@@ -33,7 +33,7 @@ Place the session on the highest true rung every turn, then own the action that 
 
 1. **Children merged** — every delivered child branch is integrated into the epic branch.
 2. **Epic assembled** — the complete product change exists on the epic branch.
-3. **Integration gated** — the required integrated checks have durable receipts.
+3. **Integration gated** — integrated checks and the [epic flow walk](cas-supervisor/references/epic-driving.md#epic-flow-walk) have receipts.
 4. **PR queued** — the reviewed epic is in its protected merge path.
 5. **On main** — the validated tree has landed on the default branch.
 6. **Released and deployed** — required publication and production verification are complete.

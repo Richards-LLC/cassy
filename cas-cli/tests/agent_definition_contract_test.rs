@@ -115,6 +115,133 @@ fn verifier_mirrors_document_the_current_close_contract() {
     }
 }
 
+/// An epic's own demo is often empty. Pin the child-discovery route ahead of
+/// the shared evidence gate so per-task success cannot bypass combined QA.
+#[test]
+fn epic_child_demos_require_evidence_before_close_reason() {
+    for path in VERIFIER_PATHS {
+        let body = load(path);
+        let prerequisites = body.find("### Epic evidence prerequisites").unwrap();
+        let table = body.find("| Check | REJECT when |").unwrap();
+        let close_reason = body.find("### Step 0B: Check Close Reason").unwrap();
+        assert!(prerequisites < table && table < close_reason, "{path}");
+        assert_eq!(body.matches("| Check | REJECT when |").count(), 1, "{path}");
+        let epic_gate = &body[prerequisites..body.find("### Step 0A:").unwrap()];
+        for required in [
+            "verification_type=epic",
+            "exactly one `Epic flow walk` note",
+            "~/.cas/artifacts/<epic-id>/LEDGER.md",
+            "QA evidence required: epic has child demo_statement but no Epic flow walk note or LEDGER.md",
+            "current assembled epic tip",
+            "60-minute budget",
+            "coverage mapping for every child demo",
+            "missing, duplicate",
+            "running, stale-tip, or incomplete-coverage",
+            "counts and label split must match",
+            "same Step 0A REJECT table",
+            "Contradictions across",
+            "Do not rerun QA",
+        ] {
+            assert!(
+                epic_gate
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+                    .contains(required),
+                "{path}: {required}"
+            );
+        }
+        assert!(body[..prerequisites].contains("**any child**"), "{path}");
+        assert!(body[..prerequisites].contains("closed children"), "{path}");
+        for check in [
+            "Required cells",
+            "Source inference",
+            "Failed-cell ownership",
+            "Forbidden verdict",
+            "Matrix breadth",
+            "Headline counts",
+            "PASS evidence",
+        ] {
+            assert!(body[table..close_reason].contains(check), "{path}: {check}");
+        }
+    }
+}
+
+/// Exercise the installed catalog routes, including the deliberately renamed
+/// Codex checklist, rather than accepting unregistered source-only guidance.
+#[test]
+fn epic_walk_is_one_concurrent_pass_in_every_harness() {
+    for (flavor, label) in builtin_catalog::FLAVORS {
+        let get = |path| builtin_catalog::find(*flavor, path);
+        let supervisor = get("skills/cas-supervisor.md");
+        let checklist = get(if *flavor == builtin_catalog::Flavor::Codex {
+            "skills/cas-codex-supervisor-checklist.md"
+        } else {
+            "skills/cas-supervisor-checklist.md"
+        });
+        let route = "cas-supervisor/references/epic-driving.md#epic-flow-walk";
+        assert!(supervisor.contains(route), "{label} supervisor route");
+        assert!(checklist.contains(route), "{label} checklist route");
+        assert!(checklist.contains("release gate detached"), "{label}");
+        assert!(checklist.contains("verification_type=epic"), "{label}");
+
+        let walk = get("skills/cas-supervisor/references/epic-driving.md");
+        let launch = walk.find("Launch the release").unwrap();
+        let spawn = walk.find("Spawn exactly one").unwrap();
+        assert!(launch < spawn, "{label}: launch the gate before QA");
+        for required in [
+            "one pass per epic",
+            "Include closed children",
+            "if none exist, skip",
+            "dedicated worktree",
+            "**before** dispatching",
+            "gate launch or monitoring",
+            "never spawn a duplicate",
+            "verifier-class evidence agent",
+            "not the sealed task-verifier close dispatch",
+            "**60-minute**",
+            "one combined matrix",
+            "at least three unmentioned conditions",
+            "at least one adjacent surface",
+            "zero replay cells after row 1",
+            "cap **8 cells**",
+            "every child demo",
+            "across children",
+            "Contradictions",
+            "Richards-LLC/cassy/issues/759",
+            "NOT EXERCISED",
+            "one task per defect",
+            "exactly one epic note",
+            "receipt is stale",
+            "do not silently rerun",
+        ] {
+            assert!(
+                walk.split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+                    .contains(required),
+                "{label}: {required}"
+            );
+        }
+        let qa = get("skills/cas-qa-craft/SKILL.md");
+        assert!(qa.contains(route), "{label}: QA routes to epic procedure");
+        assert!(qa.contains("empty and no child has one"), "{label}");
+        assert!(qa.contains("**60-minute** box overrides"), "{label}");
+        let example = walk.split("### Example epic note").nth(1).unwrap();
+        for field in [
+            "Epic flow walk",
+            "Tip:",
+            "Children:",
+            "Ledger:",
+            "cells=4; PASS=3; FAIL=0; NOT EXERCISED=1",
+            "labels:",
+            "Owed:",
+        ] {
+            assert!(example.contains(field), "{label}: example lacks {field}");
+        }
+    }
+}
+
 #[test]
 fn learning_reviewer_receives_and_consumes_explicit_ids() {
     let stop_handler = load("cas-cli/src/hooks/handlers/handlers_middle/session_stop/mod.rs");

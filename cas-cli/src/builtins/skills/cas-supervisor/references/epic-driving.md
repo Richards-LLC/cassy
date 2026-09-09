@@ -9,5 +9,6 @@
 - Set `proof_scope_fix=true` and bind `known-repos` when a receipt names the wrong repository.
 - Carry the version bump, CHANGELOG section, and release-notes draft as the epic branch’s final commit; land them through its single integration PR before tagging for one tree, one queue cycle; reserve `release/vX-prepare` for multi-PR batch releases (version lives in the tree; the merge queue revalidates every tree).
 - Own the release cut; wait for Release Prebuild completion before tagging or publishing.
+- Keep this reference under the 2 KB operator budget; split new guidance into a separate reference file and link it when this compact playbook would grow.
 - Mirror this skill/reference change into Claude, Codex, and Grok builtin trees; run flavor-drift and sync tests.
 - Run one [epic flow walk](epic-flow-walk.md) per epic when any child has a demo statement, concurrently with the detached gate; never rerun it on a gate retry.

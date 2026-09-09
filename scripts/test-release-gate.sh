@@ -540,6 +540,29 @@ else
     bad "--learn did not record the nextest factory-session diagnosis: $learn_output"
 fi
 
+# cas-7715. A worker's scoped proof can pass while archive-mode catches a
+# builtin size/phrase guardrail that the proof surface failed to require. Keep
+# that diagnosis attached to a real executable release row, and exercise the
+# exact operator text through --learn so the three mirrors remain durable.
+repo="$(new_fixture learn-scoped-proof-surface)"
+scoped_proof_symptom='worker proof passed while a skill-size guardrail test failed in the gate'
+scoped_proof_cause='proof surface mapped files to the tests that mention them, not to the guardrail binaries that read them'
+learn_output="$(cd "$repo" && \
+    "$repo/scripts/release-gate.sh" --learn "$scoped_proof_symptom" "$scoped_proof_cause" archive-mode 2>&1)"
+if grep -qF 'Learned release failure in all three mirrors' <<<"$learn_output" \
+    && grep -qF "**archive-mode**" \
+        "$repo/cas-cli/src/builtins/skills/cas-cut-release/references/failure-log.md" \
+    && grep -qF "Symptom: $scoped_proof_symptom Root cause: $scoped_proof_cause" \
+        "$repo/cas-cli/src/builtins/skills/cas-cut-release/references/failure-log.md" \
+    && cmp -s "$repo/cas-cli/src/builtins/skills/cas-cut-release/references/failure-log.md" \
+        "$repo/cas-cli/src/builtins/codex/skills/cas-cut-release/references/failure-log.md" \
+    && cmp -s "$repo/cas-cli/src/builtins/skills/cas-cut-release/references/failure-log.md" \
+        "$repo/cas-cli/src/builtins/grok/skills/cas-cut-release/references/failure-log.md"; then
+    ok '--learn records the scoped-proof guardrail diagnosis on archive-mode'
+else
+    bad "--learn did not record the scoped-proof guardrail diagnosis: $learn_output"
+fi
+
 # cas-77c1. Integration spawn fixtures must carry the build-guard override into
 # isolated children: otherwise a saturated host makes them read live
 # /proc/loadavg and refuse a request that is healthy under the test contract.

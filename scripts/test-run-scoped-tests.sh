@@ -370,6 +370,60 @@ expect pass "SCOPED PROOF SURFACE: covered committed diff" \
     "proof: nested integration module resolves to its owning binary" \
     bash -c "cd '${surface_repo}' && '${SURFACE_GUARD}' --base main -- -p cas --lib worker_commit_guard_tests --test factory_mcp_ops_test --test mcp_tools_test"
 
+# Builtin skill/reference changes must include the cross-flavor, agent-contract,
+# and path-specific guardrail binaries. The latter is discovered from the
+# guardrail's literal builtin path, so a compact-reference edit cannot claim
+# coverage from flavor drift alone (cas-7715).
+mkdir -p "${surface_repo}/cas-cli/src/builtins/skills/cas-supervisor/references"
+printf 'compact reference\n' \
+    >"${surface_repo}/cas-cli/src/builtins/skills/cas-supervisor/references/epic-driving.md"
+cat >"${surface_repo}/cas-cli/tests/factory_codex_skill_guardrails.rs" <<'EOF'
+fn supervisor_epic_driving_reference_is_compact() {
+    let _path = "cas-cli/src/builtins/skills/cas-supervisor/references/epic-driving.md";
+}
+EOF
+git -C "${surface_repo}" add .
+git -C "${surface_repo}" -c user.name=scoped-test-fixture -c user.email=scoped-test-fixture@example.invalid \
+    commit -qm builtin-reference-base
+printf 'new guidance\n' \
+    >>"${surface_repo}/cas-cli/src/builtins/skills/cas-supervisor/references/epic-driving.md"
+git -C "${surface_repo}" add .
+git -C "${surface_repo}" -c user.name=scoped-test-fixture -c user.email=scoped-test-fixture@example.invalid \
+    commit -qm builtin-reference-change
+
+expect fail "missing integration target 'factory_codex_skill_guardrails'" \
+    "proof: builtin reference guardrail cannot be omitted" \
+    bash -c "cd '${surface_repo}' && '${SURFACE_GUARD}' --base main -- -p cas --test builtin_flavor_drift_test --test agent_definition_contract_test"
+
+expect pass "SCOPED PROOF SURFACE: covered committed diff" \
+    "proof: builtin reference includes its literal-path guardrail" \
+    bash -c "cd '${surface_repo}' && '${SURFACE_GUARD}' --base main -- -p cas --lib worker_commit_guard_tests --test builtin_flavor_drift_test --test agent_definition_contract_test --test factory_codex_skill_guardrails --test factory_mcp_ops_test --test mcp_tools_test"
+
+# Installed catalogs flatten skill bodies to skills/<name>/SKILL.md. The
+# issue-intake directive guard reads that path rather than the source-tree
+# spelling, so a supervisor-body-only change must name its binary too.
+printf 'supervisor body\n' \
+    >"${surface_repo}/cas-cli/src/builtins/skills/cas-supervisor.md"
+cat >"${surface_repo}/cas-cli/tests/issue_intake_directive_test.rs" <<'EOF'
+const SUPERVISOR_BODY: &str = "skills/cas-supervisor/SKILL.md";
+EOF
+git -C "${surface_repo}" add .
+git -C "${surface_repo}" -c user.name=scoped-test-fixture -c user.email=scoped-test-fixture@example.invalid \
+    commit -qm builtin-body-base
+printf 'body-only change\n' \
+    >>"${surface_repo}/cas-cli/src/builtins/skills/cas-supervisor.md"
+git -C "${surface_repo}" add .
+git -C "${surface_repo}" -c user.name=scoped-test-fixture -c user.email=scoped-test-fixture@example.invalid \
+    commit -qm builtin-body-change
+
+expect fail "missing integration target 'issue_intake_directive_test'" \
+    "proof: installed catalog guardrail cannot be omitted" \
+    bash -c "cd '${surface_repo}' && '${SURFACE_GUARD}' --base main -- -p cas --lib worker_commit_guard_tests --test builtin_flavor_drift_test --test agent_definition_contract_test --test factory_codex_skill_guardrails --test factory_mcp_ops_test --test mcp_tools_test"
+
+expect pass "SCOPED PROOF SURFACE: covered committed diff" \
+    "proof: supervisor body includes its installed-catalog guardrail" \
+    bash -c "cd '${surface_repo}' && '${SURFACE_GUARD}' --base main -- -p cas --lib worker_commit_guard_tests --test builtin_flavor_drift_test --test agent_definition_contract_test --test factory_codex_skill_guardrails --test issue_intake_directive_test --test factory_mcp_ops_test --test mcp_tools_test"
+
 docs_repo="${tmpdir}/docs-repo"
 mkdir -p "${docs_repo}/docs"
 git -C "${docs_repo}" init -q -b main

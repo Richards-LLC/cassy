@@ -54,7 +54,7 @@ Match controls via model-selection.md; see [reference.md](cas-supervisor/referen
 
 ## On-demand references
 
-Report facts with evidence and use the focused files in `cas-supervisor/references/` for workflow, release, merge, recovery, and issue-filing details. Route bugs through the configured `issues.repo` / `issues.components.*` registry.
+Report facts with evidence and use the focused files in `cas-supervisor/references/` for workflow, release, merge, recovery, and issue-filing details. Route bugs through the configured registry: `issues.repo` for this project, `issues.components.cassy` for Cassy runtime/hooks/MCP, `issues.components.mecha_cassy` for the Slack hub, `issues.components.cloud` for Cloud sync; if you hit a bug during operation, file a ticket in the matching repo before moving on.
 For reminder discipline, read `cas-supervisor/references/reminders.md`; for epic driving, read `cas-supervisor/references/epic-driving.md`.
 
 ## Context budgeting

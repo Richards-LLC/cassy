@@ -239,13 +239,18 @@
       "d9437509594c27626f8d71ef2c39c7391b1fdb2ec68ab2109fb5e17de23170dd"
     ],
     "skills/cas-qa-craft/references/evidence-ledger.md": [
-      "49b39e853bf2d23f7b7c13cf97d53bb5496a1e753fe9b25b76be64204b6d8e82"
+      "49b39e853bf2d23f7b7c13cf97d53bb5496a1e753fe9b25b76be64204b6d8e82",
+      "f58d7c1c1c02778890f5cd1252c0c99c9c01c0e17e3169dc87664b5d94d17d78"
     ],
     "skills/cas-qa-craft/references/exemplar.md": [
-      "01e262c379080a2f4676064091cb3c8b34d278337eab8a17626053408e7d82be"
+      "01e262c379080a2f4676064091cb3c8b34d278337eab8a17626053408e7d82be",
+      "c901c898d9e29eea66d970c20668762c291f43a1cb6158eaa4b699ea83e7fe55"
     ],
     "skills/cas-qa-craft/references/matrix-builder.md": [
       "b259edd54251c807929e68f52685653346abff1fd440c3324b7b87869f56393e"
+    ],
+    "skills/cas-qa-craft/references/telemetry-sweep.md": [
+      "6880d75c986a9588a541d84b9072ce3345c55096641a1951de33861bfc496f32"
     ],
     "skills/cas-release-report/references/brief-template.md": [
       "3ce3883daed131aea74844e3efd36f70896ea6fba904c2324487d4cce264c40d"
@@ -263,6 +268,14 @@
       "380cd4ca42607f408e470eaa531128d38f41e9d2bc632593bd6ae3f7f6072e9b"
     ],
     "skills/cas-supervisor/references/epic-driving.md": [
+      "46959c80aa1e8650d97f5cd155a00fa879df4631e10f63f9f413da3e0e65f2aa",
+      "dbc536031f5f575ee6a3a79cf89c5544d303e9eebef33c0fbc4bc3f38547fe37",
+      "eb744fd4f41d6b08f84a3d3394f57a8d84cea9ef8aaf0bc9b8b290320bcb197b",
+      "f46d8104c66be30f9e6bfdfb26d0c720944f0ec22db0aeb2d836146db3039214"
+    ],
+    "skills/cas-supervisor/references/epic-flow-walk.md": [
+      "46959c80aa1e8650d97f5cd155a00fa879df4631e10f63f9f413da3e0e65f2aa",
+      "56f10f111052bb19e364c23776d5b778b654e5e7f67ce90b08b8a1a832bf6243",
       "eb744fd4f41d6b08f84a3d3394f57a8d84cea9ef8aaf0bc9b8b290320bcb197b",
       "f46d8104c66be30f9e6bfdfb26d0c720944f0ec22db0aeb2d836146db3039214"
     ],

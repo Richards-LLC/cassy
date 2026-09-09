@@ -60,6 +60,7 @@ impl Config {
             "tasks.commit_nudge_on_close" => Some(tasks.commit_nudge_on_close.to_string()),
             "tasks.block_exit_on_open" => Some(tasks.block_exit_on_open.to_string()),
             "qa.user_facing_labels" => Some(qa.user_facing_labels.join(",")),
+            "qa.telemetry_sweep" => Some(qa.telemetry_sweep.unwrap_or_default()),
             // Dev section
             "dev.dev_mode" => Some(dev.dev_mode.to_string()),
             "dev.trace_commands" => Some(dev.trace_commands.to_string()),

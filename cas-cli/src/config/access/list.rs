@@ -136,6 +136,10 @@ impl Config {
                 "qa.user_facing_labels".to_string(),
                 qa.user_facing_labels.join(","),
             ),
+            (
+                "qa.telemetry_sweep".to_string(),
+                qa.telemetry_sweep.unwrap_or_default(),
+            ),
             // Dev section
             ("dev.dev_mode".to_string(), dev.dev_mode.to_string()),
             (

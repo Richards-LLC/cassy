@@ -249,6 +249,14 @@ impl Config {
                     .map(ToOwned::to_owned)
                     .collect();
             }
+            "qa.telemetry_sweep" => {
+                let qa = self.qa.get_or_insert_with(QaConfig::default);
+                qa.telemetry_sweep = if value.trim().is_empty() {
+                    None
+                } else {
+                    Some(value.trim().to_string())
+                };
+            }
             // Dev section
             "dev.dev_mode" => {
                 let dev = self.dev.get_or_insert_with(DevConfig::default);

@@ -7,6 +7,38 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.21.0] - 2026-09-09
+
+### Added
+- Epic-level flow walk: when any child of an epic carries a demo statement, the
+  supervisor runs one combined user-flow evidence pass on the assembled epic
+  tip, concurrently with the release gate, with a 60-minute box and the
+  cas-qa-craft quotas. A single `LEDGER.md` and one `Epic flow walk` note record
+  child coverage, counts, and cross-child contradictions; epic close
+  verification requires that note and applies the same REJECT table before it
+  reads the close reason.
+- QA telemetry sweep contract: the optional `qa.telemetry_sweep` setting names a
+  project-relative read-only command that `cas-qa-craft` runs as its first
+  step. Each `NEW`, `RISING`, `HIGH_RATE`, or `BLACKOUT` finding becomes an
+  `eyewitness/telemetry` ledger row; without a command the ledger header says
+  `sweep: not configured`. A documentation-only PostHog HogQL example and a
+  known-noise citation table ship with the skill.
+- `cas doctor` reports when the Claude Code prompt hook has gone silent and
+  counts observed misses.
+
+### Changed
+- Turn context (ambient recall, supervisor reminders, factory inbox) is
+  delivered once per prompt through PostToolUse or any Cassy tool response when
+  the UserPromptSubmit hook is not invoked, which Claude Code 2.1.263 and later
+  omit in long-lived team sessions (#763).
+- Ambient discovery ranks candidate memories by term overlap before recency,
+  caps prompt terms at 16, gives the semantic step a 1500 ms deadline, and
+  sorts unbound commit history behind guidance (#764).
+- The release gate runs the workspace suite once across the nextest and archive
+  rows, records per-row timings, runs doctests through the CI wrapper, and can
+  re-gate an unchanged tree from content-keyed receipts with `--reuse` without
+  ever authorizing the pipeline.
+
 ## [3.20.0] - 2026-09-08
 
 ### Added

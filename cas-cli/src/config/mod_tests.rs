@@ -77,6 +77,38 @@ fn qa_user_facing_labels_default_and_round_trip() {
     let loaded = Config::load(temp.path()).unwrap();
     assert_eq!(loaded.qa().user_facing_labels, vec!["mobile", "public-api"]);
 }
+
+#[test]
+fn qa_telemetry_sweep_is_optional_and_round_trips() {
+    let temp = TempDir::new().unwrap();
+    let mut config = Config::default();
+
+    assert_eq!(config.qa().telemetry_sweep, None);
+    assert_eq!(config.get("qa.telemetry_sweep"), Some(String::new()));
+    assert!(meta::registry().get("qa.telemetry_sweep").is_some());
+
+    config
+        .set("qa.telemetry_sweep", " scripts/qa/telemetry-sweep.sh ")
+        .unwrap();
+    assert_eq!(
+        config.qa().telemetry_sweep.as_deref(),
+        Some("scripts/qa/telemetry-sweep.sh")
+    );
+    assert!(config.list().contains(&(
+        "qa.telemetry_sweep".to_string(),
+        "scripts/qa/telemetry-sweep.sh".to_string()
+    )));
+
+    config.save(temp.path()).unwrap();
+    let loaded = Config::load(temp.path()).unwrap();
+    assert_eq!(
+        loaded.qa().telemetry_sweep.as_deref(),
+        Some("scripts/qa/telemetry-sweep.sh")
+    );
+
+    config.set("qa.telemetry_sweep", "  ").unwrap();
+    assert_eq!(config.qa().telemetry_sweep, None);
+}
 #[test]
 fn memory_decay_policy_is_configurable_and_round_trips() {
     let temp = TempDir::new().unwrap();

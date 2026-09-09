@@ -219,6 +219,10 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
         content: include_str!("builtins/skills/cas-supervisor/references/epic-driving.md"),
     },
     BuiltinFile {
+        path: "skills/cas-supervisor/references/epic-flow-walk.md",
+        content: include_str!("builtins/skills/cas-supervisor/references/epic-flow-walk.md"),
+    },
+    BuiltinFile {
         path: "skills/cas-supervisor-checklist/SKILL.md",
         content: include_str!("builtins/skills/cas-supervisor-checklist.md"),
     },
@@ -773,6 +777,10 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
         content: include_str!("builtins/codex/skills/cas-supervisor/references/epic-driving.md"),
     },
     BuiltinFile {
+        path: "skills/cas-supervisor/references/epic-flow-walk.md",
+        content: include_str!("builtins/codex/skills/cas-supervisor/references/epic-flow-walk.md"),
+    },
+    BuiltinFile {
         path: "skills/cas-codex-supervisor-checklist/SKILL.md",
         content: include_str!("builtins/codex/skills/cas-codex-supervisor-checklist.md"),
     },
@@ -1265,6 +1273,10 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-supervisor/references/epic-driving.md",
         content: include_str!("builtins/grok/skills/cas-supervisor/references/epic-driving.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-supervisor/references/epic-flow-walk.md",
+        content: include_str!("builtins/grok/skills/cas-supervisor/references/epic-flow-walk.md"),
     },
     BuiltinFile {
         path: "skills/cas-supervisor/references/worker-recovery.md",

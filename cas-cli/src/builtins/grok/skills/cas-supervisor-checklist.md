@@ -100,7 +100,7 @@ Supervisor close override constraints: [`supervisor_override`](cas-supervisor/re
 
 - Run `cas__coordination action=epic_status id=<epic-id>` — confirms every child task's `factory/<assignee>` branch is merged into the epic branch (this check is now also enforced automatically at `cas__task action=close` for Epic-type tasks and cannot be waived)
 - Confirm task deliverables exist on the epic branch
-- Launch the release gate detached on the assembled epic in its dedicated worktree, then run the [epic flow walk](cas-supervisor/references/epic-driving.md#epic-flow-walk) concurrently when any child has a demo statement.
+- Launch the release gate detached on the assembled epic in its dedicated worktree, then run the [epic flow walk](cas-supervisor/references/epic-flow-walk.md) concurrently when any child has a demo statement.
 - Require both gate receipts and the single epic evidence note before epic close verification; apply task-verifier Step 0A with `verification_type=epic`.
 
 The `epic_status` action is a defense-in-depth diagnostic: the close-time gate (cas-8f8f) refuses to close an epic with stranded child branches regardless of supervisor overrides, but running `epic_status` mid-flight surfaces the same data so you can resolve merges without chasing a close-time error.

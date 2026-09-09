@@ -179,13 +179,13 @@ fn epic_walk_is_one_concurrent_pass_in_every_harness() {
         } else {
             "skills/cas-supervisor-checklist.md"
         });
-        let route = "cas-supervisor/references/epic-driving.md#epic-flow-walk";
+        let route = "cas-supervisor/references/epic-flow-walk.md";
         assert!(supervisor.contains(route), "{label} supervisor route");
         assert!(checklist.contains(route), "{label} checklist route");
         assert!(checklist.contains("release gate detached"), "{label}");
         assert!(checklist.contains("verification_type=epic"), "{label}");
 
-        let walk = get("skills/cas-supervisor/references/epic-driving.md");
+        let walk = get("skills/cas-supervisor/references/epic-flow-walk.md");
         let launch = walk.find("Launch the release").unwrap();
         let spawn = walk.find("Spawn exactly one").unwrap();
         assert!(launch < spawn, "{label}: launch the gate before QA");

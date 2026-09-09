@@ -11,7 +11,7 @@ prove it against the named build. This is an evidence pass, not a fixture test
 and not a substitute for unit or integration tests. Time-box the whole pass to
 **30 minutes**; an honest incomplete ledger beats a late, invented result.
 For an epic with child demos, use the supervisor's
-[epic flow walk](../cas-supervisor/references/epic-driving.md#epic-flow-walk):
+[epic flow walk](../cas-supervisor/references/epic-flow-walk.md):
 one combined matrix with a **60-minute** box overrides the task defaults below.
 
 ## Procedure

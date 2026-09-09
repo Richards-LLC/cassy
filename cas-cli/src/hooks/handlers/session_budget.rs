@@ -56,6 +56,11 @@ pub(crate) enum DegradationPriority {
 /// passed this gate over the real limit.
 pub(crate) const SESSION_START_BUDGET_BYTES: usize = 9 * 1024;
 
+/// Minimum un-compacted payload headroom required by the self-test/doctor
+/// guard. A payload closer than this to the harness boundary is one small
+/// guidance edit away from invoking compaction.
+pub(crate) const SESSION_START_MIN_HEADROOM_BYTES: usize = 512;
+
 /// Separator between assembled segments (matches the pre-budget assembly).
 const SEP: &str = "\n";
 
@@ -302,6 +307,21 @@ impl SessionContextAssembler {
             .join(SEP)
     }
 
+    /// Measure the payload before any degradation is applied.
+    ///
+    /// This is the value that matters for headroom: `render()` can make an
+    /// over-budget payload fit by compacting it, but that is already a loss of
+    /// detail and should be visible to the regression test.
+    #[cfg(test)]
+    pub(crate) fn full_len(&self) -> usize {
+        self.segments
+            .iter()
+            .map(|segment| segment.full.as_str())
+            .collect::<Vec<_>>()
+            .join(SEP)
+            .len()
+    }
+
     /// Degradation order: lower-value segments first, then biggest saving,
     /// ties broken by assembly order.
     fn degradation_order(&self) -> Vec<usize> {
@@ -471,6 +491,64 @@ mod tests {
         assert!(out.contains("[SessionStart compacted: Static skills index]"));
         assert!(out.contains(&seg(80, 'a')), "ambient recall must survive");
         assert!(out.contains(&seg(80, 'i')), "factory inbox must survive");
+    }
+
+    /// Production-shape regression for cas-6a20: a supervisor guidance edit
+    /// that pushes the assembled payload over the aggregate budget must
+    /// compact a static listing before it touches ambient recall. The real
+    /// supervisor guidance is used so this fails when future edits consume
+    /// the remaining SessionStart headroom, while the surrounding sections
+    /// model the headings emitted by the production context builder.
+    #[test]
+    fn guidance_growth_compacts_static_listing_before_ambient_recall() {
+        let guidance_growth = "\nAdditional supervisor guidance retained for future policy edits."
+            .repeat(32);
+        let static_listing = (0..64)
+            .map(|i| format!("- skill-{i:02}: a representative static skill listing row\n"))
+            .collect::<String>();
+        let base = format!(
+            "## 📋 CAS Context\n**Session:** `7d3511aa-9cf5-44d8-921d-0289bd66fe0a`\n\n{}{}\n\n## Available Skills (64 skills, ~1.2k tk if expanded)\n{}",
+            crate::builtins::supervisor_guidance(),
+            guidance_growth,
+            static_listing,
+        );
+        let mut assembler = SessionContextAssembler::new(base);
+        let ambient = "[ambient recall v1 role=supervisor]\nCurrent release recovery audit receipts preserve operator intent\n"
+            .to_string();
+        assembler.append_degradable_with_priority(
+            "Ambient recall",
+            ambient.clone(),
+            "[ambient recall v1 role=supervisor] 1 evidence card; run `mcp__cas__search` for bodies"
+                .to_string(),
+            DegradationPriority::AmbientRecall,
+        );
+
+        let full_len = assembler.full_len();
+        assert!(
+            full_len > SESSION_START_BUDGET_BYTES,
+            "guidance-growth fixture must cross the {}B budget (full payload: {full_len}B)",
+            SESSION_START_BUDGET_BYTES
+        );
+
+        let payload = assembler.render();
+        assert!(
+            payload.len() <= SESSION_START_BUDGET_BYTES,
+            "compacted payload is {}B, over the {}B budget",
+            payload.len(),
+            SESSION_START_BUDGET_BYTES
+        );
+        assert!(
+            payload.contains("[SessionStart compacted: Available Skills"),
+            "static guidance listing must compact first: {payload}"
+        );
+        assert!(
+            payload.contains(&ambient),
+            "ambient recall must remain full after static guidance grows: {payload}"
+        );
+        assert!(
+            !payload.contains("skill-00: a representative static skill listing row"),
+            "static listing rows must not survive after the listing is compacted"
+        );
     }
 
     #[test]

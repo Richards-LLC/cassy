@@ -55,6 +55,7 @@ Match controls via model-selection.md; see [reference.md](cas-supervisor/referen
 ## On-demand references
 
 Report facts with evidence and use the focused files in `cas-supervisor/references/` for workflow, release, merge, recovery, and issue-filing details. Route bugs through the configured `issues.repo` / `issues.components.*` registry.
+For reminder discipline, read `cas-supervisor/references/reminders.md`; for epic driving, read `cas-supervisor/references/epic-driving.md`.
 
 ## Context budgeting
 

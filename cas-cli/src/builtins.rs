@@ -3708,6 +3708,7 @@ This is the body content."#;
     #[test]
     fn test_supervisor_guidance_under_8kb() {
         let guide = supervisor_guidance();
+        let headroom = SUPERVISOR_GUIDANCE_HARD_CEILING_BYTES.saturating_sub(guide.len());
         assert!(
             guide.len() < SUPERVISOR_GUIDANCE_HARD_CEILING_BYTES,
             "supervisor_guidance is {} bytes — over the {SUPERVISOR_GUIDANCE_HARD_CEILING_BYTES}B SessionStart ceiling. \
@@ -3722,6 +3723,14 @@ This is the body content."#;
              into cas-supervisor/references/ to keep CI headroom.",
             guide.len(),
             SUPERVISOR_GUIDANCE_HARD_CEILING_BYTES - guide.len()
+        );
+        assert!(
+            headroom >= crate::hooks::handlers::session_budget::SESSION_START_MIN_HEADROOM_BYTES,
+            "supervisor_guidance is {} bytes — only {headroom}B remains below the \
+             {SUPERVISOR_GUIDANCE_HARD_CEILING_BYTES}B hard ceiling; keep at least {}B of \
+             SessionStart headroom by moving detail into cas-supervisor/references/",
+            guide.len(),
+            crate::hooks::handlers::session_budget::SESSION_START_MIN_HEADROOM_BYTES
         );
     }
 

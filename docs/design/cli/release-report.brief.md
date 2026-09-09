@@ -14,7 +14,8 @@ their value or mark with an indented continuation.
 ## Readable
 
 The generated Markdown carries the fixed report skeleton, source references,
-theme counts, issue ledger, asset digests, and release timing; source warnings
+theme counts, issue ledger, asset digests, and release timing; release-note
+Was/Now articles stay in their User or Dev audience, while source warnings
 remain in the Evidence and scope section.
 
 ## Machine output
@@ -31,7 +32,7 @@ repository; use `--refresh-sources` to intentionally replace a Markdown source.
 
 ## Critique
 
-terminal-qa: PASS cas-release-report-cas-7dfa · 11 runs · 0 fail · 0 warn · 0 allowed · /home/pippenz/.cas/artifacts/cas-7dfa/terminal-qa/report.json
+terminal-qa: PASS cas-release-report-cas-52ba · 12 runs · 0 fail · 0 warn · 0 allowed · /home/pippenz/.cas/artifacts/cas-52ba/terminal-qa/report.json
 | Dimension | Score | Evidence |
 | --- | --- | --- |
 | Hierarchy | 4 | The verdict is line one; aligned artifact rows and one remedy follow before warning evidence. |
@@ -39,4 +40,4 @@ terminal-qa: PASS cas-release-report-cas-7dfa · 11 runs · 0 fail · 0 warn · 
 | Craft | 4 | Source/HTML/PDF labels align, continuation rows stay within 80 cells, and the C-locale capture uses ASCII marks. |
 | Theme safety | 5 | Four palettes, piped output, NO_COLOR, and LC_ALL=C all pass with marks carrying the status meaning. |
 | Machine contract | 5 | The human branch uses Formatter while the existing `--json` serialization branch is unchanged; terminal QA passes the pipe contract. |
-Scored by keen-finch-52 on 2026-09-09; floor holds.
+Scored by nimble-viper-86 on 2026-09-09; floor holds.

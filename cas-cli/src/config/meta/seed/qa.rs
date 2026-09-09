@@ -18,4 +18,21 @@ pub(super) fn register_qa(registry: &mut ConfigRegistry) {
             "Clear the list when no labels should opt into the creation gate",
         ],
     });
+
+    registry.register(ConfigMeta {
+        key: "qa.telemetry_sweep",
+        section: "qa",
+        name: "Telemetry Sweep Command",
+        description: "Optional project-relative read-only command run by cas-qa-craft before its exploration matrix. It must emit one tab-delimited finding per line and never print secrets or raw event payloads.",
+        value_type: ConfigType::String,
+        default: "",
+        constraint: Constraint::None,
+        advanced: false,
+        requires_feature: None,
+        keywords: &["qa", "telemetry", "sweep", "findings", "posthog", "blackout"],
+        use_cases: &[
+            "Run a project-owned analytics sweep before user-flow QA",
+            "Leave empty to record sweep: not configured in the QA ledger",
+        ],
+    });
 }

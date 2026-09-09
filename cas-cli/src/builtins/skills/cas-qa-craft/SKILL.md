@@ -51,3 +51,23 @@ framework-specific diagnosis, `cas-servers` owns process lifecycle, and the
 task verifier owns judgment. Add automation-caused artifacts to the ledger's
 honesty section. Do not modify the verifier to make a missing or failing
 capture pass.
+
+## Telemetry sweep
+
+Before building the matrix, read `[qa] telemetry_sweep`. If it is configured,
+resolve the project-relative executable from the project root and run it
+read-only as the first QA step. Pass the task's reporter with
+`--reporter <value>` when one is present; omit that flag otherwise. Disable
+shell tracing, do not print environment variables, credentials, or raw event
+payloads, and save only the contract stdout/stderr under the task artifact
+directory.
+
+The command emits one tab-delimited line per finding with exactly
+`kind`, `subject`, `count`, `people`, `window`, and `sample` fields. `kind` is
+one of `NEW`, `RISING`, `HIGH_RATE`, or `BLACKOUT`; `HIGH_RATE` is the
+events-per-person finding. Reject malformed lines as sweep errors rather than
+inventing findings. Write `sweep: configured — <path>` in the ledger header,
+then add every valid finding as a `telemetry sweep` row labeled
+`eyewitness/telemetry` using [references/telemetry-sweep.md](references/telemetry-sweep.md).
+If it is unset, write the exact header line `sweep: not configured` and
+continue the ordinary matrix.

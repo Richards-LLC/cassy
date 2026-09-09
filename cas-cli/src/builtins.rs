@@ -485,6 +485,10 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
         path: "skills/cas-qa-craft/references/exemplar.md",
         content: include_str!("builtins/skills/cas-qa-craft/references/exemplar.md"),
     },
+    BuiltinFile {
+        path: "skills/cas-qa-craft/references/telemetry-sweep.md",
+        content: include_str!("builtins/skills/cas-qa-craft/references/telemetry-sweep.md"),
+    },
     // release-notes skill (GH #65): drafts/posts the user + dev Slack threads
     // for every staging/main merge and installs the canonical rubric template
     // at docs/release-notes/RUBRIC.md when a project has none.
@@ -1025,6 +1029,10 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-qa-craft/references/exemplar.md",
         content: include_str!("builtins/codex/skills/cas-qa-craft/references/exemplar.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-qa-craft/references/telemetry-sweep.md",
+        content: include_str!("builtins/codex/skills/cas-qa-craft/references/telemetry-sweep.md"),
     },
     // release-notes skill (GH #65) — codex mirror.
     BuiltinFile {
@@ -1578,6 +1586,10 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-qa-craft/references/exemplar.md",
         content: include_str!("builtins/grok/skills/cas-qa-craft/references/exemplar.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-qa-craft/references/telemetry-sweep.md",
+        content: include_str!("builtins/grok/skills/cas-qa-craft/references/telemetry-sweep.md"),
     },
     // release-notes skill (GH #65) — grok twin.
     BuiltinFile {
@@ -4872,6 +4884,7 @@ This is the body content."#;
             "skills/cas-qa-craft/references/matrix-builder.md",
             "skills/cas-qa-craft/references/evidence-ledger.md",
             "skills/cas-qa-craft/references/exemplar.md",
+            "skills/cas-qa-craft/references/telemetry-sweep.md",
         ];
         let mut claude_bodies = Vec::new();
         for (label, catalog) in [
@@ -4903,6 +4916,9 @@ This is the body content."#;
                 "fixture",
                 "real-build",
                 "eyewitness",
+                "telemetry_sweep",
+                "sweep: not configured",
+                "eyewitness/telemetry",
                 "NOT EXERCISED",
                 "MIN_",
                 "contradictory claims",
@@ -4940,6 +4956,20 @@ This is the body content."#;
             let exemplar = get(FILES[3]);
             for marker in ["M01", "M07", "real-build", "FAIL", "adjacent", "Honesty"] {
                 assert!(exemplar.contains(marker), "{label} exemplar missing {marker:?}");
+            }
+            let telemetry = get(FILES[4]);
+            for marker in [
+                "qa.telemetry_sweep",
+                "NEW",
+                "RISING",
+                "HIGH_RATE",
+                "BLACKOUT",
+                "PostHog",
+                "HogQL",
+                "Known noise",
+                "task id",
+            ] {
+                assert!(telemetry.contains(marker), "{label} telemetry reference missing {marker:?}");
             }
             if label == "claude" {
                 claude_bodies = FILES.iter().map(|path| (*path, get(path))).collect();

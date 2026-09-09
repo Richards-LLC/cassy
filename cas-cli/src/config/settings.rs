@@ -266,6 +266,11 @@ pub struct QaConfig {
     /// Labels that opt a task into the non-empty `demo_statement` creation gate.
     #[serde(default = "default_user_facing_labels")]
     pub user_facing_labels: Vec<String>,
+
+    /// Optional project-relative, read-only telemetry sweep command used by
+    /// the `cas-qa-craft` skill before it exercises a task's demo statement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub telemetry_sweep: Option<String>,
 }
 
 pub fn default_user_facing_labels() -> Vec<String> {
@@ -279,6 +284,7 @@ impl Default for QaConfig {
     fn default() -> Self {
         Self {
             user_facing_labels: default_user_facing_labels(),
+            telemetry_sweep: None,
         }
     }
 }

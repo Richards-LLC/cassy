@@ -23,6 +23,27 @@ narrative in the full ledger. The row label is `real-build`, so each PASS is
 user-facing evidence rather than source inference or a fixture result.
 
 ```markdown
+## Telemetry sweep
+`[qa] telemetry_sweep = "scripts/qa/telemetry-sweep.sh"` produced the
+following valid line before the matrix:
+
+```text
+RISING\tcheckout\t42\t17\t2026-09-01..2026-09-07\tcheckout completed
+```
+
+The header says `sweep: configured — scripts/qa/telemetry-sweep.sh`, and the
+finding is recorded before M01 as:
+
+```text
+T01 | telemetry sweep | RISING finding is surfaced | kind=RISING; subject=checkout; count=42; people=17; window=2026-09-01..2026-09-07; sample=checkout completed | PASS | eyewitness/telemetry | telemetry-sweep.stdout | —
+```
+
+Known, explained noise is cited rather than filed again with this table:
+
+| subject | explanation | task id | citation |
+| --- | --- | --- | --- |
+| checkout | expected spike during migration | cas-1234 | task note |
+
 ## Constants vs expectation
 | `DEBOUNCE_MS=300` | filter.ts:18 | user sees delayed update | no — no progress cue | cas-defect-4 |
 

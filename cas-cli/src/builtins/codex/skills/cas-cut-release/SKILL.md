@@ -133,22 +133,36 @@ name the blocking step in the operator timeline, and require its receipt.
    the run directory. Only the published receipt's matching tag, SHA, actual
    `PUBLISHED_AT`, and both required asset digests authorize `--status` to name
    green-to-published latency.
-13. Run `cas-release-report` after publication and before Slack: produce the
-   Markdown, concept brief, standalone HTML, verified PDF and QA receipt under
-   `docs/release-reports/`. Require continuous A4/Letter pagination and source
-   fidelity. Commit the report and PDF with their sources; link both in the
-   announcement draft and carry them into the next prep commit. Keep the
-   published tag unchanged.
-14. Use
-   MechaCassy's default `cas-internal` channel, retain `C0B44GUKDK2` only for
-   verification, and save four Slack POSTED entries with timestamps and
-   permalinks. If the live proxy lacks registration, use the configured direct
-   mecha-cassy MCP or an approved bounded one-shot route; do not retry an
-   authenticated-session rejection. Save `cas update`, `cas --version`, and
-   `cas hub` proof and require `refresh_binary_version` in the host update JSON
-   to equal the released version. Carry the POSTED receipt into the next prep
-   commit. Close only after merge and stranded-branch inspection; use
-   `stranded_branch_override` only with proof on main.
+13. After the published receipt exists, run
+   `scripts/release-train.sh <version> <epic-worktree> --report`. This runs
+   `cas release report <version> --pdf` (or the executable named by
+   `CAS_RELEASE_TRAIN_REPORT_CMD`), requires the Markdown, standalone HTML and
+   PDF under `docs/release-reports/`, and records its log and exit status in
+   the run directory. Commit the report, concept brief, HTML, PDF and QA receipt
+   with their sources; link both report formats in the announcement draft and
+   carry them into the next prep commit. Keep the published tag unchanged.
+   `--report` is fail-closed until a posting adapter has written
+   `release-report.receipt` with `TAG`, `PDF_PATH`, `HTML_PATH`,
+   `PDF_SHA256`, `HTML_SHA256`, `PAGE_COUNT`, `PDF_FILE_PERMALINK`,
+   `PDF_FILE_ID`, `HTML_FILE_ID`, `USER_THREAD_TS`, and `DEV_THREAD_TS`;
+   the train re-hashes the local PDF/HTML and verifies the PDF page count before
+   accepting the receipt.
+14. The posting adapter named by `CAS_RELEASE_TRAIN_REPORT_POST_CMD` owns the
+   authenticated Slack call. Upload the PDF as a file attached to the User
+   thread, link the HTML from the Dev thread, and write the receipt only after
+   both thread receipts and the PDF integrity checks are available. The
+   supervisor route uses the Claude.ai Slack MCP two-step
+   `slack_get_file_upload_url` → upload bytes → `slack_complete_file_upload`;
+   the MechaCassy fallback uses `mecha_post` with a file/image after its source
+   hash and decode checks pass. Use MechaCassy's default `cas-internal` channel,
+   retain `C0B44GUKDK2` only for verification, and save four Slack POSTED
+   entries with timestamps and permalinks. If the live proxy lacks registration,
+   use the configured direct mecha-cassy MCP or an approved bounded one-shot
+   route; do not retry an authenticated-session rejection. Save `cas update`,
+   `cas --version`, and `cas hub` proof and require `refresh_binary_version`
+   in the host update JSON to equal the released version. Carry the POSTED
+   receipt into the next prep commit. Close only after merge and stranded-branch
+   inspection; use `stranded_branch_override` only with proof on main.
 
 ## Release-gate timing and full retries
 

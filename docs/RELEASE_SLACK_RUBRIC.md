@@ -24,9 +24,11 @@ handing its draft back.
 
 The fallback is the approved `pippenz@gmail.com` Claude profile's
 `claude.ai Slack` MCP, owned by the supervisor or an explicitly approved Claude
-posting owner. Use it when the hub is unavailable; it cannot upload files and is
-bound to that one profile. Either way a `Connected` server listing is not a
-receipt: the read-only preflight must succeed before a post is attempted.
+posting owner. Use it when the hub is unavailable; it is bound to that one
+profile and provides the `slack_get_file_upload_url` and
+`slack_complete_file_upload` two-step file route. Either way a
+`Connected` server listing is not a receipt: the read-only preflight must
+succeed before a post is attempted.
 
 When a worker genuinely has neither transport, it saves the exact draft and
 hands the draft path, target channel, deploy target, and requested receipt back
@@ -90,6 +92,28 @@ transcribe a local build's values.
 The workflow publishes macOS ARM64 from its macOS runner regardless of the host
 that tagged the release; never describe the release as Linux-only because a
 local audit host cannot build Darwin.
+
+### Published report before announcement
+
+Every published runtime release also requires the post-publication report
+before either top-level announcement is sent. Run
+`scripts/release-train.sh <version> <epic-worktree> --report` after the
+published and latency receipts exist. It runs `cas release report <version>
+--pdf`, requires the Markdown, standalone HTML and PDF under
+`docs/release-reports/`, and refuses completion until
+`release-report.receipt` is saved in the run directory with the PDF file
+permalink, SHA-256 and page count. The train re-hashes the local PDF and
+verifies the page count from the file.
+
+Attach the PDF to the User top-level thread as a file and link the HTML from
+the Dev thread. The supervisor's approved Claude route uses
+`slack_get_file_upload_url`, uploads the exact PDF bytes, then calls
+`slack_complete_file_upload`; the MechaCassy fallback uses
+`mecha_post` with a file/image after download, decode and source-hash
+integrity checks. Preserve the returned file permalink, User/Dev thread
+receipts, PDF and HTML SHA-256 values, both file ids and the PDF page count in
+the release-report receipt. A release with a published asset receipt but no
+report receipt remains pending.
 
 `scripts/release.sh --publish-tag --manual-publish
 --acknowledge-workflow-conflict` is an emergency failover for a disabled or
@@ -254,6 +278,13 @@ compatibility snapshot. Neither includes factory plumbing or ticket IDs.
 - [ ] Hosted install proof is supplemented by the manual consumer-Mac
   Gatekeeper checklist in [the install-proof guide](ci/install-path-proof.md);
   its GUI/SIP limits are not silently presented as covered by CI.
+- [ ] `cas release report <version> --pdf` produced the Markdown, brief, HTML,
+  PDF and QA receipt under `docs/release-reports/`; A4/Letter pagination and
+  source fidelity passed.
+- [ ] The PDF is attached to the User thread, the HTML is linked from the Dev
+  thread, and `release-report.receipt` records both paths, both SHA-256
+  values, both file ids, the User/Dev thread timestamps, file permalink and
+  PDF page count.
 - [ ] Post 1 (user): punch (was→now) + plain-language details
 - [ ] Post 2 (dev): punch (was→now) + technical details
 - [ ] Both: zero ticket numbers, zero internal-agent narration

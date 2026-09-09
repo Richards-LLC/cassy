@@ -1331,9 +1331,6 @@ impl RendererAssets {
             project_root.join(".claude").join(relative),
             project_root.join(".codex").join(relative),
             project_root.join(".grok").join(relative),
-            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("src/builtins")
-                .join(relative),
             dirs::home_dir()
                 .unwrap_or_else(|| PathBuf::from("."))
                 .join(".claude")
@@ -1358,9 +1355,10 @@ impl RendererAssets {
             });
         }
 
-        // Installed binaries retain the skill source in the builtin registry,
-        // but do not retain a checkout-relative path.  Materialize only the
-        // renderer's three read-only resources in a private temporary tree.
+        // Installed binaries and development builds both retain the skill
+        // source in the builtin registry; a checkout-relative path is never
+        // read at runtime (release-gate fixture-paths row).  Materialize only
+        // the renderer's three read-only resources in a private temporary tree.
         let temp = tempfile::tempdir().context("could not create builtin renderer workspace")?;
         let root = temp.path().join("skills/cas-release-report");
         let references = root.join("references");

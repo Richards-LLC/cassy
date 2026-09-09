@@ -501,6 +501,7 @@ fn post_swap_mode_is_a_terminal_update_path() {
         register: None,
         post_swap: true,
         from: Some("3.7.7".to_owned()),
+        refresh_receipt: None,
     };
     let cli = Cli {
         json: true,
@@ -636,6 +637,44 @@ fn post_swap_refresh_failure_preserves_the_child_receipt_and_failed_project() {
 
 #[cfg(unix)]
 #[test]
+fn plain_post_swap_refresh_failure_preserves_the_child_receipt_and_failed_project() {
+    let temp_dir = tempfile::tempdir().expect("create post-swap test directory");
+    let installed_binary = temp_dir.path().join("cas-failed-plain-refresh");
+    write_stub_binary(
+        &installed_binary,
+        "#!/bin/sh
+receipt=''
+while [ \"$#\" -gt 0 ]; do
+  if [ \"$1\" = \"--refresh-receipt\" ]; then receipt=\"$2\"; shift 2; else shift; fi
+done
+printf '%s' '{\"refresh_binary_version\":\"9.9.9-stub\",\"projects\":[{\"project\":\"/tmp/failed-project\",\"cloud_sync\":\"FAILED: cloud sync: project registration missing\"}],\"user_level_store\":{\"status\":\"ok\"}}' > \"$receipt\"
+exit 1
+",
+    );
+
+    let error = run_post_swap_refresh(&installed_binary, "3.15.1", "9.9.9-stub", false)
+        .expect_err("a failed plain child refresh must preserve its receipt");
+    let failure = error
+        .downcast_ref::<PostSwapRefreshFailure>()
+        .expect("a child refresh failure should preserve structured failure data");
+    let receipt = failure
+        .receipt
+        .as_ref()
+        .expect("the child receipt should be retained");
+
+    assert_eq!(receipt["binary_updated"], true);
+    assert_eq!(receipt["refresh_binary_version"], "9.9.9-stub");
+    assert_eq!(receipt["refresh_status"], "refresh_failed");
+    assert_eq!(receipt["projects"][0]["project"], "/tmp/failed-project");
+    assert!(
+        failure.to_string().contains("/tmp/failed-project")
+            && failure.to_string().contains("cas update --all-projects"),
+        "plain guidance must name the failed project and remedy: {failure}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn post_swap_refresh_failure_without_a_receipt_is_not_reported_as_skipped() {
     let temp_dir = tempfile::tempdir().expect("create post-swap test directory");
     let installed_binary = temp_dir.path().join("cas-no-receipt");
@@ -671,6 +710,37 @@ fn refresh_receipt_names_the_binary_that_ran_it() {
         receipt["refresh_binary_version"],
         env!("CARGO_PKG_VERSION"),
         "every refresh receipt must name the binary version that produced it: {receipt}"
+    );
+}
+
+#[test]
+fn refresh_receipt_records_partial_failure_before_refresh_returns_error() {
+    let temp_dir = tempfile::tempdir().expect("create refresh receipt directory");
+    let path = temp_dir.path().join("refresh.json");
+    let receipts = vec![ProjectRefreshReceipt {
+        project: PathBuf::from("/tmp/failed-project"),
+        unregistered: false,
+        migration: ProjectPhase::Ok("migration".to_owned()),
+        search_index: ProjectPhase::Ok("no stray root".to_owned()),
+        skills: ProjectPhase::Ok("skills".to_owned()),
+        membership: ProjectPhase::Ok("membership".to_owned()),
+        cloud: ProjectPhase::Failed("cloud sync: project registration missing".to_owned()),
+        details: String::new(),
+        phase_details: Vec::new(),
+    }];
+    let receipt =
+        project_refresh_receipt_json(&receipts, &ProjectPhase::Ok("up to date".to_owned()), &[]);
+
+    assert_eq!(receipt["refresh_status"], "refresh_failed");
+    write_refresh_receipt(&path, &receipt).expect("partial refresh receipt should be writable");
+    let written = read_refresh_receipt(&path).expect("partial refresh receipt should be readable");
+    assert_eq!(written["refresh_binary_version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(written["projects"][0]["project"], "/tmp/failed-project");
+    assert!(
+        written["projects"][0]["cloud_sync"]
+            .as_str()
+            .expect("cloud phase summary")
+            .starts_with("FAILED:")
     );
 }
 
@@ -812,6 +882,7 @@ fn update_test_args() -> UpdateArgs {
         register: None,
         post_swap: false,
         from: None,
+        refresh_receipt: None,
     }
 }
 

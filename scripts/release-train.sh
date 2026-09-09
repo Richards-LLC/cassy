@@ -23,6 +23,7 @@
 #   scripts/release-train.sh <version> <epic-worktree> --gate [--reuse | --only <row,row>]
 #   scripts/release-train.sh <version> <epic-worktree> --pipeline
 #   scripts/release-train.sh <version> <epic-worktree> --publish [<landed-sha>]
+#   scripts/release-train.sh <version> <epic-worktree> --report
 #   scripts/release-train.sh <version> <epic-worktree> --status
 #   scripts/release-train.sh <version> <epic-worktree> --stop
 #   scripts/release-train.sh <version> <epic-worktree> --print-run-dir
@@ -37,11 +38,13 @@
 #   CAS_RELEASE_TRAIN_CHECK_TRIES default 40
 #   CAS_RELEASE_TRAIN_WATCH_TRIES default 60
 #   CAS_RELEASE_TRAIN_PUBLISH_CMD default <tag worktree>/scripts/release.sh
+#   CAS_RELEASE_TRAIN_REPORT_CMD default cas (runs `cas release report <version> --pdf`)
+#   CAS_RELEASE_TRAIN_REPORT_POST_CMD optional file-post adapter; it writes release-report.receipt
 #   CAS_RELEASE_ENV_FILE          default ~/.cas/release.env
 set -euo pipefail
 
 usage() {
-    printf 'Usage: %s <version> <epic-worktree> [--check-lane <branch>|--gate [--reuse | --only <row,row>]|--pipeline|--publish [sha]|--status|--stop|--print-run-dir]\n' "$0"
+    printf 'Usage: %s <version> <epic-worktree> [--check-lane <branch>|--gate [--reuse | --only <row,row>]|--pipeline|--publish [sha]|--report|--status|--stop|--print-run-dir]\n' "$0"
 }
 
 version="${1:-}"
@@ -453,12 +456,113 @@ receipt_field() {
     sed -n "s/^${key}=//p" "$path" 2>/dev/null | head -n1
 }
 
+pdf_page_count() {
+    local pdf="$1" pages
+    if command -v pdfinfo >/dev/null 2>&1; then
+        pages="$(pdfinfo "$pdf" 2>/dev/null | awk '$1 == "Pages:" { print $2; exit }' || true)"
+    else
+        pages="$(LC_ALL=C grep -aEo '/Type[[:space:]]*/Page([^[:alnum:]]|$)' "$pdf" 2>/dev/null \
+            | wc -l | tr -d '[:space:]' || true)"
+    fi
+    [[ "$pages" =~ ^[1-9][0-9]*$ ]] || return 1
+    printf '%s\n' "$pages"
+}
+
+print_release_report_status() {
+    local receipt="$run_dir/release-report.receipt"
+    local tag pdf_path html_path pdf_sha html_sha page_count file_permalink
+    local pdf_file_id html_file_id user_thread dev_thread
+    local actual_sha actual_html_sha actual_pages resolved_pdf resolved_html
+
+    if [[ ! -s "$receipt" ]]; then
+        printf 'release report: pending (run `cas release report %s --pdf`, post its PDF in the User thread, and save %s)\n' \
+            "$version" "$receipt"
+        return 1
+    fi
+
+    tag="$(receipt_field "$receipt" TAG)"
+    [[ -n "$tag" ]] || tag="$(receipt_field "$receipt" VERSION)"
+    pdf_path="$(receipt_field "$receipt" PDF_PATH)"
+    [[ -n "$pdf_path" ]] || pdf_path="docs/release-reports/v$version.pdf"
+    html_path="$(receipt_field "$receipt" HTML_PATH)"
+    [[ -n "$html_path" ]] || html_path="docs/release-reports/v$version.html"
+    pdf_sha="$(receipt_field "$receipt" PDF_SHA256)"
+    [[ -n "$pdf_sha" ]] || pdf_sha="$(receipt_field "$receipt" SHA256)"
+    html_sha="$(receipt_field "$receipt" HTML_SHA256)"
+    page_count="$(receipt_field "$receipt" PDF_PAGE_COUNT)"
+    [[ -n "$page_count" ]] || page_count="$(receipt_field "$receipt" PAGE_COUNT)"
+    file_permalink="$(receipt_field "$receipt" PDF_FILE_PERMALINK)"
+    [[ -n "$file_permalink" ]] || file_permalink="$(receipt_field "$receipt" FILE_PERMALINK)"
+    pdf_file_id="$(receipt_field "$receipt" PDF_FILE_ID)"
+    [[ -n "$pdf_file_id" ]] || pdf_file_id="$(receipt_field "$receipt" FILE_ID)"
+    html_file_id="$(receipt_field "$receipt" HTML_FILE_ID)"
+    user_thread="$(receipt_field "$receipt" USER_THREAD_TS)"
+    [[ -n "$user_thread" ]] || user_thread="$(receipt_field "$receipt" USER_THREAD_ID)"
+    dev_thread="$(receipt_field "$receipt" DEV_THREAD_TS)"
+    [[ -n "$dev_thread" ]] || dev_thread="$(receipt_field "$receipt" DEV_THREAD_ID)"
+
+    if [[ "$tag" != "v$version" || ! "$pdf_sha" =~ ^[0-9a-f]{64}$ \
+        || ! "$html_sha" =~ ^[0-9a-f]{64}$ \
+        || ! "$page_count" =~ ^[1-9][0-9]*$ \
+        || ! "$file_permalink" =~ ^https://[^[:space:]]+$ \
+        || -z "$pdf_file_id" || -z "$html_file_id" \
+        || ! "$pdf_file_id" =~ ^[^[:space:]]+$ || ! "$html_file_id" =~ ^[^[:space:]]+$ \
+        || -z "$user_thread" || -z "$dev_thread" \
+        || ! "$user_thread" =~ ^[^[:space:]]+$ || ! "$dev_thread" =~ ^[^[:space:]]+$ ]]; then
+        printf 'release report: pending (receipt is incomplete; require TAG, PDF_PATH, HTML_PATH, PDF_SHA256, HTML_SHA256, PAGE_COUNT, PDF_FILE_PERMALINK, PDF_FILE_ID, HTML_FILE_ID, USER_THREAD_TS, and DEV_THREAD_TS)\n'
+        return 1
+    fi
+
+    if [[ "$pdf_path" = /* ]]; then
+        resolved_pdf="$pdf_path"
+    else
+        resolved_pdf="$worktree/$pdf_path"
+    fi
+    resolved_pdf="$(realpath -m "$resolved_pdf" 2>/dev/null || true)"
+    if [[ "$html_path" = /* ]]; then
+        resolved_html="$html_path"
+    else
+        resolved_html="$worktree/$html_path"
+    fi
+    resolved_html="$(realpath -m "$resolved_html" 2>/dev/null || true)"
+    case "$resolved_pdf:$resolved_html" in
+        "$worktree"/*:"$worktree"/*) ;;
+        *)
+            printf 'release report: pending (PDF_PATH or HTML_PATH escapes the release worktree)\n'
+            return 1
+            ;;
+    esac
+    if [[ ! -f "$resolved_pdf" ]]; then
+        printf 'release report: pending (PDF_PATH does not exist: %s)\n' "$pdf_path"
+        return 1
+    fi
+    if [[ ! -f "$resolved_html" ]]; then
+        printf 'release report: pending (HTML_PATH does not exist: %s)\n' "$html_path"
+        return 1
+    fi
+
+    actual_sha="$(sha256sum "$resolved_pdf" | awk '{print $1}')"
+    actual_html_sha="$(sha256sum "$resolved_html" | awk '{print $1}')"
+    actual_pages="$(pdf_page_count "$resolved_pdf" || true)"
+    if [[ "$actual_sha" != "$pdf_sha" || "$actual_html_sha" != "$html_sha" \
+        || "$actual_pages" != "$page_count" ]]; then
+        printf 'release report: unavailable (PDF receipt does not match bytes/pages; expected sha=%s pages=%s, got sha=%s pages=%s)\n' \
+            "$pdf_sha" "$page_count" "$actual_sha" "${actual_pages:-unknown}"
+        return 1
+    fi
+
+    printf 'release report: verified PDF=%s sha256=%s HTML=%s sha256=%s pages=%s file=%s pdf_file_id=%s html_file_id=%s user_thread=%s dev_thread=%s\n' \
+        "$pdf_path" "$pdf_sha" "$html_path" "$html_sha" "$page_count" "$file_permalink" \
+        "$pdf_file_id" "$html_file_id" "$user_thread" "$dev_thread"
+}
+
 print_publication_status() {
     local tag="v$version" landed tag_sha workflow_row workflow_branch workflow_sha workflow_status workflow_conclusion
     local published_file="$run_dir/release-published.receipt"
     local latency_file="$run_dir/release-latency.receipt"
     local workflow_file="$run_dir/release-workflow.json"
     local receipt_tag published_at linux_sha macos_sha latency_tag latency_published latency published_epoch green_epoch
+    publication_verified=false
 
     landed="$(cat "$run_dir/landed-main.sha" 2>/dev/null | tr -d '[:space:]' || true)"
 
@@ -519,6 +623,7 @@ print_publication_status() {
         return
     fi
 
+    publication_verified=true
     printf 'publication: verified at %s for %s\n' "$published_at" "$landed"
     printf 'tag-to-published latency: %ss\n' "$latency"
     if [[ -s "$run_dir/gate.green.epoch" ]]; then
@@ -529,6 +634,70 @@ print_publication_status() {
             printf 'green-to-published latency: unavailable (invalid gate-green timestamp)\n'
         fi
     fi
+    print_release_report_status || true
+}
+
+run_report() {
+    mkdir -p "$run_dir"
+    print_publication_status
+    if [[ "$publication_verified" != true ]]; then
+        return 1
+    fi
+
+    local report_dir="$worktree/docs/release-reports"
+    local report_prefix="$report_dir/v$version"
+    local report_cmd="${CAS_RELEASE_TRAIN_REPORT_CMD:-cas}"
+    local report_post_cmd="${CAS_RELEASE_TRAIN_REPORT_POST_CMD:-}"
+    local report_receipt="$run_dir/release-report.receipt"
+
+    if [[ ! -f "${report_prefix}.md" || ! -f "${report_prefix}.html" || ! -f "${report_prefix}.pdf" ]]; then
+        if ! command -v "$report_cmd" >/dev/null 2>&1; then
+            printf 'release report: unavailable (report command %s is not executable; set CAS_RELEASE_TRAIN_REPORT_CMD)\n' \
+                "$report_cmd" >&2
+            return 2
+        fi
+        printf 'report start %s version=%s worktree=%s\n' \
+            "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$version" "$worktree"
+        set +e
+        (cd "$worktree" && "$report_cmd" release report "$version" --pdf) \
+            >"$run_dir/report.log" 2>&1
+        local report_rc=$?
+        set -e
+        printf '%s\n' "$report_rc" >"$run_dir/report.done"
+        if [[ "$report_rc" -ne 0 ]]; then
+            printf 'release report: unavailable (command failed with status %s; inspect %s)\n' \
+                "$report_rc" "$run_dir/report.log" >&2
+            return "$report_rc"
+        fi
+    fi
+
+    for artifact in "${report_prefix}.md" "${report_prefix}.html" "${report_prefix}.pdf"; do
+        if [[ ! -f "$artifact" ]]; then
+            printf 'release report: unavailable (expected artifact is missing: %s)\n' "$artifact" >&2
+            return 1
+        fi
+    done
+
+    # A posting adapter owns the authenticated Slack call. It receives paths,
+    # never inline bytes or credentials, and must write the receipt only after
+    # the PDF upload and its source-hash/page-count checks succeed.
+    if [[ ! -s "$report_receipt" && -n "$report_post_cmd" ]]; then
+        if ! command -v "$report_post_cmd" >/dev/null 2>&1; then
+            printf 'release report: unavailable (post command %s is not executable)\n' \
+                "$report_post_cmd" >&2
+            return 2
+        fi
+        CAS_RELEASE_TRAIN_REPORT_VERSION="$version" \
+        CAS_RELEASE_TRAIN_REPORT_WORKTREE="$worktree" \
+        CAS_RELEASE_TRAIN_REPORT_DIR="$report_dir" \
+        CAS_RELEASE_TRAIN_REPORT_PDF="${report_prefix}.pdf" \
+        CAS_RELEASE_TRAIN_REPORT_HTML="${report_prefix}.html" \
+        CAS_RELEASE_TRAIN_REPORT_RECEIPT="$report_receipt" \
+        CAS_RELEASE_TRAIN_REPORT_CHANNEL="${CAS_RELEASE_TRAIN_REPORT_CHANNEL:-cas-internal}" \
+            "$report_post_cmd" "$version" "$worktree" "$report_receipt"
+    fi
+
+    print_release_report_status
 }
 
 case "$action" in
@@ -558,6 +727,10 @@ case "$action" in
         fi
         print_publication_status
         exit 0
+        ;;
+    --report)
+        run_report
+        exit $?
         ;;
     --stop)
         if pid="$(live_gate_pid)"; then

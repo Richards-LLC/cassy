@@ -56,10 +56,16 @@ Lead with the user-visible before/after; an implementation inventory is not a re
 After every published version release, before its Slack announcement, run
 `cas-release-report`. Commit the Markdown source, concept brief, standalone HTML,
 verified PDF and QA receipt under `docs/release-reports/`; link the HTML and PDF
-in the announcement draft. Verify continuous A4 and Letter pagination, source
-fidelity and the brief's rubric. Carry these post-publication artifacts into the
-next release-prep commit without rewriting the published tag. A branch merge
-without a published version continues to use the normal release-note draft.
+in the announcement draft. The PDF is a required file upload attached to the
+User thread, and the HTML must be linked from the Dev thread. Save
+`release-report.receipt` in the release-train run directory with both report
+paths, both SHA-256 values, both Slack file ids, User/Dev thread timestamps, the
+PDF file permalink and page count; do not mark the release announced without
+it.
+Verify continuous A4 and Letter pagination, source fidelity and the brief's
+rubric. Carry these post-publication artifacts into the next release-prep commit
+without rewriting the published tag. A branch merge without a published version
+continues to use the normal release-note draft.
 
 ## Artifact
 

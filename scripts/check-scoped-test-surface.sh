@@ -100,6 +100,34 @@ integration_target_for() {
     printf '%s\n' "$directory"
 }
 
+add_required_test_target() {
+    local target="$1" known
+    for known in "${required_test_targets[@]}"; do
+        [[ "$known" == "$target" ]] && return 0
+    done
+    required_test_targets+=("$target")
+}
+
+is_builtin_skill_or_agent_path() {
+    local path="$1"
+    [[ "$path" == cas-cli/src/builtins/skills/* \
+        || "$path" == cas-cli/src/builtins/*/skills/* \
+        || "$path" == cas-cli/src/builtins/agents/* \
+        || "$path" == cas-cli/src/builtins/*/agents/* ]]
+}
+
+test_target_for_path() {
+    local test_path="$1"
+    case "$test_path" in
+        cas-cli/tests/*.rs)
+            basename "${test_path%.rs}"
+            ;;
+        cas-cli/tests/*/*.rs)
+            integration_target_for "${test_path#cas-cli/tests/}"
+            ;;
+    esac
+}
+
 lib_filter_covers() {
     local module="$1" filter
     # An unfiltered --lib run covers every library module. A module filter must
@@ -130,12 +158,31 @@ while IFS= read -r path; do
             ;;
         cas-cli/tests/*/*.rs)
             nested="${path#cas-cli/tests/}"
-            required_test_targets+=("$(integration_target_for "$nested")")
+            add_required_test_target "$(integration_target_for "$nested")"
             ;;
         cas-cli/tests/*.rs)
-            required_test_targets+=("$(basename "${path%.rs}")")
+            add_required_test_target "$(basename "${path%.rs}")"
             ;;
     esac
+done < <(git diff --name-only "$merge_base" HEAD)
+
+# Builtin skills and agents are embedded into all harness flavors, so their
+# source paths can be covered by tests that are not themselves changed. Always
+# require the cross-flavor and agent contracts, then discover any additional
+# guardrail binaries that name the changed builtin path literally. This keeps
+# size/phrase tests coupled to the files they read without maintaining a
+# hand-written path-to-test table.
+while IFS= read -r path; do
+    is_builtin_skill_or_agent_path "$path" || continue
+    add_required_test_target builtin_flavor_drift_test
+    add_required_test_target agent_definition_contract_test
+    add_required_test_target factory_codex_skill_guardrails
+    while IFS= read -r test_path; do
+        [[ -n "$test_path" ]] || continue
+        target="$(test_target_for_path "$test_path")"
+        [[ -n "$target" ]] || continue
+        add_required_test_target "$target"
+    done < <(rg -l -F -- "$path" cas-cli/tests --glob '*.rs' 2>/dev/null || true)
 done < <(git diff --name-only "$merge_base" HEAD)
 
 missing=()
@@ -155,9 +202,9 @@ if [[ ${#missing[@]} -eq 0 ]]; then
     exit 0
 fi
 
-echo "SCOPED PROOF SURFACE INCOMPLETE: this invocation does not cover the committed diff from ${base_ref} ($(git rev-parse --short "$merge_base"))." >&2
+echo "SCOPED PROOF INCOMPLETE: diff ${base_ref}@$(git rev-parse --short "$merge_base") is not covered." >&2
 for item in "${missing[@]}"; do
     echo "  - missing ${item}" >&2
 done
-echo "Use --proof only for a final receipt that covers every listed surface; ordinary narrow iteration is allowed without it." >&2
+echo "Use --proof for a complete receipt; narrow runs may omit it." >&2
 exit 1

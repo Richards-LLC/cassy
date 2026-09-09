@@ -10,12 +10,16 @@ Turn a non-empty task `demo_statement` into a capped exploration matrix and
 prove it against the named build. This is an evidence pass, not a fixture test
 and not a substitute for unit or integration tests. Time-box the whole pass to
 **30 minutes**; an honest incomplete ledger beats a late, invented result.
+For an epic with child demos, use the supervisor's
+[epic flow walk](../cas-supervisor/references/epic-flow-walk.md):
+one combined matrix with a **60-minute** box overrides the task defaults below.
 
 ## Procedure
 
 1. Read the active task with `task action=show`; name the binary version or
    commit SHA and write a one-line scope sentence before exercising anything.
-   If `demo_statement` is empty, do not invent a matrix or invoke this skill.
+   If `demo_statement` is empty and no child has one, do not invent a matrix
+   or invoke this skill.
 2. Build the exploration matrix with [references/matrix-builder.md](references/matrix-builder.md):
    derive the first row from the demo, then add **at least three unmentioned
    conditions**, at least one adjacent surface, and no replay cells after row
@@ -47,3 +51,23 @@ framework-specific diagnosis, `cas-servers` owns process lifecycle, and the
 task verifier owns judgment. Add automation-caused artifacts to the ledger's
 honesty section. Do not modify the verifier to make a missing or failing
 capture pass.
+
+## Telemetry sweep
+
+Before building the matrix, read `[qa] telemetry_sweep`. If it is configured,
+resolve the project-relative executable from the project root and run it
+read-only as the first QA step. Pass the task's reporter with
+`--reporter <value>` when one is present; omit that flag otherwise. Disable
+shell tracing, do not print environment variables, credentials, or raw event
+payloads, and save only the contract stdout/stderr under the task artifact
+directory.
+
+The command emits one tab-delimited line per finding with exactly
+`kind`, `subject`, `count`, `people`, `window`, and `sample` fields. `kind` is
+one of `NEW`, `RISING`, `HIGH_RATE`, or `BLACKOUT`; `HIGH_RATE` is the
+events-per-person finding. Reject malformed lines as sweep errors rather than
+inventing findings. Write `sweep: configured — <path>` in the ledger header,
+then add every valid finding as a `telemetry sweep` row labeled
+`eyewitness/telemetry` using [references/telemetry-sweep.md](references/telemetry-sweep.md).
+If it is unset, write the exact header line `sweep: not configured` and
+continue the ordinary matrix.

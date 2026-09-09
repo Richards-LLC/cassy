@@ -2,7 +2,9 @@
 
 Store the file at `~/.cas/artifacts/<task-id>/LEDGER.md`. The header names the
 build revision, one-line scope, surface, 30-minute budget, headline counts for
-cells/PASS/FAIL/NOT EXERCISED, and the evidence-label split.
+cells/PASS/FAIL/NOT EXERCISED, the evidence-label split, and the telemetry
+sweep state (`sweep: configured — <path>` or the exact line
+`sweep: not configured`).
 
 Use this exact row grammar so the verifier can consume it:
 
@@ -12,10 +14,12 @@ id | cell | expected | observed | verdict | label | evidence path | defect task
 
 Every row uses one label: `source-inferred` (code read only; proves nothing
 user-facing), `fixture` (harness, emulator, or mock), `real-build` (the actual
-binary or site), or `eyewitness` (a human report recorded verbatim). A weaker
-label than the cell requires is `NOT EXERCISED`, never `PASS`; `partial` is not
-a verdict. Each run cell has one screenshot or terminal capture and a short
-observed result.
+binary or site), `eyewitness` (a human report recorded verbatim), or
+`eyewitness/telemetry` (one valid finding emitted by the configured read-only
+sweep). A weaker label than the cell requires is `NOT EXERCISED`, never `PASS`;
+`partial` is not a verdict. Each run cell has one screenshot or terminal
+capture and a short observed result. Telemetry rows use the saved sweep stdout
+as their evidence path and include all six parsed fields in `observed`.
 
 After the rows, include these sections:
 

@@ -1952,6 +1952,78 @@ fn command_launches_codex(command: &str, args: &[String]) -> bool {
     command == "codex" || (command == "nice" && args.iter().any(|arg| arg == "codex"))
 }
 
+/// Audit the actual executable and its provider's account environment. Do not
+/// infer the worker CLI from the supervisor's inherited metadata.
+#[derive(Debug)]
+struct WorkerSpawnAudit<'a> {
+    worker: &'a str,
+    cli: &'a str,
+    model: &'a str,
+    effort: &'a str,
+    account_env: &'static str,
+    account: String,
+    source: &'static str,
+}
+
+fn worker_spawn_audit(
+    config: &PtyConfig,
+    inherited: impl Fn(&str) -> Option<String>,
+) -> Option<WorkerSpawnAudit<'_>> {
+    let env = |name: &str| {
+        config
+            .env
+            .iter()
+            .rev()
+            .find_map(|(key, value)| (key == name).then_some(value.as_str()))
+    };
+    if env("CAS_AGENT_ROLE") != Some("worker") {
+        return None;
+    }
+    // This is the exact wrapper emitted by maybe_wrap_with_nice.
+    let cli = if config.command == "nice" && config.args.first().map(String::as_str) == Some("-n") {
+        config.args.get(2).map(String::as_str).unwrap_or("nice")
+    } else {
+        &config.command
+    };
+    let (account_env, source_env, default) = match cli {
+        "claude" => (
+            "CLAUDE_CONFIG_DIR",
+            "CAS_FACTORY_CLAUDE_CONFIG_DIR_SOURCE",
+            "default (~/.claude)",
+        ),
+        "codex" => (
+            "CODEX_HOME",
+            "CAS_FACTORY_CODEX_HOME_SOURCE",
+            "default (~/.codex)",
+        ),
+        _ => ("none", "", "no account directory"),
+    };
+    let (account, source) = if account_env == "none" {
+        (default.to_string(), "none")
+    } else if let Some(dir) = env(account_env) {
+        let source = match env(source_env) {
+            Some("supervisor") => "supervisor session",
+            _ => "explicit param",
+        };
+        (dir.to_string(), source)
+    } else if !config.env_remove.iter().any(|key| key == account_env)
+        && let Some(dir) = inherited(account_env)
+    {
+        (dir, "host env")
+    } else {
+        (default.to_string(), "default")
+    };
+    Some(WorkerSpawnAudit {
+        worker: env("CAS_AGENT_NAME").unwrap_or("unknown"),
+        cli,
+        model: env("CAS_FACTORY_WORKER_MODEL").unwrap_or("(backend default)"),
+        effort: env("CAS_FACTORY_WORKER_EFFORT").unwrap_or("(backend default)"),
+        account_env,
+        account,
+        source,
+    })
+}
+
 impl Pty {
     /// Spawn a new PTY with the given configuration
     pub fn spawn(id: impl Into<String>, config: PtyConfig) -> Result<Self> {
@@ -2042,44 +2114,24 @@ impl Pty {
             cmd.env_remove("CODEX_ACCESS_TOKEN");
         }
 
-        if config
-            .env
-            .iter()
-            .any(|(key, value)| key == "CAS_AGENT_ROLE" && value == "worker")
-        {
-            let explicit =
-                config.env.iter().rev().find_map(|(key, value)| {
-                    (key == "CLAUDE_CONFIG_DIR").then_some(value.as_str())
-                });
-            let inherited = std::env::var("CLAUDE_CONFIG_DIR").ok();
-            let pushed_source = config.env.iter().rev().find_map(|(key, value)| {
-                (key == "CAS_FACTORY_CLAUDE_CONFIG_DIR_SOURCE").then_some(value.as_str())
-            });
-            let (config_dir, source) = match (explicit, pushed_source, inherited.as_deref()) {
-                (Some(dir), Some("explicit"), _) => (dir, "explicit param"),
-                (Some(dir), Some("supervisor"), _) => (dir, "supervisor session"),
-                (Some(dir), _, _) => (dir, "explicit param"),
-                (None, _, Some(dir)) => (dir, "host env"),
-                (None, _, None) => ("default (~/.claude)", "default"),
-            };
-            let worker = config
-                .env
-                .iter()
-                .find_map(|(key, value)| (key == "CAS_AGENT_NAME").then_some(value.as_str()))
-                .unwrap_or("unknown");
-            tracing::info!(
-                worker,
-                claude_config_dir = config_dir,
-                source,
-                "factory worker spawn: effective Claude account directory"
-            );
-        }
-
         // Spawn the child process
         let child = pair
             .slave
             .spawn_command(cmd)
             .map_err(|e| Error::pty(format!("Failed to spawn command: {e}")))?;
+
+        if let Some(audit) = worker_spawn_audit(&config, |key| std::env::var(key).ok()) {
+            tracing::info!(
+                worker = audit.worker,
+                cli = audit.cli,
+                model = audit.model,
+                effort = audit.effort,
+                account_env = audit.account_env,
+                account = audit.account,
+                source = audit.source,
+                "factory worker spawn"
+            );
+        }
 
         // Drop slave - the child process owns it now
         drop(pair.slave);
@@ -2410,6 +2462,89 @@ fn filter_cursor_position_requests(carry: &[u8], chunk: &[u8]) -> (Vec<u8>, Vec<
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn worker_spawn_audit_tracks_launched_cli_and_provider_account() {
+        for cli in ["codex", "claude", "grok", "opencode"] {
+            for wrapped in [false, true] {
+                for source in ["explicit", "supervisor", "inherited", "default", "removed"] {
+                    let mut config = PtyConfig {
+                        command: if wrapped { "nice" } else { cli }.to_string(),
+                        args: if wrapped {
+                            vec!["-n".into(), "10".into(), cli.into()]
+                        } else {
+                            vec![]
+                        },
+                        env: vec![
+                            ("CAS_AGENT_ROLE".into(), "worker".into()),
+                            ("CAS_AGENT_NAME".into(), "probe".into()),
+                            ("CAS_FACTORY_WORKER_MODEL".into(), "requested-model".into()),
+                            ("CAS_FACTORY_WORKER_EFFORT".into(), "high".into()),
+                            // A stale supervisor hint must not change the audit.
+                            ("CAS_FACTORY_WORKER_CLI".into(), "claude".into()),
+                        ],
+                        ..PtyConfig::default()
+                    };
+                    let (account_env, source_env) = if cli == "codex" {
+                        ("CODEX_HOME", "CAS_FACTORY_CODEX_HOME_SOURCE")
+                    } else {
+                        ("CLAUDE_CONFIG_DIR", "CAS_FACTORY_CLAUDE_CONFIG_DIR_SOURCE")
+                    };
+                    if matches!(source, "explicit" | "supervisor") {
+                        config.env.push((account_env.into(), "/selected".into()));
+                        config.env.push((source_env.into(), source.into()));
+                    }
+                    if source == "removed" {
+                        config.env_remove.push(account_env.into());
+                    }
+                    let audit = worker_spawn_audit(&config, |key| {
+                        if source == "default" {
+                            None
+                        } else {
+                            Some(
+                                if key == account_env {
+                                    "/inherited"
+                                } else {
+                                    "/wrong-provider"
+                                }
+                                .into(),
+                            )
+                        }
+                    })
+                    .unwrap();
+                    assert_eq!(audit.cli, cli);
+                    assert_eq!(audit.worker, "probe");
+                    assert_eq!(audit.model, "requested-model");
+                    assert_eq!(audit.effort, "high");
+                    if matches!(cli, "grok" | "opencode") {
+                        assert_eq!(audit.account, "no account directory");
+                        assert_eq!(audit.account_env, "none");
+                        assert_eq!(audit.source, "none");
+                    } else {
+                        assert_eq!(audit.account_env, account_env);
+                        let expected = match source {
+                            "explicit" | "supervisor" => "/selected",
+                            "inherited" => "/inherited",
+                            _ if cli == "codex" => "default (~/.codex)",
+                            _ => "default (~/.claude)",
+                        };
+                        assert_eq!(audit.account, expected, "{cli}/{wrapped}/{source}");
+                        assert_eq!(
+                            audit.source,
+                            match source {
+                                "explicit" => "explicit param",
+                                "supervisor" => "supervisor session",
+                                "inherited" => "host env",
+                                _ => "default",
+                            }
+                        );
+                    }
+                }
+            }
+        }
+        assert!(worker_spawn_audit(&PtyConfig::default(), |_| None).is_none());
+    }
+
+
     use crate::pty::*;
     use std::sync::{Mutex, MutexGuard};
 

@@ -219,6 +219,10 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
         content: include_str!("builtins/skills/cas-supervisor/references/epic-driving.md"),
     },
     BuiltinFile {
+        path: "skills/cas-supervisor/references/epic-flow-walk.md",
+        content: include_str!("builtins/skills/cas-supervisor/references/epic-flow-walk.md"),
+    },
+    BuiltinFile {
         path: "skills/cas-supervisor-checklist/SKILL.md",
         content: include_str!("builtins/skills/cas-supervisor-checklist.md"),
     },
@@ -484,6 +488,10 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-qa-craft/references/exemplar.md",
         content: include_str!("builtins/skills/cas-qa-craft/references/exemplar.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-qa-craft/references/telemetry-sweep.md",
+        content: include_str!("builtins/skills/cas-qa-craft/references/telemetry-sweep.md"),
     },
     // release-notes skill (GH #65): drafts/posts the user + dev Slack threads
     // for every staging/main merge and installs the canonical rubric template
@@ -769,6 +777,10 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
         content: include_str!("builtins/codex/skills/cas-supervisor/references/epic-driving.md"),
     },
     BuiltinFile {
+        path: "skills/cas-supervisor/references/epic-flow-walk.md",
+        content: include_str!("builtins/codex/skills/cas-supervisor/references/epic-flow-walk.md"),
+    },
+    BuiltinFile {
         path: "skills/cas-codex-supervisor-checklist/SKILL.md",
         content: include_str!("builtins/codex/skills/cas-codex-supervisor-checklist.md"),
     },
@@ -1026,6 +1038,10 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
         path: "skills/cas-qa-craft/references/exemplar.md",
         content: include_str!("builtins/codex/skills/cas-qa-craft/references/exemplar.md"),
     },
+    BuiltinFile {
+        path: "skills/cas-qa-craft/references/telemetry-sweep.md",
+        content: include_str!("builtins/codex/skills/cas-qa-craft/references/telemetry-sweep.md"),
+    },
     // release-notes skill (GH #65) — codex mirror.
     BuiltinFile {
         path: "skills/release-notes/SKILL.md",
@@ -1257,6 +1273,10 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-supervisor/references/epic-driving.md",
         content: include_str!("builtins/grok/skills/cas-supervisor/references/epic-driving.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-supervisor/references/epic-flow-walk.md",
+        content: include_str!("builtins/grok/skills/cas-supervisor/references/epic-flow-walk.md"),
     },
     BuiltinFile {
         path: "skills/cas-supervisor/references/worker-recovery.md",
@@ -1578,6 +1598,10 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-qa-craft/references/exemplar.md",
         content: include_str!("builtins/grok/skills/cas-qa-craft/references/exemplar.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-qa-craft/references/telemetry-sweep.md",
+        content: include_str!("builtins/grok/skills/cas-qa-craft/references/telemetry-sweep.md"),
     },
     // release-notes skill (GH #65) — grok twin.
     BuiltinFile {
@@ -3684,6 +3708,7 @@ This is the body content."#;
     #[test]
     fn test_supervisor_guidance_under_8kb() {
         let guide = supervisor_guidance();
+        let headroom = SUPERVISOR_GUIDANCE_HARD_CEILING_BYTES.saturating_sub(guide.len());
         assert!(
             guide.len() < SUPERVISOR_GUIDANCE_HARD_CEILING_BYTES,
             "supervisor_guidance is {} bytes — over the {SUPERVISOR_GUIDANCE_HARD_CEILING_BYTES}B SessionStart ceiling. \
@@ -3698,6 +3723,14 @@ This is the body content."#;
              into cas-supervisor/references/ to keep CI headroom.",
             guide.len(),
             SUPERVISOR_GUIDANCE_HARD_CEILING_BYTES - guide.len()
+        );
+        assert!(
+            headroom >= crate::hooks::handlers::session_budget::SESSION_START_MIN_HEADROOM_BYTES,
+            "supervisor_guidance is {} bytes — only {headroom}B remains below the \
+             {SUPERVISOR_GUIDANCE_HARD_CEILING_BYTES}B hard ceiling; keep at least {}B of \
+             SessionStart headroom by moving detail into cas-supervisor/references/",
+            guide.len(),
+            crate::hooks::handlers::session_budget::SESSION_START_MIN_HEADROOM_BYTES
         );
     }
 
@@ -4872,6 +4905,7 @@ This is the body content."#;
             "skills/cas-qa-craft/references/matrix-builder.md",
             "skills/cas-qa-craft/references/evidence-ledger.md",
             "skills/cas-qa-craft/references/exemplar.md",
+            "skills/cas-qa-craft/references/telemetry-sweep.md",
         ];
         let mut claude_bodies = Vec::new();
         for (label, catalog) in [
@@ -4903,6 +4937,9 @@ This is the body content."#;
                 "fixture",
                 "real-build",
                 "eyewitness",
+                "telemetry_sweep",
+                "sweep: not configured",
+                "eyewitness/telemetry",
                 "NOT EXERCISED",
                 "MIN_",
                 "contradictory claims",
@@ -4940,6 +4977,20 @@ This is the body content."#;
             let exemplar = get(FILES[3]);
             for marker in ["M01", "M07", "real-build", "FAIL", "adjacent", "Honesty"] {
                 assert!(exemplar.contains(marker), "{label} exemplar missing {marker:?}");
+            }
+            let telemetry = get(FILES[4]);
+            for marker in [
+                "qa.telemetry_sweep",
+                "NEW",
+                "RISING",
+                "HIGH_RATE",
+                "BLACKOUT",
+                "PostHog",
+                "HogQL",
+                "Known noise",
+                "task id",
+            ] {
+                assert!(telemetry.contains(marker), "{label} telemetry reference missing {marker:?}");
             }
             if label == "claude" {
                 claude_bodies = FILES.iter().map(|path| (*path, get(path))).collect();

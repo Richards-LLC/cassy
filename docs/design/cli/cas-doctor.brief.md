@@ -3,10 +3,10 @@
 | Field | Sentence |
 | --- | --- |
 | First two lines | Whether the local store is healthy, how many findings need a hand, and which project and version this is about. |
-| Scannable | One line per healthy group with its marks; one row per finding under its group, with the mark, the name, and a repeat count when the same check fired per instance. |
+| Scannable | One line per healthy group with its marks; one row per finding under its group, including the `SessionStart budget` guard with its byte headroom. |
 | Readable | Each finding's cause (at most three lines) and its remedy under `→`; everything whole under `--verbose`. |
 | Machine output | `--json`: one array of `{name, status, group, message, remediation, duration_ms, phase}`; nothing else on stdout. |
-| Omitted | Per-check timings, the slow-phase table, and instances beyond the first of a repeated finding — all under `--verbose`. |
+| Omitted | Per-check timings, the slow-phase table, and instances beyond the first of a repeated finding — all under `--verbose`; detailed payload sections remain in the SessionStart references. |
 
 ## Rendering decisions
 
@@ -32,6 +32,11 @@ The MCP upstream reachability check is one grouped row: it reports the number pr
 reachable upstreams, and includes the bounded credential-free cause for each unavailable one;
 the same message is carried in the existing `--json` check object.
 
+The `SessionStart budget` row reports supervisor guidance bytes and remaining headroom below
+the protected 8,192-byte ceiling. It warns at less than 512 bytes of headroom and directs the
+operator to move detail into `cas-supervisor/references/`; its status and message are carried
+by the existing `--json` check object.
+
 ## Critique
 
 Before (build `eda3dfd1`): `terminal-qa: FAIL cas-doctor · 12 runs · 841 fail · 24 warn` — 788 contrast, 28 word-split, 24 overflow, 1 unicode-without-fallback.
@@ -55,3 +60,18 @@ this task.
 Task capture: `terminal-qa: PASS cas-doctor-fcba · 12 runs · 0 fail · 8 warn · 0 allowed · /home/pippenz/.cas/artifacts/cas-fcba/terminal-qa/cas-doctor/report.json`.
 The eight warnings are the existing 120-column word-split heuristics for temporary registered
 roots and the quarantine remedy; the new reachability row did not introduce a failure or overflow.
+
+SessionStart budget capture: `terminal-qa: PASS cas-doctor-budget · 12 runs · 0 fail · 4 warn · 0 allowed · /home/pippenz/.cas/artifacts/cas-6a20/terminal-qa/cas-doctor-budget/report.json`.
+The four warnings are the existing 120-column word-split heuristic on the quarantine remedy;
+the new `SessionStart budget` row is present in the 80-column capture and the JSON document,
+with no new failure or overflow.
+
+| Dimension | Score | Evidence |
+| --- | --- | --- |
+| Hierarchy | 5 | The first two lines give the warning count and the first group; the new budget status is a grouped Config row. |
+| Fit | 4 | The byte guard is one scan-friendly row and remains a typed JSON check rather than a separate output shape. |
+| Craft | 4 | The row names guidance bytes, headroom, and the protected ceiling in one line at 80 columns. |
+| Theme safety | 5 | The four palettes, `NO_COLOR`, and C-locale runs have no mechanical color or Unicode failures. |
+| Machine contract | 5 | The JSON run is one document and includes `name`, `status`, `message`, `phase`, and timing fields. |
+
+Scored by Codex on 2026-09-09; hierarchy, fit, and craft floors hold.

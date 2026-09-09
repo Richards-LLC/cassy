@@ -242,3 +242,24 @@ These require a major version bump:
    asset is still uploading, or a downloaded byte hash disagrees with GitHub.
    Copy its emitted fields into the release-note draft; never transcribe a
    digest from `dist/local-audit/`.
+
+### Task close delivery attribution
+
+Close posture checks (`additive-only`, `value-only`), no-code intent, and the
+receipt diff stat share task delivery attribution in
+`mcp/tools/core/task/lifecycle/close_ops/task_attribution.rs`. The remote-tracking
+integration target is preferred when present. Unmerged commits are bounded by
+the task work window; already integrated commits need task identity. An explicit
+commit receipt caps the displayed history and includes unnamed predecessor
+commits within the work window, stopping at another task's commit. Receipt
+inputs remain hexadecimal commit IDs, including unambiguous abbreviations.
+
+A live registered supervisor may use `supervisor_override=true` with a non-empty
+reason to waive additive-only/value-only posture checks and the receipt epoch
+check for a retroactive record task. Close records the decision. Repository
+binding, ancestry, non-empty delivery, and target-content checks still apply.
+
+An empty `execution_note` update may clear a constraint after approval when its
+exact repository proof is unchanged. Pending, skipped, unbound, and changed
+proofs remain locked; changing other scope fields or replacing the constraint
+still requires a fresh proof cycle.

@@ -253,7 +253,8 @@ impl CheckGroup {
             | "mcp stdio upstreams"
             | "mcp upstream reachability"
             | "sync target"
-            | "models" =>
+            | "models"
+            | "sessionstart budget" =>
             {
                 Self::Config
             }
@@ -1142,6 +1143,37 @@ fn prompt_hook_check(cas_root: &Path) -> Check {
     }
 }
 
+/// Keep the protected supervisor guidance comfortably below the SessionStart
+/// harness ceiling. Dynamic sections can compact, but guidance edits are
+/// protected and therefore consume the budget permanently.
+fn session_start_budget_check_for(guidance_bytes: usize) -> Check {
+    let hard_ceiling = crate::builtins::SUPERVISOR_GUIDANCE_HARD_CEILING_BYTES;
+    let headroom = hard_ceiling.saturating_sub(guidance_bytes);
+    let minimum = crate::hooks::handlers::session_budget::SESSION_START_MIN_HEADROOM_BYTES;
+
+    if guidance_bytes < hard_ceiling && headroom >= minimum {
+        Check::new(
+            "SessionStart budget",
+            CheckStatus::Ok,
+            format!(
+                "supervisor guidance is {guidance_bytes}B; {headroom}B headroom below the {hard_ceiling}B protected ceiling"
+            ),
+        )
+    } else {
+        Check::new(
+            "SessionStart budget",
+            CheckStatus::Warning,
+            format!(
+                "supervisor guidance is {guidance_bytes}B; only {headroom}B headroom below the {hard_ceiling}B protected ceiling (need at least {minimum}B). Move detail into cas-supervisor/references/"
+            ),
+        )
+    }
+}
+
+fn session_start_budget_check() -> Check {
+    session_start_budget_check_for(crate::builtins::supervisor_guidance().len())
+}
+
 pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow::Result<()> {
     let started = Instant::now();
     let mut checks = Vec::new();
@@ -1283,6 +1315,8 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
     recorder.mark("host checks", &checks);
     checks.push(prompt_hook_check(&cas_root));
     recorder.mark("prompt hook", &checks);
+    checks.push(session_start_budget_check());
+    recorder.mark("SessionStart budget", &checks);
     // Check 2: Store type and database
     let store_type = detect_store_type(&cas_root);
     match store_type {
@@ -8994,6 +9028,20 @@ fn output_checks_timed(
 #[cfg(test)]
 mod prompt_hook_tests {
     use super::*;
+
+    #[test]
+    fn session_start_budget_row_requires_512_bytes_of_headroom() {
+        let hard_ceiling = crate::builtins::SUPERVISOR_GUIDANCE_HARD_CEILING_BYTES;
+        let minimum = crate::hooks::handlers::session_budget::SESSION_START_MIN_HEADROOM_BYTES;
+
+        let at_floor = session_start_budget_check_for(hard_ceiling - minimum);
+        assert!(matches!(at_floor.status, CheckStatus::Ok));
+        assert!(at_floor.message.contains("512B headroom"));
+
+        let below_floor = session_start_budget_check_for(hard_ceiling - minimum + 1);
+        assert!(matches!(below_floor.status, CheckStatus::Warning));
+        assert!(below_floor.message.contains("need at least 512B"));
+    }
 
     #[test]
     fn prompt_hook_row_reports_observed_silence_and_ignores_old_sessions() {

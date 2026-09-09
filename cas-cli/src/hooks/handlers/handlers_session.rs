@@ -1,4 +1,4 @@
-use crate::hooks::handlers::session_budget::SessionContextAssembler;
+use crate::hooks::handlers::session_budget::{DegradationPriority, SessionContextAssembler};
 use crate::hooks::handlers::*;
 
 fn registered_role_mismatch_banner(
@@ -217,7 +217,12 @@ pub fn handle_session_start(
 
     #[cfg(feature = "mcp-proxy")]
     if let Some(warning) = crate::mcp::viktor_watch::session_start_warning(cas_root) {
-        assembler.prepend_degradable(warning.clone(), warning);
+        assembler.prepend_degradable_with_priority(
+            "Viktor upstream warning",
+            warning.clone(),
+            warning,
+            DegradationPriority::Context,
+        );
     }
 
     // Planning is a shared write surface: two live supervisors can otherwise
@@ -228,7 +233,12 @@ pub fn handle_session_start(
         if let Some(banner) =
             active_peer_supervisor_banner(cas_root, std::env::var("CAS_AGENT_NAME").ok().as_deref())
         {
-            assembler.prepend_degradable(banner.clone(), banner);
+            assembler.prepend_degradable_with_priority(
+                "Concurrent supervisor warning",
+                banner.clone(),
+                banner,
+                DegradationPriority::Context,
+            );
         }
     }
 
@@ -238,7 +248,12 @@ pub fn handle_session_start(
     if let Some(packet) =
         crate::ambient_recall::build_ambient_recall_context(input, cas_root, None, true)
     {
-        assembler.append_degradable(packet.full, packet.compact);
+        assembler.append_degradable_with_priority(
+            "Ambient recall",
+            packet.full,
+            packet.compact,
+            DegradationPriority::AmbientRecall,
+        );
     }
 
     if let Some(staleness) =
@@ -247,9 +262,19 @@ pub fn handle_session_start(
         let full = staleness.format_injection(is_supervisor);
         let compact = staleness.format_injection_compact(is_supervisor);
         if staleness.is_high_severity(is_supervisor) {
-            assembler.prepend_degradable(full, compact);
+            assembler.prepend_degradable_with_priority(
+                "Codemap freshness",
+                full,
+                compact,
+                DegradationPriority::Context,
+            );
         } else {
-            assembler.append_degradable(full, compact);
+            assembler.append_degradable_with_priority(
+                "Codemap freshness",
+                full,
+                compact,
+                DegradationPriority::Context,
+            );
         }
     }
 
@@ -283,7 +308,12 @@ pub fn handle_session_start(
         if let Some(banner) =
             crate::hooks::handlers::session_hygiene::build_session_start_wip_banner_sized(cas_root)
         {
-            assembler.append_degradable(banner.full, banner.compact);
+            assembler.append_degradable_with_priority(
+                "Factory worktree changes",
+                banner.full,
+                banner.compact,
+                DegradationPriority::Context,
+            );
         }
     }
 
@@ -296,7 +326,12 @@ pub fn handle_session_start(
             cas_root,
         )
     {
-        assembler.append_degradable(banner.full, banner.compact);
+        assembler.append_degradable_with_priority(
+            "Stale builtin references",
+            banner.full,
+            banner.compact,
+            DegradationPriority::Context,
+        );
     }
 
     // cas-20f27: issue-filing detectors. Both are surfaced to every role — a
@@ -310,7 +345,12 @@ pub fn handle_session_start(
             cas_root,
         )
     {
-        assembler.append_degradable(banner.full, banner.compact);
+        assembler.append_degradable_with_priority(
+            "Unfiled reports",
+            banner.full,
+            banner.compact,
+            DegradationPriority::Context,
+        );
     }
 
     // (2) No issue target configured in a project that stages requests. Never
@@ -321,7 +361,12 @@ pub fn handle_session_start(
             cas_root, &config,
         )
     {
-        assembler.append_degradable(banner.full, banner.compact);
+        assembler.append_degradable_with_priority(
+            "Issue repository target",
+            banner.full,
+            banner.compact,
+            DegradationPriority::Context,
+        );
     }
 
     // cas-b7dd (GH #88): leftovers from dead sessions — orphan processes still
@@ -335,7 +380,12 @@ pub fn handle_session_start(
                 cas_root,
             )
         {
-            assembler.append_degradable(banner.full, banner.compact);
+            assembler.append_degradable_with_priority(
+                "Orphaned factory resources",
+                banner.full,
+                banner.compact,
+                DegradationPriority::Context,
+            );
         }
     }
 
@@ -348,7 +398,12 @@ pub fn handle_session_start(
         if let Some(banner) = crate::hooks::handlers::issue_triage::build_session_start_banner_sized(
             cas_root, &config,
         ) {
-            assembler.append_degradable(banner.full, banner.compact);
+            assembler.append_degradable_with_priority(
+                "GitHub issue triage",
+                banner.full,
+                banner.compact,
+                DegradationPriority::Context,
+            );
         }
     }
 

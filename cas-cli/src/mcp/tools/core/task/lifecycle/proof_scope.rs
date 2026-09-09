@@ -214,6 +214,30 @@ fn exact_proof_locks_scope(cas_root: &Path, task: &Task) -> Result<bool, String>
     }
 }
 
+fn approved_repository_is_unchanged(cas_root: &Path, task: &Task) -> bool {
+    let Ok(Some(dispatch)) = cas_store::get_latest_verification_dispatch(cas_root, &task.id) else {
+        return false;
+    };
+    if dispatch.task_id != task.id || dispatch.state != VerificationDispatchState::Resolved {
+        return false;
+    }
+    let Ok(Some(verdict)) = cas_store::get_verification_for_dispatch(cas_root, &dispatch.id) else {
+        return false;
+    };
+    if verdict.status != VerificationStatus::Approved
+        || verdict.provenance == VerificationProvenance::Legacy
+        || verdict.dispatch_id.as_deref() != Some(dispatch.id.as_str())
+    {
+        return false;
+    }
+    dispatch.repository.as_ref().is_some_and(|proof| {
+        matches!(
+            super::repository_proof::evaluate_repository_proof(proof),
+            Ok(super::repository_proof::RepositoryProofStatus::Unchanged)
+        )
+    })
+}
+
 /// Reject mutations that could change a terminal task or an active exact proof.
 ///
 /// This guard must run immediately after loading the task, before receipt
@@ -252,6 +276,18 @@ pub(crate) fn guard_task_proof_scope(
             .is_some_and(|reference| !reference.trim().is_empty())
     {
         locked_fields.retain(|field| *field != "external_ref");
+    }
+    // Clearing a constraint does not change the reviewed delivery. Require
+    // an approved exact repository snapshot and an unchanged checkout; pending,
+    // skipped, stale, and unbound proofs keep the ordinary scope lock.
+    if let ProofScopeOperation::TaskUpdate { request, .. } = operation
+        && request
+            .execution_note
+            .as_deref()
+            .is_some_and(|note| note.trim().is_empty())
+        && approved_repository_is_unchanged(cas_root, task)
+    {
+        locked_fields.retain(|field| *field != "execution_note");
     }
     if locked_fields.is_empty() {
         return Ok(());
@@ -605,6 +641,96 @@ mod tests {
             assert_eq!(reopened.status, TaskStatus::Open);
             assert_eq!(reopened.assignee.as_deref(), Some("worker"));
         }
+    }
+
+    #[test]
+    fn approved_unchanged_delivery_allows_only_posture_clear() {
+        let root = TempDir::new().unwrap();
+        let repo = TempDir::new().unwrap();
+        for args in [
+            vec!["init", "-q"],
+            vec![
+                "-c",
+                "user.name=fixture",
+                "-c",
+                "user.email=fixture@example.test",
+                "commit",
+                "--allow-empty",
+                "-qm",
+                "seed",
+            ],
+        ] {
+            assert!(
+                std::process::Command::new("git")
+                    .args(args)
+                    .current_dir(repo.path())
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        let proof = super::super::repository_proof::capture_repository_proof_with_anchors(
+            repo.path(),
+            repo.path(),
+            vec![],
+        )
+        .unwrap();
+        let mut task = Task::new("cas-clear-posture".into(), "reviewed delivery".into());
+        task.execution_note = Some("value-only".into());
+        cas_store::create_verification_dispatch_bound(
+            root.path(),
+            &task.id,
+            "requester",
+            FIXTURE_SUPERVISOR_ID,
+            &VerificationProofBoundary::task_at(proof),
+            chrono::Utc::now() + chrono::Duration::minutes(10),
+            false,
+        )
+        .unwrap();
+        let mut update = empty_update();
+        update.execution_note = Some(String::new());
+        let check = |update: &TaskUpdateRequest| {
+            guard_task_proof_scope(
+                root.path(),
+                &task,
+                ProofScopeOperation::TaskUpdate {
+                    request: update,
+                    target_repo_supplied: false,
+                    target_branch_supplied: false,
+                },
+            )
+        };
+        assert!(check(&update).is_err(), "pending proof cannot be changed");
+        let dispatch = cas_store::get_latest_verification_dispatch(root.path(), &task.id)
+            .unwrap()
+            .unwrap();
+        add_exact_supervisor_fixture_verdict(
+            root.path(),
+            cas_types::Verification::approved(
+                "ver-clear".into(),
+                task.id.clone(),
+                "approved exact repository".into(),
+            ),
+            &dispatch,
+        );
+        assert!(
+            check(&update).is_ok(),
+            "clearing posture preserves unchanged approved delivery"
+        );
+        update.title = Some("different scope".into());
+        assert!(check(&update).is_err());
+        update.title = None;
+        update.execution_note = Some("no-code".into());
+        assert!(
+            check(&update).is_err(),
+            "replacing a methodology remains locked"
+        );
+        update.execution_note = Some(String::new());
+        std::fs::write(repo.path().join("changed.rs"), "changed scope").unwrap();
+        assert!(
+            check(&update).is_err(),
+            "changed repository needs fresh verification"
+        );
     }
 
     #[test]

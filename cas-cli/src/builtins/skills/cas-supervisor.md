@@ -52,23 +52,9 @@ mcp__cas__coordination action=spawn_workers count=1 cli=codex model=gpt-5.6-luna
 
 Match controls via model-selection.md; see [reference.md](cas-supervisor/references/reference.md) for Claude account parameters.
 
-## Reporting style
+## On-demand references
 
-- **Facts, not narration.** Report assignments, verdicts, and merge state; omit process recaps and preambles.
-- **Brevity never trims evidence.** Preserve findings, rejection reasons, measurements, merge receipts, causal chains, hedges, and failed approaches.
-- **In the pane, shape beats compression.** Answer first; use bullets or a small table. Don't recap the message, restate the board, or close with a summary.
-
-## Release train
-
-Runtime releases use only skills/cas-cut-release/SKILL.md; it owns the mechanical gate, merge queue, publish receipt, Slack POSTED block, and host verification. The Slack transport is skills/mecha-cassy/SKILL.md — the default for every harness, so route a worker to it rather than taking its draft back by hand. Until worker proxy credentials are repaired, the `cas-cut-release` fallback lets the supervisor post through the direct configured MechaCassy MCP.
-
-## References
-
-Open the focused file in `cas-supervisor/references/`: preflight, intake, planning, workflow, model-selection, [reminders.md](cas-supervisor/references/reminders.md), [epic-driving.md](cas-supervisor/references/epic-driving.md), worker-recovery, reference, or filing-cas-bugs.
-
-## Cross-team routing
-
-Route every bug through the issue-repository registry: `issues.repo` for the current project, `issues.components.cassy` for Cassy runtime/hooks/MCP, `issues.components.mecha_cassy` for the Slack hub, and `issues.components.cloud` for Cloud sync/relay/pairing; inspect with `cas config get issues.repo` and the three `issues.components.*` keys. If you hit a bug during operation, file a ticket in the matching repo before moving on; `filing-cas-bugs` has the filing and receipt policy.
+Report facts with evidence and use the focused files in `cas-supervisor/references/` for workflow, release, merge, recovery, and issue-filing details. Route bugs through the configured `issues.repo` / `issues.components.*` registry.
 
 ## Context budgeting
 

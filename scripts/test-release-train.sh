@@ -458,6 +458,81 @@ else
     bad "verified publication receipts did not produce actual latency: $status"
 fi
 
+# A published tag is not announcement-complete until the report PDF has been
+# uploaded in the User thread and its immutable receipt is saved. The status
+# surface must keep that missing post visible instead of implying completion.
+if [[ "$status" == *'release report: pending'* ]] \
+    && [[ "$status" != *'release report: verified'* ]]; then
+    ok '--status reports the missing release-report receipt as pending'
+else
+    bad "missing release-report receipt was not reported as pending: $status"
+fi
+
+report_pdf="$wt_a/docs/release-reports/v9.99.0.pdf"
+mkdir -p "$(dirname "$report_pdf")"
+cp "$repo_root/docs/release-reports/v3.19.0.pdf" "$report_pdf"
+report_sha="$(sha256sum "$report_pdf" | awk '{print $1}')"
+report_pages="$(pdfinfo "$report_pdf" | awk '$1 == "Pages:" { print $2; exit}')"
+report_html="$wt_a/docs/release-reports/v9.99.0.html"
+printf '<!doctype html><title>Fixture release report</title>\n' >"$report_html"
+report_html_sha="$(sha256sum "$report_html" | awk '{print $1}')"
+cat >"$dir_a/release-report.receipt" <<EOF
+TAG=v9.99.0
+PDF_PATH=docs/release-reports/v9.99.0.pdf
+HTML_PATH=docs/release-reports/v9.99.0.html
+PDF_SHA256=$report_sha
+HTML_SHA256=$report_html_sha
+PAGE_COUNT=$report_pages
+PDF_FILE_PERMALINK=https://petra-stella.slack.com/files/FIXTURE/report.pdf
+PDF_FILE_ID=F0FIXTUREPDF
+HTML_FILE_ID=F0FIXTUREHTML
+USER_THREAD_TS=fixture-user-thread
+DEV_THREAD_TS=fixture-dev-thread
+EOF
+status="$("$train" 9.99.0 "$wt_a" --status 2>&1 || true)"
+if [[ "$status" == *"release report: verified PDF=docs/release-reports/v9.99.0.pdf"* ]] \
+    && [[ "$status" == *"sha256=$report_sha"* ]] \
+    && [[ "$status" == *"pages=$report_pages"* ]]; then
+    ok '--status accepts a complete report PDF receipt with matching hash and page count'
+else
+    bad "complete release-report receipt was not accepted: $status"
+fi
+
+# The post adapter seam keeps authenticated Slack transport outside this shell
+# script while making the receipt a required output of the --report action.
+report_post="$tmp/report-post.sh"
+cat >"$report_post" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+pdf_sha="$(sha256sum "$CAS_RELEASE_TRAIN_REPORT_PDF" | awk '{print $1}')"
+pdf_pages="$(pdfinfo "$CAS_RELEASE_TRAIN_REPORT_PDF" | awk '$1 == "Pages:" { print $2; exit}')"
+html_sha="$(sha256sum "$CAS_RELEASE_TRAIN_REPORT_HTML" | awk '{print $1}')"
+cat >"$CAS_RELEASE_TRAIN_REPORT_RECEIPT" <<RECEIPT
+TAG=v$CAS_RELEASE_TRAIN_REPORT_VERSION
+PDF_PATH=docs/release-reports/v9.99.0.pdf
+HTML_PATH=docs/release-reports/v9.99.0.html
+PDF_SHA256=$pdf_sha
+HTML_SHA256=$html_sha
+PAGE_COUNT=$pdf_pages
+PDF_FILE_PERMALINK=https://petra-stella.slack.com/files/FIXTURE/report.pdf
+PDF_FILE_ID=F0FIXTUREPDF
+HTML_FILE_ID=F0FIXTUREHTML
+USER_THREAD_TS=fixture-user-thread
+DEV_THREAD_TS=fixture-dev-thread
+RECEIPT
+EOF
+chmod +x "$report_post"
+printf '# Fixture release report\n' >"$wt_a/docs/release-reports/v9.99.0.md"
+rm "$dir_a/release-report.receipt"
+report_out="$(CAS_RELEASE_TRAIN_REPORT_POST_CMD="$report_post" \
+    "$train" 9.99.0 "$wt_a" --report 2>&1)"
+if [[ "$report_out" == *'release report: verified PDF=docs/release-reports/v9.99.0.pdf'* ]] \
+    && [[ -s "$dir_a/release-report.receipt" ]]; then
+    ok '--report requires and accepts the posting adapter receipt after publication'
+else
+    bad "--report did not complete through the receipt adapter: $report_out"
+fi
+
 # ---------------------------------------------------------------------------
 # The rule itself: nothing in the release path may locate a process by pattern.
 # This is the guard that stops a future wrapper from reintroducing

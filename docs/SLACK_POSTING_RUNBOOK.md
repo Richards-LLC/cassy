@@ -63,6 +63,31 @@ timestamp and permalink, and that threaded replies carry their parent
 timestamp. During the embargo, replace the target with a pre-approved test
 channel or DM and use a smoke-test body; never substitute `#cas-internal`.
 
+### Release-report PDF upload
+
+The report is a required publication artifact, not a repository-only link.
+After `cas release report <version> --pdf` has produced the committed
+Markdown, brief, HTML, PDF and QA receipt, attach the exact PDF bytes to the
+User top-level thread and link the HTML from the Dev thread.
+
+The supervisor-owned Claude fallback uses the authenticated
+`slack_get_file_upload_url` → upload the PDF bytes →
+`slack_complete_file_upload` sequence. Pass the exact content length to the
+URL request, preserve the returned file permalink, and record the User/Dev
+thread receipts. A file upload is accepted only after downloading it back,
+checking the SHA-256 against the local PDF, decoding it successfully, and
+verifying its page count. The MechaCassy fallback uses
+`mecha_post` with `kind: file` (or its approved image/file equivalent);
+apply the same download, decode and hash checks before writing
+`release-report.receipt`.
+
+The receipt belongs under the release-train run directory and must include
+`TAG`, `PDF_PATH`, `HTML_PATH`, `PDF_SHA256`, `HTML_SHA256`,
+`PAGE_COUNT`, `PDF_FILE_PERMALINK`, `PDF_FILE_ID`, `HTML_FILE_ID`,
+`USER_THREAD_TS` and `DEV_THREAD_TS`. Keep the returned thread permalinks
+alongside those fields. Never mark the release announced on an upload response
+or permalink alone.
+
 If the approved Claude profile cannot complete a read-only preflight, stop
 after saving the draft. Report the exact command, exit status, and error in the
 task note, then ask the supervisor to restore authorization or provide a
@@ -100,7 +125,11 @@ must use the designated test channel/DM during an embargo.
 top-level → capture `ts` → Dev reply. A reply without its parent's `ts` is a
 stray top-level message.
 
-**4. Record the receipt.** Annotate the saved draft with a `## POSTED` block
+**4. Upload and verify the report.** Attach the PDF to the User thread, link
+the HTML from the Dev thread, and complete the download/hash/decode/page-count
+checks before saving `release-report.receipt` in the train run directory.
+
+**5. Record the receipt.** Annotate the saved draft with a `## POSTED` block
 containing the UTC timestamp, channel, and permalink for every post/reply.
 
 ## One-shot gotchas

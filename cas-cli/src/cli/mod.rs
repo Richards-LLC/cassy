@@ -28,6 +28,7 @@ pub use knowledge_cmd::{
 mod known_repos;
 mod project_overview_cmd;
 mod provider_default;
+mod release_report;
 mod sweep;
 mod worktree;
 // `pub` so integration tests in `cas-cli/tests/` can reach
@@ -89,6 +90,7 @@ pub use list::ListArgs;
 pub use mcp_cmd::McpCommands;
 pub use open::OpenArgs;
 pub use provider_default::DefaultArgs;
+pub use release_report::ReleaseReportArgs;
 pub use setup::SetupArgs;
 pub use status::StatusArgs;
 pub use statusline::StatusLineArgs;
@@ -272,6 +274,14 @@ pub enum Commands {
     /// Show release notes and changelog from GitHub releases
     Changelog(ChangelogArgs),
 
+    /// Release lifecycle helpers
+    #[command(subcommand)]
+    Release(ReleaseCommands),
+
+    /// Legacy spelling for `cas release report`
+    #[command(name = "release-report", hide = true)]
+    ReleaseReport(ReleaseReportArgs),
+
     /// Manage upstream MCP servers
     #[command(subcommand)]
     Mcp(McpCommands),
@@ -349,6 +359,12 @@ pub enum Commands {
     RetrievalParity(retrieval_parity::RetrievalParityCommands),
 }
 
+#[derive(Subcommand)]
+pub enum ReleaseCommands {
+    /// Assemble a Markdown, standalone HTML, and optional PDF release report
+    Report(ReleaseReportArgs),
+}
+
 /// Authentication requirement for a command.
 #[derive(Copy, Clone, Eq, PartialEq)]
 enum AuthRequirement {
@@ -377,6 +393,8 @@ fn auth_requirement(command: &Option<Commands>) -> AuthRequirement {
         | Commands::Viktor(_)
         | Commands::Update(_)
         | Commands::Changelog(_)
+        | Commands::Release(_)
+        | Commands::ReleaseReport(_)
         | Commands::Hook(_)
         | Commands::Factory(_)
         | Commands::Claude(_)
@@ -602,6 +620,8 @@ fn get_command_name(cmd: &Option<Commands>) -> String {
         Commands::Whoami => "whoami".to_string(),
         Commands::Update(_) => "update".to_string(),
         Commands::Changelog(_) => "changelog".to_string(),
+        Commands::Release(_) => "release".to_string(),
+        Commands::ReleaseReport(_) => "release-report".to_string(),
         Commands::Mcp(_) => "mcp".to_string(),
         Commands::Queue(_) => "queue".to_string(),
         Commands::Cloud(_) => "cloud".to_string(),
@@ -687,6 +707,8 @@ fn run_command(cli: &Cli, cas_root: Option<&Path>) -> anyhow::Result<()> {
         Commands::Whoami => auth::execute(&AuthCommands::Whoami, cli),
         Commands::Update(args) => update::execute(args, cli, cas_root),
         Commands::Changelog(args) => changelog::execute(args, cli),
+        Commands::Release(ReleaseCommands::Report(args)) => release_report::execute(args, cli),
+        Commands::ReleaseReport(args) => release_report::execute(args, cli),
         Commands::Mcp(cmd) => mcp_cmd::execute(cmd, cli, require_cas_root(cas_root)?),
         Commands::Queue(cmd) => queue::execute(cmd, cli),
         Commands::Cloud(cmd) => cloud::execute(cmd, cli, require_cas_root(cas_root)?),

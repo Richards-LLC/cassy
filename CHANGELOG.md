@@ -7,6 +7,47 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.22.0] - 2026-09-09
+
+### Added
+- `cas release report <version> [--out <dir>] [--pdf] [--json]` assembles the
+  release-report Markdown source for any project from its Keep-a-Changelog
+  section, release-notes draft, GitHub release and closed issues (via `gh` and
+  `issues.repo`), and release receipts, then renders the standalone HTML with
+  the built-in `cas-release-report` renderer and, with `--pdf`, the PDF through
+  Playwright. Issues are themed by labels first, then a keyword table, with an
+  explicit Unclassified row; an existing Markdown source is preserved unless
+  `--refresh-sources` is given. Human output fits 80 columns with ASCII
+  fallbacks; `--json` emits one result object.
+- The release train gains a `--report` step: after verified publication it
+  produces the report files, hands the PDF and HTML to a posting adapter, and
+  validates `release-report.receipt` (worktree-confined paths, both SHA-256
+  values, PDF page count, Slack file ids, user and dev thread timestamps).
+  `--status` revalidates the receipt against the bytes and reports the release
+  report as pending, unavailable, or verified; the cas-cut-release, mecha-cassy,
+  and release-notes skills describe the file-post step for every harness.
+- Release reports for v3.20.0 and v3.21.0 ship under `docs/release-reports/`
+  (Markdown, brief, standalone HTML, A4 PDF, visual-QA receipt); the report
+  template keeps print pagination continuous.
+- `cas doctor` gains a `SessionStart budget` row that reports supervisor
+  guidance size against the protected ceiling and fails under 512 B of headroom.
+
+### Changed
+- SessionStart payload compaction orders sections by value: static listings
+  compact first, ambient recall and the factory inbox last, and a compacted
+  section leaves a one-line marker in the payload. Built-in supervisor guidance
+  is over 1 KB shorter in every harness flavor.
+- Task close gates judge only the task's own delivery: additive-only and
+  value-only posture gates, the no-code intent gate, the receipt diff stat, and
+  the receipt epoch check share one first-parent delivery range bounded by the
+  target merge-base and the task's work window; a registered supervisor override
+  with a reason passes posture and epoch gates with a logged decision; clearing
+  `execution_note` no longer invalidates an approved verification when the
+  exact repository proof is unchanged (#767).
+- The factory worker spawn audit names the launched CLI, model, effort, and the
+  provider's account directory instead of always printing a Claude account
+  path, with a regression pinning Codex routing to the Codex launcher.
+
 ## [3.21.0] - 2026-09-09
 
 ### Added

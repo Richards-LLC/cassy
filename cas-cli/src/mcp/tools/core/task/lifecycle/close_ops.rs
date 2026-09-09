@@ -1,3 +1,5 @@
+mod task_attribution;
+
 use super::TaskLifecycleGateError;
 use crate::harness_policy::{
     is_supervisor_from_env, is_worker_without_subagents_from_env, supervisor_harness_from_env,
@@ -2020,11 +2022,9 @@ impl CasCore {
         };
         let mut advanced = task.clone();
         let now = chrono::Utc::now();
-        let Some(audit) = Self::apply_awaiting_merge_anchor_advance(
-            &mut advanced,
-            factory_branch_anchor,
-            now,
-        ) else {
+        let Some(audit) =
+            Self::apply_awaiting_merge_anchor_advance(&mut advanced, factory_branch_anchor, now)
+        else {
             return;
         };
 
@@ -2350,7 +2350,7 @@ impl CasCore {
         if let Err(message) = validate_supervisor_override(
             supervisor_override,
             req.reason.as_deref(),
-            is_supervisor_from_env(),
+            !supervisor_override || self.resolve_live_supervisor_authority().is_ok(),
         ) {
             return Ok(Self::tool_error(message));
         }
@@ -2821,11 +2821,15 @@ impl CasCore {
                 .ok()
                 .and_then(|store| store.get_lease_history(&req.id, None).ok())
                 .unwrap_or_default();
-            Some(resolve_task_commit_receipt_window(
+            let mut window = resolve_task_commit_receipt_window(
                 task.created_at,
                 &lease_history,
                 task_commit_identity.clone(),
-            ))
+            );
+            if supervisor_override {
+                window.supervisor_override_reason = req.reason.clone();
+            }
+            Some(window)
         };
 
         // For Epics: Check that all worker branches are merged before verification
@@ -3181,10 +3185,7 @@ impl CasCore {
                             // shows a genuine conflict or cannot be evaluated.
                             // Refresh the flag so the worker exit remains open
                             // without duplicating the park audit note.
-                            self.mark_awaiting_merge_conflicted(
-                                task_store.as_ref(),
-                                &task.id,
-                            );
+                            self.mark_awaiting_merge_conflicted(task_store.as_ref(), &task.id);
                         }
                     }
 
@@ -4195,18 +4196,31 @@ impl CasCore {
         // path has been deleted in this commit because it reintroduced
         // the exact wrong-worktree-scope bug cas-bc1b was filed to fix.
         if close_disposition.requires_delivery_gates()
+            && !supervisor_override
             && task.execution_note.as_deref() == Some("additive-only")
         {
             if let Some(worker_wt) = worker_worktree_path.as_ref() {
                 // cas-7efe: use the single close-time resolver instead of
                 // an independent worktree-only lookup that fell back to a
                 // bare "main".
-                let violations = check_additive_only_branch_violations(
-                    worker_wt,
-                    &resolved_parent_branch,
-                    task.deliverables.factory_branch_anchor.as_deref(),
-                    &task_commit_identity,
-                );
+                let violations = commit_receipt_window
+                    .as_ref()
+                    .and_then(|window| {
+                        task_attribution::violations(
+                            worker_wt,
+                            &resolved_parent_branch,
+                            window,
+                            &|status| matches!(status, 'M' | 'D' | 'R'),
+                        )
+                    })
+                    .unwrap_or_else(|| {
+                        check_additive_only_branch_violations(
+                            worker_wt,
+                            &resolved_parent_branch,
+                            task.deliverables.factory_branch_anchor.as_deref(),
+                            &task_commit_identity,
+                        )
+                    });
                 if !violations.is_empty() {
                     let file_list = violations
                         .iter()
@@ -4232,15 +4246,28 @@ impl CasCore {
         // gates below; unlike an additive-only task, it has a real modified
         // diff for those gates to inspect.
         if close_disposition.requires_delivery_gates()
+            && !supervisor_override
             && task.execution_note.as_deref() == Some("value-only")
         {
             if let Some(worker_wt) = worker_worktree_path.as_ref() {
-                let violations = check_value_only_branch_violations(
-                    worker_wt,
-                    &resolved_parent_branch,
-                    task.deliverables.factory_branch_anchor.as_deref(),
-                    &task_commit_identity,
-                );
+                let violations = commit_receipt_window
+                    .as_ref()
+                    .and_then(|window| {
+                        task_attribution::violations(
+                            worker_wt,
+                            &resolved_parent_branch,
+                            window,
+                            &|status| status != 'M',
+                        )
+                    })
+                    .unwrap_or_else(|| {
+                        check_value_only_branch_violations(
+                            worker_wt,
+                            &resolved_parent_branch,
+                            task.deliverables.factory_branch_anchor.as_deref(),
+                            &task_commit_identity,
+                        )
+                    });
                 if !violations.is_empty() {
                     let file_list = violations
                         .iter()
@@ -6501,6 +6528,25 @@ fn check_branch_violations(
 ) -> Vec<AdditiveOnlyViolation> {
     use std::process::Command;
 
+    if !identity.is_empty() && factory_branch_anchor.is_none() {
+        let floor = chrono::DateTime::from_timestamp(0, 0).expect("Unix epoch");
+        let window = TaskCommitReceiptWindow {
+            supervisor_override_reason: None,
+            not_before: floor,
+            task_floor: floor,
+            basis: "legacy task identity",
+            identity: identity.clone(),
+        };
+        if let Some(violations) = task_attribution::violations(
+            worker_worktree_path,
+            parent_branch,
+            &window,
+            &is_violation,
+        ) {
+            return violations;
+        }
+    }
+
     // cas-3f7f: once the parked worker tip is integrated, HEAD and the
     // parent branch may both point at (or beyond) an epic merge. Re-scanning
     // merge-base..HEAD then includes unrelated epic history. Find the
@@ -8620,13 +8666,9 @@ mod parent_branch_resolver_tests {
     fn epic_work_target_wins_over_project_trunk_when_legacy_branch_is_missing() {
         let dir = init_committed_repo("main");
         git(dir.path(), &["checkout", "-q", "-b", "staging"]);
-        let resolved = resolve_close_parent_branch(
-            None,
-            None,
-            Some("staging".to_string()),
-            dir.path(),
-        )
-        .expect("parent epic WorkTarget must resolve before project trunk");
+        let resolved =
+            resolve_close_parent_branch(None, None, Some("staging".to_string()), dir.path())
+                .expect("parent epic WorkTarget must resolve before project trunk");
         assert_eq!(resolved, "staging");
         assert_ne!(resolved, "main");
     }
@@ -9140,6 +9182,7 @@ fn render_close_diff_stat(
                 filtered_commits.push(full_sha);
             }
             augmented_window = Some(TaskCommitReceiptWindow {
+                supervisor_override_reason: window.supervisor_override_reason.clone(),
                 not_before: window.not_before,
                 basis: "durable task commit identity across task lifetime",
                 task_floor: window.task_floor,
@@ -9157,9 +9200,9 @@ fn render_close_diff_stat(
         window
     };
 
-    match effective_window
-        .and_then(|window| get_task_attributable_diff_stat(repo_path, parent_branch, window))
-    {
+    match effective_window.and_then(|window| {
+        task_attribution::diff_stat(repo_path, parent_branch, window, explicit_receipt)
+    }) {
         Some(measurement) if !measurement.stat.is_empty() => format!(
             "\n\n📊 Task-attributed committed diff stat (target {}; basis: {}):\n{}",
             measurement.target_ref, measurement.basis, measurement.stat
@@ -9180,111 +9223,6 @@ fn render_close_diff_stat(
             }
         }
     }
-}
-
-/// Return the net stat for the contiguous commits durably attributable to this
-/// task. Commit-message identity (or a recorded anchor/receipt SHA) prevents a
-/// recent inherited target commit from entering the display merely because it
-/// falls inside the task's clock window.
-///
-/// `None` means Git cannot prove a task-only contiguous range. The caller may
-/// show branch-wide context only when it labels that weaker scope explicitly.
-fn get_task_attributable_diff_stat(
-    repo_path: &std::path::Path,
-    parent_branch: &str,
-    window: &TaskCommitReceiptWindow,
-) -> Option<TaskAttributedDiffStat> {
-    use std::process::Command;
-
-    if !is_safe_git_refname(parent_branch) || window.identity.is_empty() {
-        return None;
-    }
-    let mut history_command = Command::new("git");
-    history_command.args(["log", "--reverse", "--first-parent"]);
-    if let Some(since) = task_commit_receipt_since(window.task_floor) {
-        history_command.arg(format!("--since={since}"));
-    }
-    let history = history_command
-        .args(["--format=%H%x1f%B%x1e", "HEAD"])
-        .current_dir(repo_path)
-        .output()
-        .ok()?;
-    if !history.status.success() {
-        return None;
-    }
-    let records = String::from_utf8_lossy(&history.stdout);
-    let commits: Vec<String> = records
-        .split('\u{1e}')
-        .filter_map(|record| {
-            let record = record.trim();
-            if record.is_empty() {
-                return None;
-            }
-            let (commit, message) = record.split_once('\u{1f}').unwrap_or((record, ""));
-            let commit = commit.trim();
-            let attributable = window.identity.matches_known_commit(commit)
-                || window
-                    .identity
-                    .task_id
-                    .as_deref()
-                    .is_some_and(|task_id| message_references_task(message, task_id));
-            attributable.then(|| commit.to_string())
-        })
-        .collect();
-
-    let target_ref = preferred_diff_target_ref(repo_path, parent_branch);
-    let Some((first, last)) = commits.first().zip(commits.last()) else {
-        return Some(TaskAttributedDiffStat {
-            stat: String::new(),
-            target_ref,
-            basis: "durable task commit identity across task lifetime",
-        });
-    };
-    let base_out = Command::new("git")
-        .args(["rev-parse", &format!("{first}^")])
-        .current_dir(repo_path)
-        .output()
-        .ok()?;
-    if !base_out.status.success() {
-        return None;
-    }
-    let base = String::from_utf8_lossy(&base_out.stdout).trim().to_string();
-    if base.is_empty() {
-        return None;
-    }
-
-    // A net diff is task-only only when every first-parent commit between the
-    // selected endpoints is attributable. Otherwise refuse to relabel a
-    // mixed history as the task's work and let the caller show honest context.
-    let range = format!("{base}..{last}");
-    let contiguous_out = Command::new("git")
-        .args(["rev-list", "--first-parent", "--reverse", &range])
-        .current_dir(repo_path)
-        .output()
-        .ok()?;
-    if !contiguous_out.status.success() {
-        return None;
-    }
-    let contiguous_stdout = String::from_utf8_lossy(&contiguous_out.stdout);
-    let contiguous: Vec<&str> = contiguous_stdout
-        .lines()
-        .map(str::trim)
-        .filter(|commit| !commit.is_empty())
-        .collect();
-    if contiguous.len() != commits.len()
-        || !contiguous
-            .iter()
-            .zip(&commits)
-            .all(|(actual, expected)| *actual == expected)
-    {
-        return None;
-    }
-
-    Some(TaskAttributedDiffStat {
-        stat: get_diff_stat_for_range(repo_path, &base, last),
-        target_ref,
-        basis: "durable task commit identity across task lifetime",
-    })
 }
 
 /// Return a `git diff --stat` summary for commits on `HEAD` beyond
@@ -9423,6 +9361,7 @@ fn task_commit_receipt_since(task_floor: chrono::DateTime<chrono::Utc>) -> Optio
 /// Durable lower bound used to attribute a receipt to one task work cycle.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TaskCommitReceiptWindow {
+    pub supervisor_override_reason: Option<String>,
     pub not_before: chrono::DateTime<chrono::Utc>,
     pub basis: &'static str,
     /// cas-9596 (GH #82): lower bound of the task's ENTIRE life, not just the
@@ -9448,12 +9387,14 @@ pub(crate) fn resolve_task_commit_receipt_window(
         .max();
     match cycle_start {
         Some(timestamp) if timestamp > task_created_at => TaskCommitReceiptWindow {
+            supervisor_override_reason: None,
             not_before: timestamp,
             basis: "latest task lease claim/transfer",
             task_floor: task_created_at,
             identity,
         },
         _ => TaskCommitReceiptWindow {
+            supervisor_override_reason: None,
             not_before: task_created_at,
             basis: "task creation time (lease-history fallback)",
             task_floor: task_created_at,
@@ -9646,10 +9587,19 @@ pub(crate) fn validate_task_commit_receipt(
     let earliest_allowed = window.not_before.timestamp() - COMMIT_RECEIPT_CLOCK_SKEW_SECS;
     let mut prior_cycle_basis = None;
     if commit_epoch < earliest_allowed {
-        let task_floor = window.task_floor.timestamp() - COMMIT_RECEIPT_CLOCK_SKEW_SECS;
-        if commit_epoch >= task_floor
-            && commit_is_task_attributable(repo_path, &full_receipt, &window.identity)
+        if let Some(reason) = window
+            .supervisor_override_reason
+            .as_deref()
+            .filter(|reason| !reason.trim().is_empty())
         {
+            prior_cycle_basis = Some(format!(
+                " Registered supervisor override accepted historical receipt despite task epoch boundary. Reason: {reason}"
+            ));
+        } else if task_attribution::in_work_window(
+            window,
+            commit_epoch,
+            commit_is_task_attributable(repo_path, &full_receipt, &window.identity),
+        ) {
             prior_cycle_basis = Some(format!(
                 " The commit predates the current work cycle beginning {} ({}), but it is \
                  attributable to an earlier work cycle of this task, postdates the task itself \
@@ -9711,7 +9661,7 @@ pub(crate) fn validate_task_commit_receipt(
     Ok(format!(
         "decision: accepted commit_receipt `{receipt}` resolved to full commit `{full_receipt}` \
          as task-attributed merge evidence; \
-         commit epoch {commit_epoch} is within the current task work cycle beginning {} \
+         commit epoch {commit_epoch} accepted against the task work cycle beginning {} \
          (basis: {}; {}s clock-skew allowance), the commit is merged into \
          {parent_branch}/origin/{parent_branch}, and its merge-aware file diff is non-empty.{}",
         window.not_before.to_rfc3339(),
@@ -10966,9 +10916,7 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
                 .filter(|candidate| git_ref_exists(repo_path, candidate))
                 .find(|candidate| {
                     commit_tip_tree_reachable_from(repo_path, anchor, candidate)
-                            || anchor_work_patches_equivalent_on_parent(
-                                repo_path, anchor, candidate,
-                            )
+                        || anchor_work_patches_equivalent_on_parent(repo_path, anchor, candidate)
                 });
             if let Some(content_parent) = content_parent {
                 unmerged_count = 0;
@@ -12224,45 +12172,7 @@ pub(crate) fn has_task_attributable_reviewable_changes(
     parent_branch: &str,
     window: &TaskCommitReceiptWindow,
 ) -> Option<bool> {
-    use std::process::Command;
-
-    if !is_safe_git_refname(parent_branch) {
-        return None;
-    }
-
-    let merge_base_out = Command::new("git")
-        .args(["merge-base", "HEAD", parent_branch])
-        .current_dir(repo_path)
-        .output()
-        .ok()?;
-    if !merge_base_out.status.success() {
-        return None;
-    }
-    let merge_base = String::from_utf8_lossy(&merge_base_out.stdout)
-        .trim()
-        .to_string();
-    if merge_base.is_empty() {
-        return None;
-    }
-
-    let mut log_command = Command::new("git");
-    log_command.args(["log", "--name-only", "--pretty=format:"]);
-    if let Some(since) = task_commit_receipt_since(window.not_before) {
-        log_command.arg(format!("--since={since}"));
-    }
-    let log_out = log_command
-        .arg(format!("{merge_base}..HEAD"))
-        .current_dir(repo_path)
-        .output()
-        .ok()?;
-    if !log_out.status.success() {
-        return None;
-    }
-    let output = String::from_utf8_lossy(&log_out.stdout);
-    Some(output.lines().any(|line| {
-        let trimmed = line.trim();
-        !trimmed.is_empty() && is_reviewable_path(trimmed)
-    }))
+    task_attribution::reviewable(repo_path, parent_branch, window)
 }
 
 /// Parse name-status rows and retain exactly the statuses a constrained
@@ -16767,6 +16677,7 @@ mod merge_state_gate_tests {
 
     fn window_at(epoch: i64, basis: &'static str) -> TaskCommitReceiptWindow {
         TaskCommitReceiptWindow {
+            supervisor_override_reason: None,
             not_before: chrono::DateTime::from_timestamp(epoch, 0).unwrap(),
             basis,
             task_floor: chrono::DateTime::from_timestamp(epoch, 0).unwrap(),
@@ -17830,6 +17741,7 @@ mod merge_state_gate_tests {
         // is task-attributable, so the administrative reset must not disown
         // the real merged receipt.
         let window = TaskCommitReceiptWindow {
+            supervisor_override_reason: None,
             not_before: chrono::Utc::now() + chrono::Duration::hours(1),
             basis: "latest task lease claim/transfer after administrative request_changes",
             task_floor: chrono::Utc::now() - chrono::Duration::hours(1),
@@ -20268,7 +20180,12 @@ mod epic_status_gate_tests {
     #[test]
     fn epic_status_full_view_budget_stays_bounded_for_60_children() {
         let workers: Vec<(&str, usize)> = (0..60)
-            .map(|index| (Box::leak(format!("anchored-worker-{index}").into_boxed_str()) as &str, 1))
+            .map(|index| {
+                (
+                    Box::leak(format!("anchored-worker-{index}").into_boxed_str()) as &str,
+                    1,
+                )
+            })
             .collect();
         let dir = init_epic_repo(&workers);
         let subtasks: Vec<Task> = workers
@@ -20280,8 +20197,10 @@ mod epic_status_gate_tests {
                     TaskStatus::Closed,
                     Some(worker),
                 );
-                task.deliverables.factory_branch_anchor =
-                    Some(epic_git_stdout(dir.path(), &["rev-parse", &format!("factory/{worker}")]));
+                task.deliverables.factory_branch_anchor = Some(epic_git_stdout(
+                    dir.path(),
+                    &["rev-parse", &format!("factory/{worker}")],
+                ));
                 task
             })
             .collect();
@@ -22489,6 +22408,7 @@ mod zero_change_close_tests {
 
     fn test_receipt_window() -> TaskCommitReceiptWindow {
         TaskCommitReceiptWindow {
+            supervisor_override_reason: None,
             not_before: chrono::Utc::now() - chrono::Duration::hours(1),
             basis: "test fixture",
             task_floor: chrono::Utc::now() - chrono::Duration::hours(2),
@@ -23976,6 +23896,7 @@ mod zero_change_close_tests {
         let window = TaskCommitReceiptWindow {
             // Put the task cycle definitively after the fixture commit. This
             // reproduces copying an arbitrary old merged SHA from git log.
+            supervisor_override_reason: None,
             not_before: chrono::Utc::now() + chrono::Duration::hours(1),
             basis: "latest task lease claim/transfer",
             // cas-9596: the task itself is younger than the borrowed commit, so
@@ -24036,6 +23957,7 @@ mod zero_change_close_tests {
         // The restart put the current cycle after the commit; the task itself
         // is older than it.
         let window = TaskCommitReceiptWindow {
+            supervisor_override_reason: None,
             not_before: chrono::Utc::now() + chrono::Duration::hours(1),
             basis: "latest task lease claim/transfer",
             task_floor: chrono::Utc::now() - chrono::Duration::hours(2),
@@ -24076,6 +23998,7 @@ mod zero_change_close_tests {
         );
 
         let window = TaskCommitReceiptWindow {
+            supervisor_override_reason: None,
             not_before: chrono::Utc::now() + chrono::Duration::hours(1),
             basis: "latest task lease claim/transfer",
             task_floor: chrono::Utc::now() - chrono::Duration::hours(2),
@@ -24108,6 +24031,7 @@ mod zero_change_close_tests {
         );
 
         let window = TaskCommitReceiptWindow {
+            supervisor_override_reason: None,
             not_before: chrono::Utc::now() + chrono::Duration::hours(2),
             basis: "latest task lease claim/transfer",
             task_floor: chrono::Utc::now() + chrono::Duration::hours(1),
@@ -24147,6 +24071,7 @@ mod zero_change_close_tests {
         git(dir.path(), &["reset", "--hard", "main"]);
 
         let window = TaskCommitReceiptWindow {
+            supervisor_override_reason: None,
             not_before: chrono::Utc::now() - chrono::Duration::hours(1),
             basis: "latest task lease claim/transfer",
             task_floor: chrono::Utc::now() - chrono::Duration::hours(2),
@@ -24288,13 +24213,8 @@ mod zero_change_close_tests {
         // The fix: resolve_close_parent_branch must select the epic
         // branch, never guess "main", when the worktree store has
         // nothing recorded (the common System-B factory-isolation shape).
-        let resolved = resolve_close_parent_branch(
-            None,
-            Some("epic/foo".to_string()),
-            None,
-            p,
-        )
-        .expect("explicit epic branch resolves");
+        let resolved = resolve_close_parent_branch(None, Some("epic/foo".to_string()), None, p)
+            .expect("explicit epic branch resolves");
         assert_eq!(
             resolved, "epic/foo",
             "must resolve the real epic branch, never a bare 'main'"
@@ -24672,6 +24592,7 @@ mod zero_diff_spike_close_tests {
     fn window() -> TaskCommitReceiptWindow {
         let cycle_start = chrono::DateTime::from_timestamp(CYCLE_START_EPOCH, 0).unwrap();
         TaskCommitReceiptWindow {
+            supervisor_override_reason: None,
             not_before: cycle_start,
             basis: "latest task lease claim/transfer",
             // cas-9596: these tests exercise cycle-scoped attribution only —

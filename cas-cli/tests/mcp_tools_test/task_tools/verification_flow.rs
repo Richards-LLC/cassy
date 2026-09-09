@@ -5947,6 +5947,31 @@ impl ScopedSupervisorEnv {
     }
 }
 
+#[tokio::test]
+async fn test_supervisor_override_rejects_worker_with_supervisor_env_only() {
+    let (_temp, service) = setup_cas();
+    let _env_lock = env_test_lock();
+    let created = service
+        .cas_task_create(Parameters(simple_task_req("override authority")))
+        .await
+        .unwrap();
+    let id = extract_task_id(&extract_text(created)).unwrap().to_string();
+    let _guard = ScopedSupervisorEnv::new();
+    let result = service
+        .cas_task_close(Parameters(TaskCloseRequest {
+            stranded_branch_override: None,
+            id,
+            reason: Some("historical record".into()),
+            supervisor_override: Some(true),
+            legacy_bypass_code_review: None,
+            search_manifest: None,
+            commit_receipt: None,
+        }))
+        .await
+        .unwrap();
+    assert!(extract_text(result).contains("SUPERVISOR OVERRIDE REJECTED"));
+}
+
 /// A supervisor-owned epic has no ordinary task assignee by design. Once the
 /// configured verification owner passes the close gate, the response and
 /// audit row must describe the epic verification semantics rather than the
@@ -6265,7 +6290,7 @@ async fn test_close_supervisor_bypass_ghost_assignee() {
 /// "assignee inactive".
 #[tokio::test]
 async fn test_close_supervisor_active_worker_assignee_by_name() {
-    let (temp, service) = setup_cas();
+    let (temp, service) = setup_cas_as(AgentRole::Supervisor);
     let _env_lock = env_test_lock();
     let cas_dir = temp.path().join(".cas");
     let task_store = open_task_store(&cas_dir).unwrap();
@@ -9244,7 +9269,7 @@ async fn test_timeout_escalation_uses_codex_supervisor_verification_alias_cas_79
 /// verification_flow's domain (supervisor orphan bypass → Closed).
 #[tokio::test]
 async fn test_062d_close_lifecycle_push_to_owning_supervisor() {
-    let (temp, service) = setup_cas();
+    let (temp, service) = setup_cas_as(AgentRole::Supervisor);
     let _env_lock = env_test_lock();
     let cas_dir = temp.path().join(".cas");
 

@@ -1082,7 +1082,7 @@ fn assemble_markdown(
     let verdict = sources
         .release_note_user_punch
         .as_deref()
-        .map(ToOwned::to_owned)
+        .map(format_verdict)
         .unwrap_or_else(|| {
             if issue_count == 0 {
                 format!("{tag} has no verified closed GitHub issues in the available release sources.")
@@ -2052,6 +2052,20 @@ fn format_publication_line(value: &str) -> String {
             )
         })
         .unwrap_or_else(|_| format!("Published {value}"))
+}
+
+fn format_verdict(value: &str) -> String {
+    let value = value.trim();
+    let mut chars = value.chars();
+    let mut verdict = chars
+        .next()
+        .map(|first| first.to_uppercase().collect::<String>())
+        .unwrap_or_default();
+    verdict.push_str(chars.as_str());
+    if !(verdict.ends_with('.') || verdict.ends_with('!') || verdict.ends_with('?')) {
+        verdict.push('.');
+    }
+    verdict
 }
 
 fn format_duration(seconds: i64) -> String {

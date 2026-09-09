@@ -272,7 +272,7 @@ fn cli_release_report_resolves_main_config_from_a_git_worktree() {
     let source = fs::read_to_string(worktree.join("docs/release-reports/v3.19.0.md")).unwrap();
     let (user_section, developer_and_rest) = source.split_once("## Under the hood").unwrap();
     assert!(source.contains("Published 9 September 2026 · 16:51 UTC"));
-    assert!(source.contains("the release is ready to inspect."));
+    assert!(source.contains("The release is ready to inspect."));
     assert!(source.contains("themes: [\"Release\", \"Memory\", \"Verification\", \"Factory\"]"));
     assert!(source.contains("| Verification | 1 | #767 |"));
     assert!(!source.contains("has no verified closed GitHub issues"));

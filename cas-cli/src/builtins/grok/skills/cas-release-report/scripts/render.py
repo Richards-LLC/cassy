@@ -177,6 +177,15 @@ def token_css(project_root, token_path):
 def render(source, *, project_root=Path('.'), tokens=None, source_href='source.md',
            pdf_href='report.pdf', emphasis='', footer='Release report'):
     """Return standalone HTML; callers may write it or hand it to Chromium."""
+    # The CLI assembler records machine-readable release metadata in a small
+    # YAML front matter block.  Keep the renderer's fixed Markdown contract
+    # unchanged after that block so hand-authored exemplar sources remain
+    # valid too.
+    if source.startswith('---\n'):
+        closing = source.find('\n---\n', 4)
+        if closing < 0:
+            raise ValueError('front matter needs a closing --- line')
+        source = source[closing + len('\n---\n'):]
     parts = re.split(r'^## (.+)\n', source.replace('\r\n', '\n'), flags=re.M)
     names = parts[1::2]
     if tuple(names) != SECTION_NAMES:

@@ -25,11 +25,29 @@ mcp__cas__verification action=add task_id=<id> status=error summary="BUG: close 
 
 ## Demo-statement evidence mode
 
-When the task's `demo_statement` is non-empty, QA evidence is the first
-completeness gate. Fetch the task with `mcp__cas__task action=show` and inspect
-the task fields and notes, but do not read the close reason yet. Tasks with an
-empty `demo_statement` skip this entire section and keep the existing
-close-reason-first path below.
+Fetch the task with `mcp__cas__task action=show` and inspect fields and notes
+before reading the close reason. A non-empty `demo_statement` requires Step
+0A. For `task_type=epic`, first enumerate ParentChild children with
+`mcp__cas__task action=dep_list id=<epic-id>` and fetch every child, including
+closed children: **any child** with a non-empty `demo_statement` requires the
+epic evidence gate below, even when the epic's own demo is empty. Only tasks
+with no demo and epics with neither their own nor any child demo skip Step 0A.
+
+### Epic evidence prerequisites
+
+For an epic with child demos, use `verification_type=epic` for every verdict.
+Before Step 0A, require exactly one `Epic flow walk` note and
+`~/.cas/artifacts/<epic-id>/LEDGER.md`; reject missing evidence with
+`QA evidence required: epic has child demo_statement but no Epic flow walk note or LEDGER.md`.
+Require a completed pass on the current assembled epic tip, a 60-minute budget,
+and coverage mapping for every child demo. Reject a missing, duplicate,
+running, stale-tip, or incomplete-coverage receipt; list omitted demos as owed
+work. The note's cells/PASS/FAIL/NOT EXERCISED counts and label split must match
+the ledger. Apply the same Step 0A REJECT table and capture judgments to this
+single combined matrix, not separately per child. Check Contradictions across
+child surfaces against the captures; a cross-child contradiction is a defect,
+not a reason to accept individually passing child receipts. Do not rerun QA
+from the close verifier or substitute the children's ledgers for the epic walk.
 
 ### Step 0A: Apply the QA evidence gate before any judgment
 
@@ -425,6 +443,7 @@ The close reason may come from:
 
 ### Epic-Specific Checks
 
+0. **Child-demo evidence first:** Apply Epic evidence prerequisites and Step 0A before finding or reading the close reason when any child has a demo statement.
 1. **All subtasks closed:** `mcp__cas__task action=dep_list id=<epic-id>` — every subtask must be `closed`. If any is open/in_progress/blocked, REJECT.
 2. **No open blockers:** No unresolved blocking dependencies.
 3. **Close reason covers full scope:** Must describe complete implementation across all subtasks, not just the last one. REJECT only if it describes work defined in the epic's acceptance criteria as incomplete. Forward-looking roadmap notes or follow-ups belonging to future epics are acceptable.
@@ -451,7 +470,7 @@ Do not look for, request, or pass `verifier_capability`; omit that field on the
 final `verification action=add` call. If Cassy rejects the handoff, fail closed
 and report the generic recovery guidance instead of fabricating authority.
 
-1. For a non-empty `demo_statement`, complete Step 0A before reading the close reason; otherwise check the close reason first. In either path compare it against the task's acceptance criteria, not a keyword list, and reject only if an AC item is described as not done
+1. For a non-empty task or child `demo_statement`, complete Step 0A (and Epic evidence prerequisites for child demos) before reading the close reason; otherwise check the close reason first. In either path compare it against the task's acceptance criteria, not a keyword list, and reject only if an AC item is described as not done
 2. Check parent epic spec — verify alignment
 3. Be strict on completeness — any placeholder language = reject
 4. Read entire files, not snippets

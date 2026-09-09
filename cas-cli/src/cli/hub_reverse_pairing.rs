@@ -1530,23 +1530,68 @@ mod tests {
         use std::net::TcpListener;
 
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let address = listener.local_addr().unwrap();
+        listener.set_nonblocking(true).unwrap_or_else(|error| {
+            panic!("relay fixture at {address}: failed to set nonblocking mode: {error}")
+        });
+        let endpoint = format!("http://{address}");
+        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
         let server = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
+            let deadline = std::time::Instant::now() + Duration::from_secs(3);
+            let mut ready_tx = Some(ready_tx);
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        if let Some(ready_tx) = ready_tx.take() {
+                            ready_tx.send(()).unwrap_or_else(|_| {
+                                panic!("relay fixture at {address}: readiness receiver dropped")
+                            });
+                        }
+                        break stream;
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        if let Some(ready_tx) = ready_tx.take() {
+                            ready_tx.send(()).unwrap_or_else(|_| {
+                                panic!("relay fixture at {address}: readiness receiver dropped")
+                            });
+                        }
+                        if std::time::Instant::now() >= deadline {
+                            panic!("relay fixture at {address}: timed out waiting for the request");
+                        }
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => {
+                        panic!("relay fixture at {address}: accept failed: {error}")
+                    }
+                }
+            };
+            stream
+                .set_read_timeout(Some(Duration::from_secs(1)))
+                .unwrap_or_else(|error| {
+                    panic!("relay fixture at {address}: failed to set read timeout: {error}")
+                });
             let mut request = [0_u8; 4096];
-            let _ = stream.read(&mut request).unwrap();
+            let _ = stream.read(&mut request).unwrap_or_else(|error| {
+                panic!("relay fixture at {address}: failed to read request: {error}")
+            });
             let body = r#"{"error":"invalid_invitation","error_description":"malformed or has an invalid expiry"}"#;
-            write!(
-                stream,
+            let response = format!(
                 "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                 body.len(),
                 body
-            )
-            .unwrap();
+            );
+            stream
+                .write_all(response.as_bytes())
+                .unwrap_or_else(|error| {
+                    panic!("relay fixture at {address}: failed to write response: {error}")
+                });
+        });
+        ready_rx.recv().unwrap_or_else(|_| {
+            panic!("relay fixture at {address}: server exited before accepting requests")
         });
 
         let relay = RelayClient {
-            endpoint,
+            endpoint: endpoint.clone(),
             token: "test-token".to_owned(),
         };
         let scopes = Scope::default_read_only();
@@ -1562,14 +1607,25 @@ mod tests {
             )
             .unwrap_err();
         let error = format!("{error:#}");
-        server.join().unwrap();
+        server
+            .join()
+            .unwrap_or_else(|_| panic!("relay fixture at {address}: server thread panicked"));
 
-        assert!(error.contains("invitation_url"), "{error}");
-        assert!(error.contains("exactly two fragment keys"), "{error}");
-        assert!(!error.contains("invalid expiry"), "{error}");
+        assert!(
+            error.contains("invitation_url"),
+            "relay endpoint {endpoint}; {error}"
+        );
+        assert!(
+            error.contains("exactly two fragment keys"),
+            "relay endpoint {endpoint}; {error}"
+        );
+        assert!(
+            !error.contains("invalid expiry"),
+            "relay endpoint {endpoint}; {error}"
+        );
         assert!(
             error.contains("https://commander.example/#pair=<redacted>&hub=machine-uuid"),
-            "{error}"
+            "relay endpoint {endpoint}; {error}"
         );
     }
 

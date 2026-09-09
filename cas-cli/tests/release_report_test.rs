@@ -54,6 +54,33 @@ esac
 }
 
 #[cfg(unix)]
+fn install_followup_fake_gh(project: &TempDir) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    let path = project.path().join("fake-gh-followup");
+    fs::write(
+        &path,
+        r##"#!/bin/sh
+case "$1 $2" in
+  "release view")
+    printf '%s' '{"name":"CAS v3.19.0","url":"https://github.com/example/project/releases/tag/v3.19.0","body":"Release closes #767.","publishedAt":"2026-09-09T16:51:40Z","isDraft":false,"assets":[]}'
+    ;;
+  "pr list")
+    printf '%s' '[{"number":785,"title":"Release v3.19.0","body":"Closes #767","url":"https://github.com/example/project/pull/785","closingIssuesReferences":[],"mergedAt":"2026-09-09T16:29:20Z"}]'
+    ;;
+  "issue list")
+    printf '%s' '[{"number":767,"title":"Close gates","url":"https://github.com/example/project/issues/767","state":"CLOSED","closedAt":"2026-09-09T14:47:28Z","labels":[],"body":"Delivery range attribution."}]'
+    ;;
+  *) exit 1 ;;
+esac
+"##
+    )
+    .unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    path
+}
+
+#[cfg(unix)]
 #[test]
 fn cli_release_report_renders_fixture_html_and_preserves_source() {
     let project = TempDir::new().unwrap();
@@ -161,13 +188,13 @@ fn cli_release_report_resolves_main_config_from_a_git_worktree() {
 
     fs::write(
         project.path().join("CHANGELOG.md"),
-        "# Changelog\n\n## [3.19.0] - 2026-09-08\n\n### Changed\n- `cas release report` assembles the\n  complete report from project sources. (#705)\n\n### Fixed\n- The report reports supervisor\n  delivery evidence without truncation. (#746)\n",
+        "# Changelog\n\n## [3.19.0] - 2026-09-08\n\n### Changed\n- Close gates judge only the task's own delivery and preserve exact repository proof. (#767)\n",
     )
     .unwrap();
     fs::create_dir_all(project.path().join("docs/release-notes")).unwrap();
     fs::write(
         project.path().join("docs/release-notes/v3.19.0.md"),
-        "# v3.19.0 release notes\n\nUser top-level\n\n```text\n*Live on production — User — Cassy v3.19.0*\nWas: users had to assemble reports by hand. Now: one command builds the report.\n```\n\nDev top-level\n\n```text\n*Live on production — Dev — Cassy v3.19.0*\nWas: report sources were gathered manually. Now: the assembler gathers them.\n```\n",
+        "# v3.19.0 release notes\n\nUser top-level\n\n```text\n*Live on production — User — Cassy v3.19.0*\nWas: the report had no trusted closure register. Now: the release is ready to inspect.\n```\n\nUser reply\n\n```text\n*Release reports*\n\n• *Build the report* — Was: reports were manual. Now: one command builds them.\n\n*Already live on hosts that updated from main*\n\n• *Recall memory* — Was: recall could disappear. Now: memory stays visible.\n\n• *Fair task closes* — Was: an old task could block a close. Now: verification checks the task's own range (#767).\n\n• *Honest start-up line* — Was: worker identity was unclear. Now: the provider is named.\n```\n\nDev top-level\n\n```text\n*Live on production — Dev — Cassy v3.19.0*\nWas: report sources were gathered manually. Now: the assembler gathers them.\n```\n\nDev reply\n\n```text\n*Release report command*\n\n• *Assembler* — Was: sources were manual. Now: release reports are assembled.\n```\n",
     )
     .unwrap();
     run(["add", "CHANGELOG.md", "docs/release-notes/v3.19.0.md"].as_slice());
@@ -194,9 +221,17 @@ fn cli_release_report_resolves_main_config_from_a_git_worktree() {
         "HEAD",
     ]
     .as_slice());
-    let fake_gh = install_fake_gh(&project);
+    let fake_gh = install_followup_fake_gh(&project);
     let home = project.path().join(".test-home");
     let xdg = project.path().join(".test-xdg-config");
+    let receipt_dir = home.join(".cas/artifacts/release/v3.19.0-fixture");
+    fs::create_dir_all(&receipt_dir).unwrap();
+    fs::write(receipt_dir.join("gate.green.epoch"), "1788970165\n").unwrap();
+    fs::write(
+        receipt_dir.join("release-published.receipt"),
+        "TAG=v3.19.0\nPUBLISHED_AT=2026-09-09T16:51:40Z\n",
+    )
+    .unwrap();
     let output = cas_cmd_at(&worktree, &home, &xdg)
         .env("GH_BIN", &fake_gh)
         .args([
@@ -215,6 +250,17 @@ fn cli_release_report_resolves_main_config_from_a_git_worktree() {
     let result: Value = serde_json::from_slice(&output).unwrap();
     assert_eq!(result["project"], "configured-project");
     assert_eq!(result["github_repo"], "example/project");
+    assert_eq!(result["issue_count"], 1);
+    assert_eq!(result["release_published_at"], "2026-09-09T16:51:40Z");
+    assert_eq!(
+        result["theme_counts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|theme| theme["theme"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["Release", "Memory", "Verification", "Factory"]
+    );
     assert!(
         !result["warnings"]
             .as_array()
@@ -225,9 +271,19 @@ fn cli_release_report_resolves_main_config_from_a_git_worktree() {
 
     let source = fs::read_to_string(worktree.join("docs/release-reports/v3.19.0.md")).unwrap();
     let (user_section, developer_and_rest) = source.split_once("## Under the hood").unwrap();
-    assert!(user_section.contains("one command builds the report."));
-    assert!(!user_section.contains("the assembler gathers them."));
-    assert!(developer_and_rest.contains("the assembler gathers them."));
+    assert!(source.contains("Published 9 September 2026 · 16:51 UTC"));
+    assert!(source.contains("the release is ready to inspect."));
+    assert!(source.contains("themes: [\"Release\", \"Memory\", \"Verification\", \"Factory\"]"));
+    assert!(source.contains("| Verification | 1 | #767 |"));
+    assert!(!source.contains("has no verified closed GitHub issues"));
+    assert!(user_section.contains("### Release reports"));
+    assert!(user_section.contains("### Already live on hosts that updated from main"));
+    assert!(user_section.contains("one command builds them."));
+    assert!(!user_section.contains("#### Live on production"));
+    assert!(developer_and_rest.contains("### Release report command"));
+    assert!(!developer_and_rest.contains("the assembler gathers them."));
+    assert!(developer_and_rest.contains("release reports are assembled."));
+    assert!(!developer_and_rest.contains("#### Live on production"));
     assert!(
         !developer_and_rest[..developer_and_rest.find("## Fixes ledger").unwrap()]
             .contains("one command builds the report.")

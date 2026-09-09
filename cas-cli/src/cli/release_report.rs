@@ -24,6 +24,7 @@ use crate::bounded_process::{BoundedCommandError, Deadline, run_command};
 use crate::builtins::BUILTIN_SKILLS;
 use crate::cli::Cli;
 use crate::config::Config;
+use crate::store::find_cas_root_from;
 use crate::ui::components::{Formatter, Verdict, ascii_fallback};
 use crate::ui::theme::ActiveTheme;
 
@@ -143,9 +144,11 @@ struct ReleaseEvidence {
 
 #[derive(Debug, Clone)]
 struct AcquiredSources {
+    project: String,
     changelog: Option<ChangelogSection>,
     changelog_path: Option<PathBuf>,
     release_notes: Option<(PathBuf, String)>,
+    release_note_articles: Vec<ReleaseNoteArticle>,
     release: Option<ReleaseMetadata>,
     issues: Vec<GithubIssue>,
     assets: Vec<ReleaseAsset>,
@@ -156,11 +159,28 @@ struct AcquiredSources {
     retrieved_at: String,
 }
 
+#[derive(Debug, Clone)]
+struct ReleaseNoteArticle {
+    title: String,
+    was: String,
+    now: String,
+    user_facing: bool,
+}
+
 /// Execute `cas release report`.
 pub fn execute(args: &ReleaseReportArgs, cli: &Cli) -> anyhow::Result<()> {
     let version = normalize_version(&args.version)?;
     let tag = format!("v{version}");
     let project_root = std::env::current_dir().context("could not determine project root")?;
+    // A git worktree has its own checkout path but shares the project's .cas
+    // directory with the main checkout. Resolve that root once and use it for
+    // all project-scoped configuration reads below.
+    let config_root = find_cas_root_from(&project_root).ok();
+    let project_config = config_root
+        .as_deref()
+        .and_then(|root| Config::load(root).ok())
+        .unwrap_or_default();
+    let project = project_name(&project_config, &project_root);
     let out_dir = if args.out.is_absolute() {
         args.out.clone()
     } else {
@@ -176,10 +196,10 @@ pub fn execute(args: &ReleaseReportArgs, cli: &Cli) -> anyhow::Result<()> {
     let (source, mut acquired, source_written) = if source_path.is_file() && !args.refresh_sources {
         let source = fs::read_to_string(&source_path)
             .with_context(|| format!("could not read existing source {}", source_path.display()))?;
-        let acquired = AcquiredSources::from_existing(&source_path, &source, &tag);
+        let acquired = AcquiredSources::from_existing(&source_path, &source, &tag, project.clone());
         (source, acquired, false)
     } else {
-        let acquired = acquire_sources(&project_root, &version, &tag)?;
+        let acquired = acquire_sources(&project_root, &version, &tag, &project_config, project)?;
         let source = assemble_markdown(&project_root, &version, &tag, &acquired);
         write_text(&source_path, &source)?;
         (source, acquired, true)
@@ -210,7 +230,7 @@ pub fn execute(args: &ReleaseReportArgs, cli: &Cli) -> anyhow::Result<()> {
     let result = ReportResult {
         version: version.clone(),
         tag,
-        project: project_name(&project_root),
+        project: acquired.project.clone(),
         source_path: display_path(&source_path, &project_root),
         html_path: display_path(&html_path, &project_root),
         pdf_path: args.pdf.then(|| display_path(&pdf_path, &project_root)),
@@ -392,12 +412,14 @@ fn write_wrapped_warning(fmt: &mut Formatter<'_>, warning: &str, width: usize) -
 }
 
 impl AcquiredSources {
-    fn from_existing(path: &Path, source: &str, tag: &str) -> Self {
+    fn from_existing(path: &Path, source: &str, tag: &str, project: String) -> Self {
         let issue_count = count_issues_in_source(source);
         Self {
+            project,
             changelog: None,
             changelog_path: None,
             release_notes: None,
+            release_note_articles: Vec::new(),
             release: None,
             issues: Vec::new(),
             assets: Vec::new(),
@@ -425,6 +447,8 @@ fn acquire_sources(
     project_root: &Path,
     version: &str,
     tag: &str,
+    config: &Config,
+    project: String,
 ) -> anyhow::Result<AcquiredSources> {
     let retrieved_at = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     let mut warnings = Vec::new();
@@ -450,13 +474,16 @@ fn acquire_sources(
     };
 
     let release_notes = find_release_notes(project_root, version);
+    let release_note_articles = release_notes
+        .as_ref()
+        .map(|(_, notes)| parse_release_note_articles(notes))
+        .unwrap_or_default();
     if release_notes.is_none() {
         warnings.push(format!(
             "release notes: no draft matching {tag} under docs/release-notes/"
         ));
     }
 
-    let config = Config::load(&project_root.join(".cas")).unwrap_or_default();
     let github_repo = config.issue_repo_registry().project;
     let mut release = None;
     let mut issues = Vec::new();
@@ -577,9 +604,11 @@ fn acquire_sources(
 
     let issue_count = issues.len();
     Ok(AcquiredSources {
+        project,
         changelog,
         changelog_path,
         release_notes,
+        release_note_articles,
         release,
         issues,
         assets,
@@ -622,13 +651,21 @@ fn parse_changelog_section(content: &str, version: &str) -> Option<ChangelogSect
     let body = lines[start + 1..end].join("\n").trim().to_string();
     let mut category = String::new();
     let mut entries = Vec::new();
+    let mut current = None;
     for line in body.lines() {
-        if let Some(value) = line.strip_prefix("### ") {
+        let trimmed = line.trim();
+        if let Some(value) = trimmed.strip_prefix("### ") {
+            if let Some(entry) = current.take() {
+                entries.push(entry);
+            }
             category = value.trim().to_string();
-        } else if let Some(value) = line.strip_prefix("- ") {
+        } else if let Some(value) = line.trim_start().strip_prefix("- ") {
+            if let Some(entry) = current.take() {
+                entries.push(entry);
+            }
             let text = value.trim();
             if !text.is_empty() {
-                entries.push(ChangelogEntry {
+                current = Some(ChangelogEntry {
                     category: if category.is_empty() {
                         "Changes".to_string()
                     } else {
@@ -637,7 +674,19 @@ fn parse_changelog_section(content: &str, version: &str) -> Option<ChangelogSect
                     text: text.to_string(),
                 });
             }
+        } else if let Some(entry) = current.as_mut() {
+            // Keep-a-Changelog permits a bullet's prose to wrap onto indented
+            // lines. Preserve the complete entry for issue extraction and the
+            // report's Was/Now fallback instead of silently truncating it.
+            let continuation = trimmed;
+            if !continuation.is_empty() {
+                entry.text.push(' ');
+                entry.text.push_str(continuation);
+            }
         }
+    }
+    if let Some(entry) = current {
+        entries.push(entry);
     }
     Some(ChangelogSection {
         heading,
@@ -872,7 +921,7 @@ fn assemble_markdown(
     tag: &str,
     sources: &AcquiredSources,
 ) -> String {
-    let project = project_name(project_root);
+    let project = &sources.project;
     let date = sources
         .release
         .as_ref()
@@ -1117,6 +1166,23 @@ fn assemble_markdown(
 
 fn was_now_sections(sources: &AcquiredSources, user_facing: bool) -> String {
     let mut output = String::new();
+    let release_note_entries = sources
+        .release_note_articles
+        .iter()
+        .filter(|article| article.user_facing == user_facing)
+        .take(80)
+        .collect::<Vec<_>>();
+    if !release_note_entries.is_empty() {
+        output.push_str("### Release notes\n\n");
+        for article in release_note_entries {
+            output.push_str(&format!(
+                "#### {}\n\nWas: {}\n\nNow: {}\n\n",
+                article.title, article.was, article.now
+            ));
+        }
+        return output;
+    }
+
     let entries = sources
         .changelog
         .as_ref()
@@ -1192,6 +1258,137 @@ fn source_reference_line(sources: &AcquiredSources, tag: &str) -> String {
     }
 }
 
+fn parse_release_note_articles(content: &str) -> Vec<ReleaseNoteArticle> {
+    let mut articles = Vec::new();
+    let mut audience = None;
+    let mut block = Vec::new();
+
+    let flush = |block: &mut Vec<String>, articles: &mut Vec<ReleaseNoteArticle>, audience| {
+        if block.is_empty() {
+            return;
+        }
+        let text = block.join(" ");
+        if let Some(article) = parse_release_note_article(&text, audience) {
+            articles.push(article);
+        }
+        block.clear();
+    };
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if let Some(next_audience) = release_note_audience(trimmed) {
+            if is_release_note_section_label(trimmed) {
+                flush(&mut block, &mut articles, audience);
+                audience = Some(next_audience);
+                continue;
+            }
+            audience = Some(next_audience);
+        }
+        if trimmed.starts_with("```") {
+            continue;
+        }
+        if trimmed.is_empty() {
+            flush(&mut block, &mut articles, audience);
+            continue;
+        }
+        let starts_bullet =
+            trimmed.starts_with('•') || trimmed.starts_with("- ") || trimmed.starts_with("* ");
+        if starts_bullet && block.iter().any(|line| contains_marker(line, "was:")) {
+            flush(&mut block, &mut articles, audience);
+        }
+        block.push(trimmed.to_string());
+    }
+    flush(&mut block, &mut articles, audience);
+    articles
+}
+
+fn parse_release_note_article(text: &str, audience: Option<bool>) -> Option<ReleaseNoteArticle> {
+    let user_facing = audience?;
+    let was_start = find_marker(text, "was:")?;
+    let after_was = was_start + "was:".len();
+    let now_relative = find_marker(&text[after_was..], "now:")?;
+    let now_start = after_was + now_relative;
+    let was = clean_release_note_value(&text[after_was..now_start]);
+    let now = clean_release_note_value(&text[now_start + "now:".len()..]);
+    if was.is_empty() || now.is_empty() {
+        return None;
+    }
+    Some(ReleaseNoteArticle {
+        title: release_note_title(&text[..was_start]),
+        was,
+        now,
+        user_facing,
+    })
+}
+
+fn release_note_title(value: &str) -> String {
+    let mut title = value
+        .trim()
+        .trim_start_matches(['•', '-', '*'])
+        .trim()
+        .trim_end_matches('—')
+        .trim()
+        .trim_matches('*')
+        .trim()
+        .to_string();
+    if title.is_empty() {
+        title = "Release change".to_string();
+    }
+    title
+}
+
+fn clean_release_note_value(value: &str) -> String {
+    value
+        .trim()
+        .trim_start_matches('*')
+        .trim_end_matches('*')
+        .trim()
+        .to_string()
+}
+
+fn contains_marker(value: &str, marker: &str) -> bool {
+    find_marker(value, marker).is_some()
+}
+
+fn find_marker(value: &str, marker: &str) -> Option<usize> {
+    value.to_ascii_lowercase().find(marker)
+}
+
+fn release_note_audience(line: &str) -> Option<bool> {
+    let lower = line
+        .trim()
+        .trim_start_matches('#')
+        .trim()
+        .trim_matches('*')
+        .trim()
+        .to_ascii_lowercase();
+    if lower.contains("— user —") || lower == "user thread" {
+        Some(true)
+    } else if lower.contains("— dev —") || lower == "dev thread" {
+        Some(false)
+    } else if lower.starts_with("user top-level") || lower.starts_with("user reply") {
+        Some(true)
+    } else if lower.starts_with("dev top-level") || lower.starts_with("dev reply") {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+fn is_release_note_section_label(line: &str) -> bool {
+    let lower = line
+        .trim()
+        .trim_start_matches('#')
+        .trim()
+        .to_ascii_lowercase();
+    lower == "user thread"
+        || lower == "dev thread"
+        || lower.starts_with("user top-level")
+        || lower.starts_with("user reply")
+        || lower.starts_with("dev top-level")
+        || lower.starts_with("dev reply")
+}
+
 fn render_html(
     script: &Path,
     source: &Path,
@@ -1252,13 +1449,52 @@ fn render_pdf(html: &Path, output: &Path, project_root: &Path) -> anyhow::Result
         .arg(&script)
         .arg(html)
         .arg(output_dir);
-    let output_result = run_command(&mut command, Deadline::after(PDF_TIMEOUT), PDF_TIMEOUT)
+    let mut output_result = run_command(&mut command, Deadline::after(PDF_TIMEOUT), PDF_TIMEOUT)
         .map_err(|error| anyhow::anyhow!(bounded_error("node", error)))?;
     if !output_result.status.success() {
-        bail!(
-            "PDF renderer unavailable or failed: {}; remedy `npm exec --yes --package=playwright -- node <renderer-script> <report.html> <output-dir>`",
-            command_output_detail(&output_result)
-        );
+        let detail = command_output_detail(&output_result);
+        if playwright_module_missing(&detail) {
+            // npm exposes the package's CLI through `npm exec`, but does not
+            // add that package to Node's module search path for an external
+            // script. Install into the disposable renderer workspace instead;
+            // Playwright still uses its normal host browser cache.
+            let mut npm_install = Command::new("npm");
+            npm_install
+                .current_dir(temp.path())
+                .args(["install", "--no-save", "playwright"]);
+            let install_result =
+                run_command(&mut npm_install, Deadline::after(PDF_TIMEOUT), PDF_TIMEOUT)
+                    .map_err(|error| anyhow::anyhow!(bounded_error("npm install", error)))?;
+            if !install_result.status.success() {
+                bail!(
+                    "PDF renderer unavailable or failed: {}; remedy `npm install --no-save playwright` in a disposable renderer workspace",
+                    command_output_detail(&install_result)
+                );
+            }
+
+            let node_modules = temp.path().join("node_modules");
+            let playwright_module = node_modules.join("playwright");
+            let mut fallback_node = Command::new("node");
+            fallback_node
+                .current_dir(project_root)
+                .env("NODE_PATH", &node_modules)
+                .env("PLAYWRIGHT_MODULE", &playwright_module)
+                .arg(&script)
+                .arg(html)
+                .arg(output_dir);
+            output_result = run_command(
+                &mut fallback_node,
+                Deadline::after(PDF_TIMEOUT),
+                PDF_TIMEOUT,
+            )
+            .map_err(|error| anyhow::anyhow!(bounded_error("node", error)))?;
+        }
+        if !output_result.status.success() {
+            bail!(
+                "PDF renderer unavailable or failed: {}; remedy `npm exec --yes --package=playwright -- node <renderer-script> <report.html> <output-dir>`",
+                command_output_detail(&output_result)
+            );
+        }
     }
     let a4 = output_dir.join(format!(
         "{}-A4.pdf",
@@ -1549,12 +1785,20 @@ fn normalize_version(value: &str) -> anyhow::Result<String> {
     Ok(value.to_string())
 }
 
-fn project_name(root: &Path) -> String {
-    root.file_name()
-        .and_then(|name| name.to_str())
-        .filter(|name| !name.is_empty())
-        .unwrap_or("Project")
-        .to_string()
+fn project_name(config: &Config, root: &Path) -> String {
+    config
+        .project
+        .as_ref()
+        .and_then(|project| project.canonical_id.as_deref())
+        .filter(|name| !name.trim().is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| {
+            root.file_name()
+                .and_then(|name| name.to_str())
+                .filter(|name| !name.is_empty())
+                .unwrap_or("Project")
+                .to_string()
+        })
 }
 
 fn display_path(path: &Path, root: &Path) -> String {
@@ -1607,7 +1851,7 @@ fn clean_markdown_text(text: &str) -> String {
 }
 
 fn heading_from_entry(text: &str) -> String {
-    let text = text.trim_start_matches(['*', '`', '[']);
+    let text = text.trim_start_matches(['*', '[']);
     let text = text.split_once(':').map(|(head, _)| head).unwrap_or(text);
     let text = text.split_once(" — ").map(|(head, _)| head).unwrap_or(text);
     let mut heading = text.trim().to_string();
@@ -1645,6 +1889,13 @@ fn bounded_error(command: &str, error: BoundedCommandError) -> String {
     }
 }
 
+fn playwright_module_missing(detail: &str) -> bool {
+    let detail = detail.to_ascii_lowercase();
+    detail.contains("playwright is not installed")
+        || detail.contains("cannot find module 'playwright'")
+        || detail.contains("cannot find module \"playwright\"")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1658,6 +1909,116 @@ mod tests {
         assert_eq!(section.entries[0].category, "Added");
         assert_eq!(section.entries[1].category, "Fixed");
         assert!(section.body.contains("New thing"));
+    }
+
+    #[test]
+    fn changelog_parser_joins_wrapped_entries_and_preserves_inline_code_heading() {
+        let fixture = "# Changelog\n\n## [2.4.0] - 2026-09-01\n\n### Changed\n- `cas release report` assembles the\n  complete report from project sources.\n\n### Fixed\n- The report reports supervisor\n  delivery evidence without truncation.\n";
+        let section = parse_changelog_section(fixture, "2.4.0").expect("section");
+
+        assert_eq!(section.entries.len(), 2);
+        assert_eq!(
+            section.entries[0].text,
+            "`cas release report` assembles the complete report from project sources."
+        );
+        assert_eq!(
+            section.entries[1].text,
+            "The report reports supervisor delivery evidence without truncation."
+        );
+        assert!(heading_from_entry(&section.entries[0].text).starts_with('`'));
+    }
+
+    #[test]
+    fn release_note_articles_are_partitioned_into_user_and_developer_sections() {
+        let draft = r#"User top-level
+
+```text
+*Live on production — User — Cassy v2.4.0*
+Was: users had to assemble reports by hand. Now: one command builds the report.
+```
+
+User reply
+
+```text
+• *Readable report* — Was: the old report hid the evidence. Now: the report shows it.
+```
+
+Dev top-level
+
+```text
+*Live on production — Dev — Cassy v2.4.0*
+Was: report sources were gathered manually. Now: the assembler gathers them.
+```
+"#;
+        let articles = parse_release_note_articles(draft);
+        assert_eq!(articles.len(), 3);
+        assert_eq!(
+            articles
+                .iter()
+                .filter(|article| article.user_facing)
+                .count(),
+            2
+        );
+        assert_eq!(
+            articles
+                .iter()
+                .filter(|article| !article.user_facing)
+                .count(),
+            1
+        );
+        assert_eq!(articles[0].was, "users had to assemble reports by hand.");
+        assert_eq!(articles[1].title, "Readable report");
+        assert_eq!(articles[2].now, "the assembler gathers them.");
+
+        let sources = AcquiredSources {
+            project: "fixture".to_string(),
+            changelog: None,
+            changelog_path: None,
+            release_notes: None,
+            release_note_articles: articles,
+            release: None,
+            issues: Vec::new(),
+            assets: Vec::new(),
+            release_evidence: ReleaseEvidence::default(),
+            github_repo: None,
+            issue_count: 0,
+            warnings: Vec::new(),
+            retrieved_at: "2026-09-09T00:00:00Z".to_string(),
+        };
+        let user = was_now_sections(&sources, true);
+        let dev = was_now_sections(&sources, false);
+        assert!(user.contains("Readable report"));
+        assert!(!user.contains("report sources were gathered manually"));
+        assert!(dev.contains("report sources were gathered manually"));
+        assert!(!dev.contains("Readable report"));
+    }
+
+    #[test]
+    fn project_name_prefers_the_configured_canonical_id() {
+        let config = Config {
+            project: Some(crate::config::ProjectConfig {
+                canonical_id: Some("configured-project".to_string()),
+                aliases: Vec::new(),
+            }),
+            ..Config::default()
+        };
+        assert_eq!(
+            project_name(&config, Path::new("/repo/worker-worktree")),
+            "configured-project"
+        );
+    }
+
+    #[test]
+    fn playwright_module_failure_is_selected_for_npm_fallback() {
+        assert!(playwright_module_missing(
+            "Playwright is not installed: Cannot find module 'playwright'"
+        ));
+        assert!(playwright_module_missing(
+            "Error: Cannot find module \"playwright\""
+        ));
+        assert!(!playwright_module_missing(
+            "browserType.launch: Executable doesn't exist"
+        ));
     }
 
     #[test]

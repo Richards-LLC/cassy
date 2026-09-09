@@ -1,18 +1,24 @@
 use std::fs;
+use std::path::Path;
 use std::path::PathBuf;
+use std::process::Command as ProcessCommand;
 
 use assert_cmd::Command;
 use serde_json::Value;
 use tempfile::TempDir;
 
 fn cas_cmd(project: &TempDir) -> Command {
-    let mut command = Command::new(cas::test_paths::cas_binary());
     let home = project.path().join(".test-home");
     let xdg = project.path().join(".test-xdg-config");
+    cas_cmd_at(project.path(), &home, &xdg)
+}
+
+fn cas_cmd_at(project: &Path, home: &Path, xdg: &Path) -> Command {
     fs::create_dir_all(&home).unwrap();
     fs::create_dir_all(&xdg).unwrap();
+    let mut command = Command::new(cas::test_paths::cas_binary());
     command
-        .current_dir(project.path())
+        .current_dir(project)
         .env("HOME", home)
         .env("XDG_CONFIG_HOME", xdg)
         .env_remove("CAS_ROOT")
@@ -130,4 +136,100 @@ fn cli_release_report_renders_fixture_html_and_preserves_source() {
     assert_eq!(second["source_written"], false);
     assert_eq!(fs::read_to_string(&source_path).unwrap(), source);
     assert_eq!(fs::read_to_string(&html_path).unwrap(), html);
+}
+
+#[cfg(unix)]
+#[test]
+fn cli_release_report_resolves_main_config_from_a_git_worktree() {
+    let project = TempDir::new().unwrap();
+    let run = |args: &[&str]| {
+        let output = ProcessCommand::new("git")
+            .current_dir(project.path())
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    run(["init", "--quiet"].as_slice());
+    run(["config", "user.email", "fixture@example.test"].as_slice());
+    run(["config", "user.name", "Fixture"].as_slice());
+
+    fs::write(
+        project.path().join("CHANGELOG.md"),
+        "# Changelog\n\n## [3.19.0] - 2026-09-08\n\n### Changed\n- `cas release report` assembles the\n  complete report from project sources. (#705)\n\n### Fixed\n- The report reports supervisor\n  delivery evidence without truncation. (#746)\n",
+    )
+    .unwrap();
+    fs::create_dir_all(project.path().join("docs/release-notes")).unwrap();
+    fs::write(
+        project.path().join("docs/release-notes/v3.19.0.md"),
+        "# v3.19.0 release notes\n\nUser top-level\n\n```text\n*Live on production — User — Cassy v3.19.0*\nWas: users had to assemble reports by hand. Now: one command builds the report.\n```\n\nDev top-level\n\n```text\n*Live on production — Dev — Cassy v3.19.0*\nWas: report sources were gathered manually. Now: the assembler gathers them.\n```\n",
+    )
+    .unwrap();
+    run(["add", "CHANGELOG.md", "docs/release-notes/v3.19.0.md"].as_slice());
+    run(["commit", "--quiet", "-m", "fixture"].as_slice());
+
+    cas_cmd(&project).args(["init", "--yes"]).assert().success();
+    cas_cmd(&project)
+        .args(["config", "set", "issues.repo", "example/project"])
+        .assert()
+        .success();
+    let config_path = project.path().join(".cas/config.toml");
+    let mut config = fs::read_to_string(&config_path).unwrap();
+    config.push_str("\n[project]\ncanonical_id = \"configured-project\"\n");
+    fs::write(config_path, config).unwrap();
+
+    let worktree = project.path().join("report-worktree");
+    run([
+        "worktree",
+        "add",
+        "--quiet",
+        "-b",
+        "report-fixture",
+        worktree.to_str().unwrap(),
+        "HEAD",
+    ]
+    .as_slice());
+    let fake_gh = install_fake_gh(&project);
+    let home = project.path().join(".test-home");
+    let xdg = project.path().join(".test-xdg-config");
+    let output = cas_cmd_at(&worktree, &home, &xdg)
+        .env("GH_BIN", &fake_gh)
+        .args([
+            "--json",
+            "release",
+            "report",
+            "3.19.0",
+            "--out",
+            "docs/release-reports",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let result: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(result["project"], "configured-project");
+    assert_eq!(result["github_repo"], "example/project");
+    assert!(
+        !result["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|warning| warning.as_str().unwrap().contains("issues.repo is unset"))
+    );
+
+    let source = fs::read_to_string(worktree.join("docs/release-reports/v3.19.0.md")).unwrap();
+    let (user_section, developer_and_rest) = source.split_once("## Under the hood").unwrap();
+    assert!(user_section.contains("one command builds the report."));
+    assert!(!user_section.contains("the assembler gathers them."));
+    assert!(developer_and_rest.contains("the assembler gathers them."));
+    assert!(
+        !developer_and_rest[..developer_and_rest.find("## Fixes ledger").unwrap()]
+            .contains("one command builds the report.")
+    );
 }

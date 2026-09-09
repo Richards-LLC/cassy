@@ -100,7 +100,16 @@ fn task_delivery_ranges(
             let foreign = !owned
                 && message
                     .split(|c: char| !c.is_ascii_alphanumeric() && c != '-')
-                    .any(|word| word.starts_with("cas-") && word.len() > 4);
+                    .any(|word| {
+                        // TaskStore::generate_hash_id emits hexadecimal IDs.
+                        // Crate/path words such as cas-cli are not task claims.
+                        word.get(..4)
+                            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("cas-"))
+                            && word.get(4..).is_some_and(|id| {
+                                (4..=8).contains(&id.len())
+                                    && id.bytes().all(|byte| byte.is_ascii_hexdigit())
+                            })
+                    });
             Some(Commit {
                 sha,
                 parent: fields[1].split_whitespace().next().unwrap_or("").into(),
@@ -281,6 +290,41 @@ mod tests {
             },
         }
     }
+    #[test]
+    fn crate_names_are_not_foreign_task_ids() {
+        let dir = fixture();
+        let p = dir.path();
+        commit(
+            p,
+            "crate_change.rs",
+            "own\n",
+            "fix cas-cli build and cas-core integration",
+        );
+        commit(p, "foreign.rs", "foreign\n", "cas-a1b2: unrelated task");
+        commit(
+            p,
+            "explicit.rs",
+            "explicit\n",
+            "cas-taskb: follow up on cas-a1b2",
+        );
+        let known = commit(p, "recorded.rs", "known\n", "cas-cafe: recorded delivery");
+        let mut scope = window();
+        scope.identity.known_commits.push(known);
+        let stat = diff_stat(p, "main", &scope, None).unwrap().stat;
+        assert!(
+            stat.contains("crate_change.rs"),
+            "crate wording must remain attributed: {stat}"
+        );
+        assert!(
+            !stat.contains("foreign.rs"),
+            "other task IDs must remain excluded: {stat}"
+        );
+        assert!(
+            stat.contains("explicit.rs") && stat.contains("recorded.rs"),
+            "own task ID and known commit must take precedence: {stat}"
+        );
+    }
+
     #[test]
     fn historical_record_receipt_requires_audited_supervisor_exception() {
         let dir = fixture();

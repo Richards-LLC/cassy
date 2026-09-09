@@ -7,8 +7,9 @@ closures it contains; the second line gives the copyable Markdown source path.
 
 ## Scannable
 
-The human output is a short verdict followed by source, HTML, and optional PDF
-paths, then one warning row per unavailable evidence source.
+The human output is a short verdict followed by aligned Source, HTML, and
+optional PDF path rows; long paths, the remedy, and warning rows wrap under
+their value or mark with an indented continuation.
 
 ## Readable
 
@@ -30,5 +31,12 @@ repository; use `--refresh-sources` to intentionally replace a Markdown source.
 
 ## Critique
 
-The command's final terminal QA receipt is recorded with the release-report
-implementation task after the binary and a fixture renderer are available.
+terminal-qa: PASS cas-release-report-cas-7dfa · 11 runs · 0 fail · 0 warn · 0 allowed · /home/pippenz/.cas/artifacts/cas-7dfa/terminal-qa/report.json
+| Dimension | Score | Evidence |
+| --- | --- | --- |
+| Hierarchy | 4 | The verdict is line one; aligned artifact rows and one remedy follow before warning evidence. |
+| Fit | 4 | Paths stay scannable as labeled rows, while only long values and warnings expand with hanging indents. |
+| Craft | 4 | Source/HTML/PDF labels align, continuation rows stay within 80 cells, and the C-locale capture uses ASCII marks. |
+| Theme safety | 5 | Four palettes, piped output, NO_COLOR, and LC_ALL=C all pass with marks carrying the status meaning. |
+| Machine contract | 5 | The human branch uses Formatter while the existing `--json` serialization branch is unchanged; terminal QA passes the pipe contract. |
+Scored by keen-finch-52 on 2026-09-09; floor holds.

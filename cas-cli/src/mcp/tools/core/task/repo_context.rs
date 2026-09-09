@@ -1961,6 +1961,7 @@ mod tests {
             ));
 
             let window = TaskCommitReceiptWindow {
+                supervisor_override_reason: None,
                 not_before: chrono::DateTime::from_timestamp(0, 0).unwrap(),
                 basis: "test task creation",
                 task_floor: chrono::DateTime::from_timestamp(0, 0).unwrap(),

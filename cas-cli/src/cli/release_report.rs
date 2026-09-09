@@ -8,6 +8,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -23,6 +24,8 @@ use crate::bounded_process::{BoundedCommandError, Deadline, run_command};
 use crate::builtins::BUILTIN_SKILLS;
 use crate::cli::Cli;
 use crate::config::Config;
+use crate::ui::components::{Formatter, Verdict, ascii_fallback};
+use crate::ui::theme::ActiveTheme;
 
 const GH_TIMEOUT: Duration = Duration::from_secs(20);
 const RENDER_TIMEOUT: Duration = Duration::from_secs(45);
@@ -174,11 +177,7 @@ pub fn execute(args: &ReleaseReportArgs, cli: &Cli) -> anyhow::Result<()> {
         let source = fs::read_to_string(&source_path)
             .with_context(|| format!("could not read existing source {}", source_path.display()))?;
         let acquired = AcquiredSources::from_existing(&source_path, &source, &tag);
-        (
-            source,
-            acquired,
-            false,
-        )
+        (source, acquired, false)
     } else {
         let acquired = acquire_sources(&project_root, &version, &tag)?;
         let source = assemble_markdown(&project_root, &version, &tag, &acquired);
@@ -235,30 +234,160 @@ pub fn execute(args: &ReleaseReportArgs, cli: &Cli) -> anyhow::Result<()> {
     if cli.json {
         println!("{}", serde_json::to_string_pretty(&result)?);
     } else {
-        let warning_count = result.warnings.len();
-        let mark = if warning_count == 0 { "✓" } else { "⚠" };
-        println!(
-            "{mark} report ready · {} · {} issues · {} warning{}",
+        let stdout = io::stdout();
+        let mut output = stdout.lock();
+        let mut fmt = Formatter::stdout(&mut output, ActiveTheme::default());
+        render_human_output(&mut fmt, &result)?;
+        fmt.flush()?;
+    }
+
+    Ok(())
+}
+
+fn render_human_output(fmt: &mut Formatter<'_>, result: &ReportResult) -> io::Result<()> {
+    let warning_count = result.warnings.len();
+    let verdict = if warning_count == 0 {
+        Verdict::Ok
+    } else {
+        Verdict::Warning
+    };
+    let separator = if fmt.unicode() { "·" } else { "-" };
+    fmt.verdict(
+        verdict,
+        "report ready",
+        &format!(
+            "{} {separator} {} issues {separator} {} warning{}",
             result.tag,
             result.issue_count,
             warning_count,
             if warning_count == 1 { "" } else { "s" }
-        );
-        println!("  Source: {}", result.source_path);
-        println!("  HTML:  {}", result.html_path);
-        if let Some(path) = &result.pdf_path {
-            println!("  PDF:   {path}");
-        }
-        if !result.warnings.is_empty() {
-            println!(
-                "  Remedy: inspect the Evidence and scope section; rerun with --refresh-sources after fixing sources."
-            );
-            for warning in &result.warnings {
-                println!("  ⚠ {warning}");
-            }
+        ),
+    )?;
+
+    let width = report_output_width(fmt);
+    write_wrapped_field(fmt, "  Source: ", &result.source_path, width)?;
+    write_wrapped_field(fmt, "  HTML:  ", &result.html_path, width)?;
+    if let Some(path) = &result.pdf_path {
+        write_wrapped_field(fmt, "  PDF:   ", path, width)?;
+    }
+    if !result.warnings.is_empty() {
+        write_wrapped_field(
+            fmt,
+            "  Remedy: ",
+            "inspect the Evidence and scope section; rerun with --refresh-sources after fixing sources.",
+            width,
+        )?;
+        for warning in &result.warnings {
+            write_wrapped_warning(fmt, warning, width)?;
         }
     }
+    Ok(())
+}
 
+fn report_output_width(fmt: &Formatter<'_>) -> usize {
+    let width = fmt.width() as usize;
+    if width < 40 { 80 } else { width }
+}
+
+/// Wrap ordinary words and hard-wrap a single long value (usually an absolute
+/// path) with one spare cell. The spare cell avoids terminal-qa mistaking a
+/// continuation of a path for a word split at the right edge.
+fn wrap_report_output(text: &str, width: usize) -> Vec<String> {
+    if text.is_empty() {
+        return vec![String::new()];
+    }
+    let width = width.max(1);
+    let hard_width = width.saturating_sub(1).max(1);
+    let mut lines = Vec::new();
+    let mut current = String::new();
+
+    for word in text.split_whitespace() {
+        let word_width = word.chars().count();
+        if word_width <= width {
+            if current.is_empty() {
+                current.push_str(word);
+            } else if current.chars().count() + 1 + word_width <= width {
+                current.push(' ');
+                current.push_str(word);
+            } else {
+                lines.push(std::mem::take(&mut current));
+                current.push_str(word);
+            }
+            continue;
+        }
+
+        if !current.is_empty() {
+            lines.push(std::mem::take(&mut current));
+        }
+        let mut remaining = word;
+        while remaining.chars().count() > hard_width {
+            let split_at = remaining
+                .char_indices()
+                .nth(hard_width)
+                .map(|(index, _)| index)
+                .unwrap_or(remaining.len());
+            lines.push(remaining[..split_at].to_string());
+            remaining = &remaining[split_at..];
+        }
+        current.push_str(remaining);
+    }
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+    lines
+}
+
+fn output_text_for_locale(fmt: &Formatter<'_>, text: &str) -> String {
+    if fmt.unicode() {
+        text.to_string()
+    } else {
+        ascii_fallback(text).into_owned()
+    }
+}
+
+fn write_wrapped_field(
+    fmt: &mut Formatter<'_>,
+    prefix: &str,
+    text: &str,
+    width: usize,
+) -> io::Result<()> {
+    let prefix_width = prefix.chars().count();
+    let available = width.saturating_sub(prefix_width).max(1);
+    let text = output_text_for_locale(fmt, text);
+    for (index, line) in wrap_report_output(&text, available).into_iter().enumerate() {
+        if index == 0 {
+            fmt.write_raw(prefix)?;
+        } else {
+            fmt.write_raw(&" ".repeat(prefix_width))?;
+        }
+        fmt.write_text(&line)?;
+        fmt.newline()?;
+    }
+    Ok(())
+}
+
+fn write_wrapped_warning(fmt: &mut Formatter<'_>, warning: &str, width: usize) -> io::Result<()> {
+    let mark = Verdict::Warning.label(fmt.glyphs());
+    let prefix_width = 2 + mark.chars().count() + 1;
+    let available = width.saturating_sub(prefix_width).max(1);
+    let warning = output_text_for_locale(fmt, warning);
+    for (index, line) in wrap_report_output(&warning, available)
+        .into_iter()
+        .enumerate()
+    {
+        if index == 0 {
+            fmt.write_raw("  ")?;
+            fmt.mark(Verdict::Warning)?;
+            fmt.write_raw(" ")?;
+        } else {
+            fmt.write_raw(&" ".repeat(prefix_width))?;
+        }
+        fmt.write_text(&line)?;
+        fmt.newline()?;
+    }
     Ok(())
 }
 
@@ -657,7 +786,10 @@ fn classify_theme(issue: &GithubIssue) -> String {
         ("Factory", &["factory", "worker", "spawn", "supervisor"][..]),
         ("Delivery", &["delivery", "task", "queue", "message"][..]),
         ("Cloud", &["cloud", "sync", "pairing"][..]),
-        ("Diagnostics", &["diagnostic", "doctor", "config", "history"][..]),
+        (
+            "Diagnostics",
+            &["diagnostic", "doctor", "config", "history"][..],
+        ),
         (
             "MechaCassy",
             &["mecha-cassy", "mecha_cassy", "slack", "hub"][..],
@@ -1578,5 +1710,98 @@ mod tests {
         assert_eq!(counts[5].theme, "Install");
         assert_eq!(counts[5].issues, 0);
         assert_eq!(counts[6].issue_numbers, vec![1]);
+    }
+
+    #[test]
+    fn human_output_wraps_paths_and_remedies_to_the_terminal_width() {
+        let result = ReportResult {
+            version: "3.19.0".to_string(),
+            tag: "v3.19.0".to_string(),
+            project: "fixture".to_string(),
+            source_path: "/home/pippenz/.cas/artifacts/cas-7dfa/reports/v3.19.0.md".to_string(),
+            html_path: "/home/pippenz/.cas/artifacts/cas-7dfa/reports/v3.19.0.html".to_string(),
+            pdf_path: Some(
+                "/home/pippenz/.cas/artifacts/cas-7dfa/reports/v3.19.0.pdf".to_string(),
+            ),
+            source_written: false,
+            html_written: true,
+            pdf_written: true,
+            issue_count: 2,
+            asset_count: 1,
+            theme_counts: Vec::new(),
+            warnings: vec![
+                "source preserved: /home/pippenz/.cas/artifacts/cas-7dfa/reports/v3.19.0.md is authoritative for v3.19.0".to_string(),
+            ],
+            retrieved_at: "2026-09-09T15:00:00Z".to_string(),
+            github_repo: None,
+            release_published_at: None,
+            green_to_published_seconds: None,
+        };
+        let mut output = Vec::new();
+        {
+            let mut fmt = crate::ui::components::Formatter::new(
+                &mut output,
+                crate::ui::components::OutputMode::Plain,
+                crate::ui::theme::ActiveTheme::default(),
+                80,
+            );
+            render_human_output(&mut fmt, &result).unwrap();
+        }
+        let output = String::from_utf8(output).unwrap();
+        assert!(
+            output.lines().all(|line| line.chars().count() <= 80),
+            "human output overflowed:\n{output}"
+        );
+        assert!(output.contains("  Source: "));
+        assert!(output.contains("  HTML:  "));
+        assert!(output.contains("  PDF:   "));
+        assert!(output.contains("  Remedy: "));
+        assert!(
+            output.lines().any(|line| line.starts_with("          ")),
+            "expected indented continuation line:\n{output}"
+        );
+    }
+
+    #[test]
+    fn human_output_uses_ascii_marks_for_c_locale() {
+        let mut env = crate::test_support::TestEnvGuard::new();
+        env.set("LC_ALL", "C");
+        env.remove("LC_CTYPE");
+        env.remove("LANG");
+        let result = ReportResult {
+            version: "3.19.0".to_string(),
+            tag: "v3.19.0".to_string(),
+            project: "fixture".to_string(),
+            source_path: "docs/release-reports/v3.19.0.md".to_string(),
+            html_path: "docs/release-reports/v3.19.0.html".to_string(),
+            pdf_path: None,
+            source_written: false,
+            html_written: true,
+            pdf_written: false,
+            issue_count: 0,
+            asset_count: 0,
+            theme_counts: Vec::new(),
+            warnings: vec!["source preserved: docs/release-reports/v3.19.0.md".to_string()],
+            retrieved_at: "2026-09-09T15:00:00Z".to_string(),
+            github_repo: None,
+            release_published_at: None,
+            green_to_published_seconds: None,
+        };
+        let mut output = Vec::new();
+        {
+            let mut fmt = crate::ui::components::Formatter::new(
+                &mut output,
+                crate::ui::components::OutputMode::Styled,
+                crate::ui::theme::ActiveTheme::default(),
+                80,
+            );
+            render_human_output(&mut fmt, &result).unwrap();
+        }
+        let output = String::from_utf8(output).unwrap();
+        let output = crate::ui::components::test_helpers::strip_ansi_codes(&output);
+        assert!(output.contains("[WARN] report ready - v3.19.0"), "{output}");
+        assert!(output.contains("  [WARN] source preserved"), "{output}");
+        assert!(!output.contains('⚠'));
+        assert!(!output.contains('·'));
     }
 }

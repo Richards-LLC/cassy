@@ -10711,6 +10711,111 @@ mod tests {
         assert_eq!(spec.effort, Some(cas_mux::Effort::High));
     }
 
+    /// cas-7eed: connect request resolution, queue serialization, receipt,
+    /// launcher construction and registration metadata under a Claude default.
+    #[test]
+    fn codex_spawn_routes_match_launcher_receipt_and_registration() {
+        let mut env = TestEnvGuard::temp_home();
+        let project = tempfile::tempdir().unwrap();
+        let config = project.path().join("config.toml");
+        let mut cases = Vec::new();
+        for configured in ["claude", "codex"] {
+            std::fs::write(
+                &config,
+                format!("[llm.worker]\nharness = \"{configured}\"\n"),
+            )
+            .unwrap();
+            for (label, cli, workers) in [
+                ("explicit", Some("codex"), None),
+                (
+                    "per-worker",
+                    Some("claude"),
+                    Some(r#"[{"cli":"codex","model":"gpt-5.6-luna","effort":"xhigh"}]"#),
+                ),
+            ] {
+                let specs = build_spawn_specs_with_project_config(
+                    1,
+                    cli,
+                    None,
+                    None,
+                    None,
+                    workers,
+                    Some(config.clone()),
+                )
+                .unwrap();
+                cases.push((format!("{label}/configured-{configured}"), specs));
+            }
+            if configured == "codex" {
+                cases.push((
+                    "config-default".into(),
+                    build_spawn_specs_with_project_config(
+                        1,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        Some(config.clone()),
+                    )
+                    .unwrap(),
+                ));
+            }
+        }
+        for lane in ["standard", "heavy"] {
+            let (specs, _, _) = build_lane_spawn_specs(
+                1,
+                lane,
+                None,
+                None,
+                &cas_factory::CapabilitySnapshot::default(),
+            )
+            .unwrap();
+            cases.push((lane.into(), specs));
+        }
+        let mut mux = cas_mux::Mux::new(24, 80);
+        mux.set_default_worker_spec(cas_mux::WorkerSpec::builtin_default());
+        mux.set_worker_spec("probe", cas_mux::WorkerSpec::builtin_default());
+        for (label, specs) in cases {
+            let receipt = spawn_specs_summary(&specs, &[]);
+            assert!(receipt.contains(": codex model="), "{label}: {receipt}");
+            // Queue producers serialize the fully resolved spec. The daemon
+            // must hand that same spec to the dynamic launcher.
+            let queued = serde_json::to_string(&specs[0]).unwrap();
+            let spec: cas_mux::WorkerSpec = serde_json::from_str(&queued).unwrap();
+            let launch = mux.build_add_worker_config(
+                "probe",
+                project.path().into(),
+                None,
+                "supervisor",
+                None,
+                Some(spec),
+            );
+            let launched_cli = if launch.command == "nice" {
+                launch.args[2].as_str()
+            } else {
+                launch.command.as_str()
+            };
+            assert_eq!(launched_cli, "codex", "{label}");
+            let registered_cli = launch
+                .args
+                .iter()
+                .find_map(|arg| arg.strip_prefix("mcp_servers.cs.env.CAS_FACTORY_WORKER_CLI="))
+                .expect("Codex MCP registration must receive the launched CLI");
+            let registered_cli: String = serde_json::from_str(registered_cli).unwrap();
+            assert_eq!(registered_cli, launched_cli, "{label}");
+            env.set("CAS_FACTORY_WORKER_CLI", &registered_cli);
+            env.set("CAS_AGENT_ROLE", "worker");
+            let mut agent = cas_types::Agent::new("codex-probe".into(), "probe".into());
+            crate::mcp::daemon::apply_factory_worker_metadata(&mut agent, None);
+            assert_eq!(
+                worker_cli_from_agent(&agent),
+                cas_mux::SupervisorCli::Codex,
+                "{label}"
+            );
+            assert_eq!(agent.metadata["worker_cli"], launched_cli, "{label}");
+        }
+    }
+
     #[test]
     fn spawn_specs_keep_per_worker_harness_and_account_overrides() {
         let specs = build_spawn_specs_with_project_config(

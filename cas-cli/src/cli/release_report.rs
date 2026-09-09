@@ -149,6 +149,7 @@ struct AcquiredSources {
     changelog_path: Option<PathBuf>,
     release_notes: Option<(PathBuf, String)>,
     release_note_articles: Vec<ReleaseNoteArticle>,
+    release_note_user_punch: Option<String>,
     release: Option<ReleaseMetadata>,
     issues: Vec<GithubIssue>,
     assets: Vec<ReleaseAsset>,
@@ -165,6 +166,13 @@ struct ReleaseNoteArticle {
     was: String,
     now: String,
     user_facing: bool,
+    group: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ReleaseNoteDraft {
+    articles: Vec<ReleaseNoteArticle>,
+    user_punch: Option<String>,
 }
 
 /// Execute `cas release report`.
@@ -239,7 +247,7 @@ pub fn execute(args: &ReleaseReportArgs, cli: &Cli) -> anyhow::Result<()> {
         pdf_written,
         issue_count: acquired.issue_count,
         asset_count: acquired.assets.len(),
-        theme_counts: theme_counts(&acquired.issues),
+        theme_counts: theme_counts_for_sources(&acquired),
         warnings: acquired.warnings.clone(),
         retrieved_at: acquired.retrieved_at.clone(),
         github_repo: acquired.github_repo.clone(),
@@ -420,6 +428,7 @@ impl AcquiredSources {
             changelog_path: None,
             release_notes: None,
             release_note_articles: Vec::new(),
+            release_note_user_punch: None,
             release: None,
             issues: Vec::new(),
             assets: Vec::new(),
@@ -474,9 +483,9 @@ fn acquire_sources(
     };
 
     let release_notes = find_release_notes(project_root, version);
-    let release_note_articles = release_notes
+    let release_note_draft = release_notes
         .as_ref()
-        .map(|(_, notes)| parse_release_note_articles(notes))
+        .map(|(_, notes)| parse_release_note_draft(notes))
         .unwrap_or_default();
     if release_notes.is_none() {
         warnings.push(format!(
@@ -608,7 +617,8 @@ fn acquire_sources(
         changelog,
         changelog_path,
         release_notes,
-        release_note_articles,
+        release_note_articles: release_note_draft.articles,
+        release_note_user_punch: release_note_draft.user_punch,
         release,
         issues,
         assets,
@@ -822,6 +832,9 @@ fn collect_pr_issue_references(value: &Value, referenced: &mut BTreeSet<u64>) {
                 }
             }
         }
+        if let Some(body) = pr.get("body").and_then(Value::as_str) {
+            referenced.extend(extract_issue_numbers(body));
+        }
     }
 }
 
@@ -897,22 +910,136 @@ fn classify_theme(issue: &GithubIssue) -> String {
 }
 
 fn theme_counts(issues: &[GithubIssue]) -> Vec<ThemeCount> {
-    THEME_ORDER
-        .iter()
+    theme_counts_with_context(issues, None, &[])
+}
+
+fn theme_counts_for_sources(sources: &AcquiredSources) -> Vec<ThemeCount> {
+    theme_counts_with_context(
+        &sources.issues,
+        sources.changelog.as_ref(),
+        &sources.release_note_articles,
+    )
+}
+
+fn theme_counts_with_context(
+    issues: &[GithubIssue],
+    changelog: Option<&ChangelogSection>,
+    articles: &[ReleaseNoteArticle],
+) -> Vec<ThemeCount> {
+    let mut theme_order = draft_theme_order(articles);
+    if theme_order.is_empty() {
+        theme_order = THEME_ORDER
+            .iter()
+            .map(|theme| (*theme).to_string())
+            .collect();
+    }
+
+    let mut assignments = HashMap::new();
+    for article in articles {
+        let theme = draft_theme_label(article);
+        if !theme_order.iter().any(|known| known == &theme) {
+            theme_order.push(theme.clone());
+        }
+        let text = format!("{} {} {}", article.title, article.was, article.now);
+        for number in extract_issue_numbers(&text) {
+            if issues.iter().any(|issue| issue.number == number) {
+                assignments.entry(number).or_insert_with(|| theme.clone());
+            }
+        }
+    }
+
+    for issue in issues {
+        if assignments.contains_key(&issue.number) {
+            continue;
+        }
+        let fallback = if articles.is_empty() {
+            issue.theme.clone()
+        } else {
+            changelog
+                .and_then(|section| {
+                    section
+                        .entries
+                        .iter()
+                        .find(|entry| extract_issue_numbers(&entry.text).contains(&issue.number))
+                })
+                .map(|entry| entry.category.clone())
+                .unwrap_or_else(|| issue.theme.clone())
+        };
+        if !theme_order.iter().any(|known| known == &fallback) {
+            theme_order.push(fallback.clone());
+        }
+        assignments.insert(issue.number, fallback);
+    }
+
+    theme_order
+        .into_iter()
         .map(|theme| {
             let mut issue_numbers = issues
                 .iter()
-                .filter(|issue| issue.theme == *theme)
+                .filter(|issue| assignments.get(&issue.number) == Some(&theme))
                 .map(|issue| issue.number)
                 .collect::<Vec<_>>();
             issue_numbers.sort_unstable();
             ThemeCount {
-                theme: (*theme).to_string(),
+                theme,
                 issues: issue_numbers.len(),
                 issue_numbers,
             }
         })
         .collect()
+}
+
+fn draft_theme_order(articles: &[ReleaseNoteArticle]) -> Vec<String> {
+    let mut order = Vec::new();
+    for article in articles {
+        let theme = draft_theme_label(article);
+        if !order.iter().any(|known| known == &theme) {
+            order.push(theme);
+        }
+    }
+    order
+}
+
+fn draft_theme_label(article: &ReleaseNoteArticle) -> String {
+    let text = format!(
+        "{} {} {} {}",
+        article.title,
+        article.group.as_deref().unwrap_or_default(),
+        article.was,
+        article.now
+    )
+    .to_ascii_lowercase();
+    if text.contains("release") || text.contains("report") || text.contains("train") {
+        "Release".to_string()
+    } else if text.contains("recall")
+        || text.contains("briefing")
+        || text.contains("memory")
+        || text.contains("budget")
+        || text.contains("headroom")
+    {
+        "Memory".to_string()
+    } else if text.contains("verification")
+        || text.contains("close-gate")
+        || text.contains("close gate")
+        || text.contains("fair task")
+        || text.contains("posture")
+        || text.contains("epoch")
+    {
+        "Verification".to_string()
+    } else if text.contains("factory")
+        || text.contains("worker")
+        || text.contains("spawn")
+        || text.contains("start-up")
+        || text.contains("startup")
+        || text.contains("provider")
+    {
+        "Factory".to_string()
+    } else {
+        article
+            .group
+            .clone()
+            .unwrap_or_else(|| "Release".to_string())
+    }
 }
 
 fn assemble_markdown(
@@ -935,10 +1062,10 @@ fn assemble_markdown(
         })
         .unwrap_or_else(|| Utc::now().date_naive().to_string());
     let issue_count = sources.issues.len();
-    let themes = theme_counts(&sources.issues)
-        .into_iter()
-        .filter(|theme| theme.issues > 0)
-        .map(|theme| theme.theme)
+    let themes_for_report = theme_counts_for_sources(sources);
+    let themes = themes_for_report
+        .iter()
+        .map(|theme| theme.theme.clone())
         .collect::<Vec<_>>();
     let theme_frontmatter = if themes.is_empty() {
         "[]".to_string()
@@ -952,23 +1079,30 @@ fn assemble_markdown(
                 .join(", ")
         )
     };
-    let verdict = if issue_count == 0 {
-        format!("{tag} has no verified closed GitHub issues in the available release sources.")
-    } else {
-        format!(
-            "{tag} closes {issue_count} verified GitHub issue{} across the sourced release surfaces.",
-            if issue_count == 1 { "" } else { "s" }
-        )
-    };
+    let verdict = sources
+        .release_note_user_punch
+        .as_deref()
+        .map(format_verdict)
+        .unwrap_or_else(|| {
+            if issue_count == 0 {
+                format!("{tag} has no verified closed GitHub issues in the available release sources.")
+            } else {
+                format!(
+                    "{tag} closes {issue_count} verified GitHub issue{} across the sourced release surfaces.",
+                    if issue_count == 1 { "" } else { "s" }
+                )
+            }
+        });
     let publication_line = sources
         .release
         .as_ref()
         .and_then(|release| release.published_at.as_deref())
-        .map(|published| format!("Published {published}"))
+        .or(sources.release_evidence.tag_published_at.as_deref())
+        .map(format_publication_line)
         .unwrap_or_else(|| format!("Draft assembled {date} · publication evidence unavailable"));
 
-    let map_rows = theme_counts(&sources.issues)
-        .iter()
+    let map_rows = themes_for_report
+        .into_iter()
         .map(|theme| {
             let ids = if theme.issue_numbers.is_empty() {
                 "No listed issues".to_string()
@@ -984,7 +1118,8 @@ fn assemble_markdown(
         })
         .collect::<Vec<_>>();
     let source_refs = source_reference_line(sources, tag);
-    let claim = if let Some(largest) = theme_counts(&sources.issues)
+    let theme_counts = theme_counts_for_sources(sources);
+    let claim = if let Some(largest) = theme_counts
         .iter()
         .max_by_key(|theme| theme.issues)
         .filter(|theme| theme.issues > 0)
@@ -1053,10 +1188,7 @@ fn assemble_markdown(
     output.push_str(&map_rows.join("\n"));
     output.push_str(&format!(
         "\n| Total | {issue_count} | {} issue-bearing themes |\n\n{}\n\n",
-        theme_counts(&sources.issues)
-            .iter()
-            .filter(|theme| theme.issues > 0)
-            .count(),
+        theme_counts.iter().filter(|theme| theme.issues > 0).count(),
         source_refs
     ));
     output.push_str("## Release at a glance\n\n");
@@ -1173,12 +1305,26 @@ fn was_now_sections(sources: &AcquiredSources, user_facing: bool) -> String {
         .take(80)
         .collect::<Vec<_>>();
     if !release_note_entries.is_empty() {
-        output.push_str("### Release notes\n\n");
+        let mut grouped = Vec::<(String, Vec<&ReleaseNoteArticle>)>::new();
         for article in release_note_entries {
-            output.push_str(&format!(
-                "#### {}\n\nWas: {}\n\nNow: {}\n\n",
-                article.title, article.was, article.now
-            ));
+            let group = article
+                .group
+                .clone()
+                .unwrap_or_else(|| "Release changes".to_string());
+            if let Some((_, articles)) = grouped.iter_mut().find(|(known, _)| known == &group) {
+                articles.push(article);
+            } else {
+                grouped.push((group, vec![article]));
+            }
+        }
+        for (group, articles) in grouped {
+            output.push_str(&format!("### {group}\n\n"));
+            for article in articles {
+                output.push_str(&format!(
+                    "#### {}\n\nWas: {}\n\nNow: {}\n\n",
+                    article.title, article.was, article.now
+                ));
+            }
         }
         return output;
     }
@@ -1258,52 +1404,93 @@ fn source_reference_line(sources: &AcquiredSources, tag: &str) -> String {
     }
 }
 
-fn parse_release_note_articles(content: &str) -> Vec<ReleaseNoteArticle> {
-    let mut articles = Vec::new();
+fn parse_release_note_draft(content: &str) -> ReleaseNoteDraft {
+    let mut draft = ReleaseNoteDraft::default();
     let mut audience = None;
-    let mut block = Vec::new();
+    let mut group = None;
+    let mut block: Vec<String> = Vec::new();
 
-    let flush = |block: &mut Vec<String>, articles: &mut Vec<ReleaseNoteArticle>, audience| {
+    let flush = |block: &mut Vec<String>,
+                 draft: &mut ReleaseNoteDraft,
+                 audience: Option<bool>,
+                 group: Option<String>| {
         if block.is_empty() {
             return;
         }
         let text = block.join(" ");
-        if let Some(article) = parse_release_note_article(&text, audience) {
-            articles.push(article);
+        if is_release_note_top_level(&text) {
+            if audience == Some(true) && draft.user_punch.is_none() {
+                draft.user_punch = parse_release_note_values(&text).map(|(_, now)| now);
+            }
+        } else if let Some(article) = parse_release_note_article(&text, audience, group.as_deref())
+        {
+            draft.articles.push(article);
         }
         block.clear();
     };
 
     for line in content.lines() {
         let trimmed = line.trim();
-        if let Some(next_audience) = release_note_audience(trimmed) {
-            if is_release_note_section_label(trimmed) {
-                flush(&mut block, &mut articles, audience);
-                audience = Some(next_audience);
-                continue;
-            }
-            audience = Some(next_audience);
-        }
         if trimmed.starts_with("```") {
             continue;
         }
         if trimmed.is_empty() {
-            flush(&mut block, &mut articles, audience);
+            flush(&mut block, &mut draft, audience, group.clone());
+            continue;
+        }
+        if let Some(next_audience) = release_note_audience(trimmed) {
+            if is_release_note_section_label(trimmed) {
+                flush(&mut block, &mut draft, audience, group.clone());
+                audience = Some(next_audience);
+                group = None;
+                continue;
+            }
+            if is_release_note_top_level(trimmed) {
+                flush(&mut block, &mut draft, audience, group.clone());
+                audience = Some(next_audience);
+            }
+        }
+        if let Some(next_group) = release_note_group_label(trimmed) {
+            flush(&mut block, &mut draft, audience, group.clone());
+            group = Some(next_group);
             continue;
         }
         let starts_bullet =
             trimmed.starts_with('•') || trimmed.starts_with("- ") || trimmed.starts_with("* ");
         if starts_bullet && block.iter().any(|line| contains_marker(line, "was:")) {
-            flush(&mut block, &mut articles, audience);
+            flush(&mut block, &mut draft, audience, group.clone());
         }
         block.push(trimmed.to_string());
     }
-    flush(&mut block, &mut articles, audience);
-    articles
+    flush(&mut block, &mut draft, audience, group);
+    draft
 }
 
-fn parse_release_note_article(text: &str, audience: Option<bool>) -> Option<ReleaseNoteArticle> {
+fn parse_release_note_article(
+    text: &str,
+    audience: Option<bool>,
+    group: Option<&str>,
+) -> Option<ReleaseNoteArticle> {
+    if is_release_note_top_level(text) {
+        return None;
+    }
     let user_facing = audience?;
+    let (was, now, was_start) = parse_release_note_values_with_offset(text)?;
+    Some(ReleaseNoteArticle {
+        title: release_note_title(&text[..was_start]),
+        was,
+        now,
+        user_facing,
+        group: group.map(ToOwned::to_owned),
+    })
+}
+
+fn parse_release_note_values(text: &str) -> Option<(String, String)> {
+    let (was, now, _) = parse_release_note_values_with_offset(text)?;
+    Some((was, now))
+}
+
+fn parse_release_note_values_with_offset(text: &str) -> Option<(String, String, usize)> {
     let was_start = find_marker(text, "was:")?;
     let after_was = was_start + "was:".len();
     let now_relative = find_marker(&text[after_was..], "now:")?;
@@ -1313,12 +1500,7 @@ fn parse_release_note_article(text: &str, audience: Option<bool>) -> Option<Rele
     if was.is_empty() || now.is_empty() {
         return None;
     }
-    Some(ReleaseNoteArticle {
-        title: release_note_title(&text[..was_start]),
-        was,
-        now,
-        user_facing,
-    })
+    Some((was, now, was_start))
 }
 
 fn release_note_title(value: &str) -> String {
@@ -1335,6 +1517,33 @@ fn release_note_title(value: &str) -> String {
         title = "Release change".to_string();
     }
     title
+}
+
+fn release_note_group_label(line: &str) -> Option<String> {
+    let value = line.trim();
+    let value = value
+        .strip_prefix("**")
+        .and_then(|value| value.strip_suffix("**"))
+        .or_else(|| {
+            value
+                .strip_prefix('*')
+                .and_then(|value| value.strip_suffix('*'))
+        })?
+        .trim();
+    if value.is_empty()
+        || value.contains("Was:")
+        || value.contains("Now:")
+        || is_release_note_top_level(value)
+    {
+        return None;
+    }
+    Some(value.to_string())
+}
+
+fn is_release_note_top_level(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    lower.contains("live on production")
+        && (lower.contains("— user —") || lower.contains("— dev —"))
 }
 
 fn clean_release_note_value(value: &str) -> String {
@@ -1832,6 +2041,33 @@ fn date_from_timestamp(value: &str) -> Option<String> {
         })
 }
 
+fn format_publication_line(value: &str) -> String {
+    DateTime::parse_from_rfc3339(value)
+        .map(|timestamp| {
+            let timestamp = timestamp.with_timezone(&Utc);
+            format!(
+                "Published {} · {} UTC",
+                timestamp.format("%-d %B %Y"),
+                timestamp.format("%H:%M")
+            )
+        })
+        .unwrap_or_else(|_| format!("Published {value}"))
+}
+
+fn format_verdict(value: &str) -> String {
+    let value = value.trim();
+    let mut chars = value.chars();
+    let mut verdict = chars
+        .next()
+        .map(|first| first.to_uppercase().collect::<String>())
+        .unwrap_or_default();
+    verdict.push_str(chars.as_str());
+    if !(verdict.ends_with('.') || verdict.ends_with('!') || verdict.ends_with('?')) {
+        verdict.push('.');
+    }
+    verdict
+}
+
 fn format_duration(seconds: i64) -> String {
     if seconds < 60 {
         format!("{seconds}s")
@@ -1949,15 +2185,26 @@ Dev top-level
 *Live on production — Dev — Cassy v2.4.0*
 Was: report sources were gathered manually. Now: the assembler gathers them.
 ```
+
+Dev reply
+
+```text
+• *Assembler detail* — Was: the report omitted its inputs. Now: the assembler records them.
+```
 "#;
-        let articles = parse_release_note_articles(draft);
-        assert_eq!(articles.len(), 3);
+        let parsed = parse_release_note_draft(draft);
+        let articles = parsed.articles;
+        assert_eq!(
+            parsed.user_punch.as_deref(),
+            Some("one command builds the report.")
+        );
+        assert_eq!(articles.len(), 2);
         assert_eq!(
             articles
                 .iter()
                 .filter(|article| article.user_facing)
                 .count(),
-            2
+            1
         );
         assert_eq!(
             articles
@@ -1966,9 +2213,11 @@ Was: report sources were gathered manually. Now: the assembler gathers them.
                 .count(),
             1
         );
-        assert_eq!(articles[0].was, "users had to assemble reports by hand.");
-        assert_eq!(articles[1].title, "Readable report");
-        assert_eq!(articles[2].now, "the assembler gathers them.");
+        assert_eq!(articles[0].was, "the old report hid the evidence.");
+        assert_eq!(articles[0].title, "Readable report");
+        assert_eq!(articles[1].now, "the assembler records them.");
+        assert_eq!(articles[1].title, "Assembler detail");
+        assert_eq!(articles[0].group, None);
 
         let sources = AcquiredSources {
             project: "fixture".to_string(),
@@ -1976,6 +2225,7 @@ Was: report sources were gathered manually. Now: the assembler gathers them.
             changelog_path: None,
             release_notes: None,
             release_note_articles: articles,
+            release_note_user_punch: None,
             release: None,
             issues: Vec::new(),
             assets: Vec::new(),
@@ -1989,8 +2239,94 @@ Was: report sources were gathered manually. Now: the assembler gathers them.
         let dev = was_now_sections(&sources, false);
         assert!(user.contains("Readable report"));
         assert!(!user.contains("report sources were gathered manually"));
-        assert!(dev.contains("report sources were gathered manually"));
+        assert!(!dev.contains("report sources were gathered manually"));
+        assert!(dev.contains("Assembler detail"));
         assert!(!dev.contains("Readable report"));
+    }
+
+    #[test]
+    fn release_note_groups_drive_verdict_themes_and_issue_assignment() {
+        let draft = r#"User top-level
+
+```text
+*Live on production — User — Cassy v2.4.0*
+Was: the old release. Now: the release is ready to inspect.
+```
+
+User reply
+
+```text
+*Release reports*
+
+• *Build the report* — Was: reports were manual. Now: one command builds them.
+
+*Already live on hosts that updated from main*
+
+• *Recall memory* — Was: recall could disappear. Now: memory stays visible.
+
+• *Fair task closes* — Was: an old task could block a close. Now: verification checks the task's own range (#767).
+
+• *Honest start-up line* — Was: worker identity was unclear. Now: the provider is named.
+```
+
+Dev reply
+
+```text
+*Release report command*
+
+• *Assembler* — Was: sources were manual. Now: release reports are assembled.
+```
+"#;
+        let parsed = parse_release_note_draft(draft);
+        assert_eq!(
+            parsed.user_punch.as_deref(),
+            Some("the release is ready to inspect.")
+        );
+        assert_eq!(parsed.articles[0].group.as_deref(), Some("Release reports"));
+        assert_eq!(
+            parsed.articles[1].group.as_deref(),
+            Some("Already live on hosts that updated from main")
+        );
+        assert_eq!(parsed.articles[2].title, "Fair task closes");
+
+        let changelog = parse_changelog_section(
+            "# Changelog\n\n## [2.4.0] - 2026-09-01\n\n### Changed\n- Close gate repair (#767)\n",
+            "2.4.0",
+        )
+        .expect("section");
+        let issue = GithubIssue {
+            number: 767,
+            title: "Close gate repair".to_string(),
+            url: "https://example.test/issues/767".to_string(),
+            state: "CLOSED".to_string(),
+            closed_at: Some("2026-09-09T14:47:28Z".to_string()),
+            labels: Vec::new(),
+            body: None,
+            theme: "Unclassified".to_string(),
+        };
+        let counts = theme_counts_with_context(&[issue], Some(&changelog), &parsed.articles);
+        assert_eq!(
+            counts
+                .iter()
+                .map(|theme| theme.theme.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Release", "Memory", "Verification", "Factory"]
+        );
+        assert_eq!(counts[2].issue_numbers, vec![767]);
+        assert_eq!(
+            format_publication_line("2026-09-09T16:51:40Z"),
+            "Published 9 September 2026 · 16:51 UTC"
+        );
+    }
+
+    #[test]
+    fn release_pr_body_issue_references_are_collected() {
+        let value = serde_json::json!([
+            {"body": "Release closes #767", "closingIssuesReferences": []}
+        ]);
+        let mut referenced = BTreeSet::new();
+        collect_pr_issue_references(&value, &mut referenced);
+        assert_eq!(referenced.into_iter().collect::<Vec<_>>(), vec![767]);
     }
 
     #[test]

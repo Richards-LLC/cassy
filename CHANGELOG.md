@@ -7,6 +7,38 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.22.1] - 2026-09-09
+
+### Fixed
+- `cas release report` assembles a usable report on its first run from any
+  checkout: project settings resolve through the shared store detection (a git
+  worktree finds `issues.repo` and the project is named from its config),
+  wrapped changelog entries are joined, the release-notes draft's Was → Now
+  bullets fill the user and developer sections separately, inline-code headings
+  keep their backticks, issues named in the changelog or the release pull
+  request are counted and verified, the header shows the publication time from
+  the release or its receipt, the draft's opening line becomes the verdict, the
+  change map takes its themes from the draft's section labels and records them
+  in the front matter, and `--pdf` fetches a disposable Playwright when the
+  module is absent.
+- `cas update` keeps the post-swap refresh receipt: the refresh child writes it
+  to a file the updater reads back, so a partial refresh names the projects that
+  did not refresh and the command to rerun instead of reporting an unknown
+  outcome; the JSON path falls back to the same file.
+- The scoped proof-surface guard requires the cross-flavor, agent-contract, and
+  skill-guardrail tests for any built-in skill, reference, or agent edit and
+  discovers further guardrail tests by the file's source and installed paths;
+  the release failure log records the lesson with a self-test.
+- The invalid-invitation hub pairing test no longer races its own listener on a
+  loaded CI shard; it waits for readiness, bounds accept and read, and names the
+  refused address.
+
+### Changed
+- The supervisor skill's reporting-style, release-train ownership, and
+  cross-team routing guidance is parked verbatim in
+  `cas-supervisor/references/reporting-and-routing.md`, linked from the skill
+  body in every harness flavor, keeping the body under its protected budget.
+
 ## [3.22.0] - 2026-09-09
 
 ### Added

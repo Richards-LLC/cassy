@@ -75,7 +75,9 @@
       "a9b691135f21d9fafd027ba50acfe7dcb2fecbef3451100859e5c74ce62596fd",
       "ba51077aab05467327e66485660184b84540eeddcd7e56f2d71e212c821e2a7c",
       "ba70f5e94ada7cff4c5c5c8aabd16178ff0418e4c9b29e5ab5d8bab43c23b955",
+      "bc54da865ebe63f84861a1b55377360582c4bf0b6f77bce0defe60e0b7356fa1",
       "c1e03a0182d1314c57a5d3c482a346ca88563cd8675f4690c7ff20207ace53fa",
+      "c9ce3357cd3e447de5673eba478b36eade0e75bfb28a7b97eac5ba88352fae00",
       "d3a2d5a57fa756d658eb895e43f921ab740a034f5ae94ca66fe811ebe31a11e4",
       "e1ccc5eda92ca476cbef0bdeea6f6c3fae31fa810f4607159a2e8a54640e88e5",
       "e436b22c7cf8899a0edc5eb256f772ee36d6ea0eacf97b162ccc6d7e37f58474",
@@ -235,6 +237,15 @@
     "skills/cas-nuxt-playwright/references/auth-fixture-template.md": [
       "b74b96068a8e21c2f394b2d564842c79c669dfc339238529cc0c50d2710e70d8",
       "d9437509594c27626f8d71ef2c39c7391b1fdb2ec68ab2109fb5e17de23170dd"
+    ],
+    "skills/cas-qa-craft/references/evidence-ledger.md": [
+      "49b39e853bf2d23f7b7c13cf97d53bb5496a1e753fe9b25b76be64204b6d8e82"
+    ],
+    "skills/cas-qa-craft/references/exemplar.md": [
+      "01e262c379080a2f4676064091cb3c8b34d278337eab8a17626053408e7d82be"
+    ],
+    "skills/cas-qa-craft/references/matrix-builder.md": [
+      "b259edd54251c807929e68f52685653346abff1fd440c3324b7b87869f56393e"
     ],
     "skills/cas-release-report/references/brief-template.md": [
       "3ce3883daed131aea74844e3efd36f70896ea6fba904c2324487d4cce264c40d"

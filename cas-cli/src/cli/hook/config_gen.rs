@@ -377,7 +377,8 @@ pub(crate) fn get_cas_hooks_config(config: &crate::config::HookConfig) -> serde_
         );
     }
 
-    // async: true - observation recording, doesn't affect execution
+    // Context recovery must reach the first tool result of a turn. Async
+    // hooks defer additionalContext and can lose the only working channel.
     if config.post_tool_use.enabled {
         let matcher = config.post_tool_use.matcher.join("|");
         hooks.insert(
@@ -389,8 +390,7 @@ pub(crate) fn get_cas_hooks_config(config: &crate::config::HookConfig) -> serde_
                         {
                             "type": "command",
                             "command": "cas hook PostToolUse",
-                            "timeout": config.post_tool_use.timeout,
-                            "async": true
+                            "timeout": config.post_tool_use.timeout
                         }
                     ]
                 }
@@ -990,5 +990,16 @@ mod codex_provision_tests {
         let post_key = format!("{}:post_tool_use:0:0", hooks_path.display());
         assert!(state.get(&pre_key).is_some());
         assert!(state.get(&post_key).is_some());
+    }
+}
+
+#[cfg(test)]
+mod turn_context_tests {
+    #[test]
+    fn post_tool_context_runs_synchronously_for_read_and_mcp_tools() {
+        let hooks = super::get_cas_hooks_config(&crate::config::HookConfig::default());
+        let hook = &hooks["hooks"]["PostToolUse"][0];
+        assert_eq!(hook["matcher"], "*");
+        assert!(hook["hooks"][0].get("async").is_none());
     }
 }

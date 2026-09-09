@@ -118,6 +118,7 @@ impl CasCore {
 
         // Create a minimal HookInput for context building
         let hook_input = HookInput {
+            prompt_id: None,
             session_id: "mcp".to_string(),
             transcript_path: None,
             cwd: self
@@ -181,6 +182,7 @@ impl CasCore {
         let task_content = format!("{} {}", task.title, task.description);
 
         let hook_input = HookInput {
+            prompt_id: None,
             session_id: "mcp".to_string(),
             transcript_path: None,
             cwd: self

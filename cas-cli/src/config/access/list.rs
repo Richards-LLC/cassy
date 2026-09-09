@@ -5,6 +5,7 @@ impl Config {
         let cloud = self.cloud.clone().unwrap_or_default();
         let hooks = self.hooks.clone().unwrap_or_default();
         let tasks = self.tasks.clone().unwrap_or_default();
+        let qa = self.qa.clone().unwrap_or_default();
         let dev = self.dev.clone().unwrap_or_default();
         let daemon = self.daemon.clone().unwrap_or_default();
         let staging = self.staging.clone().unwrap_or_default();
@@ -130,6 +131,10 @@ impl Config {
             (
                 "tasks.block_exit_on_open".to_string(),
                 tasks.block_exit_on_open.to_string(),
+            ),
+            (
+                "qa.user_facing_labels".to_string(),
+                qa.user_facing_labels.join(","),
             ),
             // Dev section
             ("dev.dev_mode".to_string(), dev.dev_mode.to_string()),
@@ -649,6 +654,11 @@ impl Config {
     /// Get tasks config with defaults
     pub fn tasks(&self) -> TasksConfig {
         self.tasks.clone().unwrap_or_default()
+    }
+
+    /// Get QA gate configuration with defaults.
+    pub fn qa(&self) -> QaConfig {
+        self.qa.clone().unwrap_or_default()
     }
 
     /// Get worktrees config with defaults

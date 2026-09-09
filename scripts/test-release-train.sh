@@ -180,6 +180,36 @@ else
     bad "ledger drift did not refuse before detach: $out"
 fi
 
+# Incremental mode is still a full gate at the new exact SHA. The train owns
+# its PID and authorization, and diagnostic --only cannot be combined with it.
+wt_reuse="$(new_worktree epic-reuse-merge)"
+dir_reuse="$("$train" 9.99.2 "$wt_reuse" --print-run-dir)"
+CAS_RELEASE_TRAIN_GATE_CMD="$gate_ok" "$train" 9.99.2 "$wt_reuse" --gate --reuse >/dev/null 2>&1
+wait_gate_done "$dir_reuse" || true
+if grep -qF 'args=9.99.2 --reuse' "$dir_reuse/gate.log" \
+    && [[ "$(cat "$dir_reuse/gate.full.sha")" == "$(git -C "$wt_reuse" rev-parse HEAD)" ]]; then
+    ok '--reuse is forwarded as a full exact-SHA gate'
+else
+    bad '--reuse lost full-gate authorization or was not forwarded'
+fi
+if CAS_RELEASE_TRAIN_GATE_CMD="$gate_ok" "$train" 9.99.2 "$wt_reuse" --gate --reuse --only nextest >/dev/null 2>&1; then
+    bad '--reuse combined with diagnostic --only was accepted'
+else
+    ok '--reuse cannot be combined with diagnostic --only'
+fi
+
+wt_web="$(new_worktree epic-web-rows)"
+dir_web="$("$train" 9.99.2 "$wt_web" --print-run-dir)"
+CAS_RELEASE_TRAIN_GATE_CMD="$gate_ok" "$train" 9.99.2 "$wt_web" \
+    --gate --only hub-web-dist-drift,hub-web-visual-qa >/dev/null 2>&1
+wait_for_file "$dir_web/diagnostics/*/gate.done" || true
+web_log="$(find "$dir_web/diagnostics" -name gate.log -print -quit)"
+if grep -qF -- '--only hub-web-dist-drift,hub-web-visual-qa' "$web_log"; then
+    ok 'train accepts the same web diagnostic rows as the gate'
+else
+    bad 'train rejected or lost web diagnostic selection'
+fi
+
 # A targeted rerun forwards only known non-empty rows to the gate, writes a
 # diagnostic receipt, and never overwrites the full-gate authorization/history.
 wt_only="$(new_worktree epic-only-merge)"

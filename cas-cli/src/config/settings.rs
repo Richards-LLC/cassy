@@ -260,6 +260,29 @@ impl Default for TasksConfig {
     }
 }
 
+/// User-facing QA gate configuration. Lives at `[qa]` in `.cas/config.toml`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QaConfig {
+    /// Labels that opt a task into the non-empty `demo_statement` creation gate.
+    #[serde(default = "default_user_facing_labels")]
+    pub user_facing_labels: Vec<String>,
+}
+
+pub fn default_user_facing_labels() -> Vec<String> {
+    ["ui", "hub", "cli-ux", "commander", "frontend"]
+        .into_iter()
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+impl Default for QaConfig {
+    fn default() -> Self {
+        Self {
+            user_facing_labels: default_user_facing_labels(),
+        }
+    }
+}
+
 /// Factory configuration for multi-agent sessions (native TUI)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrchestrationConfig {

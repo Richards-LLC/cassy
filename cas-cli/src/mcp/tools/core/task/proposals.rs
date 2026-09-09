@@ -141,6 +141,25 @@ impl CasCore {
                 "Cross-project task proposals require an explicit target project; nothing is inferred from cwd.",
             ));
         }
+        let task_type: TaskType = req.task_type.parse().unwrap_or(TaskType::Task);
+        let labels = req
+            .labels
+            .as_deref()
+            .unwrap_or_default()
+            .split(',')
+            .map(str::trim)
+            .filter(|label| !label.is_empty())
+            .map(ToOwned::to_owned)
+            .collect::<Vec<_>>();
+        super::lifecycle::validate_demo_statement_requirement(
+            task_type,
+            &labels,
+            req.demo_statement.as_deref(),
+            false,
+            crate::harness_policy::is_supervisor_from_env(),
+            &self.load_config().qa().user_facing_labels,
+        )
+        .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
         let client = self.proposal_client_after_authority()?;
         let delivery_mode = crate::mcp::tools::types::validate_delivery_mode(delivery_mode)
             .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?
@@ -166,6 +185,7 @@ impl CasCore {
                 .map(str::trim).filter(|label| !label.is_empty()).collect::<Vec<_>>(),
             "design": req.design.unwrap_or_default(),
             "acceptance_criteria": req.acceptance_criteria.unwrap_or_default(),
+            "demo_statement": req.demo_statement.unwrap_or_default(),
             "external_ref": req.external_ref.unwrap_or_default(),
             "delivery_mode": delivery_mode,
         });

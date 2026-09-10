@@ -22,12 +22,14 @@ asset type:
 - **NB Pro** (`gemini-3-pro-image`) for finals, report covers, and text-heavy
   compositions.
 
-The helper uses the `GEMINI_API_KEY` environment variable and never accepts a
-key as a command-line argument. No CAS-managed image-provider secret store is
-currently available, so configure the key in the process environment (for
-example, from the operator's local secret manager). If it is absent, the
-helper stops before network access and prints the exact Google AI Studio setup
-guidance. Run it from the project root:
+The helper reads `GEMINI_API_KEY` from the environment, writes the request
+headers to a mode-600 temporary file, and gives curl only that file; the key
+never appears in curl's command-line arguments and is never accepted as a
+command-line argument. No CAS-managed image-provider secret store is currently
+available, so configure the key in the process environment (for example, from
+the operator's local secret manager). If it is absent, the helper stops before
+network access and prints the exact Google AI Studio setup guidance. Run it
+from the project root:
 
 ```bash
 bash <harness-config-dir>/skills/cas-image-generate/scripts/generate-image.sh \

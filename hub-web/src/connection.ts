@@ -14,7 +14,7 @@ import {
   type ConnectionStage,
   type AttachSnapshot,
 } from "./connection-state";
-import type { HubSession, LeaseState, OperatorReply, PaneInfo, SessionCardSummary, SessionState, StoredMachine } from "./types";
+import type { HubSession, LeaseState, MessageQueued, OperatorReply, PaneInfo, SessionCardSummary, SessionState, StoredMachine } from "./types";
 
 export type ConnectionState = ConnectionSnapshot;
 export type AuthFailureKind = "expired" | "revoked" | "scope-mismatch" | "needs-pairing";
@@ -36,6 +36,7 @@ export interface HubCallbacks {
   onMachineEvent(event: Record<string, unknown>): void;
   onSessionState(session: string, state: SessionState, scrollback?: Record<string, number[][]>, authoritativeKeyframes?: boolean): void;
   onOutput(session: string, paneId: string, data: Uint8Array): void;
+  onMessageQueued?(session: string, queued: MessageQueued): void;
   onOperatorReply?(session: string, reply: OperatorReply): void;
   onSessionSummary?(session: string, summary: SessionCardSummary): void;
   onPaneKeyframe(session: string, paneId: string, data: Uint8Array): void;
@@ -797,17 +798,18 @@ export class HubConnectionSupervisor {
     }
   }
 
-  send(session: string, message: unknown): boolean {
+  send(session: string, message: unknown, clientRef?: string): boolean {
+    const outbound = withClientRef(message, clientRef);
     if (this.machineSocketReady && this.machineSocket?.readyState === WebSocket.OPEN) {
-      const resize = typeof message === "object" && message !== null && "ResizePane" in message;
+      const resize = typeof outbound === "object" && outbound !== null && "ResizePane" in outbound;
       this.machineSocket.send(JSON.stringify(resize
-        ? { channel: "resize", session, message }
-        : { channel: `pty:${session}`, message }));
+        ? { channel: "resize", session, message: outbound }
+        : { channel: `pty:${session}`, message: outbound }));
       return true;
     }
     const socket = this.sockets.get(session);
     if (!socket || socket.readyState !== WebSocket.OPEN) return false;
-    socket.send(JSON.stringify(message));
+    socket.send(JSON.stringify(outbound));
     return true;
   }
 
@@ -954,6 +956,9 @@ export class HubConnectionSupervisor {
       this.callbacks.onSessionState(session, message.StateUpdate.state);
     } else if (message.Output) {
       this.callbacks.onOutput(session, message.Output.pane_id, new Uint8Array(message.Output.data));
+    } else if (message.MessageQueued) {
+      const queued = messageQueuedFromDaemon(message);
+      if (queued) this.callbacks.onMessageQueued?.(session, queued);
     } else if (message.OperatorReply) {
       this.callbacks.onOperatorReply?.(session, message.OperatorReply as OperatorReply);
     } else if (message.SessionSummary) {
@@ -964,4 +969,25 @@ export class HubConnectionSupervisor {
       this.callbacks.onSocketError(session, message.Error.message);
     }
   }
+}
+
+/** Normalize the additive daemon acknowledgment before invoking the callback. */
+export function messageQueuedFromDaemon(message: Record<string, any>): MessageQueued | undefined {
+  const value = message.MessageQueued;
+  if (!value || typeof value !== "object") return undefined;
+  if (!Number.isFinite(Number(value.notification_id)) || typeof value.target !== "string") return undefined;
+  return {
+    client_ref: typeof value.client_ref === "string" ? value.client_ref : null,
+    notification_id: Number(value.notification_id),
+    target: value.target,
+    stamped: value.stamped === true,
+  };
+}
+
+function withClientRef(message: unknown, clientRef: string | undefined): unknown {
+  if (!clientRef || typeof message !== "object" || message === null) return message;
+  const envelope = message as Record<string, unknown>;
+  const send = envelope.SendMessage;
+  if (!send || typeof send !== "object") return message;
+  return { ...envelope, SendMessage: { ...(send as Record<string, unknown>), client_ref: clientRef } };
 }

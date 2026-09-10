@@ -1403,6 +1403,7 @@ async fn commander_attention_event_is_immediate_then_durably_patched_in_place() 
         "factory-a",
         &DaemonMessage::Error {
             message: "serde panic in auth.rs:44".into(),
+            client_ref: None,
         },
     );
     let immediate = broadcast.recv().await.unwrap();
@@ -1447,6 +1448,7 @@ async fn commander_attention_api_off_is_complete_without_pending_state() {
         "factory-a",
         &DaemonMessage::Error {
             message: "raw error remains actionable".into(),
+            client_ref: None,
         },
     );
 
@@ -1947,6 +1949,7 @@ fn h2_scope_05_each_mutation_has_an_exact_scope_and_legacy_interrupt_is_forbidde
         text: "status?".into(),
         summary: None,
         urgent: false,
+        client_ref: None,
         attribution: MessageAttribution {
             device_id: None,
             credential_id: None,
@@ -2036,7 +2039,10 @@ fn hub_stamps_send_message_attribution_from_the_device_session_not_the_client() 
     let ClientMessage::SendMessage { attribution, .. } = &mut message else {
         panic!("fixture is a SendMessage");
     };
-    assert!(attribution.operator_verified, "the client may claim anything");
+    assert!(
+        attribution.operator_verified,
+        "the client may claim anything"
+    );
     *attribution = super::server::verified_attribution(&context);
     assert_eq!(
         *attribution,
@@ -2051,7 +2057,10 @@ fn hub_stamps_send_message_attribution_from_the_device_session_not_the_client() 
             operator_verified: true,
         }
     );
-    assert_eq!(attribution.queue_source(), "commander:Daniel@Daniel's phone");
+    assert_eq!(
+        attribution.queue_source(),
+        "commander:Daniel@Daniel's phone"
+    );
     assert!(
         !attribution.scopes.iter().any(|scope| scope == "hub:admin"),
         "scopes come from the session, never the frame"
@@ -2498,14 +2507,21 @@ fn h5_session_worker_roster_comes_from_the_live_registry_not_the_session_file() 
     }
 
     let mapped = hub_session(&session);
-    assert_eq!(mapped.workers.len(), 5, "five live workers must be reported");
+    assert_eq!(
+        mapped.workers.len(),
+        5,
+        "five live workers must be reported"
+    );
     assert_eq!(mapped.supervisor, "supervisor-agent");
     assert_eq!(mapped.epic_id.as_deref(), Some("cas-5d94"));
     assert_eq!(mapped.liveness, DaemonLiveness::Live);
     // The roster carries agent names (what Commander shows), not agent ids.
     let mut names = mapped.workers.clone();
     names.sort();
-    assert_eq!(names, vec!["worker-0", "worker-1", "worker-2", "worker-3", "worker-4"]);
+    assert_eq!(
+        names,
+        vec!["worker-0", "worker-1", "worker-2", "worker-3", "worker-4"]
+    );
 
     // A worker that has shut down or gone silent is not part of the roster.
     let mut shutdown = agents.get("roster-worker-0").unwrap();
@@ -2552,7 +2568,6 @@ fn h5_session_worker_roster_comes_from_the_live_registry_not_the_session_file() 
     };
     assert_eq!(hub_session(&unreachable).workers, vec!["fallback-worker"]);
 }
-
 
 // cas-37f8: a phone-sized viewer must never shrink the operator's dashboard.
 // The daemon answers a refused ResizePane with the authoritative geometry; the

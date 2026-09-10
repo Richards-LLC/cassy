@@ -221,6 +221,9 @@ pub enum ClientMessage {
         summary: Option<String>,
         #[serde(default)]
         urgent: bool,
+        /// Client-generated nonce used to correlate durable enqueue receipt.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        client_ref: Option<String>,
         attribution: MessageAttribution,
     },
 
@@ -299,6 +302,14 @@ pub enum DaemonMessage {
         device_id: String,
         #[serde(default)]
         operator_label: Option<String>,
+    },
+
+    /// Durable acknowledgment for a Commander semantic message.
+    MessageQueued {
+        client_ref: Option<String>,
+        notification_id: i64,
+        target: String,
+        stamped: bool,
     },
 
     /// An authoritative ANSI serialization of the pane's current terminal state.
@@ -384,6 +395,9 @@ pub enum DaemonMessage {
     Error {
         /// Error message
         message: String,
+        /// Client-generated nonce for a rejected semantic message, when known.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        client_ref: Option<String>,
     },
 
     /// Pong response to ping
@@ -766,6 +780,7 @@ mod tests {
             text: "Please checkpoint now".to_string(),
             summary: Some("checkpoint request".to_string()),
             urgent: false,
+            client_ref: Some("send-42".to_string()),
             attribution: attributed_remote_operator(),
         };
         let json = serde_json::to_string(&msg).unwrap();
@@ -776,12 +791,14 @@ mod tests {
                 text,
                 summary,
                 urgent,
+                client_ref,
                 attribution,
             } => {
                 assert_eq!(target, "worker-1");
                 assert_eq!(text, "Please checkpoint now");
                 assert_eq!(summary.as_deref(), Some("checkpoint request"));
                 assert!(!urgent);
+                assert_eq!(client_ref.as_deref(), Some("send-42"));
                 assert_eq!(attribution.device_id.as_deref(), Some("device-123"));
                 assert_eq!(attribution.operator_label.as_deref(), Some("Pippenz"));
             }
@@ -794,6 +811,40 @@ mod tests {
             serde_json::from_str::<ClientMessage>(missing_attribution).is_err(),
             "attribution is a required part of the wire contract"
         );
+
+        let legacy_without_client_ref = r#"{"SendMessage":{"target":"worker-1","text":"hello","summary":null,"urgent":false,"attribution":{"device_id":null,"credential_id":null,"device_label":null,"operator_label":null,"controller_origin":null,"request_id":null}}}"#;
+        let decoded = serde_json::from_str::<ClientMessage>(legacy_without_client_ref).unwrap();
+        assert!(matches!(
+            decoded,
+            ClientMessage::SendMessage {
+                client_ref: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn message_queued_round_trips_its_client_ref_and_durable_id() {
+        let message = DaemonMessage::MessageQueued {
+            client_ref: Some("send-42".to_string()),
+            notification_id: 812,
+            target: "patient-pelican-9".to_string(),
+            stamped: true,
+        };
+        let json = serde_json::to_string(&message).unwrap();
+        assert_eq!(
+            json,
+            r#"{"MessageQueued":{"client_ref":"send-42","notification_id":812,"target":"patient-pelican-9","stamped":true}}"#
+        );
+        assert!(matches!(
+            serde_json::from_str::<DaemonMessage>(&json).unwrap(),
+            DaemonMessage::MessageQueued {
+                client_ref: Some(client_ref),
+                notification_id: 812,
+                target,
+                stamped: true,
+            } if client_ref == "send-42" && target == "patient-pelican-9"
+        ));
     }
 
     #[test]
@@ -974,6 +1025,7 @@ mod tests {
                 text: "hello".to_string(),
                 summary: None,
                 urgent: false,
+                client_ref: None,
                 attribution: attributed_remote_operator(),
             })
             .unwrap(),

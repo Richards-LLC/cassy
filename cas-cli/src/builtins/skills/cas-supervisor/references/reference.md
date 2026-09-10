@@ -38,10 +38,12 @@ The hub routes `operator` to the originating paired device and reports `queued f
 
 **Valid `mcp__cas__coordination` actions** (do not invent others):
 - *Agent*: `register`, `unregister`, `whoami`, `heartbeat`, `agent_list`, `agent_cleanup`, `session_start`, `session_end`, `loop_start`, `loop_cancel`, `loop_status`, `lease_history`, `queue_notify`, `queue_poll`, `queue_peek`, `queue_ack`, `inbox_poll`, `message`, `interrupt`, `message_ack`, `message_status`
-- *Factory*: `spawn_workers`, `shutdown_workers`, `hold_worker`, `release_worker`, `worker_status`, `worker_activity`, `clear_context`, `my_context`, `sync_all_workers`, `gc_report`, `gc_cleanup`, `epic_status`, `focus_epic`, `remind`, `remind_list`, `remind_cancel`, `server_start`, `server_stop`, `server_list`
+- *Factory*: `spawn_workers`, `shutdown_workers`, `hold_worker`, `release_worker`, `worker_status`, `worker_activity`, `sweep_tasks`, `clear_context`, `my_context`, `sync_all_workers`, `gc_report`, `gc_cleanup`, `epic_status`, `focus_epic`, `remind`, `remind_list`, `remind_cancel`, `server_start`, `server_stop`, `server_list`
 - *Worktree*: `worktree_create`, `worktree_list`, `worktree_show`, `worktree_cleanup`, `worktree_merge`, `worktree_status`
 
 **`hold_worker` / `release_worker` — pause a worker without faking a task state.** `action=hold_worker target=<worker>` marks a worker as deliberately paused: the Director stops accumulating idle ticks for them and emits no `WorkerIdle` nudges until you `release_worker`. Use it for "stand by while I sort out the merge base" instead of parking the task in a misleading status. Supervisor-only, requires a live worker in your factory session; the hold survives a daemon restart of that session and clears on worker removal or session shutdown.
+
+**`sweep_tasks` — fan out an integration failure report.** Omit `accept` to preview `.cas/merge-sweeps/sweep-tasks.json`, which contains one class with its failing tests, targets, assertion text, log path, and suggested lane. A live supervisor may pass `accept=true` to create one local bug task and queue one isolated, task-preassigned worker per class. Acceptance is idempotent: retrying resumes classes whose task or spawn receipt is missing without duplicating completed classes.
 
 **`server_start` / `server_stop` / `server_list` — the sanctioned way to run a long-lived server.** A raw `npm run dev &` from a worker dies with the worker and leaves no record of what is listening. Register it instead:
 

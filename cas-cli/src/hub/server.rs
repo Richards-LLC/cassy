@@ -772,10 +772,11 @@ async fn proxy_socket(
                         pending_message_refs.insert((session.clone(), client_ref.to_owned()));
                     }
                     if handle_client_message(&connector, &session, &auth, text.as_bytes()).await.is_err() {
-                        if let Some(client_ref) = client_ref {
-                            pending_message_refs.remove(&(session.clone(), client_ref));
+                        if let Some(client_ref) = client_ref.as_deref() {
+                            pending_message_refs.remove(&(session.clone(), client_ref.to_owned()));
                         }
-                        let _ = sink.send(Message::Text(r#"{"error":"forbidden"}"#.into())).await;
+                        let error = legacy_forbidden_error(client_ref.as_deref());
+                        let _ = sink.send(Message::Text(error.to_string().into())).await;
                     }
                 }
                 Some(Ok(Message::Binary(bytes))) => {
@@ -784,10 +785,11 @@ async fn proxy_socket(
                         pending_message_refs.insert((session.clone(), client_ref.to_owned()));
                     }
                     if handle_client_message(&connector, &session, &auth, &bytes).await.is_err() {
-                        if let Some(client_ref) = client_ref {
-                            pending_message_refs.remove(&(session.clone(), client_ref));
+                        if let Some(client_ref) = client_ref.as_deref() {
+                            pending_message_refs.remove(&(session.clone(), client_ref.to_owned()));
                         }
-                        let _ = sink.send(Message::Text(r#"{"error":"forbidden"}"#.into())).await;
+                        let error = legacy_forbidden_error(client_ref.as_deref());
+                        let _ = sink.send(Message::Text(error.to_string().into())).await;
                     }
                 }
             },
@@ -1156,6 +1158,29 @@ fn client_message_ref(bytes: &[u8]) -> Option<String> {
     client_ref
 }
 
+/// Preserve the submitted reference on a legacy attach refusal without
+/// changing the wire shape for clients that predate correlated sends.
+fn legacy_forbidden_error(client_ref: Option<&str>) -> serde_json::Value {
+    let mut error = serde_json::json!({"error": "forbidden"});
+    if let Some(client_ref) = client_ref {
+        error["client_ref"] = serde_json::Value::String(client_ref.to_owned());
+    }
+    error
+}
+
+/// Preserve the submitted reference inside the multiplex channel's structured
+/// error envelope. The browser uses it to reject only the matching send.
+fn multiplex_forbidden_error(session: &str, client_ref: Option<&str>) -> serde_json::Value {
+    let mut error = serde_json::json!({
+        "channel": format!("pty:{session}"),
+        "error": {"code": "forbidden"},
+    });
+    if let Some(client_ref) = client_ref {
+        error["error"]["client_ref"] = serde_json::Value::String(client_ref.to_owned());
+    }
+    error
+}
+
 /// MessageQueued and correlated Error frames share one daemon upstream, so
 /// the hub filters them by the authenticated socket that submitted the ref.
 fn correlated_daemon_frame_allowed(
@@ -1422,10 +1447,10 @@ async fn proxy_machine_socket<R: SessionReadModel>(
                         pending_message_refs.insert((session.clone(), client_ref.to_owned()));
                     }
                     if handle_client_message(&state.connector, &session, &auth, &bytes).await.is_err() {
-                        if let Some(client_ref) = client_ref {
-                            pending_message_refs.remove(&(session.clone(), client_ref));
+                        if let Some(client_ref) = client_ref.as_deref() {
+                            pending_message_refs.remove(&(session.clone(), client_ref.to_owned()));
                         }
-                        let error = serde_json::json!({"channel":format!("pty:{session}"),"error":{"code":"forbidden"}});
+                        let error = multiplex_forbidden_error(&session, client_ref.as_deref());
                         if sink.send(Message::Text(error.to_string().into())).await.is_err() { break; }
                     }
                 }
@@ -1761,6 +1786,36 @@ mod machine_protocol_tests {
     fn non_pty_machine_messages_remain_on_the_json_channel() {
         let frame = proxy_frame(DaemonMessage::Pong);
         assert!(machine_binary_frame("factory-a", &frame).unwrap().is_none());
+    }
+
+    #[test]
+    fn legacy_forbidden_refusal_round_trips_client_ref_and_preserves_legacy_shape() {
+        assert_eq!(
+            legacy_forbidden_error(Some("send-42")),
+            serde_json::json!({"error": "forbidden", "client_ref": "send-42"})
+        );
+        assert_eq!(
+            legacy_forbidden_error(None),
+            serde_json::json!({"error": "forbidden"})
+        );
+    }
+
+    #[test]
+    fn multiplex_forbidden_refusal_round_trips_client_ref_and_preserves_legacy_shape() {
+        assert_eq!(
+            multiplex_forbidden_error("factory-a", Some("send-42")),
+            serde_json::json!({
+                "channel": "pty:factory-a",
+                "error": {"code": "forbidden", "client_ref": "send-42"},
+            })
+        );
+        assert_eq!(
+            multiplex_forbidden_error("factory-a", None),
+            serde_json::json!({
+                "channel": "pty:factory-a",
+                "error": {"code": "forbidden"},
+            })
+        );
     }
 
     #[test]

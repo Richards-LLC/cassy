@@ -28,3 +28,29 @@ No synthesized replies, new message transport, worker-first overview, decorative
 - 390×844, 844×390 and 1280×800, light/dark, plus reduced motion. Review each screenshot and record the verdict/change in `/home/pippenz/.cas/artifacts/cas-11b01/element-review.md`.
 - Run Hub npm test, typecheck and an isolated-output build; supervisor owns committed dist regeneration per DESIGN.md unless explicitly instructed otherwise. Measure bundle delta; retain no new runtime dependency.
 - UI critique and final evidence remain pending until the real default view is wired and inspected.
+
+## Implementation and critique
+
+The shell reuses existing pane mounts, composer handlers, dialogs and context
+regions. `ConversationHistory` owns only browser evidence, keyed by machine and
+session in main; `MessageQueued` remains owned by the existing channel. The live
+pane is one explicitly labeled document that moves only when its actual text
+changes. Redraws never become invented chat turns. Rejections have an Edit
+message action; a rendered-thread guard prevents sending after stale selection.
+
+| Dimension | Score | Evidence |
+| --- | --- | --- |
+| Distinctiveness | 4 | Cassy Cloud serif lockup and indigo project anchors on warm paper/graphite |
+| Fit | 5 | Project → supervisor → exact words → addressed reply is the primary flow |
+| Hierarchy | 4 | One indigo Send action; quiet host/freshness and desktop context |
+| Craft | 4 | Initial toast, tail-follow and terminal-header defects were reworked from screenshots |
+| Accessibility | 4 | Named buttons, keyboard-safe drafts, local code scroll and two-scheme strict checks |
+
+QA: 457 unit tests; typecheck and isolated build; six production-bundle viewport/
+scheme journeys with controlled protocol fixtures; strict visual QA covers
+15 fixtures × 2 schemes × 3 viewports. The per-element decisions and screenshot
+reviews live in `/home/pippenz/.cas/artifacts/cas-11b01/element-review.md`; full
+labelled evidence is in `LEDGER.md` beside it. Native paired-device delivery is
+supervisor-owned integration verification (notification 28848), not claimed by
+these browser fixtures. No new runtime dependency; bundle ~72.5KB JS / 12.5KB CSS
+gzip. Physical-device interaction timings remain unmeasured.

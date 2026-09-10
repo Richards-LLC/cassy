@@ -2326,6 +2326,8 @@ dialog form > *,
     text-overflow: ellipsis;
   }
 
+  .mode-badge { max-width: none; flex-shrink: 0; }
+
   .session-header .actions { gap: var(--line-width); }
 
   /* A 44px header leaves 36px for its controls; 32px was the smallest target
@@ -2855,3 +2857,6 @@ dialog form > *,
 
 .conversation-row-state:empty { display: none; }
 .conversation-context .status-identifier { display: none; }
+
+#conversation-return { flex: none; white-space: nowrap; }
+.conversation-turn > button { margin-top: var(--space-3); }

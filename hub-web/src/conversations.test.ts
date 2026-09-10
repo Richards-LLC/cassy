@@ -64,3 +64,18 @@ describe('conversation evidence', () => {
     view.update(); expect(view.element.querySelectorAll('.conversation-pane')).toHaveLength(1);
   });
 });
+
+// The gateway can reject before the daemon accepts a message. These are a
+// message outcome, not a reason to replace the supervisor's whole pane.
+import { HubConnectionSupervisor, type HubCallbacks } from './connection';
+import type { StoredMachine } from './types';
+it('routes correlated daemon, legacy Hub and multiplex Hub rejections to the addressed send', async () => {
+  const onMessageRejected = vi.fn(), onSocketError = vi.fn();
+  const connection = new HubConnectionSupervisor({} as StoredMachine, { onMessageRejected, onSocketError } as unknown as HubCallbacks);
+  const internals = connection as unknown as { handleDaemonObject(session: string, payload: unknown): void; handleMachineMessage(input: string): Promise<void> };
+  internals.handleDaemonObject('a', { Error: { client_ref: 'daemon', message: 'Refused by daemon' } });
+  internals.handleDaemonObject('a', { error: 'forbidden', client_ref: 'legacy' });
+  await internals.handleMachineMessage(JSON.stringify({ channel: 'pty:b', error: { code: 'forbidden', client_ref: 'mux' } }));
+  expect(onMessageRejected.mock.calls).toEqual([['a', 'daemon', 'Refused by daemon'], ['a', 'legacy', 'forbidden'], ['b', 'mux', 'forbidden']]);
+  expect(onSocketError).not.toHaveBeenCalled();
+});

@@ -17,7 +17,7 @@ export class ConversationView {
   private pinPending = false;
   private disposed = false;
   private resize?: ResizeObserver;
-  constructor(document: Document, private source: TranscriptSource, private history: ConversationHistory, private supervisor: string) {
+  constructor(document: Document, private source: TranscriptSource, private history: ConversationHistory, private supervisor: string, private editMessage?: (text: string) => void) {
     this.element = document.createElement("div");
     this.element.className = "conversation-reading";
     this.element.tabIndex = 0;
@@ -91,6 +91,11 @@ export class ConversationView {
     } else { node.dataset.replyTo = String(event.value.reply_to); state.textContent = "Reply to you"; }
     const body = document.createElement("p"); body.textContent = event.kind === "send" ? event.value.text : event.value.message;
     header.append(sender, state); node.replaceChildren(header, body);
+    if (event.kind === "send" && event.value.state === "error" && this.editMessage) {
+      const edit = document.createElement("button"); edit.type = "button"; edit.textContent = "Edit message";
+      edit.onclick = () => this.editMessage?.(event.value.text);
+      node.append(edit);
+    }
   }
   private pin(): void {
     this.element.scrollTop = this.element.scrollHeight;

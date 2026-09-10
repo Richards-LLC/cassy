@@ -153,7 +153,7 @@ describe("binding Cassy Commander browser invariants", () => {
     // duplicate message to the supervisor.
     expect(source).toContain("function sendControl(machineId: string, session: string, message: unknown): boolean {");
     expect(source).toContain("const sent = sendControl(machine.id, session, supervisorMessage(supervisor, text, clientRef));");
-    expect(source).toContain("messageDelivery = { session: sessionKey(machine.id, session), target: supervisor };");
+    expect(source).toContain("messageDelivery = { session: sessionKey(machine.id, session), target: supervisor, clientRef };");
     expect(source).toContain("toast(`Sending to ${supervisor}`);");
   });
 

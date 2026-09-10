@@ -1,5 +1,4 @@
 import "./styles.css";
-import { cloudBrand } from "./cloud-brand";
 import { ConversationList, type ConversationRow } from "./conversation-list";
 import { ConversationHistory } from "./conversation-history";
 import { ConversationView } from "./conversation-view";
@@ -160,7 +159,7 @@ let speechDetectionStarted = false;
 let speechController: SpeechDictationController | undefined;
 let speechInputState: SpeechInputState = "idle";
 let speechInputDetail = "";
-let messageDelivery: { session: string; target: string } | undefined;
+let messageDelivery: { session: string; target: string; clientRef: string } | undefined;
 const operatorReplies = new Map<string, OperatorReply[]>();
 // Why a send did not happen has to survive the render that follows it, and has
 // to sit beside the composer: a toast is gone before a phone operator has
@@ -229,7 +228,12 @@ function applyPaneView(key: string, mount: HTMLElement, surface: TerminalSurface
     if (!conversation) {
       const threadKey = sessionKey(selectedMachineId!, selectedSession!);
       const target = supervisorTarget(sessions.get(selectedMachineId!)?.find((item) => item.name === selectedSession)) || "Supervisor";
-      conversation = new ConversationView(document, surface.transcript, conversationHistory(threadKey), target);
+      conversation = new ConversationView(document, surface.transcript, conversationHistory(threadKey), target, (text) => {
+        const composer = document.querySelector<HTMLTextAreaElement>("#message-text");
+        if (!composer || composer.dataset.threadKey !== threadKey) return;
+        if (composer.value.trim()) { showComposerStatus("Your draft already has text. Clear it before editing the refused message.", "info"); composer.focus(); return; }
+        composer.value = text; composer.dispatchEvent(new Event("input")); composer.focus();
+      });
       conversationViews.set(key, conversation);
     }
     if (conversation.element.parentElement !== mount) mount.append(conversation.element);
@@ -523,11 +527,12 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
     },
     onMessageQueued: (session, receipt) => {
       conversationHistory(sessionKey(machine.id, session)).acknowledge(receipt);
-      if (messageDelivery?.session === sessionKey(machine.id, session)) { messageDelivery = undefined; document.querySelector<HTMLElement>("#message-delivery")?.setAttribute("hidden", ""); }
+      if (messageDelivery?.session === sessionKey(machine.id, session) && messageDelivery.clientRef === receipt.client_ref) { messageDelivery = undefined; document.querySelector<HTMLElement>("#message-delivery")?.setAttribute("hidden", ""); }
       updateConversationViews();
     },
     onMessageRejected: (session, clientRef, detail) => {
       conversationHistory(sessionKey(machine.id, session)).reject(clientRef, detail);
+      if (messageDelivery?.session === sessionKey(machine.id, session) && messageDelivery.clientRef === clientRef) { messageDelivery = undefined; document.querySelector<HTMLElement>("#message-delivery")?.setAttribute("hidden", ""); }
       updateConversationViews();
     },
     onOperatorReply: (session, reply) => {
@@ -1803,6 +1808,8 @@ function deliverSupervisorMessage(machine: StoredMachine, session: string, super
   }
   conversationHistory(sessionKey(machine.id, session)).submit(clientRef, supervisor, text);
   updateConversationViews();
+  const storedDraft = conversationDrafts.get(sessionKey(machine.id, session));
+  if (storedDraft?.text.trim() === text) conversationDrafts.delete(sessionKey(machine.id, session));
   if (selectedMachineId !== machine.id || selectedSession !== session) return;
   clearComposerStatus();
   const composer = document.querySelector<HTMLTextAreaElement>("#message-text");
@@ -1810,7 +1817,7 @@ function deliverSupervisorMessage(machine: StoredMachine, session: string, super
   conversationDrafts.delete(sessionKey(machine.id, session));
   messageDraft = composer?.value ?? "";
   messageDraftSelection = messageDraft.length;
-  messageDelivery = { session: sessionKey(machine.id, session), target: supervisor };
+  messageDelivery = { session: sessionKey(machine.id, session), target: supervisor, clientRef };
   const delivery = document.querySelector<HTMLElement>("#message-delivery");
   if (delivery) {
     delivery.hidden = false;
@@ -1825,6 +1832,12 @@ function deliverSupervisorMessage(machine: StoredMachine, session: string, super
 async function submitSupervisorMessage(): Promise<void> {
   const composer = document.querySelector<HTMLTextAreaElement>("#message-text");
   if (!composer) return;
+  const renderedThread = composer.dataset.threadKey;
+  const selectedThread = selectedMachineId && selectedSession ? sessionKey(selectedMachineId, selectedSession) : undefined;
+  if (renderedThread !== selectedThread) {
+    showComposerStatus("The selected conversation changed. Reopen the conversation before sending.", "error");
+    return;
+  }
   const text = composer.value.trim();
   const plan = planSupervisorSend(supervisorSendContext(text));
   if (plan.kind === "blocked") {
@@ -1840,7 +1853,7 @@ async function submitSupervisorMessage(): Promise<void> {
   if (pendingSubmissions.has(submissionKey)) return;
   pendingSubmissions.add(submissionKey);
   try {
-  if (plan.kind === "take-control-then-send") {
+    if (plan.kind === "take-control-then-send") {
     showComposerStatus(plan.notice, "info");
     if (!await takeControlForMessage(machine, session)) {
       showComposerStatus(`Could not take control of ${session}, and the hub refuses a message from a device that is only observing. Take control from the header, then send again.`, "error");
@@ -1848,7 +1861,9 @@ async function submitSupervisorMessage(): Promise<void> {
     }
   }
   deliverSupervisorMessage(machine, session, supervisor, text);
-  } finally { pendingSubmissions.delete(submissionKey); }
+  } finally {
+    pendingSubmissions.delete(submissionKey);
+  }
 }
 
 /**
@@ -2082,6 +2097,7 @@ function render(captureDraft = true): void {
         <input id="command-palette-query" type="search" aria-label="Filter commands" placeholder="Type a command or session">
         <div class="palette-commands">
           ${(["system", "light", "dark"] as const).map((scheme) => `<button type="button" class="palette-command" data-palette-scheme="${scheme}"><span>Appearance · ${scheme === "system" ? "System" : scheme === "light" ? "Light" : "Dark"}</span><small>${scheme === "system" ? "Follow this device" : "Use this scheme"}</small></button>`).join("")}
+          <button type="button" class="palette-command" data-palette-action="terminal-view"><span>Terminal workspace</span><small>Machines, sessions and terminal controls</small></button>
           <button type="button" class="palette-command" data-palette-action="workers" aria-pressed="${revealWorkers}"><span>${escapeHtml(workersCommandLabel(revealWorkers).title)}</span><small>${escapeHtml(workersCommandLabel(revealWorkers).hint)}</small></button>
           <button type="button" class="palette-command" data-palette-action="control" ${controlActionDisabled ? "disabled" : ""}><span>${controlActionLabel}</span><small>${controlActionDisabled ? escapeHtml(takeControlReason ?? "Control unavailable") : "Current session"}</small></button>
           <button type="button" class="palette-command" data-palette-action="dismiss-info" ${infoItems.length === 0 ? "disabled" : ""}><span>Dismiss all info</span><small>${infoItems.length} outstanding</small></button>
@@ -2100,8 +2116,9 @@ function render(captureDraft = true): void {
   if (hubPresentation === "conversation") {
     arrangeConversationShell(app, { selected: Boolean(selectedSession), supervisor, projectDir: selectedHubSession?.project_dir, host: selected?.label, loaded: machineCatalogLoaded, paired: machines.size > 0 });
   } else {
-    const header = app.querySelector(".session-header");
-    header?.insertAdjacentHTML("afterbegin", `<button id="conversation-return" type="button">Conversations</button>${cloudBrand()}`);
+    const returnControl = app.querySelector<HTMLButtonElement>("#talk-supervisor");
+    if (returnControl) { returnControl.id = "conversation-return"; returnControl.textContent = "Conversations"; }
+    else app.querySelector(".session-identity")?.insertAdjacentHTML("afterbegin", '<button id="conversation-return" type="button">Conversations</button>');
   }
   if (preservedGrid) document.querySelector<HTMLElement>("#pane-grid")!.replaceWith(preservedGrid);
   const focusWinner = composerFocusWinner({ composerWasFocused, terminalWasFocused });
@@ -2564,13 +2581,13 @@ function globalShortcut(event: KeyboardEvent): void {
     openCommandPalette();
     return;
   }
-  if (command && event.key.toLowerCase() === "f" && activePaneContext()) {
+  if (command && event.key.toLowerCase() === "f" && hubPresentation === "terminal" && activePaneContext()) {
     event.preventDefault();
     event.stopPropagation();
     openTerminalSearch();
     return;
   }
-  if (command && /^[1-9]$/.test(event.key)) {
+  if (command && hubPresentation === "terminal" && /^[1-9]$/.test(event.key)) {
     event.preventDefault();
     event.stopPropagation();
     focusPaneByNumber(Number(event.key) - 1);
@@ -2630,6 +2647,8 @@ function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | und
   for (const command of palette.querySelectorAll<HTMLButtonElement>("[data-palette-scheme]")) {
     command.onclick = () => { setScheme(command.dataset.paletteScheme as SchemePreference); closePalette(); };
   }
+  const paletteTerminal = palette.querySelector<HTMLButtonElement>("[data-palette-action=terminal-view]");
+  if (paletteTerminal) paletteTerminal.onclick = () => { closePalette(); hubPresentation = "terminal"; render(); };
   const paletteWorkers = palette.querySelector<HTMLButtonElement>("[data-palette-action='workers']");
   if (paletteWorkers) paletteWorkers.onclick = () => { closePalette(); setWorkersRevealed(!revealWorkers); };
   const paletteControl = palette.querySelector<HTMLButtonElement>("[data-palette-action='control']");

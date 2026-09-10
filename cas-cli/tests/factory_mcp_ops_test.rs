@@ -673,6 +673,12 @@ fn get_text(result: &rmcp::model::CallToolResult) -> String {
         .join("\n")
 }
 
+fn worker_status_block<'a>(text: &'a str, name: &str) -> Option<&'a str> {
+    let marker = format!(" | {name} (heartbeat:");
+    text.split("  liveness: ")
+        .find(|block| block.contains(&marker))
+}
+
 fn write_session_metadata(session_name: &str, epic_id: Option<&str>) {
     write_session_metadata_for_project(session_name, epic_id, "/tmp/project");
 }
@@ -2304,7 +2310,11 @@ async fn test_worker_status_dedupes_nested_identity_with_missing_worktree() {
             .expect("worker_status"),
     );
     assert!(text.contains("Workers (1)"), "{text}");
-    assert_eq!(text.matches("• knowledge-worker").count(), 1, "{text}");
+    assert_eq!(
+        text.matches(" | knowledge-worker (heartbeat:").count(),
+        1,
+        "{text}"
+    );
     assert!(
         text.contains("Collapsed 1 superseded registry row(s) for: knowledge-worker"),
         "{text}"
@@ -2433,10 +2443,7 @@ async fn test_worker_status_stale_lease_alone_does_not_assert_work_in_progress()
             .await
             .expect("status"),
     );
-    let row = text
-        .split("• ")
-        .find(|block| block.starts_with("badger"))
-        .expect("badger row");
+    let row = worker_status_block(&text, "badger").expect("badger row");
     assert!(
         !row.contains("STALLED"),
         "a lease outliving its closed task must not assert work in progress: {row}"
@@ -2631,14 +2638,8 @@ async fn test_worker_status_shows_inbox_depth_even_when_not_stalled() {
             .await
             .expect("status"),
     );
-    let wolf = text
-        .split("• ")
-        .find(|b| b.starts_with("wolf"))
-        .expect("wolf row");
-    let fox = text
-        .split("• ")
-        .find(|b| b.starts_with("fox"))
-        .expect("fox row");
+    let wolf = worker_status_block(&text, "wolf").expect("wolf row");
+    let fox = worker_status_block(&text, "fox").expect("fox row");
     assert!(
         wolf.contains("inbox: 1 unread message"),
         "a parked worker with mail must still show its inbox: {wolf}"
@@ -2949,7 +2950,7 @@ async fn test_worker_status_and_agent_list_agree_on_live_workers() {
         "dual-signal must appear for process-alive stale-hb worker.\nstatus:\n{status_text}\nlist:\n{list_text}"
     );
     assert!(
-        !status_text.contains("dead-stale"),
+        worker_status_block(&status_text, "dead-stale").is_none(),
         "dead worker must not be in worker_status Active roster. Got:\n{status_text}"
     );
 }
@@ -3210,9 +3211,7 @@ async fn test_9829_worker_status_marks_stalled_worker_with_in_progress_task() {
     );
     // Find the busy-badger's own row/block for a precise assertion (avoid a
     // STALLED marker from the wrong worker satisfying the check).
-    let badger_block = text
-        .split("• ")
-        .find(|block| block.starts_with("busy-badger"))
+    let badger_block = worker_status_block(&text, "busy-badger")
         .expect("busy-badger row must be present");
     assert!(
         badger_block.contains("⚠ STALLED"),
@@ -3222,9 +3221,7 @@ async fn test_9829_worker_status_marks_stalled_worker_with_in_progress_task() {
     // A worker with no claimed task is never "stalled" in this sense — an
     // idle worker with no task is the pre-existing WorkerIdle state, not a
     // stall, regardless of how fresh/stale its activity looks.
-    let ibis_block = text
-        .split("• ")
-        .find(|block| block.starts_with("idle-ibis"))
+    let ibis_block = worker_status_block(&text, "idle-ibis")
         .expect("idle-ibis row must be present");
     assert!(
         !ibis_block.contains("⚠ STALLED"),

@@ -3892,13 +3892,21 @@ impl CasService {
                     }
                 };
                 // GH #67: name the assignment on the roster row itself.
-                // Legacy activity heuristics may retain an unmatched tool
-                // call across a completed turn. The execution verdict wins.
-                let activity_info = liveness_rows
-                    .iter()
-                    .find(|(name, _)| name == &agent.name)
-                    .map(|(_, observation)| format!("\n    evidence: {}", observation.evidence))
-                    .unwrap_or(activity_info);
+                // Keep the execution evidence alongside the activity verdict;
+                // legacy activity heuristics may retain an unmatched tool call
+                // across a completed turn.
+                // Keep the actionable activity verdict (for example
+                // `between turns` or `⚠ STALLED`) and append the execution
+                // evidence from the shared liveness observation. Replacing
+                // the verdict with evidence makes every row lose its alert,
+                // which hides both healthy turn boundaries and real stalls.
+                let activity_info = if let Some((_, observation)) =
+                    liveness_rows.iter().find(|(name, _)| name == &agent.name)
+                {
+                    format!("{activity_info}\n    evidence: {}", observation.evidence)
+                } else {
+                    activity_info
+                };
                 let matches_agent = |assignee: Option<&str>| {
                     assignee == Some(agent.name.as_str()) || assignee == Some(agent.id.as_str())
                 };

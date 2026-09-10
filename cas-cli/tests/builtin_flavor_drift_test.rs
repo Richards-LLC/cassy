@@ -1555,10 +1555,17 @@ fn release_report_fresh_builtin_sync_installs_runnable_bundle() {
 
 #[test]
 fn supervisor_worker_liveness_contract_is_pinned_in_every_mirror() {
-    for flavor in ["", "codex/", "grok/"] {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join(format!("src/builtins/{flavor}skills/cas-supervisor.md"));
-        let text = std::fs::read_to_string(path).unwrap();
+    for (flavor, text) in [
+        ("", include_str!("../src/builtins/skills/cas-supervisor.md")),
+        (
+            "codex/",
+            include_str!("../src/builtins/codex/skills/cas-supervisor.md"),
+        ),
+        (
+            "grok/",
+            include_str!("../src/builtins/grok/skills/cas-supervisor.md"),
+        ),
+    ] {
         for marker in [
             "worker_status summary_mode=true",
             "Trust `liveness`",

@@ -457,6 +457,31 @@ expect pass "SCOPED_PROOF: targets=lib:factory_ops,test:factory_mcp_ops_test res
     "proof: factory_ops public symbol maps to factory_mcp_ops_test" \
     bash -c "cd '${mapping_repo}' && '${SURFACE_GUARD}' --base main -- -p cas --lib factory_ops --test factory_mcp_ops_test"
 
+# The end-to-end runner must propagate a rejected surface check instead of
+# printing a green receipt after the checker reports missing targets. It also
+# forwards an explicit baseline for release-assembly proof runs.
+mkdir -p "${mapping_repo}/scripts"
+cp "${SURFACE_GUARD}" "${mapping_repo}/scripts/check-scoped-test-surface.sh"
+cp "${GUARD}" "${mapping_repo}/scripts/run-scoped-tests.sh"
+runner_stub="$(make_stub cargo-proof-runner 0 <<'EOF'
+    Summary [   0.001s] 1 tests run: 1 passed, 0 skipped
+EOF
+)"
+expect fail "SCOPED PROOF INCOMPLETE" \
+    "proof runner: missing integration target is a nonzero delivery result" \
+    env CARGO="${runner_stub}" SCOPED_PROOF_BASE=main \
+    "${mapping_repo}/scripts/run-scoped-tests.sh" --proof -p cas --lib factory_ops
+
+expect fail "cannot find a merge-base" \
+    "proof runner: explicit baseline is forwarded to the surface checker" \
+    env CARGO="${runner_stub}" SCOPED_PROOF_BASE=missing-baseline \
+    "${mapping_repo}/scripts/run-scoped-tests.sh" --proof -p cas --lib factory_ops
+
+expect pass "SCOPED_PROOF: command=scripts/run-scoped-tests.sh --proof" \
+    "proof runner: complete mapped receipt is green" \
+    env CARGO="${runner_stub}" SCOPED_PROOF_BASE=main \
+    "${mapping_repo}/scripts/run-scoped-tests.sh" --proof -p cas --lib factory_ops --test factory_mcp_ops_test
+
 docs_repo="${tmpdir}/docs-repo"
 mkdir -p "${docs_repo}/docs"
 git -C "${docs_repo}" init -q -b main

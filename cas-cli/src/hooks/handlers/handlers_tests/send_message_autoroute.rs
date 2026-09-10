@@ -232,6 +232,53 @@ fn send_message_no_tool_input_falls_back_to_guidance() {
     assert!(reason.contains("SendMessage is disabled"));
 }
 
+// Supervisors must not return `allow` from this hook: Claude Code then runs
+// its native SendMessage transport after the hook, which bypasses Cassy's
+// durable queue and can strand an assignment. The CAS coordination command is
+// the only supported supervisor-to-worker transport.
+#[test]
+fn factory_supervisor_send_message_to_worker_is_denied_with_cas_guidance() {
+    let _env = TestEnvGuard::with_optional_vars(&[
+        ("CAS_AGENT_ROLE", None),
+        ("CAS_FACTORY_SUPERVISOR_CLI", Some("claude")),
+        ("CAS_FACTORY_SESSION", None),
+    ]);
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let mut input = send_message_input(Some(serde_json::json!({
+        "to": "test-worker-7",
+        "message": "Task cas-f42e is assigned; start it now.",
+        "summary": "assign cas-f42e",
+    })));
+    input.agent_role = Some("supervisor".into());
+
+    let out = handle_pre_tool_use(&input, None).expect("handler ok");
+    let reason = deny_reason(&out).expect("factory supervisor SendMessage must be denied");
+    assert!(
+        reason.contains("mcp__cas__coordination action=message target=<worker>")
+            && reason.contains("summary=")
+            && reason.contains("message="),
+        "deny reason must provide the exact CAS message replacement: {reason}"
+    );
+    assert!(
+        reason.contains("task action=update id=<task-id> assignee=<worker>"),
+        "assignment guidance must point at task update assignee: {reason}"
+    );
+    assert!(
+        !reason.contains("AUTO-ROUTED"),
+        "supervisor SendMessage must not enqueue or claim a successful native transport"
+    );
+
+    let queue = crate::store::open_prompt_queue_store(tmp.path()).expect("queue opens");
+    assert!(
+        queue
+            .peek_for_targets(&["test-worker-7"], None, 10)
+            .expect("peek pending")
+            .is_empty(),
+        "denied supervisor SendMessage must not enqueue a parallel transport"
+    );
+}
+
 // ============================================================================
 // Scope: non-factory sessions must not auto-route — they fall through to
 // Claude Code's normal flow (SendMessage works there).

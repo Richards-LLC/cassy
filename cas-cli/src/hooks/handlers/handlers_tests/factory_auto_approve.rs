@@ -19,6 +19,8 @@
 //! `agent_worktree_block`'s env-fallback test.
 
 use crate::hooks::handlers::handle_pre_tool_use;
+use crate::store::open_agent_store;
+use crate::types::{Agent, AgentRole};
 use cas_core::hooks::types::HookInput;
 
 fn input_for(tool: &str, file_path: Option<&str>) -> HookInput {
@@ -401,6 +403,230 @@ fn worker_edit_is_auto_approved_without_cas_root() {
         allow_reason(&out).is_some(),
         "worker Edit must auto-approve even when cas_root is None (deadlock case)"
     );
+}
+
+#[test]
+fn worker_edit_on_primary_checkout_is_denied_with_resolved_cas_root() {
+    let _g = super::env_lock();
+    let _role = set_role_env(Some("worker"));
+    let _factory = set_env_var("CAS_FACTORY_MODE", std::ffi::OsStr::new("1"));
+    let _session = set_env_var(
+        "CAS_SESSION_ID",
+        std::ffi::OsStr::new("registered-worker-session"),
+    );
+    let cas_root = tempfile::tempdir().expect("cas root");
+    let worktree = tempfile::tempdir().expect("worker worktree");
+    let primary = tempfile::tempdir().expect("primary checkout");
+
+    let agent_store = open_agent_store(cas_root.path()).expect("agent store");
+    let mut agent = Agent::new(
+        "registered-worker-session".to_string(),
+        "registered-worker".to_string(),
+    );
+    agent.role = AgentRole::Worker;
+    agent.metadata.insert(
+        "clone_path".to_string(),
+        worktree.path().to_string_lossy().into_owned(),
+    );
+    agent_store.register(&agent).expect("register worker");
+
+    for tool_name in ["Edit", "MultiEdit"] {
+        let input = HookInput {
+            session_id: "native-hook-session".into(),
+            cwd: worktree.path().to_string_lossy().into_owned(),
+            hook_event_name: "PreToolUse".into(),
+            tool_name: Some(tool_name.into()),
+            tool_input: Some(serde_json::json!({
+                "file_path": primary.path().join("cas-cli/src/lib.rs"),
+                "old_string": "old",
+                "new_string": "new",
+            })),
+            agent_role: Some("worker".into()),
+            ..HookInput::default()
+        };
+
+        let out = handle_pre_tool_use(&input, Some(cas_root.path())).expect("handler ok");
+        let reason = deny_reason(&out).unwrap_or_else(|| {
+            panic!("primary-checkout {tool_name} must be denied");
+        });
+        assert!(reason.contains("WORKSPACE CONTRACT"), "{reason}");
+        assert!(
+            reason.contains(worktree.path().to_string_lossy().as_ref()),
+            "{reason}"
+        );
+    }
+}
+
+#[test]
+fn worker_cd_primary_checkout_git_add_commit_is_denied_with_resolved_cas_root() {
+    let _g = super::env_lock();
+    let _role = set_role_env(Some("worker"));
+    let _factory = set_env_var("CAS_FACTORY_MODE", std::ffi::OsStr::new("1"));
+    let _name = set_env_var("CAS_AGENT_NAME", std::ffi::OsStr::new("registered-git-worker"));
+    let _session = set_env_var(
+        "CAS_SESSION_ID",
+        std::ffi::OsStr::new("registered-git-worker-session"),
+    );
+    let cas_root = tempfile::tempdir().expect("cas root");
+    let worktree = tempfile::tempdir().expect("worker worktree");
+    let primary = tempfile::tempdir().expect("primary checkout");
+    std::fs::create_dir_all(primary.path().join("scripts")).expect("primary scripts");
+    std::process::Command::new("git")
+        .args(["init", "-b", "main"])
+        .current_dir(primary.path())
+        .output()
+        .expect("initialize primary checkout");
+    std::process::Command::new("git")
+        .args(["switch", "-c", "factory/registered-git-worker"])
+        .current_dir(primary.path())
+        .output()
+        .expect("switch primary checkout to feature branch");
+
+    let agent_store = open_agent_store(cas_root.path()).expect("agent store");
+    let mut agent = Agent::new(
+        "registered-git-worker-session".to_string(),
+        "registered-git-worker".to_string(),
+    );
+    agent.role = AgentRole::Worker;
+    agent.metadata.insert(
+        "clone_path".to_string(),
+        worktree.path().to_string_lossy().into_owned(),
+    );
+    agent_store.register(&agent).expect("register worker");
+
+    let command = format!(
+        "cd '{}' && git add -A && git commit -m x",
+        primary.path().display()
+    );
+    let input = HookInput {
+        session_id: "native-hook-session".into(),
+        cwd: worktree.path().to_string_lossy().into_owned(),
+        hook_event_name: "PreToolUse".into(),
+        tool_name: Some("Bash".into()),
+        tool_input: Some(serde_json::json!({"command": command})),
+        agent_role: Some("worker".into()),
+        ..HookInput::default()
+    };
+
+    let out = handle_pre_tool_use(&input, Some(cas_root.path())).expect("handler ok");
+    let reason = deny_reason(&out).expect("primary-checkout git write must be denied");
+    assert!(
+        reason.contains("outside your assigned worktree"),
+        "{reason}"
+    );
+}
+
+fn resolved_primary_checkout_git_fixture() -> (
+    tempfile::TempDir,
+    tempfile::TempDir,
+    tempfile::TempDir,
+) {
+    let cas_root = tempfile::tempdir().expect("cas root");
+    let worktree = tempfile::tempdir().expect("worker worktree");
+    let primary = tempfile::tempdir().expect("primary checkout");
+    std::fs::create_dir_all(primary.path().join("scripts")).expect("primary scripts");
+
+    let output = std::process::Command::new("git")
+        .args(["init", "-b", "main"])
+        .current_dir(primary.path())
+        .output()
+        .expect("initialize primary checkout");
+    assert!(
+        output.status.success(),
+        "git init failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let output = std::process::Command::new("git")
+        .args(["switch", "-c", "factory/registered-git-worker"])
+        .current_dir(primary.path())
+        .output()
+        .expect("switch primary checkout to feature branch");
+    assert!(
+        output.status.success(),
+        "git switch failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let agent_store = open_agent_store(cas_root.path()).expect("agent store");
+    let mut agent = Agent::new(
+        "registered-git-worker-session".to_string(),
+        "registered-git-worker".to_string(),
+    );
+    agent.role = AgentRole::Worker;
+    agent.metadata.insert(
+        "clone_path".to_string(),
+        worktree.path().to_string_lossy().into_owned(),
+    );
+    agent_store.register(&agent).expect("register worker");
+
+    (cas_root, worktree, primary)
+}
+
+fn assert_resolved_primary_git_write_denied(
+    cas_root: &std::path::Path,
+    worktree: &tempfile::TempDir,
+    command: String,
+) {
+    let input = HookInput {
+        session_id: "native-hook-session".into(),
+        cwd: worktree.path().to_string_lossy().into_owned(),
+        hook_event_name: "PreToolUse".into(),
+        tool_name: Some("Bash".into()),
+        tool_input: Some(serde_json::json!({"command": command})),
+        agent_role: Some("worker".into()),
+        ..HookInput::default()
+    };
+
+    let out = handle_pre_tool_use(&input, Some(cas_root)).expect("handler ok");
+    let reason = deny_reason(&out).expect("primary-checkout git write must be denied");
+    assert!(
+        reason.contains("outside your assigned worktree"),
+        "{reason}"
+    );
+    assert!(
+        reason.contains(worktree.path().to_string_lossy().as_ref()),
+        "denial must name the assigned worktree: {reason}"
+    );
+}
+
+#[test]
+fn worker_cd_primary_checkout_git_reset_hard_is_denied_with_resolved_cas_root() {
+    let _g = super::env_lock();
+    let _role = set_role_env(Some("worker"));
+    let _factory = set_env_var("CAS_FACTORY_MODE", std::ffi::OsStr::new("1"));
+    let _name = set_env_var("CAS_AGENT_NAME", std::ffi::OsStr::new("registered-git-worker"));
+    let _session = set_env_var(
+        "CAS_SESSION_ID",
+        std::ffi::OsStr::new("registered-git-worker-session"),
+    );
+    let _clone = set_env_var("CAS_CLONE_PATH", std::ffi::OsStr::new(""));
+    let _factory_session = set_env_var("CAS_FACTORY_SESSION", std::ffi::OsStr::new(""));
+    let (cas_root, worktree, primary) = resolved_primary_checkout_git_fixture();
+    let command = format!(
+        "cd '{}' && git reset --hard origin/main",
+        primary.path().display()
+    );
+    assert_resolved_primary_git_write_denied(cas_root.path(), &worktree, command);
+}
+
+#[test]
+fn worker_cd_primary_checkout_git_push_refspec_is_denied_with_resolved_cas_root() {
+    let _g = super::env_lock();
+    let _role = set_role_env(Some("worker"));
+    let _factory = set_env_var("CAS_FACTORY_MODE", std::ffi::OsStr::new("1"));
+    let _name = set_env_var("CAS_AGENT_NAME", std::ffi::OsStr::new("registered-git-worker"));
+    let _session = set_env_var(
+        "CAS_SESSION_ID",
+        std::ffi::OsStr::new("registered-git-worker-session"),
+    );
+    let _clone = set_env_var("CAS_CLONE_PATH", std::ffi::OsStr::new(""));
+    let _factory_session = set_env_var("CAS_FACTORY_SESSION", std::ffi::OsStr::new(""));
+    let (cas_root, worktree, primary) = resolved_primary_checkout_git_fixture();
+    let command = format!(
+        "cd '{}' && git push origin deadbeef:refs/heads/factory/x",
+        primary.path().display()
+    );
+    assert_resolved_primary_git_write_denied(cas_root.path(), &worktree, command);
 }
 
 #[test]

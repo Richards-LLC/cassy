@@ -301,6 +301,8 @@ fn close_update_request(id: String) -> TaskUpdateRequest {
         acceptance_criteria: None,
         demo_statement: None,
         execution_note: None,
+        risk: None,
+        proof_targets: None,
         external_ref: None,
         assignee: None,
         status: Some("closed".to_string()),
@@ -1089,6 +1091,7 @@ async fn public_create_update_and_close_reuse_duplicate_selector_binding() {
     let create = svc
         .task(Parameters(task_req(serde_json::json!({
             "action": "create",
+            "risk": "none",
             "title": "Bound lifecycle",
             "depth": "light",
             "target_repo": repo_b.root,

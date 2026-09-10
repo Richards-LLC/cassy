@@ -239,6 +239,21 @@ impl CasCore {
             output.push_str(&format!("\nExecution Note: {execution_note}\n"));
         }
 
+        if !task.risk.is_empty() {
+            let risks = task
+                .risk
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>();
+            output.push_str(&format!("\nRisk: {}\n", risks.join(", ")));
+        }
+        if !task.proof_targets.is_empty() {
+            output.push_str(&format!(
+                "Proof Targets: {}\n",
+                task.proof_targets.join(", ")
+            ));
+        }
+
         if !task.labels.is_empty() {
             output.push_str(&format!("\nLabels: {}\n", task.labels.join(", ")));
         }

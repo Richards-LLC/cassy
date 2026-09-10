@@ -29,6 +29,8 @@ fn requested_update_fields(
     supplied!(acceptance_criteria);
     supplied!(demo_statement);
     supplied!(execution_note);
+    supplied!(risk);
+    supplied!(proof_targets);
     supplied!(external_ref);
     supplied!(assignee);
     supplied!(origin_project);
@@ -378,6 +380,37 @@ impl CasCore {
             message: Cow::from(format!("Task not found: {e}")),
             data: None,
         })?;
+        let requested_risk = req.risk.as_deref().map(str::trim);
+        let effective_risk = match requested_risk {
+            Some(value) if !value.is_empty() => cas_types::TaskRisk::parse_csv(value).map_err(|error| {
+                McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(format!(
+                        "TASK UPDATE REJECTED: invalid risk declaration: {error}. Expected blast-radius, platform, concurrency, or none."
+                    )),
+                    data: None,
+                }
+            })?,
+            Some(_) => Vec::new(),
+            None => task.risk.clone(),
+        };
+        let effective_proof_targets = req
+            .proof_targets
+            .as_deref()
+            .map(|targets| crate::mcp::tools::types::parse_proof_targets(Some(targets)))
+            .unwrap_or_else(|| task.proof_targets.clone());
+        if effective_risk.contains(&cas_types::TaskRisk::BlastRadius)
+            && effective_proof_targets.is_empty()
+        {
+            return Err(McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from(
+                    "TASK UPDATE REJECTED: risk=blast-radius requires at least one non-empty proof_targets entry."
+                        .to_string(),
+                ),
+                data: None,
+            });
+        }
         let origin_project = req
             .origin_project
             .as_deref()
@@ -469,6 +502,8 @@ impl CasCore {
                 ("acceptance_criteria", req.acceptance_criteria.is_some()),
                 ("demo_statement", req.demo_statement.is_some()),
                 ("execution_note", req.execution_note.is_some()),
+                ("risk", req.risk.is_some()),
+                ("proof_targets", req.proof_targets.is_some()),
                 ("external_ref", req.external_ref.is_some()),
                 ("assignee", req.assignee.is_some()),
                 ("status", req.status.is_some()),
@@ -868,6 +903,15 @@ impl CasCore {
                 })?;
             task.execution_note = validated;
             changes.push("execution_note");
+        }
+
+        if req.risk.is_some() {
+            task.risk = effective_risk;
+            changes.push("risk");
+        }
+        if req.proof_targets.is_some() {
+            task.proof_targets = effective_proof_targets;
+            changes.push("proof_targets");
         }
 
         if let Some(external_ref) = req.external_ref {

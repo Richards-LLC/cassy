@@ -6866,6 +6866,8 @@ async fn test_062d_lifecycle_start_and_blocked_push_session_isolated() {
             acceptance_criteria: None,
             demo_statement: None,
             execution_note: None,
+            risk: None,
+            proof_targets: None,
             external_ref: None,
             assignee: None,
             status: Some("blocked".to_string()),

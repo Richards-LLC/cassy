@@ -2637,8 +2637,7 @@ impl CasCore {
                     }
                     let halt_exempt = super::stale_close_guard::halt_exempt_for_owned_task(
                         task.status,
-                        task.assignee.as_deref(),
-                        Some(agent.name.as_str()),
+                        self.caller_is_task_assignee(&task),
                     );
                     if super::stale_close_guard::agent_task_work_halted(&agent.metadata)
                         && !halt_exempt
@@ -3295,11 +3294,7 @@ impl CasCore {
         // task assignee for a non-epic task (fixes supervisor self-close deadlock).
         let supervisor_is_assignee = is_supervisor_from_env()
             && task.task_type != TaskType::Epic
-            && self
-                .get_agent_id()
-                .ok()
-                .map(|aid| task.assignee.as_deref() == Some(aid.as_str()))
-                .unwrap_or(false);
+            && self.caller_is_task_assignee(&task);
 
         // cas-6538: `depth_light` short-circuits the verification jail. The
         // jail arms `pending_verification=true` and demands a `task-verifier`
@@ -3470,11 +3465,7 @@ impl CasCore {
                         // Only auto-claim if the closing agent is the task's assignee.
                         // If a supervisor closes a worker's task, skip the lease to avoid
                         // locking the task to the supervisor.
-                        let is_assignee = self
-                            .get_agent_id()
-                            .ok()
-                            .map(|aid| task.assignee.as_deref() == Some(aid.as_str()))
-                            .unwrap_or(false);
+                        let is_assignee = self.caller_is_task_assignee(&task);
                         if is_assignee {
                             self.auto_claim_for_verification(&req.id, task_store.as_ref())?;
                         }
@@ -3680,11 +3671,7 @@ impl CasCore {
                         // Only auto-claim if the closing agent is the task's assignee.
                         // If a supervisor closes a worker's task, skip the lease to avoid
                         // locking the task to the supervisor.
-                        let is_assignee = self
-                            .get_agent_id()
-                            .ok()
-                            .map(|aid| task.assignee.as_deref() == Some(aid.as_str()))
-                            .unwrap_or(false);
+                        let is_assignee = self.caller_is_task_assignee(&task);
                         if is_assignee {
                             self.auto_claim_for_verification(&req.id, task_store.as_ref())?;
                         }
@@ -5190,6 +5177,28 @@ impl CasCore {
         Ok(system_b)
     }
 
+    /// Whether the authenticated caller owns this task's assigned agent.
+    ///
+    /// Task assignees may be persisted as either the registered display name
+    /// or opaque agent id. Keep every close-time ownership branch on the same
+    /// registry-backed canonical comparison.
+    fn caller_is_task_assignee(&self, task: &cas_types::Task) -> bool {
+        let Ok(caller_id) = self.get_agent_id() else {
+            return false;
+        };
+        let Ok(agent_store) = self.open_agent_store() else {
+            return false;
+        };
+        let Ok(caller) = agent_store.get(&caller_id) else {
+            return false;
+        };
+        super::super::task_assignee_matches_agent(
+            agent_store.as_ref(),
+            task.assignee.as_deref(),
+            &caller,
+        )
+    }
+
     /// Compute why (if at all) the task-verifier step should be skipped
     /// for this close attempt.
     ///
@@ -5209,9 +5218,8 @@ impl CasCore {
     ///    supervisor passed `supervisor_override=true`, in which case
     ///    we honor it as `SupervisorBypass`). If the lease is stale or
     ///    the referenced agent is dead → `AssigneeInactive`.
-    /// 3. No lease — try a direct `agent_store.get(task.assignee)` for
-    ///    legacy tasks whose assignee field may hold an agent_id. Same
-    ///    liveness logic as above.
+    /// 3. No lease — resolve either the legacy agent id or display name from
+    ///    the registry. Same liveness logic as above.
     /// 4. Everything failed → `AssigneeUnknown` (never falsely reported
     ///    as "assignee inactive" — the agent row is simply missing).
     pub(crate) fn compute_verification_skip_reason(
@@ -5270,9 +5278,8 @@ impl CasCore {
             };
         }
 
-        // 2) No lease — try the legacy direct-id lookup. Works only when
-        //    task.assignee holds an agent_id, not a display name.
-        if let Ok(agent) = agent_store.get(assignee) {
+        // 2) No lease — resolve either the legacy agent id or display name.
+        if let Some(agent) = super::super::resolve_agent_identity(agent_store.as_ref(), assignee) {
             return if alive_result(&agent) {
                 if bypass_requested {
                     VerificationSkipReason::SupervisorBypass

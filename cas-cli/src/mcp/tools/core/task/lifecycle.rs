@@ -1211,14 +1211,18 @@ impl CasCore {
             if let (Ok(agent), Some(assignee)) =
                 (agent_store.get(&agent_id), task.assignee.as_deref())
             {
-                if assignee != agent.name {
+                if !super::task_assignee_matches_agent(agent_store.as_ref(), Some(assignee), &agent)
+                {
+                    let assigned_identity =
+                        super::agent_identity_label(agent_store.as_ref(), assignee);
+                    let caller_identity = format!("{} ({})", agent.name, agent.id);
                     return Err(Self::error(
                         ErrorCode::INVALID_PARAMS,
                         format!(
                             "Task {} is assigned to {}, not you ({}). Do not self-dispatch — \
                             wait for an explicit assignment, or ask the supervisor to \
                             reassign it: mcp__cas__task action=transfer id={} to_agent=<your-agent-id>",
-                            req.id, assignee, agent.name, req.id
+                            req.id, assigned_identity, caller_identity, req.id
                         ),
                     ));
                 }
@@ -1239,10 +1243,9 @@ impl CasCore {
         if is_worker
             && task.status == TaskStatus::Open
             && let Ok(worker) = agent_store.get(&agent_id)
-            && task
-                .assignee
-                .as_deref()
-                .is_some_and(|assignee| assignee.eq_ignore_ascii_case(&worker.name))
+            && task.assignee.as_deref().is_some_and(|assignee| {
+                super::task_assignee_matches_agent(agent_store.as_ref(), Some(assignee), &worker)
+            })
             && let Some(factory_session) = worker.factory_session.as_deref()
         {
             let mut supervisor_sources = vec!["supervisor".to_string()];
@@ -1359,7 +1362,12 @@ impl CasCore {
                     // is idle or stopped is still local provenance.
                     Some(assignee) => agent_store
                         .list(None)
-                        .map(|agents| agents.iter().any(|agent| agent.name == assignee))
+                        .map(|agents| {
+                            agents.iter().any(|agent| {
+                                agent.id.eq_ignore_ascii_case(assignee)
+                                    || agent.name.eq_ignore_ascii_case(assignee)
+                            })
+                        })
                         // An unreadable agent registry must not manufacture a
                         // warning about an assignee we simply could not check.
                         .unwrap_or(true),
@@ -1594,8 +1602,9 @@ impl CasCore {
         // epic-focus inference gate (task_assigned_to_session_agent, tasks.rs) could
         // never pass without the supervisor manually running
         // `task action=update assignee=<worker>`. Default the assignee to the
-        // starting agent's display name — assignees are matched as display names,
-        // not session IDs (cas-dbbb, see task/update.rs) — whenever it's unset.
+        // starting agent's display name — lifecycle ownership accepts either
+        // the display name or registered agent id through the shared resolver
+        // (cas-dbbb, see task/update.rs) — whenever it's unset.
         // Never clobber an existing assignee (e.g. the supervisor already assigned
         // it to someone else, or this is a resume after reassignment).
         if task.assignee.is_none() {

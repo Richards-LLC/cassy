@@ -21,6 +21,65 @@ pub(crate) fn task_visible_in_project(task: &cas_types::Task, project_id: Option
     task.origin_project.is_none() || task_belongs_to_project(task, project_id)
 }
 
+/// Resolve one task assignee/caller token to the registered agent it names.
+///
+/// Task rows historically stored display names, while newer assignment paths
+/// can store the opaque agent id. `AgentStore::get` only accepts the latter, so
+/// lifecycle code must resolve both forms through the registry before making
+/// an ownership decision.
+pub(crate) fn resolve_agent_identity(
+    agent_store: &dyn cas_store::AgentStore,
+    token: &str,
+) -> Option<cas_types::Agent> {
+    let token = token.trim();
+    if token.is_empty() {
+        return None;
+    }
+    let agents = agent_store.list(None).ok()?;
+    agents
+        .iter()
+        .find(|agent| agent.id.eq_ignore_ascii_case(token))
+        .or_else(|| {
+            agents
+                .iter()
+                .find(|agent| agent.name.eq_ignore_ascii_case(token))
+        })
+        .cloned()
+}
+
+/// Whether a task's assignee belongs to the supplied registered caller.
+///
+/// Both sides are resolved to canonical agent ids. The raw-token fallback
+/// preserves legacy behavior when the registry is temporarily unavailable,
+/// while still accepting either the caller's id or display name.
+pub(crate) fn task_assignee_matches_agent(
+    agent_store: &dyn cas_store::AgentStore,
+    assignee: Option<&str>,
+    caller: &cas_types::Agent,
+) -> bool {
+    let Some(assignee) = assignee.map(str::trim).filter(|value| !value.is_empty()) else {
+        return false;
+    };
+    let assigned = resolve_agent_identity(agent_store, assignee);
+    let caller_identity = resolve_agent_identity(agent_store, &caller.id)
+        .or_else(|| resolve_agent_identity(agent_store, &caller.name));
+    match (assigned, caller_identity) {
+        (Some(assigned), Some(caller)) => assigned.id.eq_ignore_ascii_case(&caller.id),
+        _ => {
+            assignee.eq_ignore_ascii_case(caller.id.trim())
+                || assignee.eq_ignore_ascii_case(caller.name.trim())
+        }
+    }
+}
+
+/// Render a registered agent token with both the display name and canonical id
+/// so ownership errors are actionable regardless of which form was supplied.
+pub(crate) fn agent_identity_label(agent_store: &dyn cas_store::AgentStore, token: &str) -> String {
+    resolve_agent_identity(agent_store, token)
+        .map(|agent| format!("{} ({})", agent.name, agent.id))
+        .unwrap_or_else(|| token.trim().to_string())
+}
+
 pub(crate) fn foreign_tasks_hidden_footer(hidden: usize) -> Option<String> {
     (hidden > 0)
         .then(|| format!("{hidden} foreign-origin tasks hidden (include_foreign=true to show)"))
@@ -104,8 +163,14 @@ mod assignee_identity_tests {
             Some(other.id.as_str()),
             &caller,
         ));
-        assert_eq!(agent_identity_label(&store, &other.id), "other-name (other-uuid)");
-        assert_eq!(agent_identity_label(&store, &caller.name), "caller-name (caller-uuid)");
+        assert_eq!(
+            agent_identity_label(&store, &other.id),
+            "other-name (other-uuid)"
+        );
+        assert_eq!(
+            agent_identity_label(&store, &caller.name),
+            "caller-name (caller-uuid)"
+        );
     }
 }
 

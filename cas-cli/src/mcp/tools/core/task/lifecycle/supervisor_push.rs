@@ -276,16 +276,13 @@ fn auto_unblock_worker_target(
         let agent_store = crate::store::open_agent_store(cas_root).map_err(|error| {
             format!("agent store open failed while resolving assignee: {error}")
         })?;
-        let agents = agent_store
-            .list(None)
-            .map_err(|error| format!("agent list failed while resolving assignee: {error}"))?;
-        let live_assignee = agents.into_iter().find(|agent| {
-            agent.role == AgentRole::Worker
-                && agent.visible_to_factory_session(factory_session.as_deref())
-                && (agent.name == assignee || agent.id == assignee)
-                && agent.is_alive()
-                && !agent.is_heartbeat_expired(AUTO_UNBLOCK_ASSIGNEE_STALE_SECS)
-        });
+        let live_assignee = super::super::resolve_agent_identity(agent_store.as_ref(), assignee)
+            .filter(|agent| {
+                agent.role == AgentRole::Worker
+                    && agent.visible_to_factory_session(factory_session.as_deref())
+                    && agent.is_alive()
+                    && !agent.is_heartbeat_expired(AUTO_UNBLOCK_ASSIGNEE_STALE_SECS)
+            });
         return Ok(match live_assignee {
             Some(agent) => AutoUnblockWorkerTarget::Worker(agent.name),
             None => AutoUnblockWorkerTarget::Skipped(format!(

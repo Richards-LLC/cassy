@@ -572,5 +572,41 @@ fn verified_operator_authority_rule_is_pinned_cas_7f81() {
                 "{flavor} worker guidance missing {marker:?}"
             );
         }
+
+/// cas-556a: `max` is a Cassy effort value, documented with its provider
+/// sources and pinned in every mirror; Luna's xhigh-only policy stays stated.
+#[test]
+fn max_effort_guidance_is_pinned_and_cited_cas_556a() {
+    let root = source_root();
+    for flavor in ["", "codex/", "grok/"] {
+        let base = root.join(format!("cas-cli/src/builtins/{flavor}skills/cas-supervisor"));
+        let supervisor = load(&base.with_extension("md"));
+        assert!(
+            supervisor.contains("`max` only on explicit request where the recipe lists it (Fable, Opus, Astra, Sol), never as a default"),
+            "{flavor} supervisor guidance missing the max effort rule"
+        );
+        let model_selection = load(&base.join("references/model-selection.md"));
+        for marker in [
+            "| `xhigh` (alias `x-high`) \\| `max`.",
+            "### `max` effort (explicit request only)",
+            "https://platform.claude.com/docs/en/build-with-claude/effort",
+            "codex-rs/protocol/src/openai_models.rs",
+            "`codex_luna` (GPT-5.6 Luna) | rejected — `xhigh` only",
+            "`ultra` is not a Cassy effort value",
+        ] {
+            assert!(
+                model_selection.contains(marker),
+                "{flavor} model-selection.md missing {marker:?}"
+            );
+        }
+        assert!(
+            !model_selection.contains("`max` and `ultra` are not Cassy effort values"),
+            "{flavor} model-selection.md still denies max"
+        );
+        let reference = load(&base.join("references/reference.md"));
+        assert!(
+            reference.contains("\\| `max` (only where the registry recipe lists it"),
+            "{flavor} reference.md effort row missing max"
+        );
     }
 }

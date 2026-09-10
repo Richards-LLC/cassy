@@ -1115,8 +1115,8 @@ pub struct LlmConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
 
-    /// Reasoning effort level: "minimal", "low", "medium", "high", or
-    /// "xhigh" (only supported by some models)
+    /// Reasoning effort level: "minimal", "low", "medium", "high", "xhigh",
+    /// or "max" ("xhigh"/"max" only where the model's registry recipe allows)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
 

@@ -24,6 +24,9 @@ pub enum Effort {
     /// Extra-high; serialised/parsed as `"xhigh"`.
     #[serde(rename = "xhigh")]
     XHigh,
+    /// Absolute maximum capability with no constraint on token spending
+    /// (cas-556a). Only models whose registry recipe lists it accept it.
+    Max,
 }
 
 impl Effort {
@@ -35,6 +38,7 @@ impl Effort {
             Self::Medium => "medium",
             Self::High => "high",
             Self::XHigh => "xhigh",
+            Self::Max => "max",
         }
     }
 }
@@ -49,8 +53,9 @@ impl FromStr for Effort {
             "medium" => Ok(Self::Medium),
             "high" => Ok(Self::High),
             "xhigh" | "x-high" => Ok(Self::XHigh),
+            "max" => Ok(Self::Max),
             other => Err(format!(
-                "unsupported effort level {other:?}; expected one of minimal|low|medium|high|xhigh"
+                "unsupported effort level {other:?}; expected one of minimal|low|medium|high|xhigh|max"
             )),
         }
     }
@@ -158,6 +163,7 @@ mod tests {
             (Effort::Medium, "medium"),
             (Effort::High, "high"),
             (Effort::XHigh, "xhigh"),
+            (Effort::Max, "max"),
         ];
         for (variant, s) in cases {
             assert_eq!(

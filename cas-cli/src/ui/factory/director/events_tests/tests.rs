@@ -3085,6 +3085,11 @@ fn test_09d0_effective_stall_threshold_secs_scaling_table() {
         effective_stall_threshold_secs(300, Some(cas_mux::Effort::XHigh)),
         900
     );
+    // cas-556a: max has no token ceiling, so it earns the widest window.
+    assert_eq!(
+        effective_stall_threshold_secs(300, Some(cas_mux::Effort::Max)),
+        1200
+    );
 }
 
 /// AC (c): a worker explicitly put on hold must never be flagged

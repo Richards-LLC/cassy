@@ -67,6 +67,33 @@ The scheme follows the OS with light as the fallback; `commander.scheme` stores 
 This document records the token foundation. The fleet figure, attention timeline and connection verdict follow `docs/design/hub-web/concept-brief.md` in the subsequent screen units; their current component forms below remain until those units land.
 Ghostty's ANSI palette stays in `hub-web/src/terminal/ghostty-adapter.ts`; it is independent of the application palette.
 
+## Brand
+
+The Hub's product name is **Cassy Cloud**. `hub-web/src/cloud-brand.ts` owns an
+inline SVG open-C/cloud mark beside the system-serif wordmark. The wordmark uses
+`--font-display`, medium weight, `--fs-lg` (21px), with `--space-2` separation;
+no downloaded font or image is required. The mark uses `--color-action`: indigo
+#2E3A9F on warm paper in light, #A9B3FF on warm graphite in dark. Text uses
+`--text-hi` (#1B1D24 / #E9E6E0); do not reverse it into a white badge.
+
+Place the complete brand at the top of the thread list on phone and desktop.
+The phone conversation header retains the complete lockup above its project
+badge; the desktop context rail repeats a quiet 14px wordmark with a 24px mark.
+The main wordmark is 21px with a 32px mark; compact minimums are 14px / 24px.
+Reserve 8px around the mark. The vector is decorative beside readable text,
+never an unlabeled navigation control. A project badge names the work, not the
+product: use `--bg-active` and `--color-action`, 15px semibold, allow wrapping,
+and derive its name from catalog `project_dir` with an honest missing state.
+
+Conversations are the default presentation at every width. Desktop places a
+320px list and 240px context rail around a flexible reading column. Phone and
+short-axis touch layouts use list → full-width thread with an always addressed
+composer. `conversation-shell.ts`, `conversation-list.ts`, `conversation-view.ts`
+and `conversation-history.ts` separate layout, catalog rows, the real pane,
+and correlated channel events. Terminal view retains the original renderer.
+The generated dark-well selector excludes `.conversation-active` so reading
+inherits the chosen page scheme; code scrolls locally without clipping prose.
+
 ## Colors
 
 - `--bg-root` inherits house `bg` (warm paper / warm graphite); `--bg-panel` inherits `surface` for the rail, header, drawer and context panel.

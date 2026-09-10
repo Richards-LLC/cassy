@@ -474,6 +474,7 @@ struct SessionsResponse {
 
 async fn sessions<R: SessionReadModel>(
     State(state): State<HubState<R>>,
+    Query(query): Query<SessionsQuery>,
     headers: HeaderMap,
 ) -> Response {
     if authorize(
@@ -492,7 +493,7 @@ async fn sessions<R: SessionReadModel>(
         Ok(sessions) => with_cors(
             Json(SessionsResponse {
                 schema_version: super::HUB_SCHEMA_VERSION,
-                sessions,
+                sessions: supervisor_sessions(sessions, query.workers),
             })
             .into_response(),
             &headers,
@@ -594,6 +595,37 @@ struct AttachQuery {
     panes: String,
     #[serde(default)]
     ticket: String,
+    /// Off by default: worker panes are hidden and never streamed unless the
+    /// viewer asks with `workers=1` (cas-6261).
+    #[serde(default, deserialize_with = "flag")]
+    workers: bool,
+}
+
+/// Accepts `1`, `true`, `yes`, or `on` as an enabled query flag.
+fn flag<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<bool, D::Error> {
+    let raw = String::deserialize(deserializer)?;
+    Ok(matches!(
+        raw.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    ))
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct SessionsQuery {
+    #[serde(default, deserialize_with = "flag")]
+    workers: bool,
+}
+
+/// The default catalog lists supervisor-led sessions only; `workers=1` lifts
+/// the filter for debugging.
+pub(crate) fn supervisor_sessions(sessions: Vec<HubSession>, reveal_workers: bool) -> Vec<HubSession> {
+    if reveal_workers {
+        return sessions;
+    }
+    sessions
+        .into_iter()
+        .filter(|session| !session.supervisor.trim().is_empty())
+        .collect()
 }
 
 async fn attach<R: SessionReadModel>(
@@ -656,6 +688,7 @@ async fn attach<R: SessionReadModel>(
                 panes,
                 daemon_identity,
                 socket_auth,
+                query.workers,
             )
         })
         .into_response()
@@ -669,6 +702,7 @@ async fn proxy_socket(
     panes: Vec<String>,
     daemon_identity: Option<super::DaemonIdentity>,
     auth: Option<(AuthStore, AuthContext)>,
+    reveal_workers: bool,
 ) {
     let Ok(mut viewer) = connector
         .attach(&session, port, panes, daemon_identity)
@@ -676,6 +710,7 @@ async fn proxy_socket(
     else {
         return;
     };
+    let mut worker_gate = super::WorkerGate::new(reveal_workers);
     let (mut sink, mut source) = socket.split();
     // MessageQueued has no device field: retain the authenticated submitter's
     // client_ref so only that socket receives its durable acknowledgment.
@@ -693,6 +728,7 @@ async fn proxy_socket(
         tokio::select! {
             frame = viewer.recv() => match frame {
                 Ok(frame) => {
+                    let Some(frame) = worker_gate.admit(frame) else { continue };
                     if !operator_reply_allowed(&auth, &frame.bytes) {
                         continue;
                     }
@@ -1037,6 +1073,9 @@ struct MachineClientEnvelope {
     subscribe: bool,
     #[serde(default)]
     panes: Vec<String>,
+    /// Off by default (cas-6261): worker panes stay hidden on this stream.
+    #[serde(default)]
+    workers: bool,
     #[serde(default)]
     session: Option<String>,
     #[serde(default)]
@@ -1377,10 +1416,12 @@ async fn proxy_machine_socket<R: SessionReadModel>(
                         };
                         let tx = outbound_tx.clone();
                         let task_session = session.clone();
+                        let mut worker_gate = super::WorkerGate::new(envelope.workers);
                         let handle = tokio::spawn(async move {
                             loop {
                                 match viewer.recv().await {
                                     Ok(frame) => {
+                                        let Some(frame) = worker_gate.admit(frame) else { continue };
                                         if tx.send(MachineOutbound::Frame { session: task_session.clone(), frame }).await.is_err() { break; }
                                     }
                                     Err(ViewerRecvError::Lagged { skipped }) => {

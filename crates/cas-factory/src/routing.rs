@@ -973,6 +973,10 @@ pub fn validate_model_is_active(model: &str) -> Result<(), String> {
 }
 
 /// Enforce Luna's existing xhigh-only effort policy.
+///
+/// The Codex models manifest lists `max` for Luna too (cas-556a), but Cassy
+/// keeps Luna pinned at xhigh as the standard lane's cost ceiling; `max` is an
+/// explicit-request effort for the Fable, Opus, Astra and Sol recipes.
 pub fn validate_model_effort_policy(model: &str, effort: Option<Effort>) -> Result<(), String> {
     if model.trim().eq_ignore_ascii_case("gpt-5.6-luna") && effort != Some(Effort::XHigh) {
         return Err(
@@ -1199,7 +1203,7 @@ candidates = ["codex_luna"]
         assert_eq!(fable.provider, "anthropic");
         assert_eq!(fable.model, "claude-fable-5-1");
         assert_eq!(fable.default_effort, Effort::Medium);
-        assert_eq!(fable.allowed_efforts, [Effort::Medium, Effort::High]);
+        assert_eq!(fable.allowed_efforts, [Effort::Medium, Effort::High, Effort::Max]);
         assert_eq!(fable.required_capability.as_deref(), Some("claude-account"));
         assert!(registry.recipes.contains_key("codex_astra"));
         assert_eq!(
@@ -1211,7 +1215,10 @@ candidates = ["codex_luna"]
         let astra_high = &registry.recipes["codex_astra_high"];
         assert_eq!(astra_high.model, "gpt-6-astra");
         assert_eq!(astra_high.default_effort, Effort::High);
-        assert_eq!(astra_high.allowed_efforts, [Effort::High, Effort::XHigh]);
+        assert_eq!(
+            astra_high.allowed_efforts,
+            [Effort::High, Effort::XHigh, Effort::Max]
+        );
         assert_eq!(astra_high.required_capability.as_deref(), Some("codex-account"));
         assert!(
             !lane_references(&registry.lanes["taste"])
@@ -1254,7 +1261,7 @@ candidates = ["codex_luna"]
         assert_eq!(recipe.provider, "anthropic");
         assert_eq!(recipe.model, "claude-fable-5-1");
         assert_eq!(recipe.default_effort, Effort::Medium);
-        assert_eq!(recipe.allowed_efforts, [Effort::Medium, Effort::High]);
+        assert_eq!(recipe.allowed_efforts, [Effort::Medium, Effort::High, Effort::Max]);
         assert_eq!(
             recipe.required_capability.as_deref(),
             Some("claude-account")
@@ -1806,6 +1813,56 @@ no_fallback = true
         assert!(error.contains("routing rule 'suspended recipe'"), "{error}");
         assert!(error.contains("codex_luna"), "{error}");
         assert!(error.contains("effort=xhigh"), "{error}");
+    }
+
+    /// cas-556a: `max` is accepted exactly where the registry recipe lists it
+    /// (Fable, Opus, Astra, Sol), Luna keeps its xhigh-only policy message, and
+    /// Haiku rejects it with the recipe's allowed set.
+    #[test]
+    fn max_effort_follows_the_registry_and_luna_stays_xhigh_only() {
+        let spec = |cli: SupervisorCli, model: &str| WorkerSpec {
+            name: None,
+            cli,
+            model: Some(model.to_string()),
+            effort: Some(Effort::Max),
+            config_dir: None,
+            requester_config_dir: None,
+            requester_secure_storage_dir: None,
+        };
+        for (cli, model) in [
+            (SupervisorCli::Codex, "gpt-6-astra"),
+            (SupervisorCli::Codex, "gpt-5.6-sol"),
+            (SupervisorCli::Claude, "claude-fable-5-1"),
+            (SupervisorCli::Claude, "claude-opus-5"),
+        ] {
+            validate_explicit(&spec(cli, model), &CapabilitySnapshot::default())
+                .unwrap_or_else(|error| panic!("{model} must accept effort=max: {error}"));
+        }
+        let luna = validate_explicit(
+            &spec(SupervisorCli::Codex, "gpt-5.6-luna"),
+            &CapabilitySnapshot::default(),
+        )
+        .expect_err("Luna max must fail closed")
+        .to_string();
+        assert!(luna.contains("Luna is only permitted"), "{luna}");
+        assert!(luna.contains("effort=xhigh"), "{luna}");
+        let haiku = validate_explicit(
+            &spec(SupervisorCli::Claude, "claude-haiku-4-5-20251001"),
+            &CapabilitySnapshot::default(),
+        )
+        .expect_err("Haiku max must fail closed")
+        .to_string();
+        assert!(haiku.contains("rejects effort max"), "{haiku}");
+        assert!(haiku.contains("allowed efforts are low|medium"), "{haiku}");
+        // Defaults are untouched: no lane recipe defaults to max.
+        let registry = registry().unwrap();
+        assert!(
+            registry
+                .recipes
+                .values()
+                .all(|recipe| recipe.default_effort != Effort::Max),
+            "max must never be a recipe default"
+        );
     }
 
     #[test]

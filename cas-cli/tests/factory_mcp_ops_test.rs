@@ -7096,6 +7096,24 @@ async fn test_a844_worker_can_start_awaiting_merge_task() {
         after.notes
     );
     assert!(
+        after.notes.contains("inside the worker worktree")
+            && after
+                .notes
+                .to_lowercase()
+                .contains("rebase factory/swift-fox")
+            && after.notes.contains("current integration target tip")
+            && after.notes.contains("push")
+            && after.notes.contains("re-park")
+            && after.notes.contains("merge_request=true"),
+        "merge recovery must prescribe worktree-only rebase, push, and re-park: {}",
+        after.notes
+    );
+    assert!(
+        !after.notes.contains("resolve directly"),
+        "merge recovery must not direct workers to resolve against the target checkout: {}",
+        after.notes
+    );
+    assert!(
         after.deliverables.factory_branch_anchor.is_none(),
         "conflict rework must invalidate the parked anchor"
     );

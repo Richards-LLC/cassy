@@ -32,10 +32,66 @@ pub(crate) const INBOX_REDELIVERY_MARKER: &str = "[redelivery]";
 /// valid but still worth calling out as late to the recipient.
 pub(crate) const MESSAGE_PROVENANCE_STALE_AFTER_SECS: i64 = 5 * 60;
 
+/// Fixed sender namespace the Commander daemon path writes (cas-7f81). The
+/// label after it is what the client sent; identity comes from the stamp.
+pub(crate) const COMMANDER_SOURCE_PREFIX: &str = "commander:";
+
+/// How a Commander-originated row classifies (cas-7f81, EPIC cas-fbc8).
+///
+/// `Verified` requires BOTH the `commander:` source namespace and a
+/// hub-stamped [`cas_store::QueueOrigin::PairedDevice`] origin. The label is
+/// never enough on its own: it is client-typed and a spoofed one must render
+/// as `unverified:<label>`, not as the operator.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum OperatorClass {
+    Verified { operator: String, device: String },
+    Unverified { label: String },
+}
+
+pub(crate) fn operator_class(message: &cas_store::QueuedPrompt) -> Option<OperatorClass> {
+    let label = message.source.strip_prefix(COMMANDER_SOURCE_PREFIX)?;
+    let verified = message
+        .origin
+        .as_ref()
+        .and_then(cas_store::QueueOrigin::verified_device_id)
+        .is_some();
+    if !verified {
+        return Some(OperatorClass::Unverified {
+            label: label.to_owned(),
+        });
+    }
+    let (operator, device) = label
+        .rsplit_once('@')
+        .map(|(operator, device)| (operator.to_owned(), device.to_owned()))
+        .unwrap_or_else(|| (label.to_owned(), "unknown-device".to_owned()));
+    Some(OperatorClass::Verified { operator, device })
+}
+
 pub(crate) fn queued_message_provenance_at(
     message: &cas_store::QueuedPrompt,
     observed_at: chrono::DateTime<chrono::Utc>,
 ) -> String {
+    let delivery = if message.processed_at.is_some() {
+        "replay"
+    } else {
+        "first"
+    };
+    let age_secs = (observed_at - message.created_at).num_seconds().max(0);
+    match operator_class(message) {
+        Some(OperatorClass::Verified { operator, device }) => {
+            return format!(
+                "[cas #{} operator {operator}@{device} verified {age_secs}s {delivery}]",
+                message.id
+            );
+        }
+        Some(OperatorClass::Unverified { label }) => {
+            return format!(
+                "[cas #{} unverified:{label} {age_secs}s {delivery}]",
+                message.id
+            );
+        }
+        None => {}
+    }
     let origin = if message.source.eq_ignore_ascii_case("supervisor") {
         "supervisor-authored"
     } else if message.source.eq_ignore_ascii_case("viktor") {
@@ -54,12 +110,6 @@ pub(crate) fn queued_message_provenance_at(
     } else {
         "agent-authored"
     };
-    let delivery = if message.processed_at.is_some() {
-        "replay"
-    } else {
-        "first"
-    };
-    let age_secs = (observed_at - message.created_at).num_seconds().max(0);
     format!(
         "[cas #{} {} {}s {}]",
         message.id,
@@ -129,6 +179,69 @@ mod viktor_provenance_tests {
         assert!(provenance.contains("299s"));
         assert!(provenance.contains("spawn-boilerplate"));
         assert!(provenance.contains("first"));
+    }
+
+    fn commander_row(origin: Option<cas_store::QueueOrigin>) -> QueuedPrompt {
+        QueuedPrompt {
+            id: 75,
+            source: "commander:Daniel@iphone-15".to_string(),
+            target: "supervisor".to_string(),
+            prompt: "Status please".to_string(),
+            created_at: chrono::DateTime::parse_from_rfc3339("2026-09-10T16:00:00Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+            processed_at: None,
+            factory_session: Some("factory-1".to_string()),
+            summary: None,
+            priority: NotificationPriority::High,
+            acked_at: None,
+            urgent: false,
+            origin,
+        }
+    }
+
+    /// cas-7f81: a hub-stamped paired device renders as the operator class —
+    /// the one header the skills treat as user authority.
+    #[test]
+    fn verified_commander_rows_render_the_operator_header() {
+        let row = commander_row(Some(cas_store::QueueOrigin::PairedDevice {
+            device_id: "dev-42".into(),
+        }));
+        let observed_at = row.created_at + chrono::Duration::seconds(4);
+        assert_eq!(
+            queued_message_provenance_at(&row, observed_at),
+            "[cas #75 operator Daniel@iphone-15 verified 4s first]"
+        );
+        let mut replayed = row.clone();
+        replayed.processed_at = Some(observed_at);
+        assert!(queued_message_provenance_at(&replayed, observed_at).ends_with("4s replay]"));
+    }
+
+    /// cas-7f81: the `commander:` label alone never verifies. Unstamped,
+    /// unattributed, and even registered-agent stamps all render unverified —
+    /// only a paired-device stamp is the operator.
+    #[test]
+    fn commander_rows_without_a_device_stamp_render_unverified() {
+        for origin in [
+            None,
+            Some(cas_store::QueueOrigin::Unattributed),
+            Some(cas_store::QueueOrigin::Daemon),
+            Some(cas_store::QueueOrigin::RegisteredAgent {
+                agent_id: "agent-1".into(),
+            }),
+        ] {
+            let row = commander_row(origin.clone());
+            let observed_at = row.created_at + chrono::Duration::seconds(9);
+            assert_eq!(
+                queued_message_provenance_at(&row, observed_at),
+                "[cas #75 unverified:Daniel@iphone-15 9s first]",
+                "origin {origin:?} must not verify"
+            );
+        }
+        let mut agent = commander_row(None);
+        agent.source = "supervisor".into();
+        assert_eq!(super::operator_class(&agent), None);
+        assert!(queued_message_provenance_at(&agent, agent.created_at).contains("supervisor-authored"));
     }
 }
 

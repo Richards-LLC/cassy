@@ -468,6 +468,12 @@ pub enum QueueOrigin {
     /// operator reading a row can tell "nobody was authenticated" apart from
     /// "this predates the column".
     Unattributed,
+    /// A human operator on a paired Commander device whose device session the
+    /// hub authenticated at enqueue time (cas-7f81, EPIC cas-fbc8).
+    /// `device_id` is the credential record's id, never a client-sent label,
+    /// so a row can only carry this stamp when the hub actually verified the
+    /// sender. Readers render it as the `operator … verified` class.
+    PairedDevice { device_id: String },
 }
 
 impl QueueOrigin {
@@ -477,14 +483,27 @@ impl QueueOrigin {
             Self::RegisteredAgent { .. } => "registered_agent",
             Self::Daemon => "daemon",
             Self::Unattributed => "unattributed",
+            Self::PairedDevice { .. } => "paired_device",
         }
     }
 
-    /// Column value for `origin_agent_id`, when there is one.
+    /// Column value for `origin_agent_id`, when there is one. A paired device
+    /// stores its credential id here: the column names the authenticated
+    /// principal, and for an operator row that principal is the device.
     pub fn agent_id(&self) -> Option<&str> {
         match self {
             Self::RegisteredAgent { agent_id } => Some(agent_id.as_str()),
+            Self::PairedDevice { device_id } => Some(device_id.as_str()),
             Self::Daemon | Self::Unattributed => None,
+        }
+    }
+
+    /// The verified paired-device id, when this row was stamped by the hub
+    /// from an authenticated device session (cas-7f81).
+    pub fn verified_device_id(&self) -> Option<&str> {
+        match self {
+            Self::PairedDevice { device_id } => Some(device_id.as_str()),
+            Self::RegisteredAgent { .. } | Self::Daemon | Self::Unattributed => None,
         }
     }
 
@@ -501,6 +520,7 @@ impl QueueOrigin {
             "registered_agent" => agent_id.map(|agent_id| Self::RegisteredAgent { agent_id }),
             "daemon" => Some(Self::Daemon),
             "unattributed" => Some(Self::Unattributed),
+            "paired_device" => agent_id.map(|device_id| Self::PairedDevice { device_id }),
             _ => None,
         }
     }
@@ -511,7 +531,10 @@ impl QueueOrigin {
     /// particular row wake" — the envelope class is a separate, second factor
     /// applied by the wake gate. Both must hold.
     pub fn is_attributed(&self) -> bool {
-        matches!(self, Self::RegisteredAgent { .. } | Self::Daemon)
+        matches!(
+            self,
+            Self::RegisteredAgent { .. } | Self::Daemon | Self::PairedDevice { .. }
+        )
     }
 }
 
@@ -4960,6 +4983,19 @@ mod tests {
         );
         assert_eq!(QueueOrigin::Daemon.agent_id(), None);
         assert_eq!(QueueOrigin::Unattributed.kind_str(), "unattributed");
+        // cas-7f81: a verified operator stamp round-trips through the same
+        // two columns and names the device, never a client label.
+        let device = QueueOrigin::PairedDevice { device_id: "dev-42".into() };
+        assert_eq!(device.kind_str(), "paired_device");
+        assert_eq!(device.agent_id(), Some("dev-42"));
+        assert_eq!(device.verified_device_id(), Some("dev-42"));
+        assert!(device.is_attributed());
+        assert_eq!(
+            QueueOrigin::from_columns(Some("dev-42".into()), Some("paired_device")),
+            Some(device)
+        );
+        assert_eq!(QueueOrigin::from_columns(None, Some("paired_device")), None);
+        assert_eq!(QueueOrigin::Daemon.verified_device_id(), None);
     }
 
     /// A stamp survives the round trip through SQLite and comes back on the

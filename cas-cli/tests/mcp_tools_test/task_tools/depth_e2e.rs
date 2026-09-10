@@ -110,6 +110,7 @@ async fn create_task(cas_dir: &std::path::Path, title: &str, depth: Option<&str>
     let service = CasService::new(core, None);
     let mut body = serde_json::json!({
         "action": "create",
+            "risk": "none",
         "title": title,
         "priority": 2,
         "task_type": "task",

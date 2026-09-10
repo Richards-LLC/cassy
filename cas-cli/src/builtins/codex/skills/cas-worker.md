@@ -21,10 +21,7 @@ results, errors and the return contract only.
    then `mcp__cs__task action=start id=<task-id>` before editing.
 3. Read the task's depth and acceptance criteria and the project `CLAUDE.md`.
    For non-empty `demo_statement`, run `cas-qa-craft` before close.
-4. Read the task's `Risk:` and `Proof Targets:` fields before editing. Every
-   code task must declare `risk=blast-radius`, `platform`, `concurrency`, or
-   `none`; `blast-radius` must name every source module its diff can touch.
-   Do not weaken a declaration to make the close gate pass.
+4. Read `Risk:`/`Proof Targets:` before editing; follow the matching close gate.
 5. Implement only the assigned scope. Commit logical units with the task ID.
    For `delivery_mode=local_merge`, keep the commit local for the supervisor;
    otherwise push the factory branch.
@@ -61,9 +58,8 @@ deferred: <one line or none>
 need: <what the supervisor must do, one line, or none>
 ```
 
-Blockers add one line `blocker: <cause>` and set `blocker=true`. Progress
-notes: one line, milestone only, max one per milestone. Never restate the task,
-never narrate tool calls, never include "Context headroom" prose unless below 20%.
+Blockers add one line `blocker: <cause>` and set `blocker=true`. Progress notes
+are one line per milestone and report context headroom as a percentage.
 
 ## Issue routing
 
@@ -77,17 +73,6 @@ file a ticket in the matching repo before moving on; see the supervisor's
 
 ## Task types and depth
 
-- **Risk declarations:**
-  - `risk=none` is for isolated changes with no platform or concurrency claim.
-  - `risk=blast-radius` requires `proof_targets` covering every changed source
-    module. Run the scoped proof for the complete target set and record a
-    `SCOPED_PROOF: targets=... result=PASS` receipt in a task progress note.
-  - `risk=platform` requires a `platform_proof` note naming the macOS command
-    and its passing result. `risk=concurrency` requires a `loaded_proof` note
-    naming the whole target, `-j16`, at least three loops, and a passing result.
-  - Combined platform/concurrency declarations require every corresponding
-    receipt. A proof narrower than the diff is a close failure, not a reason to
-    edit the declaration.
 - **Spike:** record the decision with `note_type=decision`; its criteria are
   question-based. **Demo:** produce the stated observable outcome.
 - **Report / evidence tasks:** use MCP task/search/coordination surfaces,
@@ -130,8 +115,6 @@ This is a requirement, not a suggestion.
 
 - **Builtin skill/agent:** update Claude, Codex, and Grok mirrors and run the
    flavor-drift test.
-- **Task risk:** show the declared `Risk:`/`Proof Targets:` and paste the
-  `SCOPED_PROOF`, `platform_proof`, or `loaded_proof` receipt that applies.
 - **MCP tool:** cover CLI parity, docs, and dispatch registration.
 - **Hook/gate:** regenerate `config_gen` and `.codex/hooks.json` when applicable.
 - **Migration:** update pinned bootstrap/reconciliation expectations and

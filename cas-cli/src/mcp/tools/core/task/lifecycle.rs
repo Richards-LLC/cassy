@@ -670,7 +670,12 @@ impl CasCore {
             .unwrap_or_default();
 
         let mut task_notes = req.notes.unwrap_or_default();
-        if supervisor_override && req.risk.as_deref().is_none_or(|risk| risk.trim().is_empty()) {
+        if supervisor_override
+            && req
+                .risk
+                .as_deref()
+                .is_none_or(|risk| risk.trim().is_empty())
+        {
             let reason = req.reason.as_deref().unwrap_or_default().trim();
             let audit = format!(
                 "[{}] DECISION: supervisor_override=true accepted missing task risk declaration. Reason: {}",
@@ -1396,9 +1401,10 @@ impl CasCore {
                         .unwrap_or(true),
                     None => false,
                 },
-                cloud_sync_configured: crate::cloud::CloudConfig::load_from_cas_dir_inheriting_user_credentials(
-                    &self.cas_root,
-                )
+                cloud_sync_configured:
+                    crate::cloud::CloudConfig::load_from_cas_dir_inheriting_user_credentials(
+                        &self.cas_root,
+                    )
                     .map(|config| config.is_logged_in())
                     .unwrap_or(false),
             };

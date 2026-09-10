@@ -19,10 +19,10 @@ async fn create_task(service: &cas::mcp::CasCore, title: &str) -> String {
         description: None,
         priority: 2,
         task_type: "task".to_string(),
-            risk: Some("none".to_string()),
-            proof_targets: None,
-            supervisor_override: None,
-            reason: None,
+        risk: Some("none".to_string()),
+        proof_targets: None,
+        supervisor_override: None,
+        reason: None,
         labels: None,
         notes: None,
         blocked_by: None,
@@ -346,6 +346,7 @@ async fn create_task_via_service(service: &cas::mcp::CasService, title: &str) ->
     let created = service
         .task(Parameters(task_req(serde_json::json!({
             "action": "create",
+            "risk": "none",
             "title": title,
         }))))
         .await
@@ -544,6 +545,7 @@ async fn task_update_blocked_by_rejects_the_parent_epic() {
     let epic = service
         .task(Parameters(task_req(serde_json::json!({
             "action": "create",
+            "risk": "none",
             "title": "Epic parent",
             "task_type": "epic",
         }))))
@@ -644,6 +646,7 @@ async fn task_update_blocked_by_rejects_the_epic_set_in_the_same_call() {
     let epic = service
         .task(Parameters(task_req(serde_json::json!({
             "action": "create",
+            "risk": "none",
             "title": "Epic parent",
             "task_type": "epic",
         }))))

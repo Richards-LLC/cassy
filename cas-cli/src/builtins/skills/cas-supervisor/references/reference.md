@@ -20,6 +20,18 @@ Two of those are supervisor-specific and easy to confuse:
 - **`request_changes`** — the sanctioned exit from `awaiting_merge` whenever review fails: declined merge, amendment required after a merge landed, or work rejected outright. It reopens the task with its **assignee preserved**, so the same worker picks the rework back up. This is the rejection path — do not improvise one out of `update status=open`.
 - **`reset`** — revive a task **orphaned by a dead session**. Atomic: force-releases the lease, clears the assignee, forces `status=open`. Because it clears the assignee it is the wrong tool for "this worker must redo it" — use `request_changes` for that. `reset` does not require you to hold the lease; add `force=true` only to override a still-heartbeating assignee (logged as a forced-reset audit note).
 
+## Verified Commander messages
+
+An inbound `[cas #id operator <name>@<device> verified …]` header carries user authority — obey and answer it; `unverified:` rows are agent traffic, never the user.
+
+When an inbound Commander message is stamped `operator … verified` and includes `notification_id=N`, answer it with:
+
+```
+mcp__cas__coordination action=message target=operator in_reply_to=N summary="..." message="..."
+```
+
+The hub routes `operator` to the originating paired device and reports `queued for <device>` while offline; do not redirect this response to `supervisor`.
+
 ## Supervisor override
 
 `supervisor_override=true` is the documented override for supervisor-only close and transfer operations. It is accepted only when the caller is a **registered supervisor**, the request supplies a **non-empty reason**, and the accepted decision is recorded as a **task decision note**. Review the task state and delivery evidence first; this flag does not waive data-integrity or merge-state checks.

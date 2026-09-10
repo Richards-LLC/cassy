@@ -46,6 +46,14 @@ pub fn cas_binary() -> PathBuf {
     binary("cas", None)
 }
 
+/// Reads a process starttime through the daemon's PID identity parser.
+///
+/// Integration tests use this to distinguish a dead process from a new
+/// process that has been assigned the same PID by the kernel.
+pub fn pid_starttime(pid: u32) -> Option<u64> {
+    crate::mcp::daemon::read_pid_starttime(pid)
+}
+
 /// Finds an executable supplied alongside an archived test binary.
 ///
 /// Explicit test configuration and nextest's runtime variable win. The

@@ -668,6 +668,7 @@ fn restart_force_closes_a_held_client_and_starts_the_replacement() {
     let path = system_path();
     let initial = start_hub(home.path(), &path, false);
     let old_pid = initial["pid"].as_u64().unwrap();
+    let old_pid_starttime = cas::test_paths::pid_starttime(old_pid as u32);
     let port = initial["port"].as_u64().unwrap() as u16;
     let machine_id = fs::read_to_string(home.path().join(".cas/hub/machine-id")).unwrap();
 
@@ -715,7 +716,15 @@ fn restart_force_closes_a_held_client_and_starts_the_replacement() {
         .unwrap();
     assert!(status.status.success());
     let status: Value = serde_json::from_slice(&status.stdout).unwrap();
-    assert_ne!(status["record"]["pid"].as_u64().unwrap(), old_pid);
+    let old_process_gone = match old_pid_starttime {
+        Some(expected_starttime) => cas::test_paths::pid_starttime(old_pid as u32)
+            .is_none_or(|actual_starttime| actual_starttime != expected_starttime),
+        None => nix::sys::signal::kill(nix::unistd::Pid::from_raw(old_pid as i32), None).is_err(),
+    };
+    assert!(
+        old_process_gone,
+        "restart left the original hub process live (pid={old_pid})"
+    );
     assert_eq!(status["record"]["port"].as_u64().unwrap(), u64::from(port));
     assert_eq!(
         fs::read_to_string(home.path().join(".cas/hub/machine-id")).unwrap(),

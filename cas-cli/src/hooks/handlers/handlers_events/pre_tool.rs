@@ -200,6 +200,40 @@ pub fn handle_pre_tool_use(
     }
 
     // ========================================================================
+    // FACTORY WORKSPACE CONTRACT — ROOT-INDEPENDENT FALLBACK
+    //
+    // Filesystem auto-approval must remain available when Cassy cannot resolve
+    // a root for the hook invocation, but it must not bypass the workspace
+    // contract. The normal guard below can read the registered checkout and
+    // configured roots from Cassy's stores; this fallback uses the bootstrap
+    // `CAS_CLONE_PATH` binding and the default artifacts root so an isolated
+    // worker cannot write into the primary checkout on the cas_root=None path.
+    // ========================================================================
+    if cas_root.is_none() && is_factory_agent {
+        let worktree_root = std::env::var_os("CAS_CLONE_PATH")
+            .filter(|value| !value.is_empty())
+            .map(std::path::PathBuf::from);
+        if let Some(violation) = factory_write_violation(
+            input,
+            &None,
+            None,
+            crate::harness_policy::is_supervisor(input),
+            worktree_root.as_deref(),
+        ) {
+            return Ok(HookOutput::with_pre_tool_permission(
+                "deny",
+                &factory_workspace_contract_denial(
+                    input,
+                    &violation,
+                    None,
+                    None,
+                    worktree_root.as_deref(),
+                ),
+            ));
+        }
+    }
+
+    // ========================================================================
     // FACTORY AUTO-APPROVE — HOISTED ABOVE cas_root check (cas-7f33)
     //
     // The factory filesystem auto-approve also runs below, AFTER all
@@ -272,21 +306,15 @@ pub fn handle_pre_tool_use(
             crate::harness_policy::is_supervisor(input),
             registered_worktree.as_deref(),
         ) {
-            let path = &violation.resolved_path;
             log_factory_workspace_rejection(cas_root, input, &violation);
-            let artifacts =
-                crate::config::resolved_factory_artifacts_root(artifacts_root.as_deref());
-            let scratch = scratch_root
-                .as_deref()
-                .map(|root| format!(" or `{root}/...` for ephemeral scratch output"))
-                .unwrap_or_default();
             return Ok(HookOutput::with_pre_tool_permission(
                 "deny",
-                &format!(
-                    "🚫 FACTORY WORKSPACE CONTRACT: file creation outside the worktree, durable artifacts root, configured scratch root, or harness exceptions is blocked: {}. Use your worktree, `{}/<task-id>/` for durable proof{}; only this session's harness scratchpad is sanctioned for ephemeral notes. Bare /tmp and stray $HOME files are not sanctioned.",
-                    path.display(),
-                    artifacts.display(),
-                    scratch
+                &factory_workspace_contract_denial(
+                    input,
+                    &violation,
+                    artifacts_root.as_deref(),
+                    scratch_root.as_deref(),
+                    registered_worktree.as_deref(),
                 ),
             ));
         }
@@ -2233,6 +2261,32 @@ fn log_factory_workspace_rejection(
             ("payload_bytes", payload_bytes.as_str()),
         ],
     );
+}
+
+fn factory_workspace_contract_denial(
+    input: &HookInput,
+    violation: &FactoryWriteViolation,
+    configured_artifacts_root: Option<&str>,
+    configured_scratch_root: Option<&str>,
+    worktree_root: Option<&std::path::Path>,
+) -> String {
+    let artifacts = crate::config::resolved_factory_artifacts_root(configured_artifacts_root)
+        .display()
+        .to_string();
+    let scratch = configured_scratch_root
+        .filter(|root| !root.trim().is_empty())
+        .map(|root| format!(" or `{root}/...` for ephemeral scratch output"))
+        .unwrap_or_default();
+    let worktree = worktree_root
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| std::path::PathBuf::from(&input.cwd));
+    format!(
+        "🚫 FACTORY WORKSPACE CONTRACT: file creation outside the assigned worktree, durable artifacts root, configured scratch root, or harness exceptions is blocked: {}. Assigned worktree: `{}`. Use your worktree, `{}/<task-id>/` for durable proof{}; only this session's harness scratchpad is sanctioned for ephemeral notes. Bare /tmp and stray $HOME files are not sanctioned.",
+        violation.resolved_path.display(),
+        worktree.display(),
+        artifacts,
+        scratch,
+    )
 }
 
 /// Persist a refusal for a history-changing Git command that targeted a

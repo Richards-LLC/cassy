@@ -37,6 +37,7 @@ export interface HubCallbacks {
   onSessionState(session: string, state: SessionState, scrollback?: Record<string, number[][]>, authoritativeKeyframes?: boolean): void;
   onOutput(session: string, paneId: string, data: Uint8Array): void;
   onMessageQueued?(session: string, queued: MessageQueued): void;
+  onMessageRejected?(session: string, clientRef: string, detail: string): void;
   onOperatorReply?(session: string, reply: OperatorReply): void;
   onSessionSummary?(session: string, summary: SessionCardSummary): void;
   onPaneKeyframe(session: string, paneId: string, data: Uint8Array): void;
@@ -891,7 +892,8 @@ export class HubConnectionSupervisor {
     }
     if (envelope.error) {
       const detail = String(envelope.error.message ?? envelope.error.code ?? "machine protocol error");
-      this.callbacks.onSocketError(session, detail);
+      if (typeof envelope.error.client_ref === "string") this.callbacks.onMessageRejected?.(session, envelope.error.client_ref, detail);
+      else this.callbacks.onSocketError(session, detail);
       return;
     }
     if (envelope.message) this.handleDaemonObject(session, envelope.message as Record<string, any>);
@@ -965,8 +967,16 @@ export class HubConnectionSupervisor {
       this.callbacks.onSessionSummary?.(session, message.SessionSummary.summary);
     } else if (message.PaneAdded || message.PaneRemoved || message.PaneExited) {
       this.send(session, "GetState");
+    } else if (message.error) {
+      const detail = typeof message.error === "string"
+        ? message.error
+        : String(message.error.message ?? message.error.code ?? "Message refused");
+      const clientRef = message.client_ref ?? (typeof message.error === "object" ? message.error.client_ref : undefined);
+      if (typeof clientRef === "string") this.callbacks.onMessageRejected?.(session, clientRef, detail);
+      else this.callbacks.onSocketError(session, detail);
     } else if (message.Error) {
-      this.callbacks.onSocketError(session, message.Error.message);
+      if (typeof message.Error.client_ref === "string") this.callbacks.onMessageRejected?.(session, message.Error.client_ref, message.Error.message);
+      else this.callbacks.onSocketError(session, message.Error.message);
     }
   }
 }

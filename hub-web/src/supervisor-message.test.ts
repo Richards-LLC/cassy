@@ -38,6 +38,11 @@ describe("Cassy Commander supervisor composer targeting", () => {
       .toMatchObject({ SendMessage: { target: "patient-lynx-59", text: "Please review the mobile state" } });
   });
 
+  it("includes a client reference when the sender needs a correlated refusal", () => {
+    expect(supervisorMessage("patient-lynx-59", "Please review the mobile state", "send-42"))
+      .toMatchObject({ SendMessage: { client_ref: "send-42" } });
+  });
+
   it("does not invent a fallback target for a session without a supervisor", () => {
     expect(supervisorTarget(session("  "))).toBeUndefined();
   });

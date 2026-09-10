@@ -140,7 +140,7 @@ let speechDetectionStarted = false;
 let speechController: SpeechDictationController | undefined;
 let speechInputState: SpeechInputState = "idle";
 let speechInputDetail = "";
-let messageDelivery: { session: string; target: string } | undefined;
+let messageDelivery: { session: string; target: string; clientRef: string } | undefined;
 const operatorReplies = new Map<string, OperatorReply[]>();
 // Why a send did not happen has to survive the render that follows it, and has
 // to sit beside the composer: a toast is gone before a phone operator has
@@ -477,6 +477,13 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
         operatorReplies.set(key, replies.slice(-20));
       }
       if (selectedMachineId === machine.id && selectedSession === session) render();
+    },
+    onMessageRejected: (session, clientRef, detail) => {
+      if (messageDelivery?.session !== session || messageDelivery.clientRef !== clientRef) return;
+      messageDelivery = undefined;
+      if (selectedMachineId === machine.id && selectedSession === session) {
+        showComposerStatus(`Message rejected by the hub: ${detail}`, "error");
+      }
     },
     onSessionSummary: (session, summary) => {
       sessionSummaries.set(sessionKey(machine.id, session), summary);
@@ -1691,7 +1698,8 @@ async function takeControlForMessage(machine: StoredMachine, session: string): P
 }
 
 function deliverSupervisorMessage(machine: StoredMachine, session: string, supervisor: string, text: string): void {
-  const sent = sendControl(machine.id, session, supervisorMessage(supervisor, text));
+  const clientRef = crypto.randomUUID();
+  const sent = sendControl(machine.id, session, supervisorMessage(supervisor, text, clientRef));
   // Without an outcome the operator cannot tell a sent message from a lost
   // one, and the natural response is to send it a second time.
   if (!sent) {
@@ -1703,7 +1711,7 @@ function deliverSupervisorMessage(machine: StoredMachine, session: string, super
   if (composer) composer.value = "";
   messageDraft = "";
   messageDraftSelection = 0;
-  messageDelivery = { session, target: supervisor };
+  messageDelivery = { session, target: supervisor, clientRef };
   const delivery = document.querySelector<HTMLElement>("#message-delivery");
   if (delivery) {
     delivery.hidden = false;

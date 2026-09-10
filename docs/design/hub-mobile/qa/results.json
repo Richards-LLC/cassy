@@ -1,0 +1,124 @@
+{
+  "build": "aaa49f0fde8360402b03c3a40b24be55a33914c5",
+  "htmlSha256": "91c04740f890b81ddac0a397a1658c4a02c4ca3bf3ff31be61562e975ad97e01",
+  "at": "2026-09-10T17:13:09.646Z",
+  "results": [
+    {
+      "id": "M01",
+      "cell": "Phone image → pinch → fullscreen → landscape → scroll",
+      "expected": "I can zoom, fill the screen, rotate and keep reading at the same relative place.",
+      "observed": "Touch pinch 1.69×; fullscreen native; scroll ratio 0.400 → 0.400 on rotation; drag continued scrolling.",
+      "evidence": "M01-rotated-reader.png",
+      "verdict": "PASS",
+      "label": "real-build"
+    },
+    {
+      "id": "M02",
+      "cell": "Appearance and geometry at six scheme/viewport combinations",
+      "expected": "The study and image controls stay readable without page overflow in light and dark.",
+      "observed": "All 6 viewport/scheme pairs: 10 proposals, 20 proposal views, no horizontal page overflow; reader controls visible and vertically scrollable.",
+      "evidence": "matrix-390x844-light.png",
+      "verdict": "PASS",
+      "label": "real-build"
+    },
+    {
+      "id": "M03",
+      "cell": "Fullscreen API rejects; page and image fallback",
+      "expected": "Full screen still gives me a scrollable full-viewport reader and Escape restores the page.",
+      "observed": "Native API deliberately rejected; CSS viewport fallback remained scrollable after rotation. First Escape exited fullscreen; second closed the reader.",
+      "evidence": "M03-fullscreen-fallback.png",
+      "verdict": "PASS",
+      "label": "real-build"
+    },
+    {
+      "id": "M04",
+      "cell": "Keyboard-only opening, zoom, scroll, close and return",
+      "expected": "I can operate the image reader with the keyboard and focus returns to the image I opened.",
+      "observed": "Enter opened; + zoomed; PageDown scrolled; 0 fit width; Escape restored focus to the opening image.",
+      "evidence": "M04-keyboard-reader.png",
+      "verdict": "PASS",
+      "label": "real-build"
+    },
+    {
+      "id": "M05",
+      "cell": "Revisit and switch images after zooming",
+      "expected": "A new image opens at fit width; the correct caption and system context follow it.",
+      "observed": "Reopening a different image reset to fit width and showed its own caption; mouse wheel zoom increased the new image scale.",
+      "evidence": "M05-revisit-desktop-image.png",
+      "verdict": "PASS",
+      "label": "real-build"
+    },
+    {
+      "id": "M06",
+      "cell": "JavaScript disabled and print",
+      "expected": "All ten proposals, baseline images and the comparison remain available.",
+      "observed": "JavaScript off: 10 proposals, 10 comparison rows and all 25 images decoded; print PDF contains the study.",
+      "evidence": "M06-no-javascript.png; study-print.pdf",
+      "verdict": "PASS",
+      "label": "real-build"
+    },
+    {
+      "id": "M07",
+      "cell": "Offline standalone file and all embedded images",
+      "expected": "The study opens from a local file and loads every image without network access.",
+      "observed": "Opened standalone file with browser offline; zero HTTP(S) requests; all embedded images decoded and current-state lightbox opened.",
+      "evidence": "M07-offline-current-image.png",
+      "verdict": "PASS",
+      "label": "real-build"
+    },
+    {
+      "id": "M08",
+      "cell": "Whole-study fullscreen and comparison navigation",
+      "expected": "I can read the entire study fullscreen, reach the comparison and return without losing my place.",
+      "observed": "Whole-study fullscreen (native) reached the comparison; Escape restored document scrolling near the same position.",
+      "evidence": "M08-study-fullscreen-comparison.png",
+      "verdict": "PASS",
+      "label": "real-build"
+    }
+  ],
+  "matrix": [
+    {
+      "width": 390,
+      "height": 844,
+      "scheme": "light",
+      "readerHeight": 604,
+      "pageOverflow": false
+    },
+    {
+      "width": 844,
+      "height": 390,
+      "scheme": "light",
+      "readerHeight": 245,
+      "pageOverflow": false
+    },
+    {
+      "width": 1280,
+      "height": 800,
+      "scheme": "light",
+      "readerHeight": 585,
+      "pageOverflow": false
+    },
+    {
+      "width": 390,
+      "height": 844,
+      "scheme": "dark",
+      "readerHeight": 604,
+      "pageOverflow": false
+    },
+    {
+      "width": 844,
+      "height": 390,
+      "scheme": "dark",
+      "readerHeight": 245,
+      "pageOverflow": false
+    },
+    {
+      "width": 1280,
+      "height": 800,
+      "scheme": "dark",
+      "readerHeight": 585,
+      "pageOverflow": false
+    }
+  ],
+  "pageErrors": []
+}

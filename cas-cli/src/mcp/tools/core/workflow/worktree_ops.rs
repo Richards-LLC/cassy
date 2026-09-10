@@ -1320,7 +1320,9 @@ fn resolve_system_b_merge_target(
     let mut branchless_parent_epics: Vec<String> = Vec::new();
     let mut closed_parent_epics: Vec<(String, String)> = Vec::new(); // task, epic
     for task in &all_tasks {
-        if task.assignee.as_deref() != Some(assignee) {
+        if !task.assignee.as_deref().is_some_and(|task_assignee| {
+            identity_belongs_to_worker(task_assignee, assignee, agent_store)
+        }) {
             continue;
         }
         if !assignee_task_is_merge_relevant(task.status) {

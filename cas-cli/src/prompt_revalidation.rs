@@ -122,6 +122,22 @@ pub(crate) fn assignment_targets_started_task(
     .filter(|_| assignee.is_some_and(|owner| owner.eq_ignore_ascii_case(recipient)))
 }
 
+/// Return the task state that makes an assignment/start prompt stale at the
+/// final transport boundary. Terminal states are stale for every recipient;
+/// non-terminal progress is stale only when the addressed worker is still the
+/// task assignee. Missing or unreadable task state remains a delivery-fail-open
+/// condition in the callers that load the task record.
+pub(crate) fn assignment_stale_task(
+    prompt: &str,
+    status: TaskStatus,
+    assignee: Option<&str>,
+    recipient: &str,
+) -> Option<(String, TaskStatus)> {
+    assignment_targets_terminal_task(prompt, status)
+        .or_else(|| assignment_targets_started_task(prompt, status, assignee, recipient))
+        .map(|task_id| (task_id, status))
+}
+
 fn first_task_id_token(text: &str) -> Option<String> {
     text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
         .find(|token| {
@@ -795,6 +811,12 @@ pub(crate) struct VerificationDispatchEnvelope {
     pub owner: String,
     /// RFC3339 instant after which the dispatch times out.
     pub deadline: String,
+    /// Git HEAD captured when this dispatch was created, when it is a
+    /// repository-bound task cycle.
+    pub bound_head: Option<String>,
+    /// Verdict id from the immediately preceding cycle, when a close retry
+    /// replaced a proof that had already been reviewed.
+    pub approved_verdict_id: Option<String>,
 }
 
 /// Attribute values are written by CAS from registry/store values, but a task
@@ -860,10 +882,23 @@ pub(crate) fn verification_dispatch_envelope(
     deadline: &str,
     worker: &str,
     close_reason: Option<&str>,
+    bound_head: Option<&str>,
+    approved_verdict_id: Option<&str>,
 ) -> String {
+    let bound_head_attribute = bound_head
+        .map(|head| format!(" bound_head=\"{}\"", xml_attribute_value(head)))
+        .unwrap_or_default();
+    let approved_verdict_attribute = approved_verdict_id
+        .map(|verdict| {
+            format!(
+                " approved_verdict_id=\"{}\"",
+                xml_attribute_value(verdict)
+            )
+        })
+        .unwrap_or_default();
     format!(
         "{VERIFICATION_DISPATCH_ENVELOPE_OPEN}dispatch_id=\"{dispatch}\" task_id=\"{task}\" \
-         owner=\"{owner}\" deadline=\"{deadline}\">\n\
+         owner=\"{owner}\" deadline=\"{deadline}\"{bound_head_attribute}{approved_verdict_attribute}>\n\
          Task {task} is ready to close and is parked on verification dispatch {dispatch}, \
          delivered by {worker}.\n\
          {reason}\
@@ -901,6 +936,12 @@ pub(crate) fn parse_verification_dispatch_envelope(
         task_id: required("task_id")?.to_string(),
         owner: required("owner")?.to_string(),
         deadline: required("deadline")?.to_string(),
+        bound_head: xml_attribute(tag, "bound_head")
+            .filter(|value| !value.is_empty())
+            .map(str::to_string),
+        approved_verdict_id: xml_attribute(tag, "approved_verdict_id")
+            .filter(|value| !value.is_empty())
+            .map(str::to_string),
     })
 }
 
@@ -986,7 +1027,7 @@ pub(crate) fn revalidate_lifecycle_prompt(
 #[cfg(test)]
 mod cas_8aee_assignment_delivery_tests {
     use super::{
-        assignment_solicited_task_id, assignment_targets_started_task,
+        assignment_solicited_task_id, assignment_stale_task, assignment_targets_started_task,
         assignment_targets_terminal_task, urgent_assignment_task_id,
     };
     use cas_types::TaskStatus;
@@ -1062,6 +1103,38 @@ mod cas_8aee_assignment_delivery_tests {
             )
             .is_none(),
             "an open task still needs its assignment instruction"
+        );
+    }
+
+    #[test]
+    fn assignment_stale_task_covers_every_non_open_state_for_its_assignee() {
+        let prompt = "You were spawned for task cas-7c1a — \"stale brief\" — and it is assigned to you now."
+            .to_string()
+            + "\nStart with `mcp__cas__task action=show id=cas-7c1a`, then `mcp__cas__task action=start id=cas-7c1a` before you change any code.";
+
+        for status in [
+            TaskStatus::InProgress,
+            TaskStatus::Blocked,
+            TaskStatus::AwaitingMerge,
+            TaskStatus::Closed,
+            TaskStatus::Cancelled,
+        ] {
+            assert_eq!(
+                assignment_stale_task(&prompt, status, Some("worker-1"), "worker-1")
+                    .map(|(_, observed)| observed),
+                Some(status),
+                "a stale assignment must be identified at the final delivery boundary for {status}"
+            );
+        }
+        assert_eq!(
+            assignment_stale_task(&prompt, TaskStatus::Open, Some("worker-1"), "worker-1"),
+            None,
+            "an open task still needs the assignment instruction"
+        );
+        assert_eq!(
+            assignment_stale_task(&prompt, TaskStatus::InProgress, Some("worker-2"), "worker-1"),
+            None,
+            "another worker's progress must not suppress this recipient's assignment"
         );
     }
 
@@ -2125,6 +2198,8 @@ mod cas_3dcb_worker_died_relay_tests {
             "2026-09-04T09:30:00+00:00",
             "swift-fox",
             Some("envelopes shipped"),
+            Some("bound-head"),
+            Some("ver-approved"),
         );
         let parsed =
             parse_verification_dispatch_envelope(&body).expect("CAS's own handoff must parse");
@@ -2132,6 +2207,8 @@ mod cas_3dcb_worker_died_relay_tests {
         assert_eq!(parsed.task_id, "cas-8725");
         assert_eq!(parsed.owner, "supervisor-agent-id");
         assert_eq!(parsed.deadline, "2026-09-04T09:30:00+00:00");
+        assert_eq!(parsed.bound_head.as_deref(), Some("bound-head"));
+        assert_eq!(parsed.approved_verdict_id.as_deref(), Some("ver-approved"));
         assert!(
             body.contains("envelopes shipped"),
             "the proposed close reason is what the verdict is about: {body}"

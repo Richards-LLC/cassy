@@ -1471,7 +1471,10 @@ fn safe_error_detail(error: &anyhow::Error) -> String {
             .downcast_ref::<MissingCredentialError>()
             .map(|missing| missing.name.as_str())
     }) {
-        return format!("missing required environment variable {name}");
+        let remedy = (name == "MECHA_VERCEL_BYPASS" || name.starts_with("MECHA_SLACK_TOKEN_"))
+            .then_some("; run `cas integrate mecha-cassy` to refresh credentials")
+            .unwrap_or_default();
+        return format!("missing required environment variable {name}{remedy}");
     }
     safe_error_detail_text(&format!("{error:#}"))
 }
@@ -1641,7 +1644,10 @@ async fn connect_server(name: &str, config: &ServerConfig) -> Result<ConnectedSe
                         .map(|value| (key.clone(), value))
                 })
                 .collect::<Result<Vec<_>>>()?;
-            let args_clone = args.clone();
+            let args_clone = args
+                .iter()
+                .map(|arg| expand_environment_placeholders(arg))
+                .collect::<Result<Vec<_>>>()?;
             let transport = TokioChildProcess::new(cmd.configure(move |cmd| {
                 cmd.args(&args_clone);
                 for (k, v) in &env_clone {
@@ -1727,17 +1733,56 @@ fn http_transport_config(
 }
 
 fn resolve_credential(value: &str) -> Result<String> {
-    let env_name = value
-        .strip_prefix("env:")
-        .or_else(|| value.strip_prefix("${").and_then(|v| v.strip_suffix('}')));
-    match env_name {
-        Some(name) if !name.is_empty() => std::env::var(name).map_err(|_| {
-            anyhow::Error::new(MissingCredentialError {
-                name: name.to_string(),
-            })
-        }),
-        _ => Ok(value.to_string()),
+    if let Some(name) = value.strip_prefix("env:").filter(|name| !name.is_empty()) {
+        return resolve_environment_variable(name);
     }
+    expand_environment_placeholders(value)
+}
+
+fn expand_environment_placeholders(value: &str) -> Result<String> {
+    let mut expanded = String::with_capacity(value.len());
+    let mut cursor = 0;
+
+    while let Some(relative_start) = value[cursor..].find("${") {
+        let start = cursor + relative_start;
+        expanded.push_str(&value[cursor..start]);
+        let expression_start = start + 2;
+        let Some(relative_end) = value[expression_start..].find('}') else {
+            expanded.push_str(&value[start..]);
+            return Ok(expanded);
+        };
+        let end = expression_start + relative_end;
+        let expression = &value[expression_start..end];
+        let (name, default) = expression
+            .split_once(":-")
+            .map_or((expression, None), |(name, default)| (name, Some(default)));
+
+        if safe_environment_name(name).is_none() {
+            expanded.push_str(&value[start..=end]);
+            cursor = end + 1;
+            continue;
+        }
+
+        match std::env::var(name) {
+            Ok(current) if default.is_none() || !current.is_empty() => expanded.push_str(&current),
+            Ok(_) | Err(_) => match default {
+                Some(default) => expanded.push_str(default),
+                None => return resolve_environment_variable(name),
+            },
+        }
+        cursor = end + 1;
+    }
+
+    expanded.push_str(&value[cursor..]);
+    Ok(expanded)
+}
+
+fn resolve_environment_variable(name: &str) -> Result<String> {
+    std::env::var(name).map_err(|_| {
+        anyhow::Error::new(MissingCredentialError {
+            name: name.to_string(),
+        })
+    })
 }
 
 /// A search result entry including the server name.
@@ -2545,6 +2590,34 @@ mod tests {
     }
 
     #[test]
+    fn stdio_values_expand_environment_placeholders_and_defaults() {
+        let env_name = format!(
+            "CAS_PROXY_EXPANSION_TEST_{}_{}",
+            std::process::id(),
+            SESSION_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        );
+        unsafe { std::env::set_var(&env_name, "from-process") };
+        let missing = format!(
+            "CAS_PROXY_EXPANSION_MISSING_{}_{}",
+            std::process::id(),
+            SESSION_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        );
+
+        let expanded_arg = expand_environment_placeholders(&format!(
+            "prefix-${{{env_name}}}-${{{missing}:-fallback}}-${{{env_name}}}"
+        ))
+        .unwrap();
+        let expanded_env = resolve_credential(&format!(
+            "env-prefix-${{{env_name}}}-${{{missing}:-env-fallback}}"
+        ))
+        .unwrap();
+
+        unsafe { std::env::remove_var(&env_name) };
+        assert_eq!(expanded_arg, "prefix-from-process-fallback-from-process");
+        assert_eq!(expanded_env, "env-prefix-from-process-env-fallback");
+    }
+
+    #[test]
     fn missing_imported_credential_is_fail_closed_and_redacted() {
         let missing = format!(
             "CAS_PROXY_MISSING_{}_{}",
@@ -2598,6 +2671,63 @@ mod tests {
         assert!(json.contains(&missing));
         assert!(!json.contains(secret));
         assert!(!json.contains("connection_failed"));
+    }
+
+    #[tokio::test]
+    async fn mecha_cassy_missing_credential_health_names_refresh_command() {
+        let missing = format!("MECHA_SLACK_TOKEN_CAS_PROXY_HEALTH_{}", std::process::id());
+        let config = ServerConfig::Http {
+            url: "https://example.invalid/mcp".to_string(),
+            auth: Some(format!("env:{missing}")),
+            headers: HashMap::new(),
+            oauth: false,
+        };
+        let engine =
+            ProxyEngine::from_configs(HashMap::from([("mecha-cassy".to_string(), config)]))
+                .await
+                .unwrap();
+        let server = engine
+            .health_snapshot()
+            .await
+            .servers
+            .into_iter()
+            .find(|server| server.name == "mecha-cassy")
+            .expect("configured upstream health must be present");
+
+        let expected = format!(
+            "missing required environment variable {missing}; run `cas integrate mecha-cassy` to refresh credentials"
+        );
+        assert_eq!(server.last_error.as_deref(), Some(expected.as_str()));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn missing_stdio_placeholder_is_reported_before_spawn_as_a_credential_failure() {
+        let missing = format!(
+            "CAS_PROXY_MISSING_STDIO_{}_{}",
+            std::process::id(),
+            SESSION_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        );
+        let config = ServerConfig::Stdio {
+            command: "true".to_string(),
+            args: vec![format!("${{{missing}}}")],
+            env: HashMap::new(),
+        };
+        let engine = ProxyEngine::from_configs(HashMap::from([("stdio".to_string(), config)]))
+            .await
+            .unwrap();
+        let server = engine.health_snapshot().await.servers.remove(0);
+        let expected_code = format!("{MISSING_CREDENTIAL_ENV_PREFIX}{missing}");
+        let expected_detail = format!("missing required environment variable {missing}");
+
+        assert_eq!(
+            server.last_error_code.as_deref(),
+            Some(expected_code.as_str())
+        );
+        assert_eq!(server.last_error.as_deref(), Some(expected_detail.as_str()));
+        assert_ne!(
+            server.last_error_code.as_deref(),
+            Some("authentication_required")
+        );
     }
 
     #[test]

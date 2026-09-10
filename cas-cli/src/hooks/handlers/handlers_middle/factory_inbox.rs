@@ -44,6 +44,26 @@ use std::path::Path;
 use cas_core::hooks::types::HookInput;
 use cas_store::QueuedPrompt;
 
+fn assignment_is_stale_for_recipient(
+    task_store: &dyn crate::store::TaskStore,
+    row: &QueuedPrompt,
+    recipient: &str,
+) -> bool {
+    let Some(task_id) = crate::prompt_revalidation::assignment_solicited_task_id(&row.prompt) else {
+        return false;
+    };
+    let Ok(task) = task_store.get(&task_id) else {
+        return false;
+    };
+    crate::prompt_revalidation::assignment_stale_task(
+        &row.prompt,
+        task.status,
+        task.assignee.as_deref(),
+        recipient,
+    )
+    .is_some()
+}
+
 /// Rows surfaced into a single turn.
 ///
 /// Bounded because the injection lands in the model's context window: an agent
@@ -112,6 +132,7 @@ fn surface_factory_inbox_with_transport_delivery(
     }
     let session = factory_session();
     let queue = crate::store::open_prompt_queue_store(cas_root).ok()?;
+    let task_store = crate::store::open_task_store_local(cas_root).ok();
 
     let mut rows: Vec<QueuedPrompt> = Vec::new();
     for alias in &aliases {
@@ -131,6 +152,22 @@ fn surface_factory_inbox_with_transport_delivery(
         match found {
             Ok(found) => {
                 for row in found {
+                    // Transport-delivered rows remain eligible for this hook
+                    // so a wake the harness dropped can recover. Revalidate
+                    // assignment/start boilerplate before rendering it: the
+                    // task may have moved beyond Open while the row waited.
+                    if task_store.as_ref().is_some_and(|store| {
+                        assignment_is_stale_for_recipient(store.as_ref(), &row, alias)
+                    }) {
+                        tracing::info!(
+                            target: "cas::coordination",
+                            stage = "suppress_stale_assignment_at_hook_surface",
+                            prompt_id = row.id,
+                            recipient = %alias,
+                            "cas-7c1a: withheld stale assignment boilerplate from turn-start surfacing"
+                        );
+                        continue;
+                    }
                     // A supervisor's two aliases are two distinct recipient
                     // keys in the receipt table, so a broadcast row can come
                     // back from both. Injecting it twice into one turn is the
@@ -256,6 +293,66 @@ mod tests {
         let mut urgent = row(1, "supervisor", "stop");
         urgent.urgent = true;
         assert!(render_surfaced(&[urgent]).contains("urgent"));
+    }
+
+    #[test]
+    fn turn_start_does_not_replay_a_transport_delivered_spawn_brief_after_progress() {
+        let _guard = crate::hooks::test_env_lock();
+        let temp = TempDir::new().unwrap();
+        let cas_root = crate::store::init_cas_dir(temp.path()).unwrap();
+        let task_store = crate::store::open_task_store(&cas_root).unwrap();
+        let mut task = cas_types::Task::new(
+            "cas-7c1e".to_string(),
+            "spawn brief already acted on".to_string(),
+        );
+        task.status = cas_types::TaskStatus::AwaitingMerge;
+        task.assignee = Some("worker-1".to_string());
+        task_store.add(&task).unwrap();
+
+        let queue = crate::store::open_prompt_queue_store(&cas_root).unwrap();
+        let prompt = "You were spawned for task cas-7c1e — \"spawn brief already acted on\" — and it is assigned to you now."
+            .to_string()
+            + "\nStart with `mcp__cs__task action=show id=cas-7c1e`, then `mcp__cs__task action=start id=cas-7c1e` before you change any code.";
+        let id = queue
+            .enqueue_with_summary(
+                "director",
+                "worker-1",
+                &prompt,
+                Some("session"),
+                Some("Assigned task: cas-7c1e"),
+            )
+            .unwrap();
+        queue.mark_transport_delivered(id).unwrap();
+        queue
+            .record_recipient_surfaced(
+                id,
+                "worker-1",
+                cas_store::SurfacingSource::TransportDelivered,
+            )
+            .unwrap();
+
+        // SAFETY: guarded by the process-wide hook test env lock.
+        unsafe {
+            std::env::set_var("CAS_AGENT_NAME", "worker-1");
+            std::env::set_var("CAS_FACTORY_SESSION", "session");
+        }
+        let mut input = HookInput {
+            hook_event_name: "UserPromptSubmit".to_string(),
+            ..Default::default()
+        };
+        input.agent_role = Some("worker".to_string());
+
+        assert_eq!(
+            surface_factory_inbox(Some(&cas_root), &input),
+            None,
+            "a stale spawn brief must be consumed without replaying task-start boilerplate"
+        );
+
+        // SAFETY: guarded by the process-wide hook test env lock.
+        unsafe {
+            std::env::remove_var("CAS_AGENT_NAME");
+            std::env::remove_var("CAS_FACTORY_SESSION");
+        }
     }
 
     /// cas-78d3 (GH #165) — the regression this whole task exists for.

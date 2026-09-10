@@ -4076,14 +4076,18 @@ impl FactoryDaemon {
                 }
             }
 
-            // cas-8aee (GH #336): assignment and spawn-intro prompts carry a
-            // `task start` imperative. They can wait in the durable queue
-            // while that task closes, so inspect its live status at this final
-            // shared transport boundary instead of injecting stale work.
-            // Unreadable/missing tasks fail open; only Closed/Cancelled is
-            // positive evidence that the instruction is unsafe.
+            // cas-8aee/cas-7c1a (GH #336/#756): assignment and spawn-intro
+            // prompts carry a `task start` imperative. They can wait in the
+            // durable queue while the task moves through InProgress,
+            // AwaitingMerge, or a terminal state, so inspect live task state at
+            // this final shared transport boundary instead of injecting stale
+            // work. Unreadable/missing tasks fail open.
             if let Some((task_id, status)) =
-                super::delivery::assignment_terminal_status(self.app.cas_dir(), &queued.prompt)
+                super::delivery::assignment_stale_status(
+                    self.app.cas_dir(),
+                    &queued.prompt,
+                    &queued.target,
+                )
             {
                 let detail = format!(
                     "withdrawn before transport: assignment for {task_id} is stale because the task is {}",
@@ -4098,45 +4102,6 @@ impl FactoryDaemon {
                     task_id = %task_id,
                     status = %status,
                     "cas-8aee: suppressed a queued assignment/start instruction for a terminal task"
-                );
-                continue;
-            }
-
-            // A registration-time spawn brief is historical once the same
-            // addressed worker has already started or parked its task. This
-            // closes the other side of GH #589: if the queue wake was delayed,
-            // do not inject a stale `task start` imperative after the worker
-            // has already acted on the assignment through another turn.
-            if queued.source.eq_ignore_ascii_case("director")
-                && queued
-                    .summary
-                    .as_deref()
-                    .is_some_and(|summary| summary.starts_with("Assigned task:"))
-                && let Some(task_id) =
-                    crate::prompt_revalidation::assignment_solicited_task_id(&queued.prompt)
-                && let Ok(store) = crate::store::open_task_store_local(self.app.cas_dir())
-                && let Ok(task) = store.get(&task_id)
-                && let Some(task_id) = crate::prompt_revalidation::assignment_targets_started_task(
-                    &queued.prompt,
-                    task.status,
-                    task.assignee.as_deref(),
-                    &queued.target,
-                )
-            {
-                let detail = format!(
-                    "withdrawn before transport: spawn assignment for {task_id} is stale because the addressed worker already moved the task to {}",
-                    task.status
-                );
-                let _ = queue.mark_superseded(queued.id, &detail);
-                self.forget_row_delivery_state(queued.id);
-                tracing::info!(
-                    target: "cas::coordination",
-                    stage = "suppress_started_assignment",
-                    prompt_id = queued.id,
-                    task_id = %task_id,
-                    status = %task.status,
-                    target_agent = %queued.target,
-                    "cas-589: suppressed a delayed spawn assignment after the addressed worker started the task"
                 );
                 continue;
             }
@@ -8085,6 +8050,8 @@ mod tests {
             "2026-09-04T09:30:00+00:00",
             "swift-fox",
             Some("envelopes shipped"),
+            Some("bound-head"),
+            Some("ver-approved"),
         );
         let source = "verification-dispatch:vd-8725";
 

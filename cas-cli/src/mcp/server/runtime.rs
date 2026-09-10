@@ -341,6 +341,11 @@ async fn run_server_impl() -> anyhow::Result<()> {
         });
         match cfg {
             Ok(mut cfg) if !cfg.servers.is_empty() => {
+                if let Err(error) =
+                    crate::cli::integrate::mecha_cassy::load_machine_credentials_into_process_env()
+                {
+                    eprintln!("[Cassy] Failed to load machine-scoped proxy credentials: {error}");
+                }
                 if std::env::var_os("VIKTOR_API_KEY").is_none() {
                     match crate::cli::viktor::load_machine_credential() {
                         Ok(Some(key)) => install_machine_viktor_credential(&mut cfg, key),

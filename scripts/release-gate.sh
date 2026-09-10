@@ -19,7 +19,7 @@ failure_log_codex_rel='cas-cli/src/builtins/codex/skills/cas-cut-release/referen
 failure_log_grok_rel='cas-cli/src/builtins/grok/skills/cas-cut-release/references/failure-log.md'
 readonly -a gate_check_ids=(
     scratch-base epic-worktree-fresh epic-worktree-zig failure-log ancestor-proxy-config
-    version-literals fixture-paths workspace-tests hub-web-dist-drift hub-web-visual-qa nextest doctests archive-mode
+    version-literals fixture-paths workspace-tests macos-check hub-web-dist-drift hub-web-visual-qa nextest doctests archive-mode
     snapshot-portability builtin-projections changelog-and-versions release-script
     procedure-guardrails working-tree
 )
@@ -199,7 +199,7 @@ row_cache_key() {
     local -a inputs=()
     case "$name" in
         hub-web-visual-qa|hub-web-dist-drift) inputs=(hub-web scripts .github) ;;
-        fixture-paths|workspace-tests|nextest|doctests|archive-mode|snapshot-portability)
+        fixture-paths|workspace-tests|macos-check|nextest|doctests|archive-mode|snapshot-portability)
             inputs=(.) ;;
         *) return 1 ;;
     esac
@@ -589,6 +589,71 @@ check_workspace_tests() {
     "$cargo_bin" check --workspace --tests
 }
 
+check_macos() {
+    local rustup_bin="${RUSTUP:-rustup}" macos_cc="$tmp_dir/macos-check-cc"
+    if ! command -v "$rustup_bin" >/dev/null 2>&1; then
+        printf 'macos-check: rustup is unavailable; install rustup before checking aarch64-apple-darwin\n'
+        return 1
+    fi
+    if ! "$rustup_bin" target add aarch64-apple-darwin; then
+        printf 'macos-check: rustup target add aarch64-apple-darwin failed\n'
+        return 1
+    fi
+    # Cross-target `cargo check` still runs C build scripts, but its output is
+    # metadata-only and never links the target archive. Linux hosts reject the
+    # Darwin-only flags and headers emitted by zstd-sys/ring/blake3, so compile
+    # each C/assembly input as a tiny valid host object while preserving Cargo's
+    # real Rust target analysis. This lane intentionally does not claim C ABI
+    # or linker coverage; the macOS build lane owns that proof.
+    cat >"$macos_cc" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+args=()
+consume_next=false
+compile=false
+for arg in "$@"; do
+    if [[ "$consume_next" == true ]]; then
+        consume_next=false
+        continue
+    fi
+    case "$arg" in
+        -arch)
+            consume_next=true
+            continue
+            ;;
+        -m*-version-min=*|-fembed-bitcode|-fembed-bitcode-marker|-gfull)
+            continue
+            ;;
+        -c)
+            compile=true
+            args+=("$arg")
+            continue
+            ;;
+        *.c|*.cc|*.cpp|*.cxx|*.m|*.mm|*.S|*.s|-)
+            if [[ "$compile" == true ]]; then
+                continue
+            fi
+            args+=("$arg")
+            continue
+            ;;
+    esac
+    args+=("$arg")
+done
+if [[ "$compile" == true ]]; then
+    printf '%s\n' 'int cas_release_gate_c_probe(void) { return 0; }' |
+        cc "${args[@]}" -x c -
+else
+    exec cc "${args[@]}"
+fi
+EOF
+    chmod +x "$macos_cc"
+    env RUSTC_WRAPPER= \
+        "CC_aarch64-apple-darwin=$macos_cc" \
+        "CC_aarch64_apple_darwin=$macos_cc" \
+        TARGET_CC="$macos_cc" \
+        "$cargo_bin" check --workspace --tests --target aarch64-apple-darwin
+}
+
 # The merge queue validates the whole workspace, so the suite and archive rows
 # do too (cas-1f6e: a cas-mux snapshot test failed in the queue after a local
 # `-p cas` gate passed). The non-cas crates add roughly a minute to each row.
@@ -971,6 +1036,9 @@ run_check fixture-paths \
 run_check workspace-tests \
     "$cargo_bin check --workspace --tests" \
     check_workspace_tests
+run_check macos-check \
+    "$cargo_bin check --workspace --tests --target aarch64-apple-darwin (rustup target add preflight)" \
+    check_macos
 run_check hub-web-dist-drift \
     'npm ci --no-audit --no-fund && npm run build && git diff --exit-code -- dist' \
     check_hub_web_dist_drift

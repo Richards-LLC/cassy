@@ -43,7 +43,7 @@ pub use events::{
     MachineEventKind, SessionAttentionContext,
 };
 pub use identity::{MachineIdentity, MachineIdentityStore};
-pub use runtime::{HubInstanceLock, HubProcessRecord, HubRuntimePaths};
+pub use runtime::{HubInstanceLock, HubLockHolder, HubLockOwner, HubProcessRecord, HubRuntimePaths};
 pub use server::{HubState, router};
 pub(crate) use state::ensure_private_dir;
 pub use tailscale::{TailscaleServeManager, TailscaleServeReceipt};

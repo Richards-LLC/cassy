@@ -14,8 +14,8 @@ use crate::cli::Cli;
 use crate::config::Config;
 use crate::hub::{
     AuthStore, DEFAULT_HUB_PORT, DEFAULT_VIEWER_QUEUE_CAPACITY, DaemonConnector, HubProcessRecord,
-    HubRuntimePaths, HubState, LocalSessionReadModel, MachineEventBus, MachineIdentityStore,
-    MachineMetadata, MachineTransport, PreAuthAuthorizer, Scope, SessionCatalog,
+    HubLockHolder, HubRuntimePaths, HubState, LocalSessionReadModel, MachineEventBus,
+    MachineIdentityStore, MachineMetadata, MachineTransport, PreAuthAuthorizer, Scope, SessionCatalog,
     SessionMultiplexer, TailscaleServeManager, TailscaleServeReceipt, TransportSecurity,
     load_cloud_device_suggestions, router, spawn_attention_enricher, validate_control_bind,
 };
@@ -83,7 +83,7 @@ pub enum HubCommands {
     /// Report the durable hub process and endpoint state
     Status,
     /// Gracefully stop the machine hub
-    Stop,
+    Stop(HubStopArgs),
     /// Stop and start the hub while preserving machine identity
     Restart(HubServeArgs),
     /// Install, inspect, or remove boot-persistent hub supervision
@@ -185,6 +185,16 @@ pub struct HubServeArgs {
     /// Cassy-created cgroup scope passed through the detached launch barrier.
     #[arg(long, hide = true)]
     pub cgroup: Option<std::path::PathBuf>,
+    /// Reclaim a wedged hub lock without waiting for the lifecycle timeout.
+    #[arg(long)]
+    pub force: bool,
+}
+
+#[derive(Args, Debug, Clone, Default)]
+pub struct HubStopArgs {
+    /// Reclaim a wedged hub lock without waiting for the lifecycle timeout.
+    #[arg(long)]
+    pub force: bool,
 }
 
 impl Default for HubServeArgs {
@@ -195,6 +205,7 @@ impl Default for HubServeArgs {
             launched_by: "cli".to_owned(),
             launched_at: None,
             cgroup: None,
+            force: false,
         }
     }
 }
@@ -244,13 +255,45 @@ impl HubTransportReport {
         expected_target: Option<String>,
         actual_target: Option<String>,
     ) -> Self {
+        Self::fail_with_remedy(
+            message,
+            expected_target,
+            actual_target,
+            "Run `cas hub restart --tailscale-serve` to republish the route.".to_owned(),
+        )
+    }
+
+    fn fail_with_remedy(
+        message: impl Into<String>,
+        expected_target: Option<String>,
+        actual_target: Option<String>,
+        remedy: String,
+    ) -> Self {
         Self {
             status: "fail".to_owned(),
             message: message.into(),
             expected_target,
             actual_target,
-            remedy: Some("Run `cas hub restart --tailscale-serve` to republish the route.".to_owned()),
+            remedy: Some(remedy),
         }
+    }
+
+    fn wedged_lock(holder: &HubLockHolder, tailscale: bool) -> Self {
+        let command = if tailscale {
+            "cas hub restart --force --tailscale-serve"
+        } else {
+            "cas hub restart --force"
+        };
+        Self::fail_with_remedy(
+            format!(
+                "hub machine lock is held by pid {} ({}) but no live runtime endpoint is responding",
+                holder.pid,
+                holder.age_label()
+            ),
+            None,
+            None,
+            format!("Run `{command}` to terminate the wedged holder and restore the hub."),
+        )
     }
 
     fn unavailable(error: impl Into<String>) -> Self {
@@ -436,9 +479,18 @@ fn wait_for_stop_or_satisfying_hub(
     stale_pid: Option<u32>,
     timeout: Duration,
     relaunch: Option<&RelaunchIntent<'_>>,
+    force: bool,
 ) -> Result<Option<HubProcessRecord>> {
     let deadline = Instant::now() + timeout;
     loop {
+        let holder = paths
+            .lock_holders()
+            .into_iter()
+            .find(|holder| force || Some(holder.pid) != settle_pid);
+        if let Some(holder) = holder.as_ref() && force {
+            terminate_lock_holder(paths, holder)?;
+            continue;
+        }
         let lock = paths.try_acquire_instance_lock()?;
         let quiescent = lock.is_some()
             && settle_pid.is_none_or(|pid| !process_is_running(pid));
@@ -456,12 +508,18 @@ fn wait_for_stop_or_satisfying_hub(
                 intent.tailscale_port,
                 env!("CARGO_PKG_VERSION"),
             )
-            && record_is_live(&record)
+            && record_is_ready(paths, &record)
         {
             return Ok(Some(record));
         }
         if Instant::now() >= deadline {
-            return match settle_pid {
+            if let Some(holder) = holder.as_ref()
+                && (force || !holder.is_stopping())
+            {
+                terminate_lock_holder(paths, holder)?;
+                continue;
+            }
+            match settle_pid {
                 Some(pid) => anyhow::bail!(
                     "cas hub pid {pid} or its machine lock remained live after {:.1}s; no replacement was started",
                     timeout.as_secs_f64()
@@ -474,6 +532,80 @@ fn wait_for_stop_or_satisfying_hub(
         }
         std::thread::sleep(Duration::from_millis(50));
     }
+}
+
+fn terminate_lock_holder(paths: &HubRuntimePaths, holder: &HubLockHolder) -> Result<()> {
+    anyhow::ensure!(
+        holder.pid != std::process::id(),
+        "refusing to terminate the current cas hub lifecycle process"
+    );
+    eprintln!(
+        "cas hub lock holder pid {} ({}) has no completed runtime state; terminating it",
+        holder.pid,
+        holder.age_label()
+    );
+
+    #[cfg(unix)]
+    {
+        // SAFETY: the lock file itself proves this PID owns the private hub
+        // lock; SIGTERM gives a normal hub a chance to release it cleanly.
+        let result = unsafe { libc::kill(holder.pid as libc::pid_t, libc::SIGTERM) };
+        if result != 0 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::ESRCH) {
+                return Err(error).context("terminate wedged cas hub lock holder");
+            }
+        }
+    }
+    #[cfg(windows)]
+    {
+        Command::new("taskkill")
+            .args(["/PID", &holder.pid.to_string()])
+            .status()
+            .context("terminate wedged cas hub lock holder")?;
+    }
+
+    let graceful_deadline = Instant::now() + HUB_CONNECTION_DRAIN_TIMEOUT;
+    while Instant::now() < graceful_deadline {
+        if let Some(lock) = paths.try_acquire_instance_lock()? {
+            drop(lock);
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    #[cfg(unix)]
+    {
+        // SAFETY: this is the same private lock owner that did not release
+        // after SIGTERM; SIGKILL is the bounded final recovery step.
+        let result = unsafe { libc::kill(holder.pid as libc::pid_t, libc::SIGKILL) };
+        if result != 0 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::ESRCH) {
+                return Err(error).context("force-terminate wedged cas hub lock holder");
+            }
+        }
+    }
+    #[cfg(windows)]
+    {
+        Command::new("taskkill")
+            .args(["/F", "/PID", &holder.pid.to_string()])
+            .status()
+            .context("force-terminate wedged cas hub lock holder")?;
+    }
+
+    let kill_deadline = Instant::now() + HUB_CONNECTION_DRAIN_TIMEOUT;
+    while Instant::now() < kill_deadline {
+        if let Some(lock) = paths.try_acquire_instance_lock()? {
+            drop(lock);
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    anyhow::bail!(
+        "cas hub lock holder pid {} did not release the machine lock after termination",
+        holder.pid
+    )
 }
 
 /// How a launch attempt resolved its race with a concurrent lifecycle command.
@@ -516,7 +648,7 @@ fn wait_for_lock_or_satisfying_hub(
                 tailscale_port,
                 env!("CARGO_PKG_VERSION"),
             )
-            && record_is_live(&record)
+            && record_is_ready(paths, &record)
         {
             return Ok(LaunchWait::AlreadySatisfied(Box::new(record)));
         }
@@ -590,7 +722,7 @@ pub fn execute(args: &HubArgs, cli: &Cli) -> Result<()> {
             serve_foreground(&serve, args.tailscale_serve, args.tailscale_serve_port)
         }
         HubCommands::Status => status(cli),
-        HubCommands::Stop => stop(cli),
+        HubCommands::Stop(stop_args) => stop(cli, stop_args.force),
         HubCommands::Restart(serve) => {
             let paths = HubRuntimePaths::default_for_user()?;
             let (tailscale_serve, tailscale_port) = resolve_lifecycle_tailscale_request(
@@ -611,6 +743,7 @@ pub fn execute(args: &HubArgs, cli: &Cli) -> Result<()> {
                     tailscale_serve,
                     tailscale_port,
                 }),
+                serve.force,
             )? {
                 StopOutcome::AlreadySatisfied(record) => {
                     if cli.json {
@@ -702,7 +835,7 @@ fn start_with_output_resolved(
     )?;
     crate::hub::ensure_private_dir(paths.root())?;
     match paths.read_process_record() {
-        Ok(record) if record_is_live(&record) => {
+        Ok(record) if record_is_ready(&paths, &record) => {
             match decide_live_start(
                 &record,
                 args,
@@ -759,6 +892,7 @@ fn start_with_output_resolved(
                             tailscale_serve,
                             tailscale_port,
                         }),
+                        args.force,
                     )? {
                         if emit_output && cli.json {
                             println!("{}", serde_json::to_string(&record)?);
@@ -917,7 +1051,7 @@ fn start_with_output_resolved(
     let deadline = Instant::now() + HUB_LAUNCH_TIMEOUT;
     while Instant::now() < deadline {
         if let Ok(record) = paths.read_process_record() {
-            if record_is_live(&record) {
+            if record_is_ready(&paths, &record) {
                 if emit_output && cli.json {
                     println!("{}", serde_json::to_string(&record)?);
                 } else if emit_output {
@@ -938,7 +1072,7 @@ fn start_with_output_resolved(
         }
         if let Some(status) = child.try_wait().context("poll detached cas hub")? {
             if let Ok(record) = paths.read_process_record()
-                && record_is_live(&record)
+                && record_is_ready(&paths, &record)
             {
                 anyhow::bail!(
                     "another cas hub instance won the machine lock (pid {}); replacement process exited with {}",
@@ -1010,12 +1144,14 @@ fn serve_foreground(args: &HubServeArgs, tailscale_serve: bool, tailscale_port: 
     let addr = SocketAddr::new(args.bind, args.port);
     validate_control_bind(addr, TransportSecurity::Plaintext)?;
     let paths = HubRuntimePaths::default_for_user()?;
-    let _lock = paths.acquire_instance_lock()?;
     let (tailscale_serve, tailscale_port) = resolve_lifecycle_tailscale_request(
         tailscale_serve,
         tailscale_port,
         &paths,
     )?;
+    // AuthStore::open takes an exclusive auth.lock. Do this before claiming
+    // hub.lock: a stale auth writer must never leave a launchd hub process
+    // holding the machine lock while it waits indefinitely.
     let machine = MachineIdentityStore::new(paths.root()).load_or_create()?;
     let auth = AuthStore::open(paths.root(), machine.id.clone())?;
     // Commander hub is machine-scoped, so its one AI-enrichment opt-in comes
@@ -1035,9 +1171,33 @@ fn serve_foreground(args: &HubServeArgs, tailscale_serve: bool, tailscale_port: 
     let launched_by = args.launched_by.clone();
     let launched_at = args.launched_at.clone();
     runtime.block_on(async move {
+        // Bind before hub.lock so a failed port acquisition cannot strand a
+        // machine-lock owner with no listener to diagnose or stop.
         let listener = tokio::net::TcpListener::bind(addr).await?;
         let actual = listener.local_addr()?;
+        let mut lock = paths.acquire_instance_lock()?;
         let tailscale_manager = TailscaleServeManager::new(paths.root());
+        let started_at = chrono::Utc::now().to_rfc3339();
+        let mut record = HubProcessRecord {
+            pid: std::process::id(),
+            sid: current_session_id(),
+            pgid: current_process_group_id(),
+            bind: actual.ip().to_string(),
+            port: actual.port(),
+            version: env!("CARGO_PKG_VERSION").to_owned(),
+            started_at: started_at.clone(),
+            cgroup: args.cgroup.clone(),
+            launched_by: Some(launched_by),
+            launched_at: Some(launched_at.unwrap_or(started_at)),
+            public_url: None,
+            tailscale_serve_port: None,
+            tailscale_cli: tailscale_serve.then(|| tailscale_manager.executable_display()),
+            tailscale_serve_target: None,
+            transport_warning: None,
+        };
+        paths.write_process_record(&record)?;
+        let mut startup_guard = HubStartupGuard::new(paths.clone(), tailscale_manager.clone());
+
         let (tailscale_listener, tailscale, transport_warning) = if tailscale_serve {
             let proxy_listener =
                 tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
@@ -1053,30 +1213,14 @@ fn serve_foreground(args: &HubServeArgs, tailscale_serve: bool, tailscale_port: 
         } else {
             (None, None, None)
         };
-        let started_at = chrono::Utc::now().to_rfc3339();
-        let record = HubProcessRecord {
-            pid: std::process::id(),
-            sid: current_session_id(),
-            pgid: current_process_group_id(),
-            bind: actual.ip().to_string(),
-            port: actual.port(),
-            version: env!("CARGO_PKG_VERSION").to_owned(),
-            started_at: started_at.clone(),
-            cgroup: args.cgroup.clone(),
-            launched_by: Some(launched_by),
-            launched_at: Some(launched_at.unwrap_or(started_at)),
-            public_url: tailscale.as_ref().map(|receipt| receipt.public_url.clone()),
-            tailscale_serve_port: tailscale.as_ref().map(|receipt| receipt.https_port),
-            // Keep the requested transport as durable lifecycle intent even
-            // when optional publication falls back to loopback with a warning.
-            tailscale_cli: tailscale_serve.then(|| tailscale_manager.executable_display()),
-            tailscale_serve_target: tailscale.as_ref().map(|receipt| receipt.local_target.clone()),
-            transport_warning,
-        };
-        if let Err(error) = paths.write_process_record(&record) {
-            let _ = tailscale_manager.disable_owned();
-            return Err(error);
-        }
+        record.public_url = tailscale.as_ref().map(|receipt| receipt.public_url.clone());
+        record.tailscale_serve_port = tailscale.as_ref().map(|receipt| receipt.https_port);
+        // Keep the requested transport as durable lifecycle intent even when
+        // optional publication falls back to loopback with a warning.
+        record.tailscale_serve_target =
+            tailscale.as_ref().map(|receipt| receipt.local_target.clone());
+        record.transport_warning = transport_warning;
+        paths.write_process_record(&record)?;
 
         let catalog = SessionCatalog::new(LocalSessionReadModel);
         let events = MachineEventBus::open(1024, paths.events_path())?;
@@ -1129,6 +1273,7 @@ fn serve_foreground(args: &HubServeArgs, tailscale_serve: bool, tailscale_port: 
             }
         });
 
+        lock.set_phase("running")?;
         let result = if let Some(proxy_listener) = tailscale_listener {
             serve_with_trusted_tls_proxy(listener, state, proxy_listener).await
         } else {
@@ -1138,7 +1283,9 @@ fn serve_foreground(args: &HubServeArgs, tailscale_serve: bool, tailscale_port: 
         if let Some(task) = attention_task {
             task.abort();
         }
+        let _ = lock.set_phase("stopping");
         paths.remove_process_record()?;
+        startup_guard.disarm();
         #[cfg(debug_assertions)]
         hold_instance_lock_after_record_removal_for_test()?;
         // A service manager stops a foreground hub with SIGTERM instead of
@@ -1149,6 +1296,35 @@ fn serve_foreground(args: &HubServeArgs, tailscale_serve: bool, tailscale_port: 
         let _ = tailscale_manager.disable_owned();
         result
     })
+}
+
+struct HubStartupGuard {
+    paths: HubRuntimePaths,
+    tailscale_manager: TailscaleServeManager,
+    armed: bool,
+}
+
+impl HubStartupGuard {
+    fn new(paths: HubRuntimePaths, tailscale_manager: TailscaleServeManager) -> Self {
+        Self {
+            paths,
+            tailscale_manager,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for HubStartupGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = self.paths.remove_process_record();
+            let _ = self.tailscale_manager.disable_owned();
+        }
+    }
 }
 
 async fn serve_with_bounded_connection_drain(
@@ -1395,8 +1571,47 @@ async fn shutdown_signal() {
 
 fn status(cli: &Cli) -> Result<()> {
     let paths = HubRuntimePaths::default_for_user()?;
-    let record = paths.read_process_record()?;
-    let live = record_is_live(&record);
+    let record = match paths.read_process_record() {
+        Ok(record) => record,
+        Err(error) => {
+            let holder = paths.lock_holders().into_iter().next();
+            let transport = hub_transport_report(&paths, None);
+            if cli.json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "running": false,
+                        "record": null,
+                        "binary": env!("CARGO_PKG_VERSION"),
+                        "lock_holder": holder.as_ref().map(lock_holder_json),
+                        "tailscale_serve": transport,
+                    })
+                );
+            } else if let Some(holder) = &holder {
+                println!(
+                    "Cassy hub is not ready: lock holder pid {} ({}) has no runtime record",
+                    holder.pid,
+                    holder.age_label()
+                );
+                println!("{}", render_transport_status(&transport));
+            } else {
+                println!("Cassy hub is not ready: no runtime record");
+            }
+            let detail = holder
+                .as_ref()
+                .map(|holder| {
+                    format!(
+                        "lock holder pid {} ({}) — {}",
+                        holder.pid,
+                        holder.age_label(),
+                        transport.message_with_remedy()
+                    )
+                })
+                .unwrap_or_else(|| error.to_string());
+            anyhow::bail!("cas hub runtime record unavailable: {detail}");
+        }
+    };
+    let live = record_is_ready(&paths, &record);
     let transport = hub_transport_report(&paths, Some(&record));
     if cli.json {
         println!(
@@ -1445,7 +1660,9 @@ fn render_transport_status(report: &HubTransportReport) -> String {
         return format!("Tailscale Serve: OK - {message}");
     }
 
-    let mut lines = if report.expected_target.is_some() && report.actual_target.is_some() {
+    let mut lines = if report.message.starts_with("hub machine lock") {
+        vec!["Tailscale Serve: FAIL - hub startup is wedged".to_owned()]
+    } else if report.expected_target.is_some() && report.actual_target.is_some() {
         vec!["Tailscale Serve: FAIL - route target differs from the live hub shim".to_owned()]
     } else {
         vec!["Tailscale Serve: FAIL - CAS ownership receipt is missing".to_owned()]
@@ -1462,16 +1679,26 @@ fn render_transport_status(report: &HubTransportReport) -> String {
     lines.join("\n")
 }
 
-fn stop(cli: &Cli) -> Result<()> {
+fn lock_holder_json(holder: &HubLockHolder) -> serde_json::Value {
+    serde_json::json!({
+        "pid": holder.pid,
+        "age": holder.age_label(),
+        "phase": holder.phase,
+        "command": holder.command,
+    })
+}
+
+fn stop(cli: &Cli, force: bool) -> Result<()> {
     // No relaunch intent: a live hub can never mean success here, so this
     // keeps the pre-cas-bf90 behaviour exactly.
-    stop_with_output(cli, true, None).map(|_| ())
+    stop_with_output(cli, true, None, force).map(|_| ())
 }
 
 fn stop_with_output(
     cli: &Cli,
     emit_output: bool,
     relaunch: Option<RelaunchIntent<'_>>,
+    force: bool,
 ) -> Result<StopOutcome> {
     let paths = HubRuntimePaths::default_for_user()?;
     let record = paths.read_process_record().ok();
@@ -1499,6 +1726,7 @@ fn stop_with_output(
             stale_pid,
             HUB_LIFECYCLE_TIMEOUT,
             relaunch.as_ref(),
+            force,
         )? {
             return Ok(StopOutcome::AlreadySatisfied(Box::new(satisfying)));
         }
@@ -1511,6 +1739,7 @@ fn stop_with_output(
             stale_pid,
             HUB_LIFECYCLE_TIMEOUT,
             relaunch.as_ref(),
+            force,
         )? {
             return Ok(StopOutcome::AlreadySatisfied(Box::new(satisfying)));
         }
@@ -1605,6 +1834,7 @@ pub(crate) fn restart_stale_hub(binary_version: &str, cli: &Cli) -> Result<bool>
             tailscale_serve: spec.tailscale_serve,
             tailscale_port: spec.tailscale_port,
         }),
+        false,
     )? {
         return Ok(true);
     }
@@ -1675,6 +1905,35 @@ pub(crate) fn record_is_live(record: &HubProcessRecord) -> bool {
         })
 }
 
+/// A startup record is durable before optional transport setup completes. A
+/// lifecycle caller may treat it as ready only after the lock owner reaches
+/// the running phase. Missing metadata is accepted only for records written
+/// by older binaries, which had no phase marker. Current-version records fail
+/// closed when the metadata is missing or being rewritten: `set_phase` updates
+/// the lock file in place, and accepting a transiently empty file would expose
+/// the startup record before optional transport fields (including `public_url`)
+/// have been written.
+fn record_is_ready(paths: &HubRuntimePaths, record: &HubProcessRecord) -> bool {
+    if record.version == env!("CARGO_PKG_VERSION")
+        && record.tailscale_cli.is_some()
+        && record.public_url.is_none()
+        && record.transport_warning.is_none()
+    {
+        // The startup record advertises the requested optional transport
+        // before ensure() has either published it or recorded its warning.
+        // Keep lifecycle callers from treating that intermediate shape as
+        // ready even if they observe a phase update racing the record rename.
+        return false;
+    }
+    if !record_is_live(record) {
+        return false;
+    }
+    match paths.read_lock_owner() {
+        Some(owner) => owner.pid == record.pid && owner.phase == "running",
+        None => record.version != env!("CARGO_PKG_VERSION"),
+    }
+}
+
 pub(crate) fn hub_transport_report(
     paths: &HubRuntimePaths,
     record: Option<&HubProcessRecord>,
@@ -1684,6 +1943,18 @@ pub(crate) fn hub_transport_report(
         Ok(receipt) => receipt,
         Err(error) => return HubTransportReport::unavailable(error.to_string()),
     };
+    let live = record.is_some_and(|record| record_is_ready(paths, record));
+    if let Some(holder) = paths
+        .lock_holders()
+        .into_iter()
+        .find(|holder| !holder.is_stopping())
+        && !live
+    {
+        return HubTransportReport::wedged_lock(
+            &holder,
+            receipt.is_some() || record.is_some_and(tailscale_enabled),
+        );
+    }
     let Some(receipt) = receipt else {
         if record.is_some_and(|record| {
             record.tailscale_serve_target.is_some()
@@ -1704,7 +1975,6 @@ pub(crate) fn hub_transport_report(
             "hub is loopback-only; no CAS-created Tailscale Serve route is recorded",
         );
     };
-    let live = record.is_some_and(record_is_live);
     let handlers = match manager.serve_handlers(receipt.https_port) {
         Ok(handlers) => handlers,
         Err(error) => return HubTransportReport::unavailable(error.to_string()),
@@ -1877,6 +2147,28 @@ mod tests {
         assert_eq!(
             render_transport_status(&unavailable),
             "Tailscale Serve: WARN - unavailable; hub remains loopback-only"
+        );
+    }
+
+    #[test]
+    fn wedged_lock_report_names_holder_and_force_remedy() {
+        let holder = HubLockHolder {
+            pid: 804,
+            age: Some(Duration::from_secs(91)),
+            phase: Some("starting".to_owned()),
+            command: Some("cas hub serve".to_owned()),
+        };
+        let report = HubTransportReport::wedged_lock(&holder, true);
+
+        assert_eq!(report.status, "fail");
+        assert!(report.message.contains("pid 804 (1m 31s)"));
+        assert!(report
+            .remedy
+            .as_deref()
+            .is_some_and(|remedy| remedy.contains("cas hub restart --force --tailscale-serve")));
+        assert_eq!(
+            render_transport_status(&report),
+            "Tailscale Serve: FAIL - hub startup is wedged\n  remedy: Run `cas hub restart --force --tailscale-serve` to terminate the wedged holder and restore the hub."
         );
     }
 

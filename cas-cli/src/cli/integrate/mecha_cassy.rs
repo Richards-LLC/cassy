@@ -725,10 +725,10 @@ impl MachinePaths {
                     .join("cas")
                     .join("credentials.env")
             });
-        let login_profile = Some(login_profile_path(
+        let login_profile = Some(profile_write_path(&login_profile_path(
             &home_for_credentials,
             env.get("SHELL").as_deref(),
-        ));
+        ))?);
         Ok(Self {
             user_proxy,
             claude_json: claude_dir.map(|d| d.join(".claude.json")),
@@ -772,6 +772,19 @@ fn assignment_name(line: &str) -> Option<&str> {
     let (name, _) = value.split_once('=')?;
     let name = name.trim();
     valid_env_name(name).then_some(name)
+}
+
+fn assignment_value(line: &str) -> Option<(String, String)> {
+    let name = assignment_name(line)?.to_string();
+    let raw_value = line.split_once('=')?.1.trim();
+    let value = if raw_value.starts_with('\'') && raw_value.ends_with('\'') {
+        raw_value[1..raw_value.len() - 1].replace("'\\''", "'")
+    } else if raw_value.starts_with('"') && raw_value.ends_with('"') {
+        raw_value[1..raw_value.len() - 1].replace("\\\"", "\"")
+    } else {
+        raw_value.to_string()
+    };
+    Some((name, value))
 }
 
 fn shell_quote(value: &str) -> String {
@@ -885,12 +898,42 @@ fn profile_source_line(credentials: &Path) -> String {
     format!("[ -f '{path}' ] && . '{path}'")
 }
 
+/// Resolve a symlinked login profile before using atomic replacement. Renaming
+/// a temporary file onto the link itself would replace the link and leave the
+/// real profile untouched; resolving first preserves the operator's link while
+/// making the actual target that changed visible in the report.
+fn profile_write_path(profile: &Path) -> Result<PathBuf> {
+    let metadata = match fs::symlink_metadata(profile) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(profile.to_path_buf());
+        }
+        Err(error) => {
+            return Err(error).with_context(|| format!("reading {}", profile.display()));
+        }
+    };
+    if metadata.file_type().is_symlink() {
+        let target = fs::canonicalize(profile)
+            .with_context(|| format!("resolving symlinked login profile {}", profile.display()))?;
+        anyhow::ensure!(
+            ifs::is_regular_file(&target),
+            "symlinked login profile {} resolves to a non-regular file {}",
+            profile.display(),
+            target.display()
+        );
+        return Ok(target);
+    }
+    if metadata.file_type().is_file() {
+        return Ok(profile.to_path_buf());
+    }
+    anyhow::bail!("{} is not a regular file", profile.display());
+}
+
 fn ensure_profile_line(profile: &Path, credentials: &Path) -> Result<bool> {
     let line = profile_source_line(credentials);
-    let existing = if ifs::is_regular_file(profile) {
-        ifs::read_capped(profile)?
-    } else if profile.exists() {
-        anyhow::bail!("{} is not a regular file", profile.display());
+    let profile = profile_write_path(profile)?;
+    let existing = if ifs::is_regular_file(&profile) {
+        ifs::read_capped(&profile)?
     } else {
         String::new()
     };
@@ -902,8 +945,77 @@ fn ensure_profile_line(profile: &Path, credentials: &Path) -> Result<bool> {
     } else {
         "\n"
     };
-    ifs::atomic_write_create_dirs(profile, &format!("{existing}{separator}{line}\n"))?;
+    ifs::atomic_write_create_dirs(&profile, &format!("{existing}{separator}{line}\n"))?;
     Ok(true)
+}
+
+fn sourced_profile_path(line: &str) -> Option<PathBuf> {
+    let value = line
+        .split_once("&& . ")
+        .map(|(_, value)| value.trim())
+        .or_else(|| line.trim().strip_prefix(". ").map(str::trim))
+        .or_else(|| line.trim().strip_prefix("source ").map(str::trim))?;
+    let value = value.split_whitespace().next()?;
+    let value = if value.starts_with('\'') && value.ends_with('\'') {
+        value[1..value.len() - 1].replace("'\\''", "'")
+    } else if value.starts_with('"') && value.ends_with('"') {
+        value[1..value.len() - 1].replace("\\\"", "\"")
+    } else {
+        value.to_string()
+    };
+    (!value.is_empty()).then(|| PathBuf::from(value))
+}
+
+fn load_shell_assignments(
+    path: &Path,
+    values: &mut std::collections::BTreeMap<String, String>,
+    visited: &mut std::collections::BTreeSet<PathBuf>,
+    depth: usize,
+) {
+    if depth > 8 {
+        return;
+    }
+    let identity = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    if !visited.insert(identity) {
+        return;
+    }
+    let Ok(contents) = fs::read_to_string(path) else {
+        return;
+    };
+    for line in contents.lines() {
+        if let Some((name, value)) = assignment_value(line) {
+            values.insert(name, value);
+        }
+        if let Some(source) = sourced_profile_path(line) {
+            load_shell_assignments(&source, values, visited, depth + 1);
+        }
+    }
+}
+
+/// Load private machine credentials for a proxy child whose parent harness
+/// does not forward arbitrary environment variables (notably Codex MCP
+/// subprocesses). Existing process values win, and shell code is never
+/// executed while reading the credentials/profile files.
+#[cfg(feature = "mcp-proxy")]
+pub fn load_machine_credentials_into_process_env() -> Result<usize> {
+    let paths = MachinePaths::from_env(&ProcessEnv)?;
+    let mut values = std::collections::BTreeMap::new();
+    let mut visited = std::collections::BTreeSet::new();
+    load_shell_assignments(&paths.credentials_file, &mut values, &mut visited, 0);
+    if let Some(profile) = paths.login_profile.as_deref() {
+        load_shell_assignments(profile, &mut values, &mut visited, 0);
+    }
+    let mut loaded = 0;
+    for (name, value) in values {
+        if value.trim().is_empty() || std::env::var_os(&name).is_some() {
+            continue;
+        }
+        // SAFETY: this is process initialization, before the async proxy
+        // runtime starts and before any threads are spawned.
+        unsafe { std::env::set_var(&name, value) };
+        loaded += 1;
+    }
+    Ok(loaded)
 }
 
 // ---------------------------------------------------------------------------
@@ -1378,6 +1490,11 @@ fn run_with_credentials(
     let token_env_state = EnvState::of(env, &token_env);
     let bypass_env_state = EnvState::of(env, &bypass_env);
     let credentials_ready = token_env_state.is_usable() && bypass_env_state.is_usable();
+    let login_profile_path = paths
+        .login_profile
+        .as_deref()
+        .map(profile_write_path)
+        .transpose()?;
 
     let (credentials_state, profile_state) = match credentials {
         Some(_values) if args.dry_run => (WriteState::Planned, WriteState::Planned),
@@ -1395,7 +1512,7 @@ fn run_with_credentials(
             } else {
                 WriteState::AlreadyCurrent
             };
-            let profile_state = match paths.login_profile.as_deref() {
+            let profile_state = match login_profile_path.as_deref() {
                 Some(profile) => {
                     let changed = ensure_profile_line(profile, &paths.credentials_file)
                         .with_context(|| format!("writing {}", profile.display()))?;
@@ -1582,7 +1699,7 @@ fn run_with_credentials(
         registration,
         credentials_path: paths.credentials_file.clone(),
         credentials: credentials_state,
-        login_profile_path: paths.login_profile.clone(),
+        login_profile_path,
         login_profile: profile_state,
         allowlist,
         project_proxy: project.map(|(entry, _)| entry),
@@ -2712,6 +2829,46 @@ mod tests {
         .unwrap();
         assert_eq!(second.credentials, WriteState::AlreadyCurrent);
         assert_eq!(second.login_profile, WriteState::AlreadyCurrent);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn integrated_credentials_write_through_a_symlinked_login_profile() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut paths = paths_in(dir.path());
+        let profile_target = dir.path().join("real-profile");
+        let profile_link = dir.path().join(".bash_profile");
+        std::fs::write(&profile_target, "# operator profile\n").unwrap();
+        symlink(&profile_target, &profile_link).unwrap();
+        paths.login_profile = Some(profile_link);
+        let args = MechaCassyArgs {
+            label: Some("laptop".to_string()),
+            bypass_env: MECHA_CASSY_DEFAULT_BYPASS_ENV.to_string(),
+            url: MECHA_CASSY_MCP_URL.to_string(),
+            no_harness: true,
+            ..Default::default()
+        };
+        let values = CredentialValues {
+            token: FAKE_TOKEN.to_string(),
+            bypass: FAKE_BYPASS.to_string(),
+        };
+
+        let report = run_with_credentials(
+            &args,
+            None,
+            &paths,
+            &ready_env(),
+            &FakeProbe(live_tools()),
+            Some(&values),
+        )
+        .unwrap();
+
+        assert_eq!(report.login_profile, WriteState::Written);
+        assert_eq!(report.login_profile_path, Some(profile_target.clone()));
+        let written = std::fs::read_to_string(profile_target).unwrap();
+        assert!(written.contains(&profile_source_line(&paths.credentials_file)));
     }
 
     #[test]

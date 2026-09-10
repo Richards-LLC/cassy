@@ -2570,9 +2570,14 @@ impl CasCore {
                         );
                     } else {
                         let sup_ver = supervisor_verification_tool();
+                        let bound_head = dispatch
+                            .repository
+                            .as_ref()
+                            .map(|proof| format!(" Bound head: {}.", proof.head_commit))
+                            .unwrap_or_default();
                         return Ok(Self::tool_error(format!(
-                            "⚠️ VERIFICATION REQUIRED\n\nTask {} cannot close until exact pending dispatch {} records its capability-bound verifier or registered supervisor-direct verdict. If the bound worker or verifier is unavailable, a registered supervisor can recover without them: {} action=add task_id={} dispatch_id={} status=approved summary=\"...\", then retry task close.",
-                            req.id, dispatch.id, sup_ver, req.id, dispatch.id
+                            "⚠️ VERIFICATION REQUIRED\n\nTask {} cannot close until exact pending dispatch {} records its capability-bound verifier or registered supervisor-direct verdict.{} If the bound worker or verifier is unavailable, a registered supervisor can recover without them: {} action=add task_id={} dispatch_id={} status=approved summary=\"...\", then retry task close.",
+                            req.id, dispatch.id, bound_head, sup_ver, req.id, dispatch.id
                         )));
                     }
                 }
@@ -2637,8 +2642,7 @@ impl CasCore {
                     }
                     let halt_exempt = super::stale_close_guard::halt_exempt_for_owned_task(
                         task.status,
-                        task.assignee.as_deref(),
-                        Some(agent.name.as_str()),
+                        self.caller_is_task_assignee(&task),
                     );
                     if super::stale_close_guard::agent_task_work_halted(&agent.metadata)
                         && !halt_exempt
@@ -2775,11 +2779,19 @@ impl CasCore {
         // close (where Cassy's own root is not inside a repository) can still
         // discover the standalone task's configured or detected trunk from
         // the task-owned System-A/System-B worktree.
-        let worker_worktree_path =
+        // Gates close as supervisor-authored Decisions, not worker deliveries.
+        // Do not resolve or validate an assigned worker checkout for this
+        // disposition: a detached, stale, or already-retired worker worktree
+        // must not make the supervisor's recorded decision unclosable. Worker
+        // delivery dispositions retain the resolution and branch gate below.
+        let worker_worktree_path = if close_disposition == TaskCloseDisposition::Decision {
+            None
+        } else {
             match self.resolve_worker_worktree_path(&task, declared_repo_context.as_ref()) {
                 Ok(path) => path,
                 Err(message) => return Ok(Self::tool_error(message)),
-            };
+            }
+        };
         let standalone_target_repo = if close_repo_verified {
             close_project_root.clone()
         } else {
@@ -3295,11 +3307,7 @@ impl CasCore {
         // task assignee for a non-epic task (fixes supervisor self-close deadlock).
         let supervisor_is_assignee = is_supervisor_from_env()
             && task.task_type != TaskType::Epic
-            && self
-                .get_agent_id()
-                .ok()
-                .map(|aid| task.assignee.as_deref() == Some(aid.as_str()))
-                .unwrap_or(false);
+            && self.caller_is_task_assignee(&task);
 
         // cas-6538: `depth_light` short-circuits the verification jail. The
         // jail arms `pending_verification=true` and demands a `task-verifier`
@@ -3339,6 +3347,7 @@ impl CasCore {
                         )));
                     }
                 };
+                let mut superseded_approved_verdict_id = None;
 
                 // Revalidate repository-bound legacy proof even after a verdict
                 // was recorded. This prevents an approval from authorizing file
@@ -3351,6 +3360,16 @@ impl CasCore {
                     )
                     .is_err()
                 {
+                    if dispatch.state == cas_types::VerificationDispatchState::Resolved
+                        && let Ok(Some(verdict)) =
+                            cas_store::get_verification_for_dispatch(&self.cas_root, &dispatch.id)
+                        && matches!(
+                            verdict.status,
+                            VerificationStatus::Approved | VerificationStatus::Skipped
+                        )
+                    {
+                        superseded_approved_verdict_id = Some(verdict.id);
+                    }
                     cas_store::invalidate_verification_dispatch_for_repository_drift(
                         &self.cas_root,
                         &dispatch.id,
@@ -3470,11 +3489,7 @@ impl CasCore {
                         // Only auto-claim if the closing agent is the task's assignee.
                         // If a supervisor closes a worker's task, skip the lease to avoid
                         // locking the task to the supervisor.
-                        let is_assignee = self
-                            .get_agent_id()
-                            .ok()
-                            .map(|aid| task.assignee.as_deref() == Some(aid.as_str()))
-                            .unwrap_or(false);
+                        let is_assignee = self.caller_is_task_assignee(&task);
                         if is_assignee {
                             self.auto_claim_for_verification(&req.id, task_store.as_ref())?;
                         }
@@ -3633,16 +3648,62 @@ impl CasCore {
                         // or its lease. If Git inspection fails, the close remains
                         // failure-atomic instead of leaving a pending task without a
                         // dispatch.
-                        let proof_worktree = self
-                            .resolve_worker_worktree_path(&task, declared_repo_context.as_ref())
-                            .map_err(|error| McpError {
-                                code: ErrorCode::INVALID_PARAMS,
-                                message: Cow::from(format!(
-                                    "Failed to resolve verification worktree: {error}"
-                                )),
-                                data: None,
-                            })?
-                            .unwrap_or_else(|| close_project_root.clone());
+                        // A transactional delivery close runs after the
+                        // supervisor has published the target and persisted
+                        // CloseReady. Bind that post-merge cycle to the
+                        // target checkout, even when the worker worktree is
+                        // still present, so the proof describes the merged
+                        // head rather than the source branch that was just
+                        // consumed.
+                        let post_merge_target = if task.status == TaskStatus::AwaitingMerge
+                            && task.deliverables.factory_branch_anchor.is_some()
+                        {
+                            Some(close_project_root.clone())
+                        } else {
+                            req.commit_receipt
+                                .as_deref()
+                                .and_then(|receipt| {
+                                    cas_store::get_latest_worker_delivery(
+                                        &self.cas_root,
+                                        &req.id,
+                                    )
+                                    .ok()
+                                    .flatten()
+                                    .and_then(|(delivery, transaction)| {
+                                        if !matches!(
+                                            transaction.state,
+                                            cas_types::WorkerDeliveryState::Merged
+                                                | cas_types::WorkerDeliveryState::CloseReady
+                                                | cas_types::WorkerDeliveryState::Delivered
+                                        ) {
+                                            return None;
+                                        }
+                                        let resolved = resolve_task_commit_receipt_sha(
+                                            &close_project_root,
+                                            receipt,
+                                        )
+                                        .ok()?;
+                                        (resolved == delivery.commit_sha).then_some(())
+                                    })
+                                })
+                                .map(|_| close_project_root.clone())
+                        };
+                        let proof_worktree = match post_merge_target {
+                            Some(target) => target,
+                            None => self
+                                .resolve_worker_worktree_path(
+                                    &task,
+                                    declared_repo_context.as_ref(),
+                                )
+                                .map_err(|error| McpError {
+                                    code: ErrorCode::INVALID_PARAMS,
+                                    message: Cow::from(format!(
+                                        "Failed to resolve verification worktree: {error}"
+                                    )),
+                                    data: None,
+                                })?
+                                .unwrap_or_else(|| close_project_root.clone()),
+                        };
                         let proof_boundary = if crate::mcp::tools::core::task::lifecycle::repository_proof::is_git_worktree(
                                 &proof_worktree,
                             ) {
@@ -3680,11 +3741,7 @@ impl CasCore {
                         // Only auto-claim if the closing agent is the task's assignee.
                         // If a supervisor closes a worker's task, skip the lease to avoid
                         // locking the task to the supervisor.
-                        let is_assignee = self
-                            .get_agent_id()
-                            .ok()
-                            .map(|aid| task.assignee.as_deref() == Some(aid.as_str()))
-                            .unwrap_or(false);
+                        let is_assignee = self.caller_is_task_assignee(&task);
                         if is_assignee {
                             self.auto_claim_for_verification(&req.id, task_store.as_ref())?;
                         }
@@ -3788,6 +3845,11 @@ impl CasCore {
                                         // row than one that names it.
                                         task_to_update.assignee.as_deref().unwrap_or("worker"),
                                         req.reason.as_deref(),
+                                        dispatch
+                                            .repository
+                                            .as_ref()
+                                            .map(|proof| proof.head_commit.as_str()),
+                                        superseded_approved_verdict_id.as_deref(),
                                     ) {
                                         Ok(()) => dispatch_handoff_queued = true,
                                         Err(error) => {
@@ -3860,9 +3922,19 @@ impl CasCore {
                                 "Forward to supervisor (workers cannot spawn task-verifier \
                                  directly):\n\n"
                             };
+                            let bound_head = dispatch
+                                .repository
+                                .as_ref()
+                                .map(|proof| format!(" Bound head: {}.", proof.head_commit))
+                                .unwrap_or_default();
+                            let superseded_verdict = superseded_approved_verdict_id
+                                .as_deref()
+                                .map(|id| format!(" Previous approved verdict: {id}."))
+                                .unwrap_or_default();
                             format!(
                                 "Factory worker verification gate: task {id} close is pending \
                                      dispatch {dispatch_id}, owned by {owner}, deadline {deadline}. \
+                                     {bound_head}{superseded_verdict}\
                                      This close will only succeed after a legitimate verifier records a verdict.\n\n\
                                      {handoff_line}\
                                      {coord} action=message target=supervisor \
@@ -3889,9 +3961,14 @@ impl CasCore {
                                 verifier_agent, req.id, req.id
                             )
                         } else {
+                            let bound_head = dispatch
+                                .repository
+                                .as_ref()
+                                .map(|proof| format!(" Bound head: {}.", proof.head_commit))
+                                .unwrap_or_default();
                             format!(
                                 "Task {} close is pending verification dispatch {} owned by {} \
-                                     until {}.\n\n\
+                                     until {}.{bound_head}\n\n\
                                      Use the Task tool to spawn a task-verifier subagent: \
                                      Task(subagent_type=\"{}\", prompt=\"Verify task {}\")",
                                 req.id,
@@ -5190,6 +5267,28 @@ impl CasCore {
         Ok(system_b)
     }
 
+    /// Whether the authenticated caller owns this task's assigned agent.
+    ///
+    /// Task assignees may be persisted as either the registered display name
+    /// or opaque agent id. Keep every close-time ownership branch on the same
+    /// registry-backed canonical comparison.
+    fn caller_is_task_assignee(&self, task: &cas_types::Task) -> bool {
+        let Ok(caller_id) = self.get_agent_id() else {
+            return false;
+        };
+        let Ok(agent_store) = self.open_agent_store() else {
+            return false;
+        };
+        let Ok(caller) = agent_store.get(&caller_id) else {
+            return false;
+        };
+        super::super::task_assignee_matches_agent(
+            agent_store.as_ref(),
+            task.assignee.as_deref(),
+            &caller,
+        )
+    }
+
     /// Compute why (if at all) the task-verifier step should be skipped
     /// for this close attempt.
     ///
@@ -5209,9 +5308,8 @@ impl CasCore {
     ///    supervisor passed `supervisor_override=true`, in which case
     ///    we honor it as `SupervisorBypass`). If the lease is stale or
     ///    the referenced agent is dead → `AssigneeInactive`.
-    /// 3. No lease — try a direct `agent_store.get(task.assignee)` for
-    ///    legacy tasks whose assignee field may hold an agent_id. Same
-    ///    liveness logic as above.
+    /// 3. No lease — resolve either the legacy agent id or display name from
+    ///    the registry. Same liveness logic as above.
     /// 4. Everything failed → `AssigneeUnknown` (never falsely reported
     ///    as "assignee inactive" — the agent row is simply missing).
     pub(crate) fn compute_verification_skip_reason(
@@ -5270,9 +5368,8 @@ impl CasCore {
             };
         }
 
-        // 2) No lease — try the legacy direct-id lookup. Works only when
-        //    task.assignee holds an agent_id, not a display name.
-        if let Ok(agent) = agent_store.get(assignee) {
+        // 2) No lease — resolve either the legacy agent id or display name.
+        if let Some(agent) = super::super::resolve_agent_identity(agent_store.as_ref(), assignee) {
             return if alive_result(&agent) {
                 if bypass_requested {
                     VerificationSkipReason::SupervisorBypass
@@ -10451,13 +10548,22 @@ pub(crate) struct EpicChildBranchStatus {
     /// resolved locally or on `origin/`. [`Self::unmerged_count`] is then
     /// not a measurement and must never be rendered as a count.
     pub refs_unresolved: bool,
+    /// Content direction measurements made while collecting this row. The
+    /// close gate reuses these for remediation guidance instead of running
+    /// the same branch-vs-parent Git proofs a second time.
+    pub content_directions: Vec<(String, BranchContentDirection)>,
 }
 
-/// The read-only epic-status action has a stricter wall-clock budget than the
-/// close gate.  A supervisor needs a useful partial diagnostic before the MCP
-/// tool deadline, while the close gate must continue to inspect every child
-/// and fail closed.
+/// The read-only epic-status action has its own wall-clock budget. The close
+/// gate uses a shorter budget so task-store mutation and the MCP response have
+/// headroom; both routes surface partial work explicitly and fail closed.
 pub(crate) const EPIC_STATUS_BUDGET: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Close must leave headroom for the task-store mutation and MCP response.
+/// A partial branch evaluation is a structured, fail-closed rejection; it is
+/// safer than allowing an unbounded content proof to become an MCP timeout
+/// with an unknown mutation outcome.
+pub(crate) const EPIC_CLOSE_GATE_BUDGET: std::time::Duration = std::time::Duration::from_secs(8);
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct EpicStatusOptions {
@@ -10468,7 +10574,7 @@ pub(crate) struct EpicStatusOptions {
 }
 
 impl EpicStatusOptions {
-    pub(crate) const fn full_for_close_gate() -> Self {
+    pub(crate) const fn full_unbounded() -> Self {
         Self {
             offset: 0,
             limit: None,
@@ -10486,6 +10592,188 @@ pub(crate) struct EpicStatusCollection {
     pub requested_limit: Option<usize>,
     pub summary: bool,
     pub budget_exhausted: bool,
+}
+
+#[derive(Debug, Clone)]
+struct EpicGitRefSnapshot {
+    commit: String,
+    last_commit_unix: Option<i64>,
+}
+
+/// Immutable Git inputs shared by every child in one epic-close evaluation.
+/// The old collector asked Git to resolve the same factory and parent refs for
+/// every child, then repeated those lookups inside each count/content helper.
+/// Snapshotting the refs once makes the per-child work deterministic and keeps
+/// branch guidance from observing a mixed ref state while workers are active.
+#[derive(Debug, Default)]
+struct EpicGitSnapshot {
+    refs: std::collections::HashMap<String, EpicGitRefSnapshot>,
+    resolved_anchors: std::collections::HashSet<String>,
+}
+
+impl EpicGitSnapshot {
+    fn collect(
+        repo_path: &std::path::Path,
+        parent_branch: &str,
+        subtasks: &[Task],
+    ) -> Self {
+        use std::process::Command;
+
+        let mut snapshot = Self::default();
+        let mut patterns = vec![
+            "refs/heads/factory/*".to_string(),
+            "refs/remotes/origin/factory/*".to_string(),
+        ];
+        if is_safe_git_refname(parent_branch) {
+            patterns.push(format!("refs/heads/{parent_branch}"));
+            patterns.push(format!("refs/remotes/origin/{parent_branch}"));
+        }
+        let mut args = vec![
+            "for-each-ref".to_string(),
+            "--format=%(refname) %(objectname) %(committerdate:unix)".to_string(),
+        ];
+        args.extend(patterns);
+        if let Ok(output) = Command::new("git").args(&args).current_dir(repo_path).output()
+            && output.status.success()
+        {
+            for line in String::from_utf8_lossy(&output.stdout).lines() {
+                let mut fields = line.split_whitespace();
+                let Some(refname) = fields.next() else {
+                    continue;
+                };
+                let Some(commit) = fields.next() else {
+                    continue;
+                };
+                let Some(requested) = Self::canonical_refname(refname) else {
+                    continue;
+                };
+                snapshot.refs.insert(
+                    requested,
+                    EpicGitRefSnapshot {
+                        commit: commit.to_string(),
+                        last_commit_unix: fields.next().and_then(|value| value.parse().ok()),
+                    },
+                );
+            }
+        }
+
+        let anchors = subtasks
+            .iter()
+            .filter_map(|task| task.deliverables.factory_branch_anchor.as_deref())
+            .filter(|anchor| is_safe_git_refname(anchor))
+            .map(str::to_string)
+            .collect::<std::collections::BTreeSet<_>>();
+        if !anchors.is_empty()
+            && let Ok(mut child) = Command::new("git")
+                .args(["cat-file", "--batch-check=%(objectname) %(objecttype)"])
+                .current_dir(repo_path)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+        {
+            if let Some(mut stdin) = child.stdin.take() {
+                use std::io::Write;
+                for anchor in &anchors {
+                    let _ = writeln!(stdin, "{anchor}");
+                }
+            }
+            if let Ok(output) = child.wait_with_output()
+                && output.status.success()
+            {
+                for (anchor, line) in anchors
+                    .iter()
+                    .zip(String::from_utf8_lossy(&output.stdout).lines())
+                {
+                    if line.split_whitespace().nth(1) == Some("commit") {
+                        snapshot.resolved_anchors.insert(anchor.clone());
+                    }
+                }
+            }
+        }
+        snapshot
+    }
+
+    fn canonical_refname(refname: &str) -> Option<String> {
+        if let Some(rest) = refname.strip_prefix("refs/heads/") {
+            return Some(rest.to_string());
+        }
+        refname
+            .strip_prefix("refs/remotes/")
+            .map(str::to_string)
+    }
+
+    fn ref_info(&self, refname: &str) -> Option<&EpicGitRefSnapshot> {
+        self.refs.get(refname)
+    }
+
+    fn ref_exists(&self, refname: &str) -> bool {
+        self.refs.contains_key(refname)
+    }
+
+    fn commit_exists(&self, commit: &str) -> bool {
+        self.resolved_anchors.contains(commit)
+            || self.refs.values().any(|info| info.commit == commit)
+    }
+
+    fn read_ref(&self, requested: &str) -> CheckedRefRead {
+        if self.ref_exists(requested) {
+            return CheckedRefRead::Local {
+                requested: requested.to_string(),
+            };
+        }
+        let origin = format!("origin/{requested}");
+        if self.ref_exists(&origin) {
+            return CheckedRefRead::Origin {
+                requested: requested.to_string(),
+                read: origin,
+            };
+        }
+        CheckedRefRead::Missing {
+            requested: requested.to_string(),
+        }
+    }
+
+    fn count_unmerged(
+        &self,
+        repo_path: &std::path::Path,
+        requested: &str,
+        parent_branch: &str,
+    ) -> Option<u32> {
+        use std::process::Command;
+
+        if !is_safe_git_refname(requested) || !is_safe_git_refname(parent_branch) {
+            return None;
+        }
+        let commit_ref = self.read_ref(requested).read_ref()?.to_string();
+        let parent_ref = if self.ref_exists(parent_branch) {
+            parent_branch.to_string()
+        } else {
+            let origin_parent = format!("origin/{parent_branch}");
+            self.ref_exists(&origin_parent).then_some(origin_parent)?
+        };
+        let origin_parent = format!("origin/{parent_branch}");
+        let range = format!("{parent_ref}..{commit_ref}");
+        let mut args = vec!["rev-list", "--count", range.as_str()];
+        if self.ref_exists(&origin_parent) && origin_parent != parent_ref {
+            args.extend(["--not", origin_parent.as_str()]);
+        }
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(repo_path)
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        String::from_utf8_lossy(&output.stdout).trim().parse().ok()
+    }
+
+    fn last_commit_unix(&self, requested: &str) -> Option<i64> {
+        self.read_ref(requested)
+            .read_ref()
+            .and_then(|refname| self.ref_info(refname))
+            .and_then(|info| info.last_commit_unix)
+    }
 }
 
 /// Which ref an epic-status row's unmerged count was actually read from
@@ -10527,30 +10815,6 @@ impl CheckedRefRead {
             Self::Origin { requested, read } => format!("{read} (local {requested} missing)"),
             Self::Missing { requested } => format!("{requested} missing (local + origin)"),
         }
-    }
-}
-
-/// Resolve `requested` preferring the local ref and falling back to
-/// `origin/<requested>` (cas-2a99 / GH #131).
-///
-/// Mirrors the dual-ref read the director's merge-alert path already performs
-/// before it reports a count: read both, and never let "the ref I happened to
-/// look at is gone" masquerade as a measurement.
-fn read_ref_preferring_local(repo_path: &std::path::Path, requested: &str) -> CheckedRefRead {
-    if git_ref_exists(repo_path, requested) {
-        return CheckedRefRead::Local {
-            requested: requested.to_string(),
-        };
-    }
-    let origin = format!("origin/{requested}");
-    if git_ref_exists(repo_path, &origin) {
-        return CheckedRefRead::Origin {
-            requested: requested.to_string(),
-            read: origin,
-        };
-    }
-    CheckedRefRead::Missing {
-        requested: requested.to_string(),
     }
 }
 
@@ -10748,10 +11012,9 @@ fn reanchored_delivery_content_in_parent(
 /// a commit-ish that resolves neither way is recorded as unresolved rather than
 /// counted as `0` — see [`CheckedRefRead`].
 ///
-/// Used by both:
-/// - `factory_epic_status` (read-only diagnostic — renders all rows)
-/// - `run_epic_close_merge_gate` (close gate — filters to rows with
-///   `unmerged_count > 0`)
+/// This unbounded compatibility wrapper is used by existing internal status
+/// consumers and focused tests. The close gate calls the options-based form
+/// directly so it can enforce [`EPIC_CLOSE_GATE_BUDGET`].
 ///
 /// Children without any recorded branch or assignee are still represented in
 /// the output so the report is complete; the gate filters only on
@@ -10767,14 +11030,14 @@ pub(crate) fn collect_epic_branch_statuses(
         subtasks,
         parent_branch,
         repo_path,
-        EpicStatusOptions::full_for_close_gate(),
+        EpicStatusOptions::full_unbounded(),
     )
     .statuses
 }
 
-/// Collect the read-only epic-status view with an explicit page and deadline.
-/// The default close-gate collector above intentionally remains unbounded and
-/// full-fidelity; only the supervisor diagnostic uses this budgeted path.
+/// Collect an epic-status view with an explicit page and deadline. The close
+/// gate uses the full-fidelity mode with its own bounded deadline, while the
+/// public status action selects its page and summary mode independently.
 pub(crate) fn collect_epic_branch_statuses_with_options(
     subtasks: &[Task],
     parent_branch: &str,
@@ -10782,6 +11045,7 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
     options: EpicStatusOptions,
 ) -> EpicStatusCollection {
     let total_children = subtasks.len();
+    let git_snapshot = EpicGitSnapshot::collect(repo_path, parent_branch, subtasks);
     let offset = options.offset.min(total_children);
     let page_len = options
         .limit
@@ -10816,8 +11080,7 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
         let recorded_anchor = has_delivery
             .then_some(t.deliverables.factory_branch_anchor.as_deref())
             .flatten();
-        let resolved_anchor =
-            recorded_anchor.filter(|anchor| git_ref_exists(repo_path, anchor));
+        let resolved_anchor = recorded_anchor.filter(|anchor| git_snapshot.commit_exists(anchor));
 
         let mut fallback_branches = Vec::new();
         if let Some(branch) = parked_branch.as_ref() {
@@ -10859,16 +11122,21 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
         let mut checked_ref_reads = Vec::new();
         let mut any_ref_resolved = false;
         for commit in checked_refs {
-            let read = read_ref_preferring_local(repo_path, commit);
+            let read = git_snapshot.read_ref(commit);
             if let Some(refname) = read.read_ref() {
                 any_ref_resolved = true;
-                let count = count_unmerged_against_targets(repo_path, refname, parent_branch)
+                let count = git_snapshot
+                    .count_unmerged(repo_path, refname, parent_branch)
+                    .or_else(|| count_unmerged_against_targets(repo_path, refname, parent_branch))
                     .unwrap_or_else(|| {
                         count_unmerged_factory_commits(repo_path, refname, parent_branch)
                     });
                 unmerged_count = unmerged_count.max(count);
-                latest_commit_unix =
-                    latest_commit_unix.max(last_commit_unix(repo_path, refname));
+                latest_commit_unix = latest_commit_unix.max(
+                    git_snapshot
+                        .last_commit_unix(refname)
+                        .or_else(|| last_commit_unix(repo_path, refname)),
+                );
             }
             checked_ref_reads.push(read);
         }
@@ -10895,6 +11163,7 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
                 content_check_error: None,
                 checked_ref_reads,
                 refs_unresolved,
+                content_directions: Vec::new(),
             });
             continue;
         }
@@ -10903,12 +11172,47 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
         let mut content_evolution_note = None;
         let mut dropped_paths = Vec::new();
         let mut content_check_error = None;
+        let mut content_directions = Vec::new();
+        // A stranded live lane is the common close-gate case. Measure each
+        // distinct branch once before attempting anchor reconciliation so the
+        // close gate can reuse the result for guidance. Do not clear the row
+        // here: a task-specific anchor is authoritative when a worker lane
+        // has been reused, superseded, or reset after delivery.
+        if unmerged_count > 0 && !fallback_branches.is_empty() {
+            content_directions = fallback_branches
+                .iter()
+                .map(|branch| {
+                    (
+                        branch.clone(),
+                        branch_content_direction_with_snapshot(
+                            repo_path,
+                            branch,
+                            parent_branch,
+                            &git_snapshot,
+                        ),
+                    )
+                })
+                .collect();
+        }
         if let Some(anchor) = resolved_anchor
-            && unmerged_count == 0
             && commit_is_merged_into_parent(repo_path, anchor, parent_branch)
+            && dropped_paths.is_empty()
+            && content_check_error.is_none()
+            && merge_evidence_note.is_none()
         {
             match delivery_content_presence_in_parent(repo_path, anchor, parent_branch) {
-                DeliveryContentPresence::Present { .. } => {}
+                DeliveryContentPresence::Present { .. } => {
+                    if unmerged_count > 0 {
+                        unmerged_count = 0;
+                        merge_evidence_note = Some(format!(
+                            "decision: recorded factory_branch_anchor `{anchor}` for child task \
+                             `{}` is merged into `{parent_branch}`. Later commits on the \
+                             reusable live lane are outside this child's delivery receipt and \
+                             were excluded from its epic-close accounting.",
+                            t.id,
+                        ));
+                    }
+                }
                 DeliveryContentPresence::Superseded { paths, commits } => {
                     content_evolution_note = Some(format!(
                         "decision: recorded factory_branch_anchor `{anchor}` for child task `{}` \
@@ -10996,6 +11300,7 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
         // resolution that dropped delivery content.
         if let Some(anchor) = resolved_anchor
             && !commit_is_merged_into_parent(repo_path, anchor, parent_branch)
+            && unmerged_count == 0
             && dropped_paths.is_empty()
             && content_check_error.is_none()
             && merge_evidence_note.is_none()
@@ -11070,9 +11375,27 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
             && merge_evidence_note.is_none()
             && !fallback_branches.is_empty()
         {
-            let directions: Vec<BranchContentDirection> = fallback_branches
+            if content_directions.is_empty() {
+                let directions: Vec<BranchContentDirection> = fallback_branches
+                    .iter()
+                    .map(|branch| {
+                        branch_content_direction_with_snapshot(
+                            repo_path,
+                            branch,
+                            parent_branch,
+                            &git_snapshot,
+                        )
+                    })
+                    .collect();
+                content_directions = fallback_branches
+                    .iter()
+                    .cloned()
+                    .zip(directions)
+                    .collect();
+            }
+            let directions: Vec<BranchContentDirection> = content_directions
                 .iter()
-                .map(|branch| branch_content_direction(repo_path, branch, parent_branch))
+                .map(|(_, direction)| direction.clone())
                 .collect();
             let delivered: Vec<String> = directions
                 .iter()
@@ -11107,6 +11430,28 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
                 ));
             }
         }
+        // Guidance for content-proof failures needs the same measurement as
+        // the status row. Compute it once here so the close gate can reuse it
+        // instead of spawning the same Git probes a second time.
+        if (unmerged_count > 0 || !dropped_paths.is_empty() || content_check_error.is_some())
+            && content_directions.is_empty()
+            && !fallback_branches.is_empty()
+        {
+            content_directions = fallback_branches
+                .iter()
+                .map(|branch| {
+                    (
+                        branch.clone(),
+                        branch_content_direction_with_snapshot(
+                            repo_path,
+                            branch,
+                            parent_branch,
+                            &git_snapshot,
+                        ),
+                    )
+                })
+                .collect();
+        }
         statuses.push(EpicChildBranchStatus {
             task_id: t.id.clone(),
             task_status: t.status,
@@ -11123,6 +11468,7 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
             content_check_error,
             checked_ref_reads,
             refs_unresolved,
+            content_directions,
         });
     }
 
@@ -11635,6 +11981,65 @@ pub(crate) fn branch_content_direction(
         })
 }
 
+fn branch_content_direction_with_snapshot(
+    repo_path: &std::path::Path,
+    branch_ref: &str,
+    target_ref: &str,
+    snapshot: &EpicGitSnapshot,
+) -> BranchContentDirection {
+    let mut candidates: Vec<String> = vec![target_ref.to_string()];
+    if !target_ref.starts_with("origin/") {
+        candidates.push(format!("origin/{target_ref}"));
+    }
+    let readings: Vec<BranchContentDirection> = candidates
+        .iter()
+        .filter(|candidate| snapshot.ref_exists(candidate))
+        .map(|candidate| {
+            branch_content_direction_against_ref_with_snapshot(
+                repo_path,
+                branch_ref,
+                candidate,
+                Some(snapshot),
+            )
+        })
+        .collect();
+    if readings.is_empty() {
+        return branch_content_direction_against_ref_with_snapshot(
+            repo_path,
+            branch_ref,
+            target_ref,
+            Some(snapshot),
+        );
+    }
+    if let Some(present) = readings
+        .iter()
+        .find(|r| matches!(r, BranchContentDirection::ContentPresent { .. }))
+    {
+        return present.clone();
+    }
+    if let Some(behind) = readings
+        .iter()
+        .find(|r| matches!(r, BranchContentDirection::BehindTarget { .. }))
+    {
+        return behind.clone();
+    }
+    if let Some(absent) = readings
+        .iter()
+        .find(|r| matches!(r, BranchContentDirection::ContentAbsent { .. }))
+        && readings
+            .iter()
+            .all(|r| matches!(r, BranchContentDirection::ContentAbsent { .. }))
+    {
+        return absent.clone();
+    }
+    readings
+        .into_iter()
+        .find(|r| matches!(r, BranchContentDirection::Unknown { .. }))
+        .unwrap_or(BranchContentDirection::Unknown {
+            reason: format!("no usable reading of target `{target_ref}`"),
+        })
+}
+
 /// Single-ref core of [`branch_content_direction`].
 ///
 /// Paths are chunked before being handed to `git` so a lane touching thousands
@@ -11645,6 +12050,15 @@ fn branch_content_direction_against_ref(
     branch_ref: &str,
     target_ref: &str,
 ) -> BranchContentDirection {
+    branch_content_direction_against_ref_with_snapshot(repo_path, branch_ref, target_ref, None)
+}
+
+fn branch_content_direction_against_ref_with_snapshot(
+    repo_path: &std::path::Path,
+    branch_ref: &str,
+    target_ref: &str,
+    snapshot: Option<&EpicGitSnapshot>,
+) -> BranchContentDirection {
     const PATH_CHUNK: usize = 64;
 
     if !is_safe_git_refname(branch_ref) || !is_safe_git_refname(target_ref) {
@@ -11652,12 +12066,25 @@ fn branch_content_direction_against_ref(
             reason: format!("unsafe ref name in `{branch_ref}` or `{target_ref}`"),
         };
     }
-    if !git_ref_exists(repo_path, branch_ref) {
+    let snapshot_branch_ref = snapshot.and_then(|snapshot| {
+        snapshot
+            .read_ref(branch_ref)
+            .read_ref()
+            .map(str::to_string)
+    });
+    let branch_ref = snapshot_branch_ref.as_deref().unwrap_or(branch_ref);
+    let ref_exists = |refname: &str| {
+        snapshot.map_or_else(
+            || git_ref_exists(repo_path, refname),
+            |snapshot| snapshot.ref_exists(refname),
+        )
+    };
+    if !ref_exists(branch_ref) {
         return BranchContentDirection::Unknown {
             reason: format!("branch ref `{branch_ref}` does not resolve"),
         };
     }
-    if !git_ref_exists(repo_path, target_ref) {
+    if !ref_exists(target_ref) {
         return BranchContentDirection::Unknown {
             reason: format!("target ref `{target_ref}` does not resolve"),
         };
@@ -11707,24 +12134,34 @@ fn branch_content_direction_against_ref(
     // For each still-differing delivery path: has the TARGET moved it since the
     // merge base? If so the branch holds an older version of a file that has
     // since shipped, and merging re-opens it. If not, the branch may hold work
-    // the target has never seen.
+    // the target has never seen. Ask Git once for the complete set of paths
+    // touched in the target range instead of starting one rev-list process per
+    // path (a 50-file child otherwise costs 50 extra subprocesses).
+    let range = format!("{merge_base}..{target_ref}");
+    let mut target_touched_paths = std::collections::HashSet::new();
+    for chunk in differing.chunks(PATH_CHUNK) {
+        let mut args: Vec<&str> = vec![
+            "log",
+            "--format=",
+            "--name-only",
+            "--no-renames",
+            &range,
+            "--",
+        ];
+        args.extend(chunk.iter().map(String::as_str));
+        match git_stdout_lines(repo_path, &args) {
+            Ok(paths) => target_touched_paths.extend(paths),
+            Err(reason) => return BranchContentDirection::Unknown { reason },
+        }
+    }
+
     let mut stale_paths = Vec::new();
     let mut candidate_paths = Vec::new();
-    for path in &differing {
-        let range = format!("{merge_base}..{target_ref}");
-        match git_stdout_lines(repo_path, &["rev-list", "--count", &range, "--", path]) {
-            Ok(lines) => {
-                let moved = lines
-                    .first()
-                    .and_then(|line| line.parse::<u64>().ok())
-                    .unwrap_or(0);
-                if moved > 0 {
-                    stale_paths.push(path.clone());
-                } else {
-                    candidate_paths.push(path.clone());
-                }
-            }
-            Err(reason) => return BranchContentDirection::Unknown { reason },
+    for path in differing {
+        if target_touched_paths.contains(&path) {
+            stale_paths.push(path);
+        } else {
+            candidate_paths.push(path);
         }
     }
 
@@ -11761,15 +12198,65 @@ fn branch_content_direction_against_ref(
 /// delivery mode.
 pub(crate) fn run_epic_close_merge_gate(
     task: &Task,
-    _req: &TaskCloseRequest,
+    req: &TaskCloseRequest,
     parent_branch: &str,
     repo_path: &std::path::Path,
     subtasks: &[Task],
 ) -> EpicCloseGateOutcome {
+    run_epic_close_merge_gate_with_budget(
+        task,
+        req,
+        parent_branch,
+        repo_path,
+        subtasks,
+        EPIC_CLOSE_GATE_BUDGET,
+    )
+}
+
+fn run_epic_close_merge_gate_with_budget(
+    task: &Task,
+    _req: &TaskCloseRequest,
+    parent_branch: &str,
+    repo_path: &std::path::Path,
+    subtasks: &[Task],
+    budget: std::time::Duration,
+) -> EpicCloseGateOutcome {
     if task.task_type != TaskType::Epic {
         return EpicCloseGateOutcome::Proceed;
     }
-    let statuses = collect_epic_branch_statuses(subtasks, parent_branch, repo_path);
+    let collection = collect_epic_branch_statuses_with_options(
+        subtasks,
+        parent_branch,
+        repo_path,
+        EpicStatusOptions {
+            offset: 0,
+            limit: None,
+            summary: false,
+            budget,
+        },
+    );
+    if collection.budget_exhausted {
+        let checked = collection.statuses.len();
+        let unchecked = subtasks
+            .iter()
+            .skip(collection.offset + checked)
+            .map(|child| format!("  - {}", child.id))
+            .collect::<Vec<_>>();
+        return EpicCloseGateOutcome::Reject(format!(
+            "⚠️ EPIC CLOSE CHECK INCOMPLETE\n\n\
+             Partial evaluation: checked {checked} of {total} child task(s) in the \
+             {budget:?} close-gate budget. The gate did not proceed and no close \
+             mutation was attempted.\n\n\
+             Child task(s) not checked:\n{unchecked}\n\n\
+             Retry the close after the repository settles, or run `epic_status` \
+             for a paged diagnostic. This is a bounded fail-closed result, not \
+             an unknown mutation outcome.",
+            total = collection.total_children,
+            budget = budget,
+            unchecked = unchecked.join("\n"),
+        ));
+    }
+    let statuses = collection.statuses;
     let stranded: Vec<&EpicChildBranchStatus> =
         statuses.iter().filter(|s| s.blocks_epic_close()).collect();
     if stranded.is_empty() {
@@ -11840,7 +12327,12 @@ pub(crate) fn run_epic_close_merge_gate(
             // target holds pre-refactor versions of files that have already
             // shipped; merging it is a revert wearing a merge's clothes, and
             // the operator reading this text is being told it is mandatory.
-            let direction = branch_content_direction(repo_path, branch, parent_branch);
+            let direction = s
+                .content_directions
+                .iter()
+                .find(|(measured_branch, _)| measured_branch == branch)
+                .map(|(_, direction)| direction.clone())
+                .unwrap_or_else(|| branch_content_direction(repo_path, branch, parent_branch));
             match &direction {
                 BranchContentDirection::ContentAbsent { .. } => {
                     let _ = writeln!(
@@ -20341,6 +20833,91 @@ mod epic_status_gate_tests {
         }
     }
 
+    #[test]
+    fn epic_close_gate_50_children_stays_below_mcp_deadline_cas_9f64() {
+        let workers: Vec<(&str, usize)> = (0..50)
+            .map(|index| {
+                (
+                    Box::leak(format!("close-worker-{index}").into_boxed_str()) as &str,
+                    50,
+                )
+            })
+            .collect();
+        let dir = init_epic_repo(&workers);
+        let subtasks: Vec<Task> = workers
+            .iter()
+            .enumerate()
+            .map(|(index, (worker, _))| {
+                let mut task = child(
+                    &format!("cas-close-child-{index}"),
+                    TaskStatus::Closed,
+                    Some(worker),
+                );
+                task.deliverables.factory_branch_anchor = Some(epic_git_stdout(
+                    dir.path(),
+                    &["rev-parse", &format!("factory/{worker}")],
+                ));
+                task
+            })
+            .collect();
+        let task = epic("cas-close-large");
+        let req = base_req(&task.id);
+        let started = std::time::Instant::now();
+        let outcome = run_epic_close_merge_gate(&task, &req, "main", dir.path(), &subtasks);
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed < EPIC_CLOSE_GATE_BUDGET,
+            "50-child close gate exceeded the bounded close budget: {elapsed:?}"
+        );
+        match outcome {
+            EpicCloseGateOutcome::Reject(message) => {
+                assert!(
+                    message.contains("MERGE REQUIRED")
+                        && !message.contains("Partial evaluation"),
+                    "synthetic 50-child close must complete inside the budget: {message}"
+                );
+            }
+            other => panic!("synthetic stranded children must fail closed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn epic_close_gate_reports_unchecked_children_when_budget_expires() {
+        let dir = init_epic_repo(&[]);
+        let subtasks: Vec<Task> = (0..3)
+            .map(|index| {
+                child(
+                    &format!("cas-partial-child-{index}"),
+                    TaskStatus::Closed,
+                    None,
+                )
+            })
+            .collect();
+        let task = epic("cas-partial-epic");
+        let req = base_req(&task.id);
+
+        let outcome = run_epic_close_merge_gate_with_budget(
+            &task,
+            &req,
+            "main",
+            dir.path(),
+            &subtasks,
+            std::time::Duration::ZERO,
+        );
+
+        match outcome {
+            EpicCloseGateOutcome::Reject(message) => {
+                assert!(message.contains("Partial evaluation: checked 0 of 3"));
+                assert!(message.contains("cas-partial-child-0"));
+                assert!(message.contains("cas-partial-child-1"));
+                assert!(message.contains("cas-partial-child-2"));
+                assert!(message.contains("no close mutation was attempted"));
+            }
+            other => panic!("expired close budget must fail closed, got {other:?}"),
+        }
+    }
+
     // --- collect_epic_branch_statuses ---------------------------------------
 
     #[test]
@@ -22369,6 +22946,7 @@ mod epic_status_gate_tests {
                     read: "origin/factory/alpha".to_string(),
                 }],
                 refs_unresolved: false,
+                content_directions: Vec::new(),
             },
             EpicChildBranchStatus {
                 task_id: "cas-bbbb".to_string(),
@@ -22388,6 +22966,7 @@ mod epic_status_gate_tests {
                     requested: "factory/bravo".to_string(),
                 }],
                 refs_unresolved: false,
+                content_directions: Vec::new(),
             },
             EpicChildBranchStatus {
                 task_id: "cas-cccc".to_string(),
@@ -22405,6 +22984,7 @@ mod epic_status_gate_tests {
                 content_check_error: None,
                 checked_ref_reads: Vec::new(),
                 refs_unresolved: false,
+                content_directions: Vec::new(),
             },
         ];
         let report = render_epic_status_report("cas-754b", "epic/foo", &statuses);

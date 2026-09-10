@@ -167,6 +167,66 @@ fn server_stop_reaps_script_wrapped_cas_factory_descendants() {
     workload_guard.armed = false;
 }
 
+/// GH #796: the registered command may be a wrapper that starts a watcher,
+/// which then starts the actual server. All three processes must share the
+/// registry-owned group so one stop cannot leave the grandchild holding a
+/// database connection.
+#[cfg(target_os = "linux")]
+#[test]
+fn server_stop_reaps_a_nested_grandchild() {
+    let temp = tempfile::tempdir().unwrap();
+    let cas_root = temp.path().join("registry");
+    std::fs::create_dir_all(&cas_root).unwrap();
+    let grandchild_pid_file = temp.path().join("grandchild.pid");
+    let command = format!(
+        "sh -c 'trap \"\" TERM; sh -c \"trap \\\"\\\" TERM; while :; do sleep 300; done\" >/dev/null 2>&1 & printf \"%s\" $! > \"{}\"; wait'",
+        grandchild_pid_file.display()
+    );
+    let record = start(
+        &cas_root,
+        &spec("nested-watcher", &command, temp.path(), false),
+    )
+    .unwrap();
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let grandchild_pid = loop {
+        if let Ok(contents) = std::fs::read_to_string(&grandchild_pid_file)
+            && let Ok(pid) = contents.trim().parse::<u32>()
+        {
+            break pid;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "nested fixture never published its grandchild pid; log: {:?}",
+            record
+                .log_path
+                .as_ref()
+                .and_then(|path| std::fs::read_to_string(path).ok())
+        );
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    };
+    let mut grandchild_guard = ProcessTreeGuard {
+        pid: grandchild_pid,
+        armed: true,
+    };
+
+    assert_ne!(record.pid, grandchild_pid);
+    assert!(
+        live_descendant_count(&record) >= 1,
+        "server_list's descendant count must observe the nested watcher"
+    );
+    stop(&cas_root, &record).unwrap();
+    assert!(
+        wait_until_gone(record.pid),
+        "registered wrapper survived stop"
+    );
+    assert!(
+        wait_until_gone(grandchild_pid),
+        "server_stop returned success while the grandchild survived"
+    );
+    grandchild_guard.armed = false;
+}
+
 /// AC1: register, query, stop — the end-to-end shape a supervisor sees.
 #[test]
 fn start_records_ownership_then_list_and_stop_resolve_it() {
@@ -498,16 +558,16 @@ fn forget_removes_only_the_named_record_and_is_idempotent() {
 // teardown; an unregistered process does not.
 // ---------------------------------------------------------------------------
 
-/// Process-group tier, the floor on every host. The caller of `start` stands in
-/// for the worker: a shared server must leave the caller's process group (so
-/// the `killpg` half of teardown misses it), a private one must stay in it (so
-/// teardown still takes it down).
+/// Process-group tier, the floor on every host. Every registered server gets a
+/// dedicated process group. A private server remains in the worker's cgroup,
+/// while a shared one gets a sibling cgroup, but both groups are safe for
+/// `server_stop` to signal without reaching the caller.
 ///
 /// The escape is asserted structurally rather than by killing the caller's
 /// group — that group contains the test runner.
 #[cfg(unix)]
 #[test]
-fn shared_server_leaves_the_callers_process_group_and_a_private_one_stays() {
+fn every_server_leaves_the_callers_process_group() {
     let temp = tempfile::tempdir().unwrap();
     let cas_root = temp.path().to_path_buf();
 
@@ -535,16 +595,15 @@ fn shared_server_leaves_the_callers_process_group_and_a_private_one_stays() {
         "GH #87: a shared server must leave the caller's process group, or killpg \
          at teardown reaches it regardless of registration"
     );
-    assert_eq!(
+    assert_ne!(
         private.pgid,
         Some(caller_pgid),
-        "a private server must stay in the caller's group so it dies with it"
+        "a private server must also get a dedicated group so server_stop can
+         terminate wrappers without signalling the worker"
     );
     assert_ne!(shared.cgroup, private.cgroup);
 
-    // And the signal targets follow from that: the shared server's own group
-    // may be signalled; the private one may only ever be signalled by pid,
-    // because its group is the worker's.
+    // Both dedicated groups may be signalled without taking down the worker.
     assert_eq!(
         signal_target(&shared),
         SignalTarget::ProcessGroup(shared.pgid.unwrap()),
@@ -552,8 +611,8 @@ fn shared_server_leaves_the_callers_process_group_and_a_private_one_stays() {
     );
     assert_eq!(
         signal_target(&private),
-        SignalTarget::Pid(private.pid),
-        "killpg on a private server would kill the worker that started it"
+        SignalTarget::ProcessGroup(private.pgid.unwrap()),
+        "server_stop must reach private server wrappers and descendants"
     );
 
     let _ = stop(&cas_root, &shared);
@@ -574,9 +633,10 @@ fn a_shared_server_still_in_the_callers_group_is_never_killpg_ed() {
         &spec("degraded", "sleep 300", temp.path(), false),
     )
     .unwrap();
-    // The private child inherits the caller's group. Use its recorded group
-    // rather than querying or mutating the test runner's current session.
-    let caller_pgid = record.pgid.expect("private server process group");
+    // Model a legacy record whose private child inherited the caller's group.
+    // The current server is dedicated, so query the actual caller group and
+    // overwrite only the record's stale metadata.
+    let caller_pgid = process_group_of(std::process::id()).expect("caller process group");
     record.shared = true;
     record.pgid = Some(caller_pgid);
 
@@ -605,7 +665,7 @@ fn shared_server_uses_a_sibling_scope_that_survives_worker_reap() {
 
     // A registered shared server is launched with the same fake backend and
     // therefore gets a sibling scope; the process-group assertion remains
-    // covered by shared_server_leaves_the_callers_process_group_and_a_private_one_stays.
+    // covered by every_server_leaves_the_callers_process_group.
     let shared = super::start_with_scope_ops(
         &cas_root,
         &spec("shared-srv", "sleep 300", temp.path(), true),

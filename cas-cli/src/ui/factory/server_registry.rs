@@ -14,9 +14,10 @@
 //!
 //! Two containment tiers, mirroring [`super::cgroup`]'s:
 //!
-//! - **Process group.** A shared server is spawned into its own session
-//!   (`setsid`), so the `killpg` half of teardown cannot reach it. A private
-//!   server keeps the worker's process group and dies with it.
+//! - **Process group.** Every server is spawned into its own session
+//!   (`setsid`), so `server_stop` can signal wrappers and watchers as one
+//!   unit without reaching the worker. A private server still dies with the
+//!   worker because its cgroup remains nested under the worker scope.
 //! - **cgroup v2.** A shared server is moved into its own leaf scope, so the
 //!   `cgroup.kill` half — which by design has no escape hatch — does not reach
 //!   it either. A private server keeps the worker's inherited scope.
@@ -43,7 +44,6 @@ const LOG_DIR: &str = "logs";
 const PID_PUBLISH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Grace between SIGTERM and SIGKILL on [`stop`].
-#[cfg(not(target_os = "linux"))]
 const STOP_GRACE: std::time::Duration = std::time::Duration::from_millis(1500);
 
 /// Lifecycle state of a registry entry.
@@ -103,13 +103,12 @@ pub(crate) struct RegisteredServer {
     pub cwd: PathBuf,
     /// Pid of the server itself — not of the launcher shell.
     pub pid: u32,
-    /// Process group the server ended up in, read after launch.
-    ///
-    /// For a shared server this is the launcher's new session, of which the
-    /// server is a member but usually *not* the leader (it is backgrounded
-    /// from that shell). Signalling therefore has to target this recorded
-    /// pgid: `killpg(pid)` on a non-leader names a process group that does not
-    /// exist and silently kills nothing.
+    /// Process group the server ended up in, read after launch. This is the
+    /// launcher's fresh session in the normal case, of which the server is a
+    /// member but usually *not* the leader (it is backgrounded from that
+    /// shell). Signalling therefore targets this recorded pgid: `killpg(pid)`
+    /// on a non-leader names a process group that does not exist and silently
+    /// kills nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pgid: Option<u32>,
     /// `/proc` start-time fingerprint, the guard against pid reuse.
@@ -447,14 +446,16 @@ fn start_inner(
         .stdout(Stdio::null())
         .stderr(Stdio::null());
 
-    // A shared server must leave the worker's process group, or the `killpg`
-    // half of teardown reaches it regardless of any registry state. A private
-    // one deliberately stays, so it dies with its worker.
+    // Every server gets its own session/process group. Private servers still
+    // remain in the worker's cgroup, while shared servers are moved to a
+    // sibling cgroup below; the group boundary is what lets server_stop reach
+    // wrappers and nested watchers without signalling the worker.
     #[cfg(unix)]
-    if spec.shared {
+    {
         use std::os::unix::process::CommandExt;
-        // SAFETY: `setsid` between fork and exec — the same call portable_pty
-        // makes for every worker pane. Async-signal-safe.
+        // SAFETY: `setsid` between fork and exec. The freshly forked child has
+        // a distinct pid and is not a process-group leader, so this is safe
+        // and async-signal-safe on Linux and macOS.
         unsafe {
             launcher.pre_exec(|| {
                 if libc::setsid() == -1 {
@@ -477,7 +478,6 @@ fn start_inner(
             return Err(error);
         }
     };
-
     // Every registered server gets a dedicated scope when cgroup v2 is
     // delegated. Private scopes stay below the worker so teardown still owns
     // them; shared scopes are true siblings so teardown cannot reach them.
@@ -552,13 +552,14 @@ fn start_inner(
         }
     };
 
+    let pgid = process_group_of(pid);
     let record = RegisteredServer {
         id: generate_id(&spec.name, pid),
         name: spec.name.clone(),
         command: spec.command.clone(),
         cwd: spec.cwd.clone(),
         pid,
-        pgid: process_group_of(pid),
+        pgid,
         pid_starttime: crate::mcp::daemon::read_pid_starttime(pid),
         expected_port: spec.expected_port,
         owner_task: spec.owner_task.clone(),
@@ -609,10 +610,11 @@ fn read_published_pid(pid_file: &Path) -> io::Result<u32> {
 /// whose identity cannot be proven, is refused rather than killed. That
 /// discipline is why the registry can be trusted to hold pids for hours.
 ///
-/// A shared server leads its own session, so its whole process group is
-/// signalled — `npm run dev` is a wrapper whose real server is a child. A
-/// private server shares the worker's group, so only its own pid is
-/// signalled: `killpg` there would take the worker down with it.
+/// Every server launched by this registry owns a fresh session/process group.
+/// Stop therefore signals that group first, allowing wrappers such as
+/// `pnpm start:dev -> nest --watch -> node` to receive the same signal. The
+/// original process tree is also fingerprinted and checked after escalation,
+/// because a child can deliberately call `setsid` and leave the group.
 pub(crate) fn stop(cas_root: &Path, record: &RegisteredServer) -> io::Result<StopOutcome> {
     let scope_ops = super::cgroup::SystemScopeOps;
     stop_with_scope_ops(cas_root, record, &scope_ops)
@@ -695,197 +697,289 @@ fn stop_inner(
     Ok(outcome)
 }
 
-/// Terminate the registered workload and prove that the target is gone.
+/// Terminate the registered workload and prove that the target and every
+/// descendant observed before shutdown are gone.
 ///
 /// A dedicated cgroup is authoritative when available: it includes every
-/// descendant even after `setsid`, and `kill_scope` now refuses success while
-/// members remain. Older records and hosts without delegated cgroup v2 use a
-/// platform fallback below.
+/// descendant even after `setsid`, and `kill_scope` reaches children that are
+/// no longer in the process group. Hosts without delegated cgroup v2 use the
+/// dedicated process group plus fingerprinted descendant cleanup.
 fn terminate_server(
     record: &RegisteredServer,
     scope_ops: &dyn super::cgroup::ScopeOps,
 ) -> io::Result<()> {
+    let initial = process_snapshot();
     if let Some(ref dir) = record.cgroup {
         scope_ops.kill_scope(dir)?;
         scope_ops.remove_scope(dir);
         if scope_ops.cgroup_kill_is_authoritative() {
-            return verify_record_gone(record);
+            return verify_no_survivors(record, &initial, false);
         }
     }
 
-    #[cfg(target_os = "linux")]
-    {
-        return terminate_linux_process_tree(record);
-    }
-
-    #[cfg(all(unix, not(target_os = "linux")))]
-    {
-        signal_server(record);
-        return verify_record_gone(record);
-    }
+    #[cfg(unix)]
+    return terminate_unix_processes(record, &initial);
 
     #[cfg(not(unix))]
-    {
-        return Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            format!(
-                "cannot prove termination of server '{}' descendants on this platform",
-                record.name
-            ),
-        ));
-    }
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        format!(
+            "cannot prove termination of server '{}' descendants on this platform",
+            record.name
+        ),
+    ))
 }
 
-fn verify_record_gone(record: &RegisteredServer) -> io::Result<()> {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-    loop {
-        if !matches!(liveness(record), ServerLiveness::Live) {
-            return Ok(());
-        }
-        if std::time::Instant::now() >= deadline {
-            return Err(io::Error::other(format!(
-                "server_stop could not prove termination; surviving registered pid {} ({})",
-                record.pid, record.name
-            )));
-        }
-        std::thread::sleep(std::time::Duration::from_millis(25));
-    }
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProcessDetails {
+    pid: u32,
+    ppid: u32,
+    pgid: Option<u32>,
+    starttime: Option<u64>,
+    command: String,
+    zombie: bool,
 }
 
-#[cfg(target_os = "linux")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ProcessIdentity {
     pid: u32,
     starttime: u64,
 }
 
-/// Discover and freeze the full Linux descendant tree before killing it.
-///
-/// Freezing is what closes the fork/reparent race: once the root and every
-/// discovered descendant has received SIGSTOP, another scan must be stable
-/// before any parent is killed. Every signal is start-time fingerprinted so a
-/// recycled pid is never touched.
+impl ProcessDetails {
+    fn identity(&self) -> Option<ProcessIdentity> {
+        self.starttime.map(|starttime| ProcessIdentity {
+            pid: self.pid,
+            starttime,
+        })
+    }
+
+    fn is_live(&self) -> bool {
+        !self.zombie && self.starttime.is_some()
+    }
+}
+
+/// Return the currently live descendants of a registered server. The count is
+/// deliberately ancestry-based rather than just a process-group count: a
+/// watcher that calls `setsid` is still a descendant and must be visible.
+pub(crate) fn live_descendant_count(record: &RegisteredServer) -> usize {
+    descendants_from_snapshot(record.pid, &process_snapshot())
+        .into_iter()
+        .filter(ProcessDetails::is_live)
+        .count()
+}
+
 #[cfg(target_os = "linux")]
-fn terminate_linux_process_tree(record: &RegisteredServer) -> io::Result<()> {
-    let mut tree = Vec::<ProcessIdentity>::new();
-    let root_starttime = record.pid_starttime.ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            format!(
-                "refusing to stop server '{}' without a start-time fingerprint",
-                record.name
-            ),
-        )
-    })?;
-    tree.push(ProcessIdentity {
-        pid: record.pid,
-        starttime: root_starttime,
-    });
-    signal_fingerprinted(tree[0], libc::SIGSTOP)?;
+fn process_snapshot() -> Vec<ProcessDetails> {
+    let Ok(entries) = fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| entry.file_name().to_str()?.parse::<u32>().ok())
+        .filter_map(|pid| {
+            let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+            let (comm, state, ppid, pgid, starttime) = parse_linux_proc_stat(&stat)?;
+            let command = fs::read(format!("/proc/{pid}/cmdline"))
+                .ok()
+                .map(|raw| {
+                    raw.split(|byte| *byte == 0)
+                        .filter(|part| !part.is_empty())
+                        .map(|part| String::from_utf8_lossy(part).into_owned())
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                })
+                .filter(|command| !command.is_empty())
+                .unwrap_or(comm);
+            Some(ProcessDetails {
+                pid,
+                ppid,
+                pgid: Some(pgid),
+                starttime: Some(starttime),
+                command,
+                zombie: state == 'Z',
+            })
+        })
+        .collect()
+}
 
-    for _ in 0..8 {
-        let before = tree.len();
-        let roots: Vec<u32> = tree.iter().map(|proc| proc.pid).collect();
-        for pid in roots {
-            collect_linux_descendants(pid, &mut tree)?;
+#[cfg(target_os = "linux")]
+fn parse_linux_proc_stat(stat: &str) -> Option<(String, char, u32, u32, u64)> {
+    let open = stat.find('(')?;
+    let close = stat.rfind(')')?;
+    let comm = stat.get(open + 1..close)?.to_string();
+    let mut fields = stat.get(close + 1..)?.split_whitespace();
+    let state = fields.next()?.chars().next()?;
+    let ppid = fields.next()?.parse().ok()?;
+    let pgid = fields.next()?.parse().ok()?;
+    let starttime = fields.nth(16)?.parse().ok()?;
+    Some((comm, state, ppid, pgid, starttime))
+}
+
+#[cfg(target_os = "macos")]
+fn process_snapshot() -> Vec<ProcessDetails> {
+    let Ok(output) = Command::new("ps")
+        .args(["-axo", "pid=,ppid=,pgid=,command="])
+        .output()
+    else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let pid = fields.next()?.parse::<u32>().ok()?;
+            let ppid = fields.next()?.parse::<u32>().ok()?;
+            let pgid = fields.next()?.parse::<u32>().ok()?;
+            let command = fields.collect::<Vec<_>>().join(" ");
+            Some(ProcessDetails {
+                pid,
+                ppid,
+                pgid: Some(pgid),
+                starttime: crate::mcp::daemon::read_pid_starttime(pid),
+                command,
+                zombie: false,
+            })
+        })
+        .collect()
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn process_snapshot() -> Vec<ProcessDetails> {
+    Vec::new()
+}
+
+fn descendants_from_snapshot(pid: u32, snapshot: &[ProcessDetails]) -> Vec<ProcessDetails> {
+    let mut descendants = Vec::new();
+    let mut parents = vec![pid];
+    let mut seen = std::collections::HashSet::new();
+    while let Some(parent) = parents.pop() {
+        for process in snapshot.iter().filter(|process| process.ppid == parent) {
+            if !seen.insert(process.pid) {
+                continue;
+            }
+            descendants.push(process.clone());
+            parents.push(process.pid);
         }
-        for proc in &tree {
-            signal_fingerprinted(*proc, libc::SIGSTOP)?;
+    }
+    descendants
+}
+
+fn process_group_members(pgid: u32, snapshot: &[ProcessDetails]) -> Vec<ProcessDetails> {
+    snapshot
+        .iter()
+        .filter(|process| process.pgid == Some(pgid) && process.is_live())
+        .cloned()
+        .collect()
+}
+
+fn initial_identities(
+    record: &RegisteredServer,
+    snapshot: &[ProcessDetails],
+) -> Vec<ProcessIdentity> {
+    let mut identities = Vec::new();
+    if let Some(starttime) = record.pid_starttime {
+        identities.push(ProcessIdentity {
+            pid: record.pid,
+            starttime,
+        });
+    }
+    for process in descendants_from_snapshot(record.pid, snapshot) {
+        if let Some(identity) = process.identity()
+            && !identities.contains(&identity)
+        {
+            identities.push(identity);
         }
-        if tree.len() == before {
-            break;
+    }
+    identities
+}
+
+fn remaining_processes(
+    record: &RegisteredServer,
+    initial: &[ProcessDetails],
+    include_group: bool,
+) -> Vec<ProcessDetails> {
+    let snapshot = process_snapshot();
+    let initial_identities = initial_identities(record, initial);
+    let mut survivors = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut add = |process: ProcessDetails| {
+        if process.is_live() && seen.insert((process.pid, process.starttime)) {
+            survivors.push(process);
+        }
+    };
+
+    for identity in initial_identities {
+        if let Some(current) = snapshot.iter().find(|current| {
+            current.pid == identity.pid
+                && current.starttime == Some(identity.starttime)
+                && current.is_live()
+        }) {
+            add(current.clone());
         }
     }
-
-    // One final scan after all known members are frozen. Any child found here
-    // was forked during the preceding pass; freeze it and include it too.
-    let roots: Vec<u32> = tree.iter().map(|proc| proc.pid).collect();
-    for pid in roots {
-        collect_linux_descendants(pid, &mut tree)?;
+    if include_group && let Some(pgid) = record.pgid {
+        for process in process_group_members(pgid, &snapshot) {
+            add(process);
+        }
     }
-    for proc in &tree {
-        signal_fingerprinted(*proc, libc::SIGSTOP)?;
+    if crate::mcp::daemon::read_pid_starttime(record.pid) == record.pid_starttime {
+        for process in descendants_from_snapshot(record.pid, &snapshot) {
+            add(process);
+        }
     }
+    survivors
+}
 
-    // Children first makes the survivor report easier to interpret and avoids
-    // relying on reparenting behavior. SIGKILL cannot be ignored.
-    for proc in tree.iter().rev() {
-        signal_fingerprinted(*proc, libc::SIGKILL)?;
+fn survivor_detail(record: &RegisteredServer, survivors: &[ProcessDetails]) -> String {
+    if survivors.is_empty() {
+        return format!("server '{}'", record.name);
     }
+    survivors
+        .iter()
+        .map(|process| format!("pid {} ({})", process.pid, process.command))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
 
+fn verify_no_survivors(
+    record: &RegisteredServer,
+    initial: &[ProcessDetails],
+    include_group: bool,
+) -> io::Result<()> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
     loop {
-        let survivors: Vec<_> = tree
-            .iter()
-            .copied()
-            .filter(|proc| process_identity_live(*proc))
-            .collect();
+        let survivors = remaining_processes(record, initial, include_group);
         if survivors.is_empty() {
             return Ok(());
         }
         if std::time::Instant::now() >= deadline {
-            let detail = survivors
-                .iter()
-                .map(|proc| proc.pid.to_string())
-                .collect::<Vec<_>>()
-                .join(", ");
             return Err(io::Error::other(format!(
-                "server_stop could not terminate surviving descendant pid(s): {detail}"
+                "server_stop could not terminate surviving process(es): {}",
+                survivor_detail(record, &survivors)
             )));
         }
         std::thread::sleep(std::time::Duration::from_millis(25));
     }
 }
 
-#[cfg(target_os = "linux")]
-fn collect_linux_descendants(pid: u32, tree: &mut Vec<ProcessIdentity>) -> io::Result<()> {
-    let path = format!("/proc/{pid}/task/{pid}/children");
-    let children = match fs::read_to_string(&path) {
-        Ok(children) => children,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => {
-            return Err(io::Error::new(
-                error.kind(),
-                format!("cannot inspect descendants through {path}: {error}"),
-            ));
-        }
-    };
-    for child in children
-        .split_whitespace()
-        .filter_map(|value| value.parse::<u32>().ok())
-    {
-        if tree.iter().any(|known| known.pid == child) {
-            continue;
-        }
-        if let Some(starttime) = crate::mcp::daemon::read_pid_starttime(child) {
-            let identity = ProcessIdentity {
-                pid: child,
-                starttime,
-            };
-            // Freeze on discovery, before recursing. If the child forked in
-            // the small scan-to-stop gap, the next scan of this now-frozen
-            // parent finds that last child deterministically.
-            signal_fingerprinted(identity, libc::SIGSTOP)?;
-            tree.push(identity);
-            collect_linux_descendants(child, tree)?;
-        }
-    }
-    Ok(())
+#[cfg(unix)]
+fn process_identity_live(process: ProcessIdentity) -> bool {
+    crate::mcp::daemon::read_pid_starttime(process.pid) == Some(process.starttime)
+        && !process_is_zombie(process.pid)
 }
 
-#[cfg(target_os = "linux")]
-fn process_identity_live(proc: ProcessIdentity) -> bool {
-    crate::mcp::daemon::read_pid_starttime(proc.pid) == Some(proc.starttime) && !is_zombie(proc.pid)
-}
-
-#[cfg(target_os = "linux")]
-fn signal_fingerprinted(proc: ProcessIdentity, signal: libc::c_int) -> io::Result<()> {
-    if !process_identity_live(proc) {
+#[cfg(unix)]
+fn signal_fingerprinted(process: ProcessIdentity, signal: libc::c_int) -> io::Result<()> {
+    if !process_identity_live(process) {
         return Ok(());
     }
     // SAFETY: the pid's start-time fingerprint was revalidated immediately
     // above; ESRCH is an ordinary exit race.
-    let rc = unsafe { libc::kill(proc.pid as libc::pid_t, signal) };
+    let rc = unsafe { libc::kill(process.pid as libc::pid_t, signal) };
     if rc == 0 {
         return Ok(());
     }
@@ -895,6 +989,90 @@ fn signal_fingerprinted(proc: ProcessIdentity, signal: libc::c_int) -> io::Resul
     } else {
         Err(error)
     }
+}
+
+#[cfg(target_os = "linux")]
+fn process_is_zombie(pid: u32) -> bool {
+    fs::read_to_string(format!("/proc/{pid}/stat"))
+        .ok()
+        .and_then(|stat| parse_linux_proc_stat(&stat).map(|(_, state, _, _, _)| state == 'Z'))
+        .unwrap_or(false)
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn process_is_zombie(_pid: u32) -> bool {
+    false
+}
+
+#[cfg(unix)]
+fn process_group_is_safe(record: &RegisteredServer) -> bool {
+    let Some(pgid) = record.pgid else {
+        return false;
+    };
+    if Some(pgid) == process_group_of(std::process::id()) {
+        return false;
+    }
+    if liveness(record) == ServerLiveness::Live {
+        return process_group_of(record.pid) == Some(pgid);
+    }
+    false
+}
+
+#[cfg(unix)]
+fn signal_process_group(record: &RegisteredServer, signal: libc::c_int) -> io::Result<bool> {
+    if !process_group_is_safe(record) {
+        return Ok(false);
+    }
+    let pgid = record.pgid.expect("safe process group has a pgid");
+    signal_process_group_id(pgid, signal)
+}
+
+#[cfg(unix)]
+fn signal_process_group_id(pgid: u32, signal: libc::c_int) -> io::Result<bool> {
+    // SAFETY: process_group_is_safe checked that this is the server's own
+    // group, not the Cassy worker's group, immediately before the initial
+    // signal. A later escalation reuses the same dedicated group id so a
+    // wrapper that exits on SIGTERM cannot hide a still-running child.
+    let rc = unsafe { libc::killpg(pgid as libc::pid_t, signal) };
+    if rc == 0 {
+        return Ok(true);
+    }
+    let error = io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::ESRCH) {
+        Ok(true)
+    } else {
+        Err(error)
+    }
+}
+
+#[cfg(unix)]
+fn terminate_unix_processes(
+    record: &RegisteredServer,
+    initial_snapshot: &[ProcessDetails],
+) -> io::Result<()> {
+    let identities = initial_identities(record, initial_snapshot);
+    let grouped = signal_process_group(record, libc::SIGTERM)?;
+    let grace_deadline = std::time::Instant::now() + STOP_GRACE;
+    while std::time::Instant::now() < grace_deadline {
+        if remaining_processes(record, initial_snapshot, grouped).is_empty() {
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+
+    if grouped {
+        let pgid = record
+            .pgid
+            .expect("grouped termination requires a recorded process group");
+        let _ = signal_process_group_id(pgid, libc::SIGKILL)?;
+    }
+    // Group signalling catches the normal watcher tree. Fingerprinted pid
+    // cleanup catches children that deliberately escaped with setsid, and is
+    // also the safe fallback for legacy records that share the worker group.
+    for process in identities.iter().rev() {
+        signal_fingerprinted(*process, libc::SIGKILL)?;
+    }
+    verify_no_survivors(record, initial_snapshot, grouped)
 }
 
 /// The process group `pid` belongs to, when the platform can tell us.
@@ -912,14 +1090,9 @@ fn process_group_of(_pid: u32) -> Option<u32> {
 
 /// Which process(es) [`stop`] may signal for this record.
 ///
-/// A shared server leads (or belongs to) a session of its own, so its whole
-/// group is fair game — `npm run dev` is a wrapper whose real server is a
-/// child, and killing only the wrapper leaves the port bound. A private server
-/// sits in the *worker's* group, so only its own pid may be signalled:
-/// `killpg` there would take the worker down with it.
-///
-/// Pure, so the "never killpg a private server's group" rule is testable
-/// without spawning anything.
+/// New records always have a group created by `setsid`, so both private and
+/// shared servers use the group target. Records from before GH #796 can still
+/// point at the worker's group; those remain pid-only to protect the worker.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg(any(test, not(target_os = "linux")))]
 pub(crate) enum SignalTarget {
@@ -929,41 +1102,12 @@ pub(crate) enum SignalTarget {
 
 #[cfg(any(test, not(target_os = "linux")))]
 pub(crate) fn signal_target(record: &RegisteredServer) -> SignalTarget {
-    match (record.shared, record.pgid) {
-        // Only signal the group when it is genuinely the server's own, not the
-        // caller's — a shared server whose setsid failed must not take its
-        // launcher's group with it.
-        (true, Some(pgid)) if Some(pgid) != process_group_of(std::process::id()) => {
+    match record.pgid {
+        Some(pgid) if Some(pgid) != process_group_of(std::process::id()) => {
             SignalTarget::ProcessGroup(pgid)
         }
         _ => SignalTarget::Pid(record.pid),
     }
-}
-
-/// SIGTERM, brief grace, then SIGKILL to whatever is still there.
-#[cfg(all(unix, not(target_os = "linux")))]
-fn signal_server(record: &RegisteredServer) {
-    let send = |signal: libc::c_int| {
-        // SAFETY: identity was fingerprint-validated by the caller immediately
-        // above; a signal to an already-dead target fails harmlessly with
-        // ESRCH.
-        unsafe {
-            match signal_target(record) {
-                SignalTarget::ProcessGroup(pgid) => libc::killpg(pgid as libc::pid_t, signal),
-                SignalTarget::Pid(pid) => libc::kill(pid as libc::pid_t, signal),
-            }
-        };
-    };
-
-    send(libc::SIGTERM);
-    let deadline = std::time::Instant::now() + STOP_GRACE;
-    while std::time::Instant::now() < deadline {
-        if !matches!(liveness(record), ServerLiveness::Live) {
-            return;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(25));
-    }
-    send(libc::SIGKILL);
 }
 
 /// How long a stopped/dead entry stays visible as history before it is pruned.

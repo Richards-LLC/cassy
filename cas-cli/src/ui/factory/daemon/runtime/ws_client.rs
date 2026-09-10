@@ -291,13 +291,25 @@ impl FactoryDaemon {
     async fn handle_ws_message(&mut self, client_id: usize, msg: ClientMessage) {
         if let Some(control) = commander_control_from_ws_message(&msg) {
             let error_prefix = control.error_prefix();
-            if let Err(error) = self.dispatch_commander_control(control).await
-                && let Some(frame) = ws_encode(&DaemonMessage::Error {
-                    message: format!("{error_prefix}: {error}"),
-                })
-                && let Some(client) = self.ws_clients.get_mut(&client_id)
-            {
-                let _ = client.sink.feed(frame).now_or_never();
+            let client_ref = control.client_ref().map(str::to_owned);
+            match self.dispatch_commander_control(control).await {
+                Ok(Some(message)) => {
+                    if let Some(frame) = ws_encode(&message)
+                        && let Some(client) = self.ws_clients.get_mut(&client_id)
+                    {
+                        let _ = client.sink.feed(frame).now_or_never();
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    if let Some(frame) = ws_encode(&DaemonMessage::Error {
+                        message: format!("{error_prefix}: {error}"),
+                        client_ref,
+                    }) && let Some(client) = self.ws_clients.get_mut(&client_id)
+                    {
+                        let _ = client.sink.feed(frame).now_or_never();
+                    }
+                }
             }
             return;
         }
@@ -366,6 +378,7 @@ impl FactoryDaemon {
                 if generation != commander_epoch() {
                     if let Some(frame) = ws_encode(&DaemonMessage::Error {
                         message: format!("scrollback generation expired for pane '{actual}'"),
+                        client_ref: None,
                     }) && let Some(client) = self.ws_clients.get_mut(&client_id)
                     {
                         let _ = client.sink.feed(frame).now_or_never();

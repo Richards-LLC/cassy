@@ -4,6 +4,8 @@
 use super::*;
 use cas_types::{Task, TaskStatus, TaskType};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct EpicTip {
@@ -22,6 +24,11 @@ struct IntegrationReceipt {
     detail: String,
     affected: Vec<String>,
 }
+
+const ROW_CACHE_FORMAT: &str = "row-cache-v2";
+const ROW_CACHE_DIR: &str = "row-cache";
+const NEXTTEST_ROW: &str = "nextest";
+const GATE_INIT_TIMEOUT_SECS: &str = "900";
 
 #[derive(Debug)]
 enum Assembly {
@@ -307,6 +314,16 @@ fn integrate(
         settings.clone(),
         Arc::clone(cancel),
     );
+    if result.status == SweepStatus::Passed {
+        if let Err(error) =
+            write_sweep_row_receipt(project_root, &shared_cas, &result.request, NEXTTEST_ROW)
+        {
+            result.status = SweepStatus::SetupFailed;
+            result.summary.push_str(&format!(
+                "; could not write release-gate row receipt: {error}"
+            ));
+        }
+    }
     let mut affected = vec![request.epic_id.clone()];
     if result.status == SweepStatus::Failed {
         let mut probe_settings = settings.clone();
@@ -426,6 +443,137 @@ fn write_receipt(path: &Path, receipt: &IntegrationReceipt) -> Result<(), String
     )
     .map_err(|error| error.to_string())?;
     fs::rename(temporary, path).map_err(|error| error.to_string())
+}
+
+/// Publish the successful sweep in the release gate's flat row-cache format.
+/// The key is deliberately independent of the release version and linked
+/// worktree path: assembly and the later gate use the same Git repository and
+/// content, but not the same checkout directory.
+fn write_sweep_row_receipt(
+    project_root: &Path,
+    shared_cas: &Path,
+    request: &SweepRequest,
+    row: &str,
+) -> Result<(), String> {
+    let worktree = prepare_merge_worktree(project_root, request)?;
+    let common_dir = git_output(
+        &worktree,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    )?;
+    let checkout_identity = sha256_hex(format!("{common_dir}\n").as_bytes());
+    let tree_ref = format!("{}^{{tree}}", request.commit);
+    let input_hash = git_output(project_root, &["rev-parse", &tree_ref])?;
+    let effective_zig = resolve_zig(&worktree);
+    let environment = environment_fingerprint(effective_zig.as_deref());
+    let toolchain = toolchain_fingerprint()?;
+    let implementation = sha256_file(&worktree.join("scripts/release-gate.sh"))?;
+    let key = row_cache_key(
+        row,
+        &checkout_identity,
+        &input_hash,
+        &environment,
+        &toolchain,
+        &implementation,
+    );
+    let epoch = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| format!("system clock before Unix epoch: {error}"))?
+        .as_secs();
+    let cache_dir = shared_cas.join(LOG_DIR).join(ROW_CACHE_DIR);
+    fs::create_dir_all(&cache_dir).map_err(|error| error.to_string())?;
+    let path = cache_dir.join(format!("{row}.{key}"));
+    let temporary = cache_dir.join(format!(".{row}.{key}.tmp.{}", std::process::id()));
+    let receipt = format!(
+        "{key} {} {epoch} PASS {checkout_identity} {input_hash} {environment} {toolchain} {implementation}\n",
+        request.commit
+    );
+    fs::write(&temporary, receipt).map_err(|error| error.to_string())?;
+    fs::rename(temporary, path).map_err(|error| error.to_string())
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+fn sha256_file(path: &Path) -> Result<String, String> {
+    let bytes = fs::read(path).map_err(|error| format!("read {}: {error}", path.display()))?;
+    Ok(sha256_hex(&bytes))
+}
+
+fn row_cache_key(
+    row: &str,
+    checkout_identity: &str,
+    input_hash: &str,
+    environment: &str,
+    toolchain: &str,
+    implementation: &str,
+) -> String {
+    sha256_hex(
+        format!(
+            "{ROW_CACHE_FORMAT}\n{row}\n{checkout_identity}\n{input_hash}\n{environment}\n{toolchain}\n{implementation}\n"
+        )
+        .as_bytes(),
+    )
+}
+
+fn environment_fingerprint(effective_zig: Option<&Path>) -> String {
+    let ignored = [
+        "_",
+        "SHLVL",
+        "CAS_FACTORY_SESSION",
+        "CAS_AGENT_ROLE",
+        "CAS_AGENT_NAME",
+        "CAS_SUPERVISOR_NAME",
+        "CAS_AGENT_ID",
+        "CAS_RELEASE_GATE_LOG_DIR",
+        "CAS_RELEASE_GATE_ARCHIVE_SIZE_FILE",
+        "CAS_RELEASE_GATE_CACHE_DIR",
+        "CAS_RELEASE_GATE_SWEEP_CACHE_DIR",
+        "CAS_RELEASE_GATE_HOME_DIR",
+    ];
+    let mut values: std::collections::BTreeMap<String, String> = std::env::vars()
+        .filter(|(name, _)| {
+            !ignored.contains(&name.as_str()) && !name.starts_with("CAS_RELEASE_TRAIN_")
+        })
+        .collect();
+    if let Some(zig) = effective_zig {
+        values.insert("ZIG".to_owned(), zig.to_string_lossy().into_owned());
+    }
+    values
+        .entry("CAS_INIT_TIMEOUT_SECS".to_owned())
+        .or_insert_with(|| GATE_INIT_TIMEOUT_SECS.to_owned());
+    let material = values
+        .into_iter()
+        .map(|(name, value)| format!("{name}={value}\n"))
+        .collect::<String>();
+    sha256_hex(material.as_bytes())
+}
+
+fn toolchain_fingerprint() -> Result<String, String> {
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
+    let npm = std::env::var("NPM").unwrap_or_else(|_| "npm".to_owned());
+    let output = Command::new("bash")
+        .args([
+            "-c",
+            r#"set -o pipefail; { "$1" --version && "$1" nextest --version && rustc -Vv && node --version && "$2" --version; } 2>&1 | sha256sum | cut -d' ' -f1"#,
+            "row-cache",
+            &cargo,
+            &npm,
+        ])
+        .output()
+        .map_err(|error| format!("run toolchain fingerprint: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "toolchain fingerprint command failed: {}",
+            first_output_line(&output.stderr)
+        ));
+    }
+    let digest = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    if digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        Ok(digest)
+    } else {
+        Err("toolchain fingerprint was not a SHA-256 digest".to_owned())
+    }
 }
 
 /// The final prefix is known red. Re-run only failing targets on earlier tips;
@@ -593,6 +741,8 @@ mod tests {
             &["config", "user.email", "test@example.invalid"],
         );
         git(temp.path(), &["config", "commit.gpgsign", "false"]);
+        fs::create_dir_all(temp.path().join("scripts")).unwrap();
+        fs::write(temp.path().join("scripts/release-gate.sh"), "#!/bin/sh\n").unwrap();
         fs::write(temp.path().join("shared"), "base\n").unwrap();
         git(temp.path(), &["add", "."]);
         git(temp.path(), &["commit", "-m", "base"]);
@@ -832,6 +982,23 @@ echo 'Summary: 1 passed'
             )
             .unwrap();
             assert_eq!(receipt.status, status_text(expected));
+            let row_cache = cas_dir.join(LOG_DIR).join(ROW_CACHE_DIR);
+            let row_receipts = fs::read_dir(&row_cache)
+                .map(|entries| {
+                    entries
+                        .filter_map(Result::ok)
+                        .filter(|entry| entry.file_name().to_string_lossy().starts_with("nextest."))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            if expected == SweepStatus::Passed {
+                assert_eq!(row_receipts.len(), 1);
+                let fields = fs::read_to_string(row_receipts[0].path()).unwrap();
+                let fields = fields.split_whitespace().collect::<Vec<_>>();
+                assert_eq!(fields.len(), 9);
+                assert_eq!(fields[1], receipt.tip.as_deref().unwrap());
+                assert_eq!(fields[3], "PASS");
+            }
             if expected == SweepStatus::Failed {
                 assert!(
                     result.summary.contains("introduced by b"),

@@ -157,20 +157,13 @@ row_log_dir="${CAS_RELEASE_GATE_LOG_DIR:-$tmp_dir/rows}"
 mkdir -p "$row_log_dir"
 printf 'row\tstarted_utc\tended_utc\twall_s\tuser_s\tsystem_s\tstatus\tsource_sha\n' >"$row_log_dir/timing.tsv"
 cache_dir="${CAS_RELEASE_GATE_CACHE_DIR:-}"
-# Fingerprint the caller environment before the gate installs temporary roots.
-# Never persist environment values (which may contain credentials).
-cache_environment="$(python3 -c '
-import hashlib, os
-ignored = {"_", "SHLVL", "CAS_RELEASE_GATE_LOG_DIR", "CAS_RELEASE_GATE_ARCHIVE_SIZE_FILE"}
-print(hashlib.sha256(repr(sorted((k, v) for k, v in os.environ.items() if k not in ignored)).encode()).hexdigest())')"
 cache_head="$(git rev-parse HEAD)"
 gate_implementation="$(realpath "${BASH_SOURCE[0]}")"
 cache_toolchain=''
-if [[ -n "$cache_dir" && -z "$only_rows" ]]; then
-    mkdir -p "$cache_dir"
+if [[ ( -n "$cache_dir" || "$reuse_rows" == true ) && -z "$only_rows" ]]; then
+    [[ -z "$cache_dir" ]] || mkdir -p "$cache_dir"
     if ! cache_toolchain="$( { "$cargo_bin" --version && "$cargo_bin" nextest --version &&
-        rustc -Vv && node --version && "${NPM:-npm}" --version &&
-        printf '%s\n' "$BASH_VERSION"; } 2>&1 | sha256sum | cut -d' ' -f1)"; then
+        rustc -Vv && node --version && "${NPM:-npm}" --version; } 2>&1 | sha256sum | cut -d' ' -f1)"; then
         # Unknown tool identity is a cache miss, never a reason to skip tests.
         cache_dir=''
     fi
@@ -189,10 +182,93 @@ print_result() {
 
 # Explicit dependency boundary. Live checks and any unknown future row never
 # reuse evidence. Web tests are independent of Rust; Cargo tests conservatively
-# depend on the entire commit, including build.rs's embedded revision.
-row_cache_key() {
+# depend on the entire commit, including build.rs's embedded revision. The
+# assembly sweep uses the same fields, but stores its receipt in the shared
+# merge-sweep directory because its detached checkout is not the release
+# worktree that consumes the receipt.
+cache_environment() {
+    python3 -c '
+import hashlib, os
+
+def ignored(name):
+    return name in {
+        "_", "SHLVL", "CAS_FACTORY_SESSION", "CAS_AGENT_ROLE",
+        "CAS_AGENT_NAME", "CAS_SUPERVISOR_NAME", "CAS_AGENT_ID",
+        "CAS_RELEASE_GATE_LOG_DIR", "CAS_RELEASE_GATE_ARCHIVE_SIZE_FILE",
+        "CAS_RELEASE_GATE_CACHE_DIR", "CAS_RELEASE_GATE_SWEEP_CACHE_DIR",
+        "CAS_RELEASE_GATE_HOME_DIR",
+    } or name.startswith("CAS_RELEASE_TRAIN_")
+
+material = "".join(
+    f"{key}={value}\n"
+    for key, value in sorted(os.environ.items())
+    if not ignored(key)
+)
+print(hashlib.sha256(material.encode()).hexdigest())'
+}
+
+cache_input_hash() {
     local name="$1"
-    [[ -n "$cache_dir" && -z "$only_rows" ]] || return 1
+    case "$name" in
+        hub-web-visual-qa|hub-web-dist-drift)
+            git ls-tree -r HEAD -- hub-web scripts .github | sha256sum | cut -d' ' -f1
+            ;;
+        fixture-paths|workspace-tests|macos-check|nextest|doctests|archive-mode|snapshot-portability)
+            git rev-parse "$cache_head^{tree}"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+cache_git_common_dir="$(git rev-parse --path-format=absolute --git-common-dir)"
+cache_checkout_identity="$(printf '%s\n' "$cache_git_common_dir" | sha256sum | cut -d' ' -f1)"
+cache_implementation_digest="$(sha256sum "$gate_implementation" | cut -d' ' -f1)"
+cache_repository_root="$(dirname "$cache_git_common_dir")"
+sweep_cache_dir="${CAS_RELEASE_GATE_SWEEP_CACHE_DIR:-$cache_repository_root/.cas/merge-sweeps/row-cache}"
+sweep_receipt="${CAS_RELEASE_GATE_SWEEP_RECEIPT:-$cache_repository_root/.cas/merge-sweeps/integration.json}"
+
+assembly_sweep_green_for_head() {
+    [[ -s "$sweep_receipt" ]] || return 1
+    python3 - "$sweep_receipt" "$cache_head" <<'PY'
+import json
+import sys
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as stream:
+        receipt = json.load(stream)
+except (OSError, ValueError):
+    raise SystemExit(1)
+raise SystemExit(0 if receipt.get("status") == "PASSED" and receipt.get("tip") == sys.argv[2] else 1)
+PY
+}
+
+row_receipt_valid() {
+    local path="$1" expected_key="$2" expected_sha="$3" expected_input="$4"
+    local expected_env="$5" expected_toolchain="$6" expected_checkout="$7" expected_implementation="$8"
+    local receipt_key receipt_sha receipt_epoch receipt_status receipt_checkout receipt_input receipt_env receipt_toolchain receipt_implementation
+    read -r receipt_key receipt_sha receipt_epoch receipt_status receipt_checkout receipt_input receipt_env receipt_toolchain receipt_implementation <"$path" || return 1
+    [[ "$receipt_key" == "$expected_key" && "$receipt_sha" =~ ^[0-9a-f]{40}$ \
+        && "$receipt_epoch" =~ ^[0-9]{10}$ && "$receipt_status" == PASS ]] || return 1
+    # Gate-created v1 receipts only have the first four fields. They remain
+    # valid for one migration cycle; newly-written receipts carry all fields
+    # and are required to prove the assembly handoff.
+    if [[ -z "${receipt_checkout:-}" && -z "${receipt_input:-}" \
+        && -z "${receipt_env:-}" && -z "${receipt_toolchain:-}" \
+        && -z "${receipt_implementation:-}" ]]; then
+        return 0
+    fi
+    [[ "$receipt_checkout" == "$expected_checkout" \
+        && "$receipt_input" == "$expected_input" \
+        && "$receipt_env" == "$expected_env" \
+        && "$receipt_toolchain" == "$expected_toolchain" \
+        && "$receipt_implementation" == "$expected_implementation" ]]
+}
+
+row_cache_key() {
+    local name="$1" env_fingerprint input_hash
+    [[ ( -n "$cache_dir" || "$reuse_rows" == true ) && -z "$only_rows" ]] || return 1
     git diff --quiet HEAD || return 1
     [[ "$(git rev-parse HEAD)" == "$cache_head" ]] || return 1
     [[ -z "$(git ls-files --others --exclude-standard)" ]] || return 1
@@ -203,33 +279,47 @@ row_cache_key() {
             inputs=(.) ;;
         *) return 1 ;;
     esac
-    local input_tree implementation_digest
-    input_tree="$(git ls-tree -r HEAD -- "${inputs[@]}")" || return 1
-    implementation_digest="$(sha256sum "$gate_implementation")" || return 1
+    env_fingerprint="$(cache_environment)" || return 1
+    input_hash="$(cache_input_hash "$name")" || return 1
     {
-        printf '%s\n' row-cache-v1 "$name" "$version" "$repo_root" "$cache_environment" "$cache_toolchain"
-        [[ "${inputs[0]}" != . ]] || printf '%s\n' "$cache_head"
-        printf '%s\n' "$input_tree" "$implementation_digest"
+        printf '%s\n' row-cache-v2 "$name" "$cache_checkout_identity" "$input_hash" \
+            "$env_fingerprint" "$cache_toolchain" "$cache_implementation_digest"
     } | sha256sum | cut -d' ' -f1
 }
 
 run_check() {
     local name="$1" command="$2" function_name="$3" log status=0
     local started ended wall user system key='' source_sha="$cache_head"
-    local receipt_key receipt_sha receipt_epoch receipt_status now
+    local receipt_key='' receipt_sha='' receipt_epoch='' receipt_status='' now receipt_path='' receipt_origin=''
+    local env_fingerprint input_hash
     row_selected "$name" || return 0
     log="$row_log_dir/$name.log"
     started="$(date -u +%FT%TZ)"
     key="$(row_cache_key "$name" || true)"
-    if "$reuse_rows" && [[ -n "$key" && -f "$cache_dir/$name.$key" ]]; then
-        read -r receipt_key receipt_sha receipt_epoch receipt_status <"$cache_dir/$name.$key" || true
+    env_fingerprint="$(cache_environment)"
+    input_hash="$(cache_input_hash "$name" || true)"
+    if "$reuse_rows" && [[ -n "$key" ]]; then
+        receipt_path=''
+        receipt_origin=''
+        if [[ -n "$cache_dir" && -f "$cache_dir/$name.$key" ]]; then
+            receipt_path="$cache_dir/$name.$key"
+            receipt_origin='gate'
+        elif assembly_sweep_green_for_head && [[ -f "$sweep_cache_dir/$name.$key" ]]; then
+            receipt_path="$sweep_cache_dir/$name.$key"
+            receipt_origin='assembly sweep'
+        fi
         now="$(date +%s)"
-        if [[ "$receipt_key" == "$key" && "$receipt_sha" =~ ^[0-9a-f]{40}$ \
+        if [[ -n "$receipt_path" ]] && row_receipt_valid "$receipt_path" "$key" "$cache_head" \
+            "$input_hash" "$env_fingerprint" "$cache_toolchain" "$cache_checkout_identity" \
+            "$cache_implementation_digest"; then
+            read -r receipt_key receipt_sha receipt_epoch receipt_status _ <"$receipt_path" || true
+        fi
+        if [[ -n "$receipt_path" && "$receipt_key" == "$key" && "$receipt_sha" =~ ^[0-9a-f]{40}$ \
             && "$receipt_epoch" =~ ^[0-9]{10}$ && "$receipt_status" == PASS ]] \
             && (( now >= receipt_epoch && now - receipt_epoch <= 86400 )); then
             print_result PASS "$name" "$command"
-            printf '  reused PASS from %s\n' "$receipt_sha"
-            printf 'Reused PASS key=%s source_sha=%s epoch=%s\n' "$key" "$receipt_sha" "$receipt_epoch" >"$log"
+            printf '  reused PASS from %s (%s)\n' "$receipt_sha" "$receipt_origin"
+            printf 'Reused PASS key=%s source_sha=%s epoch=%s source=%s\n' "$key" "$receipt_sha" "$receipt_epoch" "$receipt_origin" >"$log"
             printf '%s\t%s\t%s\t0\t0\t0\tREUSED\t%s\n' "$name" "$started" "$started" "$receipt_sha" >>"$row_log_dir/timing.tsv"
             return 0
         fi
@@ -242,7 +332,9 @@ run_check() {
         if [[ -n "$key" ]] && git diff --quiet HEAD \
             && [[ "$(git rev-parse HEAD)" == "$cache_head" ]] \
             && [[ -z "$(git ls-files --others --exclude-standard)" ]]; then
-            printf '%s %s %s PASS\n' "$key" "$cache_head" "$(date +%s)" >"$cache_dir/$name.$key.tmp.$$"
+            printf '%s %s %s PASS %s %s %s %s %s\n' "$key" "$cache_head" "$(date +%s)" \
+                "$cache_checkout_identity" "$input_hash" "$env_fingerprint" \
+                "$cache_toolchain" "$cache_implementation_digest" >"$cache_dir/$name.$key.tmp.$$"
             mv "$cache_dir/$name.$key.tmp.$$" "$cache_dir/$name.$key"
         fi
     else

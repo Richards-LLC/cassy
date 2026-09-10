@@ -21,6 +21,17 @@ locations as the release gate. Build pressure leaves a DEFERRED receipt and an
 owner alert, with a retry after 30 seconds. Tests run asynchronously; reports are delivered when the daemon
 reaps the completed job, without waiting inside the merge MCP request.
 
+Each successful equivalent row is also written to
+`.cas/merge-sweeps/row-cache/<row>.<key>` in the release gate's
+`row-cache-v2` format. The receipt binds the row to the shared Git checkout
+identity, input tree hash, normalized environment and toolchain fingerprints,
+gate implementation digest, exact sweep SHA, and a UTC epoch. The gate's
+`--reuse` mode accepts a sweep row only when those fields match, the receipt is
+younger than 24 hours, and `integration.json` is `PASSED` for the current tip.
+The current sweep emits `nextest`; `workspace-tests` and `doctests` use the
+same format when a future sweep executes those rows. Archive, scratch,
+identity, procedure, ledger, and cleanliness checks remain live.
+
 On failure, reported failing targets are rerun on the prior integration tip and
 on preceding union prefixes to identify the introducing merge. Compilation
 failures without test names require a workspace rerun. Missing or timed-out

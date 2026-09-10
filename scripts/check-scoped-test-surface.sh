@@ -8,17 +8,22 @@
 set -euo pipefail
 
 usage() {
-    echo "usage: $0 [--base <git-ref>] -- <cargo/nextest arguments>" >&2
+    echo "usage: $0 [--base <git-ref>] [--resolve-targets] -- [cargo/nextest arguments]" >&2
     exit 2
 }
 
 base_ref=""
+resolve_targets=false
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --base)
             [[ $# -ge 2 ]] || usage
             base_ref="$2"
             shift 2
+            ;;
+        --resolve-targets)
+            resolve_targets=true
+            shift
             ;;
         --)
             shift
@@ -28,7 +33,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-[[ $# -gt 0 ]] || usage
+[[ $# -gt 0 || "$resolve_targets" == true ]] || usage
 requested_args=("$@")
 
 repo_root="$(git rev-parse --show-toplevel 2>/dev/null)" || {
@@ -377,6 +382,22 @@ while IFS= read -r path; do
 done < <(git diff --name-only "$merge_base" HEAD)
 
 missing=()
+if [[ "$resolve_targets" == true ]]; then
+    emitted_lib_modules=()
+    printf 'SCOPED_PROOF_TARGET_ARGS:'
+    for module in "${required_lib_modules[@]}"; do
+        if ! contains_exact "$module" "${emitted_lib_modules[@]}"; then
+            emitted_lib_modules+=("$module")
+            printf ' --lib %s' "$module"
+        fi
+    done
+    for target in "${required_test_targets[@]}"; do
+        printf ' --test %s' "$target"
+    done
+    printf '\n'
+    exit 0
+fi
+
 for module in "${required_lib_modules[@]}"; do
     if ! "$lib_requested" || ! lib_filter_covers "$module"; then
         missing+=("library module '$module'")

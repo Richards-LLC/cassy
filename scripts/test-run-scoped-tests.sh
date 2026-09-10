@@ -449,6 +449,15 @@ git -C "${mapping_repo}" add .
 git -C "${mapping_repo}" -c user.name=scoped-test-fixture -c user.email=scoped-test-fixture@example.invalid \
     commit -qm factory-ops-change
 
+resolved_targets="$(cd "${mapping_repo}" && "${SURFACE_GUARD}" --resolve-targets --base main --)"
+if [[ "$resolved_targets" == 'SCOPED_PROOF_TARGET_ARGS: --lib factory_ops --test factory_mcp_ops_test' ]]; then
+    pass_count=$((pass_count + 1))
+    echo "ok   proof resolver emits the mapped library and integration arguments"
+else
+    fail_count=$((fail_count + 1))
+    echo "FAIL proof resolver emitted unexpected arguments: $resolved_targets"
+fi
+
 expect fail "missing integration target 'factory_mcp_ops_test'" \
     "proof: changed factory_ops module cannot omit its public-surface binary" \
     bash -c "cd '${mapping_repo}' && '${SURFACE_GUARD}' --base main -- -p cas --lib factory_ops"
@@ -481,6 +490,24 @@ expect pass "SCOPED_PROOF: command=scripts/run-scoped-tests.sh --proof" \
     "proof runner: complete mapped receipt is green" \
     env CARGO="${runner_stub}" SCOPED_PROOF_BASE=main \
     "${mapping_repo}/scripts/run-scoped-tests.sh" --proof -p cas --lib factory_ops --test factory_mcp_ops_test
+
+proof_receipt="${mapping_repo}/supervisor-proof.receipt"
+expect pass "SCOPED_PROOF_RECEIPT: id=sp-" \
+    "proof runner: --proof can persist a durable supervisor receipt" \
+    env CARGO="${runner_stub}" SCOPED_PROOF_BASE=main \
+    SCOPED_PROOF_RECEIPT="${proof_receipt}" \
+    "${mapping_repo}/scripts/run-scoped-tests.sh" --proof -p cas --lib factory_ops --test factory_mcp_ops_test
+if [[ -s "${proof_receipt}" ]] \
+    && grep -q '^result=PASS$' "${proof_receipt}" \
+    && grep -q "^head_sha=$(git -C "${mapping_repo}" rev-parse HEAD)$" "${proof_receipt}" \
+    && grep -q '^targets=lib:factory_ops,test:factory_mcp_ops_test$' "${proof_receipt}" \
+    && grep -q '^receipt_id=sp-[0-9a-f]\{64\}$' "${proof_receipt}"; then
+    pass_count=$((pass_count + 1))
+    echo "ok   proof runner receipt binds result, exact tip, targets, and digest"
+else
+    fail_count=$((fail_count + 1))
+    echo "FAIL proof runner receipt is incomplete: $(tr '\n' ' ' <"${proof_receipt}" 2>/dev/null || true)"
+fi
 
 docs_repo="${tmpdir}/docs-repo"
 mkdir -p "${docs_repo}/docs"

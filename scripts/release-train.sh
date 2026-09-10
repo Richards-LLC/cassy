@@ -20,7 +20,7 @@
 #
 # Usage:
 #   scripts/release-train.sh <version> <release-worktree> --assemble
-#   scripts/release-train.sh <version> <epic-worktree> --check-lane <branch>
+#   scripts/release-train.sh <version> <epic-worktree> --check-lane <branch> [proof-receipt]
 #   scripts/release-train.sh <version> <epic-worktree> --gate [--reuse | --only <row,row>]
 #   scripts/release-train.sh <version> <epic-worktree> --pipeline
 #   scripts/release-train.sh <version> <epic-worktree> --publish [<landed-sha>]
@@ -35,6 +35,9 @@
 #   CAS_RELEASE_TRAIN_PROXY_TOML default <main checkout>/.cas/proxy.toml
 #   CAS_RELEASE_TRAIN_GH          default gh
 #   CAS_RELEASE_TRAIN_BRANCH      default the epic worktree's current branch
+#   CAS_RELEASE_TRAIN_FAST_BASE   comparison ref for small-delta admission
+#   CAS_RELEASE_TRAIN_FAST_MAX_FILES default 5
+#   CAS_RELEASE_TRAIN_SCOPED_PROOF_RECEIPT optional supervisor proof receipt
 #   CAS_RELEASE_TRAIN_POLL_SECS   default 45 (checks) / 60 (queue watch)
 #   CAS_RELEASE_TRAIN_CHECK_TRIES default 40
 #   CAS_RELEASE_TRAIN_WATCH_TRIES default 60
@@ -124,8 +127,81 @@ EOF
 # --------------------------------------------------------------------------
 gh_cmd() { "${CAS_RELEASE_TRAIN_GH:-gh}" "$@"; }
 
+proof_receipt_field() {
+    local receipt="$1" field="$2"
+    sed -n "s/^${field}=//p" "$receipt" | head -1
+}
+
+proof_receipt_digest() {
+    local version="$1" result="$2" head_sha="$3" base_sha="$4"
+    local changed_files="$5" targets="$6" proof_worktree="$7"
+    printf 'version=%s\nresult=%s\nhead_sha=%s\nbase_sha=%s\nchanged_files=%s\ntargets=%s\nworktree=%s\n' \
+        "$version" "$result" "$head_sha" "$base_sha" "$changed_files" "$targets" "$proof_worktree" \
+        | sha256sum | awk '{print "sp-" $1}'
+}
+
+fast_admission_base() {
+    if [[ -n "${CAS_RELEASE_TRAIN_FAST_BASE:-}" ]]; then
+        printf '%s\n' "$CAS_RELEASE_TRAIN_FAST_BASE"
+    elif git -C "$worktree" rev-parse --verify --quiet origin/main^{commit} >/dev/null; then
+        printf 'origin/main\n'
+    elif git -C "$worktree" rev-parse --verify --quiet main^{commit} >/dev/null; then
+        printf 'main\n'
+    else
+        printf 'HEAD^\n'
+    fi
+}
+
+fast_admission_summary() {
+    local base_ref="$1" sha="$2"
+    (
+        cd "$worktree"
+        CAS_FAST_ADMISSION_MAX_FILES="${CAS_RELEASE_TRAIN_FAST_MAX_FILES:-5}" \
+            "$script_dir/classify-fast-admission.sh" "$base_ref" "$sha"
+    )
+}
+
+# Validate a supervisor proof receipt against the exact branch tip and current
+# worktree. A receipt is an optimization only: every field is recomputed here,
+# and any mismatch falls through to the normal GitHub job lookup.
+check_scoped_proof_receipt() {
+    local branch="$1" receipt="$2" sha base_sha result changed_files targets proof_worktree
+    local expected_id actual_id summary actual_files
+    [[ -s "$receipt" ]] || return 1
+    sha="$(git -C "$worktree" rev-parse --verify --quiet "refs/heads/$branch^{commit}" 2>/dev/null \
+        || git -C "$worktree" rev-parse --verify --quiet "refs/remotes/origin/$branch^{commit}" 2>/dev/null || true)"
+    [[ -n "$sha" ]] || return 1
+    result="$(proof_receipt_field "$receipt" result)"
+    base_sha="$(proof_receipt_field "$receipt" base_sha)"
+    changed_files="$(proof_receipt_field "$receipt" changed_files)"
+    targets="$(proof_receipt_field "$receipt" targets)"
+    proof_worktree="$(proof_receipt_field "$receipt" worktree)"
+    actual_id="$(proof_receipt_field "$receipt" receipt_id)"
+    [[ "$(proof_receipt_field "$receipt" version)" == 1 ]] || return 1
+    [[ "$result" == PASS && "$sha" == "$(proof_receipt_field "$receipt" head_sha)" ]] || return 1
+    [[ "$proof_worktree" == "$worktree" && "$base_sha" =~ ^[0-9a-f]{40}$ ]] || return 1
+    [[ "$changed_files" =~ ^[0-9]+$ && -n "$targets" ]] || return 1
+    git -C "$worktree" rev-parse --verify --quiet "$base_sha^{commit}" >/dev/null || return 1
+    summary="$(fast_admission_summary "$base_sha" "$sha" 2>&1 || true)"
+    [[ "$summary" == *'eligible=true'* ]] || return 1
+    actual_files="$(printf '%s\n' "$summary" | sed -n 's/.* files=\([0-9][0-9]*\) .*/\1/p')"
+    [[ "$actual_files" == "$changed_files" ]] || return 1
+    expected_id="$(proof_receipt_digest 1 "$result" "$sha" "$base_sha" "$changed_files" "$targets" "$proof_worktree")"
+    [[ "$actual_id" == "$expected_id" ]] || return 1
+    printf 'lane %s at %s: FAST GREEN; supervisor scoped proof receipt id=%s (%s files)\n' \
+        "$branch" "$sha" "$actual_id" "$changed_files"
+    return 0
+}
+
+lane_is_fast_admissible() {
+    local sha="$1" base_ref="$2" summary
+    summary="$(fast_admission_summary "$base_ref" "$sha" 2>&1 || true)"
+    [[ "$summary" == *'eligible=true'* ]]
+}
+
 check_lane() {
-    local branch="$1" repo_slug sha runs row run_id jobs job status conclusion job_id
+    local branch="$1" proof_receipt="${2:-}" repo_slug sha runs row run_id jobs job status conclusion job_id
+    local lane_job lane_base
     [[ -n "$branch" ]] || {
         printf 'error: --check-lane requires a branch\n' >&2
         return 2
@@ -137,6 +213,22 @@ check_lane() {
         printf 'lane %s: MISSING (branch tip not found locally)\n' "$branch"
         return 1
     }
+    if [[ -z "$proof_receipt" && -n "${CAS_RELEASE_TRAIN_SCOPED_PROOF_RECEIPT:-}" ]]; then
+        proof_receipt="$CAS_RELEASE_TRAIN_SCOPED_PROOF_RECEIPT"
+    fi
+    if [[ -n "$proof_receipt" ]] && check_scoped_proof_receipt "$branch" "$proof_receipt"; then
+        return 0
+    fi
+    lane_base="$(fast_admission_base)"
+    lane_job='Scoped Validation (factory/PR)'
+    if lane_is_fast_admissible "$sha" "$lane_base"; then
+        lane_job='Scoped Validation (fast)'
+        printf 'lane %s at %s: FAST admission eligible from %s; requiring %s or a supervisor proof receipt\n' \
+            "$branch" "$sha" "$lane_base" "$lane_job"
+    else
+        printf 'lane %s at %s: full scoped admission required from %s; requiring %s\n' \
+            "$branch" "$sha" "$lane_base" "$lane_job"
+    fi
     if ! runs="$(gh_cmd run list -R "$repo_slug" --workflow ci.yml --branch "$branch" \
         --event push --limit 20 --json databaseId,headBranch,headSha,status,conclusion,event,workflowName 2>&1)"; then
         printf 'lane %s at %s: API ERROR listing CI push runs: %s\n' "$branch" "$sha" "$runs"
@@ -163,16 +255,16 @@ check_lane() {
         printf 'lane %s at %s: API ERROR parsing CI run %s jobs\n' "$branch" "$sha" "$run_id"
         return 1
     fi
-    job="$(printf '%s' "$jobs" | jq -c '[.jobs[] | select(.name == "Scoped Validation (factory/PR)")] | first // empty')"
+    job="$(printf '%s' "$jobs" | jq -c --arg lane_job "$lane_job" '[.jobs[] | select(.name == $lane_job)] | first // empty')"
     if [[ -z "$job" ]]; then
-        printf 'lane %s at %s: MISSING Scoped Validation (factory/PR) job in CI run %s\n' "$branch" "$sha" "$run_id"
+        printf 'lane %s at %s: MISSING %s job in CI run %s\n' "$branch" "$sha" "$lane_job" "$run_id"
         return 1
     fi
     status="$(printf '%s' "$job" | jq -r '.status // "unknown"')"
     conclusion="$(printf '%s' "$job" | jq -r '.conclusion // "pending"')"
     job_id="$(printf '%s' "$job" | jq -r '.databaseId // "unknown"')"
-    printf 'lane %s at %s: CI run %s Scoped Validation (factory/PR) job %s status=%s conclusion=%s\n' \
-        "$branch" "$sha" "$run_id" "$job_id" "$status" "$conclusion"
+    printf 'lane %s at %s: CI run %s %s job %s status=%s conclusion=%s (receipt id=%s/%s)\n' \
+        "$branch" "$sha" "$run_id" "$lane_job" "$job_id" "$status" "$conclusion" "$run_id" "$job_id"
     if [[ "$status" != completed ]]; then
         printf 'lane %s: PENDING; refusing release-bound merge\n' "$branch"
         return 1
@@ -181,7 +273,8 @@ check_lane() {
         printf 'lane %s: RED (%s); refusing release-bound merge\n' "$branch" "$conclusion"
         return 1
     fi
-    printf 'lane %s: GREEN; eligible for release-bound merge\n' "$branch"
+    printf 'lane %s: GREEN; admission path=CI %s receipt id=%s/%s; eligible for release-bound merge\n' \
+        "$branch" "$lane_job" "$run_id" "$job_id"
 }
 
 pipeline_log() { printf '%s %s\n' "$(date -u +%H:%M:%SZ)" "$*"; }
@@ -768,7 +861,11 @@ case "$action" in
         exit "${PIPESTATUS[0]}"
         ;;
     --check-lane)
-        check_lane "${4:-}"
+        [[ "$#" -eq 4 || "$#" -eq 5 ]] || {
+            usage >&2
+            exit 2
+        }
+        check_lane "${4:-}" "${5:-}"
         exit $?
         ;;
     --gate)

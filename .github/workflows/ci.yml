@@ -146,6 +146,108 @@ jobs:
   # into epic branches by a supervisor `git merge --no-ff` with no PR, so this
   # push lane is the only validation those commits ever get; removing it would
   # create a merge path with no validation at all.
+  # Factory pushes under the small-delta policy use the mapped proof surface
+  # only. The release train can accept this exact job, or a supervisor's
+  # equivalent --proof receipt, without waiting for the full scoped lane.
+  scoped-validation-fast:
+    name: Scoped Validation (fast)
+    if: >-
+      github.event_name == 'push'
+      && startsWith(github.ref, 'refs/heads/factory/')
+    concurrency:
+      group: scoped-validation-fast-${{ github.ref }}
+      cancel-in-progress: true
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+          ref: ${{ github.sha }}
+
+      - id: classify-diff
+        uses: ./.github/actions/classify-required-diff
+        with:
+          base-sha: ${{ github.event.before }}
+          zero-base-ref: origin/${{ github.event.repository.default_branch }}
+
+      - name: Report full-tier routing
+        if: steps.classify-diff.outputs.fast-admission != 'true'
+        run: >-
+          echo "Fast tier skipped: ${{ steps.classify-diff.outputs.fast-admission-reason }};
+          Scoped Validation (factory/PR) owns this delta."
+
+      # The bridge is Node-only and its whole suite is bounded to the fast
+      # tier when a small delta touches it.  Keeping this target here avoids
+      # making the shared fast admission classifier a coverage hole for mixed
+      # or bridge-only changes.
+      - name: Build and test the Slack bridge
+        if: >-
+          steps.classify-diff.outputs.fast-admission == 'true'
+          && steps.classify-diff.outputs.bridge-check-needed == 'true'
+        working-directory: slack-bridge
+        run: |
+          npm ci
+          npm test
+          npm run build
+
+      - uses: ./.github/actions/setup-rust-linux
+        if: >-
+          steps.classify-diff.outputs.fast-admission == 'true'
+          && steps.classify-diff.outputs.rust-unaffected != 'true'
+        with:
+          cache-key: scoped-validation-fast
+
+      - name: Install nextest
+        if: >-
+          steps.classify-diff.outputs.fast-admission == 'true'
+          && steps.classify-diff.outputs.rust-unaffected != 'true'
+        uses: taiki-e/install-action@nextest
+
+      - name: Check library and mapped test targets
+        if: >-
+          steps.classify-diff.outputs.fast-admission == 'true'
+          && steps.classify-diff.outputs.rust-unaffected != 'true'
+        env:
+          BASE_SHA: ${{ github.event.before }}
+          ZERO_BASE_REF: origin/${{ github.event.repository.default_branch }}
+          ZIG: ${{ github.workspace }}/.context/zig/zig
+        run: |
+          set -euo pipefail
+          proof_base="$BASE_SHA"
+          if [[ "$proof_base" =~ ^0+$ ]]; then
+            proof_base="$ZERO_BASE_REF"
+          fi
+          merge_base="$(git merge-base "$proof_base" HEAD)"
+          target_line="$(scripts/check-scoped-test-surface.sh --resolve-targets --base "$merge_base" --)"
+          target_args="${target_line#SCOPED_PROOF_TARGET_ARGS:}"
+          read -r -a mapped_args <<< "$target_args"
+          cargo check -p cas --lib --tests
+          if [[ ${#mapped_args[@]} -gt 0 ]]; then
+            SCOPED_PROOF_BASE="$merge_base" \
+              scripts/run-scoped-tests.sh --proof -p cas "${mapped_args[@]}"
+          else
+            echo 'No Rust test targets mapped for this small delta.'
+          fi
+
+      - name: Test snapshot-pinned CLI output surfaces
+        if: >-
+          steps.classify-diff.outputs.fast-admission == 'true'
+          && steps.classify-diff.outputs.rust-unaffected != 'true'
+        env:
+          BASE_SHA: ${{ github.event.before }}
+          ZERO_BASE_REF: origin/${{ github.event.repository.default_branch }}
+        run: scripts/check-scoped-snapshot-tests.sh --base-sha "$BASE_SHA" --zero-base-ref "$ZERO_BASE_REF"
+
+      - name: Report sccache stats
+        if: always()
+        run: |
+          if [[ -x ./scripts/ci-sccache-summary.sh ]]; then
+            ./scripts/ci-sccache-summary.sh "Scoped Validation (fast)"
+          else
+            echo "::notice title=sccache stats::scripts/ci-sccache-summary.sh is absent at this checkout; skipping cache reporting."
+          fi
+
   scoped-validation:
     name: Scoped Validation (factory/PR)
     if: >-
@@ -206,7 +308,9 @@ jobs:
           zero-base-ref: origin/${{ github.event.repository.default_branch }}
 
       - name: Test portable installer fixtures
-        if: steps.pr-dedupe.outputs.covered != 'true'
+        if: >-
+          steps.pr-dedupe.outputs.covered != 'true'
+          && (github.event_name != 'push' || steps.classify-diff.outputs.fast-admission != 'true')
         run: ./scripts/test-cas-install.sh
 
       # The bridge is Node-only and its whole suite runs in about a second, so
@@ -214,6 +318,7 @@ jobs:
       - name: Build and test the Slack bridge
         if: >-
           steps.pr-dedupe.outputs.covered != 'true'
+          && (github.event_name != 'push' || steps.classify-diff.outputs.fast-admission != 'true')
           && steps.classify-diff.outputs.bridge-check-needed == 'true'
         working-directory: slack-bridge
         run: |
@@ -224,6 +329,7 @@ jobs:
       - uses: ./.github/actions/setup-rust-linux
         if: >-
           steps.pr-dedupe.outputs.covered != 'true'
+          && (github.event_name != 'push' || steps.classify-diff.outputs.fast-admission != 'true')
           && steps.classify-diff.outputs.rust-unaffected != 'true'
         with:
           cache-key: scoped-validation
@@ -231,12 +337,14 @@ jobs:
       - name: Install nextest
         if: >-
           steps.pr-dedupe.outputs.covered != 'true'
+          && (github.event_name != 'push' || steps.classify-diff.outputs.fast-admission != 'true')
           && steps.classify-diff.outputs.rust-unaffected != 'true'
         uses: taiki-e/install-action@nextest
 
       - name: Check library and test targets
         if: >-
           steps.pr-dedupe.outputs.covered != 'true'
+          && (github.event_name != 'push' || steps.classify-diff.outputs.fast-admission != 'true')
           && steps.classify-diff.outputs.rust-unaffected != 'true'
         env:
           ZIG: ${{ github.workspace }}/.context/zig/zig
@@ -245,6 +353,7 @@ jobs:
       - name: Test library target (one binary)
         if: >-
           steps.pr-dedupe.outputs.covered != 'true'
+          && (github.event_name != 'push' || steps.classify-diff.outputs.fast-admission != 'true')
           && steps.classify-diff.outputs.rust-unaffected != 'true'
         env:
           ZIG: ${{ github.workspace }}/.context/zig/zig
@@ -258,6 +367,7 @@ jobs:
       - name: Test snapshot-pinned CLI output surfaces
         if: >-
           steps.pr-dedupe.outputs.covered != 'true'
+          && (github.event_name != 'push' || steps.classify-diff.outputs.fast-admission != 'true')
           && steps.classify-diff.outputs.rust-unaffected != 'true'
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}

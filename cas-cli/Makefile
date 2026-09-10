@@ -213,6 +213,7 @@ test-scoped-selftest:
 # exhaustive — if you add a scripts/test-*.sh, wire it into a lane here.
 test-ci-tiers:
 	cd .. && ./scripts/test-run-verified-tests.sh
+	cd .. && ./scripts/test-classify-fast-admission.sh
 	cd .. && ./scripts/test-ci-test-tiers.sh
 	cd .. && ./scripts/test-self-hosted-rust-setup.sh
 	cd .. && ./scripts/test-release-publication-policy.sh

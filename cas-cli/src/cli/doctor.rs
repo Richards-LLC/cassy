@@ -227,8 +227,13 @@ impl CheckGroup {
 
     fn for_name(name: &str) -> Self {
         match name.to_ascii_lowercase().as_str() {
-            "host" | "user-level store" | "known repos" | "host proxy" | "hub service"
+            "host"
+            | "user-level store"
+            | "known repos"
+            | "host proxy"
+            | "hub service"
             | "hub transport"
+            | "hub supervised but not publishable"
             | "registered project roots" | "host user skills" => Self::Host,
             "user skills" => Self::Config,
             "legacy search index"
@@ -605,8 +610,13 @@ fn host_hub_transport_check() -> Check {
     };
     let record = paths.read_process_record().ok();
     let report = crate::cli::hub::hub_transport_report(&paths, record.as_ref());
+    let name = if report.is_supervised_unavailable() {
+        "hub supervised but not publishable"
+    } else {
+        "hub transport"
+    };
     Check::new(
-        "hub transport",
+        name,
         if report.is_failure() {
             CheckStatus::Error
         } else {

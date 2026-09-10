@@ -154,6 +154,12 @@ fn clean_home_process_start_health_status_stop_needs_no_init() {
     let home = private_home();
     let path = system_path();
     let record = start_hub(home.path(), &path, false);
+    let startup_log = fs::read_to_string(home.path().join(".cas/hub/hub.log"))
+        .expect("hub startup must create a diagnostic log before optional probes");
+    assert!(
+        startup_log.contains("cas hub serve starting (tailscale_serve=false"),
+        "startup log: {startup_log}"
+    );
     #[cfg(unix)]
     assert_private_state_modes(home.path());
 

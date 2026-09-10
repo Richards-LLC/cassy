@@ -9,6 +9,7 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, ensure};
 use serde::Serialize;
@@ -18,6 +19,7 @@ use crate::hub::{DEFAULT_HUB_PORT, HubRuntimePaths};
 
 const LAUNCHD_LABEL: &str = "dev.cas.commander-hub";
 const SYSTEMD_UNIT: &str = "cas-hub.service";
+const LAUNCHD_TAILSCALE_REFUSAL: &str = "`cas hub service install --tailscale-serve` is not supported for launchd: Tailscale Serve needs the interactive user's GUI namespace, while launchd starts in its bootstrap namespace. Install the loopback-only service with `cas hub service install`, or run `cas hub service uninstall && cas hub start --tailscale-serve` from an interactive shell when Commander pairing needs a public URL.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ServicePlatform {
@@ -86,6 +88,9 @@ fn install(
     let paths = HubRuntimePaths::default_for_user()?;
     match platform {
         ServicePlatform::Launchd => {
+            if tailscale_serve {
+                anyhow::bail!("{LAUNCHD_TAILSCALE_REFUSAL}");
+            }
             let path = launchd_path()?;
             let binary = service_binary(dry_run)?;
             let definition =
@@ -154,6 +159,92 @@ fn install(
         ServicePlatform::Unsupported => {
             anyhow::bail!("hub service management is supported on macOS and Linux only")
         }
+    }
+}
+
+/// Restart a hub that is owned by a user-level service manager without racing
+/// its KeepAlive/restart policy. Returns `true` when the manager handled the
+/// restart, leaving normal stop/start lifecycle code for manually launched
+/// hubs.
+pub(super) fn restart_supervised(
+    _cli: &Cli,
+    tailscale_serve: bool,
+    _tailscale_port: u16,
+) -> Result<bool> {
+    match native_platform() {
+        ServicePlatform::Launchd => {
+            let path = launchd_path()?;
+            if !path.is_file() {
+                return Ok(false);
+            }
+            let domain = launchd_domain()?;
+            if !command_succeeds(
+                "launchctl",
+                ["print", &format!("{domain}/{LAUNCHD_LABEL}")],
+            ) {
+                return Ok(false);
+            }
+            let service_tailscale = service_file_requests_tailscale(&path)?;
+            if tailscale_serve && !service_tailscale {
+                anyhow::bail!(
+                    "cas hub restart --tailscale-serve cannot change launchd service arguments while KeepAlive supervision is active; run `cas hub service uninstall && cas hub start --tailscale-serve` from an interactive shell"
+                );
+            }
+            let previous_pid = HubRuntimePaths::default_for_user()?
+                .read_process_record()
+                .ok()
+                .map(|record| record.pid);
+            run_manager_vec("launchctl", &launchd_kickstart_args(&domain))?;
+            wait_for_supervised_hub(previous_pid)?;
+            Ok(true)
+        }
+        ServicePlatform::Systemd => {
+            let path = systemd_path()?;
+            if !path.is_file() || !command_succeeds("systemctl", ["--user", "is-active", "--quiet", SYSTEMD_UNIT]) {
+                return Ok(false);
+            }
+            let service_tailscale = service_file_requests_tailscale(&path)?;
+            if tailscale_serve && !service_tailscale {
+                anyhow::bail!(
+                    "cas hub restart --tailscale-serve cannot change systemd service arguments while supervision is active; run `cas hub service uninstall && cas hub start --tailscale-serve` from an interactive shell"
+                );
+            }
+            let previous_pid = HubRuntimePaths::default_for_user()?
+                .read_process_record()
+                .ok()
+                .map(|record| record.pid);
+            run_manager("systemctl", ["--user", "restart", SYSTEMD_UNIT], None)?;
+            wait_for_supervised_hub(previous_pid)?;
+            Ok(true)
+        }
+        ServicePlatform::ManualLinux | ServicePlatform::Unsupported => Ok(false),
+    }
+}
+
+fn service_file_requests_tailscale(path: &Path) -> Result<bool> {
+    Ok(fs::read_to_string(path)?.contains("--tailscale-serve"))
+}
+
+fn wait_for_supervised_hub(previous_pid: Option<u32>) -> Result<()> {
+    let paths = HubRuntimePaths::default_for_user()?;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Ok(record) = paths.read_process_record()
+            && previous_pid != Some(record.pid)
+            && super::hub::record_is_live(&record)
+            && paths
+                .read_lock_owner()
+                .is_some_and(|owner| owner.pid == record.pid && owner.phase == "running")
+        {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            anyhow::bail!(
+                "supervised cas hub did not become ready after 10.0s; inspect `cas hub service status` and `{}`",
+                paths.log_path().display()
+            );
+        }
+        std::thread::sleep(Duration::from_millis(50));
     }
 }
 
@@ -567,6 +658,8 @@ fn service_args(binary: &Path, tailscale_serve: bool, tailscale_port: u16) -> Ve
         "127.0.0.1".into(),
         "--port".into(),
         DEFAULT_HUB_PORT.to_string(),
+        "--launched-by".into(),
+        "service".into(),
     ];
     if tailscale_serve {
         args.extend([
@@ -638,7 +731,7 @@ mod tests {
             unit,
             include_str!("../../tests/fixtures/hub-service-systemd.service")
         );
-        assert!(unit.contains("ExecStart=/opt/cas/bin/cas hub serve --bind 127.0.0.1 --port 4173 --tailscale-serve --tailscale-serve-port 8443"));
+        assert!(unit.contains("ExecStart=/opt/cas/bin/cas hub serve --bind 127.0.0.1 --port 4173 --launched-by service --tailscale-serve --tailscale-serve-port 8443"));
         assert!(!unit.to_ascii_lowercase().contains("token"));
         assert!(!unit.contains("credentials"));
         assert!(unit.contains("StandardOutput=append:%h/.cas/hub/hub.log"));
@@ -654,6 +747,31 @@ mod tests {
     }
 
     #[test]
+    fn launchd_tailscale_refusal_names_the_interactive_pairing_recovery() {
+        assert!(LAUNCHD_TAILSCALE_REFUSAL.contains("bootstrap namespace"));
+        assert!(LAUNCHD_TAILSCALE_REFUSAL.contains("cas hub service install`"));
+        assert!(LAUNCHD_TAILSCALE_REFUSAL.contains(
+            "cas hub service uninstall && cas hub start --tailscale-serve"
+        ));
+    }
+
+    #[test]
+    fn service_definition_detection_distinguishes_serve_arguments() {
+        let temp = tempfile::tempdir().unwrap();
+        let loopback = temp.path().join("loopback.service");
+        let published = temp.path().join("published.service");
+        fs::write(&loopback, "ExecStart=/opt/cas/bin/cas hub serve\n").unwrap();
+        fs::write(
+            &published,
+            "ExecStart=/opt/cas/bin/cas hub serve --tailscale-serve\n",
+        )
+        .unwrap();
+
+        assert!(!service_file_requests_tailscale(&loopback).unwrap());
+        assert!(service_file_requests_tailscale(&published).unwrap());
+    }
+
+    #[test]
     fn service_arguments_keep_tailscale_optional_and_loopback_fixed() {
         assert_eq!(
             service_args(Path::new("/opt/cas/bin/cas"), false, 443),
@@ -664,7 +782,9 @@ mod tests {
                 "--bind",
                 "127.0.0.1",
                 "--port",
-                "4173"
+                "4173",
+                "--launched-by",
+                "service"
             ]
         );
     }

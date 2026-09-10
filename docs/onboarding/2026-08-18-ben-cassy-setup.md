@@ -101,14 +101,16 @@ and exposes it to the Petra Stella tailnet over HTTPS.
 ```zsh
 brew install --cask tailscale
 open -a Tailscale
-cas hub service install --tailscale-serve
+cas hub service install
 cas hub service status
 cas hub pair
 ```
 
 On macOS, this installs a user-level `launchd` service that starts at login and
-survives reboots. Use `cas hub service install` without the flag if tailnet
-access is not wanted. In Commander, choose **Pair a machine** and complete the
+survives reboots, but remains loopback-only because Tailscale Serve cannot
+publish from launchd's bootstrap namespace. For Commander pairing, run
+`cas hub service uninstall && cas hub start --tailscale-serve` from an
+interactive shell. In Commander, choose **Pair a machine** and complete the
 code flow. `cas hub service uninstall` removes supervision without deleting hub
 identity or approved devices.
 

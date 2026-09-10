@@ -507,3 +507,32 @@ fn supervisor_reference_tree_uses_current_lifecycle_contract() {
         );
     }
 }
+
+/// cas-c401: the supervisor pane budget lives in the skill body, not only in
+/// the director prompt, so it survives sessions where the prompt is not
+/// replayed. All three mirrors must carry the three output-contract rules.
+#[test]
+fn supervisor_skill_mirrors_pin_the_pane_budget() {
+    let root = source_root();
+    for path in [
+        "cas-cli/src/builtins/skills/cas-supervisor.md",
+        "cas-cli/src/builtins/codex/skills/cas-supervisor.md",
+        "cas-cli/src/builtins/grok/skills/cas-supervisor.md",
+    ] {
+        let body = load(&root.join(path));
+        for marker in [
+            "**Pane budget:**",
+            "at most ~150 words",
+            "Answer first",
+            "**Evidence lives elsewhere:**",
+            "the pane gets the verdict and the pointer",
+            "**Messages to workers:**",
+            "no process narration",
+        ] {
+            assert!(
+                body.contains(marker),
+                "{path} must pin the supervisor pane budget marker {marker:?}"
+            );
+        }
+    }
+}

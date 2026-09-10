@@ -37,6 +37,41 @@ impl CasCore {
 
     /// Show skill details
     /// Checks database first, then falls back to .claude/skills/ files
+    /// "Skill not found: X. Did you mean: y?" (GH #810). Candidates are every
+    /// name an agent could legitimately have meant: stored skills (name and
+    /// id), the project's `.claude/skills` directories, and the builtin
+    /// catalog.
+    fn unknown_skill_message(&self, query: &str, skill_store: &dyn cas_store::SkillStore) -> String {
+        let mut candidates: Vec<String> = Vec::new();
+        if let Ok(skills) = skill_store.list(None) {
+            for skill in skills {
+                candidates.push(skill.name);
+                candidates.push(skill.id);
+            }
+        }
+        let project_root = self.cas_root.parent().unwrap_or(&self.cas_root);
+        if let Ok(entries) = std::fs::read_dir(project_root.join(".claude").join("skills")) {
+            for entry in entries.flatten() {
+                if entry.path().join("SKILL.md").is_file()
+                    && let Some(name) = entry.file_name().to_str()
+                {
+                    candidates.push(name.to_owned());
+                }
+            }
+        }
+        candidates.extend(
+            crate::builtins::BUILTIN_SKILLS
+                .iter()
+                .filter_map(|file| file.path.strip_prefix("skills/"))
+                .filter_map(|rest| rest.split('/').next())
+                .map(str::to_owned),
+        );
+        crate::sync::skill_suggest::unknown_skill_message(
+            query,
+            candidates.iter().map(String::as_str),
+        )
+    }
+
     pub async fn cas_skill_show(
         &self,
         Parameters(req): Parameters<IdRequest>,
@@ -56,7 +91,7 @@ impl CasCore {
                     Ok(None) => {
                         return Err(McpError {
                             code: ErrorCode::INVALID_PARAMS,
-                            message: Cow::from(format!("Skill not found: {}", req.id)),
+                            message: Cow::from(self.unknown_skill_message(&req.id, skill_store.as_ref())),
                             data: None,
                         });
                     }
@@ -331,7 +366,12 @@ impl CasCore {
 
         let mut skill = skill_store.get(&req.id).map_err(|e| McpError {
             code: ErrorCode::INVALID_PARAMS,
-            message: Cow::from(format!("Skill not found: {e}")),
+            message: Cow::from(match e {
+                cas_store::StoreError::NotFound(_) => {
+                    self.unknown_skill_message(&req.id, skill_store.as_ref())
+                }
+                other => format!("Skill not found: {other}"),
+            }),
             data: None,
         })?;
 

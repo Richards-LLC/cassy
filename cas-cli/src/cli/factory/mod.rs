@@ -494,7 +494,7 @@ pub struct KillAllArgs {
 }
 
 /// Internal factory subcommands (hidden from help)
-#[derive(Subcommand, Debug, Clone)]
+#[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
 pub enum FactoryCommands {
     /// Report local Claude/Codex/CAS-MCP readiness without spawning workers.
     Doctor,
@@ -1388,7 +1388,10 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
         let mut spec = resolve_supervisor_spec(sources)
             .map_err(|e| anyhow::anyhow!("Failed to resolve supervisor spec: {e}"))?;
         if spec.config_dir.is_none() {
-            spec.config_dir = args.supervisor_config_dir.clone();
+            spec.config_dir = args
+                .supervisor_config_dir
+                .as_ref()
+                .map(|path| path.to_string_lossy().into_owned());
         }
         cas_factory::validate_explicit(&spec, &CapabilitySnapshot::default())
             .map_err(|e| anyhow::anyhow!("Failed to validate supervisor routing spec: {e}"))?;

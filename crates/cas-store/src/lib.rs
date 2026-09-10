@@ -192,6 +192,7 @@ pub use verification_store::{
     issue_server_verifier_handoff_with_secret, issue_verifier_capability,
     reopen_closed_task_atomic,
     reopen_terminal_task_atomic, request_changes_for_parked_delivery,
+    resolve_verification_dispatch_for_add, resolve_verification_dispatch_for_add_with_conn,
     resolve_verification_dispatch_with_conn, save_verification_issues_with_conn,
     timeout_verification_dispatch, update_system_verification,
 };

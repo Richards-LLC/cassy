@@ -2570,9 +2570,14 @@ impl CasCore {
                         );
                     } else {
                         let sup_ver = supervisor_verification_tool();
+                        let bound_head = dispatch
+                            .repository
+                            .as_ref()
+                            .map(|proof| format!(" Bound head: {}.", proof.head_commit))
+                            .unwrap_or_default();
                         return Ok(Self::tool_error(format!(
-                            "⚠️ VERIFICATION REQUIRED\n\nTask {} cannot close until exact pending dispatch {} records its capability-bound verifier or registered supervisor-direct verdict. If the bound worker or verifier is unavailable, a registered supervisor can recover without them: {} action=add task_id={} dispatch_id={} status=approved summary=\"...\", then retry task close.",
-                            req.id, dispatch.id, sup_ver, req.id, dispatch.id
+                            "⚠️ VERIFICATION REQUIRED\n\nTask {} cannot close until exact pending dispatch {} records its capability-bound verifier or registered supervisor-direct verdict.{} If the bound worker or verifier is unavailable, a registered supervisor can recover without them: {} action=add task_id={} dispatch_id={} status=approved summary=\"...\", then retry task close.",
+                            req.id, dispatch.id, bound_head, sup_ver, req.id, dispatch.id
                         )));
                     }
                 }
@@ -3342,6 +3347,7 @@ impl CasCore {
                         )));
                     }
                 };
+                let mut superseded_approved_verdict_id = None;
 
                 // Revalidate repository-bound legacy proof even after a verdict
                 // was recorded. This prevents an approval from authorizing file
@@ -3354,6 +3360,16 @@ impl CasCore {
                     )
                     .is_err()
                 {
+                    if dispatch.state == cas_types::VerificationDispatchState::Resolved
+                        && let Ok(Some(verdict)) =
+                            cas_store::get_verification_for_dispatch(&self.cas_root, &dispatch.id)
+                        && matches!(
+                            verdict.status,
+                            VerificationStatus::Approved | VerificationStatus::Skipped
+                        )
+                    {
+                        superseded_approved_verdict_id = Some(verdict.id);
+                    }
                     cas_store::invalidate_verification_dispatch_for_repository_drift(
                         &self.cas_root,
                         &dispatch.id,
@@ -3632,16 +3648,62 @@ impl CasCore {
                         // or its lease. If Git inspection fails, the close remains
                         // failure-atomic instead of leaving a pending task without a
                         // dispatch.
-                        let proof_worktree = self
-                            .resolve_worker_worktree_path(&task, declared_repo_context.as_ref())
-                            .map_err(|error| McpError {
-                                code: ErrorCode::INVALID_PARAMS,
-                                message: Cow::from(format!(
-                                    "Failed to resolve verification worktree: {error}"
-                                )),
-                                data: None,
-                            })?
-                            .unwrap_or_else(|| close_project_root.clone());
+                        // A transactional delivery close runs after the
+                        // supervisor has published the target and persisted
+                        // CloseReady. Bind that post-merge cycle to the
+                        // target checkout, even when the worker worktree is
+                        // still present, so the proof describes the merged
+                        // head rather than the source branch that was just
+                        // consumed.
+                        let post_merge_target = if task.status == TaskStatus::AwaitingMerge
+                            && task.deliverables.factory_branch_anchor.is_some()
+                        {
+                            Some(close_project_root.clone())
+                        } else {
+                            req.commit_receipt
+                                .as_deref()
+                                .and_then(|receipt| {
+                                    cas_store::get_latest_worker_delivery(
+                                        &self.cas_root,
+                                        &req.id,
+                                    )
+                                    .ok()
+                                    .flatten()
+                                    .and_then(|(delivery, transaction)| {
+                                        if !matches!(
+                                            transaction.state,
+                                            cas_types::WorkerDeliveryState::Merged
+                                                | cas_types::WorkerDeliveryState::CloseReady
+                                                | cas_types::WorkerDeliveryState::Delivered
+                                        ) {
+                                            return None;
+                                        }
+                                        let resolved = resolve_task_commit_receipt_sha(
+                                            &close_project_root,
+                                            receipt,
+                                        )
+                                        .ok()?;
+                                        (resolved == delivery.commit_sha).then_some(())
+                                    })
+                                })
+                                .map(|_| close_project_root.clone())
+                        };
+                        let proof_worktree = match post_merge_target {
+                            Some(target) => target,
+                            None => self
+                                .resolve_worker_worktree_path(
+                                    &task,
+                                    declared_repo_context.as_ref(),
+                                )
+                                .map_err(|error| McpError {
+                                    code: ErrorCode::INVALID_PARAMS,
+                                    message: Cow::from(format!(
+                                        "Failed to resolve verification worktree: {error}"
+                                    )),
+                                    data: None,
+                                })?
+                                .unwrap_or_else(|| close_project_root.clone()),
+                        };
                         let proof_boundary = if crate::mcp::tools::core::task::lifecycle::repository_proof::is_git_worktree(
                                 &proof_worktree,
                             ) {
@@ -3783,6 +3845,11 @@ impl CasCore {
                                         // row than one that names it.
                                         task_to_update.assignee.as_deref().unwrap_or("worker"),
                                         req.reason.as_deref(),
+                                        dispatch
+                                            .repository
+                                            .as_ref()
+                                            .map(|proof| proof.head_commit.as_str()),
+                                        superseded_approved_verdict_id.as_deref(),
                                     ) {
                                         Ok(()) => dispatch_handoff_queued = true,
                                         Err(error) => {
@@ -3855,9 +3922,19 @@ impl CasCore {
                                 "Forward to supervisor (workers cannot spawn task-verifier \
                                  directly):\n\n"
                             };
+                            let bound_head = dispatch
+                                .repository
+                                .as_ref()
+                                .map(|proof| format!(" Bound head: {}.", proof.head_commit))
+                                .unwrap_or_default();
+                            let superseded_verdict = superseded_approved_verdict_id
+                                .as_deref()
+                                .map(|id| format!(" Previous approved verdict: {id}."))
+                                .unwrap_or_default();
                             format!(
                                 "Factory worker verification gate: task {id} close is pending \
                                      dispatch {dispatch_id}, owned by {owner}, deadline {deadline}. \
+                                     {bound_head}{superseded_verdict}\
                                      This close will only succeed after a legitimate verifier records a verdict.\n\n\
                                      {handoff_line}\
                                      {coord} action=message target=supervisor \
@@ -3884,9 +3961,14 @@ impl CasCore {
                                 verifier_agent, req.id, req.id
                             )
                         } else {
+                            let bound_head = dispatch
+                                .repository
+                                .as_ref()
+                                .map(|proof| format!(" Bound head: {}.", proof.head_commit))
+                                .unwrap_or_default();
                             format!(
                                 "Task {} close is pending verification dispatch {} owned by {} \
-                                     until {}.\n\n\
+                                     until {}.{bound_head}\n\n\
                                      Use the Task tool to spawn a task-verifier subagent: \
                                      Task(subagent_type=\"{}\", prompt=\"Verify task {}\")",
                                 req.id,

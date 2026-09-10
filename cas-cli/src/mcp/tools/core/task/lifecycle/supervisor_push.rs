@@ -747,6 +747,8 @@ pub fn emit_verification_dispatch_handoff(
     deadline: DateTime<Utc>,
     worker: &str,
     close_reason: Option<&str>,
+    bound_head: Option<&str>,
+    approved_verdict_id: Option<&str>,
 ) -> Result<(), String> {
     let body = crate::prompt_revalidation::verification_dispatch_envelope(
         dispatch_id,
@@ -755,6 +757,8 @@ pub fn emit_verification_dispatch_handoff(
         &deadline.to_rfc3339(),
         worker,
         close_reason,
+        bound_head,
+        approved_verdict_id,
     );
     let factory_session = std::env::var("CAS_FACTORY_SESSION").ok();
     let source = format!("{VERIFICATION_DISPATCH_SOURCE_PREFIX}{dispatch_id}");

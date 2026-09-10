@@ -7,6 +7,32 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.23.0] - 2026-09-10
+
+### Added
+- Factory coordination traffic is now configurable and bounded: ordinary
+  messages allow 1,200 characters, escalations allow 2,500, and task notes
+  allow 1,500; over-cap messages are rejected before queueing with an artifact
+  remedy, and every message requires a summary.
+- Worker launch prompts now use a fixed six-field return contract and silent
+  execution, with context headroom reported only below 20 percent.
+- Supervisor panes now have a concise output budget, with evidence kept in
+  task notes and artifacts and one decision per worker message.
+
+### Changed
+- Startup context is delivered once per session; tool-result fallback no
+  longer replays transport-delivered mail, task details show the newest five
+  notes, claim files are pruned, and queue provenance is a one-line
+  `[cas #id origin <age>s <first|replay>]` envelope.
+- Close-gate recovery now requires origin reachability for trunk targets,
+  rebases merge recovery inside the worker worktree, blocks history-changing
+  Git commands outside that worktree, and refuses an unpublished local epic
+  parent during base refresh.
+
+### Fixed
+- Release reports no longer mistake GitHub pull-request references for issue
+  references.
+
 ## [3.22.1] - 2026-09-09
 
 ### Fixed

@@ -34,7 +34,8 @@ import { DeferredRenderScheduler } from "./deferred-render";
 import { FleetBoardRenderer } from "./fleet-board";
 import { FirstConnectionAnnouncer, installPairedMachine } from "./first-connection";
 import { isEditableElement, renderDecision, shellSignature } from "./render-model";
-import type { AttentionItem, HubSession, LeaseState, PaneInfo, Scope, SessionCardSummary, SessionState, StoredMachine } from "./types";
+import { operatorThreadMarkup } from "./operator-thread";
+import type { AttentionItem, HubSession, LeaseState, OperatorReply, PaneInfo, Scope, SessionCardSummary, SessionState, StoredMachine } from "./types";
 
 applyScheme();
 
@@ -144,6 +145,7 @@ let speechController: SpeechDictationController | undefined;
 let speechInputState: SpeechInputState = "idle";
 let speechInputDetail = "";
 let messageDelivery: { session: string; target: string } | undefined;
+const operatorReplies = new Map<string, OperatorReply[]>();
 // Why a send did not happen has to survive the render that follows it, and has
 // to sit beside the composer: a toast is gone before a phone operator has
 // finished reading it, and a disabled button says nothing at all.
@@ -482,6 +484,15 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       surfaces.get(key)?.write(data);
       const activity = document.querySelector<HTMLElement>(`[data-pane-id="${CSS.escape(pane)}"] .pane-last-activity`);
       if (activity && selectedMachineId === machine.id && selectedSession === session) updatePaneActivity(activity, paneLastActivity.get(key));
+    },
+    onOperatorReply: (session, reply) => {
+      const key = sessionKey(machine.id, session);
+      const replies = operatorReplies.get(key) ?? [];
+      if (!replies.some((item) => item.notification_id === reply.notification_id)) {
+        replies.push(reply);
+        operatorReplies.set(key, replies.slice(-20));
+      }
+      if (selectedMachineId === machine.id && selectedSession === session) render();
     },
     onSessionSummary: (session, summary) => {
       sessionSummaries.set(sessionKey(machine.id, session), summary);
@@ -1818,6 +1829,7 @@ function render(captureDraft = true): void {
     : undefined;
   const supervisor = supervisorTarget(selectedHubSession);
   const delivery = selectedSession && messageDelivery?.session === selectedSession ? messageDelivery : undefined;
+  const thread = selected && selectedSession ? operatorReplies.get(sessionKey(selected.id, selectedSession)) ?? [] : [];
   // Evaluated with the draft the operator can actually see, so the button's
   // stated reason and the reason a send would print are the same sentence. It
   // never carries `disabled`: a disabled Send button swallows the tap and looks
@@ -1999,7 +2011,7 @@ function render(captureDraft = true): void {
             <button id="context-panel-close" class="context-panel-close" type="button" aria-label="Close panel">×</button>
           </div>
           <section id="attention-panel" class="context-tab" data-context-content="attention" ${activeContextTab === "attention" ? "" : "hidden"}></section>
-          <section class="context-tab status-context" data-context-content="status" ${activeContextTab === "status" ? "" : "hidden"}><p class="status-stale" role="status" hidden></p><div id="status-view"></div><div class="message"><h2><label for="message-text">Talk to ${escapeHtml(supervisor ?? "supervisor")}</label></h2><textarea aria-describedby="message-status" id="message-text" placeholder="Speak or type a message, then review it before sending"></textarea><p class="control-disabled-reason" role="note" hidden></p><div class="composer-actions"><button id="message-mic" type="button" hidden aria-label="Start voice input" aria-pressed="false"><span class="mic-mark" aria-hidden="true">●</span><span data-mic-label>Tap to talk</span></button><button id="message-keyboard" type="button">Keyboard</button><button id="message-send" class="primary">Send message</button></div><p id="speech-status" class="composer-status" role="status" hidden></p><p id="message-status" class="message-status" role="status" hidden></p><p id="message-delivery" class="message-delivery" role="status" hidden></p></div></section>
+          <section class="context-tab status-context" data-context-content="status" ${activeContextTab === "status" ? "" : "hidden"}><p class="status-stale" role="status" hidden></p><div id="status-view"></div><div class="message"><h2><label for="message-text">Talk to ${escapeHtml(supervisor ?? "supervisor")}</label></h2>${operatorThreadMarkup(thread)}<textarea aria-describedby="message-status" id="message-text" placeholder="Speak or type a message, then review it before sending"></textarea><p class="control-disabled-reason" role="note" hidden></p><div class="composer-actions"><button id="message-mic" type="button" hidden aria-label="Start voice input" aria-pressed="false"><span class="mic-mark" aria-hidden="true">●</span><span data-mic-label>Tap to talk</span></button><button id="message-keyboard" type="button">Keyboard</button><button id="message-send" class="primary">Send message</button></div><p id="speech-status" class="composer-status" role="status" hidden></p><p id="message-status" class="message-status" role="status" hidden></p><p id="message-delivery" class="message-delivery" role="status" hidden></p></div></section>
         </div>
       </aside>
     </div>

@@ -3549,6 +3549,97 @@ impl FactoryDaemon {
         )
     }
 
+    /// Forward pending supervisor replies to the authenticated Commander hub
+    /// transport. The queue remains pending while no upstream hub socket is
+    /// connected, which makes device offline/reconnect delivery durable.
+    fn process_operator_replies(
+        &mut self,
+        queue: &dyn cas_store::PromptQueueStore,
+    ) -> anyhow::Result<()> {
+        if self.ws_clients.is_empty() {
+            return Ok(());
+        }
+        let replies = queue.peek_operator_replies(&self.session_name, 10)?;
+        for queued in replies {
+            let Some(device_id) = queued.recipient_device_id.as_deref() else {
+                let _ = queue.mark_dropped(
+                    queued.id,
+                    Some("operator reply has no authenticated recipient device"),
+                );
+                continue;
+            };
+            let payload = match serde_json::from_str::<crate::ui::factory::OperatorReplyPayload>(
+                &queued.prompt,
+            ) {
+                Ok(payload) if payload.device_id == device_id && payload.schema_version == 1 => {
+                    payload
+                }
+                Ok(_) => {
+                    let _ = queue.mark_dropped(
+                        queued.id,
+                        Some("operator reply payload/device receipt mismatch"),
+                    );
+                    continue;
+                }
+                Err(error) => {
+                    let _ = queue.mark_dropped(
+                        queued.id,
+                        Some("operator reply payload is not a valid schema-1 message"),
+                    );
+                    tracing::warn!(
+                        prompt_id = queued.id,
+                        %error,
+                        "discarded malformed operator reply payload"
+                    );
+                    continue;
+                }
+            };
+            let _ = queue.record_selected(queued.id);
+            let reply = crate::ui::factory::DaemonMessage::OperatorReply {
+                notification_id: queued.id,
+                reply_to: payload.reply_to,
+                message: payload.message,
+                summary: payload.summary,
+                device_id: device_id.to_string(),
+                operator_label: payload.operator_label,
+            };
+            self.ws_broadcast(&reply);
+            tracing::info!(
+                target: "cas::coordination",
+                stage = "operator_reply_forwarded",
+                prompt_id = queued.id,
+                reply_to = payload.reply_to,
+                device_id,
+                "supervisor reply forwarded to the Commander hub; awaiting paired-device receipt"
+            );
+        }
+        Ok(())
+    }
+
+    /// Apply the hub's authenticated paired-device receipt to one operator
+    /// reply. The device id is checked against the durable row before the
+    /// transport stage is closed, so a stale or misrouted receipt cannot
+    /// consume another device's reply.
+    pub(super) fn acknowledge_operator_reply(
+        &self,
+        notification_id: i64,
+        device_id: &str,
+    ) -> anyhow::Result<()> {
+        let queue = crate::store::open_prompt_queue_store(self.app.cas_dir())?;
+        let Some(row) = queue.queued_prompt(notification_id)? else {
+            anyhow::bail!("operator reply {notification_id} no longer exists");
+        };
+        anyhow::ensure!(
+            row.target.eq_ignore_ascii_case("operator")
+                && row.recipient_device_id.as_deref() == Some(device_id),
+            "operator reply {notification_id} receipt does not match its paired device"
+        );
+        if row.processed_at.is_none() {
+            queue.mark_transport_delivered(notification_id)?;
+        }
+        Ok(())
+    }
+
     /// Process prompt queue
     pub(super) async fn process_prompt_queue(&mut self) -> anyhow::Result<()> {
         use cas_store::{EventStore, SqliteEventStore};
@@ -3565,6 +3656,7 @@ impl FactoryDaemon {
         // proves it took the turn — and never before.
         self.resolve_urgent_wake_probes(queue.as_ref());
         self.resolve_normal_delivery_probes(queue.as_ref()).await;
+        self.process_operator_replies(queue.as_ref())?;
 
         // Native-extension agents consume their own queue rows. Excluding them
         // from the daemon's target universe prevents this PTY/inbox processor

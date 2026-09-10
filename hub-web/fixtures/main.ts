@@ -8,6 +8,7 @@ import { pairingDialogCancellationActive } from "../src/pairing-dialog";
 import { cleanupStepCopy } from "../src/pairing-cleanup";
 import { pairingExchangeFailure } from "../src/pairing-messages";
 import { renderDecision, shellSignature } from "../src/render-model";
+import { operatorThreadMarkup } from "../src/operator-thread";
 import { TranscriptView, type TranscriptSource } from "../src/transcript-view";
 import type { AttentionItem, HubSession } from "../src/types";
 import type { GhosttyCell, GhosttyColor, GhosttyRow } from "../src/terminal/ghostty/core";
@@ -20,6 +21,7 @@ export const FIXTURE_NAMES = [
   "transcript",
   "attention-0",
   "attention-12",
+  "operator-thread",
   "connection-failed-retry",
   "pairing-step-1",
   "pairing-cleanup",
@@ -122,7 +124,7 @@ function renderHeader(openSession: boolean): HTMLElement {
   const heading = element("h1", openSession ? "toolbar-session-title" : undefined);
   const picker = button("", "session-picker-toggle");
   picker.append(
-    element("span", "session-picker-name", openSession ? (["session-canvas", "session-workers", "transcript", "attention-0", "attention-12"].includes(fixtureName) ? "bright-otter" : "Penguinz-fierce-tiger-commander") : "Fleet overview"),
+    element("span", "session-picker-name", openSession ? (["session-canvas", "session-workers", "transcript", "attention-0", "attention-12", "operator-thread"].includes(fixtureName) ? "bright-otter" : "Penguinz-fierce-tiger-commander") : "Fleet overview"),
     element("span", "session-picker-caret", "▾"),
   );
   picker.lastElementChild?.setAttribute("aria-hidden", "true");
@@ -162,8 +164,30 @@ function renderContext(count: number): HTMLElement {
   const tabs = element("div", "context-tabs");
   tabs.setAttribute("role", "tablist");
   tabs.append(button("Attention", "active"), button("Workers & Tasks"));
-  body.append(tabs, renderAttention(count));
+  body.append(tabs, fixtureName === "operator-thread" ? renderOperatorComposer() : renderAttention(count));
   panel.append(body);
+  return panel;
+}
+
+function renderOperatorComposer(): HTMLElement {
+  const panel = element("section", "context-tab status-context");
+  panel.dataset.contextContent = "status";
+  const message = element("div", "message");
+  message.append(element("h2", undefined, "Talk to bright-otter"));
+  const thread = element("div");
+  thread.innerHTML = operatorThreadMarkup([{
+    notification_id: 93,
+    reply_to: 41,
+    message: "The deployment is confirmed and healthy.",
+    summary: "deployment confirmed",
+    device_id: "phone-7",
+    operator_label: "Daniel",
+  }]);
+  message.append(thread, element("textarea"));
+  const actions = element("div", "composer-actions");
+  actions.append(button("Keyboard"), button("Send message", "primary"));
+  message.append(actions, element("p", "message-status"), element("p", "message-delivery"));
+  panel.append(message);
   return panel;
 }
 
@@ -313,7 +337,7 @@ function appendOpenPairingDialog(cleanup: boolean): void {
 
 function renderShell(): void {
   const machineCount = fixtureName === "fleet-empty" ? 0 : 2;
-  const openSession = ["session-canvas", "session-workers", "transcript", "attention-0", "attention-12", "connection-failed-retry"].includes(fixtureName);
+  const openSession = ["session-canvas", "session-workers", "transcript", "attention-0", "attention-12", "operator-thread", "connection-failed-retry"].includes(fixtureName);
   const shell = element("div", `shell ${["session-canvas", "session-workers", "transcript"].includes(fixtureName) ? "attention-collapsed" : "attention-expanded"}${fixtureName === "fleet-empty" ? " fleet-empty" : ""}`);
   shell.dataset.fixture = fixtureName;
   const signature = shellSignature({
@@ -367,7 +391,7 @@ function renderShell(): void {
     secondary.append(collapsed, renderTerminalPlaceholder("steady-badger", "worker", true));
     grid.append(primary, secondary);
     main.append(grid);
-  } else if (["session-canvas", "attention-0", "attention-12"].includes(fixtureName)) {
+  } else if (["session-canvas", "attention-0", "attention-12", "operator-thread"].includes(fixtureName)) {
     // The default view: supervisor only, with the hidden-workers line (cas-6261).
     const grid = element("section", "pane-grid pane-layout workers-hidden");
     const primary = element("div", "primary-pane-slot");
@@ -392,7 +416,7 @@ function renderShell(): void {
     main.append(grid);
   }
   shell.append(main);
-  if (fixtureName === "attention-0" || fixtureName === "attention-12") shell.append(renderContext(fixtureName === "attention-12" ? 12 : 0));
+  if (["attention-0", "attention-12", "operator-thread"].includes(fixtureName)) shell.append(renderContext(fixtureName === "attention-12" ? 12 : 0));
   app.replaceChildren(shell);
   renderRestingToast();
   if (fixtureName === "pairing-step-1") appendOpenPairingDialog(false);

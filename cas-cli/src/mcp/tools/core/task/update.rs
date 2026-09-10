@@ -1106,6 +1106,34 @@ impl CasCore {
 
                     task.assignee = Some(canonical_assignee);
                     changes.push("assignee");
+
+                    // Gates are supervisor-owned decisions. Keep assignment
+                    // available for coordination/audit, but warn when a
+                    // registered worker receives one because that worker is
+                    // intentionally barred from starting or closing it.
+                    if task.task_type == TaskType::Gate
+                        && self
+                            .open_agent_store()
+                            .ok()
+                            .and_then(|store| store.list(None).ok())
+                            .is_some_and(|agents| {
+                                agents.iter().any(|agent| {
+                                    agent.role == cas_types::AgentRole::Worker
+                                        && task
+                                            .assignee
+                                            .as_deref()
+                                            .is_some_and(|assignee| {
+                                                agent.name.eq_ignore_ascii_case(assignee)
+                                                    || agent.id.eq_ignore_ascii_case(assignee)
+                                            })
+                                })
+                            })
+                    {
+                        warnings.push(format!(
+                            "⚠️ Gate task assigned to worker '{}': Gates are supervisor-owned decisions; this worker cannot start or close it. Assign a supervisor or leave the Gate unassigned.",
+                            task.assignee.as_deref().unwrap_or("unknown")
+                        ));
+                    }
                 }
             }
         }

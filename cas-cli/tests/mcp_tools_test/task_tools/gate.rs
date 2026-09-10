@@ -3,7 +3,7 @@ use cas::mcp::CasService;
 use cas::mcp::tools::{IdRequest, TaskUpdateRequest};
 use cas::store::{open_agent_store, open_task_store};
 use cas::types::{
-    AgentRole, TaskStatus, TaskTerminalOutcome, TaskType, WorkerCompletionReceiptInput,
+    Agent, AgentRole, TaskStatus, TaskTerminalOutcome, TaskType, WorkerCompletionReceiptInput,
     WorkerDeliveryState,
 };
 use rmcp::handler::server::wrapper::Parameters;
@@ -145,6 +145,7 @@ async fn gate_start_is_supervisor_only_without_weakening_ordinary_start_protecti
     let cas_dir = temp.path().join(".cas");
     let store = open_task_store(&cas_dir).unwrap();
     let service = CasService::new(core.clone(), None);
+    set_test_agent_role(&cas_dir, AgentRole::Worker);
 
     let mut gate = cas::types::Task::new("cas-gate-worker-start".into(), "Gate".into());
     gate.task_type = TaskType::Gate;
@@ -218,6 +219,166 @@ async fn gate_start_is_supervisor_only_without_weakening_ordinary_start_protecti
         supervisor_error.message
     );
     assert_eq!(store.get(&ordinary.id).unwrap().status, TaskStatus::Open);
+}
+
+#[tokio::test]
+async fn supervisor_can_close_worker_assigned_gate_without_worker_branch_validation() {
+    let (temp, core) = setup_cas();
+    let _env_lock = env_test_lock();
+    let cas_dir = temp.path().join(".cas");
+    let git = |args: &[&str]| {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(temp.path())
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    git(&["init", "-q", "-b", "main"]);
+    git(&[
+        "remote",
+        "add",
+        "origin",
+        "https://github.com/example/cas-gate-worker-fixture.git",
+    ]);
+    std::fs::write(temp.path().join("seed.txt"), "seed\n").unwrap();
+    git(&["add", "seed.txt"]);
+    let commit = Command::new("git")
+        .args(["commit", "-q", "-m", "seed"])
+        .current_dir(temp.path())
+        .env("GIT_AUTHOR_NAME", "test")
+        .env("GIT_AUTHOR_EMAIL", "test@test")
+        .env("GIT_COMMITTER_NAME", "test")
+        .env("GIT_COMMITTER_EMAIL", "test@test")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .status()
+        .unwrap();
+    assert!(commit.success(), "seed commit should succeed");
+    cas::store::known_repos::ensure_host_schema().unwrap();
+
+    let worker = Agent::new_with_role(
+        "gate-worker-session".to_string(),
+        "gate-worker".to_string(),
+        AgentRole::Worker,
+    );
+    open_agent_store(&cas_dir)
+        .unwrap()
+        .register(&worker)
+        .unwrap();
+    set_test_agent_role(&cas_dir, AgentRole::Supervisor);
+
+    let worker_worktree = cas_dir.join("worktrees").join("gate-worker");
+    std::fs::create_dir_all(worker_worktree.parent().unwrap()).unwrap();
+    let worker_worktree_string = worker_worktree.to_str().unwrap();
+    git(&["worktree", "add", "--detach", worker_worktree_string, "HEAD"]);
+
+    let service = CasService::new(core.clone(), None);
+    let created = unified_task(
+        &service,
+        serde_json::json!({
+            "action": "create",
+            "title": "Approve worker delivery",
+            "task_type": "gate",
+            "assignee": "gate-worker",
+            "target_repo": temp.path().to_str().unwrap(),
+            "target_branch": "main"
+        }),
+    )
+    .await;
+    let gate_id = extract_task_id(&created).unwrap().to_string();
+
+    let started = unified_task(
+        &service,
+        serde_json::json!({"action": "start", "id": gate_id, "brief": true}),
+    )
+    .await;
+    assert!(started.contains("Started task"), "{started}");
+    unified_task(
+        &service,
+        serde_json::json!({
+            "action": "notes",
+            "id": gate_id,
+            "note_type": "decision",
+            "notes": "Approve the worker delivery after review."
+        }),
+    )
+    .await;
+
+    let closed = unified_task(
+        &service,
+        serde_json::json!({
+            "action": "close",
+            "id": gate_id,
+            "reason": "worker delivery approved"
+        }),
+    )
+    .await;
+    assert!(closed.contains("Closed task"), "{closed}");
+    assert_eq!(
+        open_task_store(&cas_dir).unwrap().get(&gate_id).unwrap().status,
+        TaskStatus::Closed
+    );
+}
+
+#[tokio::test]
+async fn assigning_gate_to_worker_warns_that_gate_is_supervisor_owned() {
+    let (temp, core) = setup_cas();
+    let _env_lock = env_test_lock();
+    let cas_dir = temp.path().join(".cas");
+    unsafe {
+        std::env::set_var("CAS_FACTORY_MODE", "1");
+    }
+    let worker = Agent::new_with_role(
+        "gate-assignment-worker-session".to_string(),
+        "gate-assignment-worker".to_string(),
+        AgentRole::Worker,
+    );
+    open_agent_store(&cas_dir)
+        .unwrap()
+        .register(&worker)
+        .unwrap();
+    set_test_agent_role(&cas_dir, AgentRole::Supervisor);
+
+    let service = CasService::new(core, None);
+    let created = unified_task(
+        &service,
+        serde_json::json!({
+            "action": "create",
+            "title": "Warn on worker gate assignment",
+            "task_type": "gate"
+        }),
+    )
+    .await;
+    let gate_id = extract_task_id(&created).unwrap().to_string();
+    let updated = unified_task(
+        &service,
+        serde_json::json!({
+            "action": "update",
+            "id": gate_id,
+            "assignee": "gate-assignment-worker"
+        }),
+    )
+    .await;
+    unsafe {
+        std::env::remove_var("CAS_FACTORY_MODE");
+    }
+
+    assert!(
+        updated.contains("Gate task assigned to worker")
+            && updated.contains("cannot start or close"),
+        "{updated}"
+    );
+    assert_eq!(
+        open_task_store(&cas_dir).unwrap().get(&gate_id).unwrap().assignee,
+        Some("gate-assignment-worker".to_string())
+    );
 }
 
 #[tokio::test]

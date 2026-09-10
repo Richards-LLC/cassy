@@ -8081,6 +8081,8 @@ mod tests {
             "2026-09-04T09:30:00+00:00",
             "swift-fox",
             Some("envelopes shipped"),
+            Some("bound-head"),
+            Some("ver-approved"),
         );
         let source = "verification-dispatch:vd-8725";
 

@@ -795,6 +795,12 @@ pub(crate) struct VerificationDispatchEnvelope {
     pub owner: String,
     /// RFC3339 instant after which the dispatch times out.
     pub deadline: String,
+    /// Git HEAD captured when this dispatch was created, when it is a
+    /// repository-bound task cycle.
+    pub bound_head: Option<String>,
+    /// Verdict id from the immediately preceding cycle, when a close retry
+    /// replaced a proof that had already been reviewed.
+    pub approved_verdict_id: Option<String>,
 }
 
 /// Attribute values are written by CAS from registry/store values, but a task
@@ -860,10 +866,23 @@ pub(crate) fn verification_dispatch_envelope(
     deadline: &str,
     worker: &str,
     close_reason: Option<&str>,
+    bound_head: Option<&str>,
+    approved_verdict_id: Option<&str>,
 ) -> String {
+    let bound_head_attribute = bound_head
+        .map(|head| format!(" bound_head=\"{}\"", xml_attribute_value(head)))
+        .unwrap_or_default();
+    let approved_verdict_attribute = approved_verdict_id
+        .map(|verdict| {
+            format!(
+                " approved_verdict_id=\"{}\"",
+                xml_attribute_value(verdict)
+            )
+        })
+        .unwrap_or_default();
     format!(
         "{VERIFICATION_DISPATCH_ENVELOPE_OPEN}dispatch_id=\"{dispatch}\" task_id=\"{task}\" \
-         owner=\"{owner}\" deadline=\"{deadline}\">\n\
+         owner=\"{owner}\" deadline=\"{deadline}\"{bound_head_attribute}{approved_verdict_attribute}>\n\
          Task {task} is ready to close and is parked on verification dispatch {dispatch}, \
          delivered by {worker}.\n\
          {reason}\
@@ -901,6 +920,12 @@ pub(crate) fn parse_verification_dispatch_envelope(
         task_id: required("task_id")?.to_string(),
         owner: required("owner")?.to_string(),
         deadline: required("deadline")?.to_string(),
+        bound_head: xml_attribute(tag, "bound_head")
+            .filter(|value| !value.is_empty())
+            .map(str::to_string),
+        approved_verdict_id: xml_attribute(tag, "approved_verdict_id")
+            .filter(|value| !value.is_empty())
+            .map(str::to_string),
     })
 }
 
@@ -2125,6 +2150,8 @@ mod cas_3dcb_worker_died_relay_tests {
             "2026-09-04T09:30:00+00:00",
             "swift-fox",
             Some("envelopes shipped"),
+            Some("bound-head"),
+            Some("ver-approved"),
         );
         let parsed =
             parse_verification_dispatch_envelope(&body).expect("CAS's own handoff must parse");
@@ -2132,6 +2159,8 @@ mod cas_3dcb_worker_died_relay_tests {
         assert_eq!(parsed.task_id, "cas-8725");
         assert_eq!(parsed.owner, "supervisor-agent-id");
         assert_eq!(parsed.deadline, "2026-09-04T09:30:00+00:00");
+        assert_eq!(parsed.bound_head.as_deref(), Some("bound-head"));
+        assert_eq!(parsed.approved_verdict_id.as_deref(), Some("ver-approved"));
         assert!(
             body.contains("envelopes shipped"),
             "the proposed close reason is what the verdict is about: {body}"

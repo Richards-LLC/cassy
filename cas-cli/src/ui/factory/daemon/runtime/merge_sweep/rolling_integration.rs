@@ -200,6 +200,25 @@ fn integrate(
         affected: vec![request.epic_id.clone()],
     };
     write_receipt(&receipt_path, &receipt)?;
+    // Invalidate an old failed sweep report at the same boundary. A fetch,
+    // assembly, or build-guard error must never leave yesterday's classes
+    // available for a later `sweep_tasks accept=true` call.
+    crate::factory_sweep_tasks::write_report(
+        &shared_cas,
+        &crate::factory_sweep_tasks::SweepTaskReport {
+            schema_version: 1,
+            status: "RUNNING".to_owned(),
+            generated_at: chrono::Utc::now().to_rfc3339(),
+            integration_branch: branch.clone(),
+            integration_tip: String::new(),
+            source_epic: request.epic_id.clone(),
+            affected_epics: vec![request.epic_id.clone()],
+            log_path: receipt_path.display().to_string(),
+            failure_count: 0,
+            classes: Vec::new(),
+            accepted_at: None,
+        },
+    )?;
     git_output(project_root, &["fetch", "--prune", "origin"])?;
     let base = git_output(
         project_root,
@@ -376,6 +395,48 @@ fn integrate(
     receipt.status = status_text(result.status).to_owned();
     receipt.detail = sweep_detail(&result);
     receipt.affected = affected;
+    // Keep the raw sweep log and the machine-readable fix queue together. A
+    // passing sweep clears a prior report so a supervisor can never accept
+    // stale proposals after a later green integration tip.
+    let sweep_tasks = if result.status == SweepStatus::Failed {
+        crate::factory_sweep_tasks::build_report(
+            project_root,
+            &result.log_path,
+            status_text(result.status),
+            &branch,
+            &tip,
+            &request.epic_id,
+            &result.integration_epics,
+        )
+    } else {
+        Ok(crate::factory_sweep_tasks::SweepTaskReport {
+            schema_version: 1,
+            status: status_text(result.status).to_owned(),
+            generated_at: chrono::Utc::now().to_rfc3339(),
+            integration_branch: branch.clone(),
+            integration_tip: tip.clone(),
+            source_epic: request.epic_id.clone(),
+            affected_epics: result.integration_epics.clone(),
+            log_path: result.log_path.display().to_string(),
+            failure_count: result.failures.len(),
+            classes: Vec::new(),
+            accepted_at: None,
+        })
+    };
+    match sweep_tasks.and_then(|report| {
+        crate::factory_sweep_tasks::write_report(&shared_cas, &report)
+    }) {
+        Ok(path) if result.status == SweepStatus::Failed && !result.failures.is_empty() => {
+            result
+                .summary
+                .push_str(&format!("; fix proposals: {}", path.display()));
+        }
+        Ok(_) => {}
+        Err(error) => {
+            tracing::warn!(%error, "could not publish sweep task report");
+            result.summary.push_str(&format!("; fix proposal report failed: {error}"));
+        }
+    }
     write_receipt(&receipt_path, &receipt)?;
     Ok(result)
 }

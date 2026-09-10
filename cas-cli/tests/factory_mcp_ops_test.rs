@@ -456,6 +456,7 @@ fn factory_req(action: &str) -> FactoryRequest {
         action: action.to_string(),
         id: None,
         count: None,
+        accept: None,
         limit: None,
         offset: None,
         summary: None,
@@ -526,6 +527,7 @@ fn coord_req(action: &str) -> CoordinationRequest {
         priority: None,
         notification_id: None,
         count: None,
+        accept: None,
         worker_names: None,
         lane: None,
         branch: None,
@@ -587,6 +589,50 @@ async fn coordination_session_end_runs_hook_path_off_dispatch_runtime_cas_e0ab()
         env.agent_store().get(session_id).is_err(),
         "session_end must unregister the ending agent"
     );
+}
+
+#[tokio::test]
+async fn sweep_tasks_previews_durable_failure_classes_through_coordination() {
+    let env = FactoryTestEnv::new();
+    let report_dir = env.cas_root.join("merge-sweeps");
+    std::fs::create_dir_all(&report_dir).expect("create merge sweep report directory");
+    let report = serde_json::json!({
+        "schema_version": 1,
+        "status": "FAILED",
+        "generated_at": "2026-09-10T21:00:00Z",
+        "integration_branch": "integration/cas-src",
+        "integration_tip": "deadbeef",
+        "source_epic": "cas-c280",
+        "affected_epics": ["cas-c280"],
+        "log_path": "/tmp/sweep.log",
+        "failure_count": 1,
+        "classes": [{
+            "failure_class": "cas-7b7b",
+            "class_name": "worker_status contract",
+            "title": "Fix cas-7b7b worker_status contract failures",
+            "failing_tests": ["test_worker_status_contract"],
+            "failing_targets": ["cas::factory_mcp_ops_test test_worker_status_contract"],
+            "assertion_text": "busy-badger row must be present",
+            "log_path": "/tmp/sweep.log",
+            "suggested_lane": "standard"
+        }]
+    });
+    std::fs::write(
+        report_dir.join("sweep-tasks.json"),
+        serde_json::to_vec(&report).expect("encode sweep task report"),
+    )
+    .expect("write sweep task report");
+
+    let result = env
+        .service
+        .coordination(Parameters(coord_req("sweep_tasks")))
+        .await
+        .expect("sweep_tasks preview should return a receipt");
+    let text = get_text(&result);
+    assert!(text.contains("Fix cas-7b7b worker_status contract failures"));
+    assert!(text.contains("cas::factory_mcp_ops_test test_worker_status_contract"));
+    assert!(text.contains("busy-badger row must be present"));
+    assert!(text.contains("Suggested lane: standard"));
 }
 
 /// GH #276: existing callers did not supply task_id. With exactly one active
@@ -5196,6 +5242,7 @@ fn coord_msg(
         priority: None,
         notification_id: None,
         count: None,
+        accept: None,
         worker_names: None,
         lane: None,
         branch: None,

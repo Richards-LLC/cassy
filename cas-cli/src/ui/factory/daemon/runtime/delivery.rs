@@ -522,7 +522,8 @@ pub(super) fn enqueue_commander_message(
     let queue = crate::store::open_prompt_queue_store(cas_dir)?;
     let attribution_json = serde_json::to_value(attribution)?;
     let priority = urgent.then_some(cas_store::NotificationPriority::Critical);
-    Ok(queue.enqueue_attributed_urgent_with_outcome(
+    let operator = operator_stamp(attribution);
+    Ok(queue.enqueue_operator_message(
         &attribution.queue_source(),
         target,
         text,
@@ -531,8 +532,31 @@ pub(super) fn enqueue_commander_message(
         priority,
         urgent,
         Some(&attribution_json),
-        None,
+        &operator,
     )?)
+}
+
+/// The durable operator columns for one Commander row (cas-e8df).
+///
+/// `verified` is true only when the hub said so AND named both the device and
+/// its credential; a frame that claims verification without a principal is
+/// treated as a client claim, and the row's origin becomes `Unattributed`.
+pub(super) fn operator_stamp(
+    attribution: &crate::ui::factory::protocol::MessageAttribution,
+) -> cas_store::OperatorStamp {
+    let verified = attribution.operator_verified
+        && attribution.device_id.as_deref().is_some_and(|id| !id.is_empty())
+        && attribution
+            .credential_id
+            .as_deref()
+            .is_some_and(|id| !id.is_empty());
+    cas_store::OperatorStamp {
+        operator: attribution.operator_label.clone().unwrap_or_default(),
+        device_id: attribution.device_id.clone().unwrap_or_default(),
+        device_label: attribution.device_label.clone().unwrap_or_default(),
+        scopes: attribution.scopes.clone(),
+        verified,
+    }
 }
 
 /// cas-c73d (GH #177): which Claude config dir does this worker's harness run
@@ -1125,6 +1149,8 @@ mod tests {
             operator_label: Some("Pippenz".to_string()),
             controller_origin: Some("https://commander.example".to_string()),
             request_id: Some("request-789".to_string()),
+            scopes: vec!["message:send".to_string()],
+            operator_verified: true,
         }
     }
 

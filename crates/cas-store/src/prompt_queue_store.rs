@@ -231,6 +231,65 @@ pub struct QueuedPrompt {
     /// Never derived from [`Self::source`]. `source` is what the caller typed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin: Option<QueueOrigin>,
+    /// Operator identity for Commander rows, as the hub authenticated it
+    /// (cas-e8df). `None` for every non-Commander row and for rows written
+    /// before the columns existed. `verified: false` rows carry whatever the
+    /// client claimed and must render as `unverified:`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operator: Option<OperatorStamp>,
+}
+
+/// Who the hub says sent a Commander message (cas-e8df, EPIC cas-fbc8).
+///
+/// Every field is copied from the daemon's view of the attribution the hub
+/// attached after authenticating the device session. When `verified` is
+/// false the labels are client-typed and only good for display.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OperatorStamp {
+    /// Operator display name from the credential record.
+    pub operator: String,
+    /// Paired device id from the credential record.
+    pub device_id: String,
+    /// Device label from the credential record.
+    pub device_label: String,
+    /// Scopes the device session held at send time (`message:send` …).
+    #[serde(default)]
+    pub scopes: Vec<String>,
+    /// True only when the hub authenticated the sending device session.
+    pub verified: bool,
+}
+
+impl OperatorStamp {
+    /// The origin stamp this operator row earns: a verified device is a
+    /// `PairedDevice` principal; anything else is explicitly unattributed.
+    pub fn origin(&self) -> QueueOrigin {
+        if self.verified && !self.device_id.is_empty() {
+            QueueOrigin::PairedDevice {
+                device_id: self.device_id.clone(),
+            }
+        } else {
+            QueueOrigin::Unattributed
+        }
+    }
+
+    fn from_columns(
+        operator: Option<String>,
+        device_id: Option<String>,
+        device_label: Option<String>,
+        scopes: Option<String>,
+        verified: Option<i64>,
+    ) -> Option<Self> {
+        let verified = verified?;
+        Some(Self {
+            operator: operator.unwrap_or_default(),
+            device_id: device_id.unwrap_or_default(),
+            device_label: device_label.unwrap_or_default(),
+            scopes: scopes
+                .and_then(|raw| serde_json::from_str(&raw).ok())
+                .unwrap_or_default(),
+            verified: verified != 0,
+        })
+    }
 }
 
 /// A supervisor lifecycle wake relay that reached a terminal stage without
@@ -400,6 +459,25 @@ const PROMPT_QUEUE_ORIGIN_KIND_MIGRATION: &str = r#"
 ALTER TABLE prompt_queue ADD COLUMN origin_kind TEXT;
 "#;
 
+/// Operator stamp for Commander rows (cas-e8df, EPIC cas-fbc8). Written only
+/// by the daemon from the hub-authenticated attribution; readers use these
+/// columns instead of parsing the `commander:<label>` source string.
+const PROMPT_QUEUE_OPERATOR_LABEL_MIGRATION: &str = r#"
+ALTER TABLE prompt_queue ADD COLUMN operator_label TEXT;
+"#;
+const PROMPT_QUEUE_OPERATOR_DEVICE_ID_MIGRATION: &str = r#"
+ALTER TABLE prompt_queue ADD COLUMN operator_device_id TEXT;
+"#;
+const PROMPT_QUEUE_OPERATOR_DEVICE_LABEL_MIGRATION: &str = r#"
+ALTER TABLE prompt_queue ADD COLUMN operator_device_label TEXT;
+"#;
+const PROMPT_QUEUE_OPERATOR_SCOPES_MIGRATION: &str = r#"
+ALTER TABLE prompt_queue ADD COLUMN operator_scopes TEXT;
+"#;
+const PROMPT_QUEUE_OPERATOR_VERIFIED_MIGRATION: &str = r#"
+ALTER TABLE prompt_queue ADD COLUMN operator_verified INTEGER;
+"#;
+
 /// Indexes supporting two-lane `peek_for_targets` selection (cas-2bcb).
 /// Partial indexes keep the path bounded to pending rows only.
 const PROMPT_QUEUE_TWO_LANE_INDEXES: &str = r#"
@@ -468,6 +546,12 @@ pub enum QueueOrigin {
     /// operator reading a row can tell "nobody was authenticated" apart from
     /// "this predates the column".
     Unattributed,
+    /// A human operator on a paired Commander device whose device session the
+    /// hub authenticated at enqueue time (cas-7f81, EPIC cas-fbc8).
+    /// `device_id` is the credential record's id, never a client-sent label,
+    /// so a row can only carry this stamp when the hub actually verified the
+    /// sender. Readers render it as the `operator … verified` class.
+    PairedDevice { device_id: String },
 }
 
 impl QueueOrigin {
@@ -477,14 +561,27 @@ impl QueueOrigin {
             Self::RegisteredAgent { .. } => "registered_agent",
             Self::Daemon => "daemon",
             Self::Unattributed => "unattributed",
+            Self::PairedDevice { .. } => "paired_device",
         }
     }
 
-    /// Column value for `origin_agent_id`, when there is one.
+    /// Column value for `origin_agent_id`, when there is one. A paired device
+    /// stores its credential id here: the column names the authenticated
+    /// principal, and for an operator row that principal is the device.
     pub fn agent_id(&self) -> Option<&str> {
         match self {
             Self::RegisteredAgent { agent_id } => Some(agent_id.as_str()),
+            Self::PairedDevice { device_id } => Some(device_id.as_str()),
             Self::Daemon | Self::Unattributed => None,
+        }
+    }
+
+    /// The verified paired-device id, when this row was stamped by the hub
+    /// from an authenticated device session (cas-7f81).
+    pub fn verified_device_id(&self) -> Option<&str> {
+        match self {
+            Self::PairedDevice { device_id } => Some(device_id.as_str()),
+            Self::RegisteredAgent { .. } | Self::Daemon | Self::Unattributed => None,
         }
     }
 
@@ -501,6 +598,7 @@ impl QueueOrigin {
             "registered_agent" => agent_id.map(|agent_id| Self::RegisteredAgent { agent_id }),
             "daemon" => Some(Self::Daemon),
             "unattributed" => Some(Self::Unattributed),
+            "paired_device" => agent_id.map(|device_id| Self::PairedDevice { device_id }),
             _ => None,
         }
     }
@@ -511,7 +609,10 @@ impl QueueOrigin {
     /// particular row wake" — the envelope class is a separate, second factor
     /// applied by the wake gate. Both must hold.
     pub fn is_attributed(&self) -> bool {
-        matches!(self, Self::RegisteredAgent { .. } | Self::Daemon)
+        matches!(
+            self,
+            Self::RegisteredAgent { .. } | Self::Daemon | Self::PairedDevice { .. }
+        )
     }
 }
 
@@ -1384,6 +1485,37 @@ pub trait PromptQueueStore: Send + Sync {
         origin: Option<&QueueOrigin>,
     ) -> Result<WorkerPeerMessageEnqueue>;
 
+    /// Queue one Commander message with its hub-authenticated operator stamp
+    /// (cas-e8df). The origin is derived from the stamp — `PairedDevice` when
+    /// verified, `Unattributed` otherwise — never from `source` or the
+    /// attribution body.
+    #[allow(clippy::too_many_arguments)]
+    fn enqueue_operator_message(
+        &self,
+        source: &str,
+        target: &str,
+        prompt: &str,
+        factory_session: Option<&str>,
+        summary: Option<&str>,
+        priority: Option<NotificationPriority>,
+        urgent: bool,
+        attribution: Option<&serde_json::Value>,
+        operator: &OperatorStamp,
+    ) -> Result<EnqueueOutcome> {
+        let origin = operator.origin();
+        self.enqueue_attributed_urgent_with_outcome(
+            source,
+            target,
+            prompt,
+            factory_session,
+            summary,
+            priority,
+            urgent,
+            attribution,
+            Some(&origin),
+        )
+    }
+
     /// Queue a prompt with structured sender attribution persisted on the same
     /// durable row. Existing MCP senders pass `None`; Commander messages pass
     /// their explicit device/operator wire object.
@@ -1961,6 +2093,15 @@ impl SqlitePromptQueueStore {
         let origin_agent_id: Option<String> = row.get(11).unwrap_or(None);
         let origin_kind: Option<String> = row.get(12).unwrap_or(None);
         let origin = QueueOrigin::from_columns(origin_agent_id, origin_kind.as_deref());
+        // Columns 13-17 = the operator stamp (cas-e8df); absent on legacy
+        // SELECTs and non-Commander rows alike.
+        let operator = OperatorStamp::from_columns(
+            row.get(13).unwrap_or(None),
+            row.get(14).unwrap_or(None),
+            row.get(15).unwrap_or(None),
+            row.get(16).unwrap_or(None),
+            row.get(17).unwrap_or(None),
+        );
 
         Ok(QueuedPrompt {
             id: row.get(0)?,
@@ -1975,6 +2116,7 @@ impl SqlitePromptQueueStore {
             acked_at,
             urgent,
             origin,
+            operator,
         })
     }
 
@@ -2482,6 +2624,14 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                 ("attribution_json", PROMPT_QUEUE_ATTRIBUTION_MIGRATION),
                 ("origin_agent_id", PROMPT_QUEUE_ORIGIN_MIGRATION),
                 ("origin_kind", PROMPT_QUEUE_ORIGIN_KIND_MIGRATION),
+                ("operator_label", PROMPT_QUEUE_OPERATOR_LABEL_MIGRATION),
+                ("operator_device_id", PROMPT_QUEUE_OPERATOR_DEVICE_ID_MIGRATION),
+                (
+                    "operator_device_label",
+                    PROMPT_QUEUE_OPERATOR_DEVICE_LABEL_MIGRATION,
+                ),
+                ("operator_scopes", PROMPT_QUEUE_OPERATOR_SCOPES_MIGRATION),
+                ("operator_verified", PROMPT_QUEUE_OPERATOR_VERIFIED_MIGRATION),
                 ("selected_at", PROMPT_QUEUE_SELECTED_AT_MIGRATION),
                 ("last_pending_reason", PROMPT_QUEUE_PENDING_REASON_MIGRATION),
                 ("last_pending_detail", PROMPT_QUEUE_PENDING_DETAIL_MIGRATION),
@@ -2774,6 +2924,52 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         })
     }
 
+    fn enqueue_operator_message(
+        &self,
+        source: &str,
+        target: &str,
+        prompt: &str,
+        factory_session: Option<&str>,
+        summary: Option<&str>,
+        priority: Option<NotificationPriority>,
+        urgent: bool,
+        attribution: Option<&serde_json::Value>,
+        operator: &OperatorStamp,
+    ) -> Result<EnqueueOutcome> {
+        let origin = operator.origin();
+        let outcome = self.enqueue_attributed_urgent_with_outcome(
+            source,
+            target,
+            prompt,
+            factory_session,
+            summary,
+            priority,
+            urgent,
+            attribution,
+            Some(&origin),
+        )?;
+        let EnqueueOutcome::Created(id) = outcome else {
+            return Ok(outcome);
+        };
+        let scopes = serde_json::to_string(&operator.scopes)?;
+        crate::shared_db::with_write_retry(|| {
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
+            conn.execute(
+                "UPDATE prompt_queue SET operator_label = ?, operator_device_id = ?, operator_device_label = ?, operator_scopes = ?, operator_verified = ? WHERE id = ?",
+                params![
+                    operator.operator,
+                    operator.device_id,
+                    operator.device_label,
+                    scopes,
+                    i64::from(operator.verified),
+                    id
+                ],
+            )?;
+            Ok(())
+        })?;
+        Ok(outcome)
+    }
+
     fn enqueue_attributed_urgent_with_outcome(
         &self,
         source: &str,
@@ -2932,7 +3128,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         let stale_cutoff = cutoff("stale TTL", PROMPT_QUEUE_STALE_TTL_SECS)?;
         let conn = crate::shared_db::lock_connection(&self.conn)?;
         let mut stmt = conn.prepare(
-            "SELECT id, source, target, prompt, created_at, processed_at, summary, priority, acked_at, urgent, factory_session, origin_agent_id, origin_kind
+            "SELECT id, source, target, prompt, created_at, processed_at, summary, priority, acked_at, urgent, factory_session, origin_agent_id, origin_kind, operator_label, operator_device_id, operator_device_label, operator_scopes, operator_verified
              FROM prompt_queue q
              WHERE q.target <> 'all_workers'
                AND q.source <> 'all_workers'
@@ -3063,7 +3259,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                 factory_session
             {
                 (
-                    "SELECT id, source, target, prompt, created_at, processed_at, summary, priority, acked_at, urgent, factory_session, origin_agent_id, origin_kind
+                    "SELECT id, source, target, prompt, created_at, processed_at, summary, priority, acked_at, urgent, factory_session, origin_agent_id, origin_kind, operator_label, operator_device_id, operator_device_label, operator_scopes, operator_verified
              FROM prompt_queue
              WHERE processed_at IS NULL
                AND (
@@ -3081,7 +3277,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                 )
             } else {
                 (
-                    "SELECT id, source, target, prompt, created_at, processed_at, summary, priority, acked_at, urgent, factory_session, origin_agent_id, origin_kind
+                    "SELECT id, source, target, prompt, created_at, processed_at, summary, priority, acked_at, urgent, factory_session, origin_agent_id, origin_kind, operator_label, operator_device_id, operator_device_label, operator_scopes, operator_verified
              FROM prompt_queue
              WHERE (target = ? OR target = 'all_workers') AND processed_at IS NULL
              ORDER BY priority ASC, id ASC
@@ -3306,7 +3502,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             let now = Utc::now().to_rfc3339();
 
             let mut stmt = conn.prepare_cached(
-            "SELECT id, source, target, prompt, created_at, processed_at, summary, priority, acked_at, urgent, factory_session, origin_agent_id, origin_kind
+            "SELECT id, source, target, prompt, created_at, processed_at, summary, priority, acked_at, urgent, factory_session, origin_agent_id, origin_kind, operator_label, operator_device_id, operator_device_label, operator_scopes, operator_verified
              FROM prompt_queue
              WHERE processed_at IS NULL
              ORDER BY priority ASC, id ASC
@@ -3345,7 +3541,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         let mut stmt = conn.prepare_cached(
-            "SELECT id, source, target, prompt, created_at, processed_at, summary, priority, acked_at, urgent, factory_session, origin_agent_id, origin_kind
+            "SELECT id, source, target, prompt, created_at, processed_at, summary, priority, acked_at, urgent, factory_session, origin_agent_id, origin_kind, operator_label, operator_device_id, operator_device_label, operator_scopes, operator_verified
              FROM prompt_queue
              WHERE processed_at IS NULL
              ORDER BY priority ASC, id ASC
@@ -3388,7 +3584,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         let Some(session) = factory_session else {
             let placeholders: Vec<&str> = std::iter::repeat_n("?", targets.len()).collect();
             let sql = format!(
-                "SELECT id, source, target, prompt, created_at, processed_at, summary, priority, acked_at, urgent, factory_session, origin_agent_id, origin_kind
+                "SELECT id, source, target, prompt, created_at, processed_at, summary, priority, acked_at, urgent, factory_session, origin_agent_id, origin_kind, operator_label, operator_device_id, operator_device_label, operator_scopes, operator_verified
                  FROM (
                      SELECT *, ROW_NUMBER() OVER (
                          PARTITION BY target, priority ORDER BY id ASC
@@ -3446,7 +3642,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         // logged as failing, simply invisible. Reproduced at
         // `peek_for_targets_gives_active_target_a_slot_despite_another_targets_stuck_backlog`.
         let placeholders: Vec<&str> = std::iter::repeat_n("?", targets.len()).collect();
-        let session_sql = format!("SELECT id, source, target, prompt, created_at, processed_at, summary, priority, acked_at, urgent, factory_session, origin_agent_id, origin_kind
+        let session_sql = format!("SELECT id, source, target, prompt, created_at, processed_at, summary, priority, acked_at, urgent, factory_session, origin_agent_id, origin_kind, operator_label, operator_device_id, operator_device_label, operator_scopes, operator_verified
              FROM (
                  SELECT *, ROW_NUMBER() OVER (
                      PARTITION BY target, priority ORDER BY id ASC
@@ -3479,7 +3675,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         } else {
             let placeholders: Vec<&str> = std::iter::repeat_n("?", targets.len()).collect();
             let legacy_sql = format!(
-                "SELECT id, source, target, prompt, created_at, processed_at, summary, priority, acked_at, urgent, factory_session, origin_agent_id, origin_kind
+                "SELECT id, source, target, prompt, created_at, processed_at, summary, priority, acked_at, urgent, factory_session, origin_agent_id, origin_kind, operator_label, operator_device_id, operator_device_label, operator_scopes, operator_verified
                  FROM (
                      SELECT *, ROW_NUMBER() OVER (
                          PARTITION BY target, priority ORDER BY id ASC
@@ -3778,7 +3974,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         let cutoff = (Utc::now() - chrono::Duration::seconds(timeout_secs)).to_rfc3339();
 
         let mut stmt = conn.prepare_cached(
-            "SELECT id, source, target, prompt, created_at, processed_at, summary, priority, acked_at, urgent, factory_session, origin_agent_id, origin_kind
+            "SELECT id, source, target, prompt, created_at, processed_at, summary, priority, acked_at, urgent, factory_session, origin_agent_id, origin_kind, operator_label, operator_device_id, operator_device_label, operator_scopes, operator_verified
              FROM prompt_queue
              WHERE processed_at IS NOT NULL
                AND processed_at < ?
@@ -4527,7 +4723,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
 
             let stale: Vec<QueuedPrompt> = {
                 let mut stmt = tx.prepare_cached(
-                    "SELECT id, source, target, prompt, created_at, processed_at, summary, priority, acked_at, urgent, factory_session, origin_agent_id, origin_kind
+                    "SELECT id, source, target, prompt, created_at, processed_at, summary, priority, acked_at, urgent, factory_session, origin_agent_id, origin_kind, operator_label, operator_device_id, operator_device_label, operator_scopes, operator_verified
                      FROM prompt_queue
                      WHERE processed_at IS NULL AND created_at < ?
                      ORDER BY id ASC",
@@ -4960,11 +5156,107 @@ mod tests {
         );
         assert_eq!(QueueOrigin::Daemon.agent_id(), None);
         assert_eq!(QueueOrigin::Unattributed.kind_str(), "unattributed");
+        // cas-7f81: a verified operator stamp round-trips through the same
+        // two columns and names the device, never a client label.
+        let device = QueueOrigin::PairedDevice { device_id: "dev-42".into() };
+        assert_eq!(device.kind_str(), "paired_device");
+        assert_eq!(device.agent_id(), Some("dev-42"));
+        assert_eq!(device.verified_device_id(), Some("dev-42"));
+        assert!(device.is_attributed());
+        assert_eq!(
+            QueueOrigin::from_columns(Some("dev-42".into()), Some("paired_device")),
+            Some(device)
+        );
+        assert_eq!(QueueOrigin::from_columns(None, Some("paired_device")), None);
+        assert_eq!(QueueOrigin::Daemon.verified_device_id(), None);
     }
 
     /// A stamp survives the round trip through SQLite and comes back on the
     /// row the delivery path actually reads (cas-d9a8). Without this the wake
     /// gate would be keyed on a value that is always `None` in production.
+    /// cas-e8df: the operator columns round-trip through SQLite, the origin is
+    /// derived from `verified` (never from the label), and rows written by
+    /// every other enqueue path read back with no stamp at all.
+    #[test]
+    fn operator_stamp_round_trips_and_derives_its_origin() {
+        let (_temp, store) = create_test_store();
+        let verified = OperatorStamp {
+            operator: "Daniel".into(),
+            device_id: "dev-42".into(),
+            device_label: "iphone-15".into(),
+            scopes: vec!["message:send".into(), "pane:read".into()],
+            verified: true,
+        };
+        let verified_id = store
+            .enqueue_operator_message(
+                "commander:Daniel@iphone-15",
+                "supervisor",
+                "Status please",
+                Some("factory-1"),
+                None,
+                None,
+                false,
+                None,
+                &verified,
+            )
+            .unwrap()
+            .id();
+        let claimed = OperatorStamp {
+            operator: "Mallory".into(),
+            device_id: "dev-42".into(),
+            device_label: "iphone-15".into(),
+            scopes: Vec::new(),
+            verified: false,
+        };
+        let claimed_id = store
+            .enqueue_operator_message(
+                "commander:Mallory@iphone-15",
+                "supervisor",
+                "Status please?",
+                Some("factory-1"),
+                None,
+                None,
+                false,
+                None,
+                &claimed,
+            )
+            .unwrap()
+            .id();
+        let plain_id = store
+            .enqueue_urgent_with_outcome(
+                "worker-1",
+                "supervisor",
+                "merge request",
+                Some("factory-1"),
+                None,
+                None,
+                false,
+                None,
+            )
+            .unwrap()
+            .id();
+
+        let rows = store.peek_all(10).unwrap();
+        let find = |id: i64| rows.iter().find(|row| row.id == id).unwrap();
+        let row = find(verified_id);
+        assert_eq!(row.operator.as_ref(), Some(&verified));
+        assert_eq!(
+            row.origin,
+            Some(QueueOrigin::PairedDevice {
+                device_id: "dev-42".into()
+            })
+        );
+        let row = find(claimed_id);
+        assert_eq!(row.operator.as_ref(), Some(&claimed));
+        assert_eq!(
+            row.origin,
+            Some(QueueOrigin::Unattributed),
+            "a device id without verification is a claim, not a principal"
+        );
+        assert_eq!(find(plain_id).operator, None);
+        assert_eq!(find(plain_id).origin, None);
+    }
+
     #[test]
     fn a_stamped_row_returns_its_origin_to_the_delivery_path() {
         let (_temp, store) = create_test_store();
@@ -8210,6 +8502,7 @@ mod tests {
                 acked_at: None,
                 urgent: priority == 0,
                 origin: None,
+                operator: None,
             }
         }
 

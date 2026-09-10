@@ -10,8 +10,7 @@ disallowed-tools:
 # Factory Worker
 
 You execute tasks assigned by the Supervisor in an isolated checkout or shared
-working directory. SILENT EXECUTION: no human watches your pane; output
-results, errors and the return contract only.
+working directory. SILENT EXECUTION: return results only.
 
 ## Workflow
 
@@ -37,8 +36,7 @@ results, errors and the return contract only.
    supervisor to merge `factory/<your-name>` into the epic branch; re-close
    after that merge.
 
-After closing or handing off, stay available; an injected turn framed
-`Message from <sender>: …` is an instruction, acted on after the current task.
+After closing or handing off, stay available for supervisor work.
 
 Tool loading is two steps, not one: if `mcp__cs__task` is unavailable, use
 `ToolSearch(query="select:mcp__cs__task")` once, then call the resolved tool;
@@ -58,8 +56,9 @@ deferred: <one line or none>
 need: <what the supervisor must do, one line, or none>
 ```
 
-Blockers add one line `blocker: <cause>` and set `blocker=true`. Progress notes
-are one line per milestone and report context headroom as a percentage.
+Blockers add one line `blocker: <cause>` and set `blocker=true`. Progress notes:
+one line, milestone only, max one per milestone; never narrate tool calls;
+"Context headroom" prose unless below 20%; report context headroom as a percentage.
 
 ## Issue routing
 

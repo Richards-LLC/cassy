@@ -173,7 +173,9 @@ jobs:
 
       - name: Report full-tier routing
         if: steps.classify-diff.outputs.fast-admission != 'true'
-        run: echo "Fast tier skipped: ${{ steps.classify-diff.outputs.fast-admission-reason }}; Scoped Validation (factory/PR) owns this delta."
+        run: >-
+          echo "Fast tier skipped: ${{ steps.classify-diff.outputs.fast-admission-reason }};
+          Scoped Validation (factory/PR) owns this delta."
 
       # The bridge is Node-only and its whole suite is bounded to the fast
       # tier when a small delta touches it.  Keeping this target here avoids

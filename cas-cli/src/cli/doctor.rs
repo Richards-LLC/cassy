@@ -451,6 +451,115 @@ fn scan_user_skill_dirs(
     strays
 }
 
+/// One skill name present in more than one user-level skills directory with
+/// differing `SKILL.md` content (GH #810, cas-d019). Identical copies are not
+/// reported: they are the normal projected state. Divergent ones mean an agent
+/// reads a different contract depending on which account directory it runs
+/// under, and only one of them is the file `cas update` keeps current.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DivergentUserSkill {
+    name: String,
+    canonical: PathBuf,
+    others: Vec<PathBuf>,
+}
+
+/// The directory that owns a user skill when copies disagree: the Claude
+/// user scope (`~/.claude/skills`, or `CLAUDE_CONFIG_DIR` when set).
+fn canonical_user_skills_dir() -> Option<PathBuf> {
+    if let Some(configured) = std::env::var_os("CLAUDE_CONFIG_DIR") {
+        return Some(PathBuf::from(configured).join("skills"));
+    }
+    std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".claude").join("skills"))
+}
+
+/// Group `SKILL.md` files by skill name across `dirs` (canonical-path
+/// deduplicated like [`scan_user_skill_dirs`]) and keep the names whose
+/// copies differ. The canonical copy is the one under `canonical_dir` when
+/// present, else the lexically first path.
+fn find_divergent_user_skills(dirs: &[PathBuf], canonical_dir: &Path) -> Vec<DivergentUserSkill> {
+    let mut by_name: std::collections::BTreeMap<String, Vec<(PathBuf, String)>> =
+        std::collections::BTreeMap::new();
+    let mut seen = std::collections::HashSet::new();
+    for dir in dirs {
+        let Ok(entries) = fs::read_dir(dir) else { continue };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let skill_file = path.join("SKILL.md");
+            if !path.is_dir() || !skill_file.is_file() {
+                continue;
+            }
+            let canonical = skill_file.canonicalize().unwrap_or_else(|_| skill_file.clone());
+            if !seen.insert(canonical) {
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(|s| s.to_str()) else { continue };
+            let Ok(content) = fs::read_to_string(&skill_file) else { continue };
+            by_name.entry(name.to_string()).or_default().push((skill_file, content));
+        }
+    }
+    by_name
+        .into_iter()
+        .filter_map(|(name, mut copies)| {
+            if copies.len() < 2 || copies.iter().all(|(_, body)| *body == copies[0].1) {
+                return None;
+            }
+            copies.sort_by(|a, b| a.0.cmp(&b.0));
+            let canonical_index = copies
+                .iter()
+                .position(|(path, _)| path.starts_with(canonical_dir))
+                .unwrap_or(0);
+            let (canonical, canonical_body) = copies.remove(canonical_index);
+            Some(DivergentUserSkill {
+                name,
+                canonical,
+                // Only the copies that actually disagree with the canonical
+                // file are named; identical projections are fine where they are.
+                others: copies
+                    .into_iter()
+                    .filter(|(_, body)| *body != canonical_body)
+                    .map(|(path, _)| path)
+                    .collect(),
+            })
+        })
+        .collect()
+}
+
+fn divergent_user_skills_check(divergent: &[DivergentUserSkill]) -> Check {
+    if divergent.is_empty() {
+        return Check::new(
+            "duplicate skills",
+            CheckStatus::Ok,
+            "no user-level skill has divergent copies across account directories",
+        );
+    }
+    let detail = divergent
+        .iter()
+        .map(|entry| {
+            format!(
+                "{} (canonical {}; differs: {})",
+                entry.name,
+                entry.canonical.display(),
+                entry
+                    .others
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    Check::new(
+        "duplicate skills",
+        CheckStatus::Warning,
+        format!(
+            "{} skill(s) exist in more than one skills directory with different content: {detail}. \
+             Keep the canonical copy (~/.claude/skills) and delete or symlink the others",
+            divergent.len()
+        ),
+    )
+}
+
 /// Every user-level skills directory this machine might carry.
 ///
 /// `cas update --user` writes into `~/.claude`, `~/.codex` and `~/.grok`, and
@@ -537,9 +646,16 @@ fn host_checks(current: Option<&Path>) -> Vec<Check> {
     #[cfg(not(feature = "mcp-proxy"))]
     checks.push(Check::new("host proxy", CheckStatus::Ok, "proxy integration unavailable in this build"));
     checks.extend(registered_project_root_checks(current.unwrap_or_else(|| Path::new(""))));
-    let mut skills = stray_user_skills_check(&scan_user_skill_dirs(&user_skill_scan_targets()));
+    let targets = user_skill_scan_targets();
+    let mut skills = stray_user_skills_check(&scan_user_skill_dirs(&targets));
     skills.name = "host user skills".into();
     checks.push(skills);
+    if let Some(canonical) = canonical_user_skills_dir() {
+        let dirs: Vec<PathBuf> = targets.iter().map(|(dir, _)| dir.clone()).collect();
+        let mut duplicates = divergent_user_skills_check(&find_divergent_user_skills(&dirs, &canonical));
+        duplicates.name = "host duplicate skills".into();
+        checks.push(duplicates);
+    }
     checks
 }
 
@@ -6832,6 +6948,43 @@ mod tests {
 
     fn claude_names() -> std::collections::HashSet<String> {
         catalog_skill_names(crate::builtins::BUILTIN_SKILLS)
+    }
+
+    /// GH #810 (cas-d019): the same skill name in two account directories is
+    /// only a finding when the bodies differ, and the Claude user scope is
+    /// named as the copy to keep.
+    #[test]
+    fn divergent_duplicate_user_skills_are_flagged_with_the_canonical_copy() {
+        let home = TempDir::new().unwrap();
+        let claude = home.path().join(".claude").join("skills");
+        let alt = home.path().join(".claude-alt").join("skills");
+        let codex = home.path().join(".codex").join("skills");
+        let body = "---\nname: exa-search\n---\n\nRun `exa-search \"query\"`.\n";
+        let canonical = write_skill(&claude, "exa-search", body);
+        write_skill(&codex, "exa-search", body);
+        let drifted = write_skill(&alt, "exa-search", "---\nname: exa-search\n---\n\nOld text.\n");
+        write_skill(&claude, "cas-worker", "same");
+        write_skill(&alt, "cas-worker", "same");
+
+        let dirs = vec![alt.clone(), claude.clone(), codex.clone()];
+        let divergent = find_divergent_user_skills(&dirs, &claude);
+        assert_eq!(
+            divergent,
+            vec![DivergentUserSkill {
+                name: "exa-search".to_string(),
+                canonical,
+                others: vec![drifted],
+            }]
+        );
+        let check = divergent_user_skills_check(&divergent);
+        assert!(matches!(check.status, CheckStatus::Warning));
+        assert!(check.message.contains("exa-search"), "{}", check.message);
+        assert!(check.message.contains(".claude-alt"), "{}", check.message);
+        assert!(check.message.contains("canonical"), "{}", check.message);
+
+        let identical = find_divergent_user_skills(&[claude.clone(), codex], &claude);
+        assert!(identical.is_empty(), "identical copies are not findings");
+        assert!(matches!(divergent_user_skills_check(&identical).status, CheckStatus::Ok));
     }
 
     fn write_skill(dir: &Path, name: &str, body: &str) -> PathBuf {

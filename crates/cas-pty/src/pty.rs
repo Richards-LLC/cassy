@@ -1028,6 +1028,7 @@ impl PtyConfig {
         // (cas-4513 Claude Code JS crash-screen symptom). Emitted only
         // for role="worker"; supervisor stays uncapped.
         push_worker_cargo_env(&mut env, role);
+        push_local_bin_path_env(&mut env);
         // cas-eb39: share dependency compilation across isolated worktrees
         // without serializing their Cargo target directories.
         push_worker_build_cache_env(&mut env, role);
@@ -1216,6 +1217,7 @@ impl PtyConfig {
 
         // cas-0bf4: see equivalent comment in `claude()`.
         push_worker_cargo_env(&mut env, role);
+        push_local_bin_path_env(&mut env);
         // cas-eb39: see equivalent comment in `claude()`.
         push_worker_build_cache_env(&mut env, role);
         // cas-3522 follow-on: see equivalent comment in `claude()`.
@@ -1334,6 +1336,7 @@ impl PtyConfig {
         }
         push_factory_worker_metadata_env(&mut env, role, factory_worker_cli, model, effort);
         push_worker_cargo_env(&mut env, role);
+        push_local_bin_path_env(&mut env);
         push_worker_build_cache_env(&mut env, role);
         push_worker_zig_env(&mut env, role, cas_root);
 
@@ -1530,6 +1533,7 @@ impl PtyConfig {
 
         // cas-0bf4: see equivalent comment in `claude()`.
         push_worker_cargo_env(&mut env, role);
+        push_local_bin_path_env(&mut env);
         // cas-eb39: see equivalent comment in `claude()`.
         push_worker_build_cache_env(&mut env, role);
         // cas-3522 follow-on: see equivalent comment in `claude()`.
@@ -1801,6 +1805,39 @@ fn cas_binary_on_path() -> bool {
         let candidate = dir.join("cas");
         candidate.is_file()
     })
+}
+
+/// Keep `~/.local/bin` on the spawned agent's `PATH` (GH #810, cas-d019).
+///
+/// Skill CLIs such as `exa-search` install there, and their docs promise "no
+/// further setup". A daemon started from a non-login shell inherits a `PATH`
+/// without it, so every worker paid an `export PATH=...` per session. Only
+/// prepends when the directory exists and is not already listed.
+fn push_local_bin_path_env(env: &mut Vec<(String, String)>) {
+    let Some(home) = dirs::home_dir() else {
+        return;
+    };
+    push_local_bin_path_env_with(env, &home, std::env::var_os("PATH"));
+}
+
+fn push_local_bin_path_env_with(
+    env: &mut Vec<(String, String)>,
+    home: &std::path::Path,
+    current: Option<std::ffi::OsString>,
+) {
+    let local_bin = home.join(".local").join("bin");
+    if !local_bin.is_dir() {
+        return;
+    }
+    let current = current.unwrap_or_default();
+    if std::env::split_paths(&current).any(|dir| dir == local_bin) {
+        return;
+    }
+    let mut paths = vec![local_bin];
+    paths.extend(std::env::split_paths(&current));
+    if let Ok(joined) = std::env::join_paths(paths) {
+        env.push(("PATH".to_string(), joined.to_string_lossy().into_owned()));
+    }
 }
 
 /// Push the `CARGO_BUILD_JOBS` env entry into `env` when `role == "worker"`.
@@ -3648,6 +3685,41 @@ mod tests {
             .position(|a| a == "--effort")
             .expect("--effort must be present when Some(effort) is given");
         assert_eq!(config.args[idx + 1], "medium");
+    }
+
+    /// GH #810 (cas-d019): a spawn whose inherited PATH lacks `~/.local/bin`
+    /// gets it prepended; one that already has it is left alone.
+    #[test]
+    fn local_bin_is_prepended_to_path_only_when_missing() {
+        let root = std::env::temp_dir().join(format!("cas-pty-localbin-{}", std::process::id()));
+        let home = root.join("home");
+        let local_bin = home.join(".local").join("bin");
+        std::fs::create_dir_all(&local_bin).unwrap();
+        let bare = root.join("bare");
+        std::fs::create_dir_all(&bare).unwrap();
+        let mut env = Vec::new();
+        push_local_bin_path_env_with(&mut env, &home, Some("/usr/bin:/bin".into()));
+        assert_eq!(env.len(), 1);
+        assert_eq!(env[0].0, "PATH");
+        assert!(
+            env[0].1.starts_with(&format!("{}:", local_bin.display())),
+            "{}",
+            env[0].1
+        );
+        assert!(env[0].1.ends_with("/usr/bin:/bin"));
+
+        let mut already = Vec::new();
+        push_local_bin_path_env_with(
+            &mut already,
+            &home,
+            Some(format!("/usr/bin:{}", local_bin.display()).into()),
+        );
+        assert!(already.is_empty(), "present PATH entry must not be duplicated");
+
+        let mut missing = Vec::new();
+        push_local_bin_path_env_with(&mut missing, &bare, Some("/usr/bin".into()));
+        assert!(missing.is_empty(), "no ~/.local/bin means no PATH override");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// cas-556a: `max` passes through to Codex unchanged as

@@ -57,17 +57,14 @@ pub(crate) fn queued_message_provenance_at(
     let delivery = if message.processed_at.is_some() {
         "replay"
     } else {
-        "first-delivery"
+        "first"
     };
     let age_secs = (observed_at - message.created_at).num_seconds().max(0);
-    let stale = age_secs >= MESSAGE_PROVENANCE_STALE_AFTER_SECS;
     format!(
-        "CAS provenance: notification_id={} origin={} queued_at={} age_secs={} stale={} delivery={}",
+        "[cas #{} {} {}s {}]",
         message.id,
         origin,
-        message.created_at.to_rfc3339(),
         age_secs,
-        stale,
         delivery,
     )
 }
@@ -105,7 +102,7 @@ mod viktor_provenance_tests {
             .with_timezone(&chrono::Utc);
         assert_eq!(
             queued_message_provenance_at(&row, observed_at),
-            "CAS provenance: notification_id=73 origin=viktor queued_at=2026-08-18T20:00:00+00:00 age_secs=360 stale=true delivery=first-delivery"
+            "[cas #73 viktor 360s first]"
         );
     }
 
@@ -129,8 +126,9 @@ mod viktor_provenance_tests {
         };
         let observed_at = row.created_at + chrono::Duration::seconds(299);
         let provenance = queued_message_provenance_at(&row, observed_at);
-        assert!(provenance.contains("age_secs=299"));
-        assert!(provenance.contains("stale=false"));
+        assert!(provenance.contains("299s"));
+        assert!(provenance.contains("spawn-boilerplate"));
+        assert!(provenance.contains("first"));
     }
 }
 

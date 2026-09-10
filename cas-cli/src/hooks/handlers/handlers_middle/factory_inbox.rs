@@ -226,9 +226,8 @@ mod tests {
         assert!(rendered.contains("supervisor"), "{rendered}");
         assert!(rendered.contains("7640"), "{rendered}");
         assert!(
-            rendered.contains("origin=supervisor-authored")
-                && rendered.contains("queued_at=")
-                && rendered.contains("delivery=first-delivery"),
+            rendered.contains("[cas #7640 supervisor-authored")
+                && rendered.contains("s first]"),
             "every hook-surfaced message must retain actionable queue provenance: {rendered}"
         );
         assert!(rendered.contains("start cas-7a01"), "{rendered}");

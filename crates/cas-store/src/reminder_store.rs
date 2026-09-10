@@ -189,7 +189,7 @@ pub fn format_reminder_delivery_with_provenance(
         (None, _) => "no task context".to_string(),
     };
     delivery.push_str(&format!(
-        "\n\nProvenance: issued {age_minutes} min ago under {task_context}."
+        "\nProvenance: issued {age_minutes} min ago under {task_context}."
     ));
     delivery
 }

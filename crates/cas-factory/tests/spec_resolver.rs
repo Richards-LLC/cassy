@@ -642,6 +642,7 @@ fn all_effort_variants_roundtrip_through_toml() {
         ("medium", Effort::Medium),
         ("high", Effort::High),
         ("xhigh", Effort::XHigh),
+        ("max", Effort::Max),
     ] {
         let project = toml_file(&format!("[factory.defaults]\neffort = \"{toml_val}\"\n"));
 

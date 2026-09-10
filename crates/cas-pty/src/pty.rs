@@ -1242,7 +1242,7 @@ impl PtyConfig {
             args.push(m.to_string());
         }
         // Codex CLI 0.146.0 has no --effort flag; effort is set via -c TOML override.
-        // Valid values: none, minimal, low, medium, high, xhigh (same vocabulary as Claude).
+        // Valid values: none, minimal, low, medium, high, xhigh, max (same vocabulary as Claude).
         // Unlike claude(), we do NOT apply a role-based default when effort is None — Codex
         // CLI's built-in server-side default is acceptable and avoids hard-coding a TOML
         // override that would need revisiting each Codex release.
@@ -3648,6 +3648,49 @@ mod tests {
             .position(|a| a == "--effort")
             .expect("--effort must be present when Some(effort) is given");
         assert_eq!(config.args[idx + 1], "medium");
+    }
+
+    /// cas-556a: `max` passes through to Codex unchanged as
+    /// `model_reasoning_effort=max` and to Claude as `--effort max`.
+    #[tokio::test]
+    async fn test_pty_config_max_effort_passes_through_to_codex_and_claude() {
+        let _e = ScopedEnv::new();
+        let codex = PtyConfig::codex(
+            "wrk",
+            "worker",
+            PathBuf::from("/tmp"),
+            None,
+            None,
+            None,
+            None,
+            Some("max"),
+            None,
+        );
+        let codex_args = codex.args.join(" ");
+        assert!(
+            codex_args.contains("-c model_reasoning_effort=max"),
+            "Codex worker must emit model_reasoning_effort=max; got: {codex_args}"
+        );
+        unsafe {
+            std::env::set_var("CAS_FACTORY_EFFORT_SUPPORTED", "1");
+        }
+        let claude = PtyConfig::claude(
+            "wrk",
+            "worker",
+            PathBuf::from("/tmp"),
+            None,
+            None,
+            None,
+            None,
+            Some("max"),
+            None,
+        );
+        let idx = claude
+            .args
+            .iter()
+            .position(|a| a == "--effort")
+            .expect("--effort must be present for max");
+        assert_eq!(claude.args[idx + 1], "max");
     }
 
     /// cas-34f7f: Codex worker with explicit effort → --config model_reasoning_effort=<v>.

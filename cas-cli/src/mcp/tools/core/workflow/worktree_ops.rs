@@ -3165,14 +3165,39 @@ impl CasCore {
         };
 
         if !reconciled_delivery {
+            let epic_id = worktree.epic_id.clone().or_else(|| {
+                let task_store = self.open_task_store().ok()?;
+                if let Some(task_id) = task_id {
+                    let task = task_store.get(task_id).ok()?;
+                    if task.task_type == cas_types::TaskType::Epic {
+                        return Some(task.id);
+                    }
+                    return task_store.get_parent_epic(task_id).ok()?.map(|epic| epic.id);
+                }
+                task_store
+                    .list(None)
+                    .ok()?
+                    .into_iter()
+                    .find(|task| {
+                        task.task_type == cas_types::TaskType::Epic
+                            && task.branch.as_deref() == Some(worktree.parent_branch.as_str())
+                    })
+                    .map(|task| task.id)
+            });
+            let epic_id = epic_id.as_deref().unwrap_or("none");
+            let task_id = task_id.unwrap_or("none");
+            let target_tip = merge_commit.as_deref().unwrap_or("none");
             let _ = crate::hooks::handlers::session_hygiene::append_factory_session_event(
                 &self.cas_root,
                 "worktree_merged",
                 &[
                     ("worktree_id", &worktree.id),
+                    ("epic_id", epic_id),
+                    ("task_id", task_id),
                     ("branch", &worktree.branch),
                     ("target_branch", &worktree.parent_branch),
                     ("commit", merge_commit.as_deref().unwrap_or("none")),
+                    ("target_tip", target_tip),
                     ("cleanup", if do_cleanup { "true" } else { "false" }),
                 ],
             );

@@ -258,6 +258,10 @@ pub struct FactoryDaemon {
     /// In-flight spawns cancelled by a shutdown that targeted that specific
     /// generation. Entries are consumed when the matching spawn task finishes.
     cancelled_spawns: std::collections::HashSet<String>,
+    /// Background validation launched after a successful merge into an epic.
+    /// The coordinator tails merge events and keeps the bounded sweep outside
+    /// the MCP merge request's latency path.
+    merge_sweep: runtime::merge_sweep::MergeSweepCoordinator,
     /// Tracks last idle-like message time per worker source for dedup.
     /// Prevents idle spam when workers send repeated "standing by" / "ready" messages.
     last_idle_message_times: HashMap<String, std::time::Instant>,

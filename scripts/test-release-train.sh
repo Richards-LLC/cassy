@@ -280,6 +280,31 @@ run_lane_check() {
     LANE_GH_CALLS="$lane_calls" LANE_GH_RUNS="$lane_runs" LANE_GH_JOBS="$lane_jobs" \
     CAS_RELEASE_TRAIN_GH="$tmp/lane-gh.sh" "$train" 9.99.4 "$wt_lane" --check-lane main 2>&1
 }
+
+# A supervisor proof receipt is sufficient for a small exact-tip lane and must
+# avoid any GitHub lookup. The receipt digest is the same content-addressing
+# contract emitted by run-scoped-tests.sh.
+proof_receipt="$tmp/supervisor-proof.receipt"
+proof_payload="version=1\nresult=PASS\nhead_sha=${lane_sha}\nbase_sha=${remote_lane_sha}\nchanged_files=1\ntargets=lib:lane_module\nworktree=${wt_lane}"
+proof_id="sp-$(printf '%b\n' "$proof_payload" | sha256sum | awk '{print $1}')"
+printf '%b\nreceipt_id=%s\n' "$proof_payload" "$proof_id" >"$proof_receipt"
+lane_call_count_before=0
+if [[ -f "$lane_calls" ]]; then
+    lane_call_count_before="$(wc -l <"$lane_calls" | tr -d '[:space:]')"
+fi
+proof_out="$(LANE_GH_CALLS="$lane_calls" LANE_GH_RUNS="$lane_runs" LANE_GH_JOBS="$lane_jobs" \
+    CAS_RELEASE_TRAIN_GH="$tmp/lane-gh.sh" "$train" 9.99.4 "$wt_lane" --check-lane main "$proof_receipt" 2>&1)"
+lane_call_count_after=0
+if [[ -f "$lane_calls" ]]; then
+    lane_call_count_after="$(wc -l <"$lane_calls" | tr -d '[:space:]')"
+fi
+if [[ "$proof_out" == *"FAST GREEN; supervisor scoped proof receipt id=$proof_id"* \
+    && "$lane_call_count_before" == "$lane_call_count_after" ]]; then
+    ok '--check-lane accepts a valid exact-tip supervisor proof without CI lookup'
+else
+    bad "supervisor proof receipt was not accepted without CI lookup: $proof_out"
+fi
+
 printf '[]\n' >"$lane_runs"
 printf '{"jobs":[]}\n' >"$lane_jobs"
 out="$(run_lane_check || true)"
@@ -295,20 +320,20 @@ out="$(LANE_GH_FAIL=view run_lane_check || true)"
 out="$(run_lane_check || true)"
 [[ "$out" == *MISSING* ]] && ok '--check-lane distinguishes a missing Scoped Validation job' \
     || bad "missing Scoped Validation job was not refused: $out"
-printf '{"jobs":[{"databaseId":101,"name":"Scoped Validation (factory/PR)","status":"in_progress","conclusion":null}]}\n' >"$lane_jobs"
+printf '{"jobs":[{"databaseId":101,"name":"Scoped Validation (fast)","status":"in_progress","conclusion":null}]}\n' >"$lane_jobs"
 out="$(run_lane_check || true)"
 [[ "$out" == *PENDING* ]] && ok '--check-lane distinguishes a pending run' \
     || bad "pending lane run was not refused: $out"
-printf '{"jobs":[{"databaseId":102,"name":"Scoped Validation (factory/PR)","status":"completed","conclusion":"failure"}]}\n' >"$lane_jobs"
+printf '{"jobs":[{"databaseId":102,"name":"Scoped Validation (fast)","status":"completed","conclusion":"failure"}]}\n' >"$lane_jobs"
 out="$(run_lane_check || true)"
 [[ "$out" == *'RED (failure)'* ]] && ok '--check-lane distinguishes a red run' \
     || bad "red lane run was not refused: $out"
-printf '{"jobs":[{"databaseId":103,"name":"Scoped Validation (factory/PR)","status":"completed","conclusion":"skipped"}]}\n' >"$lane_jobs"
+printf '{"jobs":[{"databaseId":103,"name":"Scoped Validation (fast)","status":"completed","conclusion":"skipped"}]}\n' >"$lane_jobs"
 out="$(run_lane_check || true)"
 [[ "$out" == *'RED (skipped)'* ]] && ok '--check-lane never accepts a skipped push row' \
     || bad "skipped lane run was accepted: $out"
 printf '[{"databaseId":40,"headBranch":"other","headSha":"%s","status":"completed","conclusion":"success","event":"push","workflowName":"CI"},{"databaseId":41,"headBranch":"main","headSha":"%s","status":"completed","conclusion":"success","event":"push","workflowName":"CI"}]\n' "$lane_sha" "$lane_sha" >"$lane_runs"
-printf '{"jobs":[{"databaseId":104,"name":"Fast Validation","status":"completed","conclusion":"skipped"},{"databaseId":105,"name":"Scoped Validation (factory/PR)","status":"completed","conclusion":"success"}]}\n' >"$lane_jobs"
+printf '{"jobs":[{"databaseId":104,"name":"Fast Validation","status":"completed","conclusion":"skipped"},{"databaseId":105,"name":"Scoped Validation (fast)","status":"completed","conclusion":"success"}]}\n' >"$lane_jobs"
 out="$(run_lane_check)"
 [[ "$out" == *GREEN* ]] && ok '--check-lane accepts the branch tip own green run' \
     || bad "green lane run was refused: $out"
@@ -317,6 +342,27 @@ if grep -q -- '--workflow ci.yml --branch main --event push' "$lane_calls" \
     ok '--check-lane scopes the CI run to branch push and inspects its jobs'
 else
     bad "--check-lane did not query the real workflow/job shape: $(cat "$lane_calls")"
+fi
+
+# A six-file ordinary delta cannot use either the supervisor receipt or the
+# fast CI job; the full historical Scoped Validation job remains required.
+wt_large="$(new_worktree lane-large-ci)"
+large_base="$(git -C "$wt_large" rev-parse HEAD)"
+for number in 1 2 3 4 5 6; do
+    printf '%s\n' "$number" >"$wt_large/large-$number.txt"
+    git -C "$wt_large" add "large-$number.txt"
+done
+git -C "$wt_large" -c commit.gpgsign=false commit -qm 'large lane tip'
+large_sha="$(git -C "$wt_large" rev-parse HEAD)"
+git -C "$wt_large" update-ref refs/remotes/origin/main "$large_base"
+printf '[{"databaseId":42,"headBranch":"main","headSha":"%s","status":"completed","conclusion":"success","event":"push","workflowName":"CI"}]\n' "$large_sha" >"$lane_runs"
+printf '{"jobs":[{"databaseId":106,"name":"Scoped Validation (factory/PR)","status":"completed","conclusion":"success"}]}\n' >"$lane_jobs"
+large_out="$(LANE_GH_CALLS="$lane_calls" LANE_GH_RUNS="$lane_runs" LANE_GH_JOBS="$lane_jobs" \
+    CAS_RELEASE_TRAIN_GH="$tmp/lane-gh.sh" "$train" 9.99.4 "$wt_large" --check-lane main 2>&1)"
+if [[ "$large_out" == *"full scoped admission required"* && "$large_out" == *"GREEN"* ]]; then
+    ok 'larger deltas require the full Scoped Validation CI job'
+else
+    bad "large delta selected the fast path or was refused: $large_out"
 fi
 
 # ---------------------------------------------------------------------------

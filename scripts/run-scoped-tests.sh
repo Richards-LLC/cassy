@@ -56,6 +56,10 @@
 #   SCOPED_PROOF_BASE
 #                 git ref for the committed-diff proof baseline (default:
 #                 origin/main, then main, then HEAD^)
+#   SCOPED_PROOF_RECEIPT
+#                 optional durable path for a supervisor proof receipt. When
+#                 set, --proof writes an exact-tip, content-addressed receipt
+#                 after both the test and surface checks pass.
 #
 # Exit codes: 0 = genuinely green with a nonzero passed count,
 #             1 = the run failed, executed nothing, or `--proof` missed a
@@ -255,13 +259,48 @@ if [[ "${proof_mode}" -eq 1 ]]; then
     if [[ -n "${SCOPED_PROOF_BASE:-}" ]]; then
         proof_checker_args+=(--base "${SCOPED_PROOF_BASE}")
     fi
-    if ! (cd "${REPO_ROOT}" && "${REPO_ROOT}/scripts/check-scoped-test-surface.sh" "${proof_checker_args[@]}" -- "$@"); then
+    proof_output="$(cd "${REPO_ROOT}" && "${REPO_ROOT}/scripts/check-scoped-test-surface.sh" "${proof_checker_args[@]}" -- "$@" 2>&1)"
+    proof_status=$?
+    printf '%s\n' "${proof_output}"
+    if [[ "${proof_status}" -ne 0 ]]; then
         echo "FAIL: --proof surface validation rejected this test receipt." >&2
         exit 1
     fi
     printf 'SCOPED_PROOF: command=scripts/run-scoped-tests.sh --proof'
     printf ' %q' "$@"
     printf ' result=PASS\n'
+
+    # Keep the receipt intentionally line-oriented and shell-safe. The release
+    # train rechecks every field against the current branch and the shared
+    # classifier; the digest only proves the fields were not edited after the
+    # proof runner wrote them.
+    if [[ -n "${SCOPED_PROOF_RECEIPT:-}" ]]; then
+        proof_base="${SCOPED_PROOF_BASE:-}"
+        if [[ -z "${proof_base}" ]]; then
+            if git -C "${REPO_ROOT}" rev-parse --verify --quiet origin/main >/dev/null; then
+                proof_base=origin/main
+            elif git -C "${REPO_ROOT}" rev-parse --verify --quiet main >/dev/null; then
+                proof_base=main
+            else
+                proof_base=HEAD^
+            fi
+        fi
+        proof_head="$(git -C "${REPO_ROOT}" rev-parse HEAD)"
+        proof_merge_base="$(git -C "${REPO_ROOT}" merge-base "${proof_base}" HEAD)"
+        proof_changed_files="$(git -C "${REPO_ROOT}" diff --name-only "${proof_merge_base}" HEAD | sed '/^$/d' | wc -l | tr -d '[:space:]')"
+        proof_targets="$(printf '%s\n' "${proof_output}" | sed -n 's/^SCOPED_PROOF: targets=//p' | sed 's/ result=PASS$//' | tail -1)"
+        proof_payload="version=1\nresult=PASS\nhead_sha=${proof_head}\nbase_sha=${proof_merge_base}\nchanged_files=${proof_changed_files}\ntargets=${proof_targets}\nworktree=${REPO_ROOT}"
+        proof_id="sp-$(printf '%b\n' "${proof_payload}" | sha256sum | awk '{print $1}')"
+        proof_receipt_dir="$(dirname "${SCOPED_PROOF_RECEIPT}")"
+        mkdir -p "${proof_receipt_dir}"
+        proof_receipt_tmp="${SCOPED_PROOF_RECEIPT}.tmp.$$"
+        {
+            printf '%b\n' "${proof_payload}"
+            printf 'receipt_id=%s\n' "${proof_id}"
+        } >"${proof_receipt_tmp}"
+        mv -f "${proof_receipt_tmp}" "${SCOPED_PROOF_RECEIPT}"
+        printf 'SCOPED_PROOF_RECEIPT: id=%s path=%s\n' "${proof_id}" "${SCOPED_PROOF_RECEIPT}"
+    fi
 else
     echo "      Iteration receipt only. Add --proof for committed-diff surface validation at handoff."
 fi

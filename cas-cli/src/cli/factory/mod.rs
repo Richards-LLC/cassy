@@ -184,7 +184,7 @@ fn parse_num_threads_from_proc_stat(data: &str) -> Option<u32> {
 }
 
 /// Launch hierarchical multi-agent factory session
-#[derive(Args, Debug, Clone)]
+#[derive(Args, Debug, Clone, PartialEq, Eq)]
 pub struct FactoryArgs {
     /// Factory subcommand
     #[command(subcommand)]
@@ -273,6 +273,12 @@ pub struct FactoryArgs {
     #[arg(skip)]
     pub supervisor_cli_explicit: bool,
 
+    /// Internal account directory selected by a provider shortcut. Keeping
+    /// this with the explicit harness choice makes supervisor availability
+    /// checks use the account the spawned pane inherits.
+    #[arg(skip)]
+    pub supervisor_config_dir: Option<std::path::PathBuf>,
+
     /// Disable cloud phone-home (push factory state to Cassy Cloud)
     #[arg(long, global = true)]
     pub no_phone_home: bool,
@@ -340,6 +346,7 @@ impl Default for FactoryArgs {
             supervisor_spec: None,
             set_default: false,
             supervisor_cli_explicit: false,
+            supervisor_config_dir: None,
             strict_cli: false,
         }
     }
@@ -487,7 +494,7 @@ pub struct KillAllArgs {
 }
 
 /// Internal factory subcommands (hidden from help)
-#[derive(Subcommand, Debug, Clone)]
+#[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
 pub enum FactoryCommands {
     /// Report local Claude/Codex/CAS-MCP readiness without spawning workers.
     Doctor,
@@ -1378,8 +1385,14 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
         };
         let fallback_model = cas_factory::configured_factory_default_model(&sources)
             .map_err(|e| anyhow::anyhow!("Failed to resolve factory defaults: {e}"))?;
-        let spec = resolve_supervisor_spec(sources)
+        let mut spec = resolve_supervisor_spec(sources)
             .map_err(|e| anyhow::anyhow!("Failed to resolve supervisor spec: {e}"))?;
+        if spec.config_dir.is_none() {
+            spec.config_dir = args
+                .supervisor_config_dir
+                .as_ref()
+                .map(|path| path.to_string_lossy().into_owned());
+        }
         cas_factory::validate_explicit(&spec, &CapabilitySnapshot::default())
             .map_err(|e| anyhow::anyhow!("Failed to validate supervisor routing spec: {e}"))?;
         (spec, fallback_model)

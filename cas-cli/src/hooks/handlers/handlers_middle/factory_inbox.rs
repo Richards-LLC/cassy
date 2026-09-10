@@ -252,6 +252,7 @@ mod tests {
             acked_at: None,
             urgent: false,
             origin: None,
+            operator: None,
         }
     }
 

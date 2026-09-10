@@ -60,6 +60,20 @@ pub(crate) fn operator_class(message: &cas_store::QueuedPrompt) -> Option<Operat
             label: label.to_owned(),
         });
     }
+    // cas-e8df: a stamped row names the operator and device from the
+    // credential record; the label is only the fallback for rows written
+    // before the operator columns existed.
+    if let Some(stamp) = message.operator.as_ref().filter(|stamp| stamp.verified) {
+        let device = if stamp.device_label.is_empty() {
+            stamp.device_id.clone()
+        } else {
+            stamp.device_label.clone()
+        };
+        return Some(OperatorClass::Verified {
+            operator: stamp.operator.clone(),
+            device,
+        });
+    }
     let (operator, device) = label
         .rsplit_once('@')
         .map(|(operator, device)| (operator.to_owned(), device.to_owned()))
@@ -145,6 +159,7 @@ mod viktor_provenance_tests {
             acked_at: None,
             urgent: false,
             origin: None,
+            operator: None,
         };
 
         let observed_at = chrono::DateTime::parse_from_rfc3339("2026-08-18T20:06:00Z")
@@ -173,6 +188,7 @@ mod viktor_provenance_tests {
             acked_at: None,
             urgent: false,
             origin: None,
+            operator: None,
         };
         let observed_at = row.created_at + chrono::Duration::seconds(299);
         let provenance = queued_message_provenance_at(&row, observed_at);
@@ -197,6 +213,7 @@ mod viktor_provenance_tests {
             acked_at: None,
             urgent: false,
             origin,
+            operator: None,
         }
     }
 
@@ -238,6 +255,45 @@ mod viktor_provenance_tests {
                 "origin {origin:?} must not verify"
             );
         }
+        let mut agent = commander_row(None);
+        agent.source = "supervisor".into();
+        assert_eq!(super::operator_class(&agent), None);
+        assert!(queued_message_provenance_at(&agent, agent.created_at).contains("supervisor-authored"));
+    }
+
+    /// cas-e8df: once the daemon stamps the operator columns, the header
+    /// names the credential record, not the `commander:` label — so a label
+    /// that disagrees with the stamp cannot rename the operator.
+    #[test]
+    fn stamped_rows_take_operator_and_device_from_the_columns() {
+        let mut row = commander_row(Some(cas_store::QueueOrigin::PairedDevice {
+            device_id: "dev-42".into(),
+        }));
+        row.source = "commander:Mallory@spoofed".into();
+        row.operator = Some(cas_store::OperatorStamp {
+            operator: "Daniel".into(),
+            device_id: "dev-42".into(),
+            device_label: "iphone-15".into(),
+            scopes: vec!["message:send".into()],
+            verified: true,
+        });
+        assert_eq!(
+            queued_message_provenance_at(&row, row.created_at),
+            "[cas #75 operator Daniel@iphone-15 verified 0s first]"
+        );
+        // An unverified stamp never upgrades an unattributed row.
+        let mut unverified = commander_row(Some(cas_store::QueueOrigin::Unattributed));
+        unverified.operator = Some(cas_store::OperatorStamp {
+            operator: "Daniel".into(),
+            device_id: String::new(),
+            device_label: "phone".into(),
+            scopes: Vec::new(),
+            verified: false,
+        });
+        assert_eq!(
+            queued_message_provenance_at(&unverified, unverified.created_at),
+            "[cas #75 unverified:Daniel@iphone-15 0s first]"
+        );
         let mut agent = commander_row(None);
         agent.source = "supervisor".into();
         assert_eq!(super::operator_class(&agent), None);

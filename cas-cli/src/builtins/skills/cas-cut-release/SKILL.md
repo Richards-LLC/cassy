@@ -133,8 +133,14 @@ name the blocking step in the operator timeline, and require its receipt.
    the run directory. Only the published receipt's matching tag, SHA, actual
    `PUBLISHED_AT`, and both required asset digests authorize `--status` to name
    green-to-published latency.
-13. After the published receipt exists, run
-   `scripts/release-train.sh <version> <epic-worktree> --report`. This runs
+13. After the published receipt exists, set
+   `CAS_RELEASE_TRAIN_REPORT_USER_THREAD_TS` and
+   `CAS_RELEASE_TRAIN_REPORT_DEV_THREAD_TS` to the existing User and Dev parent
+   timestamps, then run `scripts/release-train.sh <version> <epic-worktree>
+   --report`. The train defaults to the checked-in
+   `scripts/release-report-post.py` adapter; set
+   `CAS_RELEASE_TRAIN_REPORT_POST_CMD` only for an explicitly approved alternate
+   route or a stub. This runs
    `cas release report <version> --pdf` (or the executable named by
    `CAS_RELEASE_TRAIN_REPORT_CMD`), requires the Markdown, standalone HTML and
    PDF under `docs/release-reports/`, and records its log and exit status in
@@ -147,10 +153,15 @@ name the blocking step in the operator timeline, and require its receipt.
    `PDF_FILE_ID`, `HTML_FILE_ID`, `USER_THREAD_TS`, and `DEV_THREAD_TS`;
    the train re-hashes the local PDF/HTML and verifies the PDF page count before
    accepting the receipt.
-14. The posting adapter named by `CAS_RELEASE_TRAIN_REPORT_POST_CMD` owns the
-   authenticated Slack call. Upload the PDF as a file attached to the User
-   thread, link the HTML from the Dev thread, and write the receipt only after
-   both thread receipts and the PDF integrity checks are available. The
+14. The default posting adapter owns the authenticated MechaCassy HTTP MCP
+   call. It accepts `TAG PDF_PATH HTML_PATH USER_THREAD_TS DEV_THREAD_TS`, reads
+   the report bytes locally, uploads the PDF as a file attached to the User
+   thread, and posts a GitHub permalink for the HTML from the Dev thread. It
+   writes the receipt only after both thread receipts and the PDF/HTML SHA-256
+   and PDF page-count checks are available; report bytes never enter agent
+   context. Load the bearer and bypass from the configured credentials file or
+   named environment variables (`MECHA_SLACK_TOKEN_ENV` and
+   `MECHA_VERCEL_BYPASS`). The
    supervisor route uses the Claude.ai Slack MCP two-step
    `slack_get_file_upload_url` → upload bytes → `slack_complete_file_upload`;
    the MechaCassy fallback uses `mecha_post` with a file/image after its source

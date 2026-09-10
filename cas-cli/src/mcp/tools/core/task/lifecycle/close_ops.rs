@@ -10621,8 +10621,8 @@ impl EpicGitSnapshot {
 
         let mut snapshot = Self::default();
         let mut patterns = vec![
-            "refs/heads/factory".to_string(),
-            "refs/remotes/origin/factory".to_string(),
+            "refs/heads/factory/*".to_string(),
+            "refs/remotes/origin/factory/*".to_string(),
         ];
         if is_safe_git_refname(parent_branch) {
             patterns.push(format!("refs/heads/{parent_branch}"));
@@ -11174,10 +11174,10 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
         let mut content_check_error = None;
         let mut content_directions = Vec::new();
         // A stranded live lane is the common close-gate case. Measure each
-        // distinct branch once before attempting anchor reconciliation: an
-        // absent/behind direction already proves that the child cannot clear,
-        // while an all-present result clears it without the expensive anchor
-        // history scans. This keeps content proof limited to stranded rows.
+        // distinct branch once before attempting anchor reconciliation so the
+        // close gate can reuse the result for guidance. Do not clear the row
+        // here: a task-specific anchor is authoritative when a worker lane
+        // has been reused, superseded, or reset after delivery.
         if unmerged_count > 0 && !fallback_branches.is_empty() {
             content_directions = fallback_branches
                 .iter()
@@ -11193,37 +11193,26 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
                     )
                 })
                 .collect();
-            let delivered: Vec<String> = content_directions
-                .iter()
-                .flat_map(|(_, direction)| match direction {
-                    BranchContentDirection::ContentPresent { paths } => paths.clone(),
-                    _ => Vec::new(),
-                })
-                .collect();
-            if !delivered.is_empty()
-                && content_directions.iter().all(|(_, direction)| {
-                    matches!(direction, BranchContentDirection::ContentPresent { .. })
-                })
-            {
-                unmerged_count = 0;
-                merge_evidence_note = Some(format!(
-                    "decision: child task `{}` branch(es) {} are merged (squash, ancestry \
-                         lost): every path they deliver is already byte-identical on \
-                         `{parent_branch}`, so there is nothing left to integrate. Delivered \
-                         path(s) checked: {}. Requiring a merge here would only pollute history \
-                         — and where the branch is additionally behind, revert shipped work.",
-                    t.id,
-                    fallback_branches.join(", "),
-                    delivered.join(", "),
-                ));
-            }
         }
         if let Some(anchor) = resolved_anchor
-            && unmerged_count == 0
             && commit_is_merged_into_parent(repo_path, anchor, parent_branch)
+            && dropped_paths.is_empty()
+            && content_check_error.is_none()
+            && merge_evidence_note.is_none()
         {
             match delivery_content_presence_in_parent(repo_path, anchor, parent_branch) {
-                DeliveryContentPresence::Present { .. } => {}
+                DeliveryContentPresence::Present { .. } => {
+                    if unmerged_count > 0 {
+                        unmerged_count = 0;
+                        merge_evidence_note = Some(format!(
+                            "decision: recorded factory_branch_anchor `{anchor}` for child task \
+                             `{}` is merged into `{parent_branch}`. Later commits on the \
+                             reusable live lane are outside this child's delivery receipt and \
+                             were excluded from its epic-close accounting.",
+                            t.id,
+                        ));
+                    }
+                }
                 DeliveryContentPresence::Superseded { paths, commits } => {
                     content_evolution_note = Some(format!(
                         "decision: recorded factory_branch_anchor `{anchor}` for child task `{}` \
@@ -11253,7 +11242,6 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
         }
         if let Some(anchor) = resolved_anchor
             && unmerged_count > 0
-            && fallback_branches.is_empty()
             && dropped_paths.is_empty()
             && content_check_error.is_none()
         {
@@ -11312,7 +11300,7 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
         // resolution that dropped delivery content.
         if let Some(anchor) = resolved_anchor
             && !commit_is_merged_into_parent(repo_path, anchor, parent_branch)
-            && fallback_branches.is_empty()
+            && unmerged_count == 0
             && dropped_paths.is_empty()
             && content_check_error.is_none()
             && merge_evidence_note.is_none()
@@ -11385,24 +11373,29 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
             && dropped_paths.is_empty()
             && content_check_error.is_none()
             && merge_evidence_note.is_none()
-            && content_directions.is_empty()
             && !fallback_branches.is_empty()
         {
-            let directions: Vec<BranchContentDirection> = fallback_branches
+            if content_directions.is_empty() {
+                let directions: Vec<BranchContentDirection> = fallback_branches
+                    .iter()
+                    .map(|branch| {
+                        branch_content_direction_with_snapshot(
+                            repo_path,
+                            branch,
+                            parent_branch,
+                            &git_snapshot,
+                        )
+                    })
+                    .collect();
+                content_directions = fallback_branches
+                    .iter()
+                    .cloned()
+                    .zip(directions)
+                    .collect();
+            }
+            let directions: Vec<BranchContentDirection> = content_directions
                 .iter()
-                .map(|branch| {
-                    branch_content_direction_with_snapshot(
-                        repo_path,
-                        branch,
-                        parent_branch,
-                        &git_snapshot,
-                    )
-                })
-                .collect();
-            content_directions = fallback_branches
-                .iter()
-                .cloned()
-                .zip(directions.iter().cloned())
+                .map(|(_, direction)| direction.clone())
                 .collect();
             let delivered: Vec<String> = directions
                 .iter()
@@ -12073,6 +12066,13 @@ fn branch_content_direction_against_ref_with_snapshot(
             reason: format!("unsafe ref name in `{branch_ref}` or `{target_ref}`"),
         };
     }
+    let snapshot_branch_ref = snapshot.and_then(|snapshot| {
+        snapshot
+            .read_ref(branch_ref)
+            .read_ref()
+            .map(str::to_string)
+    });
+    let branch_ref = snapshot_branch_ref.as_deref().unwrap_or(branch_ref);
     let ref_exists = |refname: &str| {
         snapshot.map_or_else(
             || git_ref_exists(repo_path, refname),

@@ -249,6 +249,9 @@ echo "Quote that passed count in your close note (rule-173)."
 
 if [[ "${proof_mode}" -eq 1 ]]; then
     "${REPO_ROOT}/scripts/check-scoped-test-surface.sh" -- "$@"
+    printf 'SCOPED_PROOF: command=scripts/run-scoped-tests.sh --proof'
+    printf ' %q' "$@"
+    printf ' result=PASS\n'
 else
     echo "      Iteration receipt only. Add --proof for committed-diff surface validation at handoff."
 fi

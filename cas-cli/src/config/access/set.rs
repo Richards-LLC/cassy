@@ -47,6 +47,30 @@ impl Config {
                     ))
                 })?;
             }
+            "factory.message_max_chars" => {
+                let factory = self.factory.get_or_insert_with(FactoryConfig::default);
+                factory.message_max_chars = value.parse().map_err(|_| {
+                    MemError::Parse(format!(
+                        "Invalid integer value for factory.message_max_chars: {value}"
+                    ))
+                })?;
+            }
+            "factory.message_max_chars_escalation" => {
+                let factory = self.factory.get_or_insert_with(FactoryConfig::default);
+                factory.message_max_chars_escalation = value.parse().map_err(|_| {
+                    MemError::Parse(format!(
+                        "Invalid integer value for factory.message_max_chars_escalation: {value}"
+                    ))
+                })?;
+            }
+            "factory.note_max_chars" => {
+                let factory = self.factory.get_or_insert_with(FactoryConfig::default);
+                factory.note_max_chars = value.parse().map_err(|_| {
+                    MemError::Parse(format!(
+                        "Invalid integer value for factory.note_max_chars: {value}"
+                    ))
+                })?;
+            }
             "factory.worker_build_jobs" | "factory.cargo_build_jobs" => {
                 let factory = self.factory.get_or_insert_with(FactoryConfig::default);
                 factory.cargo_build_jobs = value.to_string();

@@ -22,6 +22,48 @@ pub(super) fn register_coordination_lease_telemetry_and_missing(registry: &mut C
     });
 
     registry.register(ConfigMeta {
+        key: "factory.message_max_chars",
+        section: "factory",
+        name: "Agent Message Character Cap",
+        description: "Reject ordinary coordination message bodies longer than this many characters. Store detailed evidence under [factory] artifacts_root/<task-id>/ and send its path with a short summary.",
+        value_type: ConfigType::Int,
+        default: "1200",
+        constraint: Constraint::Range(1, 1_000_000),
+        advanced: false,
+        requires_feature: None,
+        keywords: &["factory", "message", "coordination", "cap", "characters", "traffic"],
+        use_cases: &["Keep ordinary worker-to-worker traffic compact", "Raise the cap only when a project has a specific short-message need"],
+    });
+
+    registry.register(ConfigMeta {
+        key: "factory.message_max_chars_escalation",
+        section: "factory",
+        name: "Escalation Message Character Cap",
+        description: "Reject blocker and merge-request coordination message bodies longer than this many characters. These escalation types receive structured CAS envelopes and have a larger default budget.",
+        value_type: ConfigType::Int,
+        default: "2500",
+        constraint: Constraint::Range(1, 1_000_000),
+        advanced: false,
+        requires_feature: None,
+        keywords: &["factory", "message", "blocker", "merge", "escalation", "cap"],
+        use_cases: &["Allow concise blocker evidence and merge receipts", "Keep escalations bounded while preserving their structured context"],
+    });
+
+    registry.register(ConfigMeta {
+        key: "factory.note_max_chars",
+        section: "factory",
+        name: "Task Note Character Cap",
+        description: "Reject appended task notes longer than this many characters. Store detailed evidence under [factory] artifacts_root/<task-id>/ and send the path with a short summary.",
+        value_type: ConfigType::Int,
+        default: "1500",
+        constraint: Constraint::Range(1, 1_000_000),
+        advanced: false,
+        requires_feature: None,
+        keywords: &["factory", "task", "notes", "cap", "characters", "traffic"],
+        use_cases: &["Keep task timelines readable", "Use supervisor review overrides for durable discovery or decision evidence"],
+    });
+
+    registry.register(ConfigMeta {
         key: "factory.max_concurrent_builders",
         section: "factory",
         name: "Maximum Concurrent Builders",

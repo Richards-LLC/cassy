@@ -39,6 +39,34 @@ impl CasCore {
             data: None,
         })?;
 
+        let supervisor_override = req.supervisor_override.unwrap_or(false);
+        let registered_supervisor = if supervisor_override {
+            self.resolve_live_supervisor_authority().map_err(|error| McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from(format!(
+                    "SUPERVISOR OVERRIDE REJECTED: supervisor_override=true requires a live registered supervisor ({error:?})."
+                )),
+                data: None,
+            })?;
+            true
+        } else {
+            false
+        };
+        let override_accepted = crate::mcp::tools::traffic_limits::validate_note_body(
+            &req.note_type,
+            &req.note,
+            &self.load_config(),
+            &req.id,
+            supervisor_override,
+            registered_supervisor,
+            req.reason.as_deref(),
+        )
+        .map_err(|message| McpError {
+            code: ErrorCode::INVALID_PARAMS,
+            message: Cow::from(message),
+            data: None,
+        })?;
+
         // Format the note with type prefix and timestamp
         let timestamp = chrono::Utc::now().format("%Y-%m-%d %H:%M");
         let type_prefix = match req.note_type.to_lowercase().as_str() {
@@ -66,7 +94,12 @@ impl CasCore {
             data: None,
         })?;
 
-        if let Err(e) = self.record_task_note_activity(&req.id, &req.note_type, &req.note) {
+        if let Err(e) = self.record_task_note_activity(
+            &req.id,
+            &req.note_type,
+            &req.note,
+            override_accepted.then_some(req.reason.as_deref().unwrap_or_default()),
+        ) {
             tracing::warn!(
                 task_id = %req.id,
                 error = %e,
@@ -85,6 +118,7 @@ impl CasCore {
         task_id: &str,
         note_type: &str,
         note: &str,
+        supervisor_override_reason: Option<&str>,
     ) -> anyhow::Result<()> {
         use cas_types::{Event, EventEntityType, EventType};
 
@@ -96,6 +130,16 @@ impl CasCore {
             "Task note added ({note_type}): {}",
             truncate_str(note, 120)
         );
+        let metadata = match supervisor_override_reason {
+            Some(reason) => serde_json::json!({
+                "note_type": note_type,
+                "supervisor_override": true,
+                "supervisor_override_reason": reason,
+            }),
+            None => serde_json::json!({
+                "note_type": note_type,
+            }),
+        };
         let event = Event::new(
             EventType::TaskNoteAdded,
             EventEntityType::Task,
@@ -103,9 +147,7 @@ impl CasCore {
             summary,
         )
         .with_session(agent_id)
-        .with_metadata(serde_json::json!({
-            "note_type": note_type,
-        }));
+        .with_metadata(metadata);
 
         event_store.record(&event)?;
         Ok(())

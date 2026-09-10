@@ -19,7 +19,7 @@ Routing is two stages. **Stage 1 — tier the task** by complexity; the tier is 
   support from the selector alone. The operator's default hosted lane is the explicit
   QwenCloud Token Plan route.
 
-Luna remains xhigh-only; `max` and `ultra` are not Cassy effort values. The canonical policy is `crates/cas-factory/policy/lane-registry.toml`; the generated table below reflects its lane status.
+Luna remains xhigh-only by Cassy policy: the Codex models manifest lists `max` for Luna too, but the standard lane keeps its cost ceiling. `max` is a Cassy effort value (cas-556a) accepted only on explicit request by recipes that list it — Claude Fable 5.1, Claude Opus 5, Codex GPT-6 Astra, Codex GPT-5.6 Sol; `ultra` is not a Cassy effort value. The canonical policy is `crates/cas-factory/policy/lane-registry.toml`; the generated table below reflects its lane status.
 
 ## Registry route table
 
@@ -118,7 +118,7 @@ mcp__cas__coordination action=spawn_workers count=1 isolate=true cli=claude mode
 
 ### Effort vocabulary (Cassy-wide)
 
-Accepted values: `minimal` \| `low` \| `medium` \| `high` \| `xhigh` (alias `x-high`).
+Accepted values: `minimal` \| `low` \| `medium` \| `high` \| `xhigh` (alias `x-high`) \| `max`.
 
 How each backend receives them:
 
@@ -129,7 +129,20 @@ How each backend receives them:
 | Grok | `--reasoning-effort <level>` |
 | OpenCode | generated primary-agent `variant` (local: endpoint-specific; Token Plan/pay-as-you-go qwen3.8-max: `low`, `medium`, `xhigh`; Token Plan also pins `enable_thinking`) |
 
-For non-Luna multi-step workers, `effort=high` is the ceiling. Luna is the exception: its only permitted Cassy effort is the current maximum, `xhigh`. The registry sets Haiku light to low, Fable taste to medium, and Astra heavy to high; do not use `max`/`ultra` until Cassy's vocabulary is extended and validated.
+For non-Luna multi-step workers, `effort=high` is the ceiling by default. Luna is the exception: its only permitted Cassy effort is `xhigh`. The registry sets Haiku light to low, Fable taste to medium, and Astra heavy to high; `max` is never a lane default and `ultra` is not a Cassy effort value.
+
+### `max` effort (explicit request only)
+
+`max` means "absolute maximum capability with no constraints on token spending". It is accepted only where the registry recipe lists it, and no lane recipe defaults to it:
+
+| Recipe | `max` | Source |
+|---|---|---|
+| `claude_fable` (Claude Fable 5.1), `claude_opus` (Claude Opus 5) | accepted | Claude effort doc (https://platform.claude.com/docs/en/build-with-claude/effort): `max` is available on Claude Fable 5.1/5, Mythos 5.1/5, Opus 5/4.8/4.7/4.6, Sonnet 5/4.6; `xhigh` on Fable 5.1/5, Mythos 5.1/5, Opus 5/4.8/4.7, Sonnet 5. Set a large `max_tokens` (≥64k) at xhigh/max. |
+| `codex_astra`, `codex_astra_high` (GPT-6 Astra), `codex_sol` (GPT-5.6 Sol) | accepted | codex-rs `codex-rs/protocol/src/openai_models.rs` defines `ReasoningEffort::Max` (wire value `max`); the per-model sets come from the Codex models manifest (codex 0.153.4): Astra/Sol/Terra list `low`–`xhigh`, `max`, `ultra`; Luna lists `low`–`xhigh`, `max`. |
+| `codex_luna` (GPT-5.6 Luna) | rejected — `xhigh` only | Cassy policy (standard-lane cost ceiling), not a provider limit. |
+| `claude_haiku`, OpenCode Qwen lanes | rejected | Not listed by the provider tables above. |
+
+Cost caveat: an independent measurement (dev.to, synthorai) put Astra `max` at ≈2.3× the cost of `low` with no accuracy gain on its 11 tasks. Reach for `max` when a task has already failed at `high`/`xhigh` and the operator asked for it, not as a routine escalation. Codex receives `--config model_reasoning_effort=max`; Claude receives `--effort max`.
 
 ## Spawn recipes
 
@@ -174,7 +187,7 @@ Score each task while breaking down the EPIC:
 
 Use the generated recipe block in [workflow.md](workflow.md#phase-2-coordinate) for the selected lane. Every command must carry explicit `cli=`, `model=`, and `effort=`; do not invent a fallback route outside the registry.
 
-For every worker, `effort=high` is the ceiling except for the registry's Luna/xhigh standard route. `max` and `ultra` are not Cassy effort values. If a route is unavailable, report it and choose another active registry lane deliberately rather than silently changing the requested route.
+For every worker, `effort=high` is the ceiling except for the registry's Luna/xhigh standard route and an explicit operator request for `max` on a recipe that lists it. `ultra` is not a Cassy effort value. If a route is unavailable, report it and choose another active registry lane deliberately rather than silently changing the requested route.
 
 ## Workflow
 

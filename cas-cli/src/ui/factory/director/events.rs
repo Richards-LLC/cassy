@@ -303,6 +303,9 @@ pub(crate) fn effective_stall_threshold_secs(
         Some(cas_mux::Effort::Medium) => 1.5,
         Some(cas_mux::Effort::High) => 2.0,
         Some(cas_mux::Effort::XHigh) => 3.0,
+        // cas-556a: max has no token ceiling, so a quiet pane is even less
+        // evidence of a stall than at xhigh.
+        Some(cas_mux::Effort::Max) => 4.0,
     };
     ((base_secs as f64) * multiplier).round() as u64
 }

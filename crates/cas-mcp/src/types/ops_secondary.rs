@@ -718,7 +718,7 @@ pub struct FactoryRequest {
     /// Worker reasoning effort override for spawn_workers.
     /// Applies to every spawned worker in this request.
     #[schemars(
-        description = "Worker reasoning effort override: 'minimal', 'low', 'medium', 'high', 'xhigh'. Applies to all workers in this spawn request."
+        description = "Worker reasoning effort override: 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'. 'max' is accepted only by models whose registry recipe allows it (Claude Fable/Opus, Codex Astra/Sol); Luna stays xhigh. Applies to all workers in this spawn request."
     )]
     #[serde(default)]
     pub effort: Option<String>,
@@ -1052,7 +1052,7 @@ pub struct CoordinationRequest {
     /// Worker reasoning effort override for spawn_workers.
     /// Applies to every spawned worker in this request.
     #[schemars(
-        description = "Worker reasoning effort override: 'minimal', 'low', 'medium', 'high', 'xhigh'. Applies to all workers in this spawn_workers request."
+        description = "Worker reasoning effort override: 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'. 'max' is accepted only by models whose registry recipe allows it (Claude Fable/Opus, Codex Astra/Sol); Luna stays xhigh. Applies to all workers in this spawn_workers request."
     )]
     #[serde(default)]
     pub effort: Option<String>,

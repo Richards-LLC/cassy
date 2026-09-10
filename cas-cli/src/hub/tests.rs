@@ -1466,6 +1466,9 @@ fn h1_runtime_state_is_single_instance_and_round_trips() {
     let paths = HubRuntimePaths::new(temp.path().join("hub"));
     let first_lock = paths.acquire_instance_lock().unwrap();
     assert!(paths.acquire_instance_lock().is_err());
+    let owner = paths.read_lock_owner().unwrap();
+    assert_eq!(owner.pid, std::process::id());
+    assert_eq!(owner.phase, "starting");
 
     let record = HubProcessRecord {
         pid: std::process::id(),
@@ -1488,6 +1491,7 @@ fn h1_runtime_state_is_single_instance_and_round_trips() {
     assert_eq!(paths.read_process_record().unwrap(), record);
 
     drop(first_lock);
+    assert!(paths.read_lock_owner().is_none());
     assert!(paths.acquire_instance_lock().is_ok());
 }
 

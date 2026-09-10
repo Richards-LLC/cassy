@@ -8960,6 +8960,63 @@ mod tests {
         );
     }
 
+    /// cas-e8df: a frame that claims verification without the hub's device
+    /// principal, or that was never verified, lands as an Unattributed row with
+    /// `verified: false` and renders `unverified:` — client labels never
+    /// define identity.
+    #[test]
+    fn unverified_commander_messages_are_unattributed_and_render_unverified() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+        let mut unpaired = crate::ui::factory::protocol::MessageAttribution {
+            device_id: None,
+            credential_id: None,
+            device_label: Some("Pippenz phone".to_string()),
+            operator_label: Some("Pippenz".to_string()),
+            controller_origin: None,
+            request_id: None,
+            scopes: Vec::new(),
+            operator_verified: false,
+        };
+        let unpaired_id = super::super::delivery::enqueue_commander_message(
+            &cas_dir,
+            "factory-1",
+            "supervisor",
+            "Status please",
+            None,
+            false,
+            &unpaired,
+        )
+        .unwrap()
+        .id();
+        // A client asserting `operator_verified` without a device principal.
+        unpaired.operator_verified = true;
+        let claimed_id = super::super::delivery::enqueue_commander_message(
+            &cas_dir,
+            "factory-1",
+            "supervisor",
+            "Status please, really",
+            None,
+            false,
+            &unpaired,
+        )
+        .unwrap()
+        .id();
+        let queued = queue.peek_all(10).unwrap();
+        for id in [unpaired_id, claimed_id] {
+            let row = queued.iter().find(|row| row.id == id).unwrap();
+            assert_eq!(row.origin, Some(cas_store::QueueOrigin::Unattributed));
+            assert_eq!(row.operator.as_ref().map(|stamp| stamp.verified), Some(false));
+            let header =
+                crate::mcp::tools::service::agent_search_system::message::queued_message_provenance(row);
+            assert!(
+                header.starts_with(&format!("[cas #{id} unverified:Pippenz@Pippenz phone ")),
+                "{header}"
+            );
+        }
+    }
+
     /// cas-f65d: a Commander semantic message and the equivalent MCP
     /// coordination message must differ only in authenticated sender metadata.
     /// Once the daemon's real delivery receipt helper runs, both rows must have
@@ -8976,6 +9033,8 @@ mod tests {
             operator_label: Some("Pippenz".to_string()),
             controller_origin: Some("https://commander.example".to_string()),
             request_id: Some("request-789".to_string()),
+            scopes: vec!["message:send".to_string()],
+            operator_verified: true,
         };
 
         let commander_id = super::super::delivery::enqueue_commander_message(
@@ -9014,6 +9073,25 @@ mod tests {
         assert_eq!(commander.urgent, mcp.urgent);
         assert_eq!(commander.source, attribution.queue_source());
         assert_eq!(mcp.source, "supervisor");
+        // cas-e8df: the hub-verified attribution becomes a PairedDevice origin
+        // plus the durable operator columns; the MCP row carries neither.
+        assert_eq!(
+            commander.origin,
+            Some(cas_store::QueueOrigin::PairedDevice {
+                device_id: "device-123".to_string()
+            })
+        );
+        assert_eq!(
+            commander.operator,
+            Some(cas_store::OperatorStamp {
+                operator: "Pippenz".to_string(),
+                device_id: "device-123".to_string(),
+                device_label: "Pippenz phone".to_string(),
+                scopes: vec!["message:send".to_string()],
+                verified: true,
+            })
+        );
+        assert_eq!(mcp.operator, None);
 
         let conn = rusqlite::Connection::open(cas_dir.join("cas.db")).unwrap();
         let commander_metadata: String = conn

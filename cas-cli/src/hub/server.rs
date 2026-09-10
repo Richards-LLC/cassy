@@ -784,14 +784,10 @@ async fn handle_client_message(
         anyhow::bail!("authorization refused")
     }
     if let ClientMessage::SendMessage { attribution, .. } = &mut message {
-        *attribution = MessageAttribution {
-            device_id: Some(context.device_id.clone()),
-            credential_id: Some(context.credential_id.clone()),
-            device_label: Some(context.device_label.clone()),
-            operator_label: Some(context.operator_label.clone()),
-            controller_origin: Some(context.controller_origin.clone()),
-            request_id: Some(context.request_id.clone()),
-        };
+        // cas-e8df: identity comes from the authenticated device session, never
+        // from what the client put in the frame. Whatever labels arrived are
+        // discarded here, and `operator_verified` is only ever set on this path.
+        *attribution = verified_attribution(context);
     }
     connector.send(session, message).await?;
     store.audit(
@@ -806,6 +802,25 @@ async fn handle_client_message(
         Some(session),
         now,
     )
+}
+
+/// The attribution a hub-authenticated Commander send carries downstream
+/// (cas-e8df): every field from the device session's credential record.
+pub(crate) fn verified_attribution(context: &AuthContext) -> MessageAttribution {
+    MessageAttribution {
+        device_id: Some(context.device_id.clone()),
+        credential_id: Some(context.credential_id.clone()),
+        device_label: Some(context.device_label.clone()),
+        operator_label: Some(context.operator_label.clone()),
+        controller_origin: Some(context.controller_origin.clone()),
+        request_id: Some(context.request_id.clone()),
+        scopes: context
+            .scopes
+            .iter()
+            .map(|scope| scope.as_str().to_owned())
+            .collect(),
+        operator_verified: true,
+    }
 }
 
 pub(crate) fn is_pane_read_message(message: &ClientMessage) -> bool {

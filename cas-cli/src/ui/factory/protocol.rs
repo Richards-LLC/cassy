@@ -51,6 +51,16 @@ pub struct MessageAttribution {
     pub operator_label: Option<String>,
     pub controller_origin: Option<String>,
     pub request_id: Option<String>,
+    /// Scopes the authenticated device session held (cas-e8df). Absent on the
+    /// wire means none were established.
+    #[serde(default)]
+    pub scopes: Vec<String>,
+    /// True only when the hub authenticated the device session and rewrote
+    /// every field above from the credential record (cas-e8df). A client can
+    /// send `true`, but the hub overwrites the whole struct, and a daemon
+    /// reached without the hub has no session to verify against.
+    #[serde(default)]
+    pub operator_verified: bool,
 }
 
 impl MessageAttribution {
@@ -574,6 +584,8 @@ mod tests {
             operator_label: Some("Pippenz".to_string()),
             controller_origin: Some("https://commander.example".to_string()),
             request_id: Some("request-789".to_string()),
+            scopes: vec!["message:send".to_string()],
+            operator_verified: true,
         }
     }
 
@@ -759,6 +771,8 @@ mod tests {
             operator_label: None,
             controller_origin: None,
             request_id: None,
+            scopes: Vec::new(),
+            operator_verified: false,
         };
         let json = serde_json::to_value(&attribution).unwrap();
         for field in [

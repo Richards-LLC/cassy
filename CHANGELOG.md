@@ -7,6 +7,25 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.25.1] - 2026-09-10
+
+### Added
+- Rolling integration branch: every epic merge re-merges main plus all open
+  epics into `integration/<project>`, sweeps it, and reports conflicts or
+  failures to the owning supervisors at merge time.
+- Scoped proof maps changed modules to the integration test targets that
+  exercise them; a delivery cannot close without running them.
+- Fast merge admission: a supervisor scoped proof on the exact lane tip admits
+  small deltas without waiting for the full lane CI run, plus a fast CI tier.
+- Sweep failures are grouped into ready-to-file tasks per failure class and
+  can be accepted and spawned in one call.
+- Release gate `--reuse` accepts row receipts written by the integration
+  sweep, so a clean assembly needs one short gate.
+
+### Fixed
+- `version-literals` gate row scans tracked files only, so gitignored build
+  caches cannot fail a release.
+
 ## [3.25.0] - 2026-09-10
 
 ### Added

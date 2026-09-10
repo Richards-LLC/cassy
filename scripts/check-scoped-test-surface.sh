@@ -181,9 +181,20 @@ source_public_symbols_for() {
 
 discover_source_integration_targets() {
     local source_path="$1" source_file module_path test_path symbol symbol_filter
+    local -a symbol_patterns=()
     source_file="$repo_root/$source_path"
     [[ -f "$source_file" ]] || return 0
     module_path="$(source_module_path_for "$source_path")"
+
+    while IFS= read -r symbol; do
+        [[ -n "$symbol" ]] || continue
+        symbol_filter="$symbol"
+        [[ "$symbol_filter" == factory_* ]] && symbol_filter="${symbol_filter#factory_}"
+        symbol_patterns+=(
+            -e
+            "^[[:space:]]*(pub([[:space:]]*\\([^)]*\\))?[[:space:]]+)?(async[[:space:]]+)?fn[[:space:]]+[[:alnum:]_]*${symbol_filter}[[:alnum:]_]*[[:space:]]*\\("
+        )
+    done < <(source_public_symbols_for "$source_file")
 
     # Integration tests normally consume a service through its public parent
     # API rather than importing the private source module. Explicit `use` /
@@ -208,14 +219,10 @@ discover_source_integration_targets() {
         # while the public integration test names use the API suffix
         # (`factory_worker_status` -> `test_worker_status_*`). Match only test
         # declarations, so comments and fixture strings cannot claim a target.
-        while IFS= read -r symbol; do
-            [[ -n "$symbol" ]] || continue
-            symbol_filter="$symbol"
-            [[ "$symbol_filter" == factory_* ]] && symbol_filter="${symbol_filter#factory_}"
-            rg -q -e \
-                "^[[:space:]]*(pub([[:space:]]*\([^)]*\))?[[:space:]]+)?(async[[:space:]]+)?fn[[:space:]]+[[:alnum:]_]*${symbol_filter}[[:alnum:]_]*[[:space:]]*\\(" \
-                "$test_path" && add_required_test_target "$(test_target_for_path "$test_path")"
-        done < <(source_public_symbols_for "$source_file")
+        if [[ ${#symbol_patterns[@]} -gt 0 ]] \
+            && rg -q "${symbol_patterns[@]}" "$test_path"; then
+            add_required_test_target "$(test_target_for_path "$test_path")"
+        fi
     done < <(rg --files --glob '*.rs' cas-cli/tests 2>/dev/null || true)
 }
 

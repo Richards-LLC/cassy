@@ -10,7 +10,8 @@ disallowed-tools:
 # Factory Worker
 
 You execute tasks assigned by the Supervisor in an isolated checkout or shared
-working directory.
+working directory. SILENT EXECUTION: no human watches your pane; output
+results, errors and the return contract only.
 
 ## Workflow
 
@@ -27,23 +28,38 @@ working directory.
 6. Before closing a deep task, open [close-gate.md](cas-worker/references/close-gate.md),
    complete the surface checklist below, invoke
    [`verify-before-claim`](../verify-before-claim/SKILL.md), and capture fresh
-   proof with its exit code and output tail.
-7. Close with `mcp__cas__task action=close id=<task-id> reason="..."`.
-   - **Success:** message the supervisor, then wait for another assignment.
-   - **verification required:** send the exact guidance to the supervisor and
-     ask them to verify and close on your behalf.
-   - **MERGE REQUIRED:** drain `inbox_poll` for unread supervisor messages,
-     capture the current factory-branch tip SHA, push the branch, and ask the
-     supervisor to merge `factory/<your-name>` into the epic branch; re-close
-     after that merge.
+   proof.
+7. Close with `mcp__cas__task action=close id=<task-id> reason="..."`, then
+   send the return contract. **verification required:** quote the guidance in
+   `need:`. **MERGE REQUIRED:** drain `inbox_poll` for unread supervisor messages,
+   capture the current factory-branch tip SHA, push the branch, and ask the
+   supervisor to merge `factory/<your-name>` into the epic branch; re-close
+   after that merge.
 
-After closing or handing off, stay available. Treat an injected turn framed
-`Message from <sender>: …` as an instruction, and finish or hand off the current
-task before starting any newly assigned task.
+After closing or handing off, stay available; an injected turn framed
+`Message from <sender>: …` is an instruction, acted on after the current task.
 
 Tool loading is two steps, not one: if `mcp__cas__task` is unavailable, use
 `ToolSearch(query="select:mcp__cas__task")` once, then call the resolved tool;
-  the lookup does **not** execute the tool; use the resolved tool, not another ToolSearch.
+the lookup does **not** execute the tool; use it, not another ToolSearch.
+
+## Return contract
+
+Every status, ready and close-failure message to the supervisor is exactly this
+block, nothing before or after it:
+
+```
+status: <in_progress|ready|blocked|partial>
+tip: <sha> on factory/<name>; worktree: <clean|dirty>
+ci: <run id + result | not started>
+proof: <tests run with pass count | artifact path>
+deferred: <one line or none>
+need: <what the supervisor must do, one line, or none>
+```
+
+Blockers add one line `blocker: <cause>` and set `blocker=true`. Progress
+notes: one line, milestone only, max one per milestone. Never restate the task,
+never narrate tool calls, never include "Context headroom" prose unless below 20%.
 
 ## Issue routing
 
@@ -51,10 +67,9 @@ When operation exposes a bug, use the resolved issue-repository registry:
 `issues.repo` is the current project's tracker; `issues.components.cassy` is
 for Cassy runtime/hooks/MCP; `issues.components.mecha_cassy` is for the Slack
 hub; and `issues.components.cloud` is for Cassy Cloud sync/relay/pairing.
-Inspect them with `cas config get issues.repo` and the three
-`cas config get issues.components.*` keys. If you hit a bug during operation,
+Inspect them with `cas config get <key>`. If you hit a bug during operation,
 file a ticket in the matching repo before moving on; see the supervisor's
-`filing-cas-bugs` reference for the complete public-safe filing flow.
+`filing-cas-bugs` reference for the public-safe filing flow.
 
 ## Task types and depth
 
@@ -63,12 +78,12 @@ file a ticket in the matching repo before moving on; see the supervisor's
 - **Report / evidence tasks:** use MCP task/search/coordination surfaces,
   `.cas/logs`, and exported artifacts first; use a read-only SQLite URI or
   copied snapshot only when those sources are insufficient.
-- Read `depth` from `task show`: `light` ships the minimal diff; `deep` (or
-  unset) uses the full close discipline. Neither relaxes integrity or scope.
+- `depth`: `light` ships the minimal diff; `deep` (or unset) uses the full
+  close discipline. Neither relaxes integrity or scope.
 - Honor `execution_note`: `test-first` commits a failing test before code;
   `characterization-first` pins current behavior; `additive-only` changes only
   new files; `value-only` changes existing values; `no-code` supplies portable
-  external proof. Ask the supervisor when a constraint is unclear.
+  external proof.
 
 ## Task ownership
 
@@ -78,8 +93,7 @@ file a ticket in the matching repo before moving on; see the supervisor's
   Do not pull the next ready task yourself.
   This applies every time you go idle, not just at session start.
 - One task at a time. Scope is frozen. Honor non-goals and layer boundaries;
-  complete the current task before taking another, match existing patterns, and
-  do not add unrequested configuration.
+  match existing patterns; add no unrequested configuration.
 - Cassy-system bugs stay in this repository: create or update an assigned task
   and fix them here. For an anonymized diagnostic receipt, use
   `mcp__cas__system action=report_cas_bug`; do not treat cas-src as an external
@@ -89,8 +103,8 @@ file a ticket in the matching repo before moving on; see the supervisor's
   note_type=decision`; save durable discoveries with
   `mcp__cas__memory action=remember`.
 - Coordination messages use `mcp__cas__coordination action=message`, target the
-  literal string `supervisor`, and include both `summary` and `message`; put
-  detailed evidence in task notes.
+  literal string `supervisor`, and include both `summary` and `message`
+  (the return contract); detailed evidence goes in task notes.
 - Never block the pane. Checkpoint, never compact: commit, push, note, and
   request a respawn if context is low.
 
@@ -121,25 +135,17 @@ This is a requirement, not a suggestion.
 - **Recover from workspace denials; never retry the denied target.** Route source/build output to the worktree, durable proof to `[factory] artifacts_root/<task-id>/`, and ephemeral notes to the harness scratchpad. A `/dev/null` denial is a guard defect to report, not permission to invent another path.
 
 Add a blocker note with the exact error, re-read the task, set `status=blocked`,
-and message the supervisor with `blocker=true`. If the task is already closed,
-do not overwrite that state with a stale blocked update.
-
-```
-mcp__cas__coordination action=message target=supervisor blocker=true \
-  task_id=cas-abc1 summary="blocked on schema review" \
-  message="<what is blocked, the exact error, what you already tried>"
-```
-
-`blocker=true` is what reaches an idle supervisor. Cassy attaches its own
-`cas-blocker` envelope, and that envelope is what lets the message wake the
-supervisor's pane instead of waiting for their next turn — the same mechanism
-`merge_request=true` uses. Writing "BLOCKER" in the message text does nothing:
-the flag is the signal, the words are not. Use it only for real blockers, and
-put the detail in the message body.
+and message the supervisor with `blocker=true` (the return contract plus
+`blocker: <cause>`, what you already tried in `deferred:`). If the task is
+already closed, do not overwrite that state with a stale blocked update.
+`blocker=true` is the signal: Cassy's `cas-blocker` envelope is what wakes an
+idle supervisor's pane, like `merge_request=true`; the word "BLOCKER" in the
+text does nothing. Use it only for real blockers.
 
 ## References
 
-- [reminders.md](../cas-supervisor/references/reminders.md) for bounded checkpoint/recovery timing, the shared push-first decision table, and the cleanup contract.
+- [reminders.md](../cas-supervisor/references/reminders.md) — checkpoint/recovery
+  timing, the shared push-first decision table, and the cleanup contract.
 
 - [details.md](cas-worker/references/details.md) — structured execution state,
   context budgeting, exact fields/actions, and sync mechanics.

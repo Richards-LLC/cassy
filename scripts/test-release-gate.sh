@@ -140,6 +140,23 @@ printf 'CAS_FACTORY_SESSION=%s CAS_AGENT_ROLE=%s CAS_AGENT_NAME=%s CAS_SUPERVISO
   >>"${GATE_FIXTURE_FACTORY_ENV_LOG:-/dev/null}"
 if [[ "$*" == 'check --workspace --tests' && "${GATE_FIXTURE_CHECK_FAIL:-}" == 1 ]]; then exit 1; fi
 if [[ "$*" == 'check --workspace --tests --target aarch64-apple-darwin' && "${GATE_FIXTURE_MACOS_FAIL:-}" == 1 ]]; then exit 1; fi
+if [[ "$*" == 'check --workspace --tests --target aarch64-apple-darwin' ]]; then
+  [[ -z "${RUSTC_WRAPPER:-}" ]] || {
+    printf 'macOS fixture: target check must clear RUSTC_WRAPPER\n' >&2
+    exit 1
+  }
+  [[ -x "${CC_aarch64_apple_darwin:-}" ]] || {
+    printf 'macOS fixture: target CC shim is missing\n' >&2
+    exit 1
+  }
+  printf '%s\n' 'int cas_release_gate_fixture(void) { return 0; }' |
+    "$CC_aarch64_apple_darwin" -arch arm64 -mmacosx-version-min=11.0 \
+    -x c -c -o "${GATE_FIXTURE_CC_OBJECT:?}" -
+  [[ -s "${GATE_FIXTURE_CC_OBJECT:?}" ]] || {
+    printf 'macOS fixture: target CC shim produced no object\n' >&2
+    exit 1
+  }
+fi
 if [[ "$*" == 'nextest run --workspace'* && "${GATE_FIXTURE_NEXTEST_FAIL:-}" == 1 ]]; then exit 1; fi
 if [[ "$*" == *'builtin_archive_portability_test'* && "${GATE_FIXTURE_FIXTURE_PATHS_FAIL:-}" == 1 ]]; then exit 1; fi
 if [[ "$*" == 'test -p cas --doc' && "${GATE_FIXTURE_DOCTEST_FAIL:-}" == 1 ]]; then exit 1; fi
@@ -208,6 +225,7 @@ run_gate() {
           "$failure_variable=1" \
           GATE_FIXTURE_CARGO_LOG="$tmp/cargo.log" \
           GATE_FIXTURE_RUSTUP_LOG="$tmp/rustup.log" \
+          GATE_FIXTURE_CC_OBJECT="$tmp/macos-check.o" \
           CARGO="$repo/scripts/cargo-stub" \
           RUSTUP="$repo/scripts/rustup-stub" \
           GATE_FIXTURE_VISUAL_QA_LOG="$tmp/visual-qa.log" \
@@ -219,6 +237,7 @@ run_gate() {
           env -u ZIG -u CAS_RELEASE_EPIC_REF -u CAS_RELEASE_TRAIN_BRANCH \
           GATE_FIXTURE_CARGO_LOG="$tmp/cargo.log" \
           GATE_FIXTURE_RUSTUP_LOG="$tmp/rustup.log" \
+          GATE_FIXTURE_CC_OBJECT="$tmp/macos-check.o" \
           CARGO="$repo/scripts/cargo-stub" \
           RUSTUP="$repo/scripts/rustup-stub" \
           GATE_FIXTURE_VISUAL_QA_LOG="$tmp/visual-qa.log" \
@@ -654,6 +673,7 @@ run_gate_unset_home() {
       CAS_RELEASE_GATE_CHECKOUT_DEVICE=1 CAS_RELEASE_GATE_SCRATCH_DEVICE=1 \
       GATE_FIXTURE_CARGO_LOG="$tmp/cargo.log" \
       GATE_FIXTURE_RUSTUP_LOG="$tmp/rustup.log" \
+      GATE_FIXTURE_CC_OBJECT="$tmp/macos-check.o" \
       CARGO="$repo/scripts/cargo-stub" \
       RUSTUP="$repo/scripts/rustup-stub" \
       RELEASE_GATE_GEN_REFERENCE_HISTORY="$repo/scripts/gen-builtin-reference-history.sh" \
@@ -678,6 +698,7 @@ repo="$(new_fixture explicit-scratch-base)"
 output="$(cd "$repo" && env CAS_RELEASE_GATE_HOME_DIR="$override/base" \
     GATE_FIXTURE_CARGO_LOG="$tmp/cargo.log" \
     GATE_FIXTURE_RUSTUP_LOG="$tmp/rustup.log" \
+    GATE_FIXTURE_CC_OBJECT="$tmp/macos-check.o" \
     CARGO="$repo/scripts/cargo-stub" \
     RUSTUP="$repo/scripts/rustup-stub" \
     RELEASE_GATE_GEN_REFERENCE_HISTORY="$repo/scripts/gen-builtin-reference-history.sh" \
@@ -845,6 +866,7 @@ run_gate_with_env_log() {
       GATE_FIXTURE_CARGO_LOG="$tmp/cargo.log" \
       GATE_FIXTURE_ENV_LOG="$env_log" \
       GATE_FIXTURE_RUSTUP_LOG="$tmp/rustup.log" \
+      GATE_FIXTURE_CC_OBJECT="$tmp/macos-check.o" \
       CARGO="$repo/scripts/cargo-stub" \
       RUSTUP="$repo/scripts/rustup-stub" \
       RELEASE_GATE_GEN_REFERENCE_HISTORY="$repo/scripts/gen-builtin-reference-history.sh" \
@@ -915,6 +937,7 @@ output="$(CAS_RELEASE_GATE_LOG_DIR="$macos_log_dir" run_gate "$repo" '' \
 if grep -qF 'PASS macos-check' <<<"$output" \
     && grep -qxF 'target add aarch64-apple-darwin' "$tmp/rustup.log" \
     && grep -qxF 'check --workspace --tests --target aarch64-apple-darwin' "$tmp/cargo.log" \
+    && [[ -s "$tmp/macos-check.o" ]] \
     && [[ "$(wc -l <"$macos_log_dir/timing.tsv")" == 2 ]] \
     && awk -F '\t' '$1 == "macos-check" && $7 == 0 && $4 ~ /^[0-9]+\.[0-9]+$/ {found=1} END {exit !found}' \
         "$macos_log_dir/timing.tsv"; then

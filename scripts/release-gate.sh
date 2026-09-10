@@ -590,7 +590,7 @@ check_workspace_tests() {
 }
 
 check_macos() {
-    local rustup_bin="${RUSTUP:-rustup}"
+    local rustup_bin="${RUSTUP:-rustup}" macos_cc="$tmp_dir/macos-check-cc"
     if ! command -v "$rustup_bin" >/dev/null 2>&1; then
         printf 'macos-check: rustup is unavailable; install rustup before checking aarch64-apple-darwin\n'
         return 1
@@ -599,7 +599,59 @@ check_macos() {
         printf 'macos-check: rustup target add aarch64-apple-darwin failed\n'
         return 1
     fi
-    "$cargo_bin" check --workspace --tests --target aarch64-apple-darwin
+    # Cross-target `cargo check` still runs C build scripts, but its output is
+    # metadata-only and never links the target archive. Linux hosts reject the
+    # Darwin-only flags and headers emitted by zstd-sys/ring/blake3, so compile
+    # each C/assembly input as a tiny valid host object while preserving Cargo's
+    # real Rust target analysis. This lane intentionally does not claim C ABI
+    # or linker coverage; the macOS build lane owns that proof.
+    cat >"$macos_cc" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+args=()
+consume_next=false
+compile=false
+for arg in "$@"; do
+    if [[ "$consume_next" == true ]]; then
+        consume_next=false
+        continue
+    fi
+    case "$arg" in
+        -arch)
+            consume_next=true
+            continue
+            ;;
+        -m*-version-min=*|-fembed-bitcode|-fembed-bitcode-marker|-gfull)
+            continue
+            ;;
+        -c)
+            compile=true
+            args+=("$arg")
+            continue
+            ;;
+        *.c|*.cc|*.cpp|*.cxx|*.m|*.mm|*.S|*.s|-)
+            if [[ "$compile" == true ]]; then
+                continue
+            fi
+            args+=("$arg")
+            continue
+            ;;
+    esac
+    args+=("$arg")
+done
+if [[ "$compile" == true ]]; then
+    printf '%s\n' 'int cas_release_gate_c_probe(void) { return 0; }' |
+        cc "${args[@]}" -x c -
+else
+    exec cc "${args[@]}"
+fi
+EOF
+    chmod +x "$macos_cc"
+    env RUSTC_WRAPPER= \
+        "CC_aarch64-apple-darwin=$macos_cc" \
+        "CC_aarch64_apple_darwin=$macos_cc" \
+        TARGET_CC="$macos_cc" \
+        "$cargo_bin" check --workspace --tests --target aarch64-apple-darwin
 }
 
 # The merge queue validates the whole workspace, so the suite and archive rows

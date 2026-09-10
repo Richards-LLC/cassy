@@ -2774,11 +2774,19 @@ impl CasCore {
         // close (where Cassy's own root is not inside a repository) can still
         // discover the standalone task's configured or detected trunk from
         // the task-owned System-A/System-B worktree.
-        let worker_worktree_path =
+        // Gates close as supervisor-authored Decisions, not worker deliveries.
+        // Do not resolve or validate an assigned worker checkout for this
+        // disposition: a detached, stale, or already-retired worker worktree
+        // must not make the supervisor's recorded decision unclosable. Worker
+        // delivery dispositions retain the resolution and branch gate below.
+        let worker_worktree_path = if close_disposition == TaskCloseDisposition::Decision {
+            None
+        } else {
             match self.resolve_worker_worktree_path(&task, declared_repo_context.as_ref()) {
                 Ok(path) => path,
                 Err(message) => return Ok(Self::tool_error(message)),
-            };
+            }
+        };
         let standalone_target_repo = if close_repo_verified {
             close_project_root.clone()
         } else {

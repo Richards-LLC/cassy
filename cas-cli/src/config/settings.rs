@@ -323,6 +323,19 @@ pub struct FactoryConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artifacts_root: Option<String>,
 
+    /// Maximum number of characters accepted in an ordinary agent message.
+    #[serde(default = "default_message_max_chars")]
+    pub message_max_chars: usize,
+
+    /// Maximum number of characters accepted for blocker and merge-request
+    /// escalations. These messages need room for their structured envelope.
+    #[serde(default = "default_message_max_chars_escalation")]
+    pub message_max_chars_escalation: usize,
+
+    /// Maximum number of characters accepted in an appended task note.
+    #[serde(default = "default_note_max_chars")]
+    pub note_max_chars: usize,
+
     /// Warn when assigning tasks to workers with stale worktrees
     #[serde(default = "default_true")]
     pub warn_stale_assignment: bool,
@@ -501,6 +514,18 @@ fn default_max_concurrent_builders() -> usize {
     4
 }
 
+fn default_message_max_chars() -> usize {
+    1200
+}
+
+fn default_message_max_chars_escalation() -> usize {
+    2500
+}
+
+fn default_note_max_chars() -> usize {
+    1500
+}
+
 fn default_stall_threshold_secs() -> u64 {
     cas_factory::DEFAULT_STALL_THRESHOLD_SECS
 }
@@ -537,6 +562,9 @@ impl Default for FactoryConfig {
     fn default() -> Self {
         Self {
             artifacts_root: None,
+            message_max_chars: default_message_max_chars(),
+            message_max_chars_escalation: default_message_max_chars_escalation(),
+            note_max_chars: default_note_max_chars(),
             warn_stale_assignment: true,
             block_stale_assignment: true,
             stale_threshold_commits: default_stale_threshold(),

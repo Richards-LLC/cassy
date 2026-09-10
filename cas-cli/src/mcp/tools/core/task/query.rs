@@ -1,5 +1,45 @@
 use crate::mcp::tools::core::imports::*;
 
+const TASK_SHOW_NOTES_LIMIT: usize = 5;
+
+fn task_show_notes(notes: &str, task_id: &str) -> String {
+    // Notes written by `task notes` begin with a timestamped `[... ]`
+    // heading. Split on the heading boundary so blank lines inside a note do
+    // not accidentally turn one note into several; retain the simpler split
+    // for legacy/plain note blobs without headings.
+    let entries: Vec<&str> = if notes.contains("\n\n[") {
+        let mut entries = Vec::new();
+        let mut start = 0;
+        for (offset, _) in notes.match_indices("\n\n[") {
+            let entry = &notes[start..offset];
+            if !entry.trim().is_empty() {
+                entries.push(entry);
+            }
+            start = offset + 2;
+        }
+        let entry = &notes[start..];
+        if !entry.trim().is_empty() {
+            entries.push(entry);
+        }
+        entries
+    } else {
+        notes
+            .split("\n\n")
+            .filter(|entry| !entry.trim().is_empty())
+            .collect()
+    };
+    let earlier = entries.len().saturating_sub(TASK_SHOW_NOTES_LIMIT);
+    let visible = &entries[earlier..];
+    let mut rendered = String::new();
+    if earlier > 0 {
+        rendered.push_str(&format!(
+            "{earlier} earlier notes; `task notes id={task_id}` for all\n\n"
+        ));
+    }
+    rendered.push_str(&visible.join("\n\n"));
+    rendered
+}
+
 impl CasCore {
     pub async fn cas_task_show(
         &self,
@@ -157,7 +197,10 @@ impl CasCore {
         }
 
         if !task.notes.is_empty() {
-            output.push_str(&format!("\nNotes:\n{}\n", task.notes));
+            output.push_str(&format!(
+                "\nNotes:\n{}\n",
+                task_show_notes(&task.notes, &task.id)
+            ));
         }
 
         // cas-7d54: surface web-authored comments (read-only mirror, contract
@@ -691,5 +734,42 @@ impl CasCore {
         }
 
         Ok(Self::success(output))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::task_show_notes;
+
+    #[test]
+    fn task_show_notes_pages_old_entries_but_keeps_newest_five() {
+        let notes = (1..=7)
+            .map(|index| format!("[2026-09-10T12:00:0{index}Z] PROGRESS note-{index}"))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+
+        let rendered = task_show_notes(&notes, "cas-9568");
+
+        assert!(rendered.starts_with("2 earlier notes; `task notes id=cas-9568` for all"));
+        assert!(!rendered.contains("note-1"));
+        assert!(!rendered.contains("note-2"));
+        for index in 3..=7 {
+            assert!(rendered.contains(&format!("note-{index}")), "{rendered}");
+        }
+    }
+
+    #[test]
+    fn task_show_notes_leaves_short_history_without_paging_line() {
+        let rendered = task_show_notes("first\n\nsecond", "cas-9568");
+        assert_eq!(rendered, "first\n\nsecond");
+    }
+
+    #[test]
+    fn task_show_notes_preserves_blank_lines_inside_a_note() {
+        let notes = "[2026-09-10 12:00] 📝 PROGRESS first paragraph\n\nsecond paragraph\n\n\
+[2026-09-10 12:01] 📝 PROGRESS latest";
+        let rendered = task_show_notes(notes, "cas-9568");
+        assert!(rendered.contains("first paragraph\n\nsecond paragraph"));
+        assert!(rendered.contains("latest"));
     }
 }

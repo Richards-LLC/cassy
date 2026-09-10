@@ -153,10 +153,19 @@ pub fn handle_session_start(
         Some(root) => root,
         None => return Ok(HookOutput::empty()),
     };
+    // Claude custom profiles can deliver the same startup context through the
+    // SessionStart hook and the queued supervisor intro. The first delivery
+    // claims the session; a later seam keeps its own non-context metadata but
+    // omits the duplicate bundle.
+    let suppress_custom_profile_context =
+        crate::hooks::session_start_fallback::is_custom_claude_supervisor()
+            && !crate::hooks::session_start_fallback::claim(cas_root, &input.session_id);
     let context_limit = config.context_limit();
 
     // Build appropriate context based on mode
-    let context = if is_plan_mode {
+    let context = if suppress_custom_profile_context {
+        String::new()
+    } else if is_plan_mode {
         eprintln!("cas: Plan mode detected, building planning context");
         build_plan_context(input, 10, cas_root)?
     } else if config.hooks.as_ref().map(|h| h.ai_context).unwrap_or(false) {

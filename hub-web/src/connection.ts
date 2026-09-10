@@ -1,3 +1,4 @@
+import type { MessageReceipt } from "./conversation-history";
 import { anySignal } from "./abort-signals";
 import { browserSupport, unsupportedBrowserNotice } from "./browser-support";
 import { dpopHeaders } from "./dpop";
@@ -46,6 +47,8 @@ export interface HubCallbacks {
   onMachineEvent(event: Record<string, unknown>): void;
   onSessionState(session: string, state: SessionState, scrollback?: Record<string, number[][]>, authoritativeKeyframes?: boolean): void;
   onOutput(session: string, paneId: string, data: Uint8Array): void;
+  onMessageQueued?(session: string, receipt: MessageReceipt): void;
+  onMessageRejected?(session: string, clientRef: string, detail: string): void;
   onOperatorReply?(session: string, reply: OperatorReply): void;
   onSessionSummary?(session: string, summary: SessionCardSummary): void;
   onPaneKeyframe(session: string, paneId: string, data: Uint8Array): void;
@@ -966,6 +969,8 @@ export class HubConnectionSupervisor {
       this.callbacks.onSessionState(session, message.StateUpdate.state);
     } else if (message.Output) {
       this.callbacks.onOutput(session, message.Output.pane_id, new Uint8Array(message.Output.data));
+    } else if (message.MessageQueued) {
+      this.callbacks.onMessageQueued?.(session, message.MessageQueued as MessageReceipt);
     } else if (message.OperatorReply) {
       this.callbacks.onOperatorReply?.(session, message.OperatorReply as OperatorReply);
     } else if (message.SessionSummary) {
@@ -973,7 +978,8 @@ export class HubConnectionSupervisor {
     } else if (message.PaneAdded || message.PaneRemoved || message.PaneExited) {
       this.send(session, "GetState");
     } else if (message.Error) {
-      this.callbacks.onSocketError(session, message.Error.message);
+      if (typeof message.Error.client_ref === "string") this.callbacks.onMessageRejected?.(session, message.Error.client_ref, message.Error.message);
+      else this.callbacks.onSocketError(session, message.Error.message);
     }
   }
 }

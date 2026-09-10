@@ -1,4 +1,9 @@
 import "./styles.css";
+import { cloudBrand } from "./cloud-brand";
+import { ConversationList, type ConversationRow } from "./conversation-list";
+import { ConversationHistory } from "./conversation-history";
+import { ConversationView } from "./conversation-view";
+import { arrangeConversationShell } from "./conversation-shell";
 import { applyScheme, setScheme, type SchemePreference } from "./scheme";
 import { applyAttentionEnrichment, attentionCounts, attentionSummary, attentionUrl, createAttentionItem, dismissableInfoItems, machineEventAttention, mergeAttentionItem, type AttentionAction, type AttentionContent, type AttentionEnrichment } from "./attention";
 import { cycleAttentionGroup, renderAttentionPanel, renderAttentionSummary } from "./attention-view";
@@ -74,6 +79,17 @@ const statuses = new Map<string, Record<string, unknown>>();
 const leases = new Map<string, LeaseState>();
 const surfaces = new Map<string, TerminalSurface>();
 const transcripts = new Map<string, TranscriptView>();
+const conversationViews = new Map<string, ConversationView>();
+const conversationHistories = new Map<string, ConversationHistory>();
+const conversationList = new ConversationList();
+let hubPresentation: "conversation" | "terminal" = "conversation";
+const pendingSubmissions = new Set<string>();
+function conversationHistory(key: string): ConversationHistory {
+  let history = conversationHistories.get(key);
+  if (!history) { history = new ConversationHistory(); conversationHistories.set(key, history); }
+  return history;
+}
+function updateConversationViews(): void { for (const view of conversationViews.values()) view.update(); }
 // The shell is rebuilt only when its own inputs changed. A hub heartbeat
 // carries none of them, so it can no longer replace the composer mid-sentence.
 let lastShellSignature: string | undefined;
@@ -194,6 +210,8 @@ function setPaneViewMode(selectedKey: string, view: TranscriptViewMode): void {
  * is the thing on screen.
  */
 function releaseSurface(key: string, surface: TerminalSurface): void {
+  conversationViews.get(key)?.dispose();
+  conversationViews.delete(key);
   transcripts.get(key)?.dispose();
   transcripts.delete(key);
   surface.dispose();
@@ -202,6 +220,24 @@ function releaseSurface(key: string, surface: TerminalSurface): void {
 
 function applyPaneView(key: string, mount: HTMLElement, surface: TerminalSurface, view: TranscriptViewMode): void {
   surface.setMinimumColumns(compactViewport() ? COMPACT_MINIMUM_COLUMNS : 0);
+  if (hubPresentation === "conversation") {
+    transcripts.get(key)?.dispose(); transcripts.delete(key);
+    mount.classList.remove("transcript-active");
+    mount.classList.add("conversation-active");
+    surface.setCanvasPainting(false);
+    let conversation = conversationViews.get(key);
+    if (!conversation) {
+      const threadKey = sessionKey(selectedMachineId!, selectedSession!);
+      const target = supervisorTarget(sessions.get(selectedMachineId!)?.find((item) => item.name === selectedSession)) || "Supervisor";
+      conversation = new ConversationView(document, surface.transcript, conversationHistory(threadKey), target);
+      conversationViews.set(key, conversation);
+    }
+    if (conversation.element.parentElement !== mount) mount.append(conversation.element);
+    conversation.update();
+    return;
+  }
+  mount.classList.remove("conversation-active");
+  conversationViews.get(key)?.dispose(); conversationViews.delete(key);
   const active = view === "transcript";
   mount.classList.toggle("transcript-active", active);
   surface.setCanvasPainting(!active);
@@ -485,7 +521,18 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       const activity = document.querySelector<HTMLElement>(`[data-pane-id="${CSS.escape(pane)}"] .pane-last-activity`);
       if (activity && selectedMachineId === machine.id && selectedSession === session) updatePaneActivity(activity, paneLastActivity.get(key));
     },
+    onMessageQueued: (session, receipt) => {
+      conversationHistory(sessionKey(machine.id, session)).acknowledge(receipt);
+      if (messageDelivery?.session === sessionKey(machine.id, session)) { messageDelivery = undefined; document.querySelector<HTMLElement>("#message-delivery")?.setAttribute("hidden", ""); }
+      updateConversationViews();
+    },
+    onMessageRejected: (session, clientRef, detail) => {
+      conversationHistory(sessionKey(machine.id, session)).reject(clientRef, detail);
+      updateConversationViews();
+    },
     onOperatorReply: (session, reply) => {
+      conversationHistory(sessionKey(machine.id, session)).reply(reply);
+      updateConversationViews();
       const key = sessionKey(machine.id, session);
       const replies = operatorReplies.get(key) ?? [];
       if (!replies.some((item) => item.notification_id === reply.notification_id)) {
@@ -1172,7 +1219,7 @@ async function renderSessionState(machineId: string, session: string, state: Ses
   if (selectedMachineId !== machineId || selectedSession !== session) return;
   const grid = document.querySelector<HTMLElement>("#pane-grid");
   if (!grid) return;
-  const { visible: visiblePanes, hiddenWorkers } = splitVisiblePanes(state.panes, revealWorkers);
+  const { visible: visiblePanes, hiddenWorkers } = splitVisiblePanes(state.panes, hubPresentation === "terminal" && revealWorkers);
   // The hub strips hidden workers from the stream, so the roster count comes
   // from the catalog; local filtering covers hubs that predate the gate.
   const hiddenWorkerCount = revealWorkers
@@ -1247,6 +1294,7 @@ async function renderSessionState(machineId: string, session: string, state: Ses
       card.dataset.paneRole = pane.kind.toLowerCase();
       if (selectedPanes.get(selectedKey) === pane.id) card.classList.add("selected");
       card.onclick = () => {
+        if (hubPresentation === "conversation") return;
         focusPane(machineId, session, pane.id);
       };
       const title = document.createElement("header"); title.className = "pane-header";
@@ -1363,7 +1411,7 @@ async function renderSessionState(machineId: string, session: string, state: Ses
         onResize: (cols, rows) => requestPaneSize(machineId, session, pane.id, cols, rows),
         // The transcript is a reading of the same frame the grid just rendered,
         // so it follows the emulator's own tick instead of polling it.
-        onRender: () => transcripts.get(key)?.update(),
+        onRender: () => { transcripts.get(key)?.update(); conversationViews.get(key)?.update(); },
       });
       const currentMount = document.querySelector<HTMLElement>(`[data-pane-id="${CSS.escape(pane.id)}"] .terminal-mount`);
       if (selectedMachineId !== machineId || selectedSession !== session || !mount.isConnected || currentMount !== mount) {
@@ -1570,17 +1618,21 @@ function pairDialogMarkup(): string {
 // the composer draft survives re-render exactly like the pairing draft does.
 let messageDraft = "";
 let messageDraftSelection = 0;
+const conversationDrafts = new Map<string, { text: string; caret: number }>();
 
 function captureMessageDraft(): void {
   const composer = document.querySelector<HTMLTextAreaElement>("#message-text");
-  if (!composer) return;
-  messageDraft = composer.value;
-  messageDraftSelection = composer.selectionStart ?? composer.value.length;
+  if (composer?.dataset.threadKey) conversationDrafts.set(composer.dataset.threadKey, { text: composer.value, caret: composer.selectionStart ?? composer.value.length });
+  const key = selectedMachineId && selectedSession ? sessionKey(selectedMachineId, selectedSession) : "";
+  const draft = conversationDrafts.get(key);
+  messageDraft = draft?.text ?? "";
+  messageDraftSelection = draft?.caret ?? 0;
 }
 
 function restoreMessageDraft(): void {
   const composer = document.querySelector<HTMLTextAreaElement>("#message-text");
-  if (!composer || !messageDraft) return;
+  if (!composer) return;
+  composer.dataset.threadKey = selectedMachineId && selectedSession ? sessionKey(selectedMachineId, selectedSession) : "";
   composer.value = messageDraft;
   const caret = Math.min(messageDraftSelection, messageDraft.length);
   composer.setSelectionRange(caret, caret);
@@ -1686,7 +1738,7 @@ function openSupervisorComposer(): void {
  * those used to look identical to a Send button that does nothing.
  */
 function showComposerStatus(text: string, tone: "info" | "error"): void {
-  messageStatus = { session: selectedSession, text, tone };
+  messageStatus = { session: selectedMachineId && selectedSession ? sessionKey(selectedMachineId, selectedSession) : undefined, text, tone };
   // A stale "Message sent" beside a refusal reads as a contradiction.
   messageDelivery = undefined;
   const delivery = document.querySelector<HTMLElement>("#message-delivery");
@@ -1741,25 +1793,30 @@ async function takeControlForMessage(machine: StoredMachine, session: string): P
 }
 
 function deliverSupervisorMessage(machine: StoredMachine, session: string, supervisor: string, text: string): void {
-  const sent = sendControl(machine.id, session, supervisorMessage(supervisor, text));
+  const clientRef = crypto.randomUUID();
+  const sent = sendControl(machine.id, session, supervisorMessage(supervisor, text, clientRef));
   // Without an outcome the operator cannot tell a sent message from a lost
   // one, and the natural response is to send it a second time.
   if (!sent) {
     showComposerStatus("The hub connection is reconnecting, so this message was not delivered. Try again once the session is live.", "error");
     return;
   }
+  conversationHistory(sessionKey(machine.id, session)).submit(clientRef, supervisor, text);
+  updateConversationViews();
+  if (selectedMachineId !== machine.id || selectedSession !== session) return;
   clearComposerStatus();
   const composer = document.querySelector<HTMLTextAreaElement>("#message-text");
-  if (composer) composer.value = "";
-  messageDraft = "";
-  messageDraftSelection = 0;
-  messageDelivery = { session, target: supervisor };
+  if (composer && composer.value.trim() === text) composer.value = "";
+  conversationDrafts.delete(sessionKey(machine.id, session));
+  messageDraft = composer?.value ?? "";
+  messageDraftSelection = messageDraft.length;
+  messageDelivery = { session: sessionKey(machine.id, session), target: supervisor };
   const delivery = document.querySelector<HTMLElement>("#message-delivery");
   if (delivery) {
     delivery.hidden = false;
-    delivery.textContent = `Message sent to ${supervisor}`;
+    delivery.textContent = `Sending to ${supervisor} · awaiting receipt`;
   }
-  toast(`Message sent to ${supervisor}`);
+  if (hubPresentation === "terminal") toast(`Sending to ${supervisor}`);
   // A phone operator usually has a second sentence; keep the caret where they
   // left it rather than dropping focus to the page body.
   composer?.focus();
@@ -1779,6 +1836,10 @@ async function submitSupervisorMessage(): Promise<void> {
   const session = selectedSession;
   const supervisor = machine && session ? supervisorTarget(sessions.get(machine.id)?.find((item) => item.name === session)) : undefined;
   if (!machine || !session || !supervisor) return;
+  const submissionKey = sessionKey(machine.id, session);
+  if (pendingSubmissions.has(submissionKey)) return;
+  pendingSubmissions.add(submissionKey);
+  try {
   if (plan.kind === "take-control-then-send") {
     showComposerStatus(plan.notice, "info");
     if (!await takeControlForMessage(machine, session)) {
@@ -1787,6 +1848,7 @@ async function submitSupervisorMessage(): Promise<void> {
     }
   }
   deliverSupervisorMessage(machine, session, supervisor, text);
+  } finally { pendingSubmissions.delete(submissionKey); }
 }
 
 /**
@@ -1828,7 +1890,7 @@ function render(captureDraft = true): void {
     ? sessions.get(selected.id)?.find((item) => item.name === selectedSession)
     : undefined;
   const supervisor = supervisorTarget(selectedHubSession);
-  const delivery = selectedSession && messageDelivery?.session === selectedSession ? messageDelivery : undefined;
+  const delivery = selectedSession && messageDelivery?.session === (selected && selectedSession ? sessionKey(selected.id, selectedSession) : undefined) ? messageDelivery : undefined;
   const thread = selected && selectedSession ? operatorReplies.get(sessionKey(selected.id, selectedSession)) ?? [] : [];
   // Evaluated with the draft the operator can actually see, so the button's
   // stated reason and the reason a send would print are the same sentence. It
@@ -1836,7 +1898,7 @@ function render(captureDraft = true): void {
   // exactly like a broken one.
   const sendPlan = planSupervisorSend(supervisorSendContext(messageDraft));
   const sendReason = sendPlan.kind === "blocked" && sendPlan.block !== "empty" ? sendPlan.reason : undefined;
-  const composerStatus = messageStatus?.session === selectedSession ? messageStatus : undefined;
+  const composerStatus = messageStatus?.session === (selected && selectedSession ? sessionKey(selected.id, selectedSession) : undefined) ? messageStatus : undefined;
   // A phone has no hover, so a title attribute is an explanation nobody can
   // reach. Unavailable controls stay focusable and say why when tapped.
   const interruptReason = !selected || !selectedSession || !canControl(selected.id, selectedSession, "pane-interrupt")
@@ -1902,7 +1964,7 @@ function render(captureDraft = true): void {
     ...(controlReason ? { controlReason } : {}),
     ...(sendReason ? { sendReason } : {}),
     ...(composerStatus ? { messageStatus: { text: composerStatus.text, error: composerStatus.tone === "error" } } : {}),
-    ...(delivery ? { delivery: `Message sent to ${delivery.target}` } : {}),
+    ...(delivery ? { delivery: `Sending to ${delivery.target} · awaiting receipt` } : {}),
     pairing: {
       ...(pairingStatus ? { status: pairingStatus } : {}),
       exchangeInFlight: pairingExchangeInFlight,
@@ -1939,7 +2001,7 @@ function render(captureDraft = true): void {
     commandPaletteOpen,
     sessionPickerOpen,
     pairingView,
-  });
+  }) + JSON.stringify([hubPresentation, selectedHubSession?.project_dir]);
   const active = document.activeElement;
   const composing = isEditableElement(active) && app.contains(active);
   const decision = renderDecision({
@@ -1967,8 +2029,7 @@ function render(captureDraft = true): void {
   if (preservedGrid) {
     preservedGrid.remove();
   } else {
-    for (const surface of surfaces.values()) surface.dispose();
-    surfaces.clear();
+    for (const [key, surface] of surfaces) releaseSurface(key, surface);
   }
   app.innerHTML = `
     ${browserNotice ? `<p class="browser-unsupported" role="alert">${escapeHtml(browserNotice)}</p>` : ""}
@@ -2036,6 +2097,12 @@ function render(captureDraft = true): void {
       </section>
     </dialog>
     ${pairDialogMarkup()}`;
+  if (hubPresentation === "conversation") {
+    arrangeConversationShell(app, { selected: Boolean(selectedSession), supervisor, projectDir: selectedHubSession?.project_dir, host: selected?.label, loaded: machineCatalogLoaded, paired: machines.size > 0 });
+  } else {
+    const header = app.querySelector(".session-header");
+    header?.insertAdjacentHTML("afterbegin", `<button id="conversation-return" type="button">Conversations</button>${cloudBrand()}`);
+  }
   if (preservedGrid) document.querySelector<HTMLElement>("#pane-grid")!.replaceWith(preservedGrid);
   const focusWinner = composerFocusWinner({ composerWasFocused, terminalWasFocused });
   if (focusWinner === "terminal") queueMicrotask(() => activePaneContext()?.surface.focus());
@@ -2069,6 +2136,7 @@ interface RegionContext {
  * screen. This runs on every render — after a rebuild, and instead of one.
  */
 function renderRegions(context: RegionContext): void {
+  renderConversationList();
   renderMachineNavigation();
   renderSessionPicker();
   renderFleetBoard();
@@ -2151,6 +2219,21 @@ function renderMachineNavigation(): void {
  * board is rebuilt when a machine or session actually changes state and a
  * button the operator is on is never pulled out from under a thumb.
  */
+function renderConversationList(): void {
+  const container = document.querySelector<HTMLElement>("#conversation-list");
+  if (!container) return;
+  const rows: ConversationRow[] = [...machines.values()].flatMap((machine) => (sessions.get(machine.id) ?? []).filter((session) => supervisorTarget(session)).map((session) => {
+    const updated = fleetCatalogUpdatedAt.get(machine.id);
+    const counts = attentionCounts(attention.filter((item) => item.machineId === machine.id && item.session === session.name));
+    return { key: sessionKey(machine.id, session.name), machineId: machine.id, session: session.name, supervisor: session.supervisor, projectDir: session.project_dir, host: machine.label, freshness: updated ? `Catalog checked ${relativeTimestamp(Date.parse(updated))}` : "Catalog not yet checked", connection: session.liveness === "live" ? fleetConnectionLabel(connectionStates.get(machine.id)) : "Session unavailable", attention: counts.critical + counts.warning, selected: machine.id === selectedMachineId && session.name === selectedSession };
+  }));
+  conversationList.render(container, rows, (row) => { void openSession(row.machineId, row.session); });
+  const empty = document.querySelector<HTMLElement>("#conversation-empty");
+  if (empty) { empty.hidden = rows.length > 0; empty.textContent = !machineCatalogLoaded ? "Loading paired machines…" : machines.size === 0 ? "Pair a machine to start your first conversation." : "No supervisors listed. Check that a factory is running on your paired machine."; }
+  const state = document.querySelector<HTMLElement>("#conversation-connection");
+  if (state && selectedMachineId) state.textContent = ` · ${fleetConnectionLabel(connectionStates.get(selectedMachineId))}`;
+}
+
 function fleetConnectionLabel(state: ConnectionState | undefined): string {
   if (!state) return "Idle";
   if (state.phase === "live") return state.degraded ? "Degraded" : "Live";
@@ -2326,7 +2409,8 @@ function renderSessionPicker(): void {
 function renderAttention(): void {
   const container = document.querySelector<HTMLElement>("#attention-panel");
   if (!container) return;
-  renderAttentionPanel(container, attention, {
+  const visibleAttention = hubPresentation === "conversation" ? attention.filter((item) => item.machineId === selectedMachineId && (!item.session || item.session === selectedSession)) : attention;
+  renderAttentionPanel(container, visibleAttention, {
     dismiss: acknowledgeAttentionGroup,
     act: performAttentionAction,
     copy: async (payload) => {
@@ -2357,11 +2441,12 @@ async function performAttentionAction(item: AttentionItem, action: AttentionActi
 }
 
 function renderStatus(status?: Record<string, unknown>): void {
-  const container = document.querySelector("#status-view")!;
+  const container = document.querySelector("#status-view");
+  if (!container) return;
   // Region updates run against a container the shell rebuild is no longer
   // clearing for them, so this owns its own emptying.
   container.replaceChildren();
-  if (!status) { container.textContent = "Open a session for push-refreshed status."; return; }
+  if (!status) { container.textContent = selectedSession ? "Waiting for project status…" : "Open a session for project status."; return; }
   const summary = selectedMachineId && selectedSession ? sessionSummaries.get(sessionKey(selectedMachineId, selectedSession)) : undefined;
   if (summary) {
     const row = document.createElement("article");
@@ -2500,6 +2585,13 @@ function globalShortcut(event: KeyboardEvent): void {
 }
 
 function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | undefined): void {
+  const conversationBack = document.querySelector<HTMLButtonElement>("#conversation-back");
+  if (conversationBack) conversationBack.onclick = () => { if (selectedMachineId) commitSelection({ machineId: selectedMachineId }); render(); queueMicrotask(() => document.querySelector<HTMLButtonElement>(".conversation-row")?.focus()); };
+  const terminal = document.querySelector<HTMLButtonElement>("#conversation-terminal");
+  if (terminal) terminal.onclick = () => { hubPresentation = "terminal"; const storage = paneLayoutStorage(); if (storage && selectedMachineId && selectedSession) saveTranscriptView(storage, sessionKey(selectedMachineId, selectedSession), "terminal"); render(); };
+  const returning = document.querySelector<HTMLButtonElement>("#conversation-return");
+  if (returning) returning.onclick = () => { hubPresentation = "conversation"; render(); };
+
   const paletteToggle = document.querySelector<HTMLButtonElement>("#command-palette-toggle");
   if (paletteToggle) paletteToggle.onclick = openCommandPalette;
   const palette = document.querySelector<HTMLDialogElement>("#command-palette")!;
@@ -2544,7 +2636,7 @@ function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | und
   if (paletteControl) paletteControl.onclick = () => { closePalette(); void toggleControl(selected, lease); };
   const paletteDismiss = palette.querySelector<HTMLButtonElement>("[data-palette-action='dismiss-info']");
   if (paletteDismiss) paletteDismiss.onclick = () => { closePalette(); void acknowledgeAttentionGroup(dismissableInfoItems(attention)); };
-  document.querySelector<HTMLButtonElement>("#session-picker-toggle")!.onclick = openSessionPicker;
+  if (document.querySelector<HTMLButtonElement>("#session-picker-toggle")) document.querySelector<HTMLButtonElement>("#session-picker-toggle")!.onclick = openSessionPicker;
   const back = document.querySelector<HTMLButtonElement>("#session-back");
   if (back) back.onclick = goBack;
   const picker = document.querySelector<HTMLDialogElement>("#session-picker")!;
@@ -2574,17 +2666,17 @@ function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | und
     if (event.key === "Enter") first.click();
     else first.focus();
   };
-  document.querySelector<HTMLButtonElement>("#pair-toggle")!.onclick = () => (document.querySelector<HTMLDialogElement>("#pair-dialog")!).showModal();
-  document.querySelector<HTMLButtonElement>("#machine-drawer-toggle")!.onclick = () => { machineDrawerOpen = !machineDrawerOpen; render(); };
-  document.querySelector<HTMLButtonElement>("#machine-drawer-close")!.onclick = () => { machineDrawerOpen = false; render(); document.querySelector<HTMLButtonElement>("#machine-drawer-toggle")?.focus(); };
+  if (document.querySelector<HTMLButtonElement>("#pair-toggle")) document.querySelector<HTMLButtonElement>("#pair-toggle")!.onclick = () => (document.querySelector<HTMLDialogElement>("#pair-dialog")!).showModal();
+  if (document.querySelector<HTMLButtonElement>("#machine-drawer-toggle")) document.querySelector<HTMLButtonElement>("#machine-drawer-toggle")!.onclick = () => { machineDrawerOpen = !machineDrawerOpen; render(); };
+  if (document.querySelector<HTMLButtonElement>("#machine-drawer-close")) document.querySelector<HTMLButtonElement>("#machine-drawer-close")!.onclick = () => { machineDrawerOpen = false; render(); document.querySelector<HTMLButtonElement>("#machine-drawer-toggle")?.focus(); };
   const openMachines = document.querySelector<HTMLButtonElement>("#open-machines");
   if (openMachines) openMachines.onclick = () => { machineDrawerOpen = true; render(); };
   for (const pair of document.querySelectorAll<HTMLButtonElement>("#empty-pair, #drawer-pair")) {
     pair.onclick = () => document.querySelector<HTMLDialogElement>("#pair-dialog")!.showModal();
   }
-  document.querySelector<HTMLButtonElement>("#attention-panel-toggle")!.onclick = () => { attentionPanelCollapsed = !attentionPanelCollapsed; render(); };
-  document.querySelector<HTMLButtonElement>("#context-panel-close")!.onclick = () => { attentionPanelCollapsed = true; render(); };
-  document.querySelector<HTMLButtonElement>("#mobile-message-toggle")!.onclick = openSupervisorComposer;
+  if (document.querySelector<HTMLButtonElement>("#attention-panel-toggle")) document.querySelector<HTMLButtonElement>("#attention-panel-toggle")!.onclick = () => { attentionPanelCollapsed = !attentionPanelCollapsed; render(); };
+  if (document.querySelector<HTMLButtonElement>("#context-panel-close")) document.querySelector<HTMLButtonElement>("#context-panel-close")!.onclick = () => { attentionPanelCollapsed = true; render(); };
+  if (document.querySelector<HTMLButtonElement>("#mobile-message-toggle")) document.querySelector<HTMLButtonElement>("#mobile-message-toggle")!.onclick = openSupervisorComposer;
   const talkSupervisor = document.querySelector<HTMLButtonElement>("#talk-supervisor");
   if (talkSupervisor) talkSupervisor.onclick = openSupervisorComposer;
   for (const button of document.querySelectorAll<HTMLButtonElement>("[data-open-context]")) {
@@ -2700,7 +2792,7 @@ function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | und
     if (pane) sendControl(selected.id, selectedSession, { InterruptPane: { pane_id: pane } });
   };
   bindSpeechComposer();
-  document.querySelector<HTMLButtonElement>("#message-send")!.onclick = () => { void submitSupervisorMessage(); };
+  if (document.querySelector<HTMLButtonElement>("#message-send")) document.querySelector<HTMLButtonElement>("#message-send")!.onclick = () => { void submitSupervisorMessage(); };
 }
 
 /**

@@ -357,7 +357,7 @@ html[data-scheme="dark"] {
 }
 
 /* Dark wells: color.dark.* + color.series-neutral.dark; derived surfaces use those roles. */
-.terminal-mount, .transcript, .terminal-search input, .attention-payload pre,
+.terminal-mount:not(.conversation-active), .transcript, .terminal-search input, .attention-payload pre,
 .connection-log pre, dialog:not(.command-palette) input {
   color-scheme: dark;
   --bg-raised: color-mix(in srgb, var(--bg-panel) 96%, var(--text-hi));

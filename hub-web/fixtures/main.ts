@@ -1,4 +1,5 @@
 import "../src/styles.css";
+import { renderConversationFixture } from "./conversations";
 import { attentionCounts, createAttentionItem } from "../src/attention";
 import { renderAttentionPanel } from "../src/attention-view";
 import { renderConnectionSurfaceInto } from "../src/connection-state-view";
@@ -14,6 +15,7 @@ import type { AttentionItem, HubSession } from "../src/types";
 import type { GhosttyCell, GhosttyColor, GhosttyRow } from "../src/terminal/ghostty/core";
 
 export const FIXTURE_NAMES = [
+  "conversations-list", "conversation", "conversation-replied", "conversation-error",
   "fleet-populated",
   "fleet-empty",
   "session-canvas",
@@ -430,4 +432,5 @@ function renderShell(): void {
   }
 }
 
-renderShell();
+if (fixtureName.startsWith("conversation")) renderConversationFixture(app, fixtureName);
+else renderShell();

@@ -5,9 +5,10 @@ export function supervisorTarget(session: HubSession | undefined): string | unde
   return target || undefined;
 }
 
-export function supervisorMessage(target: string, text: string): Record<string, unknown> {
+export function supervisorMessage(target: string, text: string, clientRef?: string): Record<string, unknown> {
   return {
     SendMessage: {
+      ...(clientRef ? { client_ref: clientRef } : {}),
       target,
       text,
       summary: "Cassy Commander message",

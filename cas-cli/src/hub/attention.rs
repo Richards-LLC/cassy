@@ -308,6 +308,7 @@ mod tests {
                 "factory-a",
                 &DaemonMessage::Error {
                     message: format!("wording {index}"),
+                    client_ref: None,
                 },
             );
         }
@@ -353,6 +354,7 @@ mod tests {
             "factory-a",
             &DaemonMessage::Error {
                 message: "raw error still visible".into(),
+                client_ref: None,
             },
         );
         let raw = updates.recv().await.expect("raw event broadcast");

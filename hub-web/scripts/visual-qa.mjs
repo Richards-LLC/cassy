@@ -10,6 +10,7 @@ import { build } from "vite";
 import { runVisualQa } from "../../scripts/visual-qa.mjs";
 
 export const FIXTURE_NAMES = [
+  "conversations-list", "conversation", "conversation-replied", "conversation-error",
   "fleet-populated",
   "fleet-empty",
   "session-canvas",
@@ -17,6 +18,7 @@ export const FIXTURE_NAMES = [
   "transcript",
   "attention-0",
   "attention-12",
+  "operator-thread",
   "connection-failed-retry",
   "pairing-step-1",
   "pairing-cleanup",
@@ -26,6 +28,7 @@ export const REQUIRED_SCHEMES = ["light", "dark"];
 export const REQUIRED_VIEWPORTS = [
   { name: "desktop", width: 1280, height: 800 },
   { name: "phone", width: 390, height: 844 },
+  { name: "landscape", width: 844, height: 390 },
 ];
 
 const here = fileURLToPath(new URL(".", import.meta.url));

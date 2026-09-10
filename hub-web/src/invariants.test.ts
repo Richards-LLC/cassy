@@ -44,7 +44,7 @@ describe("binding Cassy Commander browser invariants", () => {
     expect(source).toContain('pairingCreateInFlight ? "Creating…" : "Create pairing code"');
     expect(source).toContain("const relayAction = relayOrigin");
     expect(html).toContain('name="cas-pairing-relay-origin" content="https://petra-stella-cloud.vercel.app"');
-    expect(html).toContain("<title>Cassy Commander</title>");
+    expect(html).toContain("<title>Cassy Cloud</title>");
   });
 
   it("declares the Cassy Commander favicon from the static web source", async () => {
@@ -152,9 +152,9 @@ describe("binding Cassy Commander browser invariants", () => {
     // A send with no outcome is indistinguishable from a lost one, and invites a
     // duplicate message to the supervisor.
     expect(source).toContain("function sendControl(machineId: string, session: string, message: unknown): boolean {");
-    expect(source).toContain("const sent = sendControl(machine.id, session, supervisorMessage(supervisor, text));");
-    expect(source).toContain("messageDelivery = { session, target: supervisor };");
-    expect(source).toContain("toast(`Message sent to ${supervisor}`);");
+    expect(source).toContain("const sent = sendControl(machine.id, session, supervisorMessage(supervisor, text, clientRef));");
+    expect(source).toContain("messageDelivery = { session: sessionKey(machine.id, session), target: supervisor, clientRef };");
+    expect(source).toContain("toast(`Sending to ${supervisor}`);");
   });
 
   it("sends the supervisor message from Enter and from the button, through one path", async () => {
@@ -522,7 +522,7 @@ describe("binding Cassy Commander browser invariants", () => {
     const [main, attentionView, css] = await Promise.all(["main.ts", "attention-view.ts", "styles.css"].map((path) => readFile(new URL(path, import.meta.url), "utf8")));
     expect(main).toContain('machineEventAttention(kind, payload, pending)');
     expect(main).toContain('applyAttentionEnrichment(provisional, enriched');
-    expect(main).toContain('renderAttentionPanel(container, attention');
+    expect(main).toContain('renderAttentionPanel(container, visibleAttention');
     expect(attentionView).toContain('headline.textContent = card.content.headline');
     expect(attentionView).toContain('button("Dismiss all info"');
     expect(attentionView).toContain('button("Dismiss group"');
@@ -593,7 +593,7 @@ describe("binding Cassy Commander browser invariants", () => {
     // compact layout has no focusable pane chrome of its own, so the whole
     // phone block must be free of it.
     expect(css).toContain(".pane.selected { border-color: var(--line-strong); }");
-    const compact = css.slice(css.indexOf("@media (max-width: 53rem), (max-height: 30rem) and (pointer: coarse)"));
+    const compact = css.slice(css.indexOf("@media (max-width: 53rem), (max-height: 30rem) and (pointer: coarse)"), css.indexOf("/* Cassy Cloud:"));
     expect(compact).not.toContain("var(--line-strong)");
 
     // The collapsed pill floats over the rail, so it must not paint a second

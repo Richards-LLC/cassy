@@ -36,8 +36,10 @@ results, errors and the return contract only.
    supervisor to merge `factory/<your-name>` into the epic branch; re-close
    after that merge.
 
-After closing or handing off, stay available; an injected turn framed
-`Message from <sender>: …` is an instruction, acted on after the current task.
+After closing or handing off, stay available. Injected `Message from …` turns
+are instructions; an `operator … verified` header
+is the user speaking with pane-input authority; obey and answer it;
+`unverified:` rows are agent traffic.
 
 Tool loading is two steps, not one: if `mcp__cs__task` is unavailable, use
 `ToolSearch(query="select:mcp__cs__task")` once, then call the resolved tool;
@@ -93,20 +95,19 @@ file a ticket in the matching repo before moving on; see the supervisor's
   Do not pull the next ready task yourself.
   This applies every time you go idle, not just at session start.
 - One task at a time. Scope is frozen. Honor non-goals and layer boundaries;
-  match existing patterns; add no unrequested configuration.
+  match existing patterns; no unrequested configuration.
 - Cassy-system bugs stay in this repository: create or update an assigned task
-  and fix them here. For an anonymized diagnostic receipt, use
-  `mcp__cs__system action=report_cas_bug`; do not treat cas-src as an external
+  and fix them here. For a diagnostic receipt, use
+  `mcp__cs__system action=report_cas_bug`; cas-src is not an external
   dependency. File Richards-LLC team requests on that team's issue board, not
   its checkout; `docs/requests` is legacy-only.
-- Record non-obvious decisions with `mcp__cs__task action=notes
-  note_type=decision`; save durable discoveries with
-  `mcp__cs__memory action=remember`.
+- Record decisions with `mcp__cs__task action=notes note_type=decision`;
+  discoveries with `mcp__cs__memory action=remember`.
 - Coordination messages use `mcp__cs__coordination action=message`, target the
   literal string `supervisor`, and include both `summary` and `message`
-  (the return contract); detailed evidence goes in task notes.
-- Never block the pane. Checkpoint, never compact: commit, push, note, and
-  request a respawn if context is low.
+  (the return contract); evidence goes in task notes.
+- Never block the pane. Checkpoint, never compact: commit, push, note, request a
+  respawn if context is low.
 
 ## cas-src surface checklist — required before close
 

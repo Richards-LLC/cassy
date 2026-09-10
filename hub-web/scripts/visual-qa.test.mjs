@@ -12,8 +12,8 @@ describe("hub-web fixture visual QA", () => {
     const source = await readFile(join(repoRoot, "fixtures", "main.ts"), "utf8");
     for (const name of FIXTURE_NAMES) expect(source).toContain(`"${name}"`);
     expect(REQUIRED_SCHEMES).toEqual(["light", "dark"]);
-    expect(REQUIRED_VIEWPORTS.map(({ width }) => width)).toEqual([1280, 390]);
-    expect(REQUIRED_VIEWPORTS.map(({ height }) => height)).toEqual([800, 844]);
+    expect(REQUIRED_VIEWPORTS.map(({ width }) => width)).toEqual([1280, 390, 844]);
+    expect(REQUIRED_VIEWPORTS.map(({ height }) => height)).toEqual([800, 844, 390]);
   });
 
   it("renders every scoped allowlist shape with its production attributes", async () => {

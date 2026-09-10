@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::convert::Infallible;
 use std::process::Command;
 use std::sync::Arc;
@@ -711,6 +712,9 @@ async fn proxy_socket(
     };
     let mut worker_gate = super::WorkerGate::new(reveal_workers);
     let (mut sink, mut source) = socket.split();
+    // MessageQueued has no device field: retain the authenticated submitter's
+    // client_ref so only that socket receives its durable acknowledgment.
+    let mut pending_message_refs = HashSet::<(String, String)>::new();
     let mut revocations = auth
         .as_ref()
         .map(|(store, _)| store.subscribe_revocations());
@@ -725,9 +729,31 @@ async fn proxy_socket(
             frame = viewer.recv() => match frame {
                 Ok(frame) => {
                     let Some(frame) = worker_gate.admit(frame) else { continue };
+                    if !operator_reply_allowed(&auth, &frame.bytes) {
+                        continue;
+                    }
+                    if !correlated_daemon_frame_allowed(
+                        &mut pending_message_refs,
+                        &session,
+                        &frame.bytes,
+                    ) {
+                        continue;
+                    }
+                    let receipt = operator_reply_receipt(&frame.bytes);
                     audit_refused_pane_resize(&auth, &session, &frame.bytes);
                     if sink.send(Message::Binary(frame.bytes.into())).await.is_err() {
                         break;
+                    }
+                    if let Some((notification_id, device_id)) = receipt {
+                        let _ = connector
+                            .send(
+                                &session,
+                                ClientMessage::OperatorReplyDelivered {
+                                    notification_id,
+                                    device_id,
+                                },
+                            )
+                            .await;
                     }
                 }
                 Err(ViewerRecvError::Lagged { skipped }) => {
@@ -741,12 +767,26 @@ async fn proxy_socket(
                 Some(Ok(Message::Ping(_))) | Some(Ok(Message::Pong(_))) => {}
                 Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
                 Some(Ok(Message::Text(text))) => {
+                    let client_ref = client_message_ref(text.as_bytes());
+                    if let Some(client_ref) = client_ref.as_deref() {
+                        pending_message_refs.insert((session.clone(), client_ref.to_owned()));
+                    }
                     if handle_client_message(&connector, &session, &auth, text.as_bytes()).await.is_err() {
+                        if let Some(client_ref) = client_ref {
+                            pending_message_refs.remove(&(session.clone(), client_ref));
+                        }
                         let _ = sink.send(Message::Text(r#"{"error":"forbidden"}"#.into())).await;
                     }
                 }
                 Some(Ok(Message::Binary(bytes))) => {
+                    let client_ref = client_message_ref(&bytes);
+                    if let Some(client_ref) = client_ref.as_deref() {
+                        pending_message_refs.insert((session.clone(), client_ref.to_owned()));
+                    }
                     if handle_client_message(&connector, &session, &auth, &bytes).await.is_err() {
+                        if let Some(client_ref) = client_ref {
+                            pending_message_refs.remove(&(session.clone(), client_ref));
+                        }
                         let _ = sink.send(Message::Text(r#"{"error":"forbidden"}"#.into())).await;
                     }
                 }
@@ -820,14 +860,10 @@ async fn handle_client_message(
         anyhow::bail!("authorization refused")
     }
     if let ClientMessage::SendMessage { attribution, .. } = &mut message {
-        *attribution = MessageAttribution {
-            device_id: Some(context.device_id.clone()),
-            credential_id: Some(context.credential_id.clone()),
-            device_label: Some(context.device_label.clone()),
-            operator_label: Some(context.operator_label.clone()),
-            controller_origin: Some(context.controller_origin.clone()),
-            request_id: Some(context.request_id.clone()),
-        };
+        // cas-e8df: identity comes from the authenticated device session, never
+        // from what the client put in the frame. Whatever labels arrived are
+        // discarded here, and `operator_verified` is only ever set on this path.
+        *attribution = verified_attribution(context);
     }
     connector.send(session, message).await?;
     store.audit(
@@ -842,6 +878,25 @@ async fn handle_client_message(
         Some(session),
         now,
     )
+}
+
+/// The attribution a hub-authenticated Commander send carries downstream
+/// (cas-e8df): every field from the device session's credential record.
+pub(crate) fn verified_attribution(context: &AuthContext) -> MessageAttribution {
+    MessageAttribution {
+        device_id: Some(context.device_id.clone()),
+        credential_id: Some(context.credential_id.clone()),
+        device_label: Some(context.device_label.clone()),
+        operator_label: Some(context.operator_label.clone()),
+        controller_origin: Some(context.controller_origin.clone()),
+        request_id: Some(context.request_id.clone()),
+        scopes: context
+            .scopes
+            .iter()
+            .map(|scope| scope.as_str().to_owned())
+            .collect(),
+        operator_verified: true,
+    }
 }
 
 pub(crate) fn is_pane_read_message(message: &ClientMessage) -> bool {
@@ -1078,6 +1133,64 @@ fn audit_refused_pane_resize(
     );
 }
 
+/// Operator replies are durable daemon frames, but their recipient is the
+/// authenticated device that originated the referenced Commander message.
+/// A machine can have several paired browsers attached, so the hub performs
+/// this final recipient check instead of broadcasting the frame to every one.
+pub(super) fn operator_reply_allowed(
+    auth: &Option<(AuthStore, AuthContext)>,
+    bytes: &[u8],
+) -> bool {
+    operator_reply_receipt(bytes).is_none_or(|(_, device_id)| {
+        auth.as_ref()
+            .is_some_and(|(_, context)| context.device_id == device_id)
+    })
+}
+
+fn client_message_ref(bytes: &[u8]) -> Option<String> {
+    let ClientMessage::SendMessage { client_ref, .. } =
+        serde_json::from_slice::<ClientMessage>(bytes).ok()?
+    else {
+        return None;
+    };
+    client_ref
+}
+
+/// MessageQueued and correlated Error frames share one daemon upstream, so
+/// the hub filters them by the authenticated socket that submitted the ref.
+fn correlated_daemon_frame_allowed(
+    pending: &mut HashSet<(String, String)>,
+    session: &str,
+    bytes: &[u8],
+) -> bool {
+    if let Ok(DaemonMessage::MessageQueued { client_ref, .. }) =
+        serde_json::from_slice::<DaemonMessage>(bytes)
+    {
+        return client_ref
+            .is_some_and(|client_ref| pending.remove(&(session.to_owned(), client_ref)));
+    }
+    if let Ok(DaemonMessage::Error {
+        client_ref: Some(client_ref),
+        ..
+    }) = serde_json::from_slice::<DaemonMessage>(bytes)
+    {
+        return pending.remove(&(session.to_owned(), client_ref));
+    }
+    true
+}
+
+fn operator_reply_receipt(bytes: &[u8]) -> Option<(i64, String)> {
+    let DaemonMessage::OperatorReply {
+        notification_id,
+        device_id,
+        ..
+    } = serde_json::from_slice::<DaemonMessage>(bytes).ok()?
+    else {
+        return None;
+    };
+    Some((notification_id, device_id))
+}
+
 fn machine_binary_frame(session: &str, frame: &ProxyFrame) -> anyhow::Result<Option<Vec<u8>>> {
     let (kind, pane_id, payload) = match frame.kind {
         ProxyFrameKind::Output => {
@@ -1153,6 +1266,9 @@ async fn proxy_machine_socket<R: SessionReadModel>(
     let mut subscriptions = std::collections::HashMap::<String, tokio::task::JoinHandle<()>>::new();
     let mut machine_events = state.events.subscribe();
     let mut events_subscribed = false;
+    // Scoped to this authenticated machine socket; paired devices cannot see
+    // one another's MessageQueued acknowledgments.
+    let mut pending_message_refs = HashSet::<(String, String)>::new();
     let mut revocations = auth
         .as_ref()
         .map(|(store, _)| store.subscribe_revocations());
@@ -1167,6 +1283,17 @@ async fn proxy_machine_socket<R: SessionReadModel>(
         tokio::select! {
             outgoing = outbound_rx.recv() => match outgoing {
                 Some(MachineOutbound::Frame { session, frame }) => {
+                    if !operator_reply_allowed(&auth, &frame.bytes) {
+                        continue;
+                    }
+                    if !correlated_daemon_frame_allowed(
+                        &mut pending_message_refs,
+                        &session,
+                        &frame.bytes,
+                    ) {
+                        continue;
+                    }
+                    let receipt = operator_reply_receipt(&frame.bytes);
                     audit_refused_pane_resize(&auth, &session, &frame.bytes);
                     let result = match machine_binary_frame(&session, &frame) {
                         Ok(Some(bytes)) => sink.send(Message::Binary(bytes.into())).await,
@@ -1178,6 +1305,18 @@ async fn proxy_machine_socket<R: SessionReadModel>(
                         Err(_) => break,
                     };
                     if result.is_err() { break; }
+                    if let Some((notification_id, device_id)) = receipt {
+                        let _ = state
+                            .connector
+                            .send(
+                                &session,
+                                ClientMessage::OperatorReplyDelivered {
+                                    notification_id,
+                                    device_id,
+                                },
+                            )
+                            .await;
+                    }
                 }
                 Some(MachineOutbound::Lagged { session, skipped }) => {
                     let envelope = serde_json::json!({
@@ -1278,7 +1417,14 @@ async fn proxy_machine_socket<R: SessionReadModel>(
                         Ok(bytes) => bytes,
                         Err(_) => continue,
                     };
+                    let client_ref = client_message_ref(&bytes);
+                    if let Some(client_ref) = client_ref.as_deref() {
+                        pending_message_refs.insert((session.clone(), client_ref.to_owned()));
+                    }
                     if handle_client_message(&state.connector, &session, &auth, &bytes).await.is_err() {
+                        if let Some(client_ref) = client_ref {
+                            pending_message_refs.remove(&(session.clone(), client_ref));
+                        }
                         let error = serde_json::json!({"channel":format!("pty:{session}"),"error":{"code":"forbidden"}});
                         if sink.send(Message::Text(error.to_string().into())).await.is_err() { break; }
                     }
@@ -1615,5 +1761,43 @@ mod machine_protocol_tests {
     fn non_pty_machine_messages_remain_on_the_json_channel() {
         let frame = proxy_frame(DaemonMessage::Pong);
         assert!(machine_binary_frame("factory-a", &frame).unwrap().is_none());
+    }
+
+    #[test]
+    fn message_queued_reaches_only_the_socket_that_submitted_its_ref() {
+        let mut pending = HashSet::from([("factory-a".to_owned(), "send-42".to_owned())]);
+        let queued = serde_json::to_vec(&DaemonMessage::MessageQueued {
+            client_ref: Some("send-42".to_owned()),
+            notification_id: 812,
+            target: "patient-pelican-9".to_owned(),
+            stamped: true,
+        })
+        .unwrap();
+        assert!(correlated_daemon_frame_allowed(
+            &mut pending,
+            "factory-a",
+            &queued
+        ));
+        assert!(
+            pending.is_empty(),
+            "receipt is single-delivery to its submitter"
+        );
+        assert!(!correlated_daemon_frame_allowed(
+            &mut pending,
+            "factory-a",
+            &queued
+        ));
+
+        let error = serde_json::to_vec(&DaemonMessage::Error {
+            message: "enqueue failed".to_owned(),
+            client_ref: Some("send-99".to_owned()),
+        })
+        .unwrap();
+        pending.insert(("factory-a".to_owned(), "send-99".to_owned()));
+        assert!(correlated_daemon_frame_allowed(
+            &mut pending,
+            "factory-a",
+            &error
+        ));
     }
 }

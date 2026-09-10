@@ -39,7 +39,8 @@
 #   CAS_RELEASE_TRAIN_WATCH_TRIES default 60
 #   CAS_RELEASE_TRAIN_PUBLISH_CMD default <tag worktree>/scripts/release.sh
 #   CAS_RELEASE_TRAIN_REPORT_CMD default cas (runs `cas release report <version> --pdf`)
-#   CAS_RELEASE_TRAIN_REPORT_POST_CMD optional file-post adapter; it writes release-report.receipt
+#   CAS_RELEASE_TRAIN_REPORT_POST_CMD default <checkout>/scripts/release-report-post.py
+#   CAS_RELEASE_TRAIN_REPORT_USER_THREAD_TS and _DEV_THREAD_TS supplied to the adapter
 #   CAS_RELEASE_ENV_FILE          default ~/.cas/release.env
 set -euo pipefail
 
@@ -62,6 +63,7 @@ fi
 
 worktree="$(cd "$worktree" && pwd)"
 worktree_name="$(basename "$worktree")"
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 artifacts_root="${CAS_RELEASE_ARTIFACTS_ROOT:-$HOME/.cas/artifacts/release}"
 # The identity of a run: which version, from which worktree. Two supervisors
 # cutting the same version from different epics get different directories.
@@ -647,7 +649,7 @@ run_report() {
     local report_dir="$worktree/docs/release-reports"
     local report_prefix="$report_dir/v$version"
     local report_cmd="${CAS_RELEASE_TRAIN_REPORT_CMD:-cas}"
-    local report_post_cmd="${CAS_RELEASE_TRAIN_REPORT_POST_CMD:-}"
+    local report_post_cmd="${CAS_RELEASE_TRAIN_REPORT_POST_CMD:-$script_dir/release-report-post.py}"
     local report_receipt="$run_dir/release-report.receipt"
 
     if [[ ! -f "${report_prefix}.md" || ! -f "${report_prefix}.html" || ! -f "${report_prefix}.pdf" ]]; then
@@ -694,7 +696,10 @@ run_report() {
         CAS_RELEASE_TRAIN_REPORT_HTML="${report_prefix}.html" \
         CAS_RELEASE_TRAIN_REPORT_RECEIPT="$report_receipt" \
         CAS_RELEASE_TRAIN_REPORT_CHANNEL="${CAS_RELEASE_TRAIN_REPORT_CHANNEL:-cas-internal}" \
-            "$report_post_cmd" "$version" "$worktree" "$report_receipt"
+        CAS_RELEASE_TRAIN_REPORT_USER_THREAD_TS="${CAS_RELEASE_TRAIN_REPORT_USER_THREAD_TS:-}" \
+        CAS_RELEASE_TRAIN_REPORT_DEV_THREAD_TS="${CAS_RELEASE_TRAIN_REPORT_DEV_THREAD_TS:-}" \
+            "$report_post_cmd" "v$version" "${report_prefix}.pdf" "${report_prefix}.html" \
+                "${CAS_RELEASE_TRAIN_REPORT_USER_THREAD_TS:-}" "${CAS_RELEASE_TRAIN_REPORT_DEV_THREAD_TS:-}"
     fi
 
     print_release_report_status

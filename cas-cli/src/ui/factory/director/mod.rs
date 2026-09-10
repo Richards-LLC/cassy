@@ -36,7 +36,10 @@ pub use prompts::{
     revalidate_event_for_delivery_with_focus, with_response_instructions,
     worker_now_has_real_assignment, MergeAlertFreshness, Prompt,
 };
-pub(crate) use prompts::{epic_completion_is_current, prompt_is_still_deliverable};
+pub(crate) use prompts::{
+    apply_idle_liveness, epic_completion_is_current, idle_worker_liveness,
+    prompt_is_still_deliverable,
+};
 // PanelAreas, SidecarFocus, SidecarState, ViewMode, DiffLine, DiffLineType, render, render_with_state are already public in this module
 
 use ratatui::layout::{Constraint, Direction, Layout, Rect};

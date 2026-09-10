@@ -2684,7 +2684,7 @@ impl CasService {
 
     pub(super) async fn factory_worker_status(
         &self,
-        _req: FactoryRequest,
+        req: FactoryRequest,
     ) -> Result<CallToolResult, McpError> {
         use crate::store::open_agent_store;
         use cas_types::{AgentRole, AgentStatus};
@@ -2695,6 +2695,21 @@ impl CasService {
                 format!("Failed to open agent store: {e}"),
             )
         })?;
+
+        // Snapshot execution before housekeeping can remove a dead worker.
+        // The fast poll does no Git, network, history scan or stale mutation.
+        let liveness_rows = worker_liveness_rows(
+            &self.inner.cas_root,
+            store.as_ref(),
+            current_factory_session().as_deref(),
+            chrono::Utc::now(),
+        )
+        .map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, e))?;
+        if req.summary.unwrap_or(false) {
+            return Ok(Self::success(render_worker_liveness_summary(
+                &liveness_rows,
+            )));
+        }
 
         // Opportunistically prune stale agents so status output stays actionable.
         // Worker threshold tightened from 120s → 30s per cas-2749 so a dead CC
@@ -3009,6 +3024,9 @@ impl CasService {
             let mut msg = String::from(
                 "No active agents registered.\n\nNote: Factory TUI must be running for agents to be registered.",
             );
+            for (name, observation) in &liveness_rows {
+                msg.push_str(&format!("\n{} | {name}", observation.detail()));
+            }
             if let Some(warning) = shared_clone_warning.as_deref() {
                 msg.push_str("\n\n");
                 msg.push_str(warning);
@@ -3026,6 +3044,11 @@ impl CasService {
 
         let owned = supervisor_owned_workers();
         let mut output = String::from("Worker Status\n=============\n\n");
+        for (name, observation) in &liveness_rows {
+            if !agents.iter().any(|agent| &agent.name == name) {
+                output.push_str(&format!("{} | {name}\n", observation.detail()));
+            }
+        }
         output.push_str(&undelivered_section);
         if duplicate_registrations_filtered > 0 {
             output.push_str(&format!(
@@ -3869,6 +3892,13 @@ impl CasService {
                     }
                 };
                 // GH #67: name the assignment on the roster row itself.
+                // Legacy activity heuristics may retain an unmatched tool
+                // call across a completed turn. The execution verdict wins.
+                let activity_info = liveness_rows
+                    .iter()
+                    .find(|(name, _)| name == &agent.name)
+                    .map(|(_, observation)| format!("\n    evidence: {}", observation.evidence))
+                    .unwrap_or(activity_info);
                 let matches_agent = |assignee: Option<&str>| {
                     assignee == Some(agent.name.as_str()) || assignee == Some(agent.id.as_str())
                 };
@@ -3898,8 +3928,13 @@ impl CasService {
                         )
                     }),
                 );
+                let execution = liveness_rows
+                    .iter()
+                    .find(|(name, _)| name == &agent.name)
+                    .map(|(_, observation)| observation.state.as_str())
+                    .unwrap_or("stalled");
                 output.push_str(&format!(
-                    "  • {} (heartbeat: {}){}{}{}{}{}{}{}{}{}{}{}{}{}{}{}\n    session: {}\n",
+                    "  liveness: {execution} | {} (heartbeat: {}){}{}{}{}{}{}{}{}{}{}{}{}{}{}{}\n    session: {}\n",
                     &agent.name,
                     since,
                     if usage_limited {
@@ -8701,6 +8736,97 @@ fn hard_dead_worker_transcript_block(
     )
 }
 
+pub(crate) fn worker_liveness_for_agent(
+    cas_root: &std::path::Path,
+    agent: &cas_types::Agent,
+    now: chrono::DateTime<chrono::Utc>,
+    stall_secs: i64,
+) -> super::worker_liveness::Observation {
+    let cli = worker_cli_from_agent(agent);
+    let clone_path = match resolve_worker_clone_path(cas_root, agent) {
+        WorkerClonePathResolve::Ready(path) => path,
+        WorkerClonePathResolve::NotOnDisk { candidate, .. } => candidate,
+    };
+    let session = agent.cc_session_id.as_deref().unwrap_or(&agent.id);
+    let path = worker_status_path_from_resolution(
+        worker_status_cached_transcript_resolution_for_account(
+            clone_path.to_str(),
+            session,
+            cli,
+            agent.metadata.get("worker_account_dir").map(String::as_str),
+        )
+        .resolution,
+        cli,
+    );
+    let process = super::worker_liveness::process_evidence(agent);
+    if cli == cas_mux::SupervisorCli::OpenCode {
+        if let Some(mapped) = super::opencode_liveness::observe(
+            cas_root,
+            session,
+            now.timestamp_millis().max(0) as u64,
+            process.alive == Some(true),
+        ) {
+            use super::worker_liveness::{Liveness, Observation};
+            use cas_mux::{OpenCodeLiveness, OpenCodeLivenessVerdict};
+            let state = if process.alive == Some(false) {
+                Liveness::Dead
+            } else {
+                match mapped.verdict {
+                    OpenCodeLivenessVerdict::Signal(OpenCodeLiveness::Busy) => Liveness::Executing,
+                    OpenCodeLivenessVerdict::Signal(OpenCodeLiveness::Idle) => {
+                        Liveness::WaitingForInput
+                    }
+                    _ => Liveness::Stalled,
+                }
+            };
+            return Observation {
+                state,
+                evidence: format!("mapped OpenCode {:?}; {}", mapped.verdict, process.detail),
+            };
+        }
+    }
+    super::worker_liveness::observe(cli, path.as_deref(), process, now, stall_secs)
+}
+
+pub(crate) fn worker_liveness_rows(
+    cas_root: &std::path::Path,
+    store: &dyn cas_store::AgentStore,
+    session: Option<&str>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<Vec<(String, super::worker_liveness::Observation)>, String> {
+    let agents = store
+        .list(None)
+        .map_err(|e| format!("Cannot read worker roster: {e}"))?
+        .into_iter()
+        .filter(|a| a.role == cas_types::AgentRole::Worker && a.visible_to_factory_session(session))
+        .collect();
+    let (agents, _) = dedupe_authoritative_agents(agents);
+    let stall_secs = crate::config::Config::load(cas_root)
+        .unwrap_or_default()
+        .factory()
+        .stall_threshold_secs as i64;
+    let mut rows: Vec<_> = agents
+        .iter()
+        .map(|agent| {
+            (
+                agent.name.clone(),
+                worker_liveness_for_agent(cas_root, agent, now, stall_secs),
+            )
+        })
+        .collect();
+    rows.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(rows)
+}
+
+pub(crate) fn render_worker_liveness_summary(
+    rows: &[(String, super::worker_liveness::Observation)],
+) -> String {
+    rows.iter()
+        .map(|(name, observation)| observation.summary(name))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn worker_status_cached_transcript_resolution_for_account(
     clone_path: Option<&str>,
     session_id: &str,
@@ -13308,6 +13434,116 @@ effort = "high"
     /// activity/context/in-flight path through `transcript_path_fast`.
     /// A real Codex rollout exists and is discoverable by the established
     /// cwd-aware resolver, so that production path must return it too.
+    #[tokio::test]
+    async fn worker_liveness_summary_five_workers_under_one_second() {
+        let proof_dir = std::env::var("CAS_LIVENESS_PROOF_DIR");
+        use cas_store::{AgentStore, SqliteAgentStore};
+        use cas_types::{Agent, AgentRole};
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[(
+            "CAS_FACTORY_SESSION",
+            "liveness-fixture-session",
+        )]);
+        let temp = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(temp.path()).unwrap();
+        let store = SqliteAgentStore::open(&root).unwrap();
+        let sessions = temp.path().join("account/sessions/2026/09/10");
+        std::fs::create_dir_all(&sessions).unwrap();
+        let now = chrono::Utc::now();
+        // A real, identity-labelled PTY child surrogate for the OS probe. The
+        // event fixtures remain the execution evidence; a sleeping process
+        // alone must not decide waiting versus executing.
+        struct Child(std::process::Child);
+        impl Drop for Child {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let child = Child(
+            std::process::Command::new("bash")
+                .args(["-c", "exec -a codex sleep 120"])
+                .spawn()
+                .unwrap(),
+        );
+        for (index, (kind, age, dead)) in [
+            ("task_complete", 1800, false),
+            ("turn_completed", 600, false),
+            ("task_started", 1, false),
+            ("task_started", 1800, false),
+            ("task_started", 1, true),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let name = format!("liveness-fixture-{index}");
+            let cwd = temp.path().join(&name);
+            std::fs::create_dir_all(&cwd).unwrap();
+            let path = sessions.join(format!("rollout-2026-09-10T19-00-00-{index}.jsonl"));
+            let metadata = serde_json::json!({"type":"session_meta","payload":{"id":format!("fixture-{index}"),"cwd":cwd.to_str().unwrap(),"source":"cli"}});
+            let event = serde_json::json!({"timestamp":(now-chrono::Duration::seconds(age)).to_rfc3339(),"type":"event_msg","payload":{"type":kind,"turn_id":"fixture"}});
+            // A large old record makes the performance test sensitive to
+            // accidental full-rollout scanning without retaining private data.
+            std::fs::write(
+                &path,
+                format!("{metadata}\n{}\n{event}\n", "x".repeat(4 * 1024 * 1024)),
+            )
+            .unwrap();
+            let mut agent =
+                Agent::new_with_role(format!("fixture-{index}"), name, AgentRole::Worker);
+            agent.last_heartbeat = now;
+            agent.factory_session = Some("liveness-fixture-session".into());
+            agent.pid = Some(if dead { i32::MAX as u32 } else { child.0.id() });
+            agent.metadata.insert("worker_cli".into(), "codex".into());
+            agent
+                .metadata
+                .insert("clone_path".into(), cwd.to_string_lossy().into());
+            agent.metadata.insert(
+                "worker_account_dir".into(),
+                temp.path().join("account").to_string_lossy().into(),
+            );
+            store.register(&agent).unwrap();
+        }
+        drop(store);
+        let core = CasCore::with_daemon(root, None, None);
+        #[cfg(feature = "mcp-proxy")]
+        let service = CasService::new(core, None);
+        #[cfg(not(feature = "mcp-proxy"))]
+        let service = CasService::new(core);
+        let request =
+            serde_json::from_value(serde_json::json!({"action":"worker_status","summary":true}))
+                .unwrap();
+        let start = std::time::Instant::now();
+        let output = response_text(service.factory_worker_status(request).await.unwrap());
+        let elapsed = start.elapsed();
+        assert_eq!(output.lines().count(), 5, "{output}");
+        for (index, expected) in [
+            "waiting_for_input",
+            "waiting_for_input",
+            "executing",
+            "stalled",
+            "dead",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert!(
+                output
+                    .lines()
+                    .nth(index)
+                    .unwrap()
+                    .starts_with(&format!("liveness: {expected} |")),
+                "{output}"
+            );
+        }
+        assert!(
+            elapsed < std::time::Duration::from_secs(1),
+            "five-worker poll: {elapsed:?}"
+        );
+        if let Ok(dir) = proof_dir {
+            std::fs::write(std::path::Path::new(&dir).join("five-worker-latency.txt"), format!("cold worker_status summary_mode: {elapsed:?}\n5 workers; 4 MiB rollout each; fresh heartbeat each; local process lookup\n{output}\n")).unwrap();
+        }
+    }
+
     #[test]
     fn worker_status_transcript_path_resolves_codex_rollout_by_cwd() {
         let _lock = crate::hooks::test_env_lock();

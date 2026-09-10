@@ -638,6 +638,17 @@ pub enum FactoryCommands {
         cas_root: Option<std::path::PathBuf>,
     },
 
+    /// Local worker execution evidence (same source as MCP worker_status)
+    WorkerStatus {
+        #[arg(long)]
+        session: Option<String>,
+        #[arg(long)]
+        cas_root: Option<std::path::PathBuf>,
+        /// One liveness line per worker
+        #[arg(long)]
+        summary: bool,
+    },
+
     /// Aggregated status snapshot for a session (ideal for external tools)
     Status {
         /// Session name (default: most recent attachable session for this project)
@@ -914,6 +925,16 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
                 *all,
                 *limit,
                 cas_root.as_deref(),
+            ),
+            FactoryCommands::WorkerStatus {
+                session,
+                cas_root,
+                summary,
+            } => queries::execute_worker_status(
+                cli,
+                session.as_deref(),
+                cas_root.as_deref(),
+                *summary,
             ),
             FactoryCommands::Status {
                 session,

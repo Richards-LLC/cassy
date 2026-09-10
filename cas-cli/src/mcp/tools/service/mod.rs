@@ -1363,6 +1363,7 @@ mod server_handler;
 /// cas-7c93 (GH #87): server_start / server_stop / server_list.
 mod server_ops;
 mod spec_ops;
+pub(crate) mod worker_liveness;
 mod worktree_verification_team_ops;
 
 #[cfg(test)]

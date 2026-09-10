@@ -37,6 +37,14 @@ fn listing_answers_what_is_listening_and_who_started_it() {
 
     assert!(line.contains("web"), "names the server: {line}");
     assert!(line.contains("pid 1234"));
+    assert!(
+        line.contains("pgid 1234"),
+        "process group is visible: {line}"
+    );
+    assert!(
+        line.contains("live descendants 0"),
+        "live descendant count is visible: {line}"
+    );
     assert!(line.contains("listening on 5173"), "ports observed: {line}");
     assert!(line.contains("running"));
     assert!(

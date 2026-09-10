@@ -2235,6 +2235,12 @@ pub(crate) fn queue_supervisor_intro_prompt(
     if supervisor_cli == cas_mux::SupervisorCli::Claude {
         if let Some(context) =
             claude_custom_config_context_fallback(cas_dir, session_id.unwrap_or(supervisor_name))
+            .filter(|_| {
+                crate::hooks::session_start_fallback::claim(
+                    cas_dir,
+                    session_id.unwrap_or(supervisor_name),
+                )
+            })
         {
             prompt.push_str("\n\n<cas-session-start-fallback>\n");
             prompt.push_str(&context);
@@ -2286,11 +2292,27 @@ pub(crate) fn queue_supervisor_intro_prompt(
     }
 
     if let Ok(queue) = open_prompt_queue_store(cas_dir) {
-        if let Some(session) = factory_session {
-            let _ = queue.enqueue_with_session("cas", supervisor_name, &prompt, session);
-        } else {
-            let _ = queue.enqueue("cas", supervisor_name, &prompt);
-        }
+        // Startup can be retried after a harness reconnect. Bind the intro to
+        // the logical session so that a replay creates one durable row even
+        // when the first enqueue already succeeded but the caller timed out.
+        // The session id is included separately from factory_session because
+        // the latter identifies the factory, not an individual harness turn.
+        let session_key = session_id.unwrap_or(supervisor_name);
+        let factory_key = factory_session.unwrap_or("legacy");
+        let dedupe_key = format!(
+            "startup-envelope:{supervisor_name}:{}:{session_key}:{factory_key}",
+            supervisor_cli.backend().name()
+        );
+        let _ = queue.enqueue_idempotent(
+            "cas",
+            supervisor_name,
+            &prompt,
+            factory_session,
+            Some("factory supervisor startup envelope"),
+            None,
+            &dedupe_key,
+            None,
+        );
     }
 }
 
@@ -2876,6 +2898,30 @@ mod tests {
         );
     }
 
+    #[test]
+    fn supervisor_intro_is_idempotent_for_a_factory_session() {
+        use crate::store::{detect::open_prompt_queue_store, init_cas_dir};
+
+        let project = tempfile::tempdir().unwrap();
+        let cas_dir = init_cas_dir(project.path()).unwrap();
+        for _ in 0..2 {
+            queue_supervisor_intro_prompt(
+                &cas_dir,
+                "sup",
+                cas_mux::SupervisorCli::Codex,
+                &[],
+                Some("session-9568"),
+                Some("factory-9568"),
+            );
+        }
+
+        let queue = open_prompt_queue_store(&cas_dir).unwrap();
+        let rows = queue
+            .peek_for_targets(&["sup"], Some("factory-9568"), 10)
+            .unwrap();
+        assert_eq!(rows.len(), 1, "same startup session must enqueue once");
+    }
+
     /// cas-2085 / GH #290: Claude 2.1.231 did not dispatch SessionStart for a
     /// live factory supervisor even though its custom config dir and per-team
     /// `--settings` file both contained the hook. The guaranteed launch-time
@@ -2908,12 +2954,25 @@ mod tests {
             Some("custom-config-factory"),
             Some("custom-config-factory"),
         );
+        queue_supervisor_intro_prompt(
+            &cas_dir,
+            "sup",
+            cas_mux::SupervisorCli::Claude,
+            &[],
+            Some("custom-config-factory"),
+            Some("custom-config-factory"),
+        );
 
         let queue = open_prompt_queue_store(&cas_dir).unwrap();
         let rows = queue
             .peek_for_targets(&["sup"], Some("custom-config-factory"), 10)
             .unwrap();
         assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].prompt.matches("<cas-session-start-fallback>").count(),
+            1,
+            "startup fallback must appear once in the deduplicated envelope"
+        );
         assert!(
             rows[0]
                 .prompt

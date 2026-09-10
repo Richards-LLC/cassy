@@ -129,6 +129,13 @@ const UNSURFACED_UNLESS_EXPLICIT_ACK_SQL: &str = "AND (q.target = 'all_workers'
 const UNCLAIMED_RECIPIENT_RECEIPT_SQL: &str =
     "AND (seen.prompt_id IS NULL OR seen.source = 'transport_delivered')";
 
+/// Eligibility for a fallback invoked after a tool result. Unlike a new
+/// turn, this path must never replay a row whose transport handoff was
+/// already recorded: the preceding injected turn is precisely the delivery
+/// being recovered from. (cas-9568)
+const UNSEEN_RECIPIENT_RECEIPT_SQL: &str =
+    "AND seen.prompt_id IS NULL AND q.transport_delivered_at IS NULL";
+
 /// cas-dcf2 (GH #390): may later activity be recorded as a weak, visibly
 /// non-confirming indication that a delivered message might have been seen?
 ///
@@ -1494,6 +1501,17 @@ pub trait PromptQueueStore: Send + Sync {
     ///
     /// [`PromptQueueStore::poll_unseen_for_recipient`]: PromptQueueStore::poll_unseen_for_recipient
     fn surface_unseen_for_recipient(
+        &self,
+        recipient: &str,
+        factory_session: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<QueuedPrompt>>;
+
+    /// Surface unread rows for a tool-result fallback, excluding every row
+    /// with a transport-delivered marker. A turn-start hook may still recover
+    /// provisional transport receipts, but a fallback after that turn must
+    /// not put the same payload into a second tool result (cas-9568).
+    fn surface_unseen_for_recipient_without_transport_delivery(
         &self,
         recipient: &str,
         factory_session: Option<&str>,
@@ -3117,6 +3135,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             limit,
             SurfacingSource::InboxPoll,
             None,
+            false,
         )
     }
 
@@ -3135,6 +3154,23 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             limit,
             SurfacingSource::HookSurfaced,
             None,
+            false,
+        )
+    }
+
+    fn surface_unseen_for_recipient_without_transport_delivery(
+        &self,
+        recipient: &str,
+        factory_session: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<QueuedPrompt>> {
+        self.drain_unseen_for_recipient(
+            recipient,
+            factory_session,
+            limit,
+            SurfacingSource::HookSurfaced,
+            None,
+            true,
         )
     }
 
@@ -3151,6 +3187,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             limit,
             SurfacingSource::HookSurfaced,
             Some(sources),
+            false,
         )
     }
 
@@ -4614,11 +4651,14 @@ impl PromptQueueStore for SqlitePromptQueueStore {
 
 impl SqlitePromptQueueStore {
     /// Shared body of [`PromptQueueStore::poll_unseen_for_recipient`] and
-    /// [`PromptQueueStore::surface_unseen_for_recipient`] (cas-7a01).
+    /// [`PromptQueueStore::surface_unseen_for_recipient`] (cas-7a01), plus
+    /// the stricter fallback variant used after a tool result (cas-9568).
     ///
-    /// The two paths differ only in the provenance they record, so they must
-    /// not drift in eligibility: a row the hook would surface and a row the
-    /// inbox poll would drain are by definition the same row.
+    /// The ordinary poll and hook paths differ only in the provenance they
+    /// record, so they must not drift in eligibility: a row the hook would
+    /// surface and a row the inbox poll would drain are by definition the
+    /// same row. The fallback variant opts into an additional transport-marker
+    /// exclusion because its caller is already inside the delivered turn.
     fn drain_unseen_for_recipient(
         &self,
         recipient: &str,
@@ -4626,6 +4666,7 @@ impl SqlitePromptQueueStore {
         limit: usize,
         source: SurfacingSource,
         source_filter: Option<&[&str]>,
+        exclude_transport_delivery: bool,
     ) -> Result<Vec<QueuedPrompt>> {
         if recipient.trim().is_empty() {
             return Err(StoreError::Other(
@@ -4664,6 +4705,11 @@ impl SqlitePromptQueueStore {
                  AND (q.highest_stage IS NULL
                       OR q.highest_stage NOT IN {TERMINAL_NON_DELIVERY_STAGES})"
             );
+            let receipt_sql = if exclude_transport_delivery {
+                UNSEEN_RECIPIENT_RECEIPT_SQL
+            } else {
+                UNCLAIMED_RECIPIENT_RECEIPT_SQL
+            };
             let source_sql = if normalized_sources.is_empty() {
                 String::new()
             } else {
@@ -4697,7 +4743,7 @@ impl SqlitePromptQueueStore {
                          LEFT JOIN prompt_queue_recipient_seen seen
                            ON seen.prompt_id = q.id AND seen.recipient = ?
                          WHERE 1 = 1
-                           {UNCLAIMED_RECIPIENT_RECEIPT_SQL}
+                           {receipt_sql}
                            {UNSURFACED_UNLESS_EXPLICIT_ACK_SQL}
                            {deliverable_sql}
                            AND (q.target = ? OR q.target = 'all_workers')
@@ -4730,7 +4776,7 @@ impl SqlitePromptQueueStore {
                          LEFT JOIN prompt_queue_recipient_seen seen
                            ON seen.prompt_id = q.id AND seen.recipient = ?
                          WHERE 1 = 1
-                           {UNCLAIMED_RECIPIENT_RECEIPT_SQL}
+                           {receipt_sql}
                            {UNSURFACED_UNLESS_EXPLICIT_ACK_SQL}
                            {deliverable_sql}
                            AND (q.target = ? OR q.target = 'all_workers')

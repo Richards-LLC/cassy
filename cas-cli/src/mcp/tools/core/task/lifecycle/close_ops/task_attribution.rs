@@ -237,6 +237,36 @@ pub(super) fn diff_stat(
     })
 }
 
+/// Return the paths carried by the same task-attributed delivery ranges used
+/// by the close diff stat. Risk proof must not fall back to an unrelated
+/// branch-wide diff: a proof narrower than this set is a hard close failure.
+pub(super) fn paths(
+    repo: &Path,
+    target: &str,
+    window: &TaskCommitReceiptWindow,
+    receipt: Option<&str>,
+) -> Option<Vec<String>> {
+    let receipt = receipt
+        .map(|receipt| resolve_task_commit_receipt_sha(repo, receipt))
+        .transpose()
+        .ok()?;
+    let ranges = task_delivery_ranges(repo, target, window, receipt.as_deref())?;
+    let mut paths = Vec::new();
+    for range in ranges {
+        let changed = git_text(repo, &["diff", "--name-only", &range.base, &range.tip, "--"])?;
+        paths.extend(
+            changed
+                .lines()
+                .map(str::trim)
+                .filter(|path| !path.is_empty())
+                .map(ToOwned::to_owned),
+        );
+    }
+    paths.sort();
+    paths.dedup();
+    Some(paths)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

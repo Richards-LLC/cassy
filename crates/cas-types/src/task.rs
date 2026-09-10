@@ -184,6 +184,77 @@ impl FromStr for TaskType {
     }
 }
 
+/// Declared delivery risk for a task. The declaration is intentionally a
+/// small, closed vocabulary so close gates can require the matching proof
+/// without parsing free-form task prose.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TaskRisk {
+    /// The task can affect multiple source ownership/modules and needs a
+    /// proof target for each touched module.
+    #[serde(rename = "blast-radius")]
+    BlastRadius,
+    /// The task needs a platform-specific proof (currently macOS).
+    Platform,
+    /// The task needs a repeated whole-target parallel-load proof.
+    Concurrency,
+    /// No additional risk-specific proof is required.
+    None,
+}
+
+impl fmt::Display for TaskRisk {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::BlastRadius => "blast-radius",
+            Self::Platform => "platform",
+            Self::Concurrency => "concurrency",
+            Self::None => "none",
+        })
+    }
+}
+
+impl FromStr for TaskRisk {
+    type Err = TypeError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "blast-radius" | "blast_radius" => Ok(Self::BlastRadius),
+            "platform" => Ok(Self::Platform),
+            "concurrency" => Ok(Self::Concurrency),
+            "none" => Ok(Self::None),
+            other => Err(TypeError::Parse(format!(
+                "invalid task risk: {other}; expected blast-radius, platform, concurrency, or none"
+            ))),
+        }
+    }
+}
+
+impl TaskRisk {
+    /// Parse the comma-separated public task declaration and reject empty,
+    /// duplicate, and mutually-exclusive values.
+    pub fn parse_csv(value: &str) -> Result<Vec<Self>, String> {
+        let mut risks = Vec::new();
+        for raw in value.split(',') {
+            let raw = raw.trim();
+            if raw.is_empty() {
+                continue;
+            }
+            let risk = raw.parse::<Self>().map_err(|error| error.to_string())?;
+            if risks.contains(&risk) {
+                return Err(format!("duplicate task risk `{risk}`"));
+            }
+            risks.push(risk);
+        }
+        if risks.is_empty() {
+            return Err("task risk must name at least one value".to_string());
+        }
+        if risks.len() > 1 && risks.contains(&Self::None) {
+            return Err("task risk `none` cannot be combined with another risk".to_string());
+        }
+        Ok(risks)
+    }
+}
+
 /// Execution depth of a task (EPIC cas-1255 — per-task speed mode).
 ///
 /// Controls the speed-vs-rigor tradeoff for feel-driven iteration. `Deep`
@@ -698,6 +769,16 @@ pub struct Task {
     #[serde(default)]
     pub task_type: TaskType,
 
+    /// Explicit delivery-risk declaration. Legacy rows deserialize as an
+    /// empty list and are rejected only when a new task requires a declaration.
+    #[serde(default)]
+    pub risk: Vec<TaskRisk>,
+
+    /// Test modules/targets that must be covered by close-time proof for a
+    /// blast-radius task.
+    #[serde(default)]
+    pub proof_targets: Vec<String>,
+
     /// Who is working on this
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assignee: Option<String>,
@@ -811,6 +892,8 @@ impl Task {
             status: TaskStatus::Open,
             priority: Priority::MEDIUM,
             task_type: TaskType::Task,
+            risk: Vec::new(),
+            proof_targets: Vec::new(),
             assignee: None,
             labels: Vec::new(),
             created_at: now,
@@ -925,6 +1008,8 @@ impl Default for Task {
             status: TaskStatus::Open,
             priority: Priority::MEDIUM,
             task_type: TaskType::Task,
+            risk: Vec::new(),
+            proof_targets: Vec::new(),
             assignee: None,
             labels: Vec::new(),
             created_at: DateTime::<Utc>::default(),

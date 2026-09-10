@@ -1499,11 +1499,13 @@ impl FactoryDaemon {
                         }
                         // GH #682: the event snapshot was read before this
                         // loop. Re-read assignment state at the final direct
-                        // transport boundary so a task closed in that gap
-                        // cannot receive stale `task start` boilerplate.
-                        if let Some((task_id, status)) = super::delivery::assignment_terminal_status(
+                        // transport boundary so a task that moved beyond Open
+                        // in that gap cannot receive stale `task start`
+                        // boilerplate.
+                        if let Some((task_id, status)) = super::delivery::assignment_stale_status(
                             self.app.cas_dir(),
                             &prompt.text,
+                            &prompt.target,
                         ) {
                             tracing::info!(
                                 target: "cas::coordination",

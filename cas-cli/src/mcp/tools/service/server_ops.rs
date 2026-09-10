@@ -12,9 +12,9 @@ use crate::ui::factory::server_registry::{
 
 /// How a registry entry reads in `server_list`.
 ///
-/// Kept pure and separate from the handler so the rendering rules — including
-/// "a shared entry must say it survives teardown" — are unit-testable without
-/// spawning processes.
+/// Kept separate from the handler so the rendering rules — including "a
+/// shared entry must say it survives teardown" and the live descendant count
+/// — are unit-testable without spawning a server.
 pub(super) fn render_server_line(
     record: &RegisteredServer,
     liveness: ServerLiveness,
@@ -56,12 +56,19 @@ pub(super) fn render_server_line(
     } else {
         " [private: dies with its worker]"
     };
+    let descendant_count = server_registry::live_descendant_count(record);
+    let process_group = record
+        .pgid
+        .map(|pgid| pgid.to_string())
+        .unwrap_or_else(|| "unknown".to_string());
 
     format!(
-        "  {} ({}) pid {}{} — {}{}{}\n     cmd: {}\n     cwd: {}",
+        "  {} ({}) pid {} pgid {} live descendants {}{} — {}{}{}\n     cmd: {}\n     cwd: {}",
         record.name,
         record.id,
         record.pid,
+        process_group,
+        descendant_count,
         ports,
         state,
         owner,
@@ -164,12 +171,16 @@ impl CasService {
         };
 
         Ok(Self::success(format!(
-            "Started server '{}' (id {})\n  pid: {}\n  cwd: {}\n  cmd: {}\n  {}\n  logs: {}\n\n\
+            "Started server '{}' (id {})\n  pid: {}\n  pgid: {}\n  cwd: {}\n  cmd: {}\n  {}\n  logs: {}\n\n\
              Query it with `coordination action=server_list`; stop it with \
              `coordination action=server_stop id={}`.",
             record.name,
             record.id,
             record.pid,
+            record
+                .pgid
+                .map(|pgid| pgid.to_string())
+                .unwrap_or_else(|| "unknown".to_string()),
             record.cwd.display(),
             record.command,
             survival,

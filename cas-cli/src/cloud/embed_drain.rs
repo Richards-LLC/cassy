@@ -41,8 +41,8 @@ use cas_store::{
 use crate::cloud::CloudConfig;
 use crate::cloud::embeddings::{
     DEFAULT_EMBED_BATCH, EmbedReport, EmbedUnit, KnowledgeEmbedder, KnowledgeVectorCache,
-    MAX_EMBED_TEXT_CHARS, RateLimiter, cap_embedding_text, drain_units_with_quarantine,
-    embed_pending_pages, history_commit_key, history_doc_key,
+    RateLimiter, drain_units_with_quarantine, embed_pending_pages, history_commit_key,
+    history_doc_key,
 };
 use crate::error::CasError;
 
@@ -104,6 +104,14 @@ impl DrainReport {
             + self.code.as_ref().map_or(0, |r| r.quarantined)
     }
 
+    /// Units embedded after the input was shortened to the provider-safe
+    /// token budget.
+    pub fn truncated(&self) -> usize {
+        self.knowledge.as_ref().map_or(0, |r| r.truncated)
+            + self.history.as_ref().map_or(0, |r| r.truncated)
+            + self.code.as_ref().map_or(0, |r| r.truncated)
+    }
+
     /// Every problem worth showing a human, verbatim.
     pub fn problems(&self) -> Vec<String> {
         let mut out = Vec::new();
@@ -155,6 +163,10 @@ pub fn is_noise_merge_subject(subject: &str) -> bool {
 /// Embedded text for a commit: `subject + "\n" + body` (spec §4.4), capped at
 /// [`MAX_EMBED_TEXT_CHARS`].
 pub fn commit_embedding_text(commit: &HistoryCommit) -> String {
+    commit_embedding_text_with_status(commit).0
+}
+
+fn commit_embedding_text_with_status(commit: &HistoryCommit) -> (String, bool) {
     let text = match commit
         .body
         .as_deref()
@@ -164,7 +176,7 @@ pub fn commit_embedding_text(commit: &HistoryCommit) -> String {
         Some(body) => format!("{}\n{}", commit.subject, body),
         None => commit.subject.clone(),
     };
-    cap_embedding_text(text)
+    crate::cloud::embeddings::cap_embedding_text_with_status(text)
 }
 
 /// Embedded text for a doc: `title + body` (spec §4.4).
@@ -173,6 +185,10 @@ pub fn commit_embedding_text(commit: &HistoryCommit) -> String {
 /// both halves are optional and the join drops the empty one rather than
 /// embedding a leading blank line that shifts every vector slightly.
 pub fn doc_embedding_text(doc: &HistoryDoc) -> String {
+    doc_embedding_text_with_status(doc).0
+}
+
+fn doc_embedding_text_with_status(doc: &HistoryDoc) -> (String, bool) {
     let title = doc.title.as_deref().unwrap_or("").trim();
     let body = doc.body.as_deref().unwrap_or("").trim();
     let text = match (title.is_empty(), body.is_empty()) {
@@ -181,7 +197,7 @@ pub fn doc_embedding_text(doc: &HistoryDoc) -> String {
         (true, false) => body.to_string(),
         (true, true) => String::new(),
     };
-    cap_embedding_text(text)
+    crate::cloud::embeddings::cap_embedding_text_with_status(text)
 }
 
 /// Embed up to `limit` pending history units (commits first, then docs).
@@ -223,7 +239,7 @@ pub fn embed_pending_history(
             }
             continue;
         }
-        let text = commit_embedding_text(commit);
+        let (text, truncated) = commit_embedding_text_with_status(commit);
         if text.trim().is_empty() {
             // Nothing to embed and nothing to retry: a request would come back
             // as a zero vector at best.
@@ -233,10 +249,11 @@ pub fn embed_pending_history(
             }
             continue;
         }
-        units.push(EmbedUnit::new(
+        units.push(EmbedUnit::new_with_truncation(
             history_commit_key(&commit.sha),
             commit.sha.clone(),
             text,
+            truncated,
         ));
     }
 
@@ -270,7 +287,7 @@ pub fn embed_pending_history(
 
         let mut doc_units: Vec<EmbedUnit> = Vec::with_capacity(docs.len());
         for doc in &docs {
-            let text = doc_embedding_text(doc);
+            let (text, truncated) = doc_embedding_text_with_status(doc);
             if text.trim().is_empty() {
                 match store.mark_doc_embedded(&doc.id) {
                     Ok(()) => report.skipped += 1,
@@ -278,10 +295,11 @@ pub fn embed_pending_history(
                 }
                 continue;
             }
-            doc_units.push(EmbedUnit::new(
+            doc_units.push(EmbedUnit::new_with_truncation(
                 history_doc_key(&doc.id),
                 doc.id.clone(),
                 text,
+                truncated,
             ));
         }
 
@@ -317,8 +335,8 @@ pub fn embed_pending_history(
 /// embedder: that is a state of the installation, not a failure of the tick,
 /// and the daemon must keep ticking for every other subsystem.
 pub fn drain_all_pending(cas_root: &Path, limit: usize) -> Result<DrainReport, CasError> {
-    let config = CloudConfig::load_from_cas_dir_inheriting_user_credentials(cas_root)
-        .unwrap_or_default();
+    let config =
+        CloudConfig::load_from_cas_dir_inheriting_user_credentials(cas_root).unwrap_or_default();
 
     // First gate: no auth, no embedder, no cache directory on disk, no request.
     let Some(embedder) = KnowledgeEmbedder::from_config(&config) else {
@@ -418,7 +436,9 @@ pub const DRAIN_BATCH: usize = DEFAULT_EMBED_BATCH;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cloud::embeddings::{EmbeddingMeta, MAX_EMBED_INPUTS_PER_REQUEST, VectorNamespace};
+    use crate::cloud::embeddings::{
+        EmbeddingMeta, MAX_EMBED_INPUTS_PER_REQUEST, MAX_EMBED_TEXT_CHARS, VectorNamespace,
+    };
     use cas_store::{IngestBatch, KnowledgePage, PageWrite, SqliteKnowledgeStore};
     use std::sync::{Arc, Mutex};
 
@@ -862,6 +882,101 @@ mod tests {
         );
     }
 
+    struct RejectsLongInput {
+        dims: usize,
+        max_bytes: usize,
+    }
+
+    impl wiremock::Respond for RejectsLongInput {
+        fn respond(&self, request: &wiremock::Request) -> wiremock::ResponseTemplate {
+            let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+            let inputs = body.get("input").and_then(|v| v.as_array()).unwrap();
+            if inputs.iter().any(|input| {
+                input
+                    .as_str()
+                    .is_some_and(|text| text.len() > self.max_bytes)
+            }) {
+                return wiremock::ResponseTemplate::new(400).set_body_json(serde_json::json!({
+                    "error": "embedding_input_rejected",
+                    "message": "maximum input length is 8192 tokens"
+                }));
+            }
+            let vectors: Vec<Vec<f32>> = (0..inputs.len())
+                .map(|_| {
+                    let mut vector = vec![0.0f32; self.dims];
+                    vector[0] = 1.0;
+                    vector
+                })
+                .collect();
+            wiremock::ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({ "embeddings": vectors }))
+        }
+    }
+
+    /// GH #805: a previously quarantined over-limit history unit is re-armed
+    /// by the retry command, shortened at the embedding boundary, and
+    /// embedded without remaining quarantined or pending.
+    #[tokio::test]
+    async fn oversized_history_unit_retries_with_safe_truncation() {
+        use wiremock::{Mock, MockServer, matchers::method, matchers::path};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/embeddings"))
+            .respond_with(RejectsLongInput {
+                dims: 4,
+                max_bytes: 1_024,
+            })
+            .mount(&server)
+            .await;
+        let endpoint = server.uri();
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+
+        let (report, pending, quarantined, requeued, cached) =
+            tokio::task::spawn_blocking(move || {
+                let id = "gh:pr:620";
+                seed_history(
+                    &root,
+                    &[],
+                    &[doc(id, "Large pull request", &"dense ".repeat(20_000))],
+                );
+                let store = cas_store::SqliteHistoryStore::open(&root).unwrap();
+                store
+                    .quarantine_doc_embedding(id, "old provider input rejection")
+                    .unwrap();
+                let requeued = store.requeue_quarantined_embeddings().unwrap();
+                let embedder =
+                    KnowledgeEmbedder::new(&endpoint, "test-token").with_model("test-model", 4);
+                let report = drain_all_pending_with(&root, DRAIN_BATCH, &embedder).unwrap();
+                let (commits_pending, docs_pending) = store.count_pending_embedding().unwrap();
+                let (quarantined_commits, quarantined_docs) =
+                    store.count_quarantined_embedding().unwrap();
+                let cache = KnowledgeVectorCache::open(
+                    &root,
+                    EmbeddingMeta::new("cas-cloud", "test-model", 4),
+                )
+                .unwrap();
+                (
+                    report,
+                    commits_pending + docs_pending,
+                    quarantined_commits + quarantined_docs,
+                    requeued,
+                    cache.count().unwrap(),
+                )
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(requeued, 1);
+        assert_eq!(report.embedded(), 1);
+        assert_eq!(report.truncated(), 1);
+        assert_eq!(pending, 0);
+        assert_eq!(quarantined, 0);
+        assert_eq!(cached, 1);
+        assert!(report.problems().is_empty(), "{:?}", report.problems());
+    }
+
     /// The docs half must not be starved by a refused commit. Before GH #695's
     /// fix a failing commit chunk set `request_errors`, and the doc queue was
     /// skipped entirely on every tick.
@@ -887,7 +1002,11 @@ mod tests {
         let (report, pending) = tokio::task::spawn_blocking(move || {
             seed_history(
                 &root,
-                &[commit(&format!("{:040x}", 1), "feat: poison", Some("POISON-BODY"))],
+                &[commit(
+                    &format!("{:040x}", 1),
+                    "feat: poison",
+                    Some("POISON-BODY"),
+                )],
                 &[doc("gh:issue:1", "An issue", "ordinary text")],
             );
             let embedder =
@@ -901,7 +1020,11 @@ mod tests {
         .unwrap();
 
         assert_eq!(report.quarantined(), 1);
-        assert_eq!(report.embedded(), 1, "the doc embeds despite the bad commit");
+        assert_eq!(
+            report.embedded(),
+            1,
+            "the doc embeds despite the bad commit"
+        );
         assert_eq!(pending, 0);
     }
 
@@ -955,7 +1078,11 @@ mod tests {
         let squashed = commit(&format!("{:040x}", 9), "squash: everything", Some(&huge));
         let text = commit_embedding_text(&squashed);
 
-        assert_eq!(text.chars().count(), MAX_EMBED_TEXT_CHARS);
+        assert!(text.chars().count() < MAX_EMBED_TEXT_CHARS);
+        assert!(
+            crate::cloud::embeddings::estimate_embedding_tokens(&text)
+                <= crate::cloud::embeddings::MAX_EMBED_TEXT_BYTES
+        );
         assert!(
             text.starts_with("squash: everything"),
             "the subject is the most useful part and must survive the cap"

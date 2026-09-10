@@ -921,6 +921,58 @@ pub fn get_verification_dispatch(
     get_verification_dispatch_with_conn(&conn, dispatch_id)
 }
 
+/// Resolve a task verifier's dispatch reference to the current pending cycle
+/// when a previous task-only repository cycle was superseded without changing
+/// its exact proof boundary.
+///
+/// Supervisor-direct verification normally names the dispatch it was handed.
+/// A close retry can, however, retire that row and mint a replacement before
+/// the supervisor submits the verdict. Reusing the old id is safe only when
+/// both rows are task-only repository cycles with byte-for-byte identical
+/// repository proofs; receipt-bound delivery cycles and changed tips remain
+/// exact and are never aliased.
+pub fn resolve_verification_dispatch_for_add_with_conn(
+    conn: &Connection,
+    dispatch_id: &str,
+) -> Result<VerificationDispatch> {
+    let requested = get_verification_dispatch_with_conn(conn, dispatch_id)?;
+    if requested.state != VerificationDispatchState::Invalidated {
+        return Ok(requested);
+    }
+
+    let Some(current) = get_latest_verification_dispatch_with_conn(conn, &requested.task_id)?
+    else {
+        return Ok(requested);
+    };
+    let same_task_only_proof = requested.receipt_id.is_none()
+        && requested.delivery_transaction_id.is_none()
+        && current.receipt_id.is_none()
+        && current.delivery_transaction_id.is_none()
+        && requested.repository.is_some()
+        && requested.repository == current.repository;
+    if current.id != requested.id
+        && matches!(
+            current.state,
+            VerificationDispatchState::Pending | VerificationDispatchState::Claimed
+        )
+        && same_task_only_proof
+    {
+        return Ok(current);
+    }
+    Ok(requested)
+}
+
+/// Resolve a task verifier's dispatch reference using a fresh store
+/// connection. See [`resolve_verification_dispatch_for_add_with_conn`].
+pub fn resolve_verification_dispatch_for_add(
+    cas_dir: &Path,
+    dispatch_id: &str,
+) -> Result<VerificationDispatch> {
+    let store = SqliteVerificationStore::open(cas_dir)?;
+    let conn = store.conn.lock().map_err(lock_err)?;
+    resolve_verification_dispatch_for_add_with_conn(&conn, dispatch_id)
+}
+
 /// Create one durable task-scoped dispatch, returning an existing active
 /// dispatch when a retry races the same pending transition.
 pub fn create_verification_dispatch_bound(
@@ -1271,8 +1323,21 @@ pub fn invalidate_verification_dispatch_for_repository_drift(
         || dispatch.repository.is_none()
     {
         return Err(StoreError::Parse(
-            "repository proof invalidation requires the latest task-only repository dispatch"
-                .to_string(),
+            format!(
+                "repository proof invalidation requires the latest task-only repository dispatch (named {} bound head {}; latest {} bound head {})",
+                dispatch.id,
+                dispatch
+                    .repository
+                    .as_ref()
+                    .map(|proof| proof.head_commit.as_str())
+                    .unwrap_or("unbound"),
+                latest.id,
+                latest
+                    .repository
+                    .as_ref()
+                    .map(|proof| proof.head_commit.as_str())
+                    .unwrap_or("unbound")
+            ),
         ));
     }
     if dispatch.state == VerificationDispatchState::Invalidated {
@@ -3931,6 +3996,51 @@ mod tests {
             )
             .expect("post-conflict boundary counts");
         assert_eq!(counts_after, counts);
+    }
+
+    #[test]
+    fn superseded_task_dispatch_resolves_to_current_cycle_when_proof_is_unchanged() {
+        let (_store, dir) = create_test_store();
+        let repository = cas_types::RepositoryProofBoundary {
+            repository_root: "/repo".to_string(),
+            worktree_root: "/repo-worker".to_string(),
+            head_commit: "head-a".to_string(),
+            state_digest: "digest-a".to_string(),
+            anchor_commits: vec!["delivered-a".to_string()],
+        };
+        let boundary = cas_types::VerificationProofBoundary::task_at(repository);
+        let first = create_verification_dispatch_bound(
+            dir.path(),
+            "cas-superseded-add",
+            "worker",
+            "supervisor",
+            &boundary,
+            Utc::now() + Duration::minutes(10),
+            false,
+        )
+        .expect("first dispatch");
+        let conn = Connection::open(dir.path().join("cas.db")).expect("db");
+        resolve_verification_dispatch_with_conn(&conn, &first.id, "supervisor", None, true)
+            .expect("resolve first dispatch");
+        drop(conn);
+        invalidate_verification_dispatch_for_new_cycle(dir.path(), "cas-superseded-add")
+            .expect("invalidate first dispatch")
+            .expect("invalidated dispatch");
+        let replacement = create_verification_dispatch_bound(
+            dir.path(),
+            "cas-superseded-add",
+            "worker",
+            "supervisor",
+            &boundary,
+            Utc::now() + Duration::minutes(10),
+            false,
+        )
+        .expect("replacement dispatch");
+
+        let conn = Connection::open(dir.path().join("cas.db")).expect("db");
+        let effective = resolve_verification_dispatch_for_add_with_conn(&conn, &first.id)
+            .expect("superseded dispatch should resolve");
+        assert_eq!(effective.id, replacement.id);
     }
 
     #[test]

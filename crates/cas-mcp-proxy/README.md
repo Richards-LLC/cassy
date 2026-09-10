@@ -47,6 +47,13 @@ args = ["mcp-server-git"]
 env = { HOME = "/tmp" }
 ```
 
+Stdio `args` and `env` values expand `${VAR}` and `${VAR:-default}` from the
+proxy process environment when the child starts. An unset `${VAR}` prevents
+the child from starting and records `missing_credential_env:VAR` in proxy
+health and doctor output; it is never passed through as a literal placeholder.
+The legacy `env:VAR` credential reference remains supported for HTTP/SSE
+credentials and stdio environment values.
+
 **HTTP** — streamable HTTP connection:
 ```toml
 [servers.sentry]

@@ -78,8 +78,7 @@ impl CasCore {
         // UNLESS the task is orphaned (assignee is inactive/dead worker).
         if is_supervisor && task.task_type != crate::types::TaskType::Epic {
             let assignee_inactive = if let Some(assignee_id) = task.assignee.as_deref() {
-                agent_store
-                    .get(assignee_id)
+                super::super::task::resolve_agent_identity(agent_store.as_ref(), assignee_id)
                     .map(|a| !a.is_alive() || a.is_heartbeat_expired(300))
                     .unwrap_or(true) // assignee not found → treat as inactive
             } else {
@@ -111,6 +110,22 @@ impl CasCore {
             let _ = task_store.update(&task);
         }
 
+        let assignee_matches_caller = |assignee: &str| {
+            agent.as_ref().map_or_else(
+                || {
+                    assignee.eq_ignore_ascii_case(agent_id.trim())
+                        || assignee.eq_ignore_ascii_case(agent_name.trim())
+                },
+                |caller| {
+                    super::super::task::task_assignee_matches_agent(
+                        agent_store.as_ref(),
+                        Some(assignee),
+                        caller,
+                    )
+                },
+            )
+        };
+
         match &task.assignee {
             None => {
                 return Err(McpError {
@@ -121,12 +136,14 @@ impl CasCore {
                     data: None,
                 });
             }
-            Some(assignee) if assignee != &agent_id && assignee != &agent_name => {
+            Some(assignee) if !assignee_matches_caller(assignee) => {
                 // Allow supervisors to reclaim orphaned tasks from dead workers
                 let prev_assignee = assignee.clone();
                 let can_reclaim = is_supervisor
-                    && agent_store
-                        .get(&prev_assignee)
+                    && super::super::task::resolve_agent_identity(
+                        agent_store.as_ref(),
+                        &prev_assignee,
+                    )
                         .map(|a| !a.is_alive() || a.is_heartbeat_expired(300))
                         .unwrap_or(true);
 
@@ -146,12 +163,26 @@ impl CasCore {
                     let _ = task_store.update(&task);
 
                     // Release stale lease held by dead worker
-                    let _ = agent_store.release_lease(&req.task_id, &prev_assignee);
+                    let lease_owner = super::super::task::resolve_agent_identity(
+                        agent_store.as_ref(),
+                        &prev_assignee,
+                    )
+                    .map(|agent| agent.id)
+                    .unwrap_or(prev_assignee.as_str().to_string());
+                    let _ = agent_store.release_lease(&req.task_id, &lease_owner);
                 } else {
+                    let assigned_identity = super::super::task::agent_identity_label(
+                        agent_store.as_ref(),
+                        &prev_assignee,
+                    );
+                    let caller_identity = agent
+                        .as_ref()
+                        .map(|caller| format!("{} ({})", caller.name, caller.id))
+                        .unwrap_or_else(|| agent_name.clone());
                     return Err(McpError {
                         code: ErrorCode::INVALID_PARAMS,
                         message: Cow::from(format!(
-                            "Cannot claim task: assigned to '{prev_assignee}', not you ({agent_name})"
+                            "Cannot claim task: assigned to '{assigned_identity}', not you ({caller_identity})"
                         )),
                         data: None,
                     });
@@ -500,13 +531,12 @@ impl CasCore {
         // is unaffected — this is the intended dead-session recovery path.
         if !req.force.unwrap_or(false) {
             if let Some(ref assignee) = task.assignee {
-                // Look up the agent by name/id.  `list(None)` includes all statuses
-                // so we can check the raw heartbeat even for agents marked stale.
-                let all_agents = agent_store.list(None).unwrap_or_default();
-                let live_agent = all_agents
-                    .iter()
-                    .find(|a| a.name == *assignee || a.id == *assignee);
-                if let Some(agent) = live_agent {
+                // Resolve either the display name or opaque id. The registry
+                // includes all statuses so we can check the raw heartbeat
+                // even for agents marked stale.
+                if let Some(agent) =
+                    super::super::task::resolve_agent_identity(agent_store.as_ref(), assignee)
+                {
                     use crate::mcp::tools::service::factory_ops::WORKER_STALE_SECS;
                     let elapsed = (chrono::Utc::now() - agent.last_heartbeat).num_seconds();
                     if elapsed <= WORKER_STALE_SECS {

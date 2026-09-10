@@ -23,6 +23,14 @@ impl RestoreEnv {
         unsafe { std::env::set_var(key, value.into()) };
         Self { key, previous }
     }
+
+    fn remove(key: &'static str) -> Self {
+        let previous = std::env::var_os(key);
+        // SAFETY: callers hold `TEST_ENV_LOCK` for the lifetime of the guard,
+        // serializing process-wide test environment mutation in this binary.
+        unsafe { std::env::remove_var(key) };
+        Self { key, previous }
+    }
 }
 
 impl Drop for RestoreEnv {
@@ -133,6 +141,132 @@ auth = "env:NEON_API_KEY_TEST_WORKER"
     assert_eq!(
         env_value(worker_config, "NEON_API_KEY_TEST_WORKER"),
         Some("neon-value")
+    );
+}
+
+#[test]
+fn factory_pane_configs_reads_proxy_credentials_from_cas_credentials_file() {
+    let _env_lock = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let config_home = tempfile::tempdir().expect("temporary config home");
+    let _config_home = RestoreEnv::set("XDG_CONFIG_HOME", config_home.path());
+    let config_path = config_home.path().join("code-mode-mcp/config.toml");
+    std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &config_path,
+        r#"
+[servers.mecha-cassy]
+transport = "http"
+auth = "env:MECHA_SLACK_TOKEN_CREDENTIALS_FILE"
+
+[servers.mecha-cassy.headers]
+x-vercel-protection-bypass = "env:MECHA_VERCEL_BYPASS"
+"#,
+    )
+    .unwrap();
+    let credentials = config_home.path().join("cas/credentials.env");
+    std::fs::create_dir_all(credentials.parent().unwrap()).unwrap();
+    std::fs::write(
+        &credentials,
+        "export MECHA_SLACK_TOKEN_CREDENTIALS_FILE='token-from-file'\nexport MECHA_VERCEL_BYPASS='bypass-from-file'\n",
+    )
+    .unwrap();
+    let _credentials_file = RestoreEnv::set("CAS_CREDENTIALS_FILE", &credentials);
+    let _token = RestoreEnv::remove("MECHA_SLACK_TOKEN_CREDENTIALS_FILE");
+    let _bypass = RestoreEnv::remove("MECHA_VERCEL_BYPASS");
+
+    let config = MuxConfig {
+        cwd: PathBuf::from("/tmp/test"),
+        workers: 1,
+        include_director: false,
+        worker_cli: SupervisorCli::Codex,
+        ..MuxConfig::default()
+    };
+    let configs = Mux::factory_pane_configs(&config);
+    let (_, worker_config) = configs
+        .iter()
+        .find(|(name, _)| name == "worker-1")
+        .expect("worker config must be present");
+
+    assert_eq!(
+        env_value(worker_config, "MECHA_SLACK_TOKEN_CREDENTIALS_FILE"),
+        Some("token-from-file")
+    );
+    assert_eq!(
+        env_value(worker_config, "MECHA_VERCEL_BYPASS"),
+        Some("bypass-from-file")
+    );
+    let credentials_arg = format!(
+        "mcp_servers.cs.env.CAS_CREDENTIALS_FILE={}",
+        serde_json::to_string(&credentials.to_string_lossy()).unwrap()
+    );
+    assert!(
+        worker_config.args.contains(&credentials_arg),
+        "Codex's restricted MCP environment must receive the credentials path; args={:?}",
+        worker_config.args
+    );
+}
+
+#[test]
+fn factory_pane_configs_reads_proxy_credentials_from_login_profile_source() {
+    let _env_lock = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let config_home = tempfile::tempdir().expect("temporary config home");
+    let _config_home = RestoreEnv::set("XDG_CONFIG_HOME", config_home.path());
+    let home = tempfile::tempdir().expect("temporary home");
+    let _home = RestoreEnv::set("HOME", home.path());
+    let _shell = RestoreEnv::set("SHELL", "/bin/bash");
+    let _credentials_override = RestoreEnv::remove("CAS_CREDENTIALS_FILE");
+    let config_path = config_home.path().join("code-mode-mcp/config.toml");
+    std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &config_path,
+        r#"
+[servers.mecha-cassy]
+transport = "http"
+auth = "env:MECHA_SLACK_TOKEN_PROFILE_SOURCE"
+
+[servers.mecha-cassy.headers]
+x-vercel-protection-bypass = "env:MECHA_VERCEL_BYPASS_PROFILE_SOURCE"
+"#,
+    )
+    .unwrap();
+    let credentials = home.path().join("private/mecha-cassy.env");
+    std::fs::create_dir_all(credentials.parent().unwrap()).unwrap();
+    std::fs::write(
+        &credentials,
+        "export MECHA_SLACK_TOKEN_PROFILE_SOURCE='token-from-profile'\nexport MECHA_VERCEL_BYPASS_PROFILE_SOURCE='bypass-from-profile'\n",
+    )
+    .unwrap();
+    std::fs::write(
+        home.path().join(".profile"),
+        format!(
+            "[ -f '{}' ] && . '{}'\n",
+            credentials.display(),
+            credentials.display()
+        ),
+    )
+    .unwrap();
+    let _token = RestoreEnv::remove("MECHA_SLACK_TOKEN_PROFILE_SOURCE");
+    let _bypass = RestoreEnv::remove("MECHA_VERCEL_BYPASS_PROFILE_SOURCE");
+
+    let config = MuxConfig {
+        cwd: PathBuf::from("/tmp/test"),
+        workers: 1,
+        include_director: false,
+        ..MuxConfig::default()
+    };
+    let configs = Mux::factory_pane_configs(&config);
+    let (_, worker_config) = configs
+        .iter()
+        .find(|(name, _)| name == "worker-1")
+        .expect("worker config must be present");
+
+    assert_eq!(
+        env_value(worker_config, "MECHA_SLACK_TOKEN_PROFILE_SOURCE"),
+        Some("token-from-profile")
+    );
+    assert_eq!(
+        env_value(worker_config, "MECHA_VERCEL_BYPASS_PROFILE_SOURCE"),
+        Some("bypass-from-profile")
     );
 }
 

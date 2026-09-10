@@ -276,16 +276,13 @@ fn auto_unblock_worker_target(
         let agent_store = crate::store::open_agent_store(cas_root).map_err(|error| {
             format!("agent store open failed while resolving assignee: {error}")
         })?;
-        let agents = agent_store
-            .list(None)
-            .map_err(|error| format!("agent list failed while resolving assignee: {error}"))?;
-        let live_assignee = agents.into_iter().find(|agent| {
-            agent.role == AgentRole::Worker
-                && agent.visible_to_factory_session(factory_session.as_deref())
-                && (agent.name == assignee || agent.id == assignee)
-                && agent.is_alive()
-                && !agent.is_heartbeat_expired(AUTO_UNBLOCK_ASSIGNEE_STALE_SECS)
-        });
+        let live_assignee = super::super::resolve_agent_identity(agent_store.as_ref(), assignee)
+            .filter(|agent| {
+                agent.role == AgentRole::Worker
+                    && agent.visible_to_factory_session(factory_session.as_deref())
+                    && agent.is_alive()
+                    && !agent.is_heartbeat_expired(AUTO_UNBLOCK_ASSIGNEE_STALE_SECS)
+            });
         return Ok(match live_assignee {
             Some(agent) => AutoUnblockWorkerTarget::Worker(agent.name),
             None => AutoUnblockWorkerTarget::Skipped(format!(
@@ -750,6 +747,8 @@ pub fn emit_verification_dispatch_handoff(
     deadline: DateTime<Utc>,
     worker: &str,
     close_reason: Option<&str>,
+    bound_head: Option<&str>,
+    approved_verdict_id: Option<&str>,
 ) -> Result<(), String> {
     let body = crate::prompt_revalidation::verification_dispatch_envelope(
         dispatch_id,
@@ -758,6 +757,8 @@ pub fn emit_verification_dispatch_handoff(
         &deadline.to_rfc3339(),
         worker,
         close_reason,
+        bound_head,
+        approved_verdict_id,
     );
     let factory_session = std::env::var("CAS_FACTORY_SESSION").ok();
     let source = format!("{VERIFICATION_DISPATCH_SOURCE_PREFIX}{dispatch_id}");

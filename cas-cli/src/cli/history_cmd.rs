@@ -265,6 +265,8 @@ fn execute_embed(args: &EmbedArgs, cas_root: &Path) -> anyhow::Result<()> {
                 "pending_after": report.pending_after(),
                 "quarantined_this_run": report.quarantined(),
                 "quarantined_total": quarantined_total,
+                "truncated_this_run": report.truncated(),
+                "truncated": report.truncated() > 0,
                 "requeued": requeued,
                 "problems": report.problems(),
             })
@@ -293,6 +295,12 @@ fn execute_embed(args: &EmbedArgs, cas_root: &Path) -> anyhow::Result<()> {
         report.skipped(),
         report.pending_after(),
     );
+    if report.truncated() > 0 {
+        println!(
+            "{} unit(s) truncated to stay below the provider token limit",
+            report.truncated()
+        );
+    }
     // Quarantine is reported apart from the backlog on purpose: these units are
     // not waiting their turn, they need a decision. Naming the provider's own
     // words is what turns the count into something actionable.

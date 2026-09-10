@@ -1907,16 +1907,31 @@ pub(crate) fn record_is_live(record: &HubProcessRecord) -> bool {
 
 /// A startup record is durable before optional transport setup completes. A
 /// lifecycle caller may treat it as ready only after the lock owner reaches
-/// the running phase. Missing metadata is accepted for records written by
-/// older binaries, which had no phase marker.
+/// the running phase. Missing metadata is accepted only for records written
+/// by older binaries, which had no phase marker. Current-version records fail
+/// closed when the metadata is missing or being rewritten: `set_phase` updates
+/// the lock file in place, and accepting a transiently empty file would expose
+/// the startup record before optional transport fields (including `public_url`)
+/// have been written.
 fn record_is_ready(paths: &HubRuntimePaths, record: &HubProcessRecord) -> bool {
+    if record.version == env!("CARGO_PKG_VERSION")
+        && record.tailscale_cli.is_some()
+        && record.public_url.is_none()
+        && record.transport_warning.is_none()
+    {
+        // The startup record advertises the requested optional transport
+        // before ensure() has either published it or recorded its warning.
+        // Keep lifecycle callers from treating that intermediate shape as
+        // ready even if they observe a phase update racing the record rename.
+        return false;
+    }
     if !record_is_live(record) {
         return false;
     }
-    paths
-        .read_lock_owner()
-        .map(|owner| owner.pid == record.pid && owner.phase == "running")
-        .unwrap_or(true)
+    match paths.read_lock_owner() {
+        Some(owner) => owner.pid == record.pid && owner.phase == "running",
+        None => record.version != env!("CARGO_PKG_VERSION"),
+    }
 }
 
 pub(crate) fn hub_transport_report(

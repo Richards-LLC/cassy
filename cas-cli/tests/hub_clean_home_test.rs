@@ -165,6 +165,34 @@ fn clean_home_process_start_health_status_stop_needs_no_init() {
 
 #[cfg(unix)]
 #[test]
+fn current_hub_with_incomplete_lock_metadata_is_not_reported_ready() {
+    let home = private_home();
+    let path = system_path();
+    let record = start_hub(home.path(), &path, false);
+    fs::write(home.path().join(".cas/hub/hub.lock"), b"").unwrap();
+
+    let status = cas_command(home.path(), &path)
+        .args(["--json", "hub", "status"])
+        .output()
+        .expect("status with incomplete lock metadata");
+    assert!(!status.status.success());
+    let status: Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert_eq!(status["running"], false);
+    assert_eq!(status["record"]["pid"], record["pid"]);
+
+    let stop = cas_command(home.path(), &path)
+        .args(["--json", "hub", "stop"])
+        .output()
+        .expect("cleanup hub with incomplete lock metadata");
+    assert!(
+        stop.status.success(),
+        "cleanup failed: {}",
+        String::from_utf8_lossy(&stop.stderr)
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn hub_serve_does_not_hold_instance_lock_while_auth_lock_is_contended() {
     use fs2::FileExt;
     use std::os::unix::fs::PermissionsExt;

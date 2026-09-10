@@ -3176,6 +3176,10 @@ impl FactoryDaemon {
         match origin {
             None => WakeSender::Unstamped,
             Some(cas_store::QueueOrigin::Unattributed) => WakeSender::Unattributed,
+            // cas-7f81: a verified operator row keeps today's Commander wake
+            // behaviour (inbox-only) until the reply path (cas-7f59) defines
+            // its wake policy; the provenance header already names it.
+            Some(cas_store::QueueOrigin::PairedDevice { .. }) => WakeSender::Unattributed,
             Some(cas_store::QueueOrigin::Daemon) => WakeSender::Daemon,
             Some(cas_store::QueueOrigin::RegisteredAgent { .. }) => match resolved {
                 Some(agent) => WakeSender::Registered {

@@ -1150,4 +1150,19 @@ mod tests {
         let decoded: Task = serde_json::from_value(legacy).unwrap();
         assert_eq!(decoded.delivery_mode, DeliveryMode::PushBranch);
     }
+
+    #[test]
+    fn task_risk_declaration_requires_known_values_and_normalizes_csv() {
+        assert_eq!(
+            TaskRisk::parse_csv("blast-radius, platform, concurrency").unwrap(),
+            vec![
+                TaskRisk::BlastRadius,
+                TaskRisk::Platform,
+                TaskRisk::Concurrency,
+            ]
+        );
+        assert_eq!(TaskRisk::parse_csv("none").unwrap(), vec![TaskRisk::None]);
+        assert!(TaskRisk::parse_csv("platform,none").is_err());
+        assert!(TaskRisk::parse_csv("").is_err());
+    }
 }

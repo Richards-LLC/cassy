@@ -473,6 +473,211 @@ async fn test_close_remints_a_fresh_dispatch_when_the_bound_proof_is_dead() {
 }
 
 #[tokio::test]
+async fn test_supervisor_verdict_follows_superseded_dispatch_with_unchanged_proof() {
+    let (_temp, service, cas_dir, task_id, _worker_dir, _env_lock) =
+        delivered_worktree_fixture("factory/superseded-verdict").await;
+
+    let first = extract_text(
+        service
+            .cas_task_close(Parameters(close_request(&task_id, "delivered work")))
+            .await
+            .expect("first close"),
+    );
+    assert!(first.contains("VERIFICATION REQUIRED"), "{first}");
+    let stale = cas_store::get_latest_verification_dispatch(&cas_dir, &task_id)
+        .unwrap()
+        .expect("initial dispatch");
+    let boundary = cas_types::VerificationProofBoundary {
+        receipt_id: stale.receipt_id.clone(),
+        delivery_transaction_id: stale.delivery_transaction_id.clone(),
+        repository: stale.repository.clone(),
+    };
+    cas_store::invalidate_verification_dispatch_for_repository_drift(&cas_dir, &stale.id)
+        .expect("retire superseded dispatch");
+    let current = cas_store::create_verification_dispatch_bound(
+        &cas_dir,
+        &task_id,
+        &stale.requester_agent_id,
+        &stale.owner_agent_id,
+        &boundary,
+        chrono::Utc::now() + chrono::Duration::minutes(10),
+        false,
+    )
+    .expect("replacement dispatch");
+    assert_ne!(stale.id, current.id);
+
+    let supervisor = registered_supervisor(&cas_dir, "superseded-verdict-supervisor").await;
+    supervisor
+        .cas_verification_add(Parameters(VerificationAddRequest {
+            task_id: task_id.clone(),
+            status: "approved".to_string(),
+            summary: "approved unchanged superseded proof".to_string(),
+            confidence: Some(1.0),
+            issues: None,
+            files_reviewed: Some("delivered.txt".to_string()),
+            duration_ms: Some(1),
+            verification_type: None,
+            verifier_capability: None,
+            dispatch_id: Some(stale.id.clone()),
+        }))
+        .await
+        .expect("old handoff dispatch should resolve to current proof cycle");
+
+    let verdict = open_verification_store(&cas_dir)
+        .unwrap()
+        .get_latest_for_task(&task_id)
+        .unwrap()
+        .expect("supervisor verdict");
+    assert_eq!(verdict.dispatch_id.as_deref(), Some(current.id.as_str()));
+    assert_eq!(
+        cas_store::get_verification_dispatch(&cas_dir, &stale.id)
+            .unwrap()
+            .state,
+        cas::types::VerificationDispatchState::Invalidated
+    );
+    assert_eq!(
+        cas_store::get_verification_dispatch(&cas_dir, &current.id)
+            .unwrap()
+            .state,
+        cas::types::VerificationDispatchState::Resolved
+    );
+}
+
+#[tokio::test]
+async fn test_close_consumes_approved_verdict_when_tip_is_unchanged() {
+    let (_temp, service, cas_dir, task_id, _worker_dir, _env_lock) =
+        delivered_worktree_fixture("factory/approved-tip-retry").await;
+
+    let first = extract_text(
+        service
+            .cas_task_close(Parameters(close_request(&task_id, "delivered work")))
+            .await
+            .expect("first close"),
+    );
+    assert!(first.contains("VERIFICATION REQUIRED"), "{first}");
+    let dispatch = cas_store::get_latest_verification_dispatch(&cas_dir, &task_id)
+        .unwrap()
+        .expect("initial dispatch");
+
+    let supervisor = registered_supervisor(&cas_dir, "approved-tip-supervisor").await;
+    supervisor
+        .cas_verification_add(Parameters(VerificationAddRequest {
+            task_id: task_id.clone(),
+            status: "approved".to_string(),
+            summary: "approved exact task tip".to_string(),
+            confidence: Some(1.0),
+            issues: None,
+            files_reviewed: Some("delivered.txt".to_string()),
+            duration_ms: Some(1),
+            verification_type: None,
+            verifier_capability: None,
+            dispatch_id: Some(dispatch.id.clone()),
+        }))
+        .await
+        .expect("approve exact task tip");
+
+    let second = extract_text(
+        service
+            .cas_task_close(Parameters(close_request(&task_id, "delivered work")))
+            .await
+            .expect("same-tip retry close"),
+    );
+    assert!(
+        second.contains("Closed task:") && !second.contains("VERIFICATION REQUIRED"),
+        "approved same-tip verdict must be consumed rather than minting a new dispatch: {second}"
+    );
+    assert_eq!(
+        cas_store::get_latest_verification_dispatch(&cas_dir, &task_id)
+            .unwrap()
+            .expect("dispatch remains authoritative")
+            .id,
+        dispatch.id
+    );
+}
+
+#[tokio::test]
+async fn test_post_merge_close_dispatch_binds_the_published_target_head() {
+    let (temp, service, cas_dir, task_id, _worker_dir, _env_lock) =
+        delivered_worktree_fixture("factory/post-merge-target").await;
+    let task_store = open_task_store(&cas_dir).expect("task store");
+    let mut task = task_store.get(&task_id).expect("task");
+    task.status = TaskStatus::AwaitingMerge;
+    task.deliverables.factory_branch_anchor = Some(
+        String::from_utf8_lossy(
+            &std::process::Command::new("git")
+                .args(["rev-parse", "factory/post-merge-target"])
+                .current_dir(&temp)
+                .output()
+                .expect("resolve worker tip")
+                .stdout,
+        )
+        .trim()
+        .to_string(),
+    );
+    task_store.update(&task).expect("park task");
+    proof_boundary_git(
+        temp.path(),
+        &[
+            "merge",
+            "--no-ff",
+            "factory/post-merge-target",
+            "-m",
+            "publish delivered work",
+        ],
+    );
+    let target_head = std::process::Command::new("git")
+        .args(["rev-parse", "main"])
+        .current_dir(temp.path())
+        .output()
+        .expect("resolve target head");
+    assert!(target_head.status.success());
+    let target_head = String::from_utf8_lossy(&target_head.stdout).trim().to_string();
+
+    let post_merge = extract_text(
+        service
+            .cas_task_close(Parameters(close_request(&task_id, "merged delivered work")))
+            .await
+            .expect("post-merge close"),
+    );
+    assert!(post_merge.contains("VERIFICATION REQUIRED"), "{post_merge}");
+    let dispatch = cas_store::get_latest_verification_dispatch(&cas_dir, &task_id)
+        .unwrap()
+        .expect("post-merge dispatch");
+    assert_eq!(
+        dispatch
+            .repository
+            .as_ref()
+            .expect("repository-bound dispatch")
+            .head_commit,
+        target_head,
+        "post-merge proof must bind the published target checkout"
+    );
+    let supervisor = registered_supervisor(&cas_dir, "post-merge-target-supervisor").await;
+    supervisor
+        .cas_verification_add(Parameters(VerificationAddRequest {
+            task_id: task_id.clone(),
+            status: "approved".to_string(),
+            summary: "approved published target proof".to_string(),
+            confidence: Some(1.0),
+            issues: None,
+            files_reviewed: Some("delivered.txt".to_string()),
+            duration_ms: Some(1),
+            verification_type: None,
+            verifier_capability: None,
+            dispatch_id: Some(dispatch.id),
+        }))
+        .await
+        .expect("post-merge target proof should verify cleanly");
+    let closed = extract_text(
+        service
+            .cas_task_close(Parameters(close_request(&task_id, "merged delivered work")))
+            .await
+            .expect("post-merge close retry"),
+    );
+    assert!(closed.contains("Closed task:"), "{closed}");
+}
+
+#[tokio::test]
 async fn test_worker_main_loop_cannot_self_attest_verification() {
     let (temp, service) = setup_cas();
     let _env_lock = env_test_lock();

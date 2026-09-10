@@ -250,12 +250,37 @@ pub(crate) fn evaluate_repository_proof(
     proof: &RepositoryProofBoundary,
 ) -> Result<RepositoryProofStatus, TaskLifecycleGateError> {
     let worktree_root = PathBuf::from(&proof.worktree_root);
-    let current = capture_repository_proof_with_anchors(
+    let (current, validation_root) = match capture_repository_proof_with_anchors(
         Path::new(&proof.repository_root),
         &worktree_root,
         proof.anchor_commits.clone(),
-    )
-    .map_err(|message| TaskLifecycleGateError::RepositoryProof { message })?;
+    ) {
+        Ok(current) => (current, worktree_root),
+        Err(original) => {
+            // A successful post-merge cleanup removes the worker checkout that
+            // supplied this proof. The declared repository root is the durable
+            // target checkout, so it is the only safe fallback for a delivered
+            // task proof; keep all other missing-worktree errors strict.
+            let repository_root = Path::new(&proof.repository_root);
+            if repository_root != worktree_root.as_path() && is_git_worktree(repository_root) {
+                let current = capture_repository_proof_with_anchors(
+                    repository_root,
+                    repository_root,
+                    proof.anchor_commits.clone(),
+                )
+                .map_err(|fallback| {
+                    TaskLifecycleGateError::RepositoryProof {
+                        message: format!(
+                            "{original}; target checkout fallback also failed: {fallback}"
+                        ),
+                    }
+                })?;
+                (current, repository_root.to_path_buf())
+            } else {
+                return Err(TaskLifecycleGateError::RepositoryProof { message: original });
+            }
+        }
+    };
     if &current == proof {
         return Ok(RepositoryProofStatus::Unchanged);
     }
@@ -277,8 +302,8 @@ pub(crate) fn evaluate_repository_proof(
         .anchor_commits
         .iter()
         .filter(|anchor| {
-            !commit_exists(&worktree_root, anchor)
-                || !commit_is_reachable_from(&worktree_root, anchor, &current.head_commit)
+            !commit_exists(&validation_root, anchor)
+                || !commit_is_reachable_from(&validation_root, anchor, &current.head_commit)
         })
         .collect();
     if !missing.is_empty() {
@@ -354,6 +379,60 @@ mod tests {
 
     fn head(path: &Path) -> String {
         rev_parse(path, "HEAD").expect("HEAD")
+    }
+
+    #[test]
+    fn delivered_proof_rechecks_published_target_after_source_worktree_cleanup() {
+        let repo = tempfile::tempdir().expect("repository");
+        let worker = tempfile::tempdir().expect("worker worktree");
+        git(repo.path(), &["init", "-q", "-b", "main"]);
+        std::fs::write(repo.path().join("seed.txt"), "seed\n").expect("seed");
+        git(repo.path(), &["add", "seed.txt"]);
+        git(repo.path(), &["commit", "-q", "-m", "seed"]);
+        git(repo.path(), &["branch", "factory/worker"]);
+        git(
+            repo.path(),
+            &[
+                "worktree",
+                "add",
+                "-q",
+                worker.path().to_str().expect("worker path"),
+                "factory/worker",
+            ],
+        );
+        std::fs::write(worker.path().join("delivered.txt"), "delivered\n")
+            .expect("delivered file");
+        git(worker.path(), &["add", "delivered.txt"]);
+        git(worker.path(), &["commit", "-q", "-m", "deliver"]);
+        let delivered = head(worker.path());
+        let proof = capture_repository_proof_with_anchors(
+            repo.path(),
+            worker.path(),
+            vec![delivered],
+        )
+        .expect("capture worker proof");
+
+        git(
+            repo.path(),
+            &["merge", "--no-ff", "factory/worker", "-m", "merge delivery"],
+        );
+        git(
+            repo.path(),
+            &[
+                "worktree",
+                "remove",
+                "--force",
+                worker.path().to_str().expect("worker path"),
+            ],
+        );
+
+        assert!(
+            matches!(
+                evaluate_repository_proof(&proof).expect("published target proof"),
+                RepositoryProofStatus::DeliveredContentIntact { .. }
+            ),
+            "merged delivery should remain valid after source cleanup"
+        );
     }
 
     #[test]

@@ -165,6 +165,75 @@ fn clean_home_process_start_health_status_stop_needs_no_init() {
 
 #[cfg(unix)]
 #[test]
+fn current_hub_with_incomplete_lock_metadata_is_not_reported_ready() {
+    let home = private_home();
+    let path = system_path();
+    let record = start_hub(home.path(), &path, false);
+    fs::write(home.path().join(".cas/hub/hub.lock"), b"").unwrap();
+
+    let status = cas_command(home.path(), &path)
+        .args(["--json", "hub", "status"])
+        .output()
+        .expect("status with incomplete lock metadata");
+    assert!(!status.status.success());
+    let status: Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert_eq!(status["running"], false);
+    assert_eq!(status["record"]["pid"], record["pid"]);
+
+    let stop = cas_command(home.path(), &path)
+        .args(["--json", "hub", "stop"])
+        .output()
+        .expect("cleanup hub with incomplete lock metadata");
+    assert!(
+        stop.status.success(),
+        "cleanup failed: {}",
+        String::from_utf8_lossy(&stop.stderr)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn hub_serve_does_not_hold_instance_lock_while_auth_lock_is_contended() {
+    use fs2::FileExt;
+    use std::os::unix::fs::PermissionsExt;
+
+    let home = private_home();
+    let path = system_path();
+    let hub = home.path().join(".cas/hub");
+    fs::create_dir_all(&hub).unwrap();
+    fs::set_permissions(home.path().join(".cas"), fs::Permissions::from_mode(0o700)).unwrap();
+    fs::set_permissions(&hub, fs::Permissions::from_mode(0o700)).unwrap();
+    let auth_lock = fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(hub.join("auth.lock"))
+        .unwrap();
+    fs::set_permissions(hub.join("auth.lock"), fs::Permissions::from_mode(0o600)).unwrap();
+    auth_lock.lock_exclusive().unwrap();
+
+    let mut serve = cas_process_command(home.path(), &path);
+    serve
+        .args(["hub", "serve", "--bind", "127.0.0.1", "--port", "0"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let mut child = serve.spawn().expect("spawn auth-lock contention fixture");
+    thread::sleep(Duration::from_millis(300));
+
+    let paths = cas::hub::HubRuntimePaths::new(&hub);
+    let contender = paths
+        .acquire_instance_lock()
+        .expect("hub serve must not hold hub.lock while auth.lock blocks startup");
+    drop(contender);
+    assert!(!hub.join("process.json").exists());
+
+    auth_lock.unlock().unwrap();
+    child.kill().unwrap();
+    child.wait().unwrap();
+}
+
+#[cfg(unix)]
+#[test]
 fn clean_home_tailscale_stop_reports_removal_after_serve_exit_teardown() {
     use std::os::unix::fs::PermissionsExt;
 
@@ -714,6 +783,60 @@ fn restart_deadline_keeps_old_lock_owner_and_launches_no_replacement() {
         .expect("clean deadline fixture");
     assert!(cleanup.status.success());
     assert!(!home.path().join(".cas/hub/process.json").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn restart_force_terminates_a_recordless_lock_holder_and_starts_replacement() {
+    let home = private_home();
+    let bin = home.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    let barrier = home.path().join("restart-lock-force");
+    fs::create_dir(&barrier).unwrap();
+
+    let initial = cas_command(home.path(), bin.as_os_str())
+        .env("CAS_TEST_HUB_LOCK_RELEASE_BARRIER", &barrier)
+        .args(["--json", "hub", "start", "--port", "0"])
+        .output()
+        .expect("start force-recovery fixture");
+    assert!(initial.status.success());
+    let initial: Value = serde_json::from_slice(&initial.stdout).unwrap();
+
+    let restart = cas_command(home.path(), bin.as_os_str())
+        .args(["--json", "hub", "restart", "--force", "--port", "0"])
+        .output()
+        .expect("force-restart recordless holder");
+    assert!(
+        restart.status.success(),
+        "force restart failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&restart.stdout),
+        String::from_utf8_lossy(&restart.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&restart.stderr).contains("lock holder pid"),
+        "force recovery must name the terminated holder: {}",
+        String::from_utf8_lossy(&restart.stderr)
+    );
+
+    let status = cas_command(home.path(), bin.as_os_str())
+        .args(["--json", "hub", "status"])
+        .output()
+        .expect("status after force recovery");
+    assert!(status.status.success());
+    let status: Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert_eq!(status["running"], true);
+    assert_ne!(status["record"]["pid"], initial["pid"]);
+    assert!(home.path().join(".cas/hub/process.json").exists());
+
+    let stop = cas_command(home.path(), bin.as_os_str())
+        .args(["--json", "hub", "stop"])
+        .output()
+        .expect("stop force-recovery replacement");
+    assert!(
+        stop.status.success(),
+        "replacement stop failed: {}",
+        String::from_utf8_lossy(&stop.stderr)
+    );
 }
 
 /// cas-bf90 guard on the shared stop path.

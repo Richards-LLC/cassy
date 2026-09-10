@@ -410,8 +410,8 @@ pub fn is_merge_reclose_exempt_urgent(text: &str, target_awaiting_merge_task_ids
 /// The exemption is narrow by construction, identical in shape to the
 /// `AwaitingMerge` case:
 /// - It fires **only** when the task being closed is `AwaitingMerge` OR
-///   `InProgress` and its `assignee` is exactly the calling agent's own
-///   display name — someone else's task, or this same task in any other
+///   `InProgress` and the calling agent owns its assigned identity — someone
+///   else's task, or this same task in any other
 ///   status (`Open`, `Blocked`, `Closed`, `AwaitingMerge`), still
 ///   halts.
 /// - It does **not** clear `halt_task_work` — every other close/verify call
@@ -435,21 +435,13 @@ pub fn is_merge_reclose_exempt_urgent(text: &str, target_awaiting_merge_task_ids
 ///   about this task in the first place.
 pub fn halt_exempt_for_owned_task(
     task_status: TaskStatus,
-    task_assignee: Option<&str>,
-    caller_agent_name: Option<&str>,
+    caller_owns_task: bool,
 ) -> bool {
-    if !matches!(
-        task_status,
-        TaskStatus::AwaitingMerge | TaskStatus::InProgress
-    ) {
-        return false;
-    }
-    match (task_assignee, caller_agent_name) {
-        (Some(assignee), Some(caller)) if !assignee.is_empty() && !caller.is_empty() => {
-            assignee == caller
-        }
-        _ => false,
-    }
+    caller_owns_task
+        && matches!(
+            task_status,
+            TaskStatus::AwaitingMerge | TaskStatus::InProgress
+        )
 }
 
 #[cfg(test)]
@@ -804,8 +796,7 @@ mod tests {
     fn test_60393_owned_awaiting_merge_is_halt_exempt() {
         assert!(halt_exempt_for_owned_task(
             TaskStatus::AwaitingMerge,
-            Some("swift-fox-12"),
-            Some("swift-fox-12"),
+            true,
         ));
     }
 
@@ -816,8 +807,7 @@ mod tests {
     fn test_60393_other_workers_awaiting_merge_task_not_exempt() {
         assert!(!halt_exempt_for_owned_task(
             TaskStatus::AwaitingMerge,
-            Some("other-worker"),
-            Some("swift-fox-12"),
+            false,
         ));
     }
 
@@ -834,7 +824,7 @@ mod tests {
             TaskStatus::Closed,
         ] {
             assert!(
-                !halt_exempt_for_owned_task(status, Some("swift-fox-12"), Some("swift-fox-12"),),
+                !halt_exempt_for_owned_task(status, true),
                 "status {status:?} must not be halt-exempt — only AwaitingMerge/InProgress are"
             );
         }
@@ -847,18 +837,15 @@ mod tests {
     fn test_60393_missing_identity_fails_closed_to_halt() {
         assert!(!halt_exempt_for_owned_task(
             TaskStatus::AwaitingMerge,
-            None,
-            Some("swift-fox-12"),
+            false,
         ));
         assert!(!halt_exempt_for_owned_task(
             TaskStatus::AwaitingMerge,
-            Some("swift-fox-12"),
-            None,
+            false,
         ));
         assert!(!halt_exempt_for_owned_task(
             TaskStatus::AwaitingMerge,
-            Some(""),
-            Some(""),
+            false,
         ));
     }
 
@@ -871,8 +858,7 @@ mod tests {
     fn test_3894_owned_in_progress_is_halt_exempt() {
         assert!(halt_exempt_for_owned_task(
             TaskStatus::InProgress,
-            Some("patient-cobra-45"),
-            Some("patient-cobra-45"),
+            true,
         ));
     }
 
@@ -883,8 +869,7 @@ mod tests {
     fn test_3894_other_workers_in_progress_task_not_exempt() {
         assert!(!halt_exempt_for_owned_task(
             TaskStatus::InProgress,
-            Some("other-worker"),
-            Some("patient-cobra-45"),
+            false,
         ));
     }
 
@@ -895,18 +880,15 @@ mod tests {
     fn test_3894_in_progress_missing_identity_fails_closed_to_halt() {
         assert!(!halt_exempt_for_owned_task(
             TaskStatus::InProgress,
-            None,
-            Some("patient-cobra-45"),
+            false,
         ));
         assert!(!halt_exempt_for_owned_task(
             TaskStatus::InProgress,
-            Some("patient-cobra-45"),
-            None,
+            false,
         ));
         assert!(!halt_exempt_for_owned_task(
             TaskStatus::InProgress,
-            Some(""),
-            Some(""),
+            false,
         ));
     }
 }

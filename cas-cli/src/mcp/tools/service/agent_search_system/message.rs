@@ -1,6 +1,6 @@
 use crate::mcp::tools::service::imports::*;
 use crate::prompt_revalidation::{
-    assignment_solicited_task_id, assignment_targets_terminal_task, urgent_assignment_task_id,
+    assignment_solicited_task_id, assignment_stale_task, urgent_assignment_task_id,
 };
 
 fn resolve_inbox_recipient(
@@ -1812,68 +1812,30 @@ impl CasService {
                 continue;
             }
             let solicited_task = assignment_solicited_task_id(&message.prompt);
-            let terminal_assignment = match (&solicited_task, task_store.as_ref()) {
+            let stale_assignment = match (&solicited_task, task_store.as_ref()) {
                 (Some(task_id), Some(store)) => store.get(task_id).ok().and_then(|task| {
-                    assignment_targets_terminal_task(&message.prompt, task.status)
-                        .map(|task_id| (task_id, task.status))
+                    assignment_stale_task(
+                        &message.prompt,
+                        task.status,
+                        task.assignee.as_deref(),
+                        &recipient,
+                    )
                 }),
                 _ => None,
             };
-            if let Some((task_id, status)) = terminal_assignment {
+            if let Some((task_id, status)) = stale_assignment {
                 tracing::info!(
                     target: "cas::coordination",
-                    stage = "inbox_withheld_terminal_assignment",
+                    stage = "inbox_withheld_stale_assignment",
                     prompt_id = message.id,
                     recipient = %recipient,
                     task_id = %task_id,
                     status = %status,
-                    "cas-8aee: withheld a queued assignment whose task is terminal"
+                    "cas-7c1a: withheld a queued assignment whose task state makes its start instruction stale"
                 );
                 withheld.push((
                     message.id,
-                    format!("assignment for {task_id}, already done: {status}"),
-                ));
-                continue;
-            }
-            // GH #589: a registration-time spawn brief that arrives after the
-            // addressed worker has already moved its task beyond Open is stale
-            // even when the daemon never stamped transport delivery. Do not
-            // render old `task start` boilerplate from a direct inbox poll.
-            let started_spawn_assignment = if message.source.eq_ignore_ascii_case("director")
-                && message
-                    .summary
-                    .as_deref()
-                    .is_some_and(|summary| summary.starts_with("Assigned task:"))
-            {
-                solicited_task.as_deref().and_then(|task_id| {
-                    task_store.as_ref().and_then(|store| {
-                        store.get(task_id).ok().and_then(|task| {
-                            crate::prompt_revalidation::assignment_targets_started_task(
-                                &message.prompt,
-                                task.status,
-                                task.assignee.as_deref(),
-                                &recipient,
-                            )
-                            .map(|task_id| (task_id, task.status))
-                        })
-                    })
-                })
-            } else {
-                None
-            };
-            if let Some((task_id, status)) = started_spawn_assignment {
-                tracing::info!(
-                    target: "cas::coordination",
-                    stage = "inbox_withheld_started_assignment",
-                    prompt_id = message.id,
-                    recipient = %recipient,
-                    task_id = %task_id,
-                    status = %status,
-                    "cas-589: withheld a delayed spawn assignment after the addressed worker started the task"
-                );
-                withheld.push((
-                    message.id,
-                    format!("spawn assignment for {task_id}, already started: {status}"),
+                    format!("assignment for {task_id}, already started: {status}"),
                 ));
                 continue;
             }

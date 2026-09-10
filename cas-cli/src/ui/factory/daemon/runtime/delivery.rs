@@ -299,11 +299,28 @@ pub(crate) fn assignment_terminal_status(
     cas_dir: &Path,
     prompt: &str,
 ) -> Option<(String, cas_types::TaskStatus)> {
+    assignment_stale_status(cas_dir, prompt, "")
+}
+
+/// Read assignment state immediately before a prompt crosses a transport
+/// boundary. A worker must not receive registration/start boilerplate once it
+/// has already moved its assigned task beyond `Open`; terminal tasks are stale
+/// for every recipient, while in-progress/blocked/parked tasks are stale only
+/// for their current assignee. Missing or unreadable state fails open.
+pub(crate) fn assignment_stale_status(
+    cas_dir: &Path,
+    prompt: &str,
+    recipient: &str,
+) -> Option<(String, cas_types::TaskStatus)> {
     let task_id = crate::prompt_revalidation::assignment_solicited_task_id(prompt)?;
     let store = crate::store::open_task_store_local(cas_dir).ok()?;
     let task = store.get(&task_id).ok()?;
-    crate::prompt_revalidation::assignment_targets_terminal_task(prompt, task.status)
-        .map(|task_id| (task_id, task.status))
+    crate::prompt_revalidation::assignment_stale_task(
+        prompt,
+        task.status,
+        task.assignee.as_deref(),
+        recipient,
+    )
 }
 
 /// cas-ae6d: hand a director prompt to the durable `prompt_queue` so the
@@ -1298,6 +1315,48 @@ mod tests {
             assignment_terminal_status(&cas_dir, &prompt),
             Some((task_id.to_string(), cas_types::TaskStatus::Closed)),
             "both direct delivery and wake-time queue flush must suppress the stale start instruction"
+        );
+    }
+
+    #[test]
+    fn started_assignment_is_suppressed_for_the_current_worker_at_transport() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        let task_store = crate::store::open_task_store(&cas_dir).unwrap();
+        let task_id = "cas-7c1d";
+        let mut task = cas_types::Task::new(task_id.to_string(), "already delivered".into());
+        task.status = cas_types::TaskStatus::AwaitingMerge;
+        task.assignee = Some("worker-1".to_string());
+        task_store.add(&task).unwrap();
+
+        let prompt = format!(
+            "You were spawned for task {task_id} — \"already delivered\" — and it is assigned to you now."
+        ) + &format!(
+            "\nStart with `mcp__cs__task action=show id={task_id}`, then `mcp__cs__task action=start id={task_id}` before you change any code."
+        );
+        assert_eq!(
+            crate::prompt_revalidation::assignment_solicited_task_id(&prompt).as_deref(),
+            Some(task_id),
+            "prompt was not recognized as an assignment: {prompt:?}"
+        );
+        let stored = crate::store::open_task_store_local(&cas_dir)
+            .unwrap()
+            .get(task_id)
+            .unwrap();
+        assert_eq!(stored.status, cas_types::TaskStatus::AwaitingMerge);
+        assert_eq!(stored.assignee.as_deref(), Some("worker-1"));
+        assert_eq!(
+            assignment_stale_status(&cas_dir, &prompt, "worker-1"),
+            Some((
+                task_id.to_string(),
+                cas_types::TaskStatus::AwaitingMerge
+            )),
+            "the direct and durable transports must suppress an old spawn brief for its assignee"
+        );
+        assert_eq!(
+            assignment_stale_status(&cas_dir, &prompt, "worker-2"),
+            None,
+            "another worker must not lose a valid assignment because this worker parked it"
         );
     }
 

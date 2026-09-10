@@ -105,6 +105,10 @@ async fn server_start_list_stop_round_trip() {
         started.contains("dies at teardown"),
         "an unshared server must say it is contained: {started}"
     );
+    assert!(
+        started.contains("pgid:"),
+        "the group id is recorded: {started}"
+    );
 
     let listed = env.call(serde_json::json!({"action": "server_list"})).await;
     assert!(listed.contains("Running servers (1)"), "{listed}");
@@ -112,6 +116,11 @@ async fn server_start_list_stop_round_trip() {
     assert!(listed.contains(&id), "{listed}");
     assert!(listed.contains("cas-7c93"), "owner task shown: {listed}");
     assert!(listed.contains("sleep 300"), "command shown: {listed}");
+    assert!(listed.contains("pgid"), "process group shown: {listed}");
+    assert!(
+        listed.contains("live descendants"),
+        "live descendant count shown: {listed}"
+    );
 
     let stopped = env
         .call(serde_json::json!({"action": "server_stop", "id": id}))

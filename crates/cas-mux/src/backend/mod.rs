@@ -5,7 +5,7 @@ mod codex;
 mod grok;
 mod opencode;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use crate::harness::{HarnessCapabilities, SupervisorCli};
@@ -127,8 +127,15 @@ pub(super) fn finish_worker_config(
 /// explicitly, so the supervisor must resolve those references before
 /// spawning them. Both the user config and the project-scoped `.cas/proxy.toml`
 /// are read because project definitions override user definitions at runtime.
+///
+/// A factory daemon is often started by a desktop launcher or a non-login
+/// service, so its environment is not guaranteed to contain credentials that
+/// the supervisor's login shell had sourced. Resolve the same private
+/// credentials file and shell profile used by `cas integrate mecha-cassy` as a
+/// fallback, while keeping an explicitly exported value authoritative.
 fn proxy_credential_environment(cas_root: Option<&PathBuf>) -> Vec<(String, String)> {
     let mut names = BTreeSet::new();
+    let mut values = BTreeMap::new();
     let mut paths = Vec::new();
     if let Some(config_home) = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
@@ -148,13 +155,151 @@ fn proxy_credential_environment(cas_root: Option<&PathBuf>) -> Vec<(String, Stri
         };
         collect_env_references(&document, &mut names);
     }
+    for path in credential_source_paths() {
+        load_shell_environment(&path, &mut values, &mut BTreeSet::new(), 0);
+    }
     names
         .into_iter()
         .filter_map(|name| {
-            std::env::var_os(&name)
-                .and_then(|value| value.into_string().ok().map(|value| (name, value)))
+            std::env::var(&name)
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .or_else(|| {
+                    values
+                        .remove(&name)
+                        .filter(|value| !value.trim().is_empty())
+                })
+                .map(|value| (name, value))
         })
         .collect()
+}
+
+/// Return the credentials file and login profile locations that a normal
+/// `cas integrate mecha-cassy` invocation uses. The explicit override wins,
+/// then XDG, then the HOME default; the profile is included so a profile can
+/// source an operator-selected credentials file outside those defaults.
+fn credential_source_paths() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+
+    if let Some(path) = std::env::var_os("CAS_CREDENTIALS_FILE")
+        .map(PathBuf::from)
+        .filter(|path| !path.as_os_str().is_empty())
+    {
+        paths.push(path);
+    } else if let Some(config_home) = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .filter(|path| !path.as_os_str().is_empty())
+    {
+        paths.push(config_home.join("cas").join("credentials.env"));
+    } else if let Some(home) = &home {
+        paths.push(home.join(".config").join("cas").join("credentials.env"));
+    }
+
+    if let Some(home) = home {
+        let shell = std::env::var_os("SHELL");
+        paths.push(login_profile_path(&home, shell.as_deref()));
+    }
+    paths
+}
+
+fn login_profile_path(home: &Path, shell: Option<&std::ffi::OsStr>) -> PathBuf {
+    let shell_name = shell
+        .and_then(|value| Path::new(value).file_name())
+        .and_then(|value| value.to_str())
+        .unwrap_or_default();
+    if shell_name == "zsh" {
+        return home.join(".zprofile");
+    }
+    if shell_name == "bash" && home.join(".bash_profile").exists() {
+        return home.join(".bash_profile");
+    }
+    home.join(".profile")
+}
+
+fn valid_environment_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.bytes().enumerate().all(|(index, byte)| {
+            byte == b'_'
+                || (byte.is_ascii_alphanumeric() && (index > 0 || byte.is_ascii_alphabetic()))
+        })
+}
+
+/// Parse the simple `export NAME='value'` form emitted by the integration
+/// writer. The unquoted/double-quoted forms cover hand-maintained profiles as
+/// well; arbitrary shell is intentionally not executed while resolving
+/// credentials.
+fn shell_assignment(line: &str) -> Option<(String, String)> {
+    let mut line = line.trim();
+    if line.is_empty() || line.starts_with('#') {
+        return None;
+    }
+    if let Some(rest) = line.strip_prefix("export") {
+        if !rest.starts_with(char::is_whitespace) {
+            return None;
+        }
+        line = rest.trim_start();
+    }
+    let (name, raw_value) = line.split_once('=')?;
+    let name = name.trim();
+    if !valid_environment_name(name) {
+        return None;
+    }
+    let raw_value = raw_value.trim();
+    let value = if raw_value.starts_with('\'') && raw_value.ends_with('\'') {
+        raw_value[1..raw_value.len() - 1].replace("'\\''", "'")
+    } else if raw_value.starts_with('"') && raw_value.ends_with('"') {
+        raw_value[1..raw_value.len() - 1].replace("\\\"", "\"")
+    } else {
+        raw_value.to_string()
+    };
+    Some((name.to_string(), value))
+}
+
+fn sourced_profile_path(line: &str) -> Option<PathBuf> {
+    let value = line
+        .split_once("&& . ")
+        .map(|(_, value)| value.trim())
+        .or_else(|| line.trim().strip_prefix(". ").map(str::trim))
+        .or_else(|| line.trim().strip_prefix("source ").map(str::trim))?;
+    let value = value.split_whitespace().next()?;
+    let value = if value.starts_with('\'') && value.ends_with('\'') {
+        value[1..value.len() - 1].replace("'\\''", "'")
+    } else if value.starts_with('"') && value.ends_with('"') {
+        value[1..value.len() - 1].replace("\\\"", "\"")
+    } else {
+        value.to_string()
+    };
+    (!value.is_empty()).then(|| PathBuf::from(value))
+}
+
+/// Read profile assignments without executing operator shell code. Follow
+/// sourced files only through explicit path tokens and cap recursion to avoid
+/// cycles in mutually-sourced profiles.
+fn load_shell_environment(
+    path: &Path,
+    values: &mut BTreeMap<String, String>,
+    visited: &mut BTreeSet<PathBuf>,
+    depth: usize,
+) {
+    if depth > 8 {
+        return;
+    }
+    let identity = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    if !visited.insert(identity) {
+        return;
+    }
+    let Ok(contents) = std::fs::read_to_string(path) else {
+        return;
+    };
+    for line in contents.lines() {
+        if let Some((name, value)) = shell_assignment(line) {
+            values.insert(name, value);
+        }
+        if let Some(source) = sourced_profile_path(line) {
+            load_shell_environment(&source, values, visited, depth + 1);
+        }
+    }
 }
 
 fn collect_env_references(value: &toml::Value, names: &mut BTreeSet<String>) {

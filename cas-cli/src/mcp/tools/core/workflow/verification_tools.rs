@@ -148,7 +148,7 @@ impl CasCore {
             });
         }
         let mut bound_server_handoff = None;
-        let requested_dispatch_id = if let Some(capability_token) =
+        let mut requested_dispatch_id = if let Some(capability_token) =
             req.verifier_capability.as_deref()
         {
             let capability = cas_store::inspect_verifier_capability(
@@ -319,6 +319,25 @@ impl CasCore {
             });
         };
 
+        // A supervisor may submit the dispatch id from the handoff it read
+        // after a close retry has already retired that row and minted the
+        // next task-only repository cycle. Preserve exact capability and
+        // child-handoff authority, but let a direct supervisor verdict follow
+        // an unchanged proof boundary to the current pending dispatch.
+        if supervisor_direct {
+            requested_dispatch_id =
+                cas_store::resolve_verification_dispatch_for_add(
+                    &self.cas_root,
+                    &requested_dispatch_id,
+                )
+                .map_err(|_| McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from("Supervisor-direct verification rejected: named dispatch is unavailable."),
+                    data: None,
+                })?
+                .id;
+        }
+
         // cas-b269: urgent stop halt blocks verification MCP.
         //
         // cas-3894: same owned-task exemption as `task action=close`
@@ -359,8 +378,11 @@ impl CasCore {
         let halt_exempt =
             crate::mcp::tools::core::task::lifecycle::stale_close_guard::halt_exempt_for_owned_task(
                 task.status,
-                task.assignee.as_deref(),
-                Some(caller.name.as_str()),
+                crate::mcp::tools::core::task::task_assignee_matches_agent(
+                    agent_store.as_ref(),
+                    task.assignee.as_deref(),
+                    &caller,
+                ),
             );
         if crate::mcp::tools::core::task::lifecycle::stale_close_guard::agent_task_work_halted(
             &caller.metadata,
@@ -400,6 +422,44 @@ impl CasCore {
             ) {
                 Ok(status) => repository_drift_note = status.drift_note(),
                 Err(error) => {
+                    let superseded = cas_store::get_latest_verification_dispatch(
+                        &self.cas_root,
+                        &req.task_id,
+                    )
+                    .ok()
+                    .flatten()
+                    .filter(|current| current.id != proof_dispatch.id);
+                    if proof_dispatch.state == cas_types::VerificationDispatchState::Invalidated
+                        || superseded.is_some()
+                    {
+                        let bound_head = proof_dispatch
+                            .repository
+                            .as_ref()
+                            .map(|proof| proof.head_commit.as_str())
+                            .unwrap_or("unbound");
+                        let current = superseded
+                            .as_ref()
+                            .map(|dispatch| {
+                                let head = dispatch
+                                    .repository
+                                    .as_ref()
+                                    .map(|proof| proof.head_commit.as_str())
+                                    .unwrap_or("unbound");
+                                format!(
+                                    " Current dispatch {} is bound to head {}.",
+                                    dispatch.id, head
+                                )
+                            })
+                            .unwrap_or_default();
+                        return Err(McpError {
+                            code: ErrorCode::INVALID_PARAMS,
+                            message: Cow::from(format!(
+                                "Verification rejected: dispatch {} was superseded or invalidated (bound head {}).{} Re-run task close and submit the current dispatch instead of retrying this stale id.",
+                                proof_dispatch.id, bound_head, current
+                            )),
+                            data: None,
+                        });
+                    }
                     cas_store::invalidate_verification_dispatch_for_repository_drift(
                         &self.cas_root,
                         &requested_dispatch_id,

@@ -89,9 +89,30 @@ contains_exact() {
 integration_target_for() {
     local nested_path="$1" directory candidate
     directory="${nested_path%%/*}"
+
+    # GH #778: the nested path is often owned by the conventional top-level
+    # integration target with the same stem (for example,
+    # mcp_tools_test/task_tools/operations.rs belongs to mcp_tools_test.rs).
+    # Resolve that filename before inspecting file contents so a fixture that
+    # merely mentions the path cannot claim ownership.
+    candidate="cas-cli/tests/${directory}.rs"
+    if [[ -f "${candidate}" ]]; then
+        basename "${candidate%.rs}"
+        return 0
+    fi
+
+    # Some integration targets keep their root in a differently named file
+    # and declare the nested module with `mod <directory>;` or an explicit
+    # Rust path attribute. Only anchored declarations are ownership evidence;
+    # arbitrary strings and comments are not.
     for candidate in cas-cli/tests/*.rs; do
         [[ -f "$candidate" ]] || continue
-        if grep -qF "${directory}/" "$candidate"; then
+        if grep -Eq \
+            "^[[:space:]]*mod[[:space:]]+${directory}[[:space:]]*;[[:space:]]*$" \
+            "$candidate" \
+            || grep -Eq \
+            "^[[:space:]]*#\\[path[[:space:]]*=[[:space:]]*\"${directory}/[^\"[:space:]]+\"[[:space:]]*\\][[:space:]]*$" \
+            "$candidate"; then
             basename "${candidate%.rs}"
             return 0
         fi

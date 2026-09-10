@@ -2,11 +2,11 @@
 
 | Field | Sentence |
 | --- | --- |
-| First two lines | Whether the running hub's CAS-created Tailscale Serve route reaches its current ephemeral shim, followed by one copyable restart remedy when it does not. |
-| Scannable | `cas hub status` keeps the hub verdict first and adds one Tailscale Serve row; `cas doctor --host` adds one `hub transport` check row with the same status and cause. |
-| Readable | The report names the expected and actual loopback targets only when they differ, then gives the single restart command that republishes the route. |
-| Machine output | `cas hub status --json` returns one object with the existing `running`, `record`, and `binary` fields plus `tailscale_serve: {status, message, expected_target?, actual_target?, remedy?}`; `cas doctor --json --host` remains one array of check objects and never prints a human banner. |
-| Omitted | Raw Tailscale status JSON, receipt timestamps, and unrelated Serve handlers are omitted from normal output; operators can inspect the route with the existing Tailscale CLI. |
+| First two lines | Whether the hub is healthy or wedged, followed immediately by the one copyable restart command that clears a lock holder with no live runtime endpoint. |
+| Scannable | `cas hub status` keeps the hub verdict first and adds one Tailscale Serve row; `cas doctor --host` adds one `hub transport` check row with the same status, holder PID/age, and remedy. |
+| Readable | The report names a wedged holder by PID and age, names expected and actual loopback targets only when they differ, and gives one restart command. |
+| Machine output | `cas hub status --json` returns one object with `running`, `record`, `binary`, optional `lock_holder: {pid, age, phase, command}`, and `tailscale_serve: {status, message, expected_target?, actual_target?, remedy?}`; `cas doctor --json --host` remains one array of check objects and never prints a human banner. |
+| Omitted | Raw Tailscale status JSON, receipt timestamps, and unrelated Serve handlers remain omitted; process-table archaeology stays behind the holder PID/age summary. |
 
 ## Rendering decisions
 
@@ -33,6 +33,24 @@ terminal-qa: PASS cas-doctor-hub-transport · 12 runs · 0 fail · 0 warn · 0 a
 | Machine contract | 5 | Both JSON runs produce one document and preserve the command exit verdict. |
 
 Scored by the worker on 2026-09-08; floor holds.
+
+### Wedged-holder recovery rendering
+
+terminal-qa: PASS cas-be89-hub-status · 12 runs · 0 fail · 0 warn · 0 allowed · /home/pippenz/.cas/artifacts/cas-be89/terminal-qa/report.json
+
+terminal-qa: PASS cas-be89-doctor-hub-transport-allowlisted · 12 runs · 0 fail · 0 warn · 12 allowed · /home/pippenz/.cas/artifacts/cas-be89/terminal-qa-doctor-allowlisted/report.json
+
+The doctor receipt has a raw companion failure at `/home/pippenz/.cas/artifacts/cas-be89/terminal-qa-doctor/report.json`; its 12 findings are pre-existing truncations in unrelated stale-registration and cloud-purge diagnostics, each explicitly allowlisted in `/home/pippenz/.cas/artifacts/cas-be89/terminal-qa-doctor-allowlist.json`. The hub transport row remains one compact `✓ hub transport` check in the captured doctor output, and the status surface retains a three-line verdict/owner/transport hierarchy.
+
+| Dimension | Score | Evidence |
+| --- | --- | --- |
+| Hierarchy | 4 | `cas hub status` leads with running/not-ready, then PID/version, then the transport verdict; wedged status leads with holder PID/age and its force remedy. |
+| Fit | 4 | Human output remains compact while JSON adds optional `lock_holder` detail without banners or mixed documents. |
+| Craft | 4 | Holder age, phase, and one copyable force restart remedy use the existing hanging-indentation grammar; status and doctor share the classifier. |
+| Theme safety | 5 | Both status and doctor gates pass dark, light, Solarized, `NO_COLOR`, and C-locale runs; doctor unrelated truncations are the only allowlisted findings. |
+| Machine contract | 5 | JSON runs produced one document and preserved the command exit verdict in both gates. |
+
+Scored by the worker on 2026-09-10; floor holds.
 
 ### Healthy-route rendering correction
 

@@ -1471,7 +1471,10 @@ fn safe_error_detail(error: &anyhow::Error) -> String {
             .downcast_ref::<MissingCredentialError>()
             .map(|missing| missing.name.as_str())
     }) {
-        return format!("missing required environment variable {name}");
+        let remedy = (name == "MECHA_VERCEL_BYPASS" || name.starts_with("MECHA_SLACK_TOKEN_"))
+            .then_some("; run `cas integrate mecha-cassy` to refresh credentials")
+            .unwrap_or_default();
+        return format!("missing required environment variable {name}{remedy}");
     }
     safe_error_detail_text(&format!("{error:#}"))
 }
@@ -2668,6 +2671,33 @@ mod tests {
         assert!(json.contains(&missing));
         assert!(!json.contains(secret));
         assert!(!json.contains("connection_failed"));
+    }
+
+    #[tokio::test]
+    async fn mecha_cassy_missing_credential_health_names_refresh_command() {
+        let missing = format!("MECHA_SLACK_TOKEN_CAS_PROXY_HEALTH_{}", std::process::id());
+        let config = ServerConfig::Http {
+            url: "https://example.invalid/mcp".to_string(),
+            auth: Some(format!("env:{missing}")),
+            headers: HashMap::new(),
+            oauth: false,
+        };
+        let engine =
+            ProxyEngine::from_configs(HashMap::from([("mecha-cassy".to_string(), config)]))
+                .await
+                .unwrap();
+        let server = engine
+            .health_snapshot()
+            .await
+            .servers
+            .into_iter()
+            .find(|server| server.name == "mecha-cassy")
+            .expect("configured upstream health must be present");
+
+        let expected = format!(
+            "missing required environment variable {missing}; run `cas integrate mecha-cassy` to refresh credentials"
+        );
+        assert_eq!(server.last_error.as_deref(), Some(expected.as_str()));
     }
 
     #[tokio::test(flavor = "current_thread")]

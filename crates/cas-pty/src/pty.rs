@@ -801,6 +801,52 @@ fn push_host_home_env(env: &mut Vec<(String, String)>, role: &str) {
     }
 }
 
+/// Pass the non-secret machine credential discovery paths into Codex's CAS
+/// MCP subprocess. Codex deliberately starts MCP servers with a restricted
+/// environment, so `cas serve` cannot otherwise see the credentials file or
+/// the login profile that the factory pane can resolve.
+fn push_codex_machine_credential_env(args: &mut Vec<String>) {
+    let home = dirs::home_dir();
+    let credentials_file = std::env::var_os("CAS_CREDENTIALS_FILE")
+        .map(PathBuf::from)
+        .filter(|path| !path.as_os_str().is_empty())
+        .or_else(|| {
+            std::env::var_os("XDG_CONFIG_HOME")
+                .map(PathBuf::from)
+                .filter(|path| !path.as_os_str().is_empty())
+                .map(|path| path.join("cas").join("credentials.env"))
+        })
+        .or_else(|| {
+            home.clone()
+                .map(|path| path.join(".config").join("cas").join("credentials.env"))
+        });
+
+    let mut inject = |key: &str, value: PathBuf| {
+        let value = serde_json::to_string(&value.to_string_lossy())
+            .expect("serializing a filesystem path string cannot fail");
+        args.push("-c".to_string());
+        args.push(format!("mcp_servers.cs.env.{key}={value}"));
+    };
+    if let Some(value) = credentials_file {
+        inject("CAS_CREDENTIALS_FILE", value);
+    }
+    if let Some(value) = home {
+        inject("HOME", value);
+    }
+    if let Some(value) = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .filter(|path| !path.as_os_str().is_empty())
+    {
+        inject("XDG_CONFIG_HOME", value);
+    }
+    if let Some(value) = std::env::var_os("SHELL")
+        .map(PathBuf::from)
+        .filter(|path| !path.as_os_str().is_empty())
+    {
+        inject("SHELL", value);
+    }
+}
+
 impl PtyConfig {
     /// Apply the Codex account home override to this worker config.
     ///
@@ -1633,6 +1679,7 @@ fn push_codex_mcp_server_args(
         args.push("-c".to_string());
         args.push(format!("mcp_servers.cs.env.CAS_ROOT={root}"));
     }
+    push_codex_machine_credential_env(args);
     // cas-3522: inject the canonical session id into the `cs` MCP server env so
     // `get_agent_id()` auto-registers the agent on its FIRST tool call — the same
     // env fast-path Claude workers rely on. Codex starts MCP servers with a

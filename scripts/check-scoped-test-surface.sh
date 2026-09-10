@@ -181,6 +181,7 @@ source_public_symbols_for() {
 
 discover_source_integration_targets() {
     local source_path="$1" source_file module_path test_path symbol symbol_filter
+    local matched_paths rg_status
     local -a symbol_patterns=()
     source_file="$repo_root/$source_path"
     [[ -f "$source_file" ]] || return 0
@@ -200,30 +201,50 @@ discover_source_integration_targets() {
     # API rather than importing the private source module. Explicit `use` /
     # path references remain useful evidence for modules that are public in a
     # crate, and source-path literals are accepted only as an anchored path
-    # reference (not as arbitrary target-name text).
+    # reference (not as arbitrary target-name text). Search the test tree once
+    # for each evidence class; per-symbol/per-file subprocesses made a large
+    # close diff needlessly expensive.
+    if matched_paths="$(rg -l --glob '*.rs' \
+        -e "^[[:space:]]*(pub[[:space:]]+)?use[[:space:]].*${module_path}([[:space:];:{]|$)" \
+        -e "^[[:space:]]*[^/].*${module_path}" \
+        -e "^[[:space:]]*[^/].*(include_str!|include_bytes!|Path|read_to_string).*${source_path}" \
+        -- cas-cli/tests 2>/dev/null)"; then
+        :
+    else
+        rg_status=$?
+        if [[ "$rg_status" -ne 1 ]]; then
+            printf 'SCOPED PROOF SURFACE: source path discovery failed for %s (rg exit %s).\n' \
+                "$source_path" "$rg_status" >&2
+            exit 2
+        fi
+        matched_paths=''
+    fi
     while IFS= read -r test_path; do
         [[ -n "$test_path" ]] || continue
-        if rg -q -e \
-            "^[[:space:]]*(pub[[:space:]]+)?use[[:space:]].*${module_path}([[:space:];:{]|$)" \
-            "$test_path" \
-            || rg -q -e \
-            "^[[:space:]]*[^/].*${module_path}" \
-            "$test_path" \
-            || rg -q -e \
-            "^[[:space:]]*[^/].*(include_str!|include_bytes!|Path|read_to_string).*${source_path}" \
-            "$test_path"; then
-            add_required_test_target "$(test_target_for_path "$test_path")"
-        fi
+        add_required_test_target "$(test_target_for_path "$test_path")"
+    done <<<"$matched_paths"
 
-        # Service methods commonly have a `factory_` implementation prefix
-        # while the public integration test names use the API suffix
-        # (`factory_worker_status` -> `test_worker_status_*`). Match only test
-        # declarations, so comments and fixture strings cannot claim a target.
-        if [[ ${#symbol_patterns[@]} -gt 0 ]] \
-            && rg -q "${symbol_patterns[@]}" "$test_path"; then
-            add_required_test_target "$(test_target_for_path "$test_path")"
+    # Service methods commonly have a `factory_` implementation prefix while
+    # public integration test names use the API suffix (`factory_worker_status`
+    # -> `test_worker_status_*`). Match only test declarations, so comments
+    # and fixture strings cannot claim a target.
+    if [[ ${#symbol_patterns[@]} -gt 0 ]]; then
+        if matched_paths="$(rg -l --glob '*.rs' "${symbol_patterns[@]}" -- cas-cli/tests 2>/dev/null)"; then
+            :
+        else
+            rg_status=$?
+            if [[ "$rg_status" -ne 1 ]]; then
+                printf 'SCOPED PROOF SURFACE: source symbol discovery failed for %s (rg exit %s).\n' \
+                    "$source_path" "$rg_status" >&2
+                exit 2
+            fi
+            matched_paths=''
         fi
-    done < <(rg --files --glob '*.rs' cas-cli/tests 2>/dev/null || true)
+        while IFS= read -r test_path; do
+            [[ -n "$test_path" ]] || continue
+            add_required_test_target "$(test_target_for_path "$test_path")"
+        done <<<"$matched_paths"
+    fi
 }
 
 builtin_catalog_path_for() {

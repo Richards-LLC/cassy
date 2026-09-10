@@ -153,6 +153,10 @@ async fn combined_work_target_update_and_close_uses_the_updated_branch() {
     run_git(&repo.root, &["commit", "-m", "worker change"]);
     run_git(&repo.root, &["checkout", "main"]);
     run_git(&repo.root, &["merge", "--ff-only", "factory/alice"]);
+    run_git(
+        &repo.root,
+        &["update-ref", "refs/remotes/origin/main", "main"],
+    );
 
     let cas_root = init_cas_dir(&repo.root).expect("initialize CAS");
     std::fs::write(

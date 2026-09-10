@@ -3,7 +3,7 @@ use cas::cloud::CloudConfig;
 use cas::mcp::tools::*;
 use cas::mcp::{CasCore, CasService};
 use cas::store::{SqliteTaskStore, TaskStore, open_agent_store, open_event_store, open_task_store};
-use cas::types::{EventType, Task};
+use cas::types::{Agent, AgentRole, EventType, Task};
 use rmcp::handler::server::wrapper::Parameters;
 use rusqlite::Connection;
 use wiremock::matchers::{method, path};
@@ -3338,6 +3338,76 @@ async fn test_worker_cannot_start_task_assigned_to_other_worker() {
         task.status,
         cas::types::TaskStatus::Open,
         "rejected start must not flip status to InProgress"
+    );
+}
+
+#[tokio::test]
+async fn test_worker_can_start_task_assigned_to_its_agent_uuid() {
+    let (temp, service) = setup_cas();
+    let cas_dir = temp.path().join(".cas");
+    let agent_store = open_agent_store(&cas_dir).expect("open agent store");
+    let caller_id = format!("test-session-{}", std::process::id());
+    let mut caller = agent_store.get(&caller_id).expect("test agent exists");
+    caller.role = AgentRole::Worker;
+    agent_store.update(&caller).expect("mark test agent worker");
+
+    let task_store = open_task_store(&cas_dir).expect("open task store");
+    let mut task = Task::new(
+        "cas-assignee-uuid-start".to_string(),
+        "UUID-assigned task".to_string(),
+    );
+    task.assignee = Some(caller_id.clone());
+    task_store.add(&task).expect("add UUID-assigned task");
+
+    service
+        .cas_task_start(Parameters(IdRequest {
+            id: task.id.clone(),
+        }))
+        .await
+        .expect("worker assigned by UUID should be allowed to start");
+
+    assert_eq!(
+        task_store.get(&task.id).expect("started task").status,
+        cas::types::TaskStatus::InProgress
+    );
+}
+
+#[tokio::test]
+async fn test_worker_rejection_names_resolved_assignee_and_caller_identities() {
+    let (temp, service) = setup_cas();
+    let cas_dir = temp.path().join(".cas");
+    let agent_store = open_agent_store(&cas_dir).expect("open agent store");
+    let caller_id = format!("test-session-{}", std::process::id());
+    let mut caller = agent_store.get(&caller_id).expect("test agent exists");
+    caller.role = AgentRole::Worker;
+    agent_store.update(&caller).expect("mark test agent worker");
+    agent_store
+        .register(&Agent::new_with_role(
+            "other-worker-uuid".to_string(),
+            "other-worker".to_string(),
+            AgentRole::Worker,
+        ))
+        .expect("register other worker");
+
+    let task_store = open_task_store(&cas_dir).expect("open task store");
+    let mut task = Task::new(
+        "cas-assignee-different-start".to_string(),
+        "Different UUID-assigned task".to_string(),
+    );
+    task.assignee = Some("other-worker-uuid".to_string());
+    task_store.add(&task).expect("add different-agent task");
+
+    let error = service
+        .cas_task_start(Parameters(IdRequest {
+            id: task.id.clone(),
+        }))
+        .await
+        .expect_err("different worker must remain refused");
+    assert!(
+        error.message.contains("other-worker (other-worker-uuid)")
+            && error.message.contains(&format!("test-agent ({caller_id})")),
+        "rejection must name both canonical identities: {}",
+        error.message
     );
 }
 

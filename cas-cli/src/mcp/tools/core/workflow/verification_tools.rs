@@ -359,8 +359,11 @@ impl CasCore {
         let halt_exempt =
             crate::mcp::tools::core::task::lifecycle::stale_close_guard::halt_exempt_for_owned_task(
                 task.status,
-                task.assignee.as_deref(),
-                Some(caller.name.as_str()),
+                crate::mcp::tools::core::task::task_assignee_matches_agent(
+                    agent_store.as_ref(),
+                    task.assignee.as_deref(),
+                    &caller,
+                ),
             );
         if crate::mcp::tools::core::task::lifecycle::stale_close_guard::agent_task_work_halted(
             &caller.metadata,

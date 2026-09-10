@@ -6828,8 +6828,9 @@ fn enrich_merge_required_with_conflict_check(
              merge attempt will fail here. Conflicting file(s): {}.\n\n\
              Alternative: the assigned worker can \
              `mcp__cas__task action=start id={task_id}` (now permitted from \
-             `awaiting_merge`) to resolve the conflict directly on their \
-             factory branch and re-close.",
+             `awaiting_merge`) to inspect from inside their worker worktree, \
+             rebase the factory branch onto the current integration target tip, \
+             push, and re-park it with merge_request=true before re-closing.",
             conflict_paths.join(", ")
         )
     } else if let Some(error) = check_error {
@@ -6839,8 +6840,10 @@ fn enrich_merge_required_with_conflict_check(
              into {parent_branch}. Git conflict preflight failed: {error}.\n\n\
              To avoid stranding the task in `awaiting_merge`, Cassy marks this \
              park as reopen-eligible. The assigned worker can \
-             `mcp__cas__task action=start id={task_id}` to inspect or resolve \
-             the branch, then re-close."
+             `mcp__cas__task action=start id={task_id}` to inspect from inside \
+             the worker worktree, rebase the factory branch onto the current \
+             integration target tip, push, and re-park it with \
+             merge_request=true before re-closing."
         )
     } else {
         message
@@ -7094,7 +7097,38 @@ pub(crate) fn run_factory_branch_merge_gate_with_attribution(
         _ => None,
     };
     let commit_ish = trusted_anchor.unwrap_or(factory_branch.as_str());
-    let stranded = count_unmerged_factory_commits(repo_path, commit_ish, parent_branch);
+    let origin_parent_branch = format!("origin/{parent_branch}");
+    let mut origin_fetch_attempted = false;
+    let mut stranded = count_unmerged_factory_commits(repo_path, commit_ish, parent_branch);
+    let mut local_only_trunk_target = false;
+    if stranded == 0 {
+        // A local trunk ref is not shared integration evidence. Refresh and
+        // consult origin before accepting the local zero; otherwise a worker
+        // who committed on the primary checkout can merge into local `main`
+        // and close successfully while origin/main remains untouched.
+        origin_fetch_attempted = fetch_parent_branch_best_effort(repo_path, parent_branch);
+        let local_epic_merge = parent_branch.starts_with("epic/");
+        let origin_required = !local_epic_merge && origin_remote_configured(repo_path);
+        let origin_proves_delivery = git_ref_exists(repo_path, &origin_parent_branch)
+            && matches!(
+                known_unmerged_factory_commits(repo_path, commit_ish, &origin_parent_branch),
+                KnownUnmergedCount::KnownZero
+            );
+        if origin_required && !origin_proves_delivery {
+            // Keep the existing local-only epic exception and local-only
+            // repositories, but force a normal remote-backed trunk through
+            // the rejection path when origin cannot prove the delivery.
+            local_only_trunk_target = true;
+            stranded = match known_unmerged_factory_commits(
+                repo_path,
+                commit_ish,
+                &origin_parent_branch,
+            ) {
+                KnownUnmergedCount::KnownPositive(count) => count.max(1),
+                KnownUnmergedCount::KnownZero | KnownUnmergedCount::Unknown => 1,
+            };
+        }
+    }
     if stranded == 0 {
         if let Some(recorded_anchor) = trusted_anchor {
             // The local parent ref may be stale immediately after the
@@ -7146,8 +7180,9 @@ pub(crate) fn run_factory_branch_merge_gate_with_attribution(
     // origin Git state masquerade as integration. Missing origin ref
     // simply skips this block (no rescue); KnownPositive and Unknown
     // fall through to Reject.
-    let origin_fetch_attempted = fetch_parent_branch_best_effort(repo_path, parent_branch);
-    let origin_parent_branch = format!("origin/{parent_branch}");
+    if !origin_fetch_attempted {
+        origin_fetch_attempted = fetch_parent_branch_best_effort(repo_path, parent_branch);
+    }
     if git_ref_exists(repo_path, &origin_parent_branch)
         && matches!(
             known_unmerged_factory_commits(repo_path, commit_ish, &origin_parent_branch),
@@ -7178,8 +7213,11 @@ pub(crate) fn run_factory_branch_merge_gate_with_attribution(
     // this branch's stranded work. Unknowable git state keeps the local
     // measurement (fail closed), and a partially-merged branch now reports the
     // real remainder instead of stale-base arithmetic.
-    let remote_aware_stranded =
-        count_unmerged_against_targets(repo_path, commit_ish, parent_branch);
+    let remote_aware_stranded = if local_only_trunk_target {
+        None
+    } else {
+        count_unmerged_against_targets(repo_path, commit_ish, parent_branch)
+    };
     if remote_aware_stranded == Some(0) {
         if let Some(recorded_anchor) = trusted_anchor {
             let anchor = delivery_content_anchor_at_close(
@@ -8125,6 +8163,18 @@ pub(crate) fn fetch_parent_branch_best_effort(
             Err(_) => return true,
         }
     }
+}
+
+/// Return whether this checkout has an `origin` remote whose target refs are
+/// the shared integration authority. A repository with no origin remains a
+/// supported local-only development repository; a configured origin with no
+/// matching target ref must not let a local trunk ref masquerade as landed.
+fn origin_remote_configured(repo_path: &std::path::Path) -> bool {
+    std::process::Command::new("git")
+        .args(["remote", "get-url", "origin"])
+        .current_dir(repo_path)
+        .output()
+        .is_ok_and(|output| output.status.success())
 }
 
 /// cas-cf64 (P3, option-injection hardening): `true` when `name` is safe to
@@ -19501,6 +19551,67 @@ mod merge_state_gate_tests {
         assert!(
             matches!(out, MergeStateGateOutcome::Reject(_)),
             "origin KnownPositive must reject, got {out:?}"
+        );
+    }
+
+    /// cas-93e8: a worker commit that is reachable only from the local target
+    /// branch must not satisfy the close gate. The local target can be ahead
+    /// because a worker committed in the primary checkout during merge
+    /// recovery; only origin/<target> is shared integration evidence for a
+    /// normal trunk target.
+    #[test]
+    fn local_only_trunk_merge_does_not_satisfy_close_gate_cas_93e8() {
+        let bare = tempfile::tempdir().unwrap();
+        let bare_status = std::process::Command::new("git")
+            .args(["init", "-q", "--bare"])
+            .current_dir(bare.path())
+            .status()
+            .expect("git init --bare");
+        assert!(bare_status.success());
+
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        git(
+            p,
+            &["remote", "add", "origin", bare.path().to_str().unwrap()],
+        );
+        // Establish origin/main at the pre-delivery tip.
+        git(p, &["push", "-q", "origin", "main"]);
+
+        std::fs::write(p.join("local-only.rs"), "// only on local main\n").unwrap();
+        git(p, &["add", "local-only.rs"]);
+        git(p, &["commit", "-q", "-m", "worker delivery"]);
+        let worker_tip = rev_parse(p, "factory/worker");
+
+        // Simulate the unsafe recovery: merge the worker into local main but
+        // leave origin/main at the old tip.
+        git(p, &["checkout", "-q", "main"]);
+        git(
+            p,
+            &["merge", "-q", "--no-ff", "factory/worker", "-m", "local merge"],
+        );
+        let local_main_tip = rev_parse(p, "main");
+        assert!(
+            git_commit_is_ancestor(p, &worker_tip, "main"),
+            "precondition: worker tip must be reachable from local main"
+        );
+        assert!(
+            !git_commit_is_ancestor(p, &worker_tip, "origin/main"),
+            "precondition: worker tip must not be reachable from origin/main"
+        );
+        assert_ne!(
+            local_main_tip,
+            rev_parse(p, "origin/main"),
+            "precondition: local main must be ahead of origin/main"
+        );
+        git(p, &["checkout", "-q", "factory/worker"]);
+
+        let task = worker_task("worker");
+        let req = base_req(&task.id);
+        let out = run_factory_branch_merge_gate(&task, &req, "main", p);
+        assert!(
+            matches!(out, MergeStateGateOutcome::Reject(_)),
+            "local-only trunk integration must reject until origin/main carries the work, got {out:?}"
         );
     }
 }

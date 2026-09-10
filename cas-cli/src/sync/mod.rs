@@ -35,6 +35,7 @@
 
 // #![allow(dead_code)] // Check unused // API for sync functionality
 
+pub mod skill_suggest;
 pub mod skills;
 
 pub use skills::{SkillSyncer, create_planning_skill, generate_planning_skill};

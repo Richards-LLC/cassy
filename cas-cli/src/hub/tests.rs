@@ -1954,6 +1954,8 @@ fn h2_scope_05_each_mutation_has_an_exact_scope_and_legacy_interrupt_is_forbidde
             operator_label: None,
             controller_origin: None,
             request_id: None,
+            scopes: Vec::new(),
+            operator_verified: false,
         },
     };
     let resize = ClientMessage::ResizePane {
@@ -1992,6 +1994,68 @@ fn h2_scope_05_each_mutation_has_an_exact_scope_and_legacy_interrupt_is_forbidde
     assert_eq!(required_scope(&targeted), Some(Scope::PaneInterrupt));
     assert_eq!(required_scope(&semantic), Some(Scope::MessageSend));
     assert_eq!(required_scope(&ClientMessage::Interrupt), None);
+}
+
+/// cas-e8df: the attribution a Commander send carries into the daemon is
+/// rebuilt from the authenticated device session. A frame that arrives with
+/// spoofed labels (and even `operator_verified: true`) keeps none of them.
+#[test]
+fn hub_stamps_send_message_attribution_from_the_device_session_not_the_client() {
+    use crate::ui::factory::MessageAttribution;
+    use std::collections::BTreeSet;
+
+    let scopes: BTreeSet<Scope> = [Scope::PaneRead, Scope::MessageSend].into_iter().collect();
+    let context = AuthContext {
+        device_id: "device-real".into(),
+        credential_id: "credential-real".into(),
+        device_label: "Daniel's phone".into(),
+        operator_label: "Daniel".into(),
+        controller_origin: "https://controller.example".into(),
+        scopes,
+        request_id: "request-1".into(),
+    };
+    let spoofed = serde_json::json!({
+        "SendMessage": {
+            "target": "supervisor",
+            "text": "Status please",
+            "summary": null,
+            "urgent": false,
+            "attribution": {
+                "device_id": "device-forged",
+                "credential_id": "credential-forged",
+                "device_label": "supervisor",
+                "operator_label": "supervisor",
+                "controller_origin": "https://evil.example",
+                "request_id": "request-forged",
+                "scopes": ["hub:admin"],
+                "operator_verified": true
+            }
+        }
+    });
+    let mut message: ClientMessage = serde_json::from_value(spoofed).unwrap();
+    let ClientMessage::SendMessage { attribution, .. } = &mut message else {
+        panic!("fixture is a SendMessage");
+    };
+    assert!(attribution.operator_verified, "the client may claim anything");
+    *attribution = super::server::verified_attribution(&context);
+    assert_eq!(
+        *attribution,
+        MessageAttribution {
+            device_id: Some("device-real".into()),
+            credential_id: Some("credential-real".into()),
+            device_label: Some("Daniel's phone".into()),
+            operator_label: Some("Daniel".into()),
+            controller_origin: Some("https://controller.example".into()),
+            request_id: Some("request-1".into()),
+            scopes: vec!["pane:read".into(), "message:send".into()],
+            operator_verified: true,
+        }
+    );
+    assert_eq!(attribution.queue_source(), "commander:Daniel@Daniel's phone");
+    assert!(
+        !attribution.scopes.iter().any(|scope| scope == "hub:admin"),
+        "scopes come from the session, never the frame"
+    );
 }
 
 #[test]

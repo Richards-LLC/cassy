@@ -129,7 +129,8 @@ pub fn required_scope(message: &ClientMessage) -> Option<Scope> {
         ClientMessage::Attach { .. }
         | ClientMessage::Detach
         | ClientMessage::GetState
-        | ClientMessage::Ping => None,
+        | ClientMessage::Ping
+        | ClientMessage::OperatorReplyDelivered { .. } => None,
     }
 }
 

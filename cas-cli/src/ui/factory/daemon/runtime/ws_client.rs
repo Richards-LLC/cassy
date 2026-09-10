@@ -303,6 +303,19 @@ impl FactoryDaemon {
         }
 
         match msg {
+            ClientMessage::OperatorReplyDelivered {
+                notification_id,
+                device_id,
+            } => {
+                if let Err(error) = self.acknowledge_operator_reply(notification_id, &device_id) {
+                    tracing::warn!(
+                        notification_id,
+                        device_id,
+                        %error,
+                        "ignored invalid Commander operator-reply receipt"
+                    );
+                }
+            }
             ClientMessage::Attach { request_scrollback } => {
                 let state = self.build_session_state();
                 let pane_bootstrap = self.commander_pane_bootstrap(&state);

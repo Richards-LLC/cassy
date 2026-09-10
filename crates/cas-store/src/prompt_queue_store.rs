@@ -237,6 +237,11 @@ pub struct QueuedPrompt {
     /// client claimed and must render as `unverified:`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operator: Option<OperatorStamp>,
+    /// Authenticated paired device that must receive an operator reply.
+    /// This is a recipient fact, distinct from [`Self::origin`], which names
+    /// the principal that wrote the row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recipient_device_id: Option<String>,
 }
 
 /// Who the hub says sent a Commander message (cas-e8df, EPIC cas-fbc8).
@@ -387,6 +392,7 @@ CREATE TABLE IF NOT EXISTS prompt_queue_recipient_transport (
     prompt_id INTEGER NOT NULL,
     recipient TEXT NOT NULL,
     delivered_at TEXT NOT NULL,
+    device_id TEXT,
     PRIMARY KEY (prompt_id, recipient)
 );
 
@@ -476,6 +482,15 @@ ALTER TABLE prompt_queue ADD COLUMN operator_scopes TEXT;
 "#;
 const PROMPT_QUEUE_OPERATOR_VERIFIED_MIGRATION: &str = r#"
 ALTER TABLE prompt_queue ADD COLUMN operator_verified INTEGER;
+/// Authenticated Commander device selected by an operator reply. This is
+/// recipient routing, not sender provenance, so it stays in its own column.
+const PROMPT_QUEUE_RECIPIENT_DEVICE_MIGRATION: &str = r#"
+ALTER TABLE prompt_queue ADD COLUMN recipient_device_id TEXT;
+"#;
+
+/// Preserve the device identity alongside recipient-side transport receipts.
+const PROMPT_QUEUE_RECIPIENT_TRANSPORT_DEVICE_MIGRATION: &str = r#"
+ALTER TABLE prompt_queue_recipient_transport ADD COLUMN device_id TEXT;
 "#;
 
 /// Indexes supporting two-lane `peek_for_targets` selection (cas-2bcb).
@@ -1211,6 +1226,13 @@ pub struct MessageDeliveryReport {
     /// table existed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub recipient_transport_at: Option<DateTime<Utc>>,
+    /// Authenticated device selected at enqueue time for this recipient.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recipient_device_id: Option<String>,
+    /// Device id recorded with the recipient-side transport receipt. Present
+    /// for Commander operator replies and absent on ordinary agent rows.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recipient_transport_device_id: Option<String>,
     pub confirmed_at: Option<DateTime<Utc>>,
     /// Later recipient activity inferred from a reply. Unlike `confirmed_at`,
     /// this is not evidence that this specific message reached that turn.
@@ -1889,6 +1911,24 @@ pub trait PromptQueueStore: Send + Sync {
     /// Returns `Err` if required timestamps are corrupt (never fabricates `now`).
     fn message_delivery_report(&self, prompt_id: i64) -> Result<Option<MessageDeliveryReport>>;
 
+    /// Read one queue row, including its stamped origin and device recipient.
+    /// Unlike a pending peek this also finds rows already transported to an
+    /// agent, which lets a supervisor securely answer that exact message.
+    fn queued_prompt(&self, prompt_id: i64) -> Result<Option<QueuedPrompt>>;
+
+    /// Stamp the authenticated device that is the recipient of an operator
+    /// reply. The write is only accepted for an existing `operator` row.
+    fn stamp_recipient_device(&self, prompt_id: i64, device_id: &str) -> Result<()>;
+
+    /// Pending operator replies for this factory session. These rows stay
+    /// pending while the hub/device is offline and are drained only after the
+    /// daemon has a Commander transport to hand them to.
+    fn peek_operator_replies(
+        &self,
+        factory_session: &str,
+        limit: usize,
+    ) -> Result<Vec<QueuedPrompt>>;
+
     /// Record that the daemon selected/peeked this message for a delivery attempt.
     fn record_selected(&self, prompt_id: i64) -> Result<()>;
 
@@ -2102,6 +2142,8 @@ impl SqlitePromptQueueStore {
             row.get(16).unwrap_or(None),
             row.get(17).unwrap_or(None),
         );
+        // Column 18 = the reply recipient device; absent on older SELECTs.
+        let recipient_device_id: Option<String> = row.get(18).unwrap_or(None);
 
         Ok(QueuedPrompt {
             id: row.get(0)?,
@@ -2117,6 +2159,7 @@ impl SqlitePromptQueueStore {
             urgent,
             origin,
             operator,
+            recipient_device_id,
         })
     }
 
@@ -2469,8 +2512,8 @@ impl SqlitePromptQueueStore {
         if stamp_transport {
             tx.execute(
                 "INSERT OR IGNORE INTO prompt_queue_recipient_transport
-                     (prompt_id, recipient, delivered_at)
-                 SELECT id, target, ?
+                     (prompt_id, recipient, delivered_at, device_id)
+                 SELECT id, target, ?, recipient_device_id
                    FROM prompt_queue
                   WHERE id = ? AND target <> 'all_workers'",
                 params![now, prompt_id],
@@ -2632,6 +2675,10 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                 ),
                 ("operator_scopes", PROMPT_QUEUE_OPERATOR_SCOPES_MIGRATION),
                 ("operator_verified", PROMPT_QUEUE_OPERATOR_VERIFIED_MIGRATION),
+                (
+                    "recipient_device_id",
+                    PROMPT_QUEUE_RECIPIENT_DEVICE_MIGRATION,
+                ),
                 ("selected_at", PROMPT_QUEUE_SELECTED_AT_MIGRATION),
                 ("last_pending_reason", PROMPT_QUEUE_PENDING_REASON_MIGRATION),
                 ("last_pending_detail", PROMPT_QUEUE_PENDING_DETAIL_MIGRATION),
@@ -2704,6 +2751,12 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                 "prompt_queue_recipient_seen",
                 "source",
                 PROMPT_QUEUE_RECIPIENT_SEEN_SOURCE_MIGRATION,
+            )?;
+            crate::shared_db::ensure_column(
+                &conn,
+                "prompt_queue_recipient_transport",
+                "device_id",
+                PROMPT_QUEUE_RECIPIENT_TRANSPORT_DEVICE_MIGRATION,
             )?;
 
             // Pre-telemetry rows only have the legacy processed_at marker. Hydrate
@@ -4090,17 +4143,34 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         // existed, or on `all_workers` (whose per-recipient transport is the
         // broadcast counts). A direct row reporting stage=delivered with this
         // field empty is the exact contradiction #130 reported.
-        let recipient_transport_at = conn
+        let recipient_device_id = conn
             .query_row(
-                "SELECT delivered_at FROM prompt_queue_recipient_transport
-                  WHERE prompt_id = ? AND recipient = ?",
-                params![id, &target],
+                "SELECT recipient_device_id FROM prompt_queue WHERE id = ?",
+                params![id],
                 |row| row.get::<_, Option<String>>(0),
             )
             .optional()?
-            .flatten()
-            .as_deref()
-            .and_then(Self::parse_datetime);
+            .flatten();
+        let (recipient_transport_at, recipient_transport_device_id) = conn
+            .query_row(
+                "SELECT delivered_at, device_id FROM prompt_queue_recipient_transport
+                  WHERE prompt_id = ? AND recipient = ?",
+                params![id, &target],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, Option<String>>(1).unwrap_or(None),
+                    ))
+                },
+            )
+            .optional()?
+            .map(|(timestamp, device_id)| {
+                (
+                    timestamp.as_deref().and_then(Self::parse_datetime),
+                    device_id,
+                )
+            })
+            .unwrap_or((None, None));
 
         // cas-7a01 (GH #155): the only concrete artifact CAS holds that a turn
         // actually carried this row's content — the `hook_surfaced` receipt
@@ -4240,6 +4310,8 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             selected_at,
             delivered_at,
             recipient_transport_at,
+            recipient_device_id,
+            recipient_transport_device_id,
             confirmed_at,
             assumed_seen_at,
             confirmation_source: ConfirmationSource::from_column(
@@ -4270,6 +4342,77 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             reaction_observed_at: None,
             reaction_evidence: None,
         }))
+    }
+
+    fn queued_prompt(&self, prompt_id: i64) -> Result<Option<QueuedPrompt>> {
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        let row = conn
+            .query_row(
+                "SELECT id, source, target, prompt, created_at, processed_at,
+                        summary, priority, acked_at, urgent, factory_session,
+                        origin_agent_id, origin_kind, operator_label,
+                        operator_device_id, operator_device_label, operator_scopes,
+                        operator_verified, recipient_device_id
+                 FROM prompt_queue WHERE id = ?",
+                params![prompt_id],
+                Self::prompt_from_row,
+            )
+            .optional()?;
+        Ok(row)
+    }
+
+    fn stamp_recipient_device(&self, prompt_id: i64, device_id: &str) -> Result<()> {
+        let device_id = device_id.trim();
+        if device_id.is_empty() {
+            return Err(StoreError::Other(
+                "operator reply recipient device id cannot be empty".to_string(),
+            ));
+        }
+        crate::shared_db::with_write_retry(|| {
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
+            let changed = conn.execute(
+                "UPDATE prompt_queue
+                    SET recipient_device_id = ?
+                  WHERE id = ? AND lower(target) = 'operator'",
+                params![device_id, prompt_id],
+            )?;
+            if changed == 0 {
+                return Err(StoreError::Other(format!(
+                    "prompt_queue id={prompt_id} is not an operator reply row"
+                )));
+            }
+            Ok(())
+        })
+    }
+
+    fn peek_operator_replies(
+        &self,
+        factory_session: &str,
+        limit: usize,
+    ) -> Result<Vec<QueuedPrompt>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        let mut stmt = conn.prepare_cached(
+            "SELECT id, source, target, prompt, created_at, processed_at,
+                    summary, priority, acked_at, urgent, factory_session,
+                    origin_agent_id, origin_kind, operator_label,
+                    operator_device_id, operator_device_label, operator_scopes,
+                    operator_verified, recipient_device_id
+             FROM prompt_queue
+             WHERE lower(target) = 'operator'
+               AND factory_session = ?
+               AND processed_at IS NULL
+               AND recipient_device_id IS NOT NULL
+               AND (selected_at IS NULL OR julianday(selected_at) < julianday('now', '-1 second'))
+             ORDER BY priority ASC, id ASC
+             LIMIT ?",
+        )?;
+        let prompts = stmt
+            .query_map(params![factory_session, limit as i64], Self::prompt_from_row)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(prompts)
     }
 
     fn record_selected(&self, prompt_id: i64) -> Result<()> {
@@ -5169,6 +5312,46 @@ mod tests {
         );
         assert_eq!(QueueOrigin::from_columns(None, Some("paired_device")), None);
         assert_eq!(QueueOrigin::Daemon.verified_device_id(), None);
+    }
+
+    #[test]
+    fn operator_reply_keeps_device_routing_and_receipt_identity() {
+        let (_temp, store) = create_test_store();
+        let reply = store
+            .enqueue_urgent_with_outcome(
+                "supervisor",
+                "operator",
+                r#"{"schema_version":1,"reply_to":41,"message":"ready","summary":"reply","device_id":"device-7"}"#,
+                Some("factory-7"),
+                Some("reply"),
+                Some(NotificationPriority::Normal),
+                false,
+                Some(&QueueOrigin::Daemon),
+            )
+            .unwrap();
+        store
+            .stamp_recipient_device(reply.id(), "device-7")
+            .unwrap();
+
+        let row = store.queued_prompt(reply.id()).unwrap().unwrap();
+        assert_eq!(row.recipient_device_id.as_deref(), Some("device-7"));
+        assert_eq!(
+            store
+                .peek_operator_replies("factory-7", 10)
+                .unwrap()
+                .first()
+                .and_then(|row| row.recipient_device_id.as_deref()),
+            Some("device-7")
+        );
+
+        store.mark_transport_delivered(reply.id()).unwrap();
+        let report = store.message_delivery_report(reply.id()).unwrap().unwrap();
+        assert!(report.delivered_at.is_some());
+        assert_eq!(report.recipient_device_id.as_deref(), Some("device-7"));
+        assert_eq!(
+            report.recipient_transport_device_id.as_deref(),
+            Some("device-7")
+        );
     }
 
     /// A stamp survives the round trip through SQLite and comes back on the
@@ -8503,6 +8686,7 @@ mod tests {
                 urgent: priority == 0,
                 origin: None,
                 operator: None,
+                recipient_device_id: None,
             }
         }
 

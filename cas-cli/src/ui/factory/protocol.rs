@@ -63,6 +63,20 @@ pub struct MessageAttribution {
     pub operator_verified: bool,
 }
 
+/// Durable supervisor-to-Commander reply payload. The device id is included
+/// in the daemon frame so the hub can enforce recipient routing even when one
+/// machine has multiple paired browsers attached.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OperatorReplyPayload {
+    pub schema_version: u32,
+    pub reply_to: i64,
+    pub message: String,
+    pub summary: String,
+    pub device_id: String,
+    #[serde(default)]
+    pub operator_label: Option<String>,
+}
+
 impl MessageAttribution {
     /// Durable prompt-queue sender label. The fixed `commander:` namespace
     /// prevents a remote label from impersonating `supervisor` or `mcp`.
@@ -210,6 +224,13 @@ pub enum ClientMessage {
         attribution: MessageAttribution,
     },
 
+    /// Confirm that the hub handed an operator reply to its authenticated
+    /// paired device. This is a hub-to-daemon receipt, not an operator command.
+    OperatorReplyDelivered {
+        notification_id: i64,
+        device_id: String,
+    },
+
     /// Request current state snapshot
     GetState,
 
@@ -265,6 +286,19 @@ pub enum DaemonMessage {
         /// Content-free attach metadata used by protocol v3 clients.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         pane_bootstrap: Vec<PaneBootstrap>,
+    },
+
+    /// A supervisor reply addressed to one authenticated Commander device.
+    /// The queue row remains the retry/receipt authority until this frame is
+    /// handed to the daemon's connected hub transport.
+    OperatorReply {
+        notification_id: i64,
+        reply_to: i64,
+        message: String,
+        summary: String,
+        device_id: String,
+        #[serde(default)]
+        operator_label: Option<String>,
     },
 
     /// An authoritative ANSI serialization of the pane's current terminal state.
@@ -760,6 +794,28 @@ mod tests {
             serde_json::from_str::<ClientMessage>(missing_attribution).is_err(),
             "attribution is a required part of the wire contract"
         );
+    }
+
+    #[test]
+    fn operator_reply_receipt_is_an_additive_daemon_control() {
+        let message = ClientMessage::OperatorReplyDelivered {
+            notification_id: 75,
+            device_id: "phone-7".to_string(),
+        };
+        let json = serde_json::to_string(&message).unwrap();
+        assert_eq!(
+            json,
+            r#"{"OperatorReplyDelivered":{"notification_id":75,"device_id":"phone-7"}}"#
+        );
+        let decoded = serde_json::from_str::<ClientMessage>(&json).unwrap();
+        assert!(matches!(
+            decoded,
+            ClientMessage::OperatorReplyDelivered {
+                notification_id: 75,
+                device_id
+            } if device_id == "phone-7"
+        ));
+        let _ = message;
     }
 
     #[test]

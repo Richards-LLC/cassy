@@ -581,6 +581,35 @@ for job in "${required_jobs[@]}"; do
     require_absent "$block" 'refs/heads/factory/' "$job is absent from factory pushes"
 done
 
+# Protected-default CI jobs and release-gate rows must stay in lockstep. The
+# mutation run deliberately removes one mapping from the checker and must go
+# red, so a newly-added required job cannot silently bypass release validation.
+gate_row_parity="$repo_root/scripts/check-ci-gate-row-parity.sh"
+gate_exemptions="$repo_root/docs/ci/gate-exemptions.md"
+if [[ -x "$gate_row_parity" ]]; then
+    if "$gate_row_parity" "$ci" "$repo_root/scripts/release-gate.sh" "$gate_exemptions"; then
+        printf 'ok   protected CI jobs map to release-gate rows\n'
+        pass=$((pass + 1))
+    else
+        printf 'FAIL protected CI jobs map to release-gate rows\n'
+        fail=$((fail + 1))
+    fi
+    parity_tmp="$(mktemp)"
+    sed '/\[fast-validation-suite-shards\]=archive-mode/d' "$gate_row_parity" >"$parity_tmp"
+    chmod +x "$parity_tmp"
+    if "$parity_tmp" "$ci" "$repo_root/scripts/release-gate.sh" "$gate_exemptions" >/dev/null 2>&1; then
+        printf 'FAIL CI gate-row parity mutation removes a required mapping\n'
+        fail=$((fail + 1))
+    else
+        printf 'ok   CI gate-row parity mutation catches a removed mapping\n'
+        pass=$((pass + 1))
+    fi
+    rm -f "$parity_tmp"
+else
+    printf 'FAIL CI gate-row parity checker is executable\n'
+    fail=$((fail + 1))
+fi
+
 # Required contexts must always be emitted. The expensive work in each lane is
 # gated only after a shared, fail-closed diff classification step succeeds.
 for job in fast-validation-preflight fast-validation-suite-build fast-validation-suite-shards fast-validation-suite fast-validation-docs macos-check; do

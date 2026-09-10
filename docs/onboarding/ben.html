@@ -85,10 +85,10 @@ cas cloud status</code></pre>
 brew install --cask tailscale
 open -a Tailscale
 
-cas hub service install --tailscale-serve
+cas hub service install
 cas hub service status
 cas hub pair</code></pre>
-    <p>On macOS this is a user-level <code>launchd</code> service: it starts at login and survives a reboot. Open Commander, choose <strong>Pair a machine</strong>, then follow the code flow. Use <code>cas hub service install</code> without the flag if you do not want tailnet access. Use <code>cas hub service uninstall</code> to remove the service later without deleting the hub identity or pairings.</p>
+    <p>On macOS this is a user-level <code>launchd</code> service: it starts at login and survives a reboot, but stays loopback-only because Tailscale Serve needs the interactive user session. For Commander pairing, run <code>cas hub service uninstall &amp;&amp; cas hub start --tailscale-serve</code> from an interactive shell. Use <code>cas hub service uninstall</code> later without deleting the hub identity or pairings.</p>
   </section>
 
   <section class="card">

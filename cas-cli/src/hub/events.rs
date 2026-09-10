@@ -267,7 +267,7 @@ impl MachineEventBus {
             DaemonMessage::PaneRemoved { pane_id } => {
                 (MachineEventKind::PaneRemoved, Some(pane_id.clone()), None)
             }
-            DaemonMessage::Error { message } => (
+            DaemonMessage::Error { message, .. } => (
                 MachineEventKind::DaemonError,
                 None,
                 Some(serde_json::json!({"message": message})),

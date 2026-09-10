@@ -513,7 +513,7 @@ fn resolve_hub_url(
         .or(configured_hub_url)
         .or(remembered_hub_url.as_deref())
         .context(
-            "hub is running without a public URL; pass --hub-url https://<commander-host> (remembered for next time) or `cas hub restart --tailscale-serve`",
+            "hub is running without a public URL; run `cas hub service uninstall && cas hub start --tailscale-serve` from an interactive shell, then retry authorization",
         )?;
     let parsed = validate_hub_url(url)?;
     Ok(parsed.origin().ascii_serialization())
@@ -557,11 +557,11 @@ fn verify_public_hub_ready(hub_url: &str) -> Result<()> {
 fn public_hub_readiness_error(hub_url: &str, status: Option<u16>) -> anyhow::Error {
     if status == Some(502) {
         anyhow::anyhow!(
-            "hub public URL {hub_url} route exists but the backend is gone (HTTP 502); the pairing code remains unclaimed and no invitation was created. Restore its HTTPS route (for Tailscale Serve, run `cas hub restart --tailscale-serve`) or pass a reachable `--hub-url`, then retry"
+            "hub public URL {hub_url} route exists but the backend is gone (HTTP 502); the pairing code remains unclaimed and no invitation was created. Run `cas hub service uninstall && cas hub start --tailscale-serve`, then retry authorization"
         )
     } else {
         anyhow::anyhow!(
-            "hub public URL {hub_url} is not reachable from this machine; the pairing code remains unclaimed and no invitation was created. Restore its HTTPS route (for Tailscale Serve, run `cas hub restart --tailscale-serve`) or pass a reachable `--hub-url`, then retry"
+            "hub public URL {hub_url} is not reachable from this machine; the pairing code remains unclaimed and no invitation was created. Run `cas hub service uninstall && cas hub start --tailscale-serve`, then retry authorization"
         )
     }
 }
@@ -860,15 +860,24 @@ fn redact_relay_secrets(value: &mut serde_json::Value) {
 }
 
 fn relay_error_from_parts(status: Option<u16>, code: &str, description: &str) -> anyhow::Error {
+    if code.contains("consum") || description.to_ascii_lowercase().contains("consum") {
+        return anyhow::anyhow!(
+            "The pairing code is already consumed and cannot be retried. Return to Commander, display a fresh pairing code, then run `cas hub authorize <NEW-CODE>`."
+        );
+    }
     match (status, code) {
         (None, "relay_unavailable") => anyhow::anyhow!("relay unavailable: {description}"),
         (Some(404), "invalid_code") => {
-            anyhow::anyhow!("No live pairing request matches that code.")
+            anyhow::anyhow!(
+                "No live pairing request matches that code; it may be expired or already consumed. Return to Commander, display a fresh pairing code, then run `cas hub authorize <NEW-CODE>`."
+            )
         }
-        (Some(410), "expired_code") => anyhow::anyhow!("The pairing code has expired."),
+        (Some(410), "expired_code") => anyhow::anyhow!(
+            "The pairing code has expired and is consumed; it cannot be retried. Return to Commander, display a fresh pairing code, then run `cas hub authorize <NEW-CODE>`."
+        ),
         (Some(409), "code_claimed") => {
             anyhow::anyhow!(
-                "That pairing code has a live claim from a different machine or an earlier local attempt whose saved claim state is unavailable. This machine automatically resumes claims whose state is still present."
+                "That pairing code is already claimed or consumed by a different machine or an earlier local attempt. Return to Commander, display a fresh pairing code, then run `cas hub authorize <NEW-CODE>`; this machine automatically resumes claims whose state is still present."
             )
         }
         (Some(401), "unauthorized") => {
@@ -962,8 +971,20 @@ mod tests {
     fn documented_wrong_code_and_expiry_are_honest() {
         let invalid = relay_error_from_parts(Some(404), "invalid_code", "safe text");
         assert!(invalid.to_string().contains("No live pairing request"));
+        assert!(invalid.to_string().contains("fresh pairing code"));
         let expired = relay_error_from_parts(Some(410), "expired_code", "safe text");
         assert!(expired.to_string().contains("expired"));
+        assert!(expired.to_string().contains("consumed"));
+        assert!(expired.to_string().contains("cas hub authorize <NEW-CODE>"));
+    }
+
+    #[test]
+    fn consumed_code_error_names_the_fresh_commander_code_action() {
+        let error = relay_error_from_parts(Some(409), "code_consumed", "safe text");
+        let text = error.to_string();
+        assert!(text.contains("already consumed"));
+        assert!(text.contains("Return to Commander"));
+        assert!(text.contains("cas hub authorize <NEW-CODE>"));
     }
 
     #[test]
@@ -1102,7 +1123,7 @@ mod tests {
 
         let error = resolve_hub_url(&paths, None, None).unwrap_err().to_string();
         assert!(error.contains("hub is running without a public URL"));
-        assert!(error.contains("cas hub restart --tailscale-serve"));
+        assert!(error.contains("cas hub service uninstall && cas hub start --tailscale-serve"));
         assert!(!error.contains("cas hub --tailscale-serve start"));
         health.join().unwrap();
     }
@@ -1383,10 +1404,7 @@ mod tests {
                 .to_string();
 
         assert!(error.contains("not reachable from this machine"), "{error}");
-        assert!(
-            error.contains("cas hub restart --tailscale-serve"),
-            "{error}"
-        );
+        assert!(error.contains("cas hub service uninstall && cas hub start --tailscale-serve"), "{error}");
         assert!(relay.claims.lock().unwrap().is_empty());
         assert!(relay.completed_invitation_urls.lock().unwrap().is_empty());
 

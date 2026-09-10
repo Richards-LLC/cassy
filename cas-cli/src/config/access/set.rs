@@ -75,6 +75,20 @@ impl Config {
                 let factory = self.factory.get_or_insert_with(FactoryConfig::default);
                 factory.cargo_build_jobs = value.to_string();
             }
+            "factory.merge_sweep" => {
+                let factory = self.factory.get_or_insert_with(FactoryConfig::default);
+                factory.merge_sweep = value
+                    .parse()
+                    .map_err(|_| MemError::Parse(format!("Invalid boolean value: {value}")))?;
+            }
+            "factory.merge_sweep_timeout_secs" => {
+                let factory = self.factory.get_or_insert_with(FactoryConfig::default);
+                factory.merge_sweep_timeout_secs = value.parse().map_err(|_| {
+                    MemError::Parse(format!(
+                        "Invalid integer value for factory.merge_sweep_timeout_secs: {value}"
+                    ))
+                })?;
+            }
             // Sync section
             "sync.enabled" => {
                 self.sync.enabled = value

@@ -157,6 +157,7 @@ async fn combined_work_target_update_and_close_uses_the_updated_branch() {
         &repo.root,
         &["update-ref", "refs/remotes/origin/main", "main"],
     );
+    let worker_commit = git_stdout(&repo.root, &["rev-parse", "factory/alice"]);
 
     let cas_root = init_cas_dir(&repo.root).expect("initialize CAS");
     std::fs::write(
@@ -176,8 +177,7 @@ async fn combined_work_target_update_and_close_uses_the_updated_branch() {
         repo_selector: "remote:github.com/org/updated-target".to_string(),
         target_branch: "main".to_string(),
     });
-    task.deliverables.factory_branch_anchor =
-        Some(git_stdout(&repo.root, &["rev-parse", "factory/alice"]));
+    task.deliverables.factory_branch_anchor = Some(worker_commit.clone());
     task_store.add(&task).expect("add task");
 
     let before = durable_snapshot(&cas_root);
@@ -192,11 +192,10 @@ async fn combined_work_target_update_and_close_uses_the_updated_branch() {
         .await
         .expect_err("updated target must reject the close");
     let text = error.message.to_string();
-    assert!(
-        text.contains("PRE-CLOSE HOOK CONTEXT REJECTED")
-            && text.contains("not reachable from the declared target branch"),
-        "the worker commit is not merged into the updated alternate target; got:\n{text}"
-    );
+    assert!(text.contains("PRE-CLOSE HOOK CONTEXT REJECTED"));
+    assert!(text.contains(&worker_commit));
+    assert!(text.contains("live target_branch `alternate`"));
+    assert!(text.contains("(local)"));
     assert_eq!(
         durable_snapshot(&cas_root),
         before,

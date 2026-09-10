@@ -1594,7 +1594,17 @@ impl DirectorEventDetector {
                     age_secs >= 0 && age_secs < RECENT_ACTIVITY_SECS
                 })
                 .unwrap_or(false);
-            if has_fresh_heartbeat && has_recent_activity {
+            let observed_liveness = self
+                .cas_root
+                .as_deref()
+                .and_then(|root| super::prompts::idle_worker_liveness(root, &resolved_name));
+            let harness_busy = observed_liveness.as_ref().is_some_and(|observation| {
+                observation.state
+                    != crate::mcp::tools::service::worker_liveness::Liveness::WaitingForInput
+            });
+            if harness_busy
+                || (observed_liveness.is_none() && has_fresh_heartbeat && has_recent_activity)
+            {
                 // Worker is alive and recently active between turns — do not count
                 // this tick and reset any partial idle streak so a genuine idle
                 // that follows has to accumulate from zero.

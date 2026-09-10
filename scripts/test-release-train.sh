@@ -1025,5 +1025,11 @@ else
     bad "publish did not use the recorded landed sha: $(cat "$run_default_dir/release.done" 2>/dev/null || echo absent)"
 fi
 
+if python3 "$script_dir/test-release-integration.py"; then
+    ok 'rolling integration assembly: clean, stale, red, dirty and locked fixtures'
+else
+    bad 'rolling integration assembly fixture suite'
+fi
+
 printf '\n%s passed, %s failed\n' "$pass" "$fail"
 test "$fail" -eq 0

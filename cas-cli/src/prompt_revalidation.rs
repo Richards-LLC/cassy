@@ -586,6 +586,7 @@ pub(crate) fn parse_worker_attention_envelope(prompt: &str) -> bool {
                     // relay), so it inherits the wake terms rather than
                     // inventing new ones.
                     | "supervisor_unread"
+                    | "sweep_failed"
             )
         )
         && xml_attribute(tag, "worker").is_some_and(|value| !value.is_empty())

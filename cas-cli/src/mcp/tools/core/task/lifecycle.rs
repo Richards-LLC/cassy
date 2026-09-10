@@ -459,11 +459,26 @@ impl CasCore {
             })
             .unwrap_or_default();
 
+        let supervisor_override = req.supervisor_override.unwrap_or(false);
+        let (risk, proof_targets) = crate::mcp::tools::types::validate_task_risk_declaration(
+            task_type,
+            req.risk.as_deref(),
+            req.proof_targets.as_deref(),
+            supervisor_override,
+            crate::harness_policy::is_supervisor_from_env(),
+            req.reason.as_deref(),
+        )
+        .map_err(|message| McpError {
+            code: ErrorCode::INVALID_PARAMS,
+            message: Cow::from(message),
+            data: None,
+        })?;
+
         validate_demo_statement_requirement(
             task_type,
             &labels,
             req.demo_statement.as_deref(),
-            false,
+            supervisor_override,
             crate::harness_policy::is_supervisor_from_env(),
             &self.load_config().qa().user_facing_labels,
         )
@@ -655,6 +670,23 @@ impl CasCore {
             .unwrap_or_default();
 
         let mut task_notes = req.notes.unwrap_or_default();
+        if supervisor_override
+            && req
+                .risk
+                .as_deref()
+                .is_none_or(|risk| risk.trim().is_empty())
+        {
+            let reason = req.reason.as_deref().unwrap_or_default().trim();
+            let audit = format!(
+                "[{}] DECISION: supervisor_override=true accepted missing task risk declaration. Reason: {}",
+                chrono::Utc::now().to_rfc3339(),
+                reason
+            );
+            if !task_notes.is_empty() {
+                task_notes.push('\n');
+            }
+            task_notes.push_str(&audit);
+        }
         if let Some(note) = inherited_default_note {
             if !task_notes.is_empty() {
                 task_notes.push('\n');
@@ -703,6 +735,8 @@ impl CasCore {
             status,
             priority: Priority(req.priority.min(4) as i32),
             task_type,
+            risk,
+            proof_targets,
             assignee: req.assignee,
             labels,
             created_at: now,
@@ -1375,9 +1409,10 @@ impl CasCore {
                         .unwrap_or(true),
                     None => false,
                 },
-                cloud_sync_configured: crate::cloud::CloudConfig::load_from_cas_dir_inheriting_user_credentials(
-                    &self.cas_root,
-                )
+                cloud_sync_configured:
+                    crate::cloud::CloudConfig::load_from_cas_dir_inheriting_user_credentials(
+                        &self.cas_root,
+                    )
                     .map(|config| config.is_logged_in())
                     .unwrap_or(false),
             };
@@ -2126,6 +2161,10 @@ mod related_recall_response_tests {
             description: Some(description.to_string()),
             priority: 2,
             task_type: "epic".to_string(),
+            risk: Some("none".to_string()),
+            proof_targets: None,
+            supervisor_override: None,
+            reason: None,
             labels: None,
             notes: None,
             blocked_by: None,
@@ -2146,6 +2185,10 @@ mod related_recall_response_tests {
             description: Some("A child planned under the test epic.".to_string()),
             priority: 2,
             task_type: "task".to_string(),
+            risk: Some("none".to_string()),
+            proof_targets: None,
+            supervisor_override: None,
+            reason: None,
             labels: None,
             notes: None,
             blocked_by: None,
@@ -2166,6 +2209,10 @@ mod related_recall_response_tests {
             description: None,
             priority: 2,
             task_type: "task".to_string(),
+            risk: Some("none".to_string()),
+            proof_targets: None,
+            supervisor_override: None,
+            reason: None,
             labels: None,
             notes: None,
             blocked_by: None,
@@ -2178,6 +2225,28 @@ mod related_recall_response_tests {
             epic: None,
             depth: None,
         }
+    }
+
+    #[tokio::test]
+    async fn create_path_rejects_missing_risk_for_code_tasks_before_persisting() {
+        let temp = TempDir::new().expect("temporary project");
+        let core = CasCore::with_daemon(temp.path().to_path_buf(), None, None);
+        let mut request = plain_task_request("Risk is required");
+        request.risk = None;
+
+        let error = core
+            .cas_task_create(Parameters(request))
+            .await
+            .expect_err("code-task create without risk must be refused");
+        assert!(error.message.contains("risk is required"), "{error}");
+        assert!(
+            core.open_task_store()
+                .expect("task store")
+                .list(None)
+                .expect("list tasks")
+                .is_empty(),
+            "rejected create must not persist a task row"
+        );
     }
 
     #[tokio::test]

@@ -1,5 +1,6 @@
 use std::fs::OpenOptions;
 use std::future::IntoFuture;
+use std::io::Write;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
@@ -304,8 +305,25 @@ impl HubTransportReport {
         )
     }
 
+    fn supervised_unavailable(warning: impl Into<String>) -> Self {
+        Self::fail_with_remedy(
+            format!(
+                "hub is supervised but not publishable: Tailscale Serve is unavailable: {}",
+                warning.into()
+            ),
+            None,
+            None,
+            "Run `cas hub service uninstall && cas hub start --tailscale-serve` from an interactive shell to publish the pairing route.".to_owned(),
+        )
+    }
+
     pub(crate) fn is_failure(&self) -> bool {
         self.status == "fail"
+    }
+
+    pub(crate) fn is_supervised_unavailable(&self) -> bool {
+        self.message
+            .starts_with("hub is supervised but not publishable")
     }
 
     pub(crate) fn message_with_remedy(&self) -> String {
@@ -730,6 +748,9 @@ pub fn execute(args: &HubArgs, cli: &Cli) -> Result<()> {
                 args.tailscale_serve_port,
                 &paths,
             )?;
+            if super::hub_service::restart_supervised(cli, tailscale_serve, tailscale_port)? {
+                return status(cli);
+            }
             // `hub restart` is a stop-to-relaunch, so its stop carries the
             // intent: if a concurrent lifecycle command already produced a hub
             // with these flags, the restart's goal is met and waiting out the
@@ -1144,6 +1165,19 @@ fn serve_foreground(args: &HubServeArgs, tailscale_serve: bool, tailscale_port: 
     let addr = SocketAddr::new(args.bind, args.port);
     validate_control_bind(addr, TransportSecurity::Plaintext)?;
     let paths = HubRuntimePaths::default_for_user()?;
+    // Create the log before any optional external probe. A failed or
+    // non-responsive Tailscale CLI must leave an operator-visible startup
+    // breadcrumb even when the service manager captures stdout separately.
+    crate::hub::ensure_private_dir(paths.root())?;
+    let mut startup_log = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(paths.log_path())?;
+    writeln!(
+        startup_log,
+        "cas hub serve starting (tailscale_serve={tailscale_serve}, bind={addr})"
+    )?;
+    startup_log.flush()?;
     let (tailscale_serve, tailscale_port) = resolve_lifecycle_tailscale_request(
         tailscale_serve,
         tailscale_port,
@@ -1660,7 +1694,9 @@ fn render_transport_status(report: &HubTransportReport) -> String {
         return format!("Tailscale Serve: OK - {message}");
     }
 
-    let mut lines = if report.message.starts_with("hub machine lock") {
+    let mut lines = if report.message.starts_with("hub is supervised but not publishable") {
+        vec!["Tailscale Serve: FAIL - supervised hub is not publishable".to_owned()]
+    } else if report.message.starts_with("hub machine lock") {
         vec!["Tailscale Serve: FAIL - hub startup is wedged".to_owned()]
     } else if report.expected_target.is_some() && report.actual_target.is_some() {
         vec!["Tailscale Serve: FAIL - route target differs from the live hub shim".to_owned()]
@@ -1967,6 +2003,9 @@ pub(crate) fn hub_transport_report(
             );
         }
         if let Some(warning) = record.and_then(|record| record.transport_warning.as_deref()) {
+            if record.is_some_and(|record| record.launched_by.as_deref() == Some("service")) {
+                return HubTransportReport::supervised_unavailable(warning);
+            }
             return HubTransportReport::ok(format!(
                 "hub is loopback-only; Tailscale Serve publication was unavailable: {warning}"
             ));
@@ -2147,6 +2186,23 @@ mod tests {
         assert_eq!(
             render_transport_status(&unavailable),
             "Tailscale Serve: WARN - unavailable; hub remains loopback-only"
+        );
+    }
+
+    #[test]
+    fn supervised_unavailable_transport_is_a_failure_with_one_recovery_command() {
+        let report = HubTransportReport::supervised_unavailable("tailscale command timed out");
+        assert!(report.is_failure());
+        assert!(report.message.contains("supervised but not publishable"));
+        assert!(report
+            .remedy
+            .as_deref()
+            .is_some_and(|remedy| remedy.contains(
+                "cas hub service uninstall && cas hub start --tailscale-serve"
+            )));
+        assert_eq!(
+            render_transport_status(&report),
+            "Tailscale Serve: FAIL - supervised hub is not publishable\n  remedy: Run `cas hub service uninstall && cas hub start --tailscale-serve` from an interactive shell to publish the pairing route."
         );
     }
 

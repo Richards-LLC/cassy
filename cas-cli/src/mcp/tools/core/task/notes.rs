@@ -74,6 +74,8 @@ impl CasCore {
             "decision" => "✅ DECISION",
             "discovery" => "💡 DISCOVERY",
             "question" => "❓ QUESTION",
+            "platform_proof" => "🧪 PLATFORM_PROOF",
+            "loaded_proof" => "🧪 LOADED_PROOF",
             _ => "📝 PROGRESS",
         };
 

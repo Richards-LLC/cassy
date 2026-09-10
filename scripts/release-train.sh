@@ -19,6 +19,7 @@
 #     and a sibling run survives.
 #
 # Usage:
+#   scripts/release-train.sh <version> <release-worktree> --assemble
 #   scripts/release-train.sh <version> <epic-worktree> --check-lane <branch>
 #   scripts/release-train.sh <version> <epic-worktree> --gate [--reuse | --only <row,row>]
 #   scripts/release-train.sh <version> <epic-worktree> --pipeline
@@ -45,7 +46,7 @@
 set -euo pipefail
 
 usage() {
-    printf 'Usage: %s <version> <epic-worktree> [--check-lane <branch>|--gate [--reuse | --only <row,row>]|--pipeline|--publish [sha]|--report|--status|--stop|--print-run-dir]\n' "$0"
+    printf 'Usage: %s <version> <epic-worktree> [--assemble|--check-lane <branch>|--gate [--reuse | --only <row,row>]|--pipeline|--publish [sha]|--report|--status|--stop|--print-run-dir]\n' "$0"
 }
 
 version="${1:-}"
@@ -706,6 +707,10 @@ run_report() {
 }
 
 case "$action" in
+    --assemble)
+        python3 "$script_dir/release-integrate.py" "$worktree"
+        exit $?
+        ;;
     --print-run-dir)
         printf '%s\n' "$run_dir"
         exit 0

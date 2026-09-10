@@ -248,6 +248,15 @@ impl CasService {
             .filter(|label| !label.is_empty())
             .map(ToOwned::to_owned)
             .collect::<Vec<_>>();
+        crate::mcp::tools::types::validate_task_risk_declaration(
+            task_type,
+            req.risk.as_deref(),
+            req.proof_targets.as_deref(),
+            supervisor_override.unwrap_or(false),
+            crate::harness_policy::is_supervisor_from_env(),
+            req.reason.as_deref(),
+        )
+        .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
         crate::mcp::tools::core::task::lifecycle::validate_demo_statement_requirement(
             task_type,
             &labels,
@@ -268,6 +277,10 @@ impl CasService {
             description: req.description,
             priority: req.priority.unwrap_or(2),
             task_type: req.task_type.unwrap_or_else(|| "task".to_string()),
+            risk: req.risk,
+            proof_targets: req.proof_targets,
+            supervisor_override,
+            reason: req.reason,
             labels: req.labels,
             notes: req.notes,
             blocked_by: req.blocked_by,
@@ -413,6 +426,8 @@ impl CasService {
             acceptance_criteria: req.acceptance_criteria,
             demo_statement: req.demo_statement,
             execution_note: req.execution_note,
+            risk: req.risk,
+            proof_targets: req.proof_targets,
             external_ref: req.external_ref,
             assignee: req.assignee,
             origin_project: req.origin_project,

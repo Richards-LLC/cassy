@@ -7,6 +7,44 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.25.0] - 2026-09-10
+
+### Added
+- Commander conversations: the Hub opens on a Cassy Cloud-branded list of
+  supervisor conversations with a prominent project badge, shows each
+  supervisor's real pane text, and sends addressed messages with distinct
+  sending, delivered, replied, and rejected states; the terminal is an explicit
+  alternate view.
+- Verified operator channel: Commander messages are stamped with the paired
+  device session, carry `operator` provenance with user authority, and get a
+  reply path back to the originating device; sends are acknowledged with a
+  durable `MessageQueued` receipt and refusals keep the `client_ref`.
+- Worker liveness: `worker_status` reports `executing`, `waiting_for_input`,
+  `stalled`, or `dead` per worker from turn and process evidence, in one fast
+  call, and the director relays use the same source.
+- Task risk declarations (`none`, `blast-radius`, `platform`, `concurrency`)
+  are required at create and enforced at close; a per-merge workspace sweep and
+  gate/CI row parity catch release blockers at merge time.
+- `cas hub` pairing on a supervised (launchd) host: bounded GUI-free Tailscale
+  probe, supervision-aware `restart`, exact Serve refusal and recovery guidance,
+  consumed-code pairing messages, and a doctor row (#817).
+
+### Changed
+- Supervisor skill guidance moved detail behind references to stay within the
+  SessionStart budget; `max` is a valid effort level for Fable, Opus, Astra,
+  and Sol.
+- `cas codex` and `cas claude` profile pickers hand the selected account
+  directory to the supervisor launch exactly like an explicit profile (#820).
+
+### Fixed
+- Isolated workers can no longer edit, commit, reset, or push inside the
+  primary checkout or any path outside their registered worktree (#816).
+- Task close verifies delivery content from the task's content commits when
+  the branch tip is a merge of the target, and pre-close reachability errors
+  name the commit, the resolved ref, and local-vs-origin (#818, #819).
+- Skill lookups suggest the nearest name, spawned agents get `~/.local/bin` on
+  `PATH`, and doctor flags divergent duplicate skill copies (#810).
+
 ## [3.24.0] - 2026-09-10
 
 ### Added

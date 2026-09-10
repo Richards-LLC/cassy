@@ -34,6 +34,7 @@ async fn supervisor_gate_closes_on_decision_and_unblocks_dependent_without_commi
         &service,
         serde_json::json!({
             "action": "create",
+            "risk": "none",
             "title": "Approve rollout",
             "task_type": "gate"
         }),
@@ -45,6 +46,7 @@ async fn supervisor_gate_closes_on_decision_and_unblocks_dependent_without_commi
         &service,
         serde_json::json!({
             "action": "create",
+            "risk": "none",
             "title": "Begin rollout",
             "task_type": "task",
             "blocked_by": gate_id
@@ -424,6 +426,7 @@ async fn cas525c_supervisor_proof_scope_fix_reopens_with_decision_not_review_fai
         &service,
         serde_json::json!({
             "action": "create",
+            "risk": "none",
             "title": "Correct delivery branch",
             "target_repo": temp.path().to_str().unwrap(),
             "target_branch": "main"
@@ -472,6 +475,7 @@ async fn cas525c_supervisor_proof_scope_fix_reopens_with_decision_not_review_fai
         &service,
         serde_json::json!({
             "action": "create",
+            "risk": "none",
             "title": "Clear obsolete code anchor",
             "execution_note": "no-code",
             "target_repo": temp.path().to_str().unwrap(),
@@ -555,6 +559,7 @@ async fn casb123_proof_scope_fix_rejects_immutable_merged_delivery() {
         &service,
         serde_json::json!({
             "action": "create",
+            "risk": "none",
             "title": "Do not rewrite merged delivery",
             "target_repo": temp.path().to_str().unwrap(),
             "target_branch": "main"

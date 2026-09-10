@@ -55,6 +55,8 @@ impl ProofScopeOperation<'_> {
         supplied!(acceptance_criteria);
         supplied!(demo_statement);
         supplied!(execution_note);
+        supplied!(risk);
+        supplied!(proof_targets);
         supplied!(external_ref);
         supplied!(assignee);
         // cas-d45f: blocked_by mutates ordering semantics, so it is scoped
@@ -384,6 +386,8 @@ mod tests {
             acceptance_criteria: None,
             demo_statement: None,
             execution_note: None,
+            risk: None,
+            proof_targets: None,
             external_ref: None,
             assignee: None,
             origin_project: None,

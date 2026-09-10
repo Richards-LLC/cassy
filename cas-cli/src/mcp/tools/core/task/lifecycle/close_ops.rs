@@ -7,6 +7,7 @@ use crate::harness_policy::{
     worker_harness_from_env,
 };
 use crate::mcp::tools::core::imports::*;
+use cas_types::TaskRisk;
 
 /// cas-9fff: gate epic close when `epic_verification_owner` is set.
 ///
@@ -499,6 +500,158 @@ fn has_recorded_gate_decision(notes: &str) -> bool {
             .and_then(|line| line.split_once("] ✅ DECISION "))
             .is_some_and(|(_, decision)| !decision.trim().is_empty())
     })
+}
+
+/// A platform proof is deliberately a typed note rather than an unstructured
+/// close-reason claim. The note must identify macOS, the command that ran, and
+/// a passing result so a close receipt remains useful after the worker pane is
+/// gone.
+fn has_platform_proof_note(notes: &str) -> bool {
+    notes.lines().any(|line| {
+        let lower = line.to_ascii_lowercase();
+        lower.contains("platform_proof")
+            && lower.contains("macos")
+            && (lower.contains("cargo") || lower.contains("command"))
+            && (lower.contains("pass")
+                || lower.contains("success")
+                || lower.contains("exit 0")
+                || lower.contains("status 0"))
+    })
+}
+
+/// A loaded proof must cover the whole target, use the requested parallelism,
+/// and repeat the run at least three times. This intentionally accepts common
+/// receipt phrasings (`3 loops`, `loops: 3`, `three loops`, `3x`) while refusing
+/// a one-off `-j16` command.
+fn has_loaded_proof_note(notes: &str) -> bool {
+    notes.lines().any(|line| {
+        let lower = line.to_ascii_lowercase();
+        let has_parallelism = lower.contains("-j16") || lower.contains("jobs=16");
+        let has_loops = lower.contains("3 loops")
+            || lower.contains("loops: 3")
+            || lower.contains("loops=3")
+            || lower.contains("three loops")
+            || lower.contains("3x")
+            || lower.contains("1 2 3");
+        lower.contains("loaded_proof")
+            && lower.contains("whole target")
+            && has_parallelism
+            && has_loops
+            && (lower.contains("pass")
+                || lower.contains("success")
+                || lower.contains("exit 0")
+                || lower.contains("status 0"))
+    })
+}
+
+fn proof_target_matches_module(target: &str, module: &str) -> bool {
+    let target = target.trim().to_ascii_lowercase();
+    let module = module.trim().to_ascii_lowercase();
+    if target.is_empty() || module.is_empty() {
+        return false;
+    }
+    let normalized_target = target.replace([':', '/', '\\', '_', '-'], "");
+    let normalized_module = module.replace([':', '/', '\\', '_', '-'], "");
+    target == module
+        || target.ends_with(&format!("::{module}"))
+        || target.ends_with(&format!("/{module}"))
+        || normalized_target.contains(&normalized_module)
+}
+
+/// Convert changed Rust source paths into the module names that the scoped
+/// proof-surface resolver exposes. Non-source files do not require a library
+/// proof target; integration targets are represented by their path stem.
+pub(crate) fn changed_source_modules(paths: &[String]) -> Vec<String> {
+    let mut modules = std::collections::BTreeSet::new();
+    for path in paths {
+        let normalized = path.replace('\\', "/");
+        let Some(source) = normalized.split_once("/src/").map(|(_, source)| source) else {
+            continue;
+        };
+        if !source.ends_with(".rs") {
+            continue;
+        }
+        let source = source.trim_end_matches(".rs");
+        let module = if source.ends_with("/mod") {
+            source.trim_end_matches("/mod").rsplit('/').next().unwrap_or(source)
+        } else {
+            source.rsplit('/').next().unwrap_or(source)
+        };
+        modules.insert(module.to_string());
+    }
+    modules.into_iter().collect()
+}
+
+/// Return the source modules absent from the declared close proof scope.
+pub(crate) fn uncovered_blast_radius_modules(
+    changed_paths: &[String],
+    proof_targets: &[String],
+) -> Vec<String> {
+    changed_source_modules(changed_paths)
+        .into_iter()
+        .filter(|module| {
+            !proof_targets
+                .iter()
+                .any(|target| proof_target_matches_module(target, module))
+        })
+        .collect()
+}
+
+fn validate_risk_close_proofs(
+    task: &Task,
+    changed_paths: &[String],
+) -> Result<(), String> {
+    if task.risk.contains(&TaskRisk::Platform) && !has_platform_proof_note(&task.notes) {
+        return Err(format!(
+            "TASK CLOSE REJECTED: task {} declares risk=platform but has no platform_proof note containing the macOS proof command and passing result. Add one with action=notes note_type=platform_proof, then retry close.",
+            task.id
+        ));
+    }
+    if task.risk.contains(&TaskRisk::Concurrency) && !has_loaded_proof_note(&task.notes) {
+        return Err(format!(
+            "TASK CLOSE REJECTED: task {} declares risk=concurrency but has no loaded_proof note proving the whole target under -j16 for at least 3 loops with a passing result. Add one with action=notes note_type=loaded_proof, then retry close.",
+            task.id
+        ));
+    }
+    if task.risk.contains(&TaskRisk::BlastRadius) {
+        let uncovered = uncovered_blast_radius_modules(changed_paths, &task.proof_targets);
+        if !uncovered.is_empty() {
+            return Err(format!(
+                "TASK CLOSE REJECTED: task {} declares blast-radius proof narrower than its delivery diff; uncovered source modules: {}. Expand proof_targets and record scoped proof for every module, then retry close.",
+                task.id,
+                uncovered.join(", ")
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod risk_proof_tests {
+    use super::*;
+
+    #[test]
+    fn blast_radius_names_modules_missing_from_proof_scope() {
+        let changed = vec![
+            "cas-cli/src/mcp/tools/core/task/lifecycle.rs".to_string(),
+            "cas-cli/src/mcp/tools/service/core.rs".to_string(),
+            "README.md".to_string(),
+        ];
+        assert_eq!(
+            uncovered_blast_radius_modules(&changed, &["lifecycle".to_string()]),
+            ["core"]
+        );
+    }
+
+    #[test]
+    fn platform_and_loaded_notes_require_complete_receipts() {
+        let mut task = Task::new("cas-risk-proof".into(), "risk proof".into());
+        task.risk = vec![TaskRisk::Platform, TaskRisk::Concurrency];
+        assert!(validate_risk_close_proofs(&task, &[]).is_err());
+
+        task.notes = "[2026-09-10] 🧪 PLATFORM_PROOF macOS command: cargo test -p cas --lib; result: PASS\n[2026-09-10] 🧪 LOADED_PROOF whole target under -j16, 3 loops; result: PASS".into();
+        validate_risk_close_proofs(&task, &[]).expect("complete proof notes should pass");
+    }
 }
 
 fn negative_result_missing_receipts(
@@ -4434,6 +4587,27 @@ impl CasCore {
                     checkout_has_reviewable_changes: has_reviewable_changes(&close_project_root),
                 })
             };
+
+        if close_disposition.requires_delivery_gates() {
+            let proof_repo = worker_worktree_path
+                .as_deref()
+                .unwrap_or(close_project_root.as_path());
+            let changed_paths = commit_receipt_window
+                .as_ref()
+                .and_then(|window| {
+                    task_attribution::paths(
+                        proof_repo,
+                        &resolved_parent_branch,
+                        window,
+                        req.commit_receipt.as_deref(),
+                    )
+                })
+                .filter(|paths| !paths.is_empty())
+                .unwrap_or_else(|| task.deliverables.files_changed.clone());
+            if let Err(message) = validate_risk_close_proofs(&task, &changed_paths) {
+                return Ok(Self::tool_error(message));
+            }
+        }
 
         // `no-code` is an explicit operations/artifact contract, not a broad
         // review bypass. It must retain a portable proof pointer, and any code

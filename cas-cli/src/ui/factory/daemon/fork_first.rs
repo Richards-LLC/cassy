@@ -525,6 +525,10 @@ impl DaemonInitPhase {
             }
         };
         let ai_enrichment = self.factory_config.ai_enrichment.clone();
+        let merge_sweep = super::runtime::merge_sweep::MergeSweepCoordinator::new(
+            app.cas_dir(),
+            &self.session_name,
+        );
 
         // Return a FactoryDaemon for the main event loop
         Ok(FactoryDaemon {
@@ -570,8 +574,9 @@ impl DaemonInitPhase {
             last_usage_limit_scan: None,
         reported_auth_failed_workers: std::collections::HashMap::new(),
         last_auth_failure_scan: None,
-            cancelled_spawns: std::collections::HashSet::new(),
-            last_idle_message_times: HashMap::new(),
+        cancelled_spawns: std::collections::HashSet::new(),
+        merge_sweep,
+        last_idle_message_times: HashMap::new(),
             lifecycle_redelivery_attempts: HashMap::new(),
             lifecycle_redelivery_counts: HashMap::new(),
             inbox_deferred_writes: std::collections::HashMap::new(),

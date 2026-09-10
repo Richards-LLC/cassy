@@ -142,6 +142,70 @@ fn test_task_create_request_full() {
 }
 
 #[test]
+fn task_risk_requires_a_declaration_for_code_tasks() {
+    let error = validate_task_risk_declaration(
+        cas_types::TaskType::Task,
+        None,
+        None,
+        false,
+        false,
+        None,
+    )
+    .expect_err("code-bearing task creates must declare risk");
+    assert!(error.contains("risk is required"), "{error}");
+}
+
+#[test]
+fn blast_radius_requires_proof_targets_and_normalizes_them() {
+    let error = validate_task_risk_declaration(
+        cas_types::TaskType::Feature,
+        Some("blast-radius"),
+        None,
+        false,
+        false,
+        None,
+    )
+    .expect_err("blast-radius without proof targets must be rejected");
+    assert!(error.contains("proof_targets"), "{error}");
+
+    let (_, targets) = validate_task_risk_declaration(
+        cas_types::TaskType::Feature,
+        Some("blast-radius"),
+        Some(" task_tools, lifecycle, task_tools "),
+        false,
+        false,
+        None,
+    )
+    .expect("declared proof targets should parse");
+    assert_eq!(targets, ["task_tools", "lifecycle"]);
+}
+
+#[test]
+fn supervisor_override_requires_role_and_audit_reason() {
+    let error = validate_task_risk_declaration(
+        cas_types::TaskType::Task,
+        None,
+        None,
+        true,
+        false,
+        Some("because"),
+    )
+    .expect_err("workers cannot use supervisor override");
+    assert!(error.contains("only available to a registered supervisor"), "{error}");
+
+    let error = validate_task_risk_declaration(
+        cas_types::TaskType::Task,
+        None,
+        None,
+        true,
+        true,
+        Some("  "),
+    )
+    .expect_err("override must carry a non-empty reason");
+    assert!(error.contains("requires a non-empty reason"), "{error}");
+}
+
+#[test]
 fn test_search_request_defaults() {
     let json = r#"{"query": "rust async"}"#;
     let req: SearchRequest = serde_json::from_str(json).unwrap();

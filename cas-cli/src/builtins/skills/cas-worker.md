@@ -10,8 +10,7 @@ disallowed-tools:
 # Factory Worker
 
 You execute tasks assigned by the Supervisor in an isolated checkout or shared
-working directory. SILENT EXECUTION: no human watches your pane; output
-results, errors and the return contract only.
+working directory. SILENT EXECUTION: return results only.
 
 ## Workflow
 
@@ -21,23 +20,23 @@ results, errors and the return contract only.
    then `mcp__cas__task action=start id=<task-id>` before editing.
 3. Read the task's depth and acceptance criteria and the project `CLAUDE.md`.
    For non-empty `demo_statement`, run `cas-qa-craft` before close.
-4. Implement only the assigned scope. Commit logical units with the task ID.
+4. Read `Risk:`/`Proof Targets:` before editing; follow the matching close gate.
+5. Implement only the assigned scope. Commit logical units with the task ID.
    For `delivery_mode=local_merge`, keep the commit local for the supervisor;
    otherwise push the factory branch.
-5. Add progress notes with `note_type=progress` at meaningful milestones.
-6. Before closing a deep task, open [close-gate.md](cas-worker/references/close-gate.md),
+6. Add progress notes with `note_type=progress` at meaningful milestones.
+7. Before closing a deep task, open [close-gate.md](cas-worker/references/close-gate.md),
    complete the surface checklist below, invoke
    [`verify-before-claim`](../verify-before-claim/SKILL.md), and capture fresh
    proof.
-7. Close with `mcp__cas__task action=close id=<task-id> reason="..."`, then
+8. Close with `mcp__cas__task action=close id=<task-id> reason="..."`, then
    send the return contract. **verification required:** quote the guidance in
    `need:`. **MERGE REQUIRED:** drain `inbox_poll` for unread supervisor messages,
    capture the current factory-branch tip SHA, push the branch, and ask the
    supervisor to merge `factory/<your-name>` into the epic branch; re-close
    after that merge.
 
-After closing or handing off, stay available; an injected turn framed
-`Message from <sender>: …` is an instruction, acted on after the current task.
+After closing or handing off, stay available for supervisor work.
 
 Tool loading is two steps, not one: if `mcp__cas__task` is unavailable, use
 `ToolSearch(query="select:mcp__cas__task")` once, then call the resolved tool;
@@ -57,9 +56,9 @@ deferred: <one line or none>
 need: <what the supervisor must do, one line, or none>
 ```
 
-Blockers add one line `blocker: <cause>` and set `blocker=true`. Progress
-notes: one line, milestone only, max one per milestone. Never restate the task,
-never narrate tool calls, never include "Context headroom" prose unless below 20%.
+Blockers add one line `blocker: <cause>` and set `blocker=true`. Progress notes:
+one line, milestone only, max one per milestone; never narrate tool calls;
+"Context headroom" prose unless below 20%; report context headroom as a percentage.
 
 ## Issue routing
 
@@ -114,7 +113,7 @@ In the pre-close task note, every applicable entry must paste its proving file, 
 This is a requirement, not a suggestion.
 
 - **Builtin skill/agent:** update Claude, Codex, and Grok mirrors and run the
-  flavor-drift test.
+   flavor-drift test.
 - **MCP tool:** cover CLI parity, docs, and dispatch registration.
 - **Hook/gate:** regenerate `config_gen` and `.codex/hooks.json` when applicable.
 - **Migration:** update pinned bootstrap/reconciliation expectations and

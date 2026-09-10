@@ -13492,7 +13492,9 @@ effort = "high"
                 Agent::new_with_role(format!("fixture-{index}"), name, AgentRole::Worker);
             agent.last_heartbeat = now;
             agent.factory_session = Some("liveness-fixture-session".into());
-            agent.pid = Some(if dead { i32::MAX as u32 } else { child.0.id() });
+            let pid = if dead { i32::MAX as u32 } else { child.0.id() };
+            agent.pid = Some(pid);
+            crate::mcp::daemon::stamp_pid_fingerprint(&mut agent, pid);
             agent.metadata.insert("worker_cli".into(), "codex".into());
             agent
                 .metadata

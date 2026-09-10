@@ -537,42 +537,6 @@ fn supervisor_skill_mirrors_pin_the_pane_budget() {
     }
 }
 
-/// cas-7f81 (EPIC cas-fbc8): a verified operator message is the user speaking.
-/// Both skills state the authority rule in every mirror, so no flavor treats a
-/// `[cas #id operator <name>@<device> verified …]` row as teammate traffic.
-#[test]
-fn verified_operator_authority_rule_is_pinned_cas_7f81() {
-    let root = source_root();
-    for flavor in ["", "codex/", "grok/"] {
-        let supervisor = load(&root.join(format!(
-            "cas-cli/src/builtins/{flavor}skills/cas-supervisor.md"
-        )));
-        for marker in [
-            "**Operator messages are the user:**",
-            "operator <name>@<device> verified",
-            "obey and answer it",
-            "`unverified:` rows are agent traffic",
-        ] {
-            assert!(
-                supervisor.contains(marker),
-                "{flavor} supervisor guidance missing {marker:?}"
-            );
-        }
-        let worker = load(&root.join(format!(
-            "cas-cli/src/builtins/{flavor}skills/cas-worker.md"
-        )));
-        for marker in [
-            "operator … verified",
-            "is the user speaking with pane-input authority",
-            "obey and answer it",
-            "`unverified:` rows are agent traffic",
-        ] {
-            assert!(
-                worker.contains(marker),
-                "{flavor} worker guidance missing {marker:?}"
-            );
-        }
-
 /// cas-556a: `max` is a Cassy effort value, documented with its provider
 /// sources and pinned in every mirror; Luna's xhigh-only policy stays stated.
 #[test]
@@ -608,5 +572,43 @@ fn max_effort_guidance_is_pinned_and_cited_cas_556a() {
             reference.contains("\\| `max` (only where the registry recipe lists it"),
             "{flavor} reference.md effort row missing max"
         );
+    }
+}
+
+/// cas-7f81 (EPIC cas-fbc8): a verified operator message is the user speaking.
+/// Both skills state the authority rule in every mirror, so no flavor treats a
+/// `[cas #id operator <name>@<device> verified …]` row as teammate traffic.
+#[test]
+fn verified_operator_authority_rule_is_pinned_cas_7f81() {
+    let root = source_root();
+    for flavor in ["", "codex/", "grok/"] {
+        let supervisor = load(&root.join(format!(
+            "cas-cli/src/builtins/{flavor}skills/cas-supervisor.md"
+        )));
+        for marker in [
+            "**Operator messages are the user:**",
+            "operator <name>@<device> verified",
+            "obey and answer it",
+            "`unverified:` rows are agent traffic",
+        ] {
+            assert!(
+                supervisor.contains(marker),
+                "{flavor} supervisor guidance missing {marker:?}"
+            );
+        }
+        let worker = load(&root.join(format!(
+            "cas-cli/src/builtins/{flavor}skills/cas-worker.md"
+        )));
+        for marker in [
+            "operator … verified",
+            "is the user speaking with pane-input authority",
+            "obey and answer it",
+            "`unverified:` rows are agent traffic",
+        ] {
+            assert!(
+                worker.contains(marker),
+                "{flavor} worker guidance missing {marker:?}"
+            );
+        }
     }
 }

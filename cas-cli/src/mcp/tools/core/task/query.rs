@@ -140,7 +140,9 @@ impl CasCore {
                     "⚠️  MERGE CONFLICT / REWORK REQUIRED — this task is NOT complete. \
                      The parked branch is conflicted or its conflict preflight could \
                      not be evaluated; the assigned worker can `task start` it to \
-                     inspect and resolve the branch directly.\n",
+                     inspect from inside the worker worktree, rebase the parked \
+                     factory branch onto the current integration target tip, push, \
+                     and re-park with merge_request=true.\n",
                 );
             } else {
                 output.push_str(

@@ -563,23 +563,38 @@ check_failure_log() {
     [[ "$entries" -gt 0 && "$invalid" -eq 0 ]]
 }
 
+# NUL-separated candidate files for the version-literals row: tracked files in
+# a git checkout (gitignored build caches are skipped), every file otherwise.
+version_literal_candidates() {
+    local root
+    if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        git ls-files -z -- "$@" 2>/dev/null
+        return
+    fi
+    for root in "$@"; do
+        [[ -d "$root" ]] || continue
+        find "$root" -type f -print0
+    done
+}
+
 check_version_literals() {
     local file hit found=false
     local -a roots=(cas-cli/src cas-cli/tests crates scripts)
 
-    for root in "${roots[@]}"; do
-        [[ -d "$root" ]] || continue
-        while IFS= read -r -d '' file; do
-            case "$file" in
-                *.md|*/reference-history.json|*/failure-log.md|*/Cargo.toml|*/Cargo.lock) continue ;;
-            esac
-            hit="$(grep -nIF -- "$version" "$file" 2>/dev/null || true)"
-            if [[ -n "$hit" ]]; then
-                printf '%s\n' "$hit"
-                found=true
-            fi
-        done < <(find "$root" -type f -print0)
-    done
+    # Tracked files only: gitignored build caches (for example
+    # crates/ghostty_vt_sys/zig/.zig-cache) embed absolute checkout paths, and
+    # a worktree named after the release would otherwise fail this row.
+    while IFS= read -r -d '' file; do
+        [[ -f "$file" ]] || continue
+        case "$file" in
+            *.md|*/reference-history.json|*/failure-log.md|*/Cargo.toml|*/Cargo.lock) continue ;;
+        esac
+        hit="$(grep -nIF -- "$version" "$file" 2>/dev/null || true)"
+        if [[ -n "$hit" ]]; then
+            printf '%s\n' "$hit"
+            found=true
+        fi
+    done < <(version_literal_candidates "${roots[@]}")
 
     if [[ "$found" == true ]]; then
         printf 'version-literals: source/test files contain %s; use env!("CARGO_PKG_VERSION") or a fixture value\n' "$version"

@@ -1406,6 +1406,7 @@ impl CasCore {
                             context,
                             worker_worktree.as_deref(),
                             None,
+                            false,
                         )
                         .map_err(|message| McpError {
                             code: ErrorCode::INVALID_PARAMS,

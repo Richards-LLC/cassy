@@ -4215,6 +4215,61 @@ This is the body content."#;
         }
     }
 
+    /// cas-0de3 (EPIC cas-68c2): worker-to-supervisor traffic measured 2,400
+    /// chars per message on average (max 6,819) and progress notes ran to
+    /// 3,000 chars. The worker builtin now pins a fixed six-field return
+    /// contract and the SILENT EXECUTION directive on every harness mirror;
+    /// the matching launch-prompt element is pinned by cas-pty's
+    /// `WORKER_CONTRACT_ELEMENTS`.
+    #[test]
+    fn test_worker_skills_pin_return_contract_and_silent_execution_cas_0de3() {
+        for (label, content) in [
+            ("claude", include_str!("builtins/skills/cas-worker.md")),
+            ("codex", include_str!("builtins/codex/skills/cas-worker.md")),
+            ("grok", include_str!("builtins/grok/skills/cas-worker.md")),
+        ] {
+            for required in [
+                "## Return contract",
+                "nothing before or after it",
+                "status: <in_progress|ready|blocked|partial>",
+                "tip: <sha> on factory/<name>; worktree: <clean|dirty>",
+                "ci: <run id + result | not started>",
+                "proof: <tests run with pass count | artifact path>",
+                "deferred: <one line or none>",
+                "need: <what the supervisor must do, one line, or none>",
+                "`blocker: <cause>`",
+                "one line, milestone only, max one per milestone",
+                "never narrate tool calls",
+                "\"Context headroom\" prose unless below 20%",
+                "SILENT EXECUTION",
+            ] {
+                assert!(
+                    content.contains(required),
+                    "{label} cas-worker.md missing return-contract marker {required:?}"
+                );
+            }
+        }
+        let directive = "SILENT EXECUTION: You run in an automated pipeline; no human watches \
+                         your pane. Do not narrate actions or explain before tool calls. Output \
+                         results, errors and the return contract only.";
+        for (label, surface) in [
+            ("claude", cas_mux::claude_worker_contract("probe-worker")),
+            (
+                "codex",
+                cas_mux::rendered_contract_surface("codex", cas_mux::ContractRole::Worker),
+            ),
+            (
+                "grok",
+                cas_mux::rendered_contract_surface("grok", cas_mux::ContractRole::Worker),
+            ),
+        ] {
+            assert!(
+                surface.contains(directive),
+                "{label} worker launch prompt missing the SILENT EXECUTION directive"
+            );
+        }
+    }
+
     /// cas-3627 (GH #159): the worker builtin must teach the difference
     /// between the INNER test loop and the FINAL proof.
     ///

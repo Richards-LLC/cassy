@@ -86,6 +86,31 @@ pub fn lock_delivery_target(
     canonical_repo: &Path,
     target_ref: &str,
 ) -> std::io::Result<DeliveryTargetLock> {
+    let lock = open_delivery_lock(cas_root, canonical_repo, target_ref)?;
+    lock._file.lock_exclusive()?;
+    Ok(lock)
+}
+
+/// Nonblocking acquisition for daemon jobs that must honor cancellation while
+/// another session validates the integration target.
+pub fn try_lock_delivery_target(
+    cas_root: &Path,
+    canonical_repo: &Path,
+    target_ref: &str,
+) -> std::io::Result<Option<DeliveryTargetLock>> {
+    let lock = open_delivery_lock(cas_root, canonical_repo, target_ref)?;
+    match lock._file.try_lock_exclusive() {
+        Ok(()) => Ok(Some(lock)),
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+fn open_delivery_lock(
+    cas_root: &Path,
+    canonical_repo: &Path,
+    target_ref: &str,
+) -> std::io::Result<DeliveryTargetLock> {
     let key = delivery_target_key(canonical_repo, target_ref);
     let dir = cas_root.join("locks").join("delivery-target");
     std::fs::create_dir_all(&dir)?;
@@ -96,7 +121,6 @@ pub fn lock_delivery_target(
         .write(true)
         .truncate(false)
         .open(&path)?;
-    file.lock_exclusive()?;
     Ok(DeliveryTargetLock { _file: file, key })
 }
 
@@ -282,6 +306,23 @@ mod tests {
 
         reacquire.expect(
             "dropping the guard must unlock even while a forked child retains the descriptor",
+        );
+    }
+    #[test]
+    fn nonblocking_delivery_lock_observes_contention_and_release() {
+        let temp = TempDir::new().unwrap();
+        let repo = temp.path().join(".git");
+        let held = lock_delivery_target(temp.path(), &repo, "integration/project").unwrap();
+        assert!(
+            try_lock_delivery_target(temp.path(), &repo, "integration/project")
+                .unwrap()
+                .is_none()
+        );
+        drop(held);
+        assert!(
+            try_lock_delivery_target(temp.path(), &repo, "integration/project")
+                .unwrap()
+                .is_some()
         );
     }
 }

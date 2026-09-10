@@ -436,23 +436,56 @@ fn os_lock_holders(_path: &Path) -> Vec<HubLockHolder> {
     Vec::new()
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", test))]
 fn parse_elapsed_time(value: &str) -> Option<Duration> {
     let fields = value.split(':').collect::<Vec<_>>();
-    let (days, hours, minutes, seconds) = match fields.as_slice() {
-        [minutes, seconds] => (0, 0, minutes.parse().ok()?, seconds.parse().ok()?),
-        [hours, minutes, seconds] => {
-            (0, hours.parse().ok()?, minutes.parse().ok()?, seconds.parse().ok()?)
+    let (days, hours, minutes, seconds): (u64, u64, u64, u64) = match fields.as_slice() {
+        [minutes, seconds] => {
+            let minutes: u64 = minutes.parse().ok()?;
+            let seconds: u64 = seconds.parse().ok()?;
+            (0, 0, minutes, seconds)
         }
-        [days, hours, minutes, seconds] => (
-            days.parse().ok()?,
-            hours.parse().ok()?,
-            minutes.parse().ok()?,
-            seconds.parse().ok()?,
-        ),
+        [hours, minutes, seconds] => {
+            let hours: u64 = hours.parse().ok()?;
+            let minutes: u64 = minutes.parse().ok()?;
+            let seconds: u64 = seconds.parse().ok()?;
+            (0, hours, minutes, seconds)
+        }
+        [days, hours, minutes, seconds] => {
+            let days: u64 = days.parse().ok()?;
+            let hours: u64 = hours.parse().ok()?;
+            let minutes: u64 = minutes.parse().ok()?;
+            let seconds: u64 = seconds.parse().ok()?;
+            (days, hours, minutes, seconds)
+        }
         _ => return None,
     };
     Some(Duration::from_secs(
         days * 86_400 + hours * 3_600 + minutes * 60 + seconds,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_elapsed_time;
+    use std::time::Duration;
+
+    #[test]
+    fn parse_elapsed_time_accepts_ps_elapsed_time_shapes() {
+        assert_eq!(parse_elapsed_time("01:02"), Some(Duration::from_secs(62)));
+        assert_eq!(
+            parse_elapsed_time("01:02:03"),
+            Some(Duration::from_secs(3_723))
+        );
+        assert_eq!(
+            parse_elapsed_time("2:03:04:05"),
+            Some(Duration::from_secs(2 * 86_400 + 3 * 3_600 + 4 * 60 + 5))
+        );
+    }
+
+    #[test]
+    fn parse_elapsed_time_rejects_malformed_values() {
+        assert_eq!(parse_elapsed_time("not-a-duration"), None);
+        assert_eq!(parse_elapsed_time("01:02:03:04:05"), None);
+    }
 }

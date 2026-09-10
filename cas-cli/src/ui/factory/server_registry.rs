@@ -831,9 +831,9 @@ fn process_snapshot() -> Vec<ProcessDetails> {
         .lines()
         .filter_map(|line| {
             let mut fields = line.split_whitespace();
-            let pid = fields.next()?.parse().ok()?;
-            let ppid = fields.next()?.parse().ok()?;
-            let pgid = fields.next()?.parse().ok()?;
+            let pid = fields.next()?.parse::<u32>().ok()?;
+            let ppid = fields.next()?.parse::<u32>().ok()?;
+            let pgid = fields.next()?.parse::<u32>().ok()?;
             let command = fields.collect::<Vec<_>>().join(" ");
             Some(ProcessDetails {
                 pid,

@@ -28,6 +28,8 @@ pub use types::*;
 pub mod service;
 pub use service::CasService;
 
+pub(crate) mod traffic_limits;
+
 // ============================================================================
 // Tool Implementations - All in one impl block to satisfy the macro
 // ============================================================================

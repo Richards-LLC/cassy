@@ -398,6 +398,72 @@ mod tests {
         assert_eq!(repeated.content.len(), 1);
     }
 
+    #[tokio::test]
+    async fn response_fallback_does_not_replay_transport_delivered_mail() {
+        use crate::mcp::server::CasCore;
+        use crate::mcp::tools::service::CasService;
+        use crate::test_support::TestEnvGuard;
+        use cas_store::{PromptQueueStore, SqlitePromptQueueStore};
+
+        let temp = tempfile::tempdir().unwrap();
+        let _env = TestEnvGuard::with_optional_vars(&[
+            ("CAS_AGENT_NAME", Some("response-worker")),
+            ("CAS_AGENT_ROLE", Some("worker")),
+            ("CAS_FACTORY_SESSION", Some("response-factory")),
+            (crate::internal_llm::INTERNAL_LLM_ENV, None),
+        ]);
+        let core = CasCore::with_daemon(temp.path().to_path_buf(), None, None);
+        core.register_agent("response-session".into(), "response-worker".into(), None)
+            .unwrap();
+        let service = CasService::new(
+            core,
+            #[cfg(feature = "mcp-proxy")]
+            None,
+        );
+        let account = temp.path().join("account");
+        let slug: String = std::env::current_dir()
+            .unwrap()
+            .to_string_lossy()
+            .chars()
+            .map(|c| if matches!(c, '/' | '.') { '-' } else { c })
+            .collect();
+        let transcripts = account.join("projects").join(slug);
+        std::fs::create_dir_all(&transcripts).unwrap();
+        std::fs::write(
+            transcripts.join("response-session.jsonl"),
+            r#"{"type":"user","promptId":"response-turn","message":{"content":"continue"}}"#,
+        )
+        .unwrap();
+        let store = service.inner.open_agent_store().unwrap();
+        let mut agent = store.get("response-session").unwrap();
+        agent.metadata.insert(
+            "worker_account_dir".into(),
+            account.to_string_lossy().into_owned(),
+        );
+        agent.metadata.insert("worker_cli".into(), "claude".into());
+        store.update(&agent).unwrap();
+        let queue = SqlitePromptQueueStore::open(temp.path()).unwrap();
+        queue.init().unwrap();
+        let id = queue
+            .enqueue_with_session(
+                "supervisor",
+                "response-worker",
+                "mail already injected by transport",
+                "response-factory",
+            )
+            .unwrap();
+        queue.mark_transport_delivered(id).unwrap();
+
+        let output = service
+            .append_factory_context(Ok(CasCore::success("original result")))
+            .await
+            .unwrap();
+        assert_eq!(output.content.len(), 1);
+        assert!(!serde_json::to_string(&output)
+            .unwrap()
+            .contains("mail already injected by transport"));
+    }
+
     #[test]
     fn timeout_backstop_never_treats_task_close_as_read_only() {
         assert!(potentially_mutating_call("task", "close"));

@@ -938,6 +938,8 @@ async fn test_task_notes() {
         id: id.to_string(),
         note: "Making progress on implementation".to_string(),
         note_type: "progress".to_string(),
+        supervisor_override: None,
+        reason: None,
     };
 
     let result = service
@@ -967,6 +969,85 @@ async fn test_task_notes() {
             .summary
             .contains("Making progress on implementation")
     );
+}
+
+#[tokio::test]
+async fn task_note_cap_rejects_without_mutating_the_task() {
+    let (temp, core) = setup_cas();
+    let cas_dir = temp.path().join(".cas");
+    std::fs::write(&cas_dir.join("config.toml"), "[factory]\nnote_max_chars = 7\n")
+        .expect("write test factory config");
+
+    let task_store = open_task_store(&cas_dir).expect("open task store");
+    let task = Task::new("cas-note-cap".to_string(), "note cap task".to_string());
+    task_store.add(&task).expect("add note cap task");
+
+    let error = core
+        .cas_task_notes(Parameters(TaskNotesRequest {
+            id: task.id.clone(),
+            note: "12345678".to_string(),
+            note_type: "progress".to_string(),
+            supervisor_override: None,
+            reason: None,
+        }))
+        .await
+        .expect_err("over-cap task note must be rejected");
+    assert!(error.message.contains("limit is 7 characters"), "{error:?}");
+    assert!(
+        error
+            .message
+            .contains("[factory] artifacts_root/cas-note-cap/<name>.md"),
+        "{error:?}"
+    );
+    assert_eq!(task_store.get(&task.id).expect("read unchanged task").notes, "");
+}
+
+#[tokio::test]
+async fn supervisor_note_override_preserves_evidence_and_logs_reason() {
+    let (temp, core) = setup_cas_as(cas::types::AgentRole::Supervisor);
+    let cas_dir = temp.path().join(".cas");
+    std::fs::write(&cas_dir.join("config.toml"), "[factory]\nnote_max_chars = 7\n")
+        .expect("write test factory config");
+
+    let task_store = open_task_store(&cas_dir).expect("open task store");
+    let task = Task::new(
+        "cas-note-override".to_string(),
+        "note override task".to_string(),
+    );
+    task_store.add(&task).expect("add note override task");
+    let long_note = "evidence longer than the ordinary cap";
+    let reason = "preserve merge review findings";
+
+    core.cas_task_notes(Parameters(TaskNotesRequest {
+        id: task.id.clone(),
+        note: long_note.to_string(),
+        note_type: "discovery".to_string(),
+        supervisor_override: Some(true),
+        reason: Some(reason.to_string()),
+    }))
+    .await
+    .expect("registered supervisor may preserve discovery evidence");
+
+    assert!(
+        task_store
+            .get(&task.id)
+            .expect("read updated task")
+            .notes
+            .contains(long_note)
+    );
+    let session_id = format!("test-session-{}", std::process::id());
+    let event_store = open_event_store(&cas_dir).expect("open event store");
+    let note_event = event_store
+        .list_by_session(&session_id, 20)
+        .expect("list supervisor note events")
+        .into_iter()
+        .find(|event| {
+            event.event_type == EventType::TaskNoteAdded && event.entity_id == task.id
+        })
+        .expect("supervisor note event");
+    let metadata = note_event.metadata.expect("override metadata");
+    assert_eq!(metadata["supervisor_override"], true);
+    assert_eq!(metadata["supervisor_override_reason"], reason);
 }
 
 /// GH #342: the unified `notes` action is a read when `notes` is absent and
@@ -1103,6 +1184,8 @@ async fn test_task_notes_succeeds_when_activity_event_recording_fails() {
             id: id.clone(),
             note: "This note should survive event failure".to_string(),
             note_type: "progress".to_string(),
+            supervisor_override: None,
+            reason: None,
         }))
         .await
         .expect("task_notes should succeed even if activity event recording fails");

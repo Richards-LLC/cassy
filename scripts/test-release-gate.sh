@@ -51,8 +51,9 @@ new_fixture() {
         "$repo/.context/zig"
     cp "$gate" "$repo/scripts/release-gate.sh"
     cp "$script_dir/run-verified-tests.sh" "$repo/scripts/run-verified-tests.sh"
-    cat >"$repo/.gitignore" <<'EOF'
+cat >"$repo/.gitignore" <<'EOF'
 .context/zig/
+.cas/
 EOF
     printf '%s\n' '#!/usr/bin/env bash' 'exit 0' >"$repo/.context/zig/zig"
     chmod +x "$repo/.context/zig/zig"
@@ -1085,6 +1086,58 @@ if ! grep -q REUSED "$CAS_RELEASE_GATE_LOG_DIR/timing.tsv"; then
     ok 'dirty tree cannot reuse prior PASS'
 else
     bad 'dirty tree reused prior evidence'
+fi
+unset CAS_RELEASE_GATE_CACHE_DIR CAS_RELEASE_GATE_LOG_DIR
+
+# cas-1925. A passing rolling assembly sweep writes the same row receipt shape
+# as the gate, but under the shared merge-sweep directory because its detached
+# checkout is not the release worktree. The gate may consume only the
+# equivalent nextest row when integration.json authorizes this exact tip.
+repo="$(new_fixture assembly-row-cache)"
+assembly_gate_cache="$tmp/assembly-gate-cache"
+assembly_gate_logs="$tmp/assembly-gate-logs"
+export CAS_RELEASE_GATE_CACHE_DIR="$assembly_gate_cache"
+export CAS_RELEASE_GATE_LOG_DIR="$assembly_gate_logs"
+run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 >"$tmp/assembly-first.log" 2>&1 || {
+    cat "$tmp/assembly-first.log"
+    exit 1
+}
+assembly_receipt="$(find "$assembly_gate_cache" -maxdepth 1 -type f -name 'nextest.*' -print -quit)"
+mkdir -p "$repo/.cas/merge-sweeps/row-cache"
+cp "$assembly_receipt" "$repo/.cas/merge-sweeps/row-cache/"
+printf '{"status":"PASSED","tip":"%s"}\n' "$(git -C "$repo" rev-parse HEAD)" \
+    >"$repo/.cas/merge-sweeps/integration.json"
+rm -f "$assembly_receipt"
+rm -rf "$assembly_gate_cache"
+mkdir -p "$assembly_gate_cache"
+run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 --reuse >"$tmp/assembly-reuse.log" 2>&1
+if grep -qF 'source=assembly sweep' "$assembly_gate_logs/nextest.log" \
+    && grep -qF 'source_sha='"$(git -C "$repo" rev-parse HEAD)" "$assembly_gate_logs/nextest.log" \
+    && [[ "$(awk -F '\t' '$1 == "nextest" && $7 == "REUSED" {n++} END {print n+0}' "$assembly_gate_logs/timing.tsv")" == 1 ]]; then
+    ok 'assembly sweep receipt reuses the matching nextest row and names its SHA'
+else
+    bad "assembly sweep receipt was not consumed: $(cat "$assembly_gate_logs/nextest.log" 2>/dev/null || true)"
+fi
+
+printf '{"status":"FAILED","tip":"%s"}\n' "$(git -C "$repo" rev-parse HEAD)" \
+    >"$repo/.cas/merge-sweeps/integration.json"
+run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 --reuse >"$tmp/assembly-red.log" 2>&1
+if [[ "$(awk -F '\t' '$1 == "nextest" && $7 == "REUSED" {n++} END {print n+0}' "$assembly_gate_logs/timing.tsv")" == 0 ]]; then
+    ok 'a non-green assembly sweep cannot authorize an old row receipt'
+else
+    bad 'a non-green assembly sweep authorized a stale row receipt'
+fi
+
+printf '// changed input\n' >>"$repo/cas-cli/tests/smoke.rs"
+git -C "$repo" add cas-cli/tests/smoke.rs
+git -C "$repo" commit -qm 'fixture assembly input change'
+printf '{"status":"PASSED","tip":"%s"}\n' "$(git -C "$repo" rev-parse HEAD~1)" \
+    >"$repo/.cas/merge-sweeps/integration.json"
+run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 --reuse >"$tmp/assembly-changed.log" 2>&1
+if [[ "$(awk -F '\t' '$1 == "nextest" && $7 == "REUSED" {n++} END {print n+0}' "$assembly_gate_logs/timing.tsv")" == 0 ]]; then
+    ok 'a changed workspace input invalidates the assembly row receipt'
+else
+    bad 'a changed workspace input retained the assembly row receipt'
 fi
 unset CAS_RELEASE_GATE_CACHE_DIR CAS_RELEASE_GATE_LOG_DIR
 

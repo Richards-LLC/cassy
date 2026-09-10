@@ -274,7 +274,7 @@ fn redact_stderr_line(line: &str) -> String {
 }
 
 fn describe_branch_ci_state(branch: &str, state: &BranchCiState) -> String {
-    let (sha, detail) = match state {
+    let (sha, detail, admission_path, receipt_id) = match state {
         BranchCiState::Green { sha, url } => (
             sha,
             format!(
@@ -283,6 +283,8 @@ fn describe_branch_ci_state(branch: &str, state: &BranchCiState) -> String {
                     .map(|url| format!(": {url}"))
                     .unwrap_or_default()
             ),
+            "CI check-run (green)",
+            url.as_deref().unwrap_or("unavailable"),
         ),
         BranchCiState::Red { sha, url } => (
             sha,
@@ -292,6 +294,8 @@ fn describe_branch_ci_state(branch: &str, state: &BranchCiState) -> String {
                     .map(|url| format!(": {url}"))
                     .unwrap_or_default()
             ),
+            "CI check-run (red; advisory)",
+            url.as_deref().unwrap_or("unavailable"),
         ),
         BranchCiState::Pending { sha, url } => (
             sha,
@@ -301,6 +305,8 @@ fn describe_branch_ci_state(branch: &str, state: &BranchCiState) -> String {
                     .map(|url| format!(": {url}"))
                     .unwrap_or_default()
             ),
+            "CI check-run (pending; advisory)",
+            url.as_deref().unwrap_or("unavailable"),
         ),
         BranchCiState::NoChecks {
             sha,
@@ -315,6 +321,8 @@ fn describe_branch_ci_state(branch: &str, state: &BranchCiState) -> String {
                     .map(|stderr| format!(" gh stderr: {stderr}"))
                     .unwrap_or_default()
             ),
+            "no CI receipt (advisory)",
+            "none",
         ),
         BranchCiState::GhFailure {
             sha,
@@ -323,12 +331,20 @@ fn describe_branch_ci_state(branch: &str, state: &BranchCiState) -> String {
         } => (
             sha,
             format!("CI gh auth/transport failure ({status}); gh stderr: {stderr}"),
+            "CI receipt unavailable (advisory)",
+            "unavailable",
         ),
-        BranchCiState::Unknown { sha, reason } => (sha, format!("CI state unknown: {reason}.")),
+        BranchCiState::Unknown { sha, reason } => (
+            sha,
+            format!("CI state unknown: {reason}."),
+            "CI receipt unknown (advisory)",
+            "unavailable",
+        ),
     };
     format!(
         "gh endpoint queried: GET {}\nCI SHA: {sha}\n{detail}\n\
-         Branch: {branch}\nMerge policy: CI is advisory; this lookup does not block \
+         Branch: {branch}\nAdmission path: {admission_path}\nReceipt id: {receipt_id}\n\
+         Merge policy: CI is advisory; this lookup does not block \
          worktree_merge.\n\n",
         BRANCH_CI_ENDPOINT.replace("{sha}", sha)
     )
@@ -3411,6 +3427,11 @@ mod tests {
             "{no_pr_receipt}"
         );
         assert!(
+            no_pr_receipt.contains("Admission path: no CI receipt (advisory)"),
+            "{no_pr_receipt}"
+        );
+        assert!(no_pr_receipt.contains("Receipt id: none"), "{no_pr_receipt}");
+        assert!(
             no_pr_receipt.contains("HTTP 404: Not Found"),
             "{no_pr_receipt}"
         );
@@ -3486,6 +3507,14 @@ mod tests {
         });
         let green_receipt = describe_branch_ci_state("factory/fox", &green);
         assert!(green_receipt.contains("CI state: green"), "{green_receipt}");
+        assert!(
+            green_receipt.contains("Admission path: CI check-run (green)"),
+            "{green_receipt}"
+        );
+        assert!(
+            green_receipt.contains("Receipt id: https://github.com/acme/cas/actions/runs/43"),
+            "{green_receipt}"
+        );
         assert!(green_receipt.contains("abc123"), "{green_receipt}");
         assert!(green_receipt.contains("actions/runs/43"), "{green_receipt}");
 

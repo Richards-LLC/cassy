@@ -25,9 +25,13 @@ name the blocking step in the operator timeline, and require its receipt.
    stalled, the supervisor pushes from its worktree. When a rebase makes the
    anchor stale, close the handoff with `commit_receipt` instead of spending
    another worker turn rebasing it.
-4. Assemble the exact epic tip in a dedicated worktree. Reconcile sibling lanes
-   there, run the full suite on the assembled tree, inspect guardrail/marker and
-   counted-field tests, and commit every trim or move. Real-project fixtures use
+4. Start a dedicated detached or `release/` worktree from `origin/main`, then
+   run `scripts/release-train.sh <version> <release-worktree> --assemble`.
+   Require PASS: it consumes the daemon's tested `integration/<project>` tip
+   under the shared merge lock and refuses stale inputs or an unfinished/red
+   sweep. Resolve reported conflicts in the owning epics and merge again until
+   integration is green. Run the release gate on the assembled tree; inspect
+   guardrail/marker and counted-field tests, and commit every trim or move. Real-project fixtures use
    `cas::test_paths::runtime_fixture_parent()`, never `/tmp`, `/var/tmp`, or
    `env!("CARGO_MANIFEST_DIR")`. `cas init` and serve registration remain
    unconditional; only discovery/cloud behavior skips disposable roots.

@@ -558,6 +558,285 @@ fn proof_target_matches_module(target: &str, module: &str) -> bool {
         || normalized_target.contains(&normalized_module)
 }
 
+fn scoped_proof_rust_files(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut files = Vec::new();
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return files;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            files.extend(scoped_proof_rust_files(&path));
+        } else if path.extension().is_some_and(|extension| extension == "rs") {
+            files.push(path);
+        }
+    }
+    files
+}
+
+fn scoped_proof_test_target(repo: &std::path::Path, path: &str) -> Option<String> {
+    let relative = path.strip_prefix("cas-cli/tests/")?;
+    let directory = relative.split('/').next()?;
+    if !relative.contains('/') {
+        return std::path::Path::new(relative)
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .map(str::to_string);
+    }
+
+    // Prefer the conventional root (`mcp_tools_test/task/...` belongs to
+    // `mcp_tools_test.rs`) before inspecting declarations. This is the same
+    // ownership rule as the shell proof checker and avoids decoy strings in a
+    // different integration binary claiming a nested module.
+    let root = repo.join("cas-cli/tests");
+    if root.join(format!("{directory}.rs")).is_file() {
+        return Some(directory.to_string());
+    }
+    for candidate in scoped_proof_rust_files(&root) {
+        if candidate.parent() != Some(root.as_path()) {
+            continue;
+        }
+        let Ok(body) = std::fs::read_to_string(&candidate) else {
+            continue;
+        };
+        let declared_module = body.lines().any(|line| {
+            let trimmed = line.trim();
+            trimmed == format!("mod {directory};")
+                || (trimmed.starts_with("#[path = \"")
+                    && trimmed.contains(&format!("{directory}/"))
+                    && trimmed.ends_with("\"]"))
+        });
+        if declared_module {
+            return candidate
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .map(str::to_string);
+        }
+    }
+    Some(directory.to_string())
+}
+
+fn scoped_proof_source_module_path(path: &str) -> Option<String> {
+    let relative = path.strip_prefix("cas-cli/src/")?.strip_suffix(".rs")?;
+    let relative = relative.strip_suffix("/mod").unwrap_or(relative);
+    Some(relative.replace('/', "::"))
+}
+
+fn scoped_proof_source_symbols(body: &str) -> Vec<String> {
+    let mut symbols = std::collections::BTreeSet::new();
+    for line in body.lines() {
+        let Some(mut declaration) = line.trim_start().strip_prefix("pub") else {
+            continue;
+        };
+        declaration = declaration.trim_start();
+        if declaration.starts_with('(')
+            && let Some(end) = declaration.find(')')
+        {
+            declaration = declaration[end + 1..].trim_start();
+        }
+        if let Some(rest) = declaration.strip_prefix("async ") {
+            declaration = rest;
+        }
+        let Some(rest) = declaration.strip_prefix("fn ") else {
+            let Some(rest) = declaration
+                .strip_prefix("struct ")
+                .or_else(|| declaration.strip_prefix("enum "))
+                .or_else(|| declaration.strip_prefix("const "))
+                .or_else(|| declaration.strip_prefix("type "))
+            else {
+                continue;
+            };
+            if let Some(symbol) = rest
+                .split(|character: char| {
+                    !character.is_ascii_alphanumeric() && character != '_'
+                })
+                .next()
+                && !symbol.is_empty()
+            {
+                symbols.insert(symbol.to_string());
+            }
+            continue;
+        };
+        if let Some(symbol) = rest
+            .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+            .next()
+            && !symbol.is_empty()
+        {
+            symbols.insert(symbol.to_string());
+        }
+    }
+    symbols.into_iter().collect()
+}
+
+fn scoped_proof_path_reference(body: &str, module_path: &str, source_path: &str) -> bool {
+    body.lines().any(|line| {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with('/') || trimmed.starts_with('*') {
+            return false;
+        }
+        (trimmed.starts_with("use ") || trimmed.starts_with("pub use "))
+            && trimmed.contains(module_path)
+            || ((trimmed.contains("include_str!")
+                || trimmed.contains("include_bytes!")
+                || trimmed.contains("Path")
+                || trimmed.contains("read_to_string"))
+                && trimmed.contains(source_path))
+    })
+}
+
+fn scoped_proof_symbol_reference(body: &str, symbol: &str) -> bool {
+    let symbol = symbol.strip_prefix("factory_").unwrap_or(symbol);
+    body.lines().any(|line| {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with('/') || trimmed.starts_with('*') {
+            return false;
+        }
+        let Some(function) = trimmed.split_once("fn ").map(|(_, rest)| rest) else {
+            return false;
+        };
+        let name = function
+            .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+            .next()
+            .unwrap_or_default();
+        name.contains(symbol)
+    })
+}
+
+fn scoped_proof_builtin_path(path: &str) -> bool {
+    path.starts_with("cas-cli/src/builtins/skills/")
+        || path.starts_with("cas-cli/src/builtins/agents/")
+        || path.contains("/skills/") && path.starts_with("cas-cli/src/builtins/")
+        || path.contains("/agents/") && path.starts_with("cas-cli/src/builtins/")
+}
+
+fn add_scoped_proof_target(targets: &mut std::collections::BTreeSet<String>, target: String) {
+    if !target.is_empty() {
+        targets.insert(target);
+    }
+}
+
+/// Resolve the integration binaries that exercise an attributed delivery
+/// diff. This mirrors `check-scoped-test-surface.sh` at the close boundary so
+/// a worker cannot close after running only a changed module's unit filter.
+fn required_scoped_proof_targets(
+    repo: &std::path::Path,
+    changed_paths: &[String],
+) -> Vec<String> {
+    let tests_root = repo.join("cas-cli/tests");
+    let test_files = scoped_proof_rust_files(&tests_root);
+    let mut targets = std::collections::BTreeSet::new();
+
+    for path in changed_paths {
+        let normalized = path.replace('\\', "/");
+        if normalized.starts_with("cas-cli/tests/") {
+            if let Some(target) = scoped_proof_test_target(repo, &normalized) {
+                add_scoped_proof_target(&mut targets, target);
+            }
+            add_scoped_proof_target(
+                &mut targets,
+                "builtin_archive_portability_test".to_string(),
+            );
+        }
+        if normalized.starts_with("cas-cli/src/hooks/")
+            || normalized.starts_with("cas-cli/src/cli/hook/")
+            || normalized == ".codex/hooks.json"
+        {
+            add_scoped_proof_target(&mut targets, "hook_schema".to_string());
+        }
+        if !normalized.ends_with(".rs") || !normalized.starts_with("cas-cli/src/") {
+            continue;
+        }
+        let Some(module_path) = scoped_proof_source_module_path(&normalized) else {
+            continue;
+        };
+        let source_file = repo.join(&normalized);
+        let Ok(source_body) = std::fs::read_to_string(&source_file) else {
+            continue;
+        };
+        let symbols = scoped_proof_source_symbols(&source_body);
+        for test_file in &test_files {
+            let Ok(test_body) = std::fs::read_to_string(test_file) else {
+                continue;
+            };
+            let path_reference = scoped_proof_path_reference(
+                &test_body,
+                &module_path,
+                &normalized,
+            );
+            let symbol_reference = symbols
+                .iter()
+                .any(|symbol| scoped_proof_symbol_reference(&test_body, symbol));
+            if !(path_reference || symbol_reference) {
+                continue;
+            }
+            let Some(test_path) = test_file.strip_prefix(repo).ok().and_then(|path| path.to_str())
+            else {
+                continue;
+            };
+            if let Some(target) = scoped_proof_test_target(repo, test_path) {
+                add_scoped_proof_target(&mut targets, target);
+            }
+        }
+        if scoped_proof_builtin_path(&normalized) {
+            add_scoped_proof_target(&mut targets, "builtin_flavor_drift_test".to_string());
+            add_scoped_proof_target(
+                &mut targets,
+                "agent_definition_contract_test".to_string(),
+            );
+            add_scoped_proof_target(
+                &mut targets,
+                "factory_codex_skill_guardrails".to_string(),
+            );
+            for test_file in &test_files {
+                let Some(name) = test_file.file_name().and_then(|name| name.to_str()) else {
+                    continue;
+                };
+                if name.starts_with("builtin_") {
+                    add_scoped_proof_target(
+                        &mut targets,
+                        name.trim_end_matches(".rs").to_string(),
+                    );
+                }
+            }
+        }
+    }
+    targets.into_iter().collect()
+}
+
+fn scoped_proof_note_targets(notes: &str) -> Option<String> {
+    notes.lines().find_map(|line| {
+        let lower = line.to_ascii_lowercase();
+        if !lower.contains("scoped_proof") || !lower.contains("result=pass") {
+            return None;
+        }
+        let targets = line.split_once("targets=")?.1;
+        Some(
+            targets
+                .split_once("result=")
+                .map_or(targets, |(value, _)| value)
+                .trim()
+                .to_string(),
+        )
+    })
+}
+
+fn scoped_proof_note_covers(notes: &str, required_targets: &[String]) -> Vec<String> {
+    let Some(receipt) = scoped_proof_note_targets(notes) else {
+        return required_targets.to_vec();
+    };
+    let normalized = receipt.to_ascii_lowercase();
+    required_targets
+        .iter()
+        .filter(|target| {
+            let target = target.to_ascii_lowercase();
+            !normalized
+                .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+                .any(|token| token == target)
+        })
+        .cloned()
+        .collect()
+}
+
 /// Convert changed Rust source paths into the module names that the scoped
 /// proof-surface resolver exposes. Non-source files do not require a library
 /// proof target; integration targets are represented by their path stem.
@@ -600,6 +879,7 @@ pub(crate) fn uncovered_blast_radius_modules(
 fn validate_risk_close_proofs(
     task: &Task,
     changed_paths: &[String],
+    proof_repo: &std::path::Path,
 ) -> Result<(), String> {
     if task.risk.contains(&TaskRisk::Platform) && !has_platform_proof_note(&task.notes) {
         return Err(format!(
@@ -620,6 +900,18 @@ fn validate_risk_close_proofs(
                 "TASK CLOSE REJECTED: task {} declares blast-radius proof narrower than its delivery diff; uncovered source modules: {}. Expand proof_targets and record scoped proof for every module, then retry close.",
                 task.id,
                 uncovered.join(", ")
+            ));
+        }
+    }
+    let required_targets = required_scoped_proof_targets(proof_repo, changed_paths);
+    if !required_targets.is_empty() {
+        let missing = scoped_proof_note_covers(&task.notes, &required_targets);
+        if !missing.is_empty() {
+            return Err(format!(
+                "TASK CLOSE REJECTED: task {} changed a module with integration-test proof targets that were not run or recorded as passing; missing targets: {}. Run `scripts/run-scoped-tests.sh --proof -p cas --lib --test {}` and add `SCOPED_PROOF: targets=<complete target set> result=PASS` to a progress note before retrying close.",
+                task.id,
+                missing.join(", "),
+                required_targets.join(" --test "),
             ));
         }
     }
@@ -647,10 +939,61 @@ mod risk_proof_tests {
     fn platform_and_loaded_notes_require_complete_receipts() {
         let mut task = Task::new("cas-risk-proof".into(), "risk proof".into());
         task.risk = vec![TaskRisk::Platform, TaskRisk::Concurrency];
-        assert!(validate_risk_close_proofs(&task, &[]).is_err());
+        assert!(validate_risk_close_proofs(&task, &[], std::path::Path::new(".")).is_err());
 
         task.notes = "[2026-09-10] 🧪 PLATFORM_PROOF macOS command: cargo test -p cas --lib; result: PASS\n[2026-09-10] 🧪 LOADED_PROOF whole target under -j16, 3 loops; result: PASS".into();
-        validate_risk_close_proofs(&task, &[]).expect("complete proof notes should pass");
+        validate_risk_close_proofs(&task, &[], std::path::Path::new("."))
+            .expect("complete proof notes should pass");
+    }
+
+    fn scoped_proof_fixture() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir
+            .path()
+            .join("cas-cli/src/mcp/tools/service/factory_ops.rs");
+        let test = dir.path().join("cas-cli/tests/factory_mcp_ops_test.rs");
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(test.parent().unwrap()).unwrap();
+        std::fs::write(
+            source,
+            "pub(super) async fn factory_worker_status() {}\n",
+        )
+        .unwrap();
+        std::fs::write(test, "async fn test_worker_status() {}\n").unwrap();
+        dir
+    }
+
+    #[test]
+    fn scoped_proof_close_names_unrun_integration_target_and_command() {
+        let dir = scoped_proof_fixture();
+        let mut task = Task::new("cas-scoped-proof".into(), "scoped proof".into());
+        let changed = vec!["cas-cli/src/mcp/tools/service/factory_ops.rs".to_string()];
+        let error = validate_risk_close_proofs(&task, &changed, dir.path())
+            .expect_err("missing integration proof must refuse close");
+        assert!(error.contains("factory_mcp_ops_test"), "{error}");
+        assert!(
+            error.contains("scripts/run-scoped-tests.sh --proof"),
+            "{error}"
+        );
+
+        task.notes = "[2026-09-10] 📝 PROGRESS SCOPED_PROOF: targets=lib:factory_ops,test:factory_mcp_ops_test result=PASS"
+            .into();
+        validate_risk_close_proofs(&task, &changed, dir.path())
+            .expect("the recorded integration target should satisfy close");
+    }
+
+    #[test]
+    fn scoped_proof_close_requires_archive_guardrail_for_changed_test() {
+        let dir = tempfile::tempdir().unwrap();
+        let test = dir.path().join("cas-cli/tests/factory_mcp_ops_test.rs");
+        std::fs::create_dir_all(test.parent().unwrap()).unwrap();
+        std::fs::write(test, "#[test] fn factory_ops_contract() {}\n").unwrap();
+        let task = Task::new("cas-archive-proof".into(), "archive proof".into());
+        let changed = vec!["cas-cli/tests/factory_mcp_ops_test.rs".to_string()];
+        let error = validate_risk_close_proofs(&task, &changed, dir.path())
+            .expect_err("archive guardrail must be named in the proof");
+        assert!(error.contains("builtin_archive_portability_test"), "{error}");
+        assert!(error.contains("factory_mcp_ops_test"), "{error}");
     }
 }
 
@@ -4606,7 +4949,7 @@ impl CasCore {
                 })
                 .filter(|paths| !paths.is_empty())
                 .unwrap_or_else(|| task.deliverables.files_changed.clone());
-            if let Err(message) = validate_risk_close_proofs(&task, &changed_paths) {
+            if let Err(message) = validate_risk_close_proofs(&task, &changed_paths, proof_repo) {
                 return Ok(Self::tool_error(message));
             }
         }

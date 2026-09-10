@@ -24,6 +24,15 @@ outputs:
   bridge-check-needed:
     description: Whether the Slack bridge build and tests must run.
     value: ${{ steps.classify.outputs.bridge-check-needed }}
+  changed-files:
+    description: Number of paths in the compared committed diff.
+    value: ${{ steps.classify.outputs.changed-files }}
+  fast-admission:
+    description: Whether the diff fits the bounded fast scoped-validation tier.
+    value: ${{ steps.classify.outputs.fast-admission }}
+  fast-admission-reason:
+    description: Why a diff was excluded from the bounded fast tier.
+    value: ${{ steps.classify.outputs.fast-admission-reason }}
 runs:
   using: composite
   steps:
@@ -100,6 +109,31 @@ runs:
         printf 'web-check-needed=%s\n' "$web_check_needed" >> "$GITHUB_OUTPUT"
         printf 'bridge-check-needed=%s\n' "$bridge_check_needed" >> "$GITHUB_OUTPUT"
         printf 'fast-pass=%s\n' "$rust_unaffected" >> "$GITHUB_OUTPUT"
+        fast_admission=false
+        fast_admission_reason='unavailable'
+        changed_files=0
+        if [[ -n "${merge_base:-}" ]]; then
+          fast_summary="$(scripts/classify-fast-admission.sh "$merge_base" HEAD 2>&1 || true)"
+          changed_files="$(printf '%s\n' "$fast_summary" | sed -n 's/.* files=\([0-9][0-9]*\) .*/\1/p')"
+          changed_files="${changed_files:-0}"
+          if [[ "$fast_summary" == *'eligible=true'* ]]; then
+            fast_admission=true
+            fast_admission_reason=none
+          else
+            fast_admission_reason="$(printf '%s\n' "$fast_summary" | sed -n 's/.* reason=//p' | tail -1)"
+            fast_admission_reason="${fast_admission_reason:-classifier-rejected}"
+          fi
+        else
+          fast_admission_reason='no-merge-base'
+        fi
+        printf 'changed-files=%s\n' "$changed_files" >> "$GITHUB_OUTPUT"
+        printf 'fast-admission=%s\n' "$fast_admission" >> "$GITHUB_OUTPUT"
+        printf 'fast-admission-reason=%s\n' "$fast_admission_reason" >> "$GITHUB_OUTPUT"
+        if [[ "$fast_admission" == true ]]; then
+          echo "::notice title=CI fast admission::${changed_files} changed file(s) fit the bounded fast tier"
+        else
+          echo "::notice title=CI full scoped admission::fast tier not selected (${fast_admission_reason})"
+        fi
         if [[ "$rust_unaffected" == true ]]; then
           echo "::notice title=CI Rust short-circuit::Diff class '$class' is Rust-unaffected"
         else

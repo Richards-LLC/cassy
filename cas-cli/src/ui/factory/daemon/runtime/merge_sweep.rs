@@ -1,9 +1,9 @@
 //! Bounded validation of the merged epic tip.
 //!
 //! `worktree_merge` only records a durable event.  The daemon tails those
-//! events and runs one detached checkout per epic so the MCP merge request is
-//! not held open by a workspace-sized nextest run.  A newer merge supersedes
-//! the older run; at most one sweep is active for an epic at a time.
+//! events and validates the rolling union in a detached checkout so the MCP
+//! merge request is not held open by a workspace-sized nextest run. A newer
+//! merge supersedes the older job; the shared target lock serializes sessions.
 
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
@@ -20,6 +20,8 @@ use serde::Deserialize;
 use tokio::task::JoinHandle;
 
 use crate::config::FactoryConfig;
+
+mod rolling_integration;
 
 const LOG_DIR: &str = "merge-sweeps";
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
@@ -60,6 +62,7 @@ struct SweepResult {
     log_path: PathBuf,
     summary: String,
     failures: Vec<String>,
+    integration_epics: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -77,6 +80,7 @@ struct SweepSettings {
     cargo_build_jobs: String,
     nice_cargo: bool,
     max_concurrent_builders: usize,
+    nextest_filter: Option<String>,
 }
 
 impl From<&FactoryConfig> for SweepSettings {
@@ -87,6 +91,7 @@ impl From<&FactoryConfig> for SweepSettings {
             cargo_build_jobs: config.cargo_build_jobs.clone(),
             nice_cargo: config.nice_cargo,
             max_concurrent_builders: config.max_concurrent_builders,
+            nextest_filter: None,
         }
     }
 }
@@ -99,6 +104,7 @@ pub(crate) struct MergeSweepCoordinator {
     offset: u64,
     active: HashMap<String, ActiveSweep>,
     completed: HashMap<String, String>,
+    retry_after: Option<(Instant, SweepRequest)>,
 }
 
 impl MergeSweepCoordinator {
@@ -111,6 +117,7 @@ impl MergeSweepCoordinator {
             offset,
             active: HashMap::new(),
             completed: HashMap::new(),
+            retry_after: None,
         }
     }
 
@@ -121,6 +128,15 @@ impl MergeSweepCoordinator {
         config: &FactoryConfig,
     ) {
         let mut requests = self.read_merge_events();
+        if self
+            .retry_after
+            .as_ref()
+            .is_some_and(|(when, _)| Instant::now() >= *when)
+        {
+            if let Some((_, request)) = self.retry_after.take() {
+                requests.push(request);
+            }
+        }
         requests.extend(self.reap_finished(cas_dir).await);
 
         let settings = SweepSettings::from(config);
@@ -177,6 +193,7 @@ impl MergeSweepCoordinator {
                     log_path: cas_dir.join(LOG_DIR).join("unknown.log"),
                     summary: format!("sweep task join failed: {error}"),
                     failures: Vec::new(),
+                    integration_epics: Vec::new(),
                 },
             };
             let superseded = active.pending.is_some() || result.status == SweepStatus::Superseded;
@@ -185,6 +202,8 @@ impl MergeSweepCoordinator {
             }
             if let Some(next) = active.pending.take() {
                 pending.push(next);
+            } else if !superseded && result.status == SweepStatus::Deferred {
+                self.retry_after = Some((Instant::now() + Duration::from_secs(30), result.request));
             } else if !superseded {
                 self.completed.insert(
                     result.request.epic_id.clone(),
@@ -202,8 +221,8 @@ impl MergeSweepCoordinator {
         request: SweepRequest,
         settings: &SweepSettings,
     ) {
-        if let Some(active) = self.active.get_mut(&request.epic_id) {
-            if active.request.commit != request.commit {
+        if let Some(active) = self.active.get_mut("integration") {
+            if active.request != request {
                 active.pending = Some(request);
                 active.cancel.store(true, Ordering::Relaxed);
             }
@@ -219,14 +238,7 @@ impl MergeSweepCoordinator {
             return;
         }
 
-        let guard = crate::factory_build_guard::inspect(cas_dir, &settings_to_config(settings), 1);
-        if !guard.violations().is_empty() {
-            self.record_deferred(cas_dir, &request, &guard.violations().join("; "));
-            self.completed
-                .insert(request.epic_id.clone(), request.commit.clone());
-            return;
-        }
-
+        self.retry_after = None;
         let cancel = Arc::new(AtomicBool::new(false));
         let worker_cancel = Arc::clone(&cancel);
         let project_root = project_root.to_path_buf();
@@ -234,7 +246,7 @@ impl MergeSweepCoordinator {
         let sweep_settings = settings.clone();
         let worker_request = request.clone();
         let handle = tokio::task::spawn_blocking(move || {
-            execute_sweep(
+            rolling_integration::execute(
                 &project_root,
                 &cas_dir,
                 worker_request,
@@ -248,7 +260,7 @@ impl MergeSweepCoordinator {
             "started bounded post-merge workspace sweep"
         );
         self.active.insert(
-            request.epic_id.clone(),
+            "integration".to_owned(),
             ActiveSweep {
                 request,
                 cancel,
@@ -265,6 +277,7 @@ impl MergeSweepCoordinator {
             log_path: cas_dir.join(LOG_DIR).join(log_file_name(request)),
             summary: format!("workspace sweep deferred: {reason}"),
             failures: Vec::new(),
+            integration_epics: Vec::new(),
         };
         append_epic_note(cas_dir, &result);
         tracing::warn!(epic = %request.epic_id, reason, "post-merge workspace sweep deferred");
@@ -273,6 +286,10 @@ impl MergeSweepCoordinator {
     fn record_result(&self, cas_dir: &Path, result: &SweepResult) {
         if result.status == SweepStatus::Superseded {
             tracing::debug!(epic = %result.request.epic_id, commit = %result.request.commit, "post-merge sweep superseded");
+            return;
+        }
+        if !result.integration_epics.is_empty() {
+            rolling_integration::record_result(cas_dir, result);
             return;
         }
         append_epic_note(cas_dir, result);
@@ -376,6 +393,7 @@ fn execute_sweep(
                 log_path,
                 summary: format!("cannot create sweep log: {error}"),
                 failures: Vec::new(),
+                integration_epics: Vec::new(),
             };
         }
     };
@@ -390,6 +408,7 @@ fn execute_sweep(
                 log_path: log_path.clone(),
                 summary: format!("workspace setup failed: {error}"),
                 failures: Vec::new(),
+                integration_epics: Vec::new(),
             };
         }
     };
@@ -408,6 +427,7 @@ fn execute_sweep(
             log_path,
             summary,
             failures: Vec::new(),
+            integration_epics: Vec::new(),
         };
     };
 
@@ -446,6 +466,7 @@ fn execute_sweep(
         log_path,
         summary,
         failures,
+        integration_epics: Vec::new(),
     }
 }
 
@@ -472,6 +493,18 @@ fn prepare_merge_worktree(project_root: &Path, request: &SweepRequest) -> Result
         if inside != "true" {
             return Err(format!(
                 "existing path is not a Git worktree: {}",
+                worktree.display()
+            ));
+        }
+        let actual_common = git_output(
+            &worktree,
+            &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        )?;
+        if actual_common != common_dir
+            || git_output(&worktree, &["symbolic-ref", "-q", "HEAD"]).is_ok()
+        {
+            return Err(format!(
+                "sweep requires a detached worktree in the same repository: {}",
                 worktree.display()
             ));
         }
@@ -547,7 +580,7 @@ fn spawn_nextest(worktree: &Path, settings: &SweepSettings, log: &File) -> Optio
     let mut command = if settings.nice_cargo {
         let level = nice_level();
         let mut command = Command::new("nice");
-        command.args(["-n", level.as_str()]).arg("cargo");
+        command.args(["-n", level.as_str()]).arg(&cargo_binary);
         command
     } else {
         Command::new(cargo_binary)
@@ -556,12 +589,71 @@ fn spawn_nextest(worktree: &Path, settings: &SweepSettings, log: &File) -> Optio
         .current_dir(worktree)
         .args(["nextest", "run", "--workspace", "--no-fail-fast"])
         .env("CARGO_BUILD_JOBS", effective_build_jobs(settings))
+        .stdin(Stdio::null())
         .stdout(Stdio::from(log.try_clone().ok()?))
         .stderr(Stdio::from(log.try_clone().ok()?));
+    if let Some(filter) = &settings.nextest_filter {
+        command.args(["-E", filter]);
+    }
+    if let Some(zig) = resolve_zig(worktree) {
+        command.env("ZIG", zig);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // SAFETY: only async-signal-safe calls between fork and exec. This
+        // gives the sweep nohup/setsid semantics without a shell wrapper.
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                libc::signal(libc::SIGHUP, libc::SIG_IGN);
+                Ok(())
+            });
+        }
+    }
     command.spawn().ok()
 }
 
+fn resolve_zig(worktree: &Path) -> Option<PathBuf> {
+    let configured = std::env::var_os("ZIG").map(PathBuf::from).map(|path| {
+        if path.is_absolute() {
+            path
+        } else {
+            worktree.join(path)
+        }
+    });
+    let main = git_output(
+        worktree,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    )
+    .ok()
+    .and_then(|path| Path::new(&path).parent().map(Path::to_path_buf));
+    configured
+        .into_iter()
+        .chain([worktree.join(".context/zig/zig")])
+        .chain(main.map(|path| path.join(".context/zig/zig")))
+        .find(|path| {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                path.metadata()
+                    .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+            }
+            #[cfg(not(unix))]
+            {
+                path.is_file()
+            }
+        })
+}
+
 fn terminate_child(child: &mut Child) {
+    #[cfg(unix)]
+    // SAFETY: the child created a private session/process group above.
+    unsafe {
+        libc::kill(-(child.id() as i32), libc::SIGKILL);
+    }
     let _ = child.kill();
     let _ = child.wait();
 }

@@ -3,10 +3,10 @@
 | Field | Contract |
 | --- | --- |
 | First two lines | Preserve the existing release-gate receipt and version; each executed row keeps its PASS/FAIL verdict ahead of timing evidence. |
-| Scannable | Each existing verdict gains a UTC interval and a short line of wall, user CPU and system CPU seconds; a reused row names its source commit. |
+| Scannable | Each existing verdict gains a UTC interval and a short line of wall, user CPU and system CPU seconds; a reused row names its source commit and whether the receipt came from the gate or the last green assembly sweep. |
 | Readable | Existing failure tails retain the command's cause and status; timing does not replace diagnostic output. |
 | Machine output | No new JSON CLI is introduced. `timing.tsv` has stable columns: row, started_utc, ended_utc, wall_s, user_s, system_s, status, source_sha. Executed status is a numeric exit code; a cache hit is REUSED. |
-| Omitted | Successful raw command logs and visual-QA captures live in the unique attempt's row directory, with only row verdicts and timing printed in the gate log. Environment values never appear in cache receipts. |
+| Omitted | Successful raw command logs and visual-QA captures live in the unique attempt's row directory, with only row verdicts and timing printed in the gate log. Environment values never appear in cache receipts; live precondition rows remain uncached. |
 
 The added lines are ASCII, uncoloured, and fit 80 columns for ordinary timing
 values. Existing full command descriptions and absolute checkout paths are

@@ -623,7 +623,32 @@ for job in fast-validation-preflight fast-validation-suite-build fast-validation
 done
 
 classifier="$repo_root/scripts/classify-ci-diff.sh"
+fast_classifier="$repo_root/scripts/classify-fast-admission.sh"
 classify_action="$repo_root/.github/actions/classify-required-diff/action.yml"
+if [[ -x "$fast_classifier" ]]; then
+    printf 'ok   fast admission classifier is executable\n'
+    pass=$((pass + 1))
+else
+    printf 'FAIL fast admission classifier is executable\n'
+    fail=$((fail + 1))
+fi
+require_text "$ci_text" 'fast-admission' 'shared CI diff action publishes the fast admission signal'
+require_text "$ci_text" 'Scoped Validation (fast)' 'CI declares the fast scoped-validation tier'
+require_text "$ci_text" 'scripts/check-scoped-test-surface.sh --resolve-targets' 'fast tier resolves mapped proof targets'
+require_text "$ci_text" 'scripts/run-scoped-tests.sh --proof' 'fast tier runs mapped proof targets through the guarded runner'
+require_text "$(<"$repo_root/scripts/release-train.sh")" 'CAS_RELEASE_TRAIN_SCOPED_PROOF_RECEIPT' 'release train accepts a supervisor scoped-proof receipt'
+require_text "$(<"$repo_root/scripts/release-train.sh")" 'Scoped Validation (fast)' 'release train selects the fast CI job for small deltas'
+fast_job="$(job_block scoped-validation-fast)"
+require_text "$fast_job" 'startsWith(github.ref, '\''refs/heads/factory/'\'')' 'fast tier is limited to factory branch pushes'
+require_text "$fast_job" "steps.classify-diff.outputs.fast-admission == 'true'" 'fast tier requires the shared size classifier'
+require_text "$fast_job" 'cargo check -p cas --lib --tests' 'fast tier compiles the Rust test graph'
+require_text "$fast_job" 'scripts/check-scoped-test-surface.sh --resolve-targets' 'fast tier maps changed modules to integration targets'
+require_text "$fast_job" 'scripts/run-scoped-tests.sh --proof' 'fast tier executes the mapped targets with surface proof'
+require_text "$fast_job" 'Build and test the Slack bridge' 'fast tier covers a changed Slack bridge'
+require_text "$fast_job" "steps.classify-diff.outputs.bridge-check-needed == 'true'" 'fast tier gates bridge coverage on the shared classifier'
+require_text "$fast_job" 'scripts/check-scoped-snapshot-tests.sh --base-sha' 'fast tier routes mapped snapshot surfaces'
+require_absent "$fast_job" './scripts/test-cas-install.sh' 'fast tier does not run unrelated installer fixtures'
+require_text "$(job_block scoped-validation)" "github.event_name != 'push' || steps.classify-diff.outputs.fast-admission != 'true'" 'full scoped tier is reserved for larger factory pushes'
 if [[ -x "$classifier" ]]; then
     # These committed fixtures pin both directions: the explicitly safe
     # classes are Rust-unaffected, while every code or mixed change is full.
@@ -1435,6 +1460,7 @@ require_text "$release_text" 'SCCACHE_GHA_VERSION: "cas-v2"' 'release shares the
 # Lane label must match the job so a summary is attributable to its job.
 declare -A compiling_lanes=(
     [scoped-validation]='Scoped Validation'
+    [scoped-validation-fast]='Scoped Validation (fast)'
     [fast-validation-preflight]='Fast Validation — preflight'
     [fast-validation-suite-build]='Fast Validation — suite archive build'
     [fast-validation-docs]='Fast Validation — doctests'

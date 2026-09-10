@@ -134,6 +134,23 @@ pub fn handle_pre_tool_use(
     }
 
     // ========================================================================
+    // FACTORY SUPERVISOR: Deny native SendMessage before cas_root resolution
+    // (GH #793).
+    //
+    // A supervisor must never reach the host harness's native transport: an
+    // `allow` result lets that transport run after this hook and bypass the
+    // durable CAS coordination queue. Hoist the deny next to the other
+    // root-independent factory guards so a missing Cassy root cannot create a
+    // silent escape hatch.
+    // ========================================================================
+    if is_factory_agent
+        && tool_name == "SendMessage"
+        && crate::harness_policy::is_supervisor(input)
+    {
+        return Ok(deny_factory_supervisor_send_message());
+    }
+
+    // ========================================================================
     // WORKER COMMIT GUARD — HOISTED ABOVE cas_root check (cas-bea2, LAYER 1)
     //
     // Must run before the hoisted FACTORY_AUTO_APPROVE block below. That
@@ -283,7 +300,7 @@ pub fn handle_pre_tool_use(
         .unwrap_or_default();
 
     // ========================================================================
-    // FACTORY MODE: Auto-route SendMessage → Cassy coordination (cas-f32b)
+    // FACTORY MODE: Route SendMessage through Cassy coordination (cas-f32b)
     //
     // In factory mode, agents communicate through Cassy coordination (push-based
     // via the Director/TUI). The built-in SendMessage tool bypasses this system
@@ -295,11 +312,11 @@ pub fn handle_pre_tool_use(
     // switching tools — effectively wedging workers on the deny loop
     // (observed 2026-04-23 in gabber-studio).
     //
-    // New behaviour: parse the SendMessage call, enqueue the message on the
-    // Cassy prompt queue directly (same path `mcp__cas__coordination
-    // action=message` uses), notify the daemon, then return `allow` with an
-    // `additionalContext` success receipt (cas-73c8) so agents see tool
-    // success — not a deny/`<error>` envelope — and stop retrying.
+    // Workers use the auto-route below because the Claude Code system
+    // reminder still steers them toward SendMessage. Supervisors are denied
+    // before that route: returning `allow` lets the host harness run its
+    // native SendMessage transport after this hook, which bypasses the durable
+    // CAS queue and can strand assignments (GH #793).
     //
     // On any failure (missing fields, queue open error, enqueue error) we
     // fall back to the original deny-with-guidance path — never silently drop.
@@ -3039,6 +3056,27 @@ fn auto_route_send_message(
         "allow",
         "Cassy auto-routed SendMessage",
         &receipt,
+    )
+}
+
+/// Deny the host harness transport for factory supervisors (GH #793).
+///
+/// A `SendMessage` hook result of `allow` does not replace Claude Code's
+/// native delivery: the host runs that transport after the hook returns. A
+/// supervisor assignment therefore has to fail closed here and point at the
+/// durable CAS commands instead. Workers retain the legacy auto-route above
+/// until their harness reminder can be migrated without breaking existing
+/// message flows.
+fn deny_factory_supervisor_send_message() -> HookOutput {
+    let prefix = crate::harness_policy::own_tool_prefix();
+    HookOutput::with_pre_tool_permission(
+        "deny",
+        &format!(
+            "🚫 SendMessage is disabled for factory supervisors.\n\n\
+             Use {prefix}coordination action=message target=<worker> summary=\"<brief summary>\" message=\"<message>\"\n\
+             For task assignments, use {prefix}task action=update id=<task-id> assignee=<worker>.\n\n\
+             The CAS coordination path is the only durable supervisor-to-worker transport."
+        ),
     )
 }
 

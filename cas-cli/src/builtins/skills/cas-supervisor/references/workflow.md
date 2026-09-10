@@ -151,6 +151,14 @@ Run the canonical merge-time diff review in Phase 3 after a successful merge and
 mcp__cas__coordination action=worktree_merge id=<worker> task_id=<task-id>
 ```
 
+After a successful merge into an `epic/` branch, the factory daemon launches a
+bounded `cargo nextest run --workspace --no-fail-fast` sweep in a reusable
+detached merged-tip worktree. The sweep is asynchronous and capped by
+`[factory].merge_sweep_timeout_secs`; inspect the epic note and the durable
+`<cas-root>/merge-sweeps/` log before accepting another merge when it reports
+`FAILED`, `TIMED OUT`, or `SETUP FAILED`. Set `[factory].merge_sweep = false`
+only when the host cannot absorb this additional validation load.
+
 `id` accepts the worker name or `factory/<worker>`. Target resolution: an explicit
 `task_id` first, then the assignee's current task binding. A `focus_epic` pin is a
 **display filter and never merge authority**, and Cassy never silently defaults to

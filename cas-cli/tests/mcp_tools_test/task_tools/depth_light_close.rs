@@ -32,6 +32,10 @@ fn create_req(title: &str, depth: Option<&str>) -> TaskCreateRequest {
         description: None,
         priority: 2,
         task_type: "task".to_string(),
+        risk: Some("none".to_string()),
+        proof_targets: None,
+        supervisor_override: None,
+        reason: None,
         labels: None,
         notes: None,
         blocked_by: None,
@@ -392,6 +396,7 @@ async fn test_light_depth_factory_close_skips_p0_gate_and_closes() {
     let created = service
         .task(Parameters(task_req(serde_json::json!({
             "action": "create",
+            "risk": "none",
             "title": "light feature task — factory close",
             "priority": 2,
             "task_type": "task",
@@ -418,7 +423,7 @@ async fn test_light_depth_factory_close_skips_p0_gate_and_closes() {
                 "reason": "All acceptance criteria met.",
             }))))
             .await
-        .expect("task.close should return a result"),
+            .expect("task.close should return a result"),
     );
     assert!(
         close_text.contains("Closed task"),
@@ -470,6 +475,7 @@ async fn test_deep_depth_factory_close_does_not_use_review_queue() {
     let created = service
         .task(Parameters(task_req(serde_json::json!({
             "action": "create",
+            "risk": "none",
             "title": "deep feature task — factory close",
             "priority": 2,
             "task_type": "task",
@@ -495,8 +501,8 @@ async fn test_deep_depth_factory_close_does_not_use_review_queue() {
                 "id": id,
                 "reason": "All acceptance criteria met.",
             }))))
-        .await
-        .expect("task.close should return a result"),
+            .await
+            .expect("task.close should return a result"),
     );
     assert!(
         close_text.contains("Closed task"),

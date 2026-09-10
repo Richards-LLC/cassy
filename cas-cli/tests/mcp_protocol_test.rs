@@ -497,6 +497,7 @@ fn test_mcp_tool_call_task_create() {
         "task",
         json!({
             "action": "create",
+            "risk": "none",
             "title": "MCP Protocol Test Task",
             "priority": 2,
             "task_type": "task"
@@ -626,6 +627,7 @@ fn test_mcp_task_create_cannot_escape_cas_sandbox() {
         "task",
         json!({
             "action": "create",
+            "risk": "none",
             "title": "Hermetic sandbox escape sentinel"
         }),
     );
@@ -805,7 +807,8 @@ fn test_mcp_tool_call_invalid_arguments() {
     let response = client.call_tool(
         "task",
         json!({
-            "action": "create"
+            "action": "create",
+            "risk": "none"
             // Missing required "title"
         }),
     );
@@ -953,6 +956,7 @@ fn test_mcp_context() {
         "task",
         json!({
             "action": "create",
+            "risk": "none",
             "title": "Context test task"
         }),
     );
@@ -1038,6 +1042,7 @@ fn test_mcp_consolidated_task_tool() {
         "task",
         json!({
             "action": "create",
+            "risk": "none",
             "title": "Consolidated task test"
         }),
     );
@@ -1144,6 +1149,7 @@ fn test_mcp_mutation_with_notifications() {
         "task",
         json!({
             "action": "create",
+            "risk": "none",
             "title": "Test task for notification test"
         }),
     );

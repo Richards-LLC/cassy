@@ -458,6 +458,16 @@ pub struct FactoryConfig {
     /// endpoint when transcripts must not leave the machine or tailnet.
     #[serde(default)]
     pub ai_enrichment: cas_factory::AiEnrichmentConfig,
+
+    /// Run one bounded workspace nextest sweep after each successful merge
+    /// into an epic branch. The daemon owns the sweep so the merge request
+    /// remains responsive while the merged tip is checked.
+    #[serde(default = "default_true")]
+    pub merge_sweep: bool,
+
+    /// Maximum wall-clock duration for a post-merge workspace sweep.
+    #[serde(default = "default_merge_sweep_timeout_secs")]
+    pub merge_sweep_timeout_secs: u64,
 }
 
 /// Durable staging configuration for large generated artifacts.
@@ -558,6 +568,10 @@ fn default_target_cache_retention_count() -> usize {
     1
 }
 
+fn default_merge_sweep_timeout_secs() -> u64 {
+    30 * 60
+}
+
 impl Default for FactoryConfig {
     fn default() -> Self {
         Self {
@@ -582,6 +596,8 @@ impl Default for FactoryConfig {
             target_cache_min_idle_secs: default_target_cache_min_idle_secs(),
             target_cache_retention_count: default_target_cache_retention_count(),
             ai_enrichment: cas_factory::AiEnrichmentConfig::default(),
+            merge_sweep: true,
+            merge_sweep_timeout_secs: default_merge_sweep_timeout_secs(),
         }
     }
 }
@@ -1396,6 +1412,8 @@ mod tests {
         assert_eq!(fc.message_max_chars, 1200);
         assert_eq!(fc.message_max_chars_escalation, 2500);
         assert_eq!(fc.note_max_chars, 1500);
+        assert!(fc.merge_sweep);
+        assert_eq!(fc.merge_sweep_timeout_secs, 1800);
     }
 
     /// Round-trip: a persisted config with no factory section deserializes
@@ -1434,6 +1452,8 @@ mod tests {
         assert_eq!(fc.message_max_chars, 1200);
         assert_eq!(fc.message_max_chars_escalation, 2500);
         assert_eq!(fc.note_max_chars, 1500);
+        assert!(fc.merge_sweep);
+        assert_eq!(fc.merge_sweep_timeout_secs, 1800);
     }
 
     #[test]
@@ -1455,6 +1475,16 @@ mod tests {
             toml::from_str(toml_str).expect("valid toml");
         let fc = parsed.get("factory").expect("section present");
         assert_eq!(fc.max_concurrent_builders, 6);
+    }
+
+    #[test]
+    fn factory_merge_sweep_policy_is_configurable() {
+        let toml_str = "[factory]\nmerge_sweep = false\nmerge_sweep_timeout_secs = 42\n";
+        let parsed: std::collections::HashMap<String, FactoryConfig> =
+            toml::from_str(toml_str).expect("valid toml");
+        let fc = parsed.get("factory").expect("section present");
+        assert!(!fc.merge_sweep);
+        assert_eq!(fc.merge_sweep_timeout_secs, 42);
     }
 
     #[test]

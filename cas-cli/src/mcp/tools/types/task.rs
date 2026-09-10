@@ -3,7 +3,7 @@ use std::str::FromStr;
 use rmcp::schemars::JsonSchema;
 use serde::Deserialize;
 
-use cas_types::{DeliveryMode, TaskDepth};
+use cas_types::{DeliveryMode, TaskDepth, TaskRisk, TaskType};
 
 use crate::mcp::tools::types::defaults::{
     default_dep_type, default_note_type, default_priority, default_subagent_tokens,
@@ -81,6 +81,75 @@ pub fn validate_delivery_mode(value: Option<&str>) -> Result<Option<DeliveryMode
     }
 }
 
+/// Parse the comma-separated proof-target declaration into trimmed,
+/// de-duplicated target names.
+pub fn parse_proof_targets(value: Option<&str>) -> Vec<String> {
+    let mut targets = Vec::new();
+    for target in value
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|target| !target.is_empty())
+    {
+        if !targets.iter().any(|known| known == target) {
+            targets.push(target.to_string());
+        }
+    }
+    targets
+}
+
+/// Validate a task's declared risk and proof-target contract at a write
+/// boundary. `risk` is required for code-bearing task/bug/feature creates;
+/// the supervisor override is explicit and audited by the caller.
+pub fn validate_task_risk_declaration(
+    task_type: TaskType,
+    risk: Option<&str>,
+    proof_targets: Option<&str>,
+    supervisor_override: bool,
+    is_supervisor: bool,
+    reason: Option<&str>,
+) -> Result<(Vec<TaskRisk>, Vec<String>), String> {
+    if supervisor_override && !is_supervisor {
+        return Err(
+            "SUPERVISOR OVERRIDE REJECTED: supervisor_override=true is only available to a registered supervisor."
+                .to_string(),
+        );
+    }
+    if supervisor_override && reason.is_none_or(|reason| reason.trim().is_empty()) {
+        return Err(
+            "SUPERVISOR OVERRIDE REJECTED: supervisor_override=true requires a non-empty reason."
+                .to_string(),
+        );
+    }
+
+    let risks = match risk.map(str::trim).filter(|risk| !risk.is_empty()) {
+        Some(risk) => TaskRisk::parse_csv(risk).map_err(|error| {
+            format!(
+                "TASK RISK REJECTED: {error}. Expected comma-separated values: blast-radius, platform, concurrency, none."
+            )
+        })?,
+        None if supervisor_override
+            || !matches!(task_type, TaskType::Task | TaskType::Bug | TaskType::Feature) =>
+        {
+            Vec::new()
+        }
+        None => {
+            return Err(
+                "TASK CREATE REJECTED: risk is required for task, bug, and feature tasks. Declare risk=blast-radius,platform,concurrency, or none; a registered supervisor may use supervisor_override=true with a non-empty reason."
+                    .to_string(),
+            )
+        }
+    };
+    let targets = parse_proof_targets(proof_targets);
+    if risks.contains(&TaskRisk::BlastRadius) && targets.is_empty() {
+        return Err(
+            "TASK RISK REJECTED: risk=blast-radius requires at least one non-empty proof_targets entry (test module or target)."
+                .to_string(),
+        );
+    }
+    Ok((risks, targets))
+}
+
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct TaskCreateRequest {
     /// Task title
@@ -103,6 +172,33 @@ pub struct TaskCreateRequest {
     )]
     #[serde(default = "default_task_type")]
     pub task_type: String,
+
+    /// Delivery risk declaration. Required for task, bug, and feature creates.
+    #[schemars(
+        description = "Comma-separated delivery risks: blast-radius, platform, concurrency, or none. Required for task/bug/feature creates; blast-radius also requires proof_targets. A registered supervisor may explicitly override the requirement with supervisor_override=true and reason."
+    )]
+    #[serde(default)]
+    pub risk: Option<String>,
+
+    /// Test modules/targets that must be covered by close-time proof for a
+    /// blast-radius task.
+    #[schemars(
+        description = "Comma-separated test modules or targets required to prove a blast-radius task's complete diff coverage"
+    )]
+    #[serde(default)]
+    pub proof_targets: Option<String>,
+
+    /// Supervisor-only override for the required risk declaration.
+    #[schemars(
+        description = "Create without risk only as a registered supervisor; requires a non-empty reason and records an audit note"
+    )]
+    #[serde(default)]
+    pub supervisor_override: Option<bool>,
+
+    /// Audit reason paired with supervisor_override.
+    #[schemars(description = "Required non-empty audit reason when supervisor_override=true")]
+    #[serde(default)]
+    pub reason: Option<String>,
 
     /// Labels
     #[schemars(description = "Comma-separated labels for categorization")]
@@ -359,6 +455,20 @@ pub struct TaskUpdateRequest {
     #[serde(default)]
     pub execution_note: Option<String>,
 
+    /// Update delivery risk declaration.
+    #[schemars(
+        description = "Comma-separated delivery risks: blast-radius, platform, concurrency, or none. blast-radius requires proof_targets. Pass an empty string to clear."
+    )]
+    #[serde(default)]
+    pub risk: Option<String>,
+
+    /// Update the test modules/targets required by blast-radius proof.
+    #[schemars(
+        description = "Comma-separated test modules or targets for blast-radius proof; pass empty to clear"
+    )]
+    #[serde(default)]
+    pub proof_targets: Option<String>,
+
     /// Update external reference
     #[schemars(description = "New external reference")]
     #[serde(default)]
@@ -454,7 +564,7 @@ pub struct TaskNotesRequest {
 
     /// Note type for structured categorization
     #[schemars(
-        description = "Type: 'progress' (default), 'blocker', 'decision', 'discovery', 'question'"
+        description = "Type: 'progress' (default), 'blocker', 'decision', 'discovery', 'question', 'platform_proof', or 'loaded_proof'"
     )]
     #[serde(default = "default_note_type")]
     pub note_type: String,

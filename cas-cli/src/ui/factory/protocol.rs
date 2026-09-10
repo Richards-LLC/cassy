@@ -51,6 +51,30 @@ pub struct MessageAttribution {
     pub operator_label: Option<String>,
     pub controller_origin: Option<String>,
     pub request_id: Option<String>,
+    /// Scopes the authenticated device session held (cas-e8df). Absent on the
+    /// wire means none were established.
+    #[serde(default)]
+    pub scopes: Vec<String>,
+    /// True only when the hub authenticated the device session and rewrote
+    /// every field above from the credential record (cas-e8df). A client can
+    /// send `true`, but the hub overwrites the whole struct, and a daemon
+    /// reached without the hub has no session to verify against.
+    #[serde(default)]
+    pub operator_verified: bool,
+}
+
+/// Durable supervisor-to-Commander reply payload. The device id is included
+/// in the daemon frame so the hub can enforce recipient routing even when one
+/// machine has multiple paired browsers attached.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OperatorReplyPayload {
+    pub schema_version: u32,
+    pub reply_to: i64,
+    pub message: String,
+    pub summary: String,
+    pub device_id: String,
+    #[serde(default)]
+    pub operator_label: Option<String>,
 }
 
 impl MessageAttribution {
@@ -197,7 +221,17 @@ pub enum ClientMessage {
         summary: Option<String>,
         #[serde(default)]
         urgent: bool,
+        /// Client-generated nonce used to correlate durable enqueue receipt.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        client_ref: Option<String>,
         attribution: MessageAttribution,
+    },
+
+    /// Confirm that the hub handed an operator reply to its authenticated
+    /// paired device. This is a hub-to-daemon receipt, not an operator command.
+    OperatorReplyDelivered {
+        notification_id: i64,
+        device_id: String,
     },
 
     /// Request current state snapshot
@@ -255,6 +289,27 @@ pub enum DaemonMessage {
         /// Content-free attach metadata used by protocol v3 clients.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         pane_bootstrap: Vec<PaneBootstrap>,
+    },
+
+    /// A supervisor reply addressed to one authenticated Commander device.
+    /// The queue row remains the retry/receipt authority until this frame is
+    /// handed to the daemon's connected hub transport.
+    OperatorReply {
+        notification_id: i64,
+        reply_to: i64,
+        message: String,
+        summary: String,
+        device_id: String,
+        #[serde(default)]
+        operator_label: Option<String>,
+    },
+
+    /// Durable acknowledgment for a Commander semantic message.
+    MessageQueued {
+        client_ref: Option<String>,
+        notification_id: i64,
+        target: String,
+        stamped: bool,
     },
 
     /// An authoritative ANSI serialization of the pane's current terminal state.
@@ -340,6 +395,9 @@ pub enum DaemonMessage {
     Error {
         /// Error message
         message: String,
+        /// Client-generated nonce for a rejected semantic message, when known.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        client_ref: Option<String>,
     },
 
     /// Pong response to ping
@@ -574,6 +632,8 @@ mod tests {
             operator_label: Some("Pippenz".to_string()),
             controller_origin: Some("https://commander.example".to_string()),
             request_id: Some("request-789".to_string()),
+            scopes: vec!["message:send".to_string()],
+            operator_verified: true,
         }
     }
 
@@ -720,6 +780,7 @@ mod tests {
             text: "Please checkpoint now".to_string(),
             summary: Some("checkpoint request".to_string()),
             urgent: false,
+            client_ref: Some("send-42".to_string()),
             attribution: attributed_remote_operator(),
         };
         let json = serde_json::to_string(&msg).unwrap();
@@ -730,12 +791,14 @@ mod tests {
                 text,
                 summary,
                 urgent,
+                client_ref,
                 attribution,
             } => {
                 assert_eq!(target, "worker-1");
                 assert_eq!(text, "Please checkpoint now");
                 assert_eq!(summary.as_deref(), Some("checkpoint request"));
                 assert!(!urgent);
+                assert_eq!(client_ref.as_deref(), Some("send-42"));
                 assert_eq!(attribution.device_id.as_deref(), Some("device-123"));
                 assert_eq!(attribution.operator_label.as_deref(), Some("Pippenz"));
             }
@@ -748,6 +811,62 @@ mod tests {
             serde_json::from_str::<ClientMessage>(missing_attribution).is_err(),
             "attribution is a required part of the wire contract"
         );
+
+        let legacy_without_client_ref = r#"{"SendMessage":{"target":"worker-1","text":"hello","summary":null,"urgent":false,"attribution":{"device_id":null,"credential_id":null,"device_label":null,"operator_label":null,"controller_origin":null,"request_id":null}}}"#;
+        let decoded = serde_json::from_str::<ClientMessage>(legacy_without_client_ref).unwrap();
+        assert!(matches!(
+            decoded,
+            ClientMessage::SendMessage {
+                client_ref: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn message_queued_round_trips_its_client_ref_and_durable_id() {
+        let message = DaemonMessage::MessageQueued {
+            client_ref: Some("send-42".to_string()),
+            notification_id: 812,
+            target: "patient-pelican-9".to_string(),
+            stamped: true,
+        };
+        let json = serde_json::to_string(&message).unwrap();
+        assert_eq!(
+            json,
+            r#"{"MessageQueued":{"client_ref":"send-42","notification_id":812,"target":"patient-pelican-9","stamped":true}}"#
+        );
+        assert!(matches!(
+            serde_json::from_str::<DaemonMessage>(&json).unwrap(),
+            DaemonMessage::MessageQueued {
+                client_ref: Some(client_ref),
+                notification_id: 812,
+                target,
+                stamped: true,
+            } if client_ref == "send-42" && target == "patient-pelican-9"
+        ));
+    }
+
+    #[test]
+    fn operator_reply_receipt_is_an_additive_daemon_control() {
+        let message = ClientMessage::OperatorReplyDelivered {
+            notification_id: 75,
+            device_id: "phone-7".to_string(),
+        };
+        let json = serde_json::to_string(&message).unwrap();
+        assert_eq!(
+            json,
+            r#"{"OperatorReplyDelivered":{"notification_id":75,"device_id":"phone-7"}}"#
+        );
+        let decoded = serde_json::from_str::<ClientMessage>(&json).unwrap();
+        assert!(matches!(
+            decoded,
+            ClientMessage::OperatorReplyDelivered {
+                notification_id: 75,
+                device_id
+            } if device_id == "phone-7"
+        ));
+        let _ = message;
     }
 
     #[test]
@@ -759,6 +878,8 @@ mod tests {
             operator_label: None,
             controller_origin: None,
             request_id: None,
+            scopes: Vec::new(),
+            operator_verified: false,
         };
         let json = serde_json::to_value(&attribution).unwrap();
         for field in [
@@ -904,6 +1025,7 @@ mod tests {
                 text: "hello".to_string(),
                 summary: None,
                 urgent: false,
+                client_ref: None,
                 attribution: attributed_remote_operator(),
             })
             .unwrap(),

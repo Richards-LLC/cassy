@@ -460,6 +460,32 @@ fn enqueue_worker_attention_relay_detail_with_key(
     WorkerAttentionRelayOutcome::Persisted { notification_id }
 }
 
+/// Relay a failed post-merge workspace sweep through the durable supervisor
+/// attention lane. The sweep coordinator records the task note separately;
+/// this wake is deliberately idempotent on epic, merged tip, and failure
+/// occurrence so a daemon restart cannot spam the supervisor.
+pub(super) fn enqueue_merge_sweep_failure_relay(
+    cas_dir: &std::path::Path,
+    epic_id: &str,
+    commit: &str,
+    detail: &str,
+    occurrence: &str,
+) -> WorkerAttentionRelayOutcome {
+    let detail = format!(
+        "Merged epic {epic_id} at {commit} failed its bounded workspace sweep. {detail}"
+    );
+    enqueue_worker_attention_relay_detail_with_key(
+        cas_dir,
+        "sweep_failed",
+        "supervisor",
+        Some(epic_id),
+        None,
+        &detail,
+        occurrence,
+        Some(&format!("{epic_id}:{commit}")),
+    )
+}
+
 #[cfg(test)]
 mod worker_attention_tests {
     use super::*;
@@ -725,6 +751,10 @@ impl FactoryDaemon {
         // Create the factory app (this spawns Claude instances)
         let mut app = FactoryApp::new(config.factory_config)?;
         app.set_factory_session(config.session_name.clone());
+        let merge_sweep = super::merge_sweep::MergeSweepCoordinator::new(
+            app.cas_dir(),
+            &config.session_name,
+        );
 
         // Track factory session start
         crate::telemetry::track_factory_started("supervisor", app.worker_names().len());
@@ -897,8 +927,9 @@ impl FactoryDaemon {
             reported_unavailable_workers: std::collections::HashMap::new(),
             last_usage_limit_scan: None,
         reported_auth_failed_workers: std::collections::HashMap::new(),
-        last_auth_failure_scan: None,
+            last_auth_failure_scan: None,
             cancelled_spawns: std::collections::HashSet::new(),
+            merge_sweep,
             last_idle_message_times: HashMap::new(),
             lifecycle_redelivery_attempts: HashMap::new(),
             lifecycle_redelivery_counts: HashMap::new(),
@@ -1129,6 +1160,12 @@ impl FactoryDaemon {
             if self.spawn_task.is_some() || !self.pending_spawns.is_empty() {
                 self.process_pending_spawns().await;
             }
+
+            // A successful merge only appends a durable event. The bounded
+            // workspace sweep is owned by this daemon so merge MCP latency is
+            // independent of nextest and failures are reported before the
+            // next merge is allowed to go unnoticed.
+            self.poll_merge_sweep().await;
 
             // Periodic Cassy data refresh
             let mut refreshed = false;
@@ -1921,6 +1958,8 @@ impl FactoryDaemon {
 
     /// Cleanup on shutdown
     async fn cleanup(&mut self) -> anyhow::Result<()> {
+        self.merge_sweep.shutdown().await;
+
         // Clean up notification socket
         if let Some(ref notify) = self.notify_rx {
             notify.cleanup();

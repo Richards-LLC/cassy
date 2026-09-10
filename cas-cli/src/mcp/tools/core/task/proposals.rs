@@ -151,11 +151,24 @@ impl CasCore {
             .filter(|label| !label.is_empty())
             .map(ToOwned::to_owned)
             .collect::<Vec<_>>();
+        let supervisor_override = req.supervisor_override.unwrap_or(false);
+        let (risk, proof_targets) = crate::mcp::tools::types::validate_task_risk_declaration(
+            task_type,
+            req.risk.as_deref(),
+            req.proof_targets.as_deref(),
+            supervisor_override,
+            matches!(
+                agent.role,
+                cas_types::AgentRole::Supervisor | cas_types::AgentRole::Director
+            ),
+            req.reason.as_deref(),
+        )
+        .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
         super::lifecycle::validate_demo_statement_requirement(
             task_type,
             &labels,
             req.demo_statement.as_deref(),
-            false,
+            supervisor_override,
             crate::harness_policy::is_supervisor_from_env(),
             &self.load_config().qa().user_facing_labels,
         )
@@ -188,6 +201,8 @@ impl CasCore {
             "demo_statement": req.demo_statement.unwrap_or_default(),
             "external_ref": req.external_ref.unwrap_or_default(),
             "delivery_mode": delivery_mode,
+            "risk": risk,
+            "proof_targets": proof_targets,
         });
         let client_request_id = validate_proposal_attempt_id(proposal_attempt_id)?;
         let request = CreateTaskProposalRequest {
@@ -620,6 +635,10 @@ mod tests {
             description: Some("Description".into()),
             priority: 2,
             task_type: "task".into(),
+            risk: Some("none".to_string()),
+            proof_targets: None,
+            supervisor_override: None,
+            reason: None,
             labels: None,
             notes: None,
             blocked_by: None,

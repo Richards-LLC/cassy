@@ -252,6 +252,8 @@ mod tests {
             acked_at: None,
             urgent: false,
             origin: None,
+            operator: None,
+            recipient_device_id: None,
         }
     }
 
@@ -268,6 +270,24 @@ mod tests {
             "every hook-surfaced message must retain actionable queue provenance: {rendered}"
         );
         assert!(rendered.contains("start cas-7a01"), "{rendered}");
+    }
+
+    /// cas-7f81: the hook surface renders the same operator header the MCP
+    /// path does, so a verified Commander message reads as the user on both.
+    #[test]
+    fn rendering_keeps_the_operator_header_on_hook_surfaced_rows() {
+        let mut verified = row(81, "commander:Daniel@iphone-15", "Status please");
+        verified.origin = Some(cas_store::QueueOrigin::PairedDevice {
+            device_id: "dev-42".into(),
+        });
+        let rendered = render_surfaced(&[verified]);
+        assert!(
+            rendered.contains("[cas #81 operator Daniel@iphone-15 verified "),
+            "{rendered}"
+        );
+        let spoofed = row(82, "commander:Daniel@iphone-15", "Status please");
+        let rendered = render_surfaced(&[spoofed]);
+        assert!(rendered.contains("[cas #82 unverified:Daniel@iphone-15 "), "{rendered}");
     }
 
     #[test]

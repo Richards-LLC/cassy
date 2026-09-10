@@ -447,10 +447,33 @@ pub fn execute(args: &CodexArgs, cli: &Cli, cas_root: Option<&Path>) -> Result<(
     // it runs before `initialize_telemetry` spawns a thread, and `set_var` in a
     // multi-threaded process is UB. Prompting here would also ask twice
     // (cas-898d lesson).
-    let mut factory_args = parse_factory_args(args.passthrough_args());
+    let profile = factory_profile(args.profile(), SELECTED_PROFILE.get().map(String::as_str));
+    let home = profile
+        .map(|_| dirs::home_dir().context("cannot determine home directory for Codex profiles"))
+        .transpose()?;
+    let factory_args = build_factory_args(args.passthrough_args(), profile, home.as_deref());
+    super::factory::execute(&factory_args, cli, cas_root)
+}
+
+fn factory_profile<'a>(explicit: Option<&'a str>, picked: Option<&'a str>) -> Option<&'a str> {
+    explicit.or(picked)
+}
+
+/// Build the factory handoff after account selection. Both an explicitly named
+/// profile and a picker result use this same path so the resolver can validate
+/// Codex against the account home inherited by the supervisor pane.
+fn build_factory_args(
+    args: &[OsString],
+    profile: Option<&str>,
+    home: Option<&Path>,
+) -> FactoryArgs {
+    let mut factory_args = parse_factory_args(args);
     factory_args.supervisor_cli = "codex".to_string();
     factory_args.supervisor_cli_explicit = true;
-    super::factory::execute(&factory_args, cli, cas_root)
+    factory_args.supervisor_config_dir = profile
+        .zip(home)
+        .map(|(profile, home)| resolve_profile_dir(home, profile));
+    factory_args
 }
 
 /// Parse the trailing arguments as `cas factory` flags.
@@ -700,5 +723,32 @@ mod tests {
         assert_eq!(parsed.workers, 0);
         assert!(!parsed.start_new);
         assert!(!parsed.set_default);
+    }
+
+    #[test]
+    fn picker_and_explicit_profiles_build_identical_factory_contexts() {
+        let home = Path::new("/tmp/test-home");
+        let args = [
+            OsString::from("--workers"),
+            OsString::from("3"),
+            OsString::from("--new"),
+            OsString::from("--no-worktrees"),
+        ];
+
+        let explicit_profile = factory_profile(Some("alt"), None);
+        let picked_profile = factory_profile(None, Some("alt"));
+        let explicit = build_factory_args(&args, explicit_profile, Some(home));
+        let picked = build_factory_args(&args, picked_profile, Some(home));
+
+        assert_eq!(explicit, picked);
+        assert_eq!(explicit.supervisor_cli, "codex");
+        assert!(explicit.supervisor_cli_explicit);
+        assert_eq!(
+            explicit.supervisor_config_dir,
+            Some(home.join(".codex-alt"))
+        );
+        assert_eq!(explicit.workers, 3);
+        assert!(explicit.start_new);
+        assert!(explicit.no_worktrees);
     }
 }

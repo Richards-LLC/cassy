@@ -237,6 +237,160 @@ pub(super) fn diff_stat(
     })
 }
 
+/// Return the paths carried by the same task-attributed delivery ranges used
+/// by the close diff stat. Risk proof must not fall back to an unrelated
+/// branch-wide diff: a proof narrower than this set is a hard close failure.
+pub(super) fn paths(
+    repo: &Path,
+    target: &str,
+    window: &TaskCommitReceiptWindow,
+    receipt: Option<&str>,
+) -> Option<Vec<String>> {
+    let receipt = receipt
+        .map(|receipt| resolve_task_commit_receipt_sha(repo, receipt))
+        .transpose()
+        .ok()?;
+    let ranges = task_delivery_ranges(repo, target, window, receipt.as_deref())?;
+    let mut paths = Vec::new();
+    for range in ranges {
+        let changed = git_text(repo, &["diff", "--name-only", &range.base, &range.tip, "--"])?;
+        paths.extend(
+            changed
+                .lines()
+                .map(str::trim)
+                .filter(|path| !path.is_empty())
+                .map(ToOwned::to_owned),
+        );
+    }
+    paths.sort();
+    paths.dedup();
+    Some(paths)
+}
+
+/// Prove the content of a merge-tip delivery from the task's first-parent
+/// commits rather than from the merge tip itself.
+///
+/// A worker commonly merges the current integration target into its factory
+/// branch before handing it back to the supervisor. That merge can have no
+/// first-parent tree effect even though the worker's earlier task commits are
+/// present on the merge's first-parent side. The merge tip is therefore an
+/// attribution boundary, not delivery content. Reuse the task-window
+/// selection above and validate every selected non-merge commit individually
+/// against the authoritative target.
+///
+/// An explicit receipt is accepted as an additional candidate only when it is
+/// a non-merge commit on the merge tip's first-parent history. The close path
+/// validates that receipt's normal topology, timestamp, diff, and target
+/// content predicates before calling this helper.
+pub(super) fn merge_tip_content_presence(
+    repo: &Path,
+    target: &str,
+    merge_tip: &str,
+    window: Option<&TaskCommitReceiptWindow>,
+    identity: &TaskCommitIdentity,
+    validated_receipt: Option<&str>,
+) -> Option<DeliveryContentPresence> {
+    let fallback_window = TaskCommitReceiptWindow {
+        supervisor_override_reason: None,
+        not_before: chrono::DateTime::from_timestamp(0, 0)?,
+        task_floor: chrono::DateTime::from_timestamp(0, 0)?,
+        basis: "task identity fallback",
+        identity: identity.clone(),
+    };
+    let window = window.unwrap_or(&fallback_window);
+    let ranges = task_delivery_ranges(repo, target, window, Some(merge_tip))?;
+
+    let first_parent_commits = git_text(
+        repo,
+        &["rev-list", "--first-parent", "--reverse", merge_tip],
+    )?;
+    let first_parent_commits = first_parent_commits
+        .lines()
+        .filter(|commit| !commit.is_empty())
+        .collect::<Vec<_>>();
+
+    let mut commits = Vec::new();
+    for range in ranges {
+        let range = format!("{}..{}", range.base, range.tip);
+        let range_commits = git_text(repo, &["rev-list", "--first-parent", "--reverse", &range])?;
+        for commit in range_commits.lines().filter(|commit| !commit.is_empty()) {
+            if !commits.iter().any(|known| known == commit) && !is_merge_commit(repo, commit) {
+                commits.push(commit.to_string());
+            }
+        }
+    }
+
+    if let Some(receipt) = validated_receipt
+        .and_then(|receipt| super::resolve_task_commit_receipt_sha(repo, receipt).ok())
+        .filter(|receipt| {
+            first_parent_commits
+                .iter()
+                .any(|commit| *commit == receipt.as_str())
+        })
+        .filter(|receipt| !is_merge_commit(repo, receipt))
+        && !commits.iter().any(|commit| commit == &receipt)
+    {
+        commits.push(receipt);
+    }
+
+    if commits.is_empty() {
+        return None;
+    }
+
+    let mut present_paths = Vec::new();
+    let mut superseded_paths = Vec::new();
+    let mut superseding_commits = Vec::new();
+    let mut dropped_paths = Vec::new();
+    let mut unknown_reason = None;
+    for commit in commits {
+        match super::delivery_content_presence_in_parent(repo, &commit, target) {
+            DeliveryContentPresence::Present { paths } => {
+                append_unique(&mut present_paths, paths);
+            }
+            DeliveryContentPresence::Superseded { paths, commits } => {
+                append_unique(&mut superseded_paths, paths);
+                append_unique(&mut superseding_commits, commits);
+            }
+            DeliveryContentPresence::Dropped { paths } => {
+                append_unique(&mut dropped_paths, paths);
+            }
+            DeliveryContentPresence::Unknown { reason } => {
+                unknown_reason.get_or_insert(reason);
+            }
+        }
+    }
+
+    if !dropped_paths.is_empty() {
+        Some(DeliveryContentPresence::Dropped {
+            paths: dropped_paths,
+        })
+    } else if let Some(reason) = unknown_reason {
+        Some(DeliveryContentPresence::Unknown { reason })
+    } else if !superseded_paths.is_empty() {
+        Some(DeliveryContentPresence::Superseded {
+            paths: superseded_paths,
+            commits: superseding_commits,
+        })
+    } else {
+        Some(DeliveryContentPresence::Present {
+            paths: present_paths,
+        })
+    }
+}
+
+fn is_merge_commit(repo: &Path, commit: &str) -> bool {
+    git_text(repo, &["rev-list", "--parents", "-n", "1", commit])
+        .is_some_and(|parents| parents.split_whitespace().count() > 2)
+}
+
+fn append_unique(values: &mut Vec<String>, additions: Vec<String>) {
+    for value in additions {
+        if !values.contains(&value) {
+            values.push(value);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

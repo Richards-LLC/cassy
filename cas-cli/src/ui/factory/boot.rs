@@ -167,7 +167,7 @@ pub fn run_boot_screen_client(
                     screen.cleanup()?;
                     return Ok(());
                 }
-                DaemonMessage::Error { message } => {
+                DaemonMessage::Error { message, .. } => {
                     // Show error
                     screen.fail_step(step_base + current_step, "Error", &message)?;
                     screen.cleanup()?;

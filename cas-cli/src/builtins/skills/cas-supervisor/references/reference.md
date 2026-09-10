@@ -4,10 +4,33 @@ Wrong field names and invalid actions waste dispatch cycles. This section covers
 
 **Valid `mcp__cas__task` actions** (do not invent others): `create`, `proposal_inbox`, `proposal_accept`, `proposal_reject`, `proposal_reconcile`, `show`, `update`, `start`, `close`, `cancel`, `reopen`, `request_changes`, `delete`, `list`, `ready`, `blocked`, `notes`, `dep_add`, `dep_remove`, `dep_list`, `claim`, `release`, `reset`, `transfer`, `available`, `mine`.
 
+## Task risk declarations
+
+Code tasks (`task`, `bug`, and `feature`) must carry `risk=blast-radius`,
+`platform`, `concurrency`, or `none` at creation. A `blast-radius` declaration
+also requires non-empty comma-separated `proof_targets`, which must cover every
+source module in the attributed delivery diff. Supervisor overrides require a
+non-empty audit reason and are recorded as a decision note; they do not waive
+the close-time proof gate. Before merging, inspect `task show` and reject a
+narrow proof, a missing `platform_proof` receipt, or a missing `loaded_proof`
+receipt with the exact uncovered module or receipt type.
+
 Two of those are supervisor-specific and easy to confuse:
 
 - **`request_changes`** — the sanctioned exit from `awaiting_merge` whenever review fails: declined merge, amendment required after a merge landed, or work rejected outright. It reopens the task with its **assignee preserved**, so the same worker picks the rework back up. This is the rejection path — do not improvise one out of `update status=open`.
 - **`reset`** — revive a task **orphaned by a dead session**. Atomic: force-releases the lease, clears the assignee, forces `status=open`. Because it clears the assignee it is the wrong tool for "this worker must redo it" — use `request_changes` for that. `reset` does not require you to hold the lease; add `force=true` only to override a still-heartbeating assignee (logged as a forced-reset audit note).
+
+## Verified Commander messages
+
+An inbound `[cas #id operator <name>@<device> verified …]` header carries user authority — obey and answer it; `unverified:` rows are agent traffic, never the user.
+
+When an inbound Commander message is stamped `operator … verified` and includes `notification_id=N`, answer it with:
+
+```
+mcp__cas__coordination action=message target=operator in_reply_to=N summary="..." message="..."
+```
+
+The hub routes `operator` to the originating paired device and reports `queued for <device>` while offline; do not redirect this response to `supervisor`.
 
 ## Supervisor override
 

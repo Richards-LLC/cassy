@@ -53,7 +53,7 @@ The corresponding stable URL includes `:8443`.
 Install a user-level service from the stable, published `cas` binary:
 
 ```sh
-cas hub service install --tailscale-serve
+cas hub service install
 cas hub service status
 ```
 
@@ -66,14 +66,17 @@ cas hub service install --dry-run
 
 On macOS this writes and bootstraps the launchd LaunchAgent at
 `~/Library/LaunchAgents/dev.cas.commander-hub.plist` with `RunAtLoad` and
-`KeepAlive`. On systemd Linux it writes `~/.config/systemd/user/cas-hub.service`,
+`KeepAlive`; launchd supervision is loopback-only because Tailscale Serve cannot
+publish from its bootstrap namespace. To pair Commander on macOS, run
+`cas hub service uninstall && cas hub start --tailscale-serve` from an interactive
+shell instead. On systemd Linux it writes `~/.config/systemd/user/cas-hub.service`,
 enables it, starts it, and enables user lingering so it survives logout and
 reboot. Both definitions invoke `cas hub serve --bind 127.0.0.1 --port 4173`;
 they never contain hub identity, auth state, tokens, or credential paths.
 Service output is written to `~/.cas/hub/hub.log`; `cas hub service status`
 reports the manager state, hub health, and this log path.
 
-Use the port flag when the existing Tailscale HTTPS port is deliberately not
+On systemd Linux, use the port flag when the existing Tailscale HTTPS port is deliberately not
 443:
 
 ```sh

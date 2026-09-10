@@ -14,9 +14,20 @@ import {
   type ConnectionStage,
   type AttachSnapshot,
 } from "./connection-state";
-import type { HubSession, LeaseState, PaneInfo, SessionCardSummary, SessionState, StoredMachine } from "./types";
+import type { HubSession, LeaseState, MessageQueued, OperatorReply, PaneInfo, SessionCardSummary, SessionState, StoredMachine } from "./types";
+
+import { sessionsPath, workersRevealed } from "./worker-visibility";
 
 export type ConnectionState = ConnectionSnapshot;
+
+/** Off by default (cas-6261): worker panes are requested only when the operator asked. */
+function revealWorkers(): boolean {
+  let storage: Storage | undefined;
+  let search = "";
+  try { storage = globalThis.localStorage; } catch { storage = undefined; }
+  try { search = globalThis.location?.search ?? ""; } catch { search = ""; }
+  return workersRevealed(search, storage);
+}
 export type AuthFailureKind = "expired" | "revoked" | "scope-mismatch" | "needs-pairing";
 
 export interface HubMachineInfo {
@@ -36,6 +47,9 @@ export interface HubCallbacks {
   onMachineEvent(event: Record<string, unknown>): void;
   onSessionState(session: string, state: SessionState, scrollback?: Record<string, number[][]>, authoritativeKeyframes?: boolean): void;
   onOutput(session: string, paneId: string, data: Uint8Array): void;
+  onMessageQueued?(session: string, queued: MessageQueued): void;
+  onMessageRejected?(session: string, clientRef: string, detail: string): void;
+  onOperatorReply?(session: string, reply: OperatorReply): void;
   onSessionSummary?(session: string, summary: SessionCardSummary): void;
   onPaneKeyframe(session: string, paneId: string, data: Uint8Array): void;
   onPaneSize?(session: string, paneId: string, cols: number, rows: number, authority: string): void;
@@ -286,7 +300,8 @@ export class HubConnectionSupervisor {
 
   async request<T>(method: string, path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
     const startedAt = performance.now();
-    const headers = await dpopHeaders(this.machine, method, path);
+    // The proof binds the bare path; the hub rejects an htu with a query.
+    const headers = await dpopHeaders(this.machine, method, path.split("?")[0] ?? path);
     const response = await fetch(new URL(path, this.machine.baseUrl), {
       method,
       headers: { ...headers, ...(body === undefined ? {} : { "Content-Type": "application/json" }) },
@@ -307,7 +322,7 @@ export class HubConnectionSupervisor {
   }
 
   async refreshSessions(signal?: AbortSignal): Promise<HubSession[]> {
-    const response = await this.request<{ sessions: HubSession[] }>("GET", "/v1/sessions", undefined, signal);
+    const response = await this.request<{ sessions: HubSession[] }>("GET", sessionsPath(revealWorkers()), undefined, signal);
     this.callbacks.onSessions(response.sessions);
     return response.sessions;
   }
@@ -482,6 +497,7 @@ export class HubConnectionSupervisor {
     const endpoint = new URL(`/v1/sessions/${encodeURIComponent(session)}/attach`, this.machine.baseUrl);
     endpoint.protocol = endpoint.protocol === "https:" ? "wss:" : "ws:";
     endpoint.searchParams.set("ticket", ticket.ticket);
+    if (revealWorkers()) endpoint.searchParams.set("workers", "1");
     const socket = new WebSocket(endpoint);
     this.transitionAttach(session, "dialing", "dialing");
     socket.binaryType = "arraybuffer";
@@ -647,7 +663,7 @@ export class HubConnectionSupervisor {
     if (this.machineSubscriptions.has(session)) return;
     this.machineSubscriptions.add(session);
     this.transitionAttach(session, "attaching", "attaching");
-    socket.send(JSON.stringify({ channel: `pty:${session}`, subscribe: true }));
+    socket.send(JSON.stringify({ channel: `pty:${session}`, subscribe: true, workers: revealWorkers() }));
     const timeouts = this.attachTimeouts.get(session) ?? {};
     if (timeouts.ready !== undefined) window.clearTimeout(timeouts.ready);
     timeouts.ready = window.setTimeout(() => {
@@ -796,17 +812,18 @@ export class HubConnectionSupervisor {
     }
   }
 
-  send(session: string, message: unknown): boolean {
+  send(session: string, message: unknown, clientRef?: string): boolean {
+    const outbound = withClientRef(message, clientRef);
     if (this.machineSocketReady && this.machineSocket?.readyState === WebSocket.OPEN) {
-      const resize = typeof message === "object" && message !== null && "ResizePane" in message;
+      const resize = typeof outbound === "object" && outbound !== null && "ResizePane" in outbound;
       this.machineSocket.send(JSON.stringify(resize
-        ? { channel: "resize", session, message }
-        : { channel: `pty:${session}`, message }));
+        ? { channel: "resize", session, message: outbound }
+        : { channel: `pty:${session}`, message: outbound }));
       return true;
     }
     const socket = this.sockets.get(session);
     if (!socket || socket.readyState !== WebSocket.OPEN) return false;
-    socket.send(JSON.stringify(message));
+    socket.send(JSON.stringify(outbound));
     return true;
   }
 
@@ -888,7 +905,8 @@ export class HubConnectionSupervisor {
     }
     if (envelope.error) {
       const detail = String(envelope.error.message ?? envelope.error.code ?? "machine protocol error");
-      this.callbacks.onSocketError(session, detail);
+      if (typeof envelope.error.client_ref === "string") this.callbacks.onMessageRejected?.(session, envelope.error.client_ref, detail);
+      else this.callbacks.onSocketError(session, detail);
       return;
     }
     if (envelope.message) this.handleDaemonObject(session, envelope.message as Record<string, any>);
@@ -953,12 +971,46 @@ export class HubConnectionSupervisor {
       this.callbacks.onSessionState(session, message.StateUpdate.state);
     } else if (message.Output) {
       this.callbacks.onOutput(session, message.Output.pane_id, new Uint8Array(message.Output.data));
+    } else if (message.MessageQueued) {
+      const queued = messageQueuedFromDaemon(message);
+      if (queued) this.callbacks.onMessageQueued?.(session, queued);
+    } else if (message.OperatorReply) {
+      this.callbacks.onOperatorReply?.(session, message.OperatorReply as OperatorReply);
     } else if (message.SessionSummary) {
       this.callbacks.onSessionSummary?.(session, message.SessionSummary.summary);
     } else if (message.PaneAdded || message.PaneRemoved || message.PaneExited) {
       this.send(session, "GetState");
+    } else if (message.error) {
+      const detail = typeof message.error === "string"
+        ? message.error
+        : String(message.error.message ?? message.error.code ?? "Message refused");
+      const clientRef = message.client_ref ?? (typeof message.error === "object" ? message.error.client_ref : undefined);
+      if (typeof clientRef === "string") this.callbacks.onMessageRejected?.(session, clientRef, detail);
+      else this.callbacks.onSocketError(session, detail);
     } else if (message.Error) {
-      this.callbacks.onSocketError(session, message.Error.message);
+      if (typeof message.Error.client_ref === "string") this.callbacks.onMessageRejected?.(session, message.Error.client_ref, message.Error.message);
+      else this.callbacks.onSocketError(session, message.Error.message);
     }
   }
+}
+
+/** Normalize the additive daemon acknowledgment before invoking the callback. */
+export function messageQueuedFromDaemon(message: Record<string, any>): MessageQueued | undefined {
+  const value = message.MessageQueued;
+  if (!value || typeof value !== "object") return undefined;
+  if (!Number.isFinite(Number(value.notification_id)) || typeof value.target !== "string") return undefined;
+  return {
+    client_ref: typeof value.client_ref === "string" ? value.client_ref : null,
+    notification_id: Number(value.notification_id),
+    target: value.target,
+    stamped: value.stamped === true,
+  };
+}
+
+function withClientRef(message: unknown, clientRef: string | undefined): unknown {
+  if (!clientRef || typeof message !== "object" || message === null) return message;
+  const envelope = message as Record<string, unknown>;
+  const send = envelope.SendMessage;
+  if (!send || typeof send !== "object") return message;
+  return { ...envelope, SendMessage: { ...(send as Record<string, unknown>), client_ref: clientRef } };
 }

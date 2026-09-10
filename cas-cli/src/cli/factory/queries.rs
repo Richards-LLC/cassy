@@ -343,6 +343,53 @@ pub(super) fn execute_targets(
     Ok(())
 }
 
+pub(super) fn execute_worker_status(
+    cli: &Cli,
+    session: Option<&str>,
+    cas_root: Option<&std::path::Path>,
+    summary: bool,
+) -> Result<()> {
+    let root = cas_root
+        .map(std::path::Path::to_path_buf)
+        .or_else(|| find_cas_root_from(&std::env::current_dir().ok()?).ok())
+        .ok_or_else(|| anyhow!("No Cassy root; pass --cas-root <path>"))?;
+    let store = open_agent_store(&root)?;
+    let env_session = std::env::var("CAS_FACTORY_SESSION").ok();
+    let rows = crate::mcp::tools::service::factory_ops::worker_liveness_rows(
+        &root,
+        store.as_ref(),
+        session.or(env_session.as_deref()),
+        chrono::Utc::now(),
+    )
+    .map_err(anyhow::Error::msg)?;
+    if cli.json {
+        let rows: Vec<_> = rows.iter().map(|(name, observation)| serde_json::json!({
+            "name": name, "liveness": observation.state.as_str(), "evidence": observation.evidence,
+        })).collect();
+        println!("{}", serde_json::to_string(&rows)?);
+    } else if summary {
+        println!(
+            "{}",
+            crate::mcp::tools::service::factory_ops::render_worker_liveness_summary(&rows)
+        );
+    } else {
+        for (name, observation) in rows {
+            println!("{}", observation.summary(&name));
+            let mut line = String::from("  evidence:");
+            for word in observation.evidence.split_whitespace() {
+                if line.len() + word.len() + 1 > 80 {
+                    println!("{line}");
+                    line = String::from(" ");
+                }
+                line.push(' ');
+                line.push_str(word);
+            }
+            println!("{line}");
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn execute_status(
     cli: &Cli,
     session_name: Option<&str>,

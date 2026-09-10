@@ -223,6 +223,21 @@ pub struct TaskRequest {
     #[serde(default)]
     pub task_type: Option<String>,
 
+    /// Delivery risk declaration (for create/update). Required for task, bug,
+    /// and feature creates; blast-radius also requires proof_targets.
+    #[schemars(
+        description = "Comma-separated delivery risks: blast-radius, platform, concurrency, or none. Required for task/bug/feature creates; blast-radius requires proof_targets."
+    )]
+    #[serde(default)]
+    pub risk: Option<String>,
+
+    /// Test modules/targets required by blast-radius close proof.
+    #[schemars(
+        description = "Comma-separated test modules or targets required to cover the task's complete delivery diff"
+    )]
+    #[serde(default)]
+    pub proof_targets: Option<String>,
+
     /// Labels (comma-separated)
     #[schemars(description = "Comma-separated labels")]
     #[serde(default)]
@@ -247,7 +262,7 @@ pub struct TaskRequest {
 
     /// Note type (for notes action): progress, blocker, decision, discovery, question
     #[schemars(
-        description = "Note type: 'progress', 'blocker', 'decision', 'discovery', 'question'"
+        description = "Note type: 'progress', 'blocker', 'decision', 'discovery', 'question', 'platform_proof', 'loaded_proof'"
     )]
     #[serde(default)]
     pub note_type: Option<String>,

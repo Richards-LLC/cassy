@@ -1,0 +1,122 @@
+[
+  {
+    "file": "current-1-phone-light.png",
+    "systems": 1,
+    "viewport": {
+      "name": "phone",
+      "width": 390,
+      "height": 844
+    },
+    "scheme": "light",
+    "liveIndicators": 3,
+    "capturedAt": "2026-09-10T17:04:59.992Z",
+    "evidence": "real-build; actual paired local Hub",
+    "distRevision": "3afcccce",
+    "sourceRevision": "a616f6d506a738557cd8977d130db56afa520d0d"
+  },
+  {
+    "file": "current-1-desktop-light.png",
+    "systems": 1,
+    "viewport": {
+      "name": "desktop",
+      "width": 1280,
+      "height": 800
+    },
+    "scheme": "light",
+    "liveIndicators": 3,
+    "capturedAt": "2026-09-10T17:05:00.487Z",
+    "evidence": "real-build; actual paired local Hub",
+    "distRevision": "3afcccce",
+    "sourceRevision": "a616f6d506a738557cd8977d130db56afa520d0d"
+  },
+  {
+    "file": "current-1-phone-dark.png",
+    "systems": 1,
+    "viewport": {
+      "name": "phone",
+      "width": 390,
+      "height": 844
+    },
+    "scheme": "dark",
+    "liveIndicators": 3,
+    "capturedAt": "2026-09-10T17:05:00.973Z",
+    "evidence": "real-build; actual paired local Hub",
+    "distRevision": "3afcccce",
+    "sourceRevision": "a616f6d506a738557cd8977d130db56afa520d0d"
+  },
+  {
+    "file": "current-1-desktop-dark.png",
+    "systems": 1,
+    "viewport": {
+      "name": "desktop",
+      "width": 1280,
+      "height": 800
+    },
+    "scheme": "dark",
+    "liveIndicators": 3,
+    "capturedAt": "2026-09-10T17:05:01.478Z",
+    "evidence": "real-build; actual paired local Hub",
+    "distRevision": "3afcccce",
+    "sourceRevision": "a616f6d506a738557cd8977d130db56afa520d0d"
+  },
+  {
+    "file": "current-2-phone-light.png",
+    "systems": 2,
+    "viewport": {
+      "name": "phone",
+      "width": 390,
+      "height": 844
+    },
+    "scheme": "light",
+    "liveIndicators": 6,
+    "capturedAt": "2026-09-10T17:05:03.530Z",
+    "evidence": "real-build UI; one actual Hub plus one explicitly simulated transport",
+    "distRevision": "3afcccce",
+    "sourceRevision": "a616f6d506a738557cd8977d130db56afa520d0d"
+  },
+  {
+    "file": "current-2-desktop-light.png",
+    "systems": 2,
+    "viewport": {
+      "name": "desktop",
+      "width": 1280,
+      "height": 800
+    },
+    "scheme": "light",
+    "liveIndicators": 6,
+    "capturedAt": "2026-09-10T17:05:04.028Z",
+    "evidence": "real-build UI; one actual Hub plus one explicitly simulated transport",
+    "distRevision": "3afcccce",
+    "sourceRevision": "a616f6d506a738557cd8977d130db56afa520d0d"
+  },
+  {
+    "file": "current-2-phone-dark.png",
+    "systems": 2,
+    "viewport": {
+      "name": "phone",
+      "width": 390,
+      "height": 844
+    },
+    "scheme": "dark",
+    "liveIndicators": 6,
+    "capturedAt": "2026-09-10T17:05:04.508Z",
+    "evidence": "real-build UI; one actual Hub plus one explicitly simulated transport",
+    "distRevision": "3afcccce",
+    "sourceRevision": "a616f6d506a738557cd8977d130db56afa520d0d"
+  },
+  {
+    "file": "current-2-desktop-dark.png",
+    "systems": 2,
+    "viewport": {
+      "name": "desktop",
+      "width": 1280,
+      "height": 800
+    },
+    "scheme": "dark",
+    "liveIndicators": 6,
+    "capturedAt": "2026-09-10T17:05:05.002Z",
+    "evidence": "real-build UI; one actual Hub plus one explicitly simulated transport",
+    "distRevision": "3afcccce",
+    "sourceRevision": "a616f6d506a738557cd8977d130db56afa520d0d"
+  }
+]

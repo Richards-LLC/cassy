@@ -186,8 +186,22 @@ pub fn handle_pre_tool_use(
                     ));
                 }
                 if looks_like_git_write_op(cmd) {
+                    // `CAS_CLONE_PATH` is the bootstrap value, but SessionStart
+                    // persists the authoritative checkout binding in the agent
+                    // row. Resolve it when the hook has a Cassy root so a
+                    // worker whose environment was refreshed (or whose hook
+                    // process inherited only CAS_ROOT) cannot turn the shared
+                    // primary checkout into an apparently unbound target.
+                    let registered_worktree = cas_root.and_then(|root| {
+                        let mut stores = ToolHookStores::new(root);
+                        registered_factory_worktree_root(&mut stores, input)
+                    });
                     if let Some((target, deny_msg)) =
-                        worker_git_scope_violation_for_command(&input.cwd, cmd)
+                        worker_git_scope_violation_for_command_with_worktree(
+                            &input.cwd,
+                            cmd,
+                            registered_worktree.as_deref(),
+                        )
                     {
                         if let Some(root) = cas_root {
                             log_factory_git_scope_rejection(root, input, &target, cmd);
@@ -1311,10 +1325,19 @@ fn worker_git_scope_violation_for_command(
     cwd: &str,
     command: &str,
 ) -> Option<(GitCommandTarget, String)> {
+    worker_git_scope_violation_for_command_with_worktree(cwd, command, None)
+}
+
+fn worker_git_scope_violation_for_command_with_worktree(
+    cwd: &str,
+    command: &str,
+    registered_worktree_root: Option<&std::path::Path>,
+) -> Option<(GitCommandTarget, String)> {
     git_write_targets(cwd, command)
         .into_iter()
         .find_map(|target| {
-            check_worker_git_commit_scope_at_target(&target).map(|message| (target, message))
+            check_worker_git_commit_scope_at_target(&target, registered_worktree_root)
+                .map(|message| (target, message))
         })
 }
 
@@ -1323,7 +1346,8 @@ fn worker_git_scope_violation_for_command(
 ///
 /// Returns `Some(denial_message)` when:
 /// - HEAD at `cwd` is a protected branch (`main`, `master`, `staging`) or detached.
-/// - `CAS_CLONE_PATH` is set (isolated worker) AND `cwd` is outside the worktree.
+/// - the registered worker worktree (or `CAS_CLONE_PATH`) exists AND `cwd` is
+///   outside that worktree.
 ///
 /// Returns `None` to allow when HEAD is on the worker's own factory branch.
 ///
@@ -1336,12 +1360,17 @@ fn worker_git_scope_violation_for_command(
 /// commit-msg/pre-commit hooks, not the Claude Code PreToolUse harness.
 /// Switching to a non-protected branch is the only way to unblock.
 pub(crate) fn check_worker_git_commit_scope(cwd: &str) -> Option<String> {
-    check_worker_git_commit_scope_at_target(&GitCommandTarget::from_cwd(cwd))
+    check_worker_git_commit_scope_at_target(&GitCommandTarget::from_cwd(cwd), None)
 }
 
-fn check_worker_git_commit_scope_at_target(target: &GitCommandTarget) -> Option<String> {
+fn check_worker_git_commit_scope_at_target(
+    target: &GitCommandTarget,
+    registered_worktree_root: Option<&std::path::Path>,
+) -> Option<String> {
     let cwd = target.path_for_scope().display().to_string();
-    let clone_path = std::env::var("CAS_CLONE_PATH").ok();
+    let clone_path = registered_worktree_root
+        .map(|path| path.to_string_lossy().into_owned())
+        .or_else(|| std::env::var("CAS_CLONE_PATH").ok());
     let is_isolated = clone_path
         .as_deref()
         .map(|s| !s.is_empty())
@@ -2064,7 +2093,7 @@ fn factory_write_violation(
     let tool = input.tool_name.as_deref()?;
     let tool_input = input.tool_input.as_ref()?;
     let raw_paths = match tool {
-        "Write" | "Edit" | "NotebookEdit" => tool_input
+        "Write" | "Edit" | "MultiEdit" | "NotebookEdit" => tool_input
             .get("file_path")
             .or_else(|| tool_input.get("path"))
             .and_then(|value| value.as_str())

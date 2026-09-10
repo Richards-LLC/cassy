@@ -64,6 +64,14 @@ export interface OperatorReply {
   operator_label?: string;
 }
 
+/** Durable acknowledgment for a Commander SendMessage submission. */
+export interface MessageQueued {
+  client_ref: string | null;
+  notification_id: number;
+  target: string;
+  stamped: boolean;
+}
+
 export type SessionPhase = "planning" | "editing" | "testing" | "building" | "blocked" | "reviewing" | "idle";
 
 export interface SessionCardSummary {

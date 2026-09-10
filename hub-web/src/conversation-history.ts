@@ -1,11 +1,5 @@
-import type { OperatorReply } from "./types";
+import type { MessageQueued, OperatorReply } from "./types";
 
-export interface MessageReceipt {
-  client_ref: string;
-  notification_id: number;
-  target: string;
-  stamped: boolean;
-}
 export interface ConversationSend {
   id: string;
   target: string;
@@ -23,7 +17,7 @@ export class ConversationHistory {
   submit(id: string, target: string, text: string): void {
     this.events.push({ kind: "send", value: { id, target, text, state: "sending" } });
   }
-  acknowledge(receipt: MessageReceipt): boolean {
+  acknowledge(receipt: MessageQueued): boolean {
     const send = this.events.find((event) => event.kind === "send" && event.value.id === receipt.client_ref && event.value.target === receipt.target);
     if (!send || send.kind !== "send") return false;
     send.value.notificationId = receipt.notification_id;

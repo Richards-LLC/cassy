@@ -6367,7 +6367,7 @@ mod tests {
                 "neon".to_string(),
                 cmcp_core::config::ServerConfig::Http {
                     url: "https://neon.example.invalid/mcp".to_string(),
-                    auth: Some(format!("env:{missing}")),
+                    auth: Some(format!("${{{missing}}}")),
                     headers: std::collections::HashMap::new(),
                     oauth: false,
                 },

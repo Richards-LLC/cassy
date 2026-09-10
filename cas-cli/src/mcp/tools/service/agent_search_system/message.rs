@@ -160,6 +160,7 @@ mod viktor_provenance_tests {
             urgent: false,
             origin: None,
             operator: None,
+            recipient_device_id: None,
         };
 
         let observed_at = chrono::DateTime::parse_from_rfc3339("2026-08-18T20:06:00Z")
@@ -189,6 +190,7 @@ mod viktor_provenance_tests {
             urgent: false,
             origin: None,
             operator: None,
+            recipient_device_id: None,
         };
         let observed_at = row.created_at + chrono::Duration::seconds(299);
         let provenance = queued_message_provenance_at(&row, observed_at);
@@ -214,6 +216,7 @@ mod viktor_provenance_tests {
             urgent: false,
             origin,
             operator: None,
+            recipient_device_id: None,
         }
     }
 
@@ -633,6 +636,7 @@ impl CasService {
         };
 
         let addressed_logical_supervisor = target.eq_ignore_ascii_case("supervisor");
+        let addressed_operator = target.eq_ignore_ascii_case("operator");
         let mut peer_supervisor_copy = None;
         let resolved_target = if role == "worker" {
             if target.eq_ignore_ascii_case("supervisor") {
@@ -884,6 +888,154 @@ impl CasService {
                 .or_else(|| env_agent_name.clone())
                 .unwrap_or_else(|| source.clone())
         };
+
+        // Commander replies are a separate recipient lane. They must point
+        // at a live, hub-stamped operator row so a supervisor cannot guess a
+        // device id or redirect a response to another paired browser.
+        if addressed_operator {
+            if role != "supervisor" {
+                return Err(Self::error(
+                    ErrorCode::INVALID_REQUEST,
+                    "Only a registered supervisor may message target='operator'",
+                ));
+            }
+            let notification_id = req.in_reply_to.ok_or_else(|| {
+                Self::error(
+                    ErrorCode::INVALID_PARAMS,
+                    "target='operator' requires in_reply_to=<Commander notification_id>",
+                )
+            })?;
+            let prior = queue
+                .queued_prompt(notification_id)
+                .map_err(|error| {
+                    Self::error(
+                        ErrorCode::INTERNAL_ERROR,
+                        format!(
+                            "Failed to inspect Commander notification {notification_id}: {error}"
+                        ),
+                    )
+                })?
+                .ok_or_else(|| {
+                    Self::error(
+                        ErrorCode::INVALID_PARAMS,
+                        format!(
+                            "in_reply_to notification {notification_id} does not exist"
+                        ),
+                    )
+                })?;
+            let device_id = prior
+                .origin
+                .as_ref()
+                .and_then(cas_store::QueueOrigin::verified_device_id)
+                .filter(|device_id| !device_id.trim().is_empty())
+                .ok_or_else(|| {
+                    Self::error(
+                        ErrorCode::INVALID_PARAMS,
+                        format!(
+                            "in_reply_to notification {notification_id} has no verified paired-device origin"
+                        ),
+                    )
+                })?
+                .to_string();
+            if !prior.source.starts_with(COMMANDER_SOURCE_PREFIX) {
+                return Err(Self::error(
+                    ErrorCode::INVALID_PARAMS,
+                    format!(
+                        "in_reply_to notification {notification_id} is not a Commander operator message"
+                    ),
+                ));
+            }
+            let expected_targets = [
+                "supervisor",
+                env_agent_name.as_deref().unwrap_or_default(),
+                agent_from_store
+                    .as_ref()
+                    .map(|agent| agent.name.as_str())
+                    .unwrap_or_default(),
+            ];
+            if !expected_targets
+                .iter()
+                .filter(|target| !target.is_empty())
+                .any(|target| prior.target.eq_ignore_ascii_case(target))
+            {
+                return Err(Self::error(
+                    ErrorCode::INVALID_PARAMS,
+                    format!(
+                        "in_reply_to notification {notification_id} targets {}, not this supervisor",
+                        prior.target
+                    ),
+                ));
+            }
+            let factory_session = prior
+                .factory_session
+                .as_deref()
+                .filter(|session| !session.trim().is_empty())
+                .ok_or_else(|| {
+                    Self::error(
+                        ErrorCode::INVALID_PARAMS,
+                        format!(
+                            "in_reply_to notification {notification_id} has no factory session"
+                        ),
+                    )
+                })?;
+            let operator_label = prior
+                .source
+                .strip_prefix(COMMANDER_SOURCE_PREFIX)
+                .and_then(|label| label.rsplit_once('@').map(|(operator, _)| operator.trim()))
+                .filter(|operator| !operator.is_empty())
+                .map(str::to_owned);
+            let payload = serde_json::to_string(&crate::ui::factory::OperatorReplyPayload {
+                schema_version: 1,
+                reply_to: notification_id,
+                message: message.clone(),
+                summary: summary.clone(),
+                device_id: device_id.clone(),
+                operator_label,
+            })
+            .map_err(|error| {
+                Self::error(
+                    ErrorCode::INTERNAL_ERROR,
+                    format!("Failed to encode Commander reply: {error}"),
+                )
+            })?;
+            let reply = queue
+                .enqueue_urgent_with_outcome(
+                    "supervisor",
+                    "operator",
+                    &payload,
+                    Some(factory_session),
+                    Some(summary.as_str()),
+                    Some(cas_store::NotificationPriority::Normal),
+                    false,
+                    Some(&cas_store::QueueOrigin::Daemon),
+                )
+                .map_err(|error| {
+                    Self::error(
+                        ErrorCode::INTERNAL_ERROR,
+                        format!("Failed to queue Commander reply: {error}"),
+                    )
+                })?;
+            let reply_id = reply.id();
+            queue.stamp_recipient_device(reply_id, &device_id).map_err(|error| {
+                Self::error(
+                    ErrorCode::INTERNAL_ERROR,
+                    format!(
+                        "Commander reply {reply_id} queued but device receipt could not be stamped: {error}"
+                    ),
+                )
+            })?;
+            queue.ack(notification_id).map_err(|error| {
+                Self::error(
+                    ErrorCode::INTERNAL_ERROR,
+                    format!(
+                        "Commander reply {reply_id} queued but notification {notification_id} could not be confirmed: {error}"
+                    ),
+                )
+            })?;
+            return Ok(Self::success(format!(
+                "Commander reply queued\n\nID: {reply_id}\nIn reply to: {notification_id}\nDevice: {device_id}\nStatus: queued for {device_id}"
+            )));
+        }
 
         // cas-4a27 (GH #334): reply inference intentionally requires a
         // recipient-surfacing receipt, so it cannot turn an unrelated later
@@ -3483,5 +3635,76 @@ mod cas_89e1_post_merge_message_type_tests {
             .poll_all(10)
             .expect("queued messages");
         assert!(rows.is_empty(), "rejected message must not be queued: {rows:?}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn supervisor_operator_reply_preserves_paired_device_thread_route() {
+        let _env = TestEnvGuard::with_optional_vars(&[
+            ("CAS_AGENT_ROLE", None),
+            ("CAS_AGENT_NAME", None),
+            ("CAS_FACTORY_SESSION", None),
+            ("CAS_SUPERVISOR_NAME", None),
+        ]);
+        let temp = tempfile::tempdir().expect("temporary Cassy root");
+        let cas_root = temp.path().join(".cas");
+        std::fs::create_dir_all(&cas_root).expect("Cassy root");
+        let agents = crate::store::open_agent_store(&cas_root).expect("agent store");
+        let mut supervisor = Agent::new("supervisor-id".to_string(), "supervisor".to_string());
+        supervisor.role = AgentRole::Supervisor;
+        supervisor.factory_session = Some("factory-operator".to_string());
+        agents.register(&supervisor).expect("register supervisor");
+
+        let queue = crate::store::open_prompt_queue_store(&cas_root).expect("prompt queue");
+        let commander = queue
+            .enqueue_urgent_with_outcome(
+                "commander:Daniel@phone-7",
+                "supervisor",
+                "Please confirm the deployment.",
+                Some("factory-operator"),
+                Some("deployment status"),
+                Some(cas_store::NotificationPriority::Normal),
+                false,
+                Some(&cas_store::QueueOrigin::PairedDevice {
+                    device_id: "phone-7".to_string(),
+                }),
+            )
+            .expect("queue Commander message")
+            .id();
+
+        let core = crate::mcp::server::CasCore::with_daemon(cas_root.clone(), None, None);
+        core.set_agent_id_for_testing(supervisor.id);
+        #[cfg(feature = "mcp-proxy")]
+        let service = CasService::new(core, None);
+        #[cfg(not(feature = "mcp-proxy"))]
+        let service = CasService::new(core);
+        let request: AgentRequest = serde_json::from_value(serde_json::json!({
+            "action": "message",
+            "target": "operator",
+            "in_reply_to": commander,
+            "summary": "deployment confirmed",
+            "message": "The deployment is confirmed and healthy.",
+        }))
+        .expect("operator reply request");
+
+        let response = response_text(
+            service
+                .message_send(request)
+                .await
+                .expect("supervisor reply queues successfully"),
+        );
+        assert!(response.contains("queued for phone-7"), "{response}");
+
+        let rows = queue
+            .peek_operator_replies("factory-operator", 10)
+            .expect("read queued operator replies");
+        let reply = rows.first().expect("operator reply row");
+        assert_eq!(reply.source, "supervisor");
+        assert_eq!(reply.factory_session.as_deref(), Some("factory-operator"));
+        assert_eq!(reply.recipient_device_id.as_deref(), Some("phone-7"));
+        let payload: crate::ui::factory::OperatorReplyPayload =
+            serde_json::from_str(&reply.prompt).expect("operator reply payload");
+        assert_eq!(payload.reply_to, commander);
+        assert_eq!(payload.device_id, "phone-7");
+        assert_eq!(payload.message, "The deployment is confirmed and healthy.");
     }
 }

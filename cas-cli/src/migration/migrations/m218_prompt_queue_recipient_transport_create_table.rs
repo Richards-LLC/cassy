@@ -20,6 +20,7 @@ pub const MIGRATION: Migration = Migration {
             prompt_id INTEGER NOT NULL,
             recipient TEXT NOT NULL,
             delivered_at TEXT NOT NULL,
+            device_id TEXT,
             PRIMARY KEY (prompt_id, recipient)
         )",
         "CREATE INDEX IF NOT EXISTS idx_prompt_queue_recipient_transport_recipient

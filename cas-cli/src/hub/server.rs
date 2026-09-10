@@ -689,9 +689,24 @@ async fn proxy_socket(
         tokio::select! {
             frame = viewer.recv() => match frame {
                 Ok(frame) => {
+                    if !operator_reply_allowed(&auth, &frame.bytes) {
+                        continue;
+                    }
+                    let receipt = operator_reply_receipt(&frame.bytes);
                     audit_refused_pane_resize(&auth, &session, &frame.bytes);
                     if sink.send(Message::Binary(frame.bytes.into())).await.is_err() {
                         break;
+                    }
+                    if let Some((notification_id, device_id)) = receipt {
+                        let _ = connector
+                            .send(
+                                &session,
+                                ClientMessage::OperatorReplyDelivered {
+                                    notification_id,
+                                    device_id,
+                                },
+                            )
+                            .await;
                     }
                 }
                 Err(ViewerRecvError::Lagged { skipped }) => {
@@ -1054,6 +1069,32 @@ fn audit_refused_pane_resize(
     );
 }
 
+/// Operator replies are durable daemon frames, but their recipient is the
+/// authenticated device that originated the referenced Commander message.
+/// A machine can have several paired browsers attached, so the hub performs
+/// this final recipient check instead of broadcasting the frame to every one.
+pub(super) fn operator_reply_allowed(
+    auth: &Option<(AuthStore, AuthContext)>,
+    bytes: &[u8],
+) -> bool {
+    operator_reply_receipt(bytes).is_none_or(|(_, device_id)| {
+        auth.as_ref()
+            .is_some_and(|(_, context)| context.device_id == device_id)
+    })
+}
+
+fn operator_reply_receipt(bytes: &[u8]) -> Option<(i64, String)> {
+    let DaemonMessage::OperatorReply {
+        notification_id,
+        device_id,
+        ..
+    } = serde_json::from_slice::<DaemonMessage>(bytes).ok()?
+    else {
+        return None;
+    };
+    Some((notification_id, device_id))
+}
+
 fn machine_binary_frame(session: &str, frame: &ProxyFrame) -> anyhow::Result<Option<Vec<u8>>> {
     let (kind, pane_id, payload) = match frame.kind {
         ProxyFrameKind::Output => {
@@ -1143,6 +1184,10 @@ async fn proxy_machine_socket<R: SessionReadModel>(
         tokio::select! {
             outgoing = outbound_rx.recv() => match outgoing {
                 Some(MachineOutbound::Frame { session, frame }) => {
+                    if !operator_reply_allowed(&auth, &frame.bytes) {
+                        continue;
+                    }
+                    let receipt = operator_reply_receipt(&frame.bytes);
                     audit_refused_pane_resize(&auth, &session, &frame.bytes);
                     let result = match machine_binary_frame(&session, &frame) {
                         Ok(Some(bytes)) => sink.send(Message::Binary(bytes.into())).await,
@@ -1154,6 +1199,18 @@ async fn proxy_machine_socket<R: SessionReadModel>(
                         Err(_) => break,
                     };
                     if result.is_err() { break; }
+                    if let Some((notification_id, device_id)) = receipt {
+                        let _ = state
+                            .connector
+                            .send(
+                                &session,
+                                ClientMessage::OperatorReplyDelivered {
+                                    notification_id,
+                                    device_id,
+                                },
+                            )
+                            .await;
+                    }
                 }
                 Some(MachineOutbound::Lagged { session, skipped }) => {
                     let envelope = serde_json::json!({

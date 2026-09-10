@@ -253,6 +253,7 @@ mod tests {
             urgent: false,
             origin: None,
             operator: None,
+            recipient_device_id: None,
         }
     }
 

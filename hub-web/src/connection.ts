@@ -14,7 +14,7 @@ import {
   type ConnectionStage,
   type AttachSnapshot,
 } from "./connection-state";
-import type { HubSession, LeaseState, PaneInfo, SessionCardSummary, SessionState, StoredMachine } from "./types";
+import type { HubSession, LeaseState, OperatorReply, PaneInfo, SessionCardSummary, SessionState, StoredMachine } from "./types";
 
 export type ConnectionState = ConnectionSnapshot;
 export type AuthFailureKind = "expired" | "revoked" | "scope-mismatch" | "needs-pairing";
@@ -36,6 +36,7 @@ export interface HubCallbacks {
   onMachineEvent(event: Record<string, unknown>): void;
   onSessionState(session: string, state: SessionState, scrollback?: Record<string, number[][]>, authoritativeKeyframes?: boolean): void;
   onOutput(session: string, paneId: string, data: Uint8Array): void;
+  onOperatorReply?(session: string, reply: OperatorReply): void;
   onSessionSummary?(session: string, summary: SessionCardSummary): void;
   onPaneKeyframe(session: string, paneId: string, data: Uint8Array): void;
   onPaneSize?(session: string, paneId: string, cols: number, rows: number, authority: string): void;
@@ -953,6 +954,8 @@ export class HubConnectionSupervisor {
       this.callbacks.onSessionState(session, message.StateUpdate.state);
     } else if (message.Output) {
       this.callbacks.onOutput(session, message.Output.pane_id, new Uint8Array(message.Output.data));
+    } else if (message.OperatorReply) {
+      this.callbacks.onOperatorReply?.(session, message.OperatorReply as OperatorReply);
     } else if (message.SessionSummary) {
       this.callbacks.onSessionSummary?.(session, message.SessionSummary.summary);
     } else if (message.PaneAdded || message.PaneRemoved || message.PaneExited) {

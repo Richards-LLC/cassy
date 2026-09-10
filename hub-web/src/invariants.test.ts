@@ -152,8 +152,9 @@ describe("binding Cassy Commander browser invariants", () => {
     // A send with no outcome is indistinguishable from a lost one, and invites a
     // duplicate message to the supervisor.
     expect(source).toContain("function sendControl(machineId: string, session: string, message: unknown): boolean {");
-    expect(source).toContain("const sent = sendControl(machine.id, session, supervisorMessage(supervisor, text));");
-    expect(source).toContain("messageDelivery = { session, target: supervisor };");
+    expect(source).toContain("const clientRef = crypto.randomUUID();");
+    expect(source).toContain("const sent = sendControl(machine.id, session, supervisorMessage(supervisor, text, clientRef));");
+    expect(source).toContain("messageDelivery = { session, target: supervisor, clientRef };");
     expect(source).toContain("toast(`Message sent to ${supervisor}`);");
   });
 

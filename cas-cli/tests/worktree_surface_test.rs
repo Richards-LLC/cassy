@@ -1475,6 +1475,10 @@ async fn update_to_closed_rejects_unmerged_task_without_mutation_then_closes_aft
     );
 
     run_git(&["merge", "--no-ff", "factory/frontend"], &repo_b.root);
+    run_git(
+        &["update-ref", "refs/remotes/origin/main", "main"],
+        &repo_b.root,
+    );
     core.cas_task_update(Parameters(close_update_request(task.id.clone())))
         .await
         .expect("merged update-to-closed must use frontend context");

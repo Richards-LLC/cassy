@@ -1166,7 +1166,9 @@ impl CasCore {
                 "[{timestamp}] Decision: resume from awaiting_merge for merge recovery. \
                  {parked_branch} was flagged with a merge conflict or its conflict \
                  preflight could not be evaluated, so the task is back in_progress for \
-                 the assigned worker to inspect and resolve directly."
+                 the assigned worker to inspect from inside the worker worktree. Rebase \
+                 {parked_branch} onto the current integration target tip, push the \
+                 rebased factory branch, and re-park it with merge_request=true."
             );
             task.notes = if task.notes.is_empty() {
                 audit

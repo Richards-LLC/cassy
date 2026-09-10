@@ -169,9 +169,12 @@ pub fn handle_pre_tool_use(
                     ));
                 }
                 if looks_like_git_write_op(cmd) {
-                    if let Some(deny_msg) =
-                        check_worker_git_commit_scope_for_command(&input.cwd, cmd)
+                    if let Some((target, deny_msg)) =
+                        worker_git_scope_violation_for_command(&input.cwd, cmd)
                     {
+                        if let Some(root) = cas_root {
+                            log_factory_git_scope_rejection(root, input, &target, cmd);
+                        }
                         return Ok(HookOutput::with_pre_tool_permission("deny", &deny_msg));
                     }
                 }
@@ -941,9 +944,9 @@ fn direct_test_invocation_without_receipt(words: &[String]) -> bool {
 
 // ── Worker commit guard helpers (cas-bea2, LAYER 1) ───────────────────────
 //
-// Detects `git commit` / `git merge` Bash commands from factory workers
-// and denies them when HEAD is on a protected branch OR (for isolated
-// workers) the cwd is outside the assigned worktree (CAS_CLONE_PATH).
+// Detects history-changing Git commands from factory workers and denies them
+// when HEAD is on a protected branch OR the effective cwd/git-dir/work-tree
+// is outside the assigned worktree (CAS_CLONE_PATH).
 //
 // Fires for ALL factory workers (CAS_AGENT_ROLE=worker && CAS_FACTORY_MODE),
 // whether or not they have an isolated worktree (CAS_CLONE_PATH). This
@@ -977,42 +980,33 @@ pub(crate) fn is_worker_commit_allowed_branch(branch: &str) -> bool {
     !matches!(b, "main" | "master" | "staging" | "")
 }
 
-/// Return true if `cmd` looks like a `git commit`, `git merge`, or `git push`
-/// invocation.
+/// Return true if `cmd` looks like a history-changing Git invocation.
 ///
 /// Matches common forms:
 /// - `git commit -m "msg"`
 /// - `git -C /some/path commit`
 /// - `git merge main`
+/// - `git rebase main`
+/// - `git reset --hard HEAD~1`
+/// - `git checkout feature/my-worker`
+/// - `git add -A`
 /// - `git push origin HEAD:refs/heads/factory/my-worker`
 /// - Commands with env-var prefixes like `GIT_AUTHOR_NAME=... git commit`
 ///
 /// Intentionally conservative: false-negatives (missed commands) are safe
 /// because LAYER 2 (pre-commit hook) is the hard floor.
 pub(crate) fn looks_like_git_write_op(cmd: &str) -> bool {
-    // Find the first occurrence of "git" as a word boundary
-    let mut rest = cmd;
-    loop {
-        let pos = match rest.find("git") {
-            Some(p) => p,
-            None => return false,
-        };
-        // Ensure "git" is not a substring of another word (e.g. "config")
-        let before_ok = pos == 0 || !rest.as_bytes()[pos - 1].is_ascii_alphanumeric();
-        let after_idx = pos + 3;
-        let after_ok =
-            after_idx >= rest.len() || !rest.as_bytes()[after_idx].is_ascii_alphanumeric();
-        if before_ok && after_ok {
-            let after_git = &rest[after_idx..];
-            // After "git" there may be flags like -C /path before the subcommand
-            // We look for a guarded write as a word anywhere after "git".
-            return after_git
-                .split_whitespace()
-                .any(|tok| matches!(tok, "commit" | "merge" | "push"));
-        }
-        // Not a word boundary — advance past this occurrence
-        rest = &rest[pos + 1..];
-    }
+    super::attribution::split_shell_statements(cmd)
+        .into_iter()
+        .any(|words| {
+            let Some(git_index) = words
+                .iter()
+                .position(|word| word == "git" || word.ends_with("/git"))
+            else {
+                return false;
+            };
+            git_history_write_operation(&words[git_index + 1..]).is_some()
+        })
 }
 
 /// Return true when a shell command invokes `git push origin`.
@@ -1107,7 +1101,10 @@ impl GitCommandTarget {
     }
 
     fn path_for_scope(&self) -> &std::path::Path {
-        self.work_tree.as_deref().unwrap_or(&self.cwd)
+        self.work_tree
+            .as_deref()
+            .or(self.git_dir.as_deref())
+            .unwrap_or(&self.cwd)
     }
 }
 
@@ -1120,14 +1117,59 @@ fn resolve_git_option_path(base: &std::path::Path, value: &str) -> std::path::Pa
     }
 }
 
-/// Extract every git write invocation's repository target from a shell command.
-/// Git's `-C`, `--git-dir`, and `--work-tree` options are parsed before the
-/// write subcommand so a linked worktree is checked instead of the hook's cwd.
+fn git_history_write_operation(git_words: &[String]) -> Option<usize> {
+    let operation_index = git_words.iter().position(|word| {
+        matches!(
+            word.as_str(),
+            "commit" | "merge" | "push" | "rebase" | "reset" | "checkout" | "add"
+        )
+    })?;
+    let operation = git_words.get(operation_index)?.as_str();
+    let args = &git_words[operation_index + 1..];
+    let is_write = match operation {
+        "commit" | "merge" | "push" | "rebase" => true,
+        "reset" => args.iter().any(|arg| arg == "--hard" || arg == "-H"),
+        "checkout" => args.iter().any(|arg| !arg.starts_with('-')),
+        "add" => args.iter().any(|arg| arg == "-A" || arg == "--all"),
+        _ => false,
+    };
+    is_write.then_some(operation_index)
+}
+
+/// Resolve the small subset of shell variable forms used in worker guidance
+/// before applying the worktree containment check. Unknown variables remain
+/// literal, which fails closed if they would resolve outside the worktree.
+fn resolve_worker_cd_path(base: &std::path::Path, value: &str) -> std::path::PathBuf {
+    let value = match value {
+        "$CAS_CLONE_PATH" | "${CAS_CLONE_PATH}" => {
+            std::env::var_os("CAS_CLONE_PATH").map_or_else(|| value.to_string(), |v| v.to_string_lossy().into_owned())
+        }
+        _ => value.to_string(),
+    };
+    resolve_git_option_path(base, &value)
+}
+
+/// Extract every history-changing git invocation's repository target from a
+/// shell command. Git's `-C`, `--git-dir`, and `--work-tree` options are
+/// parsed before the operation so a linked worktree is checked instead of the
+/// hook's cwd. Explicit `cd` statements are carried forward across `&&`, `;`,
+/// and `|` statements because the hook receives the whole shell command.
 fn git_write_targets(cwd: &str, command: &str) -> Vec<GitCommandTarget> {
     let default_target = GitCommandTarget::from_cwd(cwd);
     let mut targets = Vec::new();
+    let mut shell_cwd = default_target.cwd.clone();
 
     for words in super::attribution::split_shell_statements(command) {
+        if words.first().is_some_and(|word| word == "cd") {
+            if let Some(path) = words.get(1).filter(|path| path.as_str() != "--") {
+                shell_cwd = resolve_worker_cd_path(&shell_cwd, path);
+            } else if words.get(1).is_some_and(|path| path == "--") {
+                if let Some(path) = words.get(2) {
+                    shell_cwd = resolve_worker_cd_path(&shell_cwd, path);
+                }
+            }
+            continue;
+        }
         let Some(git_index) = words
             .iter()
             .position(|word| word == "git" || word.ends_with("/git"))
@@ -1135,14 +1177,12 @@ fn git_write_targets(cwd: &str, command: &str) -> Vec<GitCommandTarget> {
             continue;
         };
         let git_words = &words[git_index + 1..];
-        let Some(write_index) = git_words
-            .iter()
-            .position(|word| matches!(word.as_str(), "commit" | "merge" | "push"))
-        else {
+        let Some(write_index) = git_history_write_operation(git_words) else {
             continue;
         };
 
         let mut target = default_target.clone();
+        target.cwd = shell_cwd.clone();
         let mut index = 0;
         while index < write_index {
             let word = &git_words[index];
@@ -1219,12 +1259,21 @@ fn get_branch_at_git_target(target: &GitCommandTarget) -> Option<String> {
 }
 
 fn check_worker_git_commit_scope_for_command(cwd: &str, command: &str) -> Option<String> {
-    git_write_targets(cwd, command)
-        .into_iter()
-        .find_map(|target| check_worker_git_commit_scope_at_target(&target))
+    worker_git_scope_violation_for_command(cwd, command).map(|(_, message)| message)
 }
 
-/// Check whether a factory worker's `git commit` / `git merge` / `git push`
+fn worker_git_scope_violation_for_command(
+    cwd: &str,
+    command: &str,
+) -> Option<(GitCommandTarget, String)> {
+    git_write_targets(cwd, command)
+        .into_iter()
+        .find_map(|target| {
+            check_worker_git_commit_scope_at_target(&target).map(|message| (target, message))
+        })
+}
+
+/// Check whether a factory worker's history-changing Git operation
 /// should be denied.
 ///
 /// Returns `Some(denial_message)` when:
@@ -1253,14 +1302,21 @@ fn check_worker_git_commit_scope_at_target(target: &GitCommandTarget) -> Option<
         .map(|s| !s.is_empty())
         .unwrap_or(false);
 
-    // DENY: isolated worker's cwd is outside the assigned worktree.
-    // Only applicable when CAS_CLONE_PATH is set.
+    // DENY: a history-changing command's effective cwd/git-dir/work-tree is
+    // outside the assigned worktree. This applies to every factory worker
+    // with a registered CAS_CLONE_PATH, including commands that first `cd`
+    // into the primary checkout. Do not rely on string prefixes: sibling
+    // paths such as `/worktree-sibling` are outside `/worktree`.
     if is_isolated {
         let clone_path = clone_path.as_deref().unwrap();
         let cwd_path = std::path::Path::new(&cwd);
         let worktree_path = std::path::Path::new(clone_path);
 
-        if !cwd_path.starts_with(worktree_path) {
+        let inside_worktree = canonicalize_for_containment(cwd_path)
+            .zip(canonicalize_for_containment(worktree_path))
+            .is_some_and(|(cwd, worktree)| cwd.starts_with(worktree));
+
+        if !inside_worktree {
             let worker_name =
                 std::env::var("CAS_AGENT_NAME").unwrap_or_else(|_| "<worker-name>".to_string());
             return Some(format!(
@@ -2157,6 +2213,69 @@ fn log_factory_workspace_rejection(
             ("evaluated_path", violation.evaluated_path.as_str()),
             ("resolved_path", resolved_path.as_str()),
             ("matched_rule", violation.matched_rule),
+            ("payload_bytes", payload_bytes.as_str()),
+        ],
+    );
+}
+
+/// Persist a refusal for a history-changing Git command that targeted a
+/// path outside the worker's assigned worktree. Keep the command itself out
+/// of the event: Bash payloads may contain credentials or other secrets, but
+/// the operation and evaluated path are enough to audit the refusal.
+fn log_factory_git_scope_rejection(
+    cas_root: &Path,
+    input: &HookInput,
+    target: &GitCommandTarget,
+    command: &str,
+) {
+    let tool = input.tool_name.as_deref().unwrap_or("unknown");
+    let payload_bytes = input
+        .tool_input
+        .as_ref()
+        .and_then(|value| serde_json::to_vec(value).ok())
+        .map(|payload| payload.len().to_string())
+        .unwrap_or_else(|| "0".to_string());
+    let operation_tokens = command
+        .split_whitespace()
+        .map(|word| word.trim_matches(|ch: char| "'\"`;&|".contains(ch)))
+        .collect::<Vec<_>>();
+    let operation_index = operation_tokens.iter().position(|word| {
+        matches!(
+            *word,
+            "commit" | "merge" | "push" | "rebase" | "reset" | "checkout" | "add"
+        )
+    });
+    let operation = operation_index
+        .map(|index| {
+            let operation = operation_tokens[index];
+            if matches!(operation, "reset" | "add") {
+                operation_tokens
+                    .get(index + 1)
+                    .filter(|flag| {
+                        (operation == "reset" && **flag == "--hard")
+                            || (operation == "add" && **flag == "-A")
+                    })
+                    .map_or(operation, |_| {
+                        if operation == "reset" {
+                            "reset --hard"
+                        } else {
+                            "add -A"
+                        }
+                    })
+            } else {
+                operation
+            }
+        })
+        .unwrap_or("unknown");
+    let evaluated_path = target.path_for_scope().display().to_string();
+    let _ = crate::hooks::handlers::session_hygiene::append_factory_session_event(
+        cas_root,
+        "workspace_contract_git_rejection",
+        &[
+            ("tool", tool),
+            ("evaluated_path", evaluated_path.as_str()),
+            ("matched_rule", "history-changing git outside worker worktree"),
+            ("git_operation", operation),
             ("payload_bytes", payload_bytes.as_str()),
         ],
     );
@@ -3140,6 +3259,26 @@ mod worker_commit_guard_tests {
         assert!(!looks_like_git_write_op("digitalocean config commit"));
     }
 
+    /// cas-93e8: history-changing Git commands must all enter the worker
+    /// worktree guard, including commands that were previously invisible to
+    /// the commit/merge/push matcher.
+    #[test]
+    fn history_changing_git_commands_are_guarded_cas_93e8() {
+        for command in [
+            "git commit -m work",
+            "git merge main",
+            "git rebase main",
+            "git reset --hard HEAD~1",
+            "git checkout main",
+            "git add -A",
+        ] {
+            assert!(
+                looks_like_git_write_op(command),
+                "history-changing command must be recognized: {command}"
+            );
+        }
+    }
+
     // ── is_worker_commit_allowed_branch tests (cas-7e7b denylist) ──────────
 
     #[test]
@@ -3605,6 +3744,87 @@ mod worker_commit_guard_tests {
         assert!(
             result.is_none(),
             "expected allow on factory/worker1 branch, got: {result:?}"
+        );
+    }
+
+    /// cas-93e8: a `cd` in the same shell command changes the repository
+    /// targeted by every following Git history mutation. The hook cwd alone
+    /// is not sufficient because a worker can leave its worktree with
+    /// `cd /primary/checkout && git commit`.
+    #[test]
+    fn explicit_cd_outside_worker_worktree_is_denied_for_history_writes_cas_93e8() {
+        let parent = tempfile::tempdir().unwrap();
+        let worktree = parent.path().join("worker");
+        let outside = parent.path().join("primary");
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let worktree_path = worktree.to_string_lossy().to_string();
+        let outside_path = outside.to_string_lossy().to_string();
+        let _env = TestEnvGuard::with_optional_vars(&[
+            ("CAS_CLONE_PATH", Some(worktree_path.as_str())),
+            ("CAS_AGENT_NAME", Some("worker")),
+        ]);
+
+        for operation in [
+            "git commit -m work",
+            "git merge main",
+            "git rebase main",
+            "git reset --hard HEAD~1",
+            "git checkout main",
+            "git add -A",
+        ] {
+            let command = format!("cd '{outside_path}' && {operation}");
+            let message = check_worker_git_commit_scope_for_command(&worktree_path, &command)
+                .unwrap_or_else(|| panic!("outside-worktree operation must be denied: {command}"));
+            assert!(
+                message.contains("outside your assigned worktree"),
+                "refusal must identify the workspace boundary: {message}"
+            );
+        }
+    }
+
+    /// cas-93e8: an outside-worktree history mutation is denied through the
+    /// real PreToolUse handler and leaves an auditable workspace-contract
+    /// rejection event.
+    #[test]
+    fn outside_worktree_history_write_is_logged_by_pre_tool_cas_93e8() {
+        let cas_root = tempfile::tempdir().unwrap();
+        let parent = tempfile::tempdir().unwrap();
+        let worktree = parent.path().join("worker");
+        let outside = parent.path().join("primary");
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let worktree_path = worktree.to_string_lossy().to_string();
+        let outside_path = outside.to_string_lossy().to_string();
+        let _env = TestEnvGuard::with_optional_vars(&[
+            ("CAS_AGENT_ROLE", Some("worker")),
+            ("CAS_FACTORY_MODE", Some("1")),
+            ("CAS_CLONE_PATH", Some(worktree_path.as_str())),
+            ("CAS_AGENT_NAME", Some("worker")),
+            ("CAS_FACTORY_SESSION", Some("cas-93e8-pre-tool")),
+        ]);
+
+        let input = hook_git_write_input(
+            &worktree_path,
+            &format!("cd '{outside_path}' && git reset --hard HEAD~1"),
+        );
+        let output = handle_pre_tool_use(&input, Some(cas_root.path())).expect("handler ok");
+        let value = serde_json::to_value(output).unwrap();
+        assert_eq!(
+            value["hookSpecificOutput"]["permissionDecision"], "deny",
+            "outside-worktree history mutation must be denied: {value}"
+        );
+
+        let log_path = cas_root.path().join(format!(
+            "logs/factory-session-{}.log",
+            chrono::Utc::now().format("%Y-%m-%d")
+        ));
+        let log = std::fs::read_to_string(log_path).expect("git workspace refusal log");
+        assert!(
+            log.contains("workspace_contract_git_rejection")
+                && log.contains(&outside_path)
+                && log.contains("reset --hard"),
+            "git workspace refusal must be durable and identify the operation/path: {log}"
         );
     }
 

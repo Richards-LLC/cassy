@@ -927,11 +927,12 @@ fn checkout_ref_for_spawn_base(
 /// merely checking out the parent commit) keeps the new worker, later syncs,
 /// and the next spawning supervisor on the same integration history.
 ///
-/// The parent is resolved from its fresher local/`origin/` ref before the
-/// relationship is tested. This keeps the refresh decision aligned with
-/// [`stale_spawn_base_notice`], which also treats a fetched remote parent as
-/// current evidence. A genuinely split epic/parent history is refused: a
-/// worker must not be cut from a base known to omit target history.
+/// The parent is resolved from `origin/<parent>` whenever that shared ref is
+/// available before the relationship is tested. A local parent that is ahead
+/// of origin is refused rather than treated as authoritative: a worker must
+/// not be cut from an unpublished operator commit. A genuinely split
+/// epic/parent history is also refused because the worker must not inherit a
+/// base known to omit target history.
 fn fast_forward_epic_base_from_parent(
     repo_root: &std::path::Path,
     epic_branch: &str,
@@ -1094,10 +1095,11 @@ fn epic_base_refresh_refusal(error: &str) -> String {
     )
 }
 
-/// Choose the current parent ref without silently picking one side of a
-/// local/remote split. A fetched remote that strictly contains the local ref
-/// is the freshest safe parent; an ahead local ref remains authoritative until
-/// pushed; a true split must be reconciled before a worker can inherit it.
+/// Choose the shared parent ref without silently picking an unpublished local
+/// side of a local/remote split. A fetched remote that strictly contains the
+/// local ref is the freshest safe parent; an equal remote is authoritative;
+/// an ahead local ref and a true split must be reconciled before a worker can
+/// inherit either one.
 fn freshest_nondivergent_ref(repo_root: &std::path::Path, branch: &str) -> Result<String, String> {
     if branch.starts_with("origin/") {
         return Ok(branch.to_string());
@@ -1133,7 +1135,11 @@ fn freshest_nondivergent_ref(repo_root: &std::path::Path, branch: &str) -> Resul
         .status()
         .map_err(|error| format!("could not compare parent '{remote}' to '{branch}': {error}"))?;
     if remote_is_ancestor.success() {
-        return Ok(branch.to_string());
+        return Err(format!(
+            "local parent '{branch}' ({}) is ahead of shared '{remote}' ({}); refusing to advance an epic base from an unpublished local parent",
+            &local_sha[..local_sha.len().min(8)],
+            &remote_sha[..remote_sha.len().min(8)],
+        ));
     }
 
     Err(format!(
@@ -4397,6 +4403,61 @@ mod spawn_base_tests {
             "current support playbook",
             "a no-code worker must receive the current playbook from the refreshed parent"
         );
+    }
+
+    /// cas-93e8: spawn-time epic refresh must not promote a worker or operator
+    /// commit that exists only on the local parent branch. Origin is the
+    /// shared parent authority whenever that remote-tracking ref exists.
+    #[test]
+    fn epic_base_refresh_refuses_local_parent_ahead_of_origin_cas_93e8() {
+        let tmp = TempDir::new().unwrap();
+        let origin = tmp.path().join("origin");
+        std::fs::create_dir(&origin).unwrap();
+        init_repo(&origin);
+        Command::new("git")
+            .args(["branch", "epic/behind", "main"])
+            .current_dir(&origin)
+            .output()
+            .unwrap();
+
+        let repo = tmp.path().join("repo");
+        Command::new("git")
+            .args([
+                "clone",
+                "-q",
+                origin.to_str().unwrap(),
+                repo.to_str().unwrap(),
+            ])
+            .output()
+            .expect("git clone");
+        Command::new("git")
+            .args(["config", "user.email", "test@cas.test"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", "Cassy Test"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["branch", "epic/behind", "origin/epic/behind"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+
+        let remote_parent_tip = head_sha(&origin, "main");
+        commit(&repo, "operator-only.txt", "unpublished local parent work");
+        let local_parent_tip = head_sha(&repo, "main");
+        let epic_tip = head_sha(&repo, "epic/behind");
+        assert_ne!(local_parent_tip, remote_parent_tip);
+
+        let error = fast_forward_epic_base_from_parent(&repo, "epic/behind", "main")
+            .expect_err("an unpublished local parent must refuse epic refresh");
+        assert!(error.contains("ahead of shared 'origin/main'"), "{error}");
+        assert!(error.contains("unpublished local parent"), "{error}");
+        assert_eq!(head_sha(&repo, "epic/behind"), epic_tip);
+        assert_eq!(head_sha(&origin, "epic/behind"), epic_tip);
     }
 
     #[test]

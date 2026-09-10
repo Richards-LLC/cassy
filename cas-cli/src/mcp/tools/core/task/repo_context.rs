@@ -1922,6 +1922,11 @@ mod tests {
                     "factory/worker",
                 ],
             );
+            // The declared target repository has an origin remote, so its
+            // already-landed target tip must be represented by origin/master
+            // as well as the local master branch. Without this remote-tracking
+            // ref, the close gate must (correctly) reject local-only evidence.
+            git(&repo_b, &["update-ref", "refs/remotes/origin/master", "master"]);
 
             let target = declare_work_target(
                 &repo_a.join(".cas"),

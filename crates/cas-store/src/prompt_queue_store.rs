@@ -482,6 +482,7 @@ ALTER TABLE prompt_queue ADD COLUMN operator_scopes TEXT;
 "#;
 const PROMPT_QUEUE_OPERATOR_VERIFIED_MIGRATION: &str = r#"
 ALTER TABLE prompt_queue ADD COLUMN operator_verified INTEGER;
+"#;
 /// Authenticated Commander device selected by an operator reply. This is
 /// recipient routing, not sender provenance, so it stays in its own column.
 const PROMPT_QUEUE_RECIPIENT_DEVICE_MIGRATION: &str = r#"

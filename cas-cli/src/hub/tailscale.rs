@@ -277,6 +277,9 @@ impl TailscaleServeManager {
 
     fn run(&self, args: &[String]) -> Result<Vec<u8>> {
         let mut command = Command::new(&self.executable);
+        if let Some(socket) = env::var_os("TAILSCALE_SOCKET").filter(|socket| !socket.is_empty()) {
+            command.arg(format!("--socket={}", socket.to_string_lossy()));
+        }
         command.args(args);
         let output = bounded_process::run_command(
             &mut command,
@@ -299,26 +302,22 @@ impl TailscaleServeManager {
 }
 
 fn tailscale_executable() -> OsString {
+    // `TAILSCALE` is an operator-controlled escape hatch for service
+    // environments whose PATH does not contain the CLI. Do not discover the
+    // macOS app by running `version`: that binary can start the menubar
+    // application's AppKit event loop when the GUI is closed.
+    if let Some(path) = env::var_os("TAILSCALE").filter(|path| !path.is_empty()) {
+        return path;
+    }
     if cfg!(windows) {
         return OsString::from("tailscale.exe");
     }
-    #[cfg(target_os = "macos")]
-    let bundle_paths = [
-        Path::new("/Applications/Tailscale.app/Contents/MacOS/Tailscale"),
-        Path::new("/Applications/Tailscale.app/Contents/MacOS/tailscale"),
-    ];
-    #[cfg(not(target_os = "macos"))]
-    let bundle_paths: [&Path; 0] = [];
-    select_tailscale_executable(executable_on_path("tailscale"), &bundle_paths)
+    select_tailscale_executable(executable_on_path("tailscale"))
 }
 
-fn select_tailscale_executable(path_cli: Option<PathBuf>, bundle_paths: &[&Path]) -> OsString {
+fn select_tailscale_executable(path_cli: Option<PathBuf>) -> OsString {
     if let Some(path) = path_cli {
         return path.into_os_string();
-    }
-    #[cfg(target_os = "macos")]
-    if let Some(path) = bundle_paths.iter().copied().find(|path| app_bundle_cli_responds(path)) {
-        return path.as_os_str().to_owned();
     }
     OsString::from("tailscale")
 }
@@ -328,14 +327,6 @@ fn executable_on_path(name: &str) -> Option<PathBuf> {
     env::split_paths(&path)
         .map(|directory| directory.join(name))
         .find(|candidate| candidate.is_file())
-}
-
-#[cfg(target_os = "macos")]
-fn app_bundle_cli_responds(path: &Path) -> bool {
-    Command::new(path)
-        .arg("version")
-        .output()
-        .is_ok_and(|output| output.status.success())
 }
 
 fn valid_dns_name(name: &str) -> bool {
@@ -445,30 +436,15 @@ mod tests {
     }
 
     #[test]
-    fn path_cli_precedes_bundle_cli() {
+    fn path_cli_is_used_when_available() {
         let path_cli = PathBuf::from("/operator/tailscale");
-        let selected = select_tailscale_executable(Some(path_cli.clone()), &[]);
+        let selected = select_tailscale_executable(Some(path_cli.clone()));
         assert_eq!(selected, path_cli.into_os_string());
     }
 
     #[test]
     fn no_cli_keeps_existing_unavailable_command() {
-        assert_eq!(select_tailscale_executable(None, &[]), OsString::from("tailscale"));
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn app_bundle_cli_is_invoked_at_its_absolute_path() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let temp = private_tempdir();
-        let app_cli = temp.path().join("Tailscale.app/Contents/MacOS/Tailscale");
-        fs::create_dir_all(app_cli.parent().unwrap()).unwrap();
-        fs::write(&app_cli, "#!/bin/sh\n[ \"$1\" = version ]\n").unwrap();
-        fs::set_permissions(&app_cli, fs::Permissions::from_mode(0o700)).unwrap();
-
-        let selected = select_tailscale_executable(None, &[&app_cli]);
-        assert_eq!(selected, app_cli.into_os_string());
+        assert_eq!(select_tailscale_executable(None), OsString::from("tailscale"));
     }
 
     #[test]

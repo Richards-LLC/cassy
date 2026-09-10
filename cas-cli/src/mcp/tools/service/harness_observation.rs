@@ -175,7 +175,7 @@ fn scan_claude_turns(
     latest: bool,
 ) -> HarnessObservations {
     let mut observations = HarnessObservations::default();
-    for_each_jsonl(path, |value| {
+    for_each_turn_jsonl(path, latest, |value| {
         let Some(at) = json_timestamp(value) else {
             return;
         };
@@ -212,7 +212,7 @@ fn scan_claude_turns(
                 latest,
             );
         }
-        if wake_at.is_some_and(|wake_at| at >= wake_at) && claude_is_turn_end(value) {
+        if claude_is_turn_end(value) {
             record(
                 &mut observations.completion,
                 ArtifactObservation {
@@ -305,7 +305,7 @@ fn scan_codex_turns(
     latest: bool,
 ) -> HarnessObservations {
     let mut observations = HarnessObservations::default();
-    for_each_jsonl(path, |value| {
+    for_each_turn_jsonl(path, latest, |value| {
         let Some(at) = json_timestamp(value) else {
             return;
         };
@@ -342,9 +342,35 @@ fn scan_codex_turns(
                 latest,
             );
         }
+        if let Some(kind) = codex_turn_end_kind(value) {
+            record(
+                &mut observations.completion,
+                ArtifactObservation {
+                    at,
+                    evidence: format!("Codex rollout {} contains {kind}", path.display()),
+                },
+                latest,
+            );
+        }
     });
     discard_reaction_before_wake(&mut observations);
+    discard_completion_before_wake(&mut observations);
     observations
+}
+
+pub(crate) fn codex_turn_end_kind(value: &Value) -> Option<&str> {
+    if value.get("type").and_then(Value::as_str) != Some("event_msg") {
+        return None;
+    }
+    value
+        .pointer("/payload/type")
+        .and_then(Value::as_str)
+        .filter(|kind| {
+            matches!(
+                *kind,
+                "turn_completed" | "task_complete" | "turn_aborted" | "error"
+            )
+        })
 }
 
 fn scan_grok_completion(path: &Path, delivered_at: DateTime<Utc>) -> HarnessObservations {
@@ -377,7 +403,7 @@ fn scan_grok_completion(path: &Path, delivered_at: DateTime<Utc>) -> HarnessObse
 
 fn scan_grok(path: &Path, after: Option<DateTime<Utc>>, latest: bool) -> HarnessObservations {
     let mut observations = HarnessObservations::default();
-    for_each_jsonl(path, |value| {
+    for_each_turn_jsonl(path, latest, |value| {
         let Some(at) = json_timestamp(value) else {
             return;
         };
@@ -471,6 +497,14 @@ fn record(slot: &mut Option<ArtifactObservation>, candidate: ArtifactObservation
     };
     if replace {
         *slot = Some(candidate);
+    }
+}
+
+fn for_each_turn_jsonl(path: &Path, latest: bool, visit: impl FnMut(&Value)) {
+    if latest {
+        super::worker_liveness::tail_records(path, visit);
+    } else {
+        for_each_jsonl(path, visit);
     }
 }
 

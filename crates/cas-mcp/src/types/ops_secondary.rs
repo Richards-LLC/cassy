@@ -567,7 +567,7 @@ pub struct FactoryRequest {
 
     /// Use the bounded ancestry-only epic_status view without expensive content proofs.
     #[schemars(
-        description = "epic_status only: return a fast summary view that omits expensive delivery-content proofs"
+        description = "worker_status: one liveness line per worker without Git/history reads; epic_status: fast summary omitting expensive delivery-content proofs"
     )]
     #[serde(default)]
     pub summary: Option<bool>,
@@ -911,7 +911,7 @@ pub struct CoordinationRequest {
     /// `summary` is already the message preview field on this unified request,
     /// so this field is named explicitly to avoid changing message callers.
     #[schemars(
-        description = "epic_status only: return a fast summary view that omits expensive delivery-content proofs"
+        description = "worker_status: one liveness line per worker without Git/history reads; epic_status: fast summary omitting expensive delivery-content proofs"
     )]
     #[serde(default)]
     pub summary_mode: Option<bool>,

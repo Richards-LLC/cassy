@@ -531,8 +531,15 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       updateConversationViews();
     },
     onMessageRejected: (session, clientRef, detail) => {
-      conversationHistory(sessionKey(machine.id, session)).reject(clientRef, detail);
-      if (messageDelivery?.session === sessionKey(machine.id, session) && messageDelivery.clientRef === clientRef) { messageDelivery = undefined; document.querySelector<HTMLElement>("#message-delivery")?.setAttribute("hidden", ""); }
+      const key = sessionKey(machine.id, session);
+      conversationHistory(key).reject(clientRef, detail);
+      if (messageDelivery?.session === key && messageDelivery.clientRef === clientRef) {
+        messageDelivery = undefined;
+        document.querySelector<HTMLElement>("#message-delivery")?.setAttribute("hidden", "");
+        if (selectedMachineId === machine.id && selectedSession === session) {
+          showComposerStatus(`Message rejected by the hub: ${detail}`, "error");
+        }
+      }
       updateConversationViews();
     },
     onOperatorReply: (session, reply) => {

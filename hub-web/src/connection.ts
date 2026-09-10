@@ -981,8 +981,10 @@ export class HubConnectionSupervisor {
     } else if (message.PaneAdded || message.PaneRemoved || message.PaneExited) {
       this.send(session, "GetState");
     } else if (message.error) {
-      const detail = typeof message.error === "string" ? message.error : String(message.error.message ?? message.error.code ?? "Message refused");
-      const clientRef = message.client_ref ?? message.error.client_ref;
+      const detail = typeof message.error === "string"
+        ? message.error
+        : String(message.error.message ?? message.error.code ?? "Message refused");
+      const clientRef = message.client_ref ?? (typeof message.error === "object" ? message.error.client_ref : undefined);
       if (typeof clientRef === "string") this.callbacks.onMessageRejected?.(session, clientRef, detail);
       else this.callbacks.onSocketError(session, detail);
     } else if (message.Error) {

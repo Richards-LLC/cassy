@@ -151,9 +151,9 @@ pub(crate) fn fallback_context(root: &Path, input: &HookInput) -> Option<String>
     receipt.state.silent_prompts = receipt.state.silent_prompts.saturating_add(1);
     receipt.save()?;
     let mut parts = Vec::new();
-    if let Some(mail) =
-        super::handlers::handlers_middle::factory_inbox::surface_factory_inbox(Some(root), input)
-    {
+    use super::handlers::handlers_middle::factory_inbox::surface_factory_inbox_after_tool_result;
+    let mail = surface_factory_inbox_after_tool_result(Some(root), input);
+    if let Some(mail) = mail {
         parts.push(mail);
     }
     if let Some(packet) =

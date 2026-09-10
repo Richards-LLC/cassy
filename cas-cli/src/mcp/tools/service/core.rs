@@ -594,6 +594,7 @@ impl CasService {
 
     pub(super) async fn task_notes(&self, req: TaskRequest) -> Result<CallToolResult, McpError> {
         use crate::mcp::tools::{IdRequest, TaskNotesRequest};
+        let supervisor_override = req.effective_supervisor_override();
         let id = req
             .id
             .ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "id required for notes — pass task ID as `id` (not `task_id`, `taskId`, or `_id`). Example: mcp__cas__task action=notes id=cas-abc1"))?;
@@ -604,6 +605,8 @@ impl CasService {
                     id,
                     note,
                     note_type: req.note_type.unwrap_or_else(|| "progress".to_string()),
+                    supervisor_override,
+                    reason: req.reason,
                 };
                 self.inner.cas_task_notes(Parameters(inner_req)).await
             }

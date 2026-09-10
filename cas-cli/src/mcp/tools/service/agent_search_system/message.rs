@@ -57,17 +57,14 @@ pub(crate) fn queued_message_provenance_at(
     let delivery = if message.processed_at.is_some() {
         "replay"
     } else {
-        "first-delivery"
+        "first"
     };
     let age_secs = (observed_at - message.created_at).num_seconds().max(0);
-    let stale = age_secs >= MESSAGE_PROVENANCE_STALE_AFTER_SECS;
     format!(
-        "CAS provenance: notification_id={} origin={} queued_at={} age_secs={} stale={} delivery={}",
+        "[cas #{} {} {}s {}]",
         message.id,
         origin,
-        message.created_at.to_rfc3339(),
         age_secs,
-        stale,
         delivery,
     )
 }
@@ -105,7 +102,7 @@ mod viktor_provenance_tests {
             .with_timezone(&chrono::Utc);
         assert_eq!(
             queued_message_provenance_at(&row, observed_at),
-            "CAS provenance: notification_id=73 origin=viktor queued_at=2026-08-18T20:00:00+00:00 age_secs=360 stale=true delivery=first-delivery"
+            "[cas #73 viktor 360s first]"
         );
     }
 
@@ -129,8 +126,9 @@ mod viktor_provenance_tests {
         };
         let observed_at = row.created_at + chrono::Duration::seconds(299);
         let provenance = queued_message_provenance_at(&row, observed_at);
-        assert!(provenance.contains("age_secs=299"));
-        assert!(provenance.contains("stale=false"));
+        assert!(provenance.contains("299s"));
+        assert!(provenance.contains("spawn-boilerplate"));
+        assert!(provenance.contains("first"));
     }
 }
 
@@ -367,18 +365,30 @@ impl CasService {
                  summary=\"task blocked\" message=\"cas-abc1 needs ...\"",
             )
         })?;
-        let summary = req.summary.ok_or_else(|| {
-            Self::error(
-                ErrorCode::INVALID_PARAMS,
-                "summary required — a short one-line preview shown in the UI. \
+        let summary = req
+            .summary
+            .filter(|summary| !summary.trim().is_empty())
+            .ok_or_else(|| {
+                Self::error(
+                    ErrorCode::INVALID_PARAMS,
+                    "summary required — a short one-line preview shown in the UI. \
                  Example: summary=\"task blocked on verification\" (required alongside `message`).",
-            )
-        })?;
+                )
+            })?;
 
         let source = self
             .inner
             .get_agent_id()
             .unwrap_or_else(|_| "unknown".to_string());
+        crate::mcp::tools::traffic_limits::validate_message_body(
+            &source,
+            &message,
+            &self.inner.load_config(),
+            req.blocker.unwrap_or(false),
+            req.merge_request.unwrap_or(false),
+            req.task_id.as_deref().unwrap_or("<task-id>"),
+        )
+        .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
         // When agent ID lookup fails but CAS_AGENT_NAME is set (factory mode),
         // resolve display_name from the env var so messages show the correct sender.
         let env_agent_name = std::env::var("CAS_AGENT_NAME").ok();
@@ -3261,5 +3271,86 @@ mod cas_89e1_post_merge_message_type_tests {
             .find(|row| row.target == "supervisor-b")
             .expect("explicit supervisor target remains accepted");
         assert_eq!(explicit_row.factory_session.as_deref(), Some("factory-b"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn message_requires_a_non_empty_summary() {
+        let temp = tempfile::tempdir().expect("temporary Cassy root");
+        let cas_root = temp.path().join(".cas");
+        std::fs::create_dir_all(&cas_root).expect("Cassy root");
+        let core = crate::mcp::server::CasCore::with_daemon(cas_root, None, None);
+
+        #[cfg(feature = "mcp-proxy")]
+        let service = CasService::new(core, None);
+        #[cfg(not(feature = "mcp-proxy"))]
+        let service = CasService::new(core);
+
+        let request: AgentRequest = serde_json::from_value(serde_json::json!({
+            "action": "message",
+            "target": "supervisor",
+            "summary": "   ",
+            "message": "body",
+        }))
+        .expect("blank-summary message request");
+        let error = service
+            .message_send(request)
+            .await
+            .expect_err("blank summary must be rejected");
+        assert!(error.message.contains("summary required"), "{error:?}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn message_cap_rejects_before_queueing() {
+        let _env = TestEnvGuard::temp_home();
+        let temp = tempfile::tempdir().expect("temporary Cassy root");
+        let cas_root = temp.path().join(".cas");
+        std::fs::create_dir_all(&cas_root).expect("Cassy root");
+        std::fs::write(
+            cas_root.join("config.toml"),
+            "[factory]\nmessage_max_chars = 5\n",
+        )
+        .expect("write test factory config");
+
+        let agents = crate::store::open_agent_store(&cas_root).expect("agent store");
+        agents.init().expect("agent store init");
+        let mut worker = Agent::new("worker-id".to_string(), "worker-a".to_string());
+        worker.role = AgentRole::Worker;
+        agents.register(&worker).expect("register worker");
+        let mut supervisor = Agent::new("supervisor-id".to_string(), "supervisor".to_string());
+        supervisor.role = AgentRole::Supervisor;
+        agents.register(&supervisor).expect("register supervisor");
+
+        let core = crate::mcp::server::CasCore::with_daemon(cas_root.clone(), None, None);
+        core.set_agent_id_for_testing(worker.id);
+        #[cfg(feature = "mcp-proxy")]
+        let service = CasService::new(core, None);
+        #[cfg(not(feature = "mcp-proxy"))]
+        let service = CasService::new(core);
+
+        let request: AgentRequest = serde_json::from_value(serde_json::json!({
+            "action": "message",
+            "target": "supervisor",
+            "task_id": "cas-449b",
+            "summary": "short summary",
+            "message": "123456",
+        }))
+        .expect("over-cap message request");
+        let error = service
+            .message_send(request)
+            .await
+            .expect_err("over-cap message must be rejected");
+        assert!(error.message.contains("limit is 5 characters"), "{error:?}");
+        assert!(
+            error
+                .message
+                .contains("[factory] artifacts_root/cas-449b/<name>.md"),
+            "{error:?}"
+        );
+
+        let rows = crate::store::open_prompt_queue_store(&cas_root)
+            .expect("prompt queue")
+            .poll_all(10)
+            .expect("queued messages");
+        assert!(rows.is_empty(), "rejected message must not be queued: {rows:?}");
     }
 }

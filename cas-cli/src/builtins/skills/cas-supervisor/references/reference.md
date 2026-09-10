@@ -120,6 +120,8 @@ mcp__cas__coordination action=message target=worker-1 \
 
 Missing either field is a rejection. `summary` is the one-line UI preview; `message` is the full body.
 
+Factory traffic is hard-capped: ordinary message bodies default to 1,200 characters, blocker/merge-request bodies to 2,500, and appended task notes to 1,500; put longer evidence in `[factory] artifacts_root/<task-id>/<name>.md` and send its path with a one-paragraph summary.
+
 **Urgent / interrupt delivery — course-correct a worker mid-turn (cas-c931):**
 
 Normal messages land only *between* turns: a worker that is mid-turn going down the wrong path finishes the wrong turn before it ever reads "stop, do X instead." For those cases, send an **urgent** message — it breaks the worker's in-flight turn and injects your correction as its next prompt:

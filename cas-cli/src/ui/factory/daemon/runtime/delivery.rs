@@ -1539,7 +1539,7 @@ mod tests {
         );
 
         let body = "Verdict recorded: ver-515b41d9efeb pass on vdispatch-c8c7a08a";
-        let text = format!("CAS provenance: notification_id=24508 origin=supervisor-authored\n\n{body}");
+        let text = format!("[cas #24508 supervisor-authored 0s first]\n{body}");
         let wake = pointer_wake_payload("supervisor", Some(24508));
 
         assert!(

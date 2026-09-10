@@ -83,6 +83,25 @@ fn factory_session() -> Option<String> {
 /// prompt capture to a queue problem would be a worse bug than the one this
 /// fixes.
 pub fn surface_factory_inbox(cas_root: Option<&Path>, input: &HookInput) -> Option<String> {
+    surface_factory_inbox_with_transport_delivery(cas_root, input, true)
+}
+
+/// Fallback surfacing after a tool result. The transport path may already
+/// have injected the current queue row into the turn, so rows carrying either
+/// transport receipt marker are excluded here. Unmarked unread rows still
+/// recover normally.
+pub(crate) fn surface_factory_inbox_after_tool_result(
+    cas_root: Option<&Path>,
+    input: &HookInput,
+) -> Option<String> {
+    surface_factory_inbox_with_transport_delivery(cas_root, input, false)
+}
+
+fn surface_factory_inbox_with_transport_delivery(
+    cas_root: Option<&Path>,
+    input: &HookInput,
+    allow_transport_delivery: bool,
+) -> Option<String> {
     if !crate::harness_policy::is_factory_agent(input) {
         return None;
     }
@@ -100,7 +119,16 @@ pub fn surface_factory_inbox(cas_root: Option<&Path>, input: &HookInput) -> Opti
         if remaining == 0 {
             break;
         }
-        match queue.surface_unseen_for_recipient(alias, session.as_deref(), remaining) {
+        let found = if allow_transport_delivery {
+            queue.surface_unseen_for_recipient(alias, session.as_deref(), remaining)
+        } else {
+            queue.surface_unseen_for_recipient_without_transport_delivery(
+                alias,
+                session.as_deref(),
+                remaining,
+            )
+        };
+        match found {
             Ok(found) => {
                 for row in found {
                     // A supervisor's two aliases are two distinct recipient
@@ -198,9 +226,8 @@ mod tests {
         assert!(rendered.contains("supervisor"), "{rendered}");
         assert!(rendered.contains("7640"), "{rendered}");
         assert!(
-            rendered.contains("origin=supervisor-authored")
-                && rendered.contains("queued_at=")
-                && rendered.contains("delivery=first-delivery"),
+            rendered.contains("[cas #7640 supervisor-authored")
+                && rendered.contains("s first]"),
             "every hook-surfaced message must retain actionable queue provenance: {rendered}"
         );
         assert!(rendered.contains("start cas-7a01"), "{rendered}");

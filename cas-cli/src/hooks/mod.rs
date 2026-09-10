@@ -28,6 +28,7 @@ pub(crate) mod delivery_provenance;
 pub(crate) mod handlers;
 pub mod scorer;
 pub mod transcript;
+pub(crate) mod session_start_fallback;
 pub(crate) mod turn_context;
 mod types;
 

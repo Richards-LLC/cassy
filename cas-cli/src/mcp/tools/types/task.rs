@@ -458,6 +458,18 @@ pub struct TaskNotesRequest {
     )]
     #[serde(default = "default_note_type")]
     pub note_type: String,
+
+    /// Supervisor-only escape hatch for durable discovery or decision evidence.
+    #[schemars(
+        description = "Preserve an over-cap discovery or decision note without trimming. Only a registered supervisor may use this with a non-empty reason."
+    )]
+    #[serde(default)]
+    pub supervisor_override: Option<bool>,
+
+    /// Required audit reason when supervisor_override is true.
+    #[schemars(description = "Reason logged with a supervisor note override")]
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 
 // ============================================================================

@@ -29,6 +29,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ $# -gt 0 ]] || usage
+requested_args=("$@")
 
 repo_root="$(git rev-parse --show-toplevel 2>/dev/null)" || {
     echo "SCOPED PROOF SURFACE: cannot inspect the committed diff outside a Git repository." >&2
@@ -140,13 +141,110 @@ is_builtin_skill_or_agent_path() {
 test_target_for_path() {
     local test_path="$1"
     case "$test_path" in
-        cas-cli/tests/*.rs)
-            basename "${test_path%.rs}"
-            ;;
         cas-cli/tests/*/*.rs)
             integration_target_for "${test_path#cas-cli/tests/}"
             ;;
+        cas-cli/tests/*.rs)
+            basename "${test_path%.rs}"
+            ;;
     esac
+}
+
+source_module_name_for() {
+    local path="${1#cas-cli/src/}"
+    path="${path%.rs}"
+    if [[ "$path" == */mod ]]; then
+        path="${path%/mod}"
+    fi
+    basename "$path"
+}
+
+source_module_path_for() {
+    local path="${1#cas-cli/src/}"
+    path="${path%.rs}"
+    if [[ "$path" == */mod ]]; then
+        path="${path%/mod}"
+    fi
+    printf '%s\n' "${path//\//::}"
+}
+
+source_public_symbols_for() {
+    local source_file="$1"
+    # Keep the extractor deliberately Rust-shaped and conservative. `pub`,
+    # `pub(crate)`, and `pub(super)` declarations are the public surface an
+    # integration test can exercise; private unit helpers are not consumers.
+    sed -nE \
+        -e 's/^[[:space:]]*pub([[:space:]]*\([^)]*\))?[[:space:]]+(async[[:space:]]+)?fn[[:space:]]+([[:alnum:]_]+).*/\3/p' \
+        -e 's/^[[:space:]]*pub([[:space:]]*\([^)]*\))?[[:space:]]+(struct|enum|const|type)[[:space:]]+([[:alnum:]_]+).*/\3/p' \
+        "$source_file" | sort -u
+}
+
+discover_source_integration_targets() {
+    local source_path="$1" source_file module_path test_path symbol symbol_filter
+    local matched_paths rg_status
+    local -a symbol_patterns=()
+    source_file="$repo_root/$source_path"
+    [[ -f "$source_file" ]] || return 0
+    module_path="$(source_module_path_for "$source_path")"
+
+    while IFS= read -r symbol; do
+        [[ -n "$symbol" ]] || continue
+        symbol_filter="$symbol"
+        [[ "$symbol_filter" == factory_* ]] && symbol_filter="${symbol_filter#factory_}"
+        symbol_patterns+=(
+            -e
+            "^[[:space:]]*(pub([[:space:]]*\\([^)]*\\))?[[:space:]]+)?(async[[:space:]]+)?fn[[:space:]]+[[:alnum:]_]*${symbol_filter}[[:alnum:]_]*[[:space:]]*\\("
+        )
+    done < <(source_public_symbols_for "$source_file")
+
+    # Integration tests normally consume a service through its public parent
+    # API rather than importing the private source module. Explicit `use` /
+    # path references remain useful evidence for modules that are public in a
+    # crate, and source-path literals are accepted only as an anchored path
+    # reference (not as arbitrary target-name text). Search the test tree once
+    # for each evidence class; per-symbol/per-file subprocesses made a large
+    # close diff needlessly expensive.
+    if matched_paths="$(rg -l --glob '*.rs' \
+        -e "^[[:space:]]*(pub[[:space:]]+)?use[[:space:]].*${module_path}([[:space:];:{]|$)" \
+        -e "^[[:space:]]*[^/].*${module_path}" \
+        -e "^[[:space:]]*[^/].*(include_str!|include_bytes!|Path|read_to_string).*${source_path}" \
+        -- cas-cli/tests 2>/dev/null)"; then
+        :
+    else
+        rg_status=$?
+        if [[ "$rg_status" -ne 1 ]]; then
+            printf 'SCOPED PROOF SURFACE: source path discovery failed for %s (rg exit %s).\n' \
+                "$source_path" "$rg_status" >&2
+            exit 2
+        fi
+        matched_paths=''
+    fi
+    while IFS= read -r test_path; do
+        [[ -n "$test_path" ]] || continue
+        add_required_test_target "$(test_target_for_path "$test_path")"
+    done <<<"$matched_paths"
+
+    # Service methods commonly have a `factory_` implementation prefix while
+    # public integration test names use the API suffix (`factory_worker_status`
+    # -> `test_worker_status_*`). Match only test declarations, so comments
+    # and fixture strings cannot claim a target.
+    if [[ ${#symbol_patterns[@]} -gt 0 ]]; then
+        if matched_paths="$(rg -l --glob '*.rs' "${symbol_patterns[@]}" -- cas-cli/tests 2>/dev/null)"; then
+            :
+        else
+            rg_status=$?
+            if [[ "$rg_status" -ne 1 ]]; then
+                printf 'SCOPED PROOF SURFACE: source symbol discovery failed for %s (rg exit %s).\n' \
+                    "$source_path" "$rg_status" >&2
+                exit 2
+            fi
+            matched_paths=''
+        fi
+        while IFS= read -r test_path; do
+            [[ -n "$test_path" ]] || continue
+            add_required_test_target "$(test_target_for_path "$test_path")"
+        done <<<"$matched_paths"
+    fi
 }
 
 builtin_catalog_path_for() {
@@ -210,7 +308,7 @@ required_lib_modules=()
 required_test_targets=()
 while IFS= read -r path; do
     case "$path" in
-        cas-cli/src/*.rs)
+        cas-cli/src/*.rs|cas-cli/src/*/*.rs|cas-cli/src/*/*/*.rs|cas-cli/src/*/*/*/*.rs|cas-cli/src/*/*/*/*/*.rs)
             source_file="$repo_root/$path"
             [[ -f "$source_file" ]] || continue
             found_test_module=false
@@ -220,8 +318,9 @@ while IFS= read -r path; do
                 found_test_module=true
             done < <(sed -nE 's/^[[:space:]]*mod[[:space:]]+([[:alnum:]_]*tests)[[:space:]]*\{.*/\1/p' "$source_file")
             if ! "$found_test_module"; then
-                required_lib_modules+=("$(basename "${path%.rs}")")
+                required_lib_modules+=("$(source_module_name_for "$path")")
             fi
+            discover_source_integration_targets "$path"
             ;;
         cas-cli/tests/*/*.rs)
             nested="${path#cas-cli/tests/}"
@@ -229,6 +328,20 @@ while IFS= read -r path; do
             ;;
         cas-cli/tests/*.rs)
             add_required_test_target "$(basename "${path%.rs}")"
+            ;;
+    esac
+done < <(git diff --name-only "$merge_base" HEAD)
+
+# These guardrails are file-class contracts, not optional path discoveries:
+# an integration-test source must remain readable in nextest archives, and a
+# hook source must preserve the handler-level JSON schema contract.
+while IFS= read -r path; do
+    case "$path" in
+        cas-cli/tests/*)
+            add_required_test_target builtin_archive_portability_test
+            ;;
+        cas-cli/src/hooks/*|cas-cli/src/cli/hook/*|.codex/hooks.json)
+            add_required_test_target hook_schema
             ;;
     esac
 done < <(git diff --name-only "$merge_base" HEAD)
@@ -245,6 +358,17 @@ while IFS= read -r path; do
     add_required_test_target builtin_flavor_drift_test
     add_required_test_target agent_definition_contract_test
     add_required_test_target factory_codex_skill_guardrails
+    # Every builtin_* binary is a guardrail for one of the embedded catalogs;
+    # requiring the complete family keeps a newly-added size/phrase contract
+    # from becoming invisible to --proof.
+    case "$path" in
+        */skills/*|*.md)
+            for candidate in cas-cli/tests/builtin_*.rs; do
+                [[ -f "$candidate" ]] || continue
+                add_required_test_target "$(basename "${candidate%.rs}")"
+            done
+            ;;
+    esac
     relative="$(builtin_relative_path_for "$path")"
     catalog_path="$(builtin_catalog_path_for "$relative")"
     discover_builtin_test_targets "$path"
@@ -266,6 +390,17 @@ done
 
 if [[ ${#missing[@]} -eq 0 ]]; then
     echo "SCOPED PROOF SURFACE: covered committed diff from ${base_ref} ($(git rev-parse --short "$merge_base"))."
+    proof_targets=()
+    for module in "${required_lib_modules[@]}"; do
+        proof_targets+=("lib:${module}")
+    done
+    for target in "${required_test_targets[@]}"; do
+        proof_targets+=("test:${target}")
+    done
+    if [[ ${#proof_targets[@]} -eq 0 ]]; then
+        proof_targets+=(none)
+    fi
+    (IFS=,; echo "SCOPED_PROOF: targets=${proof_targets[*]} result=PASS")
     exit 0
 fi
 
@@ -273,5 +408,7 @@ echo "SCOPED PROOF INCOMPLETE: diff ${base_ref}@$(git rev-parse --short "$merge_
 for item in "${missing[@]}"; do
     echo "  - missing ${item}" >&2
 done
-echo "Use --proof for a complete receipt; narrow runs may omit it." >&2
+printf 'Run scripts/run-scoped-tests.sh --proof' >&2
+printf ' %q' "${requested_args[@]}" >&2
+printf '\n' >&2
 exit 1

@@ -53,6 +53,9 @@
 #   CARGO_CMD     subcommand: "nextest run" (default) or "test"
 #   SCOPED_TEST_LOG
 #                 path to keep the captured run log (default: a temp file)
+#   SCOPED_PROOF_BASE
+#                 git ref for the committed-diff proof baseline (default:
+#                 origin/main, then main, then HEAD^)
 #
 # Exit codes: 0 = genuinely green with a nonzero passed count,
 #             1 = the run failed, executed nothing, or `--proof` missed a
@@ -248,7 +251,17 @@ fi
 echo "Quote that passed count in your close note (rule-173)."
 
 if [[ "${proof_mode}" -eq 1 ]]; then
-    "${REPO_ROOT}/scripts/check-scoped-test-surface.sh" -- "$@"
+    proof_checker_args=()
+    if [[ -n "${SCOPED_PROOF_BASE:-}" ]]; then
+        proof_checker_args+=(--base "${SCOPED_PROOF_BASE}")
+    fi
+    if ! (cd "${REPO_ROOT}" && "${REPO_ROOT}/scripts/check-scoped-test-surface.sh" "${proof_checker_args[@]}" -- "$@"); then
+        echo "FAIL: --proof surface validation rejected this test receipt." >&2
+        exit 1
+    fi
+    printf 'SCOPED_PROOF: command=scripts/run-scoped-tests.sh --proof'
+    printf ' %q' "$@"
+    printf ' result=PASS\n'
 else
     echo "      Iteration receipt only. Add --proof for committed-diff surface validation at handoff."
 fi

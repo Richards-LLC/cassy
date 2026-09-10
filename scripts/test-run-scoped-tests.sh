@@ -345,7 +345,7 @@ expect fail "missing library module 'worker_commit_guard_tests'" \
 
 expect pass "SCOPED PROOF SURFACE: covered committed diff" \
     "proof: complete changed-module filter is accepted" \
-    bash -c "cd '${surface_repo}' && '${SURFACE_GUARD}' --base main -- -p cas --lib worker_commit_guard_tests"
+    bash -c "cd '${surface_repo}' && '${SURFACE_GUARD}' --base main -- -p cas --lib worker_commit_guard_tests --test builtin_archive_portability_test --test hook_schema"
 
 printf '// contract changed with the implementation\n' >>"${surface_repo}/cas-cli/tests/factory_mcp_ops_test.rs"
 git -C "${surface_repo}" add .
@@ -356,9 +356,13 @@ expect fail "missing integration target 'factory_mcp_ops_test'" \
     "proof: changed integration binary cannot be omitted" \
     bash -c "cd '${surface_repo}' && '${SURFACE_GUARD}' --base main -- -p cas --lib worker_commit_guard_tests"
 
+expect fail "Run scripts/run-scoped-tests.sh --proof" \
+    "proof: missing target names the complete rerun command" \
+    bash -c "cd '${surface_repo}' && '${SURFACE_GUARD}' --base main -- -p cas --lib worker_commit_guard_tests"
+
 expect pass "SCOPED PROOF SURFACE: covered committed diff" \
     "proof: changed module plus integration target is accepted" \
-    bash -c "cd '${surface_repo}' && '${SURFACE_GUARD}' --base main -- -p cas --lib worker_commit_guard_tests --test factory_mcp_ops_test"
+    bash -c "cd '${surface_repo}' && '${SURFACE_GUARD}' --base main -- -p cas --lib worker_commit_guard_tests --test factory_mcp_ops_test --test builtin_archive_portability_test --test hook_schema"
 
 printf '// nested operation changed\n' >>"${surface_repo}/cas-cli/tests/mcp_tools_test/task_tools/operations.rs"
 printf '// nested verification flow changed\n' >>"${surface_repo}/cas-cli/tests/mcp_tools_test/task_tools/verification_flow.rs"
@@ -370,9 +374,9 @@ expect fail "missing integration target 'mcp_tools_test'" \
     "proof: changed nested integration module cannot be omitted" \
     bash -c "cd '${surface_repo}' && '${SURFACE_GUARD}' --base main -- -p cas --lib worker_commit_guard_tests --test factory_mcp_ops_test"
 
-expect pass "SCOPED PROOF SURFACE: covered committed diff" \
+expect pass "SCOPED_PROOF: targets=" \
     "proof: nested integration module resolves to its owning binary" \
-    bash -c "cd '${surface_repo}' && '${SURFACE_GUARD}' --base main -- -p cas --lib worker_commit_guard_tests --test factory_mcp_ops_test --test mcp_tools_test"
+    bash -c "cd '${surface_repo}' && '${SURFACE_GUARD}' --base main -- -p cas --lib worker_commit_guard_tests --test factory_mcp_ops_test --test mcp_tools_test --test builtin_archive_portability_test --test hook_schema"
 
 # Builtin skill/reference changes must include the cross-flavor, agent-contract,
 # and path-specific guardrail binaries. The latter is discovered from the
@@ -401,7 +405,7 @@ expect fail "missing integration target 'factory_codex_skill_guardrails'" \
 
 expect pass "SCOPED PROOF SURFACE: covered committed diff" \
     "proof: builtin reference includes its literal-path guardrail" \
-    bash -c "cd '${surface_repo}' && '${SURFACE_GUARD}' --base main -- -p cas --lib worker_commit_guard_tests --test builtin_flavor_drift_test --test agent_definition_contract_test --test factory_codex_skill_guardrails --test factory_mcp_ops_test --test mcp_tools_test"
+    bash -c "cd '${surface_repo}' && '${SURFACE_GUARD}' --base main -- -p cas --lib worker_commit_guard_tests --test builtin_flavor_drift_test --test agent_definition_contract_test --test factory_codex_skill_guardrails --test factory_mcp_ops_test --test mcp_tools_test --test builtin_archive_portability_test --test hook_schema"
 
 # Installed catalogs flatten skill bodies to skills/<name>/SKILL.md. The
 # issue-intake directive guard reads that path rather than the source-tree
@@ -426,7 +430,57 @@ expect fail "missing integration target 'issue_intake_directive_test'" \
 
 expect pass "SCOPED PROOF SURFACE: covered committed diff" \
     "proof: supervisor body includes its installed-catalog guardrail" \
-    bash -c "cd '${surface_repo}' && '${SURFACE_GUARD}' --base main -- -p cas --lib worker_commit_guard_tests --test builtin_flavor_drift_test --test agent_definition_contract_test --test factory_codex_skill_guardrails --test issue_intake_directive_test --test factory_mcp_ops_test --test mcp_tools_test"
+    bash -c "cd '${surface_repo}' && '${SURFACE_GUARD}' --base main -- -p cas --lib worker_commit_guard_tests --test builtin_flavor_drift_test --test agent_definition_contract_test --test factory_codex_skill_guardrails --test issue_intake_directive_test --test factory_mcp_ops_test --test mcp_tools_test --test builtin_archive_portability_test --test hook_schema"
+
+mapping_repo="${tmpdir}/mapping-repo"
+mkdir -p "${mapping_repo}/cas-cli/src/mcp/tools/service" "${mapping_repo}/cas-cli/tests"
+git -C "${mapping_repo}" init -q -b main
+printf 'pub(super) async fn factory_worker_status() {}\n' \
+    >"${mapping_repo}/cas-cli/src/mcp/tools/service/factory_ops.rs"
+printf 'async fn test_worker_status() {}\n' \
+    >"${mapping_repo}/cas-cli/tests/factory_mcp_ops_test.rs"
+git -C "${mapping_repo}" add .
+git -C "${mapping_repo}" -c user.name=scoped-test-fixture -c user.email=scoped-test-fixture@example.invalid \
+    commit -qm base
+git -C "${mapping_repo}" checkout -qb proof
+printf '// worker status implementation changed\n' \
+    >>"${mapping_repo}/cas-cli/src/mcp/tools/service/factory_ops.rs"
+git -C "${mapping_repo}" add .
+git -C "${mapping_repo}" -c user.name=scoped-test-fixture -c user.email=scoped-test-fixture@example.invalid \
+    commit -qm factory-ops-change
+
+expect fail "missing integration target 'factory_mcp_ops_test'" \
+    "proof: changed factory_ops module cannot omit its public-surface binary" \
+    bash -c "cd '${mapping_repo}' && '${SURFACE_GUARD}' --base main -- -p cas --lib factory_ops"
+
+expect pass "SCOPED_PROOF: targets=lib:factory_ops,test:factory_mcp_ops_test result=PASS" \
+    "proof: factory_ops public symbol maps to factory_mcp_ops_test" \
+    bash -c "cd '${mapping_repo}' && '${SURFACE_GUARD}' --base main -- -p cas --lib factory_ops --test factory_mcp_ops_test"
+
+# The end-to-end runner must propagate a rejected surface check instead of
+# printing a green receipt after the checker reports missing targets. It also
+# forwards an explicit baseline for release-assembly proof runs.
+mkdir -p "${mapping_repo}/scripts"
+cp "${SURFACE_GUARD}" "${mapping_repo}/scripts/check-scoped-test-surface.sh"
+cp "${GUARD}" "${mapping_repo}/scripts/run-scoped-tests.sh"
+runner_stub="$(make_stub cargo-proof-runner 0 <<'EOF'
+    Summary [   0.001s] 1 tests run: 1 passed, 0 skipped
+EOF
+)"
+expect fail "SCOPED PROOF INCOMPLETE" \
+    "proof runner: missing integration target is a nonzero delivery result" \
+    env CARGO="${runner_stub}" SCOPED_PROOF_BASE=main \
+    "${mapping_repo}/scripts/run-scoped-tests.sh" --proof -p cas --lib factory_ops
+
+expect fail "cannot find a merge-base" \
+    "proof runner: explicit baseline is forwarded to the surface checker" \
+    env CARGO="${runner_stub}" SCOPED_PROOF_BASE=missing-baseline \
+    "${mapping_repo}/scripts/run-scoped-tests.sh" --proof -p cas --lib factory_ops
+
+expect pass "SCOPED_PROOF: command=scripts/run-scoped-tests.sh --proof" \
+    "proof runner: complete mapped receipt is green" \
+    env CARGO="${runner_stub}" SCOPED_PROOF_BASE=main \
+    "${mapping_repo}/scripts/run-scoped-tests.sh" --proof -p cas --lib factory_ops --test factory_mcp_ops_test
 
 docs_repo="${tmpdir}/docs-repo"
 mkdir -p "${docs_repo}/docs"

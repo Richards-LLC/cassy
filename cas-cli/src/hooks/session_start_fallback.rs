@@ -37,7 +37,13 @@ pub(crate) fn is_custom_claude_supervisor() -> bool {
 /// Returns `true` for the first claimant and `false` for later attempts. A
 /// blank session is not deduplicated, and filesystem failures fail open so a
 /// best-effort startup marker can never suppress all startup context.
+///
+/// Prunes claim files older than 7 days on each call (best-effort, fail-open).
 pub(crate) fn claim(cas_root: &Path, session_id: &str) -> bool {
+    // Prune old claim files (7 days = 604800 seconds) on each claim attempt.
+    // Errors are ignored to ensure a failed prune never suppresses the startup marker.
+    let _ = prune(cas_root, 7 * 24 * 3600);
+
     if session_id.trim().is_empty() {
         return true;
     }

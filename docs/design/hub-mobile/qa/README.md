@@ -24,3 +24,19 @@ For a fresh baseline, register `python3 docs/design/hub-mobile/serve-current.py 
 ## Limits
 
 Chromium touch emulation and viewport resizing prove browser behavior, not physical iOS/Android rotation or browser chrome behavior. Impact/effort ratings are design judgments. The ten depicted application workflows require product implementation and usability validation before shipping.
+
+## Final result
+
+- Browser exploration: **PASS 8/8 cells**, **6/6 viewport/theme pairs**, **0 page errors**. [Evidence ledger](LEDGER.md), [machine receipt](results.json).
+- Strict visual QA: **PASS**, **0 findings**, **0 allowlisted**, at all three required viewports in light/dark. [Receipt](visual-qa.md).
+- Vector drawings: **PASS 20/20 views**, no text overlaps or out-of-bounds labels. [Receipt](drawing-checks.json).
+- Standalone HTML SHA-256: `91c04740f890b81ddac0a397a1658c4a02c4ca3bf3ff31be61562e975ad97e01`. Regeneration without the external screenshot directory reproduced this exact hash.
+- All three temporary read-only pairing devices were revoked and verified; invitation and browser-storage scratch files were removed. [Cleanup receipt](credential-cleanup.json).
+
+| Viewport | Light reader | Dark reader |
+| --- | --- | --- |
+| 390×844 portrait | [Capture](reader-390x844-light.png) | [Capture](reader-390x844-dark.png) |
+| 844×390 landscape | [Capture](reader-844x390-light.png) | [Capture](reader-844x390-dark.png) |
+| 1280×800 desktop | [Capture](reader-1280x800-light.png) | [Capture](reader-1280x800-dark.png) |
+
+[Native fullscreen after pinch and rotation](M01-rotated-reader.png) · [Browser-denial fallback](M03-fullscreen-fallback.png) · [Whole-study fullscreen](M08-study-fullscreen-comparison.png).

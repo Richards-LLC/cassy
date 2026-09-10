@@ -122,6 +122,22 @@ pub(crate) fn assignment_targets_started_task(
     .filter(|_| assignee.is_some_and(|owner| owner.eq_ignore_ascii_case(recipient)))
 }
 
+/// Return the task state that makes an assignment/start prompt stale at the
+/// final transport boundary. Terminal states are stale for every recipient;
+/// non-terminal progress is stale only when the addressed worker is still the
+/// task assignee. Missing or unreadable task state remains a delivery-fail-open
+/// condition in the callers that load the task record.
+pub(crate) fn assignment_stale_task(
+    prompt: &str,
+    status: TaskStatus,
+    assignee: Option<&str>,
+    recipient: &str,
+) -> Option<(String, TaskStatus)> {
+    assignment_targets_terminal_task(prompt, status)
+        .or_else(|| assignment_targets_started_task(prompt, status, assignee, recipient))
+        .map(|task_id| (task_id, status))
+}
+
 fn first_task_id_token(text: &str) -> Option<String> {
     text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
         .find(|token| {
@@ -986,7 +1002,7 @@ pub(crate) fn revalidate_lifecycle_prompt(
 #[cfg(test)]
 mod cas_8aee_assignment_delivery_tests {
     use super::{
-        assignment_solicited_task_id, assignment_targets_started_task,
+        assignment_solicited_task_id, assignment_stale_task, assignment_targets_started_task,
         assignment_targets_terminal_task, urgent_assignment_task_id,
     };
     use cas_types::TaskStatus;
@@ -1062,6 +1078,38 @@ mod cas_8aee_assignment_delivery_tests {
             )
             .is_none(),
             "an open task still needs its assignment instruction"
+        );
+    }
+
+    #[test]
+    fn assignment_stale_task_covers_every_non_open_state_for_its_assignee() {
+        let prompt = "You were spawned for task cas-7c1a — \"stale brief\" — and it is assigned to you now."
+            .to_string()
+            + "\nStart with `mcp__cas__task action=show id=cas-7c1a`, then `mcp__cas__task action=start id=cas-7c1a` before you change any code.";
+
+        for status in [
+            TaskStatus::InProgress,
+            TaskStatus::Blocked,
+            TaskStatus::AwaitingMerge,
+            TaskStatus::Closed,
+            TaskStatus::Cancelled,
+        ] {
+            assert_eq!(
+                assignment_stale_task(&prompt, status, Some("worker-1"), "worker-1")
+                    .map(|(_, observed)| observed),
+                Some(status),
+                "a stale assignment must be identified at the final delivery boundary for {status}"
+            );
+        }
+        assert_eq!(
+            assignment_stale_task(&prompt, TaskStatus::Open, Some("worker-1"), "worker-1"),
+            None,
+            "an open task still needs the assignment instruction"
+        );
+        assert_eq!(
+            assignment_stale_task(&prompt, TaskStatus::InProgress, Some("worker-2"), "worker-1"),
+            None,
+            "another worker's progress must not suppress this recipient's assignment"
         );
     }
 

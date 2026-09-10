@@ -25,6 +25,7 @@ import { loadPaneLayout, movePane, normalizePaneLayout, orderedPaneIds, promoteP
 import { detectSpeechInput, SpeechDictationController, type SpeechInputCapability, type SpeechInputState } from "./speech-input";
 import { backLabel, clearStoredSelection, forgetMachine, goBackSelection, loadStoredSelection, previousSelection, restorableSession, saveStoredSelection, selectSelection, sessionPickerEntries, sessionPickerMeta, workerCountLabel, type SelectionState, type SelectionStorage, type SessionSelection } from "./session-selection";
 import { composerFocusWinner, planSupervisorSend, sendsOnEnter, supervisorMessage, supervisorTarget } from "./supervisor-message";
+import { hiddenWorkersLabel, saveWorkersRevealed, splitVisiblePanes, workersCommandLabel, workersRevealed, workersRoute } from "./worker-visibility";
 import { COMPACT_MEDIA_QUERY, PHONE_MEDIA_QUERY } from "./viewport";
 import { defaultTranscriptView, loadTranscriptView, saveTranscriptView, type TranscriptViewMode } from "./transcript";
 import { TranscriptView } from "./transcript-view";
@@ -132,6 +133,9 @@ let pairingExchangeInFlight = false;
 let pairingDraft = createPairingDraft(location.origin, preselectedScopes(pendingPairing));
 let machineDrawerOpen = false;
 let attentionPanelCollapsed = window.matchMedia(PHONE_MEDIA_QUERY).matches;
+// Off by default (cas-6261): the Hub lists supervisors only until the operator
+// asks for workers through the route or the palette.
+const revealWorkers = workersRevealed(location.search, workerVisibilityStorage());
 let activeContextTab: "attention" | "status" = "attention";
 let commandPaletteOpen = false;
 let speechCapability: SpeechInputCapability | undefined;
@@ -216,6 +220,18 @@ function applyPaneView(key: string, mount: HTMLElement, surface: TerminalSurface
 function sessionKey(machineId: string, session: string): string { return `${machineId}:${session}`; }
 function paneKey(machineId: string, session: string, pane: string): string { return `${machineId}:${session}:${pane}`; }
 function activeConnection(): HubConnectionSupervisor | undefined { return selectedMachineId ? connections.get(selectedMachineId) : undefined; }
+
+function workerVisibilityStorage(): SelectionStorage | undefined {
+  try { return window.localStorage; } catch { return undefined; }
+}
+
+/** Flip worker visibility. The stream gate is negotiated at attach, so the
+ *  Hub reloads on the matching route rather than re-attaching every session. */
+function setWorkersRevealed(next: boolean): void {
+  saveWorkersRevealed(workerVisibilityStorage(), next);
+  const route = `${location.pathname}${workersRoute(location.search, next)}${location.hash}`;
+  location.assign(route);
+}
 
 function selectionStorage(): SelectionStorage | undefined {
   try { return window.localStorage; } catch { return undefined; }
@@ -1118,7 +1134,7 @@ function resizeViewablePanes(machineId: string, session: string): void {
   if (!canResizePanes(machineId, session)) return;
   const state = sessionStates.get(sessionKey(machineId, session));
   if (!state) return;
-  for (const pane of state.panes.filter((candidate) => candidate.kind !== "Director")) {
+  for (const pane of splitVisiblePanes(state.panes, revealWorkers).visible) {
     const surface = surfaces.get(paneKey(machineId, session, pane.id));
     if (surface) requestPaneSize(machineId, session, pane.id, surface.cols, surface.rows);
   }
@@ -1145,7 +1161,12 @@ async function renderSessionState(machineId: string, session: string, state: Ses
   if (selectedMachineId !== machineId || selectedSession !== session) return;
   const grid = document.querySelector<HTMLElement>("#pane-grid");
   if (!grid) return;
-  const visiblePanes = state.panes.filter((pane) => pane.kind !== "Director");
+  const { visible: visiblePanes, hiddenWorkers } = splitVisiblePanes(state.panes, revealWorkers);
+  // The hub strips hidden workers from the stream, so the roster count comes
+  // from the catalog; local filtering covers hubs that predate the gate.
+  const hiddenWorkerCount = revealWorkers
+    ? 0
+    : Math.max(hiddenWorkers.length, sessions.get(machineId)?.find((item) => item.name === session)?.workers.length ?? 0);
   const active = new Set(visiblePanes.map((pane) => pane.id));
   if (visiblePanes.length === 0) {
     for (const [key, surface] of surfaces) {
@@ -1161,7 +1182,7 @@ async function renderSessionState(machineId: string, session: string, state: Ses
     emptyHint.className = "empty-hint";
     emptyHint.textContent = "Terminals appear here as soon as the session starts one.";
     empty.replaceChildren(emptyTitle, emptyHint);
-    grid.classList.remove("pane-layout", "single-pane");
+    grid.classList.remove("pane-layout", "single-pane", "workers-hidden");
     grid.replaceChildren(empty);
     return;
   }
@@ -1177,7 +1198,8 @@ async function renderSessionState(machineId: string, session: string, state: Ses
   const layout = layoutForPanes(selectedKey, visiblePanes, defaultPrimaryPaneId);
   if (!layout) return;
   grid.classList.add("pane-layout");
-  grid.classList.toggle("single-pane", visiblePanes.length === 1);
+  grid.classList.toggle("single-pane", visiblePanes.length === 1 && hiddenWorkerCount === 0);
+  grid.classList.toggle("workers-hidden", hiddenWorkerCount > 0);
   grid.dataset.secondaryPaneGeometry = mobileCollapsedPaneGeometry;
   let primarySlot = grid.querySelector<HTMLElement>(".primary-pane-slot");
   let secondaryStrip = grid.querySelector<HTMLElement>(".secondary-pane-strip");
@@ -1189,6 +1211,7 @@ async function renderSessionState(machineId: string, session: string, state: Ses
   for (const [key, surface] of surfaces) {
     if (key.startsWith(`${machineId}:${session}:`) && !active.has(key.split(":").at(-1)!)) releaseSurface(key, surface);
   }
+  renderHiddenWorkersNote(secondaryStrip, hiddenWorkerCount);
   const panesById = new Map(visiblePanes.map((pane) => [pane.id, pane]));
   // Re-inserting a card blurs whatever it contains, so panes are only moved when
   // their slot or their position actually changed. A five-second heartbeat render
@@ -1355,6 +1378,33 @@ async function renderSessionState(machineId: string, session: string, state: Ses
       connections.get(machineId)?.requestPaneKeyframe(session, pane.id);
     }
   }
+  const note = secondaryStrip.querySelector<HTMLElement>(".hidden-workers");
+  if (note && secondaryStrip.lastElementChild !== note) secondaryStrip.append(note);
+}
+
+/**
+ * One quiet line where the worker strip would be: how many workers the default
+ * view keeps off screen, and the one control that reveals them.
+ */
+function renderHiddenWorkersNote(strip: HTMLElement, count: number): void {
+  let note = strip.querySelector<HTMLElement>(".hidden-workers");
+  if (count === 0) { note?.remove(); return; }
+  if (!note) {
+    note = document.createElement("p");
+    note.className = "hidden-workers";
+    note.setAttribute("role", "status");
+    const label = document.createElement("span");
+    label.className = "hidden-workers-label";
+    const reveal = document.createElement("button");
+    reveal.type = "button";
+    reveal.className = "hidden-workers-reveal";
+    reveal.textContent = "Show workers";
+    reveal.title = "Show worker panes for debugging; reloads the Hub";
+    reveal.onclick = (event) => { event.stopPropagation(); setWorkersRevealed(true); };
+    note.append(label, reveal);
+    strip.append(note);
+  }
+  note.querySelector<HTMLElement>(".hidden-workers-label")!.textContent = hiddenWorkersLabel(count);
 }
 
 function hubSupports(machineId: string, capability: string): boolean {
@@ -1740,7 +1790,7 @@ function emptyCanvasMarkup(): string {
   if (machines.size === 0) {
     return '<p class="empty-title">No machine paired yet</p><p class="empty-hint">Pair the machine your sessions run on. You will get a code to approve there.</p><button id="empty-pair" class="primary" type="button">Pair a machine</button>';
   }
-  return '<p class="empty-title">No session open</p><p class="empty-hint">Pick a session to attach its supervisor and workers.</p><button id="open-machines" class="primary" type="button">Open machines</button>';
+  return '<p class="empty-title">No session open</p><p class="empty-hint">Pick a session to attach its supervisor.</p><button id="open-machines" class="primary" type="button">Open machines</button>';
 }
 
 function capturePairingDraft(): void {
@@ -1959,6 +2009,7 @@ function render(captureDraft = true): void {
         <input id="command-palette-query" type="search" aria-label="Filter commands" placeholder="Type a command or session">
         <div class="palette-commands">
           ${(["system", "light", "dark"] as const).map((scheme) => `<button type="button" class="palette-command" data-palette-scheme="${scheme}"><span>Appearance · ${scheme === "system" ? "System" : scheme === "light" ? "Light" : "Dark"}</span><small>${scheme === "system" ? "Follow this device" : "Use this scheme"}</small></button>`).join("")}
+          <button type="button" class="palette-command" data-palette-action="workers" aria-pressed="${revealWorkers}"><span>${escapeHtml(workersCommandLabel(revealWorkers).title)}</span><small>${escapeHtml(workersCommandLabel(revealWorkers).hint)}</small></button>
           <button type="button" class="palette-command" data-palette-action="control" ${controlActionDisabled ? "disabled" : ""}><span>${controlActionLabel}</span><small>${controlActionDisabled ? escapeHtml(takeControlReason ?? "Control unavailable") : "Current session"}</small></button>
           <button type="button" class="palette-command" data-palette-action="dismiss-info" ${infoItems.length === 0 ? "disabled" : ""}><span>Dismiss all info</span><small>${infoItems.length} outstanding</small></button>
           ${sessionCommands || '<p class="palette-empty">No live sessions available.</p>'}
@@ -2475,6 +2526,8 @@ function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | und
   for (const command of palette.querySelectorAll<HTMLButtonElement>("[data-palette-scheme]")) {
     command.onclick = () => { setScheme(command.dataset.paletteScheme as SchemePreference); closePalette(); };
   }
+  const paletteWorkers = palette.querySelector<HTMLButtonElement>("[data-palette-action='workers']");
+  if (paletteWorkers) paletteWorkers.onclick = () => { closePalette(); setWorkersRevealed(!revealWorkers); };
   const paletteControl = palette.querySelector<HTMLButtonElement>("[data-palette-action='control']");
   if (paletteControl) paletteControl.onclick = () => { closePalette(); void toggleControl(selected, lease); };
   const paletteDismiss = palette.querySelector<HTMLButtonElement>("[data-palette-action='dismiss-info']");

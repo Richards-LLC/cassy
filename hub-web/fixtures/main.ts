@@ -16,6 +16,7 @@ export const FIXTURE_NAMES = [
   "fleet-populated",
   "fleet-empty",
   "session-canvas",
+  "session-workers",
   "transcript",
   "attention-0",
   "attention-12",
@@ -121,7 +122,7 @@ function renderHeader(openSession: boolean): HTMLElement {
   const heading = element("h1", openSession ? "toolbar-session-title" : undefined);
   const picker = button("", "session-picker-toggle");
   picker.append(
-    element("span", "session-picker-name", openSession ? (["session-canvas", "transcript", "attention-0", "attention-12"].includes(fixtureName) ? "bright-otter" : "Penguinz-fierce-tiger-commander") : "Fleet overview"),
+    element("span", "session-picker-name", openSession ? (["session-canvas", "session-workers", "transcript", "attention-0", "attention-12"].includes(fixtureName) ? "bright-otter" : "Penguinz-fierce-tiger-commander") : "Fleet overview"),
     element("span", "session-picker-caret", "▾"),
   );
   picker.lastElementChild?.setAttribute("aria-hidden", "true");
@@ -194,6 +195,15 @@ function renderTerminalPlaceholder(title: string, role: string, collapsed = fals
   mount.append(canvas);
   pane.append(paneHeader(title), mount);
   return pane;
+}
+
+function renderHiddenWorkersNote(count: number): HTMLElement {
+  const note = element("p", "hidden-workers");
+  note.setAttribute("role", "status");
+  const reveal = button("Show workers", "hidden-workers-reveal");
+  reveal.title = "Show worker panes for debugging; reloads the Hub";
+  note.append(element("span", "hidden-workers-label", `${count} workers hidden`), reveal);
+  return note;
 }
 
 function renderRestingToast(): void {
@@ -303,8 +313,8 @@ function appendOpenPairingDialog(cleanup: boolean): void {
 
 function renderShell(): void {
   const machineCount = fixtureName === "fleet-empty" ? 0 : 2;
-  const openSession = ["session-canvas", "transcript", "attention-0", "attention-12", "connection-failed-retry"].includes(fixtureName);
-  const shell = element("div", `shell ${["session-canvas", "transcript"].includes(fixtureName) ? "attention-collapsed" : "attention-expanded"}${fixtureName === "fleet-empty" ? " fleet-empty" : ""}`);
+  const openSession = ["session-canvas", "session-workers", "transcript", "attention-0", "attention-12", "connection-failed-retry"].includes(fixtureName);
+  const shell = element("div", `shell ${["session-canvas", "session-workers", "transcript"].includes(fixtureName) ? "attention-collapsed" : "attention-expanded"}${fixtureName === "fleet-empty" ? " fleet-empty" : ""}`);
   shell.dataset.fixture = fixtureName;
   const signature = shellSignature({
     machineId: machineCount ? "atlas" : undefined,
@@ -346,7 +356,8 @@ function renderShell(): void {
     empty.append(element("p", "empty-title", "No machine paired yet"), element("p", "empty-hint", "Pair the machine your sessions run on. You will get a code to approve there."), button("Pair a machine", "primary"));
     grid.append(empty);
     main.append(grid);
-  } else if (["session-canvas", "attention-0", "attention-12"].includes(fixtureName)) {
+  } else if (fixtureName === "session-workers") {
+    // Workers revealed through the explicit off-by-default control (cas-6261).
     const grid = element("section", "pane-grid pane-layout");
     const primary = element("div", "primary-pane-slot");
     primary.append(renderTerminalPlaceholder("bright-otter", "supervisor"));
@@ -354,6 +365,15 @@ function renderShell(): void {
     const collapsed = renderTerminalPlaceholder("agile-octopus", "worker", true);
     if (!matchMedia("(max-width: 53rem)").matches) collapsed.classList.remove("collapsed");
     secondary.append(collapsed, renderTerminalPlaceholder("steady-badger", "worker", true));
+    grid.append(primary, secondary);
+    main.append(grid);
+  } else if (["session-canvas", "attention-0", "attention-12"].includes(fixtureName)) {
+    // The default view: supervisor only, with the hidden-workers line (cas-6261).
+    const grid = element("section", "pane-grid pane-layout workers-hidden");
+    const primary = element("div", "primary-pane-slot");
+    primary.append(renderTerminalPlaceholder("bright-otter", "supervisor"));
+    const secondary = element("div", "secondary-pane-strip");
+    secondary.append(renderHiddenWorkersNote(2));
     grid.append(primary, secondary);
     main.append(grid);
   } else if (fixtureName === "transcript") {

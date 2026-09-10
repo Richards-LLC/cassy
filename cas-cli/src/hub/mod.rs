@@ -25,6 +25,7 @@ mod runtime;
 mod server;
 mod state;
 mod tailscale;
+mod worker_gate;
 
 pub(crate) use attention::spawn_attention_enricher;
 pub use auth::{
@@ -47,6 +48,7 @@ pub use runtime::{HubInstanceLock, HubProcessRecord, HubRuntimePaths};
 pub use server::{HubState, router};
 pub(crate) use state::ensure_private_dir;
 pub use tailscale::{TailscaleServeManager, TailscaleServeReceipt};
+pub use worker_gate::WorkerGate;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MachineTransport {

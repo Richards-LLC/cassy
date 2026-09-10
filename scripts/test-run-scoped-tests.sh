@@ -317,6 +317,10 @@ git -C "${surface_repo}" init -q -b main
 } >"${surface_repo}/cas-cli/src/hooks/pre_tool.rs"
 printf '// factory integration target\n' \
     >"${surface_repo}/cas-cli/tests/factory_mcp_ops_test.rs"
+# This file is a decoy: the path is test data, not a Rust module declaration.
+# The proof checker must still resolve the nested module to mcp_tools_test.
+printf 'const DECOY_PATH: &str = "mcp_tools_test/task_tools/operations.rs";\n' \
+    >"${surface_repo}/cas-cli/tests/builtin_archive_portability_test.rs"
 mkdir -p "${surface_repo}/cas-cli/tests/mcp_tools_test/task_tools"
 printf '#[path = "mcp_tools_test/task_tools/mod.rs"]\nmod task_tools;\n' \
     >"${surface_repo}/cas-cli/tests/mcp_tools_test.rs"

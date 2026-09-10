@@ -54,6 +54,24 @@ export interface SessionState {
   rows: number;
 }
 
+/** Supervisor reply routed to this paired Commander device. */
+export interface OperatorReply {
+  notification_id: number;
+  reply_to: number;
+  message: string;
+  summary: string;
+  device_id: string;
+  operator_label?: string;
+}
+
+/** Durable acknowledgment for a Commander SendMessage submission. */
+export interface MessageQueued {
+  client_ref: string | null;
+  notification_id: number;
+  target: string;
+  stamped: boolean;
+}
+
 export type SessionPhase = "planning" | "editing" | "testing" | "building" | "blocked" | "reviewing" | "idle";
 
 export interface SessionCardSummary {

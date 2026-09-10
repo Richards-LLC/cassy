@@ -464,6 +464,7 @@ pub(super) enum CommanderControl {
         text: String,
         summary: Option<String>,
         urgent: bool,
+        client_ref: Option<String>,
         attribution: crate::ui::factory::protocol::MessageAttribution,
     },
 }
@@ -475,6 +476,13 @@ impl CommanderControl {
         match self {
             Self::InterruptPane { .. } => "targeted interrupt failed",
             Self::SendMessage { .. } => "semantic message enqueue failed",
+        }
+    }
+
+    pub(super) fn client_ref(&self) -> Option<&str> {
+        match self {
+            Self::SendMessage { client_ref, .. } => client_ref.as_deref(),
+            Self::InterruptPane { .. } => None,
         }
     }
 }
@@ -495,12 +503,14 @@ pub(super) fn commander_control_from_message(
             text,
             summary,
             urgent,
+            client_ref,
             attribution,
         } => Some(CommanderControl::SendMessage {
             target: target.clone(),
             text: text.clone(),
             summary: summary.clone(),
             urgent: *urgent,
+            client_ref: client_ref.clone(),
             attribution: attribution.clone(),
         }),
         _ => None,
@@ -522,7 +532,8 @@ pub(super) fn enqueue_commander_message(
     let queue = crate::store::open_prompt_queue_store(cas_dir)?;
     let attribution_json = serde_json::to_value(attribution)?;
     let priority = urgent.then_some(cas_store::NotificationPriority::Critical);
-    Ok(queue.enqueue_attributed_urgent_with_outcome(
+    let operator = operator_stamp(attribution);
+    Ok(queue.enqueue_operator_message(
         &attribution.queue_source(),
         target,
         text,
@@ -531,8 +542,31 @@ pub(super) fn enqueue_commander_message(
         priority,
         urgent,
         Some(&attribution_json),
-        None,
+        &operator,
     )?)
+}
+
+/// The durable operator columns for one Commander row (cas-e8df).
+///
+/// `verified` is true only when the hub said so AND named both the device and
+/// its credential; a frame that claims verification without a principal is
+/// treated as a client claim, and the row's origin becomes `Unattributed`.
+pub(super) fn operator_stamp(
+    attribution: &crate::ui::factory::protocol::MessageAttribution,
+) -> cas_store::OperatorStamp {
+    let verified = attribution.operator_verified
+        && attribution.device_id.as_deref().is_some_and(|id| !id.is_empty())
+        && attribution
+            .credential_id
+            .as_deref()
+            .is_some_and(|id| !id.is_empty());
+    cas_store::OperatorStamp {
+        operator: attribution.operator_label.clone().unwrap_or_default(),
+        device_id: attribution.device_id.clone().unwrap_or_default(),
+        device_label: attribution.device_label.clone().unwrap_or_default(),
+        scopes: attribution.scopes.clone(),
+        verified,
+    }
 }
 
 /// cas-c73d (GH #177): which Claude config dir does this worker's harness run
@@ -581,24 +615,33 @@ impl FactoryDaemon {
     pub(super) async fn dispatch_commander_control(
         &self,
         control: CommanderControl,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<Option<crate::ui::factory::DaemonMessage>> {
         match control {
-            CommanderControl::InterruptPane { pane_id } => self.interrupt_pane_turn(&pane_id).await,
+            CommanderControl::InterruptPane { pane_id } => {
+                self.interrupt_pane_turn(&pane_id).await?;
+                Ok(None)
+            }
             CommanderControl::SendMessage {
                 target,
                 text,
                 summary,
                 urgent,
+                client_ref,
                 attribution,
             } => {
-                self.enqueue_attributed_message(
+                let outcome = self.enqueue_attributed_message(
                     &target,
                     &text,
                     summary.as_deref(),
                     urgent,
                     &attribution,
                 )?;
-                Ok(())
+                Ok(Some(crate::ui::factory::DaemonMessage::MessageQueued {
+                    client_ref,
+                    notification_id: outcome.id(),
+                    target,
+                    stamped: operator_stamp(&attribution).verified,
+                }))
             }
         }
     }
@@ -1125,6 +1168,8 @@ mod tests {
             operator_label: Some("Pippenz".to_string()),
             controller_origin: Some("https://commander.example".to_string()),
             request_id: Some("request-789".to_string()),
+            scopes: vec!["message:send".to_string()],
+            operator_verified: true,
         }
     }
 
@@ -1144,6 +1189,7 @@ mod tests {
                 text: "checkpoint now".to_string(),
                 summary: Some("checkpoint".to_string()),
                 urgent: true,
+                client_ref: None,
                 attribution: commander_attribution(),
             },
         ];

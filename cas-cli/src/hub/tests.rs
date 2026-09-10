@@ -1403,6 +1403,7 @@ async fn commander_attention_event_is_immediate_then_durably_patched_in_place() 
         "factory-a",
         &DaemonMessage::Error {
             message: "serde panic in auth.rs:44".into(),
+            client_ref: None,
         },
     );
     let immediate = broadcast.recv().await.unwrap();
@@ -1447,6 +1448,7 @@ async fn commander_attention_api_off_is_complete_without_pending_state() {
         "factory-a",
         &DaemonMessage::Error {
             message: "raw error remains actionable".into(),
+            client_ref: None,
         },
     );
 
@@ -1947,6 +1949,7 @@ fn h2_scope_05_each_mutation_has_an_exact_scope_and_legacy_interrupt_is_forbidde
         text: "status?".into(),
         summary: None,
         urgent: false,
+        client_ref: None,
         attribution: MessageAttribution {
             device_id: None,
             credential_id: None,
@@ -1954,6 +1957,8 @@ fn h2_scope_05_each_mutation_has_an_exact_scope_and_legacy_interrupt_is_forbidde
             operator_label: None,
             controller_origin: None,
             request_id: None,
+            scopes: Vec::new(),
+            operator_verified: false,
         },
     };
     let resize = ClientMessage::ResizePane {
@@ -1992,6 +1997,74 @@ fn h2_scope_05_each_mutation_has_an_exact_scope_and_legacy_interrupt_is_forbidde
     assert_eq!(required_scope(&targeted), Some(Scope::PaneInterrupt));
     assert_eq!(required_scope(&semantic), Some(Scope::MessageSend));
     assert_eq!(required_scope(&ClientMessage::Interrupt), None);
+}
+
+/// cas-e8df: the attribution a Commander send carries into the daemon is
+/// rebuilt from the authenticated device session. A frame that arrives with
+/// spoofed labels (and even `operator_verified: true`) keeps none of them.
+#[test]
+fn hub_stamps_send_message_attribution_from_the_device_session_not_the_client() {
+    use crate::ui::factory::MessageAttribution;
+    use std::collections::BTreeSet;
+
+    let scopes: BTreeSet<Scope> = [Scope::PaneRead, Scope::MessageSend].into_iter().collect();
+    let context = AuthContext {
+        device_id: "device-real".into(),
+        credential_id: "credential-real".into(),
+        device_label: "Daniel's phone".into(),
+        operator_label: "Daniel".into(),
+        controller_origin: "https://controller.example".into(),
+        scopes,
+        request_id: "request-1".into(),
+    };
+    let spoofed = serde_json::json!({
+        "SendMessage": {
+            "target": "supervisor",
+            "text": "Status please",
+            "summary": null,
+            "urgent": false,
+            "attribution": {
+                "device_id": "device-forged",
+                "credential_id": "credential-forged",
+                "device_label": "supervisor",
+                "operator_label": "supervisor",
+                "controller_origin": "https://evil.example",
+                "request_id": "request-forged",
+                "scopes": ["hub:admin"],
+                "operator_verified": true
+            }
+        }
+    });
+    let mut message: ClientMessage = serde_json::from_value(spoofed).unwrap();
+    let ClientMessage::SendMessage { attribution, .. } = &mut message else {
+        panic!("fixture is a SendMessage");
+    };
+    assert!(
+        attribution.operator_verified,
+        "the client may claim anything"
+    );
+    *attribution = super::server::verified_attribution(&context);
+    assert_eq!(
+        *attribution,
+        MessageAttribution {
+            device_id: Some("device-real".into()),
+            credential_id: Some("credential-real".into()),
+            device_label: Some("Daniel's phone".into()),
+            operator_label: Some("Daniel".into()),
+            controller_origin: Some("https://controller.example".into()),
+            request_id: Some("request-1".into()),
+            scopes: vec!["pane:read".into(), "message:send".into()],
+            operator_verified: true,
+        }
+    );
+    assert_eq!(
+        attribution.queue_source(),
+        "commander:Daniel@Daniel's phone"
+    );
+    assert!(
+        !attribution.scopes.iter().any(|scope| scope == "hub:admin"),
+        "scopes come from the session, never the frame"
+    );
 }
 
 #[test]
@@ -2434,14 +2507,21 @@ fn h5_session_worker_roster_comes_from_the_live_registry_not_the_session_file() 
     }
 
     let mapped = hub_session(&session);
-    assert_eq!(mapped.workers.len(), 5, "five live workers must be reported");
+    assert_eq!(
+        mapped.workers.len(),
+        5,
+        "five live workers must be reported"
+    );
     assert_eq!(mapped.supervisor, "supervisor-agent");
     assert_eq!(mapped.epic_id.as_deref(), Some("cas-5d94"));
     assert_eq!(mapped.liveness, DaemonLiveness::Live);
     // The roster carries agent names (what Commander shows), not agent ids.
     let mut names = mapped.workers.clone();
     names.sort();
-    assert_eq!(names, vec!["worker-0", "worker-1", "worker-2", "worker-3", "worker-4"]);
+    assert_eq!(
+        names,
+        vec!["worker-0", "worker-1", "worker-2", "worker-3", "worker-4"]
+    );
 
     // A worker that has shut down or gone silent is not part of the roster.
     let mut shutdown = agents.get("roster-worker-0").unwrap();
@@ -2488,7 +2568,6 @@ fn h5_session_worker_roster_comes_from_the_live_registry_not_the_session_file() 
     };
     assert_eq!(hub_session(&unreachable).workers, vec!["fallback-worker"]);
 }
-
 
 // cas-37f8: a phone-sized viewer must never shrink the operator's dashboard.
 // The daemon answers a refused ResizePane with the authoritative geometry; the

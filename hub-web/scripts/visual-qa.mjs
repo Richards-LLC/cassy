@@ -16,6 +16,7 @@ export const FIXTURE_NAMES = [
   "transcript",
   "attention-0",
   "attention-12",
+  "operator-thread",
   "connection-failed-retry",
   "pairing-step-1",
   "pairing-cleanup",

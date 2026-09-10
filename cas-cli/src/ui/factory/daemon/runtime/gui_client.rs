@@ -282,18 +282,34 @@ impl FactoryDaemon {
     async fn handle_gui_message(&mut self, client_id: usize, msg: ClientMessage) {
         if let Some(control) = commander_control_from_gui_message(&msg) {
             let error_prefix = control.error_prefix();
-            if let Err(error) = self.dispatch_commander_control(control).await {
-                if let Some(frame) = encode_frame(&DaemonMessage::Error {
-                    message: format!("{error_prefix}: {error}"),
-                }) && let Some(client) = self.gui_clients.get_mut(&client_id)
-                {
-                    queue_frame(client, &frame);
+            let client_ref = control.client_ref().map(str::to_owned);
+            match self.dispatch_commander_control(control).await {
+                Ok(Some(message)) => {
+                    if let Some(frame) = encode_frame(&message)
+                        && let Some(client) = self.gui_clients.get_mut(&client_id)
+                    {
+                        queue_frame(client, &frame);
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    if let Some(frame) = encode_frame(&DaemonMessage::Error {
+                        message: format!("{error_prefix}: {error}"),
+                        client_ref,
+                    }) && let Some(client) = self.gui_clients.get_mut(&client_id)
+                    {
+                        queue_frame(client, &frame);
+                    }
                 }
             }
             return;
         }
 
         match msg {
+            ClientMessage::OperatorReplyDelivered { .. } => {
+                // Delivery receipts are emitted by the authenticated hub
+                // connector, never by the local GUI client.
+            }
             ClientMessage::Attach { request_scrollback } => {
                 let state = self.build_session_state();
                 let scrollback = request_scrollback.then(|| self.build_scrollback(&state));
@@ -485,6 +501,7 @@ impl FactoryDaemon {
                 if let Some(frame) = encode_frame(&DaemonMessage::Error {
                     message: "pane keyframes and paged scrollback require the WebSocket transport"
                         .to_string(),
+                    client_ref: None,
                 }) && let Some(client) = self.gui_clients.get_mut(&client_id)
                 {
                     queue_frame(client, &frame);

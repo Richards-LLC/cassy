@@ -19,11 +19,19 @@ header: x-goog-api-key: $GEMINI_API_KEY
 
 Use `gemini-3.1-flash-image` (Nano Banana 2) for drafts and ordinary raster
 work, or `gemini-3-pro-image` (Nano Banana Pro) for finals and dense copy. A
-minimal request is:
+minimal request uses a mode-600 temporary header file so the key is never
+placed in curl's command-line arguments:
 
 ```bash
+headers_file="$(mktemp)"
+trap 'rm -f "$headers_file"' EXIT
+(
+  umask 077
+  printf 'x-goog-api-key: %s\nContent-Type: application/json\n' "$GEMINI_API_KEY" > "$headers_file"
+)
+chmod 600 "$headers_file"
 curl -sS "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-image:generateContent" \
-  -H "x-goog-api-key: $GEMINI_API_KEY" -H "Content-Type: application/json" \
+  -H "@$headers_file" \
   -d '{"contents":[{"parts":[{"text":"{prompt with style tokens}"}]}]}'
 ```
 

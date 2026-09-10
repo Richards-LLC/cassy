@@ -145,9 +145,14 @@ done
 
 jq '{contents: [{parts: .}]}' "$work/parts.json" > "$work/payload.json"
 endpoint="https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent"
+curl_headers="$work/curl-headers.txt"
+(
+    umask 077
+    printf 'x-goog-api-key: %s\nContent-Type: application/json\n' "$GEMINI_API_KEY" > "$curl_headers"
+)
+chmod 600 "$curl_headers"
 if ! curl -sS --connect-timeout 15 --max-time 180 \
-    -H "x-goog-api-key: $GEMINI_API_KEY" \
-    -H 'Content-Type: application/json' \
+    -H "@$curl_headers" \
     --data-binary "@$work/payload.json" "$endpoint" > "$work/response.json"; then
     echo "error: Nano Banana request failed; check network access and Google AI Studio credentials" >&2
     exit 1

@@ -295,6 +295,10 @@ pub async fn run_daemon_after_fork(
         .unwrap_or_default()
         .factory()
         .ai_enrichment;
+    let merge_sweep = super::runtime::merge_sweep::MergeSweepCoordinator::new(
+        app.cas_dir(),
+        &session_name,
+    );
 
     let mut daemon = FactoryDaemon {
         session_name,
@@ -340,6 +344,7 @@ pub async fn run_daemon_after_fork(
         reported_auth_failed_workers: std::collections::HashMap::new(),
         last_auth_failure_scan: None,
         cancelled_spawns: std::collections::HashSet::new(),
+        merge_sweep,
         last_idle_message_times: HashMap::new(),
         lifecycle_redelivery_attempts: HashMap::new(),
         lifecycle_redelivery_counts: HashMap::new(),

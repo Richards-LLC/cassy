@@ -98,6 +98,34 @@ pub(super) fn register_coordination_lease_telemetry_and_missing(registry: &mut C
     });
 
     registry.register(ConfigMeta {
+        key: "factory.merge_sweep",
+        section: "factory",
+        name: "Post-Merge Workspace Sweep",
+        description: "Run one bounded cargo nextest --workspace --no-fail-fast sweep on each merged epic tip. Disable only when the factory host cannot absorb the additional validation load.",
+        value_type: ConfigType::Bool,
+        default: "true",
+        constraint: Constraint::None,
+        advanced: false,
+        requires_feature: None,
+        keywords: &["factory", "merge", "sweep", "nextest", "workspace", "epic"],
+        use_cases: &["Catch merged-tree regressions before the next merge", "Disable on a deliberately constrained host"],
+    });
+
+    registry.register(ConfigMeta {
+        key: "factory.merge_sweep_timeout_secs",
+        section: "factory",
+        name: "Post-Merge Sweep Timeout",
+        description: "Maximum wall-clock seconds allowed for one post-merge cargo nextest workspace sweep before it is terminated and reported.",
+        value_type: ConfigType::Int,
+        default: "1800",
+        constraint: Constraint::Range(1, 86_400),
+        advanced: true,
+        requires_feature: None,
+        keywords: &["factory", "merge", "sweep", "timeout", "nextest"],
+        use_cases: &["Bound validation on a shared host", "Allow a larger workspace more time to finish"],
+    });
+
+    registry.register(ConfigMeta {
         key: "factory.ai_enrichment.enabled",
         section: "factory",
         name: "AI Enrichment",

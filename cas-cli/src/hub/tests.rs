@@ -2531,3 +2531,58 @@ fn ordinary_relay_traffic_is_never_parsed_as_a_resize_refusal() {
     assert_eq!(super::server::refused_pane_resize(b""), None);
     assert_eq!(super::server::refused_pane_resize(b"not json"), None);
 }
+
+/// cas-6261: the catalog lists supervisor-led sessions only unless the viewer
+/// asks for workers explicitly.
+#[tokio::test]
+async fn sessions_catalog_hides_worker_only_rows_by_default() {
+    let mut bare = fixture_session("bare-shell");
+    bare.supervisor = String::new();
+    bare.workers = vec!["worker-9".into()];
+    let source = RecordingReadModel::with_sessions(vec![fixture_session("factory-a"), bare]);
+    let events = MachineEventBus::new(16);
+    let state = HubState::new(
+        SessionCatalog::new(source),
+        Arc::new(ExactOriginReadAuthorizer("http://127.0.0.1:4173")),
+        MachineIdentity {
+            id: "machine-test".into(),
+        },
+        DaemonConnector::new(SessionMultiplexer::new(8), events.clone()),
+        events,
+    );
+    let app = router(state);
+
+    let names = |body: serde_json::Value| -> Vec<String> {
+        body["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|session| session["name"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    let fetch = |uri: &'static str| {
+        let app = app.clone();
+        async move {
+            let response = app
+                .oneshot(
+                    Request::get(uri)
+                        .header("origin", "http://127.0.0.1:4173")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            serde_json::from_slice::<serde_json::Value>(
+                &to_bytes(response.into_body(), usize::MAX).await.unwrap(),
+            )
+            .unwrap()
+        }
+    };
+    assert_eq!(names(fetch("/v1/sessions").await), vec!["factory-a"]);
+    assert_eq!(names(fetch("/v1/sessions?workers=0").await), vec!["factory-a"]);
+    assert_eq!(
+        names(fetch("/v1/sessions?workers=1").await),
+        vec!["factory-a", "bare-shell"]
+    );
+}

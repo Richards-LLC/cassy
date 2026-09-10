@@ -1173,10 +1173,11 @@ describe("binding Cassy Commander browser invariants", () => {
     expect(socket.sent.map((value) => JSON.parse(value))).toEqual(expect.arrayContaining([
       { proto: 2 },
       { channel: "events", subscribe: true },
-      { channel: "pty:factory-a", subscribe: true },
-      { channel: "pty:factory-b", subscribe: true },
+      // Supervisors only by default (cas-6261): the subscribe names workers off.
+      { channel: "pty:factory-a", subscribe: true, workers: false },
+      { channel: "pty:factory-b", subscribe: true, workers: false },
     ]));
-    expect(socket.sent.filter((value) => value === JSON.stringify({ channel: "pty:factory-a", subscribe: true }))).toHaveLength(1);
+    expect(socket.sent.filter((value) => value === JSON.stringify({ channel: "pty:factory-a", subscribe: true, workers: false }))).toHaveLength(1);
 
     socket.receive(JSON.stringify({
       channel: "pty:factory-a",

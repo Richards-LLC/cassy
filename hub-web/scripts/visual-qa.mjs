@@ -13,6 +13,7 @@ export const FIXTURE_NAMES = [
   "fleet-populated",
   "fleet-empty",
   "session-canvas",
+  "session-workers",
   "transcript",
   "attention-0",
   "attention-12",

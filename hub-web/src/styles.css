@@ -837,6 +837,38 @@ main {
 .secondary-pane-strip .pane.collapsed > header { flex: 1; min-height: 0; padding-block: 0; }
 .secondary-pane-strip .pane.collapsed .terminal-mount { display: none; }
 
+/* Supervisors only by default (cas-6261): one quiet line stands where the
+   worker strip would be, with the single control that reveals workers. */
+.pane-grid.pane-layout.workers-hidden { grid-template-rows: minmax(0, 1fr) auto; }
+.pane-grid.pane-layout.workers-hidden .secondary-pane-strip { min-height: 0; align-items: center; }
+.hidden-workers {
+  display: flex;
+  flex: 1 0 100%;
+  min-height: var(--space-8);
+  margin: 0;
+  padding: 0 var(--space-2);
+  align-items: center;
+  gap: var(--space-3);
+  color: var(--text-mid);
+  font-size: var(--fs-xs);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.hidden-workers-reveal {
+  min-height: var(--button-compact-height);
+  padding: var(--space-1) var(--space-2);
+  color: var(--text-hi);
+  background: var(--bg-raised);
+  border: var(--line-width) solid var(--line-subtle);
+  border-radius: var(--radius-pane);
+  font-size: var(--fs-xs);
+  letter-spacing: normal;
+  text-transform: none;
+}
+.hidden-workers-reveal:hover,
+.hidden-workers-reveal:focus-visible { background: var(--bg-hover); border-color: var(--line-strong); }
+
 .terminal-mount {
   position: relative;
   flex: 1;
@@ -2415,6 +2447,9 @@ dialog form > *,
 
   /* == Unit 4: Phone panes form a stacked ruled worker list == */
   main .pane-grid.pane-layout { grid-template-rows: minmax(0, 1fr) auto; }
+  .pane-grid.pane-layout.workers-hidden .secondary-pane-strip { max-height: none; }
+  .hidden-workers { justify-content: space-between; padding-bottom: env(safe-area-inset-bottom); }
+  .hidden-workers-reveal { min-height: 44px; padding-inline: var(--space-3); }
 
   .pane-grid.pane-layout .secondary-pane-strip {
     flex-direction: column;

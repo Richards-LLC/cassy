@@ -15,8 +15,18 @@ import {
   type AttachSnapshot,
 } from "./connection-state";
 import type { HubSession, LeaseState, PaneInfo, SessionCardSummary, SessionState, StoredMachine } from "./types";
+import { sessionsPath, workersRevealed } from "./worker-visibility";
 
 export type ConnectionState = ConnectionSnapshot;
+
+/** Off by default (cas-6261): worker panes are requested only when the operator asked. */
+function revealWorkers(): boolean {
+  let storage: Storage | undefined;
+  let search = "";
+  try { storage = globalThis.localStorage; } catch { storage = undefined; }
+  try { search = globalThis.location?.search ?? ""; } catch { search = ""; }
+  return workersRevealed(search, storage);
+}
 export type AuthFailureKind = "expired" | "revoked" | "scope-mismatch" | "needs-pairing";
 
 export interface HubMachineInfo {
@@ -286,7 +296,8 @@ export class HubConnectionSupervisor {
 
   async request<T>(method: string, path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
     const startedAt = performance.now();
-    const headers = await dpopHeaders(this.machine, method, path);
+    // The proof binds the bare path; the hub rejects an htu with a query.
+    const headers = await dpopHeaders(this.machine, method, path.split("?")[0] ?? path);
     const response = await fetch(new URL(path, this.machine.baseUrl), {
       method,
       headers: { ...headers, ...(body === undefined ? {} : { "Content-Type": "application/json" }) },
@@ -307,7 +318,7 @@ export class HubConnectionSupervisor {
   }
 
   async refreshSessions(signal?: AbortSignal): Promise<HubSession[]> {
-    const response = await this.request<{ sessions: HubSession[] }>("GET", "/v1/sessions", undefined, signal);
+    const response = await this.request<{ sessions: HubSession[] }>("GET", sessionsPath(revealWorkers()), undefined, signal);
     this.callbacks.onSessions(response.sessions);
     return response.sessions;
   }
@@ -482,6 +493,7 @@ export class HubConnectionSupervisor {
     const endpoint = new URL(`/v1/sessions/${encodeURIComponent(session)}/attach`, this.machine.baseUrl);
     endpoint.protocol = endpoint.protocol === "https:" ? "wss:" : "ws:";
     endpoint.searchParams.set("ticket", ticket.ticket);
+    if (revealWorkers()) endpoint.searchParams.set("workers", "1");
     const socket = new WebSocket(endpoint);
     this.transitionAttach(session, "dialing", "dialing");
     socket.binaryType = "arraybuffer";
@@ -647,7 +659,7 @@ export class HubConnectionSupervisor {
     if (this.machineSubscriptions.has(session)) return;
     this.machineSubscriptions.add(session);
     this.transitionAttach(session, "attaching", "attaching");
-    socket.send(JSON.stringify({ channel: `pty:${session}`, subscribe: true }));
+    socket.send(JSON.stringify({ channel: `pty:${session}`, subscribe: true, workers: revealWorkers() }));
     const timeouts = this.attachTimeouts.get(session) ?? {};
     if (timeouts.ready !== undefined) window.clearTimeout(timeouts.ready);
     timeouts.ready = window.setTimeout(() => {

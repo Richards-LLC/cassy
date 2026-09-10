@@ -46,6 +46,69 @@ mod origin_project_tests {
     }
 }
 
+#[cfg(test)]
+mod assignee_identity_tests {
+    use super::{agent_identity_label, task_assignee_matches_agent};
+    use cas_store::{AgentStore, SqliteAgentStore};
+    use cas_types::{Agent, AgentRole};
+    use tempfile::TempDir;
+
+    fn registered_agents() -> (TempDir, SqliteAgentStore, Agent, Agent) {
+        let temp = TempDir::new().expect("temp dir");
+        let store = SqliteAgentStore::open(temp.path()).expect("agent store");
+        store.init().expect("agent store schema");
+
+        let caller = Agent::new_with_role(
+            "caller-uuid".to_string(),
+            "caller-name".to_string(),
+            AgentRole::Worker,
+        );
+        let other = Agent::new_with_role(
+            "other-uuid".to_string(),
+            "other-name".to_string(),
+            AgentRole::Worker,
+        );
+        store.register(&caller).expect("register caller");
+        store.register(&other).expect("register other");
+        (temp, store, caller, other)
+    }
+
+    #[test]
+    fn uuid_assignee_matches_caller_name() {
+        let (_temp, store, caller, _other) = registered_agents();
+
+        assert!(task_assignee_matches_agent(
+            &store,
+            Some(caller.id.as_str()),
+            &caller,
+        ));
+    }
+
+    #[test]
+    fn name_assignee_matches_caller_uuid() {
+        let (_temp, store, caller, _other) = registered_agents();
+
+        assert!(task_assignee_matches_agent(
+            &store,
+            Some(caller.name.as_str()),
+            &caller,
+        ));
+    }
+
+    #[test]
+    fn different_agent_does_not_match_and_labels_both_forms() {
+        let (_temp, store, caller, other) = registered_agents();
+
+        assert!(!task_assignee_matches_agent(
+            &store,
+            Some(other.id.as_str()),
+            &caller,
+        ));
+        assert_eq!(agent_identity_label(&store, &other.id), "other-name (other-uuid)");
+        assert_eq!(agent_identity_label(&store, &caller.name), "caller-name (caller-uuid)");
+    }
+}
+
 /// Gate a lifecycle action on task ownership.
 ///
 /// Returns `Ok(Some(project_id))` when the row carries **no** origin at all and

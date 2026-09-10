@@ -7,6 +7,40 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.24.0] - 2026-09-10
+
+### Added
+- MCP proxy configuration now expands `${VAR}` and `${VAR:-default}` values,
+  reporting required unset values as `missing_credential_env` (#803).
+- Hub startup is a lock, bind, and process-record transaction; `--force`
+  recovers wedged holders during stop/restart, and doctor reports the remedy
+  (#804).
+- Servers run in dedicated process groups so stopping a server terminates and
+  verifies its nested process tree (#796).
+
+### Changed
+- Task start, claim, and close accept assignees by UUID or name (#799).
+- Factory supervisors route coordination through the CAS message path instead
+  of the host `SendMessage` transport (#793).
+- Supervisors can close worker-assigned gates, while gate-to-worker assignment
+  now warns about the ownership boundary (#800).
+- Epic close uses a bounded, batched merge-gate evaluation and fails closed
+  with a partial child listing when its budget expires (#802).
+- Close retries preserve approved verification provenance, alias superseded
+  dispatches, and bind post-merge proof to the published target (#755, #753).
+- Spawn-time assignment boilerplate is suppressed after a task becomes
+  started, blocked, awaiting merge, or terminal (#756).
+- Worker proxies inherit credentials from the configured credentials file and
+  preserve symlinked profile write-through (#758).
+- Scoped proof ownership resolves module declarations instead of matching
+  arbitrary source-path test data (#778).
+
+### Fixed
+- Oversized embedding units are truncated with an explicit receipt and retried
+  instead of being quarantined permanently (#805).
+- Image generation sends the API key through a mode-600 header file rather
+  than exposing it in the curl command line (#757).
+
 ## [3.23.0] - 2026-09-10
 
 ### Added

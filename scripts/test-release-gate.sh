@@ -287,6 +287,26 @@ printf 'const VERSION: &str = "9.99.7-rc.1";\n' >"$repo/cas-cli/src/version.rs"
 output="$(run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 2>&1 || true)"
 assert_named_failure version-literals "$output"
 
+# A gitignored build cache that embeds the checkout path (for example a worktree
+# named after the release) must not trip version-literals in a git checkout.
+repo="$(new_fixture version-literal-ignored-cache)"
+(
+    cd "$repo" \
+        && git init -q \
+        && git -c user.email=gate@fixture -c user.name=gate add -A >/dev/null \
+        && printf 'crates/vendor-cache/\n' >>.gitignore \
+        && mkdir -p crates/vendor-cache \
+        && printf 'cache entry for /tmp/release-9.99.7-assembly/src\n' >crates/vendor-cache/paths.txt \
+        && git -c user.email=gate@fixture -c user.name=gate add -A >/dev/null \
+        && git -c user.email=gate@fixture -c user.name=gate commit -qm fixture
+)
+output="$(run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 --only version-literals,scratch-base 2>&1 || true)"
+if grep -qF 'PASS version-literals' <<<"$output"; then
+    ok 'version-literals ignores gitignored caches in a git checkout'
+else
+    bad "version-literals scanned a gitignored cache (output: $output)"
+fi
+
 run_scenario workspace-check GATE_FIXTURE_CHECK_FAIL workspace-tests
 run_scenario macos-check-run GATE_FIXTURE_MACOS_FAIL macos-check
 run_scenario macos-target-install GATE_FIXTURE_RUSTUP_FAIL macos-check

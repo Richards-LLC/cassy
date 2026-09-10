@@ -658,12 +658,66 @@ pub(crate) fn prompt_is_still_deliverable(
             MergeAlertFreshness::Stale
         )
     });
+    let harness_still_waiting = prompt
+        .drop_if_worker_assigned
+        .as_deref()
+        .is_none_or(|worker| {
+            idle_worker_liveness(&repo_root.join(".cas"), worker).is_none_or(|observation| {
+                observation.state
+                    == crate::mcp::tools::service::worker_liveness::Liveness::WaitingForInput
+            })
+        });
     epic_is_current
         && merge_is_still_required
+        && harness_still_waiting
         && prompt
             .drop_if_worker_assigned
             .as_deref()
             .is_none_or(|worker| !worker_now_has_real_assignment(data, worker))
+}
+
+/// Same local evidence as worker_status; task/heartbeat rows cannot prove idle.
+pub(crate) fn idle_worker_liveness(
+    cas_root: &Path,
+    worker: &str,
+) -> Option<crate::mcp::tools::service::worker_liveness::Observation> {
+    let store = crate::store::open_agent_store(cas_root).ok()?;
+    let agents = store.list(None).ok()?;
+    let agent = agents
+        .iter()
+        .filter(|a| a.name == worker)
+        .max_by_key(|a| a.registered_at)?;
+    let threshold = crate::config::Config::load(cas_root)
+        .unwrap_or_default()
+        .factory()
+        .stall_threshold_secs as i64;
+    Some(
+        crate::mcp::tools::service::factory_ops::worker_liveness_for_agent(
+            cas_root,
+            agent,
+            chrono::Utc::now(),
+            threshold,
+        ),
+    )
+}
+
+pub(crate) fn apply_idle_liveness(
+    prompt: &mut Prompt,
+    worker: &str,
+    observation: &crate::mcp::tools::service::worker_liveness::Observation,
+) -> bool {
+    use crate::mcp::tools::service::worker_liveness::Liveness;
+    // A pending merge remains actionable even if the harness starts another
+    // turn. Report that state instead of dropping the delivery notification.
+    if prompt.retract_task.is_none() && observation.state != Liveness::WaitingForInput {
+        return false;
+    }
+    prompt.text = prompt.text.replace(
+        &format!("Worker {worker} is idle while task"),
+        &format!("Worker {worker} has a pending delivery while task"),
+    );
+    prompt.text = format!("{}\n{}", observation.detail(), prompt.text);
+    true
 }
 
 /// Wrap a message with response instructions
@@ -6438,5 +6492,40 @@ mod tests {
                 "unresolvable epic branch must not silently retract: {outcome:?}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn idle_relays_and_merge_relays_use_the_status_verdict() {
+    use crate::mcp::tools::service::worker_liveness::{Liveness, Observation};
+    let prompt = Prompt {
+        target: "supervisor".into(),
+        text: "Worker wolf is idle while task t is awaiting_merge".into(),
+        retract_worker: Some("wolf".into()),
+        retract_task: None,
+        retract_epic: None,
+        drop_if_worker_assigned: None,
+        durable_retry: false,
+    };
+    for state in [
+        Liveness::Executing,
+        Liveness::WaitingForInput,
+        Liveness::Stalled,
+        Liveness::Dead,
+    ] {
+        let observed = Observation {
+            state,
+            evidence: "recorded event; pid 42 S".into(),
+        };
+        assert_eq!(
+            apply_idle_liveness(&mut prompt.clone(), "wolf", &observed),
+            state == Liveness::WaitingForInput
+        );
+        let mut merge = prompt.clone();
+        merge.retract_task = Some("t".into());
+        assert!(apply_idle_liveness(&mut merge, "wolf", &observed));
+        assert!(merge.text.starts_with(&observed.detail()));
+        assert!(!merge.text.contains("is idle while task"));
     }
 }

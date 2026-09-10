@@ -1090,7 +1090,7 @@ impl FactoryApp {
                     }
                 };
 
-            if let Some(prompt) = generate_prompt_at(
+            if let Some(mut prompt) = generate_prompt_at(
                 event,
                 &self.director_data,
                 &unfiltered_data,
@@ -1102,6 +1102,16 @@ impl FactoryApp {
                 merge_alert_evidence.as_ref(),
                 snapshot_at,
             ) {
+                if let DirectorEvent::WorkerIdle { worker, .. } = event {
+                    if let Some(observation) =
+                        super::director::idle_worker_liveness(&self.cas_dir, worker)
+                    {
+                        if !super::director::apply_idle_liveness(&mut prompt, worker, &observation)
+                        {
+                            continue;
+                        }
+                    }
+                }
                 prompts.push(prompt);
             }
         }

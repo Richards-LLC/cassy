@@ -1962,8 +1962,31 @@ fn extract_issue_numbers(text: &str) -> Vec<u64> {
     let regex = Regex::new(r"#([0-9]+)\b").expect("issue reference regex");
     regex
         .captures_iter(text)
-        .filter_map(|capture| capture.get(1)?.as_str().parse().ok())
+        .filter_map(|capture| {
+            let full_match = capture.get(0)?;
+            let start = full_match.start();
+
+            // Skip references preceded by "PR", "PRs", or "pull request"
+            if is_pr_reference(text, start) {
+                return None;
+            }
+
+            capture.get(1)?.as_str().parse().ok()
+        })
         .collect()
+}
+
+fn is_pr_reference(text: &str, hash_position: usize) -> bool {
+    if hash_position == 0 {
+        return false;
+    }
+
+    let before = &text[..hash_position].to_lowercase();
+    // Check if preceded by "PR " or "PRs " or "pull request"
+    before.ends_with("pr ")
+        || before.ends_with("prs ")
+        || before.ends_with("pull request ")
+        || before.ends_with("pull request(s) ")
 }
 
 fn extract_issue_url_numbers(text: &str) -> Vec<u64> {
@@ -2498,5 +2521,47 @@ Dev reply
         assert!(output.contains("  [WARN] source preserved"), "{output}");
         assert!(!output.contains('⚠'));
         assert!(!output.contains('·'));
+    }
+
+    #[test]
+    fn extract_issue_numbers_excludes_pull_request_references() {
+        // PR references should be excluded
+        let text_with_prs = "Merged PR #788 and PR #789 to address issues #790, #791";
+        let issues = extract_issue_numbers(text_with_prs);
+        assert_eq!(issues, vec![790, 791], "Should skip PR #788 and PR #789");
+
+        // PRs (plural) should be excluded
+        let text_with_prs_plural = "PRs #792, #793 were merged; closes #794";
+        let issues = extract_issue_numbers(text_with_prs_plural);
+        assert_eq!(issues, vec![794], "Should skip PRs #792 and #793");
+
+        // pull request should be excluded (case-insensitive)
+        let text_with_pull_request = "Pull request #795 fixes issues #796, #797";
+        let issues = extract_issue_numbers(text_with_pull_request);
+        assert_eq!(issues, vec![796, 797], "Should skip pull request #795");
+
+        // Bare issue references should be kept
+        let text_bare = "This fixes #800 and relates to #801";
+        let issues = extract_issue_numbers(text_bare);
+        assert_eq!(issues, vec![800, 801], "Should keep bare issue references");
+
+        // Issue references in parentheses should be kept
+        let text_paren = "Change (#802) was requested in #803";
+        let issues = extract_issue_numbers(text_paren);
+        assert_eq!(issues, vec![802, 803], "Should keep parenthesized issue references");
+
+        // Real v3.22.1 release notes example
+        let v3_22_1_dev_thread = "• Dev thread — PR #788, #789, #790, #791, #792, #794 deliver v3.22.1";
+        let issues = extract_issue_numbers(v3_22_1_dev_thread);
+        assert_eq!(issues, vec![], "Should skip all PRs in the release notes dev thread");
+
+        // Mix of real issues and PR references
+        let mixed = "closes #767; Merged via PR #786. Related: PR #788, #789, #790, #791, #792, #794";
+        let issues = extract_issue_numbers(mixed);
+        assert_eq!(
+            issues,
+            vec![767],
+            "Should only extract the real issue reference #767"
+        );
     }
 }

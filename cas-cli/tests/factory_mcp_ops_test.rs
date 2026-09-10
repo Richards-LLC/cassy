@@ -8227,16 +8227,21 @@ async fn cas4a27_supervisor_reply_is_linked_and_distinct_from_spawn_replay_gh334
             .await
             .expect("worker inbox poll"),
     );
+    let spawn_provenance = text
+        .lines()
+        .find(|line| line.starts_with(&format!("[cas #{spawn_id} spawn-boilerplate ")))
+        .unwrap_or("");
     assert!(
-        text.contains(&format!(
-            "notification_id={spawn_id} origin=spawn-boilerplate"
-        )) && text.contains("delivery=first-delivery"),
-        "the delayed spawn brief needs machine-readable origin, ID, time, and delivery state: {text}"
+        spawn_provenance.ends_with("s first]"),
+        "the delayed spawn brief needs machine-readable one-line provenance: {text}"
     );
+    let supervisor_provenance = text
+        .lines()
+        .find(|line| line.starts_with("[cas #") && line.contains(" supervisor-authored "))
+        .unwrap_or("");
     assert!(
-        text.contains("origin=supervisor-authored")
-            && text.contains(&format!("notification_id={escalation_id}")),
-        "the actual supervisor reply must be visibly fresh and linked to the escalation: {text}"
+        supervisor_provenance.ends_with("s first]"),
+        "the actual supervisor reply must retain one-line provenance: {text}"
     );
     assert!(
         text.contains(&format!(

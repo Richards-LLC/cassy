@@ -22,6 +22,14 @@ iterate by compiling, then prove only the affected target:
 Package selection alone (`-p cas`) is not a scope here: that package owns many
 test binaries. Reserve full runs for supervisor integration and release gates.
 
+When the task declares `risk=blast-radius`, the final receipt must cover every
+source module named by the attributed diff. Record the exact target list and
+pass count in a progress note as `SCOPED_PROOF: targets=... result=PASS` so the
+close reviewer can compare it with `Proof Targets:`. Platform and concurrency
+risk use typed task notes: `platform_proof` must include a passing macOS
+command; `loaded_proof` must include the whole target, `-j16`, and at least
+three passing loops.
+
 ## The test loop: inner loop vs final proof
 
 Batch before you verify: group related fixes before running the affected target.

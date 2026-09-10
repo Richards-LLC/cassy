@@ -2213,6 +2213,28 @@ mod related_recall_response_tests {
     }
 
     #[tokio::test]
+    async fn create_path_rejects_missing_risk_for_code_tasks_before_persisting() {
+        let temp = TempDir::new().expect("temporary project");
+        let core = CasCore::with_daemon(temp.path().to_path_buf(), None, None);
+        let mut request = plain_task_request("Risk is required");
+        request.risk = None;
+
+        let error = core
+            .cas_task_create(Parameters(request))
+            .await
+            .expect_err("code-task create without risk must be refused");
+        assert!(error.message.contains("risk is required"), "{error}");
+        assert!(
+            core.open_task_store()
+                .expect("task store")
+                .list(None)
+                .expect("list tasks")
+                .is_empty(),
+            "rejected create must not persist a task row"
+        );
+    }
+
+    #[tokio::test]
     async fn create_path_enforces_and_persists_user_facing_demo_statement() {
         let temp = TempDir::new().expect("temporary project");
         let core = CasCore::with_daemon(temp.path().to_path_buf(), None, None);

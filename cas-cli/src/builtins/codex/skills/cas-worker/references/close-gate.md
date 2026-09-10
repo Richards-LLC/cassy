@@ -64,6 +64,17 @@ The 6 checks below apply to every task type. These gates sit on top of them:
 
 - **Spike** (`task_type=spike`) — optional `search_manifest`: a JSON array of the search steps you ran, e.g. `[{"command": "rg -c foo src/", "hits": 3}]`. **Opt-in and warning-only** — it never blocks close. Entries with `hits: 0` (or a manifest that fails to parse) are appended to the task as a loud `ZERO_HIT_SEARCH_WARNING` note, because a search that matches nothing anywhere is more often a broken pattern than a clean corpus (cas-49f1). Supply it whenever your conclusion rests on "I searched and found nothing".
 - **Epic** — closing an epic additionally walks its children and blocks on any child whose recorded work is not merged into the parent branch, not just on child status.
+- **Risk declaration** — read `Risk:` and `Proof Targets:` from `task show` before
+  the final proof. For `risk=blast-radius`, `proof_targets` must cover every
+  changed Rust source module; run the guarded proof with `--proof` and record
+  `SCOPED_PROOF: targets=<complete target set> result=PASS` in a progress note.
+  Close rejects a target list narrower than the attributed delivery diff and
+  names the uncovered modules. For `risk=platform`, add a
+  `note_type=platform_proof` note containing a macOS command and a passing
+  result. For `risk=concurrency`, add a `note_type=loaded_proof` note proving
+  the whole target under `-j16` for at least three loops with a passing result.
+  Combined declarations require both typed receipts; `risk=none` adds no
+  receipt gate.
 
 ## Pre-Close Self-Verification
 

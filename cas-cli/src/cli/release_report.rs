@@ -1959,11 +1959,49 @@ fn parse_key_values(content: &str) -> HashMap<String, String> {
 }
 
 fn extract_issue_numbers(text: &str) -> Vec<u64> {
+    // First, find all PR-style references and mark their numbers for exclusion
+    let pr_numbers = extract_pr_numbers(text);
+
     let regex = Regex::new(r"#([0-9]+)\b").expect("issue reference regex");
     regex
         .captures_iter(text)
-        .filter_map(|capture| capture.get(1)?.as_str().parse().ok())
+        .filter_map(|capture| {
+            let number_str = capture.get(1)?;
+            let number: u64 = number_str.as_str().parse().ok()?;
+
+            // Skip if this number is in the PR list
+            if pr_numbers.contains(&number) {
+                return None;
+            }
+
+            Some(number)
+        })
         .collect()
+}
+
+fn extract_pr_numbers(text: &str) -> Vec<u64> {
+    let mut pr_numbers = Vec::new();
+    let text_lower = text.to_lowercase();
+
+    // Match "PR #N, #M..." or "PRs #N, #M..." or "pull request #N, #M..."
+    // This regex finds PR/PRs/pull request followed by one or more # numbers separated by commas
+    let pattern = Regex::new(r"(?i)(?:^|\s)(?:pr|prs|pull\s+request(?:\(s\))?)\s*(?:#[0-9]+(?:\s*,\s*)?)+")
+        .expect("PR context regex");
+
+    for mat in pattern.find_iter(&text_lower) {
+        let pr_section = mat.as_str();
+        // Extract all numbers from this PR section
+        let number_regex = Regex::new(r"#([0-9]+)").expect("number extraction regex");
+        for num_match in number_regex.captures_iter(pr_section) {
+            if let Some(num_str) = num_match.get(1) {
+                if let Ok(num) = num_str.as_str().parse() {
+                    pr_numbers.push(num);
+                }
+            }
+        }
+    }
+
+    pr_numbers
 }
 
 fn extract_issue_url_numbers(text: &str) -> Vec<u64> {
@@ -2498,5 +2536,47 @@ Dev reply
         assert!(output.contains("  [WARN] source preserved"), "{output}");
         assert!(!output.contains('⚠'));
         assert!(!output.contains('·'));
+    }
+
+    #[test]
+    fn extract_issue_numbers_excludes_pull_request_references() {
+        // PR references should be excluded
+        let text_with_prs = "Merged PR #788 and PR #789 to address issues #790, #791";
+        let issues = extract_issue_numbers(text_with_prs);
+        assert_eq!(issues, vec![790, 791], "Should skip PR #788 and PR #789");
+
+        // PRs (plural) should be excluded
+        let text_with_prs_plural = "PRs #792, #793 were merged; closes #794";
+        let issues = extract_issue_numbers(text_with_prs_plural);
+        assert_eq!(issues, vec![794], "Should skip PRs #792 and #793");
+
+        // pull request should be excluded (case-insensitive)
+        let text_with_pull_request = "Pull request #795 fixes issues #796, #797";
+        let issues = extract_issue_numbers(text_with_pull_request);
+        assert_eq!(issues, vec![796, 797], "Should skip pull request #795");
+
+        // Bare issue references should be kept
+        let text_bare = "This fixes #800 and relates to #801";
+        let issues = extract_issue_numbers(text_bare);
+        assert_eq!(issues, vec![800, 801], "Should keep bare issue references");
+
+        // Issue references in parentheses should be kept
+        let text_paren = "Change (#802) was requested in #803";
+        let issues = extract_issue_numbers(text_paren);
+        assert_eq!(issues, vec![802, 803], "Should keep parenthesized issue references");
+
+        // Real v3.22.1 release notes example
+        let v3_22_1_dev_thread = "• Dev thread — PR #788, #789, #790, #791, #792, #794 deliver v3.22.1";
+        let issues = extract_issue_numbers(v3_22_1_dev_thread);
+        assert_eq!(issues, Vec::<u64>::new(), "Should skip all PRs in the release notes dev thread");
+
+        // Mix of real issues and PR references
+        let mixed = "closes #767; Merged via PR #786. Related: PR #788, #789, #790, #791, #792, #794";
+        let issues = extract_issue_numbers(mixed);
+        assert_eq!(
+            issues,
+            vec![767],
+            "Should only extract the real issue reference #767"
+        );
     }
 }

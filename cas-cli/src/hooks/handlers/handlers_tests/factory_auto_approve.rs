@@ -404,6 +404,74 @@ fn worker_edit_is_auto_approved_without_cas_root() {
 }
 
 #[test]
+fn worker_write_outside_registered_worktree_is_denied_without_cas_root() {
+    let _g = super::env_lock();
+    let _role = set_role_env(Some("worker"));
+    let worktree = tempfile::tempdir().expect("worktree");
+    let primary = tempfile::tempdir().expect("primary checkout");
+    let _clone = set_env_var("CAS_CLONE_PATH", worktree.path().as_os_str());
+    let target = primary.path().join("scripts/draft.sh");
+    let input = HookInput {
+        session_id: "test-session".into(),
+        cwd: worktree.path().to_string_lossy().into_owned(),
+        hook_event_name: "PreToolUse".into(),
+        tool_name: Some("Write".into()),
+        tool_input: Some(serde_json::json!({
+            "file_path": target,
+            "content": "draft",
+        })),
+        ..HookInput::default()
+    };
+
+    let out = handle_pre_tool_use(&input, None).expect("handler ok");
+    let reason = deny_reason(&out).expect("writes outside the worker worktree must be denied");
+    assert!(reason.contains("WORKSPACE CONTRACT"), "{reason}");
+    assert!(
+        reason.contains(worktree.path().to_string_lossy().as_ref()),
+        "{reason}"
+    );
+}
+
+#[test]
+fn worker_shell_writes_outside_registered_worktree_are_denied_without_cas_root() {
+    let _g = super::env_lock();
+    let _role = set_role_env(Some("worker"));
+    let _factory = set_env_var("CAS_FACTORY_MODE", std::ffi::OsStr::new("1"));
+    let worktree = tempfile::tempdir().expect("worktree");
+    let primary = tempfile::tempdir().expect("primary checkout");
+    let _clone = set_env_var("CAS_CLONE_PATH", worktree.path().as_os_str());
+
+    for (command, filename) in [
+        ("echo draft >", "redirect.sh"),
+        ("printf draft >>", "append.sh"),
+        ("tee", "tee.sh"),
+        ("cp source", "copy.sh"),
+        ("mv source", "move.sh"),
+    ] {
+        let target = primary.path().join(filename);
+        let command = format!("{command} {}", target.display());
+        let input = HookInput {
+            session_id: "test-session".into(),
+            cwd: worktree.path().to_string_lossy().into_owned(),
+            hook_event_name: "PreToolUse".into(),
+            tool_name: Some("Bash".into()),
+            tool_input: Some(serde_json::json!({"command": command})),
+            ..HookInput::default()
+        };
+
+        let out = handle_pre_tool_use(&input, None).expect("handler ok");
+        let reason = deny_reason(&out).unwrap_or_else(|| {
+            panic!("shell write must be denied: {command}");
+        });
+        assert!(reason.contains("WORKSPACE CONTRACT"), "{reason}");
+        assert!(
+            reason.contains(worktree.path().to_string_lossy().as_ref()),
+            "{reason}"
+        );
+    }
+}
+
+#[test]
 fn solo_user_write_without_cas_root_is_not_auto_approved() {
     // When CAS_AGENT_ROLE is unset AND cas_root is None, we must still
     // fall through to Claude Code's normal flow — the bypass is strictly

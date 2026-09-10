@@ -1101,6 +1101,10 @@ exec env \
                     "title".to_string(),
                     serde_json::Value::String("proxy tool error fixture".to_string()),
                 ),
+                (
+                    "risk".to_string(),
+                    serde_json::Value::String("none".to_string()),
+                ),
             ])),
         )
         .await

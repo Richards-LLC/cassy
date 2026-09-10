@@ -113,12 +113,19 @@ pub enum EmbedError {
     /// type). Retrying is guaranteed to fail, so the drain must isolate the
     /// offending unit instead of halting the corpus behind it (GH #695).
     Rejected(String),
+    /// The provider explicitly identified an input-token limit violation.
+    /// This is recoverable: the drain shrinks the unit and retries it before
+    /// it considers quarantining the row.
+    Oversized(String),
 }
 
 impl std::fmt::Display for EmbedError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            EmbedError::Unsupported(m) | EmbedError::Failed(m) | EmbedError::Rejected(m) => {
+            EmbedError::Unsupported(m)
+            | EmbedError::Failed(m)
+            | EmbedError::Rejected(m)
+            | EmbedError::Oversized(m) => {
                 write!(f, "{m}")
             }
         }
@@ -176,6 +183,9 @@ pub struct EmbedReport {
     /// `(id, provider message)` for each quarantined unit, so the reason is
     /// reportable rather than only countable.
     pub quarantine_errors: Vec<(String, String)>,
+    /// Units whose input was shortened to stay below the provider token cap.
+    /// This is a successful, searchable outcome rather than a failed unit.
+    pub truncated: usize,
 }
 
 impl EmbedReport {
@@ -307,6 +317,11 @@ impl KnowledgeEmbedder {
                         self.endpoint
                     )));
                 }
+                if is_oversized_rejection(code, &body) {
+                    return Err(EmbedError::Oversized(format!(
+                        "Embedding request rejected with status {code}: {body}"
+                    )));
+                }
                 if is_provider_rejection(code, &body) {
                     return Err(EmbedError::Rejected(format!(
                         "Embedding request rejected with status {code}: {body}"
@@ -337,29 +352,62 @@ impl KnowledgeEmbedder {
     }
 }
 
-/// Longest text this drain will send for one unit.
-///
-/// The provider's model caps input at 8,192 tokens. GH #695 measured the cliff
-/// on real commits: 34,139 chars embedded, 43,392 chars was refused — roughly
-/// four chars per token. 24,000 chars (~6k tokens) sits comfortably under it
-/// with room for the tokenizer's worst case on dense text.
-///
-/// Truncating beats quarantining here. A squash-merge commit whose body
-/// concatenates 2,800 lines of sub-commit messages still has its subject and
-/// leading summary in the first 24k chars, so a truncated vector is a useful
-/// answer to "what was this commit about"; no vector at all is not. Quarantine
-/// remains the sink for whatever the provider still refuses.
+/// Maximum input-token budget advertised by the embedding provider.
+pub const MAX_EMBED_INPUT_TOKENS: usize = 8_192;
+
+/// Tokens reserved for provider-side framing and tokenizer variance.
+pub const EMBED_TOKEN_SAFETY_MARGIN: usize = 256;
+
+/// Conservative byte budget for one embedding input.
+pub const MAX_EMBED_TEXT_BYTES: usize = MAX_EMBED_INPUT_TOKENS - EMBED_TOKEN_SAFETY_MARGIN;
+
+/// Legacy character budget retained as a second guard for ordinary text.
+/// `MAX_EMBED_TEXT_BYTES` is the load-bearing limit because character count is
+/// not a token-count estimate for dense Unicode or punctuation-heavy text.
 pub const MAX_EMBED_TEXT_CHARS: usize = 24_000;
 
-/// Cut `text` to [`MAX_EMBED_TEXT_CHARS`] on a char boundary.
+/// Estimate provider tokens conservatively without shipping a tokenizer.
+///
+/// Provider BPE tokenizers operate over UTF-8 bytes, and every token consumes
+/// at least one byte. The byte length is therefore a safe upper bound. It is
+/// intentionally conservative: a false positive causes harmless truncation,
+/// while an underestimate recreates the permanent-quarantine bug.
+pub fn estimate_embedding_tokens(text: &str) -> usize {
+    text.len()
+}
+
+/// Cut `text` to a byte and character boundary under `max_bytes`.
 ///
 /// Char-counted, not byte-sliced: a naive `&text[..n]` panics mid-codepoint on
 /// any commit message with an emoji or accented name in it.
-pub fn cap_embedding_text(text: String) -> String {
-    if text.chars().count() <= MAX_EMBED_TEXT_CHARS {
-        return text;
+fn truncate_embedding_text_to(text: String, max_bytes: usize) -> (String, bool) {
+    if text.chars().count() <= MAX_EMBED_TEXT_CHARS && estimate_embedding_tokens(&text) <= max_bytes
+    {
+        return (text, false);
     }
-    text.chars().take(MAX_EMBED_TEXT_CHARS).collect()
+    let mut end = text.len().min(max_bytes);
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    (text[..end].to_string(), true)
+}
+
+/// Prepare one unit for the provider and report whether it was truncated.
+pub fn cap_embedding_text_with_status(text: String) -> (String, bool) {
+    truncate_embedding_text_to(text, MAX_EMBED_TEXT_BYTES)
+}
+
+/// Cut `text` to the provider-safe budget on a char boundary.
+pub fn cap_embedding_text(text: String) -> String {
+    cap_embedding_text_with_status(text).0
+}
+
+/// Return a smaller retry payload after the provider reports an input-token
+/// rejection. The caller owns the retry marker; this helper only guarantees
+/// progress toward a payload the provider can accept.
+pub fn shrink_embedding_text(text: &str) -> Option<String> {
+    let target = text.len() / 2;
+    (target > 0).then(|| truncate_embedding_text_to(text.to_string(), target).0)
 }
 
 /// Is this HTTP answer the provider refusing the payload, rather than the
@@ -389,6 +437,23 @@ pub fn is_provider_rejection(status: u16, body: &str) -> bool {
         .get(..3)
         .and_then(|code| code.parse::<u16>().ok())
         .is_some_and(|code| (400..500).contains(&code))
+}
+
+/// Whether the provider rejected the input specifically for exceeding its
+/// token limit. Other 400s remain generic refusals and retain quarantine's
+/// existing behavior.
+pub fn is_oversized_rejection(status: u16, body: &str) -> bool {
+    if !matches!(status, 400 | 413 | 422) {
+        let lower = body.to_ascii_lowercase();
+        if !lower.contains("embedding_input_rejected") {
+            return false;
+        }
+    }
+    let lower = body.to_ascii_lowercase();
+    lower.contains("embedding_input_rejected")
+        || lower.contains("maximum input length")
+        || lower.contains("token limit")
+        || lower.contains("max tokens")
 }
 
 /// Extract vectors from the committed response shape.
@@ -936,14 +1001,27 @@ pub struct EmbedUnit {
     pub id: String,
     /// The text sent to the provider.
     pub text: String,
+    /// Whether the original unit was shortened before embedding.
+    pub truncated: bool,
 }
 
 impl EmbedUnit {
     pub fn new(key: impl Into<String>, id: impl Into<String>, text: impl Into<String>) -> Self {
+        Self::new_with_truncation(key, id, text, false)
+    }
+
+    pub fn new_with_truncation(
+        key: impl Into<String>,
+        id: impl Into<String>,
+        text: impl Into<String>,
+        already_truncated: bool,
+    ) -> Self {
+        let (text, capped) = cap_embedding_text_with_status(text.into());
         Self {
             key: key.into(),
             id: id.into(),
-            text: text.into(),
+            text,
+            truncated: already_truncated || capped,
         }
     }
 }
@@ -1031,21 +1109,44 @@ fn drain_chunk(
     report.requests += 1;
     let vectors = match embedder.embed_batch(&texts) {
         Ok(vectors) => vectors,
+        Err(EmbedError::Oversized(message)) => {
+            if let [unit] = chunk {
+                if let Some(text) = shrink_embedding_text(&unit.text) {
+                    let smaller = EmbedUnit {
+                        key: unit.key.clone(),
+                        id: unit.id.clone(),
+                        text,
+                        truncated: true,
+                    };
+                    return drain_chunk(
+                        embedder,
+                        cache,
+                        std::slice::from_ref(&smaller),
+                        limiter,
+                        mark,
+                        quarantine,
+                        report,
+                    );
+                }
+            }
+            if chunk.len() > 1 {
+                let (left, right) = chunk.split_at(chunk.len() / 2);
+                let left_ok = drain_chunk(embedder, cache, left, limiter, mark, quarantine, report);
+                let right_ok =
+                    drain_chunk(embedder, cache, right, limiter, mark, quarantine, report);
+                return left_ok && right_ok;
+            }
+            if quarantine.is_some() {
+                return quarantine_rejected_unit(chunk, &message, quarantine, report);
+            }
+            report.request_errors.push(message);
+            report.deferred += chunk.len();
+            return false;
+        }
         Err(EmbedError::Rejected(message)) if quarantine.is_some() => {
             if let [unit] = chunk {
                 // Isolated: this unit alone is what the provider refuses.
-                let sink = quarantine
-                    .as_mut()
-                    .expect("guard proved the sink is present");
-                match sink(&unit.id, &message) {
-                    Ok(()) => {
-                        report.quarantined += 1;
-                        report
-                            .quarantine_errors
-                            .push((unit.id.clone(), message.clone()));
-                    }
-                    Err(e) => report.errors.push((unit.id.clone(), e)),
-                }
+                quarantine_rejected_unit(std::slice::from_ref(unit), &message, quarantine, report);
                 return true;
             }
             // Split and re-attempt: the refusal belongs to some subset, and
@@ -1078,11 +1179,40 @@ fn drain_chunk(
         }
         match cache.put(&unit.key, vector) {
             Ok(()) => match mark(&unit.id) {
-                Ok(()) => report.embedded += 1,
+                Ok(()) => {
+                    report.embedded += 1;
+                    if unit.truncated {
+                        report.truncated += 1;
+                    }
+                }
                 Err(e) => report.errors.push((unit.id.clone(), e)),
             },
             Err(e) => report.errors.push((unit.id.clone(), e.to_string())),
         }
+    }
+    true
+}
+
+fn quarantine_rejected_unit(
+    chunk: &[EmbedUnit],
+    message: &str,
+    quarantine: &mut Option<&mut dyn FnMut(&str, &str) -> Result<(), String>>,
+    report: &mut EmbedReport,
+) -> bool {
+    let Some(unit) = chunk.first() else {
+        return true;
+    };
+    let sink = quarantine
+        .as_mut()
+        .expect("guard proved the sink is present");
+    match sink(&unit.id, message) {
+        Ok(()) => {
+            report.quarantined += 1;
+            report
+                .quarantine_errors
+                .push((unit.id.clone(), message.to_string()));
+        }
+        Err(e) => report.errors.push((unit.id.clone(), e)),
     }
     true
 }
@@ -1453,6 +1583,17 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn oversized_provider_rejections_are_distinguished_from_other_400s() {
+        assert!(is_oversized_rejection(
+            400,
+            r#"{"error":"embedding_input_rejected","message":"Invalid 'input[0]': maximum input length is 8192 tokens."}"#
+        ));
+        assert!(is_oversized_rejection(413, "token limit exceeded"));
+        assert!(!is_oversized_rejection(400, "malformed input"));
+        assert!(!is_oversized_rejection(502, "upstream unavailable"));
+    }
+
     /// Every corpus that builds embedding text must stay under the model's
     /// input cap — a long knowledge page is the same poison shape as the
     /// 138k-char commit body from GH #695.
@@ -1462,9 +1603,19 @@ mod tests {
 
         let huge = "→".repeat(MAX_EMBED_TEXT_CHARS + 500);
         let capped = cap_embedding_text(huge);
-        assert_eq!(capped.chars().count(), MAX_EMBED_TEXT_CHARS);
+        assert!(capped.chars().count() < MAX_EMBED_TEXT_CHARS);
+        assert!(estimate_embedding_tokens(&capped) <= MAX_EMBED_TEXT_BYTES);
         // Multi-byte safety: a byte slice here would panic mid-codepoint.
         assert!(capped.chars().all(|c| c == '→'));
+    }
+
+    #[test]
+    fn token_safe_cap_handles_dense_text_that_char_heuristics_miss() {
+        let dense = "é".repeat(MAX_EMBED_TEXT_CHARS);
+        let (capped, truncated) = cap_embedding_text_with_status(dense);
+        assert!(truncated);
+        assert!(estimate_embedding_tokens(&capped) <= MAX_EMBED_TEXT_BYTES);
+        assert!(capped.is_char_boundary(capped.len()));
     }
 
     #[test]

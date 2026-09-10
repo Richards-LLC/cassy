@@ -19,7 +19,7 @@ failure_log_codex_rel='cas-cli/src/builtins/codex/skills/cas-cut-release/referen
 failure_log_grok_rel='cas-cli/src/builtins/grok/skills/cas-cut-release/references/failure-log.md'
 readonly -a gate_check_ids=(
     scratch-base epic-worktree-fresh epic-worktree-zig failure-log ancestor-proxy-config
-    version-literals fixture-paths workspace-tests hub-web-dist-drift hub-web-visual-qa nextest doctests archive-mode
+    version-literals fixture-paths workspace-tests macos-check hub-web-dist-drift hub-web-visual-qa nextest doctests archive-mode
     snapshot-portability builtin-projections changelog-and-versions release-script
     procedure-guardrails working-tree
 )
@@ -199,7 +199,7 @@ row_cache_key() {
     local -a inputs=()
     case "$name" in
         hub-web-visual-qa|hub-web-dist-drift) inputs=(hub-web scripts .github) ;;
-        fixture-paths|workspace-tests|nextest|doctests|archive-mode|snapshot-portability)
+        fixture-paths|workspace-tests|macos-check|nextest|doctests|archive-mode|snapshot-portability)
             inputs=(.) ;;
         *) return 1 ;;
     esac
@@ -589,6 +589,19 @@ check_workspace_tests() {
     "$cargo_bin" check --workspace --tests
 }
 
+check_macos() {
+    local rustup_bin="${RUSTUP:-rustup}"
+    if ! command -v "$rustup_bin" >/dev/null 2>&1; then
+        printf 'macos-check: rustup is unavailable; install rustup before checking aarch64-apple-darwin\n'
+        return 1
+    fi
+    if ! "$rustup_bin" target add aarch64-apple-darwin; then
+        printf 'macos-check: rustup target add aarch64-apple-darwin failed\n'
+        return 1
+    fi
+    "$cargo_bin" check --workspace --tests --target aarch64-apple-darwin
+}
+
 # The merge queue validates the whole workspace, so the suite and archive rows
 # do too (cas-1f6e: a cas-mux snapshot test failed in the queue after a local
 # `-p cas` gate passed). The non-cas crates add roughly a minute to each row.
@@ -971,6 +984,9 @@ run_check fixture-paths \
 run_check workspace-tests \
     "$cargo_bin check --workspace --tests" \
     check_workspace_tests
+run_check macos-check \
+    "$cargo_bin check --workspace --tests --target aarch64-apple-darwin (rustup target add preflight)" \
+    check_macos
 run_check hub-web-dist-drift \
     'npm ci --no-audit --no-fund && npm run build && git diff --exit-code -- dist' \
     check_hub_web_dist_drift

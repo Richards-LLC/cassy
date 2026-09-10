@@ -69,7 +69,7 @@ run_dir="$artifacts_root/v$version-$worktree_name"
 pid_file="$run_dir/gate.pid"
 readonly -a gate_rows=(
     scratch-base epic-worktree-fresh epic-worktree-zig failure-log ancestor-proxy-config
-    version-literals fixture-paths workspace-tests hub-web-dist-drift hub-web-visual-qa nextest doctests archive-mode
+    version-literals fixture-paths workspace-tests macos-check hub-web-dist-drift hub-web-visual-qa nextest doctests archive-mode
     snapshot-portability builtin-projections changelog-and-versions release-script
     procedure-guardrails working-tree
 )

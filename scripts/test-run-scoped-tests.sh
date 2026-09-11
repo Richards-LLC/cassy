@@ -378,6 +378,65 @@ expect pass "SCOPED_PROOF: targets=" \
     "proof: nested integration module resolves to its owning binary" \
     bash -c "cd '${surface_repo}' && '${SURFACE_GUARD}' --base main -- -p cas --lib worker_commit_guard_tests --test factory_mcp_ops_test --test mcp_tools_test --test builtin_archive_portability_test --test hook_schema"
 
+# A WorkTarget proof must diff from the task's own integration branch rather
+# than from main. Two commits already landed on the epic branch before the
+# worker touched one source module; without the target branch those unrelated
+# modules are incorrectly demanded by --proof.
+work_target_repo="${tmpdir}/work-target-repo"
+mkdir -p "${work_target_repo}/cas-cli/src" "${work_target_repo}/cas-cli/tests"
+git -C "${work_target_repo}" init -q -b main
+printf 'base\n' >"${work_target_repo}/cas-cli/src/base.rs"
+git -C "${work_target_repo}" add .
+git -C "${work_target_repo}" -c user.name=scoped-test-fixture -c user.email=scoped-test-fixture@example.invalid \
+    commit -qm base
+git -C "${work_target_repo}" update-ref refs/remotes/origin/main "$(git -C "${work_target_repo}" rev-parse HEAD)"
+git -C "${work_target_repo}" checkout -qb epic
+printf 'epic first\n' >"${work_target_repo}/cas-cli/src/epic_first.rs"
+git -C "${work_target_repo}" add .
+git -C "${work_target_repo}" -c user.name=scoped-test-fixture -c user.email=scoped-test-fixture@example.invalid \
+    commit -qm epic-first
+printf 'epic second\n' >"${work_target_repo}/cas-cli/src/epic_second.rs"
+git -C "${work_target_repo}" add .
+git -C "${work_target_repo}" -c user.name=scoped-test-fixture -c user.email=scoped-test-fixture@example.invalid \
+    commit -qm epic-second
+git -C "${work_target_repo}" checkout -qb proof
+printf 'worker change\n' >"${work_target_repo}/cas-cli/src/worker.rs"
+git -C "${work_target_repo}" add .
+git -C "${work_target_repo}" -c user.name=scoped-test-fixture -c user.email=scoped-test-fixture@example.invalid \
+    commit -qm worker-change
+
+no_work_target_status=0
+no_work_target_output="$(cd "${work_target_repo}" && "${SURFACE_GUARD}" -- -p cas --lib worker 2>&1)" || no_work_target_status=$?
+if [[ "${no_work_target_status}" -ne 0 ]] \
+    && [[ "${no_work_target_output}" == *"SCOPED_PROOF SURFACE: base=origin/main"* ]] \
+    && [[ "${no_work_target_output}" == *"missing library module 'epic_first'"* ]]; then
+    pass_count=$((pass_count + 1))
+    echo "ok   proof: no WorkTarget keeps the origin/main baseline"
+else
+    fail_count=$((fail_count + 1))
+    echo "FAIL proof: no WorkTarget baseline was not origin/main: ${no_work_target_output}"
+fi
+work_target_base="$(git -C "${work_target_repo}" merge-base epic proof)"
+work_target_output="$(cd "${work_target_repo}" && SCOPED_PROOF_TARGET_BRANCH=epic "${SURFACE_GUARD}" -- -p cas --lib worker 2>&1)"
+if [[ "${work_target_output}" == *"SCOPED_PROOF SURFACE: base=epic merge-base=${work_target_base}"* ]] \
+    && [[ "${work_target_output}" == *"covered committed diff"* ]]; then
+    pass_count=$((pass_count + 1))
+    echo "ok   proof: WorkTarget baseline is the epic merge-base (${work_target_base})"
+else
+    fail_count=$((fail_count + 1))
+    echo "FAIL proof: WorkTarget baseline was not selected: ${work_target_output}"
+fi
+work_target_runner_stub="$(make_stub cargo-work-target-proof 0 <<'EOF'
+    Summary [   0.001s] 1 tests run: 1 passed, 0 skipped
+EOF
+)"
+mkdir -p "${work_target_repo}/scripts"
+cp "${SURFACE_GUARD}" "${work_target_repo}/scripts/check-scoped-test-surface.sh"
+cp "${GUARD}" "${work_target_repo}/scripts/run-scoped-tests.sh"
+expect pass "SCOPED_PROOF: targets=lib:worker result=PASS base=${work_target_base}" \
+    "proof runner: WorkTarget baseline is carried by the passing receipt" \
+    bash -c "cd '${work_target_repo}' && CARGO='${work_target_runner_stub}' SCOPED_PROOF_TARGET_BRANCH=epic '${work_target_repo}/scripts/run-scoped-tests.sh' --proof -p cas --lib worker"
+
 # Builtin skill/reference changes must include the cross-flavor, agent-contract,
 # and path-specific guardrail binaries. The latter is discovered from the
 # guardrail's literal builtin path, so a compact-reference edit cannot claim

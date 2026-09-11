@@ -10903,6 +10903,12 @@ mod tests {
     fn registration_brief_warns_only_for_out_of_contract_artifact_paths() {
         let temp = tempfile::TempDir::new().unwrap();
         let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        let artifacts_root = temp.path().join("artifacts");
+        let mut config = crate::config::Config::default();
+        let mut factory = crate::config::FactoryConfig::default();
+        factory.artifacts_root = Some(artifacts_root.display().to_string());
+        config.factory = Some(factory);
+        config.save(&cas_dir).unwrap();
         let worktree = temp.path().join("worker-worktree");
         std::fs::create_dir(&worktree).unwrap();
 
@@ -10955,8 +10961,10 @@ mod tests {
             .iter()
             .find(|prompt| prompt.prompt.contains("cas-clean-path"))
             .expect("clean task brief");
-        let resolved_stale_root =
-            crate::config::resolved_factory_artifacts_root(None).join("cas-stale-path");
+        let resolved_stale_root = crate::config::resolved_factory_artifacts_root(
+            Some(artifacts_root.to_str().expect("artifacts root utf8")),
+        )
+        .join("cas-stale-path");
         assert!(
             stale_prompt.prompt.contains("Workspace-contract warning"),
             "out-of-contract path must be surfaced before work begins: {}",

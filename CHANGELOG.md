@@ -7,6 +7,15 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.25.3] - 2026-09-11
+
+### Fixed
+- The `Scoped Validation (fast)` CI tier no longer requires ripgrep on the
+  runner: the proof-surface script falls back to `git grep` (#836).
+- The director's stalled-supervisor relay distinguishes a merged delivery whose
+  close is blocked from an unmerged one, posts the close rejection once, and
+  stops repeating the merge demand (#835).
+
 ## [3.25.2] - 2026-09-11
 
 ### Fixed

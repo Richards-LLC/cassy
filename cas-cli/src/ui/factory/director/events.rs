@@ -24,6 +24,19 @@ pub enum SupervisorActionableState {
         /// `(task id, delivery branch, live tip)` in deterministic task order.
         branches: Vec<(String, String, String)>,
     },
+    /// Delivery is already reachable from its target, but the task remains
+    /// parked because the close gate rejected it. This is a different
+    /// supervisor action from merging a genuinely unmerged factory branch.
+    MergeCloseBlocked {
+        tasks: Vec<MergedCloseBlockedTask>,
+    },
+    /// A stalled epic has both genuinely unmerged deliveries and deliveries
+    /// that are already merged but still blocked at close. Keep both facts in
+    /// one actionable state so neither class is hidden by the other.
+    MergeQueue {
+        branches: Vec<(String, String, String)>,
+        merged_close_blocked: Vec<MergedCloseBlockedTask>,
+    },
     AssignReadyWork {
         task_ids: Vec<String>,
         idle_workers: Vec<String>,
@@ -47,6 +60,24 @@ impl SupervisorActionableState {
                     "Drive to the exit: merge the ready delivery branch(es) into the focused epic now:\n{rows}"
                 )
             }
+            Self::MergeCloseBlocked { tasks } => format!(
+                "Drive to the exit: delivery is already merged, but close is blocked; do not merge the factory branch again:\n{}",
+                render_merged_close_blocked(tasks)
+            ),
+            Self::MergeQueue {
+                branches,
+                merged_close_blocked,
+            } => {
+                let unmerged = Self::MergeBranches {
+                    branches: branches.clone(),
+                }
+                .next_step_text();
+                let merged = format!(
+                    "Delivery already merged but close is blocked; do not merge those factory branches again:\n{}",
+                    render_merged_close_blocked(merged_close_blocked)
+                );
+                format!("{unmerged}\n{merged}")
+            }
             Self::AssignReadyWork {
                 task_ids,
                 idle_workers,
@@ -62,6 +93,94 @@ impl SupervisorActionableState {
     }
 }
 
+/// Evidence for a parked task whose recorded delivery anchor is already on
+/// the resolved merge target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MergedCloseBlockedTask {
+    pub task_id: String,
+    pub factory_branch: String,
+    pub anchor: String,
+    pub target_branch: String,
+    pub target_tip: String,
+    pub close_rejection: String,
+}
+
+fn render_merged_close_blocked(tasks: &[MergedCloseBlockedTask]) -> String {
+    tasks
+        .iter()
+        .map(|task| {
+            format!(
+                "- {}: {} anchor {} is already reachable from {} @ {}. Last close rejection: {}. Suggested close: `mcp__cs__task action=close id={}` (or supervisor `mcp__cs__task action=close id={} supervisor_override=true reason=\"merged delivery verified; close rejection: {}\"`).",
+                task.task_id,
+                task.factory_branch,
+                task.anchor,
+                task.target_branch,
+                task.target_tip,
+                task.close_rejection,
+                task.task_id,
+                task.task_id,
+                task.close_rejection,
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn merged_close_blocked_key(tasks: &[MergedCloseBlockedTask]) -> String {
+    tasks
+        .iter()
+        .map(|task| {
+            format!(
+                "{}:{}:{}:{}",
+                task.task_id, task.anchor, task.target_branch, task.target_tip
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("|")
+}
+
+impl SupervisorActionableState {
+    /// Stable dedupe key for merged-but-close-blocked relay rows. The key
+    /// intentionally changes only when the task identity/anchor, target ref,
+    /// or target tip changes; a repeated supervisor-stall sample must not
+    /// manufacture another close demand for the same merged delivery.
+    pub(crate) fn merged_close_blocked_relay_key(&self) -> Option<String> {
+        let tasks = match self {
+            Self::MergeCloseBlocked { tasks } | Self::MergeQueue {
+                merged_close_blocked: tasks,
+                ..
+            } if !tasks.is_empty() => tasks,
+            _ => return None,
+        };
+        Some(format!("merged-close-blocked:{}", merged_close_blocked_key(tasks)))
+    }
+
+    /// Render only the genuinely unmerged portion of a mixed merge queue.
+    pub(crate) fn unmerged_merge_state(&self) -> Option<Self> {
+        match self {
+            Self::MergeQueue { branches, .. } if !branches.is_empty() => {
+                Some(Self::MergeBranches {
+                    branches: branches.clone(),
+                })
+            }
+            _ => None,
+        }
+    }
+}
+
+/// Resolve the branch a child task delivers into. A task-level WorkTarget
+/// wins; otherwise the parent epic's branch is the legacy target.
+fn merge_target_for_task(data: &DirectorData, task: &TaskSummary) -> Option<String> {
+    task.branch.clone().or_else(|| {
+        task.epic.as_ref().and_then(|epic_id| {
+            data.epic_tasks
+                .iter()
+                .find(|epic| epic.id == *epic_id)
+                .and_then(|epic| epic.branch.clone())
+        })
+    })
+}
+
 /// Persistable per-factory-session accounting for supervisor stalls.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SupervisorStallTracker {
@@ -74,6 +193,11 @@ pub struct SupervisorStallTracker {
     /// Last wake accepted for delivery in this session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_wake_at: Option<DateTime<Utc>>,
+    /// Stable merged-delivery state most recently delivered. A changed anchor
+    /// or target tip must wake immediately, while an unchanged merged
+    /// delivery must not refire the same close demand every ten minutes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_merged_close_blocked_key: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -116,10 +240,28 @@ impl SupervisorStallTracker {
             .last_wake_at
             .map(|last| (now - last).num_seconds() >= SUPERVISOR_STALL_REFIRE_SECS)
             .unwrap_or(true);
-        let wake = if condition_true && refire_due {
+        let merged_key = actionable.as_ref().and_then(|action| {
+            matches!(action, SupervisorActionableState::MergeCloseBlocked { .. })
+                .then(|| action.merged_close_blocked_relay_key())
+                .flatten()
+        });
+        let merged_state_repeated = merged_key.as_ref().is_some_and(|key| {
+            self.last_merged_close_blocked_key.as_ref() == Some(key)
+        });
+        let wake = if condition_true
+            && if merged_key.is_some() {
+                !merged_state_repeated
+            } else {
+                refire_due
+            }
+        {
             self.last_wake_at = Some(now);
+            self.last_merged_close_blocked_key = merged_key;
             actionable
         } else {
+            if !condition_true || merged_key.is_none() {
+                self.last_merged_close_blocked_key = None;
+            }
             None
         };
 
@@ -151,7 +293,38 @@ pub(crate) fn supervisor_actionable_state(
     held_workers: &HashSet<String>,
     now: DateTime<Utc>,
     idle_after_secs: u64,
+    resolve_branch_tip: impl FnMut(&str) -> Option<String>,
+) -> Option<SupervisorActionableState> {
+    supervisor_actionable_state_with_merge_classifier(
+        data,
+        focused_epic_id,
+        supervisor_name,
+        held_workers,
+        now,
+        idle_after_secs,
+        resolve_branch_tip,
+        |_, _, _, _| None,
+    )
+}
+
+/// Compute the supervisor's next action while allowing production to classify
+/// a parked delivery against live Git and task-store evidence. The plain
+/// [`supervisor_actionable_state`] wrapper preserves the pure legacy behavior
+/// used by display/unit callers that do not have a repository-backed checker.
+pub(crate) fn supervisor_actionable_state_with_merge_classifier(
+    data: &DirectorData,
+    focused_epic_id: Option<&str>,
+    supervisor_name: &str,
+    held_workers: &HashSet<String>,
+    now: DateTime<Utc>,
+    idle_after_secs: u64,
     mut resolve_branch_tip: impl FnMut(&str) -> Option<String>,
+    mut classify_merged_close_blocked: impl FnMut(
+        &TaskSummary,
+        &str,
+        &str,
+        Option<&str>,
+    ) -> Option<MergedCloseBlockedTask>,
 ) -> Option<SupervisorActionableState> {
     let epic_id = focused_epic_id?;
     let epic_is_open = data.epic_tasks.iter().any(|epic| {
@@ -165,29 +338,58 @@ pub(crate) fn supervisor_actionable_state(
         return None;
     }
 
-    let mut mergeable = data
-        .in_progress_tasks
-        .iter()
-        .filter(|task| {
-            task.epic.as_deref() == Some(epic_id) && task.status == TaskStatus::AwaitingMerge
-        })
-        .filter_map(|task| {
-            let assignee = task.assignee.as_deref()?;
-            let worker = data
-                .agent_id_to_name
-                .get(assignee)
-                .map(String::as_str)
-                .unwrap_or(assignee);
-            let branch = format!("factory/{worker}");
-            let tip = resolve_branch_tip(&branch).unwrap_or_else(|| "tip-unresolved".to_string());
-            Some((task.id.clone(), branch, tip))
-        })
-        .collect::<Vec<_>>();
+    let mut mergeable = Vec::new();
+    let mut merged_close_blocked = Vec::new();
+    for task in data.in_progress_tasks.iter().filter(|task| {
+        task.epic.as_deref() == Some(epic_id) && task.status == TaskStatus::AwaitingMerge
+    }) {
+        let Some(assignee) = task.assignee.as_deref() else {
+            continue;
+        };
+        let worker = data
+            .agent_id_to_name
+            .get(assignee)
+            .map(String::as_str)
+            .unwrap_or(assignee);
+        let branch = format!("factory/{worker}");
+        let tip = resolve_branch_tip(&branch);
+        if let Some(target) = merge_target_for_task(data, task)
+            && let Some(merged) = classify_merged_close_blocked(
+                task,
+                &branch,
+                &target,
+                tip.as_deref(),
+            )
+        {
+            merged_close_blocked.push(merged);
+            continue;
+        }
+        mergeable.push((
+            task.id.clone(),
+            branch,
+            tip.unwrap_or_else(|| "tip-unresolved".to_string()),
+        ));
+    }
     mergeable.sort_by(|left, right| left.0.cmp(&right.0));
-    if !mergeable.is_empty() {
-        return Some(SupervisorActionableState::MergeBranches {
-            branches: mergeable,
-        });
+    merged_close_blocked.sort_by(|left, right| left.task_id.cmp(&right.task_id));
+    match (mergeable.is_empty(), merged_close_blocked.is_empty()) {
+        (false, false) => {
+            return Some(SupervisorActionableState::MergeQueue {
+                branches: mergeable,
+                merged_close_blocked,
+            });
+        }
+        (true, false) => {
+            return Some(SupervisorActionableState::MergeCloseBlocked {
+                tasks: merged_close_blocked,
+            });
+        }
+        (false, true) => {
+            return Some(SupervisorActionableState::MergeBranches {
+                branches: mergeable,
+            });
+        }
+        (true, true) => {}
     }
 
     let active_children = data

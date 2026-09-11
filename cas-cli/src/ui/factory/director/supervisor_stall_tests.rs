@@ -1,6 +1,7 @@
 use super::data::{AgentSummary, DirectorData, TaskSummary};
 use super::events::{
-    SupervisorActionableState, SupervisorStallTracker, supervisor_actionable_state,
+    MergedCloseBlockedTask, SupervisorActionableState, SupervisorStallTracker,
+    supervisor_actionable_state, supervisor_actionable_state_with_merge_classifier,
 };
 use cas_types::{AgentStatus, Priority, TaskStatus, TaskType};
 use chrono::{Duration, TimeZone, Utc};
@@ -104,6 +105,52 @@ fn awaiting_merge_names_task_branch_and_live_tip() {
             )],
         })
     );
+}
+
+#[test]
+fn merged_delivery_is_classified_as_close_blocked_with_rejection_and_reclose() {
+    let now = Utc.with_ymd_and_hms(2026, 9, 5, 12, 0, 0).unwrap();
+    let mut snapshot = data();
+    snapshot.in_progress_tasks.push(task(
+        "cas-merged",
+        TaskStatus::AwaitingMerge,
+        Some("gold-fox"),
+        Some("cas-epic"),
+    ));
+
+    let state = supervisor_actionable_state_with_merge_classifier(
+        &snapshot,
+        Some("cas-epic"),
+        "supervisor",
+        &HashSet::new(),
+        now,
+        600,
+        |branch| (branch == "factory/gold-fox").then(|| "factory-tip".to_string()),
+        |task, factory_branch, target_branch, factory_tip| {
+            assert_eq!(task.id, "cas-merged");
+            assert_eq!(factory_branch, "factory/gold-fox");
+            assert_eq!(target_branch, "epic/cas-epic");
+            assert_eq!(factory_tip, Some("factory-tip"));
+            Some(MergedCloseBlockedTask {
+                task_id: task.id.clone(),
+                factory_branch: factory_branch.to_string(),
+                anchor: "anchor-sha".to_string(),
+                target_branch: target_branch.to_string(),
+                target_tip: "target-tip".to_string(),
+                close_rejection: "ZERO-COMMIT after merged delivery".to_string(),
+            })
+        },
+    );
+
+    let Some(SupervisorActionableState::MergeCloseBlocked { tasks }) = state else {
+        panic!("merged delivery must be classified separately: {state:?}");
+    };
+    assert_eq!(tasks.len(), 1);
+    let rendered = SupervisorActionableState::MergeCloseBlocked { tasks }.next_step_text();
+    assert!(rendered.contains("already merged"));
+    assert!(rendered.contains("ZERO-COMMIT after merged delivery"));
+    assert!(rendered.contains("task action=close id=cas-merged"));
+    assert!(!rendered.contains("merge the ready delivery branch(es)"));
 }
 
 #[test]
@@ -248,4 +295,57 @@ fn stall_gate_fires_once_per_ten_minutes_and_accumulates_actionable_idle_time() 
         600,
     );
     assert_eq!(cleared.actionable_idle_secs, 720);
+}
+
+#[test]
+fn merged_close_blocked_stall_wakes_for_changed_delivery_without_refiring_same_state() {
+    let start = Utc.with_ymd_and_hms(2026, 9, 5, 12, 0, 0).unwrap();
+    let merged = |target_tip: &str| SupervisorActionableState::MergeCloseBlocked {
+        tasks: vec![MergedCloseBlockedTask {
+            task_id: "cas-merged".into(),
+            factory_branch: "factory/gold-fox".into(),
+            anchor: "anchor-sha".into(),
+            target_branch: "epic/cas-epic".into(),
+            target_tip: target_tip.into(),
+            close_rejection: "already merged".into(),
+        }],
+    };
+    let mut tracker = SupervisorStallTracker::default();
+
+    assert!(
+        tracker
+            .observe(
+                Some(merged("target-a")),
+                Some(start - Duration::seconds(600)),
+                false,
+                start,
+                600,
+            )
+            .wake
+            .is_some()
+    );
+    assert!(
+        tracker
+            .observe(
+                Some(merged("target-a")),
+                Some(start - Duration::seconds(1_200)),
+                false,
+                start + Duration::seconds(600),
+                600,
+            )
+            .wake
+            .is_none()
+    );
+    assert!(
+        tracker
+            .observe(
+                Some(merged("target-b")),
+                Some(start - Duration::seconds(1_201)),
+                false,
+                start + Duration::seconds(601),
+                600,
+            )
+            .wake
+            .is_some()
+    );
 }

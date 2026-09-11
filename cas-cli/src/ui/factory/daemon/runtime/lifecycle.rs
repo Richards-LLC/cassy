@@ -13,6 +13,62 @@ fn enqueue_worker_attention_relay(
         actionable_idle_secs,
     } = event
     {
+        if let Some(stable_key) = next_step.merged_close_blocked_relay_key() {
+            let stable_key = merged_close_blocked_status_key(cas_dir, next_step)
+                .map(|status_key| format!("{stable_key}:status:{status_key}"))
+                .unwrap_or(stable_key);
+            let task_id = match next_step {
+                crate::ui::factory::director::SupervisorActionableState::MergeCloseBlocked {
+                    tasks,
+                } if tasks.len() == 1 => Some(tasks[0].task_id.as_str()),
+                crate::ui::factory::director::SupervisorActionableState::MergeQueue {
+                    merged_close_blocked: tasks,
+                    ..
+                } if tasks.len() == 1 => Some(tasks[0].task_id.as_str()),
+                _ => None,
+            };
+            let detail = format!(
+                "Supervisor actionable-idle for {}m. {}",
+                actionable_idle_secs / 60,
+                next_step.next_step_text()
+            );
+            let merged = enqueue_worker_attention_relay_detail_with_key(
+                cas_dir,
+                "merged_close_blocked",
+                "supervisor",
+                task_id,
+                Some(*actionable_idle_secs),
+                &detail,
+                occurrence,
+                Some(&stable_key),
+            );
+
+            // A mixed queue still needs the old genuinely-unmerged merge
+            // demand. Its occurrence-based key preserves the prior refire
+            // behavior, while the merged task remains stable-key deduped.
+            if let Some(unmerged) = next_step.unmerged_merge_state() {
+                let unmerged_detail = format!(
+                    "Supervisor actionable-idle for {}m. {}",
+                    actionable_idle_secs / 60,
+                    unmerged.next_step_text()
+                );
+                let unmerged_outcome = enqueue_worker_attention_relay_detail(
+                    cas_dir,
+                    "supervisor_stalled",
+                    "supervisor",
+                    None,
+                    Some(*actionable_idle_secs),
+                    &unmerged_detail,
+                    occurrence,
+                );
+                return if matches!(merged, WorkerAttentionRelayOutcome::Pending) {
+                    unmerged_outcome
+                } else {
+                    merged
+                };
+            }
+            return merged;
+        }
         let detail = format!(
             "Supervisor actionable-idle for {}m. {}",
             actionable_idle_secs / 60,
@@ -62,6 +118,40 @@ fn enqueue_worker_attention_relay(
         &detail,
         &format!("{kind}:{worker}:{}", task_id.unwrap_or("")),
     )
+}
+
+/// Add the task-store's update identity to a merged-close-blocked relay key.
+/// The actionable enum only contains AwaitingMerge tasks, so the persisted
+/// status/update pair is the status-cycle boundary that permits a new relay
+/// after a task leaves and later re-enters that state. Missing store evidence
+/// preserves the base anchor/target-tip dedupe key.
+fn merged_close_blocked_status_key(
+    cas_dir: &std::path::Path,
+    next_step: &crate::ui::factory::director::SupervisorActionableState,
+) -> Option<String> {
+    let tasks = match next_step {
+        crate::ui::factory::director::SupervisorActionableState::MergeCloseBlocked { tasks }
+        | crate::ui::factory::director::SupervisorActionableState::MergeQueue {
+            merged_close_blocked: tasks,
+            ..
+        } => tasks,
+        _ => return None,
+    };
+    let store = crate::store::open_task_store(cas_dir).ok()?;
+    let mut generations = tasks
+        .iter()
+        .map(|task| {
+            let current = store.get(&task.task_id).ok()?;
+            Some(format!(
+                "{}:{}:{}",
+                task.task_id,
+                current.status,
+                current.updated_at.to_rfc3339()
+            ))
+        })
+        .collect::<Option<Vec<_>>>()?;
+    generations.sort();
+    Some(generations.join("|"))
 }
 
 /// Persist one confirmed worker stoppage through the same durable supervisor
@@ -574,6 +664,65 @@ mod worker_attention_tests {
                 && row.prompt.contains("limited-codex")
                 && row.prompt.contains("terminal unavailable state")
         }));
+    }
+
+    #[test]
+    fn merged_close_blocked_supervisor_stall_relays_once_without_repeat_merge_demand() {
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[(
+            "CAS_FACTORY_SESSION",
+            "merged-close-blocked-test",
+        )]);
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        register_supervisor(&cas_dir, "merged-close-blocked-test");
+        let next_step = crate::ui::factory::director::SupervisorActionableState::MergeCloseBlocked {
+            tasks: vec![crate::ui::factory::director::MergedCloseBlockedTask {
+                task_id: "cas-merged".to_string(),
+                factory_branch: "factory/gold-fox".to_string(),
+                anchor: "anchor-sha".to_string(),
+                target_branch: "epic/cas-epic".to_string(),
+                target_tip: "target-tip".to_string(),
+                close_rejection: "ZERO-COMMIT after merged delivery".to_string(),
+            }],
+        };
+        let first = enqueue_worker_attention_relay(
+            &cas_dir,
+            &crate::ui::factory::director::DirectorEvent::SupervisorStalled {
+                next_step: next_step.clone(),
+                occurrence: "2026-09-11T02:40:00Z".to_string(),
+                actionable_idle_secs: 600,
+            },
+        );
+        let replay = enqueue_worker_attention_relay(
+            &cas_dir,
+            &crate::ui::factory::director::DirectorEvent::SupervisorStalled {
+                next_step,
+                occurrence: "2026-09-11T02:50:00Z".to_string(),
+                actionable_idle_secs: 1200,
+            },
+        );
+        assert!(matches!(
+            first,
+            WorkerAttentionRelayOutcome::Persisted { .. }
+        ));
+        assert!(matches!(
+            replay,
+            WorkerAttentionRelayOutcome::Persisted { .. }
+        ));
+
+        let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+        let rows = queue.peek_all(10).unwrap();
+        assert_eq!(rows.len(), 1, "the merged close block is stable-deduped");
+        assert!(rows[0].prompt.contains("kind=\"merged_close_blocked\""));
+        assert!(rows[0]
+            .prompt
+            .contains("ZERO-COMMIT after merged delivery"));
+        assert!(rows[0]
+            .prompt
+            .contains("task action=close id=cas-merged"));
+        assert!(!rows[0]
+            .prompt
+            .contains("merge the ready delivery branch(es)"));
     }
 
     /// cas-d9a8: the fail-safe for supervisor traffic that is not wake-shaped.

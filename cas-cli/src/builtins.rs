@@ -3770,12 +3770,14 @@ This is the body content."#;
         let codex = include_str!("builtins/codex/skills/cas-supervisor.md");
         let grok = include_str!("builtins/grok/skills/cas-supervisor.md");
 
-        // Claude -> Codex is a pure tool-prefix mirror.
+        // Codex selects its dedicated checklist; all other prose stays mirrored.
         assert_eq!(
-            claude.replace("mcp__cas__", "mcp__cs__"),
+            claude.replace("mcp__cas__", "mcp__cs__").replace(
+                "Use the checklist for your harness: `cas-codex-supervisor-checklist` on Codex; `cas-supervisor-checklist` on Claude, Grok, or OpenCode",
+                "Use `cas-codex-supervisor-checklist`",
+            ),
             codex,
-            "codex cas-supervisor.md must equal the Claude body apart from the \
-             mcp__cas__/mcp__cs__ tool prefix"
+            "codex cas-supervisor.md may differ only by its tool prefix and checklist selection"
         );
 
         // Claude -> Grok differs only by the cas__ prefix and the intentional
@@ -4312,7 +4314,7 @@ This is the body content."#;
         ] {
             for required in [
                 "cas-src surface checklist",
-                "This is a requirement, not a suggestion",
+                "Pre-close notes must prove each applicable entry",
                 "not applicable",
                 "Codex, and Grok mirrors",
                 "CLI parity, docs, and dispatch registration",

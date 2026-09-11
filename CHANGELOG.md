@@ -7,6 +7,18 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.25.2] - 2026-09-11
+
+### Fixed
+- `cas codex` / `cas claude` launch the supervisor on a model and effort that
+  belong to the chosen harness: an inherited incompatible model is repaired to
+  the harness recipe and an explicit incompatible model is refused at
+  preflight instead of opening a broken pane (#820).
+- Commander lists only sessions with an active supervisor; sessions with no
+  live supervisor and no workers are hidden by default behind a dormant toggle.
+- `hub_clean_home_test` proves the old hub process is gone instead of
+  asserting the next PID differs, removing a PID-reuse flake (#826).
+
 ## [3.25.1] - 2026-09-10
 
 ### Added

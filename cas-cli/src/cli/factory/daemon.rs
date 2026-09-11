@@ -5,7 +5,6 @@ use crate::ui::factory::{
     daemon_log_path, daemonize, fork_first_daemon, run_boot_screen_client,
 };
 use anyhow::{Result, bail};
-use cas_factory::routing::CapabilitySnapshot;
 use cas_factory::spec_resolver::{ConfigSources, resolve_specs, resolve_supervisor_spec};
 use std::time::Duration;
 
@@ -91,12 +90,9 @@ pub(super) fn execute_daemon(
             user_config: None, // auto-resolve from home dir
             project_config: Some(cwd.join(".cas").join("config.toml")),
         };
-        let specs = resolve_specs(effective_workers, sources)
+        let mut specs = resolve_specs(effective_workers, sources.clone())
             .map_err(|e| anyhow::anyhow!("Failed to resolve worker specs: {e}"))?;
-        for spec in &specs {
-            cas_factory::validate_explicit(spec, &CapabilitySnapshot::default())
-                .map_err(|e| anyhow::anyhow!("Failed to validate worker routing spec: {e}"))?;
-        }
+        super::normalize_worker_specs(&mut specs, &sources)?;
         specs
     };
 
@@ -120,10 +116,9 @@ pub(super) fn execute_daemon(
             user_config: None, // auto-resolve from home dir
             project_config: Some(cwd.join(".cas").join("config.toml")),
         };
-        let spec = resolve_supervisor_spec(sources)
+        let mut spec = resolve_supervisor_spec(sources.clone())
             .map_err(|e| anyhow::anyhow!("Failed to resolve supervisor spec: {e}"))?;
-        cas_factory::validate_explicit(&spec, &CapabilitySnapshot::default())
-            .map_err(|e| anyhow::anyhow!("Failed to validate supervisor routing spec: {e}"))?;
+        super::normalize_supervisor_spec(&mut spec, &sources)?;
         spec
     };
 
@@ -139,6 +134,13 @@ pub(super) fn execute_daemon(
         TeamsManager::build_configs_for_mux(session, &resolved_supervisor_name, &worker_names)
     };
 
+    let (_, worker_model, worker_effort) = resolved_worker_specs
+        .first()
+        .map(super::launch_fields_from_spec)
+        .unwrap_or((worker_cli, None, None));
+    let (supervisor_cli, supervisor_model, supervisor_effort) =
+        super::launch_fields_from_spec(&resolved_supervisor_spec);
+
     let config = FactoryConfig {
         cwd: cwd.to_path_buf(),
         workers: effective_workers,
@@ -146,12 +148,10 @@ pub(super) fn execute_daemon(
         supervisor_name: Some(resolved_supervisor_name),
         supervisor_cli,
         worker_cli,
-        supervisor_model: llm.model_for_role("supervisor").map(String::from),
-        worker_model: llm.model_for_role("worker").map(String::from),
-        supervisor_effort: llm
-            .reasoning_effort_for_role("supervisor")
-            .map(String::from),
-        worker_effort: llm.reasoning_effort_for_role("worker").map(String::from),
+        supervisor_model,
+        worker_model,
+        supervisor_effort,
+        worker_effort,
         resolved_worker_specs,
         resolved_supervisor_spec: Some(resolved_supervisor_spec),
         enable_worktrees: !no_worktrees,

@@ -773,6 +773,14 @@ pub fn validate_explicit(
 ) -> Result<(), RoutingError> {
     let registry = registry()?;
     if let Some(model) = spec.model.as_deref() {
+        if let Err(reason) = validate_model_matches_cli(spec.cli, model) {
+            return Err(RoutingError::Policy(policy_violation_with_alternatives(
+                registry,
+                reason,
+                "harness model compatibility",
+                Some(model),
+            )));
+        }
         if let Err(reason) = validate_model_slug(spec.cli, model) {
             return Err(RoutingError::Policy(policy_violation_with_alternatives(
                 registry,
@@ -1019,6 +1027,119 @@ pub fn default_worker_effort_for_cli(cli: SupervisorCli) -> Effort {
         )
 }
 
+/// Return the backend that a recognizable model slug belongs to.
+///
+/// This intentionally classifies only obvious provider families. Unknown
+/// slugs remain accepted so a newly released model is not rejected before the
+/// registry learns about it; known cross-harness slugs fail closed.
+pub fn model_harness(model: &str) -> Option<SupervisorCli> {
+    let model = model.trim().to_ascii_lowercase();
+    if model.is_empty() {
+        return None;
+    }
+    if model.starts_with("grok") {
+        return Some(SupervisorCli::Grok);
+    }
+    if model.starts_with("claude")
+        || model.starts_with("opus")
+        || model.starts_with("sonnet")
+        || model.starts_with("haiku")
+        || model.starts_with("fable")
+        || model.starts_with("mythos")
+    {
+        return Some(SupervisorCli::Claude);
+    }
+    if model.starts_with("gpt") || model.starts_with("codex") || model.starts_with("o3") {
+        return Some(SupervisorCli::Codex);
+    }
+    if model.contains('/') {
+        return Some(SupervisorCli::OpenCode);
+    }
+    None
+}
+
+/// Reject a recognizable model slug that belongs to another harness.
+pub fn validate_model_matches_cli(
+    cli: SupervisorCli,
+    model: &str,
+) -> Result<(), String> {
+    match model_harness(model) {
+        Some(model_cli) if model_cli != cli => Err(format!(
+            "model {model:?} is a {} model but cli={} was requested; pass cli={} to run it on its own harness, or choose a {} model (e.g. {})",
+            model_cli.backend().name(),
+            cli.backend().name(),
+            model_cli.backend().name(),
+            cli.backend().name(),
+            default_worker_model_for_cli(cli),
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// Return the registry recipe's default effort for a known model.
+pub fn default_effort_for_model(cli: SupervisorCli, model: &str) -> Option<Effort> {
+    let registry = registry().ok()?;
+    registry
+        .recipes
+        .values()
+        .find(|recipe| {
+            recipe.harness == cli
+                && (recipe.model.eq_ignore_ascii_case(model)
+                    || format!("{}/{}", recipe.provider, recipe.model)
+                        .eq_ignore_ascii_case(model))
+        })
+        .map(|recipe| recipe.default_effort)
+}
+
+/// Reconcile inherited model/effort values after the selected harness is
+/// known. The lane resolver may provide a Claude recipe before a CLI/config
+/// override changes the harness; inherited cross-harness values are replaced
+/// by the caller's harness recipe, while explicit cross-harness values fail
+/// closed before any pane can launch.
+pub fn normalize_spec_for_harness(
+    spec: &mut WorkerSpec,
+    default_spec: &WorkerSpec,
+    model_explicit: bool,
+    effort_explicit: bool,
+) -> Result<(), RoutingError> {
+    if spec.cli != default_spec.cli {
+        return Err(RoutingError::Policy(format!(
+            "internal routing error: default spec is for cli={}, selected cli={}",
+            default_spec.cli.backend().name(),
+            spec.cli.backend().name(),
+        )));
+    }
+
+    let mut model_repaired = false;
+    if let Some(model) = spec.model.as_deref()
+        && let Some(model_cli) = model_harness(model)
+        && model_cli != spec.cli
+    {
+        if model_explicit {
+            validate_model_matches_cli(spec.cli, model).map_err(RoutingError::Policy)?;
+        }
+        spec.model = default_spec.model.clone();
+        model_repaired = true;
+    } else if !model_explicit && spec.model.is_none() && default_spec.model.is_some() {
+        spec.model = default_spec.model.clone();
+        model_repaired = true;
+    }
+
+    if !effort_explicit {
+        let inherited_effort_is_invalid = validate_explicit(spec, &CapabilitySnapshot::default())
+            .is_err();
+        if model_repaired || inherited_effort_is_invalid {
+            spec.effort = spec
+                .model
+                .as_deref()
+                .and_then(|model| default_effort_for_model(spec.cli, model))
+                .or(default_spec.effort);
+        }
+    }
+
+    validate_explicit(spec, &CapabilitySnapshot::default())
+}
+
 const GENERATED_ROUTE_TABLE_START: &str =
     "<!-- BEGIN GENERATED ROUTE TABLE: cas-factory lane registry -->";
 const GENERATED_ROUTE_TABLE_END: &str = "<!-- END GENERATED ROUTE TABLE -->";
@@ -1151,6 +1272,62 @@ fn recipe_status_name(status: RecipeStatus) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn harness_transition_repairs_inherited_model_and_effort() {
+        let mut spec = WorkerSpec {
+            name: None,
+            cli: SupervisorCli::Codex,
+            model: Some("claude-fable-5-1".to_string()),
+            effort: Some(Effort::Medium),
+            config_dir: None,
+            requester_config_dir: None,
+            requester_secure_storage_dir: None,
+        };
+        let default = WorkerSpec {
+            name: None,
+            cli: SupervisorCli::Codex,
+            model: Some("gpt-5.6-luna".to_string()),
+            effort: Some(Effort::XHigh),
+            config_dir: None,
+            requester_config_dir: None,
+            requester_secure_storage_dir: None,
+        };
+
+        normalize_spec_for_harness(&mut spec, &default, false, false)
+            .expect("inherited cross-harness values should be repaired");
+        assert_eq!(spec.model.as_deref(), Some("gpt-5.6-luna"));
+        assert_eq!(spec.effort, Some(Effort::XHigh));
+    }
+
+    #[test]
+    fn harness_transition_refuses_explicit_cross_harness_model() {
+        let mut spec = WorkerSpec {
+            name: None,
+            cli: SupervisorCli::Codex,
+            model: Some("claude-fable-5-1".to_string()),
+            effort: Some(Effort::Medium),
+            config_dir: None,
+            requester_config_dir: None,
+            requester_secure_storage_dir: None,
+        };
+        let default = WorkerSpec {
+            name: None,
+            cli: SupervisorCli::Codex,
+            model: Some("gpt-5.6-luna".to_string()),
+            effort: Some(Effort::XHigh),
+            config_dir: None,
+            requester_config_dir: None,
+            requester_secure_storage_dir: None,
+        };
+
+        let error = normalize_spec_for_harness(&mut spec, &default, true, true)
+            .expect_err("explicit cross-harness values must fail closed")
+            .to_string();
+        assert!(error.contains("claude"), "{error}");
+        assert!(error.contains("codex"), "{error}");
+        assert!(error.contains("model"), "{error}");
+    }
 
     fn valid_registry() -> &'static str {
         r#"

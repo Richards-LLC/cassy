@@ -35,6 +35,8 @@ export interface HubSession {
   epic_id?: string;
   ws_port?: number;
   liveness: "live" | "stale_metadata" | "missing_endpoint";
+  /** Metadata survived after its registered supervisor stopped being live. */
+  dormant?: boolean;
 }
 
 export interface PaneInfo {

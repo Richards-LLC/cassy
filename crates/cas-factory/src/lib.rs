@@ -51,10 +51,12 @@ pub use routing::{
     CapabilityAvailability, CapabilityEvidence, CapabilitySnapshot, CapabilityStatus, Lane,
     LaneDefinition, LaneRegistry, Recipe, RecipeStatus, RouteIdentity, RouteRecipe,
     RoutingDecision, RoutingError, default_worker_effort_for_cli, default_worker_model_for_cli,
-    embedded_registry, parse_registry, recipe_route_identity, registered_harnesses, registry,
-    render_route_table, render_spawn_recipes, resolve_lane, resolve_lane_from_registry,
-    resolve_lane_specs, validate_explicit, validate_lane_request, validate_model_effort_policy,
-    is_claude_model_slug, validate_model_is_active, validate_model_slug, validate_model_slug_with,
+    default_effort_for_model, embedded_registry, model_harness, parse_registry,
+    recipe_route_identity, registered_harnesses, registry, render_route_table,
+    render_spawn_recipes, resolve_lane, resolve_lane_from_registry, resolve_lane_specs,
+    validate_explicit, validate_lane_request, validate_model_effort_policy,
+    validate_model_matches_cli, is_claude_model_slug, validate_model_is_active,
+    validate_model_slug, validate_model_slug_with, normalize_spec_for_harness,
 };
 pub use session::lifecycle::SessionManager;
 pub use session::resume::{
@@ -68,5 +70,6 @@ pub use session::state::{
 pub use spec_resolver::{
     ConfigSources, SpecResolverError, apply_codex_fallback, apply_codex_fallback_for_supervisor,
     configured_factory_default_model, resolve_specs, resolve_supervisor_spec,
-    worker_slot_cli_configured, worker_slot_effort_configured,
+    supervisor_effort_configured, supervisor_model_configured, worker_slot_cli_configured,
+    worker_slot_effort_configured, worker_slot_model_configured,
 };

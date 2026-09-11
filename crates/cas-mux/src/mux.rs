@@ -266,6 +266,7 @@ impl Mux {
     /// appeared in both `factory_pane_configs` and `factory`.
     fn resolve_worker_spec_from_config(
         name: &str,
+        slot: usize,
         config: &MuxConfig,
     ) -> (
         SupervisorCli,
@@ -279,6 +280,7 @@ impl Mux {
             .resolved_worker_specs
             .iter()
             .find(|s| s.name.as_deref() == Some(name))
+            .or_else(|| config.resolved_worker_specs.get(slot))
             .map(|spec| {
                 let effort_str = spec
                     .effort
@@ -332,7 +334,7 @@ impl Mux {
 
         let mut result = Vec::with_capacity(worker_names.len() + 1);
 
-        for name in &worker_names {
+        for (slot, name) in worker_names.iter().enumerate() {
             let worker_cwd = config
                 .worker_cwds
                 .get(name)
@@ -342,7 +344,7 @@ impl Mux {
 
             // Resolve per-worker spec via the shared helper.
             let (cli, model_opt, effort_opt, config_dir, config_dir_source, secure_storage_dir) =
-                Self::resolve_worker_spec_from_config(name, config);
+                Self::resolve_worker_spec_from_config(name, slot, config);
 
             let pty_config = Pane::build_worker_config(
                 name,
@@ -448,7 +450,7 @@ impl Mux {
         // Create worker panes
         let worker_names = Self::resolve_worker_names(&config);
 
-        for name in &worker_names {
+        for (slot, name) in worker_names.iter().enumerate() {
             // Use worker-specific CWD if available, otherwise fall back to default
             let worker_cwd = config
                 .worker_cwds
@@ -459,7 +461,7 @@ impl Mux {
 
             // Resolve per-worker spec via the shared helper.
             let (cli, model_opt, effort_opt, config_dir, config_dir_source, secure_storage_dir) =
-                Self::resolve_worker_spec_from_config(name, &config);
+                Self::resolve_worker_spec_from_config(name, slot, &config);
 
             let pane = Pane::worker(
                 name,

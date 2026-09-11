@@ -2497,6 +2497,13 @@ fn h5_session_worker_roster_comes_from_the_live_registry_not_the_session_file() 
 
     let agents = SqliteAgentStore::open(&cas_root).unwrap();
     agents.init().unwrap();
+    let mut supervisor = cas_types::Agent::new(
+        "roster-supervisor-id".into(),
+        "supervisor-agent".into(),
+    );
+    supervisor.role = AgentRole::Supervisor;
+    supervisor.factory_session = Some(session_name.to_string());
+    agents.register(&supervisor).unwrap();
     for index in 0..5 {
         let mut worker =
             cas_types::Agent::new(format!("roster-worker-{index}"), format!("worker-{index}"));
@@ -2513,8 +2520,19 @@ fn h5_session_worker_roster_comes_from_the_live_registry_not_the_session_file() 
         "five live workers must be reported"
     );
     assert_eq!(mapped.supervisor, "supervisor-agent");
+    assert!(!mapped.dormant, "a fresh registered supervisor keeps the row live");
     assert_eq!(mapped.epic_id.as_deref(), Some("cas-5d94"));
     assert_eq!(mapped.liveness, DaemonLiveness::Live);
+
+    let mut dead_supervisor = agents.get("roster-supervisor-id").unwrap();
+    dead_supervisor.status = AgentStatus::Stale;
+    dead_supervisor.last_heartbeat = chrono::Utc::now() - chrono::Duration::seconds(31);
+    agents.update(&dead_supervisor).unwrap();
+    assert!(
+        hub_session(&session).dormant,
+        "a stale supervisor registry row must not keep the session visible"
+    );
+
     // The roster carries agent names (what Commander shows), not agent ids.
     let mut names = mapped.workers.clone();
     names.sort();
@@ -2550,6 +2568,7 @@ fn h5_session_worker_roster_comes_from_the_live_registry_not_the_session_file() 
         socket_exists: true,
     };
     assert!(hub_session(&empty).workers.is_empty());
+    assert!(hub_session(&empty).dormant, "no registered supervisor is dormant");
 
     // With no registry to read, the daemon roster is still better than nothing.
     let unreachable = SessionInfo {
@@ -2567,6 +2586,10 @@ fn h5_session_worker_roster_comes_from_the_live_registry_not_the_session_file() 
         socket_exists: true,
     };
     assert_eq!(hub_session(&unreachable).workers, vec!["fallback-worker"]);
+    assert!(
+        hub_session(&unreachable).dormant,
+        "without a registry, supervisor liveness is unproven"
+    );
 }
 
 // cas-37f8: a phone-sized viewer must never shrink the operator's dashboard.
@@ -2622,7 +2645,10 @@ async fn sessions_catalog_hides_worker_only_rows_by_default() {
     let mut bare = fixture_session("bare-shell");
     bare.supervisor = String::new();
     bare.workers = vec!["worker-9".into()];
-    let source = RecordingReadModel::with_sessions(vec![fixture_session("factory-a"), bare]);
+    let mut dormant = fixture_session("orphaned-supervisor");
+    dormant.dormant = true;
+    dormant.workers.clear();
+    let source = RecordingReadModel::with_sessions(vec![fixture_session("factory-a"), bare, dormant]);
     let events = MachineEventBus::new(16);
     let state = HubState::new(
         SessionCatalog::new(source),
@@ -2667,5 +2693,25 @@ async fn sessions_catalog_hides_worker_only_rows_by_default() {
     assert_eq!(
         names(fetch("/v1/sessions?workers=1").await),
         vec!["factory-a", "bare-shell"]
+    );
+    assert_eq!(
+        names(fetch("/v1/sessions?dormant=1").await),
+        vec!["factory-a", "orphaned-supervisor"]
+    );
+    assert_eq!(
+        names(fetch("/v1/sessions?workers=1&dormant=1").await),
+        vec!["factory-a", "bare-shell", "orphaned-supervisor"]
+    );
+}
+
+/// cas-94e1: metadata can outlive the supervisor pane and must be marked
+/// dormant rather than treated as a live Commander conversation.
+#[test]
+fn dormant_supervisor_metadata_is_not_a_live_catalog_row() {
+    let mut dormant = fixture_session("orphaned-supervisor");
+    dormant.dormant = true;
+    assert!(
+        super::server::supervisor_sessions(vec![dormant], false, false).is_empty(),
+        "a non-empty supervisor name is not proof of a live supervisor"
     );
 }

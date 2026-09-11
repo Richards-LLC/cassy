@@ -17,6 +17,7 @@ import {
 import type { HubSession, LeaseState, MessageQueued, OperatorReply, PaneInfo, SessionCardSummary, SessionState, StoredMachine } from "./types";
 
 import { sessionsPath, workersRevealed } from "./worker-visibility";
+import { dormantRevealed } from "./dormant-visibility";
 
 export type ConnectionState = ConnectionSnapshot;
 
@@ -27,6 +28,14 @@ function revealWorkers(): boolean {
   try { storage = globalThis.localStorage; } catch { storage = undefined; }
   try { search = globalThis.location?.search ?? ""; } catch { search = ""; }
   return workersRevealed(search, storage);
+}
+
+function revealDormant(): boolean {
+  let storage: Storage | undefined;
+  let search = "";
+  try { storage = globalThis.localStorage; } catch { storage = undefined; }
+  try { search = globalThis.location?.search ?? ""; } catch { search = ""; }
+  return dormantRevealed(search, storage);
 }
 export type AuthFailureKind = "expired" | "revoked" | "scope-mismatch" | "needs-pairing";
 
@@ -322,7 +331,7 @@ export class HubConnectionSupervisor {
   }
 
   async refreshSessions(signal?: AbortSignal): Promise<HubSession[]> {
-    const response = await this.request<{ sessions: HubSession[] }>("GET", sessionsPath(revealWorkers()), undefined, signal);
+    const response = await this.request<{ sessions: HubSession[] }>("GET", sessionsPath(revealWorkers(), revealDormant()), undefined, signal);
     this.callbacks.onSessions(response.sessions);
     return response.sessions;
   }

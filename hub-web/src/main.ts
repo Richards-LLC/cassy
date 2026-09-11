@@ -30,6 +30,7 @@ import { detectSpeechInput, SpeechDictationController, type SpeechInputCapabilit
 import { backLabel, clearStoredSelection, forgetMachine, goBackSelection, loadStoredSelection, previousSelection, restorableSession, saveStoredSelection, selectSelection, sessionPickerEntries, sessionPickerMeta, workerCountLabel, type SelectionState, type SelectionStorage, type SessionSelection } from "./session-selection";
 import { composerFocusWinner, planSupervisorSend, sendsOnEnter, supervisorMessage, supervisorTarget } from "./supervisor-message";
 import { hiddenWorkersLabel, saveWorkersRevealed, splitVisiblePanes, workersCommandLabel, workersRevealed, workersRoute } from "./worker-visibility";
+import { dormantCommandLabel, dormantRevealed, dormantRoute, saveDormantRevealed } from "./dormant-visibility";
 import { COMPACT_MEDIA_QUERY, PHONE_MEDIA_QUERY } from "./viewport";
 import { defaultTranscriptView, loadTranscriptView, saveTranscriptView, type TranscriptViewMode } from "./transcript";
 import { TranscriptView } from "./transcript-view";
@@ -152,6 +153,9 @@ let attentionPanelCollapsed = window.matchMedia(PHONE_MEDIA_QUERY).matches;
 // Off by default (cas-6261): the Hub lists supervisors only until the operator
 // asks for workers through the route or the palette.
 const revealWorkers = workersRevealed(location.search, workerVisibilityStorage());
+// Off by default: sessions whose supervisor is no longer live are retained
+// only for an explicit recovery view.
+const revealDormant = dormantRevealed(location.search, workerVisibilityStorage());
 let activeContextTab: "attention" | "status" = "attention";
 let commandPaletteOpen = false;
 let speechCapability: SpeechInputCapability | undefined;
@@ -273,6 +277,16 @@ function setWorkersRevealed(next: boolean): void {
   saveWorkersRevealed(workerVisibilityStorage(), next);
   const route = `${location.pathname}${workersRoute(location.search, next)}${location.hash}`;
   location.assign(route);
+}
+
+function setDormantRevealed(next: boolean): void {
+  saveDormantRevealed(workerVisibilityStorage(), next);
+  const route = `${location.pathname}${dormantRoute(location.search, next)}${location.hash}`;
+  location.assign(route);
+}
+
+function visibleSessions(machineId: string): HubSession[] {
+  return (sessions.get(machineId) ?? []).filter((session) => revealDormant || session.dormant !== true);
 }
 
 function selectionStorage(): SelectionStorage | undefined {
@@ -1959,7 +1973,7 @@ function render(captureDraft = true): void {
   const machineLabel = selected?.label ?? "No machine";
   const compactMachineLabel = machineLabel.split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part[0]?.toUpperCase()).join("") || "—";
   const controlActionDisabled = takeControlReason !== undefined;
-  const sessionCommands = [...machines.values()].flatMap((machine) => (sessions.get(machine.id) ?? []).map((session) => {
+  const sessionCommands = [...machines.values()].flatMap((machine) => visibleSessions(machine.id).map((session) => {
     const summary = sessionSummaries.get(sessionKey(machine.id, session.name));
     const searchMetadata = summary ? `${summary.title} ${summary.description} ${summary.phase}` : "";
     const secondary = summary ? `${machine.label} · ${summary.title} · ${summary.phase}` : machine.label;
@@ -1969,7 +1983,7 @@ function render(captureDraft = true): void {
   const backText = backLabel(backTarget, (machineId) => machines.get(machineId)?.label);
   // The session name is the switch: on a phone it is the only always-visible
   // chrome that can carry one, and the ⌘K palette is hidden below 500px.
-  const sessionCount = [...machines.values()].reduce((total, machine) => total + (sessions.get(machine.id)?.length ?? 0), 0);
+  const sessionCount = [...machines.values()].reduce((total, machine) => total + visibleSessions(machine.id).length, 0);
   const sessionPickerLabel = sessionCount === 0
     ? "Switch session — no sessions listed yet"
     : `Switch session — ${sessionCount} available`;
@@ -2008,7 +2022,7 @@ function render(captureDraft = true): void {
     // Label as well as id: a credential refresh can rename a machine, and the
     // header chip and rail read that label.
     machineIds: [...machines.values()].map((machine) => `${machine.id}:${machine.label}`),
-    sessionKeys: [...machines.keys()].flatMap((id) => (sessions.get(id) ?? []).map((item) => `${id}/${item.name}`)),
+    sessionKeys: [...machines.keys()].flatMap((id) => visibleSessions(id).map((item) => `${id}/${item.name}`)),
     catalogLoaded: machineCatalogLoaded,
     drawerOpen: machineDrawerOpen,
     attentionCollapsed: attentionPanelCollapsed,
@@ -2106,6 +2120,7 @@ function render(captureDraft = true): void {
           ${(["system", "light", "dark"] as const).map((scheme) => `<button type="button" class="palette-command" data-palette-scheme="${scheme}"><span>Appearance · ${scheme === "system" ? "System" : scheme === "light" ? "Light" : "Dark"}</span><small>${scheme === "system" ? "Follow this device" : "Use this scheme"}</small></button>`).join("")}
           <button type="button" class="palette-command" data-palette-action="terminal-view"><span>Terminal workspace</span><small>Machines, sessions and terminal controls</small></button>
           <button type="button" class="palette-command" data-palette-action="workers" aria-pressed="${revealWorkers}"><span>${escapeHtml(workersCommandLabel(revealWorkers).title)}</span><small>${escapeHtml(workersCommandLabel(revealWorkers).hint)}</small></button>
+          <button type="button" class="palette-command" data-palette-action="dormant" aria-pressed="${revealDormant}"><span>${escapeHtml(dormantCommandLabel(revealDormant).title)}</span><small>${escapeHtml(dormantCommandLabel(revealDormant).hint)}</small></button>
           <button type="button" class="palette-command" data-palette-action="control" ${controlActionDisabled ? "disabled" : ""}><span>${controlActionLabel}</span><small>${controlActionDisabled ? escapeHtml(takeControlReason ?? "Control unavailable") : "Current session"}</small></button>
           <button type="button" class="palette-command" data-palette-action="dismiss-info" ${infoItems.length === 0 ? "disabled" : ""}><span>Dismiss all info</span><small>${infoItems.length} outstanding</small></button>
           ${sessionCommands || '<p class="palette-empty">No live sessions available.</p>'}
@@ -2205,7 +2220,7 @@ function renderMachineNavigation(): void {
       machine.label,
       connectionClass(connectionStates.get(machine.id)),
       connectionLabel(connectionStates.get(machine.id)),
-      (sessions.get(machine.id) ?? []).map((item) => item.name).join(","),
+      visibleSessions(machine.id).map((item) => item.name).join(","),
     ].join("|")),
   ].join("~");
   if (signature === lastRailSignature) return;
@@ -2246,14 +2261,14 @@ function renderMachineNavigation(): void {
 function renderConversationList(): void {
   const container = document.querySelector<HTMLElement>("#conversation-list");
   if (!container) return;
-  const rows: ConversationRow[] = [...machines.values()].flatMap((machine) => (sessions.get(machine.id) ?? []).filter((session) => supervisorTarget(session)).map((session) => {
+  const rows: ConversationRow[] = [...machines.values()].flatMap((machine) => visibleSessions(machine.id).filter((session) => supervisorTarget(session)).map((session) => {
     const updated = fleetCatalogUpdatedAt.get(machine.id);
     const counts = attentionCounts(attention.filter((item) => item.machineId === machine.id && item.session === session.name));
-    return { key: sessionKey(machine.id, session.name), machineId: machine.id, session: session.name, supervisor: session.supervisor, projectDir: session.project_dir, host: machine.label, freshness: updated ? `Catalog checked ${relativeTimestamp(Date.parse(updated))}` : "Catalog not yet checked", connection: session.liveness === "live" ? fleetConnectionLabel(connectionStates.get(machine.id)) : "Session unavailable", attention: counts.critical + counts.warning, selected: machine.id === selectedMachineId && session.name === selectedSession };
+    return { key: sessionKey(machine.id, session.name), machineId: machine.id, session: session.name, supervisor: session.supervisor, projectDir: session.project_dir, host: machine.label, freshness: updated ? `Catalog checked ${relativeTimestamp(Date.parse(updated))}` : "Catalog not yet checked", connection: session.dormant ? "Dormant" : session.liveness === "live" ? fleetConnectionLabel(connectionStates.get(machine.id)) : "Session unavailable", attention: counts.critical + counts.warning, selected: machine.id === selectedMachineId && session.name === selectedSession };
   }));
   conversationList.render(container, rows, (row) => { void openSession(row.machineId, row.session); });
   const empty = document.querySelector<HTMLElement>("#conversation-empty");
-  if (empty) { empty.hidden = rows.length > 0; empty.textContent = !machineCatalogLoaded ? "Loading paired machines…" : machines.size === 0 ? "Pair a machine to start your first conversation." : "No supervisors listed. Check that a factory is running on your paired machine."; }
+  if (empty) { empty.hidden = rows.length > 0; empty.textContent = !machineCatalogLoaded ? "Loading paired machines…" : machines.size === 0 ? "Pair a machine to start your first conversation." : "No live supervisors listed. Use Appearance & commands to show dormant sessions for recovery."; }
   const state = document.querySelector<HTMLElement>("#conversation-connection");
   if (state && selectedMachineId) state.textContent = ` · ${fleetConnectionLabel(connectionStates.get(selectedMachineId))}`;
 }
@@ -2273,6 +2288,7 @@ function renderFleetBoard(): void {
   const entries = sessionPickerEntries({
     machines: [...machines.values()].map((machine) => ({ id: machine.id, label: machine.label })),
     sessions,
+    includeDormant: revealDormant,
     selection: selectedMachineId ? { machineId: selectedMachineId } : undefined,
     summaries: sessionSummaries,
   });
@@ -2345,7 +2361,7 @@ function machineTreeGroup(machine: StoredMachine): HTMLElement {
   if (machine.id === selectedMachineId) {
     const sessionList = document.createElement("div");
     sessionList.className = "session-tree";
-    for (const session of sessions.get(machine.id) ?? []) sessionList.append(sessionButton(machine.id, session));
+    for (const session of visibleSessions(machine.id)) sessionList.append(sessionButton(machine.id, session));
     if (!sessionList.childElementCount) {
       const empty = document.createElement("p"); empty.className = "drawer-empty"; empty.textContent = "No live sessions."; sessionList.append(empty);
     }
@@ -2387,6 +2403,7 @@ function renderSessionPicker(): void {
   const entries = sessionPickerEntries({
     machines: [...machines.values()].map((machine) => ({ id: machine.id, label: machine.label })),
     sessions,
+    includeDormant: revealDormant,
     selection: selection.current ?? (selectedMachineId ? { machineId: selectedMachineId, session: selectedSession } : undefined),
     summaries: sessionSummaries,
   });
@@ -2658,6 +2675,8 @@ function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | und
   if (paletteTerminal) paletteTerminal.onclick = () => { closePalette(); hubPresentation = "terminal"; render(); };
   const paletteWorkers = palette.querySelector<HTMLButtonElement>("[data-palette-action='workers']");
   if (paletteWorkers) paletteWorkers.onclick = () => { closePalette(); setWorkersRevealed(!revealWorkers); };
+  const paletteDormant = palette.querySelector<HTMLButtonElement>("[data-palette-action='dormant']");
+  if (paletteDormant) paletteDormant.onclick = () => { closePalette(); setDormantRevealed(!revealDormant); };
   const paletteControl = palette.querySelector<HTMLButtonElement>("[data-palette-action='control']");
   if (paletteControl) paletteControl.onclick = () => { closePalette(); void toggleControl(selected, lease); };
   const paletteDismiss = palette.querySelector<HTMLButtonElement>("[data-palette-action='dismiss-info']");

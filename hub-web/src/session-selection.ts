@@ -137,6 +137,7 @@ export interface SessionPickerEntry {
 export interface SessionPickerInput {
   readonly machines: readonly { readonly id: string; readonly label: string }[];
   readonly sessions: ReadonlyMap<string, readonly HubSession[]>;
+  readonly includeDormant?: boolean;
   readonly selection?: SessionSelection;
   readonly summaries?: ReadonlyMap<string, { readonly title: string; readonly phase: SessionPhase }>;
 }
@@ -162,19 +163,21 @@ export function sessionPickerEntries(input: SessionPickerInput): SessionPickerEn
   const selectedMachineId = input.selection?.machineId;
   const ordered = [...input.machines].sort((a, b) =>
     Number(b.id === selectedMachineId) - Number(a.id === selectedMachineId));
-  return ordered.flatMap((machine) => (input.sessions.get(machine.id) ?? []).map((session) => {
-    const summary = input.summaries?.get(`${machine.id}:${session.name}`);
-    return {
-      machineId: machine.id,
-      machineLabel: machine.label,
-      session: session.name,
-      role: session.supervisor ? "supervisor" as const : "session" as const,
-      supervisor: session.supervisor || undefined,
-      workerCount: session.workers.length,
-      status: session.liveness.replaceAll("_", " "),
-      title: summary?.title,
-      phase: summary?.phase,
-      current: machine.id === selectedMachineId && session.name === input.selection?.session,
-    };
-  }));
+  return ordered.flatMap((machine) => (input.sessions.get(machine.id) ?? [])
+    .filter((session) => input.includeDormant === true || session.dormant !== true)
+    .map((session) => {
+      const summary = input.summaries?.get(`${machine.id}:${session.name}`);
+      return {
+        machineId: machine.id,
+        machineLabel: machine.label,
+        session: session.name,
+        role: session.supervisor ? "supervisor" as const : "session" as const,
+        supervisor: session.supervisor || undefined,
+        workerCount: session.workers.length,
+        status: session.dormant ? "dormant" : session.liveness.replaceAll("_", " "),
+        title: summary?.title,
+        phase: summary?.phase,
+        current: machine.id === selectedMachineId && session.name === input.selection?.session,
+      };
+    }));
 }

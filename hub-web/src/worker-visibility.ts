@@ -47,9 +47,13 @@ export function workersRoute(search: string, revealed: boolean): string {
   return query ? `?${query}` : "";
 }
 
-/** The catalog path for this visibility; the DPoP proof binds the bare path. */
-export function sessionsPath(revealed: boolean): string {
-  return revealed ? `/v1/sessions?${WORKERS_QUERY_PARAM}=1` : "/v1/sessions";
+/** The catalog path for these visibilities; DPoP binds the bare path. */
+export function sessionsPath(revealWorkers: boolean, revealDormant = false): string {
+  const params = new URLSearchParams();
+  if (revealWorkers) params.set(WORKERS_QUERY_PARAM, "1");
+  if (revealDormant) params.set("dormant", "1");
+  const query = params.toString();
+  return query ? `/v1/sessions?${query}` : "/v1/sessions";
 }
 
 export interface PaneVisibility {

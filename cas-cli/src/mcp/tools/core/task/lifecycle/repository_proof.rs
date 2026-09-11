@@ -139,6 +139,103 @@ pub(crate) fn capture_repository_proof_with_anchors(
         worktree_root: worktree_root.to_string_lossy().into_owned(),
         head_commit,
         state_digest: format!("{:x}", hasher.finalize()),
+        target_branch: None,
+        anchor_commits,
+    })
+}
+
+/// Resolve a declared integration branch to the live ref that currently
+/// exists in the target repository.
+///
+/// The primary checkout can be parked on an unrelated branch while a target
+/// branch is checked out in a linked worktree. Resolve the named branch from
+/// the repository object database, then fall back to its remote-tracking ref;
+/// never use that checkout's incidental `HEAD` for a declared WorkTarget.
+fn resolve_target_branch_ref(
+    repository_root: &Path,
+    target_branch: &str,
+) -> Result<(String, String), String> {
+    let target_branch = target_branch.trim();
+    if target_branch.is_empty() || target_branch.starts_with('-') {
+        return Err(format!(
+            "repository proof target branch `{target_branch}` is not a safe Git ref"
+        ));
+    }
+    for target_ref in [
+        format!("refs/heads/{target_branch}"),
+        format!("refs/remotes/origin/{target_branch}"),
+    ] {
+        let revision = format!("{target_ref}^{{commit}}");
+        if let Ok(output) = git_output(
+            repository_root,
+            &["rev-parse", "--verify", revision.as_str()],
+        ) {
+            let head = String::from_utf8_lossy(&output).trim().to_string();
+            if !head.is_empty() {
+                return Ok((target_ref, head));
+            }
+        }
+    }
+    Err(format!(
+        "repository proof target branch `{target_branch}` does not resolve locally or as `origin/{target_branch}`"
+    ))
+}
+
+/// Capture the committed tree at a task's declared integration branch.
+///
+/// Unlike [`capture_repository_proof_with_anchors`], this intentionally does
+/// not inspect the current checkout's files: the target branch may be checked
+/// out in a different linked worktree while the primary checkout remains on a
+/// supervisor or staging branch. The tree listing is content-addressed and
+/// excludes Cassy's mutable `.cas` metadata just like the worktree proof.
+pub(crate) fn capture_repository_proof_at_target(
+    repository_root: &Path,
+    target_branch: &str,
+    anchor_commits: Vec<String>,
+) -> Result<RepositoryProofBoundary, String> {
+    let repository_root = canonical(repository_root, "repository root")?;
+    let (target_ref, head_commit) = resolve_target_branch_ref(&repository_root, target_branch)?;
+    let tree = git_output(
+        &repository_root,
+        &[
+            "ls-tree",
+            "-r",
+            "-z",
+            target_ref.as_str(),
+            "--",
+            ".",
+        ],
+    )?;
+    // `ls-tree` does not support the `:(exclude)` pathspec magic on all Git
+    // versions Cassy supports. Filter its NUL-delimited records instead; the
+    // path begins after the mode/type/object prefix's tab separator.
+    let tree = tree
+        .split(|byte| *byte == 0)
+        .filter(|entry| {
+            let Some(separator) = entry.iter().position(|byte| *byte == b'\t') else {
+                return true;
+            };
+            let path = &entry[separator + 1..];
+            path != b".cas" && !path.starts_with(b".cas/")
+        })
+        .flat_map(|entry| entry.iter().copied().chain(std::iter::once(0)))
+        .collect::<Vec<_>>();
+
+    let mut hasher = Sha256::new();
+    hasher.update(b"cas-verification-repository-proof-v1\0");
+    hasher.update(head_commit.as_bytes());
+    hasher.update(b"\0target-tree\0");
+    hasher.update(tree);
+
+    Ok(RepositoryProofBoundary {
+        repository_root: repository_root.to_string_lossy().into_owned(),
+        // Keep the owning repository root here. Evaluation resolves
+        // `target_branch` again, so a later primary-checkout move or linked
+        // worktree removal cannot make it silently fall back to HEAD.
+        worktree_root: repository_root.to_string_lossy().into_owned(),
+        head_commit,
+        state_digest: format!("{:x}", hasher.finalize()),
+        target_branch: Some(target_branch.trim().to_string()),
         anchor_commits,
     })
 }
@@ -250,34 +347,46 @@ pub(crate) fn evaluate_repository_proof(
     proof: &RepositoryProofBoundary,
 ) -> Result<RepositoryProofStatus, TaskLifecycleGateError> {
     let worktree_root = PathBuf::from(&proof.worktree_root);
-    let (current, validation_root) = match capture_repository_proof_with_anchors(
-        Path::new(&proof.repository_root),
-        &worktree_root,
-        proof.anchor_commits.clone(),
-    ) {
-        Ok(current) => (current, worktree_root),
-        Err(original) => {
-            // A successful post-merge cleanup removes the worker checkout that
-            // supplied this proof. The declared repository root is the durable
-            // target checkout, so it is the only safe fallback for a delivered
-            // task proof; keep all other missing-worktree errors strict.
-            let repository_root = Path::new(&proof.repository_root);
-            if repository_root != worktree_root.as_path() && is_git_worktree(repository_root) {
-                let current = capture_repository_proof_with_anchors(
-                    repository_root,
-                    repository_root,
-                    proof.anchor_commits.clone(),
-                )
-                .map_err(|fallback| {
-                    TaskLifecycleGateError::RepositoryProof {
+    let repository_root = Path::new(&proof.repository_root);
+    let (current, validation_root) = if let Some(target_branch) = proof.target_branch.as_deref() {
+        // A declared WorkTarget is authoritative at every proof check. In
+        // particular, never recover by reading the primary checkout's HEAD
+        // when the target branch is missing or moved.
+        let current = capture_repository_proof_at_target(
+            repository_root,
+            target_branch,
+            proof.anchor_commits.clone(),
+        )
+        .map_err(|message| TaskLifecycleGateError::RepositoryProof { message })?;
+        (current, repository_root.to_path_buf())
+    } else {
+        match capture_repository_proof_with_anchors(
+            repository_root,
+            &worktree_root,
+            proof.anchor_commits.clone(),
+        ) {
+            Ok(current) => (current, worktree_root),
+            Err(original) => {
+                // A successful post-merge cleanup removes the worker checkout
+                // that supplied this proof. The declared repository root is
+                // the durable target checkout, so it is the only safe fallback
+                // for a delivered task proof; keep all other missing-worktree
+                // errors strict.
+                if repository_root != worktree_root.as_path() && is_git_worktree(repository_root) {
+                    let current = capture_repository_proof_with_anchors(
+                        repository_root,
+                        repository_root,
+                        proof.anchor_commits.clone(),
+                    )
+                    .map_err(|fallback| TaskLifecycleGateError::RepositoryProof {
                         message: format!(
                             "{original}; target checkout fallback also failed: {fallback}"
                         ),
-                    }
-                })?;
-                (current, repository_root.to_path_buf())
-            } else {
-                return Err(TaskLifecycleGateError::RepositoryProof { message: original });
+                    })?;
+                    (current, repository_root.to_path_buf())
+                } else {
+                    return Err(TaskLifecycleGateError::RepositoryProof { message: original });
+                }
             }
         }
     };
@@ -582,5 +691,81 @@ mod tests {
         let proof: RepositoryProofBoundary =
             serde_json::from_value(legacy).expect("pre-cas-5c33 dispatch rows still parse");
         assert!(proof.anchor_commits.is_empty());
+    }
+
+    #[test]
+    fn target_proof_binds_declared_branch_when_primary_head_differs() {
+        let repo = tempfile::tempdir().expect("repository");
+        let worker = tempfile::tempdir().expect("target worktree");
+        let path = repo.path();
+        git(path, &["init", "-q", "-b", "primary"]);
+        std::fs::write(path.join("seed.txt"), "seed\n").expect("seed");
+        git(path, &["add", "seed.txt"]);
+        git(path, &["commit", "-q", "-m", "seed"]);
+        git(path, &["branch", "target"]);
+        git(
+            path,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                worker.path().to_str().expect("target worktree path"),
+                "target",
+            ],
+        );
+        std::fs::write(worker.path().join("delivered.txt"), "delivered\n")
+            .expect("delivered");
+        git(worker.path(), &["add", "delivered.txt"]);
+        git(worker.path(), &["commit", "-q", "-m", "deliver target work"]);
+        let target_tip = head(worker.path());
+        std::fs::write(path.join("primary.txt"), "primary\n").expect("primary");
+        git(path, &["add", "primary.txt"]);
+        git(path, &["commit", "-q", "-m", "advance primary"]);
+        let primary_tip = head(path);
+
+        let proof = capture_repository_proof_at_target(path, "target", Vec::new())
+            .expect("declared target proof");
+
+        assert_eq!(proof.head_commit, target_tip);
+        assert_ne!(proof.head_commit, primary_tip);
+        assert_eq!(proof.target_branch.as_deref(), Some("target"));
+        assert_eq!(
+            evaluate_repository_proof(&proof).expect("unchanged target proof"),
+            RepositoryProofStatus::Unchanged
+        );
+    }
+
+    #[test]
+    fn target_proof_falls_back_to_origin_branch_when_local_ref_is_missing() {
+        let origin = tempfile::tempdir().expect("origin");
+        git(origin.path(), &["init", "-q", "--bare", "-b", "primary"]);
+        let repo = tempfile::tempdir().expect("repository");
+        let path = repo.path();
+        git(path, &["init", "-q", "-b", "primary"]);
+        std::fs::write(path.join("seed.txt"), "seed\n").expect("seed");
+        git(path, &["add", "seed.txt"]);
+        git(path, &["commit", "-q", "-m", "seed"]);
+        git(path, &["remote", "add", "origin", origin.path().to_str().unwrap()]);
+        git(path, &["push", "-q", "origin", "primary"]);
+        git(path, &["branch", "target"]);
+        git(path, &["checkout", "-q", "target"]);
+        std::fs::write(path.join("target.txt"), "target\n").expect("target");
+        git(path, &["add", "target.txt"]);
+        git(path, &["commit", "-q", "-m", "target delivery"]);
+        let target_tip = head(path);
+        git(path, &["push", "-q", "origin", "target"]);
+        git(path, &["checkout", "-q", "primary"]);
+        git(path, &["branch", "-D", "target"]);
+        git(path, &["fetch", "-q", "origin"]);
+
+        let proof = capture_repository_proof_at_target(path, "target", Vec::new())
+            .expect("origin target proof");
+
+        assert_eq!(proof.head_commit, target_tip);
+        assert_eq!(proof.target_branch.as_deref(), Some("target"));
+        assert_eq!(
+            evaluate_repository_proof(&proof).expect("unchanged origin target proof"),
+            RepositoryProofStatus::Unchanged
+        );
     }
 }

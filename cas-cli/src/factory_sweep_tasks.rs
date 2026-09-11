@@ -331,12 +331,10 @@ fn classify_failure(project_root: &Path, failure: &FailureRecord) -> FailureClas
         };
     }
 
-    let prefix = assertion_prefix(&failure.assertion_text);
-    let key = format!("{}:{prefix}", failure.binary);
     FailureClass {
-        id: format!("inferred:{}", slug(&key)),
-        name: format!("{} / {prefix}", failure.binary),
-        title: format!("Fix {} sweep failures", failure.binary),
+        id: "unclassified".to_owned(),
+        name: "unclassified".to_owned(),
+        title: "Investigate unclassified sweep failures".to_owned(),
         lane: "standard".to_owned(),
     }
 }
@@ -377,33 +375,6 @@ fn is_stop_term(term: &str) -> bool {
         term,
         "symptom" | "root" | "cause" | "release" | "operator" | "reported" | "failed" | "failure"
     )
-}
-
-fn assertion_prefix(value: &str) -> String {
-    let value = value.trim();
-    let value = value.split_once(':').map_or(value, |(prefix, _)| prefix);
-    let value = value
-        .split_whitespace()
-        .take(10)
-        .collect::<Vec<_>>()
-        .join(" ");
-    if value.is_empty() {
-        "unknown assertion".to_owned()
-    } else {
-        value
-    }
-}
-
-fn slug(value: &str) -> String {
-    let mut output = String::new();
-    for character in value.chars() {
-        if character.is_ascii_alphanumeric() {
-            output.push(character.to_ascii_lowercase());
-        } else if !output.ends_with('-') {
-            output.push('-');
-        }
-    }
-    output.trim_matches('-').to_owned()
 }
 
 #[cfg(test)]
@@ -493,5 +464,23 @@ mod tests {
         let path = write_report(temp.path(), &report).unwrap();
         assert_eq!(path, report_path(temp.path()));
         assert_eq!(read_report(temp.path(), None).unwrap(), report);
+    }
+
+    #[test]
+    fn unknown_assertion_is_unclassified() {
+        let temp = tempfile::tempdir().unwrap();
+        let report = build_report_from_contents(
+            temp.path(),
+            Path::new("/artifacts/sweep.log"),
+            "FAILED",
+            "integration/cas-src",
+            "tip",
+            "cas-848",
+            &["cas-848".to_owned()],
+            "FAIL [0.1s] cas::fixture novel_test\nthread 'novel_test' panicked at x:1:1:\nAn assertion never seen before\n",
+        );
+        assert_eq!(report.classes.len(), 1);
+        assert_eq!(report.classes[0].failure_class, "unclassified");
+        assert_eq!(report.classes[0].class_name, "unclassified");
     }
 }

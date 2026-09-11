@@ -931,17 +931,18 @@ fn worker_command_runs_unguarded_tests(command: &str) -> bool {
 /// while direct `rustfmt` follows `mod` declarations unless `skip_children` is
 /// enabled. Checks and stdout-only runs are non-mutating and remain available.
 fn worker_command_runs_dangerous_formatter(command: &str) -> bool {
-    super::attribution::split_shell_statements(command)
+    shell_statement_words(command)
         .iter()
         .any(|words| formatter_invocation_can_spill(words))
 }
 
 fn formatter_invocation_can_spill(words: &[String]) -> bool {
-    if let Some(cargo_index) = words
-        .iter()
-        .position(|word| word == "cargo" || word.ends_with("/cargo"))
-    {
-        let mut cargo_args = &words[cargo_index + 1..];
+    let Some(command_index) = executable_word_index(words) else {
+        return false;
+    };
+    let command = shell_word_basename(&words[command_index]);
+    if command == "cargo" {
+        let mut cargo_args = &words[command_index + 1..];
         if cargo_args.first().is_some_and(|arg| arg.starts_with('+')) {
             cargo_args = &cargo_args[1..];
         }
@@ -956,13 +957,10 @@ fn formatter_invocation_can_spill(words: &[String]) -> bool {
         }
     }
 
-    let Some(rustfmt_index) = words
-        .iter()
-        .position(|word| word == "rustfmt" || word.ends_with("/rustfmt"))
-    else {
+    if command != "rustfmt" {
         return false;
-    };
-    let rustfmt_args = &words[rustfmt_index + 1..];
+    }
+    let rustfmt_args = &words[command_index + 1..];
     let is_read_only = rustfmt_args.iter().any(|arg| {
         matches!(
             arg.as_str(),
@@ -1560,6 +1558,7 @@ fn factory_shell_tokens(command: &str) -> Vec<ShellToken> {
     let mut word = String::new();
     let mut quote = None;
     let mut escaped = false;
+    let mut comment = false;
 
     let push_word = |tokens: &mut Vec<ShellToken>, word: &mut String| {
         if !word.is_empty() {
@@ -1568,6 +1567,14 @@ fn factory_shell_tokens(command: &str) -> Vec<ShellToken> {
     };
 
     for ch in command.chars() {
+        if comment {
+            if matches!(ch, '\n' | '\r') {
+                comment = false;
+                push_word(&mut tokens, &mut word);
+                tokens.push(ShellToken::Operator(';'));
+            }
+            continue;
+        }
         if escaped {
             word.push(ch);
             escaped = false;
@@ -1579,6 +1586,7 @@ fn factory_shell_tokens(command: &str) -> Vec<ShellToken> {
             None => match ch {
                 '\\' => escaped = true,
                 '\'' | '"' => quote = Some(ch),
+                '#' if word.is_empty() => comment = true,
                 '>' | '<' | '|' | '&' | ';' | '(' | ')' => {
                     push_word(&mut tokens, &mut word);
                     tokens.push(ShellToken::Operator(ch));
@@ -1597,6 +1605,334 @@ fn factory_shell_tokens(command: &str) -> Vec<ShellToken> {
     }
     push_word(&mut tokens, &mut word);
     tokens
+}
+
+/// Return shell statements with heredoc bodies and comments removed. Quoted
+/// arguments remain one word, so a formatter name in a script string cannot be
+/// mistaken for the executable command.
+fn shell_statement_words(command: &str) -> Vec<Vec<String>> {
+    let shell_command = shell_command_without_heredoc_bodies(command);
+    let tokens = factory_shell_tokens(&shell_command);
+    let mut statements = Vec::new();
+    let mut words = Vec::new();
+    for token in tokens {
+        match token {
+            ShellToken::Word(word) => words.push(word),
+            ShellToken::Operator(';')
+            | ShellToken::Operator('|')
+            | ShellToken::Operator('&')
+            | ShellToken::Operator('(')
+            | ShellToken::Operator(')') => {
+                if !words.is_empty() {
+                    statements.push(std::mem::take(&mut words));
+                }
+            }
+            ShellToken::Operator(_) => {}
+        }
+    }
+    if !words.is_empty() {
+        statements.push(words);
+    }
+    statements
+}
+
+fn shell_word_basename(word: &str) -> &str {
+    std::path::Path::new(word)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(word)
+}
+
+/// Find the executable word after the small set of shell wrappers commonly
+/// used by worker commands. This is deliberately not a shell evaluator.
+fn executable_word_index(words: &[String]) -> Option<usize> {
+    let mut index = 0;
+    while index < words.len() {
+        let word = &words[index];
+        match shell_word_basename(word) {
+            "!" | "if" | "then" | "else" | "elif" | "do" => index += 1,
+            "env" => {
+                index += 1;
+                while index < words.len()
+                    && (words[index].starts_with('-')
+                        || words[index]
+                            .split_once('=')
+                            .is_some_and(|(name, _)| is_shell_variable_name(name)))
+                {
+                    index += 1;
+                }
+            }
+            "sudo" => {
+                index += 1;
+                while index < words.len() && words[index].starts_with('-') {
+                    index += 1;
+                }
+            }
+            "command" => index += 1,
+            _ if word
+                .split_once('=')
+                .is_some_and(|(name, _)| is_shell_variable_name(name)) =>
+            {
+                index += 1;
+            }
+            _ => return Some(index),
+        }
+    }
+    None
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ScriptToken {
+    Identifier(String),
+    String(String),
+    Punctuation(char),
+}
+
+/// Tokenize only enough Python/JavaScript syntax to identify known write APIs.
+/// Comments and string contents are opaque; in particular, `</script>`, Vue
+/// interpolation text, and template literals cannot become path tokens.
+fn script_tokens(script: &str) -> Vec<ScriptToken> {
+    let chars: Vec<char> = script.chars().collect();
+    let mut tokens = Vec::new();
+    let mut index = 0;
+    while index < chars.len() {
+        let ch = chars[index];
+        if ch.is_whitespace() {
+            index += 1;
+            continue;
+        }
+        if ch == '#' {
+            while index < chars.len() && chars[index] != '\n' {
+                index += 1;
+            }
+            continue;
+        }
+        if ch == '/' && chars.get(index + 1) == Some(&'/') {
+            index += 2;
+            while index < chars.len() && chars[index] != '\n' {
+                index += 1;
+            }
+            continue;
+        }
+        if ch == '/' && chars.get(index + 1) == Some(&'*') {
+            index += 2;
+            while index + 1 < chars.len() && !(chars[index] == '*' && chars[index + 1] == '/') {
+                index += 1;
+            }
+            index = (index + 2).min(chars.len());
+            continue;
+        }
+        if matches!(ch, '\'' | '"' | '`') {
+            let quote = ch;
+            let triple = quote != '`'
+                && chars.get(index + 1) == Some(&quote)
+                && chars.get(index + 2) == Some(&quote);
+            let prefix = if triple { 3 } else { 1 };
+            index += prefix;
+            let start = index;
+            while index < chars.len() {
+                if chars[index] == '\\' {
+                    index = (index + 2).min(chars.len());
+                    continue;
+                }
+                let closed = if triple {
+                    chars.get(index) == Some(&quote)
+                        && chars.get(index + 1) == Some(&quote)
+                        && chars.get(index + 2) == Some(&quote)
+                } else {
+                    chars[index] == quote
+                };
+                if closed {
+                    break;
+                }
+                index += 1;
+            }
+            let value = chars[start..index].iter().collect();
+            tokens.push(ScriptToken::String(value));
+            index = (index + prefix).min(chars.len());
+            continue;
+        }
+        if ch == '_' || ch.is_ascii_alphanumeric() || ch == '$' {
+            let start = index;
+            index += 1;
+            while index < chars.len()
+                && (chars[index] == '_'
+                    || chars[index].is_ascii_alphanumeric()
+                    || chars[index] == '$')
+            {
+                index += 1;
+            }
+            tokens.push(ScriptToken::Identifier(
+                chars[start..index].iter().collect(),
+            ));
+            continue;
+        }
+        tokens.push(ScriptToken::Punctuation(ch));
+        index += 1;
+    }
+    tokens
+}
+
+fn script_assignment_values(tokens: &[ScriptToken]) -> std::collections::HashMap<String, String> {
+    let mut assignments = std::collections::HashMap::new();
+    for index in 0..tokens.len() {
+        let ScriptToken::Identifier(name) = &tokens[index] else {
+            continue;
+        };
+        if !matches!(tokens.get(index + 1), Some(ScriptToken::Punctuation('='))) {
+            continue;
+        }
+        match tokens.get(index + 2) {
+            Some(ScriptToken::String(value)) => {
+                assignments.insert(name.clone(), value.clone());
+            }
+            Some(ScriptToken::Identifier(path_type)) if path_type == "Path" => {
+                if let Some(ScriptToken::String(value)) = tokens.get(index + 4) {
+                    if matches!(tokens.get(index + 3), Some(ScriptToken::Punctuation('('))) {
+                        assignments.insert(name.clone(), value.clone());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    assignments
+}
+
+fn script_target_value(
+    tokens: &[ScriptToken],
+    index: usize,
+    assignments: &std::collections::HashMap<String, String>,
+) -> Option<String> {
+    match tokens.get(index)? {
+        ScriptToken::String(value) => Some(value.clone()),
+        ScriptToken::Identifier(name) => assignments.get(name).cloned(),
+        _ => None,
+    }
+}
+
+fn script_call_end(tokens: &[ScriptToken], open: usize) -> Option<usize> {
+    if !matches!(tokens.get(open), Some(ScriptToken::Punctuation('('))) {
+        return None;
+    }
+    let mut depth = 0;
+    for index in open..tokens.len() {
+        match tokens[index] {
+            ScriptToken::Punctuation('(') => depth += 1,
+            ScriptToken::Punctuation(')') => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn script_method_is_write(method: &str) -> bool {
+    matches!(
+        method,
+        "write_text"
+            | "write_bytes"
+            | "writeFile"
+            | "writeFileSync"
+            | "appendFile"
+            | "appendFileSync"
+            | "createWriteStream"
+    )
+}
+
+fn script_node_method_is_write(method: &str) -> bool {
+    matches!(
+        method,
+        "writeFile" | "writeFileSync" | "appendFile" | "appendFileSync" | "createWriteStream"
+    )
+}
+
+fn script_mode_is_write(mode: &str) -> bool {
+    mode.starts_with('w') || mode.starts_with('a') || mode.starts_with('x')
+}
+
+fn script_write_targets(script: &str) -> Vec<String> {
+    let tokens = script_tokens(script);
+    let assignments = script_assignment_values(&tokens);
+    let mut targets = Vec::new();
+    for index in 0..tokens.len() {
+        let ScriptToken::Identifier(name) = &tokens[index] else {
+            continue;
+        };
+        let Some(ScriptToken::Punctuation('(')) = tokens.get(index + 1) else {
+            continue;
+        };
+        let Some(end) = script_call_end(&tokens, index + 1) else {
+            continue;
+        };
+        if name == "open" {
+            let target = script_target_value(&tokens, index + 2, &assignments);
+            let mode = script_target_value(&tokens, index + 4, &assignments);
+            if mode.as_deref().is_some_and(script_mode_is_write) {
+                if let Some(target) = target {
+                    targets.push(target);
+                }
+            }
+            continue;
+        }
+        if name == "Path" {
+            let Some(ScriptToken::Punctuation(')')) = tokens.get(end) else {
+                continue;
+            };
+            let Some(ScriptToken::Punctuation('.')) = tokens.get(end + 1) else {
+                continue;
+            };
+            let Some(ScriptToken::Identifier(method)) = tokens.get(end + 2) else {
+                continue;
+            };
+            if script_method_is_write(method) {
+                if let Some(target) = script_target_value(&tokens, index + 2, &assignments) {
+                    targets.push(target);
+                }
+            }
+            continue;
+        }
+        if !script_node_method_is_write(name) {
+            continue;
+        }
+        if let Some(target) = script_target_value(&tokens, index + 2, &assignments) {
+            targets.push(target);
+        }
+    }
+
+    // `path.write_text(...)` and `path.open("w")` use the path object on the
+    // left of the method call rather than passing the path as an argument.
+    for index in 2..tokens.len() {
+        let (Some(ScriptToken::Punctuation('.')), Some(ScriptToken::Identifier(method))) =
+            (tokens.get(index - 1), tokens.get(index))
+        else {
+            continue;
+        };
+        if !script_method_is_write(method) && method != "open" {
+            continue;
+        }
+        let ScriptToken::Identifier(object) = &tokens[index - 2] else {
+            continue;
+        };
+        let Some(ScriptToken::Punctuation('(')) = tokens.get(index + 1) else {
+            continue;
+        };
+        if method == "open"
+            && !script_target_value(&tokens, index + 2, &assignments)
+                .as_deref()
+                .is_some_and(script_mode_is_write)
+        {
+            continue;
+        }
+        if let Some(target) = assignments.get(object) {
+            targets.push(target.clone());
+        }
+    }
+    targets
 }
 
 /// Collect the finite values that are visible in the simple shell forms used
@@ -1850,62 +2186,68 @@ fn shell_command_without_heredoc_bodies(command: &str) -> String {
     shell_command
 }
 
-/// Extract the file argument from the narrow Python heredoc rewrite shape
-/// emitted by factory workers. A heredoc's body is opaque to the shell-token
-/// recognizer above, but `open(path, 'w')` is still a real write target and
-/// must remain inside the factory workspace contract. Unknown expressions are
-/// ignored here and remain subject to Claude's own permission classifier.
-fn bash_heredoc_write_targets(command: &str) -> Vec<String> {
-    if !command.contains("<<") {
-        return Vec::new();
-    }
-    let mut assignments = std::collections::HashMap::new();
-    for line in command.lines() {
-        let trimmed = line.trim();
-        let Some(equal) = trimmed.find('=') else {
-            continue;
-        };
-        let name = trimmed[..equal].trim();
-        let value = trimmed[equal + 1..].trim();
-        if is_shell_variable_name(name) {
-            if let Some(quoted) = quoted_string_value(value) {
-                assignments.insert(name.to_string(), quoted.to_string());
+fn shell_heredoc_bodies(command: &str) -> Vec<String> {
+    let mut pending: std::collections::VecDeque<(HeredocDelimiter, String)> =
+        std::collections::VecDeque::new();
+    let mut bodies = Vec::new();
+    for line in command.split_inclusive('\n') {
+        if let Some((delimiter, body)) = pending.front_mut() {
+            let candidate = line.trim_end_matches('\n').trim_end_matches('\r');
+            let candidate = if delimiter.strip_leading_tabs {
+                candidate.trim_start_matches('\t')
+            } else {
+                candidate
+            };
+            let is_delimiter = candidate == delimiter.value;
+            if is_delimiter {
+                let (_, body) = pending.pop_front().expect("heredoc body is pending");
+                bodies.push(body);
+            } else {
+                body.push_str(line);
             }
+            continue;
         }
+        pending.extend(
+            heredoc_delimiters(line)
+                .into_iter()
+                .map(|delimiter| (delimiter, String::new())),
+        );
     }
-
-    let mut targets = Vec::new();
-    let mut remainder = command;
-    while let Some(open) = remainder.find("open(") {
-        let args = &remainder[open + "open(".len()..];
-        let first = args.trim_start();
-        let (target, consumed) = if let Some(quoted) = quoted_string_value(first) {
-            (Some(quoted.to_string()), quoted.len() + 2)
-        } else {
-            let end = first
-                .find(|ch: char| ch == ',' || ch == ')' || ch.is_whitespace())
-                .unwrap_or(first.len());
-            let name = &first[..end];
-            (assignments.get(name).cloned(), end)
-        };
-        if let Some(target) = target {
-            targets.push(target);
-        }
-        let advance =
-            (open + "open(".len() + first.len().min(consumed.max(1))).min(remainder.len());
-        remainder = &remainder[advance..];
-    }
-    targets
+    bodies
 }
 
-fn quoted_string_value(value: &str) -> Option<&str> {
-    let mut chars = value.char_indices();
-    let (_, quote) = chars.next()?;
-    if quote != '\'' && quote != '"' {
-        return None;
+/// Extract targets from known script write APIs only. The script itself is
+/// opaque to shell tokenization; this bounded parser recognizes Python/Node
+/// invocations and never treats arbitrary source strings as filesystem paths.
+fn script_write_targets_from_command(command: &str) -> Vec<String> {
+    let mut heredoc_bodies = shell_heredoc_bodies(command).into_iter();
+    let mut targets = Vec::new();
+    for words in shell_statement_words(command) {
+        let Some(command_index) = executable_word_index(&words) else {
+            continue;
+        };
+        let executable = shell_word_basename(&words[command_index]);
+        if !matches!(executable, "python" | "python3" | "node") {
+            continue;
+        }
+        let args = &words[command_index + 1..];
+        let script = args.windows(2).find_map(|pair| {
+            if matches!(pair[0].as_str(), "-c" | "-e") {
+                Some(pair[1].clone())
+            } else {
+                None
+            }
+        });
+        let script = script.or_else(|| {
+            args.iter()
+                .position(|arg| arg == "-")
+                .and_then(|_| heredoc_bodies.next())
+        });
+        if let Some(script) = script {
+            targets.extend(script_write_targets(&script));
+        }
     }
-    let (end, _) = chars.find(|(_, ch)| *ch == quote)?;
-    Some(&value[1..end])
+    targets
 }
 
 /// Identify shell words that are actual output targets, without treating every
@@ -1932,7 +2274,7 @@ fn bash_write_targets(command: &str) -> Vec<String> {
             }
         }
     }
-    for target in bash_heredoc_write_targets(command) {
+    for target in script_write_targets_from_command(command) {
         add_target(&target);
     }
 
@@ -1977,7 +2319,10 @@ fn bash_write_targets(command: &str) -> Vec<String> {
                     .file_name()
                     .and_then(|name| name.to_str())
                     .unwrap_or(command);
-                if !matches!(command, "touch" | "mkdir" | "tee" | "cp" | "mv" | "rm") {
+                if !matches!(
+                    command,
+                    "touch" | "mkdir" | "tee" | "cp" | "mv" | "rm" | "install"
+                ) {
                     index += 1;
                     continue;
                 }
@@ -1999,7 +2344,7 @@ fn bash_write_targets(command: &str) -> Vec<String> {
                     }
                     cursor += 1;
                 }
-                if matches!(command, "cp" | "mv") {
+                if matches!(command, "cp" | "mv" | "install") {
                     if let Some(destination) = operands.pop() {
                         add_target(&destination);
                     }
@@ -2568,6 +2913,92 @@ mod workspace_contract_tests {
             Some(std::path::PathBuf::from("/etc/x")),
             "an absolute redirect target must remain guarded"
         );
+    }
+
+    #[test]
+    fn issue_payload_script_text_is_not_a_workspace_target() {
+        let cwd = tempfile::tempdir().expect("worktree");
+        let target = cwd.path().join("tests/generated.ts");
+        std::fs::create_dir_all(target.parent().expect("target parent")).expect("target dir");
+        let target = target.to_string_lossy();
+        let commands = [
+            format!("cat > '{target}' <<'EOF'\nconst closing = '</script>';\nEOF"),
+            format!(
+                "python3 - <<'PY'\nfrom pathlib import Path\npath = '{target}'\nsource = source.replace(\"${{canonicalEmail}}\", canonical_email)\nPath(path).write_text(source)\nPY"
+            ),
+            format!(
+                "python3 - <<'PY'\nfrom pathlib import Path\npath = '{target}'\nsource = \"target.$transaction(async () => true)\"\nPath(path).write_text(source)\nPY"
+            ),
+            format!(
+                "python3 - <<'PY'\nfrom pathlib import Path\npath = '{target}'\nreplacement = \"{{{{ a }}}} / {{{{ b }}}}\"\nPath(path).write_text(replacement)\nPY"
+            ),
+            format!(
+                "python3 - <<'PY'\nfrom pathlib import Path\npath = '{target}'\nreplacement = \"/{{{{ learnerCards.length }}}}\"\nPath(path).write_text(replacement)\nPY"
+            ),
+            format!(
+                "python3 - <<'PY'\nfrom pathlib import Path\npath = '{target}'\nsource = \"learner:${{s.workspaceId}}:${{s.projectSlug}}:${{s.itemId}}\"\nPath(path).write_text(source)\nPY"
+            ),
+        ];
+
+        for command in commands {
+            let input = bash_input(&command, cwd.path());
+            assert_eq!(
+                bash_write_targets(&command),
+                vec![target.to_string()],
+                "only the actual output file is a target: {command}"
+            );
+            assert_eq!(
+                factory_write_violation(&input, &None, None, false, Some(cwd.path())),
+                None,
+                "in-worktree issue payload must be allowed: {command}"
+            );
+        }
+    }
+
+    #[test]
+    fn script_write_targets_are_structural_and_outside_paths_remain_denied() {
+        let cwd = tempfile::tempdir().expect("worktree");
+        let inside = cwd.path().join("generated.ts");
+        for command in [
+            format!(
+                "python3 -c 'from pathlib import Path; Path(\"{}\").write_text(\"/{{{{ not a path }}}}\")'",
+                inside.display()
+            ),
+            format!(
+                "node -e 'require(\"fs\").writeFileSync(\"{}\", \"target.$transaction\")'",
+                inside.display()
+            ),
+        ] {
+            let input = bash_input(&command, cwd.path());
+            assert_eq!(
+                factory_write_violation(&input, &None, None, false, Some(cwd.path())),
+                None,
+                "embedded script strings must not become targets: {command}"
+            );
+        }
+
+        for (command, expected) in [
+            (
+                "python3 -c 'from pathlib import Path; Path(\"/tmp/cas-script-escape\").write_text(\"ok\")'",
+                "/tmp/cas-script-escape",
+            ),
+            (
+                "node -e 'require(\"fs\").writeFileSync(\"/tmp/cas-script-escape\", \"ok\")'",
+                "/tmp/cas-script-escape",
+            ),
+            (
+                "install -D source /tmp/cas-install-escape",
+                "/tmp/cas-install-escape",
+            ),
+        ] {
+            let input = bash_input(command, cwd.path());
+            assert_eq!(
+                factory_write_violation(&input, &None, None, false, Some(cwd.path()))
+                    .map(|violation| violation.resolved_path),
+                Some(std::path::PathBuf::from(expected)),
+                "outside script/install targets must remain denied: {command}"
+            );
+        }
     }
 
     #[test]

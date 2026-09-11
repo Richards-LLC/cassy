@@ -289,5 +289,3 @@ fn test_stop_not_blocked_without_summary_config() {
 // =============================================================================
 // Part H: Learning Review Tests
 // =============================================================================
-
-/// Helper to add a learning entry via CLI

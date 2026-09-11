@@ -94,6 +94,6 @@ export function unsupportedBrowserNotice(support: BrowserSupport): string | unde
     firefox: Math.max(worst.firefox, requirement.since.firefox),
     safari: newerSafari(worst.safari, requirement.since.safari),
   }), { chrome: 0, edge: 0, firefox: 0, safari: "0" });
-  return `This browser is missing ${listApis(support.missing)}, which Cassy Commander needs. `
+  return `This browser is missing ${listApis(support.missing)}, which Cassy Cloud needs. `
     + `Update to Chrome ${floor.chrome}, Edge ${floor.edge}, Firefox ${floor.firefox}, or Safari ${floor.safari} or newer.`;
 }

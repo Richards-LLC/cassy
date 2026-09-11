@@ -1,4 +1,4 @@
-import type { PaneInfo } from "./types";
+import type { HubSession, PaneInfo } from "./types";
 
 /**
  * Worker visibility is off by default (cas-6261). The operator asked for a Hub
@@ -63,11 +63,12 @@ export interface PaneVisibility {
 }
 
 /** Director panes never render; worker panes render only when revealed. */
-export function splitVisiblePanes(panes: readonly PaneInfo[], revealed: boolean): PaneVisibility {
+export function splitVisiblePanes(panes: readonly PaneInfo[], revealed: boolean, liveWorkers?: readonly string[]): PaneVisibility {
   const visible: PaneInfo[] = [];
   const hiddenWorkers: PaneInfo[] = [];
   for (const pane of panes) {
-    if (pane.kind === "Director") continue;
+    if (pane.kind === "Director" || pane.exited) continue;
+    if (pane.kind === "Worker" && liveWorkers && !liveWorkers.includes(pane.title)) continue;
     if (pane.kind === "Worker" && !revealed) hiddenWorkers.push(pane);
     else visible.push(pane);
   }
@@ -84,4 +85,24 @@ export function workersCommandLabel(revealed: boolean): { title: string; hint: s
   return revealed
     ? { title: "Workers · Shown", hint: "Hide worker panes; supervisors only" }
     : { title: "Workers · Hidden", hint: "Show worker panes for debugging" };
+}
+
+/** Require a fresh staffed supervisor; recovery is explicit and pending work stays visible. */
+export function sessionReachable(session: HubSession, catalogFresh = true): boolean {
+  return catalogFresh && !session.unreachable && session.dormant !== true
+    && session.liveness === "live" && Boolean(session.supervisor.trim()) && session.workers.length > 0;
+}
+
+export function visibleCatalog(sessions: readonly HubSession[], pending: (name: string) => boolean, catalogFresh = true, recovery = false): HubSession[] {
+  return sessions.flatMap(session => {
+    if (sessionReachable(session, catalogFresh)) return [session];
+    if (pending(session.name)) return [{ ...session, unreachable: true }];
+    return recovery ? [session] : [];
+  });
+}
+
+/** A filtered server response cannot erase a conversation awaiting its outcome. */
+export function retainPendingSessions(previous: readonly HubSession[], incoming: readonly HubSession[], pending: (name: string) => boolean): HubSession[] {
+  const names = new Set(incoming.map(session => session.name));
+  return [...incoming, ...previous.filter(session => !names.has(session.name) && pending(session.name)).map(session => ({ ...session, unreachable: true }))];
 }

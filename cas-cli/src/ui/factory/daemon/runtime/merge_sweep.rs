@@ -63,6 +63,7 @@ struct SweepResult {
     summary: String,
     failures: Vec<String>,
     integration_epics: Vec<String>,
+    base_failure: Option<rolling_integration::BaseFailure>,
 }
 
 #[derive(Debug)]
@@ -194,6 +195,7 @@ impl MergeSweepCoordinator {
                     summary: format!("sweep task join failed: {error}"),
                     failures: Vec::new(),
                     integration_epics: Vec::new(),
+                    base_failure: None,
                 },
             };
             let superseded = active.pending.is_some() || result.status == SweepStatus::Superseded;
@@ -278,6 +280,7 @@ impl MergeSweepCoordinator {
             summary: format!("workspace sweep deferred: {reason}"),
             failures: Vec::new(),
             integration_epics: Vec::new(),
+            base_failure: None,
         };
         append_epic_note(cas_dir, &result);
         tracing::warn!(epic = %request.epic_id, reason, "post-merge workspace sweep deferred");
@@ -394,6 +397,7 @@ fn execute_sweep(
                 summary: format!("cannot create sweep log: {error}"),
                 failures: Vec::new(),
                 integration_epics: Vec::new(),
+                base_failure: None,
             };
         }
     };
@@ -409,6 +413,7 @@ fn execute_sweep(
                 summary: format!("workspace setup failed: {error}"),
                 failures: Vec::new(),
                 integration_epics: Vec::new(),
+                base_failure: None,
             };
         }
     };
@@ -428,6 +433,7 @@ fn execute_sweep(
             summary,
             failures: Vec::new(),
             integration_epics: Vec::new(),
+            base_failure: None,
         };
     };
 
@@ -467,6 +473,7 @@ fn execute_sweep(
         summary,
         failures,
         integration_epics: Vec::new(),
+        base_failure: None,
     }
 }
 
@@ -748,7 +755,22 @@ fn sweep_detail(result: &SweepResult) -> String {
     } else {
         format!(" Failing rows: {}.", result.failures.join(" | "))
     };
-    format!("{}{}", result.summary, failures)
+    let base_failure = result
+        .base_failure
+        .as_ref()
+        .map(|failure| {
+            format!(
+                " Base-only evidence: base tip {}; failing set: {}.",
+                failure.base,
+                if failure.failing.is_empty() {
+                    "(none parsed)".to_owned()
+                } else {
+                    failure.failing.join(" | ")
+                }
+            )
+        })
+        .unwrap_or_default();
+    format!("{}{}{}", result.summary, failures, base_failure)
 }
 
 fn status_text(status: SweepStatus) -> &'static str {

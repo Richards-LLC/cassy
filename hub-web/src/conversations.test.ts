@@ -79,3 +79,16 @@ it('routes correlated daemon, legacy Hub and multiplex Hub rejections to the add
   expect(onMessageRejected.mock.calls).toEqual([['a', 'daemon', 'Refused by daemon'], ['a', 'legacy', 'forbidden'], ['b', 'mux', 'forbidden']]);
   expect(onSocketError).not.toHaveBeenCalled();
 });
+
+it('retains a destination until a correlated reply or refusal settles each send', () => {
+  const history = new ConversationHistory();
+  expect(history.hasPending()).toBe(false);
+  history.submit('pending', 'supervisor', 'instruction');
+  expect(history.hasPending()).toBe(true);
+  history.acknowledge({ client_ref: 'pending', target: 'supervisor', notification_id: 7, stamped: true });
+  expect(history.hasPending()).toBe(true);
+  history.reply({ notification_id: 8, reply_to: 7, message: 'done', summary: '', device_id: 'fixture' });
+  expect(history.hasPending()).toBe(false);
+  history.submit('refused', 'supervisor', 'instruction'); history.reject('refused', 'no access');
+  expect(history.hasPending()).toBe(false);
+});

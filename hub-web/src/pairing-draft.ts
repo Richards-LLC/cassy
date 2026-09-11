@@ -20,7 +20,7 @@ export function createPairingDraft(controllerOrigin: string, scopes?: readonly S
     hubUrl: "",
     pageOrigin: controllerOrigin,
     machineLabel: "",
-    deviceLabel: "Cassy Commander browser",
+    deviceLabel: "Cassy Cloud browser",
     operatorLabel: "",
     scopes: scopes ? [...scopes] : [...PAIRING_SCOPES],
     email: "",

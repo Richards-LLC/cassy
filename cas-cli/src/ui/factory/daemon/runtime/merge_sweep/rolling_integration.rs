@@ -15,6 +15,12 @@ struct EpicTip {
     owner: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(super) struct BaseFailure {
+    pub(super) base: String,
+    pub(super) failing: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct IntegrationReceipt {
     base: String,
@@ -23,6 +29,8 @@ struct IntegrationReceipt {
     status: String,
     detail: String,
     affected: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    base_failure: Option<BaseFailure>,
 }
 
 const ROW_CACHE_FORMAT: &str = "row-cache-v2";
@@ -121,13 +129,90 @@ fn assemble(worktree: &Path, base: &str, epics: &[EpicTip]) -> Result<Assembly, 
 }
 
 fn open_epics(mut tasks: Vec<Task>) -> Vec<Task> {
-    tasks.retain(|task| task.task_type == TaskType::Epic && task.status != TaskStatus::Closed);
+    tasks.retain(|task| {
+        task.task_type == TaskType::Epic
+            && !matches!(task.status, TaskStatus::Closed | TaskStatus::Cancelled)
+    });
     tasks.sort_by(|a, b| {
         a.created_at
             .cmp(&b.created_at)
             .then_with(|| a.id.cmp(&b.id))
     });
     tasks
+}
+
+/// An epic's legacy `branch` is its coordination branch. A WorkTarget on an
+/// epic names the branch it delivers into (usually `main`), so it must not
+/// replace the coordination branch when assembling the rolling union.
+fn epic_branch(task: &Task) -> Option<&str> {
+    task.branch
+        .as_deref()
+        .filter(|branch| branch.starts_with("epic/"))
+        .or_else(|| {
+            task.deliverables
+                .work_target
+                .as_ref()
+                .map(|target| target.target_branch.as_str())
+                .filter(|branch| branch.starts_with("epic/"))
+        })
+}
+
+fn ref_tip(root: &Path, reference: &str) -> Option<String> {
+    git_output(
+        root,
+        &["rev-parse", "--verify", &format!("{reference}^{{commit}}")],
+    )
+    .ok()
+}
+
+/// Build the set from all open task rows, independent of ownership. Rows with
+/// no live local or origin ref are ignored; a divergent local/origin pair is
+/// still an actionable integration error and is preserved for the caller.
+fn live_open_epics(root: &Path, tasks: Vec<Task>) -> Result<Vec<EpicTip>, String> {
+    open_epics(tasks)
+        .into_iter()
+        .filter_map(|task| {
+            let branch = epic_branch(&task)?.to_owned();
+            let local = ref_tip(root, &format!("refs/heads/{branch}"));
+            let remote = ref_tip(root, &format!("refs/remotes/origin/{branch}"));
+            if local.is_none() && remote.is_none() {
+                return None;
+            }
+            let tip = match resolve_epic_tip(root, &branch) {
+                Ok(tip) => tip,
+                Err(error) => return Some(Err(error)),
+            };
+            Some(Ok(EpicTip {
+                id: task.id,
+                branch,
+                tip,
+                owner: task.epic_verification_owner.or(task.assignee),
+            }))
+        })
+        .collect()
+}
+
+fn focused_epic_id_for_project(root: &Path) -> Option<String> {
+    let session = std::env::var("CAS_FACTORY_SESSION")
+        .ok()
+        .filter(|session| !session.trim().is_empty())?;
+    let path = crate::ui::factory::session::metadata_path(&session);
+    let metadata = serde_json::from_slice::<crate::ui::factory::protocol::SessionMetadata>(
+        &fs::read(path).ok()?,
+    )
+    .ok()?;
+    let metadata_project = metadata
+        .project_dir
+        .as_deref()
+        .filter(|project| !project.trim().is_empty())
+        .and_then(|project| fs::canonicalize(project).ok())?;
+    if fs::canonicalize(root).ok()? != metadata_project {
+        return None;
+    }
+    metadata
+        .pinned_epic_id
+        .or(metadata.epic_id)
+        .filter(|id| !id.trim().is_empty())
 }
 
 pub(super) fn execute(
@@ -146,6 +231,7 @@ pub(super) fn execute(
             log_path: cas_dir.join(LOG_DIR).join("integration.json"),
             summary: format!("Rolling integration setup failed: {error}"),
             failures: Vec::new(),
+            base_failure: None,
         },
     }
 }
@@ -182,6 +268,7 @@ fn integrate(
                 summary: "Integration superseded while waiting for lock".into(),
                 failures: Vec::new(),
                 integration_epics: vec![request.epic_id.clone()],
+                base_failure: None,
             });
         }
         if let Some(lock) =
@@ -205,6 +292,7 @@ fn integrate(
         status: "RUNNING".to_owned(),
         detail: format!("Triggered by {} at {}", request.epic_id, request.commit),
         affected: vec![request.epic_id.clone()],
+        base_failure: None,
     };
     write_receipt(&receipt_path, &receipt)?;
     // Invalidate an old failed sweep report at the same boundary. A fetch,
@@ -232,28 +320,16 @@ fn integrate(
         &["rev-parse", "--verify", "refs/remotes/origin/main^{commit}"],
     )?;
     receipt.base = base.clone();
-    let store = crate::store::open_task_store(cas_dir).map_err(|error| error.to_string())?;
-    for task in open_epics(store.list(None).map_err(|error| error.to_string())?) {
-        let branch = task
-            .deliverables
-            .work_target
-            .as_ref()
-            .map(|target| &target.target_branch)
-            .or(task.branch.as_ref());
-        let Some(branch) = branch.filter(|branch| branch.starts_with("epic/")) else {
-            // An unstarted epic without a branch contributes no code yet.
-            continue;
-        };
-        // Local epic tips are authoritative for supervisor-local delivery.
-        // Remote-only epics are included after the fetch above.
-        let tip = resolve_epic_tip(project_root, branch)?;
-        receipt.epics.push(EpicTip {
-            id: task.id,
-            branch: branch.clone(),
-            tip,
-            owner: task.epic_verification_owner.or(task.assignee),
-        });
+    let store = crate::store::open_task_store(&shared_cas).map_err(|error| error.to_string())?;
+    let mut tasks = store.list(None).map_err(|error| error.to_string())?;
+    if let Some(focused_id) = focused_epic_id_for_project(main_root) {
+        if !tasks.iter().any(|task| task.id == focused_id) {
+            if let Ok(task) = store.get(&focused_id) {
+                tasks.push(task);
+            }
+        }
     }
+    receipt.epics = live_open_epics(project_root, tasks)?;
     let synthetic = SweepRequest {
         epic_id: format!("integration-{}", sanitize_component(project)),
         target_branch: branch.clone(),
@@ -282,6 +358,7 @@ fn integrate(
                 summary: detail,
                 failures: Vec::new(),
                 integration_epics: affected,
+                base_failure: None,
             });
         }
         Assembly::Clean { tip, prefixes } => (tip, prefixes),
@@ -294,6 +371,7 @@ fn integrate(
             summary: "Integration superseded before publication".to_owned(),
             failures: Vec::new(),
             integration_epics: vec![request.epic_id.clone()],
+            base_failure: None,
         });
     }
     // The detached checkout can move freely; publication alone changes the
@@ -321,6 +399,7 @@ fn integrate(
             summary: format!("{branch} updated; sweep deferred: {}", receipt.detail),
             failures: Vec::new(),
             integration_epics: vec![request.epic_id.clone()],
+            base_failure: None,
         });
     }
     let mut result = execute_sweep(
@@ -344,6 +423,7 @@ fn integrate(
         }
     }
     let mut affected = vec![request.epic_id.clone()];
+    let mut base_failure = None;
     if result.status == SweepStatus::Failed {
         let mut probe_settings = settings.clone();
         probe_settings.nextest_filter = failing_filter(&result.failures);
@@ -395,6 +475,12 @@ fn integrate(
                     .summary
                     .push_str("; failing targets also fail on origin/main (no epic attribution)");
                 affected = receipt.epics.iter().map(|epic| epic.id.clone()).collect();
+                let evidence = BaseFailure {
+                    base: base.clone(),
+                    failing: normalized_failures(&result.failures),
+                };
+                base_failure = Some(evidence.clone());
+                result.base_failure = Some(evidence);
             }
             Err(error) => result
                 .summary
@@ -412,6 +498,7 @@ fn integrate(
     receipt.status = status_text(result.status).to_owned();
     receipt.detail = sweep_detail(&result);
     receipt.affected = affected;
+    receipt.base_failure = base_failure;
     // Keep the raw sweep log and the machine-readable fix queue together. A
     // passing sweep clears a prior report so a supervisor can never accept
     // stale proposals after a later green integration tip.
@@ -459,24 +546,8 @@ fn integrate(
 }
 
 fn resolve_epic_tip(root: &Path, branch: &str) -> Result<String, String> {
-    let local = git_output(
-        root,
-        &[
-            "rev-parse",
-            "--verify",
-            &format!("refs/heads/{branch}^{{commit}}"),
-        ],
-    )
-    .ok();
-    let remote = git_output(
-        root,
-        &[
-            "rev-parse",
-            "--verify",
-            &format!("refs/remotes/origin/{branch}^{{commit}}"),
-        ],
-    )
-    .ok();
+    let local = ref_tip(root, &format!("refs/heads/{branch}"));
+    let remote = ref_tip(root, &format!("refs/remotes/origin/{branch}"));
     match (local, remote) {
         (Some(local), Some(remote)) => {
             if git_output(root, &["merge-base", "--is-ancestor", &local, &remote]).is_ok() {
@@ -492,6 +563,15 @@ fn resolve_epic_tip(root: &Path, branch: &str) -> Result<String, String> {
         (Some(tip), None) | (None, Some(tip)) => Ok(tip),
         (None, None) => Err(format!("Open epic branch {branch} is missing")),
     }
+}
+
+fn normalized_failures(failures: &[String]) -> Vec<String> {
+    failures
+        .iter()
+        .filter_map(|line| failure_identity(line))
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect()
 }
 
 fn write_receipt(path: &Path, receipt: &IntegrationReceipt) -> Result<(), String> {
@@ -654,24 +734,37 @@ fn introducing_epic(
 fn failing_filter(failures: &[String]) -> Option<String> {
     let names: Vec<String> = failures
         .iter()
-        .filter_map(|line| {
-            let (_, rest) = line.split_once(']')?;
-            let mut fields = rest.split_whitespace();
-            let first = fields.next()?;
-            if first.starts_with('(') {
-                fields.next()?;
-            }
-            let name = fields.collect::<Vec<_>>().join(" ");
-            if name.is_empty() {
-                return None;
-            }
-            Some(format!(
+        .filter_map(|line| failure_target(line))
+        .map(|name| {
+            format!(
                 "test(/^{}$/)",
                 regex::escape(&name).replace('/', "\\/")
-            ))
+            )
         })
         .collect();
     (!names.is_empty()).then(|| names.join(" | "))
+}
+
+fn failure_target(line: &str) -> Option<String> {
+    let (_, rest) = line.split_once(']')?;
+    let mut fields = rest.split_whitespace();
+    let first = fields.next()?;
+    if first.starts_with('(') {
+        fields.next()?;
+    }
+    let name = fields.collect::<Vec<_>>().join(" ");
+    (!name.is_empty()).then_some(name)
+}
+
+fn failure_identity(line: &str) -> Option<String> {
+    let (_, rest) = line.split_once(']')?;
+    let mut fields = rest.split_whitespace();
+    let mut binary = fields.next()?;
+    if binary.starts_with('(') {
+        binary = fields.next()?;
+    }
+    let test_name = fields.collect::<Vec<_>>().join(" ");
+    (!test_name.is_empty()).then(|| format!("{binary} {test_name}"))
 }
 
 /// Fan out via the existing durable supervisor notification + prompt outbox,
@@ -736,8 +829,23 @@ fn notify_owner(cas_dir: &Path, owner: &str, result: &SweepResult) -> Result<(),
         result.log_path.display()
     );
     let key = format!(
-        "integration:{owner}:{}:{}:{:?}",
-        result.request.epic_id, result.request.commit, result.status
+        "integration:{owner}:{}",
+        result
+            .base_failure
+            .as_ref()
+            .map(|failure| {
+                format!(
+                    "base-only:{}:{}",
+                    failure.base,
+                    sha256_hex(failure.failing.join("\n").as_bytes())
+                )
+            })
+            .unwrap_or_else(|| {
+                format!(
+                    "{}:{}:{:?}",
+                    result.request.epic_id, result.request.commit, result.status
+                )
+            })
     );
     let payload = serde_json::json!({ "kind": "sweep_failed", "detail": detail,
         "epics": result.integration_epics, "factory_session": agent.factory_session })
@@ -917,6 +1025,7 @@ mod tests {
             summary: "Conflict a and b: shared".to_owned(),
             failures: Vec::new(),
             integration_epics: vec!["a".to_owned(), "b".to_owned()],
+            base_failure: None,
         };
         record_result(&cas_dir, &result);
         record_result(&cas_dir, &result);
@@ -965,6 +1074,106 @@ mod tests {
             ["a", "b"]
         );
     }
+
+    #[test]
+    fn live_open_epics_include_ownerless_origin_branch_and_exclude_closed_epic() {
+        let repo = fixture();
+        let origin_only = epic(repo.path(), "origin-open", "origin-open", "open\n");
+        let closed_branch = epic(repo.path(), "closed", "closed", "closed\n");
+        git(repo.path(), &["checkout", "--detach", "main"]);
+        git(
+            repo.path(),
+            &[
+                "update-ref",
+                &format!("refs/remotes/origin/{}", origin_only.branch),
+                &origin_only.tip,
+            ],
+        );
+        git(repo.path(), &["branch", "-D", &origin_only.branch]);
+
+        let mut open = Task::new("origin-open".to_owned(), "origin-open".to_owned());
+        open.task_type = TaskType::Epic;
+        open.branch = Some(origin_only.branch);
+        open.deliverables.work_target = Some(cas_types::WorkTarget {
+            repo_selector: "project:fixture".to_owned(),
+            target_branch: "main".to_owned(),
+        });
+        let mut closed = Task::new("closed".to_owned(), "closed".to_owned());
+        closed.task_type = TaskType::Epic;
+        closed.status = TaskStatus::Closed;
+        closed.branch = Some(closed_branch.branch);
+
+        let epics = live_open_epics(repo.path(), vec![closed, open]).unwrap();
+        assert_eq!(epics.len(), 1);
+        assert_eq!(epics[0].id, "origin-open");
+        assert_eq!(epics[0].owner, None);
+    }
+
+    #[test]
+    fn base_only_failure_relay_is_suppressed_until_evidence_changes() {
+        let temp = tempfile::tempdir().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        let agents = crate::store::open_agent_store(&cas_dir).unwrap();
+        let tasks = crate::store::open_task_store(&cas_dir).unwrap();
+        let mut agent = cas_types::Agent::new("owner".to_owned(), "lead".to_owned());
+        agent.role = cas_types::AgentRole::Supervisor;
+        agent.factory_session = Some("session".to_owned());
+        let owner = agent.id.clone();
+        agents.register(&agent).unwrap();
+        let mut task = Task::new("epic".to_owned(), "epic".to_owned());
+        task.task_type = TaskType::Epic;
+        task.epic_verification_owner = Some(owner);
+        tasks.add(&task).unwrap();
+
+        let result = SweepResult {
+            request: SweepRequest {
+                epic_id: "epic".to_owned(),
+                target_branch: "epic/epic".to_owned(),
+                commit: "dispatch-1".to_owned(),
+            },
+            status: SweepStatus::Failed,
+            log_path: temp.path().join("sweep.log"),
+            summary: "failing targets also fail on origin/main".to_owned(),
+            failures: vec!["FAIL [0.1s] (1/1) cas::fixture test_base".to_owned()],
+            integration_epics: vec!["epic".to_owned()],
+            base_failure: Some(BaseFailure {
+                base: "base-1".to_owned(),
+                failing: vec!["cas::fixture test_base".to_owned()],
+            }),
+        };
+        assert_eq!(
+            normalized_failures(&result.failures),
+            vec!["cas::fixture test_base"]
+        );
+        record_result(&cas_dir, &result);
+        let mut retry = result;
+        retry.request.commit = "dispatch-2".to_owned();
+        retry.failures = vec!["FAIL [0.8s] (2/2) cas::fixture test_base".to_owned()];
+        assert_eq!(
+            normalized_failures(&retry.failures),
+            vec!["cas::fixture test_base"]
+        );
+        record_result(&cas_dir, &retry);
+        assert_eq!(
+            crate::store::open_prompt_queue_store(&cas_dir)
+                .unwrap()
+                .peek_all(10)
+                .unwrap()
+                .len(),
+            1
+        );
+
+        retry.base_failure.as_mut().unwrap().base = "base-2".to_owned();
+        record_result(&cas_dir, &retry);
+        assert_eq!(
+            crate::store::open_prompt_queue_store(&cas_dir)
+                .unwrap()
+                .peek_all(10)
+                .unwrap()
+                .len(),
+            2
+        );
+    }
     #[test]
     fn failure_filter_accepts_nextest_progress_and_exact_test_names() {
         assert_eq!(
@@ -982,8 +1191,8 @@ mod tests {
     fn runtime_union_sweep_receipt_and_close_reopen_with_stub_cargo() {
         use std::os::unix::fs::PermissionsExt;
         let repo = fixture();
-        let first = epic(repo.path(), "a", "a", "one");
-        let second = epic(repo.path(), "b", "b", "two");
+        let first = epic(repo.path(), "cas-0081", "a", "one");
+        let second = epic(repo.path(), "cas-ed91a", "b", "two");
         git(repo.path(), &["checkout", "--detach", "main"]);
         git(
             repo.path(),
@@ -1013,12 +1222,16 @@ echo 'Summary: 1 passed'
             let mut task = Task::new(epic.id.clone(), epic.id.clone());
             task.task_type = TaskType::Epic;
             task.branch = Some(epic.branch.clone());
+            task.deliverables.work_target = Some(cas_types::WorkTarget {
+                repo_selector: "project:fixture".to_owned(),
+                target_branch: "main".to_owned(),
+            });
             tasks.add(&task).unwrap();
         }
         let mut settings = SweepSettings::from(&FactoryConfig::default());
         settings.nice_cargo = false;
         let request = SweepRequest {
-            epic_id: "b".into(),
+            epic_id: "cas-ed91a".into(),
             target_branch: second.branch,
             commit: second.tip,
         };
@@ -1027,7 +1240,7 @@ echo 'Summary: 1 passed'
             (TaskStatus::Closed, SweepStatus::Passed),
             (TaskStatus::Open, SweepStatus::Failed),
         ] {
-            let mut task = tasks.get("b").unwrap();
+            let mut task = tasks.get("cas-ed91a").unwrap();
             task.status = state;
             tasks.update(&task).unwrap();
             let result = execute(
@@ -1062,15 +1275,26 @@ echo 'Summary: 1 passed'
             }
             if expected == SweepStatus::Failed {
                 assert!(
-                    result.summary.contains("introduced by b"),
+                    result.summary.contains("introduced by cas-ed91a"),
                     "{}",
                     result.summary
                 );
-                assert_eq!(result.integration_epics, ["a", "b"]);
+                assert_eq!(result.integration_epics, ["cas-0081", "cas-ed91a"]);
+                assert_eq!(
+                    receipt
+                        .epics
+                        .iter()
+                        .map(|epic| epic.id.as_str())
+                        .collect::<Vec<_>>(),
+                    ["cas-0081", "cas-ed91a"]
+                );
             } else {
                 assert_eq!(receipt.epics.len(), 1);
             }
             assert!(receipt.tip.is_some());
+            let tip = receipt.tip.as_deref().unwrap();
+            assert_ne!(receipt.base, tip);
+            git(repo.path(), &["merge-base", "--is-ancestor", &receipt.base, tip]);
         }
     }
 }

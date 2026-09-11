@@ -396,9 +396,7 @@ mod alias_receipt_tests {
     #[test]
     fn a_broadcast_surfaced_under_one_alias_does_not_re_inject_under_the_other() {
         let (_temp, store) = store();
-        let id = store
-            .enqueue("director", "all_workers", "all hands")
-            .unwrap();
+        let id = store.enqueue("director", "all_workers", "all hands").unwrap();
         let aliases = inbox_aliases("warm-jaguar-96", true);
 
         // The pane-alias reader surfaces it and retires the whole identity.
@@ -425,9 +423,7 @@ mod alias_receipt_tests {
     #[test]
     fn the_alias_retirement_is_symmetric() {
         let (_temp, store) = store();
-        store
-            .enqueue("director", "all_workers", "all hands")
-            .unwrap();
+        store.enqueue("director", "all_workers", "all hands").unwrap();
         let aliases = inbox_aliases("warm-jaguar-96", true);
 
         let surfaced = store
@@ -451,9 +447,7 @@ mod alias_receipt_tests {
     #[test]
     fn a_real_alias_claim_upgrades_provisional_transport_receipts() {
         let (_temp, store) = store();
-        store
-            .enqueue("director", "all_workers", "all hands")
-            .unwrap();
+        store.enqueue("director", "all_workers", "all hands").unwrap();
         let aliases = inbox_aliases("warm-jaguar-96", true);
         let row = store
             .peek_all(10)
@@ -729,8 +723,10 @@ mod tests {
 
     #[test]
     fn worker_coordination_tool_returns_cas_underscore_for_opencode_harness() {
-        let _env =
-            TestEnvGuard::with_optional_vars(&[("CAS_FACTORY_WORKER_CLI", Some("opencode"))]);
+        let _env = TestEnvGuard::with_optional_vars(&[(
+            "CAS_FACTORY_WORKER_CLI",
+            Some("opencode"),
+        )]);
         assert_eq!(
             super::worker_coordination_tool(),
             "cas_coordination",
@@ -750,8 +746,7 @@ mod tests {
 
     #[test]
     fn supervisor_verification_tool_returns_cs_for_codex_supervisor() {
-        let _env =
-            TestEnvGuard::with_optional_vars(&[("CAS_FACTORY_SUPERVISOR_CLI", Some("codex"))]);
+        let _env = TestEnvGuard::with_optional_vars(&[("CAS_FACTORY_SUPERVISOR_CLI", Some("codex"))]);
         assert_eq!(
             super::supervisor_verification_tool(),
             "mcp__cs__verification",
@@ -763,8 +758,7 @@ mod tests {
     /// worker_coordination_tool_returns_cas_double_underscore_for_grok_harness.
     #[test]
     fn supervisor_verification_tool_returns_cas_double_underscore_for_grok_supervisor() {
-        let _env =
-            TestEnvGuard::with_optional_vars(&[("CAS_FACTORY_SUPERVISOR_CLI", Some("grok"))]);
+        let _env = TestEnvGuard::with_optional_vars(&[("CAS_FACTORY_SUPERVISOR_CLI", Some("grok"))]);
         assert_eq!(
             super::supervisor_verification_tool(),
             "cas__verification",
@@ -774,8 +768,10 @@ mod tests {
 
     #[test]
     fn supervisor_verification_tool_returns_cas_underscore_for_opencode_supervisor() {
-        let _env =
-            TestEnvGuard::with_optional_vars(&[("CAS_FACTORY_SUPERVISOR_CLI", Some("opencode"))]);
+        let _env = TestEnvGuard::with_optional_vars(&[(
+            "CAS_FACTORY_SUPERVISOR_CLI",
+            Some("opencode"),
+        )]);
         assert_eq!(
             super::supervisor_verification_tool(),
             "cas_verification",
@@ -785,8 +781,7 @@ mod tests {
 
     #[test]
     fn supervisor_verification_tool_returns_cas_for_claude_supervisor() {
-        let _env =
-            TestEnvGuard::with_optional_vars(&[("CAS_FACTORY_SUPERVISOR_CLI", Some("claude"))]);
+        let _env = TestEnvGuard::with_optional_vars(&[("CAS_FACTORY_SUPERVISOR_CLI", Some("claude"))]);
         assert_eq!(
             super::supervisor_verification_tool(),
             "mcp__cas__verification",

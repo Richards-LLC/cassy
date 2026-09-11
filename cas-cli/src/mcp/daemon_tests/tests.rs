@@ -145,10 +145,7 @@ fn context_reset_rebind_preserves_worker_name_and_lease_for_claude_and_codex() {
         let old_session = format!("{worker_cli}-old-session");
         let new_session = format!("{worker_cli}-post-clear-session");
         task_store
-            .add(&Task::new(
-                "cas-742-lease".to_string(),
-                "reset lease".to_string(),
-            ))
+            .add(&Task::new("cas-742-lease".to_string(), "reset lease".to_string()))
             .expect("seed lease task");
 
         let mut original = Agent::new(old_session.clone(), "patient-lion-85".to_string());
@@ -192,10 +189,7 @@ fn context_reset_rebind_preserves_worker_name_and_lease_for_claude_and_codex() {
         assert!(reused, "{worker_cli} registration must reuse the row");
         assert_eq!(resolved.id, original.id);
         assert_eq!(resolved.name, original.name);
-        assert_eq!(
-            resolved.cc_session_id.as_deref(),
-            Some(new_session.as_str())
-        );
+        assert_eq!(resolved.cc_session_id.as_deref(), Some(new_session.as_str()));
         assert_eq!(
             agent_store
                 .get_lease("cas-742-lease")
@@ -337,24 +331,14 @@ fn stale_factory_worker_queues_exact_forced_process_tree_shutdown() {
     let mut worker = Agent::new("stale-worker-id".to_string(), "stale-worker".to_string());
     worker.role = AgentRole::Worker;
     worker.factory_session = Some("factory-gh236".to_string());
-    let request_id = queue_stale_factory_worker_shutdown(&cas_root, &worker)
-        .expect("queue stale factory worker")
-        .expect("factory worker must queue shutdown");
+    let request_id = queue_stale_factory_worker_shutdown(&cas_root, &worker).expect("queue stale factory worker").expect("factory worker must queue shutdown");
     let queue = crate::store::open_spawn_queue_store(&cas_root).expect("open spawn queue");
-    let request = queue
-        .peek(10)
-        .expect("peek shutdown queue")
-        .into_iter()
-        .find(|request| request.id == request_id)
-        .expect("exact shutdown request");
+    let request = queue.peek(10).expect("peek shutdown queue").into_iter().find(|request| request.id == request_id).expect("exact shutdown request");
     assert_eq!(request.action, cas_store::SpawnAction::Shutdown);
     assert_eq!(request.worker_names, vec!["stale-worker"]);
     assert!(request.force);
     assert_eq!(request.factory_session.as_deref(), Some("factory-gh236"));
-    assert_eq!(
-        queue_stale_factory_worker_shutdown(&cas_root, &worker).expect("dedupe queue"),
-        None
-    );
+    assert_eq!(queue_stale_factory_worker_shutdown(&cas_root, &worker).expect("dedupe queue"), None);
 }
 
 // =========================================================================

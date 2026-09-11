@@ -736,13 +736,14 @@ const UNFILED_REPORTS_BANNER_MAX_ENTRIES: usize = 10;
 /// counts. Returns `None` when nothing is staged, which is the common case.
 pub fn build_session_start_unfiled_reports_banner_sized(
     cas_root: &Path,
+    artifacts_root: &Path,
 ) -> Option<SessionStartBanner> {
     let repo_root = cas_root.parent()?;
     let mut staged: Vec<String> = staged_request_reports(repo_root)
         .into_iter()
         .map(|name| format!("docs/requests/{name}"))
         .collect();
-    staged.extend(staged_factory_request_reports(cas_root));
+    staged.extend(staged_factory_request_reports(artifacts_root));
     if staged.is_empty() {
         return None;
     }
@@ -772,13 +773,7 @@ pub(crate) fn staged_request_reports(repo_root: &Path) -> Vec<String> {
 /// artifact directories are deliberately ignored. Absolute paths are shown so
 /// the next session can hand the report to a supervisor without guessing which
 /// checkout owns it.
-pub(crate) fn staged_factory_request_reports(cas_root: &Path) -> Vec<String> {
-    let configured_artifacts_root = crate::config::Config::load(cas_root)
-        .ok()
-        .and_then(|config| config.factory().artifacts_root);
-    let artifacts_root = crate::config::resolved_factory_artifacts_root(
-        configured_artifacts_root.as_deref(),
-    );
+pub(crate) fn staged_factory_request_reports(artifacts_root: &Path) -> Vec<String> {
     let Ok(task_entries) = std::fs::read_dir(&artifacts_root) else {
         return Vec::new();
     };
@@ -1618,6 +1613,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let repo = tmp.path();
         let cas_root = repo.join(".cas");
+        let artifacts_root = tmp.path().join("artifacts");
         fs::create_dir_all(&cas_root).unwrap();
         let requests = repo.join("docs").join("requests");
         fs::create_dir_all(requests.join("completed")).unwrap();
@@ -1630,7 +1626,7 @@ mod tests {
         )
         .unwrap();
         assert!(
-            build_session_start_unfiled_reports_banner_sized(&cas_root).is_none(),
+            build_session_start_unfiled_reports_banner_sized(&cas_root, &artifacts_root).is_none(),
             "archived reports are not a backlog — the banner must stay quiet"
         );
 
@@ -1638,7 +1634,7 @@ mod tests {
         fs::write(requests.join("BUG-close-hangs.md"), "report").unwrap();
         fs::write(requests.join("FEATURE-detectors.md"), "report").unwrap();
 
-        let banner = build_session_start_unfiled_reports_banner_sized(&cas_root)
+        let banner = build_session_start_unfiled_reports_banner_sized(&cas_root, &artifacts_root)
             .expect("staged reports must be surfaced");
         assert!(banner.full.contains("2 staged"), "banner: {}", banner.full);
         assert!(banner.full.contains("docs/requests/BUG-close-hangs.md"));
@@ -1660,7 +1656,7 @@ mod tests {
         fs::remove_file(requests.join("BUG-close-hangs.md")).unwrap();
         fs::remove_file(requests.join("FEATURE-detectors.md")).unwrap();
         assert!(
-            build_session_start_unfiled_reports_banner_sized(&cas_root).is_none(),
+            build_session_start_unfiled_reports_banner_sized(&cas_root, &artifacts_root).is_none(),
             "the banner must disappear once the reports are filed"
         );
     }
@@ -1693,24 +1689,52 @@ mod tests {
         let cas_root = tmp.path().join(".cas");
         fs::create_dir_all(&cas_root).unwrap();
         let artifacts_root = tmp.path().join("durable-artifacts");
-        let mut config = crate::config::Config::default();
-        let mut factory = crate::config::FactoryConfig::default();
-        factory.artifacts_root = Some(artifacts_root.display().to_string());
-        config.factory = Some(factory);
-        config.save(&cas_root).unwrap();
-
         let report_dir = artifacts_root.join("cas-a178").join("unfiled-issues");
         fs::create_dir_all(&report_dir).unwrap();
         let report = report_dir.join("BUG-gh-auth.md");
         fs::write(&report, "required credential: GITHUB_TOKEN").unwrap();
 
-        let staged = staged_factory_request_reports(&cas_root);
+        let staged = staged_factory_request_reports(&artifacts_root);
         assert_eq!(staged, vec![report.display().to_string()]);
-        let banner = build_session_start_unfiled_reports_banner_sized(&cas_root)
+        let banner = build_session_start_unfiled_reports_banner_sized(&cas_root, &artifacts_root)
             .expect("durable fallback must be visible at session start");
         assert!(banner.full.contains(&report.display().to_string()));
         assert!(banner.full.contains("1 staged"));
         assert!(banner.compact.contains(&report.display().to_string()));
+    }
+
+    #[test]
+    fn unfiled_reports_banner_uses_injected_artifacts_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cas_root = tmp.path().join(".cas");
+        fs::create_dir_all(&cas_root).unwrap();
+
+        let configured_artifacts_root = tmp.path().join("configured-artifacts");
+        let home_artifacts_root = tmp.path().join("home-artifacts");
+        let configured_report_dir = configured_artifacts_root
+            .join("cas-configured")
+            .join("unfiled-issues");
+        let home_report_dir = home_artifacts_root.join("cas-home").join("unfiled-issues");
+        fs::create_dir_all(&configured_report_dir).unwrap();
+        fs::create_dir_all(&home_report_dir).unwrap();
+        let configured_report = configured_report_dir.join("BUG-configured.md");
+        let home_report = home_report_dir.join("BUG-home.md");
+        fs::write(&configured_report, "configured").unwrap();
+        fs::write(&home_report, "ambient home report").unwrap();
+
+        let banner =
+            build_session_start_unfiled_reports_banner_sized(&cas_root, &configured_artifacts_root)
+                .expect("the injected artifacts root must be scanned");
+        assert!(
+            banner
+                .full
+                .contains(&configured_report.display().to_string())
+        );
+        assert!(
+            !banner.full.contains(&home_report.display().to_string()),
+            "the ambient home artifacts root must not be scanned: {}",
+            banner.full
+        );
     }
 
     /// cas-20f27 detector 2: an unset `issues.repo` in a project that stages

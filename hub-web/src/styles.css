@@ -2860,3 +2860,45 @@ dialog form > *,
 
 #conversation-return { flex: none; white-space: nowrap; }
 .conversation-turn > button { margin-top: var(--space-3); }
+
+/* Machine evidence stays beneath the conversations, outside the phone composer. */
+.hub-footer-badges { display: grid; gap: var(--space-2); margin-bottom: var(--space-3); }
+#paired-machines-toggle { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); text-align: left; padding: var(--space-2); color: var(--text-hi); background: var(--bg-raised); }
+#paired-machines-toggle > span:nth-child(2) { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.machine-badge-state { color: var(--text-mid); font-size: var(--fs-xs); }
+.pairing-dot { width: var(--space-2); height: var(--space-2); border-radius: var(--radius-pill); background: var(--color-series-neutral); flex: none; }
+.pairing-dot.connected { background: var(--state-ok); }
+.hub-footer-meta { display: flex; flex-wrap: wrap; justify-content: space-between; gap: var(--space-2); font-size: var(--fs-xs); color: var(--text-mid); }
+.machines-dialog-heading { display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); }
+.machines-dialog-heading button { min-width: var(--rail-item-min); min-height: var(--rail-item-min); }
+#paired-machines-dialog { padding: var(--space-6); overflow-y: auto; }
+#paired-machines-dialog h2 { margin-top: var(--space-3); margin-bottom: var(--space-2); font: var(--weight-medium) var(--fs-lg)/1.2 var(--font-display); }
+.machine-register-hint, .paired-machine p { color: var(--text-mid); font-size: var(--fs-meta); overflow-wrap: anywhere; }
+.paired-machine { border-top: var(--line-width) solid var(--line-subtle); padding: var(--space-4) 0; }
+.paired-machine h3 { margin: 0 0 var(--space-2); font: var(--weight-medium) var(--fs-md)/var(--line-ui) var(--font-ui); overflow-wrap: anywhere; }
+.paired-machine p { margin: var(--space-1) 0; }
+.paired-machine-address { font-family: var(--font-mono); }
+.paired-machine button { margin-top: var(--space-2); min-height: var(--rail-item-min); }
+#paired-machines-error { color: var(--state-crit); }
+.commander-mark .cloud-brand > span { display: none; }
+.commander-mark .cloud-brand svg { width: var(--space-6); height: var(--space-6); }
+#pair-dialog > .cloud-brand { margin-bottom: var(--space-4); }
+.conversation-sidebar > footer { flex-shrink: 0; padding-bottom: max(var(--space-4), env(safe-area-inset-bottom)); }
+@media (max-height: 30rem) {
+  .conversation-list-heading { padding: var(--space-3) var(--space-6); }
+  .conversation-list-title { margin-top: var(--space-2); }
+  .conversation-list-heading p { display: none; }
+  .conversation-sidebar > footer { padding-top: var(--space-2); padding-bottom: var(--space-2); }
+  .hub-footer-badges { margin-bottom: var(--space-1); gap: var(--space-1); }
+}
+@media (max-height: 30rem) {
+  #paired-machines-dialog[open] { width: min(48rem, calc(100vw - var(--space-6))); display: grid; grid-template-columns: 1fr 1fr; column-gap: var(--space-4); padding: var(--space-3); }
+  .machines-dialog-heading, #paired-machines-list, #paired-machines-error, #paired-machines-add { grid-column: 1 / -1; }
+  #paired-machines-dialog h2 { margin: 0; align-self: center; }
+  #paired-machines-dialog .machine-register-hint { font-size: var(--fs-xs); }
+  #paired-machines-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-4); }
+  .paired-machine { padding: var(--space-2) 0; }
+  .paired-machine h3 { margin-bottom: var(--space-1); }
+  .paired-machine p { margin: 0; }
+  .paired-machine button { min-height: var(--button-height); margin-top: var(--space-1); }
+}

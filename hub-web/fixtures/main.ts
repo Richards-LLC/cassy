@@ -15,7 +15,7 @@ import type { AttentionItem, HubSession } from "../src/types";
 import type { GhosttyCell, GhosttyColor, GhosttyRow } from "../src/terminal/ghostty/core";
 
 export const FIXTURE_NAMES = [
-  "conversations-list", "conversation", "conversation-replied", "conversation-error",
+  "paired-machines", "conversations-list", "conversation", "conversation-replied", "conversation-error",
   "fleet-populated",
   "fleet-empty",
   "session-canvas",
@@ -310,7 +310,7 @@ function renderPairing(cleanup: boolean): HTMLDialogElement {
     const capability = element("div");
     capability.append(element("dt", undefined, "This browser will be able to"), element("dd", "pair-summary", "Read machine, session, and pane state"));
     const origin = element("div");
-    origin.append(element("dt", undefined, "Cassy Commander origin"), element("dd", undefined, window.location.origin));
+    origin.append(element("dt", undefined, "Cassy Cloud origin"), element("dd", undefined, window.location.origin));
     details.append(capability, origin);
     flow.append(details);
     const status = element("p", "pair-status", "Waiting for approval on the machine.");
@@ -432,5 +432,5 @@ function renderShell(): void {
   }
 }
 
-if (fixtureName.startsWith("conversation")) renderConversationFixture(app, fixtureName);
+if (fixtureName.startsWith("conversation") || fixtureName === "paired-machines") renderConversationFixture(app, fixtureName);
 else renderShell();

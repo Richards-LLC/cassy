@@ -3,9 +3,6 @@ use crate::mcp::tools::service::imports::*;
 use std::path::Path;
 use std::process::{Command, Output};
 
-const ISSUE_REPO_SETUP: &str =
-    "issues.repo is not configured; set it with `cas config set issues.repo owner/name`";
-
 #[derive(Debug, PartialEq, Eq)]
 struct BugFilingOutcome {
     url: String,
@@ -266,15 +263,16 @@ fn filing_failure_reason(error: &str, task_identity_warning: Option<&str>) -> St
 fn resolve_issue_repo(cas_root: &Path) -> Result<String, String> {
     let config = crate::config::Config::load(cas_root)
         .map_err(|error| format!("Failed to load config: {error}"))?;
-    let Some(repo) = config.issues.and_then(|issues| issues.repo) else {
-        return Err(ISSUE_REPO_SETUP.to_string());
-    };
+    let repo = config
+        .issues
+        .as_ref()
+        .and_then(|issues| issues.repo.as_deref())
+        .map(str::trim)
+        .filter(|repo| !repo.is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| config.issue_repo_registry().cassy);
 
-    let repo = repo.trim();
-    if repo.is_empty() {
-        return Err(ISSUE_REPO_SETUP.to_string());
-    }
-    if crate::gh_graphql::split_repo(repo).is_err() {
+    if crate::gh_graphql::split_repo(&repo).is_err() {
         return Err(
             "issues.repo must be configured as `owner/name`; set it with `cas config set issues.repo owner/name`"
                 .to_string(),
@@ -959,12 +957,12 @@ mod tests {
     }
 
     #[test]
-    fn unset_issue_repo_refuses_without_an_implicit_target() {
+    fn unset_issue_repo_uses_cassy_component_fallback() {
         let temp = tempfile::tempdir().expect("temporary config directory");
-        let error = resolve_issue_repo(temp.path()).expect_err("unset repo must refuse");
-
-        assert!(error.contains("issues.repo"));
-        assert!(error.contains("cas config set issues.repo owner/name"));
+        assert_eq!(
+            resolve_issue_repo(temp.path()).expect("Cassy component default should resolve"),
+            "Richards-LLC/cassy"
+        );
     }
 
     #[test]
@@ -981,6 +979,23 @@ mod tests {
         assert_eq!(
             resolve_issue_repo(temp.path()).expect("configured repo should resolve"),
             "example/project"
+        );
+    }
+
+    #[test]
+    fn cassy_component_repo_is_filing_fallback_when_project_repo_is_unset() {
+        let temp = tempfile::tempdir().expect("temporary config directory");
+        let mut config = crate::config::Config::default();
+        config
+            .set("issues.components.cassy", "example/cassy")
+            .expect("component repo should be valid");
+        config
+            .save(temp.path())
+            .expect("project config should be saved");
+
+        assert_eq!(
+            resolve_issue_repo(temp.path()).expect("Cassy component should resolve"),
+            "example/cassy"
         );
     }
 

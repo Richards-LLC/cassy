@@ -12,6 +12,14 @@ export const SUPERVISOR = 'patient-pelican-9';
 export async function installProtocolFixture(page, origin) {
   const sockets = new Map();
   const sends = [];
+  const liveSessions = id => {
+    const second = id === 'studio'; const supervisor = second ? 'calm-otter-4' : SUPERVISOR;
+    return [{ name: supervisor, supervisor, project_dir: second ? '/projects/gabber-studio' : '/projects/cas-src', workers: ['fixture-worker'], liveness: 'live' }];
+  };
+  const catalogs = new Map(['atlas', 'studio'].map(id => [id, [...liveSessions(id),
+    { ...liveSessions(id)[0], name: 'dead-supervisor', supervisor: 'dead-supervisor', dormant: true },
+    { ...liveSessions(id)[0], name: 'empty-supervisor', supervisor: 'empty-supervisor', workers: [] },
+  ]]));
   await page.addInitScript(() => {
     const original = window.fetch;
     window.fetch = (input, init) => {
@@ -27,7 +35,7 @@ export async function installProtocolFixture(page, origin) {
     const session = second ? 'calm-otter-4' : SUPERVISOR;
     let body = {};
     if (path === '/v1/machine') body = { schema_version: 1, version: 'fixture', capabilities: ['session_index', 'daemon_attach', 'machine_events'] };
-    if (path === '/v1/sessions') body = { sessions: [{ name: session, supervisor: session, project_dir: second ? '/projects/gabber-studio' : '/projects/cas-src', workers: [], liveness: 'live' }] };
+    if (path === '/v1/sessions') body = { freshness_threshold_secs: 30, sessions: catalogs.get(second ? 'studio' : 'atlas') };
     if (path.endsWith('/lease')) body = { held_by_me: true, controller_label: 'Fixture device' };
     if (path.endsWith('/status')) body = { tasks_in_progress: [{ id: 'task-fixture', title: 'Supervisor conversations', status: 'in_progress' }], tasks_ready: [], agents: [] };
     if (path.endsWith('/websocket-ticket')) body = { ticket: 'fixture-only' };
@@ -54,7 +62,7 @@ export async function installProtocolFixture(page, origin) {
   });
   await page.reload();
   await page.getByRole('navigation', { name: 'Choose a supervisor' }).getByRole('button').first().waitFor();
-  return { sends, sockets, send(session, message) { assert(sockets.has(session), `No fixture socket for ${session}`); sockets.get(session).send(JSON.stringify(message)); } };
+  return { sends, sockets, liveSessions, setSessions(id, rows) { catalogs.set(id, rows); }, send(session, message) { assert(sockets.has(session), `No fixture socket for ${session}`); sockets.get(session).send(JSON.stringify(message)); } };
 }
 
 export async function runConversationQa(origin, artifactDir) {

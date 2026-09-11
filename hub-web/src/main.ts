@@ -1,3 +1,6 @@
+import { cloudBrand } from "./cloud-brand";
+import { machineFooterMarkup, pairedMachinesDialogMarkup, renderPairedMachines, type PairedMachineRow } from "./paired-machines";
+import { retainPendingSessions, visibleCatalog } from "./worker-visibility";
 import "./styles.css";
 import { ConversationList, type ConversationRow } from "./conversation-list";
 import { ConversationHistory } from "./conversation-history";
@@ -69,6 +72,8 @@ const app = document.querySelector<HTMLDivElement>("#app")!;
 const machines = new Map<string, StoredMachine>();
 let machineCatalogLoaded = false;
 const sessions = new Map<string, HubSession[]>();
+const catalogExpiresAt = new Map<string, number>();
+const catalogExpiryTimers = new Map<string, number>();
 const fleetCatalogUpdatedAt = new Map<string, string>();
 const connections = new Map<string, HubConnectionSupervisor>();
 const connectionStates = new Map<string, ConnectionState>();
@@ -286,7 +291,8 @@ function setDormantRevealed(next: boolean): void {
 }
 
 function visibleSessions(machineId: string): HubSession[] {
-  return (sessions.get(machineId) ?? []).filter((session) => revealDormant || session.dormant !== true);
+  return visibleCatalog(sessions.get(machineId) ?? [], name => conversationHistories.get(sessionKey(machineId, name))?.hasPending() ?? false,
+    Date.now() < (catalogExpiresAt.get(machineId) ?? Infinity), revealDormant);
 }
 
 function selectionStorage(): SelectionStorage | undefined {
@@ -497,12 +503,20 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
     },
     onAuthFailure: (kind, detail) => {
       if (kind === "expired") return;
-      pairingStatus = `${detail}. Re-pair in Cassy Commander; no browser reset is required.`;
+      pairingStatus = `${detail}. Re-pair in Cassy Cloud; no browser reset is required.`;
       render();
     },
     onCredentialRefreshed: async (refreshed) => { machines.set(refreshed.id, refreshed); await catalog.put(refreshed); },
     onMachineInfo: (info) => { machineInfo.set(machine.id, info); render(); },
-    onSessions: (items) => { fleetCatalogUpdatedAt.set(machine.id, new Date().toISOString()); sessions.set(machine.id, items); restoreLastSession(machine.id, items); render(); },
+    onSessions: (items, freshnessThresholdSecs) => {
+      fleetCatalogUpdatedAt.set(machine.id, new Date().toISOString());
+      const ttl = freshnessThresholdSecs !== undefined && Number.isFinite(freshnessThresholdSecs) && freshnessThresholdSecs > 0 ? freshnessThresholdSecs * 1000 : Infinity;
+      catalogExpiresAt.set(machine.id, Date.now() + ttl);
+      window.clearTimeout(catalogExpiryTimers.get(machine.id));
+      if (Number.isFinite(ttl)) catalogExpiryTimers.set(machine.id, window.setTimeout(() => render(), ttl));
+      sessions.set(machine.id, retainPendingSessions(sessions.get(machine.id) ?? [], items, name => conversationHistories.get(sessionKey(machine.id, name))?.hasPending() ?? false));
+      restoreLastSession(machine.id, visibleSessions(machine.id)); render();
+    },
     onMachineEvent: (event) => {
       const kind = String(event.kind ?? "hub_event");
       if (["daemon_disconnected", "daemon_error", "pane_exited", "session_removed"].includes(kind) || event.enrichment !== undefined) {
@@ -542,7 +556,7 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
     onMessageQueued: (session, receipt) => {
       conversationHistory(sessionKey(machine.id, session)).acknowledge(receipt);
       if (messageDelivery?.session === sessionKey(machine.id, session) && messageDelivery.clientRef === receipt.client_ref) { messageDelivery = undefined; document.querySelector<HTMLElement>("#message-delivery")?.setAttribute("hidden", ""); }
-      updateConversationViews();
+      updateConversationViews(); renderConversationList();
     },
     onMessageRejected: (session, clientRef, detail) => {
       const key = sessionKey(machine.id, session);
@@ -554,11 +568,11 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
           showComposerStatus(`Message rejected by the hub: ${detail}`, "error");
         }
       }
-      updateConversationViews();
+      updateConversationViews(); renderConversationList();
     },
     onOperatorReply: (session, reply) => {
       conversationHistory(sessionKey(machine.id, session)).reply(reply);
-      updateConversationViews();
+      updateConversationViews(); renderConversationList();
       const key = sessionKey(machine.id, session);
       const replies = operatorReplies.get(key) ?? [];
       if (!replies.some((item) => item.notification_id === reply.notification_id)) {
@@ -1218,7 +1232,7 @@ function resizeViewablePanes(machineId: string, session: string): void {
   if (!canResizePanes(machineId, session)) return;
   const state = sessionStates.get(sessionKey(machineId, session));
   if (!state) return;
-  for (const pane of splitVisiblePanes(state.panes, revealWorkers).visible) {
+  for (const pane of splitVisiblePanes(state.panes, revealWorkers, visibleSessions(machineId).find(item => item.name === session)?.workers ?? []).visible) {
     const surface = surfaces.get(paneKey(machineId, session, pane.id));
     if (surface) requestPaneSize(machineId, session, pane.id, surface.cols, surface.rows);
   }
@@ -1245,7 +1259,7 @@ async function renderSessionState(machineId: string, session: string, state: Ses
   if (selectedMachineId !== machineId || selectedSession !== session) return;
   const grid = document.querySelector<HTMLElement>("#pane-grid");
   if (!grid) return;
-  const { visible: visiblePanes, hiddenWorkers } = splitVisiblePanes(state.panes, hubPresentation === "terminal" && revealWorkers);
+  const { visible: visiblePanes, hiddenWorkers } = splitVisiblePanes(state.panes, hubPresentation === "terminal" && revealWorkers, visibleSessions(machineId).find(item => item.name === session)?.workers ?? []);
   // The hub strips hidden workers from the stream, so the roster count comes
   // from the catalog; local filtering covers hubs that predate the gate.
   const hiddenWorkerCount = revealWorkers
@@ -1509,10 +1523,10 @@ function canResizePanes(machineId: string, session: string): boolean {
 function controlDisabledReason(machine: StoredMachine | undefined, session: string | undefined, lease: LeaseState | undefined): string | undefined {
   if (!machine) return "Choose a paired machine, then a live session, to use its controls.";
   if (!session) return "Choose a live session to use its controls.";
-  if (!hubSupports(machine.id, "daemon_attach")) return "This hub does not support Cassy Commander control. Upgrade the hub, then reconnect this machine.";
+  if (!hubSupports(machine.id, "daemon_attach")) return "This hub does not support Cassy Cloud control. Upgrade the hub, then reconnect this machine.";
   const missingScopes = ["pane-input", "message-send", "pane-interrupt"] as const;
   if (missingScopes.some((scope) => !machine.scopes.includes(scope))) {
-    return `Relay pairing granted read-only scopes for ${location.origin}. Run cas hub pair --origin ${location.origin}, open the new pairing URL here, and approve control access on ${machine.label}. Pairings are specific to each Cassy Commander origin.`;
+    return `Relay pairing granted read-only scopes for ${location.origin}. Run cas hub pair --origin ${location.origin}, open the new pairing URL here, and approve control access on ${machine.label}. Pairings are specific to each Cassy Cloud origin.`;
   }
   if (lease?.held_by_me) return undefined;
   if (lease?.controller_label) return `${lease.controller_label} currently controls this session. Wait for it to be released or use an administrator credential to take over.`;
@@ -1606,7 +1620,7 @@ function scopeSummaryMarkup(scopes: readonly Scope[]): string {
 }
 
 function pairingDetails(origin: string, scopes: readonly Scope[]): string {
-  return `<dl class="pair-details">${scopeSummaryMarkup(scopes)}<div><dt>Cassy Commander origin</dt><dd>${escapeHtml(origin)}</dd></div><div><dt>Exact scopes</dt><dd>${scopes.map(scopeLabel).map(escapeHtml).join(", ")}</dd></div></dl>`;
+  return `<dl class="pair-details">${scopeSummaryMarkup(scopes)}<div><dt>Cassy Cloud origin</dt><dd>${escapeHtml(origin)}</dd></div><div><dt>Exact scopes</dt><dd>${scopes.map(scopeLabel).map(escapeHtml).join(", ")}</dd></div></dl>`;
 }
 
 function pairStatusMarkup(): string {
@@ -1619,25 +1633,25 @@ function pairDialogMarkup(): string {
     // page cannot yet prove a reload will not see it again. There is no way
     // back to the invitation from here, only forward through the cleanup.
     const copy = cleanupStepCopy(pairingCleanupContext);
-    return `<dialog id="pair-dialog"><section class="pair-flow pair-cleanup" tabindex="-1" autofocus aria-labelledby="pair-cleanup-title"><h2 id="pair-cleanup-title">${escapeHtml(copy.title)}</h2><p>${escapeHtml(copy.discarded)} ${escapeHtml(copy.outstanding)}</p><p>${escapeHtml(copy.next)}</p>${pairStatusMarkup()}<div class="dialog-actions"><button id="pair-close" type="button" data-role="cleanup">Close</button><button id="pair-cleanup-retry" type="button" class="primary">Retry cleanup</button></div></section></dialog>`;
+    return `<dialog id="pair-dialog">${cloudBrand()}<section class="pair-flow pair-cleanup" tabindex="-1" autofocus aria-labelledby="pair-cleanup-title"><h2 id="pair-cleanup-title">${escapeHtml(copy.title)}</h2><p>${escapeHtml(copy.discarded)} ${escapeHtml(copy.outstanding)}</p><p>${escapeHtml(copy.next)}</p>${pairStatusMarkup()}<div class="dialog-actions"><button id="pair-close" type="button" data-role="cleanup">Close</button><button id="pair-cleanup-retry" type="button" class="primary">Retry cleanup</button></div></section></dialog>`;
   }
   if (pendingPairing?.kind === "relay-request") {
-    return `<dialog id="pair-dialog"><section class="pair-flow"><h2>Pair a machine</h2><p>On the machine you want to pair, run this command, then approve the request it prints:</p><p><code>cas hub authorize ${escapeHtml(pendingPairing.userCode)}</code></p><div class="pair-code" aria-label="Pairing code">${escapeHtml(pendingPairing.userCode)}</div><div class="pair-code-actions"><button id="pair-copy" type="button" data-pair-command="cas hub authorize ${escapeAttr(pendingPairing.userCode)}">Copy command</button></div><p>Expires in <strong id="pair-countdown">10:00</strong></p>${pairingDetails(pendingPairing.controllerOrigin, pendingPairing.requestedScopes)}${pairStatusMarkup()}<div class="dialog-actions"><button id="pair-cancel" type="button">Cancel</button></div></section></dialog>`;
+    return `<dialog id="pair-dialog">${cloudBrand()}<section class="pair-flow"><h2>Pair a machine</h2><p>On the machine you want to pair, run this command, then approve the request it prints:</p><p><code>cas hub authorize ${escapeHtml(pendingPairing.userCode)}</code></p><div class="pair-code" aria-label="Pairing code">${escapeHtml(pendingPairing.userCode)}</div><div class="pair-code-actions"><button id="pair-copy" type="button" data-pair-command="cas hub authorize ${escapeAttr(pendingPairing.userCode)}">Copy command</button></div><p>Expires in <strong id="pair-countdown">10:00</strong></p>${pairingDetails(pendingPairing.controllerOrigin, pendingPairing.requestedScopes)}${pairStatusMarkup()}<div class="dialog-actions"><button id="pair-cancel" type="button">Cancel</button></div></section></dialog>`;
   }
   if (pendingPairing?.kind === "invitation") {
     const relay = Boolean(pendingPairing.relay);
     const hubUrl = pendingPairing.hubUrl;
     const origin = pendingPairing.controllerOrigin;
     const invitationScopes = pendingPairing.scopes;
-    return `<dialog id="pair-dialog"><form id="pair-form"><h2>${relay ? "Machine authorized" : "Pair a machine"}</h2><p>${relay ? "Verify the machine details, then create this browser's device credential." : "One-time invitation ready. Confirm the target hub."}</p>${relay && hubUrl && origin && invitationScopes ? `<dl class="pair-details"><div><dt>Machine</dt><dd>${escapeHtml(pendingPairing.machineLabel ?? pendingPairing.hubId)}</dd></div><div><dt>Machine's hub address</dt><dd>${escapeHtml(hubUrl)}</dd></div>${scopeSummaryMarkup(invitationScopes)}<div><dt>Cassy Commander origin</dt><dd>${escapeHtml(origin)}</dd></div><div><dt>Granted scopes</dt><dd>${invitationScopes.map(scopeLabel).map(escapeHtml).join(", ")}</dd></div></dl><p>Invitation expires in <strong id="pair-countdown">10:00</strong></p>` : `<label>Machine's hub address<input name="url" type="url" required autofocus placeholder="https://studio.tailnet.ts.net" value="${escapeAttr(pairingDraft.hubUrl)}"><small class="field-hint">The address of the machine you are pairing, as printed by <code>cas hub pair</code> (usually its Tailscale name). It is not this page's address unless this page is served by that machine.</small></label><div class="pair-code-actions pair-address-actions"><button id="pair-use-page-origin" type="button" data-page-origin="${escapeAttr(pairingDraft.pageOrigin)}">Use this page's address (${escapeHtml(pairingDraft.pageOrigin)})</button></div><label>Machine label<input name="label" required placeholder="Studio Mac" value="${escapeAttr(pairingDraft.machineLabel)}"><small class="field-hint">How this machine is listed in Cassy Commander.</small></label><fieldset><legend>Scopes requested</legend>${scopeChecks(pairingDraft.scopes, invitationScopes)}</fieldset>${scopeCeilingHint(invitationScopes)}`}<label>Device label<input name="device" required autofocus value="${escapeAttr(pairingDraft.deviceLabel)}"><small class="field-hint">How this browser is listed on the machine.</small></label><label>Operator label<input name="operator" required placeholder="Your name" value="${escapeAttr(pairingDraft.operatorLabel)}"><small class="field-hint">Who is pairing this browser; the machine records it.</small></label>${pairStatusMarkup()}<div class="dialog-actions"><button id="pair-cancel" type="button">Cancel</button><button type="submit" class="primary" ${pairingExchangeInFlight ? "disabled" : ""}>${pairingExchangeInFlight ? "Pairing…" : "Pair"}</button></div></form></dialog>`;
+    return `<dialog id="pair-dialog">${cloudBrand()}<form id="pair-form"><h2>${relay ? "Machine authorized" : "Pair a machine"}</h2><p>${relay ? "Verify the machine details, then create this browser's device credential." : "One-time invitation ready. Confirm the target hub."}</p>${relay && hubUrl && origin && invitationScopes ? `<dl class="pair-details"><div><dt>Machine</dt><dd>${escapeHtml(pendingPairing.machineLabel ?? pendingPairing.hubId)}</dd></div><div><dt>Machine's hub address</dt><dd>${escapeHtml(hubUrl)}</dd></div>${scopeSummaryMarkup(invitationScopes)}<div><dt>Cassy Cloud origin</dt><dd>${escapeHtml(origin)}</dd></div><div><dt>Granted scopes</dt><dd>${invitationScopes.map(scopeLabel).map(escapeHtml).join(", ")}</dd></div></dl><p>Invitation expires in <strong id="pair-countdown">10:00</strong></p>` : `<label>Machine's hub address<input name="url" type="url" required autofocus placeholder="https://studio.tailnet.ts.net" value="${escapeAttr(pairingDraft.hubUrl)}"><small class="field-hint">The address of the machine you are pairing, as printed by <code>cas hub pair</code> (usually its Tailscale name). It is not this page's address unless this page is served by that machine.</small></label><div class="pair-code-actions pair-address-actions"><button id="pair-use-page-origin" type="button" data-page-origin="${escapeAttr(pairingDraft.pageOrigin)}">Use this page's address (${escapeHtml(pairingDraft.pageOrigin)})</button></div><label>Machine label<input name="label" required placeholder="Studio Mac" value="${escapeAttr(pairingDraft.machineLabel)}"><small class="field-hint">How this machine is listed in Cassy Cloud.</small></label><fieldset><legend>Scopes requested</legend>${scopeChecks(pairingDraft.scopes, invitationScopes)}</fieldset>${scopeCeilingHint(invitationScopes)}`}<label>Device label<input name="device" required autofocus value="${escapeAttr(pairingDraft.deviceLabel)}"><small class="field-hint">How this browser is listed on the machine.</small></label><label>Operator label<input name="operator" required placeholder="Your name" value="${escapeAttr(pairingDraft.operatorLabel)}"><small class="field-hint">Who is pairing this browser; the machine records it.</small></label>${pairStatusMarkup()}<div class="dialog-actions"><button id="pair-cancel" type="button">Cancel</button><button type="submit" class="primary" ${pairingExchangeInFlight ? "disabled" : ""}>${pairingExchangeInFlight ? "Pairing…" : "Pair"}</button></div></form></dialog>`;
   }
   const relayAction = relayOrigin
     ? `<button id="pair-create" type="button" class="primary" ${pairingCreateInFlight ? "disabled" : ""}>${pairingCreateInFlight ? "Creating…" : "Create pairing code"}</button>`
-    : '<p class="pairing-disabled-reason">Page-initiated pairing is unavailable because this Cassy Commander build has no reviewed relay origin.</p>';
+    : '<p class="pairing-disabled-reason">Page-initiated pairing is unavailable because this Cassy Cloud build has no reviewed relay origin.</p>';
   // One state, one next action. Without an invitation there is nothing to
   // Pair, so no Pair control exists here at all; a link printed by the machine
   // opens the confirmation form directly and never passes through this step.
-  return `<dialog id="pair-dialog"><section class="pair-flow" tabindex="-1" autofocus><h2>Pair a machine</h2><p>Create a ten-minute code, approve it on the machine you want to pair, then confirm the exact Cassy Commander origin and scopes here.</p>${pairingDetails(location.origin, DEFAULT_PAIRING_SCOPES)}<label>Email code (optional)<input id="pair-email" type="email" autocomplete="email" placeholder="operator@example.com" value="${escapeAttr(pairingDraft.email)}"></label>${pairStatusMarkup()}<p class="pair-alternative">Already have a link? Open the pairing URL that <code>cas hub pair</code> printed on the machine; it continues straight to confirmation.</p><div class="dialog-actions"><button id="pair-close" type="button">${pairingCreateInFlight ? "Cancel" : "Close"}</button>${relayAction}</div></section></dialog>`;
+  return `<dialog id="pair-dialog">${cloudBrand()}<section class="pair-flow" tabindex="-1" autofocus><h2>Pair a machine</h2><p>Create a ten-minute code, approve it on the machine you want to pair, then confirm the exact Cassy Cloud origin and scopes here.</p>${pairingDetails(location.origin, DEFAULT_PAIRING_SCOPES)}<label>Email code (optional)<input id="pair-email" type="email" autocomplete="email" placeholder="operator@example.com" value="${escapeAttr(pairingDraft.email)}"></label>${pairStatusMarkup()}<p class="pair-alternative">Already have a link? Open the pairing URL that <code>cas hub pair</code> printed on the machine; it continues straight to confirmation.</p><div class="dialog-actions"><button id="pair-close" type="button">${pairingCreateInFlight ? "Cancel" : "Close"}</button>${relayAction}</div></section></dialog>`;
 }
 
 // A phone sentence takes longer to type than the heartbeat render interval, so
@@ -2055,6 +2069,9 @@ function render(captureDraft = true): void {
   }
   deferredRender.settled();
   const currentGrid = document.querySelector<HTMLElement>("#pane-grid");
+  const machineDialog = document.querySelector<HTMLDialogElement>("#paired-machines-dialog");
+  const pairedDialogWasOpen = machineDialog?.open === true;
+  if (pairedDialogWasOpen) machineDialog!.remove();
   const pairDialogWasOpen = document.querySelector<HTMLDialogElement>("#pair-dialog")?.open === true;
   const preservedGrid = terminalSessionKey && currentGrid?.dataset.sessionKey === terminalSessionKey ? currentGrid : undefined;
   // Moving the live grid through app.innerHTML temporarily detaches its hidden
@@ -2072,12 +2089,12 @@ function render(captureDraft = true): void {
     <div class="shell${browserNotice ? " with-browser-notice" : ""}${machineDrawerOpen ? " drawer-open" : ""}${attentionPanelCollapsed ? " attention-collapsed" : " attention-expanded"}${fleetEmpty ? " fleet-empty" : ""}">
       <aside class="machine-navigation${machineDrawerOpen ? " drawer-open" : ""}" aria-label="Machines and sessions">
         <div class="machine-rail">
-          <button id="machine-drawer-toggle" class="rail-control commander-mark" type="button" aria-label="Open machines and sessions" title="Machines and sessions" aria-expanded="${machineDrawerOpen}"><svg class="commander-mark-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="3" y="4" width="18" height="12" rx="2"></rect><path d="M8 20h8M12 16v4"></path></svg><span class="commander-mark-label">Machines</span></button>
+          <button id="machine-drawer-toggle" class="rail-control commander-mark" type="button" aria-label="Open machines and sessions" title="Machines and sessions" aria-expanded="${machineDrawerOpen}">${cloudBrand()}<span class="commander-mark-label">Machines</span></button>
           <nav id="machine-rail-list" aria-label="Machines"></nav>
           <button id="pair-toggle" class="rail-control pair-machine" type="button" aria-label="Pair a machine" title="Pair a machine"><span aria-hidden="true">+</span><span class="pair-machine-label">Pair</span></button>
         </div>
         <div class="machine-drawer" aria-hidden="${!machineDrawerOpen}"${machineDrawerOpen ? "" : " inert"}>
-          <header class="drawer-header"><strong>Machines</strong><button id="machine-drawer-close" type="button" aria-label="Close machines and sessions">×</button></header>
+          <header class="drawer-header">${cloudBrand()}<button id="machine-drawer-close" type="button" aria-label="Close machines and sessions">×</button></header>
           ${compatibility ? `<div class="compatibility-warning" role="alert">${escapeHtml(compatibility)}</div>` : ""}
           <nav id="machine-tree" aria-label="Machine sessions"></nav>
           ${selected ? '<button id="remove-machine" class="remove-machine">Remove selected machine</button>' : ""}
@@ -2123,6 +2140,7 @@ function render(captureDraft = true): void {
           <button type="button" class="palette-command" data-palette-action="dormant" aria-pressed="${revealDormant}"><span>${escapeHtml(dormantCommandLabel(revealDormant).title)}</span><small>${escapeHtml(dormantCommandLabel(revealDormant).hint)}</small></button>
           <button type="button" class="palette-command" data-palette-action="control" ${controlActionDisabled ? "disabled" : ""}><span>${controlActionLabel}</span><small>${controlActionDisabled ? escapeHtml(takeControlReason ?? "Control unavailable") : "Current session"}</small></button>
           <button type="button" class="palette-command" data-palette-action="dismiss-info" ${infoItems.length === 0 ? "disabled" : ""}><span>Dismiss all info</span><small>${infoItems.length} outstanding</small></button>
+          <button type="button" class="palette-command" id="palette-paired-machines"><span>Paired machines</span><small>Hosts, connection and last seen</small></button>
           ${sessionCommands || '<p class="palette-empty">No live sessions available.</p>'}
         </div>
       </section>
@@ -2134,7 +2152,12 @@ function render(captureDraft = true): void {
         <div class="palette-commands" id="session-picker-list"></div>
       </section>
     </dialog>
+    ${pairedMachinesDialogMarkup()}
     ${pairDialogMarkup()}`;
+  if (pairedDialogWasOpen && machineDialog) {
+    document.querySelector('#paired-machines-dialog')?.replaceWith(machineDialog);
+    machineDialog.close(); machineDialog.showModal();
+  }
   if (hubPresentation === "conversation") {
     arrangeConversationShell(app, { selected: Boolean(selectedSession), supervisor, projectDir: selectedHubSession?.project_dir, host: selected?.label, loaded: machineCatalogLoaded, paired: machines.size > 0 });
   } else {
@@ -2259,18 +2282,19 @@ function renderMachineNavigation(): void {
  * button the operator is on is never pulled out from under a thumb.
  */
 function renderConversationList(): void {
+  renderMachineRegister();
   const container = document.querySelector<HTMLElement>("#conversation-list");
   if (!container) return;
   const rows: ConversationRow[] = [...machines.values()].flatMap((machine) => visibleSessions(machine.id).filter((session) => supervisorTarget(session)).map((session) => {
     const updated = fleetCatalogUpdatedAt.get(machine.id);
     const counts = attentionCounts(attention.filter((item) => item.machineId === machine.id && item.session === session.name));
-    return { key: sessionKey(machine.id, session.name), machineId: machine.id, session: session.name, supervisor: session.supervisor, projectDir: session.project_dir, host: machine.label, freshness: updated ? `Catalog checked ${relativeTimestamp(Date.parse(updated))}` : "Catalog not yet checked", connection: session.dormant ? "Dormant" : session.liveness === "live" ? fleetConnectionLabel(connectionStates.get(machine.id)) : "Session unavailable", attention: counts.critical + counts.warning, selected: machine.id === selectedMachineId && session.name === selectedSession };
+    return { key: sessionKey(machine.id, session.name), machineId: machine.id, session: session.name, supervisor: session.supervisor, projectDir: session.project_dir, host: machine.label, freshness: updated ? `Catalog checked ${relativeTimestamp(Date.parse(updated))}` : "Catalog not yet checked", connection: session.unreachable ? "Unreachable · message pending" : session.dormant ? "Dormant" : session.liveness === "live" ? fleetConnectionLabel(connectionStates.get(machine.id)) : "Session unavailable", attention: counts.critical + counts.warning, selected: machine.id === selectedMachineId && session.name === selectedSession };
   }));
   conversationList.render(container, rows, (row) => { void openSession(row.machineId, row.session); });
   const empty = document.querySelector<HTMLElement>("#conversation-empty");
   if (empty) { empty.hidden = rows.length > 0; empty.textContent = !machineCatalogLoaded ? "Loading paired machines…" : machines.size === 0 ? "Pair a machine to start your first conversation." : "No live supervisors listed. Use Appearance & commands to show dormant sessions for recovery."; }
   const state = document.querySelector<HTMLElement>("#conversation-connection");
-  if (state && selectedMachineId) state.textContent = ` · ${fleetConnectionLabel(connectionStates.get(selectedMachineId))}`;
+  if (state && selectedMachineId) state.textContent = ` · ${visibleSessions(selectedMachineId).find(session => session.name === selectedSession)?.unreachable ? "Unreachable · message pending" : fleetConnectionLabel(connectionStates.get(selectedMachineId))}`;
 }
 
 function fleetConnectionLabel(state: ConnectionState | undefined): string {
@@ -2316,7 +2340,7 @@ function compatibilityWarning(machineId: string): string | undefined {
   if (!info) return "Compatibility check unavailable: this hub may be older or newer. Read-only discovery may work, but controls stay disabled until it reports capabilities.";
   const missing = ["session_index", "daemon_attach", "machine_events"].filter((capability) => !info.capabilities.includes(capability));
   if (info.schema_version !== 1 || missing.length > 0) {
-    return `Hub ${info.version} is version-skewed (schema ${info.schema_version}; missing ${missing.join(", ") || "no required capabilities"}). Upgrade or use a compatible Cassy Commander build; unsupported controls are disabled.`;
+    return `Hub ${info.version} is version-skewed (schema ${info.schema_version}; missing ${missing.join(", ") || "no required capabilities"}). Upgrade or use a compatible Cassy Cloud build; unsupported controls are disabled.`;
   }
   return undefined;
 }
@@ -2803,21 +2827,7 @@ function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | und
     });
   };
   const remove = document.querySelector<HTMLButtonElement>("#remove-machine");
-  if (remove && selected) remove.onclick = async () => {
-    connections.get(selected.id)?.stop();
-    firstConnections.forget(selected.id);
-    connections.delete(selected.id); machines.delete(selected.id); sessions.delete(selected.id);
-    await catalog.remove(selected.id);
-    // Walking back into a credential that no longer exists is a dead end, and
-    // reopening onto it would be the same dead end tomorrow.
-    selection = forgetMachine(selection, selected.id);
-    clearStoredSelection(selectionStorage());
-    restoreTarget = undefined;
-    const next = machines.keys().next().value;
-    if (next) commitSelection({ machineId: next });
-    else applySelection(undefined);
-    render();
-  };
+  if (remove && selected) remove.onclick = () => { void forgetPairedMachine(selected.id); };
   const explainIfUnavailable = (button: HTMLButtonElement): boolean => {
     const reason = button.dataset.disabledReason;
     if (!reason) return false;
@@ -2888,3 +2898,66 @@ for (const query of [PHONE_MEDIA_QUERY, COMPACT_MEDIA_QUERY]) {
 }
 render(false);
 void boot();
+
+function pairedMachineRows(): PairedMachineRow[] {
+  return [...machines.values()].map(machine => {
+    const state = connectionStates.get(machine.id);
+    const updated = fleetCatalogUpdatedAt.get(machine.id);
+    const fresh = Date.now() < (catalogExpiresAt.get(machine.id) ?? Infinity);
+    return { id: machine.id, label: machine.label, address: new URL(machine.baseUrl).host,
+      connection: state?.phase === "live" && !state.degraded && fresh ? "Connected" : fleetConnectionLabel(state) === "Live" ? "Reconnecting" : fleetConnectionLabel(state),
+      connected: state?.phase === "live" && !state.degraded && fresh,
+      lastSeen: updated ? `Last seen ${relativeTimestamp(Date.parse(updated))} · ${new Date(updated).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : 'Not yet seen in this visit',
+      runtime: machineInfo.get(machine.id)?.version };
+  });
+}
+
+function renderMachineRegister(): void {
+  const rows = pairedMachineRows();
+  const footer = document.querySelector<HTMLElement>('#hub-footer-badges');
+  if (footer) {
+    const markup = machineFooterMarkup(rows, [...machines.keys()].reduce((sum, id) => sum + visibleSessions(id).filter(session => supervisorTarget(session)).length, 0), __HUB_BUILD__);
+    // Preserve the opener itself: dialog Escape must return focus after a catalog tick.
+    const button = footer.querySelector<HTMLButtonElement>('#paired-machines-toggle');
+    if (!button) footer.innerHTML = markup;
+    else {
+      const template = document.createElement('template'); template.innerHTML = markup;
+      const nextButton = template.content.querySelector('button')!;
+      if (button.innerHTML !== nextButton.innerHTML) button.innerHTML = nextButton.innerHTML;
+      const meta = footer.querySelector('.hub-footer-meta')!;
+      const nextMeta = template.content.querySelector('.hub-footer-meta')!;
+      if (meta.innerHTML !== nextMeta.innerHTML) meta.innerHTML = nextMeta.innerHTML;
+    }
+  }
+  const dialog = document.querySelector<HTMLDialogElement>('#paired-machines-dialog');
+  if (!dialog) return;
+  const list = dialog.querySelector<HTMLElement>('#paired-machines-list')!;
+  renderPairedMachines(list, rows, forgetPairedMachine);
+  const open = () => { document.querySelector<HTMLDialogElement>('#command-palette')?.close(); dialog.showModal(); };
+  for (const id of ['paired-machines-toggle', 'palette-paired-machines']) {
+    const button = document.getElementById(id); if (button) button.onclick = open;
+  }
+  document.getElementById('paired-machines-close')!.onclick = () => dialog.close();
+  document.getElementById('paired-machines-add')!.onclick = () => { dialog.close(); document.querySelector<HTMLDialogElement>('#pair-dialog')?.showModal(); };
+}
+
+async function forgetPairedMachine(id: string): Promise<void> {
+  const error = document.getElementById('paired-machines-error');
+  if (error) error.hidden = true;
+  try { await catalog.remove(id); }
+  catch { if (error) { error.hidden = false; error.textContent = 'Could not remove this pairing. Try again.'; } else toast('Could not remove this pairing. Try again.'); return; }
+  connections.get(id)?.stop(); firstConnections.forget(id);
+  connections.delete(id); machines.delete(id); sessions.delete(id);
+  window.clearTimeout(catalogExpiryTimers.get(id)); catalogExpiryTimers.delete(id); catalogExpiresAt.delete(id);
+  selection = forgetMachine(selection, id);
+  if (restoreTarget?.machineId === id) restoreTarget = undefined;
+  if (selectedMachineId === id) {
+    clearStoredSelection(selectionStorage());
+    const next = machines.keys().next().value;
+    if (next) commitSelection({ machineId: next }); else applySelection(undefined);
+  }
+  // Keep the open register stable after removal; close triggers shell reconciliation.
+  const dialog = document.querySelector<HTMLDialogElement>('#paired-machines-dialog');
+  if (dialog?.open) { renderMachineRegister(); dialog.addEventListener('close', () => render(), { once: true }); document.getElementById('paired-machines-close')?.focus(); }
+  else render();
+}

@@ -574,14 +574,84 @@ fn scoped_proof_rust_files(root: &std::path::Path) -> Vec<std::path::PathBuf> {
     files
 }
 
+fn scoped_proof_manifest_document(repo: &std::path::Path) -> Option<toml::Value> {
+    let manifest = std::fs::read_to_string(repo.join("cas-cli/Cargo.toml")).ok()?;
+    toml::from_str::<toml::Value>(&manifest).ok()
+}
+
+fn scoped_proof_manifest_test_target(repo: &std::path::Path, path: &str) -> Option<String> {
+    let relative = path.strip_prefix("cas-cli/").unwrap_or(path);
+    let document = scoped_proof_manifest_document(repo)?;
+    document
+        .get("test")
+        .and_then(toml::Value::as_array)
+        .and_then(|tests| {
+            tests.iter().find_map(|test| {
+                let test_path = test.get("path").and_then(toml::Value::as_str)?;
+                (std::path::Path::new(test_path) == std::path::Path::new(relative))
+                    .then(|| test.get("name").and_then(toml::Value::as_str))
+                    .flatten()
+                    .map(str::to_string)
+            })
+        })
+}
+
+fn scoped_proof_cargo_test_target_exists(repo: &std::path::Path, target: &str) -> bool {
+    let tests_root = repo.join("cas-cli/tests");
+    let document = scoped_proof_manifest_document(repo);
+    let auto_targets_enabled = document
+        .as_ref()
+        .and_then(|document| document.get("package"))
+        .and_then(toml::Value::as_table)
+        .and_then(|package| package.get("autotests"))
+        .and_then(toml::Value::as_bool)
+        .is_none_or(|enabled| enabled);
+    if auto_targets_enabled
+        && (tests_root.join(format!("{target}.rs")).is_file()
+            || tests_root.join(target).join("main.rs").is_file())
+    {
+        return true;
+    }
+
+    let Some(document) = document else {
+        return false;
+    };
+    document
+        .get("test")
+        .and_then(toml::Value::as_array)
+        .is_some_and(|tests| {
+            tests.iter().any(|test| {
+                let Some(name) = test.get("name").and_then(toml::Value::as_str) else {
+                    return false;
+                };
+                if name != target {
+                    return false;
+                }
+                test.get("path")
+                    .and_then(toml::Value::as_str)
+                    .map_or_else(
+                        || {
+                            tests_root.join(format!("{target}.rs")).is_file()
+                                || tests_root.join(target).join("main.rs").is_file()
+                        },
+                        |path| repo.join("cas-cli").join(path).is_file(),
+                    )
+            })
+        })
+}
+
 fn scoped_proof_test_target(repo: &std::path::Path, path: &str) -> Option<String> {
     let relative = path.strip_prefix("cas-cli/tests/")?;
+    if let Some(target) = scoped_proof_manifest_test_target(repo, path) {
+        return scoped_proof_cargo_test_target_exists(repo, &target).then_some(target);
+    }
     let directory = relative.split('/').next()?;
     if !relative.contains('/') {
-        return std::path::Path::new(relative)
+        let target = std::path::Path::new(relative)
             .file_stem()
             .and_then(|stem| stem.to_str())
-            .map(str::to_string);
+            .map(str::to_string)?;
+        return scoped_proof_cargo_test_target_exists(repo, &target).then_some(target);
     }
 
     // Prefer the conventional root (`mcp_tools_test/task/...` belongs to
@@ -589,7 +659,7 @@ fn scoped_proof_test_target(repo: &std::path::Path, path: &str) -> Option<String
     // ownership rule as the shell proof checker and avoids decoy strings in a
     // different integration binary claiming a nested module.
     let root = repo.join("cas-cli/tests");
-    if root.join(format!("{directory}.rs")).is_file() {
+    if scoped_proof_cargo_test_target_exists(repo, directory) {
         return Some(directory.to_string());
     }
     for candidate in scoped_proof_rust_files(&root) {
@@ -606,14 +676,16 @@ fn scoped_proof_test_target(repo: &std::path::Path, path: &str) -> Option<String
                     && trimmed.contains(&format!("{directory}/"))
                     && trimmed.ends_with("\"]"))
         });
-        if declared_module {
-            return candidate
+        if declared_module
+            && let Some(target) = candidate
                 .file_stem()
                 .and_then(|stem| stem.to_str())
-                .map(str::to_string);
+                .filter(|target| scoped_proof_cargo_test_target_exists(repo, target))
+        {
+            return Some(target.to_string());
         }
     }
-    Some(directory.to_string())
+    None
 }
 
 fn scoped_proof_source_module_path(path: &str) -> Option<String> {
@@ -668,14 +740,35 @@ fn scoped_proof_source_symbols(body: &str) -> Vec<String> {
     symbols.into_iter().collect()
 }
 
+fn scoped_proof_token_reference(line: &str, reference: &str) -> bool {
+    line.match_indices(reference).any(|(index, _)| {
+        let before = line[..index].chars().next_back();
+        let after = line[index + reference.len()..].chars().next();
+        let boundary = |character: char| {
+            !character.is_ascii_alphanumeric() && character != '_'
+        };
+        let before_is_boundary = before.is_none_or(boundary);
+        let after_is_boundary = if reference.ends_with("::") {
+            after.is_some_and(|character| character.is_ascii_alphanumeric() || character == '_')
+        } else {
+            after.is_none_or(boundary)
+        };
+        before_is_boundary && after_is_boundary
+    })
+}
+
 fn scoped_proof_path_reference(body: &str, module_path: &str, source_path: &str) -> bool {
     body.lines().any(|line| {
         let trimmed = line.trim_start();
         if trimmed.starts_with('/') || trimmed.starts_with('*') {
             return false;
         }
-        (trimmed.starts_with("use ") || trimmed.starts_with("pub use "))
-            && trimmed.contains(module_path)
+        let module_import = (trimmed.starts_with("use ") || trimmed.starts_with("pub use "))
+            && scoped_proof_token_reference(trimmed, module_path);
+        let qualified_module =
+            scoped_proof_token_reference(trimmed, &format!("{module_path}::"));
+        module_import
+            || qualified_module
             || ((trimmed.contains("include_str!")
                 || trimmed.contains("include_bytes!")
                 || trimmed.contains("Path")
@@ -684,21 +777,13 @@ fn scoped_proof_path_reference(body: &str, module_path: &str, source_path: &str)
     })
 }
 
-fn scoped_proof_symbol_reference(body: &str, symbol: &str) -> bool {
-    let symbol = symbol.strip_prefix("factory_").unwrap_or(symbol);
+fn scoped_proof_symbol_reference(body: &str, qualified_symbol: &str) -> bool {
     body.lines().any(|line| {
         let trimmed = line.trim_start();
         if trimmed.starts_with('/') || trimmed.starts_with('*') {
             return false;
         }
-        let Some(function) = trimmed.split_once("fn ").map(|(_, rest)| rest) else {
-            return false;
-        };
-        let name = function
-            .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
-            .next()
-            .unwrap_or_default();
-        name.contains(symbol)
+        scoped_proof_token_reference(trimmed, qualified_symbol)
     })
 }
 
@@ -765,7 +850,13 @@ fn required_scoped_proof_targets(
             );
             let symbol_reference = symbols
                 .iter()
-                .any(|symbol| scoped_proof_symbol_reference(&test_body, symbol));
+                .any(|symbol| {
+                    let symbol = symbol.strip_prefix("factory_").unwrap_or(symbol);
+                    scoped_proof_symbol_reference(
+                        &test_body,
+                        &format!("{module_path}::{symbol}"),
+                    )
+                });
             if !(path_reference || symbol_reference) {
                 continue;
             }
@@ -800,24 +891,33 @@ fn required_scoped_proof_targets(
             }
         }
     }
-    targets.into_iter().collect()
+    targets
+        .into_iter()
+        .filter(|target| scoped_proof_cargo_test_target_exists(repo, target))
+        .collect()
 }
 
 fn scoped_proof_note_targets(notes: &str) -> Option<String> {
-    notes.lines().find_map(|line| {
-        let lower = line.to_ascii_lowercase();
-        if !lower.contains("scoped_proof") || !lower.contains("result=pass") {
-            return None;
-        }
-        let targets = line.split_once("targets=")?.1;
-        Some(
-            targets
-                .split_once("result=")
-                .map_or(targets, |(value, _)| value)
-                .trim()
-                .to_string(),
-        )
-    })
+    // A later proof note may supersede an earlier partial receipt after a
+    // supervisor expands the required target set. Keep the latest passing
+    // receipt so close does not revalidate stale scope forever.
+    notes
+        .lines()
+        .filter_map(|line| {
+            let lower = line.to_ascii_lowercase();
+            if !lower.contains("scoped_proof") || !lower.contains("result=pass") {
+                return None;
+            }
+            let targets = line.split_once("targets=")?.1;
+            Some(
+                targets
+                    .split_once("result=")
+                    .map_or(targets, |(value, _)| value)
+                    .trim()
+                    .to_string(),
+            )
+        })
+        .last()
 }
 
 fn scoped_proof_note_covers(notes: &str, required_targets: &[String]) -> Vec<String> {
@@ -908,7 +1008,7 @@ fn validate_risk_close_proofs(
         let missing = scoped_proof_note_covers(&task.notes, &required_targets);
         if !missing.is_empty() {
             return Err(format!(
-                "TASK CLOSE REJECTED: task {} changed a module with integration-test proof targets that were not run or recorded as passing; missing targets: {}. Run `scripts/run-scoped-tests.sh --proof -p cas --lib --test {}` and add `SCOPED_PROOF: targets=<complete target set> result=PASS` to a progress note before retrying close.",
+                "TASK CLOSE REJECTED: task {} changed a module with integration-test proof targets that were not run or recorded as passing; missing targets: {}. Run `scripts/run-scoped-tests.sh --proof -p cas --lib --test {}` and add `SCOPED_PROOF: targets=<complete target set> result=PASS` to a progress note before retrying close. If the scoped command cannot run, a registered supervisor may record an equivalent full `cargo nextest run -p cas` receipt with its durable log path in the note; every real required target must be covered.",
                 task.id,
                 missing.join(", "),
                 required_targets.join(" --test "),
@@ -959,8 +1059,109 @@ mod risk_proof_tests {
             "pub(super) async fn factory_worker_status() {}\n",
         )
         .unwrap();
-        std::fs::write(test, "async fn test_worker_status() {}\n").unwrap();
+        std::fs::write(
+            test,
+            "async fn test_worker_status() { mcp::tools::service::factory_ops::worker_status(); }\n",
+        )
+        .unwrap();
         dir
+    }
+
+    #[test]
+    fn scoped_proof_drops_nested_module_without_cargo_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join("cas-cli/tests/hooks_test/mod.rs");
+        std::fs::create_dir_all(nested.parent().unwrap()).unwrap();
+        std::fs::write(nested, "mod helper {}\n").unwrap();
+
+        assert_eq!(
+            scoped_proof_test_target(dir.path(), "cas-cli/tests/hooks_test/mod.rs"),
+            None,
+            "a module file without tests/<name>.rs, tests/<name>/main.rs, or [[test]] is not a Cargo target"
+        );
+    }
+
+    #[test]
+    fn scoped_proof_accepts_directory_main_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let main = dir.path().join("cas-cli/tests/hooks_test/main.rs");
+        std::fs::create_dir_all(main.parent().unwrap()).unwrap();
+        std::fs::write(main, "fn main() {}\n").unwrap();
+
+        assert_eq!(
+            scoped_proof_test_target(dir.path(), "cas-cli/tests/hooks_test/mod.rs"),
+            Some("hooks_test".to_string())
+        );
+    }
+
+    #[test]
+    fn scoped_proof_accepts_manifest_test_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("cas-cli/Cargo.toml");
+        let entry = dir.path().join("cas-cli/tests/hooks_test/entry.rs");
+        std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
+        std::fs::write(
+            manifest,
+            "[[test]]\nname = \"custom_hooks\"\npath = \"tests/hooks_test/entry.rs\"\n",
+        )
+        .unwrap();
+        std::fs::write(entry, "#[test] fn hook_contract() {}\n").unwrap();
+
+        assert_eq!(
+            scoped_proof_test_target(dir.path(), "cas-cli/tests/hooks_test/entry.rs"),
+            Some("custom_hooks".to_string())
+        );
+    }
+
+    #[test]
+    fn scoped_proof_ignores_bare_identifier_collisions() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("cas-cli/src/hub.rs");
+        let test = dir.path().join("cas-cli/tests/hub_contract_test.rs");
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(test.parent().unwrap()).unwrap();
+        std::fs::write(source, "pub(super) fn supervisor_sessions() {}\n").unwrap();
+        std::fs::write(test, "#[test] fn test_supervisor_sessions() {}\n").unwrap();
+
+        assert!(required_scoped_proof_targets(
+            dir.path(),
+            &["cas-cli/src/hub.rs".to_string()]
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn scoped_proof_accepts_qualified_symbol_reference() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("cas-cli/src/hub.rs");
+        let test = dir.path().join("cas-cli/tests/hub_contract_test.rs");
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(test.parent().unwrap()).unwrap();
+        std::fs::write(source, "pub(super) fn supervisor_sessions() {}\n").unwrap();
+        std::fs::write(
+            test,
+            "#[test] fn test_sessions() { cas::hub::supervisor_sessions(); }\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            required_scoped_proof_targets(
+                dir.path(),
+                &["cas-cli/src/hub.rs".to_string()]
+            ),
+            ["hub_contract_test".to_string()]
+        );
+    }
+
+    #[test]
+    fn scoped_proof_accepts_supervisor_full_run_receipt() {
+        let dir = scoped_proof_fixture();
+        let mut task = Task::new("cas-full-run-proof".into(), "full run proof".into());
+        let changed = vec!["cas-cli/src/mcp/tools/service/factory_ops.rs".to_string()];
+        task.notes = "[2026-09-11] 📝 PROGRESS SCOPED_PROOF: command=cargo nextest run -p cas --all-targets log=/home/pippenz/.cas/artifacts/cas-full-run-proof/full-run.log targets=lib:factory_ops,test:factory_mcp_ops_test result=PASS".into();
+
+        validate_risk_close_proofs(&task, &changed, dir.path())
+            .expect("a registered supervisor's equivalent full-run receipt should cover targets");
     }
 
     #[test]
@@ -983,11 +1184,32 @@ mod risk_proof_tests {
     }
 
     #[test]
+    fn scoped_proof_uses_latest_receipt_when_an_earlier_one_is_partial() {
+        let dir = scoped_proof_fixture();
+        let mut task = Task::new("cas-latest-proof".into(), "latest proof".into());
+        let changed = vec!["cas-cli/src/mcp/tools/service/factory_ops.rs".to_string()];
+        task.notes = concat!(
+            "[2026-09-11] 📝 PROGRESS SCOPED_PROOF: ",
+            "targets=lib:factory_ops result=PASS\n",
+            "[2026-09-11] 📝 PROGRESS SCOPED_PROOF: ",
+            "targets=lib:factory_ops,test:factory_mcp_ops_test result=PASS",
+        )
+        .into();
+
+        validate_risk_close_proofs(&task, &changed, dir.path())
+            .expect("a later complete receipt should supersede an earlier partial receipt");
+    }
+
+    #[test]
     fn scoped_proof_close_requires_archive_guardrail_for_changed_test() {
         let dir = tempfile::tempdir().unwrap();
         let test = dir.path().join("cas-cli/tests/factory_mcp_ops_test.rs");
+        let archive = dir
+            .path()
+            .join("cas-cli/tests/builtin_archive_portability_test.rs");
         std::fs::create_dir_all(test.parent().unwrap()).unwrap();
         std::fs::write(test, "#[test] fn factory_ops_contract() {}\n").unwrap();
+        std::fs::write(archive, "#[test] fn archive_contract() {}\n").unwrap();
         let task = Task::new("cas-archive-proof".into(), "archive proof".into());
         let changed = vec!["cas-cli/tests/factory_mcp_ops_test.rs".to_string()];
         let error = validate_risk_close_proofs(&task, &changed, dir.path())
@@ -4185,6 +4407,7 @@ impl CasCore {
                                 })
                                 .map(|_| close_project_root.clone())
                         };
+                        let use_target_branch_proof = post_merge_target.is_some();
                         let proof_worktree = match post_merge_target {
                             Some(target) => target,
                             None => self
@@ -4216,11 +4439,34 @@ impl CasCore {
                                     Some(resolved_parent_branch.as_str()),
                                     req.commit_receipt.as_deref(),
                                 );
-                                let repository_proof = crate::mcp::tools::core::task::lifecycle::repository_proof::capture_repository_proof_with_anchors(
-                                    &close_project_root,
-                                    &proof_worktree,
-                                    anchor_commits,
-                                )
+                                let repository_proof = if use_target_branch_proof {
+                                    if let Some(context) = declared_repo_context.as_ref() {
+                                        // A declared WorkTarget is authoritative
+                                        // for the post-merge verification
+                                        // boundary. The primary checkout may
+                                        // be parked on a different branch while
+                                        // this target is checked out in a linked
+                                        // worktree; bind the target branch tip
+                                        // instead of its incidental HEAD (GH #821).
+                                        crate::mcp::tools::core::task::lifecycle::repository_proof::capture_repository_proof_at_target(
+                                            &context.repo_root,
+                                            &context.target_branch,
+                                            anchor_commits,
+                                        )
+                                    } else {
+                                        crate::mcp::tools::core::task::lifecycle::repository_proof::capture_repository_proof_with_anchors(
+                                            &close_project_root,
+                                            &proof_worktree,
+                                            anchor_commits,
+                                        )
+                                    }
+                                } else {
+                                    crate::mcp::tools::core::task::lifecycle::repository_proof::capture_repository_proof_with_anchors(
+                                        &close_project_root,
+                                        &proof_worktree,
+                                        anchor_commits,
+                                    )
+                                }
                                 .map_err(|error| McpError {
                                     code: ErrorCode::INVALID_PARAMS,
                                     message: Cow::from(format!(
@@ -19091,6 +19337,148 @@ mod merge_state_gate_tests {
             ),
             "a target-sync merge tip must be proven from task content commits"
         );
+    }
+
+    /// GH #840: a worker's own conflict-resolution merge can intentionally
+    /// replace the hunks from an earlier task commit before the final worker
+    /// tip is merged. That merge resolution is task content, not a dropped
+    /// delivery, even though the original non-merge commit's exact patch no
+    /// longer applies to the target tree.
+    #[test]
+    fn worker_merge_resolution_supersedes_earlier_content_without_drop_gh_840() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+
+        std::fs::write(
+            p.join("conversation-history.ts"),
+            "export type MessageReceipt = { id: string };\n",
+        )
+        .unwrap();
+        git(p, &["add", "conversation-history.ts"]);
+        git(
+            p,
+            &[
+                "commit",
+                "-q",
+                "-m",
+                "feat(cas-test1): add conversation history",
+            ],
+        );
+
+        // The integration target independently adds the same path, forcing
+        // the worker's target-sync merge to carry an explicit resolution.
+        git(p, &["checkout", "-q", "main"]);
+        std::fs::write(
+            p.join("conversation-history.ts"),
+            "export type MessageReceipt = { source: string };\n",
+        )
+        .unwrap();
+        git(p, &["add", "conversation-history.ts"]);
+        git(
+            p,
+            &["commit", "-q", "-m", "feat: advance integration history"],
+        );
+        git(p, &["checkout", "-q", "factory/worker"]);
+        let merge = git_command(
+            p,
+            &[
+                "merge",
+                "--no-ff",
+                "main",
+                "-m",
+                "Merge branch 'main' into factory/worker",
+            ],
+        )
+        .status()
+        .expect("start worker target-sync merge");
+        assert!(!merge.success(), "fixture must produce a merge conflict");
+        std::fs::write(
+            p.join("conversation-history.ts"),
+            "export type MessageQueued = { id: string };\n",
+        )
+        .unwrap();
+        git(p, &["add", "conversation-history.ts"]);
+        git(
+            p,
+            &[
+                "commit",
+                "-q",
+                "-m",
+                "Merge branch 'main' into factory/worker",
+            ],
+        );
+
+        // Keep a later ordinary task commit in the same worker branch, then
+        // merge another target-only change to make the recorded anchor a
+        // merge tip, matching the delivery shape from GH #840.
+        std::fs::write(p.join("follow-up.rs"), "pub fn follow_up() {}\n").unwrap();
+        git(p, &["add", "follow-up.rs"]);
+        git(
+            p,
+            &["commit", "-q", "-m", "fix(cas-test1): add follow-up"],
+        );
+        let later_content = rev_parse_local(p, "HEAD");
+        git(p, &["checkout", "-q", "main"]);
+        std::fs::write(p.join("target-only.rs"), "// target-only\n").unwrap();
+        git(p, &["add", "target-only.rs"]);
+        git(p, &["commit", "-q", "-m", "chore: advance target again"]);
+        git(p, &["checkout", "-q", "factory/worker"]);
+        git(
+            p,
+            &[
+                "merge",
+                "-q",
+                "--no-ff",
+                "main",
+                "-m",
+                "Merge branch 'main' into factory/worker",
+            ],
+        );
+        let worker_tip = rev_parse_local(p, "HEAD");
+
+        git(p, &["checkout", "-q", "main"]);
+        git(
+            p,
+            &[
+                "merge",
+                "-q",
+                "--no-ff",
+                "factory/worker",
+                "-m",
+                "merge worker delivery",
+            ],
+        );
+
+        let mut task = worker_task("worker");
+        task.status = TaskStatus::AwaitingMerge;
+        task.deliverables.factory_branch_anchor = Some(worker_tip);
+        let req = base_req(&task.id);
+        assert!(
+            matches!(
+                run_factory_branch_merge_gate(&task, &req, "main", p),
+                MergeStateGateOutcome::Proceed
+            ),
+            "a worker-owned merge resolution must count as delivered task content"
+        );
+
+        // A validated receipt may name that later content commit directly;
+        // the merge-tip proof must honor it as the delivery boundary too.
+        let receipt_window = window_at(0, "GH #840 receipt regression");
+        let mut receipt_req = base_req(&task.id);
+        receipt_req.commit_receipt = Some(later_content.clone());
+        assert!(matches!(
+            run_factory_branch_merge_gate_with_attribution(
+                &task,
+                &receipt_req,
+                "main",
+                p,
+                TaskCommitAttribution {
+                    receipt: Some(&later_content),
+                    window: Some(&receipt_window),
+                },
+            ),
+            MergeStateGateOutcome::Proceed
+        ));
     }
 
     /// A target-sync merge with no task-attributed content must remain

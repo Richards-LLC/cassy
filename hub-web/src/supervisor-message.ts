@@ -11,7 +11,7 @@ export function supervisorMessage(target: string, text: string, clientRef?: stri
       ...(clientRef ? { client_ref: clientRef } : {}),
       target,
       text,
-      summary: "Cassy Commander message",
+      summary: "Cassy Cloud message",
       urgent: false,
       attribution: {
         device_id: null,
@@ -90,7 +90,7 @@ export function planSupervisorSend(context: SupervisorSendContext): SupervisorSe
     return {
       kind: "blocked",
       block: "unsupported-hub",
-      reason: "This hub is too old to accept Cassy Commander messages. Upgrade the hub, then reconnect this machine.",
+      reason: "This hub is too old to accept Cassy Cloud messages. Upgrade the hub, then reconnect this machine.",
     };
   }
   if (!context.supervisor) {

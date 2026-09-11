@@ -1,10 +1,10 @@
 # Coordination contracts — main-merge announcement draft
 
-Draft only. Publish after the reviewed PR lands on main. These four message bodies describe source on main; they make no installed-runtime or deployment claim.
+Posted source-merge announcement. The reviewed changes are on main and included in published Cassy v3.25.4. These four bodies remain a separate source announcement and make no installed-host claim.
 
 Channel: #cas-internal (`C0B44GUKDK2`). Order: User top-level → User reply → Dev top-level → Dev reply. Each reply belongs to the immediately preceding top-level message.
 
-Review basis: assembled branch at `8f7181e4`, compared with its incorporated main baseline. Recheck against the final merged diff, including the pending prompt correction, before publication. Scoped test receipts support the changes; assembled integration approval remains pending.
+Review basis: PR853 landed on main at `5640e6b4` from reviewed assembly `8f6d0b63`, including the final prompt correction. The assembled gate passed 9,392 workspace tests and 2 doctests. Published v3.25.4 source `875e353b` contains these changes.
 
 ## 1. User top-level
 
@@ -24,7 +24,7 @@ Was: recovery instructions could point to commands your coding tool couldn't run
 
 • *Clearer status boundaries* — Was: an empty report could look like there was no work anywhere. → Now: it names the current session and distinguishes entries in other sessions.
 
-Availability: these changes are in the source on main. Installed copies require a later runtime release containing them.
+Availability: these changes are on main and included in published Cassy v3.25.4. Older installations need updating to receive them.
 ```
 
 ## 3. Dev top-level
@@ -49,5 +49,16 @@ Was: recovery templates assumed a tool namespace. → Now: caller and registered
 
 • *Explicit status scope* — Was: full, summary and empty status responses left their session boundary implicit. → Now: they report the session and counts inside and outside it, partitioning by session before name deduplication. These are registered-entry counts, not process-liveness claims.
 
-Availability: source on main only. No runtime version or deployment is announced here.
+Availability: this source-on-main change set is included in published Cassy v3.25.4. This source announcement does not claim any host was updated.
 ```
+
+## POSTED
+
+- **Posted at (UTC):** `2026-09-11T18:14:57.905212+00:00`
+- **Channel:** `#cas-internal` (`C0B44GUKDK2`)
+- **User top-level:** `message_id=1789150465.818649` · `thread_id=1789150465.818649` · <https://petra-stella.slack.com/archives/C0B44GUKDK2/p1789150465818649>
+- **User reply:** `message_id=1789150483.335439` · `thread_id=1789150465.818649` · <https://petra-stella.slack.com/archives/C0B44GUKDK2/p1789150483335439?thread_ts=1789150465.818649&cid=C0B44GUKDK2>
+- **Dev top-level:** `message_id=1789150491.380109` · `thread_id=1789150491.380109` · <https://petra-stella.slack.com/archives/C0B44GUKDK2/p1789150491380109>
+- **Dev reply:** `message_id=1789150497.805649` · `thread_id=1789150491.380109` · <https://petra-stella.slack.com/archives/C0B44GUKDK2/p1789150497805649?thread_ts=1789150491.380109&cid=C0B44GUKDK2>
+
+Transport: authenticated MechaCassy hub/bot. Four source-announcement messages only; runtime/report publication has its separate receipts. Approved pre-publication draft SHA-256: `7d4b03de6749144270145db57fa5e253bca41bf488021bfaaf12c64cb631e185`. No host update is claimed.

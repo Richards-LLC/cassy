@@ -15,8 +15,8 @@ authoritative task/worker state once before acting.
 | Blocked worker recovery | Read task/heartbeat/process state and send one recovery instruction | Only after an external dependency or unreachable owner could otherwise go quiet | Cancel as soon as the worker responds, is reassigned, or the task closes |
 | Concrete lifecycle event is already the desired trigger | Use the matching event, not a timer | One event reminder with a TTL | Cancel it if the phase completes through another path |
 
-Never create a reminder instead of sending/receiving a worker acknowledgement,
-checking task state, or processing an injected lifecycle message. Do not sleep,
+Never create a reminder instead of checking authoritative task acceptance,
+reading inbox updates, or processing an authenticated typed lifecycle event. Do not sleep,
 watch CI, or repeatedly poll. One active reminder per task/phase is the limit.
 
 ## API contract

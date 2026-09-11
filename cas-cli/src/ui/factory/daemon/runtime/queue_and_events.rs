@@ -723,8 +723,25 @@ fn enqueue_preassign_failure_lifecycle_relay(
     task_id: &str,
     detail: &str,
 ) -> anyhow::Result<i64> {
-    use crate::mcp::tools::core::task::lifecycle::supervisor_push::LIFECYCLE_WAKE_SOURCE_PREFIX;
+    use crate::mcp::tools::core::task::lifecycle::supervisor_push::{
+        LIFECYCLE_WAKE_SOURCE_PREFIX, resolve_owning_supervisor,
+    };
 
+    // Registry evidence belongs to this session's actual recipient, never the
+    // daemon's harness. Keep existing enqueue/routing policy for unknown names.
+    let prefix = crate::store::open_agent_store(cas_dir)
+        .ok()
+        .and_then(|agents| {
+            let supervisor = resolve_owning_supervisor(agents.as_ref(), Some(factory_session))?;
+            if supervisor_name != crate::harness_policy::SUPERVISOR_ALIAS
+                && supervisor_name != supervisor.name
+            {
+                return None;
+            }
+            let agent = agents.get(&supervisor.agent_id).ok()?;
+            crate::harness_policy::agent_tool_prefix(&agent)
+        })
+        .unwrap_or("");
     let queue = open_prompt_queue_store(cas_dir)?;
     let request = request_id
         .map(|id| id.to_string())
@@ -734,6 +751,7 @@ fn enqueue_preassign_failure_lifecycle_relay(
     let body = format!(
         "<spawn-preassign-failed task_id=\"{task_id}\" worker_name=\"{worker_name}\" notification_id=\"{request}\">\n\
          Factory spawn pre-assignment failed: {detail}\n\
+         Assign the task explicitly: `{prefix}task action=update id={task_id} assignee={worker_name}`.\n\
          </spawn-preassign-failed>"
     );
     let result = queue.enqueue_idempotent(
@@ -2786,9 +2804,7 @@ impl FactoryDaemon {
             Err(reason) => {
                 let detail = format!(
                     "Worker '{worker}' registered but the promised pre-assignment of task \
-                     {task_id} did not stick: {reason}. The worker is idle without it — assign \
-                     the task explicitly (mcp__cas__task action=update id={task_id} \
-                     assignee={worker})."
+                     {task_id} did not stick: {reason}. The worker is idle without it."
                 );
                 tracing::warn!(
                     worker = %worker,
@@ -6764,12 +6780,10 @@ impl FactoryDaemon {
                         self.app.project_path(),
                         &condition,
                     ) {
-                        Ok(Some(observation)) => {
-                            ready.push((
-                                reminder,
-                                ReminderTriggerContext::external(&condition, &observation),
-                            ))
-                        }
+                        Ok(Some(observation)) => ready.push((
+                            reminder,
+                            ReminderTriggerContext::external(&condition, &observation),
+                        )),
                         Ok(None) => {}
                         Err(error) => tracing::warn!(
                             reminder_id = reminder.id,
@@ -10752,6 +10766,71 @@ mod tests {
         assert!(updated.notes.contains("original pushed-work note"));
         assert!(updated.notes.contains("dead-session-worker"));
         assert!(updated.notes.contains("reset semantics"));
+    }
+
+    #[test]
+    fn lifecycle_recovery_preassign_failure_uses_registered_recipient_harness() {
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[
+            ("CAS_FACTORY_SUPERVISOR_CLI", "opencode"),
+            ("CAS_FACTORY_WORKER_CLI", "codex"),
+        ]);
+        for (harness, prefix) in [
+            ("claude", "mcp__cas__"),
+            ("codex", "mcp__cs__"),
+            ("grok", "cas__"),
+            ("opencode", "cas_"),
+        ] {
+            let temp = tempfile::TempDir::new().unwrap();
+            let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+            let agents = crate::store::open_agent_store(&cas_dir).unwrap();
+            let mut supervisor =
+                cas_types::Agent::new("supervisor-id".into(), "named-supervisor".into());
+            supervisor.role = cas_types::AgentRole::Supervisor;
+            supervisor.factory_session = Some("recovery-matrix".into());
+            supervisor
+                .metadata
+                .insert("supervisor_cli".into(), harness.into());
+            agents.register(&supervisor).unwrap();
+            for _ in 0..2 {
+                enqueue_preassign_failure_lifecycle_relay(
+                    &cas_dir,
+                    "named-supervisor",
+                    "recovery-matrix",
+                    Some(823),
+                    "replacement-worker",
+                    "cas-stale",
+                    "task store became unreadable",
+                )
+                .unwrap();
+            }
+            let rows = crate::store::open_prompt_queue_store(&cas_dir)
+                .unwrap()
+                .peek_all(10)
+                .unwrap();
+            assert_eq!(rows.len(), 1, "replay remains idempotent");
+            let row = &rows[0];
+            assert!(
+                row.prompt.contains(&format!(
+                    "{prefix}task action=update id=cas-stale assignee=replacement-worker"
+                )),
+                "{harness}: {}",
+                row.prompt
+            );
+            for foreign in ["mcp__cas__task", "mcp__cs__task", "cas__task", "cas_task"] {
+                if foreign != format!("{prefix}task") {
+                    assert!(
+                        !row.prompt.contains(&format!("`{foreign} ")),
+                        "{harness}: {}",
+                        row.prompt
+                    );
+                }
+            }
+            assert_eq!(row.target, "named-supervisor");
+            assert_eq!(row.origin, Some(cas_store::QueueOrigin::Daemon));
+            assert!(crate::prompt_revalidation::is_supervisor_wake_envelope(
+                &row.prompt
+            ));
+        }
     }
 
     #[test]

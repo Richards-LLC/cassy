@@ -610,10 +610,11 @@ pub(crate) fn unanchored_task_start_warning(
          to a different repository, stop now: working it here records lease, verification \
          and close rows against a replica while the authoritative task never updates, \
          corrupting both projects' histories.\n\
-         If it does belong here: `mcp__cas__task action=update id={task_id} \
+         If it does belong here: `{tool_prefix}task action=update id={task_id} \
          target_repo=<path> target_branch=<branch>` to anchor it and silence this.\n\
          If it is contamination: `cas cloud purge-foreign` (preview first) to drop \
-         foreign rows and re-pull."
+         foreign rows and re-pull.",
+        tool_prefix = crate::mcp::tools::core::guidance::caller_prefix()
     )
 }
 

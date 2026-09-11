@@ -72,6 +72,8 @@ Do not use `/cas-start`, `/cas-context`, or `/cas-end` — they are not availabl
 
 ## During Coordination
 
+Read `cas-supervisor` for authoritative task acceptance and the inbox/typed-wake policy.
+
 **Reporting style:** facts, not narration — assignments, verdicts and merge state, not a
 recap of what a worker just said. Brevity never trims evidence: findings, rejection
 reasons, measurements and merge receipts stay in full. See the `cas-supervisor` skill.

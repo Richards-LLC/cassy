@@ -100,7 +100,7 @@ EPIC subtasks only — standalone bugs/chores/spikes stay freeform. Fields can b
 
 - **Agent-task fit** — Right capability for the job; no generalist on specialist work
 - **Context injection** — Send only needed context; withhold irrelevant info to prevent scope bleed
-- **Contract handoff** — Worker acknowledges acceptance criteria before starting
+- **Contract handoff** — Worker reads the acceptance criteria and accepts the assignment with a successful `task action=start`; no prose ACK is required
 
 ## Review Gates
 

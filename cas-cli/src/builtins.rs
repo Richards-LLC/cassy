@@ -3420,6 +3420,120 @@ mod tests {
     use std::process::Command;
 
     #[test]
+    fn installed_role_skills_preserve_acceptance_and_codex_checklist_selection() {
+        let temp = tempfile::tempdir().unwrap();
+        for (harness, dir) in [
+            (SupervisorCli::Claude, ".claude"),
+            (SupervisorCli::Codex, ".codex"),
+            (SupervisorCli::Grok, ".grok"),
+        ] {
+            let target = temp.path().join(dir);
+            sync_all_builtins_for_harness(harness, &target).unwrap();
+            for path in [
+                "skills/cas-supervisor/SKILL.md",
+                "skills/cas-worker/SKILL.md",
+            ] {
+                let installed = std::fs::read_to_string(target.join(path)).unwrap();
+                let builtin = skill_catalog_for_harness(harness)
+                    .iter()
+                    .find(|file| file.path == path)
+                    .unwrap();
+                assert_eq!(installed, builtin.content, "{harness:?}/{path}");
+            }
+            if harness == SupervisorCli::Codex {
+                assert!(
+                    target
+                        .join("skills/cas-codex-supervisor-checklist/SKILL.md")
+                        .is_file()
+                );
+                assert!(
+                    !target
+                        .join("skills/cas-supervisor-checklist/SKILL.md")
+                        .exists()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn role_entrypoints_share_authoritative_acceptance_and_wake_policy() {
+        for harness in [
+            SupervisorCli::Claude,
+            SupervisorCli::Codex,
+            SupervisorCli::Grok,
+            SupervisorCli::OpenCode,
+        ] {
+            let catalog = skill_catalog_for_harness(harness);
+            for path in [
+                "skills/cas-supervisor/SKILL.md",
+                "skills/cas-worker/SKILL.md",
+            ] {
+                let content = catalog
+                    .iter()
+                    .find(|file| file.path == path)
+                    .unwrap()
+                    .content;
+                for required in [
+                    "authoritative assignment acceptance",
+                    "no prose ACK is required",
+                    "inbox on the next turn",
+                    "Only authenticated typed",
+                    "blocker=true",
+                    "merge_request=true",
+                ] {
+                    assert!(
+                        content.contains(required),
+                        "{harness:?}/{path} missing {required}"
+                    );
+                }
+            }
+            for file in catalog.iter().filter(|file| {
+                file.path.contains("cas-supervisor") || file.path.contains("cas-worker")
+            }) {
+                for stale in [
+                    "Require worker ACK",
+                    "Then send an ACK",
+                    "acknowledges acceptance criteria before starting",
+                    "sending/receiving a worker acknowledgement",
+                    "arrive asynchronously as new injected turns",
+                    "/cas-supervisor-checklist",
+                ] {
+                    assert!(
+                        !file.content.contains(stale),
+                        "{harness:?}/{} retains {stale}",
+                        file.path
+                    );
+                }
+            }
+            let recovery = catalog
+                .iter()
+                .find(|file| file.path == "skills/cas-supervisor/references/worker-recovery.md")
+                .unwrap()
+                .content;
+            for receipt in [
+                "processed_at",
+                "acked_at",
+                "queue_ack",
+                "message_ack",
+                "Neither replaces `task action=start`",
+            ] {
+                assert!(
+                    recovery.contains(receipt),
+                    "{harness:?} lost distinct receipt {receipt}"
+                );
+            }
+        }
+        let codex = CODEX_BUILTIN_SKILLS
+            .iter()
+            .find(|file| file.path == "skills/cas-supervisor/SKILL.md")
+            .unwrap()
+            .content;
+        assert!(codex.contains("Use `cas-codex-supervisor-checklist`"));
+        assert!(!codex.contains("`cas-supervisor-checklist`"));
+        assert!(supervisor_guidance().contains("`cas-codex-supervisor-checklist` on Codex"));
+    }
+
+    #[test]
     fn builtin_gitignore_block_preserves_user_entries_and_is_idempotent() {
         let temp = tempfile::tempdir().unwrap();
         let gitignore = temp.path().join(".gitignore");
@@ -3656,12 +3770,14 @@ This is the body content."#;
         let codex = include_str!("builtins/codex/skills/cas-supervisor.md");
         let grok = include_str!("builtins/grok/skills/cas-supervisor.md");
 
-        // Claude -> Codex is a pure tool-prefix mirror.
+        // Codex selects its dedicated checklist; all other prose stays mirrored.
         assert_eq!(
-            claude.replace("mcp__cas__", "mcp__cs__"),
+            claude.replace("mcp__cas__", "mcp__cs__").replace(
+                "Use the checklist for your harness: `cas-codex-supervisor-checklist` on Codex; `cas-supervisor-checklist` on Claude, Grok, or OpenCode",
+                "Use `cas-codex-supervisor-checklist`",
+            ),
             codex,
-            "codex cas-supervisor.md must equal the Claude body apart from the \
-             mcp__cas__/mcp__cs__ tool prefix"
+            "codex cas-supervisor.md may differ only by its tool prefix and checklist selection"
         );
 
         // Claude -> Grok differs only by the cas__ prefix and the intentional
@@ -4198,7 +4314,7 @@ This is the body content."#;
         ] {
             for required in [
                 "cas-src surface checklist",
-                "This is a requirement, not a suggestion",
+                "Pre-close notes must prove each applicable entry",
                 "not applicable",
                 "Codex, and Grok mirrors",
                 "CLI parity, docs, and dispatch registration",

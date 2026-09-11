@@ -645,6 +645,15 @@ mod tests {
             match requirement.ambient_recall {
                 AmbientRecallDelivery::SessionStart => {
                     let payload = claude_session_start_payload(&cas_dir);
+                    let budget = crate::hooks::handlers::session_budget::SESSION_START_BUDGET_BYTES;
+                    assert!(
+                        payload.len() <= budget,
+                        "Claude SessionStart exceeds {budget}B"
+                    );
+                    eprintln!(
+                        "Claude SessionStart with full ambient recall: {}B / {budget}B",
+                        payload.len()
+                    );
                     assert!(
                         payload.contains("[ambient recall v1 role=supervisor"),
                         "{harness:?} SessionStart payload is missing ambient recall: {payload}"

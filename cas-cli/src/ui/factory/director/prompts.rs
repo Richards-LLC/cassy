@@ -1266,9 +1266,9 @@ pub fn generate_prompt_at(
                  Title: {task_title}\n\n\
                  View full details: {worker_prefix}task action=show id={task_id}\n\
                  Start working: {worker_prefix}task action=start id={task_id}\n\
-                 Then send an ACK to supervisor with your execution plan.\n\
+                 Successful task action=start is authoritative assignment acceptance; no prose ACK is required. A concise execution plan is optional.\n\
                  While working, post progress notes with {worker_prefix}task action=notes.\n\
-                 If blocked, set status=blocked and explain the blocker."
+                 If blocked, set status=blocked and send {worker_prefix}coordination action=message target=supervisor blocker=true with the blocker. For merge requests, use merge_request=true. Ordinary updates surface through the inbox on the next turn; only authenticated typed blocker, merge, verification, or lifecycle events may wake an idle supervisor."
             );
 
             Some(Prompt {
@@ -2016,6 +2016,58 @@ mod tests {
 
     fn claude() -> SupervisorCli {
         SupervisorCli::Claude
+    }
+
+    #[test]
+    fn assignment_acceptance_and_wake_policy_use_receiving_harness_tools() {
+        let event = DirectorEvent::TaskAssigned {
+            task_id: "cas-contract".to_string(),
+            task_title: "Accept the assignment".to_string(),
+            worker: "worker-a".to_string(),
+        };
+        let data = make_data(0);
+        for cli in [
+            SupervisorCli::Claude,
+            SupervisorCli::Codex,
+            SupervisorCli::Grok,
+            SupervisorCli::OpenCode,
+        ] {
+            let prompt = generate_prompt(
+                &event,
+                &data,
+                &data,
+                "supervisor",
+                &default_config(),
+                claude(),
+                cli,
+                &HashSet::new(),
+                None,
+            )
+            .unwrap();
+            let prefix = cli.backend().capabilities().tool_prefix;
+            for action in ["show", "start"] {
+                assert!(
+                    prompt
+                        .text
+                        .contains(&format!("{prefix}task action={action} id=cas-contract")),
+                    "{cli:?}: {}",
+                    prompt.text
+                );
+            }
+            for required in [
+                "authoritative assignment acceptance",
+                "no prose ACK is required",
+                "execution plan is optional",
+                "inbox on the next turn",
+                "only authenticated typed",
+                "blocker=true",
+                "merge_request=true",
+            ] {
+                assert!(prompt.text.contains(required), "{cli:?} missing {required}");
+            }
+            assert!(!prompt.text.contains("Then send an ACK"));
+            assert!(prompt.durable_retry);
+        }
     }
 
     /// cas-ae6d (GH #100): the assignment wake-up is the one prompt whose loss

@@ -581,6 +581,8 @@ pub(crate) fn parse_worker_attention_envelope(prompt: &str) -> bool {
                     | "worker_delivery_stalled"
                     | "worker_unavailable"
                     | "supervisor_stalled"
+                    | "merged_close_blocked"
+                    | "pr_lane_failed"
                     // cas-d9a8: CAS's own unread-backlog summary for the
                     // supervisor. Same envelope, same producer (the daemon
                     // relay), so it inherits the wake terms rather than
@@ -1038,12 +1040,12 @@ mod cas_8aee_assignment_delivery_tests {
         let prompt = "You have been assigned a new task:\n\
                       Task ID: cas-8aee\n\
                       Start working: mcp__cas__task action=start id=cas-8aee\n\
-                      Then send an ACK to supervisor with your execution plan.";
+                      Successful task action=start accepts the assignment; no prose ACK is required.";
 
         assert_eq!(
             assignment_targets_terminal_task(prompt, TaskStatus::Closed).as_deref(),
             Some("cas-8aee"),
-            "the queued assignment must be withdrawn rather than render its stale start/ACK instructions"
+            "the queued assignment must be withdrawn rather than render its stale task-start instructions"
         );
         assert!(
             assignment_targets_terminal_task(prompt, TaskStatus::InProgress).is_none(),

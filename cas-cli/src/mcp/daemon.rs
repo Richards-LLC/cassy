@@ -64,6 +64,14 @@ pub(crate) fn apply_factory_worker_metadata(agent: &mut Agent, clone_path: Optio
         agent.metadata.insert("clone_path".to_string(), path);
     }
 
+    // Persist the supervisor's own CLI, never its default worker harness.
+    // This is additive evidence for cross-process recipient rendering.
+    if agent.role == AgentRole::Supervisor {
+        if let Ok(cli) = std::env::var("CAS_FACTORY_SUPERVISOR_CLI") {
+            agent.metadata.insert("supervisor_cli".to_string(), cli);
+        }
+    }
+
     let is_worker = agent.role == AgentRole::Worker
         || std::env::var("CAS_AGENT_ROLE")
             .map(|role| role.eq_ignore_ascii_case("worker"))

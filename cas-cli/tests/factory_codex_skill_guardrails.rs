@@ -340,8 +340,8 @@ fn worker_failure_recovery_guidance_is_pinned_cas_62a9() {
         for marker in [
             "never retry the denied target",
             "A `/dev/null` denial is a guard defect to report",
-            "every applicable entry must paste its proving file, command, or test",
-            "Bare assertions are non-compliant",
+            "Pre-close notes must prove each applicable entry with a file, command, or test",
+            "explain each `not applicable` entry",
         ] {
             assert!(
                 worker.contains(marker),

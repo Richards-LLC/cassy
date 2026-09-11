@@ -30,6 +30,22 @@ pub fn parse_harness(value: &str) -> Option<SupervisorCli> {
     SupervisorCli::from_str(value).ok()
 }
 
+/// Tool prefix proven by the explicitly addressed agent's registration.
+/// Missing or invalid evidence stays unknown: callers choose their own fallback,
+/// and relays must not borrow the producer's harness for an unknown recipient.
+pub fn agent_tool_prefix(agent: &cas_types::Agent) -> Option<&'static str> {
+    let key = match agent.role {
+        cas_types::AgentRole::Supervisor => "supervisor_cli",
+        cas_types::AgentRole::Worker => "worker_cli",
+        _ => return None,
+    };
+    agent
+        .metadata
+        .get(key)
+        .and_then(|value| parse_harness(value))
+        .map(|harness| harness.backend().capabilities().tool_prefix)
+}
+
 pub fn worker_harness_from_env() -> SupervisorCli {
     std::env::var("CAS_FACTORY_WORKER_CLI")
         .ok()
@@ -859,5 +875,60 @@ mod tests {
 
         env.set("CAS_FACTORY_SUPERVISOR_CLI", "opencode");
         assert_eq!(super::own_tool_prefix(), "cas_");
+    }
+}
+
+#[cfg(test)]
+mod registered_prefix_tests {
+    use super::*;
+
+    #[test]
+    fn recovery_guidance_registered_recipient_uses_own_role_metadata() {
+        let mut agent = cas_types::Agent::new("recipient".into(), "recipient".into());
+        agent.metadata.insert("worker_cli".into(), "claude".into());
+        agent
+            .metadata
+            .insert("supervisor_cli".into(), "codex".into());
+        agent.role = cas_types::AgentRole::Supervisor;
+        assert_eq!(agent_tool_prefix(&agent), Some("mcp__cs__"));
+        agent.role = cas_types::AgentRole::Worker;
+        assert_eq!(agent_tool_prefix(&agent), Some("mcp__cas__"));
+        for (harness, expected) in [
+            ("claude", "mcp__cas__"),
+            ("codex", "mcp__cs__"),
+            ("grok", "cas__"),
+            ("opencode", "cas_"),
+        ] {
+            for (role, key) in [
+                (cas_types::AgentRole::Supervisor, "supervisor_cli"),
+                (cas_types::AgentRole::Worker, "worker_cli"),
+            ] {
+                agent.role = role;
+                agent.metadata.insert(key.into(), harness.into());
+                assert_eq!(agent_tool_prefix(&agent), Some(expected));
+            }
+        }
+    }
+
+    #[test]
+    fn recovery_guidance_unknown_recipient_does_not_inherit_producer() {
+        let _env = crate::test_env_guard::TestEnvGuard::with_optional_vars(&[
+            ("CAS_AGENT_ROLE", Some("supervisor")),
+            ("CAS_FACTORY_SUPERVISOR_CLI", Some("codex")),
+            ("CAS_FACTORY_WORKER_CLI", Some("grok")),
+        ]);
+        let mut agent = cas_types::Agent::new("recipient".into(), "recipient".into());
+        for (role, key) in [
+            (cas_types::AgentRole::Supervisor, "supervisor_cli"),
+            (cas_types::AgentRole::Worker, "worker_cli"),
+        ] {
+            agent.role = role;
+            assert_eq!(agent_tool_prefix(&agent), None);
+            agent.metadata.insert(key.into(), "unknown".into());
+            assert_eq!(agent_tool_prefix(&agent), None);
+        }
+        agent.role = cas_types::AgentRole::Standard;
+        agent.metadata.insert("worker_cli".into(), "claude".into());
+        assert_eq!(agent_tool_prefix(&agent), None);
     }
 }

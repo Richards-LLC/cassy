@@ -1355,7 +1355,7 @@ mod tests {
 
         let prompt = format!(
             "You have been assigned a new task:\nTask ID: {task_id}\nStart working: \
-             mcp__cs__task action=start id={task_id}\nThen send an ACK to supervisor."
+             mcp__cs__task action=start id={task_id}\nSuccessful task action=start accepts the assignment; no prose ACK is required."
         );
         assert_eq!(
             assignment_terminal_status(&cas_dir, &prompt),

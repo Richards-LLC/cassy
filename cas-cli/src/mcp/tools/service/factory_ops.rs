@@ -1651,12 +1651,13 @@ fn worker_answers_to(worker: &cas_types::Agent, target: &str) -> bool {
 const SPAWN_QUEUE_DUPLICATE_SCAN: usize = 100;
 
 fn no_active_epic_guidance(why: &str) -> String {
+    let tool_prefix = crate::mcp::tools::core::guidance::caller_prefix();
     format!(
         "No active EPIC found, and {why} Either name the work directly or open an EPIC:\n\
          0. Spawn for one existing open task (no EPIC needed): \
-         mcp__cas__coordination action=spawn_workers count=1 task_id=<task-id>\n\
-         1. Create EPIC: mcp__cas__task action=create task_type=epic title=\"...\" description=\"...\"\n\
-         2. Or assign existing EPIC: mcp__cas__task action=start id=<epic-id>\n\
+         {tool_prefix}coordination action=spawn_workers count=1 task_id=<task-id>\n\
+         1. Create EPIC: {tool_prefix}task action=create task_type=epic title=\"...\" description=\"...\"\n\
+         2. Or assign existing EPIC: {tool_prefix}task action=start id=<epic-id>\n\
          3. Optionally gather requirements using the cas-supervisor skill's planning references\n\
          4. Break into tasks using the cas-supervisor skill's planning references\n\
          5. Then spawn workers to work on the tasks"
@@ -1933,7 +1934,8 @@ impl CasService {
                         "task_id can only be used with a single-worker spawn_workers request \
                          (count=1, or exactly one name in worker_names) — got {requested_worker_count} \
                          worker(s) requested. Assign the task after spawning instead: \
-                         mcp__cas__task action=update id={task_id} assignee=<worker-name>."
+                         {tool_prefix}task action=update id={task_id} assignee=<worker-name>.",
+                        tool_prefix = crate::mcp::tools::core::guidance::caller_prefix()
                     ),
                 ));
             }
@@ -2906,16 +2908,23 @@ impl CasService {
 
         // Snapshot execution before housekeeping can remove a dead worker.
         // The fast poll does no Git, network, history scan or stale mutation.
+        let factory_session = current_factory_session();
         let liveness_rows = worker_liveness_rows(
             &self.inner.cas_root,
             store.as_ref(),
-            current_factory_session().as_deref(),
+            factory_session.as_deref(),
             chrono::Utc::now(),
         )
         .map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, e))?;
+        let (scoped_worker_count, outside_scope_worker_count) =
+            worker_status_scope_counts(store.as_ref(), factory_session.as_deref())
+                .map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, e))?;
         if req.summary.unwrap_or(false) {
-            return Ok(Self::success(render_worker_liveness_summary(
+            return Ok(Self::success(render_worker_liveness_summary_scoped(
                 &liveness_rows,
+                factory_session.as_deref(),
+                scoped_worker_count,
+                outside_scope_worker_count,
             )));
         }
 
@@ -3010,7 +3019,6 @@ impl CasService {
         let mut process_alive_suppressed: std::collections::HashSet<String> =
             std::collections::HashSet::new();
         let mut stale_pruned = 0usize;
-        let factory_session = current_factory_session();
         let held_workers = factory_session
             .as_deref()
             .and_then(crate::ui::factory::worker_holds_from_session_metadata_named)
@@ -3173,7 +3181,8 @@ impl CasService {
         // precisely the case where a failed or unconsumed spawn is the answer,
         // and the old output said only "None active", which reads like an
         // empty fleet rather than a spawn that died.
-        let spawn_section = current_factory_session()
+        let spawn_section = factory_session
+            .clone()
             .and_then(|session| {
                 crate::store::open_spawn_queue_store(&self.inner.cas_root)
                     .ok()
@@ -3229,8 +3238,13 @@ impl CasService {
         });
 
         if agents.is_empty() {
-            let mut msg = String::from(
-                "No active agents registered.\n\nNote: Factory TUI must be running for agents to be registered.",
+            let mut msg = format!(
+                "{}\nNo active agents registered in this scope.\n\nNote: Factory TUI must be running for agents to be registered.",
+                render_worker_status_scope(
+                    factory_session.as_deref(),
+                    scoped_worker_count,
+                    outside_scope_worker_count,
+                )
             );
             for (name, observation) in &liveness_rows {
                 msg.push_str(&format!("\n{} | {name}", observation.detail()));
@@ -3251,7 +3265,14 @@ impl CasService {
         }
 
         let owned = supervisor_owned_workers();
-        let mut output = String::from("Worker Status\n=============\n\n");
+        let mut output = format!(
+            "Worker Status\n=============\n{}\n\n",
+            render_worker_status_scope(
+                factory_session.as_deref(),
+                scoped_worker_count,
+                outside_scope_worker_count,
+            )
+        );
         for (name, observation) in &liveness_rows {
             if !agents.iter().any(|agent| &agent.name == name) {
                 output.push_str(&format!("{} | {name}\n", observation.detail()));
@@ -5554,7 +5575,7 @@ impl CasService {
         let epic_id = req.id.as_deref().map(str::trim).filter(|s| !s.is_empty()).ok_or_else(|| {
             Self::error(
                 ErrorCode::INVALID_PARAMS,
-                "epic_status requires `id`: mcp__cas__coordination action=epic_status id=<epic-id>",
+                format!("epic_status requires `id`: {tool_prefix}coordination action=epic_status id=<epic-id>", tool_prefix = self.inner.guidance_prefix()),
             )
         })?;
 
@@ -9112,6 +9133,71 @@ pub(crate) fn worker_liveness_rows(
         .collect();
     rows.sort_by(|a, b| a.0.cmp(&b.0));
     Ok(rows)
+}
+
+fn worker_status_scope_counts(
+    store: &dyn cas_store::AgentStore,
+    session: Option<&str>,
+) -> Result<(usize, usize), String> {
+    let workers: Vec<cas_types::Agent> = store
+        .list(None)
+        .map_err(|e| format!("Cannot read worker roster for session scope: {e}"))?
+        .into_iter()
+        .filter(|agent| agent.role == cas_types::AgentRole::Worker)
+        .collect();
+    // Partition before deduping so the count follows worker_liveness_rows:
+    // same-name registrations in different sessions must not let a fresher
+    // foreign row hide the caller's older but still rendered row.
+    let scoped = workers
+        .iter()
+        .filter(|agent| agent.visible_to_factory_session(session))
+        .cloned()
+        .collect();
+    let outside_scope = workers
+        .into_iter()
+        .filter(|agent| !agent.visible_to_factory_session(session))
+        .collect();
+    let (scoped, _) = dedupe_authoritative_agents(scoped);
+    let (outside_scope, _) = dedupe_authoritative_agents(outside_scope);
+    Ok((scoped.len(), outside_scope.len()))
+}
+
+fn render_worker_status_scope(
+    session: Option<&str>,
+    scoped_worker_count: usize,
+    outside_scope_worker_count: usize,
+) -> String {
+    match session {
+        Some(session) => format!(
+            "Factory session: {session} | registered worker rows in scope: {scoped_worker_count}; registered rows outside this session on clone: {outside_scope_worker_count}"
+        ),
+        None => format!(
+            "Factory session: none (unscoped) | registered worker rows visible: {scoped_worker_count}"
+        ),
+    }
+}
+
+fn render_worker_liveness_summary_scoped(
+    rows: &[(String, super::worker_liveness::Observation)],
+    session: Option<&str>,
+    scoped_worker_count: usize,
+    outside_scope_worker_count: usize,
+) -> String {
+    let scope =
+        render_worker_status_scope(session, scoped_worker_count, outside_scope_worker_count);
+    let workers = rows
+        .iter()
+        .map(|(name, observation)| observation.summary(name))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if workers.is_empty() {
+        match session {
+            Some(_) => format!("{scope}\nNo registered workers in this factory session."),
+            None => format!("{scope}\nNo registered workers; no factory session context."),
+        }
+    } else {
+        format!("{scope}\n{workers}")
+    }
 }
 
 pub(crate) fn render_worker_liveness_summary(
@@ -13813,7 +13899,13 @@ effort = "high"
         let start = std::time::Instant::now();
         let output = response_text(service.factory_worker_status(request).await.unwrap());
         let elapsed = start.elapsed();
-        assert_eq!(output.lines().count(), 5, "{output}");
+        let lines: Vec<_> = output.lines().collect();
+        assert_eq!(lines.len(), 6, "{output}");
+        assert!(
+            lines[0].contains("Factory session: liveness-fixture-session")
+                && lines[0].contains("worker rows in scope: 5"),
+            "summary must lead with its session scope: {output}"
+        );
         for (index, expected) in [
             "waiting_for_input",
             "waiting_for_input",
@@ -13825,9 +13917,8 @@ effort = "high"
         .enumerate()
         {
             assert!(
-                output
-                    .lines()
-                    .nth(index)
+                lines
+                    .get(index + 1)
                     .unwrap()
                     .starts_with(&format!("liveness: {expected} |")),
                 "{output}"

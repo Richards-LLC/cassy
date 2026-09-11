@@ -247,7 +247,7 @@ fn inject_role_guidance(
     {
         guidance.push_str(
             "\n\n## Codex Worker Coordination Note\n\
-Workers are running Codex. Be explicit in assignments: include task id, acceptance criteria, required checks, and update cadence. Successful task action=start is authoritative assignment acceptance; no prose ACK is required. Ordinary worker updates surface through the inbox on the next turn; only authenticated typed blocker, merge, verification, or lifecycle events may wake an idle supervisor. Read task state and execution evidence before sending corrective prompts. For task closure, Codex workers should ask you to verify and close on their behalf; you may use task-verifier or direct mcp__cas__verification.",
+Workers are running Codex. Be explicit in assignments: include task id, acceptance criteria, required checks, and update cadence. Successful task action=start is authoritative assignment acceptance; no prose ACK is required. Ordinary worker updates surface through the inbox on the next turn; only authenticated typed blocker, merge, verification, or lifecycle events may wake an idle supervisor. Read task state and execution evidence before sending corrective prompts. For task closure, Codex workers must attempt task action=close first. Follow the returned verification-required or MERGE REQUIRED workflow: handle verification with task-verifier or mcp__cas__verification, or merge the delivery as requested. After the merge, the worker re-closes the task.",
         );
     }
     *total_tokens += estimate_tokens(&guidance);
@@ -341,6 +341,73 @@ pub(crate) fn render_normal_coordination(
             let more = format!("  ...and {} more agents", other_agents.len() - 5);
             *total_tokens += estimate_tokens(&more);
             context_parts.push(more);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::hooks::config::DefaultHooksConfig;
+
+    #[test]
+    fn codex_worker_coordination_entry_preserves_worker_close() {
+        const CHILD: &str = "CAS_TEST_COORDINATION_CLOSE_ENTRY";
+        // Exercise the real environment-gated entry without mutating the test
+        // runner's environment or adding a production-only-for-tests seam.
+        if std::env::var_os(CHILD).is_none() {
+            for worker_cli in ["codex", "CoDeX", "claude"] {
+                let output = std::process::Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "hooks::context::coordination::tests::codex_worker_coordination_entry_preserves_worker_close",
+                        "--nocapture",
+                    ])
+                    .env(CHILD, "1")
+                    .env("CAS_FACTORY_WORKER_CLI", worker_cli)
+                    .output()
+                    .unwrap();
+                assert!(
+                    output.status.success(),
+                    "worker_cli={worker_cli}: {}\n{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+            }
+            return;
+        }
+
+        let config = DefaultHooksConfig::default();
+        for role in [AgentRole::Supervisor, AgentRole::Worker] {
+            let mut parts = Vec::new();
+            let mut tokens = 0;
+            inject_role_guidance(&mut parts, &mut tokens, role, &config);
+            let emitted = parts.join("\n");
+            let expects_note = role == AgentRole::Supervisor
+                && std::env::var("CAS_FACTORY_WORKER_CLI")
+                    .unwrap()
+                    .eq_ignore_ascii_case("codex");
+            assert_eq!(
+                emitted.contains("Codex Worker Coordination Note"),
+                expects_note
+            );
+            assert!(!emitted.contains("ask you to verify and close on their behalf"));
+            if expects_note {
+                for required in [
+                    "authoritative assignment acceptance",
+                    "no prose ACK is required",
+                    "inbox on the next turn",
+                    "only authenticated typed",
+                    "workers must attempt task action=close first",
+                    "returned verification-required or MERGE REQUIRED workflow",
+                    "mcp__cas__verification",
+                    "After the merge, the worker re-closes the task",
+                ] {
+                    assert!(emitted.contains(required), "missing {required}: {emitted}");
+                }
+            }
+            assert!(tokens > 0);
         }
     }
 }

@@ -14,30 +14,19 @@ mandatory #cas-internal publication workflow. They are separate duties.**
 
 ## Transport ownership and worker handoff
 
-**The default transport is the MechaCassy hub**, and the procedure for using it
-is the builtin [mecha-cassy](../cas-cli/src/builtins/skills/mecha-cassy/SKILL.md)
-skill: channel resolution, the two-check preflight, ordered thread posting with
-one-second pacing, the `## POSTED` receipt, and the env-only credential rules.
-The hub holds the Slack bot credential server-side, so any harness on any
-account posts as the same bot — a Codex or Grok worker posts directly instead of
-handing its draft back.
+**Use only the MechaCassy hub/bot.** Never use Claude.ai Slack or a personal
+connector, including during a hub outage. The builtin
+[mecha-cassy](../cas-cli/src/builtins/skills/mecha-cassy/SKILL.md) owns channel
+resolution, authenticated `tools/list`, bounded `mecha_read` dedupe, ordered
+thread posting with one-second pacing, `## POSTED` receipts and env-only
+credential rules. Its read-only outage procedure stays on the same hub and
+requires local duplicate proof before any write.
 
-The fallback is the approved `pippenz@gmail.com` Claude profile's
-`claude.ai Slack` MCP, owned by the supervisor or an explicitly approved Claude
-posting owner. Use it when the hub is unavailable; it is bound to that one
-profile and provides the `slack_get_file_upload_url` and
-`slack_complete_file_upload` two-step file route. Either way a
-`Connected` server listing is not a receipt: the read-only preflight must
-succeed before a post is attempted.
-
-When a worker genuinely has neither transport, it saves the exact draft and
-hands the draft path, target channel, deploy target, and requested receipt back
-to the supervisor, who posts and returns timestamps/permalinks for the worker to
-record. This is the designed path, not a failed fallback.
-
-If no approved transport passes preflight, leave the draft saved and report the
-duty blocked with the measured error. Do not post from an unapproved profile or
-mark the draft `POSTED` without returned timestamps and permalinks.
+Any connected harness posts as the same bot. A worker without hub access saves
+the exact draft and hands its path, target channel, deploy target and receipt
+request to the supervisor, who must also use MechaCassy. If the hub cannot
+complete publication, preserve the draft and partial receipts and report the
+measured failure. Never mark `POSTED` without returned message IDs and permalinks.
 
 ## Runtime releases: two top-level posts
 
@@ -106,11 +95,9 @@ permalink, SHA-256 and page count. The train re-hashes the local PDF and
 verifies the page count from the file.
 
 Attach the PDF to the User top-level thread as a file and link the HTML from
-the Dev thread. The supervisor's approved Claude route uses
-`slack_get_file_upload_url`, uploads the exact PDF bytes, then calls
-`slack_complete_file_upload`; the MechaCassy fallback uses
-`mecha_post` with a file/image after download, decode and source-hash
-integrity checks. Preserve the returned file permalink, User/Dev thread
+the Dev thread. Use MechaCassy `mecha_post` with `kind: file` and verify the
+uploaded PDF through download, decode, page-count and source-hash checks. Preserve
+the returned file permalink, User/Dev thread
 receipts, PDF and HTML SHA-256 values, both file ids and the PDF page count in
 the release-report receipt. A release with a published asset receipt but no
 report receipt remains pending.

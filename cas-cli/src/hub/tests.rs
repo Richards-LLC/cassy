@@ -2497,10 +2497,8 @@ fn h5_session_worker_roster_comes_from_the_live_registry_not_the_session_file() 
 
     let agents = SqliteAgentStore::open(&cas_root).unwrap();
     agents.init().unwrap();
-    let mut supervisor = cas_types::Agent::new(
-        "roster-supervisor-id".into(),
-        "supervisor-agent".into(),
-    );
+    let mut supervisor =
+        cas_types::Agent::new("roster-supervisor-id".into(), "supervisor-agent".into());
     supervisor.role = AgentRole::Supervisor;
     supervisor.factory_session = Some(session_name.to_string());
     agents.register(&supervisor).unwrap();
@@ -2520,7 +2518,10 @@ fn h5_session_worker_roster_comes_from_the_live_registry_not_the_session_file() 
         "five live workers must be reported"
     );
     assert_eq!(mapped.supervisor, "supervisor-agent");
-    assert!(!mapped.dormant, "a fresh registered supervisor keeps the row live");
+    assert!(
+        !mapped.dormant,
+        "a fresh registered supervisor keeps the row live"
+    );
     assert_eq!(mapped.epic_id.as_deref(), Some("cas-5d94"));
     assert_eq!(mapped.liveness, DaemonLiveness::Live);
 
@@ -2531,6 +2532,15 @@ fn h5_session_worker_roster_comes_from_the_live_registry_not_the_session_file() 
     assert!(
         hub_session(&session).dormant,
         "a stale supervisor registry row must not keep the session visible"
+    );
+
+    // A process that still exists cannot keep a nonresponsive Hub conversation live.
+    dead_supervisor.status = AgentStatus::Active;
+    dead_supervisor.pid = Some(std::process::id());
+    agents.update(&dead_supervisor).unwrap();
+    assert!(
+        hub_session(&session).dormant,
+        "an old heartbeat must not be rescued by a surviving process"
     );
 
     // The roster carries agent names (what Commander shows), not agent ids.
@@ -2568,7 +2578,10 @@ fn h5_session_worker_roster_comes_from_the_live_registry_not_the_session_file() 
         socket_exists: true,
     };
     assert!(hub_session(&empty).workers.is_empty());
-    assert!(hub_session(&empty).dormant, "no registered supervisor is dormant");
+    assert!(
+        hub_session(&empty).dormant,
+        "no registered supervisor is dormant"
+    );
 
     // With no registry to read, the daemon roster is still better than nothing.
     let unreachable = SessionInfo {
@@ -2648,7 +2661,8 @@ async fn sessions_catalog_hides_worker_only_rows_by_default() {
     let mut dormant = fixture_session("orphaned-supervisor");
     dormant.dormant = true;
     dormant.workers.clear();
-    let source = RecordingReadModel::with_sessions(vec![fixture_session("factory-a"), bare, dormant]);
+    let source =
+        RecordingReadModel::with_sessions(vec![fixture_session("factory-a"), bare, dormant]);
     let events = MachineEventBus::new(16);
     let state = HubState::new(
         SessionCatalog::new(source),
@@ -2688,8 +2702,16 @@ async fn sessions_catalog_hides_worker_only_rows_by_default() {
             .unwrap()
         }
     };
-    assert_eq!(names(fetch("/v1/sessions").await), vec!["factory-a"]);
-    assert_eq!(names(fetch("/v1/sessions?workers=0").await), vec!["factory-a"]);
+    let default_catalog = fetch("/v1/sessions").await;
+    assert_eq!(
+        default_catalog["freshness_threshold_secs"],
+        crate::mcp::tools::service::agent_liveness::WORKER_STALE_SECS
+    );
+    assert_eq!(names(default_catalog), vec!["factory-a"]);
+    assert_eq!(
+        names(fetch("/v1/sessions?workers=0").await),
+        vec!["factory-a"]
+    );
     assert_eq!(
         names(fetch("/v1/sessions?workers=1").await),
         vec!["factory-a", "bare-shell"]

@@ -14,6 +14,9 @@ export type ConversationEvent = { kind: "send"; value: ConversationSend } | { ki
 /** In-memory per-thread evidence. A submitted socket frame is never a receipt. */
 export class ConversationHistory {
   readonly events: ConversationEvent[] = [];
+  hasPending(): boolean {
+    return this.events.some(event => event.kind === "send" && (event.value.state === "sending" || event.value.state === "acknowledged"));
+  }
   submit(id: string, target: string, text: string): void {
     this.events.push({ kind: "send", value: { id, target, text, state: "sending" } });
   }

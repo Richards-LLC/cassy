@@ -68,7 +68,7 @@ Route operational bugs through the issue-repository registry:
 `issues.repo` is the current project's tracker; `issues.components.cassy` is
 for Cassy runtime/hooks/MCP; `issues.components.mecha_cassy` is for the Slack
 hub; and `issues.components.cloud` is for Cassy Cloud sync/relay/pairing.
-Inspect with `cas config get <key>`; file in the matching repo before moving on.
+Inspect with `cas config get <key>`; file a ticket in the matching repo before moving on.
 Use the supervisor's `filing-cas-bugs` reference for public-safe filing.
 
 ## Task types and depth

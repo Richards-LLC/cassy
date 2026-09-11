@@ -531,6 +531,10 @@ mod tests {
         );
 
         let payload = assembler.render();
+        eprintln!(
+            "guidance-growth payload: full={full_len}B rendered={}B budget={SESSION_START_BUDGET_BYTES}B",
+            payload.len()
+        );
         assert!(
             payload.len() <= SESSION_START_BUDGET_BYTES,
             "compacted payload is {}B, over the {}B budget",

@@ -11,6 +11,14 @@
   - merged to `<staging-branch>` → label **`Staging`**
   - merged to `<production-branch>` → label **`Live on production`**
 
+## Transport
+
+Use only the MechaCassy hub/bot via the `mecha-cassy` skill. Never use Claude.ai
+Slack or a personal connector. Require authenticated `tools/list` and the
+skill's bounded `mecha_read` dedupe procedure before `mecha_post`; preserve
+message and upload-integrity receipts. If the hub cannot complete publication,
+save the draft and partial receipts and report blocked; handoff uses the same hub.
+
 ## When to post
 
 **Every PR merged to `<staging-branch>` or `<production-branch>`.** No exceptions:
@@ -34,7 +42,7 @@ different reply count in its local rubric when its posting route requires it.
 - **Top-level:** the same `<deploy target>` label + **Dev** + one technical sentence.
 - **Reply:** **Was → Now**, technical. GitHub PR numbers are allowed here (Dev thread only).
 
-Post order: user top-level → capture `ts` → user reply → dev top-level → capture `ts` → dev reply.
+Post order: user top-level → capture `message.message_id` → user reply → dev top-level → capture `message.message_id` → dev reply. Set each reply’s `reply_to` to its parent’s `message_id`.
 
 ## Hard rules
 

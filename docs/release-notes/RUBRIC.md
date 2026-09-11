@@ -18,17 +18,15 @@ For **how** to post when the session has no Slack connection of its own, see
 
 ## Transport ownership
 
-Run the runbook's transport preflight before posting. The canonical cas-src
-route is the supervisor-owned `claude.ai Slack` MCP on the approved
-`pippenz@gmail.com` profile. Default Codex workers have no Slack transport, so
-their designed path is to save the exact draft and hand its path, target
-channel, deploy target, and receipt request to the supervisor. The supervisor
-posts through the canonical route and returns timestamps/permalinks for the
-worker to record.
+Use only the MechaCassy hub/bot via the builtin `mecha-cassy` skill and the
+runbook's authenticated preflight and bounded dedupe read. Never use Claude.ai
+Slack or a personal connector. A worker with no hub connection saves the exact
+draft and hands its path, channel, deploy target and receipt request to the
+supervisor, who must use the same hub and return message IDs and permalinks.
 
-If preflight fails, leave the draft saved and report the duty blocked with the
-measured error. Never claim `POSTED` without returned timestamps and
-permalinks.
+If the hub cannot complete publication, preserve the draft and partial receipts
+and report the measured failure. Never claim `POSTED` without returned message
+IDs and permalinks.
 
 ## When to post
 
@@ -52,7 +50,7 @@ Two threads. Each thread = one punchy top-level message + **exactly one** thread
 - **Top-level:** the same deploy-target label + **Dev** + one technical sentence.
 - **Reply:** **Was → Now**, technical. GitHub PR numbers are allowed here (Dev thread only).
 
-Post order: user top-level → capture `ts` → user reply → dev top-level → capture `ts` → dev reply.
+Post order: user top-level → capture `message.message_id` → user reply → dev top-level → capture `message.message_id` → dev reply. Set each reply’s `reply_to` to its parent’s `message_id`.
 
 ## Hard rules
 

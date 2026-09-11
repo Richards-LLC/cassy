@@ -394,3 +394,72 @@ fn claude_account_allowlist_is_registered_and_documented() {
         "the [release] section must be listed by `cas config`"
     );
 }
+
+/// Active publication instructions must never select a personal Slack route.
+/// Inspect the shipped catalogs, including references, rather than only source mirrors.
+#[test]
+fn release_slack_routes_are_mecha_cassy_only() {
+    let mut files = Vec::new();
+    for (label, flavor) in FLAVORS {
+        for skill in [
+            "mecha-cassy",
+            "cas-cut-release",
+            "cli-routing",
+            "release-notes",
+        ] {
+            let prefix = format!("skills/{skill}/");
+            for builtin in builtin_catalog::skills(flavor) {
+                if builtin.path.starts_with(&prefix) && !builtin.path.ends_with("/failure-log.md") {
+                    files.push((format!("{label}/{}", builtin.path), builtin.content));
+                }
+            }
+        }
+    }
+    files.extend([
+        (
+            "release rubric".into(),
+            include_str!("../../docs/release-notes/RUBRIC.md"),
+        ),
+        (
+            "posting runbook".into(),
+            include_str!("../../docs/SLACK_POSTING_RUNBOOK.md"),
+        ),
+        (
+            "runtime rubric".into(),
+            include_str!("../../docs/RELEASE_SLACK_RUBRIC.md"),
+        ),
+    ]);
+    let mut problems = Vec::new();
+    for (path, content) in files {
+        let active = content
+            .split("## Historical transport evidence")
+            .next()
+            .unwrap();
+        for forbidden in [
+            "slack_get_file_upload_url",
+            "slack_complete_file_upload",
+            "supervisor-owned Claude",
+            "approved Claude route",
+            "MechaCassy fallback",
+            "Codex when its Slack plugin",
+            "This skill only decides which CLI runs the post",
+            "for example Slack",
+        ] {
+            if active.contains(forbidden) {
+                problems.push(format!("{path}: stale route {forbidden:?}"));
+            }
+        }
+        if path.ends_with("SKILL.md")
+            || !path.starts_with("claude/")
+                && !path.starts_with("codex/")
+                && !path.starts_with("grok/")
+        {
+            if !active.contains("MechaCassy") || !active.contains("personal") {
+                problems.push(format!(
+                    "{path}: missing explicit hub-only/personal-route guard"
+                ));
+            }
+        }
+    }
+    assert!(problems.is_empty(), "{}", problems.join("\n"));
+}

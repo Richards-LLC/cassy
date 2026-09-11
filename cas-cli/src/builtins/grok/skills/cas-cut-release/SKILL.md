@@ -165,15 +165,16 @@ name the blocking step in the operator timeline, and require its receipt.
    and PDF page-count checks are available; report bytes never enter agent
    context. Load the bearer and bypass from the configured credentials file or
    named environment variables (`MECHA_SLACK_TOKEN_ENV` and
-   `MECHA_VERCEL_BYPASS`). The
-   supervisor route uses the Claude.ai Slack MCP two-step
-   `slack_get_file_upload_url` → upload bytes → `slack_complete_file_upload`;
-   the MechaCassy fallback uses `mecha_post` with a file/image after its source
-   hash and decode checks pass. Use MechaCassy's default `cas-internal` channel,
+   `MECHA_VERCEL_BYPASS`). Use only the MechaCassy hub/bot;
+   never use Claude.ai Slack or a personal connector. Upload through `mecha_post`
+   and accept the file only after download, source-hash and decode checks pass.
+   If the hub cannot complete publication, preserve the draft and partial
+   receipts and report blocked. Use MechaCassy's default `cas-internal` channel,
    retain `C0B44GUKDK2` only for verification, and save four Slack POSTED
    entries with timestamps and permalinks. If the live proxy lacks registration,
-   use the configured direct mecha-cassy MCP or an approved bounded one-shot
-   route; do not retry an authenticated-session rejection. Save `cas update`,
+   use the configured direct mecha-cassy MCP or a bounded one-shot
+   using that same authenticated hub; do not retry an authenticated-session
+   rejection. Save `cas update`,
    `cas --version`, and `cas hub` proof and require `refresh_binary_version`
    in the host update JSON to equal the released version. Carry the POSTED
    receipt into the next prep commit. Close only after merge and stranded-branch

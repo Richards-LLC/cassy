@@ -21,9 +21,12 @@ Use the project's release rubric as the contract. The procedure is:
    reply. Do not include internal ticket labels or implementation process.
 4. **Save the draft.** Write the exact postable text to
    `docs/release-notes/<date>-<topic>-slack.md` before posting.
-5. **Post in rubric order.** Use the configured project channel and preserve
-   the parent identifier on every reply. If the configured posting route is
-   unavailable, stop after saving the draft and report the measured failure;
+5. **Post in rubric order.** Use only the MechaCassy hub/bot via
+   [mecha-cassy](../mecha-cassy/SKILL.md), with its authenticated preflight,
+   bounded dedupe read and integrity checks. Never use Claude.ai Slack or a
+   personal connector. Use the configured project channel and preserve the
+   parent identifier on every reply. If the hub cannot complete publication,
+   save the draft and partial receipts and report the measured failure;
    never claim that it was posted.
 6. **Record the receipt.** After posting, append a `## POSTED` block with the
    UTC timestamp, channel, and permalink for every top-level message and reply.

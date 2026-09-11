@@ -1,6 +1,16 @@
 use crate::mcp::tools::service::imports::*;
 
 impl CasService {
+    fn missing_id(&self, tool: &str, action: &str) -> McpError {
+        let prefix = self.inner.guidance_prefix();
+        Self::error(
+            ErrorCode::INVALID_PARAMS,
+            format!(
+                "id required for {action} — pass {tool} ID as `id` (not `task_id`, `taskId`, or `_id`). Example: {prefix}{tool} action={action} id=cas-abc1"
+            ),
+        )
+    }
+
     // Memory implementations
     pub(super) async fn memory_remember(
         &self,
@@ -30,9 +40,7 @@ impl CasService {
     pub(super) async fn memory_get(&self, req: MemoryRequest) -> Result<CallToolResult, McpError> {
         use crate::mcp::tools::IdRequest;
         let inner_req = IdRequest {
-            id: req
-                .id
-                .ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "id required for get — pass task ID as `id` (not `task_id`, `taskId`, or `_id`). Example: mcp__cas__task action=get id=cas-abc1"))?,
+            id: req.id.ok_or_else(|| self.missing_id("memory", "get"))?,
         };
         self.inner.cas_get(Parameters(inner_req)).await
     }
@@ -57,9 +65,7 @@ impl CasService {
     ) -> Result<CallToolResult, McpError> {
         use crate::mcp::tools::EntryUpdateRequest;
         let inner_req = EntryUpdateRequest {
-            id: req
-                .id
-                .ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "id required for update — pass task ID as `id` (not `task_id`, `taskId`, or `_id`). Example: mcp__cas__task action=update id=cas-abc1"))?,
+            id: req.id.ok_or_else(|| self.missing_id("memory", "update"))?,
             content: req.content,
             tags: req.tags,
             importance: req.importance,
@@ -73,9 +79,7 @@ impl CasService {
     ) -> Result<CallToolResult, McpError> {
         use crate::mcp::tools::IdRequest;
         let inner_req = IdRequest {
-            id: req
-                .id
-                .ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "id required for delete — pass task ID as `id` (not `task_id`, `taskId`, or `_id`). Example: mcp__cas__task action=delete id=cas-abc1"))?,
+            id: req.id.ok_or_else(|| self.missing_id("memory", "delete"))?,
         };
         self.inner.cas_delete(Parameters(inner_req)).await
     }
@@ -86,9 +90,7 @@ impl CasService {
     ) -> Result<CallToolResult, McpError> {
         use crate::mcp::tools::IdRequest;
         let inner_req = IdRequest {
-            id: req
-                .id
-                .ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "id required for archive — pass task ID as `id` (not `task_id`, `taskId`, or `_id`). Example: mcp__cas__task action=archive id=cas-abc1"))?,
+            id: req.id.ok_or_else(|| self.missing_id("memory", "archive"))?,
         };
         self.inner.cas_archive(Parameters(inner_req)).await
     }
@@ -99,9 +101,9 @@ impl CasService {
     ) -> Result<CallToolResult, McpError> {
         use crate::mcp::tools::IdRequest;
         let inner_req = IdRequest {
-            id: req.id.ok_or_else(|| {
-                Self::error(ErrorCode::INVALID_PARAMS, "id required for unarchive — pass task ID as `id` (not `task_id`, `taskId`, or `_id`). Example: mcp__cas__task action=unarchive id=cas-abc1")
-            })?,
+            id: req
+                .id
+                .ok_or_else(|| self.missing_id("memory", "unarchive"))?,
         };
         self.inner.cas_unarchive(Parameters(inner_req)).await
     }
@@ -112,9 +114,7 @@ impl CasService {
     ) -> Result<CallToolResult, McpError> {
         use crate::mcp::tools::IdRequest;
         let inner_req = IdRequest {
-            id: req
-                .id
-                .ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "id required for helpful — pass task ID as `id` (not `task_id`, `taskId`, or `_id`). Example: mcp__cas__task action=helpful id=cas-abc1"))?,
+            id: req.id.ok_or_else(|| self.missing_id("memory", "helpful"))?,
         };
         self.inner.cas_helpful(Parameters(inner_req)).await
     }
@@ -125,9 +125,7 @@ impl CasService {
     ) -> Result<CallToolResult, McpError> {
         use crate::mcp::tools::IdRequest;
         let inner_req = IdRequest {
-            id: req
-                .id
-                .ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "id required for harmful — pass task ID as `id` (not `task_id`, `taskId`, or `_id`). Example: mcp__cas__task action=harmful id=cas-abc1"))?,
+            id: req.id.ok_or_else(|| self.missing_id("memory", "harmful"))?,
         };
         self.inner.cas_harmful(Parameters(inner_req)).await
     }
@@ -138,9 +136,9 @@ impl CasService {
     ) -> Result<CallToolResult, McpError> {
         use crate::mcp::tools::IdRequest;
         let inner_req = IdRequest {
-            id: req.id.ok_or_else(|| {
-                Self::error(ErrorCode::INVALID_PARAMS, "id required for mark_reviewed — pass task ID as `id` (not `task_id`, `taskId`, or `_id`). Example: mcp__cas__task action=mark_reviewed id=cas-abc1")
-            })?,
+            id: req
+                .id
+                .ok_or_else(|| self.missing_id("memory", "mark_reviewed"))?,
         };
         self.inner.cas_mark_reviewed(Parameters(inner_req)).await
     }
@@ -162,9 +160,9 @@ impl CasService {
     ) -> Result<CallToolResult, McpError> {
         use crate::mcp::tools::MemoryTierRequest;
         let inner_req = MemoryTierRequest {
-            id: req.id.ok_or_else(|| {
-                Self::error(ErrorCode::INVALID_PARAMS, "id required for set_tier — pass task ID as `id` (not `task_id`, `taskId`, or `_id`). Example: mcp__cas__task action=set_tier id=cas-abc1")
-            })?,
+            id: req
+                .id
+                .ok_or_else(|| self.missing_id("memory", "set_tier"))?,
             tier: req.tier.ok_or_else(|| {
                 Self::error(ErrorCode::INVALID_PARAMS, "tier required for set_tier")
             })?,
@@ -180,7 +178,7 @@ impl CasService {
         let inner_req = OpinionReinforceRequest {
             id: req
                 .id
-                .ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "id required — pass as `id` (not `task_id`, `taskId`, or `_id`). Example: mcp__cas__task action=<verb> id=cas-abc1"))?,
+                .ok_or_else(|| self.missing_id("memory", "opinion_reinforce"))?,
             evidence: req.content.ok_or_else(|| {
                 Self::error(ErrorCode::INVALID_PARAMS, "content (evidence) required")
             })?,
@@ -198,7 +196,7 @@ impl CasService {
         let inner_req = OpinionWeakenRequest {
             id: req
                 .id
-                .ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "id required — pass as `id` (not `task_id`, `taskId`, or `_id`). Example: mcp__cas__task action=<verb> id=cas-abc1"))?,
+                .ok_or_else(|| self.missing_id("memory", "opinion_weaken"))?,
             evidence: req.content.ok_or_else(|| {
                 Self::error(ErrorCode::INVALID_PARAMS, "content (evidence) required")
             })?,
@@ -214,7 +212,7 @@ impl CasService {
         let inner_req = OpinionContradictRequest {
             id: req
                 .id
-                .ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "id required — pass as `id` (not `task_id`, `taskId`, or `_id`). Example: mcp__cas__task action=<verb> id=cas-abc1"))?,
+                .ok_or_else(|| self.missing_id("memory", "opinion_contradict"))?,
             evidence: req.content.ok_or_else(|| {
                 Self::error(ErrorCode::INVALID_PARAMS, "content (evidence) required")
             })?,
@@ -270,8 +268,11 @@ impl CasService {
             title: req.title.ok_or_else(|| {
                 Self::error(
                     ErrorCode::INVALID_PARAMS,
-                    "title required for create — pass a short descriptive title. \
-                     Example: mcp__cas__task action=create title=\"Fix login bug\" priority=1",
+                    format!(
+                        "title required for create — pass a short descriptive title. \
+                     Example: {}task action=create title=\"Fix login bug\" priority=1",
+                        self.inner.guidance_prefix()
+                    ),
                 )
             })?,
             description: req.description,
@@ -392,9 +393,7 @@ impl CasService {
     pub(super) async fn task_show(&self, req: TaskRequest) -> Result<CallToolResult, McpError> {
         use crate::mcp::tools::TaskShowRequest;
         let inner_req = TaskShowRequest {
-            id: req
-                .id
-                .ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "id required for show — pass task ID as `id` (not `task_id`, `taskId`, or `_id`). Example: mcp__cas__task action=show id=cas-abc1"))?,
+            id: req.id.ok_or_else(|| self.missing_id("task", "show"))?,
             with_deps: req.with_deps.unwrap_or(true),
         };
         self.inner.cas_task_show(Parameters(inner_req)).await
@@ -412,9 +411,7 @@ impl CasService {
         let target_branch = req.target_branch.clone();
         let state_patch = req.state_patch.clone();
         let inner_req = TaskUpdateRequest {
-            id: req
-                .id
-                .ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "id required for update — pass task ID as `id` (not `task_id`, `taskId`, or `_id`). Example: mcp__cas__task action=update id=cas-abc1"))?,
+            id: req.id.ok_or_else(|| self.missing_id("task", "update"))?,
             title: req.title,
             notes: req.notes,
             priority: req.priority,
@@ -452,9 +449,7 @@ impl CasService {
     pub(super) async fn task_start(&self, req: TaskRequest) -> Result<CallToolResult, McpError> {
         use crate::mcp::tools::TaskStartRequest;
         let inner_req = TaskStartRequest {
-            id: req
-                .id
-                .ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "id required for start — pass task ID as `id` (not `task_id`, `taskId`, or `_id`). Example: mcp__cas__task action=start id=cas-abc1"))?,
+            id: req.id.ok_or_else(|| self.missing_id("task", "start"))?,
             brief: req.brief,
         };
         self.inner
@@ -481,9 +476,7 @@ impl CasService {
             // cas-b192: forwarded, not dropped — this is the only path by which
             // the unified `task` tool can reach the epic close override.
             stranded_branch_override: req.stranded_branch_override,
-            id: req
-                .id
-                .ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "id required for close — pass task ID as `id` (not `task_id`, `taskId`, or `_id`). Example: mcp__cas__task action=close id=cas-abc1"))?,
+            id: req.id.ok_or_else(|| self.missing_id("task", "close"))?,
             reason: req.reason,
             supervisor_override: effective_supervisor_override,
             legacy_bypass_code_review: req.legacy_bypass_code_review,
@@ -505,9 +498,7 @@ impl CasService {
     pub(super) async fn task_reopen(&self, req: TaskRequest) -> Result<CallToolResult, McpError> {
         use crate::mcp::tools::TaskReopenRequest;
         let inner_req = TaskReopenRequest {
-            id: req
-                .id
-                .ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "id required for reopen — pass task ID as `id` (not `task_id`, `taskId`, or `_id`). Example: mcp__cas__task action=reopen id=cas-abc1"))?,
+            id: req.id.ok_or_else(|| self.missing_id("task", "reopen"))?,
             reason: req.reason,
         };
         self.inner.cas_task_reopen(Parameters(inner_req)).await
@@ -557,9 +548,7 @@ impl CasService {
     pub(super) async fn task_delete(&self, req: TaskRequest) -> Result<CallToolResult, McpError> {
         use crate::mcp::tools::IdRequest;
         let inner_req = IdRequest {
-            id: req
-                .id
-                .ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "id required for delete — pass task ID as `id` (not `task_id`, `taskId`, or `_id`). Example: mcp__cas__task action=delete id=cas-abc1"))?,
+            id: req.id.ok_or_else(|| self.missing_id("task", "delete"))?,
         };
         self.inner.cas_task_delete(Parameters(inner_req)).await
     }
@@ -610,9 +599,7 @@ impl CasService {
     pub(super) async fn task_notes(&self, req: TaskRequest) -> Result<CallToolResult, McpError> {
         use crate::mcp::tools::{IdRequest, TaskNotesRequest};
         let supervisor_override = req.effective_supervisor_override();
-        let id = req
-            .id
-            .ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "id required for notes — pass task ID as `id` (not `task_id`, `taskId`, or `_id`). Example: mcp__cas__task action=notes id=cas-abc1"))?;
+        let id = req.id.ok_or_else(|| self.missing_id("task", "notes"))?;
 
         match req.notes {
             Some(note) => {
@@ -636,9 +623,7 @@ impl CasService {
     pub(super) async fn task_dep_add(&self, req: TaskRequest) -> Result<CallToolResult, McpError> {
         use crate::mcp::tools::DependencyRequest;
         let inner_req = DependencyRequest {
-            from_id: req
-                .id
-                .ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "id required — pass as `id` (not `task_id`, `taskId`, or `_id`). Example: mcp__cas__task action=<verb> id=cas-abc1"))?,
+            from_id: req.id.ok_or_else(|| self.missing_id("task", "dep_add"))?,
             to_id: req
                 .to_id
                 .ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "to_id required"))?,
@@ -655,7 +640,7 @@ impl CasService {
         let inner_req = DependencyRequest {
             from_id: req
                 .id
-                .ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "id required — pass as `id` (not `task_id`, `taskId`, or `_id`). Example: mcp__cas__task action=<verb> id=cas-abc1"))?,
+                .ok_or_else(|| self.missing_id("task", "dep_remove"))?,
             to_id: req
                 .to_id
                 .ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "to_id required"))?,
@@ -667,9 +652,7 @@ impl CasService {
     pub(super) async fn task_dep_list(&self, req: TaskRequest) -> Result<CallToolResult, McpError> {
         use crate::mcp::tools::IdRequest;
         let inner_req = IdRequest {
-            id: req
-                .id
-                .ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "id required — pass as `id` (not `task_id`, `taskId`, or `_id`). Example: mcp__cas__task action=<verb> id=cas-abc1"))?,
+            id: req.id.ok_or_else(|| self.missing_id("task", "dep_list"))?,
         };
         self.inner.cas_task_dep_list(Parameters(inner_req)).await
     }
@@ -677,9 +660,7 @@ impl CasService {
     pub(super) async fn task_claim(&self, req: TaskRequest) -> Result<CallToolResult, McpError> {
         use crate::mcp::tools::TaskClaimRequest;
         let inner_req = TaskClaimRequest {
-            task_id: req
-                .id
-                .ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "id required — pass as `id` (not `task_id`, `taskId`, or `_id`). Example: mcp__cas__task action=<verb> id=cas-abc1"))?,
+            task_id: req.id.ok_or_else(|| self.missing_id("task", "claim"))?,
             duration_secs: req.duration_secs.unwrap_or(600),
             reason: req.reason,
         };
@@ -689,9 +670,7 @@ impl CasService {
     pub(super) async fn task_release(&self, req: TaskRequest) -> Result<CallToolResult, McpError> {
         use crate::mcp::tools::TaskReleaseRequest;
         let inner_req = TaskReleaseRequest {
-            task_id: req
-                .id
-                .ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "id required — pass as `id` (not `task_id`, `taskId`, or `_id`). Example: mcp__cas__task action=<verb> id=cas-abc1"))?,
+            task_id: req.id.ok_or_else(|| self.missing_id("task", "release"))?,
             force: None,
         };
         self.inner.cas_task_release(Parameters(inner_req)).await
@@ -700,9 +679,7 @@ impl CasService {
     pub(super) async fn task_reset(&self, req: TaskRequest) -> Result<CallToolResult, McpError> {
         use crate::mcp::tools::TaskReleaseRequest;
         let inner_req = TaskReleaseRequest {
-            task_id: req
-                .id
-                .ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "id required — pass as `id` (not `task_id`, `taskId`, or `_id`). Example: mcp__cas__task action=reset id=cas-abc1"))?,
+            task_id: req.id.ok_or_else(|| self.missing_id("task", "reset"))?,
             force: req.force,
         };
         self.inner.cas_task_reset(Parameters(inner_req)).await
@@ -712,21 +689,20 @@ impl CasService {
         use crate::mcp::tools::TaskTransferRequest;
         let effective_supervisor_override = req.effective_supervisor_override();
         let inner_req = TaskTransferRequest {
-            task_id: req
-                .id
-                .ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "id required — pass as `id` (not `task_id`, `taskId`, or `_id`). Example: mcp__cas__task action=<verb> id=cas-abc1"))?,
-            to_agent: req
-                .to_agent
-                .ok_or_else(|| {
-                    Self::error(
-                        ErrorCode::INVALID_PARAMS,
+            task_id: req.id.ok_or_else(|| self.missing_id("task", "transfer"))?,
+            to_agent: req.to_agent.ok_or_else(|| {
+                Self::error(
+                    ErrorCode::INVALID_PARAMS,
+                    format!(
                         "to_agent required — for transfer, the target field is `to_agent` \
                          (not `assignee`). NOTE: `transfer` is for reassigning an ALREADY-CLAIMED \
                          task between agents. For initial assignment use \
                          `action=update id=<task> assignee=<worker-name>` instead. \
-                         Example: mcp__cas__task action=transfer id=cas-abc1 to_agent=worker-2",
-                    )
-                })?,
+                         Example: {tool_prefix}task action=transfer id=cas-abc1 to_agent=worker-2",
+                        tool_prefix = crate::mcp::tools::core::guidance::caller_prefix()
+                    ),
+                )
+            })?,
             note: req.notes,
             // Keep the one-release close-gate alias usable for transfer while
             // exposing the surviving name consistently at the unified boundary.
@@ -782,9 +758,7 @@ impl CasService {
     pub(super) async fn rule_show(&self, req: RuleRequest) -> Result<CallToolResult, McpError> {
         use crate::mcp::tools::IdRequest;
         let inner_req = IdRequest {
-            id: req
-                .id
-                .ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "id required — pass as `id` (not `task_id`, `taskId`, or `_id`). Example: mcp__cas__task action=<verb> id=cas-abc1"))?,
+            id: req.id.ok_or_else(|| self.missing_id("rule", "show"))?,
         };
         self.inner.cas_rule_show(Parameters(inner_req)).await
     }
@@ -792,9 +766,7 @@ impl CasService {
     pub(super) async fn rule_update(&self, req: RuleRequest) -> Result<CallToolResult, McpError> {
         use crate::mcp::tools::RuleUpdateRequest;
         let inner_req = RuleUpdateRequest {
-            id: req
-                .id
-                .ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "id required — pass as `id` (not `task_id`, `taskId`, or `_id`). Example: mcp__cas__task action=<verb> id=cas-abc1"))?,
+            id: req.id.ok_or_else(|| self.missing_id("rule", "update"))?,
             content: req.content,
             paths: req.paths,
             tags: req.tags,
@@ -809,9 +781,7 @@ impl CasService {
     pub(super) async fn rule_delete(&self, req: RuleRequest) -> Result<CallToolResult, McpError> {
         use crate::mcp::tools::IdRequest;
         let inner_req = IdRequest {
-            id: req
-                .id
-                .ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "id required — pass as `id` (not `task_id`, `taskId`, or `_id`). Example: mcp__cas__task action=<verb> id=cas-abc1"))?,
+            id: req.id.ok_or_else(|| self.missing_id("rule", "delete"))?,
         };
         self.inner.cas_rule_delete(Parameters(inner_req)).await
     }
@@ -863,9 +833,7 @@ impl CasService {
     pub(super) async fn rule_helpful(&self, req: RuleRequest) -> Result<CallToolResult, McpError> {
         use crate::mcp::tools::IdRequest;
         let inner_req = IdRequest {
-            id: req
-                .id
-                .ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "id required — pass as `id` (not `task_id`, `taskId`, or `_id`). Example: mcp__cas__task action=<verb> id=cas-abc1"))?,
+            id: req.id.ok_or_else(|| self.missing_id("rule", "helpful"))?,
         };
         self.inner.cas_rule_helpful(Parameters(inner_req)).await
     }
@@ -873,9 +841,7 @@ impl CasService {
     pub(super) async fn rule_harmful(&self, req: RuleRequest) -> Result<CallToolResult, McpError> {
         use crate::mcp::tools::IdRequest;
         let inner_req = IdRequest {
-            id: req
-                .id
-                .ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "id required — pass as `id` (not `task_id`, `taskId`, or `_id`). Example: mcp__cas__task action=<verb> id=cas-abc1"))?,
+            id: req.id.ok_or_else(|| self.missing_id("rule", "harmful"))?,
         };
         self.inner.cas_rule_harmful(Parameters(inner_req)).await
     }
@@ -1002,9 +968,7 @@ impl CasService {
     pub(super) async fn skill_show(&self, req: SkillRequest) -> Result<CallToolResult, McpError> {
         use crate::mcp::tools::IdRequest;
         let inner_req = IdRequest {
-            id: req
-                .id
-                .ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "id required — pass as `id` (not `task_id`, `taskId`, or `_id`). Example: mcp__cas__task action=<verb> id=cas-abc1"))?,
+            id: req.id.ok_or_else(|| self.missing_id("skill", "show"))?,
         };
         self.inner.cas_skill_show(Parameters(inner_req)).await
     }
@@ -1012,9 +976,7 @@ impl CasService {
     pub(super) async fn skill_update(&self, req: SkillRequest) -> Result<CallToolResult, McpError> {
         use crate::mcp::tools::SkillUpdateRequest;
         let inner_req = SkillUpdateRequest {
-            id: req
-                .id
-                .ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "id required — pass as `id` (not `task_id`, `taskId`, or `_id`). Example: mcp__cas__task action=<verb> id=cas-abc1"))?,
+            id: req.id.ok_or_else(|| self.missing_id("skill", "update"))?,
             name: req.name,
             description: req.description,
             invocation: req.invocation,
@@ -1033,9 +995,7 @@ impl CasService {
     pub(super) async fn skill_delete(&self, req: SkillRequest) -> Result<CallToolResult, McpError> {
         use crate::mcp::tools::IdRequest;
         let inner_req = IdRequest {
-            id: req
-                .id
-                .ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "id required — pass as `id` (not `task_id`, `taskId`, or `_id`). Example: mcp__cas__task action=<verb> id=cas-abc1"))?,
+            id: req.id.ok_or_else(|| self.missing_id("skill", "delete"))?,
         };
         self.inner.cas_skill_delete(Parameters(inner_req)).await
     }
@@ -1096,9 +1056,7 @@ impl CasService {
     pub(super) async fn skill_enable(&self, req: SkillRequest) -> Result<CallToolResult, McpError> {
         use crate::mcp::tools::IdRequest;
         let inner_req = IdRequest {
-            id: req
-                .id
-                .ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "id required — pass as `id` (not `task_id`, `taskId`, or `_id`). Example: mcp__cas__task action=<verb> id=cas-abc1"))?,
+            id: req.id.ok_or_else(|| self.missing_id("skill", "enable"))?,
         };
         self.inner.cas_skill_enable(Parameters(inner_req)).await
     }
@@ -1109,9 +1067,7 @@ impl CasService {
     ) -> Result<CallToolResult, McpError> {
         use crate::mcp::tools::IdRequest;
         let inner_req = IdRequest {
-            id: req
-                .id
-                .ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "id required — pass as `id` (not `task_id`, `taskId`, or `_id`). Example: mcp__cas__task action=<verb> id=cas-abc1"))?,
+            id: req.id.ok_or_else(|| self.missing_id("skill", "disable"))?,
         };
         self.inner.cas_skill_disable(Parameters(inner_req)).await
     }
@@ -1123,9 +1079,7 @@ impl CasService {
     pub(super) async fn skill_use(&self, req: SkillRequest) -> Result<CallToolResult, McpError> {
         use crate::mcp::tools::IdRequest;
         let inner_req = IdRequest {
-            id: req
-                .id
-                .ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "id required — pass as `id` (not `task_id`, `taskId`, or `_id`). Example: mcp__cas__task action=<verb> id=cas-abc1"))?,
+            id: req.id.ok_or_else(|| self.missing_id("skill", "use"))?,
         };
         self.inner.cas_skill_use(Parameters(inner_req)).await
     }

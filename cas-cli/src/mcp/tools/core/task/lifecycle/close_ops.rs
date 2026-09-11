@@ -3,8 +3,7 @@ mod task_attribution;
 use super::TaskLifecycleGateError;
 use crate::harness_policy::{
     is_supervisor_from_env, is_worker_without_subagents_from_env, supervisor_harness_from_env,
-    supervisor_verification_tool, verification_policy, worker_coordination_tool,
-    worker_harness_from_env,
+    supervisor_verification_tool, verification_policy, worker_harness_from_env,
 };
 use crate::mcp::tools::core::imports::*;
 use cas_types::TaskRisk;
@@ -1658,8 +1657,10 @@ impl CasCore {
         if !has_recorded_gate_decision(&task.notes) {
             return Err(TaskLifecycleGateError::MissingGateDecision {
                 message: format!(
-                    "GATE CLOSE REJECTED: task {} has no non-empty recorded DECISION note. Record the decision first with mcp__cas__task action=notes id={} note_type=decision notes=\"...\", then retry close.",
-                    task.id, task.id
+                    "GATE CLOSE REJECTED: task {} has no non-empty recorded DECISION note. Record the decision first with {tool_prefix}task action=notes id={} note_type=decision notes=\"...\", then retry close.",
+                    task.id,
+                    task.id,
+                    tool_prefix = crate::mcp::tools::core::guidance::caller_prefix()
                 ),
             });
         }
@@ -2831,6 +2832,7 @@ impl CasCore {
         inline_external_ref: Option<String>,
         inline_execution_note: Option<String>,
     ) -> Result<CallToolResult, McpError> {
+        let caller_task = format!("{}task", self.guidance_prefix());
         let task_store = self.open_task_store()?;
 
         let mut task = task_store.get(&req.id).map_err(|e| McpError {
@@ -3369,17 +3371,18 @@ impl CasCore {
                     "⚠️ MERGE REQUIRED\n\n\
                     Epic {} has {} unmerged worker branch(es):\n  - {}\n\n\
                     Worker branches must be merged to {} before closing the epic.\n\n\
-                    Use /factory-merge-epic to:\n\
+                    Merge the worker branches:\n\
                     1. Fetch all worker branches from remote\n\
                     2. Merge each branch to {}\n\
                     3. Run tests on the merged code\n\n\
-                    After merging, call mcp__cas__task action=close id={} again.",
+                    After merging, call {tool_prefix}task action=close id={} again.",
                     req.id,
                     unmerged.len(),
                     branch_list,
                     target_branch,
                     target_branch,
-                    req.id
+                    req.id,
+                    tool_prefix = crate::mcp::tools::core::guidance::caller_prefix()
                 )));
             }
 
@@ -3646,6 +3649,10 @@ impl CasCore {
                     // task's activity log AND the returned refusal carry.
                     let msg = enrich_merge_required_with_conflict_check(
                         msg,
+                        task.assignee
+                            .as_deref()
+                            .and_then(|assignee| self.recipient_guidance_prefix(assignee))
+                            .unwrap_or(""),
                         &resolved_parent_branch,
                         &task.id,
                         &conflict_paths,
@@ -4037,10 +4044,13 @@ impl CasCore {
                             close_reason_note,
                             if is_worker_without_subagents {
                                 // cas-8aaf: use harness-appropriate coordination tool.
-                                let coord = worker_coordination_tool();
+                                let coord = format!(
+                                    "{}coordination",
+                                    crate::mcp::tools::core::guidance::caller_prefix()
+                                );
                                 let sup_ver = supervisor_verification_tool();
                                 format!(
-                                    "Suggested message: {coord} action=message target=supervisor \
+                                    "Suggested message: {coord} action=message target=supervisor summary=\"verification requested\" \
                                      message=\"Task {id} is ready for re-verification. \
                                      Please verify (task-verifier or direct {sup_ver}) \
                                      and close if approved.\"",
@@ -4133,7 +4143,7 @@ impl CasCore {
                             To proceed:\n\
                             1. Re-dispatch verifier: Task(subagent_type=\"task-verifier\", prompt=\"Verify task {}\")\n\
                             2. Or record verdict directly: {sup_ver} action=add task_id={} status=approved summary=\"...\"\n\
-                            3. Then call cas_task_close again.",
+                            3. Then retry {caller_task} action=close with the same task id.",
                             req.id, elapsed_mins, req.id, req.id
                         )));
                     }
@@ -4391,7 +4401,10 @@ impl CasCore {
                             // Claude workers use mcp__cas__coordination, Codex workers
                             // use mcp__cs__coordination (CAS_FACTORY_WORKER_CLI drives
                             // the selection via worker_coordination_tool()).
-                            let coord = worker_coordination_tool();
+                            let coord = format!(
+                                "{}coordination",
+                                crate::mcp::tools::core::guidance::caller_prefix()
+                            );
                             // cas-7998: escape the free-text reason so a
                             // quote/newline can't break the quoted
                             // `message="..."` argument below.
@@ -4508,17 +4521,23 @@ impl CasCore {
                             },
                             if is_worker_without_subagents {
                                 // cas-8aaf: harness-appropriate coordination tool.
-                                let coord = worker_coordination_tool();
+                                let coord = format!(
+                                    "{}coordination",
+                                    crate::mcp::tools::core::guidance::caller_prefix()
+                                );
                                 let sup_ver = supervisor_verification_tool();
                                 format!(
                                     "Suggested message: {coord} action=message \
-                                         target=supervisor message=\"Please verify task {id} \
+                                         target=supervisor summary=\"verification requested\" message=\"Please verify task {id} \
                                          (task-verifier or direct {sup_ver}) \
                                          and close it if approved.\"",
                                     id = req.id
                                 )
                             } else {
-                                "After verification passes, call cas_task_close again.".to_string()
+                                format!(
+                                    "After verification passes, retry {caller_task} action=close id={}.",
+                                    req.id
+                                )
                             }
                         )));
                     }
@@ -4577,7 +4596,7 @@ impl CasCore {
                                 2. Push the branch to remote\n\
                                 3. Merge the branch to the parent branch\n\
                                 4. Clean up the worktree directory\n\n\
-                                After the merge completes, call cas_task_close again.",
+                                After the merge completes, retry {caller_task} action=close with the same task id.",
                                 req.id,
                                 worktree.path.display(),
                                 worktree.branch
@@ -4693,12 +4712,13 @@ impl CasCore {
                         To resolve:\n\
                         1. Review the diff: `git status`\n\
                         2. Stage and commit your changes with a meaningful message.\n\
-                        3. Re-run `mcp__cas__task action=close id={}`.\n\n\
+                        3. Re-run `{tool_prefix}task action=close id={}`.\n\n\
                         Supervisors may override this gate with supervisor_override=true \
                         (logged as a decision note) when the worker is stuck and the \
                         work on disk is genuinely disposable.",
                         worker_wt.display(),
-                        req.id
+                        req.id,
+                        tool_prefix = crate::mcp::tools::core::guidance::caller_prefix()
                     )));
                 }
                 // Tree is not dirty — but "not dirty" is not automatically
@@ -5589,8 +5609,12 @@ impl CasCore {
                             } else {
                                 format!(
                                     "\n\n🎉 All subtasks of epic '{}' ({}) are now complete!\n\
-                                     → Consider closing the epic with: mcp__cas__task action=close id={}",
-                                    parent.title, parent.id, parent.id
+                                     → Consider closing the epic with: {tool_prefix}task action=close id={}",
+                                    parent.title,
+                                    parent.id,
+                                    parent.id,
+                                    tool_prefix =
+                                        crate::mcp::tools::core::guidance::caller_prefix()
                                 )
                             }
                         } else {
@@ -7431,6 +7455,7 @@ fn classify_merge_conflict_preflight(
 
 fn enrich_merge_required_with_conflict_check(
     message: String,
+    worker_prefix: &str,
     parent_branch: &str,
     task_id: &str,
     conflict_paths: &[String],
@@ -7443,7 +7468,7 @@ fn enrich_merge_required_with_conflict_check(
              {parent_branch} (not just unmerged commits) — a supervisor \
              merge attempt will fail here. Conflicting file(s): {}.\n\n\
              Alternative: the assigned worker can \
-             `mcp__cas__task action=start id={task_id}` (now permitted from \
+             `{worker_prefix}task action=start id={task_id}` (now permitted from \
              `awaiting_merge`) to inspect from inside their worker worktree, \
              rebase the factory branch onto the current integration target tip, \
              push, and re-park it with merge_request=true before re-closing.",
@@ -7456,7 +7481,7 @@ fn enrich_merge_required_with_conflict_check(
              into {parent_branch}. Git conflict preflight failed: {error}.\n\n\
              To avoid stranding the task in `awaiting_merge`, Cassy marks this \
              park as reopen-eligible. The assigned worker can \
-             `mcp__cas__task action=start id={task_id}` to inspect from inside \
+             `{worker_prefix}task action=start id={task_id}` to inspect from inside \
              the worker worktree, rebase the factory branch onto the current \
              integration target tip, push, and re-park it with \
              merge_request=true before re-closing."
@@ -8098,7 +8123,10 @@ pub(crate) fn run_factory_branch_merge_gate_with_attribution(
          {origin_parent_branch}@{origin_target_tip}; unreachable=[{unreachable_display}]; \
          origin_fetch_attempted={origin_fetch_attempted}."
     );
-    let coord = worker_coordination_tool();
+    let coord = format!(
+        "{}coordination",
+        crate::mcp::tools::core::guidance::caller_prefix()
+    );
 
     let epic_push_state_step = if parent_published_on_origin {
         format!(
@@ -8143,16 +8171,22 @@ pub(crate) fn run_factory_branch_merge_gate_with_attribution(
              merge into {parent_branch} if still needed\"`). \
              They merge with \
              `git merge --no-ff {factory_branch}` on the epic branch.\n\
-             5. Once merged, retry mcp__cas__task action=close. If this is a \
+             5. Once merged, retry {tool_prefix}task action=close. If this is a \
              completed measured negative result whose experimental delivery \
              must not land, a registered supervisor may instead close with \
              `negative_result=true negative_result_artifact_path=<absolute-path-under-artifacts_root/task-id> \
              negative_result_reference=<closed-PR-URL-or-branch> reason=\"decision rationale\"`. \
              Cassy validates all three receipts and logs the decision. If the supervisor \
              declines an actual delivery for rework instead, the supervisor runs \
-             `mcp__cas__task action=request_changes id={} reason=\"state what prior work remains and what must be corrected or reverted\"`; \
+             `{supervisor_prefix}task action=request_changes id={} reason=\"state what prior work remains and what must be corrected or reverted\"`; \
              only after that verdict may the assigned worker start a fresh cycle.",
-            task.id, task.id,
+            task.id,
+            task.id,
+            tool_prefix = crate::mcp::tools::core::guidance::caller_prefix(),
+            supervisor_prefix = crate::harness_policy::supervisor_harness_from_env()
+                .backend()
+                .capabilities()
+                .tool_prefix
         )
     } else {
         format!(
@@ -8172,16 +8206,21 @@ pub(crate) fn run_factory_branch_merge_gate_with_attribution(
              {parent_branch} ref cannot be the cause (fetch never moves a local \
              branch ref). If you believe the work is merged, check it directly: \
              `git merge-base --is-ancestor {factory_branch} origin/{parent_branch}`.\n\
-             5. Retry mcp__cas__task action=close. If this is a completed measured \
+             5. Retry {tool_prefix}task action=close. If this is a completed measured \
              negative result whose experimental delivery must not land, a registered \
              supervisor may instead close with `negative_result=true \
              negative_result_artifact_path=<absolute-path-under-artifacts_root/task-id> \
              negative_result_reference=<closed-PR-URL-or-branch> reason=\"decision rationale\"`. \
              Cassy validates all three receipts and logs the decision. If the supervisor \
              declines an actual delivery for rework instead, the supervisor runs \
-             `mcp__cas__task action=request_changes id={} reason=\"state what prior work remains and what must be corrected or reverted\"`; \
+             `{supervisor_prefix}task action=request_changes id={} reason=\"state what prior work remains and what must be corrected or reverted\"`; \
              only after that verdict may the assigned worker start a fresh cycle.",
             task.id,
+            tool_prefix = crate::mcp::tools::core::guidance::caller_prefix(),
+            supervisor_prefix = crate::harness_policy::supervisor_harness_from_env()
+                .backend()
+                .capabilities()
+                .tool_prefix
         )
     };
 
@@ -8516,7 +8555,7 @@ pub(crate) fn commit_receipt_repo_binding_error(
          To resolve:\n\
          1. If the work landed in a DIFFERENT repository, declare it on the task \
             so every close gate runs there: \
-            `mcp__cas__task action=update id=<task> target_repo=<path-or-selector> \
+            `{tool_prefix}task action=update id=<task> target_repo=<path-or-selector> \
             target_branch=<branch>`, then retry close.\n\
          2. If the work is in this repository, re-copy the SHA \
             (`git log --oneline --all`) — full or an unambiguous abbreviation \
@@ -8524,6 +8563,7 @@ pub(crate) fn commit_receipt_repo_binding_error(
          3. The commit may exist only on the remote — run `git fetch` and retry \
             close.",
         repo_path.display(),
+        tool_prefix = crate::mcp::tools::core::guidance::caller_prefix()
     ))
 }
 
@@ -8972,9 +9012,10 @@ pub(crate) fn check_factory_branch_merge_reality(
          3. Push {factory_branch} to origin:\n\
             `git push origin {factory_branch}`\n\
          4. Open a PR targeting {parent_branch} and merge it.\n\
-         5. Retry: `mcp__cas__task action=close`\n\n\
+         5. Retry: `{tool_prefix}task action=close`\n\n\
          If this task intentionally has no code commits, record an \
          execution_note or ask the supervisor to audit and close it.",
+        tool_prefix = crate::mcp::tools::core::guidance::caller_prefix()
     ))
 }
 
@@ -11053,13 +11094,14 @@ pub(crate) fn check_zero_commit_close(
             3. If this task was resolved without code (fixed by a sibling task, \
                docs-only, characterization-only), retry close with explicit \
                no-code intent and its portable proof in the same command:\n\
-               `mcp__cas__task action=close id={task_id} execution_note=no-code external_ref=<portable-reference>`\n\
+               `{tool_prefix}task action=close id={task_id} execution_note=no-code external_ref=<portable-reference>`\n\
             4. If this is external production work and a supervisor already \
                ran `verification action=external_verify`, that same live \
                registered supervisor may retry with \
                `supervisor_override=true external_verification_receipt=<dr-id> reason=<audit>`. \
                `supervisor_override` alone does not satisfy zero-commit \
-               delivery evidence."
+               delivery evidence.",
+            tool_prefix = crate::mcp::tools::core::guidance::caller_prefix()
         ));
     }
     if let Some(outcome) = resolve_merge_evidence(
@@ -11088,7 +11130,7 @@ pub(crate) fn check_zero_commit_close(
         2. If this task was resolved without code (fixed by a sibling task, \
            docs-only, characterization-only), retry close with explicit \
            no-code intent and its portable proof in the same command:\n\
-           `mcp__cas__task action=close id={task_id} execution_note=no-code external_ref=<portable-reference>`\n\
+           `{tool_prefix}task action=close id={task_id} execution_note=no-code external_ref=<portable-reference>`\n\
         3. If the supervisor already merged this task's work — including an \
            out-of-band merge after conflict rework cleared the old anchor — \
            find the SHA of the worker task commit OR the merge commit \
@@ -11101,7 +11143,8 @@ pub(crate) fn check_zero_commit_close(
            supervisor may retry with \
            `supervisor_override=true external_verification_receipt=<dr-id> reason=<audit>`. \
            `supervisor_override` alone does not satisfy zero-commit delivery \
-           evidence."
+           evidence.",
+        tool_prefix = crate::mcp::tools::core::guidance::caller_prefix()
     ))
 }
 
@@ -13055,11 +13098,11 @@ fn run_epic_close_merge_gate_with_budget(
          execution_note=no-code, which blocks the honest path and needs \
          proof_scope_fix to unwind.\n\n\
          Remediation when the worker worktree still exists:\n\
-         - `mcp__cas__coordination action=worktree_merge id=<factory-branch> \
+         - `{tool_prefix}coordination action=worktree_merge id=<factory-branch> \
            task_id=<child-task-id>`\n\n\
          {guidance_heading}\n\
          {cleaned_worktree_guidance}\n\
-         Diagnostic: run `mcp__cas__coordination action=epic_status id={epic_id}` \
+         Diagnostic: run `{tool_prefix}coordination action=epic_status id={epic_id}` \
          for a per-child report.",
         headline = headline,
         guidance_heading = guidance_heading,
@@ -13069,6 +13112,7 @@ fn run_epic_close_merge_gate_with_budget(
         closing_instruction = closing_instruction.replace("{parent}", parent_branch),
         cleaned_worktree_guidance = cleaned_worktree_guidance,
         parent = parent_branch,
+        tool_prefix = crate::mcp::tools::core::guidance::caller_prefix()
     ))
 }
 
@@ -14385,13 +14429,13 @@ fn stale_rebased_anchor_rejection(
     let retry = current_tip
         .map(|tip| {
             format!(
-                " The current worker branch tip is `{tip}`. If that commit carries this task's work, first merge it into `{parent_branch}`, then retry close with `mcp__cas__task action=close id={task_id} commit_receipt={tip}`."
-            )
+                " The current worker branch tip is `{tip}`. If that commit carries this task's work, first merge it into `{parent_branch}`, then retry close with `{tool_prefix}task action=close id={task_id} commit_receipt={tip}`."
+            , tool_prefix = crate::mcp::tools::core::guidance::caller_prefix())
         })
         .unwrap_or_else(|| {
             format!(
-                " Resolve the current worker branch tip, merge it into `{parent_branch}`, and retry close with `mcp__cas__task action=close id={task_id} commit_receipt=<current tip>`."
-            )
+                " Resolve the current worker branch tip, merge it into `{parent_branch}`, and retry close with `{tool_prefix}task action=close id={task_id} commit_receipt=<current tip>`."
+            , tool_prefix = crate::mcp::tools::core::guidance::caller_prefix())
         });
     format!(
         "PRE-CLOSE HOOK CONTEXT REJECTED: recorded task anchor `{parked_anchor}` is no longer reachable from the validated task worktree branch after a history rewrite. No close-time executable gate was run. {retry}\n\nIf the current tip cannot be merged or its task attribution is unclear, ask the supervisor to verify the delivery and re-anchor/reconcile task `{task_id}` before retrying close."
@@ -17404,13 +17448,21 @@ mod merge_state_gate_tests {
             ("claude", "mcp__cas__coordination"),
             ("codex", "mcp__cs__coordination"),
             ("grok", "cas__coordination"),
+            ("opencode", "cas_coordination"),
         ] {
             env.set("CAS_FACTORY_WORKER_CLI", harness);
+            env.set("CAS_FACTORY_SUPERVISOR_CLI", "codex");
             let out = run_factory_branch_merge_gate(&task, &req, "main", dir.path());
 
             match out {
                 MergeStateGateOutcome::Reject(msg) => {
                     assert!(msg.contains("MERGE REQUIRED"), "missing header: {msg}");
+                    let prefix = coord.strip_suffix("coordination").unwrap();
+                    assert!(msg.contains(&format!("{prefix}task action=close")), "{msg}");
+                    assert!(
+                        msg.contains("mcp__cs__task action=request_changes"),
+                        "{msg}"
+                    );
                     assert!(
                         msg.contains("factory/worker"),
                         "missing factory branch name: {msg}"
@@ -17496,13 +17548,21 @@ mod merge_state_gate_tests {
             ("claude", "mcp__cas__coordination"),
             ("codex", "mcp__cs__coordination"),
             ("grok", "cas__coordination"),
+            ("opencode", "cas_coordination"),
         ] {
             env.set("CAS_FACTORY_WORKER_CLI", harness);
+            env.set("CAS_FACTORY_SUPERVISOR_CLI", "codex");
             let out = run_factory_branch_merge_gate(&task, &req, parent, dir.path());
 
             match out {
                 MergeStateGateOutcome::Reject(msg) => {
                     assert!(msg.contains("MERGE REQUIRED"), "missing header: {msg}");
+                    let prefix = coord.strip_suffix("coordination").unwrap();
+                    assert!(msg.contains(&format!("{prefix}task action=close")), "{msg}");
+                    assert!(
+                        msg.contains("mcp__cs__task action=request_changes"),
+                        "{msg}"
+                    );
                     assert!(
                         msg.contains("factory/worker"),
                         "missing factory branch name: {msg}"
@@ -21013,6 +21073,7 @@ mod merge_conflict_detection_tests {
         );
         let message = enrich_merge_required_with_conflict_check(
             "MERGE REQUIRED".to_string(),
+            "",
             "main",
             "cas-7308a",
             &paths,

@@ -66,8 +66,9 @@ impl CasCore {
             .unwrap_or(false);
         let prefer_start_hint = if is_worker && task.status == TaskStatus::Open {
             Some(format!(
-                "\n\n⚠️ Workflow hint: prefer `cas_task action=start id={}` for normal execution.\n\
+                "\n\n⚠️ Workflow hint: prefer `{}task action=start id={}` for normal execution.\n\
                  Use `claim` when you need manual lease control (custom duration/reason/recovery).",
+                self.guidance_prefix(),
                 req.task_id
             ))
         } else {
@@ -89,15 +90,16 @@ impl CasCore {
             if !assignee_inactive {
                 return Err(McpError {
                     code: ErrorCode::INVALID_PARAMS,
-                    message: Cow::from(
+                    message: Cow::from(format!(
                         "Supervisors cannot claim non-epic tasks. To delegate work:\n\n\
                         1. Assign to existing worker:\n\
-                           mcp__cas__task action=update id=<task_id> assignee=<worker_name>\n\
-                           mcp__cas__coordination action=message target=<worker_name> message=\"Task <task_id> assigned\"\n\n\
+                           {tool_prefix}task action=update id=<task_id> assignee=<worker_name>\n\
+                           {tool_prefix}coordination action=message target=<worker_name> summary=\"task assigned\" message=\"Task <task_id> assigned\"\n\n\
                         2. Or spawn a new worker:\n\
-                           mcp__cas__coordination action=spawn_workers count=1\n\n\
+                           {tool_prefix}coordination action=spawn_workers count=1 task_id=<task_id>\n\n\
                         Supervisors coordinate and review; workers execute tasks.",
-                    ),
+                        tool_prefix = crate::mcp::tools::core::guidance::caller_prefix()
+                    )),
                     data: None,
                 });
             }
@@ -298,7 +300,7 @@ impl CasCore {
                     worktree_info.unwrap_or_default(),
                     sibling_notes_info.unwrap_or_default(),
                     prefer_start_hint.clone().unwrap_or_default(),
-                    Self::workflow_guidance()
+                    self.workflow_guidance()
                 )))
             }
             ClaimResult::AlreadyClaimed {
@@ -548,13 +550,14 @@ impl CasCore {
                                '{}' (look for fresh heartbeat + recent activity events).\n\
                              • To reset anyway (e.g. the worker is stuck in a loop), pass \
                                `force=true`:\n\
-                               mcp__cas__task action=reset id={} force=true",
+                               {tool_prefix}task action=reset id={} force=true",
                             req.task_id,
                             assignee,
                             elapsed,
                             WORKER_STALE_SECS,
                             assignee,
                             req.task_id,
+                            tool_prefix = crate::mcp::tools::core::guidance::caller_prefix()
                         )));
                     }
                 }

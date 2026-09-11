@@ -1,4 +1,5 @@
 mod agent_coordination;
+pub(crate) mod guidance;
 mod imports;
 mod knowledge;
 mod maintenance;

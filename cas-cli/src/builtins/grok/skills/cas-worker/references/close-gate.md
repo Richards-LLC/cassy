@@ -76,6 +76,11 @@ The 6 checks below apply to every task type. These gates sit on top of them:
   Combined declarations require both typed receipts; `risk=none` adds no
   receipt gate.
 
+  If a scoped command cannot run because the repository has no runnable target,
+  a registered supervisor may record an equivalent full `cargo nextest run -p
+  cas` receipt instead. Include the durable log path in the progress note and
+  name every real required target in `SCOPED_PROOF: targets=<set> result=PASS`.
+
 ## Pre-Close Self-Verification
 
 ### 1. No shortcut markers

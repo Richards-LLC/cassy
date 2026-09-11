@@ -138,9 +138,87 @@ contains_exact() {
     return 1
 }
 
+manifest_test_target_for_path() {
+    local test_path wanted
+    test_path="$1"
+    wanted="${test_path#cas-cli/}"
+    [[ -f cas-cli/Cargo.toml ]] || return 1
+    awk -v wanted="$wanted" '
+        function value(line) {
+            sub(/^[^\"]*\"/, "", line)
+            sub(/\".*$/, "", line)
+            return line
+        }
+        /^\[\[test\]\][[:space:]]*$/ {
+            in_test=1
+            name=""
+            path=""
+            next
+        }
+        /^\[\[/ {
+            if (in_test && path == wanted && name != "") {
+                print name
+                found=1
+                exit
+            }
+            in_test=0
+        }
+        in_test && $0 ~ /^[[:space:]]*name[[:space:]]*=/ { name=value($0) }
+        in_test && $0 ~ /^[[:space:]]*path[[:space:]]*=/ { path=value($0) }
+        END {
+            if (!found && in_test && path == wanted && name != "") print name
+        }
+    ' cas-cli/Cargo.toml
+}
+
+manifest_test_path_for_target() {
+    local target="$1"
+    [[ -f cas-cli/Cargo.toml ]] || return 1
+    awk -v wanted="$target" '
+        function value(line) {
+            sub(/^[^\"]*\"/, "", line)
+            sub(/\".*$/, "", line)
+            return line
+        }
+        /^\[\[test\]\][[:space:]]*$/ {
+            in_test=1
+            name=""
+            path=""
+            next
+        }
+        /^\[\[/ {
+            if (in_test && name == wanted && path != "") {
+                print path
+                found=1
+                exit
+            }
+            in_test=0
+        }
+        in_test && $0 ~ /^[[:space:]]*name[[:space:]]*=/ { name=value($0) }
+        in_test && $0 ~ /^[[:space:]]*path[[:space:]]*=/ { path=value($0) }
+        END {
+            if (!found && in_test && name == wanted && path != "") print path
+        }
+    ' cas-cli/Cargo.toml
+}
+
+cargo_test_target_exists() {
+    local target="$1" manifest_path
+    [[ -n "$target" ]] || return 1
+    [[ -f "cas-cli/tests/${target}.rs" || -f "cas-cli/tests/${target}/main.rs" ]] && return 0
+    manifest_path="$(manifest_test_path_for_target "$target" || true)"
+    [[ -n "$manifest_path" && -f "cas-cli/${manifest_path}" ]]
+}
+
 integration_target_for() {
-    local nested_path="$1" directory candidate
+    local nested_path="$1" directory candidate manifest_target
     directory="${nested_path%%/*}"
+
+    manifest_target="$(manifest_test_target_for_path "cas-cli/tests/${nested_path}" || true)"
+    if [[ -n "$manifest_target" ]] && cargo_test_target_exists "$manifest_target"; then
+        printf '%s\n' "$manifest_target"
+        return 0
+    fi
 
     # GH #778: the nested path is often owned by the conventional top-level
     # integration target with the same stem (for example,
@@ -148,8 +226,13 @@ integration_target_for() {
     # Resolve that filename before inspecting file contents so a fixture that
     # merely mentions the path cannot claim ownership.
     candidate="cas-cli/tests/${directory}.rs"
-    if [[ -f "${candidate}" ]]; then
+    if [[ -f "${candidate}" ]] && cargo_test_target_exists "$directory"; then
         basename "${candidate%.rs}"
+        return 0
+    fi
+
+    if [[ -f "cas-cli/tests/${directory}/main.rs" ]] && cargo_test_target_exists "$directory"; then
+        printf '%s\n' "$directory"
         return 0
     fi
 
@@ -165,16 +248,22 @@ integration_target_for() {
             || grep -Eq \
             "^[[:space:]]*#\\[path[[:space:]]*=[[:space:]]*\"${directory}/[^\"[:space:]]+\"[[:space:]]*\\][[:space:]]*$" \
             "$candidate"; then
-            basename "${candidate%.rs}"
-            return 0
+            local target
+            target="$(basename "${candidate%.rs}")"
+            if cargo_test_target_exists "$target"; then
+                printf '%s\n' "$target"
+                return 0
+            fi
         fi
     done
-    # An unfamiliar nested layout is still named loudly rather than skipped.
-    printf '%s\n' "$directory"
+    # A nested module without a Cargo root is not an integration target. Do
+    # not emit its directory name: Cargo would reject it as a phantom target.
 }
 
 add_required_test_target() {
     local target="$1" known
+    [[ -n "$target" ]] || return 0
+    cargo_test_target_exists "$target" || return 0
     for known in "${required_test_targets[@]}"; do
         [[ "$known" == "$target" ]] && return 0
     done
@@ -190,7 +279,12 @@ is_builtin_skill_or_agent_path() {
 }
 
 test_target_for_path() {
-    local test_path="$1"
+    local test_path="$1" manifest_target
+    manifest_target="$(manifest_test_target_for_path "$test_path" || true)"
+    if [[ -n "$manifest_target" ]] && cargo_test_target_exists "$manifest_target"; then
+        printf '%s\n' "$manifest_target"
+        return 0
+    fi
     case "$test_path" in
         cas-cli/tests/*/*.rs)
             integration_target_for "${test_path#cas-cli/tests/}"
@@ -244,7 +338,7 @@ discover_source_integration_targets() {
         [[ "$symbol_filter" == factory_* ]] && symbol_filter="${symbol_filter#factory_}"
         symbol_patterns+=(
             -e
-            "^[[:space:]]*(pub([[:space:]]*\\([^)]*\\))?[[:space:]]+)?(async[[:space:]]+)?fn[[:space:]]+[[:alnum:]_]*${symbol_filter}[[:alnum:]_]*[[:space:]]*\\("
+            "^[[:space:]]*[^/].*([^[:alnum:]_]|^)${module_path}::${symbol_filter}([^[:alnum:]_]|$)"
         )
     done < <(source_public_symbols_for "$source_file")
 
@@ -257,7 +351,7 @@ discover_source_integration_targets() {
     # close diff needlessly expensive.
     if matched_paths="$(search_test_paths regex \
         -e "^[[:space:]]*(pub[[:space:]]+)?use[[:space:]].*${module_path}([[:space:];:{]|$)" \
-        -e "^[[:space:]]*[^/].*${module_path}" \
+        -e "^[[:space:]]*[^/].*([^[:alnum:]_]|^)${module_path}::[[:alnum:]_]" \
         -e "^[[:space:]]*[^/].*(include_str!|include_bytes!|Path|read_to_string).*${source_path}" \
         2>/dev/null)"; then
         :
@@ -275,10 +369,9 @@ discover_source_integration_targets() {
         add_required_test_target "$(test_target_for_path "$test_path")"
     done <<<"$matched_paths"
 
-    # Service methods commonly have a `factory_` implementation prefix while
-    # public integration test names use the API suffix (`factory_worker_status`
-    # -> `test_worker_status_*`). Match only test declarations, so comments
-    # and fixture strings cannot claim a target.
+    # Public integration tests must reference the changed module or a
+    # qualified public symbol. Bare test-name collisions are not evidence that
+    # a test exercises the source module.
     if [[ ${#symbol_patterns[@]} -gt 0 ]]; then
         if matched_paths="$(search_test_paths regex "${symbol_patterns[@]}" 2>/dev/null)"; then
             :
@@ -434,9 +527,15 @@ if [[ "$resolve_targets" == true ]]; then
     for module in "${required_lib_modules[@]}"; do
         if ! contains_exact "$module" "${emitted_lib_modules[@]}"; then
             emitted_lib_modules+=("$module")
-            printf ' --lib %s' "$module"
         fi
     done
+    # Cargo accepts one --lib flag followed by any number of positional
+    # nextest filters. Repeating --lib makes the generated proof command
+    # invalid before it can reach the surface guard.
+    if [[ ${#emitted_lib_modules[@]} -gt 0 ]]; then
+        printf ' --lib'
+        printf ' %s' "${emitted_lib_modules[@]}"
+    fi
     for target in "${required_test_targets[@]}"; do
         printf ' --test %s' "$target"
     done

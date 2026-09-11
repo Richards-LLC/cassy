@@ -247,7 +247,7 @@ fn inject_role_guidance(
     {
         guidance.push_str(
             "\n\n## Codex Worker Coordination Note\n\
-Workers are running Codex. Be explicit in assignments: include task id, acceptance criteria, required checks, and update cadence. Require worker ACK + task start confirmation, and send corrective prompts if progress updates are missing. For task closure, Codex workers should ask you to verify and close on their behalf; you may use task-verifier or direct mcp__cas__verification.",
+Workers are running Codex. Be explicit in assignments: include task id, acceptance criteria, required checks, and update cadence. Successful task action=start is authoritative assignment acceptance; no prose ACK is required. Ordinary worker updates surface through the inbox on the next turn; only authenticated typed blocker, merge, verification, or lifecycle events may wake an idle supervisor. Read task state and execution evidence before sending corrective prompts. For task closure, Codex workers should ask you to verify and close on their behalf; you may use task-verifier or direct mcp__cas__verification.",
         );
     }
     *total_tokens += estimate_tokens(&guidance);

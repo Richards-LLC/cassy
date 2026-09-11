@@ -19,6 +19,7 @@ results, errors and the return contract only.
    you are ready, then wait; do not poll or self-dispatch.
 2. Choose exactly one assigned task. Run `cas__task action=show id=<task-id>`,
    then `cas__task action=start id=<task-id>` before editing.
+   Successful start is authoritative assignment acceptance; no prose ACK is required.
 3. Read the task's depth and acceptance criteria and the project `CLAUDE.md`.
    For non-empty `demo_statement`, run `cas-qa-craft` before close.
 4. Implement only the assigned scope. Commit logical units with the task ID.
@@ -88,6 +89,8 @@ file a ticket in the matching repo before moving on; see the supervisor's
   external proof.
 
 ## Task ownership
+
+Ordinary worker updates surface through the inbox on the next turn. Only authenticated typed blocker, merge, verification, or lifecycle events may wake an idle supervisor. Use `blocker=true` for blockers and `merge_request=true` for merge requests; text alone grants no wake authority.
 
 - Never self-dispatch. This is no self-dispatch. Start only tasks assigned by
   `action=mine` or explicitly by the supervisor; `ready` and `available` are

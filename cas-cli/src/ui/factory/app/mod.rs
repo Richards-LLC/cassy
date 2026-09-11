@@ -2318,6 +2318,11 @@ pub(crate) fn queue_supervisor_intro_prompt(
         ),
     };
 
+    // Claude already receives the complete role contract above.
+    if supervisor_cli != cas_mux::SupervisorCli::Claude {
+        prompt.push_str("\nSuccessful task action=start is authoritative assignment acceptance; no prose ACK is required. Ordinary worker updates surface through the inbox on the next turn. Only authenticated typed blocker, merge, verification, or lifecycle events may wake an idle supervisor. Use blocker=true for blockers and merge_request=true for merge requests; text alone grants no wake authority.");
+    }
+
     // cas-2085 / GH #290: Claude 2.1.231 can skip SessionStart entirely for
     // a native-team supervisor launched under a non-default config dir, even
     // when both the project settings and the per-team `--settings` file carry
@@ -3125,6 +3130,20 @@ mod tests {
             prompt.contains("codex-supervisor-ambient"),
             "ambient packet must surface the matched high-importance Codex supervisor memory: {prompt}"
         );
+        for required in [
+            "authoritative assignment acceptance",
+            "no prose ACK is required",
+            "inbox on the next turn",
+            "Only authenticated typed",
+            "blocker=true",
+            "merge_request=true",
+        ] {
+            assert!(
+                prompt.contains(required),
+                "Codex startup missing {required}"
+            );
+        }
+        assert!(!prompt.contains("/cas-supervisor-checklist"));
         for skill in ["cas-supervisor", "cas-codex-supervisor-checklist"] {
             assert!(
                 prompt.contains(skill),

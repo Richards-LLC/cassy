@@ -166,6 +166,12 @@ const CANON_HETERO: &str = "## Heterogeneous Teams (<FLAVOR_MIX>)";
 fn canonicalize(content: &str) -> String {
     let mut out = content.to_string();
 
+    // Codex loads its dedicated checklist; the shared hook guide names each harness.
+    out = out.replace(
+        "Use the checklist for your harness: `cas-codex-supervisor-checklist` on Codex; `cas-supervisor-checklist` on Claude, Grok, or OpenCode",
+        "Use `cas-codex-supervisor-checklist`",
+    );
+
     // CAS tool prefix. Longest first: `mcp__cas__` and `mcp__cs__` both end in
     // a string containing `cas__`/`cs__`.
     for pat in ["mcp__cas__", "mcp__cs__", "cas__"] {

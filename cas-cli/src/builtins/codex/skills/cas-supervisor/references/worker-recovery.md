@@ -85,16 +85,16 @@ Workers fail in production. These are recurring observed failure modes and their
 
 ### Injected but Unwoken Worker
 
-**Signature:** Heartbeat is fresh, worktree is clean, and there is zero activity for 10+ minutes after a supervisor message. The prompt was injected into the worker session, but the worker did not acknowledge or act. This is most often triggered by long multi-line payloads sent to Codex workers.
+**Signature:** Heartbeat is fresh, worktree is clean, and there is zero activity for 10+ minutes after a supervisor message. Delivery and acceptance are separate: inspect transport receipts, task state, and execution evidence before concluding the worker is stuck.
 
 **Diagnosis:**
 1. Confirm a fresh heartbeat with `mcp__cs__coordination action=worker_status`
-2. Confirm no work started: `git -C .cas/worktrees/<worker> status --short`
+2. Read `mcp__cs__task action=show id=<task-id>`: a successful start is authoritative assignment acceptance. A clean `git -C .cas/worktrees/<worker> status --short` alone does not prove inactivity.
 3. Check prompt delivery state:
    ```bash
    sqlite3 .cas/cas.db "SELECT id, processed_at, acked_at FROM prompt_queue WHERE target='<name>' ORDER BY id DESC LIMIT 5"
    ```
-   If the latest relevant row has `processed_at` set and `acked_at` NULL, the prompt was injected but not acknowledged.
+   A set `processed_at` records transport processing; `acked_at` records queue acknowledgement. Neither is assignment acceptance or execution proof. Use `queue_ack` for durable supervisor notifications and `message_ack` for prompt-message receipts; lifecycle relay acknowledgements reconcile linked rows. Neither replaces `task action=start`. Missing prose ACK alone is not a recovery trigger.
 
 **Recovery:**
 1. Ensure the work exists as an assigned task with full spec and acceptance criteria.

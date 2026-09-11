@@ -19171,6 +19171,7 @@ mod merge_state_gate_tests {
             p,
             &["commit", "-q", "-m", "fix(cas-test1): add follow-up"],
         );
+        let later_content = rev_parse_local(p, "HEAD");
         git(p, &["checkout", "-q", "main"]);
         std::fs::write(p.join("target-only.rs"), "// target-only\n").unwrap();
         git(p, &["add", "target-only.rs"]);
@@ -19213,6 +19214,25 @@ mod merge_state_gate_tests {
             ),
             "a worker-owned merge resolution must count as delivered task content"
         );
+
+        // A validated receipt may name that later content commit directly;
+        // the merge-tip proof must honor it as the delivery boundary too.
+        let receipt_window = window_at(0, "GH #840 receipt regression");
+        let mut receipt_req = base_req(&task.id);
+        receipt_req.commit_receipt = Some(later_content.clone());
+        assert!(matches!(
+            run_factory_branch_merge_gate_with_attribution(
+                &task,
+                &receipt_req,
+                "main",
+                p,
+                TaskCommitAttribution {
+                    receipt: Some(&later_content),
+                    window: Some(&receipt_window),
+                },
+            ),
+            MergeStateGateOutcome::Proceed
+        ));
     }
 
     /// A target-sync merge with no task-attributed content must remain

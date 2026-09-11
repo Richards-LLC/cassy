@@ -1,6 +1,7 @@
 //! Shared task delivery attribution for close gates and their receipt display.
 use super::*;
 
+use std::collections::HashSet;
 use std::path::Path;
 use std::process::Command;
 
@@ -337,6 +338,11 @@ pub(super) fn merge_tip_content_presence(
         return None;
     }
 
+    // GH #840: a worker-owned merge can replace an earlier task hunk before
+    // the final merge tip is integrated. When the tip and target agree on a
+    // delivered path, preserve that final tree effect instead of requiring
+    // the original non-merge patch to remain byte-for-byte applicable.
+    let merge_tip_paths = merge_tip_tree_effect_paths(repo, &target, merge_tip, &commits)?;
     let mut present_paths = Vec::new();
     let mut superseded_paths = Vec::new();
     let mut superseding_commits = Vec::new();
@@ -352,7 +358,13 @@ pub(super) fn merge_tip_content_presence(
                 append_unique(&mut superseding_commits, commits);
             }
             DeliveryContentPresence::Dropped { paths } => {
-                append_unique(&mut dropped_paths, paths);
+                append_unique(
+                    &mut dropped_paths,
+                    paths
+                        .into_iter()
+                        .filter(|path| !merge_tip_paths.contains(path))
+                        .collect(),
+                );
             }
             DeliveryContentPresence::Unknown { reason } => {
                 unknown_reason.get_or_insert(reason);
@@ -388,6 +400,64 @@ fn append_unique(values: &mut Vec<String>, additions: Vec<String>) {
         if !values.contains(&value) {
             values.push(value);
         }
+    }
+}
+
+/// Paths whose final merge-tip tree effect is the task delivery, even when an
+/// earlier non-merge task commit's exact patch no longer applies.
+///
+/// A worker can resolve a target-sync merge on top of an earlier task commit,
+/// replacing its hunk while retaining the intended path. The old attribution
+/// check only inspected each non-merge commit against the target and therefore
+/// reported that earlier hunk as dropped. Compare the merge tip to the
+/// authoritative target per delivered path, but require the merge tip to
+/// differ from at least one task commit's first parent. That last predicate
+/// preserves the genuinely-empty/reverted-delivery rejection.
+fn merge_tip_tree_effect_paths(
+    repo: &Path,
+    target: &str,
+    merge_tip: &str,
+    commits: &[String],
+) -> Option<HashSet<String>> {
+    let mut paths = HashSet::new();
+    for commit in commits {
+        let parent_ref = format!("{commit}^1");
+        let parent = git_text(repo, &["rev-parse", &parent_ref])?;
+        let changed = git_text(
+            repo,
+            &["diff", "--name-only", "--no-renames", &parent, commit, "--"],
+        )?;
+        for path in changed.lines().filter(|path| !path.is_empty()) {
+            let anchor_path = format!("{merge_tip}:{path}");
+            let anchor_exists = Command::new("git")
+                .args(["cat-file", "-e", &anchor_path])
+                .current_dir(repo)
+                .status()
+                .ok()?
+                .success();
+            if !anchor_exists {
+                continue;
+            }
+            let anchor_matches_target = git_diff_is_empty(repo, merge_tip, target, path)?;
+            let anchor_differs_from_parent = !git_diff_is_empty(repo, &parent, merge_tip, path)?;
+            if anchor_matches_target && anchor_differs_from_parent {
+                paths.insert(path.to_string());
+            }
+        }
+    }
+    Some(paths)
+}
+
+fn git_diff_is_empty(repo: &Path, left: &str, right: &str, path: &str) -> Option<bool> {
+    let status = Command::new("git")
+        .args(["diff", "--quiet", "--no-renames", left, right, "--", path])
+        .current_dir(repo)
+        .status()
+        .ok()?;
+    match status.code() {
+        Some(0) => Some(true),
+        Some(1) => Some(false),
+        _ => None,
     }
 }
 

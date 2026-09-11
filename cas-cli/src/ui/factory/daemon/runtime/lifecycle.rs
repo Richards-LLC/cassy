@@ -879,10 +879,17 @@ mod worker_attention_tests {
                     );
                 }
             }
-            assert!(row.prompt.contains("gate said \"retry\"\nthen inspect"), "rejection context stays verbatim");
-            assert!(row.prompt.contains(&format!(
-                "{prefix}task action=close id=cas-merged supervisor_override=true reason=\"merged delivery verified\""
-            )), "audit reason must remain a valid argument: {}", row.prompt);
+            assert!(
+                row.prompt.contains("gate said \"retry\"\nthen inspect"),
+                "rejection context stays verbatim"
+            );
+            assert!(
+                row.prompt.contains(&format!(
+                    "{prefix}task action=close id=cas-merged supervisor_override=true reason=\"merged delivery verified\""
+                )),
+                "audit reason must remain a valid argument: {}",
+                row.prompt
+            );
             assert_eq!(row.origin, Some(cas_store::QueueOrigin::Daemon));
             assert!(crate::prompt_revalidation::is_supervisor_wake_envelope(
                 &row.prompt

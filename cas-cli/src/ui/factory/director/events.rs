@@ -115,7 +115,7 @@ fn render_merged_close_blocked(tasks: &[MergedCloseBlockedTask], tool_prefix: &s
         .iter()
         .map(|task| {
             format!(
-                "- {}: {} anchor {} is already reachable from {} @ {}. Last close rejection: {}. Suggested close: `{tool_prefix}task action=close id={}` (or supervisor `{tool_prefix}task action=close id={} supervisor_override=true reason=\"merged delivery verified; close rejection: {}\"`).",
+                "- {}: {} anchor {} is already reachable from {} @ {}. Last close rejection: {}. Suggested close: `{tool_prefix}task action=close id={}` (or supervisor `{tool_prefix}task action=close id={} supervisor_override=true reason=\"merged delivery verified\"`).",
                 task.task_id,
                 task.factory_branch,
                 task.anchor,
@@ -124,7 +124,6 @@ fn render_merged_close_blocked(tasks: &[MergedCloseBlockedTask], tool_prefix: &s
                 task.close_rejection,
                 task.task_id,
                 task.task_id,
-                task.close_rejection,
             )
         })
         .collect::<Vec<_>>()
@@ -250,15 +249,16 @@ impl SupervisorStallTracker {
                 .then(|| action.merged_close_blocked_relay_key())
                 .flatten()
         });
-        let merged_state_repeated = merged_key
-            .as_ref()
-            .is_some_and(|key| self.last_merged_close_blocked_key.as_ref() == Some(key));
+        let merged_state_repeated = merged_key.as_ref().is_some_and(|key| {
+            self.last_merged_close_blocked_key.as_ref() == Some(key)
+        });
         let wake = if condition_true
             && if merged_key.is_some() {
                 !merged_state_repeated
             } else {
                 refire_due
-            } {
+            }
+        {
             self.last_wake_at = Some(now);
             self.last_merged_close_blocked_key = merged_key;
             actionable

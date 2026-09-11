@@ -896,7 +896,21 @@ fn required_scoped_proof_targets(
         .collect()
 }
 
-fn scoped_proof_note_targets(notes: &str) -> Option<String> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ScopedProofReceipt {
+    targets: String,
+    base: Option<String>,
+}
+
+fn scoped_proof_receipt_field(line: &str, field: &str) -> Option<String> {
+    let lower = line.to_ascii_lowercase();
+    let start = lower.find(&field.to_ascii_lowercase())? + field.len();
+    let value = line[start..].split_whitespace().next()?;
+    let value = value.trim_matches(|character: char| ",;)]}".contains(character));
+    (!value.is_empty()).then(|| value.to_string())
+}
+
+fn scoped_proof_note_receipt(notes: &str) -> Option<ScopedProofReceipt> {
     // A later proof note may supersede an earlier partial receipt after a
     // supervisor expands the required target set. Keep the latest passing
     // receipt so close does not revalidate stale scope forever.
@@ -908,15 +922,27 @@ fn scoped_proof_note_targets(notes: &str) -> Option<String> {
                 return None;
             }
             let targets = line.split_once("targets=")?.1;
-            Some(
-                targets
-                    .split_once("result=")
-                    .map_or(targets, |(value, _)| value)
-                    .trim()
-                    .to_string(),
-            )
+            let targets = targets
+                .split_once("result=")
+                .map_or(targets, |(value, _)| value);
+            let targets = targets
+                .split_once("base=")
+                .map_or(targets, |(value, _)| value);
+            let targets = targets.trim().to_string();
+            let base = ["SCOPED_PROOF_BASE=", "base_sha=", "base="]
+                .into_iter()
+                .find_map(|field| scoped_proof_receipt_field(line, field));
+            Some(ScopedProofReceipt { targets, base })
         })
         .last()
+}
+
+fn scoped_proof_note_targets(notes: &str) -> Option<String> {
+    scoped_proof_note_receipt(notes).map(|receipt| receipt.targets)
+}
+
+fn scoped_proof_note_base(notes: &str) -> Option<String> {
+    scoped_proof_note_receipt(notes).and_then(|receipt| receipt.base)
 }
 
 fn scoped_proof_note_covers(notes: &str, required_targets: &[String]) -> Vec<String> {
@@ -934,6 +960,16 @@ fn scoped_proof_note_covers(notes: &str, required_targets: &[String]) -> Vec<Str
         })
         .cloned()
         .collect()
+}
+
+fn scoped_proof_command(required_targets: &[String], base: Option<&str>) -> String {
+    let prefix = base
+        .map(|base| format!("SCOPED_PROOF_BASE={base} "))
+        .unwrap_or_default();
+    format!(
+        "{prefix}scripts/run-scoped-tests.sh --proof -p cas --lib --test {}",
+        required_targets.join(" --test ")
+    )
 }
 
 /// Convert changed Rust source paths into the module names that the scoped
@@ -980,6 +1016,15 @@ fn validate_risk_close_proofs(
     changed_paths: &[String],
     proof_repo: &std::path::Path,
 ) -> Result<(), String> {
+    validate_risk_close_proofs_with_base(task, changed_paths, proof_repo, None)
+}
+
+fn validate_risk_close_proofs_with_base(
+    task: &Task,
+    changed_paths: &[String],
+    proof_repo: &std::path::Path,
+    expected_base: Option<&str>,
+) -> Result<(), String> {
     if task.risk.contains(&TaskRisk::Platform) && !has_platform_proof_note(&task.notes) {
         return Err(format!(
             "TASK CLOSE REJECTED: task {} declares risk=platform but has no platform_proof note containing the macOS proof command and passing result. Add one with action=notes note_type=platform_proof, then retry close.",
@@ -1004,13 +1049,24 @@ fn validate_risk_close_proofs(
     }
     let required_targets = required_scoped_proof_targets(proof_repo, changed_paths);
     if !required_targets.is_empty() {
+        if let Some(expected_base) = expected_base {
+            let actual_base = scoped_proof_note_base(&task.notes);
+            if actual_base.as_deref() != Some(expected_base) {
+                return Err(format!(
+                    "TASK CLOSE REJECTED: task {} scoped proof receipt has base {:?}, but its declared WorkTarget requires SCOPED_PROOF_BASE={expected_base}. Run `{}` and add the resulting passing receipt to a progress note.",
+                    task.id,
+                    actual_base.as_deref(),
+                    scoped_proof_command(&required_targets, Some(expected_base)),
+                ));
+            }
+        }
         let missing = scoped_proof_note_covers(&task.notes, &required_targets);
         if !missing.is_empty() {
             return Err(format!(
-                "TASK CLOSE REJECTED: task {} changed a module with integration-test proof targets that were not run or recorded as passing; missing targets: {}. Run `scripts/run-scoped-tests.sh --proof -p cas --lib --test {}` and add `SCOPED_PROOF: targets=<complete target set> result=PASS` to a progress note before retrying close. If the scoped command cannot run, a registered supervisor may record an equivalent full `cargo nextest run -p cas` receipt with its durable log path in the note; every real required target must be covered.",
+                "TASK CLOSE REJECTED: task {} changed a module with integration-test proof targets that were not run or recorded as passing; missing targets: {}. Run `{}` and add `SCOPED_PROOF: targets=<complete target set> result=PASS` to a progress note before retrying close. If the scoped command cannot run, a registered supervisor may record an equivalent full `cargo nextest run -p cas` receipt with its durable log path in the note; every real required target must be covered.",
                 task.id,
                 missing.join(", "),
-                required_targets.join(" --test "),
+                scoped_proof_command(&required_targets, expected_base),
             ));
         }
     }
@@ -1197,6 +1253,41 @@ mod risk_proof_tests {
 
         validate_risk_close_proofs(&task, &changed, dir.path())
             .expect("a later complete receipt should supersede an earlier partial receipt");
+    }
+
+    #[test]
+    fn scoped_proof_work_target_receipt_requires_matching_base() {
+        let expected_base = "a".repeat(40);
+        let dir = scoped_proof_fixture();
+        assert_eq!(
+            scoped_proof_command(
+                &[
+                    "factory_ops".to_string(),
+                    "factory_mcp_ops_test".to_string(),
+                ],
+                Some(&expected_base),
+            ),
+            format!(
+                "SCOPED_PROOF_BASE={expected_base} scripts/run-scoped-tests.sh --proof -p cas --lib --test factory_ops --test factory_mcp_ops_test"
+            )
+        );
+        let mut task = Task::new("cas-work-target-proof".into(), "work target proof".into());
+        task.notes = format!(
+            "[2026-09-11] 📝 PROGRESS SCOPED_PROOF: SCOPED_PROOF_BASE={expected_base} targets=lib:factory_ops,test:factory_mcp_ops_test result=PASS"
+        );
+        let changed = vec!["cas-cli/src/mcp/tools/service/factory_ops.rs".to_string()];
+
+        validate_risk_close_proofs_with_base(&task, &changed, dir.path(), Some(&expected_base))
+            .expect("a scoped receipt with the WorkTarget merge base should pass");
+
+        task.notes = task.notes.replace(&expected_base, &"b".repeat(40));
+        let error =
+            validate_risk_close_proofs_with_base(&task, &changed, dir.path(), Some(&expected_base))
+                .expect_err(
+                    "a scoped receipt from origin/main must not satisfy a WorkTarget close",
+                );
+        assert!(error.contains("SCOPED_PROOF_BASE"), "{error}");
+        assert!(error.contains(&expected_base), "{error}");
     }
 
     #[test]
@@ -5242,7 +5333,19 @@ impl CasCore {
                 })
                 .filter(|paths| !paths.is_empty())
                 .unwrap_or_else(|| task.deliverables.files_changed.clone());
-            if let Err(message) = validate_risk_close_proofs(&task, &changed_paths, proof_repo) {
+            let scoped_proof_base = declared_repo_context.as_ref().and_then(|context| {
+                scoped_proof_base_for_work_target(
+                    proof_repo,
+                    &context.repo_root,
+                    &context.target_branch,
+                )
+            });
+            if let Err(message) = validate_risk_close_proofs_with_base(
+                &task,
+                &changed_paths,
+                proof_repo,
+                scoped_proof_base.as_deref(),
+            ) {
                 return Ok(Self::tool_error(message));
             }
         }
@@ -9342,6 +9445,28 @@ pub(crate) fn git_merge_base(
     } else {
         None
     }
+}
+
+/// Resolve the immutable baseline a scoped proof must use for a declared
+/// WorkTarget. The worker's HEAD is intentionally taken from `proof_repo`,
+/// while the target branch is resolved from the WorkTarget repository. This
+/// matters when the primary checkout is parked on another branch or the
+/// worker is a linked worktree. A target tip is a safe fallback when the
+/// merge-base cannot be queried, and keeps the close instruction actionable.
+fn scoped_proof_base_for_work_target(
+    proof_repo: &std::path::Path,
+    target_repo: &std::path::Path,
+    target_branch: &str,
+) -> Option<String> {
+    let target_ref = [
+        target_branch.to_string(),
+        format!("refs/heads/{target_branch}"),
+        format!("refs/remotes/origin/{target_branch}"),
+    ]
+    .into_iter()
+    .find(|candidate| resolve_branch_sha(target_repo, candidate).is_some())?;
+    git_merge_base(proof_repo, "HEAD", &target_ref)
+        .or_else(|| resolve_branch_sha(target_repo, &target_ref))
 }
 
 /// Resolve the git repository that owns `cas_root` for close-time enforcement.

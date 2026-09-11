@@ -1285,3 +1285,38 @@ fn code_index_defers_while_busy_then_overrides_at_the_ceiling() {
 fn code_index_max_staleness_is_five_minutes() {
     assert_eq!(CODE_INDEX_MAX_STALENESS_SECS, 300);
 }
+
+#[test]
+fn recovery_guidance_registration_records_supervisor_harness_not_worker_default() {
+    let _env = crate::test_env_guard::TestEnvGuard::with_optional_vars(&[
+        ("CAS_AGENT_ROLE", Some("supervisor")),
+        ("CAS_FACTORY_SUPERVISOR_CLI", Some("codex")),
+        ("CAS_FACTORY_WORKER_CLI", Some("claude")),
+    ]);
+    let mut agent = Agent::new("recovery-supervisor".into(), "supervisor".into());
+    agent.role = AgentRole::Supervisor;
+    apply_factory_worker_metadata(&mut agent, None);
+    assert_eq!(
+        agent.metadata.get("supervisor_cli").map(String::as_str),
+        Some("codex")
+    );
+    assert!(!agent.metadata.contains_key("worker_cli"));
+}
+
+#[test]
+fn recovery_guidance_registration_keeps_recipient_harness_evidence_optional() {
+    let mut env = crate::test_env_guard::TestEnvGuard::new();
+    let mut agent = Agent::new("recipient".into(), "recipient".into());
+    agent.role = AgentRole::Supervisor;
+    apply_factory_worker_metadata(&mut agent, None);
+    assert!(!agent.metadata.contains_key("supervisor_cli"));
+    for harness in ["claude", "codex", "grok", "opencode"] {
+        env.set("CAS_FACTORY_SUPERVISOR_CLI", harness);
+        env.set("CAS_FACTORY_WORKER_CLI", "claude");
+        apply_factory_worker_metadata(&mut agent, None);
+        assert_eq!(
+            agent.metadata.get("supervisor_cli").map(String::as_str),
+            Some(harness)
+        );
+    }
+}

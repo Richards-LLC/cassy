@@ -7,6 +7,15 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.25.5] - 2026-09-11
+
+### Fixed
+
+- Commander pairing on macOS no longer fails after `cas update` when the Tailscale app is installed without a PATH CLI. The hub resolves the app-bundle CLI at `/Applications/Tailscale.app/Contents/MacOS/Tailscale` (or `~/Applications`), invokes it by its real path, and records the resolved path.
+- `cas update` keeps a previously published hub public URL: a failed Tailscale Serve republication is reported as a hub transport error in the update banner and JSON receipt while the project refresh still completes, instead of a silent loopback fallback or an aborted update.
+- `cas hub authorize` names the actual transport cause (which Tailscale CLI locations were checked) and prescribes `cas hub restart --tailscale-serve`; the previous `service uninstall` advice is gone from authorize, readiness and status remedies.
+- `cas doctor` and `cas hub status` warn when the hub is loopback-only while Tailscale is signed in on the host.
+
 ## [3.25.4] - 2026-09-11
 
 ### Added

@@ -2236,6 +2236,10 @@ async fn test_worker_status_empty() {
         text.contains("No active agents"),
         "Should report no agents: {text}"
     );
+    assert!(
+        text.contains("Factory session: none (unscoped) | registered worker rows visible: 0"),
+        "empty status must identify its unscoped session: {text}"
+    );
 }
 
 #[tokio::test]
@@ -2925,6 +2929,150 @@ async fn test_worker_status_scopes_agents_to_factory_session() {
     assert!(
         !text.contains("plain-worker"),
         "NULL-session plain CC worker must be hidden from factory director: {text}"
+    );
+}
+
+#[tokio::test]
+async fn test_worker_status_reports_scope_for_empty_summary_and_owned_roster() {
+    let _guard = EnvGuard::set(&[("CAS_FACTORY_SESSION", "session-a")]);
+    let env = FactoryTestEnv::new();
+    env.register_worker_in_session("foreign-b", "session-b");
+
+    let full = get_text(
+        &env.service
+            .factory(Parameters(factory_req("worker_status")))
+            .await
+            .expect("empty scoped worker_status should succeed"),
+    );
+    assert!(
+        full.contains(
+            "Factory session: session-a | registered worker rows in scope: 0; registered rows outside this session on clone: 1"
+        ),
+        "empty full status must show scoped and foreign counts: {full}"
+    );
+    assert!(
+        full.contains("No active agents registered in this scope."),
+        "empty full status must explain the scoped zero: {full}"
+    );
+    assert!(
+        !full.contains("foreign-b"),
+        "foreign worker must remain contextual, not owned: {full}"
+    );
+
+    let mut summary_request = factory_req("worker_status");
+    summary_request.summary = Some(true);
+    let summary = get_text(
+        &env.service
+            .factory(Parameters(summary_request.clone()))
+            .await
+            .expect("empty scoped worker_status summary should succeed"),
+    );
+    assert!(
+        summary.contains(
+            "Factory session: session-a | registered worker rows in scope: 0; registered rows outside this session on clone: 1"
+        ),
+        "empty summary must show scoped and foreign counts: {summary}"
+    );
+    assert!(
+        summary.contains("No registered workers in this factory session."),
+        "empty summary must be nonempty and explicit: {summary}"
+    );
+    assert!(
+        !summary.contains("foreign-b"),
+        "summary must not imply ownership of a foreign worker: {summary}"
+    );
+
+    env.register_worker_in_session("owned-a", "session-a");
+    let full = get_text(
+        &env.service
+            .factory(Parameters(factory_req("worker_status")))
+            .await
+            .expect("owned worker_status should succeed"),
+    );
+    assert!(
+        full.contains(
+            "Factory session: session-a | registered worker rows in scope: 1; registered rows outside this session on clone: 1"
+        ),
+        "owned full status must retain scope counts: {full}"
+    );
+    assert!(full.contains("Workers (1):"), "owned roster count must be explicit: {full}");
+    assert!(full.contains("owned-a"), "owned worker must be visible: {full}");
+    assert!(!full.contains("foreign-b"), "foreign worker must stay hidden: {full}");
+
+    let summary = get_text(
+        &env.service
+            .factory(Parameters(summary_request))
+            .await
+            .expect("owned worker_status summary should succeed"),
+    );
+    assert!(
+        summary.contains("registered worker rows in scope: 1; registered rows outside this session on clone: 1"),
+        "owned summary must retain scope counts: {summary}"
+    );
+    assert!(summary.contains("owned-a"), "owned worker must be summarized: {summary}");
+    assert!(!summary.contains("foreign-b"), "foreign worker must stay out of summary: {summary}");
+}
+
+#[tokio::test]
+async fn test_worker_status_summary_names_no_factory_context() {
+    let _guard = EnvGuard::set_optional(&[("CAS_FACTORY_SESSION", None)]);
+    let env = FactoryTestEnv::new();
+    env.register_worker("unscoped-worker");
+
+    let mut request = factory_req("worker_status");
+    request.summary = Some(true);
+    let summary = get_text(
+        &env.service
+            .factory(Parameters(request))
+            .await
+            .expect("unscoped worker_status summary should succeed"),
+    );
+    assert!(
+        summary.contains("Factory session: none (unscoped) | registered worker rows visible: 1"),
+        "summary must name the lack of factory context: {summary}"
+    );
+    assert!(
+        summary.contains("unscoped-worker"),
+        "unscoped worker remains visible for legacy callers: {summary}"
+    );
+}
+
+#[tokio::test]
+async fn test_worker_status_summary_counts_scoped_duplicate_before_dedupe() {
+    let _guard = EnvGuard::set(&[("CAS_FACTORY_SESSION", "session-a")]);
+    let env = FactoryTestEnv::new();
+    let store = env.agent_store();
+    let now = chrono::Utc::now();
+
+    let mut scoped = Agent::new("scoped-id".to_string(), "same-name".to_string());
+    scoped.role = AgentRole::Worker;
+    scoped.factory_session = Some("session-a".to_string());
+    scoped.last_heartbeat = now - chrono::Duration::seconds(10);
+    store.register(&scoped).expect("register scoped duplicate");
+
+    let mut foreign = Agent::new("foreign-id".to_string(), "same-name".to_string());
+    foreign.role = AgentRole::Worker;
+    foreign.factory_session = Some("session-b".to_string());
+    foreign.last_heartbeat = now;
+    store.register(&foreign).expect("register fresher foreign duplicate");
+
+    let mut request = factory_req("worker_status");
+    request.summary = Some(true);
+    let summary = get_text(
+        &env.service
+            .factory(Parameters(request))
+            .await
+            .expect("duplicate worker_status summary should succeed"),
+    );
+    assert!(
+        summary.contains(
+            "Factory session: session-a | registered worker rows in scope: 1; registered rows outside this session on clone: 1"
+        ),
+        "scope counts must partition before dedupe: {summary}"
+    );
+    assert!(
+        summary.contains("same-name"),
+        "the scoped duplicate must remain the rendered worker: {summary}"
     );
 }
 

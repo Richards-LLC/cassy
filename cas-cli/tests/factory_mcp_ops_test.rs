@@ -2995,9 +2995,18 @@ async fn test_worker_status_reports_scope_for_empty_summary_and_owned_roster() {
         ),
         "owned full status must retain scope counts: {full}"
     );
-    assert!(full.contains("Workers (1):"), "owned roster count must be explicit: {full}");
-    assert!(full.contains("owned-a"), "owned worker must be visible: {full}");
-    assert!(!full.contains("foreign-b"), "foreign worker must stay hidden: {full}");
+    assert!(
+        full.contains("Workers (1):"),
+        "owned roster count must be explicit: {full}"
+    );
+    assert!(
+        full.contains("owned-a"),
+        "owned worker must be visible: {full}"
+    );
+    assert!(
+        !full.contains("foreign-b"),
+        "foreign worker must stay hidden: {full}"
+    );
 
     let summary = get_text(
         &env.service
@@ -3006,11 +3015,19 @@ async fn test_worker_status_reports_scope_for_empty_summary_and_owned_roster() {
             .expect("owned worker_status summary should succeed"),
     );
     assert!(
-        summary.contains("registered worker rows in scope: 1; registered rows outside this session on clone: 1"),
+        summary.contains(
+            "registered worker rows in scope: 1; registered rows outside this session on clone: 1"
+        ),
         "owned summary must retain scope counts: {summary}"
     );
-    assert!(summary.contains("owned-a"), "owned worker must be summarized: {summary}");
-    assert!(!summary.contains("foreign-b"), "foreign worker must stay out of summary: {summary}");
+    assert!(
+        summary.contains("owned-a"),
+        "owned worker must be summarized: {summary}"
+    );
+    assert!(
+        !summary.contains("foreign-b"),
+        "foreign worker must stay out of summary: {summary}"
+    );
 }
 
 #[tokio::test]
@@ -3054,7 +3071,9 @@ async fn test_worker_status_summary_counts_scoped_duplicate_before_dedupe() {
     foreign.role = AgentRole::Worker;
     foreign.factory_session = Some("session-b".to_string());
     foreign.last_heartbeat = now;
-    store.register(&foreign).expect("register fresher foreign duplicate");
+    store
+        .register(&foreign)
+        .expect("register fresher foreign duplicate");
 
     let mut request = factory_req("worker_status");
     request.summary = Some(true);

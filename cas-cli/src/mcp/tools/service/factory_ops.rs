@@ -3179,13 +3179,15 @@ impl CasService {
         // precisely the case where a failed or unconsumed spawn is the answer,
         // and the old output said only "None active", which reads like an
         // empty fleet rather than a spawn that died.
-        let spawn_section = factory_session.clone().and_then(|session| {
-            crate::store::open_spawn_queue_store(&self.inner.cas_root)
-                .ok()
-                .and_then(|queue| queue.recent_spawn_lifecycle(&session, 10).ok())
-        })
-        .map(|rows| format_spawn_lifecycle_section(&rows, chrono::Utc::now()))
-        .unwrap_or_default();
+        let spawn_section = factory_session
+            .clone()
+            .and_then(|session| {
+                crate::store::open_spawn_queue_store(&self.inner.cas_root)
+                    .ok()
+                    .and_then(|queue| queue.recent_spawn_lifecycle(&session, 10).ok())
+            })
+            .map(|rows| format_spawn_lifecycle_section(&rows, chrono::Utc::now()))
+            .unwrap_or_default();
 
         // cas-7787 (GH #160): lifecycle relays that expired without ever
         // reaching the supervisor. This goes FIRST, above the roster, and is
@@ -9179,11 +9181,8 @@ fn render_worker_liveness_summary_scoped(
     scoped_worker_count: usize,
     outside_scope_worker_count: usize,
 ) -> String {
-    let scope = render_worker_status_scope(
-        session,
-        scoped_worker_count,
-        outside_scope_worker_count,
-    );
+    let scope =
+        render_worker_status_scope(session, scoped_worker_count, outside_scope_worker_count);
     let workers = rows
         .iter()
         .map(|(name, observation)| observation.summary(name))

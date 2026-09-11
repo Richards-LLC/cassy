@@ -7,14 +7,16 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
 use cas_mux::{Mux, PaneKind};
+use cas_store::TaskStore;
 use chrono::{DateTime, Utc};
 use ratatui::layout::Rect;
 
 use super::director::{
     DiffLine, DirectorData, DirectorEvent, DirectorEventDetector, DirectorStores,
-    MergeAlertFreshness, PanelAreas, Prompt, SidecarFocus, ViewMode, check_merge_alert_freshness,
-    generate_prompt_at, prompt_is_still_deliverable, revalidate_event_for_delivery_with_context,
-    revalidate_event_for_delivery_with_focus, supervisor_actionable_state,
+    MergeAlertFreshness, MergedCloseBlockedTask, PanelAreas, Prompt, SidecarFocus, ViewMode,
+    check_merge_alert_freshness, generate_prompt_at, prompt_is_still_deliverable,
+    revalidate_event_for_delivery_with_context, revalidate_event_for_delivery_with_focus,
+    supervisor_actionable_state_with_merge_classifier,
 };
 use crate::store::open_prompt_queue_store;
 use crate::types::Worktree;
@@ -87,6 +89,24 @@ pub use cas_factory::{AutoPromptConfig, EpicState, FactoryConfig};
 pub use sidecar_and_selection::{
     ClickAction, ClientGeometryMode, GrokEscAction, ScrollAction, sgr_left_click_bytes,
 };
+
+fn git_is_ancestor(repo_root: &Path, ancestor: &str, descendant: &str) -> bool {
+    std::process::Command::new("git")
+        .args(["merge-base", "--is-ancestor", ancestor, descendant])
+        .current_dir(repo_root)
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+fn last_close_rejection_reason(notes: &str) -> Option<String> {
+    const MARKER: &str = "Close rejected: ";
+    const END: &str = ". Task parked as awaiting_merge";
+    notes.lines().rev().find_map(|line| {
+        let reason = line.split_once(MARKER)?.1.split_once(END)?.0.trim();
+        (!reason.is_empty()).then(|| reason.to_string())
+    })
+}
 
 /// Booting state for a worker that is being spawned (after prepare, before finish)
 #[derive(Debug, Clone)]
@@ -1165,6 +1185,50 @@ impl FactoryApp {
         self.cas_dir.parent().unwrap_or(&self.cas_dir).to_path_buf()
     }
 
+    /// Return merged-close-blocked evidence for a parked task only when its
+    /// task-specific delivery anchor is already reachable from the resolved
+    /// target. Missing task/Git evidence is deliberately treated as unknown,
+    /// preserving the existing merge demand rather than inventing a merged
+    /// verdict.
+    fn classify_merged_close_blocked_task(
+        &self,
+        task: &crate::ui::factory::director::TaskSummary,
+        factory_branch: &str,
+        target_branch: &str,
+        _factory_tip: Option<&str>,
+        repo_root: &Path,
+    ) -> Option<MergedCloseBlockedTask> {
+        let target_tip = crate::mcp::tools::core::task::lifecycle::close_ops::resolve_branch_sha(
+            repo_root,
+            target_branch,
+        )?;
+        let stores = self.director_stores.as_ref()?;
+        let parked = stores.task_store.get(&task.id).ok()?;
+        let anchor = parked
+            .deliverables
+            .factory_branch_anchor
+            .as_deref()
+            .map(str::trim)
+            .filter(|anchor| !anchor.is_empty())?;
+        let anchor_sha =
+            crate::mcp::tools::core::task::lifecycle::close_ops::resolve_branch_sha(
+                repo_root, anchor,
+            )?;
+        if !git_is_ancestor(repo_root, &anchor_sha, &target_tip) {
+            return None;
+        }
+
+        Some(MergedCloseBlockedTask {
+            task_id: task.id.clone(),
+            factory_branch: factory_branch.to_string(),
+            anchor: anchor.to_string(),
+            target_branch: target_branch.to_string(),
+            target_tip,
+            close_rejection: last_close_rejection_reason(&parked.notes)
+                .unwrap_or_else(|| "MERGE REQUIRED".to_string()),
+        })
+    }
+
     /// Refresh Cassy data from stores and detect state changes
     ///
     /// Returns the detected events. Prompt generation happens later, at
@@ -1277,7 +1341,7 @@ impl FactoryApp {
         let now = Utc::now();
         let held_workers = worker_holds_from_session_metadata_named(session).unwrap_or_default();
         let repo_root = self.delivery_repo_root();
-        let actionable = supervisor_actionable_state(
+        let actionable = supervisor_actionable_state_with_merge_classifier(
             &self.unfiltered_director_data,
             self.epic_state.epic_id().or(self.current_epic_id.as_deref()),
             &self.supervisor_name,
@@ -1288,6 +1352,15 @@ impl FactoryApp {
                 crate::mcp::tools::core::task::lifecycle::close_ops::resolve_branch_sha(
                     &repo_root,
                     branch,
+                )
+            },
+            |task, factory_branch, target_branch, factory_tip| {
+                self.classify_merged_close_blocked_task(
+                    task,
+                    factory_branch,
+                    target_branch,
+                    factory_tip,
+                    &repo_root,
                 )
             },
         );
@@ -1359,7 +1432,7 @@ impl FactoryApp {
         }
         let held_workers = worker_holds_from_session_metadata_named(session).unwrap_or_default();
         let repo_root = self.delivery_repo_root();
-        supervisor_actionable_state(
+        supervisor_actionable_state_with_merge_classifier(
             data,
             self.epic_state.epic_id().or(self.current_epic_id.as_deref()),
             &self.supervisor_name,
@@ -1370,6 +1443,15 @@ impl FactoryApp {
                 crate::mcp::tools::core::task::lifecycle::close_ops::resolve_branch_sha(
                     &repo_root,
                     branch,
+                )
+            },
+            |task, factory_branch, target_branch, factory_tip| {
+                self.classify_merged_close_blocked_task(
+                    task,
+                    factory_branch,
+                    target_branch,
+                    factory_tip,
+                    &repo_root,
                 )
             },
         )

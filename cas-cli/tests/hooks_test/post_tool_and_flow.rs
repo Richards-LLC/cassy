@@ -432,5 +432,3 @@ fn test_hook_configure_creates_settings() {
 // =============================================================================
 // Part F: Exit Blocking Tests
 // =============================================================================
-
-/// Helper to register an agent via CLI, returns agent ID

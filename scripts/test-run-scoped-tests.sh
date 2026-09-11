@@ -437,7 +437,7 @@ mkdir -p "${mapping_repo}/cas-cli/src/mcp/tools/service" "${mapping_repo}/cas-cl
 git -C "${mapping_repo}" init -q -b main
 printf 'pub(super) async fn factory_worker_status() {}\n' \
     >"${mapping_repo}/cas-cli/src/mcp/tools/service/factory_ops.rs"
-printf 'async fn test_worker_status() {}\n' \
+printf 'async fn test_worker_status() { mcp::tools::service::factory_ops::worker_status(); }\n' \
     >"${mapping_repo}/cas-cli/tests/factory_mcp_ops_test.rs"
 git -C "${mapping_repo}" add .
 git -C "${mapping_repo}" -c user.name=scoped-test-fixture -c user.email=scoped-test-fixture@example.invalid \
@@ -465,6 +465,96 @@ expect fail "missing integration target 'factory_mcp_ops_test'" \
 expect pass "SCOPED_PROOF: targets=lib:factory_ops,test:factory_mcp_ops_test result=PASS" \
     "proof: factory_ops public symbol maps to factory_mcp_ops_test" \
     bash -c "cd '${mapping_repo}' && '${SURFACE_GUARD}' --base main -- -p cas --lib factory_ops --test factory_mcp_ops_test"
+
+multi_module_repo="${tmpdir}/multi-module-repo"
+mkdir -p "${multi_module_repo}/cas-cli/src" "${multi_module_repo}/cas-cli/tests"
+git -C "${multi_module_repo}" init -q -b main
+printf 'pub fn first() {}\n' >"${multi_module_repo}/cas-cli/src/first.rs"
+printf 'pub fn second() {}\n' >"${multi_module_repo}/cas-cli/src/second.rs"
+git -C "${multi_module_repo}" add .
+git -C "${multi_module_repo}" -c user.name=scoped-test-fixture -c user.email=scoped-test-fixture@example.invalid \
+    commit -qm base
+git -C "${multi_module_repo}" checkout -qb proof
+printf '// first implementation changed\n' >>"${multi_module_repo}/cas-cli/src/first.rs"
+printf '// second implementation changed\n' >>"${multi_module_repo}/cas-cli/src/second.rs"
+git -C "${multi_module_repo}" add .
+git -C "${multi_module_repo}" -c user.name=scoped-test-fixture -c user.email=scoped-test-fixture@example.invalid \
+    commit -qm multi-module-change
+multi_module_targets="$(cd "${multi_module_repo}" && "${SURFACE_GUARD}" --resolve-targets --base main --)"
+if [[ "$multi_module_targets" == 'SCOPED_PROOF_TARGET_ARGS: --lib first second' ]]; then
+    pass_count=$((pass_count + 1))
+    echo "ok   proof resolver combines library filters under one --lib flag"
+else
+    fail_count=$((fail_count + 1))
+    echo "FAIL proof resolver repeated or dropped --lib filters: ${multi_module_targets}"
+fi
+
+phantom_repo="${tmpdir}/phantom-target-repo"
+mkdir -p "${phantom_repo}/cas-cli/src" "${phantom_repo}/cas-cli/tests/hooks_test"
+git -C "${phantom_repo}" init -q -b main
+printf 'mod helper {}\n' >"${phantom_repo}/cas-cli/tests/hooks_test/mod.rs"
+git -C "${phantom_repo}" add .
+git -C "${phantom_repo}" -c user.name=scoped-test-fixture -c user.email=scoped-test-fixture@example.invalid \
+    commit -qm base
+git -C "${phantom_repo}" checkout -qb proof
+printf 'mod helper {}\nmod changed {}\n' >"${phantom_repo}/cas-cli/tests/hooks_test/mod.rs"
+git -C "${phantom_repo}" add .
+git -C "${phantom_repo}" -c user.name=scoped-test-fixture -c user.email=scoped-test-fixture@example.invalid \
+    commit -qm phantom-target-change
+phantom_targets="$(cd "${phantom_repo}" && "${SURFACE_GUARD}" --resolve-targets --base main --)"
+if [[ "$phantom_targets" == 'SCOPED_PROOF_TARGET_ARGS:' ]]; then
+    pass_count=$((pass_count + 1))
+    echo "ok   proof resolver drops nested module without a Cargo target"
+else
+    fail_count=$((fail_count + 1))
+    echo "FAIL proof resolver emitted phantom target: ${phantom_targets}"
+fi
+
+collision_repo="${tmpdir}/collision-repo"
+mkdir -p "${collision_repo}/cas-cli/src" "${collision_repo}/cas-cli/tests"
+git -C "${collision_repo}" init -q -b main
+printf 'pub(super) fn supervisor_sessions() {}\n' >"${collision_repo}/cas-cli/src/hub.rs"
+printf '#[test] fn test_supervisor_sessions() {}\n' \
+    >"${collision_repo}/cas-cli/tests/hub_contract_test.rs"
+git -C "${collision_repo}" add .
+git -C "${collision_repo}" -c user.name=scoped-test-fixture -c user.email=scoped-test-fixture@example.invalid \
+    commit -qm base
+git -C "${collision_repo}" checkout -qb proof
+printf '// hub implementation changed\n' >>"${collision_repo}/cas-cli/src/hub.rs"
+git -C "${collision_repo}" add .
+git -C "${collision_repo}" -c user.name=scoped-test-fixture -c user.email=scoped-test-fixture@example.invalid \
+    commit -qm collision-change
+collision_targets="$(cd "${collision_repo}" && "${SURFACE_GUARD}" --resolve-targets --base main --)"
+if [[ "$collision_targets" == 'SCOPED_PROOF_TARGET_ARGS: --lib hub' ]]; then
+    pass_count=$((pass_count + 1))
+    echo "ok   proof resolver ignores bare identifier collisions"
+else
+    fail_count=$((fail_count + 1))
+    echo "FAIL proof resolver matched bare identifier collision: ${collision_targets}"
+fi
+
+qualified_repo="${tmpdir}/qualified-repo"
+mkdir -p "${qualified_repo}/cas-cli/src" "${qualified_repo}/cas-cli/tests"
+git -C "${qualified_repo}" init -q -b main
+printf 'pub(super) fn supervisor_sessions() {}\n' >"${qualified_repo}/cas-cli/src/hub.rs"
+printf '#[test] fn test_sessions() { cas::hub::supervisor_sessions(); }\n' \
+    >"${qualified_repo}/cas-cli/tests/hub_contract_test.rs"
+git -C "${qualified_repo}" add .
+git -C "${qualified_repo}" -c user.name=scoped-test-fixture -c user.email=scoped-test-fixture@example.invalid \
+    commit -qm base
+git -C "${qualified_repo}" checkout -qb proof
+printf '// qualified hub implementation changed\n' >>"${qualified_repo}/cas-cli/src/hub.rs"
+git -C "${qualified_repo}" add .
+git -C "${qualified_repo}" -c user.name=scoped-test-fixture -c user.email=scoped-test-fixture@example.invalid \
+    commit -qm qualified-change
+qualified_targets="$(cd "${qualified_repo}" && "${SURFACE_GUARD}" --resolve-targets --base main --)"
+if [[ "$qualified_targets" == 'SCOPED_PROOF_TARGET_ARGS: --lib hub --test hub_contract_test' ]]; then
+    pass_count=$((pass_count + 1))
+    echo "ok   proof resolver accepts qualified symbol references"
+else
+    fail_count=$((fail_count + 1))
+    echo "FAIL proof resolver missed qualified symbol reference: ${qualified_targets}"
+fi
 
 # The end-to-end runner must propagate a rejected surface check instead of
 # printing a green receipt after the checker reports missing targets. It also

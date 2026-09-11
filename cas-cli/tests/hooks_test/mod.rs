@@ -3,7 +3,7 @@
 //! Tests the full flow of hook events from Claude Code through to storage.
 
 use assert_cmd::Command;
-use predicates::prelude::*;
+pub(crate) use predicates::prelude::*;
 use tempfile::TempDir;
 
 // =============================================================================

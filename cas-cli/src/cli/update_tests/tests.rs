@@ -1,4 +1,5 @@
 use crate::cli::update::*;
+use crate::cli::hub::HubRestartOutcome;
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -390,6 +391,7 @@ fn refresh_receipt_names_each_skipped_project_and_why_it_was_not_refreshed() {
             project: PathBuf::from("/tmp/container-copy"),
             reason: "its .cas has no [project] canonical_id pin and no git origin remote".to_string(),
         }],
+        None,
     );
 
     assert_eq!(receipt["skipped_unregistered"][0]["project"], "/tmp/container-copy");
@@ -704,7 +706,7 @@ fn post_swap_refresh_failure_without_a_receipt_is_not_reported_as_skipped() {
 
 #[test]
 fn refresh_receipt_names_the_binary_that_ran_it() {
-    let receipt = project_refresh_receipt_json(&[], &ProjectPhase::Ok(String::new()), &[]);
+    let receipt = project_refresh_receipt_json(&[], &ProjectPhase::Ok(String::new()), &[], None);
 
     assert_eq!(
         receipt["refresh_binary_version"],
@@ -728,8 +730,12 @@ fn refresh_receipt_records_partial_failure_before_refresh_returns_error() {
         details: String::new(),
         phase_details: Vec::new(),
     }];
-    let receipt =
-        project_refresh_receipt_json(&receipts, &ProjectPhase::Ok("up to date".to_owned()), &[]);
+    let receipt = project_refresh_receipt_json(
+        &receipts,
+        &ProjectPhase::Ok("up to date".to_owned()),
+        &[],
+        None,
+    );
 
     assert_eq!(receipt["refresh_status"], "refresh_failed");
     write_refresh_receipt(&path, &receipt).expect("partial refresh receipt should be writable");
@@ -752,7 +758,7 @@ fn combined_receipt_merges_the_installed_binary_refresh_into_one_document() {
         "user_level_store": {"status": "ok"},
     });
 
-    let combined = combined_update_receipt("3.15.2", true, Some(&refresh));
+    let combined = combined_update_receipt("3.15.2", true, Some(&refresh), None);
     assert_eq!(combined["binary_updated"], true);
     assert_eq!(combined["version"], "3.15.2");
     assert_eq!(
@@ -762,9 +768,56 @@ fn combined_receipt_merges_the_installed_binary_refresh_into_one_document() {
     assert!(combined["user_level_store"].is_object(), "{combined}");
 
     // No swap: no refresh receipt to merge, and no stale version claimed.
-    let solo = combined_update_receipt("3.15.2", false, None);
+    let solo = combined_update_receipt("3.15.2", false, None, None);
     assert_eq!(solo["binary_updated"], false);
     assert!(solo.get("refresh_binary_version").is_none(), "{solo}");
+}
+
+#[test]
+fn failed_serve_publication_still_refreshes_projects_and_reports_update_error() {
+    let transport_error = "cas update: Tailscale Serve publication failed: tailscale CLI is unavailable; hub remains loopback-only; run `cas hub restart --tailscale-serve`";
+    let mut refreshed = false;
+    let (refresh, reported_error) = refresh_after_hub_restart(
+        HubRestartOutcome {
+            transport_error: Some(transport_error.to_owned()),
+        },
+        |error| {
+            assert_eq!(error, Some(transport_error));
+            refreshed = true;
+            Ok::<_, anyhow::Error>(serde_json::json!({"projects": ["refreshed"]}))
+        },
+    )
+    .expect("a transport warning must not prevent refresh");
+
+    assert!(refreshed, "project refresh must continue after Serve failure");
+    let receipt = combined_update_receipt(
+        "3.15.2",
+        false,
+        Some(&refresh),
+        reported_error.as_deref(),
+    );
+    assert_eq!(receipt["hub_transport"]["status"], "error");
+    assert_eq!(receipt["hub_transport"]["message"], transport_error);
+    let refresh_receipt = project_refresh_receipt_json(
+        &[],
+        &ProjectPhase::Ok("up to date".to_owned()),
+        &[],
+        reported_error.as_deref(),
+    );
+    assert_eq!(refresh_receipt["hub_transport"]["status"], "error");
+    assert_eq!(refresh_receipt["hub_transport"]["message"], transport_error);
+
+    let report = RefreshReport {
+        project_count: 1,
+        failed_count: 0,
+        skipped_unregistered: 0,
+        elapsed: std::time::Duration::from_millis(5),
+    };
+    let banner = render_plain_at(160, |fmt| {
+        print_update_banner_with_formatter(fmt, &report, Some(transport_error))
+    });
+    assert!(banner.contains("[ERROR] hub transport"), "{banner}");
+    assert!(banner.contains("cas hub restart --tailscale-serve"), "{banner}");
 }
 
 #[cfg(unix)]
@@ -1076,7 +1129,7 @@ fn refresh_banner_is_a_verdict_line_with_the_count_grammar_as_detail() {
         skipped_unregistered: 0,
         elapsed: std::time::Duration::from_millis(1200),
     };
-    let banner = render_plain_at(80, |fmt| print_update_banner_with_formatter(fmt, &report));
+    let banner = render_plain_at(80, |fmt| print_update_banner_with_formatter(fmt, &report, None));
     assert!(
         banner.starts_with(&format!(
             "[OK] complete · Cassy {} · 2 projects refreshed · 0 failed",
@@ -1091,7 +1144,8 @@ fn refresh_banner_is_a_verdict_line_with_the_count_grammar_as_detail() {
         skipped_unregistered: 2,
         elapsed: std::time::Duration::from_secs(4),
     };
-    let banner = render_plain_at(80, |fmt| print_update_banner_with_formatter(fmt, &failed));
+    let banner =
+        render_plain_at(80, |fmt| print_update_banner_with_formatter(fmt, &failed, None));
     assert!(banner.starts_with("[ERROR] 1 project failed · "), "{banner}");
     assert!(banner.contains("2 unregistered store(s) not refreshed"), "{banner}");
 }

@@ -342,10 +342,40 @@ impl HubTransportReport {
     }
 }
 
-fn update_transport_error(warning: &str) -> anyhow::Error {
-    anyhow::anyhow!(
+#[derive(Debug)]
+struct UpdateTransportError {
+    message: String,
+}
+
+impl std::fmt::Display for UpdateTransportError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for UpdateTransportError {}
+
+fn update_transport_error_message(warning: &str) -> String {
+    format!(
         "cas update: Tailscale Serve publication failed: {warning}; hub remains loopback-only; run `cas hub restart --tailscale-serve`"
     )
+}
+
+fn update_transport_error(warning: &str) -> anyhow::Error {
+    anyhow::Error::new(UpdateTransportError {
+        message: update_transport_error_message(warning),
+    })
+}
+
+fn update_transport_error_message_from(error: &anyhow::Error) -> Option<String> {
+    error
+        .downcast_ref::<UpdateTransportError>()
+        .map(|error| error.message.clone())
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct HubRestartOutcome {
+    pub(crate) transport_error: Option<String>,
 }
 
 fn default_hub_command() -> HubCommands {
@@ -1862,16 +1892,19 @@ fn stop_with_output(
 /// Restart a live hub left behind by an older Cassy binary. This is called by
 /// `cas update` after the replacement version is known; a missing, dead, or
 /// already-current hub is intentionally a no-op.
-pub(crate) fn restart_stale_hub(binary_version: &str, cli: &Cli) -> Result<bool> {
+pub(crate) fn restart_stale_hub(
+    binary_version: &str,
+    cli: &Cli,
+) -> Result<HubRestartOutcome> {
     let paths = HubRuntimePaths::default_for_user()?;
     let Ok(record) = paths.read_process_record() else {
-        return Ok(false);
+        return Ok(HubRestartOutcome::default());
     };
     if !record_is_live(&record) {
-        return Ok(false);
+        return Ok(HubRestartOutcome::default());
     }
     let Some(spec) = restart_spec_for_record(&record, binary_version)? else {
-        return Ok(false);
+        return Ok(HubRestartOutcome::default());
     };
 
     if !cli.json {
@@ -1900,19 +1933,31 @@ pub(crate) fn restart_stale_hub(binary_version: &str, cli: &Cli) -> Result<bool>
         if spec.tailscale_serve
             && let Some(warning) = record.transport_warning.as_deref()
         {
-            return Err(update_transport_error(warning));
+            return Ok(HubRestartOutcome {
+                transport_error: Some(update_transport_error_message(warning)),
+            });
         }
-        return Ok(true);
+        return Ok(HubRestartOutcome::default());
     }
-    start_with_output_from(
+    match start_with_output_from(
         &args,
         cli,
         spec.tailscale_serve,
         spec.tailscale_port,
         !cli.json,
         HubLaunchOrigin::Update,
-    )?;
-    Ok(true)
+    ) {
+        Ok(()) => Ok(HubRestartOutcome::default()),
+        Err(error) => {
+            if let Some(message) = update_transport_error_message_from(&error) {
+                Ok(HubRestartOutcome {
+                    transport_error: Some(message),
+                })
+            } else {
+                Err(error)
+            }
+        }
+    }
 }
 
 fn process_is_running(pid: u32) -> bool {

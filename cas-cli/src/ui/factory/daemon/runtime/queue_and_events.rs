@@ -10755,6 +10755,48 @@ mod tests {
     }
 
     #[test]
+    fn lifecycle_recovery_preassign_failure_uses_registered_recipient_harness() {
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[
+            ("CAS_FACTORY_SUPERVISOR_CLI", "opencode"),
+            ("CAS_FACTORY_WORKER_CLI", "codex"),
+        ]);
+        for (harness, prefix) in [
+            ("claude", "mcp__cas__"),
+            ("codex", "mcp__cs__"),
+            ("grok", "cas__"),
+            ("opencode", "cas_"),
+        ] {
+            let temp = tempfile::TempDir::new().unwrap();
+            let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+            let agents = crate::store::open_agent_store(&cas_dir).unwrap();
+            let mut supervisor = cas_types::Agent::new("supervisor-id".into(), "named-supervisor".into());
+            supervisor.role = cas_types::AgentRole::Supervisor;
+            supervisor.factory_session = Some("recovery-matrix".into());
+            supervisor.metadata.insert("supervisor_cli".into(), harness.into());
+            agents.register(&supervisor).unwrap();
+            for _ in 0..2 {
+                enqueue_preassign_failure_lifecycle_relay(
+                    &cas_dir, "named-supervisor", "recovery-matrix", Some(823),
+                    "replacement-worker", "cas-stale", "task store became unreadable",
+                ).unwrap();
+            }
+            let rows = crate::store::open_prompt_queue_store(&cas_dir).unwrap().peek_all(10).unwrap();
+            assert_eq!(rows.len(), 1, "replay remains idempotent");
+            let row = &rows[0];
+            assert!(row.prompt.contains(&format!("{prefix}task action=update id=cas-stale assignee=replacement-worker")),
+                "{harness}: {}", row.prompt);
+            for foreign in ["mcp__cas__task", "mcp__cs__task", "cas__task", "cas_task"] {
+                if foreign != format!("{prefix}task") {
+                    assert!(!row.prompt.contains(&format!("`{foreign} ")), "{harness}: {}", row.prompt);
+                }
+            }
+            assert_eq!(row.target, "named-supervisor");
+            assert_eq!(row.origin, Some(cas_store::QueueOrigin::Daemon));
+            assert!(crate::prompt_revalidation::is_supervisor_wake_envelope(&row.prompt));
+        }
+    }
+
+    #[test]
     fn residual_preassign_failure_uses_wake_eligible_lifecycle_relay() {
         let temp = tempfile::TempDir::new().unwrap();
         let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();

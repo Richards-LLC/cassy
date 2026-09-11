@@ -667,6 +667,64 @@ mod worker_attention_tests {
     }
 
     #[test]
+    fn lifecycle_recovery_stalled_close_uses_registered_recipient_harness() {
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[
+            ("CAS_FACTORY_SESSION", "recovery-matrix"),
+            ("CAS_FACTORY_SUPERVISOR_CLI", "opencode"),
+            ("CAS_FACTORY_WORKER_CLI", "codex"),
+        ]);
+        for (harness, prefix) in [
+            ("claude", "mcp__cas__"),
+            ("codex", "mcp__cs__"),
+            ("grok", "cas__"),
+            ("opencode", "cas_"),
+        ] {
+            let temp = tempfile::TempDir::new().unwrap();
+            let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+            register_supervisor(&cas_dir, "recovery-matrix");
+            let agents = crate::store::open_agent_store(&cas_dir).unwrap();
+            let mut supervisor = agents.get("supervisor-id").unwrap();
+            supervisor.metadata.insert("supervisor_cli".into(), harness.into());
+            agents.update(&supervisor).unwrap();
+            let event = crate::ui::factory::director::DirectorEvent::SupervisorStalled {
+                next_step: crate::ui::factory::director::SupervisorActionableState::MergeCloseBlocked {
+                    tasks: vec![crate::ui::factory::director::MergedCloseBlockedTask {
+                        task_id: "cas-merged".into(),
+                        factory_branch: "factory/gold-fox".into(),
+                        anchor: "anchor-sha".into(),
+                        target_branch: "epic/cas-epic".into(),
+                        target_tip: "target-tip".into(),
+                        close_rejection: "ZERO-COMMIT after merged delivery".into(),
+                    }],
+                },
+                occurrence: "episode-1".into(),
+                actionable_idle_secs: 600,
+            };
+            assert!(matches!(enqueue_worker_attention_relay(&cas_dir, &event),
+                WorkerAttentionRelayOutcome::Persisted { .. }));
+            assert!(matches!(enqueue_worker_attention_relay(&cas_dir, &event),
+                WorkerAttentionRelayOutcome::Persisted { .. }));
+            let rows = crate::store::open_prompt_queue_store(&cas_dir).unwrap().peek_all(10).unwrap();
+            assert_eq!(rows.len(), 1, "replay remains idempotent");
+            let row = &rows[0];
+            assert!(row.prompt.contains(&format!("{prefix}task action=close id=cas-merged")),
+                "{harness}: {}", row.prompt);
+            assert!(row.prompt.contains(&format!("{prefix}coordination action=worker_status")),
+                "{harness}: {}", row.prompt);
+            for foreign in ["mcp__cas__task", "mcp__cs__task", "cas__task", "cas_task"] {
+                if foreign != format!("{prefix}task") {
+                    // Match the command boundary: Claude's prefix contains Grok's as a suffix.
+                    assert!(!row.prompt.contains(&format!("`{foreign} ")), "{harness}: {}", row.prompt);
+                }
+            }
+            assert_eq!(row.origin, Some(cas_store::QueueOrigin::Daemon));
+            assert!(crate::prompt_revalidation::is_supervisor_wake_envelope(&row.prompt));
+            let facts = event.to_json().to_string();
+            assert!(!facts.contains("mcp__"), "stored event facts must be harness independent: {facts}");
+        }
+    }
+
+    #[test]
     fn merged_close_blocked_supervisor_stall_relays_once_without_repeat_merge_demand() {
         let _env = crate::test_support::TestEnvGuard::with_vars(&[(
             "CAS_FACTORY_SESSION",

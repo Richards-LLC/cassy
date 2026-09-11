@@ -395,6 +395,58 @@ fn claude_account_allowlist_is_registered_and_documented() {
     );
 }
 
+/// Report upload needs the parents created by the announcement procedure.
+#[test]
+fn runtime_report_publication_instructions_create_parents_before_upload_receipts() {
+    let rubric = include_str!("../../docs/RELEASE_SLACK_RUBRIC.md");
+    let report = rubric
+        .split("### Published report before announcement")
+        .nth(1)
+        .expect("runtime report procedure")
+        .split("`scripts/release.sh --publish-tag --manual-publish")
+        .next()
+        .unwrap();
+    let prepare = report
+        .find("1. Before announcements")
+        .expect("prepare report artifacts first");
+    let announce = report
+        .find("2. Post the four messages")
+        .expect("create announcement parents next");
+    let attach = report
+        .find("3. After the four messages")
+        .expect("upload to existing parents last");
+    assert!(prepare < announce && announce < attach);
+    let prerequisites = &report[prepare..announce];
+    for required in ["published", "installation", "--pdf", "QA", "HTML", "PDF"] {
+        assert!(
+            prerequisites.contains(required),
+            "missing prerequisite: {required}"
+        );
+    }
+    assert!(!prerequisites.contains("release-report.receipt"));
+    assert!(!prerequisites.contains("--report"));
+    let delivery = &report[attach..];
+    for required in [
+        "CAS_RELEASE_TRAIN_REPORT_USER_THREAD_TS",
+        "CAS_RELEASE_TRAIN_REPORT_DEV_THREAD_TS",
+        "--report",
+        "MechaCassy",
+        "download",
+        "decode",
+        "page-count",
+        "source-hash",
+        "release-report.receipt",
+        "partial receipts",
+        "uncertain write",
+        "completion requires all",
+    ] {
+        assert!(
+            delivery.contains(required),
+            "missing delivery safeguard: {required}"
+        );
+    }
+}
+
 /// Active publication instructions must never select a personal Slack route.
 /// Inspect the shipped catalogs, including references, rather than only source mirrors.
 #[test]

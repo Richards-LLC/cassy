@@ -7,6 +7,30 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.25.4] - 2026-09-11
+
+### Added
+
+- Cassy Cloud shows paired machines with connection, runtime and last-seen details, plus confirmed removal from the current browser. Cloud and local Commander builds have distinct branding.
+
+### Changed
+
+- The default Hub conversation list requires fresh, reachable sessions with active membership. Heartbeats refresh visibility, expired sessions leave the default list, and explicit dormant/recovery views and pending work remain available.
+- Worker status identifies its factory session and separates registered workers inside and outside that session before deduplicating names.
+- Role instructions align task-start acceptance, initial close ownership, receipt handling and authenticated wake behavior across Claude, Codex, Grok and OpenCode. Codex uses its own startup checklist; compact prompts retain recall coverage within existing budgets.
+- Slack publication guidance uses only the authenticated MechaCassy hub, including direct access to that same hub when the live proxy is unavailable. Personal Slack connectors are no longer a fallback; partial receipts and uncertain-write safeguards remain required.
+
+### Fixed
+
+- Workspace and formatter guards parse executable shell structure rather than treating heredoc bodies, comments or quoted template text as write targets. Actual out-of-worktree writes and formatter invocations remain guarded.
+- Bug reporting falls back to the configured Cassy component repository when the project issue repository is absent. Session hygiene scans the resolved artifact root instead of an unrelated home directory.
+- Close verification preserves content proof across merge commits, rejects merges that drop delivered edits, and binds post-merge repository proof to the declared target branch rather than the current checkout.
+- Scoped proof derives its comparison and receipt base from the declared WorkTarget, resolves nested integration targets without phantom binaries, emits valid multi-module arguments and honors the latest scoped receipt.
+- Rolling integration includes live open branches regardless of ownership, excludes closed/cancelled or missing branches, and distinguishes coordination branches from delivery targets. Repeated failures already present on main share stable evidence; unknown failures remain explicitly unclassified.
+- MCP recovery commands use caller or registered recipient tool aliases for Claude, Codex, Grok and OpenCode. Role-specific CLI evidence wins over the daemon environment, and unknown recipients receive neutral guidance.
+- Lifecycle and preassignment relays render recovery commands for their recipient, retain neutral persisted facts and resume partial outbox delivery without duplicating completed work. Quoted or multiline rejection context no longer breaks the suggested audit argument.
+- Authenticated daemon `merged_close_blocked` and `pr_lane_failed` notifications can pass the wake gate. Matching text from an untrusted sender or without a valid envelope remains rejected.
+
 ## [3.25.3] - 2026-09-11
 
 ### Fixed

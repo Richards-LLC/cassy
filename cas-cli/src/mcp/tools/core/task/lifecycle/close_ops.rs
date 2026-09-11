@@ -959,8 +959,90 @@ mod risk_proof_tests {
             "pub(super) async fn factory_worker_status() {}\n",
         )
         .unwrap();
-        std::fs::write(test, "async fn test_worker_status() {}\n").unwrap();
+        std::fs::write(
+            test,
+            "async fn test_worker_status() { mcp::tools::service::factory_ops::worker_status(); }\n",
+        )
+        .unwrap();
         dir
+    }
+
+    #[test]
+    fn scoped_proof_drops_nested_module_without_cargo_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join("cas-cli/tests/hooks_test/mod.rs");
+        std::fs::create_dir_all(nested.parent().unwrap()).unwrap();
+        std::fs::write(nested, "mod helper {}\n").unwrap();
+
+        assert_eq!(
+            scoped_proof_test_target(dir.path(), "cas-cli/tests/hooks_test/mod.rs"),
+            None,
+            "a module file without tests/<name>.rs, tests/<name>/main.rs, or [[test]] is not a Cargo target"
+        );
+    }
+
+    #[test]
+    fn scoped_proof_accepts_directory_main_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let main = dir.path().join("cas-cli/tests/hooks_test/main.rs");
+        std::fs::create_dir_all(main.parent().unwrap()).unwrap();
+        std::fs::write(main, "fn main() {}\n").unwrap();
+
+        assert_eq!(
+            scoped_proof_test_target(dir.path(), "cas-cli/tests/hooks_test/mod.rs"),
+            Some("hooks_test".to_string())
+        );
+    }
+
+    #[test]
+    fn scoped_proof_ignores_bare_identifier_collisions() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("cas-cli/src/hub.rs");
+        let test = dir.path().join("cas-cli/tests/hub_contract_test.rs");
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(test.parent().unwrap()).unwrap();
+        std::fs::write(source, "pub(super) fn supervisor_sessions() {}\n").unwrap();
+        std::fs::write(test, "#[test] fn test_supervisor_sessions() {}\n").unwrap();
+
+        assert!(required_scoped_proof_targets(
+            dir.path(),
+            &["cas-cli/src/hub.rs".to_string()]
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn scoped_proof_accepts_qualified_symbol_reference() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("cas-cli/src/hub.rs");
+        let test = dir.path().join("cas-cli/tests/hub_contract_test.rs");
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(test.parent().unwrap()).unwrap();
+        std::fs::write(source, "pub(super) fn supervisor_sessions() {}\n").unwrap();
+        std::fs::write(
+            test,
+            "#[test] fn test_sessions() { cas::hub::supervisor_sessions(); }\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            required_scoped_proof_targets(
+                dir.path(),
+                &["cas-cli/src/hub.rs".to_string()]
+            ),
+            ["hub_contract_test".to_string()]
+        );
+    }
+
+    #[test]
+    fn scoped_proof_accepts_supervisor_full_run_receipt() {
+        let dir = scoped_proof_fixture();
+        let mut task = Task::new("cas-full-run-proof".into(), "full run proof".into());
+        let changed = vec!["cas-cli/src/mcp/tools/service/factory_ops.rs".to_string()];
+        task.notes = "[2026-09-11] 📝 PROGRESS SCOPED_PROOF: command=cargo nextest run -p cas --all-targets log=/home/pippenz/.cas/artifacts/cas-full-run-proof/full-run.log targets=lib:factory_ops,test:factory_mcp_ops_test result=PASS".into();
+
+        validate_risk_close_proofs(&task, &changed, dir.path())
+            .expect("a registered supervisor's equivalent full-run receipt should cover targets");
     }
 
     #[test]

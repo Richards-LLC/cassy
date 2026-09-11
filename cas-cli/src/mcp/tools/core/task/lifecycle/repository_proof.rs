@@ -583,4 +583,64 @@ mod tests {
             serde_json::from_value(legacy).expect("pre-cas-5c33 dispatch rows still parse");
         assert!(proof.anchor_commits.is_empty());
     }
+
+    #[test]
+    fn target_proof_binds_declared_branch_when_primary_head_differs() {
+        let repo = tempfile::tempdir().expect("repository");
+        let path = repo.path();
+        git(path, &["init", "-q", "-b", "primary"]);
+        std::fs::write(path.join("seed.txt"), "seed\n").expect("seed");
+        git(path, &["add", "seed.txt"]);
+        git(path, &["commit", "-q", "-m", "seed"]);
+        git(path, &["branch", "target"]);
+        std::fs::write(path.join("primary.txt"), "primary\n").expect("primary");
+        git(path, &["add", "primary.txt"]);
+        git(path, &["commit", "-q", "-m", "advance primary"]);
+        let primary_tip = head(path);
+
+        let target_tip = rev_parse(path, "target").expect("target tip");
+        let proof = capture_repository_proof_at_target(path, "target", Vec::new())
+            .expect("declared target proof");
+
+        assert_eq!(proof.head_commit, target_tip);
+        assert_ne!(proof.head_commit, primary_tip);
+        assert_eq!(proof.target_ref.as_deref(), Some("target"));
+        assert_eq!(
+            evaluate_repository_proof(&proof).expect("unchanged target proof"),
+            RepositoryProofStatus::Unchanged
+        );
+    }
+
+    #[test]
+    fn target_proof_falls_back_to_origin_branch_when_local_ref_is_missing() {
+        let origin = tempfile::tempdir().expect("origin");
+        git(origin.path(), &["init", "-q", "--bare", "-b", "primary"]);
+        let repo = tempfile::tempdir().expect("repository");
+        let path = repo.path();
+        git(path, &["init", "-q", "-b", "primary"]);
+        std::fs::write(path.join("seed.txt"), "seed\n").expect("seed");
+        git(path, &["add", "seed.txt"]);
+        git(path, &["commit", "-q", "-m", "seed"]);
+        git(path, &["remote", "add", "origin", origin.path().to_str().unwrap()]);
+        git(path, &["push", "-q", "origin", "primary"]);
+        git(path, &["branch", "target"]);
+        std::fs::write(path.join("target.txt"), "target\n").expect("target");
+        git(path, &["add", "target.txt"]);
+        git(path, &["commit", "-q", "-m", "target delivery"]);
+        let target_tip = head(path);
+        git(path, &["push", "-q", "origin", "target"]);
+        git(path, &["checkout", "-q", "primary"]);
+        git(path, &["branch", "-D", "target"]);
+        git(path, &["fetch", "-q", "origin"]);
+
+        let proof = capture_repository_proof_at_target(path, "target", Vec::new())
+            .expect("origin target proof");
+
+        assert_eq!(proof.head_commit, target_tip);
+        assert_eq!(proof.target_ref.as_deref(), Some("origin/target"));
+        assert_eq!(
+            evaluate_repository_proof(&proof).expect("unchanged origin target proof"),
+            RepositoryProofStatus::Unchanged
+        );
+    }
 }

@@ -27,18 +27,20 @@ fn enqueue_worker_attention_relay(
                 } if tasks.len() == 1 => Some(tasks[0].task_id.as_str()),
                 _ => None,
             };
-            let detail = format!(
-                "Supervisor actionable-idle for {}m. {}",
-                actionable_idle_secs / 60,
-                next_step.next_step_text()
-            );
+            let detail = |prefix: &str| {
+                format!(
+                    "Supervisor actionable-idle for {}m. {}",
+                    actionable_idle_secs / 60,
+                    next_step.next_step_text_for(prefix)
+                )
+            };
             let merged = enqueue_worker_attention_relay_detail_with_key(
                 cas_dir,
                 "merged_close_blocked",
                 "supervisor",
                 task_id,
                 Some(*actionable_idle_secs),
-                &detail,
+                detail,
                 occurrence,
                 Some(&stable_key),
             );
@@ -361,7 +363,7 @@ pub(super) fn enqueue_pr_lane_failure_relay(
         &failure.worker,
         Some(&failure.task_id),
         None,
-        &detail,
+        |_| detail.clone(),
         &key,
         Some(&key),
     )
@@ -405,7 +407,7 @@ pub(super) fn enqueue_supervisor_unread_relay(
         oldest_sender,
         None,
         None,
-        &detail,
+        |_| detail.clone(),
         &key,
         Some(&key),
     )
@@ -436,7 +438,7 @@ fn enqueue_worker_attention_relay_detail(
         worker,
         task_id,
         elapsed_secs,
-        detail,
+        |_| detail.to_string(),
         occurrence,
         None,
     )
@@ -448,7 +450,7 @@ fn enqueue_worker_attention_relay_detail_with_key(
     worker: &str,
     task_id: Option<&str>,
     elapsed_secs: Option<u64>,
-    detail: &str,
+    detail: impl Fn(&str) -> String,
     occurrence: &str,
     stable_key: Option<&str>,
 ) -> WorkerAttentionRelayOutcome {
@@ -491,7 +493,7 @@ fn enqueue_worker_attention_relay_detail_with_key(
         "worker": worker,
         "task_id": task_id,
         "elapsed_secs": elapsed_secs,
-        "detail": detail,
+        "detail": detail(""),
         "factory_session": factory_session,
         "occurrence": occurrence,
     })
@@ -525,8 +527,18 @@ fn enqueue_worker_attention_relay_detail_with_key(
         tracing::error!(worker = %worker, kind, notification_id, "worker attention relay left pending: prompt queue unavailable");
         return WorkerAttentionRelayOutcome::Pending;
     };
+    // Resolve the registered receiver at this enqueue attempt, including retries
+    // after a durable-only write. Missing harness evidence stays neutral; the
+    // daemon's own process environment does not describe the receiving agent.
+    let prefix = agent_store
+        .get(&supervisor.agent_id)
+        .ok()
+        .as_ref()
+        .and_then(crate::harness_policy::agent_tool_prefix)
+        .unwrap_or("");
+    let detail = detail(prefix);
     let body = format!(
-        "<worker-attention kind=\"{kind}\" worker=\"{worker}\" notification_id=\"{notification_id}\">\n{detail}\nRun `coordination action=worker_status` and reassign or recover the worker as needed.\n</worker-attention>"
+        "<worker-attention kind=\"{kind}\" worker=\"{worker}\" notification_id=\"{notification_id}\">\n{detail}\nRun `{prefix}coordination action=worker_status` and reassign or recover the worker as needed.\n</worker-attention>"
     );
     let source = format!("{LIFECYCLE_WAKE_SOURCE_PREFIX}worker-attention:{notification_id}");
     if let Err(error) = prompt_queue.enqueue_idempotent(
@@ -561,16 +573,15 @@ pub(super) fn enqueue_merge_sweep_failure_relay(
     detail: &str,
     occurrence: &str,
 ) -> WorkerAttentionRelayOutcome {
-    let detail = format!(
-        "Merged epic {epic_id} at {commit} failed its bounded workspace sweep. {detail}"
-    );
+    let detail =
+        format!("Merged epic {epic_id} at {commit} failed its bounded workspace sweep. {detail}");
     enqueue_worker_attention_relay_detail_with_key(
         cas_dir,
         "sweep_failed",
         "supervisor",
         Some(epic_id),
         None,
-        &detail,
+        |_| detail.clone(),
         occurrence,
         Some(&format!("{epic_id}:{commit}")),
     )
@@ -607,43 +618,97 @@ mod worker_attention_tests {
 
     fn assert_recovery_wake_requires_daemon(row: &cas_store::QueuedPrompt) {
         use super::super::queue_and_events::{PaneWakeState, ToolCallEvidence, WakeSender};
-        use crate::ui::factory::director::data::{AgentSummary, DirectorData};
+        use crate::ui::factory::director::{AgentSummary, DirectorData};
         let now = chrono::Utc::now();
         let data = DirectorData {
-            ready_tasks: vec![], in_progress_tasks: vec![], epic_tasks: vec![],
+            ready_tasks: vec![],
+            in_progress_tasks: vec![],
+            epic_tasks: vec![],
             agents: vec![AgentSummary {
-                id: "supervisor-id".into(), name: "supervisor".into(),
-                status: AgentStatus::Idle, registered_at: now,
-                current_task: None, latest_activity: None, last_heartbeat: None,
-                pending_messages: 0, pending_supervisor_messages: 0,
-                latest_supervisor_message_at: None, active_lease: None, effort: None,
+                id: "supervisor-id".into(),
+                name: "supervisor".into(),
+                status: AgentStatus::Idle,
+                registered_at: now,
+                current_task: None,
+                latest_activity: None,
+                last_heartbeat: None,
+                pending_messages: 0,
+                pending_supervisor_messages: 0,
+                latest_supervisor_message_at: None,
+                active_lease: None,
+                effort: None,
             }],
-            activity: vec![], agent_id_to_name: HashMap::new(), changes: vec![],
-            git_loaded: true, reminders: vec![], epic_closed_counts: HashMap::new(),
+            activity: vec![],
+            agent_id_to_name: HashMap::new(),
+            changes: vec![],
+            git_loaded: true,
+            reminders: vec![],
+            epic_closed_counts: HashMap::new(),
         };
         let pane = PaneWakeState {
-            composer_dirty: false, ready_for_injection: true,
+            composer_dirty: false,
+            ready_for_injection: true,
             silent_for: Some(std::time::Duration::from_secs(600)),
             tool_call: ToolCallEvidence::Idle,
         };
         let sender = FactoryDaemon::wake_sender_from_origin(row.origin.as_ref(), None);
         let decision = FactoryDaemon::supervisor_wake_decision(
-            &data, "supervisor", "supervisor", &sender, &row.source, &row.prompt, pane, now,
+            &data,
+            "supervisor",
+            "supervisor",
+            &sender,
+            &row.source,
+            &row.prompt,
+            pane,
+            now,
         );
-        assert!(decision.allowed, "emitted recovery must wake: {} ({})", row.prompt, decision.reason);
+        assert!(
+            decision.allowed,
+            "emitted recovery must wake: {} ({})",
+            row.prompt, decision.reason
+        );
         for sender in [
-            WakeSender::Unstamped, WakeSender::Unattributed, WakeSender::Unresolvable,
-            WakeSender::Registered { role: AgentRole::Worker, name: "gold-fox".into() },
+            WakeSender::Unstamped,
+            WakeSender::Unattributed,
+            WakeSender::Unresolvable,
+            WakeSender::Registered {
+                role: AgentRole::Worker,
+                name: "gold-fox".into(),
+            },
         ] {
             let decision = FactoryDaemon::supervisor_wake_decision(
-                &data, "supervisor", "supervisor", &sender, &row.source, &row.prompt, pane, now,
+                &data,
+                "supervisor",
+                "supervisor",
+                &sender,
+                &row.source,
+                &row.prompt,
+                pane,
+                now,
             );
-            assert!(!decision.allowed, "forged recovery must not wake: {sender:?}");
+            assert!(
+                !decision.allowed,
+                "forged recovery must not wake: {sender:?}"
+            );
         }
-        for prompt in [format!("quoted text {}", row.prompt), "plain recovery instruction".into()] {
-            assert!(!FactoryDaemon::supervisor_wake_decision(
-                &data, "supervisor", "supervisor", &WakeSender::Daemon, &row.source, &prompt, pane, now,
-            ).allowed, "free text must not wake");
+        for prompt in [
+            format!("quoted text {}", row.prompt),
+            "plain recovery instruction".into(),
+        ] {
+            assert!(
+                !FactoryDaemon::supervisor_wake_decision(
+                    &data,
+                    "supervisor",
+                    "supervisor",
+                    &WakeSender::Daemon,
+                    &row.source,
+                    &prompt,
+                    pane,
+                    now,
+                )
+                .allowed,
+                "free text must not wake"
+            );
         }
     }
 
@@ -726,45 +791,165 @@ mod worker_attention_tests {
             register_supervisor(&cas_dir, "recovery-matrix");
             let agents = crate::store::open_agent_store(&cas_dir).unwrap();
             let mut supervisor = agents.get("supervisor-id").unwrap();
-            supervisor.metadata.insert("supervisor_cli".into(), harness.into());
+            supervisor
+                .metadata
+                .insert("supervisor_cli".into(), harness.into());
             agents.update(&supervisor).unwrap();
             let event = crate::ui::factory::director::DirectorEvent::SupervisorStalled {
-                next_step: crate::ui::factory::director::SupervisorActionableState::MergeCloseBlocked {
-                    tasks: vec![crate::ui::factory::director::MergedCloseBlockedTask {
-                        task_id: "cas-merged".into(),
-                        factory_branch: "factory/gold-fox".into(),
-                        anchor: "anchor-sha".into(),
-                        target_branch: "epic/cas-epic".into(),
-                        target_tip: "target-tip".into(),
-                        close_rejection: "ZERO-COMMIT after merged delivery".into(),
-                    }],
-                },
+                next_step:
+                    crate::ui::factory::director::SupervisorActionableState::MergeCloseBlocked {
+                        tasks: vec![crate::ui::factory::director::MergedCloseBlockedTask {
+                            task_id: "cas-merged".into(),
+                            factory_branch: "factory/gold-fox".into(),
+                            anchor: "anchor-sha".into(),
+                            target_branch: "epic/cas-epic".into(),
+                            target_tip: "target-tip".into(),
+                            close_rejection: "ZERO-COMMIT after merged delivery".into(),
+                        }],
+                    },
                 occurrence: "episode-1".into(),
                 actionable_idle_secs: 600,
             };
-            assert!(matches!(enqueue_worker_attention_relay(&cas_dir, &event),
-                WorkerAttentionRelayOutcome::Persisted { .. }));
-            assert!(matches!(enqueue_worker_attention_relay(&cas_dir, &event),
-                WorkerAttentionRelayOutcome::Persisted { .. }));
-            let rows = crate::store::open_prompt_queue_store(&cas_dir).unwrap().peek_all(10).unwrap();
+            if harness == "codex" {
+                // Replay a durable-only notification after the registered
+                // receiver changes harness; the unsent action must use Codex.
+                let crate::ui::factory::director::DirectorEvent::SupervisorStalled {
+                    next_step,
+                    ..
+                } = &event
+                else {
+                    unreachable!()
+                };
+                let key = format!(
+                    "worker-attention:recovery-matrix:merged_close_blocked:{}",
+                    next_step.merged_close_blocked_relay_key().unwrap()
+                );
+                supervisor
+                    .metadata
+                    .insert("supervisor_cli".into(), "claude".into());
+                agents.update(&supervisor).unwrap();
+                let queue = crate::store::open_supervisor_queue_store(&cas_dir).unwrap();
+                queue
+                    .notify_idempotent(
+                        "supervisor-id",
+                        "merged_close_blocked",
+                        &serde_json::json!({ "detail": event.description() }).to_string(),
+                        cas_store::NotificationPriority::High,
+                        &key,
+                    )
+                    .unwrap();
+                supervisor
+                    .metadata
+                    .insert("supervisor_cli".into(), harness.into());
+                agents.update(&supervisor).unwrap();
+            }
+            assert!(matches!(
+                enqueue_worker_attention_relay(&cas_dir, &event),
+                WorkerAttentionRelayOutcome::Persisted { .. }
+            ));
+            assert!(matches!(
+                enqueue_worker_attention_relay(&cas_dir, &event),
+                WorkerAttentionRelayOutcome::Persisted { .. }
+            ));
+            let rows = crate::store::open_prompt_queue_store(&cas_dir)
+                .unwrap()
+                .peek_all(10)
+                .unwrap();
             assert_eq!(rows.len(), 1, "replay remains idempotent");
             let row = &rows[0];
-            assert!(row.prompt.contains(&format!("{prefix}task action=close id=cas-merged")),
-                "{harness}: {}", row.prompt);
-            assert!(row.prompt.contains(&format!("{prefix}coordination action=worker_status")),
-                "{harness}: {}", row.prompt);
+            assert!(
+                row.prompt
+                    .contains(&format!("{prefix}task action=close id=cas-merged")),
+                "{harness}: {}",
+                row.prompt
+            );
+            assert!(
+                row.prompt
+                    .contains(&format!("{prefix}coordination action=worker_status")),
+                "{harness}: {}",
+                row.prompt
+            );
             for foreign in ["mcp__cas__task", "mcp__cs__task", "cas__task", "cas_task"] {
                 if foreign != format!("{prefix}task") {
                     // Match the command boundary: Claude's prefix contains Grok's as a suffix.
-                    assert!(!row.prompt.contains(&format!("`{foreign} ")), "{harness}: {}", row.prompt);
+                    assert!(
+                        !row.prompt.contains(&format!("`{foreign} ")),
+                        "{harness}: {}",
+                        row.prompt
+                    );
                 }
             }
             assert_eq!(row.origin, Some(cas_store::QueueOrigin::Daemon));
-            assert!(crate::prompt_revalidation::is_supervisor_wake_envelope(&row.prompt));
+            assert!(crate::prompt_revalidation::is_supervisor_wake_envelope(
+                &row.prompt
+            ));
             assert_recovery_wake_requires_daemon(row);
+            let notifications = crate::store::open_supervisor_queue_store(&cas_dir)
+                .unwrap()
+                .peek("supervisor-id", 10)
+                .unwrap();
+            assert_eq!(notifications.len(), 1);
+            assert!(
+                !notifications[0].payload.contains("mcp__"),
+                "durable facts must remain neutral"
+            );
             let facts = event.to_json().to_string();
-            assert!(!facts.contains("mcp__"), "stored event facts must be harness independent: {facts}");
+            assert!(
+                !facts.contains("mcp__"),
+                "stored event facts must be harness independent: {facts}"
+            );
         }
+    }
+
+    #[test]
+    fn lifecycle_recovery_missing_and_shutdown_recipient_preserve_relay_policy() {
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[
+            ("CAS_FACTORY_SESSION", "recovery-unknown"),
+            ("CAS_FACTORY_SUPERVISOR_CLI", "codex"),
+        ]);
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        let event = crate::ui::factory::director::DirectorEvent::WorkerIdle {
+            worker: "gold-fox".into(),
+            active_task: None,
+        };
+        assert_eq!(
+            enqueue_worker_attention_relay(&cas_dir, &event),
+            WorkerAttentionRelayOutcome::Pending
+        );
+        assert!(
+            crate::store::open_prompt_queue_store(&cas_dir)
+                .unwrap()
+                .peek_all(10)
+                .unwrap()
+                .is_empty()
+        );
+        register_supervisor(&cas_dir, "recovery-unknown");
+        let agents = crate::store::open_agent_store(&cas_dir).unwrap();
+        let mut supervisor = agents.get("supervisor-id").unwrap();
+        supervisor.status = AgentStatus::Shutdown;
+        supervisor
+            .metadata
+            .insert("supervisor_cli".into(), "unknown".into());
+        agents.update(&supervisor).unwrap();
+        // Owning-supervisor resolution already retains shutdown rows as the
+        // last candidate. Rendering must neither drop nor authorize that row.
+        assert!(matches!(
+            enqueue_worker_attention_relay(&cas_dir, &event),
+            WorkerAttentionRelayOutcome::Persisted { .. }
+        ));
+        let rows = crate::store::open_prompt_queue_store(&cas_dir)
+            .unwrap()
+            .peek_all(10)
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(
+            rows[0]
+                .prompt
+                .contains("`coordination action=worker_status`")
+        );
+        assert!(!rows[0].prompt.contains("mcp__"));
+        assert_eq!(rows[0].origin, Some(cas_store::QueueOrigin::Daemon));
     }
 
     #[test]

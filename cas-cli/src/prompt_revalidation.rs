@@ -581,6 +581,8 @@ pub(crate) fn parse_worker_attention_envelope(prompt: &str) -> bool {
                     | "worker_delivery_stalled"
                     | "worker_unavailable"
                     | "supervisor_stalled"
+                    | "merged_close_blocked"
+                    | "pr_lane_failed"
                     // cas-d9a8: CAS's own unread-backlog summary for the
                     // supervisor. Same envelope, same producer (the daemon
                     // relay), so it inherits the wake terms rather than

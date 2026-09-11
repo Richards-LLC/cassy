@@ -1,3 +1,4 @@
+import { machineFooterMarkup, pairedMachinesDialogMarkup, renderPairedMachines } from '../src/paired-machines';
 import { ConversationList } from '../src/conversation-list';
 import { ConversationHistory } from '../src/conversation-history';
 import { ConversationView } from '../src/conversation-view';
@@ -6,12 +7,20 @@ import type { GhosttyRow } from '../src/terminal/ghostty/core';
 
 export function renderConversationFixture(app: HTMLElement, state: string): void {
   const supervisor = 'patient-pelican-9';
-  const selected = state !== 'conversations-list';
+  const selected = !['conversations-list', 'paired-machines'].includes(state);
   app.innerHTML = conversationShellMarkup({ selected, supervisor, projectDir: '/projects/cas-src', host: 'Atlas · Linux', loaded: true, paired: true });
   new ConversationList().render(app.querySelector('#conversation-list')!, [
     { key: 'atlas:one', machineId: 'atlas', session: 'one', supervisor, projectDir: '/projects/cas-src', host: 'Atlas · Linux', freshness: 'Catalog checked just now', connection: 'Live', attention: 1, selected },
     { key: 'studio:two', machineId: 'studio', session: 'two', supervisor: 'calm-otter-4', projectDir: '/projects/gabber-studio', host: 'Studio Mac · macOS', freshness: 'Catalog checked 1m ago', connection: 'Live', attention: 0, selected: false },
   ], () => {});
+  const machines = [{ id: 'atlas', label: 'Atlas · Linux', address: 'atlas.test', connection: 'Connected', connected: true, lastSeen: 'Last seen just now', runtime: '3.25.3' }, { id: 'studio', label: 'Studio Mac · macOS', address: 'studio.test', connection: 'Connected', connected: true, lastSeen: 'Last seen just now', runtime: '3.25.3' }];
+  app.querySelector('#hub-footer-badges')!.innerHTML = machineFooterMarkup(machines, 2, 'fixture');
+  app.insertAdjacentHTML('beforeend', pairedMachinesDialogMarkup());
+  renderPairedMachines(app.querySelector('#paired-machines-list')!, machines, async () => {});
+  const dialog = app.querySelector<HTMLDialogElement>('#paired-machines-dialog')!;
+  app.querySelector<HTMLElement>('#paired-machines-toggle')!.onclick = () => dialog.showModal();
+  app.querySelector<HTMLElement>('#paired-machines-close')!.onclick = () => dialog.close();
+  if (state === 'paired-machines') dialog.showModal();
   if (!selected) return;
   const history = new ConversationHistory();
   if (state !== 'conversation') {

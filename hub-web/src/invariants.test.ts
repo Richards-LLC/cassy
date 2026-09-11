@@ -14,7 +14,7 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-describe("binding Cassy Commander browser invariants", () => {
+describe("binding Cassy Cloud browser invariants", () => {
   it("H4-CATALOG-01 consumes pairing fragments synchronously and preserves no capability in the URL", () => {
     const token = "A".repeat(43);
     let replacement = "";
@@ -47,13 +47,15 @@ describe("binding Cassy Commander browser invariants", () => {
     expect(html).toContain("<title>Cassy Cloud</title>");
   });
 
-  it("declares the Cassy Commander favicon from the static web source", async () => {
+  it("declares the Cassy Cloud favicon from the static web source", async () => {
     const [html, favicon] = await Promise.all([
       readFile(new URL("../index.html", import.meta.url), "utf8"),
       readFile(new URL("../public/favicon.svg", import.meta.url), "utf8"),
     ]);
     expect(html).toContain('<link rel="icon" type="image/svg+xml" href="/favicon.svg" />');
-    expect(favicon).toContain('>C</text>');
+    expect(favicon).toContain('docs/assets/cassy-logo.png');
+    expect(favicon.match(/<path /g)).toHaveLength(3);
+    expect(favicon).not.toContain('<text');
   });
 
   it("asks for the machine's hub address instead of seeding the page origin (cas-8051 F5)", async () => {
@@ -74,8 +76,8 @@ describe("binding Cassy Commander browser invariants", () => {
     const source = await readFile(new URL("main.ts", import.meta.url), "utf8");
     expect(source).toContain("Relay pairing granted read-only scopes for ${location.origin}");
     expect(source).toContain("cas hub pair --origin ${location.origin}");
-    expect(source).toContain("Pairings are specific to each Cassy Commander origin.");
-    expect(source).toContain("<dt>Cassy Commander origin</dt>");
+    expect(source).toContain("Pairings are specific to each Cassy Cloud origin.");
+    expect(source).toContain("<dt>Cassy Cloud origin</dt>");
     expect(source).toContain('class="control-action" title="${escapeAttr(takeControlReason');
     expect(source).toContain('class="control-disabled-reason"');
     // A phone cannot hover, so an unavailable control keeps its reason in the DOM
@@ -361,18 +363,18 @@ describe("binding Cassy Commander browser invariants", () => {
     expect(main).toContain('openMachines.onclick = () => { machineDrawerOpen = true; render(); }');
     expect(main).toContain('emptyTitle.textContent = "No panes in this session yet"');
     expect(main).toContain('empty.className = "empty empty-pane-slot"');
-    // Cassy Commander has no pane drag-and-drop, so the empty slot must not promise one.
+    // Cassy Cloud has no pane drag-and-drop, so the empty slot must not promise one.
     expect(main).not.toContain("drag it here");
     expect(attentionView).toContain('message.textContent = "All clear"');
     expect(attentionView).toContain("Last event ${new Date(latest.createdAt).toLocaleString()}");
   });
 
-  it("distinguishes a loading catalog from an unpaired Cassy Commander drawer", async () => {
+  it("distinguishes a loading catalog from an unpaired Cassy Cloud drawer", async () => {
     const source = await readFile(new URL("main.ts", import.meta.url), "utf8");
     expect(source).toContain("let machineCatalogLoaded = false;");
     expect(source).toContain("machineCatalogLoaded = true;");
     expect(source).toContain('"Loading paired machines…"');
-    // An unpaired Cassy Commander offers pairing instead of naming a glyph, and the
+    // An unpaired Cassy Cloud offers pairing instead of naming a glyph, and the
     // machine being paired is the one running the sessions, not this device.
     expect(source).toContain('"No machines paired yet. Pair the machine your sessions run on."');
     expect(source).toContain('pair.textContent = "Pair a machine";');
@@ -433,7 +435,7 @@ describe("binding Cassy Commander browser invariants", () => {
     expect(source).not.toContain("const paired = machines.get(selectedMachineId ?? \"\");");
     expect(source).toContain("const connectedNotice = firstConnections.observe(machine.id, machine.label, state);");
     expect(source).toContain("if (connectedNotice) toast(connectedNotice);");
-    expect(source).toContain("firstConnections.forget(selected.id);");
+    expect(source).toContain("firstConnections.forget(id);");
     expect(source).not.toContain("} paired`);");
   });
 
@@ -727,7 +729,7 @@ describe("binding Cassy Commander browser invariants", () => {
     expect(surface).not.toContain('"italic 700"');
   });
 
-  it("encodes the supervisor-first Cassy Commander shell at desktop and phone widths", async () => {
+  it("encodes the supervisor-first Cassy Cloud shell at desktop and phone widths", async () => {
     const [main, css, connection] = await Promise.all(["main.ts", "styles.css", "connection.ts"].map((path) => readFile(new URL(path, import.meta.url), "utf8")));
     expect(main).toContain('class="machine-navigation${machineDrawerOpen ? " drawer-open" : ""}"');
     expect(main).toContain('id="pair-toggle" class="rail-control pair-machine"');
@@ -797,11 +799,11 @@ describe("binding Cassy Commander browser invariants", () => {
     // machine. The session is claimed against the hub's own list.
     expect(main).toContain("const lastSelection = loadStoredSelection(selectionStorage());");
     expect(main).toContain("restoreTarget = restoredMachineId && lastSelection?.session ? lastSelection : undefined;");
-    expect(main).toContain("restoreLastSession(machine.id, items);");
+    expect(main).toContain("restoreLastSession(machine.id, visibleSessions(machine.id));");
     expect(main).toContain("const session = restorableSession(restoreTarget, machineId, items);");
     expect(main).toContain("if (selectedSession !== undefined) return;");
     // A removed machine must not survive in the back stack or in storage.
-    expect(main).toContain("selection = forgetMachine(selection, selected.id);");
+    expect(main).toContain("selection = forgetMachine(selection, id);");
     expect(main).toContain("clearStoredSelection(selectionStorage());");
     expect(main).not.toContain("selectedMachineId = machines.keys().next().value; selectedSession = undefined;");
   });
@@ -876,7 +878,7 @@ describe("binding Cassy Commander browser invariants", () => {
     await vi.waitFor(() => {
       expect(callbacks.onAuthFailure).toHaveBeenCalledWith(
         "needs-pairing",
-        "Hub is reachable but this Cassy Commander is no longer paired. Re-pair to continue.",
+        "Hub is reachable but this Cassy Cloud is no longer paired. Re-pair to continue.",
       );
     });
     expect(supervisor.snapshot()).toMatchObject({

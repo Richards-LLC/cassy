@@ -10,7 +10,7 @@ import { build } from "vite";
 import { runVisualQa } from "../../scripts/visual-qa.mjs";
 
 export const FIXTURE_NAMES = [
-  "conversations-list", "conversation", "conversation-replied", "conversation-error",
+  "paired-machines", "conversations-list", "conversation", "conversation-replied", "conversation-error",
   "fleet-populated",
   "fleet-empty",
   "session-canvas",

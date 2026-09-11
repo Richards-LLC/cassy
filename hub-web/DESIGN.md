@@ -70,11 +70,12 @@ Ghostty's ANSI palette stays in `hub-web/src/terminal/ghostty-adapter.ts`; it is
 ## Brand
 
 The Hub's product name is **Cassy Cloud**. `hub-web/src/cloud-brand.ts` owns an
-inline SVG open-C/cloud mark beside the system-serif wordmark. The wordmark uses
-`--font-display`, medium weight, `--fs-lg` (21px), with `--space-2` separation;
-no downloaded font or image is required. The mark uses `--color-action`: indigo
-#2E3A9F on warm paper in light, #A9B3FF on warm graphite in dark. Text uses
-`--text-hi` (#1B1D24 / #E9E6E0); do not reverse it into a white badge.
+inline SVG of the canonical three interlocking Cassy ribbons traced from
+`docs/assets/cassy-logo.png`. `public/favicon.svg` is the single geometry source
+for header, terminal, pairing and favicon. The monochrome mark inherits
+`--color-action`, with matching light/dark favicon ink. The serif wordmark uses
+`--font-display`, medium weight, `--fs-lg` (21px), with `--space-2` separation.
+No downloaded font or raster is required.
 
 Place the complete brand at the top of the thread list on phone and desktop.
 The phone conversation header retains the complete lockup above its project

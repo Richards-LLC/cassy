@@ -52,7 +52,7 @@ export interface HubCallbacks {
   onAuthFailure?(kind: AuthFailureKind, detail: string): void;
   onCredentialRefreshed?(machine: StoredMachine): Promise<void> | void;
   onMachineInfo?(machine: HubMachineInfo | undefined): void;
-  onSessions(sessions: HubSession[]): void;
+  onSessions(sessions: HubSession[], freshnessThresholdSecs?: number): void;
   onMachineEvent(event: Record<string, unknown>): void;
   onSessionState(session: string, state: SessionState, scrollback?: Record<string, number[][]>, authoritativeKeyframes?: boolean): void;
   onOutput(session: string, paneId: string, data: Uint8Array): void;
@@ -274,7 +274,7 @@ export class HubConnectionSupervisor {
       if (stage === "auth") {
         this.blockAuthentication(
           "needs-pairing",
-          "Hub is reachable but this Cassy Commander is no longer paired. Re-pair to continue.",
+          "Hub is reachable but this Cassy Cloud is no longer paired. Re-pair to continue.",
         );
         return;
       }
@@ -331,8 +331,8 @@ export class HubConnectionSupervisor {
   }
 
   async refreshSessions(signal?: AbortSignal): Promise<HubSession[]> {
-    const response = await this.request<{ sessions: HubSession[] }>("GET", sessionsPath(revealWorkers(), revealDormant()), undefined, signal);
-    this.callbacks.onSessions(response.sessions);
+    const response = await this.request<{ sessions: HubSession[]; freshness_threshold_secs?: number }>("GET", sessionsPath(revealWorkers(), revealDormant()), undefined, signal);
+    this.callbacks.onSessions(response.sessions, response.freshness_threshold_secs);
     return response.sessions;
   }
 
@@ -430,6 +430,7 @@ export class HubConnectionSupervisor {
   private async heartbeat(): Promise<void> {
     const started = performance.now();
     try {
+      await this.refreshSessions(AbortSignal.timeout(3_000));
       if (this.machineSocketReady && this.machineSocket?.readyState === WebSocket.OPEN) {
         if (this.healthPing) {
           this.missedHeartbeats += 1;
@@ -624,7 +625,7 @@ export class HubConnectionSupervisor {
           catch { protocolFailure("Machine protocol mismatch: hub returned an invalid handshake"); return; }
           if (hello.proto !== 2) {
             const supported = hello.error?.supported;
-            protocolFailure(`Machine protocol mismatch: Cassy Commander requires proto 2${supported ? `; hub supports ${supported}` : ""}`);
+            protocolFailure(`Machine protocol mismatch: Cassy Cloud requires proto 2${supported ? `; hub supports ${supported}` : ""}`);
             return;
           }
           clearTimers();

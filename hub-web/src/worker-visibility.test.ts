@@ -81,3 +81,34 @@ describe("worker visibility", () => {
     expect(workersCommandLabel(true).title).toBe("Workers · Shown");
   });
 });
+
+import { retainPendingSessions, visibleCatalog } from './worker-visibility';
+import type { HubSession } from './types';
+
+const liveSession: HubSession = { name: 'live', supervisor: 'supervisor', workers: ['worker'], liveness: 'live' };
+describe('staffed session catalog', () => {
+  it('hides dead, empty, worker-only and unreachable rows; keeps staffed live rows', () => {
+    const rows = [liveSession, { ...liveSession, name: 'dead', dormant: true }, { ...liveSession, name: 'empty', workers: [] }, { ...liveSession, name: 'worker', supervisor: '' }, { ...liveSession, name: 'missing', liveness: 'missing_endpoint' as const }];
+    expect(visibleCatalog(rows, () => false).map(row => row.name)).toEqual(['live']);
+    expect(visibleCatalog(rows, () => false, true, true)).toHaveLength(5);
+  });
+  it('retains missing in-flight destinations as unreachable through sending and acknowledgment', () => {
+    const rows = retainPendingSessions([liveSession], [], () => true);
+    expect(rows).toEqual([{ ...liveSession, unreachable: true }]);
+    expect(visibleCatalog(rows, () => true)).toHaveLength(1);
+    expect(visibleCatalog(rows, () => false)).toHaveLength(0);
+    expect(retainPendingSessions(rows, [liveSession], () => true)).toEqual([liveSession]);
+  });
+  it('expires cached catalogs but retains pending work, and recovers on a fresh response', () => {
+    expect(visibleCatalog([liveSession], () => false, false)).toEqual([]);
+    expect(visibleCatalog([liveSession], () => true, false)[0].unreachable).toBe(true);
+    expect(visibleCatalog([liveSession], () => true, true)[0].unreachable).toBeUndefined();
+  });
+  it('uses the fresh catalog roster when revealing worker panes', () => {
+    expect(splitVisiblePanes(panes, true, ['agile-octopus']).visible.map(pane => pane.id)).toEqual(['bright-otter', 'agile-octopus']);
+    expect(splitVisiblePanes(panes, true, []).visible.map(pane => pane.id)).toEqual(['bright-otter']);
+  });
+  it('never renders exited supervisors or workers, even with workers revealed', () => {
+    expect(splitVisiblePanes(panes.map(pane => ({ ...pane, exited: true })), true).visible).toEqual([]);
+  });
+});

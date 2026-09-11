@@ -80,6 +80,21 @@ fn checks_and_non_recursive_rustfmt_remain_available() {
 }
 
 #[test]
+fn worker_script_comments_and_heredoc_text_do_not_trigger_formatter_guard() {
+    for command in [
+        "python3 -c 'from pathlib import Path; # rustfmt is mentioned in this comment\nprint(\"cargo fmt\")'",
+        "cat <<'PY'\n# rustfmt would be unsafe here, but this is only script content\nprint(\"cargo fmt\")\nPY",
+        "python3 - <<'PY'\n# rustfmt is documentation, not an invocation\nsource = \"rustfmt --edition 2024 task.rs\"\nPY",
+    ] {
+        let out = handle_pre_tool_use(&input(command, "worker"), None).expect("handler ok");
+        assert!(
+            deny_reason(&out).is_none(),
+            "script comments and strings must not be formatter commands: {command:?}"
+        );
+    }
+}
+
+#[test]
 fn supervisor_retains_normalization_authority() {
     for command in [
         "cargo fmt --all",

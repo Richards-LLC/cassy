@@ -1651,12 +1651,13 @@ fn worker_answers_to(worker: &cas_types::Agent, target: &str) -> bool {
 const SPAWN_QUEUE_DUPLICATE_SCAN: usize = 100;
 
 fn no_active_epic_guidance(why: &str) -> String {
+    let tool_prefix = crate::mcp::tools::core::guidance::caller_prefix();
     format!(
         "No active EPIC found, and {why} Either name the work directly or open an EPIC:\n\
          0. Spawn for one existing open task (no EPIC needed): \
-         mcp__cas__coordination action=spawn_workers count=1 task_id=<task-id>\n\
-         1. Create EPIC: mcp__cas__task action=create task_type=epic title=\"...\" description=\"...\"\n\
-         2. Or assign existing EPIC: mcp__cas__task action=start id=<epic-id>\n\
+         {tool_prefix}coordination action=spawn_workers count=1 task_id=<task-id>\n\
+         1. Create EPIC: {tool_prefix}task action=create task_type=epic title=\"...\" description=\"...\"\n\
+         2. Or assign existing EPIC: {tool_prefix}task action=start id=<epic-id>\n\
          3. Optionally gather requirements using the cas-supervisor skill's planning references\n\
          4. Break into tasks using the cas-supervisor skill's planning references\n\
          5. Then spawn workers to work on the tasks"
@@ -1933,7 +1934,8 @@ impl CasService {
                         "task_id can only be used with a single-worker spawn_workers request \
                          (count=1, or exactly one name in worker_names) — got {requested_worker_count} \
                          worker(s) requested. Assign the task after spawning instead: \
-                         mcp__cas__task action=update id={task_id} assignee=<worker-name>."
+                         {tool_prefix}task action=update id={task_id} assignee=<worker-name>.",
+                        tool_prefix = crate::mcp::tools::core::guidance::caller_prefix()
                     ),
                 ));
             }
@@ -5573,7 +5575,7 @@ impl CasService {
         let epic_id = req.id.as_deref().map(str::trim).filter(|s| !s.is_empty()).ok_or_else(|| {
             Self::error(
                 ErrorCode::INVALID_PARAMS,
-                "epic_status requires `id`: mcp__cas__coordination action=epic_status id=<epic-id>",
+                format!("epic_status requires `id`: {tool_prefix}coordination action=epic_status id=<epic-id>", tool_prefix = self.inner.guidance_prefix()),
             )
         })?;
 

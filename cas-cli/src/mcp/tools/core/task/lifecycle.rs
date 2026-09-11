@@ -1179,12 +1179,14 @@ impl CasCore {
                          branch, then retry task close. If review fails — the supervisor \
                          declines the delivery, or requires an amendment after merging — \
                          they must first run \
-                         `mcp__cas__task action=request_changes id={} reason=\"state what remains and what must be corrected or reverted\"`; \
+                         `{tool_prefix}task action=request_changes id={} reason=\"state what remains and what must be corrected or reverted\"`; \
                          a worker cannot self-reject or start a clean parked delivery. If \
                          that merge fails with a genuine \
                          git conflict, Cassy marks the parked task conflicted and its assigned \
                          worker can then start task {} to resolve it.",
-                        req.id, req.id
+                        req.id,
+                        req.id,
+                        tool_prefix = self.supervisor_guidance_prefix().unwrap_or("")
                     ),
                 ));
             }
@@ -1257,8 +1259,12 @@ impl CasCore {
                         format!(
                             "Task {} is assigned to {}, not you ({}). Do not self-dispatch — \
                             wait for an explicit assignment, or ask the supervisor to \
-                            reassign it: mcp__cas__task action=transfer id={} to_agent=<your-agent-id>",
-                            req.id, assigned_identity, caller_identity, req.id
+                            reassign it: {tool_prefix}task action=transfer id={} to_agent=<your-agent-id>",
+                            req.id,
+                            assigned_identity,
+                            caller_identity,
+                            req.id,
+                            tool_prefix = self.supervisor_guidance_prefix().unwrap_or("")
                         ),
                     ));
                 }
@@ -1363,15 +1369,16 @@ impl CasCore {
             {
                 return Err(McpError {
                     code: ErrorCode::INVALID_PARAMS,
-                    message: Cow::from(
+                    message: Cow::from(format!(
                         "Supervisors cannot start non-epic tasks. To delegate work:\n\n\
                         1. Assign to existing worker:\n\
-                           mcp__cas__task action=update id=<task_id> assignee=<worker_name>\n\
-                           mcp__cas__coordination action=message target=<worker_name> message=\"Task <task_id> assigned\"\n\n\
+                           {tool_prefix}task action=update id=<task_id> assignee=<worker_name>\n\
+                           {tool_prefix}coordination action=message target=<worker_name> summary=\"task assigned\" message=\"Task <task_id> assigned\"\n\n\
                         2. Or spawn a new worker:\n\
-                           mcp__cas__coordination action=spawn_workers count=1\n\n\
+                           {tool_prefix}coordination action=spawn_workers count=1 task_id=<task_id>\n\n\
                         Supervisors coordinate and review; workers execute tasks.",
-                    ),
+                        tool_prefix = crate::mcp::tools::core::guidance::caller_prefix()
+                    )),
                     data: None,
                 });
             }
@@ -1815,7 +1822,7 @@ impl CasCore {
             epic_ownership_info.unwrap_or_default(),
             wt_info,
             sibling_notes_info.unwrap_or_default(),
-            Self::workflow_guidance(),
+            self.workflow_guidance(),
             no_code_external_ref_guidance(&task),
             push_note,
         )))

@@ -252,7 +252,7 @@ impl CasService {
         Parameters(req): Parameters<MemoryRequest>,
     ) -> Result<CallToolResult, McpError> {
         let this = self.clone();
-        panic_catch::dispatch_with_catch("memory", async move {
+        panic_catch::dispatch_with_guidance("memory", this.inner.clone(), async move {
             crate::ui::factory::record_supervisor_mcp_call();
             let action = req.action.clone();
             let is_mutating = matches!(
@@ -321,7 +321,7 @@ impl CasService {
         Parameters(req): Parameters<TaskRequest>,
     ) -> Result<CallToolResult, McpError> {
         let this = self.clone();
-        panic_catch::dispatch_with_catch("task", async move {
+        panic_catch::dispatch_with_guidance("task", this.inner.clone(), async move {
             crate::ui::factory::record_supervisor_mcp_call();
             let action = req.action.clone();
             let event_task_id = req.id.clone().unwrap_or_default();
@@ -530,7 +530,7 @@ impl CasService {
         Parameters(req): Parameters<CoordinationRequest>,
     ) -> Result<CallToolResult, McpError> {
         let this = self.clone();
-        panic_catch::dispatch_with_catch("coordination", async move {
+        panic_catch::dispatch_with_guidance("coordination", this.inner.clone(), async move {
             crate::ui::factory::record_supervisor_mcp_call();
             let action = req.action.clone();
             let event_target = req.target.clone().unwrap_or_default();
@@ -1533,3 +1533,6 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod recovery_guidance_tests;

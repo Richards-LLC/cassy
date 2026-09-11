@@ -37,6 +37,24 @@ use rmcp::ErrorData as McpError;
 use rmcp::model::{CallToolResult, ErrorCode};
 use tracing::Instrument;
 
+/// Capture rendering evidence inside the same panic boundary as the handler.
+/// Prefix context lives only for this request and never rewrites response text.
+pub(super) async fn dispatch_with_guidance<F>(
+    tool_name: &'static str,
+    core: crate::mcp::server::CasCore,
+    future: F,
+) -> Result<CallToolResult, McpError>
+where
+    F: Future<Output = Result<CallToolResult, McpError>> + Send + 'static,
+{
+    dispatch_with_catch(tool_name, async move {
+        let prefix = core.guidance_prefix();
+        let supervisor = core.supervisor_guidance_prefix();
+        crate::mcp::tools::core::guidance::with_caller_prefix(prefix, supervisor, future).await
+    })
+    .await
+}
+
 /// Run `fut` on a dedicated tokio task. On success, return the handler's
 /// own result; on panic, return a structured `INTERNAL_ERROR` so the MCP
 /// client sees a tool-error response instead of a dropped connection.
@@ -133,6 +151,33 @@ fn panic_message(payload: Box<dyn Any + Send>) -> String {
 mod tests {
     use super::*;
     use rmcp::model::Content;
+
+    #[tokio::test]
+    async fn recovery_guidance_dispatch_retains_panic_isolation() {
+        let _env = crate::test_env_guard::TestEnvGuard::new();
+        let dir = tempfile::TempDir::new().unwrap();
+        let core = crate::mcp::server::CasCore::with_daemon(dir.path().to_path_buf(), None, None);
+        let error = dispatch_with_guidance("task", core.clone(), async {
+            panic!("guidance dispatch panic");
+            #[allow(unreachable_code)]
+            Ok(CallToolResult::success(vec![]))
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, ErrorCode::INTERNAL_ERROR);
+        assert!(error.message.contains("guidance dispatch panic"));
+        let result = dispatch_with_guidance("task", core, async {
+            Ok(CallToolResult::success(vec![Content::text(
+                "literal mcp__cas__task stays",
+            )]))
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            result.content[0].as_text().unwrap().text,
+            "literal mcp__cas__task stays"
+        );
+    }
 
     // The `#[allow(unreachable_code)]` annotations below are required
     // because rustc cannot prove the async block diverges after

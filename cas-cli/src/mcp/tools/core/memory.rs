@@ -395,12 +395,14 @@ impl CasCore {
     // ========================================================================
 
     /// Generate workflow guidance to show when starting or claiming a task
-    pub(super) fn workflow_guidance() -> String {
-        "\n\n📋 Workflow Guidance:\n\
-         • Search: `mcp__cas__search` for exploratory queries, Grep for exact patterns\n\
-         • Progress: `mcp__cas__task action: notes` to track discoveries\n\
-         • Learnings: `mcp__cas__memory action: remember` for reusable knowledge"
-            .to_string()
+    pub(super) fn workflow_guidance(&self) -> String {
+        format!(
+            "\n\n📋 Workflow Guidance:\n\
+         • Search: `{tool_prefix}search` for exploratory queries, Grep for exact patterns\n\
+         • Progress: `{tool_prefix}task action=notes` to track discoveries\n\
+         • Learnings: `{tool_prefix}memory action=remember` for reusable knowledge",
+            tool_prefix = self.guidance_prefix()
+        )
     }
 
     // ========================================================================

@@ -532,9 +532,12 @@ impl CasService {
         let mut message = req.message.ok_or_else(|| {
             Self::error(
                 ErrorCode::INVALID_PARAMS,
-                "message required — full message body goes in `message`. \
-                 Example: mcp__cas__coordination action=message target=supervisor \
+                format!(
+                    "message required — full message body goes in `message`. \
+                 Example: {}coordination action=message target=supervisor \
                  summary=\"task blocked\" message=\"cas-abc1 needs ...\"",
+                    self.inner.guidance_prefix()
+                ),
             )
         })?;
         let summary = req

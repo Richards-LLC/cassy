@@ -898,20 +898,26 @@ fn required_scoped_proof_targets(
 }
 
 fn scoped_proof_note_targets(notes: &str) -> Option<String> {
-    notes.lines().find_map(|line| {
-        let lower = line.to_ascii_lowercase();
-        if !lower.contains("scoped_proof") || !lower.contains("result=pass") {
-            return None;
-        }
-        let targets = line.split_once("targets=")?.1;
-        Some(
-            targets
-                .split_once("result=")
-                .map_or(targets, |(value, _)| value)
-                .trim()
-                .to_string(),
-        )
-    })
+    // A later proof note may supersede an earlier partial receipt after a
+    // supervisor expands the required target set. Keep the latest passing
+    // receipt so close does not revalidate stale scope forever.
+    notes
+        .lines()
+        .filter_map(|line| {
+            let lower = line.to_ascii_lowercase();
+            if !lower.contains("scoped_proof") || !lower.contains("result=pass") {
+                return None;
+            }
+            let targets = line.split_once("targets=")?.1;
+            Some(
+                targets
+                    .split_once("result=")
+                    .map_or(targets, |(value, _)| value)
+                    .trim()
+                    .to_string(),
+            )
+        })
+        .last()
 }
 
 fn scoped_proof_note_covers(notes: &str, required_targets: &[String]) -> Vec<String> {
@@ -1175,6 +1181,23 @@ mod risk_proof_tests {
             .into();
         validate_risk_close_proofs(&task, &changed, dir.path())
             .expect("the recorded integration target should satisfy close");
+    }
+
+    #[test]
+    fn scoped_proof_uses_latest_receipt_when_an_earlier_one_is_partial() {
+        let dir = scoped_proof_fixture();
+        let mut task = Task::new("cas-latest-proof".into(), "latest proof".into());
+        let changed = vec!["cas-cli/src/mcp/tools/service/factory_ops.rs".to_string()];
+        task.notes = concat!(
+            "[2026-09-11] 📝 PROGRESS SCOPED_PROOF: ",
+            "targets=lib:factory_ops result=PASS\n",
+            "[2026-09-11] 📝 PROGRESS SCOPED_PROOF: ",
+            "targets=lib:factory_ops,test:factory_mcp_ops_test result=PASS",
+        )
+        .into();
+
+        validate_risk_close_proofs(&task, &changed, dir.path())
+            .expect("a later complete receipt should supersede an earlier partial receipt");
     }
 
     #[test]

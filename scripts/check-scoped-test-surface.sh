@@ -7,6 +7,12 @@
 
 set -euo pipefail
 
+# `SCOPED_PROOF_TARGET_BRANCH` carries the declared WorkTarget branch when the
+# caller has not already resolved it to SCOPED_PROOF_BASE. The checker resolves
+# the task's own baseline instead of assuming that every worker diff starts at
+# origin/main.
+target_branch="${SCOPED_PROOF_TARGET_BRANCH:-}"
+
 usage() {
     echo "usage: $0 [--base <git-ref>] [--resolve-targets] -- [cargo/nextest arguments]" >&2
     exit 2
@@ -89,7 +95,9 @@ search_test_paths() {
 }
 
 if [[ -z "$base_ref" ]]; then
-    if git rev-parse --verify --quiet origin/main >/dev/null; then
+    if [[ -n "$target_branch" ]]; then
+        base_ref="$target_branch"
+    elif git rev-parse --verify --quiet origin/main >/dev/null; then
         base_ref="origin/main"
     elif git rev-parse --verify --quiet main >/dev/null; then
         base_ref="main"
@@ -102,6 +110,13 @@ merge_base="$(git merge-base "$base_ref" HEAD 2>/dev/null)" || {
     echo "SCOPED PROOF SURFACE: cannot find a merge-base between '$base_ref' and HEAD." >&2
     exit 2
 }
+if [[ "$resolve_targets" == true ]]; then
+    # Keep --resolve-targets stdout machine-readable for the runner and send
+    # the human-facing baseline diagnostic to stderr.
+    echo "SCOPED_PROOF SURFACE: base=${base_ref} merge-base=${merge_base}" >&2
+else
+    echo "SCOPED_PROOF SURFACE: base=${base_ref} merge-base=${merge_base}"
+fi
 
 lib_requested=false
 test_targets=()
@@ -566,7 +581,7 @@ if [[ ${#missing[@]} -eq 0 ]]; then
     if [[ ${#proof_targets[@]} -eq 0 ]]; then
         proof_targets+=(none)
     fi
-    (IFS=,; echo "SCOPED_PROOF: targets=${proof_targets[*]} result=PASS")
+    (IFS=,; echo "SCOPED_PROOF: targets=${proof_targets[*]} result=PASS base=${merge_base}")
     exit 0
 fi
 

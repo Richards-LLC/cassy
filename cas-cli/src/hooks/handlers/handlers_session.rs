@@ -349,9 +349,12 @@ pub fn handle_session_start(
     // codemap/project-overview so those keep the preview top slot.
     //
     // (1) Staged BUG-*/FEATURE-* reports that were never pushed to GitHub.
+    let artifacts_root =
+        crate::config::resolved_factory_artifacts_root(config.factory().artifacts_root.as_deref());
     if let Some(banner) =
         crate::hooks::handlers::session_hygiene::build_session_start_unfiled_reports_banner_sized(
             cas_root,
+            &artifacts_root,
         )
     {
         assembler.append_degradable_with_priority(

@@ -16,6 +16,8 @@ real_store_guard="$repo_root/scripts/check-real-store-untouched.sh"
 migration_guard="$repo_root/scripts/check-release-migration-snapshots.sh"
 snapshot_router="$repo_root/scripts/check-scoped-snapshot-tests.sh"
 snapshot_router_test="$repo_root/scripts/test-check-scoped-snapshot-tests.sh"
+scoped_surface="$repo_root/scripts/check-scoped-test-surface.sh"
+scoped_surface_test="$repo_root/scripts/test-check-scoped-test-surface.sh"
 watchdog="$repo_root/.github/workflows/merge-queue-watchdog.yml"
 watchdog_script="$repo_root/scripts/cancel-stale-merge-group-runs.sh"
 runner_unit="$repo_root/ops/systemd/cassy-actions-runner.service"
@@ -503,6 +505,23 @@ else
 fi
 require_text "$(<"$makefile")" 'test-check-scoped-snapshot-tests.sh' \
     'test-ci-tiers runs the snapshot router self-test'
+
+if [[ -x "$scoped_surface" ]]; then
+    printf 'ok   scoped test surface checker is executable\n'
+    pass=$((pass + 1))
+else
+    printf 'FAIL scoped test surface checker must be executable\n'
+    fail=$((fail + 1))
+fi
+if [[ -x "$scoped_surface_test" ]]; then
+    printf 'ok   scoped test surface checker has an executable self-test\n'
+    pass=$((pass + 1))
+else
+    printf 'FAIL scoped test surface checker has no executable self-test\n'
+    fail=$((fail + 1))
+fi
+require_text "$(<"$makefile")" 'test-check-scoped-test-surface.sh' \
+    'test-ci-tiers runs the scoped test surface self-test'
 
 # Removing the factory push trigger in the name of dedupe would leave the
 # supervisor's `git merge --no-ff` integration path — which never opens a pull

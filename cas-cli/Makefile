@@ -228,6 +228,7 @@ test-ci-tiers:
 	cd .. && ./scripts/test-cas-install.sh
 	cd .. && ./scripts/test-check-release-migration-snapshots.sh
 	cd .. && ./scripts/test-check-scoped-snapshot-tests.sh
+	cd .. && ./scripts/test-check-scoped-test-surface.sh
 
 # Type check
 check:

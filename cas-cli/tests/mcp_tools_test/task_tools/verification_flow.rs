@@ -476,6 +476,96 @@ async fn test_close_remints_a_fresh_dispatch_when_the_bound_proof_is_dead() {
 }
 
 #[tokio::test]
+/// Pin cas-db60/cas-5c33's retry contract: a close retry while the exact
+/// dispatch is still live must not retire it or mint a replacement, so a
+/// supervisor can resolve the original handoff it was given.
+async fn test_close_retry_keeps_live_dispatch_for_original_supervisor_verdict() {
+    let (_temp, service, cas_dir, task_id, _worker_dir, _env_lock) =
+        delivered_worktree_fixture("factory/live-retry").await;
+
+    let first = extract_text(
+        service
+            .cas_task_close(Parameters(close_request(&task_id, "delivered work")))
+            .await
+            .expect("first close"),
+    );
+    assert!(first.contains("VERIFICATION REQUIRED"), "{first}");
+    let first_dispatch = cas_store::get_latest_verification_dispatch(&cas_dir, &task_id)
+        .unwrap()
+        .expect("first dispatch");
+    assert_eq!(
+        first_dispatch.state,
+        cas::types::VerificationDispatchState::Pending,
+        "the supervisor verdict must be recorded against a live undecided dispatch"
+    );
+    assert!(
+        cas_store::get_verification_for_dispatch(&cas_dir, &first_dispatch.id)
+            .unwrap()
+            .is_none(),
+        "the first dispatch must not already have a verdict"
+    );
+
+    let retry = extract_text(
+        service
+            .cas_task_close(Parameters(close_request(&task_id, "retry delivered work")))
+            .await
+            .expect("close retry"),
+    );
+    assert!(retry.contains("VERIFICATION REQUIRED"), "{retry}");
+    let retry_dispatch = cas_store::get_latest_verification_dispatch(&cas_dir, &task_id)
+        .unwrap()
+        .expect("dispatch after close retry");
+    assert_eq!(
+        retry_dispatch.id, first_dispatch.id,
+        "a live undecided proof cycle must be reused, not replaced: {retry}"
+    );
+    let conn = rusqlite::Connection::open(cas_dir.join("cas.db")).expect("verification db");
+    let dispatch_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM verification_dispatches WHERE task_id = ?1",
+            rusqlite::params![task_id],
+            |row| row.get(0),
+        )
+        .expect("count task dispatches");
+    assert_eq!(
+        dispatch_count, 1,
+        "a close retry must not mint a second live dispatch"
+    );
+    drop(conn);
+
+    let supervisor = registered_supervisor(&cas_dir, "live-retry-supervisor").await;
+    supervisor
+        .cas_verification_add(Parameters(VerificationAddRequest {
+            task_id: task_id.clone(),
+            status: "approved".to_string(),
+            summary: "approved the original live proof cycle".to_string(),
+            confidence: Some(1.0),
+            issues: None,
+            files_reviewed: Some("delivered.txt".to_string()),
+            duration_ms: Some(1),
+            verification_type: None,
+            verifier_capability: None,
+            dispatch_id: Some(first_dispatch.id.clone()),
+        }))
+        .await
+        .expect("supervisor verdict on the original dispatch");
+
+    assert_eq!(
+        cas_store::get_verification_dispatch(&cas_dir, &first_dispatch.id)
+            .unwrap()
+            .state,
+        cas::types::VerificationDispatchState::Resolved
+    );
+    let closed = extract_text(
+        service
+            .cas_task_close(Parameters(close_request(&task_id, "retry after approval")))
+            .await
+            .expect("close after original verdict"),
+    );
+    assert!(closed.contains("Closed task:"), "{closed}");
+}
+
+#[tokio::test]
 async fn test_supervisor_verdict_follows_superseded_dispatch_with_unchanged_proof() {
     let (_temp, service, cas_dir, task_id, _worker_dir, _env_lock) =
         delivered_worktree_fixture("factory/superseded-verdict").await;

@@ -3,7 +3,7 @@ mod task_attribution;
 use super::TaskLifecycleGateError;
 use crate::harness_policy::{
     is_supervisor_from_env, is_worker_without_subagents_from_env, supervisor_harness_from_env,
-    supervisor_verification_tool, verification_policy, worker_harness_from_env,
+    verification_policy, worker_harness_from_env,
 };
 use crate::mcp::tools::core::imports::*;
 use cas_types::TaskRisk;
@@ -3033,7 +3033,10 @@ impl CasCore {
                                 )),
                                 data: None,
                             })?;
-                        let sup_ver = supervisor_verification_tool();
+                        let sup_ver = format!(
+                            "{}verification",
+                            crate::mcp::tools::core::guidance::supervisor_prefix()
+                        );
                         return Ok(Self::tool_error(format!(
                             "⚠️ VERIFICATION TIMED OUT\n\nTask {} exact dispatch {} requires named registered-supervisor recovery before close.\n\nRecord the direct recovery verdict with {sup_ver} action=add task_id={} dispatch_id={} status=approved summary=\"...\", then retry close.",
                             req.id, timed_out.id, req.id, timed_out.id
@@ -3068,7 +3071,7 @@ impl CasCore {
                             "retired a drifted verification dispatch; minting a fresh cycle"
                         );
                     } else {
-                        let sup_ver = supervisor_verification_tool();
+                        let sup_ver = format!("{}verification", crate::mcp::tools::core::guidance::supervisor_prefix());
                         let bound_head = dispatch
                             .repository
                             .as_ref()
@@ -3967,7 +3970,10 @@ impl CasCore {
                         );
                     }
                     let elapsed_mins = (now - timed_out.requested_at).num_seconds() / 60;
-                    let sup_ver = supervisor_verification_tool();
+                    let sup_ver = format!(
+                        "{}verification",
+                        crate::mcp::tools::core::guidance::supervisor_prefix()
+                    );
                     return Ok(Self::tool_error(format!(
                         "⚠️ VERIFICATION TIMED OUT\n\n\
                          Task {} waited {} minutes for dispatch {} without a verdict. \
@@ -4029,7 +4035,10 @@ impl CasCore {
                             v.summary,
                             if is_worker_without_subagents {
                                 // cas-8aaf: use harness-appropriate tool aliases.
-                                let sup_ver = supervisor_verification_tool();
+                                let sup_ver = format!(
+                                    "{}verification",
+                                    crate::mcp::tools::core::guidance::supervisor_prefix()
+                                );
                                 format!(
                                     "To fix: Address the issues in this worker.\n\
                                      Then ask supervisor to run verification \
@@ -4048,7 +4057,10 @@ impl CasCore {
                                     "{}coordination",
                                     crate::mcp::tools::core::guidance::caller_prefix()
                                 );
-                                let sup_ver = supervisor_verification_tool();
+                                let sup_ver = format!(
+                                    "{}verification",
+                                    crate::mcp::tools::core::guidance::supervisor_prefix()
+                                );
                                 format!(
                                     "Suggested message: {coord} action=message target=supervisor summary=\"verification requested\" \
                                      message=\"Task {id} is ready for re-verification. \
@@ -4132,7 +4144,10 @@ impl CasCore {
                         // verification alias must track the supervisor CLI —
                         // hardcoding mcp__cas__verification hands a Codex
                         // supervisor an alias they cannot call.
-                        let sup_ver = supervisor_verification_tool();
+                        let sup_ver = format!(
+                            "{}verification",
+                            crate::mcp::tools::core::guidance::supervisor_prefix()
+                        );
                         return Ok(Self::tool_error(format!(
                             "⚠️ VERIFICATION TIMED OUT\n\n\
                             Task {} was awaiting verification for {} minutes with no verdict \
@@ -4461,7 +4476,10 @@ impl CasCore {
                             // own harness, so the direct verification alias
                             // must match the supervisor CLI (mcp__cs__ for a
                             // Codex supervisor, mcp__cas__ for Claude).
-                            let sup_ver = supervisor_verification_tool();
+                            let sup_ver = format!(
+                                "{}verification",
+                                crate::mcp::tools::core::guidance::supervisor_prefix()
+                            );
                             format!(
                                 "You implemented this task yourself. Spawn a task-verifier to review your work:\n\n\
                                      Task(subagent_type=\"{}\", prompt=\"Verify task {}\")\n\n\
@@ -4489,7 +4507,10 @@ impl CasCore {
                                 req.id
                             )
                         };
-                        let sup_ver = supervisor_verification_tool();
+                        let sup_ver = format!(
+                            "{}verification",
+                            crate::mcp::tools::core::guidance::supervisor_prefix()
+                        );
                         let supervisor_recovery_hint = format!(
                             "If the bound worker or verifier is unavailable, a registered supervisor can recover without them: {sup_ver} action=add task_id={} dispatch_id={} status=approved summary=\"...\", then retry task close.",
                             req.id, dispatch.id
@@ -4509,7 +4530,10 @@ impl CasCore {
                             close_reason_section.as_str(),
                             if is_worker_without_subagents {
                                 // cas-8aaf: harness-appropriate supervisor verification tool.
-                                let sup_ver = supervisor_verification_tool();
+                                let sup_ver = format!(
+                                    "{}verification",
+                                    crate::mcp::tools::core::guidance::supervisor_prefix()
+                                );
                                 format!(
                                     "Ask supervisor to run verification \
                                          (task-verifier or direct {sup_ver}) \
@@ -4525,7 +4549,10 @@ impl CasCore {
                                     "{}coordination",
                                     crate::mcp::tools::core::guidance::caller_prefix()
                                 );
-                                let sup_ver = supervisor_verification_tool();
+                                let sup_ver = format!(
+                                    "{}verification",
+                                    crate::mcp::tools::core::guidance::supervisor_prefix()
+                                );
                                 format!(
                                     "Suggested message: {coord} action=message \
                                          target=supervisor summary=\"verification requested\" message=\"Please verify task {id} \

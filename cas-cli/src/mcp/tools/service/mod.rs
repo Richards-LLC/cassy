@@ -252,10 +252,7 @@ impl CasService {
         Parameters(req): Parameters<MemoryRequest>,
     ) -> Result<CallToolResult, McpError> {
         let this = self.clone();
-        panic_catch::dispatch_with_catch("memory", async move {
-            let prefix = this.inner.guidance_prefix();
-            let supervisor_prefix = this.inner.supervisor_guidance_prefix();
-            crate::mcp::tools::core::guidance::with_caller_prefix(prefix, supervisor_prefix, async move {
+        panic_catch::dispatch_with_guidance("memory", this.inner.clone(), async move {
             crate::ui::factory::record_supervisor_mcp_call();
             let action = req.action.clone();
             let is_mutating = matches!(
@@ -308,7 +305,6 @@ impl CasService {
             crate::telemetry::track_mcp_tool("memory", &action, result.is_ok());
 
             result
-            }).await
         })
         .await
     }
@@ -325,10 +321,7 @@ impl CasService {
         Parameters(req): Parameters<TaskRequest>,
     ) -> Result<CallToolResult, McpError> {
         let this = self.clone();
-        panic_catch::dispatch_with_catch("task", async move {
-            let prefix = this.inner.guidance_prefix();
-            let supervisor_prefix = this.inner.supervisor_guidance_prefix();
-            crate::mcp::tools::core::guidance::with_caller_prefix(prefix, supervisor_prefix, async move {
+        panic_catch::dispatch_with_guidance("task", this.inner.clone(), async move {
             crate::ui::factory::record_supervisor_mcp_call();
             let action = req.action.clone();
             let event_task_id = req.id.clone().unwrap_or_default();
@@ -411,7 +404,6 @@ impl CasService {
             crate::telemetry::track_mcp_tool("task", &action, result.is_ok());
 
             result
-            }).await
         })
         .await
     }
@@ -538,10 +530,7 @@ impl CasService {
         Parameters(req): Parameters<CoordinationRequest>,
     ) -> Result<CallToolResult, McpError> {
         let this = self.clone();
-        panic_catch::dispatch_with_catch("coordination", async move {
-            let prefix = this.inner.guidance_prefix();
-            let supervisor_prefix = this.inner.supervisor_guidance_prefix();
-            crate::mcp::tools::core::guidance::with_caller_prefix(prefix, supervisor_prefix, async move {
+        panic_catch::dispatch_with_guidance("coordination", this.inner.clone(), async move {
             crate::ui::factory::record_supervisor_mcp_call();
             let action = req.action.clone();
             let event_target = req.target.clone().unwrap_or_default();
@@ -848,7 +837,6 @@ impl CasService {
             crate::telemetry::track_mcp_tool(domain, &action, result.is_ok());
 
             result
-            }).await
         })
         .await
     }

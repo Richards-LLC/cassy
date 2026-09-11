@@ -735,6 +735,8 @@ fn host_hub_transport_check() -> Check {
         name,
         if report.is_failure() {
             CheckStatus::Error
+        } else if report.is_signed_in_loopback_warning() {
+            CheckStatus::Warning
         } else {
             CheckStatus::Ok
         },

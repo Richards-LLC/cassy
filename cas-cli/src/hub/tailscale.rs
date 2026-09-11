@@ -266,6 +266,19 @@ impl TailscaleServeManager {
         self.run_json(&["status".into(), "--json".into()])
     }
 
+    /// Return whether Tailscale reports a signed-in local node.
+    ///
+    /// This uses the same bounded `status --json` probe as Serve setup, so a
+    /// missing or wedged CLI cannot make doctor hang.
+    pub fn is_logged_in(&self) -> Result<bool> {
+        let status = self.status()?;
+        Ok(status
+            .get("Self")
+            .and_then(|value| value.get("DNSName"))
+            .and_then(Value::as_str)
+            .is_some_and(|name| valid_dns_name(name.trim_end_matches('.'))))
+    }
+
     fn serve_status(&self) -> Result<Value> {
         self.run_json(&["serve".into(), "status".into(), "--json".into()])
     }
@@ -288,9 +301,7 @@ impl TailscaleServeManager {
         )
         .map_err(|error| match error {
             BoundedCommandError::TimedOut => anyhow::anyhow!("tailscale command timed out"),
-            BoundedCommandError::Io => anyhow::anyhow!(
-                "tailscale CLI is unavailable (install Tailscale and sign in first)"
-            ),
+            BoundedCommandError::Io => anyhow::anyhow!(tailscale_unavailable_message()),
         })?;
         anyhow::ensure!(
             output.status.success(),
@@ -316,10 +327,57 @@ fn tailscale_executable() -> OsString {
 }
 
 fn select_tailscale_executable(path_cli: Option<PathBuf>) -> OsString {
+    select_tailscale_executable_with_app(path_cli, macos_tailscale_app_executable())
+}
+
+fn select_tailscale_executable_with_app(
+    path_cli: Option<PathBuf>,
+    macos_app_cli: Option<PathBuf>,
+) -> OsString {
     if let Some(path) = path_cli {
         return path.into_os_string();
     }
+    if let Some(path) = macos_app_cli {
+        // Invoke the real app-bundle path. A symlink to this binary makes the
+        // Swift bundle check report an unknown bundle identifier.
+        return path.into_os_string();
+    }
     OsString::from("tailscale")
+}
+
+#[cfg(target_os = "macos")]
+fn macos_tailscale_app_executable() -> Option<PathBuf> {
+    let mut candidates = vec![PathBuf::from(MACOS_TAILSCALE_APP_CLI)];
+    if let Some(home) = dirs::home_dir() {
+        candidates.push(home.join("Applications/Tailscale.app/Contents/MacOS/Tailscale"));
+    }
+    candidates.into_iter().find(|candidate| candidate.is_file())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn macos_tailscale_app_executable() -> Option<PathBuf> {
+    None
+}
+
+const MACOS_TAILSCALE_APP_CLI: &str = "/Applications/Tailscale.app/Contents/MacOS/Tailscale";
+
+#[cfg(target_os = "macos")]
+fn tailscale_unavailable_message() -> String {
+    let user_app = dirs::home_dir()
+        .map(|home| {
+            home.join("Applications/Tailscale.app/Contents/MacOS/Tailscale")
+                .display()
+                .to_string()
+        })
+        .unwrap_or_else(|| "~/Applications/Tailscale.app/Contents/MacOS/Tailscale".to_owned());
+    format!(
+        "tailscale CLI is unavailable; looked for `tailscale` on PATH, `{MACOS_TAILSCALE_APP_CLI}`, and `{user_app}`; install Tailscale and sign in first"
+    )
+}
+
+#[cfg(not(target_os = "macos"))]
+fn tailscale_unavailable_message() -> String {
+    "tailscale CLI is unavailable; looked for `tailscale` on PATH; install Tailscale and sign in first".to_owned()
 }
 
 fn executable_on_path(name: &str) -> Option<PathBuf> {
@@ -444,7 +502,29 @@ mod tests {
 
     #[test]
     fn no_cli_keeps_existing_unavailable_command() {
-        assert_eq!(select_tailscale_executable(None), OsString::from("tailscale"));
+        assert_eq!(
+            select_tailscale_executable_with_app(None, None),
+            OsString::from("tailscale")
+        );
+    }
+
+    #[test]
+    fn macos_app_cli_is_used_when_path_cli_is_missing() {
+        let app_cli = PathBuf::from("/Applications/Tailscale.app/Contents/MacOS/Tailscale");
+        assert_eq!(
+            select_tailscale_executable_with_app(None, Some(app_cli.clone())),
+            app_cli.into_os_string()
+        );
+    }
+
+    #[test]
+    fn path_cli_wins_over_macos_app_cli() {
+        let path_cli = PathBuf::from("/opt/homebrew/bin/tailscale");
+        let app_cli = PathBuf::from("/Applications/Tailscale.app/Contents/MacOS/Tailscale");
+        assert_eq!(
+            select_tailscale_executable_with_app(Some(path_cli.clone()), Some(app_cli)),
+            path_cli.into_os_string()
+        );
     }
 
     #[test]
@@ -485,6 +565,7 @@ mod tests {
         assert!(!second.created_by_cas);
         assert_eq!(first.public_url, "https://node.tail.ts.net/");
         assert!(manager.disable_owned().unwrap().is_some());
+        assert!(manager.is_logged_in().unwrap());
 
         let calls = fs::read_to_string(calls).unwrap();
         assert_eq!(calls.matches("serve --bg").count(), 1);

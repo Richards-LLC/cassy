@@ -313,7 +313,7 @@ impl HubTransportReport {
             ),
             None,
             None,
-            "Run `cas hub service uninstall && cas hub start --tailscale-serve` from an interactive shell to publish the pairing route.".to_owned(),
+            "Run `cas hub restart --tailscale-serve` to republish the pairing route without removing hub supervision.".to_owned(),
         )
     }
 
@@ -326,12 +326,26 @@ impl HubTransportReport {
             .starts_with("hub is supervised but not publishable")
     }
 
+    pub(crate) fn is_signed_in_loopback_warning(&self) -> bool {
+        self.message
+            .starts_with("hub is loopback-only while Tailscale is signed in")
+            || self
+                .message
+                .starts_with("hub is loopback-only; Tailscale is signed in")
+    }
+
     pub(crate) fn message_with_remedy(&self) -> String {
         match &self.remedy {
             Some(remedy) => format!("{}; {remedy}", self.message),
             None => self.message.clone(),
         }
     }
+}
+
+fn update_transport_error(warning: &str) -> anyhow::Error {
+    anyhow::anyhow!(
+        "cas update: Tailscale Serve publication failed: {warning}; hub remains loopback-only; run `cas hub restart --tailscale-serve`"
+    )
 }
 
 fn default_hub_command() -> HubCommands {
@@ -1082,11 +1096,18 @@ fn start_with_output_resolved(
                         .map(str::to_owned)
                         .unwrap_or_else(|| format!("http://{}:{}", record.bind, record.port));
                     println!("Cassy hub started at {endpoint} (pid {})", record.pid);
-                    if let Some(warning) = &record.transport_warning {
+                    if launch_origin != HubLaunchOrigin::Update
+                        && let Some(warning) = &record.transport_warning
+                    {
                         eprintln!(
                             "Tailscale Serve unavailable: {warning}; local hub remains healthy"
                         );
                     }
+                }
+                if launch_origin == HubLaunchOrigin::Update
+                    && let Some(warning) = record.transport_warning.as_deref()
+                {
+                    return Err(update_transport_error(warning));
                 }
                 return Ok(());
             }
@@ -1675,6 +1696,10 @@ fn status(cli: &Cli) -> Result<()> {
 
 fn render_transport_status(report: &HubTransportReport) -> String {
     if !report.is_failure() {
+        if report.is_signed_in_loopback_warning() {
+            return "Tailscale Serve: WARN - Tailscale is signed in; hub remains loopback-only"
+                .to_owned();
+        }
         if report
             .message
             .starts_with("hub is loopback-only; Tailscale Serve publication")
@@ -1862,7 +1887,7 @@ pub(crate) fn restart_stale_hub(binary_version: &str, cli: &Cli) -> Result<bool>
     };
     // A stale-version restart is a relaunch: if a concurrent command already
     // produced a hub on the new binary, that is the outcome this wanted.
-    if let StopOutcome::AlreadySatisfied(_) = stop_with_output(
+    if let StopOutcome::AlreadySatisfied(record) = stop_with_output(
         cli,
         !cli.json,
         Some(RelaunchIntent {
@@ -1872,6 +1897,11 @@ pub(crate) fn restart_stale_hub(binary_version: &str, cli: &Cli) -> Result<bool>
         }),
         false,
     )? {
+        if spec.tailscale_serve
+            && let Some(warning) = record.transport_warning.as_deref()
+        {
+            return Err(update_transport_error(warning));
+        }
         return Ok(true);
     }
     start_with_output_from(
@@ -2006,9 +2036,19 @@ pub(crate) fn hub_transport_report(
             if record.is_some_and(|record| record.launched_by.as_deref() == Some("service")) {
                 return HubTransportReport::supervised_unavailable(warning);
             }
+            if manager.is_logged_in().unwrap_or(false) {
+                return HubTransportReport::ok(format!(
+                    "hub is loopback-only; Tailscale is signed in but Serve publication failed: {warning}; run `cas hub restart --tailscale-serve` to publish the route"
+                ));
+            }
             return HubTransportReport::ok(format!(
                 "hub is loopback-only; Tailscale Serve publication was unavailable: {warning}"
             ));
+        }
+        if live && manager.is_logged_in().unwrap_or(false) {
+            return HubTransportReport::ok(
+                "hub is loopback-only while Tailscale is signed in; run `cas hub restart --tailscale-serve` to publish the route",
+            );
         }
         return HubTransportReport::ok(
             "hub is loopback-only; no CAS-created Tailscale Serve route is recorded",
@@ -2198,11 +2238,22 @@ mod tests {
             .remedy
             .as_deref()
             .is_some_and(|remedy| remedy.contains(
-                "cas hub service uninstall && cas hub start --tailscale-serve"
+                "cas hub restart --tailscale-serve"
             )));
         assert_eq!(
             render_transport_status(&report),
-            "Tailscale Serve: FAIL - supervised hub is not publishable\n  remedy: Run `cas hub service uninstall && cas hub start --tailscale-serve` from an interactive shell to publish the pairing route."
+            "Tailscale Serve: FAIL - supervised hub is not publishable\n  remedy: Run `cas hub restart --tailscale-serve` to republish the pairing route without removing hub supervision."
+        );
+    }
+
+    #[test]
+    fn transport_status_renders_signed_in_loopback_warning() {
+        let report = HubTransportReport::ok(
+            "hub is loopback-only while Tailscale is signed in; run `cas hub restart --tailscale-serve` to publish the route",
+        );
+        assert_eq!(
+            render_transport_status(&report),
+            "Tailscale Serve: WARN - Tailscale is signed in; hub remains loopback-only"
         );
     }
 
@@ -2455,5 +2506,30 @@ mod tests {
                 .is_none(),
             "matching hub version must not trigger update restart"
         );
+    }
+
+    #[test]
+    fn update_restart_spec_preserves_a_legacy_public_url_record() {
+        let mut stale = record("3.4.1", 4310, None);
+        stale.public_url = Some("https://hub.example/".to_owned());
+        let spec = restart_spec_for_record(&stale, "3.7.7")
+            .unwrap()
+            .expect("a stale hub with a public URL must be restarted");
+
+        assert!(spec.tailscale_serve);
+        assert_eq!(spec.tailscale_port, 443);
+    }
+
+    #[test]
+    fn update_transport_failure_is_explicit_and_keeps_working_recovery() {
+        let error = update_transport_error(
+            "tailscale CLI is unavailable; looked for `tailscale` on PATH and app locations",
+        )
+        .to_string();
+        assert!(error.starts_with("cas update: Tailscale Serve publication failed"));
+        assert!(error.contains("tailscale CLI is unavailable"));
+        assert!(error.contains("looked for"));
+        assert!(error.contains("cas hub restart --tailscale-serve"));
+        assert!(!error.contains("service uninstall"));
     }
 }

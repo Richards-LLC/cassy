@@ -42,6 +42,52 @@ repo_root="$(git rev-parse --show-toplevel 2>/dev/null)" || {
 }
 cd "$repo_root"
 
+# GitHub-hosted runners do not guarantee ripgrep. Resolve the search backend
+# once, then keep every test-surface search on either rg or tracked git files.
+if command -v rg >/dev/null 2>&1; then
+    grep_backend=rg
+else
+    grep_backend=git
+fi
+tracked_rust_test_paths=('cas-cli/tests/*.rs' 'cas-cli/tests/**/*.rs')
+
+run_test_path_search() {
+    local mode="$1"
+    shift
+    case "${grep_backend}:${mode}" in
+        rg:regex)
+            rg -l --glob '*.rs' "$@" -- cas-cli/tests
+            ;;
+        rg:fixed)
+            rg -l -F --glob '*.rs' -- "$1" cas-cli/tests
+            ;;
+        git:regex)
+            git grep -n -E "$@" -- "${tracked_rust_test_paths[@]}"
+            ;;
+        git:fixed)
+            git grep -n -F -e "$1" -- "${tracked_rust_test_paths[@]}"
+            ;;
+        *)
+            return 2
+            ;;
+    esac
+}
+
+search_test_paths() {
+    local mode="$1" matches search_status
+    shift
+    if matches="$(run_test_path_search "$mode" "$@")"; then
+        [[ -n "$matches" ]] || return 0
+        if [[ "$grep_backend" == git ]]; then
+            matches="$(sed -E 's/:[0-9]+:.*$//' <<<"$matches")"
+        fi
+        printf '%s\n' "$matches" | sort -u
+    else
+        search_status=$?
+        return "$search_status"
+    fi
+}
+
 if [[ -z "$base_ref" ]]; then
     if git rev-parse --verify --quiet origin/main >/dev/null; then
         base_ref="origin/main"
@@ -186,7 +232,7 @@ source_public_symbols_for() {
 
 discover_source_integration_targets() {
     local source_path="$1" source_file module_path test_path symbol symbol_filter
-    local matched_paths rg_status
+    local matched_paths search_status
     local -a symbol_patterns=()
     source_file="$repo_root/$source_path"
     [[ -f "$source_file" ]] || return 0
@@ -209,17 +255,17 @@ discover_source_integration_targets() {
     # reference (not as arbitrary target-name text). Search the test tree once
     # for each evidence class; per-symbol/per-file subprocesses made a large
     # close diff needlessly expensive.
-    if matched_paths="$(rg -l --glob '*.rs' \
+    if matched_paths="$(search_test_paths regex \
         -e "^[[:space:]]*(pub[[:space:]]+)?use[[:space:]].*${module_path}([[:space:];:{]|$)" \
         -e "^[[:space:]]*[^/].*${module_path}" \
         -e "^[[:space:]]*[^/].*(include_str!|include_bytes!|Path|read_to_string).*${source_path}" \
-        -- cas-cli/tests 2>/dev/null)"; then
+        2>/dev/null)"; then
         :
     else
-        rg_status=$?
-        if [[ "$rg_status" -ne 1 ]]; then
-            printf 'SCOPED PROOF SURFACE: source path discovery failed for %s (rg exit %s).\n' \
-                "$source_path" "$rg_status" >&2
+        search_status=$?
+        if [[ "$search_status" -ne 1 ]]; then
+            printf 'SCOPED PROOF SURFACE: source path discovery failed for %s (%s exit %s).\n' \
+                "$source_path" "$grep_backend" "$search_status" >&2
             exit 2
         fi
         matched_paths=''
@@ -234,13 +280,13 @@ discover_source_integration_targets() {
     # -> `test_worker_status_*`). Match only test declarations, so comments
     # and fixture strings cannot claim a target.
     if [[ ${#symbol_patterns[@]} -gt 0 ]]; then
-        if matched_paths="$(rg -l --glob '*.rs' "${symbol_patterns[@]}" -- cas-cli/tests 2>/dev/null)"; then
+        if matched_paths="$(search_test_paths regex "${symbol_patterns[@]}" 2>/dev/null)"; then
             :
         else
-            rg_status=$?
-            if [[ "$rg_status" -ne 1 ]]; then
-                printf 'SCOPED PROOF SURFACE: source symbol discovery failed for %s (rg exit %s).\n' \
-                    "$source_path" "$rg_status" >&2
+            search_status=$?
+            if [[ "$search_status" -ne 1 ]]; then
+                printf 'SCOPED PROOF SURFACE: source symbol discovery failed for %s (%s exit %s).\n' \
+                    "$source_path" "$grep_backend" "$search_status" >&2
                 exit 2
             fi
             matched_paths=''
@@ -277,16 +323,16 @@ builtin_relative_path_for() {
 }
 
 discover_builtin_test_targets() {
-    local literal="$1" test_paths test_path target rg_status
-    if test_paths="$(rg -l -F --glob '*.rs' -- "$literal" cas-cli/tests)"; then
+    local literal="$1" test_paths test_path target search_status
+    if test_paths="$(search_test_paths fixed "$literal" 2>/dev/null)"; then
         :
     else
-        rg_status=$?
-        if [[ "$rg_status" -eq 1 ]]; then
+        search_status=$?
+        if [[ "$search_status" -eq 1 ]]; then
             test_paths=''
         else
-            printf 'SCOPED PROOF SURFACE: builtin path discovery failed for %s (rg exit %s).\n' \
-                "$literal" "$rg_status" >&2
+            printf 'SCOPED PROOF SURFACE: builtin path discovery failed for %s (%s exit %s).\n' \
+                "$literal" "$grep_backend" "$search_status" >&2
             exit 2
         fi
     fi

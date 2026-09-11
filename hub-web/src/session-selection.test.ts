@@ -191,6 +191,15 @@ describe("session picker entries", () => {
     expect(sessionPickerEntries({ machines, sessions: new Map(), selection: { machineId: "m1" } })).toEqual([]);
   });
 
+  it("hides dormant sessions unless the recovery view is explicit", () => {
+    const dormant = hubSession("orphaned-supervisor", { dormant: true, supervisor: "witty-panda-98", workers: [] });
+    const withDormant = new Map(sessions);
+    withDormant.set("m1", [...(withDormant.get("m1") ?? []), dormant]);
+    expect(sessionPickerEntries({ machines, sessions: withDormant, selection: { machineId: "m1" } }).map((entry) => entry.session)).not.toContain("orphaned-supervisor");
+    expect(sessionPickerEntries({ machines, sessions: withDormant, includeDormant: true, selection: { machineId: "m1" } }).map((entry) => entry.session)).toContain("orphaned-supervisor");
+    expect(sessionPickerEntries({ machines, sessions: withDormant, includeDormant: true, selection: { machineId: "m1" } }).find((entry) => entry.session === "orphaned-supervisor")?.status).toBe("dormant");
+  });
+
   it("is what the picker line says between the role and the hub status", () => {
     const [entry] = sessionPickerEntries({ machines, sessions, selection: { machineId: "m1", session: "cas-src-young-raven-93" } });
     expect(sessionPickerMeta(entry!)).toBe("supervisor fast-kestrel-6 · 5 workers · live");

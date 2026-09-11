@@ -493,7 +493,7 @@ async fn sessions<R: SessionReadModel>(
         Ok(sessions) => with_cors(
             Json(SessionsResponse {
                 schema_version: super::HUB_SCHEMA_VERSION,
-                sessions: supervisor_sessions(sessions, query.workers),
+                sessions: supervisor_sessions(sessions, query.workers, query.dormant),
             })
             .into_response(),
             &headers,
@@ -614,17 +614,27 @@ fn flag<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<bool, D::Er
 struct SessionsQuery {
     #[serde(default, deserialize_with = "flag")]
     workers: bool,
+    /// Dormant sessions are hidden by default, but remain discoverable for
+    /// recovery when the Commander explicitly asks to show them.
+    #[serde(default, deserialize_with = "flag")]
+    dormant: bool,
 }
 
-/// The default catalog lists supervisor-led sessions only; `workers=1` lifts
-/// the filter for debugging.
-pub(crate) fn supervisor_sessions(sessions: Vec<HubSession>, reveal_workers: bool) -> Vec<HubSession> {
-    if reveal_workers {
+/// The default catalog lists live supervisor-led sessions only. The two
+/// visibility controls are independent: `workers=1` includes live worker-only
+/// rows, while `dormant=1` includes sessions whose supervisor is not live.
+pub(crate) fn supervisor_sessions(
+    sessions: Vec<HubSession>,
+    reveal_workers: bool,
+    reveal_dormant: bool,
+) -> Vec<HubSession> {
+    if reveal_workers && reveal_dormant {
         return sessions;
     }
     sessions
         .into_iter()
-        .filter(|session| !session.supervisor.trim().is_empty())
+        .filter(|session| reveal_dormant || !session.dormant)
+        .filter(|session| reveal_workers || !session.supervisor.trim().is_empty())
         .collect()
 }
 

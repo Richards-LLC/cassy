@@ -60,6 +60,8 @@ describe("worker visibility", () => {
   it("asks the catalog for workers only when revealed", () => {
     expect(sessionsPath(false)).toBe("/v1/sessions");
     expect(sessionsPath(true)).toBe("/v1/sessions?workers=1");
+    expect(sessionsPath(false, true)).toBe("/v1/sessions?dormant=1");
+    expect(sessionsPath(true, true)).toBe("/v1/sessions?workers=1&dormant=1");
   });
 
   it("renders supervisors only by default and counts the hidden workers", () => {

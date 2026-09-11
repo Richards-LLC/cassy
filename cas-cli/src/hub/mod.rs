@@ -12,6 +12,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, mpsc};
 
+use crate::store::{find_cas_root_ignoring_env, open_agent_store};
 use crate::ui::factory::{DaemonMessage, SessionInfo, SessionManager};
 
 mod attention;
@@ -478,6 +479,11 @@ pub struct HubSession {
     pub epic_id: Option<String>,
     pub ws_port: Option<u16>,
     pub liveness: DaemonLiveness,
+    /// True when the session metadata remains but its registered supervisor
+    /// is no longer live. Dormant sessions are hidden from Commander by
+    /// default, but can be revealed for recovery.
+    #[serde(default)]
+    pub dormant: bool,
     #[serde(skip)]
     pub daemon_identity: Option<DaemonIdentity>,
 }
@@ -510,6 +516,7 @@ fn hub_session(session: &SessionInfo) -> HubSession {
         } else {
             DaemonLiveness::Live
         },
+        dormant: !has_live_supervisor(session),
         daemon_identity: session
             .metadata
             .daemon_pid_starttime
@@ -519,6 +526,36 @@ fn hub_session(session: &SessionInfo) -> HubSession {
                 pid_starttime,
             }),
     }
+}
+
+/// A session's metadata names the supervisor, but does not prove that the
+/// pane's harness is still around. Use the same dual heartbeat/process
+/// evidence as worker supervision, scoped to this factory session and the
+/// recorded supervisor name.
+fn has_live_supervisor(session: &SessionInfo) -> bool {
+    let supervisor_name = session.metadata.supervisor.name.trim();
+    let Some(project_dir) = session.metadata.project_dir.as_deref() else {
+        return false;
+    };
+    if supervisor_name.is_empty() {
+        return false;
+    }
+    let Ok(cas_root) = find_cas_root_ignoring_env(std::path::Path::new(project_dir)) else {
+        return false;
+    };
+    let Ok(agent_store) = open_agent_store(&cas_root) else {
+        return false;
+    };
+    let Ok(agents) = agent_store.list(None) else {
+        return false;
+    };
+    agents.iter().any(|agent| {
+        agent.role == cas_types::AgentRole::Supervisor
+            && agent.factory_session.as_deref() == Some(session.name.as_str())
+            && agent.name == supervisor_name
+            && crate::mcp::tools::service::agent_liveness::evaluate_supervision_liveness(agent)
+                .is_live()
+    })
 }
 
 impl SessionReadModel for LocalSessionReadModel {
@@ -597,6 +634,7 @@ pub fn fixture_session(name: &str) -> HubSession {
         epic_id: None,
         ws_port: Some(12345),
         liveness: DaemonLiveness::Live,
+        dormant: false,
         daemon_identity: None,
     }
 }

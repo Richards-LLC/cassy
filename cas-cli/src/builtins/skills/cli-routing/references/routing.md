@@ -16,16 +16,15 @@ recipe — the invocation, the sandbox flag, the model default, closing stdin, a
 redirecting long output to a file. Use it as written; do not restate it here.
 
 What routing adds on top of that recipe: reads can stay sandboxed, but a write
-(including a Slack post) needs a narrowly scoped prompt and
+needs a narrowly scoped prompt and
 `--dangerously-bypass-approvals-and-sandbox` in an externally sandboxed
 session. Prefer `-c model_reasoning_effort="low"` for mechanical or
 transcription work. Keep the captured output file and its exit status; they are
 the only admissible evidence if routing falls through to Claude.
 
-Plugin-backed tools are not necessarily in Codex's own tool list. Discover
-them through `list_mcp_resources` and look for the `codex_apps` resource (for
-example Slack), rather than deciding a plugin is unavailable from its function
-list or `~/.codex/config.toml`.
+For non-Slack plugin tools, use the session's tool-discovery surface; do not
+infer availability from `~/.codex/config.toml`. This CLI fallback never
+authorizes a personal Slack connector.
 
 When using `--output-schema <FILE>`, the schema is strict: at **every** object
 nesting level, `required` must list every key present in `properties`. Validate
@@ -81,20 +80,17 @@ report blocked with both captured receipts.
 
 ## Posting release notes
 
-The trigger is automatic on every merge to `main` or `staging`. Everything
-else — target channel, message shape, reply count, and which Slack transport is
-approved — is project policy, owned by the project's release-notes rubric.
-Use [release-notes](../../release-notes/SKILL.md) and that rubric for content;
-a project with no rubric and no channel posts nowhere.
+The trigger is automatic on every merge to `main` or `staging`. Use
+[release-notes](../../release-notes/SKILL.md) and the project's rubric for
+channel, message shape and ordering; a project with no rubric and no channel
+posts nowhere.
 
-This skill contributes only the routing half of the sequence:
-
-1. Read the target channel first to deduplicate a previous or partial attempt.
-2. Choose the posting CLI by the gate above: Codex when its Slack plugin is
-   present in the current session's resource probe, Claude only after its
-   account gate passes. When neither is available, hand the drafted bodies to
-   the supervisor rather than posting from an unapproved account.
-3. Retain the returned message timestamps as receipts.
-
-The rubric owns the exact commands, message bodies, and ordering; do not create
-a competing copy here.
+Use only the MechaCassy hub/bot through
+[mecha-cassy](../../mecha-cassy/SKILL.md). Never use Claude.ai Slack or a personal
+connector; the non-Slack account gate above does not authorize Slack transport.
+The hub skill owns authenticated `tools/list`, bounded `mecha_read` dedupe,
+ordered `mecha_post` calls, and message/file integrity receipts. A one-shot
+without a live proxy uses the same hub's registered direct route, as described
+in its registration reference. If that route cannot complete publication,
+save the draft and partial receipts and report the measured failure to the
+supervisor; handoff does not change the transport.

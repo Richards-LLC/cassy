@@ -394,3 +394,124 @@ fn claude_account_allowlist_is_registered_and_documented() {
         "the [release] section must be listed by `cas config`"
     );
 }
+
+/// Report upload needs the parents created by the announcement procedure.
+#[test]
+fn runtime_report_publication_instructions_create_parents_before_upload_receipts() {
+    let rubric = include_str!("../../docs/RELEASE_SLACK_RUBRIC.md");
+    let report = rubric
+        .split("### Published report before announcement")
+        .nth(1)
+        .expect("runtime report procedure")
+        .split("`scripts/release.sh --publish-tag --manual-publish")
+        .next()
+        .unwrap();
+    let prepare = report
+        .find("1. Before announcements")
+        .expect("prepare report artifacts first");
+    let announce = report
+        .find("2. Post the four messages")
+        .expect("create announcement parents next");
+    let attach = report
+        .find("3. After the four messages")
+        .expect("upload to existing parents last");
+    assert!(prepare < announce && announce < attach);
+    let prerequisites = &report[prepare..announce];
+    for required in ["published", "installation", "--pdf", "QA", "HTML", "PDF"] {
+        assert!(
+            prerequisites.contains(required),
+            "missing prerequisite: {required}"
+        );
+    }
+    assert!(!prerequisites.contains("release-report.receipt"));
+    assert!(!prerequisites.contains("--report"));
+    let delivery = &report[attach..];
+    for required in [
+        "CAS_RELEASE_TRAIN_REPORT_USER_THREAD_TS",
+        "CAS_RELEASE_TRAIN_REPORT_DEV_THREAD_TS",
+        "--report",
+        "MechaCassy",
+        "download",
+        "decode",
+        "page-count",
+        "source-hash",
+        "release-report.receipt",
+        "partial receipts",
+        "uncertain write",
+        "completion requires all",
+    ] {
+        assert!(
+            delivery.contains(required),
+            "missing delivery safeguard: {required}"
+        );
+    }
+}
+
+/// Active publication instructions must never select a personal Slack route.
+/// Inspect the shipped catalogs, including references, rather than only source mirrors.
+#[test]
+fn release_slack_routes_are_mecha_cassy_only() {
+    let mut files = Vec::new();
+    for (label, flavor) in FLAVORS {
+        for skill in [
+            "mecha-cassy",
+            "cas-cut-release",
+            "cli-routing",
+            "release-notes",
+        ] {
+            let prefix = format!("skills/{skill}/");
+            for builtin in builtin_catalog::skills(flavor) {
+                if builtin.path.starts_with(&prefix) && !builtin.path.ends_with("/failure-log.md") {
+                    files.push((format!("{label}/{}", builtin.path), builtin.content));
+                }
+            }
+        }
+    }
+    files.extend([
+        (
+            "release rubric".into(),
+            include_str!("../../docs/release-notes/RUBRIC.md"),
+        ),
+        (
+            "posting runbook".into(),
+            include_str!("../../docs/SLACK_POSTING_RUNBOOK.md"),
+        ),
+        (
+            "runtime rubric".into(),
+            include_str!("../../docs/RELEASE_SLACK_RUBRIC.md"),
+        ),
+    ]);
+    let mut problems = Vec::new();
+    for (path, content) in files {
+        let active = content
+            .split("## Historical transport evidence")
+            .next()
+            .unwrap();
+        for forbidden in [
+            "slack_get_file_upload_url",
+            "slack_complete_file_upload",
+            "supervisor-owned Claude",
+            "approved Claude route",
+            "MechaCassy fallback",
+            "Codex when its Slack plugin",
+            "This skill only decides which CLI runs the post",
+            "for example Slack",
+        ] {
+            if active.contains(forbidden) {
+                problems.push(format!("{path}: stale route {forbidden:?}"));
+            }
+        }
+        if path.ends_with("SKILL.md")
+            || !path.starts_with("claude/")
+                && !path.starts_with("codex/")
+                && !path.starts_with("grok/")
+        {
+            if !active.contains("MechaCassy") || !active.contains("personal") {
+                problems.push(format!(
+                    "{path}: missing explicit hub-only/personal-route guard"
+                ));
+            }
+        }
+    }
+    assert!(problems.is_empty(), "{}", problems.join("\n"));
+}

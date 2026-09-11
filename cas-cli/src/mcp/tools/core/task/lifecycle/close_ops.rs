@@ -19093,6 +19093,128 @@ mod merge_state_gate_tests {
         );
     }
 
+    /// GH #840: a worker's own conflict-resolution merge can intentionally
+    /// replace the hunks from an earlier task commit before the final worker
+    /// tip is merged. That merge resolution is task content, not a dropped
+    /// delivery, even though the original non-merge commit's exact patch no
+    /// longer applies to the target tree.
+    #[test]
+    fn worker_merge_resolution_supersedes_earlier_content_without_drop_gh_840() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+
+        std::fs::write(
+            p.join("conversation-history.ts"),
+            "export type MessageReceipt = { id: string };\n",
+        )
+        .unwrap();
+        git(p, &["add", "conversation-history.ts"]);
+        git(
+            p,
+            &[
+                "commit",
+                "-q",
+                "-m",
+                "feat(cas-test1): add conversation history",
+            ],
+        );
+
+        // The integration target independently adds the same path, forcing
+        // the worker's target-sync merge to carry an explicit resolution.
+        git(p, &["checkout", "-q", "main"]);
+        std::fs::write(
+            p.join("conversation-history.ts"),
+            "export type MessageReceipt = { source: string };\n",
+        )
+        .unwrap();
+        git(p, &["add", "conversation-history.ts"]);
+        git(
+            p,
+            &["commit", "-q", "-m", "feat: advance integration history"],
+        );
+        git(p, &["checkout", "-q", "factory/worker"]);
+        let merge = git_command(
+            p,
+            &[
+                "merge",
+                "--no-ff",
+                "main",
+                "-m",
+                "Merge branch 'main' into factory/worker",
+            ],
+        )
+        .status()
+        .expect("start worker target-sync merge");
+        assert!(!merge.success(), "fixture must produce a merge conflict");
+        std::fs::write(
+            p.join("conversation-history.ts"),
+            "export type MessageQueued = { id: string };\n",
+        )
+        .unwrap();
+        git(p, &["add", "conversation-history.ts"]);
+        git(
+            p,
+            &[
+                "commit",
+                "-q",
+                "-m",
+                "Merge branch 'main' into factory/worker",
+            ],
+        );
+
+        // Keep a later ordinary task commit in the same worker branch, then
+        // merge another target-only change to make the recorded anchor a
+        // merge tip, matching the delivery shape from GH #840.
+        std::fs::write(p.join("follow-up.rs"), "pub fn follow_up() {}\n").unwrap();
+        git(p, &["add", "follow-up.rs"]);
+        git(
+            p,
+            &["commit", "-q", "-m", "fix(cas-test1): add follow-up"],
+        );
+        git(p, &["checkout", "-q", "main"]);
+        std::fs::write(p.join("target-only.rs"), "// target-only\n").unwrap();
+        git(p, &["add", "target-only.rs"]);
+        git(p, &["commit", "-q", "-m", "chore: advance target again"]);
+        git(p, &["checkout", "-q", "factory/worker"]);
+        git(
+            p,
+            &[
+                "merge",
+                "-q",
+                "--no-ff",
+                "main",
+                "-m",
+                "Merge branch 'main' into factory/worker",
+            ],
+        );
+        let worker_tip = rev_parse_local(p, "HEAD");
+
+        git(p, &["checkout", "-q", "main"]);
+        git(
+            p,
+            &[
+                "merge",
+                "-q",
+                "--no-ff",
+                "factory/worker",
+                "-m",
+                "merge worker delivery",
+            ],
+        );
+
+        let mut task = worker_task("worker");
+        task.status = TaskStatus::AwaitingMerge;
+        task.deliverables.factory_branch_anchor = Some(worker_tip);
+        let req = base_req(&task.id);
+        assert!(
+            matches!(
+                run_factory_branch_merge_gate(&task, &req, "main", p),
+                MergeStateGateOutcome::Proceed
+            ),
+            "a worker-owned merge resolution must count as delivered task content"
+        );
+    }
+
     /// A target-sync merge with no task-attributed content must remain
     /// fail-closed; the presence of a merge commit alone is not delivery.
     #[test]

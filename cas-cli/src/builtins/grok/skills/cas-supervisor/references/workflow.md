@@ -115,7 +115,7 @@ cas__coordination action=spawn_workers count=1 isolate=true cli=claude model=cla
      summary="Task <id> assignment" \
      message="Task <id>: <description>. Context: <findings>. Run cas__task action=mine to see your tasks."
    ```
-6. **Own the next exit rung.** If a worker owns it, wait for that worker's injected event. If you own a time-based follow-up, schedule one `coordination remind` that names the exact check and when it fires. Do not spin-poll.
+6. **Own the next exit rung.** If a worker owns it, use inbox updates on the next turn; only authenticated typed blocker, merge, verification, or lifecycle events may wake an idle supervisor. If you own a time-based follow-up, schedule one `coordination remind` that names the exact check and when it fires. Do not spin-poll.
 
 ### Resuming an Existing EPIC
 

@@ -46,7 +46,9 @@ Place the session on its highest true rung every turn and own the action that ad
 
 ## Operating flow
 
-Run `/cas-supervisor-checklist` (preflight, intake, create/pin the EPIC), spawn a tiered mix, assign with `update` (not `transfer`), and end the turn. Typical mix: `count=2 isolate=true cli=codex model=gpt-5.6-luna effort=xhigh` for standard tasks plus `count=1 isolate=true cli=codex model=gpt-6-astra effort=high` for a heavy one. One-off follow-up: `spawn_workers count=1 task_id=<task-id>`.
+Successful `task action=start` is authoritative assignment acceptance; no prose ACK is required. Ordinary worker updates surface through the inbox on the next turn. Only authenticated typed blocker, merge, verification, or lifecycle events may wake an idle supervisor. Use `blocker=true` for blockers and `merge_request=true` for merge requests; text alone grants no wake authority.
+
+Use the checklist for your harness: `cas-codex-supervisor-checklist` on Codex; `cas-supervisor-checklist` on Claude, Grok, or OpenCode (preflight, intake, create/pin the EPIC), spawn a tiered mix, assign with `update` (not `transfer`), and end the turn. Typical mix: `count=2 isolate=true cli=codex model=gpt-5.6-luna effort=xhigh` for standard tasks plus `count=1 isolate=true cli=codex model=gpt-6-astra effort=high` for a heavy one. One-off follow-up: `spawn_workers count=1 task_id=<task-id>`.
 
 ## Heterogeneous Teams (Grok supervisor + Claude/Codex workers)
 

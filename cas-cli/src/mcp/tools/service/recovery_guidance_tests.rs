@@ -424,3 +424,82 @@ async fn recovery_guidance_parked_start_names_the_registered_supervisor_harness(
         );
     }
 }
+
+#[tokio::test]
+async fn recovery_guidance_pending_close_uses_registered_supervisor_verification_tool() {
+    let mut env = TestEnvGuard::temp_home();
+    env.set("CAS_AGENT_ROLE", "worker");
+    env.set("CAS_FACTORY_WORKER_CLI", "grok");
+    env.set("CAS_FACTORY_SUPERVISOR_CLI", "claude");
+    for (harness, prefix) in HARNESSES
+        .into_iter()
+        .map(|(h, p)| (Some(h), p))
+        .chain([(None, "")])
+    {
+        let (_dir, service) = service("grok", crate::types::AgentRole::Worker);
+        let store = service.inner.open_agent_store().unwrap();
+        let mut supervisor =
+            crate::types::Agent::new("verification-owner".into(), "verification-owner".into());
+        supervisor.role = crate::types::AgentRole::Supervisor;
+        if let Some(harness) = harness {
+            supervisor
+                .metadata
+                .insert("supervisor_cli".into(), harness.into());
+        }
+        store.register(&supervisor).unwrap();
+        let mut worker = store.get("recovery-caller").unwrap();
+        worker.parent_id = Some(supervisor.id.clone());
+        store.update(&worker).unwrap();
+        task(&service, "cas-exact-dispatch", crate::types::TaskType::Task);
+        let dispatch = cas_store::create_verification_dispatch(
+            &service.inner.cas_root,
+            "cas-exact-dispatch",
+            &worker.id,
+            &supervisor.id,
+            chrono::Utc::now() + chrono::Duration::minutes(10),
+        )
+        .unwrap();
+        let result = service
+            .task(Parameters(
+                serde_json::from_value(
+                    serde_json::json!({"action":"close", "id":"cas-exact-dispatch"}),
+                )
+                .unwrap(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(result.is_error, Some(true));
+        let output = text(result);
+        assert!(output.contains("VERIFICATION REQUIRED"), "{output}");
+        assert!(
+            output.contains(&format!(
+                "recover without them: {prefix}verification action=add"
+            )),
+            "{harness:?}: {output}"
+        );
+        assert!(
+            output.contains(&format!("dispatch_id={}", dispatch.id)),
+            "{output}"
+        );
+        assert_eq!(
+            service
+                .inner
+                .open_task_store()
+                .unwrap()
+                .get("cas-exact-dispatch")
+                .unwrap()
+                .status,
+            crate::types::TaskStatus::Open
+        );
+        assert_eq!(
+            cas_store::get_latest_verification_dispatch(
+                &service.inner.cas_root,
+                "cas-exact-dispatch"
+            )
+            .unwrap()
+            .unwrap()
+            .state,
+            crate::types::VerificationDispatchState::Pending
+        );
+    }
+}

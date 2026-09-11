@@ -8183,10 +8183,7 @@ pub(crate) fn run_factory_branch_merge_gate_with_attribution(
             task.id,
             task.id,
             tool_prefix = crate::mcp::tools::core::guidance::caller_prefix(),
-            supervisor_prefix = crate::harness_policy::supervisor_harness_from_env()
-                .backend()
-                .capabilities()
-                .tool_prefix
+            supervisor_prefix = crate::mcp::tools::core::guidance::supervisor_prefix()
         )
     } else {
         format!(
@@ -8217,10 +8214,7 @@ pub(crate) fn run_factory_branch_merge_gate_with_attribution(
              only after that verdict may the assigned worker start a fresh cycle.",
             task.id,
             tool_prefix = crate::mcp::tools::core::guidance::caller_prefix(),
-            supervisor_prefix = crate::harness_policy::supervisor_harness_from_env()
-                .backend()
-                .capabilities()
-                .tool_prefix
+            supervisor_prefix = crate::mcp::tools::core::guidance::supervisor_prefix()
         )
     };
 

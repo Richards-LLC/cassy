@@ -1186,7 +1186,7 @@ impl CasCore {
                          worker can then start task {} to resolve it.",
                         req.id,
                         req.id,
-                        tool_prefix = crate::mcp::tools::core::guidance::caller_prefix()
+                        tool_prefix = self.supervisor_guidance_prefix().unwrap_or("")
                     ),
                 ));
             }
@@ -1264,7 +1264,7 @@ impl CasCore {
                             assigned_identity,
                             caller_identity,
                             req.id,
-                            tool_prefix = crate::mcp::tools::core::guidance::caller_prefix()
+                            tool_prefix = self.supervisor_guidance_prefix().unwrap_or("")
                         ),
                     ));
                 }

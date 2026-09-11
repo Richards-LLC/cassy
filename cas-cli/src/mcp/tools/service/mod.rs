@@ -254,7 +254,8 @@ impl CasService {
         let this = self.clone();
         panic_catch::dispatch_with_catch("memory", async move {
             let prefix = this.inner.guidance_prefix();
-            crate::mcp::tools::core::guidance::with_caller_prefix(prefix, async move {
+            let supervisor_prefix = this.inner.supervisor_guidance_prefix();
+            crate::mcp::tools::core::guidance::with_caller_prefix(prefix, supervisor_prefix, async move {
             crate::ui::factory::record_supervisor_mcp_call();
             let action = req.action.clone();
             let is_mutating = matches!(
@@ -326,7 +327,8 @@ impl CasService {
         let this = self.clone();
         panic_catch::dispatch_with_catch("task", async move {
             let prefix = this.inner.guidance_prefix();
-            crate::mcp::tools::core::guidance::with_caller_prefix(prefix, async move {
+            let supervisor_prefix = this.inner.supervisor_guidance_prefix();
+            crate::mcp::tools::core::guidance::with_caller_prefix(prefix, supervisor_prefix, async move {
             crate::ui::factory::record_supervisor_mcp_call();
             let action = req.action.clone();
             let event_task_id = req.id.clone().unwrap_or_default();
@@ -538,7 +540,8 @@ impl CasService {
         let this = self.clone();
         panic_catch::dispatch_with_catch("coordination", async move {
             let prefix = this.inner.guidance_prefix();
-            crate::mcp::tools::core::guidance::with_caller_prefix(prefix, async move {
+            let supervisor_prefix = this.inner.supervisor_guidance_prefix();
+            crate::mcp::tools::core::guidance::with_caller_prefix(prefix, supervisor_prefix, async move {
             crate::ui::factory::record_supervisor_mcp_call();
             let action = req.action.clone();
             let event_target = req.target.clone().unwrap_or_default();

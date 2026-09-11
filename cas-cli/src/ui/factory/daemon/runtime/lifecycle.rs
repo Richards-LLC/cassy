@@ -605,6 +605,48 @@ mod worker_attention_tests {
         agents.register(&supervisor).unwrap();
     }
 
+    fn assert_recovery_wake_requires_daemon(row: &cas_store::QueuedPrompt) {
+        use super::super::queue_and_events::{PaneWakeState, ToolCallEvidence, WakeSender};
+        use crate::ui::factory::director::data::{AgentSummary, DirectorData};
+        let now = chrono::Utc::now();
+        let data = DirectorData {
+            ready_tasks: vec![], in_progress_tasks: vec![], epic_tasks: vec![],
+            agents: vec![AgentSummary {
+                id: "supervisor-id".into(), name: "supervisor".into(),
+                status: AgentStatus::Idle, registered_at: now,
+                current_task: None, latest_activity: None, last_heartbeat: None,
+                pending_messages: 0, pending_supervisor_messages: 0,
+                latest_supervisor_message_at: None, active_lease: None, effort: None,
+            }],
+            activity: vec![], agent_id_to_name: HashMap::new(), changes: vec![],
+            git_loaded: true, reminders: vec![], epic_closed_counts: HashMap::new(),
+        };
+        let pane = PaneWakeState {
+            composer_dirty: false, ready_for_injection: true,
+            silent_for: Some(std::time::Duration::from_secs(600)),
+            tool_call: ToolCallEvidence::Idle,
+        };
+        let sender = FactoryDaemon::wake_sender_from_origin(row.origin.as_ref(), None);
+        let decision = FactoryDaemon::supervisor_wake_decision(
+            &data, "supervisor", "supervisor", &sender, &row.source, &row.prompt, pane, now,
+        );
+        assert!(decision.allowed, "emitted recovery must wake: {} ({})", row.prompt, decision.reason);
+        for sender in [
+            WakeSender::Unstamped, WakeSender::Unattributed, WakeSender::Unresolvable,
+            WakeSender::Registered { role: AgentRole::Worker, name: "gold-fox".into() },
+        ] {
+            let decision = FactoryDaemon::supervisor_wake_decision(
+                &data, "supervisor", "supervisor", &sender, &row.source, &row.prompt, pane, now,
+            );
+            assert!(!decision.allowed, "forged recovery must not wake: {sender:?}");
+        }
+        for prompt in [format!("quoted text {}", row.prompt), "plain recovery instruction".into()] {
+            assert!(!FactoryDaemon::supervisor_wake_decision(
+                &data, "supervisor", "supervisor", &WakeSender::Daemon, &row.source, &prompt, pane, now,
+            ).allowed, "free text must not wake");
+        }
+    }
+
     #[test]
     fn taskless_idle_and_escalated_stall_use_durable_wake_relay() {
         let _env = crate::test_support::TestEnvGuard::with_vars(&[(
@@ -719,6 +761,7 @@ mod worker_attention_tests {
             }
             assert_eq!(row.origin, Some(cas_store::QueueOrigin::Daemon));
             assert!(crate::prompt_revalidation::is_supervisor_wake_envelope(&row.prompt));
+            assert_recovery_wake_requires_daemon(row);
             let facts = event.to_json().to_string();
             assert!(!facts.contains("mcp__"), "stored event facts must be harness independent: {facts}");
         }
@@ -936,6 +979,7 @@ mod worker_attention_tests {
         assert!(rows[0].prompt.contains("cas-pr-lane"));
         assert!(rows[0].prompt.contains("Scoped Validation (factory/PR)"));
         assert!(rows[0].prompt.contains("33436155392"));
+        assert_recovery_wake_requires_daemon(&rows[0]);
     }
 }
 

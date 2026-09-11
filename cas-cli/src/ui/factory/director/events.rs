@@ -47,8 +47,13 @@ pub enum SupervisorActionableState {
 }
 
 impl SupervisorActionableState {
-    /// Render an impact-first instruction suitable for the supervisor wake.
+    /// Keep event descriptions and exported facts independent of any harness.
     pub(crate) fn next_step_text(&self) -> String {
+        self.next_step_text_for("")
+    }
+
+    /// Render executable recovery hints only once the receiving harness is known.
+    pub(crate) fn next_step_text_for(&self, tool_prefix: &str) -> String {
         match self {
             Self::MergeBranches { branches } => {
                 let rows = branches
@@ -62,7 +67,7 @@ impl SupervisorActionableState {
             }
             Self::MergeCloseBlocked { tasks } => format!(
                 "Drive to the exit: delivery is already merged, but close is blocked; do not merge the factory branch again:\n{}",
-                render_merged_close_blocked(tasks)
+                render_merged_close_blocked(tasks, tool_prefix)
             ),
             Self::MergeQueue {
                 branches,
@@ -71,10 +76,10 @@ impl SupervisorActionableState {
                 let unmerged = Self::MergeBranches {
                     branches: branches.clone(),
                 }
-                .next_step_text();
+                .next_step_text_for(tool_prefix);
                 let merged = format!(
                     "Delivery already merged but close is blocked; do not merge those factory branches again:\n{}",
-                    render_merged_close_blocked(merged_close_blocked)
+                    render_merged_close_blocked(merged_close_blocked, tool_prefix)
                 );
                 format!("{unmerged}\n{merged}")
             }
@@ -105,12 +110,12 @@ pub struct MergedCloseBlockedTask {
     pub close_rejection: String,
 }
 
-fn render_merged_close_blocked(tasks: &[MergedCloseBlockedTask]) -> String {
+fn render_merged_close_blocked(tasks: &[MergedCloseBlockedTask], tool_prefix: &str) -> String {
     tasks
         .iter()
         .map(|task| {
             format!(
-                "- {}: {} anchor {} is already reachable from {} @ {}. Last close rejection: {}. Suggested close: `mcp__cs__task action=close id={}` (or supervisor `mcp__cs__task action=close id={} supervisor_override=true reason=\"merged delivery verified; close rejection: {}\"`).",
+                "- {}: {} anchor {} is already reachable from {} @ {}. Last close rejection: {}. Suggested close: `{tool_prefix}task action=close id={}` (or supervisor `{tool_prefix}task action=close id={} supervisor_override=true reason=\"merged delivery verified\"`).",
                 task.task_id,
                 task.factory_branch,
                 task.anchor,
@@ -119,7 +124,6 @@ fn render_merged_close_blocked(tasks: &[MergedCloseBlockedTask]) -> String {
                 task.close_rejection,
                 task.task_id,
                 task.task_id,
-                task.close_rejection,
             )
         })
         .collect::<Vec<_>>()

@@ -512,9 +512,17 @@ fn resolve_hub_url(
         .or(record.public_url.as_deref())
         .or(configured_hub_url)
         .or(remembered_hub_url.as_deref())
-        .context(
-            "hub is running without a public URL; run `cas hub service uninstall && cas hub start --tailscale-serve` from an interactive shell, then retry authorization",
-        )?;
+        .ok_or_else(|| {
+            if let Some(warning) = record.transport_warning.as_deref() {
+                anyhow::anyhow!(
+                    "hub is running without a public URL because Tailscale Serve failed: {warning}; run `cas hub restart --tailscale-serve`, then retry authorization"
+                )
+            } else {
+                anyhow::anyhow!(
+                    "hub is running without a public URL; run `cas hub restart --tailscale-serve`, then retry authorization"
+                )
+            }
+        })?;
     let parsed = validate_hub_url(url)?;
     Ok(parsed.origin().ascii_serialization())
 }
@@ -557,11 +565,11 @@ fn verify_public_hub_ready(hub_url: &str) -> Result<()> {
 fn public_hub_readiness_error(hub_url: &str, status: Option<u16>) -> anyhow::Error {
     if status == Some(502) {
         anyhow::anyhow!(
-            "hub public URL {hub_url} route exists but the backend is gone (HTTP 502); the pairing code remains unclaimed and no invitation was created. Run `cas hub service uninstall && cas hub start --tailscale-serve`, then retry authorization"
+            "hub public URL {hub_url} route exists but the backend is gone (HTTP 502); the pairing code remains unclaimed and no invitation was created. Run `cas hub restart --tailscale-serve`, then retry authorization"
         )
     } else {
         anyhow::anyhow!(
-            "hub public URL {hub_url} is not reachable from this machine; the pairing code remains unclaimed and no invitation was created. Run `cas hub service uninstall && cas hub start --tailscale-serve`, then retry authorization"
+            "hub public URL {hub_url} is not reachable from this machine; the pairing code remains unclaimed and no invitation was created. Run `cas hub restart --tailscale-serve`, then retry authorization"
         )
     }
 }
@@ -1123,8 +1131,29 @@ mod tests {
 
         let error = resolve_hub_url(&paths, None, None).unwrap_err().to_string();
         assert!(error.contains("hub is running without a public URL"));
-        assert!(error.contains("cas hub service uninstall && cas hub start --tailscale-serve"));
+        assert!(error.contains("cas hub restart --tailscale-serve"));
         assert!(!error.contains("cas hub --tailscale-serve start"));
+        health.join().unwrap();
+    }
+
+    #[test]
+    fn running_hub_without_public_origin_preserves_transport_failure_cause() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = HubRuntimePaths::new(temp.path().join("hub"));
+        let (port, health) = serve_ready_health_checks(1);
+        write_live_record(&paths, port, None);
+        let mut record = paths.read_process_record().unwrap();
+        record.transport_warning = Some(
+            "tailscale CLI is unavailable; looked for `tailscale` on PATH and app locations"
+                .to_owned(),
+        );
+        paths.write_process_record(&record).unwrap();
+
+        let error = resolve_hub_url(&paths, None, None).unwrap_err().to_string();
+        assert!(error.contains("tailscale CLI is unavailable"), "{error}");
+        assert!(error.contains("looked for"), "{error}");
+        assert!(error.contains("cas hub restart --tailscale-serve"), "{error}");
+        assert!(!error.contains("service uninstall"), "{error}");
         health.join().unwrap();
     }
 
@@ -1404,7 +1433,7 @@ mod tests {
                 .to_string();
 
         assert!(error.contains("not reachable from this machine"), "{error}");
-        assert!(error.contains("cas hub service uninstall && cas hub start --tailscale-serve"), "{error}");
+        assert!(error.contains("cas hub restart --tailscale-serve"), "{error}");
         assert!(relay.claims.lock().unwrap().is_empty());
         assert!(relay.completed_invitation_urls.lock().unwrap().is_empty());
 

@@ -143,7 +143,7 @@ struct WorkerSpecJson {
 ///
 /// All fields have sensible `Default` values (skip layers whose paths don't
 /// exist, no CLI overrides, no JSON overrides).
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct ConfigSources {
     /// Path to the user config file.
     ///
@@ -357,6 +357,45 @@ pub fn worker_slot_effort_configured(
     )
 }
 
+/// Return whether any parsed config layer explicitly sets `model` for a
+/// worker slot. The top-level LLM model is intentionally not part of this
+/// result: callers use that role-level value as inherited input that may need
+/// to be replaced when the selected harness changes.
+pub fn worker_slot_model_configured(
+    slot: usize,
+    sources: &ConfigSources,
+) -> Result<bool, SpecResolverError> {
+    worker_slot_configured(
+        slot,
+        sources,
+        |defaults| defaults.model.is_some(),
+        |worker| worker.model.is_some(),
+    )
+}
+
+/// Return whether a factory config layer explicitly sets the supervisor's
+/// model. Role-level `[llm]` values are inherited and therefore deliberately
+/// excluded; an incompatible factory recipe must fail closed instead of being
+/// silently repaired.
+pub fn supervisor_model_configured(
+    sources: &ConfigSources,
+) -> Result<bool, SpecResolverError> {
+    supervisor_slot_configured(sources, |defaults| defaults.model.is_some(), |supervisor| {
+        supervisor.model.is_some()
+    })
+}
+
+/// Return whether a factory config layer explicitly sets the supervisor's
+/// effort. Role-level `[llm]` values are inherited and may be replaced when a
+/// harness transition makes them invalid.
+pub fn supervisor_effort_configured(
+    sources: &ConfigSources,
+) -> Result<bool, SpecResolverError> {
+    supervisor_slot_configured(sources, |defaults| defaults.effort.is_some(), |supervisor| {
+        supervisor.effort.is_some()
+    })
+}
+
 fn worker_slot_configured(
     slot: usize,
     sources: &ConfigSources,
@@ -382,6 +421,37 @@ fn worker_slot_configured(
             return Ok(true);
         }
         if per_worker.get(slot).is_some_and(&worker_has_field) {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
+}
+
+fn supervisor_slot_configured(
+    sources: &ConfigSources,
+    defaults_has_field: impl Fn(&FactoryDefaultsToml) -> bool,
+    supervisor_has_field: impl Fn(&FactorySupervisorToml) -> bool,
+) -> Result<bool, SpecResolverError> {
+    let user_path = sources
+        .user_config
+        .clone()
+        .or_else(|| dirs::home_dir().map(|h| h.join(".cas").join("config.toml")));
+
+    if let Some(ref path) = user_path
+        && let Some((defaults, _per_worker, _supervisor)) = load_config_file(path)?
+        && defaults.as_ref().is_some_and(&defaults_has_field)
+    {
+        return Ok(true);
+    }
+
+    if let Some(path) = &sources.project_config
+        && let Some((defaults, _per_worker, supervisor)) = load_config_file(path)?
+    {
+        if defaults.as_ref().is_some_and(&defaults_has_field) {
+            return Ok(true);
+        }
+        if supervisor.as_ref().is_some_and(&supervisor_has_field) {
             return Ok(true);
         }
     }

@@ -34,6 +34,27 @@ terminal-qa: PASS cas-doctor-hub-transport · 12 runs · 0 fail · 0 warn · 0 a
 
 Scored by the worker on 2026-09-08; floor holds.
 
+### macOS app-bundle fallback and signed-in loopback warning
+
+When the PATH CLI is absent on macOS, the transport probe invokes the full
+Tailscale app-bundle binary and the status/doctor surfaces retain one compact
+warning with `cas hub restart --tailscale-serve`. Update-origin relaunches now
+surface Serve publication failure as an error while retaining the underlying
+cause. The Prowl real-build capture is recorded at
+`/Users/pippenz/.cas/artifacts/cas-5722/terminal-qa-hub-status/report.json`.
+
+terminal-qa: PASS cas-5722-hub-status · 12 runs · 0 fail · 0 warn · 0 allowed · `/Users/pippenz/.cas/artifacts/cas-5722/terminal-qa-hub-status/report.json`
+
+| Dimension | Score | Evidence |
+| --- | --- | --- |
+| Hierarchy | 4 | Status keeps the hub verdict first and places the signed-in loopback warning immediately below it. |
+| Fit | 4 | The warning is one compact transport row; JSON remains one document. |
+| Craft | 4 | The cause and one copyable restart command use the existing transport grammar. |
+| Theme safety | 5 | The terminal gate passes dark, light, Solarized, `NO_COLOR`, and C-locale runs. |
+| Machine contract | 5 | The JSON capture is one document and the diagnostic banner stays on stderr. |
+
+Scored by the worker on 2026-09-11; floor holds.
+
 ### Wedged-holder recovery rendering
 
 terminal-qa: PASS cas-be89-hub-status · 12 runs · 0 fail · 0 warn · 0 allowed · /home/pippenz/.cas/artifacts/cas-be89/terminal-qa/report.json

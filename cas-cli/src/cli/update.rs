@@ -232,12 +232,12 @@ pub fn execute(args: &UpdateArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
     if args.all_projects {
         let mut steps = UpdateStepTracker::new(1, !cli.json);
         let report = steps.run("Refreshing all local Cassy projects", || {
-            refresh_all_projects(args, cli, cas_root)
+            refresh_all_projects(args, cli, cas_root, None)
         })?;
         if !cli.json {
             let mut out = io::stdout();
             let mut fmt = Formatter::stdout(&mut out, ActiveTheme::default());
-            print_update_banner_with_formatter(&mut fmt, &report)?;
+            print_update_banner_with_formatter(&mut fmt, &report, None)?;
         }
         return Ok(());
     }
@@ -273,10 +273,10 @@ pub fn execute(args: &UpdateArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
 
     // Full update: binary + every local project's migration/sync/cloud state.
     let mut steps = UpdateStepTracker::new(2, !cli.json);
-    let outcome = steps.run("Updating Cassy binary", || {
+    let (outcome, hub_restart) = steps.run("Updating Cassy binary", || {
         let outcome = perform_update(args, current_version, cli)?;
-        super::hub::restart_stale_hub(&outcome.version, cli)?;
-        Ok(outcome)
+        let hub_restart = super::hub::restart_stale_hub(&outcome.version, cli)?;
+        Ok((outcome, hub_restart))
     })?;
     if !cli.json {
         let mut out = io::stdout();
@@ -292,7 +292,12 @@ pub fn execute(args: &UpdateArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
         if cli.json {
             println!(
                 "{}",
-                combined_update_receipt(&outcome.version, outcome.updated, Some(&refresh))
+                combined_update_receipt(
+                    &outcome.version,
+                    outcome.updated,
+                    Some(&refresh),
+                    hub_restart.transport_error.as_deref(),
+                )
             );
         }
         return Ok(());
@@ -301,12 +306,19 @@ pub fn execute(args: &UpdateArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
     if cli.json {
         println!(
             "{}",
-            combined_update_receipt(&outcome.version, outcome.updated, None)
+            combined_update_receipt(
+                &outcome.version,
+                outcome.updated,
+                None,
+                hub_restart.transport_error.as_deref(),
+            )
         );
     }
 
-    let report = steps.run("Refreshing all local Cassy projects", || {
-        refresh_all_projects(args, cli, cas_root)
+    let (report, hub_transport_error) = refresh_after_hub_restart(hub_restart, |error| {
+        steps.run("Refreshing all local Cassy projects", || {
+            refresh_all_projects(args, cli, cas_root, error)
+        })
     })?;
 
     if !cli.json {
@@ -314,7 +326,7 @@ pub fn execute(args: &UpdateArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
         let theme = ActiveTheme::default();
         let mut fmt = Formatter::stdout(&mut out, theme);
         fmt.newline()?;
-        print_update_banner_with_formatter(&mut fmt, &report)?;
+        print_update_banner_with_formatter(&mut fmt, &report, hub_transport_error.as_deref())?;
     }
 
     Ok(())
@@ -331,6 +343,7 @@ fn combined_update_receipt(
     version: &str,
     updated: bool,
     refresh: Option<&serde_json::Value>,
+    hub_transport_error: Option<&str>,
 ) -> serde_json::Value {
     let mut receipt = serde_json::json!({
         "binary_updated": updated,
@@ -341,7 +354,22 @@ fn combined_update_receipt(
             target.insert(key.clone(), value.clone());
         }
     }
+    if let Some(error) = hub_transport_error {
+        receipt["hub_transport"] = serde_json::json!({
+            "status": "error",
+            "message": error,
+        });
+    }
     receipt
+}
+
+fn refresh_after_hub_restart<T>(
+    hub_restart: super::hub::HubRestartOutcome,
+    refresh: impl FnOnce(Option<&str>) -> anyhow::Result<T>,
+) -> anyhow::Result<(T, Option<String>)> {
+    let transport_error = hub_restart.transport_error;
+    let refreshed = refresh(transport_error.as_deref())?;
+    Ok((refreshed, transport_error))
 }
 
 /// Add an existing project to the host registry.
@@ -814,6 +842,7 @@ fn update_banner_text(report: &RefreshReport) -> String {
 fn print_update_banner_with_formatter(
     fmt: &mut Formatter<'_>,
     report: &RefreshReport,
+    hub_transport_error: Option<&str>,
 ) -> io::Result<()> {
     let (verdict, word) = if report.failed_count > 0 {
         (
@@ -832,7 +861,11 @@ fn print_update_banner_with_formatter(
     } else {
         (Verdict::Ok, "complete".to_string())
     };
-    fmt.verdict(verdict, &word, &update_banner_text(report))
+    fmt.verdict(verdict, &word, &update_banner_text(report))?;
+    if let Some(error) = hub_transport_error {
+        fmt.verdict(Verdict::Error, "hub transport", error)?;
+    }
+    Ok(())
 }
 
 fn capture_phase<T>(enabled: bool, operation: impl FnOnce() -> T) -> (T, String) {
@@ -921,6 +954,7 @@ fn refresh_all_projects(
     args: &UpdateArgs,
     cli: &Cli,
     current_cas_root: Option<&Path>,
+    hub_transport_error: Option<&str>,
 ) -> anyhow::Result<RefreshReport> {
     let started_at = Instant::now();
     let discovery = discover_local_projects(current_cas_root);
@@ -992,12 +1026,17 @@ fn refresh_all_projects(
         &user_details,
         &discovery.skipped_unregistered,
         cli,
+        hub_transport_error,
     );
 
     let failed_count = receipts.iter().filter(|receipt| receipt.failed()).count()
         + usize::from(user_level.failed());
-    let receipt =
-        project_refresh_receipt_json(&receipts, &user_level, &discovery.skipped_unregistered);
+    let receipt = project_refresh_receipt_json(
+        &receipts,
+        &user_level,
+        &discovery.skipped_unregistered,
+        hub_transport_error,
+    );
     if let Some(path) = &args.refresh_receipt {
         write_refresh_receipt(path, &receipt)?;
     }
@@ -1334,6 +1373,7 @@ fn project_refresh_receipt_json(
     receipts: &[ProjectRefreshReceipt],
     user_level: &ProjectPhase,
     skipped_unregistered: &[SkippedProject],
+    hub_transport_error: Option<&str>,
 ) -> serde_json::Value {
     let projects = receipts
         .iter()
@@ -1350,7 +1390,7 @@ fn project_refresh_receipt_json(
             })
         })
         .collect::<Vec<_>>();
-    serde_json::json!({
+    let mut receipt = serde_json::json!({
         // cas-91ba: name the binary that actually performed this refresh. A
         // receipt from the pre-update image is what made an operator's first
         // `cas update` look converged when it was not.
@@ -1377,7 +1417,14 @@ fn project_refresh_receipt_json(
                 "reason": skip.reason,
             }))
             .collect::<Vec<_>>(),
-    })
+    });
+    if let Some(error) = hub_transport_error {
+        receipt["hub_transport"] = serde_json::json!({
+            "status": "error",
+            "message": error,
+        });
+    }
+    receipt
 }
 
 fn write_refresh_receipt(path: &Path, receipt: &serde_json::Value) -> anyhow::Result<()> {
@@ -1393,11 +1440,17 @@ fn print_project_refresh_summary(
     user_details: &str,
     skipped_unregistered: &[SkippedProject],
     cli: &Cli,
+    hub_transport_error: Option<&str>,
 ) {
     if cli.json {
         println!(
             "{}",
-            project_refresh_receipt_json(receipts, user_level, skipped_unregistered)
+            project_refresh_receipt_json(
+                receipts,
+                user_level,
+                skipped_unregistered,
+                hub_transport_error,
+            )
         );
         return;
     }
@@ -2840,14 +2893,16 @@ fn execute_post_swap(args: &UpdateArgs, cli: &Cli, current_version: &str) -> any
         .ok_or_else(|| anyhow::anyhow!("post-swap mode requires --from"))?;
     // The hub goes first so it picks up the new binary immediately rather than
     // waiting behind a full refresh.
-    super::hub::restart_stale_hub(current_version, cli)?;
+    let hub_restart = super::hub::restart_stale_hub(current_version, cli)?;
 
     // These are the phases that must not run in the pre-update image.
-    let report = refresh_all_projects(args, cli, None)?;
+    let (report, hub_transport_error) = refresh_after_hub_restart(hub_restart, |error| {
+        refresh_all_projects(args, cli, None, error)
+    })?;
     if !cli.json {
         let mut out = io::stdout();
         let mut fmt = Formatter::stdout(&mut out, ActiveTheme::default());
-        print_update_banner_with_formatter(&mut fmt, &report)?;
+        print_update_banner_with_formatter(&mut fmt, &report, hub_transport_error.as_deref())?;
     }
     Ok(())
 }

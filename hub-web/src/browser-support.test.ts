@@ -20,7 +20,7 @@ describe("browser support", () => {
     expect(support.missing.map((requirement) => requirement.api)).toEqual(["Array.prototype.toSorted"]);
     const notice = unsupportedBrowserNotice(support);
     expect(notice).toBe(
-      "This browser is missing Array.prototype.toSorted, which Cassy Commander needs. Update to Chrome 110, Edge 110, Firefox 115, or Safari 16.4 or newer.",
+      "This browser is missing Array.prototype.toSorted, which Cassy Cloud needs. Update to Chrome 110, Edge 110, Firefox 115, or Safari 16.4 or newer.",
     );
     expect(notice?.split("\n")).toHaveLength(1);
   });

@@ -529,8 +529,8 @@ fn hub_session(session: &SessionInfo) -> HubSession {
 }
 
 /// A session's metadata names the supervisor, but does not prove that the
-/// pane's harness is still around. Use the same dual heartbeat/process
-/// evidence as worker supervision, scoped to this factory session and the
+/// pane's harness is responsive. Require the worker_status fresh-heartbeat
+/// band (a surviving process alone is not a reachable conversation), scoped to the
 /// recorded supervisor name.
 fn has_live_supervisor(session: &SessionInfo) -> bool {
     let supervisor_name = session.metadata.supervisor.name.trim();
@@ -553,8 +553,12 @@ fn has_live_supervisor(session: &SessionInfo) -> bool {
         agent.role == cas_types::AgentRole::Supervisor
             && agent.factory_session.as_deref() == Some(session.name.as_str())
             && agent.name == supervisor_name
-            && crate::mcp::tools::service::agent_liveness::evaluate_supervision_liveness(agent)
-                .is_live()
+            && crate::mcp::tools::service::agent_liveness::evaluate_supervision_liveness_with(
+                agent,
+                false,
+                crate::mcp::tools::service::agent_liveness::WORKER_STALE_SECS,
+            )
+            .is_live()
     })
 }
 

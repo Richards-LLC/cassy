@@ -31,7 +31,7 @@ const context = (overrides: Partial<SupervisorSendContext> = {}): SupervisorSend
   ...overrides,
 });
 
-describe("Cassy Commander supervisor composer targeting", () => {
+describe("Cassy Cloud supervisor composer targeting", () => {
   it("targets the selected session supervisor exactly", () => {
     expect(supervisorTarget(session("patient-lynx-59"))).toBe("patient-lynx-59");
     expect(supervisorMessage("patient-lynx-59", "Please review the mobile state"))
@@ -48,7 +48,7 @@ describe("Cassy Commander supervisor composer targeting", () => {
   });
 });
 
-describe("Cassy Commander composer send key", () => {
+describe("Cassy Cloud composer send key", () => {
   const key = (overrides: Partial<Parameters<typeof sendsOnEnter>[0]> = {}) => ({
     key: "Enter",
     shiftKey: false,
@@ -86,7 +86,7 @@ describe("Cassy Commander composer send key", () => {
   });
 });
 
-describe("Cassy Commander supervisor send plan", () => {
+describe("Cassy Cloud supervisor send plan", () => {
   it("sends directly while this device holds the session lease", () => {
     expect(planSupervisorSend(context())).toEqual({ kind: "send" });
   });
@@ -135,7 +135,7 @@ describe("Cassy Commander supervisor send plan", () => {
     expect(plan.reason).toContain("Daniel's phone");
   });
 
-  it("blocks a session with no supervisor and a hub without Cassy Commander control", () => {
+  it("blocks a session with no supervisor and a hub without Cassy Cloud control", () => {
     expect(planSupervisorSend(context({ supervisor: undefined })))
       .toMatchObject({ kind: "blocked", block: "no-supervisor" });
     expect(planSupervisorSend(context({ daemonAttach: false })))
@@ -160,7 +160,7 @@ describe("Cassy Commander supervisor send plan", () => {
   });
 });
 
-describe("Cassy Commander focus arbitration after a render", () => {
+describe("Cassy Cloud focus arbitration after a render", () => {
   it("keeps the composer focused when both the terminal and the composer were focused", () => {
     // Every render replaces app.innerHTML, so both restores race. A terminal
     // that wins swallows the rest of the sentence being typed.

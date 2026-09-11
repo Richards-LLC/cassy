@@ -1,4 +1,5 @@
 use crate::support::*;
+use cas::mcp::CasService;
 use cas::mcp::tools::*;
 use cas::store::{
     EventStore, init_cas_dir, open_agent_store, open_event_store, open_task_store,
@@ -475,6 +476,96 @@ async fn test_close_remints_a_fresh_dispatch_when_the_bound_proof_is_dead() {
 }
 
 #[tokio::test]
+/// Pin cas-db60/cas-5c33's retry contract: a close retry while the exact
+/// dispatch is still live must not retire it or mint a replacement, so a
+/// supervisor can resolve the original handoff it was given.
+async fn test_close_retry_keeps_live_dispatch_for_original_supervisor_verdict() {
+    let (_temp, service, cas_dir, task_id, _worker_dir, _env_lock) =
+        delivered_worktree_fixture("factory/live-retry").await;
+
+    let first = extract_text(
+        service
+            .cas_task_close(Parameters(close_request(&task_id, "delivered work")))
+            .await
+            .expect("first close"),
+    );
+    assert!(first.contains("VERIFICATION REQUIRED"), "{first}");
+    let first_dispatch = cas_store::get_latest_verification_dispatch(&cas_dir, &task_id)
+        .unwrap()
+        .expect("first dispatch");
+    assert_eq!(
+        first_dispatch.state,
+        cas::types::VerificationDispatchState::Pending,
+        "the supervisor verdict must be recorded against a live undecided dispatch"
+    );
+    assert!(
+        cas_store::get_verification_for_dispatch(&cas_dir, &first_dispatch.id)
+            .unwrap()
+            .is_none(),
+        "the first dispatch must not already have a verdict"
+    );
+
+    let retry = extract_text(
+        service
+            .cas_task_close(Parameters(close_request(&task_id, "retry delivered work")))
+            .await
+            .expect("close retry"),
+    );
+    assert!(retry.contains("VERIFICATION REQUIRED"), "{retry}");
+    let retry_dispatch = cas_store::get_latest_verification_dispatch(&cas_dir, &task_id)
+        .unwrap()
+        .expect("dispatch after close retry");
+    assert_eq!(
+        retry_dispatch.id, first_dispatch.id,
+        "a live undecided proof cycle must be reused, not replaced: {retry}"
+    );
+    let conn = rusqlite::Connection::open(cas_dir.join("cas.db")).expect("verification db");
+    let dispatch_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM verification_dispatches WHERE task_id = ?1",
+            rusqlite::params![task_id],
+            |row| row.get(0),
+        )
+        .expect("count task dispatches");
+    assert_eq!(
+        dispatch_count, 1,
+        "a close retry must not mint a second live dispatch"
+    );
+    drop(conn);
+
+    let supervisor = registered_supervisor(&cas_dir, "live-retry-supervisor").await;
+    supervisor
+        .cas_verification_add(Parameters(VerificationAddRequest {
+            task_id: task_id.clone(),
+            status: "approved".to_string(),
+            summary: "approved the original live proof cycle".to_string(),
+            confidence: Some(1.0),
+            issues: None,
+            files_reviewed: Some("delivered.txt".to_string()),
+            duration_ms: Some(1),
+            verification_type: None,
+            verifier_capability: None,
+            dispatch_id: Some(first_dispatch.id.clone()),
+        }))
+        .await
+        .expect("supervisor verdict on the original dispatch");
+
+    assert_eq!(
+        cas_store::get_verification_dispatch(&cas_dir, &first_dispatch.id)
+            .unwrap()
+            .state,
+        cas::types::VerificationDispatchState::Resolved
+    );
+    let closed = extract_text(
+        service
+            .cas_task_close(Parameters(close_request(&task_id, "retry after approval")))
+            .await
+            .expect("close after original verdict"),
+    );
+    assert!(closed.contains("Closed task:"), "{closed}");
+}
+
+#[tokio::test]
 async fn test_supervisor_verdict_follows_superseded_dispatch_with_unchanged_proof() {
     let (_temp, service, cas_dir, task_id, _worker_dir, _env_lock) =
         delivered_worktree_fixture("factory/superseded-verdict").await;
@@ -677,6 +768,160 @@ async fn test_post_merge_close_dispatch_binds_the_published_target_head() {
             .expect("post-merge close retry"),
     );
     assert!(closed.contains("Closed task:"), "{closed}");
+}
+
+#[tokio::test]
+async fn test_declared_work_target_dispatch_binds_target_branch_not_primary_head() {
+    let (temp, core) = setup_cas();
+    let service = CasService::new(core.clone(), None);
+    let env_lock = env_test_lock();
+    let cas_dir = temp.path().join(".cas");
+    std::fs::write(
+        cas_dir.join("config.toml"),
+        "[verification]\nenabled = true\n[code_review]\nowner = \"worker\"\n",
+    )
+    .expect("verification config");
+
+    proof_boundary_git(temp.path(), &["init", "-q", "-b", "primary"]);
+    proof_boundary_git(
+        temp.path(),
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/example/cas821-fixture.git",
+        ],
+    );
+    std::fs::write(temp.path().join(".gitignore"), ".cas/\n").unwrap();
+    std::fs::write(temp.path().join("seed.txt"), "seed\n").unwrap();
+    proof_boundary_git(temp.path(), &["add", ".gitignore", "seed.txt"]);
+    proof_boundary_git(temp.path(), &["commit", "-q", "-m", "seed"]);
+
+    let worker_dir = TempDir::new().expect("target worktree");
+    proof_boundary_git(temp.path(), &["branch", "factory/test-agent"]);
+    proof_boundary_git(
+        temp.path(),
+        &[
+            "worktree",
+            "add",
+            "-q",
+            worker_dir.path().to_str().unwrap(),
+            "factory/test-agent",
+        ],
+    );
+    std::fs::write(worker_dir.path().join("delivered.txt"), "delivered\n").unwrap();
+    proof_boundary_git(worker_dir.path(), &["add", "delivered.txt"]);
+    proof_boundary_git(worker_dir.path(), &["commit", "-q", "-m", "deliver target work"]);
+    let target_head = String::from_utf8_lossy(
+        &Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(worker_dir.path())
+            .output()
+            .expect("resolve target head")
+            .stdout,
+    )
+    .trim()
+    .to_string();
+    std::fs::write(temp.path().join("primary.txt"), "primary\n").unwrap();
+    proof_boundary_git(temp.path(), &["add", "primary.txt"]);
+    proof_boundary_git(temp.path(), &["commit", "-q", "-m", "advance primary"]);
+    let primary_head = String::from_utf8_lossy(
+        &Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(temp.path())
+            .output()
+            .expect("resolve primary head")
+            .stdout,
+    )
+    .trim()
+    .to_string();
+    assert_ne!(target_head, primary_head);
+    cas::store::known_repos::ensure_host_schema().expect("known repository schema");
+
+    let created = service
+        .task(Parameters(
+            serde_json::from_value::<cas_mcp::TaskRequest>(serde_json::json!({
+                "action": "create",
+                "title": "Declared target proof",
+                "risk": "none",
+                "target_repo": temp.path().to_str().unwrap(),
+                "target_branch": "factory/test-agent",
+                "confirm_warning": true
+            }))
+            .expect("task create request"),
+        ))
+        .await
+        .expect("create target task");
+    let task_id = extract_task_id(&extract_text(created)).unwrap().to_string();
+    core
+        .cas_task_start(Parameters(IdRequest {
+            id: task_id.clone(),
+        }))
+        .await
+        .expect("start target task");
+
+    let worktree_store = open_worktree_store(&cas_dir).expect("worktree store");
+    worktree_store.init().expect("init worktree store");
+    let worktree_id = Worktree::generate_id();
+    worktree_store
+        .add(&Worktree::new(
+            worktree_id.clone(),
+            "factory/test-agent".to_string(),
+            "primary".to_string(),
+            worker_dir.path().to_path_buf(),
+        ))
+        .expect("register target worktree");
+    let task_store = open_task_store(&cas_dir).expect("task store");
+    let mut task = task_store.get(&task_id).expect("target task");
+    task.worktree_id = Some(worktree_id);
+    task.status = TaskStatus::AwaitingMerge;
+    // Model the post-merge retry shape from GH #821: the delivered commit is
+    // already on target B, while the primary checkout remains on unrelated A.
+    task.deliverables.factory_branch_anchor = Some(target_head.clone());
+    task_store.update(&task).expect("attach target worktree");
+
+    let close = extract_text(
+        core
+            .cas_task_close(Parameters(close_request(&task_id, "review target delivery")))
+            .await
+            .expect("close target task"),
+    );
+    assert!(close.contains("VERIFICATION REQUIRED"), "{close}");
+    let dispatch = cas_store::get_latest_verification_dispatch(&cas_dir, &task_id)
+        .unwrap()
+        .expect("target dispatch");
+    let repository = dispatch.repository.as_ref().expect("repository proof");
+    assert_eq!(repository.head_commit, target_head);
+    assert_ne!(repository.head_commit, primary_head);
+    assert_eq!(
+        repository.target_branch.as_deref(),
+        Some("factory/test-agent")
+    );
+
+    let supervisor = registered_supervisor(&cas_dir, "declared-target-supervisor").await;
+    supervisor
+        .cas_verification_add(Parameters(VerificationAddRequest {
+            task_id: task_id.clone(),
+            status: "approved".to_string(),
+            summary: "approved declared target proof".to_string(),
+            confidence: Some(1.0),
+            issues: None,
+            files_reviewed: Some("delivered.txt".to_string()),
+            duration_ms: Some(1),
+            verification_type: None,
+            verifier_capability: None,
+            dispatch_id: Some(dispatch.id),
+        }))
+        .await
+        .expect("approve declared target proof");
+    let closed = extract_text(
+        core
+            .cas_task_close(Parameters(close_request(&task_id, "review target delivery")))
+            .await
+            .expect("close approved target task"),
+    );
+    assert!(closed.contains("Closed task:"), "{closed}");
+    drop(env_lock);
 }
 
 #[tokio::test]

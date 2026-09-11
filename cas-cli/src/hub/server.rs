@@ -469,6 +469,8 @@ async fn diagnostics<R: SessionReadModel>(
 #[derive(Serialize)]
 struct SessionsResponse {
     schema_version: u32,
+    /// Browser catalog expiry shares worker_status's fresh-heartbeat band.
+    freshness_threshold_secs: i64,
     sessions: Vec<HubSession>,
 }
 
@@ -493,6 +495,8 @@ async fn sessions<R: SessionReadModel>(
         Ok(sessions) => with_cors(
             Json(SessionsResponse {
                 schema_version: super::HUB_SCHEMA_VERSION,
+                freshness_threshold_secs:
+                    crate::mcp::tools::service::agent_liveness::WORKER_STALE_SECS,
                 sessions: supervisor_sessions(sessions, query.workers, query.dormant),
             })
             .into_response(),
@@ -620,7 +624,7 @@ struct SessionsQuery {
     dormant: bool,
 }
 
-/// The default catalog lists live supervisor-led sessions only. The two
+/// The default catalog lists fresh supervisor-led sessions with live workers only. The two
 /// visibility controls are independent: `workers=1` includes live worker-only
 /// rows, while `dormant=1` includes sessions whose supervisor is not live.
 pub(crate) fn supervisor_sessions(
@@ -633,7 +637,12 @@ pub(crate) fn supervisor_sessions(
     }
     sessions
         .into_iter()
-        .filter(|session| reveal_dormant || !session.dormant)
+        .filter(|session| {
+            reveal_dormant
+                || (!session.dormant
+                    && session.liveness == super::DaemonLiveness::Live
+                    && !session.workers.is_empty())
+        })
         .filter(|session| reveal_workers || !session.supervisor.trim().is_empty())
         .collect()
 }
@@ -1116,11 +1125,7 @@ pub(super) fn refused_pane_resize(bytes: &[u8]) -> Option<(String, u16, u16)> {
 
 /// Record a refused viewer resize in the hub audit log, attributed to the
 /// device that asked for it.
-fn audit_refused_pane_resize(
-    auth: &Option<(AuthStore, AuthContext)>,
-    session: &str,
-    bytes: &[u8],
-) {
+fn audit_refused_pane_resize(auth: &Option<(AuthStore, AuthContext)>, session: &str, bytes: &[u8]) {
     let Some((store, context)) = auth.as_ref() else {
         return;
     };
@@ -1864,5 +1869,31 @@ mod machine_protocol_tests {
             "factory-a",
             &error
         ));
+    }
+}
+
+#[cfg(test)]
+mod catalog_visibility_tests {
+    use super::*;
+
+    #[test]
+    fn normal_catalog_requires_fresh_staffed_reachable_supervisor() {
+        let live = super::super::fixture_session("live");
+        let mut dead = live.clone();
+        dead.name = "dead".into();
+        dead.dormant = true;
+        let mut empty = live.clone();
+        empty.name = "empty".into();
+        empty.workers.clear();
+        let mut missing = live.clone();
+        missing.name = "missing".into();
+        missing.liveness = super::super::DaemonLiveness::MissingEndpoint;
+        let all = vec![live, dead, empty, missing];
+        let visible = supervisor_sessions(all.clone(), false, false);
+        assert_eq!(
+            visible.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+            vec!["live"]
+        );
+        assert_eq!(supervisor_sessions(all, false, true).len(), 4);
     }
 }

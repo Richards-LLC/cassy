@@ -511,6 +511,12 @@ pub struct RepositoryProofBoundary {
     pub worktree_root: String,
     pub head_commit: String,
     pub state_digest: String,
+    /// Logical integration branch used to resolve the proof head. When set,
+    /// proof checks resolve this branch in `repository_root` and fall back to
+    /// `origin/<branch>`; they never substitute the checkout's incidental
+    /// `HEAD` (GH #821).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_branch: Option<String>,
     /// Empty for pre-cas-5c33 rows and for closes with nothing delivered.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub anchor_commits: Vec<String>,

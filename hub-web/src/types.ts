@@ -37,6 +37,8 @@ export interface HubSession {
   liveness: "live" | "stale_metadata" | "missing_endpoint";
   /** Metadata survived after its registered supervisor stopped being live. */
   dormant?: boolean;
+  /** Browser-only retention of a destination with an in-flight message. */
+  unreachable?: boolean;
 }
 
 export interface PaneInfo {

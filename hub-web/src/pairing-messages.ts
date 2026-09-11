@@ -60,7 +60,7 @@ export function pairingExchangeFailure(input: { status: number; body: string; co
     return {
       message: detail
         ? `${detail} ${remint}`
-        : `The machine refused this pairing link. A link pairs once, expires ten minutes after it is printed, and only works for the Cassy Commander address it was minted for. ${remint}`,
+        : `The machine refused this pairing link. A link pairs once, expires ten minutes after it is printed, and only works for the Cassy Cloud address it was minted for. ${remint}`,
       keepInvitation: false,
     };
   }

@@ -13,7 +13,7 @@ const pixel7 = { width: 412, height: 915, coarsePointer: true };
 const pixel7Landscape = { width: 915, height: 412, coarsePointer: true };
 const laptop = { width: 1400, height: 900, coarsePointer: false };
 
-describe("Cassy Commander phone detection", () => {
+describe("Cassy Cloud phone detection", () => {
   it("treats a phone as a phone in both orientations", () => {
     // 915x412 is a Pixel 7 rotated. Keyed on width alone it cleared the 848px
     // breakpoint and rendered the three-column desktop console on a 412px-tall

@@ -2530,6 +2530,10 @@ mod related_recall_response_tests {
 
     #[tokio::test]
     async fn epic_create_surfaces_matching_memory_in_its_response() {
+        let _env = TestEnvGuard::with_optional_vars(&[
+            ("CAS_AGENT_NAME", Some("related-recall-response-test")),
+            ("CAS_SESSION_ID", Some("related-recall-response-test")),
+        ]);
         let temp = TempDir::new().expect("temp project");
         let core = CasCore::with_daemon(temp.path().to_path_buf(), None, None);
         add_memory(
@@ -2558,6 +2562,10 @@ mod related_recall_response_tests {
 
     #[tokio::test]
     async fn epic_create_with_no_prior_match_preserves_legacy_response_shape() {
+        let _env = TestEnvGuard::with_optional_vars(&[
+            ("CAS_AGENT_NAME", Some("related-recall-response-test")),
+            ("CAS_SESSION_ID", Some("related-recall-response-test")),
+        ]);
         let temp = TempDir::new().expect("temp project");
         let core = CasCore::with_daemon(temp.path().to_path_buf(), None, None);
 

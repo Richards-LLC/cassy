@@ -4006,6 +4006,7 @@ mod tests {
             worktree_root: "/repo-worker".to_string(),
             head_commit: "head-a".to_string(),
             state_digest: "digest-a".to_string(),
+            target_branch: None,
             anchor_commits: vec!["delivered-a".to_string()],
         };
         let boundary = cas_types::VerificationProofBoundary::task_at(repository);

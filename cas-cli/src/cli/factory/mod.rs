@@ -459,6 +459,157 @@ fn resolve_lane_worker_specs(
     Ok((specs, notice))
 }
 
+/// Build the registry-backed fallback recipe for a selected harness. The
+/// supervisor keeps the dedicated supervisor lane's Claude recipe (Fable),
+/// while workers use the per-harness stock defaults.
+fn default_spec_for_harness(
+    cli: cas_mux::SupervisorCli,
+    supervisor: bool,
+) -> Result<cas_mux::WorkerSpec> {
+    if supervisor && cli == cas_mux::SupervisorCli::Claude {
+        return cas_factory::resolve_lane("supervisor", &CapabilitySnapshot::default())
+            .map(|decision| decision.spec)
+            .map_err(|error| anyhow::anyhow!(error.to_string()));
+    }
+
+    Ok(cas_mux::WorkerSpec {
+        name: None,
+        cli,
+        model: Some(cas_factory::default_worker_model_for_cli(cli).to_string()),
+        effort: Some(cas_factory::default_worker_effort_for_cli(cli)),
+        config_dir: None,
+        requester_config_dir: None,
+        requester_secure_storage_dir: None,
+    })
+}
+
+/// Match a JSON worker override to the same slot selected by the shared
+/// resolver, including name-matched entries that consume no new cursor slot.
+fn worker_json_override_has_field(
+    worker_spec_jsons: &[String],
+    specs: &[cas_mux::WorkerSpec],
+    slot: usize,
+    field: &str,
+) -> bool {
+    let mut cursor = 0usize;
+    for json in worker_spec_jsons {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(json) else {
+            continue;
+        };
+        let Some(object) = value.as_object() else {
+            continue;
+        };
+        let named_target = object
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|name| {
+                specs
+                    .iter()
+                    .position(|spec| spec.name.as_deref() == Some(name))
+            });
+        let target = named_target.or_else(|| (cursor < specs.len()).then_some(cursor));
+        let Some(target) = target else {
+            continue;
+        };
+        if target == slot
+            && object
+                .get(field)
+                .is_some_and(|value| !value.is_null())
+        {
+            return true;
+        }
+        let name_matched = object.get("name").is_some() && target < cursor;
+        if !name_matched && target == cursor {
+            cursor += 1;
+        }
+    }
+    false
+}
+
+/// Reconcile direct-CLI worker specs after the final worker harness is known.
+/// Role-level `[llm]` model/effort values are inherited; factory recipe fields
+/// and per-worker JSON fields remain explicit and fail closed when crossed.
+fn normalize_worker_specs(
+    specs: &mut [cas_mux::WorkerSpec],
+    sources: &ConfigSources,
+) -> Result<()> {
+    let configured = (0..specs.len())
+        .map(|slot| {
+            Ok((
+                cas_factory::worker_slot_model_configured(slot, sources)
+                    .map_err(|error| anyhow::anyhow!(error.to_string()))?,
+                cas_factory::worker_slot_effort_configured(slot, sources)
+                    .map_err(|error| anyhow::anyhow!(error.to_string()))?,
+            ))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let json_model_explicit = (0..specs.len())
+        .map(|slot| {
+            worker_json_override_has_field(&sources.worker_spec_jsons, specs, slot, "model")
+        })
+        .collect::<Vec<_>>();
+    let json_effort_explicit = (0..specs.len())
+        .map(|slot| {
+            worker_json_override_has_field(&sources.worker_spec_jsons, specs, slot, "effort")
+        })
+        .collect::<Vec<_>>();
+
+    for (slot, spec) in specs.iter_mut().enumerate() {
+        let model_explicit = configured[slot].0 || json_model_explicit[slot];
+        let effort_explicit = configured[slot].1 || json_effort_explicit[slot];
+        let default = default_spec_for_harness(spec.cli, false)?;
+        cas_factory::normalize_spec_for_harness(spec, &default, model_explicit, effort_explicit)
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    }
+    Ok(())
+}
+
+/// Reconcile the supervisor spec after the final supervisor harness is known.
+/// The global role model is inherited and repaired; explicit factory/JSON
+/// model values are rejected when they belong to another harness.
+fn normalize_supervisor_spec(
+    spec: &mut cas_mux::WorkerSpec,
+    sources: &ConfigSources,
+) -> Result<()> {
+    let model_explicit = cas_factory::supervisor_model_configured(sources)
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?
+        || sources.supervisor_spec_json.as_deref().is_some_and(|json| {
+            serde_json::from_str::<serde_json::Value>(json)
+                .ok()
+                .and_then(|value| value.get("model").cloned())
+                .is_some_and(|value| !value.is_null())
+        });
+    let effort_explicit = cas_factory::supervisor_effort_configured(sources)
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?
+        || sources.supervisor_spec_json.as_deref().is_some_and(|json| {
+            serde_json::from_str::<serde_json::Value>(json)
+                .ok()
+                .and_then(|value| value.get("effort").cloned())
+                .is_some_and(|value| !value.is_null())
+        });
+    let default = default_spec_for_harness(spec.cli, true)?;
+    cas_factory::normalize_spec_for_harness(spec, &default, model_explicit, effort_explicit)
+        .map_err(|error| anyhow::anyhow!(error.to_string()))
+}
+
+/// Convert a resolved recipe into the scalar fields consumed by the pane
+/// launcher. Keeping this derived from the spec prevents a stale role-level
+/// LLM value from re-entering after normalization.
+fn launch_fields_from_spec(
+    spec: &cas_mux::WorkerSpec,
+) -> (
+    cas_mux::SupervisorCli,
+    Option<String>,
+    Option<String>,
+) {
+    (
+        spec.cli,
+        spec.model.clone(),
+        spec.effort
+            .map(|effort| spec.cli.backend().effort_arg(effort).to_string()),
+    )
+}
+
 /// Arguments for `cas attach`
 #[derive(Args, Debug, Clone)]
 pub struct AttachArgs {
@@ -1309,12 +1460,9 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
             };
             let fallback_model = cas_factory::configured_factory_default_model(&sources)
                 .map_err(|e| anyhow::anyhow!("Failed to resolve factory defaults: {e}"))?;
-            let specs = resolve_specs(args.workers as usize, sources)
+            let mut specs = resolve_specs(args.workers as usize, sources.clone())
                 .map_err(|e| anyhow::anyhow!("Failed to resolve worker specs: {e}"))?;
-            for spec in &specs {
-                cas_factory::validate_explicit(spec, &CapabilitySnapshot::default())
-                    .map_err(|e| anyhow::anyhow!("Failed to validate worker routing spec: {e}"))?;
-            }
+            normalize_worker_specs(&mut specs, &sources)?;
             (specs, fallback_model, None)
         }
     };
@@ -1385,7 +1533,7 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
         };
         let fallback_model = cas_factory::configured_factory_default_model(&sources)
             .map_err(|e| anyhow::anyhow!("Failed to resolve factory defaults: {e}"))?;
-        let mut spec = resolve_supervisor_spec(sources)
+        let mut spec = resolve_supervisor_spec(sources.clone())
             .map_err(|e| anyhow::anyhow!("Failed to resolve supervisor spec: {e}"))?;
         if spec.config_dir.is_none() {
             spec.config_dir = args
@@ -1393,8 +1541,7 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
                 .as_ref()
                 .map(|path| path.to_string_lossy().into_owned());
         }
-        cas_factory::validate_explicit(&spec, &CapabilitySnapshot::default())
-            .map_err(|e| anyhow::anyhow!("Failed to validate supervisor routing spec: {e}"))?;
+        normalize_supervisor_spec(&mut spec, &sources)?;
         (spec, fallback_model)
     };
 
@@ -1430,19 +1577,24 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
         TeamsManager::build_configs_for_mux(&session_name, &supervisor_name, &worker_names)
     };
 
+    let (_, worker_model, worker_effort) = resolved_worker_specs
+        .first()
+        .map(launch_fields_from_spec)
+        .unwrap_or((preflight.worker_cli, None, None));
+    let (supervisor_cli, supervisor_model, supervisor_effort) =
+        launch_fields_from_spec(&resolved_supervisor_spec);
+
     let config = FactoryConfig {
         cwd: cwd.clone(),
         workers: args.workers as usize,
         worker_names: worker_names.clone(),
         supervisor_name: Some(supervisor_name),
-        supervisor_cli: preflight.supervisor_cli,
+        supervisor_cli,
         worker_cli: preflight.worker_cli,
-        supervisor_model: llm.model_for_role("supervisor").map(String::from),
-        worker_model: llm.model_for_role("worker").map(String::from),
-        supervisor_effort: llm
-            .reasoning_effort_for_role("supervisor")
-            .map(String::from),
-        worker_effort: llm.reasoning_effort_for_role("worker").map(String::from),
+        supervisor_model,
+        worker_model,
+        supervisor_effort,
+        worker_effort,
         resolved_worker_specs,
         resolved_supervisor_spec: Some(resolved_supervisor_spec),
         enable_worktrees: preflight.enable_worktrees,
@@ -2111,6 +2263,106 @@ mod tests {
         assert_eq!(config.worker_cli, cas_mux::SupervisorCli::Claude);
         assert!(config.enable_worktrees);
         assert!(config.worktree_root.is_none());
+    }
+
+    #[test]
+    fn codex_supervisor_repairs_inherited_claude_recipe_before_pane_launch() {
+        let sources = ConfigSources {
+            user_config: Some(std::path::PathBuf::from(
+                "/nonexistent/user/.cas/config.toml",
+            )),
+            project_config: Some(std::path::PathBuf::from(
+                "/nonexistent/project/.cas/config.toml",
+            )),
+            cli_flag: Some(cas_mux::SupervisorCli::Codex),
+            model_flag: Some("claude-fable-5-1".to_string()),
+            effort_flag: Some(cas_mux::Effort::Medium),
+            ..ConfigSources::default()
+        };
+        let mut spec = resolve_supervisor_spec(sources.clone()).unwrap();
+        normalize_supervisor_spec(&mut spec, &sources).unwrap();
+
+        assert_eq!(spec.cli, cas_mux::SupervisorCli::Codex);
+        assert_eq!(spec.model.as_deref(), Some("gpt-5.6-luna"));
+        assert_eq!(spec.effort, Some(cas_mux::Effort::XHigh));
+
+        let (supervisor_cli, supervisor_model, supervisor_effort) =
+            launch_fields_from_spec(&spec);
+        let config = cas_mux::MuxConfig {
+            cwd: std::path::PathBuf::from("/tmp/cas-test"),
+            workers: 0,
+            supervisor_cli,
+            supervisor_model,
+            supervisor_effort,
+            include_director: false,
+            ..cas_mux::MuxConfig::default()
+        };
+        let panes = cas_mux::Mux::factory_pane_configs(&config);
+        let (_, supervisor) = panes
+            .iter()
+            .find(|(name, _)| name == &config.supervisor_name)
+            .expect("supervisor pane config must be present");
+        let model_idx = supervisor
+            .args
+            .iter()
+            .position(|arg| arg == "--model")
+            .expect("Codex supervisor must receive a model argument");
+        assert_eq!(
+            supervisor.args.get(model_idx + 1).map(String::as_str),
+            Some("gpt-5.6-luna")
+        );
+        assert!(
+            supervisor
+                .args
+                .iter()
+                .any(|arg| arg == "model_reasoning_effort=xhigh"),
+            "Codex supervisor must receive the resolved Codex effort"
+        );
+    }
+
+    #[test]
+    fn explicit_supervisor_cross_harness_model_refuses_before_pane_launch() {
+        let project = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            project.path(),
+            "[factory.supervisor]\ncli = \"codex\"\nmodel = \"claude-fable-5-1\"\n",
+        )
+        .unwrap();
+        let sources = ConfigSources {
+            user_config: Some(std::path::PathBuf::from(
+                "/nonexistent/user/.cas/config.toml",
+            )),
+            project_config: Some(project.path().to_path_buf()),
+            ..ConfigSources::default()
+        };
+        let mut spec = resolve_supervisor_spec(sources.clone()).unwrap();
+        let error = normalize_supervisor_spec(&mut spec, &sources)
+            .expect_err("explicit Claude model on Codex must be rejected")
+            .to_string();
+        assert!(error.contains("claude"), "{error}");
+        assert!(error.contains("codex"), "{error}");
+        assert!(error.contains("model"), "{error}");
+    }
+
+    #[test]
+    fn claude_supervisor_repairs_inherited_codex_recipe() {
+        let sources = ConfigSources {
+            user_config: Some(std::path::PathBuf::from(
+                "/nonexistent/user/.cas/config.toml",
+            )),
+            project_config: Some(std::path::PathBuf::from(
+                "/nonexistent/project/.cas/config.toml",
+            )),
+            model_flag: Some("gpt-5.6-luna".to_string()),
+            effort_flag: Some(cas_mux::Effort::XHigh),
+            ..ConfigSources::default()
+        };
+        let mut spec = resolve_supervisor_spec(sources.clone()).unwrap();
+        normalize_supervisor_spec(&mut spec, &sources).unwrap();
+
+        assert_eq!(spec.cli, cas_mux::SupervisorCli::Claude);
+        assert_eq!(spec.model.as_deref(), Some("claude-fable-5-1"));
+        assert_eq!(spec.effort, Some(cas_mux::Effort::Medium));
     }
 
     #[test]

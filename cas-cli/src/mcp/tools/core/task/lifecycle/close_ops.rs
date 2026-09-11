@@ -1178,6 +1178,23 @@ mod risk_proof_tests {
     }
 
     #[test]
+    fn scoped_proof_uses_latest_receipt_when_an_earlier_one_is_partial() {
+        let dir = scoped_proof_fixture();
+        let mut task = Task::new("cas-latest-proof".into(), "latest proof".into());
+        let changed = vec!["cas-cli/src/mcp/tools/service/factory_ops.rs".to_string()];
+        task.notes = concat!(
+            "[2026-09-11] 📝 PROGRESS SCOPED_PROOF: ",
+            "targets=lib:factory_ops result=PASS\n",
+            "[2026-09-11] 📝 PROGRESS SCOPED_PROOF: ",
+            "targets=lib:factory_ops,test:factory_mcp_ops_test result=PASS",
+        )
+        .into();
+
+        validate_risk_close_proofs(&task, &changed, dir.path())
+            .expect("a later complete receipt should supersede an earlier partial receipt");
+    }
+
+    #[test]
     fn scoped_proof_close_requires_archive_guardrail_for_changed_test() {
         let dir = tempfile::tempdir().unwrap();
         let test = dir.path().join("cas-cli/tests/factory_mcp_ops_test.rs");

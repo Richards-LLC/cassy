@@ -4185,6 +4185,7 @@ impl CasCore {
                                 })
                                 .map(|_| close_project_root.clone())
                         };
+                        let use_target_branch_proof = post_merge_target.is_some();
                         let proof_worktree = match post_merge_target {
                             Some(target) => target,
                             None => self
@@ -4216,11 +4217,34 @@ impl CasCore {
                                     Some(resolved_parent_branch.as_str()),
                                     req.commit_receipt.as_deref(),
                                 );
-                                let repository_proof = crate::mcp::tools::core::task::lifecycle::repository_proof::capture_repository_proof_with_anchors(
-                                    &close_project_root,
-                                    &proof_worktree,
-                                    anchor_commits,
-                                )
+                                let repository_proof = if use_target_branch_proof {
+                                    if let Some(context) = declared_repo_context.as_ref() {
+                                        // A declared WorkTarget is authoritative
+                                        // for the post-merge verification
+                                        // boundary. The primary checkout may
+                                        // be parked on a different branch while
+                                        // this target is checked out in a linked
+                                        // worktree; bind the target branch tip
+                                        // instead of its incidental HEAD (GH #821).
+                                        crate::mcp::tools::core::task::lifecycle::repository_proof::capture_repository_proof_at_target(
+                                            &context.repo_root,
+                                            &context.target_branch,
+                                            anchor_commits,
+                                        )
+                                    } else {
+                                        crate::mcp::tools::core::task::lifecycle::repository_proof::capture_repository_proof_with_anchors(
+                                            &close_project_root,
+                                            &proof_worktree,
+                                            anchor_commits,
+                                        )
+                                    }
+                                } else {
+                                    crate::mcp::tools::core::task::lifecycle::repository_proof::capture_repository_proof_with_anchors(
+                                        &close_project_root,
+                                        &proof_worktree,
+                                        anchor_commits,
+                                    )
+                                }
                                 .map_err(|error| McpError {
                                     code: ErrorCode::INVALID_PARAMS,
                                     message: Cow::from(format!(

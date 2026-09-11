@@ -85,12 +85,12 @@ printf '%s\n' '#[test] fn hook_contract() {}' \
     >"$manifest_repo/cas-cli/tests/hooks_test/entry.rs"
 git -C "$manifest_repo" init -q -b main
 git -C "$manifest_repo" add .
-git -C "$manifest_repo" commit -qm baseline
+git -C "$manifest_repo" -c user.name=scoped-test-fixture -c user.email=scoped-test-fixture@example.invalid commit -qm baseline
 git -C "$manifest_repo" checkout -qb changed
 printf '%s\n' '#[test] fn hook_contract_changed() {}' \
     >"$manifest_repo/cas-cli/tests/hooks_test/entry.rs"
 git -C "$manifest_repo" add .
-git -C "$manifest_repo" commit -qm 'change explicit test target'
+git -C "$manifest_repo" -c user.name=scoped-test-fixture -c user.email=scoped-test-fixture@example.invalid commit -qm 'change explicit test target'
 manifest_output="$(cd "$manifest_repo" && bash ./scripts/check-scoped-test-surface.sh --resolve-targets --base main --)"
 [[ "$manifest_output" == 'SCOPED_PROOF_TARGET_ARGS: --test custom_hooks' ]]
 printf 'ok   manifest test target mapping is preserved\n'

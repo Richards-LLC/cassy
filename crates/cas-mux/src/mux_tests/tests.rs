@@ -149,6 +149,12 @@ fn factory_pane_configs_reads_proxy_credentials_from_cas_credentials_file() {
     let _env_lock = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let config_home = tempfile::tempdir().expect("temporary config home");
     let _config_home = RestoreEnv::set("XDG_CONFIG_HOME", config_home.path());
+    // `CAS_CREDENTIALS_FILE` controls the primary credentials source, but the
+    // resolver also scans the login profile as a fallback. Keep that profile
+    // under the fixture too, so a developer's real credentials cannot replace
+    // the file value asserted below.
+    let home = tempfile::tempdir().expect("temporary home");
+    let _home = RestoreEnv::set("HOME", home.path());
     let config_path = config_home.path().join("code-mode-mcp/config.toml");
     std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
     std::fs::write(

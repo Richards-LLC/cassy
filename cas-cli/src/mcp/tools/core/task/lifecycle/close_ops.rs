@@ -574,14 +574,84 @@ fn scoped_proof_rust_files(root: &std::path::Path) -> Vec<std::path::PathBuf> {
     files
 }
 
+fn scoped_proof_manifest_document(repo: &std::path::Path) -> Option<toml::Value> {
+    let manifest = std::fs::read_to_string(repo.join("cas-cli/Cargo.toml")).ok()?;
+    toml::from_str::<toml::Value>(&manifest).ok()
+}
+
+fn scoped_proof_manifest_test_target(repo: &std::path::Path, path: &str) -> Option<String> {
+    let relative = path.strip_prefix("cas-cli/").unwrap_or(path);
+    let document = scoped_proof_manifest_document(repo)?;
+    document
+        .get("test")
+        .and_then(toml::Value::as_array)
+        .and_then(|tests| {
+            tests.iter().find_map(|test| {
+                let test_path = test.get("path").and_then(toml::Value::as_str)?;
+                (std::path::Path::new(test_path) == std::path::Path::new(relative))
+                    .then(|| test.get("name").and_then(toml::Value::as_str))
+                    .flatten()
+                    .map(str::to_string)
+            })
+        })
+}
+
+fn scoped_proof_cargo_test_target_exists(repo: &std::path::Path, target: &str) -> bool {
+    let tests_root = repo.join("cas-cli/tests");
+    let document = scoped_proof_manifest_document(repo);
+    let auto_targets_enabled = document
+        .as_ref()
+        .and_then(|document| document.get("package"))
+        .and_then(toml::Value::as_table)
+        .and_then(|package| package.get("autotests"))
+        .and_then(toml::Value::as_bool)
+        .is_none_or(|enabled| enabled);
+    if auto_targets_enabled
+        && (tests_root.join(format!("{target}.rs")).is_file()
+            || tests_root.join(target).join("main.rs").is_file())
+    {
+        return true;
+    }
+
+    let Some(document) = document else {
+        return false;
+    };
+    document
+        .get("test")
+        .and_then(toml::Value::as_array)
+        .is_some_and(|tests| {
+            tests.iter().any(|test| {
+                let Some(name) = test.get("name").and_then(toml::Value::as_str) else {
+                    return false;
+                };
+                if name != target {
+                    return false;
+                }
+                test.get("path")
+                    .and_then(toml::Value::as_str)
+                    .map_or_else(
+                        || {
+                            tests_root.join(format!("{target}.rs")).is_file()
+                                || tests_root.join(target).join("main.rs").is_file()
+                        },
+                        |path| repo.join("cas-cli").join(path).is_file(),
+                    )
+            })
+        })
+}
+
 fn scoped_proof_test_target(repo: &std::path::Path, path: &str) -> Option<String> {
     let relative = path.strip_prefix("cas-cli/tests/")?;
+    if let Some(target) = scoped_proof_manifest_test_target(repo, path) {
+        return scoped_proof_cargo_test_target_exists(repo, &target).then_some(target);
+    }
     let directory = relative.split('/').next()?;
     if !relative.contains('/') {
-        return std::path::Path::new(relative)
+        let target = std::path::Path::new(relative)
             .file_stem()
             .and_then(|stem| stem.to_str())
-            .map(str::to_string);
+            .map(str::to_string)?;
+        return scoped_proof_cargo_test_target_exists(repo, &target).then_some(target);
     }
 
     // Prefer the conventional root (`mcp_tools_test/task/...` belongs to
@@ -589,7 +659,7 @@ fn scoped_proof_test_target(repo: &std::path::Path, path: &str) -> Option<String
     // ownership rule as the shell proof checker and avoids decoy strings in a
     // different integration binary claiming a nested module.
     let root = repo.join("cas-cli/tests");
-    if root.join(format!("{directory}.rs")).is_file() {
+    if scoped_proof_cargo_test_target_exists(repo, directory) {
         return Some(directory.to_string());
     }
     for candidate in scoped_proof_rust_files(&root) {
@@ -606,14 +676,16 @@ fn scoped_proof_test_target(repo: &std::path::Path, path: &str) -> Option<String
                     && trimmed.contains(&format!("{directory}/"))
                     && trimmed.ends_with("\"]"))
         });
-        if declared_module {
-            return candidate
+        if declared_module
+            && let Some(target) = candidate
                 .file_stem()
                 .and_then(|stem| stem.to_str())
-                .map(str::to_string);
+                .filter(|target| scoped_proof_cargo_test_target_exists(repo, target))
+        {
+            return Some(target.to_string());
         }
     }
-    Some(directory.to_string())
+    None
 }
 
 fn scoped_proof_source_module_path(path: &str) -> Option<String> {
@@ -668,14 +740,35 @@ fn scoped_proof_source_symbols(body: &str) -> Vec<String> {
     symbols.into_iter().collect()
 }
 
+fn scoped_proof_token_reference(line: &str, reference: &str) -> bool {
+    line.match_indices(reference).any(|(index, _)| {
+        let before = line[..index].chars().next_back();
+        let after = line[index + reference.len()..].chars().next();
+        let boundary = |character: char| {
+            !character.is_ascii_alphanumeric() && character != '_'
+        };
+        let before_is_boundary = before.is_none_or(boundary);
+        let after_is_boundary = if reference.ends_with("::") {
+            after.is_some_and(|character| character.is_ascii_alphanumeric() || character == '_')
+        } else {
+            after.is_none_or(boundary)
+        };
+        before_is_boundary && after_is_boundary
+    })
+}
+
 fn scoped_proof_path_reference(body: &str, module_path: &str, source_path: &str) -> bool {
     body.lines().any(|line| {
         let trimmed = line.trim_start();
         if trimmed.starts_with('/') || trimmed.starts_with('*') {
             return false;
         }
-        (trimmed.starts_with("use ") || trimmed.starts_with("pub use "))
-            && trimmed.contains(module_path)
+        let module_import = (trimmed.starts_with("use ") || trimmed.starts_with("pub use "))
+            && scoped_proof_token_reference(trimmed, module_path);
+        let qualified_module =
+            scoped_proof_token_reference(trimmed, &format!("{module_path}::"));
+        module_import
+            || qualified_module
             || ((trimmed.contains("include_str!")
                 || trimmed.contains("include_bytes!")
                 || trimmed.contains("Path")
@@ -684,21 +777,13 @@ fn scoped_proof_path_reference(body: &str, module_path: &str, source_path: &str)
     })
 }
 
-fn scoped_proof_symbol_reference(body: &str, symbol: &str) -> bool {
-    let symbol = symbol.strip_prefix("factory_").unwrap_or(symbol);
+fn scoped_proof_symbol_reference(body: &str, qualified_symbol: &str) -> bool {
     body.lines().any(|line| {
         let trimmed = line.trim_start();
         if trimmed.starts_with('/') || trimmed.starts_with('*') {
             return false;
         }
-        let Some(function) = trimmed.split_once("fn ").map(|(_, rest)| rest) else {
-            return false;
-        };
-        let name = function
-            .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
-            .next()
-            .unwrap_or_default();
-        name.contains(symbol)
+        scoped_proof_token_reference(trimmed, qualified_symbol)
     })
 }
 
@@ -765,7 +850,13 @@ fn required_scoped_proof_targets(
             );
             let symbol_reference = symbols
                 .iter()
-                .any(|symbol| scoped_proof_symbol_reference(&test_body, symbol));
+                .any(|symbol| {
+                    let symbol = symbol.strip_prefix("factory_").unwrap_or(symbol);
+                    scoped_proof_symbol_reference(
+                        &test_body,
+                        &format!("{module_path}::{symbol}"),
+                    )
+                });
             if !(path_reference || symbol_reference) {
                 continue;
             }
@@ -800,7 +891,10 @@ fn required_scoped_proof_targets(
             }
         }
     }
-    targets.into_iter().collect()
+    targets
+        .into_iter()
+        .filter(|target| scoped_proof_cargo_test_target_exists(repo, target))
+        .collect()
 }
 
 fn scoped_proof_note_targets(notes: &str) -> Option<String> {
@@ -908,7 +1002,7 @@ fn validate_risk_close_proofs(
         let missing = scoped_proof_note_covers(&task.notes, &required_targets);
         if !missing.is_empty() {
             return Err(format!(
-                "TASK CLOSE REJECTED: task {} changed a module with integration-test proof targets that were not run or recorded as passing; missing targets: {}. Run `scripts/run-scoped-tests.sh --proof -p cas --lib --test {}` and add `SCOPED_PROOF: targets=<complete target set> result=PASS` to a progress note before retrying close.",
+                "TASK CLOSE REJECTED: task {} changed a module with integration-test proof targets that were not run or recorded as passing; missing targets: {}. Run `scripts/run-scoped-tests.sh --proof -p cas --lib --test {}` and add `SCOPED_PROOF: targets=<complete target set> result=PASS` to a progress note before retrying close. If the scoped command cannot run, a registered supervisor may record an equivalent full `cargo nextest run -p cas` receipt with its durable log path in the note; every real required target must be covered.",
                 task.id,
                 missing.join(", "),
                 required_targets.join(" --test "),
@@ -995,6 +1089,25 @@ mod risk_proof_tests {
     }
 
     #[test]
+    fn scoped_proof_accepts_manifest_test_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("cas-cli/Cargo.toml");
+        let entry = dir.path().join("cas-cli/tests/hooks_test/entry.rs");
+        std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
+        std::fs::write(
+            manifest,
+            "[[test]]\nname = \"custom_hooks\"\npath = \"tests/hooks_test/entry.rs\"\n",
+        )
+        .unwrap();
+        std::fs::write(entry, "#[test] fn hook_contract() {}\n").unwrap();
+
+        assert_eq!(
+            scoped_proof_test_target(dir.path(), "cas-cli/tests/hooks_test/entry.rs"),
+            Some("custom_hooks".to_string())
+        );
+    }
+
+    #[test]
     fn scoped_proof_ignores_bare_identifier_collisions() {
         let dir = tempfile::tempdir().unwrap();
         let source = dir.path().join("cas-cli/src/hub.rs");
@@ -1068,8 +1181,12 @@ mod risk_proof_tests {
     fn scoped_proof_close_requires_archive_guardrail_for_changed_test() {
         let dir = tempfile::tempdir().unwrap();
         let test = dir.path().join("cas-cli/tests/factory_mcp_ops_test.rs");
+        let archive = dir
+            .path()
+            .join("cas-cli/tests/builtin_archive_portability_test.rs");
         std::fs::create_dir_all(test.parent().unwrap()).unwrap();
         std::fs::write(test, "#[test] fn factory_ops_contract() {}\n").unwrap();
+        std::fs::write(archive, "#[test] fn archive_contract() {}\n").unwrap();
         let task = Task::new("cas-archive-proof".into(), "archive proof".into());
         let changed = vec!["cas-cli/tests/factory_mcp_ops_test.rs".to_string()];
         let error = validate_risk_close_proofs(&task, &changed, dir.path())

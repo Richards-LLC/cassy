@@ -898,20 +898,26 @@ fn required_scoped_proof_targets(
 }
 
 fn scoped_proof_note_targets(notes: &str) -> Option<String> {
-    notes.lines().find_map(|line| {
-        let lower = line.to_ascii_lowercase();
-        if !lower.contains("scoped_proof") || !lower.contains("result=pass") {
-            return None;
-        }
-        let targets = line.split_once("targets=")?.1;
-        Some(
-            targets
-                .split_once("result=")
-                .map_or(targets, |(value, _)| value)
-                .trim()
-                .to_string(),
-        )
-    })
+    // A later proof note may supersede an earlier partial receipt after a
+    // supervisor expands the required target set. Keep the latest passing
+    // receipt so close does not revalidate stale scope forever.
+    notes
+        .lines()
+        .filter_map(|line| {
+            let lower = line.to_ascii_lowercase();
+            if !lower.contains("scoped_proof") || !lower.contains("result=pass") {
+                return None;
+            }
+            let targets = line.split_once("targets=")?.1;
+            Some(
+                targets
+                    .split_once("result=")
+                    .map_or(targets, |(value, _)| value)
+                    .trim()
+                    .to_string(),
+            )
+        })
+        .last()
 }
 
 fn scoped_proof_note_covers(notes: &str, required_targets: &[String]) -> Vec<String> {

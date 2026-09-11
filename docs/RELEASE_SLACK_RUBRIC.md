@@ -84,23 +84,28 @@ local audit host cannot build Darwin.
 
 ### Published report before announcement
 
-Every published runtime release also requires the post-publication report
-before either top-level announcement is sent. Run
-`scripts/release-train.sh <version> <epic-worktree> --report` after the
-published and latency receipts exist. It runs `cas release report <version>
---pdf`, requires the Markdown, standalone HTML and PDF under
-`docs/release-reports/`, and refuses completion until
-`release-report.receipt` is saved in the run directory with the PDF file
-permalink, SHA-256 and page count. The train re-hashes the local PDF and
-verifies the page count from the file.
-
-Attach the PDF to the User top-level thread as a file and link the HTML from
-the Dev thread. Use MechaCassy `mecha_post` with `kind: file` and verify the
-uploaded PDF through download, decode, page-count and source-hash checks. Preserve
-the returned file permalink, User/Dev thread
-receipts, PDF and HTML SHA-256 values, both file ids and the PDF page count in
-the release-report receipt. A release with a published asset receipt but no
-report receipt remains pending.
+1. Before announcements, require the published-asset and latency receipts and
+   installation proof. Run `cas release report <version> --pdf` and require the
+   Markdown, brief, standalone HTML, PDF and QA evidence under
+   `docs/release-reports/`. Verify source fidelity and PDF pagination before
+   either top-level message is sent. These local artifacts precede the later
+   upload/link receipt, which needs existing parent messages.
+2. Post the four messages through MechaCassy in order: User top-level, User
+   reply, Dev top-level, Dev reply. Save every returned message ID and permalink,
+   including the two parent IDs needed for report delivery.
+3. After the four messages, set `CAS_RELEASE_TRAIN_REPORT_USER_THREAD_TS` and
+   `CAS_RELEASE_TRAIN_REPORT_DEV_THREAD_TS` to those returned parent IDs and run
+   `scripts/release-train.sh <version> <epic-worktree> --report`. Attach the PDF
+   to the existing User thread through MechaCassy `mecha_post` with `kind: file`
+   and link the HTML from the existing Dev thread. Require uploaded-PDF
+   download, decode, page-count and source-hash checks before accepting delivery.
+   Preserve the returned file permalink, User/Dev thread receipts, PDF and HTML
+   SHA-256 values, both file IDs and page count in `release-report.receipt` in
+   the run directory. The train also re-hashes the local PDF and verifies its
+   page count; local checks alone do not prove uploaded-file integrity.
+   Preserve partial receipts and stop on failure; never retry an uncertain write.
+   Publication completion requires all message, installation, published-asset
+   and verified report receipts. A missing receipt keeps completion pending.
 
 `scripts/release.sh --publish-tag --manual-publish
 --acknowledge-workflow-conflict` is an emergency failover for a disabled or

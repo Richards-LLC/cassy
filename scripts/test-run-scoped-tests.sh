@@ -466,6 +466,29 @@ expect pass "SCOPED_PROOF: targets=lib:factory_ops,test:factory_mcp_ops_test res
     "proof: factory_ops public symbol maps to factory_mcp_ops_test" \
     bash -c "cd '${mapping_repo}' && '${SURFACE_GUARD}' --base main -- -p cas --lib factory_ops --test factory_mcp_ops_test"
 
+multi_module_repo="${tmpdir}/multi-module-repo"
+mkdir -p "${multi_module_repo}/cas-cli/src" "${multi_module_repo}/cas-cli/tests"
+git -C "${multi_module_repo}" init -q -b main
+printf 'pub fn first() {}\n' >"${multi_module_repo}/cas-cli/src/first.rs"
+printf 'pub fn second() {}\n' >"${multi_module_repo}/cas-cli/src/second.rs"
+git -C "${multi_module_repo}" add .
+git -C "${multi_module_repo}" -c user.name=scoped-test-fixture -c user.email=scoped-test-fixture@example.invalid \
+    commit -qm base
+git -C "${multi_module_repo}" checkout -qb proof
+printf '// first implementation changed\n' >>"${multi_module_repo}/cas-cli/src/first.rs"
+printf '// second implementation changed\n' >>"${multi_module_repo}/cas-cli/src/second.rs"
+git -C "${multi_module_repo}" add .
+git -C "${multi_module_repo}" -c user.name=scoped-test-fixture -c user.email=scoped-test-fixture@example.invalid \
+    commit -qm multi-module-change
+multi_module_targets="$(cd "${multi_module_repo}" && "${SURFACE_GUARD}" --resolve-targets --base main --)"
+if [[ "$multi_module_targets" == 'SCOPED_PROOF_TARGET_ARGS: --lib first second' ]]; then
+    pass_count=$((pass_count + 1))
+    echo "ok   proof resolver combines library filters under one --lib flag"
+else
+    fail_count=$((fail_count + 1))
+    echo "FAIL proof resolver repeated or dropped --lib filters: ${multi_module_targets}"
+fi
+
 phantom_repo="${tmpdir}/phantom-target-repo"
 mkdir -p "${phantom_repo}/cas-cli/src" "${phantom_repo}/cas-cli/tests/hooks_test"
 git -C "${phantom_repo}" init -q -b main

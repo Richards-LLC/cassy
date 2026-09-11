@@ -527,9 +527,15 @@ if [[ "$resolve_targets" == true ]]; then
     for module in "${required_lib_modules[@]}"; do
         if ! contains_exact "$module" "${emitted_lib_modules[@]}"; then
             emitted_lib_modules+=("$module")
-            printf ' --lib %s' "$module"
         fi
     done
+    # Cargo accepts one --lib flag followed by any number of positional
+    # nextest filters. Repeating --lib makes the generated proof command
+    # invalid before it can reach the surface guard.
+    if [[ ${#emitted_lib_modules[@]} -gt 0 ]]; then
+        printf ' --lib'
+        printf ' %s' "${emitted_lib_modules[@]}"
+    fi
     for target in "${required_test_targets[@]}"; do
         printf ' --test %s' "$target"
     done

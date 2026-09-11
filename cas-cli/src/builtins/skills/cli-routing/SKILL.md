@@ -1,6 +1,6 @@
 ---
 name: cli-routing
-description: Use when a bounded, non-interactive task needs a one-shot `codex exec` or `claude -p` subprocess, such as capacity recovery or release-note posting. Codex first; Claude only after the account gate in references/routing.md passes.
+description: Use when a bounded, non-interactive task needs a one-shot `codex exec` or `claude -p` subprocess, such as capacity recovery or release-note drafting. Codex first; Claude only after the account gate in references/routing.md passes.
 managed_by: cas
 ---
 
@@ -17,7 +17,7 @@ subprocess, not as a replacement for a factory worker or the current agent.
    narrowly scoped write or structured-output call.
 2. If Codex actually fails for capacity/auth, preserve its command, exit status,
    and stderr. Do not infer an exhaustion signature from slow output.
-3. Claude is a fallback **only** after `claude auth status --json`, run with the
+3. For non-Slack work, Claude is a fallback **only** after `claude auth status --json`, run with the
    exact `CLAUDE_CONFIG_DIR`, reports `loggedIn: true`, `authMethod:
    "claude.ai"`, `apiProvider: "firstParty"`, and an address listed in this
    project's `release.claude_account_allowlist` config key. Any address outside
@@ -32,10 +32,12 @@ strict Codex output schemas, and the account-gate procedure.
 ## Release-note posting
 
 Every merge to `main` or `staging` needs the existing
-[release-notes](../release-notes/SKILL.md) flow. Content, channel, and the
-Slack transport are all project policy: follow the project's release-notes
-rubric, which names them. This skill only decides which CLI runs the post, and
-that decision is the account gate above.
+[release-notes](../release-notes/SKILL.md) flow and the project's content/channel
+rubric. Slack uses only the MechaCassy hub/bot through
+[mecha-cassy](../mecha-cassy/SKILL.md); never use Claude.ai Slack or a personal
+connector. The account gate above authorizes non-Slack CLI work only. If the
+hub is unavailable, save the draft and report the measured failure; a supervisor
+handoff must use the same hub route.
 
 ## Do not trigger
 

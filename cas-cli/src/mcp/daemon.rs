@@ -64,6 +64,14 @@ pub(crate) fn apply_factory_worker_metadata(agent: &mut Agent, clone_path: Optio
         agent.metadata.insert("clone_path".to_string(), path);
     }
 
+    // Persist the supervisor's own CLI, never its default worker harness.
+    // This is additive evidence for cross-process recipient rendering.
+    if agent.role == AgentRole::Supervisor {
+        if let Ok(cli) = std::env::var("CAS_FACTORY_SUPERVISOR_CLI") {
+            agent.metadata.insert("supervisor_cli".to_string(), cli);
+        }
+    }
+
     let is_worker = agent.role == AgentRole::Worker
         || std::env::var("CAS_AGENT_ROLE")
             .map(|role| role.eq_ignore_ascii_case("worker"))
@@ -163,7 +171,12 @@ pub(crate) fn queue_stale_factory_worker_shutdown(
         return Ok(None);
     }
     queue
-        .enqueue_shutdown(None, std::slice::from_ref(&agent.name), true, Some(factory_session))
+        .enqueue_shutdown(
+            None,
+            std::slice::from_ref(&agent.name),
+            true,
+            Some(factory_session),
+        )
         .map(Some)
         .map_err(|error| format!("queue factory shutdown: {error}"))
 }
@@ -1234,7 +1247,10 @@ impl EmbeddedDaemon {
             // tombstones every ledger path missing from it, so handing it a
             // set with no `code://` module sources would cascade-delete every
             // module page the CLI had built (and re-bill them next pass).
-            let symbols = crate::cli::knowledge_symbols_with_limit(&cas_root, crate::cli::KNOWLEDGE_MAX_SYMBOLS);
+            let symbols = crate::cli::knowledge_symbols_with_limit(
+                &cas_root,
+                crate::cli::KNOWLEDGE_MAX_SYMBOLS,
+            );
             let scan = crate::knowledge::scan_sources(&project_root, &symbols.symbols);
             // A source that could not be decoded is named here rather than
             // dropped: its page will be missing from the wiki either way, and a
@@ -1338,21 +1354,27 @@ impl EmbeddedDaemon {
                         result.errors.push(msg);
                     } else {
                         match queue_stale_factory_worker_shutdown(&cas_root, &agent) {
-                            Ok(Some(request_id)) => tracing::warn!(worker = %agent.name, agent_id = %agent.id, request_id, "heartbeat reap queued factory process-tree teardown"),
+                            Ok(Some(request_id)) => {
+                                tracing::warn!(worker = %agent.name, agent_id = %agent.id, request_id, "heartbeat reap queued factory process-tree teardown")
+                            }
                             Ok(None) => {}
                             Err(error) => {
-                                let msg = format!("Failed to queue factory teardown for stale worker {}: {error}", agent.id);
+                                let msg = format!(
+                                    "Failed to queue factory teardown for stale worker {}: {error}",
+                                    agent.id
+                                );
                                 eprintln!("[Cassy] {msg}");
                                 result.errors.push(msg);
                             }
                         }
-                        let _ = crate::mcp::tools::service::orphan_recovery::recover_worker_vanished(
-                            &cas_root,
-                            agent_store.as_ref(),
-                            &agent,
-                            &held,
-                            "embedded daemon maintenance: heartbeat stale",
-                        );
+                        let _ =
+                            crate::mcp::tools::service::orphan_recovery::recover_worker_vanished(
+                                &cas_root,
+                                agent_store.as_ref(),
+                                &agent,
+                                &held,
+                                "embedded daemon maintenance: heartbeat stale",
+                            );
                     }
                 }
             }
@@ -1686,10 +1708,8 @@ impl EmbeddedDaemon {
             // newest row before liveness checks can reap the old one.
             if let Some(mut id) = self.agent_id.read().await.clone() {
                 if let Ok(agent) = store.get(&id)
-                    && let Some(newest) = crate::daemon::newest_agent_for_identity(
-                        store.as_ref(),
-                        &agent,
-                    )
+                    && let Some(newest) =
+                        crate::daemon::newest_agent_for_identity(store.as_ref(), &agent)
                     && newest.id != id
                 {
                     tracing::info!(

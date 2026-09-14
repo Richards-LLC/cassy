@@ -145,6 +145,131 @@ auth = "env:NEON_API_KEY_TEST_WORKER"
 }
 
 #[test]
+fn factory_worker_configs_isolate_operator_credentials_for_every_harness() {
+    let _env_lock = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let home = tempfile::tempdir().expect("temporary home");
+    let config_home = tempfile::tempdir().expect("temporary config home");
+    let project = tempfile::tempdir().expect("temporary project root");
+    let cas_root = project.path().join(".cas");
+    std::fs::create_dir_all(&cas_root).unwrap();
+    std::fs::write(
+        cas_root.join("proxy.toml"),
+        r#"
+[servers.scoped-provider]
+transport = "http"
+auth = "env:NEON_API_KEY"
+
+[servers.scoped-context7]
+transport = "http"
+auth = "env:CONTEXT7_API_KEY"
+"#,
+    )
+    .unwrap();
+    let _home = RestoreEnv::set("HOME", home.path());
+    let _config_home = RestoreEnv::set("XDG_CONFIG_HOME", config_home.path());
+    let _credentials_file = RestoreEnv::remove("CAS_CREDENTIALS_FILE");
+    let _absent_capawesome = RestoreEnv::remove("CAPAWESOME_TOKEN");
+    let _absent_cloud = RestoreEnv::remove("CAS_CLOUD_TOKEN");
+    let _absent_context7 = RestoreEnv::remove("CONTEXT7_API_KEY");
+    let _absent_gh = RestoreEnv::remove("GH_TOKEN");
+    let _inherited_token = RestoreEnv::set("GITHUB_TOKEN", "inherited-fixture");
+    let _scoped_provider = RestoreEnv::set("NEON_API_KEY", "scoped-fixture");
+    let _scoped_context7 = RestoreEnv::set("CONTEXT7_API_KEY", "scoped-fixture");
+    let _absent_vercel = RestoreEnv::remove("VERCEL_TOKEN");
+    let _absent_browserless = RestoreEnv::remove("BROWSERLESS_API_KEY");
+
+    for worker_cli in [
+        SupervisorCli::Claude,
+        SupervisorCli::Codex,
+        SupervisorCli::Grok,
+        SupervisorCli::OpenCode,
+    ] {
+        let config = MuxConfig {
+            cwd: project.path().to_path_buf(),
+            cas_root: Some(cas_root.clone()),
+            workers: 1,
+            worker_names: vec!["worker-1".to_string()],
+            worker_cli,
+            include_director: false,
+            ..MuxConfig::default()
+        };
+        let configs = Mux::factory_pane_configs(&config);
+        let (_, worker_config) = configs
+            .iter()
+            .find(|(name, _)| name == "worker-1")
+            .expect("worker config must be present");
+
+        assert_eq!(
+            env_value(worker_config, "CAS_AGENT_ROLE"),
+            Some("worker"),
+            "every harness worker path must stamp its role before policy evaluation"
+        );
+        assert_eq!(env_value(worker_config, "CAS_FACTORY_MODE"), Some("1"));
+        for key in ["NEON_API_KEY", "CONTEXT7_API_KEY"] {
+            assert!(
+                env_value(worker_config, key).is_some(),
+                "explicit project credential grant must survive for each harness"
+            );
+        }
+        for key in cas_pty::PROTECTED_OPERATOR_ENV {
+            if ["NEON_API_KEY", "CONTEXT7_API_KEY"].contains(key) {
+                assert!(!worker_config
+                    .env_remove
+                    .iter()
+                    .any(|candidate| candidate == key));
+            } else {
+                assert!(worker_config
+                    .env_remove
+                    .iter()
+                    .any(|candidate| candidate == key));
+                assert!(!worker_config
+                    .env
+                    .iter()
+                    .any(|(candidate, _)| candidate == key));
+            }
+        }
+
+        let (_, supervisor_config) = configs
+            .iter()
+            .find(|(name, _)| name == &config.supervisor_name)
+            .expect("supervisor config must be present");
+        for key in cas_pty::PROTECTED_OPERATOR_ENV {
+            assert!(!supervisor_config
+                .env_remove
+                .iter()
+                .any(|candidate| candidate == key));
+        }
+
+        for role in [None, Some("operator")] {
+            let mut unstamped_worker = worker_config.clone();
+            unstamped_worker.env_remove.clear();
+            unstamped_worker
+                .env
+                .retain(|(candidate, _)| candidate != "CAS_AGENT_ROLE");
+            if let Some(role) = role {
+                unstamped_worker
+                    .env
+                    .push(("CAS_AGENT_ROLE".to_string(), role.to_string()));
+            }
+            unstamped_worker.apply_worker_credential_policy();
+            for key in cas_pty::PROTECTED_OPERATOR_ENV {
+                if ["NEON_API_KEY", "CONTEXT7_API_KEY"].contains(key) {
+                    assert!(!unstamped_worker
+                        .env_remove
+                        .iter()
+                        .any(|candidate| candidate == key));
+                } else {
+                    assert!(unstamped_worker
+                        .env_remove
+                        .iter()
+                        .any(|candidate| candidate == key));
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn factory_pane_configs_reads_proxy_credentials_from_cas_credentials_file() {
     let _env_lock = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let config_home = tempfile::tempdir().expect("temporary config home");

@@ -118,6 +118,7 @@ pub(super) fn finish_worker_config(
         ));
     }
     config.env.extend(proxy_credential_environment(cas_root));
+    config.apply_worker_credential_policy();
 }
 
 /// Pass configured proxy credentials to each worker.

@@ -626,8 +626,41 @@ impl DevTracer {
             None => return Ok(()),
         };
 
+        self.buffer_observation_for_session(
+            &inner.session_id,
+            tool_name,
+            file_path,
+            content,
+            exit_code,
+            is_error,
+        )
+    }
+
+    /// Buffer an observation under the harness session that will be supplied
+    /// to the Stop hook. Hook events run in separate CLI processes, so the
+    /// tracer's process-local session ID cannot safely key this buffer.
+    pub(crate) fn buffer_observation_for_session(
+        &self,
+        session_id: &str,
+        tool_name: &str,
+        file_path: Option<&str>,
+        content: &str,
+        exit_code: Option<i32>,
+        is_error: bool,
+    ) -> Result<(), MemError> {
+        let inner = match Self::inner() {
+            Some(i) => i,
+            None => return Ok(()),
+        };
+
+        // A missing harness session cannot be matched safely at Stop. Avoid
+        // creating an orphan row that no later hook can consume.
+        if session_id.trim().is_empty() {
+            return Ok(());
+        }
+
         let obs = BufferedObservation {
-            session_id: inner.session_id.clone(),
+            session_id: session_id.to_string(),
             tool_name: tool_name.to_string(),
             file_path: file_path.map(|s| s.to_string()),
             content: content.to_string(),

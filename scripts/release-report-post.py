@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import http.client
 import json
 import os
 import re
@@ -29,6 +30,7 @@ DEFAULT_MCP_URL = "https://mecha-cassy.vercel.app/mcp/slack"
 DEFAULT_CHANNEL = "cas-internal"
 DEFAULT_REPO = "Richards-LLC/cassy"
 MCP_PROTOCOL_VERSION = "2025-06-18"
+MAX_REMOTE_PDF_BYTES = 32 * 1024 * 1024
 
 
 class AdapterError(RuntimeError):
@@ -183,6 +185,37 @@ class McpClient:
         payload = {"jsonrpc": "2.0", "method": "notifications/initialized"}
         request_json(self.url, self.headers, payload, self.timeout)
 
+    def download(self, url: str) -> bytes:
+        """Download a transport-issued file URL with the same bearer auth."""
+
+        request = urllib.request.Request(
+            url,
+            headers={
+                "Authorization": self.headers["Authorization"],
+                "Accept": "application/pdf, application/octet-stream",
+                **(
+                    {"x-vercel-protection-bypass": self.headers["x-vercel-protection-bypass"]}
+                    if "x-vercel-protection-bypass" in self.headers
+                    else {}
+                ),
+            },
+            method="GET",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                raw = response.read(MAX_REMOTE_PDF_BYTES + 1)
+        except urllib.error.HTTPError as exc:
+            fail(f"MechaCassy PDF download returned HTTP {exc.code}")
+        except urllib.error.URLError as exc:
+            fail(f"MechaCassy PDF download failed: {exc.reason}")
+        except (http.client.HTTPException, OSError) as exc:
+            fail(f"MechaCassy PDF download failed ({type(exc).__name__})")
+        if len(raw) > MAX_REMOTE_PDF_BYTES:
+            fail("MechaCassy PDF download exceeded the safety limit")
+        if not raw:
+            fail("MechaCassy PDF download returned no bytes")
+        return raw
+
     def tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         result = self.call("tools/call", {"name": name, "arguments": arguments})
         if result.get("isError"):
@@ -214,18 +247,32 @@ def message_receipt(envelope: dict[str, Any], label: str) -> tuple[str, str]:
     return message_id, permalink
 
 
-def file_receipt(envelope: dict[str, Any]) -> tuple[str, str]:
+def file_receipt(envelope: dict[str, Any]) -> tuple[str, str, str]:
     message_id, message_permalink = message_receipt(envelope, "PDF")
     file_block = envelope.get("file")
     if not isinstance(file_block, dict):
-        return message_id, message_permalink
+        download_url = envelope.get("download_url") or message_permalink
+        if (
+            not isinstance(download_url, str)
+            or not download_url.startswith(("https://", "http://"))
+            or any(character.isspace() for character in download_url)
+        ):
+            fail("PDF post returned no usable download URL")
+        return message_id, message_permalink, download_url
     file_id = file_block.get("file_id") or file_block.get("id") or message_id
     file_permalink = file_block.get("permalink") or file_block.get("url") or message_permalink
     if not isinstance(file_id, str) or not file_id.strip():
         fail("PDF post returned no file id")
     if not isinstance(file_permalink, str) or not file_permalink.startswith("https://"):
         fail("PDF post returned no HTTPS file permalink")
-    return file_id, file_permalink
+    download_url = file_block.get("download_url") or file_block.get("url") or file_permalink
+    if (
+        not isinstance(download_url, str)
+        or not download_url.startswith(("https://", "http://"))
+        or any(character.isspace() for character in download_url)
+    ):
+        fail("PDF post returned no usable download URL")
+    return file_id, file_permalink, download_url
 
 
 def page_count(pdf_path: Path, pdf_bytes: bytes) -> int:
@@ -255,6 +302,38 @@ def page_count(pdf_path: Path, pdf_bytes: bytes) -> int:
 
 def sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def verify_remote_pdf(
+    client: McpClient,
+    download_url: str,
+    local_bytes: bytes,
+    local_sha: str,
+    local_pages: int,
+) -> tuple[str, int, int]:
+    """Prove the transport's stored PDF is the exact local, decodable PDF."""
+
+    remote_bytes = client.download(download_url)
+    remote_size = len(remote_bytes)
+    if remote_size != len(local_bytes):
+        fail(
+            "uploaded PDF byte count mismatch "
+            f"(local={len(local_bytes)}, remote={remote_size})"
+        )
+    remote_sha = sha256(remote_bytes)
+    if remote_sha != local_sha:
+        fail("uploaded PDF SHA-256 does not match the local PDF")
+
+    with tempfile.NamedTemporaryFile(prefix="cassy-release-report-", suffix=".pdf") as remote_file:
+        remote_file.write(remote_bytes)
+        remote_file.flush()
+        remote_pages = page_count(Path(remote_file.name), remote_bytes)
+    if remote_pages != local_pages:
+        fail(
+            "uploaded PDF page count mismatch "
+            f"(local={local_pages}, remote={remote_pages})"
+        )
+    return remote_sha, remote_size, remote_pages
 
 
 def html_url(tag: str) -> str:
@@ -363,7 +442,10 @@ def main(argv: list[str]) -> int:
                 },
             },
         )
-        pdf_file_id, pdf_permalink = file_receipt(pdf_envelope)
+        pdf_file_id, pdf_permalink, pdf_download_url = file_receipt(pdf_envelope)
+        remote_pdf_sha, remote_pdf_size, remote_pdf_pages = verify_remote_pdf(
+            client, pdf_download_url, pdf_bytes, pdf_sha, pages
+        )
         html_envelope = client.tool(
             "mecha_post",
             {
@@ -381,6 +463,10 @@ def main(argv: list[str]) -> int:
                 "PDF_PATH": str(pdf_path),
                 "HTML_PATH": str(html_path),
                 "PDF_SHA256": pdf_sha,
+                "PDF_SIZE_BYTES": str(len(pdf_bytes)),
+                "PDF_REMOTE_SHA256": remote_pdf_sha,
+                "PDF_REMOTE_SIZE_BYTES": str(remote_pdf_size),
+                "PDF_REMOTE_PAGE_COUNT": str(remote_pdf_pages),
                 "HTML_SHA256": html_sha,
                 "PAGE_COUNT": str(pages),
                 "PDF_FILE_PERMALINK": pdf_permalink,

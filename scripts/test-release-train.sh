@@ -527,6 +527,10 @@ TAG=v9.99.0
 PDF_PATH=docs/release-reports/v9.99.0.pdf
 HTML_PATH=docs/release-reports/v9.99.0.html
 PDF_SHA256=$report_sha
+PDF_SIZE_BYTES=$(wc -c <"$report_pdf" | tr -d '[:space:]')
+PDF_REMOTE_SHA256=$report_sha
+PDF_REMOTE_SIZE_BYTES=$(wc -c <"$report_pdf" | tr -d '[:space:]')
+PDF_REMOTE_PAGE_COUNT=$report_pages
 HTML_SHA256=$report_html_sha
 PAGE_COUNT=$report_pages
 PDF_FILE_PERMALINK=https://petra-stella.slack.com/files/FIXTURE/report.pdf
@@ -544,6 +548,15 @@ else
     bad "complete release-report receipt was not accepted: $status"
 fi
 
+sed -i 's/^PDF_REMOTE_SHA256=.*/PDF_REMOTE_SHA256=0000000000000000000000000000000000000000000000000000000000000000/' \
+    "$dir_a/release-report.receipt"
+status="$($train 9.99.0 "$wt_a" --status 2>&1 || true)"
+if [[ "$status" == *'release report: unavailable (PDF receipt does not match local or verified remote bytes/pages;'* ]]; then
+    ok '--status rejects a receipt whose remote PDF hash disagrees with the local artifact'
+else
+    bad "remote PDF mismatch was not rejected: $status"
+fi
+
 # The post adapter seam keeps authenticated Slack transport outside this shell
 # script while making the receipt a required output of the --report action.
 report_post="$tmp/report-post.sh"
@@ -558,6 +571,10 @@ TAG=v$CAS_RELEASE_TRAIN_REPORT_VERSION
 PDF_PATH=docs/release-reports/v9.99.0.pdf
 HTML_PATH=docs/release-reports/v9.99.0.html
 PDF_SHA256=$pdf_sha
+PDF_SIZE_BYTES=$(wc -c <"$CAS_RELEASE_TRAIN_REPORT_PDF" | tr -d '[:space:]')
+PDF_REMOTE_SHA256=$pdf_sha
+PDF_REMOTE_SIZE_BYTES=$(wc -c <"$CAS_RELEASE_TRAIN_REPORT_PDF" | tr -d '[:space:]')
+PDF_REMOTE_PAGE_COUNT=$pdf_pages
 HTML_SHA256=$html_sha
 PAGE_COUNT=$pdf_pages
 PDF_FILE_PERMALINK=https://petra-stella.slack.com/files/FIXTURE/report.pdf

@@ -22,7 +22,9 @@ PDF = ROOT / "docs" / "release-reports" / "v3.19.0.pdf"
 class StubState:
     def __init__(self, pdf: bytes) -> None:
         self.pdf = pdf
+        self.remote_pdf = pdf
         self.requests: list[dict] = []
+        self.download_requests: list[str] = []
 
 
 def envelope(result: dict) -> bytes:
@@ -33,6 +35,18 @@ def handler_for(state: StubState):
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, _format: str, *_args: object) -> None:
             return
+
+        def do_GET(self) -> None:  # noqa: N802
+            state.download_requests.append(self.path)
+            assert self.headers.get("Authorization") == "Bearer stub-token"
+            if self.path != "/download/report.pdf":
+                self.send_error(404)
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "application/pdf")
+            self.send_header("Content-Length", str(len(state.remote_pdf)))
+            self.end_headers()
+            self.wfile.write(state.remote_pdf)
 
         def do_POST(self) -> None:  # noqa: N802
             size = int(self.headers.get("Content-Length", "0"))
@@ -98,6 +112,7 @@ def handler_for(state: StubState):
                                         "file": {
                                             "file_id": "F-report",
                                             "permalink": "https://example.test/files/report.pdf",
+                                            "download_url": f"http://127.0.0.1:{self.server.server_port}/download/report.pdf",
                                         },
                                     }
                                 ),
@@ -140,6 +155,49 @@ def handler_for(state: StubState):
     return Handler
 
 
+def run_adapter(server: ThreadingHTTPServer, state: StubState, remote_pdf: bytes):
+    state.remote_pdf = remote_pdf
+    state.requests.clear()
+    state.download_requests.clear()
+    with tempfile.TemporaryDirectory(prefix="release-report-post-") as directory:
+        root = Path(directory)
+        html = root / "v9.99.0.html"
+        html.write_text("<!doctype html><title>stub</title>\n", encoding="utf-8")
+        credentials = root / "credentials.env"
+        credentials.write_text(
+            "export MECHA_SLACK_TOKEN_TEST='stub-token'\n"
+            "export MECHA_VERCEL_BYPASS='stub-bypass'\n",
+            encoding="utf-8",
+        )
+        receipt = root / "release-report.receipt"
+        environment = os.environ.copy()
+        environment.update(
+            {
+                "CAS_RELEASE_TRAIN_REPORT_MCP_URL": f"http://127.0.0.1:{server.server_port}",
+                "CAS_RELEASE_TRAIN_REPORT_RECEIPT": str(receipt),
+                "CAS_RELEASE_TRAIN_REPORT_USER_THREAD_TS": "user-thread",
+                "CAS_RELEASE_TRAIN_REPORT_DEV_THREAD_TS": "dev-thread",
+                "CAS_CREDENTIALS_FILE": str(credentials),
+                "CAS_RELEASE_TRAIN_MECHA_TOKEN_ENV": "MECHA_SLACK_TOKEN_TEST",
+                "CAS_RELEASE_TRAIN_REPORT_REPO": "Richards-LLC/cassy",
+            }
+        )
+        environment.pop("MECHA_SLACK_TOKEN_TEST", None)
+        environment.pop("MECHA_VERCEL_BYPASS", None)
+        result = subprocess.run(
+            [sys.executable, str(ADAPTER), "v9.99.0", str(PDF), str(html), "user-thread", "dev-thread"],
+            cwd=ROOT,
+            env=environment,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        fields = None
+        if receipt.is_file():
+            fields = dict(line.split("=", 1) for line in receipt.read_text(encoding="utf-8").splitlines())
+        return result, fields
+
+
 def main() -> int:
     pdf = PDF.read_bytes()
     state = StubState(pdf)
@@ -147,52 +205,38 @@ def main() -> int:
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
-        with tempfile.TemporaryDirectory(prefix="release-report-post-") as directory:
-            root = Path(directory)
-            html = root / "v9.99.0.html"
-            html.write_text("<!doctype html><title>stub</title>\n", encoding="utf-8")
-            credentials = root / "credentials.env"
-            credentials.write_text(
-                "export MECHA_SLACK_TOKEN_TEST='stub-token'\n"
-                "export MECHA_VERCEL_BYPASS='stub-bypass'\n",
-                encoding="utf-8",
-            )
-            receipt = root / "release-report.receipt"
-            environment = os.environ.copy()
-            environment.update(
-                {
-                    "CAS_RELEASE_TRAIN_REPORT_MCP_URL": f"http://127.0.0.1:{server.server_port}",
-                    "CAS_RELEASE_TRAIN_REPORT_RECEIPT": str(receipt),
-                    "CAS_RELEASE_TRAIN_REPORT_USER_THREAD_TS": "user-thread",
-                    "CAS_RELEASE_TRAIN_REPORT_DEV_THREAD_TS": "dev-thread",
-                    "CAS_CREDENTIALS_FILE": str(credentials),
-                    "CAS_RELEASE_TRAIN_MECHA_TOKEN_ENV": "MECHA_SLACK_TOKEN_TEST",
-                    "CAS_RELEASE_TRAIN_REPORT_REPO": "Richards-LLC/cassy",
-                }
-            )
-            environment.pop("MECHA_SLACK_TOKEN_TEST", None)
-            environment.pop("MECHA_VERCEL_BYPASS", None)
-            result = subprocess.run(
-                [sys.executable, str(ADAPTER), "v9.99.0", str(PDF), str(html), "user-thread", "dev-thread"],
-                cwd=ROOT,
-                env=environment,
-                text=True,
-                capture_output=True,
-                check=False,
-            )
-            if result.returncode != 0:
-                raise AssertionError(f"adapter failed: stdout={result.stdout!r} stderr={result.stderr!r}")
-            fields = dict(line.split("=", 1) for line in receipt.read_text(encoding="utf-8").splitlines())
-            assert fields["TAG"] == "v9.99.0"
-            assert fields["PDF_FILE_ID"] == "F-report"
-            assert fields["HTML_FILE_ID"] == "html-message"
-            assert fields["USER_THREAD_TS"] == "user-thread"
-            assert fields["DEV_THREAD_TS"] == "dev-thread"
-            assert len(fields["PDF_SHA256"]) == 64
-            assert int(fields["PAGE_COUNT"]) > 0
+        result, fields = run_adapter(server, state, pdf)
+        if result.returncode != 0:
+            raise AssertionError(f"adapter failed: stdout={result.stdout!r} stderr={result.stderr!r}")
+        assert fields is not None
+        assert fields["TAG"] == "v9.99.0"
+        assert fields["PDF_FILE_ID"] == "F-report"
+        assert fields["HTML_FILE_ID"] == "html-message"
+        assert fields["USER_THREAD_TS"] == "user-thread"
+        assert fields["DEV_THREAD_TS"] == "dev-thread"
+        assert len(fields["PDF_SHA256"]) == 64
+        assert int(fields["PAGE_COUNT"]) > 0
+        assert fields["PDF_SIZE_BYTES"] == str(len(pdf))
+        assert fields["PDF_REMOTE_SHA256"] == fields["PDF_SHA256"]
+        assert fields["PDF_REMOTE_SIZE_BYTES"] == fields["PDF_SIZE_BYTES"]
+        assert fields["PDF_REMOTE_PAGE_COUNT"] == fields["PAGE_COUNT"]
+        assert state.download_requests == ["/download/report.pdf"]
+        methods = [request.get("method") for request in state.requests]
+        assert methods == ["initialize", "notifications/initialized", "tools/list", "tools/call", "tools/call"]
+
+        scenarios = {
+            "truncated": pdf[:-17],
+            "substituted": (ROOT / "docs" / "release-reports" / "v3.20.0.pdf").read_bytes(),
+            "unreadable": b"not a PDF",
+        }
+        for label, remote_pdf in scenarios.items():
+            result, fields = run_adapter(server, state, remote_pdf)
+            assert result.returncode != 0, f"{label} remote bytes must fail closed"
+            assert fields is None, f"{label} mismatch must not write a delivery receipt"
+            assert state.download_requests == ["/download/report.pdf"]
             methods = [request.get("method") for request in state.requests]
-            assert methods == ["initialize", "notifications/initialized", "tools/list", "tools/call", "tools/call"]
-            print("release-report-post stub: 1 scenario passed")
+            assert methods == ["initialize", "notifications/initialized", "tools/list", "tools/call"], label
+        print("release-report-post stub: 4 scenarios passed")
     finally:
         server.shutdown()
         thread.join(timeout=5)

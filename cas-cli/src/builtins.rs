@@ -2137,6 +2137,22 @@ pub fn is_managed_by_cas(content: &str) -> bool {
     false
 }
 
+/// Normalize only the tool namespace that Cassy deliberately rewrites for
+/// each harness when comparing projected skill copies.
+///
+/// Claude uses `mcp__cas__`, Codex uses `mcp__cs__`, and Grok uses `cas__`.
+/// Those spellings are part of the harness contract, not content drift. Keep
+/// this normalization in the builtin catalog module so doctor and the parity
+/// tests share the same canonical-source rule. It intentionally does not
+/// normalize paths, prose, or any other text.
+pub fn normalize_harness_skill_content(content: &str) -> String {
+    let mut normalized = content.to_string();
+    for prefix in ["mcp__cas__", "mcp__cs__", "cas__"] {
+        normalized = normalized.replace(prefix, "<CAS_TOOL_PREFIX>");
+    }
+    normalized
+}
+
 /// Preview what would change for a built-in file (dry-run)
 /// Returns Some((old_content, new_content)) if file would be updated
 pub fn preview_builtin(

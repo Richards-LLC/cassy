@@ -234,8 +234,9 @@ impl CheckGroup {
             | "hub service"
             | "hub transport"
             | "hub supervised but not publishable"
-            | "registered project roots" | "host user skills" => Self::Host,
-            "user skills" => Self::Config,
+            | "registered project roots"
+            | "host user skills" => Self::Host,
+            "user skills" | "scratchpad policy" => Self::Config,
             "legacy search index"
             | "pre-versioned search index"
             | "search index"
@@ -458,9 +459,10 @@ fn scan_user_skill_dirs(
 
 /// One skill name present in more than one user-level skills directory with
 /// differing `SKILL.md` content (GH #810, cas-d019). Identical copies are not
-/// reported: they are the normal projected state. Divergent ones mean an agent
-/// reads a different contract depending on which account directory it runs
-/// under, and only one of them is the file `cas update` keeps current.
+/// reported: they are the normal projected state. The embedded catalogs are
+/// the canonical source; their deliberate per-harness tool namespace spelling
+/// is normalized before comparing copies, while every other difference remains
+/// a finding.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DivergentUserSkill {
     name: String,
@@ -475,6 +477,27 @@ fn canonical_user_skills_dir() -> Option<PathBuf> {
         return Some(PathBuf::from(configured).join("skills"));
     }
     std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".claude").join("skills"))
+}
+
+/// Return whether a skill body belongs to one of the embedded harness
+/// projections for `name`. The managed marker is the normal ownership proof;
+/// the catalog match also recognizes an older exact projection that predates
+/// the marker. A user-authored skill is never normalized merely because it
+/// happens to mention two Cassy tool prefixes.
+fn is_embedded_skill_projection(name: &str, content: &str) -> bool {
+    let expected_path = format!("skills/{name}/SKILL.md");
+    let normalized = crate::builtins::normalize_harness_skill_content(content);
+    [
+        crate::builtins::BUILTIN_SKILLS,
+        crate::builtins::CODEX_BUILTIN_SKILLS,
+        crate::builtins::GROK_BUILTIN_SKILLS,
+    ]
+    .into_iter()
+    .flat_map(|catalog| catalog.iter())
+    .filter(|builtin| builtin.path == expected_path)
+    .any(|builtin| {
+        crate::builtins::normalize_harness_skill_content(builtin.content) == normalized
+    })
 }
 
 /// Group `SKILL.md` files by skill name across `dirs` (canonical-path
@@ -499,7 +522,21 @@ fn find_divergent_user_skills(dirs: &[PathBuf], canonical_dir: &Path) -> Vec<Div
             }
             let Some(name) = path.file_name().and_then(|s| s.to_str()) else { continue };
             let Ok(content) = fs::read_to_string(&skill_file) else { continue };
-            by_name.entry(name.to_string()).or_default().push((skill_file, content));
+            // Namespace normalization is a Cassy-owned projection rule, not
+            // permission to disregard arbitrary user-authored content. An
+            // unmarked skill that happens to use two harness prefixes remains
+            // a real divergence.
+            let normalized = if crate::builtins::is_managed_by_cas(&content)
+                || is_embedded_skill_projection(name, &content)
+            {
+                crate::builtins::normalize_harness_skill_content(&content)
+            } else {
+                content
+            };
+            by_name
+                .entry(name.to_string())
+                .or_default()
+                .push((skill_file, normalized));
         }
     }
     by_name
@@ -534,7 +571,7 @@ fn divergent_user_skills_check(divergent: &[DivergentUserSkill]) -> Check {
         return Check::new(
             "duplicate skills",
             CheckStatus::Ok,
-            "no user-level skill has divergent copies across account directories",
+            "no user-level skill has unexpected drift after harness namespace normalization",
         );
     }
     let detail = divergent
@@ -558,8 +595,8 @@ fn divergent_user_skills_check(divergent: &[DivergentUserSkill]) -> Check {
         "duplicate skills",
         CheckStatus::Warning,
         format!(
-            "{} skill(s) exist in more than one skills directory with different content: {detail}. \
-             Keep the canonical copy (~/.claude/skills) and delete or symlink the others",
+            "{} skill(s) have unexpected drift from the canonical Cassy source: {detail}. \
+             Intentional Claude/Codex/Grok tool-namespace twins are ignored. Review the differing copy, then run `cas update --user`",
             divergent.len()
         ),
     )
@@ -602,8 +639,9 @@ fn user_skill_scan_targets() -> Vec<(PathBuf, std::collections::HashSet<String>)
 }
 
 /// Render the scan as a doctor row. Warning, never Error: a stale skill misleads
-/// an agent but breaks nothing on its own, and the fix is a deletion the
-/// operator must make deliberately.
+/// an agent but breaks nothing on its own. Only positively identified
+/// `managed_by: cas` entries are eligible for the supported `--fix --yes` path;
+/// unmarked user skills stay under the user's control.
 fn stray_user_skills_check(strays: &[StrayUserSkill]) -> Check {
     if strays.is_empty() {
         return Check::new(
@@ -632,10 +670,152 @@ fn stray_user_skills_check(strays: &[StrayUserSkill]) -> Check {
         CheckStatus::Warning,
         format!(
             "{} stale user-level skill file(s) no `cas update` will ever refresh: {detail}. \
-             Review then delete the directory",
+             Review then run `cas doctor --fix --yes` to remove only managed_by: cas entries; unmarked user skills are preserved",
             strays.len()
         ),
     )
+}
+
+/// Remove only stale managed skill directories that were found under the
+/// current scanner's known user-skill roots. Re-read the marker immediately
+/// before deletion and refuse symlinks or paths that no longer belong to one
+/// of those roots, so a changed fixture cannot turn a report into an escape.
+fn remove_stale_managed_user_skills(
+    strays: &[StrayUserSkill],
+    targets: &[(PathBuf, std::collections::HashSet<String>)],
+) -> std::io::Result<Vec<String>> {
+    let roots: Vec<&Path> = targets.iter().map(|(root, _)| root.as_path()).collect();
+    let mut removed = Vec::new();
+    for stray in strays {
+        if !matches!(stray.reason, StrayReason::OrphanedManagedCopy) {
+            continue;
+        }
+        let Some(skill_dir) = stray.path.parent() else {
+            continue;
+        };
+        let Some(root) = skill_dir.parent() else {
+            continue;
+        };
+        if !roots.iter().any(|candidate| *candidate == root) {
+            continue;
+        }
+        let Ok(metadata) = fs::symlink_metadata(skill_dir) else {
+            continue;
+        };
+        if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
+            continue;
+        }
+        let Ok(content) = fs::read_to_string(&stray.path) else {
+            continue;
+        };
+        if !crate::builtins::is_managed_by_cas(&content) {
+            continue;
+        }
+        fs::remove_dir_all(skill_dir)?;
+        removed.push(stray.name.clone());
+    }
+    Ok(removed)
+}
+
+/// Apply the supported stale-skill cleanup, or return a dry-run row when the
+/// explicit destructive consent flag was not supplied.
+fn stale_user_skills_autofix(args: &DoctorArgs, cli: &Cli) -> Option<Check> {
+    let targets = user_skill_scan_targets();
+    let strays = scan_user_skill_dirs(&targets);
+    let managed_count = strays
+        .iter()
+        .filter(|stray| matches!(stray.reason, StrayReason::OrphanedManagedCopy))
+        .count();
+    if managed_count == 0 {
+        return None;
+    }
+
+    let summary = format!(
+        "Doctor found {managed_count} stale managed skill(s); only entries marked `managed_by: cas` will be removed, and user-authored skills will be preserved."
+    );
+    if !confirm_doctor_consent(cli, args.yes, &summary) {
+        return Some(Check::new(
+            "auto-fix",
+            CheckStatus::Info,
+            format!(
+                "{summary} Dry run only; re-run `cas doctor --fix --yes` to apply."
+            ),
+        ));
+    }
+
+    match remove_stale_managed_user_skills(&strays, &targets) {
+        Ok(removed) => Some(Check::new(
+            "auto-fix",
+            CheckStatus::Ok,
+            format!(
+                "fixed: user skills — removed {} stale managed skill {}; unmarked user skills were preserved",
+                removed.len(),
+                if removed.len() == 1 {
+                    "directory"
+                } else {
+                    "directories"
+                }
+            ),
+        )),
+        Err(error) => Some(Check::new(
+            "auto-fix",
+            CheckStatus::Warning,
+            format!("stale managed skill cleanup failed: {error}"),
+        )),
+    }
+}
+
+/// Describe the supported scratchpad policy without asking an operator to
+/// edit a generated path or workspace hook by hand. Factory sessions receive
+/// an informational row; a missing session identity is actionable because the
+/// harness must be restarted/repaired before a scratchpad can be attributed.
+fn scratchpad_policy_check_for(
+    factory_mode: bool,
+    session_id: Option<&str>,
+    scratchpad_binding: Option<&str>,
+) -> Check {
+    if !factory_mode {
+        return Check::new(
+            "scratchpad policy",
+            CheckStatus::Ok,
+            "not active outside a factory session; the harness owns ephemeral scratchpad policy",
+        );
+    }
+
+    if session_id.is_none_or(str::is_empty) {
+        return Check::new(
+            "scratchpad policy",
+            CheckStatus::Warning,
+            "factory session has no session identity for scratchpad attribution; restart the harness and use its provided scratchpad",
+        );
+    }
+
+    let binding = scratchpad_binding
+        .filter(|path| !path.trim().is_empty())
+        .map(|_| "configured harness binding")
+        .unwrap_or("harness-provided binding");
+    Check::new(
+        "scratchpad policy",
+        CheckStatus::Info,
+        format!(
+            "{binding} is sanctioned for ephemeral notes; keep durable proof under the factory artifacts root and do not edit workspace policy manually"
+        ),
+    )
+}
+
+fn scratchpad_policy_check() -> Check {
+    let factory_mode = std::env::var("CAS_FACTORY_MODE").is_ok_and(|value| {
+        matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes")
+    });
+    let session_id = ["CAS_SESSION_ID", "CLAUDE_CODE_SESSION_ID"]
+        .into_iter()
+        .find_map(|key| std::env::var(key).ok())
+        .filter(|value| !value.trim().is_empty());
+    let binding = ["CAS_SCRATCHPAD", "CAS_SCRATCHPAD_PATH", "CLAUDE_SCRATCHPAD"]
+        .into_iter()
+        .find_map(|key| std::env::var(key).ok())
+        .filter(|value| !value.trim().is_empty());
+    scratchpad_policy_check_for(factory_mode, session_id.as_deref(), binding.as_deref())
 }
 
 fn host_checks(current: Option<&Path>) -> Vec<Check> {
@@ -651,6 +831,7 @@ fn host_checks(current: Option<&Path>) -> Vec<Check> {
     #[cfg(not(feature = "mcp-proxy"))]
     checks.push(Check::new("host proxy", CheckStatus::Ok, "proxy integration unavailable in this build"));
     checks.extend(registered_project_root_checks(current.unwrap_or_else(|| Path::new(""))));
+    checks.push(scratchpad_policy_check());
     let targets = user_skill_scan_targets();
     let mut skills = stray_user_skills_check(&scan_user_skill_dirs(&targets));
     skills.name = "host user skills".into();
@@ -757,7 +938,10 @@ fn host_proxy_check() -> Check {
 }
 
 fn host_summary(checks: &[Check]) -> Check {
-    let findings = checks.iter().filter(|c| !matches!(c.status, CheckStatus::Ok)).count();
+    let findings = checks
+        .iter()
+        .filter(|c| !matches!(c.status, CheckStatus::Ok | CheckStatus::Info))
+        .count();
     Check::new("host", if findings == 0 { CheckStatus::Ok } else { CheckStatus::Warning }, format!("host: {findings} finding{} — see `cas doctor --host`", if findings == 1 { "" } else { "s" }))
 }
 
@@ -1313,7 +1497,14 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
 
     if args.host {
         let host_root = crate::store::known_repos::host_cas_dir();
-        if args.fix { if let Some(check) = host_autofix() { checks.push(check); } }
+        if args.fix {
+            if let Some(check) = host_autofix() {
+                checks.push(check);
+            }
+            if let Some(check) = stale_user_skills_autofix(args, cli) {
+                checks.push(check);
+            }
+        }
         checks.extend(host_checks(None));
         recorder.mark("host checks", &checks);
         return output_checks_timed(&checks, recorder.per_check(), recorder.phases(), cli, started.elapsed(), Some(&host_root));
@@ -1402,6 +1593,9 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
                 checks.push(check);
             }
             checks.extend(extended_autofixes(path));
+            if let Some(check) = stale_user_skills_autofix(args, cli) {
+                checks.push(check);
+            }
         }
     }
 
@@ -6999,6 +7193,89 @@ mod tests {
         assert!(matches!(divergent_user_skills_check(&identical).status, CheckStatus::Ok));
     }
 
+    #[test]
+    fn intentional_harness_skill_twins_are_not_duplicate_findings() {
+        let home = TempDir::new().unwrap();
+        let claude = home.path().join(".claude").join("skills");
+        let codex = home.path().join(".codex").join("skills");
+        let grok = home.path().join(".grok").join("skills");
+        write_skill(
+            &claude,
+            "cas-worker",
+            "---\nname: cas-worker\nmanaged_by: cas\n---\n\nCall `mcp__cas__task action=show`.\n",
+        );
+        write_skill(
+            &codex,
+            "cas-worker",
+            "---\nname: cas-worker\nmanaged_by: cas\n---\n\nCall `mcp__cs__task action=show`.\n",
+        );
+        write_skill(
+            &grok,
+            "cas-worker",
+            "---\nname: cas-worker\nmanaged_by: cas\n---\n\nCall `cas__task action=show`.\n",
+        );
+
+        let divergent = find_divergent_user_skills(
+            &[claude.clone(), codex, grok],
+            &claude,
+        );
+        assert!(
+            divergent.is_empty(),
+            "intentional harness namespace twins must be ignored: {divergent:?}"
+        );
+        assert!(matches!(
+            divergent_user_skills_check(&divergent).status,
+            CheckStatus::Ok
+        ));
+    }
+
+    #[test]
+    fn unexpected_skill_drift_remains_a_duplicate_finding_after_normalization() {
+        let home = TempDir::new().unwrap();
+        let claude = home.path().join(".claude").join("skills");
+        let codex = home.path().join(".codex").join("skills");
+        write_skill(
+            &claude,
+            "cas-worker",
+            "---\nname: cas-worker\nmanaged_by: cas\n---\n\nCall `mcp__cas__task action=show`.\n",
+        );
+        let drifted = write_skill(
+            &codex,
+            "cas-worker",
+            "---\nname: cas-worker\nmanaged_by: cas\n---\n\nCall `mcp__cs__task action=show`.\n\nUnapproved change.\n",
+        );
+
+        let divergent = find_divergent_user_skills(&[claude.clone(), codex], &claude);
+        assert_eq!(divergent.len(), 1);
+        assert_eq!(divergent[0].others, vec![drifted]);
+        let check = divergent_user_skills_check(&divergent);
+        assert!(matches!(check.status, CheckStatus::Warning));
+        assert!(check.message.contains("canonical Cassy source"));
+        assert!(check.message.contains("cas update --user"));
+        assert!(!check.message.contains("delete or symlink"));
+    }
+
+    #[test]
+    fn unmarked_user_skill_prefix_difference_is_not_treated_as_a_cassy_twin() {
+        let home = TempDir::new().unwrap();
+        let claude = home.path().join(".claude").join("skills");
+        let codex = home.path().join(".codex").join("skills");
+        write_skill(
+            &claude,
+            "my-skill",
+            "---\nname: my-skill\n---\n\nCall `mcp__cas__task`.\n",
+        );
+        write_skill(
+            &codex,
+            "my-skill",
+            "---\nname: my-skill\n---\n\nCall `mcp__cs__task`.\n",
+        );
+
+        let divergent = find_divergent_user_skills(&[claude.clone(), codex], &claude);
+        assert_eq!(divergent.len(), 1);
+        assert_eq!(divergent[0].canonical, claude.join("my-skill/SKILL.md"));
+    }
+
     fn write_skill(dir: &Path, name: &str, body: &str) -> PathBuf {
         let skill_dir = dir.join(name);
         fs::create_dir_all(&skill_dir).unwrap();
@@ -7095,6 +7372,53 @@ mod tests {
                 .message
                 .contains("no longer a builtin")
         );
+        assert!(
+            stray_user_skills_check(&strays)
+                .message
+                .contains("cas doctor --fix --yes")
+        );
+    }
+
+    #[test]
+    fn stale_skill_cleanup_removes_only_managed_entries_in_scanned_roots() {
+        let dir = TempDir::new().unwrap();
+        let skills = dir.path().join("skills");
+        let managed = write_skill(
+            &skills,
+            "retired-managed",
+            "---\nname: retired-managed\nmanaged_by: cas\n---\n\nold\n",
+        );
+        let user = write_skill(
+            &skills,
+            "my-skill",
+            "---\nname: my-skill\n---\n\nkeep\n",
+        );
+        let targets = vec![(skills.clone(), std::collections::HashSet::new())];
+        let strays = scan_user_skill_dirs(&targets);
+        let removed = remove_stale_managed_user_skills(&strays, &targets).unwrap();
+        assert_eq!(removed, vec!["retired-managed"]);
+        assert!(!managed.parent().unwrap().exists());
+        assert!(user.parent().unwrap().exists());
+    }
+
+    #[test]
+    fn scratchpad_policy_has_safe_factory_and_healthy_classifications() {
+        let healthy = scratchpad_policy_check_for(false, None, None);
+        assert!(matches!(healthy.status, CheckStatus::Ok));
+
+        let factory = scratchpad_policy_check_for(
+            true,
+            Some("factory-session"),
+            Some("/private/tmp/claude-501/project/factory-session/scratchpad"),
+        );
+        assert!(matches!(factory.status, CheckStatus::Info));
+        assert!(factory.message.contains("ephemeral"));
+        assert!(factory.message.contains("durable proof"));
+        assert!(factory.message.contains("do not edit workspace policy"));
+
+        let missing = scratchpad_policy_check_for(true, None, None);
+        assert!(matches!(missing.status, CheckStatus::Warning));
+        assert!(missing.message.contains("restart the harness"));
     }
 
     /// Codex ships skills Claude does not. Comparing a `~/.codex/skills`

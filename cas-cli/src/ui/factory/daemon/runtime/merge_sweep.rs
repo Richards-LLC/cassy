@@ -97,6 +97,7 @@ struct TestRunner {
     kind: TestRunnerKind,
     program: String,
     args: Vec<String>,
+    package_manager: Option<&'static str>,
 }
 
 impl From<&FactoryConfig> for SweepSettings {
@@ -402,6 +403,7 @@ fn resolve_test_runner(worktree: &Path) -> Result<TestRunner, String> {
                 "--workspace".to_owned(),
                 "--no-fail-fast".to_owned(),
             ],
+            package_manager: None,
         });
     }
 
@@ -432,10 +434,18 @@ fn resolve_test_runner(worktree: &Path) -> Result<TestRunner, String> {
     let manager = package_manager(worktree, &manifest)?;
     let env_name = manager.to_ascii_uppercase();
     let program = std::env::var(&env_name).unwrap_or_else(|_| manager.to_owned());
+    let args = if manager == "bun" {
+        // `bun test` invokes Bun's built-in test runner. `bun run test` is the
+        // package-manager form that executes the declared scripts.test entry.
+        vec!["run".to_owned(), "test".to_owned()]
+    } else {
+        vec!["test".to_owned()]
+    };
     Ok(TestRunner {
         kind: TestRunnerKind::Package,
         program,
-        args: vec!["test".to_owned()],
+        args,
+        package_manager: Some(manager),
     })
 }
 
@@ -478,6 +488,110 @@ fn format_command(program: &str, args: &[String]) -> String {
         .chain(args.iter().cloned())
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+fn package_install_command(worktree: &Path, manager: &str) -> &'static str {
+    match manager {
+        "npm"
+            if worktree.join("package-lock.json").is_file()
+                || worktree.join("npm-shrinkwrap.json").is_file() =>
+        {
+            "npm ci"
+        }
+        "pnpm" if worktree.join("pnpm-lock.yaml").is_file() => "pnpm install --frozen-lockfile",
+        "yarn" if worktree.join("yarn.lock").is_file() => {
+            if worktree.join(".yarnrc.yml").is_file() {
+                "yarn install --immutable"
+            } else {
+                "yarn install --frozen-lockfile"
+            }
+        }
+        "bun" if worktree.join("bun.lock").is_file() || worktree.join("bun.lockb").is_file() => {
+            "bun install --frozen-lockfile"
+        }
+        "pnpm" => "pnpm install",
+        "yarn" => "yarn install",
+        "bun" => "bun install",
+        _ => "npm install",
+    }
+}
+
+fn missing_package_setup(worktree: &Path, runner: &TestRunner) -> Option<String> {
+    let manager = runner.package_manager?;
+    let manifest = fs::read_to_string(worktree.join("package.json"))
+        .ok()
+        .and_then(|contents| serde_json::from_str::<Value>(&contents).ok())?;
+    let mut dependencies = Vec::new();
+    for section in ["dependencies", "devDependencies"] {
+        if let Some(entries) = manifest.get(section).and_then(Value::as_object) {
+            dependencies.extend(entries.keys().cloned());
+        }
+    }
+    if dependencies.is_empty() {
+        if let Ok(metadata) = fs::symlink_metadata(worktree.join("node_modules"))
+            && (metadata.file_type().is_symlink() || !metadata.is_dir())
+        {
+            return Some(package_setup_error(
+                worktree,
+                manager,
+                format_args!("target node_modules is not a private directory in this worktree"),
+            ));
+        }
+        return None;
+    }
+    let node_modules = worktree.join("node_modules");
+    let Some(node_modules_metadata) = fs::symlink_metadata(&node_modules).ok() else {
+        return Some(package_setup_error(
+            worktree,
+            manager,
+            format_args!(
+                "target dependencies are not installed at {}",
+                node_modules.display()
+            ),
+        ));
+    };
+    if node_modules_metadata.file_type().is_symlink() {
+        return Some(package_setup_error(
+            worktree,
+            manager,
+            format_args!(
+                "target node_modules is a symlink at {}; use dependencies installed in this detached worktree",
+                node_modules.display()
+            ),
+        ));
+    }
+    if !node_modules_metadata.is_dir() {
+        return Some(package_setup_error(
+            worktree,
+            manager,
+            format_args!(
+                "target node_modules is not a directory at {}",
+                node_modules.display()
+            ),
+        ));
+    }
+    dependencies
+        .into_iter()
+        .find(|dependency| {
+            !fs::metadata(node_modules.join(dependency)).is_ok_and(|metadata| metadata.is_dir())
+        })
+        .map(|dependency| {
+            package_setup_error(
+                worktree,
+                manager,
+                format_args!(
+                    "declared dependency `{dependency}` is not resolvable from {}",
+                    node_modules.display()
+                ),
+            )
+        })
+}
+
+fn package_setup_error(worktree: &Path, manager: &str, detail: std::fmt::Arguments<'_>) -> String {
+    format!(
+        "sweep unavailable: {detail}; run `{}` in this detached worktree and retry; Cassy will not install dependencies automatically",
+        package_install_command(worktree, manager)
+    )
 }
 
 fn execute_sweep(
@@ -541,6 +655,18 @@ fn execute_sweep(
             };
         }
     };
+    if let Some(error) = missing_package_setup(&worktree, &runner) {
+        let _ = writeln!(log, "{error}");
+        return SweepResult {
+            request,
+            status: SweepStatus::Unavailable,
+            log_path,
+            summary: error,
+            failures: Vec::new(),
+            integration_epics: Vec::new(),
+            base_failure: None,
+        };
+    }
     let mut command_display = format_command(&runner.program, &runner.args);
     if runner.kind == TestRunnerKind::Cargo && settings.nice_cargo {
         command_display = format!("nice -n {} {command_display}", nice_level());
@@ -1074,6 +1200,28 @@ mod tests {
     }
 
     #[test]
+    fn bun_runner_uses_package_script_not_bun_builtin_test_runner() {
+        let _env = crate::test_support::TestEnvGuard::with_optional_vars(&[("BUN", None)]);
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("package.json"),
+            r#"{"packageManager":"bun@1.2.0","scripts":{"test":"node declared-test.mjs"}}"#,
+        )
+        .unwrap();
+        fs::write(temp.path().join("bun.lock"), "{}").unwrap();
+
+        let runner = resolve_test_runner(temp.path()).unwrap();
+
+        assert_eq!(runner.kind, TestRunnerKind::Package);
+        assert_eq!(runner.program, "bun");
+        assert_eq!(runner.args, ["run", "test"]);
+        assert_eq!(
+            format_command(&runner.program, &runner.args),
+            "bun run test"
+        );
+    }
+
+    #[test]
     fn runner_resolution_rejects_missing_test_script_as_unavailable() {
         let temp = tempfile::tempdir().unwrap();
         fs::write(
@@ -1148,80 +1296,10 @@ mod tests {
                 .to_string_lossy()
                 .into_owned(),
             args: vec!["test".to_owned()],
+            package_manager: Some("pnpm"),
         };
 
         assert!(spawn_test_runner(temp.path(), &settings, &log, &runner).is_none());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn execute_sweep_runs_pnpm_from_the_detached_target_worktree() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let temp = tempfile::tempdir().unwrap();
-        let git = |args: &[&str]| {
-            let output = Command::new("git")
-                .current_dir(temp.path())
-                .args(args)
-                .output()
-                .unwrap();
-            assert!(output.status.success(), "git {args:?}: {:?}", output.stderr);
-            String::from_utf8_lossy(&output.stdout).trim().to_owned()
-        };
-        git(&["init", "-b", "main"]);
-        git(&["config", "user.name", "Runner Fixture"]);
-        git(&["config", "user.email", "runner@example.invalid"]);
-        fs::write(
-            temp.path().join("package.json"),
-            r#"{"packageManager":"pnpm@10.4.0","scripts":{"test":"pnpm -r test"}}"#,
-        )
-        .unwrap();
-        fs::write(
-            temp.path().join("pnpm-lock.yaml"),
-            "lockfileVersion: '9.0'\n",
-        )
-        .unwrap();
-        git(&["add", "package.json", "pnpm-lock.yaml"]);
-        git(&["commit", "-m", "package runner fixture"]);
-        let commit = git(&["rev-parse", "HEAD"]);
-        let runner_script = temp.path().join("pnpm-fixture.sh");
-        let cwd_output = temp.path().join("runner-cwd");
-        let args_output = temp.path().join("runner-args");
-        fs::write(
-            &runner_script,
-            "#!/bin/sh\nprintf '%s\\n' \"$PWD\" > \"$SWEEP_RUNNER_CWD\"\nprintf '%s\\n' \"$@\" > \"$SWEEP_RUNNER_ARGS\"\necho 'Summary: 1 passed'\n",
-        )
-        .unwrap();
-        fs::set_permissions(&runner_script, fs::Permissions::from_mode(0o755)).unwrap();
-        let _env = crate::test_support::TestEnvGuard::with_vars(&[
-            ("PNPM", runner_script.to_str().unwrap()),
-            ("SWEEP_RUNNER_CWD", cwd_output.to_str().unwrap()),
-            ("SWEEP_RUNNER_ARGS", args_output.to_str().unwrap()),
-        ]);
-        let cas_dir = temp.path().join("cas-data");
-        let settings = SweepSettings::from(&FactoryConfig::default());
-        let result = execute_sweep(
-            temp.path(),
-            &cas_dir,
-            SweepRequest {
-                epic_id: "cas-pnpm".to_owned(),
-                target_branch: "epic/pnpm".to_owned(),
-                commit,
-            },
-            settings,
-            Arc::new(AtomicBool::new(false)),
-        );
-
-        assert_eq!(result.status, SweepStatus::Passed, "{}", result.summary);
-        let expected_worktree = temp.path().join(".cas/epic-cas-pnpm-merge");
-        assert_eq!(
-            fs::read_to_string(cwd_output).unwrap().trim(),
-            expected_worktree.display().to_string()
-        );
-        assert_eq!(fs::read_to_string(args_output).unwrap().trim(), "test");
-        let log = fs::read_to_string(result.log_path).unwrap();
-        assert!(log.contains("sweep: "), "{log}");
-        assert!(log.contains(" test\nworktree: "), "{log}");
     }
 
     #[test]
@@ -1269,49 +1347,240 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn pnpm_runner_executes_in_target_project_cwd() {
-        use std::os::unix::fs::PermissionsExt;
-
+    fn pnpm_runner_executes_declared_script_with_real_dependency_in_detached_worktree() {
         let temp = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .current_dir(temp.path())
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "git {args:?}: {:?}", output.stderr);
+            String::from_utf8_lossy(&output.stdout).trim().to_owned()
+        };
+        git(&["init", "-b", "main"]);
+        git(&["config", "user.name", "Runner Fixture"]);
+        git(&["config", "user.email", "runner@example.invalid"]);
+        fs::write(temp.path().join(".gitignore"), "node_modules/\n").unwrap();
         fs::write(
             temp.path().join("package.json"),
-            r#"{"packageManager":"pnpm@10.4.0","scripts":{"test":"echo declared"}}"#,
+            r#"{"name":"runner-fixture","private":true,"packageManager":"pnpm@11.20.0","scripts":{"test":"node test-runner.mjs"},"dependencies":{"fixture-dependency":"file:fixture-dependency"}}"#,
+        )
+        .unwrap();
+        fs::create_dir_all(temp.path().join("fixture-dependency")).unwrap();
+        fs::write(
+            temp.path().join("fixture-dependency/package.json"),
+            r#"{"name":"fixture-dependency","type":"module","exports":"./index.mjs"}"#,
         )
         .unwrap();
         fs::write(
-            temp.path().join("pnpm-lock.yaml"),
-            "lockfileVersion: '9.0'\n",
+            temp.path().join("fixture-dependency/index.mjs"),
+            "export default 'dependency-loaded';\n",
         )
         .unwrap();
-        let runner_script = temp.path().join("pnpm-fixture.sh");
-        let cwd_output = temp.path().join("runner-cwd");
-        let args_output = temp.path().join("runner-args");
         fs::write(
-            &runner_script,
-            "#!/bin/sh\nprintf '%s\\n' \"$PWD\" > \"$SWEEP_RUNNER_CWD\"\nprintf '%s\\n' \"$@\" > \"$SWEEP_RUNNER_ARGS\"\necho 'Summary: 1 passed'\n",
+            temp.path().join("test-runner.mjs"),
+            "import marker from 'fixture-dependency';\nimport { writeFileSync } from 'node:fs';\nwriteFileSync(process.env.SWEEP_RUNNER_RESULT, `${process.cwd()}\\n${marker}\\n`);\n",
         )
         .unwrap();
-        fs::set_permissions(&runner_script, fs::Permissions::from_mode(0o755)).unwrap();
-        let _env = crate::test_support::TestEnvGuard::with_vars(&[
-            ("PNPM", runner_script.to_str().unwrap()),
-            ("SWEEP_RUNNER_CWD", cwd_output.to_str().unwrap()),
-            ("SWEEP_RUNNER_ARGS", args_output.to_str().unwrap()),
+        git(&["add", "."]);
+        git(&["commit", "-m", "real package runner fixture"]);
+        let commit = git(&["rev-parse", "HEAD"]);
+        let request = SweepRequest {
+            epic_id: "cas-real-pnpm".to_owned(),
+            target_branch: "epic/real-pnpm".to_owned(),
+            commit,
+        };
+        let detached = prepare_merge_worktree(temp.path(), &request).unwrap();
+        fs::create_dir_all(detached.join("node_modules")).unwrap();
+        std::os::unix::fs::symlink(
+            "../fixture-dependency",
+            detached.join("node_modules/fixture-dependency"),
+        )
+        .unwrap();
+        let result_output = temp.path().join("runner-result");
+        let _env = crate::test_support::TestEnvGuard::with_optional_vars(&[
+            ("PNPM", None),
+            ("SWEEP_RUNNER_RESULT", Some(result_output.to_str().unwrap())),
         ]);
-        let runner = resolve_test_runner(temp.path()).unwrap();
-        let log_path = temp.path().join("runner.log");
-        let log = File::create(&log_path).unwrap();
-        let settings = SweepSettings::from(&FactoryConfig::default());
-        let mut child = spawn_test_runner(temp.path(), &settings, &log, &runner).unwrap();
 
-        assert!(child.wait().unwrap().success());
-        assert_eq!(
-            fs::read_to_string(cwd_output).unwrap().trim(),
-            temp.path().display().to_string()
+        let result = execute_sweep(
+            temp.path(),
+            &temp.path().join("cas-data"),
+            request,
+            SweepSettings::from(&FactoryConfig::default()),
+            Arc::new(AtomicBool::new(false)),
         );
-        assert_eq!(fs::read_to_string(args_output).unwrap().trim(), "test");
-        assert_eq!(
-            fs::read_to_string(log_path).unwrap().trim(),
-            "Summary: 1 passed"
+
+        assert_eq!(result.status, SweepStatus::Passed, "{}", result.summary);
+        let result_text = fs::read_to_string(result_output).unwrap();
+        assert!(
+            result_text.starts_with(&detached.display().to_string()),
+            "{result_text}"
         );
+        assert!(result_text.contains("dependency-loaded"), "{result_text}");
+        let log = fs::read_to_string(result.log_path).unwrap();
+        assert!(log.contains("sweep: pnpm test"), "{log}");
+        assert!(result.failures.is_empty());
+    }
+
+    #[test]
+    fn execute_sweep_reports_missing_dependencies_as_configuration_unavailable() {
+        let temp = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .current_dir(temp.path())
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "git {args:?}: {:?}", output.stderr);
+            String::from_utf8_lossy(&output.stdout).trim().to_owned()
+        };
+        git(&["init", "-b", "main"]);
+        git(&["config", "user.name", "Runner Fixture"]);
+        git(&["config", "user.email", "runner@example.invalid"]);
+        fs::write(
+            temp.path().join("package.json"),
+            r#"{"packageManager":"pnpm@11.20.0","scripts":{"test":"node test.mjs"},"dependencies":{"fixture-dependency":"file:fixture-dependency"}}"#,
+        )
+        .unwrap();
+        fs::create_dir_all(temp.path().join("fixture-dependency")).unwrap();
+        fs::write(
+            temp.path().join("fixture-dependency/package.json"),
+            r#"{"name":"fixture-dependency","type":"module"}"#,
+        )
+        .unwrap();
+        fs::create_dir_all(temp.path().join("node_modules")).unwrap();
+        fs::write(temp.path().join("node_modules/.gitkeep"), "").unwrap();
+        fs::write(
+            temp.path().join("test.mjs"),
+            "console.log('not reached');\n",
+        )
+        .unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-m", "missing dependencies fixture"]);
+        let result = execute_sweep(
+            temp.path(),
+            &temp.path().join("cas-data"),
+            SweepRequest {
+                epic_id: "cas-no-deps".to_owned(),
+                target_branch: "epic/no-deps".to_owned(),
+                commit: git(&["rev-parse", "HEAD"]),
+            },
+            SweepSettings::from(&FactoryConfig::default()),
+            Arc::new(AtomicBool::new(false)),
+        );
+
+        assert_eq!(result.status, SweepStatus::Unavailable);
+        assert!(
+            result.summary.contains("fixture-dependency")
+                && result.summary.contains("not resolvable"),
+            "{}",
+            result.summary
+        );
+        assert!(
+            result.summary.contains("pnpm install"),
+            "{}",
+            result.summary
+        );
+        assert!(result.failures.is_empty());
+    }
+
+    #[test]
+    fn execute_sweep_allows_dependency_free_declared_script_without_node_modules() {
+        let temp = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .current_dir(temp.path())
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "git {args:?}: {:?}", output.stderr);
+            String::from_utf8_lossy(&output.stdout).trim().to_owned()
+        };
+        git(&["init", "-b", "main"]);
+        git(&["config", "user.name", "Runner Fixture"]);
+        git(&["config", "user.email", "runner@example.invalid"]);
+        fs::write(
+            temp.path().join("package.json"),
+            r#"{"packageManager":"npm@11.0.0","scripts":{"test":"node test.mjs"}}"#,
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("test.mjs"),
+            "console.log('dependency-free-declared-script');\n",
+        )
+        .unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-m", "dependency-free package runner fixture"]);
+        let request = SweepRequest {
+            epic_id: "cas-no-deps-script".to_owned(),
+            target_branch: "epic/no-deps-script".to_owned(),
+            commit: git(&["rev-parse", "HEAD"]),
+        };
+        let detached = prepare_merge_worktree(temp.path(), &request).unwrap();
+        assert!(!detached.join("node_modules").exists());
+        let _env = crate::test_support::TestEnvGuard::with_optional_vars(&[("NPM", None)]);
+
+        let result = execute_sweep(
+            temp.path(),
+            &temp.path().join("cas-data"),
+            request,
+            SweepSettings::from(&FactoryConfig::default()),
+            Arc::new(AtomicBool::new(false)),
+        );
+
+        assert_eq!(result.status, SweepStatus::Passed, "{}", result.summary);
+        let log = fs::read_to_string(result.log_path).unwrap();
+        assert!(log.contains("sweep: npm test"), "{log}");
+        assert!(log.contains("dependency-free-declared-script"), "{log}");
+    }
+
+    #[test]
+    fn execute_sweep_classifies_declared_script_failure_as_test_failure() {
+        let temp = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .current_dir(temp.path())
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "git {args:?}: {:?}", output.stderr);
+            String::from_utf8_lossy(&output.stdout).trim().to_owned()
+        };
+        git(&["init", "-b", "main"]);
+        git(&["config", "user.name", "Runner Fixture"]);
+        git(&["config", "user.email", "runner@example.invalid"]);
+        fs::write(
+            temp.path().join("package.json"),
+            r#"{"packageManager":"npm@11.0.0","scripts":{"test":"node test.mjs"}}"#,
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("test.mjs"),
+            "console.error('declared-script-failure'); process.exit(17);\n",
+        )
+        .unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-m", "failing package runner fixture"]);
+        let _env = crate::test_support::TestEnvGuard::with_optional_vars(&[("NPM", None)]);
+
+        let result = execute_sweep(
+            temp.path(),
+            &temp.path().join("cas-data"),
+            SweepRequest {
+                epic_id: "cas-test-failure".to_owned(),
+                target_branch: "epic/test-failure".to_owned(),
+                commit: git(&["rev-parse", "HEAD"]),
+            },
+            SweepSettings::from(&FactoryConfig::default()),
+            Arc::new(AtomicBool::new(false)),
+        );
+
+        assert_eq!(result.status, SweepStatus::Failed, "{}", result.summary);
+        assert_ne!(result.status, SweepStatus::Unavailable);
+        let log = fs::read_to_string(result.log_path).unwrap();
+        assert!(log.contains("sweep: npm test"), "{log}");
+        assert!(log.contains("declared-script-failure"), "{log}");
     }
 }

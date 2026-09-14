@@ -492,7 +492,7 @@ mod tests {
     }
 
     #[test]
-    fn unavailable_runner_does_not_become_a_test_failure_class() {
+    fn unavailable_dependency_setup_does_not_become_a_test_failure_class() {
         let temp = tempfile::tempdir().unwrap();
         let report = build_report_from_contents(
             temp.path(),
@@ -502,7 +502,7 @@ mod tests {
             "tip",
             "cas-861",
             &[],
-            "sweep unavailable: could not start `pnpm`; ensure pnpm is installed\nFAIL [diagnostic] missing runner\n",
+            "sweep unavailable: declared dependency `fixture-dependency` is not resolvable; run `pnpm install` in this detached worktree\nFAIL [diagnostic] missing dependency\n",
         );
 
         assert_eq!(report.status, "SWEEP_UNAVAILABLE");

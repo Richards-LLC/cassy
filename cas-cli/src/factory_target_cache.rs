@@ -7,7 +7,7 @@
 //! worktrees, and only after conservative liveness, recency, containment, and
 //! filesystem-watermark checks.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -60,6 +60,8 @@ pub enum CacheDisposition {
     Retained,
     Eligible,
     Selected,
+    OwnershipUncertain,
+    OwnershipChanged,
     UnsafePath,
     Reclaimed,
     CleanupError,
@@ -74,6 +76,14 @@ pub struct TargetCacheRecord {
     pub disposition: CacheDisposition,
     pub reason: String,
     pub interrupted_cleanup: bool,
+    #[serde(skip)]
+    ownership: CacheOwnership,
+    #[serde(skip)]
+    git_admin_dir: Option<PathBuf>,
+    #[serde(skip)]
+    git_branch: Option<String>,
+    #[serde(skip)]
+    git_commit: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -113,6 +123,32 @@ struct ScannedCache {
     newest_write: Option<SystemTime>,
     interrupted_cleanup: bool,
     unsafe_reason: Option<String>,
+    ownership: CacheOwnership,
+    git_admin_dir: Option<PathBuf>,
+    git_branch: Option<String>,
+    git_commit: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum CacheOwnership {
+    #[default]
+    Durable,
+    GitConventionOnly,
+}
+
+#[derive(Debug, Clone)]
+struct GitWorktreeCandidate {
+    path: PathBuf,
+    branch: Option<String>,
+    commit: Option<String>,
+    git_admin_dir: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone)]
+struct GitWorktreeIdentity {
+    branch: Option<String>,
+    commit: Option<String>,
+    git_admin_dir: Option<PathBuf>,
 }
 
 /// Fast filesystem-only pressure probe used before a factory starts workers.
@@ -169,6 +205,11 @@ pub fn inspect(
                 CacheDisposition::RecentWrite,
                 format!("newest write is younger than {}s", policy.min_idle_secs),
             )
+        } else if cache.ownership == CacheOwnership::GitConventionOnly {
+            (
+                CacheDisposition::OwnershipUncertain,
+                "Git convention proves repository membership but not Cassy ownership; durable provenance is required for cleanup".to_string(),
+            )
         } else {
             (
                 CacheDisposition::Eligible,
@@ -183,6 +224,10 @@ pub fn inspect(
             disposition,
             reason,
             interrupted_cleanup: cache.interrupted_cleanup,
+            ownership: cache.ownership,
+            git_admin_dir: cache.git_admin_dir,
+            git_branch: cache.git_branch,
+            git_commit: cache.git_commit,
         });
     }
 
@@ -200,7 +245,7 @@ pub fn inspect(
         selected_bytes,
         reclaimed_bytes: 0,
         dry_run,
-        remediation: "Review gc_report, then run gc_cleanup force=true dry_run=false; Cassy revalidates liveness, recency, and path containment immediately before each rename.".to_string(),
+        remediation: "Review gc_report, then run gc_cleanup force=true dry_run=false; Cassy revalidates ownership, liveness, recency, and path containment immediately before each rename.".to_string(),
         caches: records,
     })
 }
@@ -245,6 +290,13 @@ pub fn cleanup_selected(
         .iter_mut()
         .filter(|record| record.disposition == CacheDisposition::Selected)
     {
+        if !ownership_is_current(cas_root, record) {
+            record.disposition = CacheDisposition::OwnershipChanged;
+            record.reason =
+                "Git worktree ownership changed after report; refusing destructive cleanup"
+                    .to_string();
+            continue;
+        }
         let rescanned = scan_cache(&record.worktree, &record.path, record.interrupted_cleanup);
         let Ok(rescanned) = rescanned else {
             record.disposition = CacheDisposition::CleanupError;
@@ -370,32 +422,59 @@ fn discover_caches(
     cas_root: &Path,
     known_worktree_roots: &[PathBuf],
 ) -> Vec<ScannedCache> {
-    let mut roots = vec![repo_root.to_path_buf()];
+    let git_worktrees = list_validated_git_worktrees(repo_root);
+    let git_identities: HashMap<PathBuf, GitWorktreeIdentity> = git_worktrees
+        .iter()
+        .map(|worktree| {
+            (
+                worktree.path.clone(),
+                GitWorktreeIdentity {
+                    branch: worktree.branch.clone(),
+                    commit: worktree.commit.clone(),
+                    git_admin_dir: worktree.git_admin_dir.clone(),
+                },
+            )
+        })
+        .collect();
+    let mut roots = HashMap::from([(repo_root.to_path_buf(), CacheOwnership::Durable)]);
     if let Ok(entries) = fs::read_dir(cas_root.join("worktrees")) {
-        roots.extend(
-            entries
-                .flatten()
-                .map(|entry| entry.path())
-                .filter(|path| path.is_dir()),
-        );
+        for path in entries.flatten().map(|entry| entry.path()) {
+            if path.is_dir() {
+                insert_root(&mut roots, path, CacheOwnership::Durable);
+            }
+        }
     }
-    roots.extend(
-        known_worktree_roots
-            .iter()
-            .filter(|path| path.exists())
-            .cloned(),
-    );
-    roots.extend(discover_managed_git_worktrees(repo_root, cas_root));
-    roots.sort();
-    roots.dedup();
+    for path in known_worktree_roots.iter().filter(|path| path.exists()) {
+        insert_root(&mut roots, path.clone(), CacheOwnership::Durable);
+    }
+    for worktree in git_worktrees.into_iter().filter(|worktree| {
+        worktree.branch.as_deref().is_some_and(|branch| {
+            MANAGED_BRANCH_PREFIXES
+                .iter()
+                .any(|prefix| branch.starts_with(prefix))
+        }) || managed_worktree_path(&worktree.path, cas_root)
+    }) {
+        let ownership = if managed_worktree_path(&worktree.path, cas_root) {
+            CacheOwnership::Durable
+        } else {
+            CacheOwnership::GitConventionOnly
+        };
+        insert_root(&mut roots, worktree.path, ownership);
+    }
+    let mut roots: Vec<_> = roots.into_iter().collect();
+    roots.sort_by(|left, right| left.0.cmp(&right.0));
     let mut caches = Vec::new();
-    for root in roots {
+    for (root, ownership) in roots {
+        let git_identity = git_identities.get(&root);
         let target = root.join("target");
         if fs::symlink_metadata(&target).is_ok() {
-            caches.push(
-                scan_cache(&root, &target, false)
-                    .unwrap_or_else(|error| scan_error_record(root.clone(), target, false, error)),
-            );
+            let mut cache = scan_cache(&root, &target, false)
+                .unwrap_or_else(|error| scan_error_record(root.clone(), target, false, error));
+            cache.ownership = ownership;
+            cache.git_admin_dir = git_identity.and_then(|identity| identity.git_admin_dir.clone());
+            cache.git_branch = git_identity.and_then(|identity| identity.branch.clone());
+            cache.git_commit = git_identity.and_then(|identity| identity.commit.clone());
+            caches.push(cache);
         }
         if let Ok(entries) = fs::read_dir(&root) {
             for entry in entries.flatten() {
@@ -405,9 +484,14 @@ fn discover_caches(
                     .starts_with(QUARANTINE_PREFIX)
                 {
                     let path = entry.path();
-                    caches.push(scan_cache(&root, &path, true).unwrap_or_else(|error| {
-                        scan_error_record(root.clone(), path, true, error)
-                    }));
+                    let mut cache = scan_cache(&root, &path, true)
+                        .unwrap_or_else(|error| scan_error_record(root.clone(), path, true, error));
+                    cache.ownership = ownership;
+                    cache.git_admin_dir =
+                        git_identity.and_then(|identity| identity.git_admin_dir.clone());
+                    cache.git_branch = git_identity.and_then(|identity| identity.branch.clone());
+                    cache.git_commit = git_identity.and_then(|identity| identity.commit.clone());
+                    caches.push(cache);
                 }
             }
         }
@@ -415,11 +499,26 @@ fn discover_caches(
     caches
 }
 
-/// Enumerate linked checkouts that Cassy owns by convention, including ones
-/// not yet represented in a worker/store record. Git is the source of truth
-/// for detached release worktrees; branch/path filters keep unrelated user
-/// worktrees outside the reclamation boundary.
-fn discover_managed_git_worktrees(repo_root: &Path, cas_root: &Path) -> Vec<PathBuf> {
+fn insert_root(
+    roots: &mut HashMap<PathBuf, CacheOwnership>,
+    path: PathBuf,
+    ownership: CacheOwnership,
+) {
+    roots
+        .entry(path)
+        .and_modify(|current| {
+            if *current == CacheOwnership::GitConventionOnly && ownership == CacheOwnership::Durable
+            {
+                *current = ownership;
+            }
+        })
+        .or_insert(ownership);
+}
+
+/// Enumerate linked checkouts that may contain factory target caches. Git is
+/// the source of truth for detached release worktrees; branch/path filters
+/// identify candidates, while durable provenance decides cleanup eligibility.
+fn list_validated_git_worktrees(repo_root: &Path) -> Vec<GitWorktreeCandidate> {
     let Some(common_git_dir) = git_common_dir(repo_root) else {
         return Vec::new();
     };
@@ -429,20 +528,25 @@ fn discover_managed_git_worktrees(repo_root: &Path, cas_root: &Path) -> Vec<Path
     worktrees
         .into_iter()
         .filter(|worktree| !worktree.is_bare)
-        .filter(|worktree| is_linked_worktree_for_repo(&worktree.path, &common_git_dir))
-        .filter(|worktree| {
-            worktree.branch.as_deref().is_some_and(|branch| {
-                MANAGED_BRANCH_PREFIXES
-                    .iter()
-                    .any(|prefix| branch.starts_with(prefix))
-            }) || managed_worktree_path(&worktree.path, cas_root)
-        })
-        .map(|worktree| {
-            if worktree.path.is_absolute() {
+        .filter_map(|worktree| {
+            let path = if worktree.path.is_absolute() {
                 worktree.path
             } else {
                 repo_root.join(worktree.path)
+            };
+            let symlink = fs::symlink_metadata(&path)
+                .ok()
+                .is_some_and(|metadata| metadata.file_type().is_symlink());
+            let git_admin_dir = linked_worktree_admin_dir(&path, &common_git_dir);
+            if git_admin_dir.is_none() && !symlink {
+                return None;
             }
+            Some(GitWorktreeCandidate {
+                path,
+                branch: worktree.branch,
+                commit: worktree.commit,
+                git_admin_dir,
+            })
         })
         .collect()
 }
@@ -466,35 +570,34 @@ fn git_common_dir(repo_root: &Path) -> Option<PathBuf> {
     path.canonicalize().ok()
 }
 
-/// Confirm that a listed path is still a linked checkout of this repository.
-/// A path replaced by a symlink is retained for `scan_cache` to report as
-/// unsafe, while a regular path without Git's linked-worktree marker is not
-/// treated as owned merely because a stale Git record names it.
-fn is_linked_worktree_for_repo(path: &Path, common_git_dir: &Path) -> bool {
+/// Return the validated Git admin directory for a linked checkout.
+/// A path replaced by a symlink is left for `scan_cache` to report as unsafe,
+/// while a regular path without Git's linked-worktree marker is omitted.
+fn linked_worktree_admin_dir(path: &Path, common_git_dir: &Path) -> Option<PathBuf> {
     let Ok(metadata) = fs::symlink_metadata(path) else {
-        return false;
+        return None;
     };
     if metadata.file_type().is_symlink() {
-        return true;
+        return None;
     }
     if !metadata.is_dir() {
-        return false;
+        return None;
     }
     let git_file = path.join(".git");
     let Ok(git_metadata) = fs::symlink_metadata(&git_file) else {
-        return false;
+        return None;
     };
     if git_metadata.file_type().is_symlink() || !git_metadata.is_file() {
-        return false;
+        return None;
     }
     let Ok(contents) = fs::read_to_string(git_file) else {
-        return false;
+        return None;
     };
     let Some(raw_git_dir) = contents
         .lines()
         .find_map(|line| line.strip_prefix("gitdir: "))
     else {
-        return false;
+        return None;
     };
     let git_dir = Path::new(raw_git_dir);
     let git_dir = if git_dir.is_absolute() {
@@ -503,16 +606,16 @@ fn is_linked_worktree_for_repo(path: &Path, common_git_dir: &Path) -> bool {
         path.join(git_dir)
     };
     let Ok(git_dir) = git_dir.canonicalize() else {
-        return false;
+        return None;
     };
     let Ok(worktrees_dir) = common_git_dir.join("worktrees").canonicalize() else {
-        return false;
+        return None;
     };
     if git_dir.parent() != Some(worktrees_dir.as_path()) {
-        return false;
+        return None;
     }
     let Ok(admin_gitdir) = fs::read_to_string(git_dir.join("gitdir")) else {
-        return false;
+        return None;
     };
     let admin_gitdir = admin_gitdir.trim();
     let admin_gitdir = Path::new(admin_gitdir);
@@ -522,12 +625,12 @@ fn is_linked_worktree_for_repo(path: &Path, common_git_dir: &Path) -> bool {
         git_dir.join(admin_gitdir)
     };
     let Ok(admin_gitdir) = admin_gitdir.canonicalize() else {
-        return false;
+        return None;
     };
     let Ok(checkout_gitdir) = path.join(".git").canonicalize() else {
-        return false;
+        return None;
     };
-    admin_gitdir == checkout_gitdir
+    (admin_gitdir == checkout_gitdir).then_some(git_dir)
 }
 
 fn managed_worktree_path(path: &Path, cas_root: &Path) -> bool {
@@ -537,6 +640,32 @@ fn managed_worktree_path(path: &Path, cas_root: &Path) -> bool {
             MANAGED_WORKTREE_PREFIXES
                 .iter()
                 .any(|prefix| name.starts_with(prefix))
+        })
+}
+
+fn ownership_is_current(cas_root: &Path, record: &TargetCacheRecord) -> bool {
+    let Some(expected_git_admin_dir) = record.git_admin_dir.as_ref() else {
+        return true;
+    };
+    let Some(repo_root) = cas_root.parent() else {
+        return false;
+    };
+    let Ok(expected_worktree) = record.worktree.canonicalize() else {
+        return false;
+    };
+    list_validated_git_worktrees(repo_root)
+        .into_iter()
+        .any(|worktree| {
+            let Some(git_admin_dir) = worktree.git_admin_dir else {
+                return false;
+            };
+            let Ok(path) = worktree.path.canonicalize() else {
+                return false;
+            };
+            path == expected_worktree
+                && git_admin_dir == *expected_git_admin_dir
+                && worktree.branch.as_ref() == record.git_branch.as_ref()
+                && worktree.commit.as_ref() == record.git_commit.as_ref()
         })
 }
 
@@ -553,6 +682,10 @@ fn scan_error_record(
         newest_write: None,
         interrupted_cleanup,
         unsafe_reason: Some(format!("scan failed closed: {error}")),
+        ownership: CacheOwnership::Durable,
+        git_admin_dir: None,
+        git_branch: None,
+        git_commit: None,
     }
 }
 
@@ -566,6 +699,10 @@ fn scan_cache(worktree: &Path, path: &Path, interrupted_cleanup: bool) -> io::Re
             newest_write: None,
             interrupted_cleanup,
             unsafe_reason: Some("worktree root is a symlink or not a directory".to_string()),
+            ownership: CacheOwnership::Durable,
+            git_admin_dir: None,
+            git_branch: None,
+            git_commit: None,
         });
     }
     let metadata = fs::symlink_metadata(path)?;
@@ -577,6 +714,10 @@ fn scan_cache(worktree: &Path, path: &Path, interrupted_cleanup: bool) -> io::Re
             newest_write: None,
             interrupted_cleanup,
             unsafe_reason: Some("cache root is a symlink or not a directory".to_string()),
+            ownership: CacheOwnership::Durable,
+            git_admin_dir: None,
+            git_branch: None,
+            git_commit: None,
         });
     }
     let canonical_worktree = worktree.canonicalize()?;
@@ -592,6 +733,10 @@ fn scan_cache(worktree: &Path, path: &Path, interrupted_cleanup: bool) -> io::Re
             newest_write: None,
             interrupted_cleanup,
             unsafe_reason: Some("cache path escaped its exact worktree parent".to_string()),
+            ownership: CacheOwnership::Durable,
+            git_admin_dir: None,
+            git_branch: None,
+            git_commit: None,
         });
     }
 
@@ -614,6 +759,10 @@ fn scan_cache(worktree: &Path, path: &Path, interrupted_cleanup: bool) -> io::Re
         newest_write,
         interrupted_cleanup,
         unsafe_reason: None,
+        ownership: CacheOwnership::Durable,
+        git_admin_dir: None,
+        git_branch: None,
+        git_commit: None,
     })
 }
 
@@ -733,6 +882,10 @@ mod tests {
             disposition: CacheDisposition::Eligible,
             reason: String::new(),
             interrupted_cleanup: false,
+            ownership: CacheOwnership::Durable,
+            git_admin_dir: None,
+            git_branch: None,
+            git_commit: None,
         }
     }
 
@@ -929,6 +1082,21 @@ mod tests {
         fs::create_dir_all(release.join("target")).unwrap();
         fs::write(release.join("target/release-artifact"), b"release").unwrap();
 
+        let user_release = temp.path().join("external-release");
+        git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                "-b",
+                "release/user-owned",
+                user_release.to_str().unwrap(),
+            ],
+        );
+        fs::create_dir_all(user_release.join("target")).unwrap();
+        fs::write(user_release.join("target/user-artifact"), b"user").unwrap();
+
         let unrelated = temp.path().join("feature-worktree");
         git(
             &repo,
@@ -948,8 +1116,36 @@ mod tests {
         let worktrees: HashSet<_> = caches.iter().map(|cache| cache.worktree.clone()).collect();
         assert!(worktrees.contains(&epic.canonicalize().unwrap()));
         assert!(worktrees.contains(&release.canonicalize().unwrap()));
+        assert!(worktrees.contains(&user_release.canonicalize().unwrap()));
         assert!(!worktrees.contains(&unrelated.canonicalize().unwrap()));
-        assert_eq!(caches.len(), 2);
+        assert_eq!(caches.len(), 3);
+
+        let report = inspect(
+            &cas_root,
+            TargetCachePolicy {
+                high_watermark_percent: 1,
+                low_watermark_percent: 0,
+                min_idle_secs: 0,
+                retention_count: 0,
+            },
+            &[],
+            &[],
+            true,
+        )
+        .unwrap();
+        assert!(report.caches.iter().any(|cache| {
+            cache.worktree == epic.canonicalize().unwrap()
+                && cache.disposition == CacheDisposition::OwnershipUncertain
+        }));
+        assert!(report.caches.iter().any(|cache| {
+            cache.worktree == user_release.canonicalize().unwrap()
+                && cache.disposition == CacheDisposition::OwnershipUncertain
+        }));
+        assert!(report.caches.iter().any(|cache| {
+            cache.worktree == release.canonicalize().unwrap()
+                && cache.disposition == CacheDisposition::Selected
+        }));
+        assert_eq!(report.selected_bytes, 7);
     }
 
     #[test]
@@ -997,6 +1193,72 @@ mod tests {
         .unwrap();
         assert!(report.caches.is_empty());
         assert!(reused.join("target/unrelated-artifact").exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cleanup_rechecks_git_ownership_after_report_before_rename() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        let cas_root = repo.join(".cas");
+        fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "--quiet"]);
+        git(&repo, &["config", "user.email", "cassy@example.invalid"]);
+        git(&repo, &["config", "user.name", "Cassy"]);
+        fs::write(repo.join("README"), b"fixture").unwrap();
+        git(&repo, &["add", "README"]);
+        git(&repo, &["commit", "--quiet", "-m", "fixture"]);
+        fs::create_dir_all(&cas_root).unwrap();
+
+        let owned = temp.path().join("owned-epic");
+        git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                "-b",
+                "epic/cas-868-owned",
+                owned.to_str().unwrap(),
+            ],
+        );
+        fs::create_dir_all(owned.join("target")).unwrap();
+        fs::write(owned.join("target/before-replacement"), b"old").unwrap();
+
+        let policy = TargetCachePolicy {
+            high_watermark_percent: 1,
+            low_watermark_percent: 0,
+            min_idle_secs: 0,
+            retention_count: 0,
+        };
+        let mut report =
+            inspect(&cas_root, policy, std::slice::from_ref(&owned), &[], false).unwrap();
+        assert_eq!(report.caches.len(), 1);
+        assert_eq!(report.caches[0].disposition, CacheDisposition::Selected);
+        git(
+            &repo,
+            &["worktree", "remove", "--force", owned.to_str().unwrap()],
+        );
+        git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                "--detach",
+                owned.to_str().unwrap(),
+                "HEAD",
+            ],
+        );
+        fs::create_dir_all(owned.join("target")).unwrap();
+        fs::write(owned.join("target/after-replacement"), b"keep").unwrap();
+
+        cleanup_selected(&cas_root, &mut report, policy, &[]).unwrap();
+        assert_eq!(
+            report.caches[0].disposition,
+            CacheDisposition::OwnershipChanged
+        );
+        assert!(owned.join("target/after-replacement").exists());
     }
 
     // Git-linked worktrees are task-owned fixtures. The explicit live root

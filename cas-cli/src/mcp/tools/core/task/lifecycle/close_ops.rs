@@ -501,46 +501,219 @@ fn has_recorded_gate_decision(notes: &str) -> bool {
     })
 }
 
-/// A platform proof is deliberately a typed note rather than an unstructured
-/// close-reason claim. The note must identify macOS, the command that ran, and
-/// a passing result so a close receipt remains useful after the worker pane is
-/// gone.
+fn contains_word(text: &str, word: &str) -> bool {
+    text.split(|character: char| !character.is_ascii_alphanumeric())
+        .any(|token| token == word)
+}
+
+fn number_near_label(text: &str, label: &str) -> Option<u32> {
+    for (index, _) in text.match_indices(label) {
+        let after = text[index + label.len()..].trim_start_matches(|character: char| {
+            !character.is_ascii_digit()
+        });
+        if let Some(number) = after
+            .chars()
+            .take_while(|character| character.is_ascii_digit())
+            .collect::<String>()
+            .parse()
+            .ok()
+        {
+            return Some(number);
+        }
+
+        let before = text[..index].trim_end_matches(|character: char| {
+            !character.is_ascii_digit()
+        });
+        let mut digits = before
+            .chars()
+            .rev()
+            .take_while(|character| character.is_ascii_digit())
+            .collect::<Vec<_>>();
+        if !digits.is_empty() {
+            digits.reverse();
+            return digits.into_iter().collect::<String>().parse().ok();
+        }
+    }
+    None
+}
+
+fn has_passing_result(lower: &str) -> bool {
+    let explicit_failure = [
+        "result: fail",
+        "result=fail",
+        "result: failed",
+        "result=failed",
+        "exit 1",
+        "status 1",
+        "not pass",
+        "no pass",
+    ]
+    .iter()
+    .any(|phrase| lower.contains(phrase));
+    if explicit_failure {
+        return false;
+    }
+
+    ["pass", "passed", "passing", "success", "successful", "green"]
+        .iter()
+        .any(|word| contains_word(lower, word))
+        || lower.contains("exit 0")
+        || lower.contains("status 0")
+}
+
+fn has_platform_command(lower: &str) -> bool {
+    // The command may be from any repository ecosystem. Keep the fallback
+    // structured (`command:`/`command=`) so arbitrary prose cannot satisfy the
+    // command requirement merely by mentioning the word "command".
+    const COMMANDS: &[&str] = &[
+        "bazel", "bun", "cargo", "cmake", "deno", "dotnet", "go", "gradle", "java",
+        "just", "make", "meson", "mix", "mvn", "node", "npm", "ninja", "pnpm", "pytest",
+        "python", "python3", "ruby", "swift", "swiftc", "xcodebuild", "xcrun", "yarn",
+    ];
+    if COMMANDS.iter().any(|command| contains_word(lower, command)) {
+        return true;
+    }
+
+    ["command:", "command="]
+        .iter()
+        .filter_map(|marker| lower.split_once(marker).map(|(_, remainder)| remainder))
+        .map(|remainder| remainder.trim_start())
+        .map(|remainder| remainder.split([';', ',', '|']).next().unwrap_or(remainder).trim())
+        .any(|command| {
+            !command.is_empty()
+                && !["pass", "passed", "success", "successful", "exit", "status", "result"]
+                    .iter()
+                    .any(|prefix| command == *prefix || command.starts_with(&format!("{prefix} ")))
+        })
+}
+
 fn has_platform_proof_note(notes: &str) -> bool {
     notes.lines().any(|line| {
         let lower = line.to_ascii_lowercase();
         lower.contains("platform_proof")
-            && lower.contains("macos")
-            && (lower.contains("cargo") || lower.contains("command"))
-            && (lower.contains("pass")
-                || lower.contains("success")
-                || lower.contains("exit 0")
-                || lower.contains("status 0"))
+            && contains_word(&lower, "macos")
+            && has_platform_command(&lower)
+            && has_passing_result(&lower)
     })
 }
 
-/// A loaded proof must cover the whole target, use the requested parallelism,
-/// and repeat the run at least three times. This intentionally accepts common
-/// receipt phrasings (`3 loops`, `loops: 3`, `three loops`, `3x`) while refusing
-/// a one-off `-j16` command.
+fn has_target_scope(lower: &str) -> bool {
+    [
+        "whole target",
+        "entire target",
+        "full target",
+        "all target",
+        "non-rust target",
+        "non rust target",
+        "whole suite",
+        "entire suite",
+        "full suite",
+    ]
+    .iter()
+    .any(|phrase| lower.contains(phrase))
+}
+
+fn has_parallelism_16(lower: &str) -> bool {
+    lower.contains("-j16")
+        || lower.contains("-j 16")
+        || number_near_label(lower, "jobs").is_some_and(|number| number == 16)
+        || number_near_label(lower, "parallelism").is_some_and(|number| number == 16)
+        || number_near_label(lower, "concurrency").is_some_and(|number| number == 16)
+}
+
+fn has_at_least_three_runs(lower: &str) -> bool {
+    if lower.contains("1 2 3") {
+        return true;
+    }
+    if lower.split(|character: char| !character.is_ascii_alphanumeric()).any(|token| {
+        token
+            .strip_suffix('x')
+            .and_then(|number| number.parse::<u32>().ok())
+            .is_some_and(|number| number >= 3)
+    }) {
+        return true;
+    }
+
+    ["loop", "loops", "run", "runs", "iteration", "iterations", "time", "times"]
+        .iter()
+        .any(|label| {
+            number_near_label(lower, label).is_some_and(|number| number >= 3)
+                || lower.contains(&format!("three {label}"))
+        })
+}
+
+/// A platform proof is deliberately a typed note rather than an unstructured
+/// close-reason claim. The note must identify macOS, a real platform command,
+/// and a passing result so a close receipt remains useful after the worker pane
+/// is gone.
+fn platform_proof_missing_evidence(notes: &str) -> Vec<&'static str> {
+    let lines = notes
+        .lines()
+        .filter(|line| line.to_ascii_lowercase().contains("platform_proof"))
+        .collect::<Vec<_>>();
+    if lines.is_empty() {
+        return vec!["typed note_type=platform_proof"];
+    }
+
+    let mut missing = Vec::new();
+    if !lines.iter().any(|line| {
+        let lower = line.to_ascii_lowercase();
+        contains_word(&lower, "macos")
+    }) {
+        missing.push("macOS marker");
+    }
+    if !lines.iter().any(|line| has_platform_command(&line.to_ascii_lowercase())) {
+        missing.push("recognized platform command (for example cargo or xcodebuild)");
+    }
+    if !lines.iter().any(|line| has_passing_result(&line.to_ascii_lowercase())) {
+        missing.push("passing result (PASS, SUCCESS, exit 0, or status 0)");
+    }
+    if missing.is_empty() {
+        missing.push("all required evidence on the same typed note");
+    }
+    missing
+}
+
+/// A loaded proof must cover the complete target, use 16-way parallelism, and
+/// repeat the run at least three times. Rust and non-Rust receipts use the same
+/// typed contract while retaining common wording variants.
 fn has_loaded_proof_note(notes: &str) -> bool {
     notes.lines().any(|line| {
         let lower = line.to_ascii_lowercase();
-        let has_parallelism = lower.contains("-j16") || lower.contains("jobs=16");
-        let has_loops = lower.contains("3 loops")
-            || lower.contains("loops: 3")
-            || lower.contains("loops=3")
-            || lower.contains("three loops")
-            || lower.contains("3x")
-            || lower.contains("1 2 3");
         lower.contains("loaded_proof")
-            && lower.contains("whole target")
-            && has_parallelism
-            && has_loops
-            && (lower.contains("pass")
-                || lower.contains("success")
-                || lower.contains("exit 0")
-                || lower.contains("status 0"))
+            && has_target_scope(&lower)
+            && has_parallelism_16(&lower)
+            && has_at_least_three_runs(&lower)
+            && has_passing_result(&lower)
     })
+}
+
+fn loaded_proof_missing_evidence(notes: &str) -> Vec<&'static str> {
+    let lines = notes
+        .lines()
+        .filter(|line| line.to_ascii_lowercase().contains("loaded_proof"))
+        .collect::<Vec<_>>();
+    if lines.is_empty() {
+        return vec!["typed note_type=loaded_proof"];
+    }
+
+    let mut missing = Vec::new();
+    if !lines.iter().any(|line| has_target_scope(&line.to_ascii_lowercase())) {
+        missing.push("whole/entire/full target or explicit non-Rust target");
+    }
+    if !lines.iter().any(|line| has_parallelism_16(&line.to_ascii_lowercase())) {
+        missing.push("parallelism at 16 jobs (-j16 or --jobs 16)");
+    }
+    if !lines.iter().any(|line| has_at_least_three_runs(&line.to_ascii_lowercase())) {
+        missing.push("at least 3 loops/runs");
+    }
+    if !lines.iter().any(|line| has_passing_result(&line.to_ascii_lowercase())) {
+        missing.push("passing result (PASS, SUCCESS, exit 0, or status 0)");
+    }
+    if missing.is_empty() {
+        missing.push("all required evidence on the same typed note");
+    }
+    missing
 }
 
 fn proof_target_matches_module(target: &str, module: &str) -> bool {
@@ -1026,15 +1199,17 @@ fn validate_risk_close_proofs_with_base(
     expected_base: Option<&str>,
 ) -> Result<(), String> {
     if task.risk.contains(&TaskRisk::Platform) && !has_platform_proof_note(&task.notes) {
+        let missing = platform_proof_missing_evidence(&task.notes).join(", ");
         return Err(format!(
-            "TASK CLOSE REJECTED: task {} declares risk=platform but has no platform_proof note containing the macOS proof command and passing result. Add one with action=notes note_type=platform_proof, then retry close.",
-            task.id
+            "TASK CLOSE REJECTED: task {} declares risk=platform but its platform_proof receipt is incomplete (missing evidence: {missing}). Add one with action=notes note_type=platform_proof containing macOS, a platform command, and a passing result, then retry close.",
+            task.id,
         ));
     }
     if task.risk.contains(&TaskRisk::Concurrency) && !has_loaded_proof_note(&task.notes) {
+        let missing = loaded_proof_missing_evidence(&task.notes).join(", ");
         return Err(format!(
-            "TASK CLOSE REJECTED: task {} declares risk=concurrency but has no loaded_proof note proving the whole target under -j16 for at least 3 loops with a passing result. Add one with action=notes note_type=loaded_proof, then retry close.",
-            task.id
+            "TASK CLOSE REJECTED: task {} declares risk=concurrency but its loaded_proof receipt is incomplete (missing evidence: {missing}). Add one with action=notes note_type=loaded_proof proving the whole or explicit non-Rust target under -j16 for at least 3 loops with a passing result, then retry close.",
+            task.id,
         ));
     }
     if task.risk.contains(&TaskRisk::BlastRadius) {
@@ -1099,6 +1274,52 @@ mod risk_proof_tests {
         task.notes = "[2026-09-10] 🧪 PLATFORM_PROOF macOS command: cargo test -p cas --lib; result: PASS\n[2026-09-10] 🧪 LOADED_PROOF whole target under -j16, 3 loops; result: PASS".into();
         validate_risk_close_proofs(&task, &[], std::path::Path::new("."))
             .expect("complete proof notes should pass");
+    }
+
+    #[test]
+    fn platform_proof_accepts_typed_xcodebuild_pass_receipt() {
+        let mut task = Task::new("cas-xcodebuild-proof".into(), "xcodebuild proof".into());
+        task.risk = vec![TaskRisk::Platform];
+        task.notes =
+            "[2026-09-14] 🧪 PLATFORM_PROOF macOS xcodebuild -scheme App test; PASS".into();
+
+        validate_risk_close_proofs(&task, &[], std::path::Path::new("."))
+            .expect("a typed xcodebuild PASS receipt should satisfy platform risk");
+    }
+
+    #[test]
+    fn loaded_proof_accepts_typed_non_rust_target_receipt() {
+        let mut task = Task::new("cas-non-rust-proof".into(), "non-Rust proof".into());
+        task.risk = vec![TaskRisk::Concurrency];
+        task.notes =
+            "[2026-09-14] 🧪 LOADED_PROOF non-Rust target: pnpm test -j16; 3 runs; PASS".into();
+
+        validate_risk_close_proofs(&task, &[], std::path::Path::new("."))
+            .expect("a typed non-Rust -j16 receipt should satisfy concurrency risk");
+    }
+
+    #[test]
+    fn incomplete_typed_receipts_name_the_missing_evidence() {
+        let mut task = Task::new("cas-incomplete-platform-proof".into(), "proof diagnostics".into());
+        task.risk = vec![TaskRisk::Platform];
+        task.notes = "[2026-09-14] 🧪 PLATFORM_PROOF macOS result: PASS".into();
+        let error = validate_risk_close_proofs(&task, &[], std::path::Path::new("."))
+            .expect_err("a platform receipt without a command must remain rejected");
+        assert!(
+            error.contains("recognized platform command")
+                && error.contains("xcodebuild"),
+            "platform diagnostics must identify the missing command evidence: {error}"
+        );
+
+        task.id = "cas-incomplete-loaded-proof".into();
+        task.risk = vec![TaskRisk::Concurrency];
+        task.notes = "[2026-09-14] 🧪 LOADED_PROOF non-Rust target: pnpm test -j16; 2 runs; PASS".into();
+        let error = validate_risk_close_proofs(&task, &[], std::path::Path::new("."))
+            .expect_err("a loaded receipt with fewer than three runs must remain rejected");
+        assert!(
+            error.contains("at least 3 loops/runs"),
+            "loaded diagnostics must identify the missing repetition evidence: {error}"
+        );
     }
 
     fn scoped_proof_fixture() -> tempfile::TempDir {

@@ -176,7 +176,10 @@ name the blocking step in the operator timeline, and require its receipt.
    PDF endpoints, and cross-origin or scheme-changing redirects are rejected.
    When the current hub file receipt omits `download_url`, the adapter may use
    authenticated `mecha_read` by the returned file ID; otherwise it fails
-   explicitly before treating the upload as verified.
+   explicitly before treating the upload as verified. Bound that fallback read
+   inclusively from the User root Slack timestamp as RFC3339 `since`, preserving
+   fractional precision so old channel history is excluded while its replies
+   remain available; reject an invalid root timestamp before any post.
    If the hub cannot complete publication, preserve the draft and partial
    receipts and report blocked. Use MechaCassy's default `cas-internal` channel,
    retain `C0B44GUKDK2` only for verification, and save four Slack POSTED

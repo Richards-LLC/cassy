@@ -105,8 +105,11 @@ local audit host cannot build Darwin.
    directory. The adapter must download the returned explicit `download_url`, or
    re-read the uploaded file by its returned ID through authenticated `mecha_read`
    when the current hub receipt omits a download URL, and compare the bytes and
-   decoded page count before writing that receipt. A message permalink is not a
-   PDF endpoint; if neither verified path is available, fail explicitly. The
+   decoded page count before writing that receipt. Bound that fallback read
+   inclusively from the User root Slack timestamp as RFC3339 `since`, preserving
+   fractional precision so old channel history is excluded while its replies are
+   included. A message permalink is not a PDF endpoint; if neither verified path
+   is available, fail explicitly. The
    adapter sends hub credentials only to the configured MCP origin (with the
    explicit same-origin loopback exception used by tests), never to external
    signed/private-provider URLs; it rejects plaintext endpoints outside that test

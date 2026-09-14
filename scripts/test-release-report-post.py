@@ -19,6 +19,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 ADAPTER = ROOT / "scripts" / "release-report-post.py"
 PDF = ROOT / "docs" / "release-reports" / "v3.19.0.pdf"
+USER_THREAD = "1710000000.000001"
+DEV_THREAD = "1710000000.000010"
+OLD_THREAD = "1709999999.999999"
+NEW_REPLY = "1710000000.000002"
+READ_SINCE = "2024-03-09T16:00:00.000001Z"
 
 
 class StubState:
@@ -31,6 +36,8 @@ class StubState:
         self.include_download_url = True
         self.read_mode = "valid"
         self.read_pdf = pdf
+        self.read_since = None
+        self.read_messages: list[str] = []
 
 
 def envelope(result: dict) -> bytes:
@@ -101,9 +108,15 @@ def handler_for(state: StubState):
                 if tool_name == "mecha_read":
                     arguments = request["params"]["arguments"]
                     assert arguments["channel"] == "cas-internal"
+                    assert arguments["since"] == READ_SINCE
                     assert arguments["include_files"] is True
+                    assert arguments["include_threads"] is True
                     assert arguments["max_file_bytes"] == 4 * 1024 * 1024
                     assert arguments["max_files"] == 50
+                    state.read_since = arguments["since"]
+                    # The hub's bounded response excludes older roots while
+                    # retaining the selected User root and its reply.
+                    state.read_messages = [USER_THREAD, NEW_REPLY]
                     read_file = {
                         "file_id": "F-report",
                         "size_bytes": len(state.read_pdf),
@@ -123,6 +136,18 @@ def handler_for(state: StubState):
                                 "type": "text",
                                 "text": json.dumps(
                                     {
+                                        "messages": [
+                                            {
+                                                "message_id": USER_THREAD,
+                                                "thread_id": USER_THREAD,
+                                                "parent_message_id": None,
+                                            },
+                                            {
+                                                "message_id": NEW_REPLY,
+                                                "thread_id": USER_THREAD,
+                                                "parent_message_id": USER_THREAD,
+                                            },
+                                        ],
                                         "files": [
                                             read_file
                                         ]
@@ -141,7 +166,7 @@ def handler_for(state: StubState):
                 arguments = request["params"]["arguments"]
                 assert tool_name == "mecha_post"
                 if arguments["kind"] == "file":
-                    assert arguments["reply_to"] == "user-thread"
+                    assert arguments["reply_to"] == USER_THREAD
                     assert arguments["file"]["content_encoding"] == "base64"
                     assert base64.b64decode(arguments["file"]["content"]) == state.pdf
                     file_receipt = {
@@ -158,7 +183,7 @@ def handler_for(state: StubState):
                         "kind": "file",
                         "message": {
                             "message_id": "file-message",
-                            "thread_id": "user-thread",
+                            "thread_id": USER_THREAD,
                             "permalink": "https://example.test/files/report.pdf",
                         },
                     }
@@ -175,7 +200,7 @@ def handler_for(state: StubState):
                     }
                 else:
                     assert arguments["kind"] == "message"
-                    assert arguments["reply_to"] == "dev-thread"
+                    assert arguments["reply_to"] == DEV_THREAD
                     assert "https://github.com/Richards-LLC/cassy/blob/main/docs/release-reports/v9.99.0.html" in arguments["text"]
                     result = {
                         "_id": request_id,
@@ -189,7 +214,7 @@ def handler_for(state: StubState):
                                         "kind": "message",
                                         "message": {
                                             "message_id": "html-message",
-                                            "thread_id": "dev-thread",
+                                            "thread_id": DEV_THREAD,
                                             "permalink": "https://example.test/messages/html",
                                         },
                                     }
@@ -319,7 +344,13 @@ def run_download_policy_proof() -> None:
     print("release-report-post transport policy: 5 boundary cases passed")
 
 
-def run_adapter(server: ThreadingHTTPServer, state: StubState, remote_pdf: bytes):
+def run_adapter(
+    server: ThreadingHTTPServer,
+    state: StubState,
+    remote_pdf: bytes,
+    user_thread: str = USER_THREAD,
+    dev_thread: str = DEV_THREAD,
+):
     state.remote_pdf = remote_pdf
     state.requests.clear()
     state.download_requests.clear()
@@ -339,8 +370,8 @@ def run_adapter(server: ThreadingHTTPServer, state: StubState, remote_pdf: bytes
             {
                 "CAS_RELEASE_TRAIN_REPORT_MCP_URL": f"http://127.0.0.1:{server.server_port}",
                 "CAS_RELEASE_TRAIN_REPORT_RECEIPT": str(receipt),
-                "CAS_RELEASE_TRAIN_REPORT_USER_THREAD_TS": "user-thread",
-                "CAS_RELEASE_TRAIN_REPORT_DEV_THREAD_TS": "dev-thread",
+                "CAS_RELEASE_TRAIN_REPORT_USER_THREAD_TS": user_thread,
+                "CAS_RELEASE_TRAIN_REPORT_DEV_THREAD_TS": dev_thread,
                 "CAS_CREDENTIALS_FILE": str(credentials),
                 "CAS_RELEASE_TRAIN_MECHA_TOKEN_ENV": "MECHA_SLACK_TOKEN_TEST",
                 "CAS_RELEASE_TRAIN_REPORT_REPO": "Richards-LLC/cassy",
@@ -349,7 +380,7 @@ def run_adapter(server: ThreadingHTTPServer, state: StubState, remote_pdf: bytes
         environment.pop("MECHA_SLACK_TOKEN_TEST", None)
         environment.pop("MECHA_VERCEL_BYPASS", None)
         result = subprocess.run(
-            [sys.executable, str(ADAPTER), "v9.99.0", str(PDF), str(html), "user-thread", "dev-thread"],
+            [sys.executable, str(ADAPTER), "v9.99.0", str(PDF), str(html), user_thread, dev_thread],
             cwd=ROOT,
             env=environment,
             text=True,
@@ -377,8 +408,8 @@ def main() -> int:
         assert fields["TAG"] == "v9.99.0"
         assert fields["PDF_FILE_ID"] == "F-report"
         assert fields["HTML_FILE_ID"] == "html-message"
-        assert fields["USER_THREAD_TS"] == "user-thread"
-        assert fields["DEV_THREAD_TS"] == "dev-thread"
+        assert fields["USER_THREAD_TS"] == USER_THREAD
+        assert fields["DEV_THREAD_TS"] == DEV_THREAD
         assert len(fields["PDF_SHA256"]) == 64
         assert int(fields["PAGE_COUNT"]) > 0
         assert fields["PDF_SIZE_BYTES"] == str(len(pdf))
@@ -420,6 +451,9 @@ def main() -> int:
         assert fields["PDF_REMOTE_SIZE_BYTES"] == fields["PDF_SIZE_BYTES"]
         assert fields["PDF_REMOTE_PAGE_COUNT"] == fields["PAGE_COUNT"]
         assert state.download_requests == []
+        assert state.read_since == READ_SINCE
+        assert state.read_messages == [USER_THREAD, NEW_REPLY]
+        assert OLD_THREAD not in state.read_messages
         methods = [request.get("method") for request in state.requests]
         assert methods == [
             "initialize",
@@ -455,7 +489,17 @@ def main() -> int:
             ], mode
         state.read_mode = "valid"
         state.read_pdf = pdf
-        print("release-report-post stub: 6 integrity/endpoint + 5 hub-read scenarios passed")
+        for invalid_thread in ("not-a-slack-timestamp", "1710000000.1234567"):
+            result, fields = run_adapter(server, state, pdf, user_thread=invalid_thread)
+            assert result.returncode != 0
+            assert "USER_THREAD_TS must be a valid Slack timestamp" in result.stderr
+            assert fields is None
+            assert state.requests == []
+            assert state.download_requests == []
+        print(
+            "release-report-post stub: 6 integrity/endpoint + 6 hub-read "
+            "+ 2 timestamp-boundary scenarios passed"
+        )
     finally:
         server.shutdown()
         thread.join(timeout=5)

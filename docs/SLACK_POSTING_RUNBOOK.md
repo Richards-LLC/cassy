@@ -79,8 +79,11 @@ thread permalinks. The remote PDF fields are written only after the adapter
 downloads the transport-returned explicit `download_url`, or re-reads the
 uploaded file by its returned ID through authenticated `mecha_read` when the
 current hub receipt omits a download URL, and proves exact bytes plus PDF
-decode/page count. A local-only hash, message permalink, or successful upload
-response is not enough; if neither verified path is available, fail explicitly.
+decode/page count. That fallback read uses an inclusive RFC3339 `since` derived
+from the User root Slack timestamp, preserving its fractional precision so old
+channel history is not scanned while replies to that root remain available. A
+local-only hash, message permalink, or successful upload response is not
+enough; if neither verified path is available, fail explicitly.
 The adapter sends hub Authorization and Vercel
 bypass headers only to the configured MCP origin (with the explicit same-origin
 loopback exception used by tests). External signed or private-provider HTTPS

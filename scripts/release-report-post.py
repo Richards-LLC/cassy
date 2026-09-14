@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+from datetime import datetime, timezone
 import hashlib
 import http.client
 import ipaddress
@@ -35,6 +36,7 @@ DEFAULT_REPO = "Richards-LLC/cassy"
 MCP_PROTOCOL_VERSION = "2025-06-18"
 MAX_REMOTE_PDF_BYTES = 32 * 1024 * 1024
 MAX_HUB_FILE_BYTES = 4 * 1024 * 1024
+SLACK_TIMESTAMP = re.compile(r"^(\d+)(?:\.(\d{1,6}))?$")
 
 
 class AdapterError(RuntimeError):
@@ -74,6 +76,19 @@ def is_loopback(host: str) -> bool:
         return ipaddress.ip_address(host).is_loopback
     except ValueError:
         return False
+
+
+def slack_timestamp_since(value: str) -> str:
+    match = SLACK_TIMESTAMP.fullmatch(value)
+    if not match:
+        fail("USER_THREAD_TS must be a valid Slack timestamp (seconds[.fraction])")
+    seconds, fraction = match.groups()
+    try:
+        timestamp = datetime.fromtimestamp(int(seconds), tz=timezone.utc)
+    except (OverflowError, OSError, ValueError):
+        fail("USER_THREAD_TS must be a valid Slack timestamp (seconds[.fraction])")
+    timestamp = timestamp.replace(microsecond=int((fraction or "").ljust(6, "0")))
+    return timestamp.isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 
 class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -350,13 +365,14 @@ class McpClient:
                     return decoded
         fail(f"MechaCassy tool {name} returned no JSON envelope")
 
-    def read_file(self, channel: str, file_id: str) -> bytes:
+    def read_file(self, channel: str, file_id: str, since: str) -> bytes:
         """Read an uploaded file through the hub's authenticated file packer."""
 
         result = self.tool(
             "mecha_read",
             {
                 "channel": channel,
+                "since": since,
                 "include_files": True,
                 "include_threads": True,
                 "max_messages": 500,
@@ -460,6 +476,7 @@ def verify_remote_pdf(
     channel: str,
     file_id: str,
     download_url: str | None,
+    since: str,
     local_bytes: bytes,
     local_sha: str,
     local_pages: int,
@@ -469,7 +486,7 @@ def verify_remote_pdf(
     remote_bytes = (
         client.download(download_url)
         if download_url
-        else client.read_file(channel, file_id)
+        else client.read_file(channel, file_id, since)
     )
     remote_size = len(remote_bytes)
     if remote_size != len(local_bytes):
@@ -555,6 +572,7 @@ def main(argv: list[str]) -> int:
             return 2
 
     try:
+        read_since = slack_timestamp_since(user_thread)
         pdf_bytes = pdf_path.read_bytes()
         html_bytes = html_path.read_bytes()
         pdf_sha = sha256(pdf_bytes)
@@ -601,7 +619,7 @@ def main(argv: list[str]) -> int:
         )
         pdf_file_id, pdf_permalink, pdf_download_url = file_receipt(pdf_envelope)
         remote_pdf_sha, remote_pdf_size, remote_pdf_pages = verify_remote_pdf(
-            client, channel, pdf_file_id, pdf_download_url, pdf_bytes, pdf_sha, pages
+            client, channel, pdf_file_id, pdf_download_url, read_since, pdf_bytes, pdf_sha, pages
         )
         html_envelope = client.tool(
             "mecha_post",

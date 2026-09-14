@@ -20,6 +20,8 @@ use walkdir::WalkDir;
 use crate::config::FactoryConfig;
 
 const QUARANTINE_PREFIX: &str = ".cas-target-gc-";
+const MANAGED_BRANCH_PREFIXES: [&str; 2] = ["epic/", "release/"];
+const MANAGED_WORKTREE_PREFIXES: [&str; 2] = ["epic-", "release-"];
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TargetCachePolicy {
@@ -383,6 +385,7 @@ fn discover_caches(
             .filter(|path| path.exists())
             .cloned(),
     );
+    roots.extend(discover_managed_git_worktrees(repo_root, cas_root));
     roots.sort();
     roots.dedup();
     let mut caches = Vec::new();
@@ -410,6 +413,131 @@ fn discover_caches(
         }
     }
     caches
+}
+
+/// Enumerate linked checkouts that Cassy owns by convention, including ones
+/// not yet represented in a worker/store record. Git is the source of truth
+/// for detached release worktrees; branch/path filters keep unrelated user
+/// worktrees outside the reclamation boundary.
+fn discover_managed_git_worktrees(repo_root: &Path, cas_root: &Path) -> Vec<PathBuf> {
+    let Some(common_git_dir) = git_common_dir(repo_root) else {
+        return Vec::new();
+    };
+    let worktrees = crate::worktree::GitOperations::new(repo_root.to_path_buf())
+        .list_worktrees()
+        .unwrap_or_default();
+    worktrees
+        .into_iter()
+        .filter(|worktree| !worktree.is_bare)
+        .filter(|worktree| is_linked_worktree_for_repo(&worktree.path, &common_git_dir))
+        .filter(|worktree| {
+            worktree.branch.as_deref().is_some_and(|branch| {
+                MANAGED_BRANCH_PREFIXES
+                    .iter()
+                    .any(|prefix| branch.starts_with(prefix))
+            }) || managed_worktree_path(&worktree.path, cas_root)
+        })
+        .map(|worktree| {
+            if worktree.path.is_absolute() {
+                worktree.path
+            } else {
+                repo_root.join(worktree.path)
+            }
+        })
+        .collect()
+}
+
+fn git_common_dir(repo_root: &Path) -> Option<PathBuf> {
+    let output = std::process::Command::new("git")
+        .args(["rev-parse", "--git-common-dir"])
+        .current_dir(repo_root)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let raw = std::str::from_utf8(&output.stdout).ok()?.trim();
+    let path = Path::new(raw);
+    let path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        repo_root.join(path)
+    };
+    path.canonicalize().ok()
+}
+
+/// Confirm that a listed path is still a linked checkout of this repository.
+/// A path replaced by a symlink is retained for `scan_cache` to report as
+/// unsafe, while a regular path without Git's linked-worktree marker is not
+/// treated as owned merely because a stale Git record names it.
+fn is_linked_worktree_for_repo(path: &Path, common_git_dir: &Path) -> bool {
+    let Ok(metadata) = fs::symlink_metadata(path) else {
+        return false;
+    };
+    if metadata.file_type().is_symlink() {
+        return true;
+    }
+    if !metadata.is_dir() {
+        return false;
+    }
+    let git_file = path.join(".git");
+    let Ok(git_metadata) = fs::symlink_metadata(&git_file) else {
+        return false;
+    };
+    if git_metadata.file_type().is_symlink() || !git_metadata.is_file() {
+        return false;
+    }
+    let Ok(contents) = fs::read_to_string(git_file) else {
+        return false;
+    };
+    let Some(raw_git_dir) = contents
+        .lines()
+        .find_map(|line| line.strip_prefix("gitdir: "))
+    else {
+        return false;
+    };
+    let git_dir = Path::new(raw_git_dir);
+    let git_dir = if git_dir.is_absolute() {
+        git_dir.to_path_buf()
+    } else {
+        path.join(git_dir)
+    };
+    let Ok(git_dir) = git_dir.canonicalize() else {
+        return false;
+    };
+    let Ok(worktrees_dir) = common_git_dir.join("worktrees").canonicalize() else {
+        return false;
+    };
+    if git_dir.parent() != Some(worktrees_dir.as_path()) {
+        return false;
+    }
+    let Ok(admin_gitdir) = fs::read_to_string(git_dir.join("gitdir")) else {
+        return false;
+    };
+    let admin_gitdir = admin_gitdir.trim();
+    let admin_gitdir = Path::new(admin_gitdir);
+    let admin_gitdir = if admin_gitdir.is_absolute() {
+        admin_gitdir.to_path_buf()
+    } else {
+        git_dir.join(admin_gitdir)
+    };
+    let Ok(admin_gitdir) = admin_gitdir.canonicalize() else {
+        return false;
+    };
+    let Ok(checkout_gitdir) = path.join(".git").canonicalize() else {
+        return false;
+    };
+    admin_gitdir == checkout_gitdir
+}
+
+fn managed_worktree_path(path: &Path, cas_root: &Path) -> bool {
+    path.parent() == Some(cas_root)
+        && path.file_name().is_some_and(|name| {
+            let name = name.to_string_lossy();
+            MANAGED_WORKTREE_PREFIXES
+                .iter()
+                .any(|prefix| name.starts_with(prefix))
+        })
 }
 
 fn scan_error_record(
@@ -573,6 +701,19 @@ fn filesystem_capacity(_path: &Path) -> io::Result<(u64, u64)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn git(repo: &Path, args: &[&str]) {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .expect("git must be available for worktree discovery coverage");
+        assert!(
+            output.status.success(),
+            "git command failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 
     fn policy() -> TargetCachePolicy {
         TargetCachePolicy {
@@ -742,6 +883,192 @@ mod tests {
         assert_eq!(report.caches.len(), 1);
         assert_eq!(report.caches[0].worktree, custom.canonicalize().unwrap());
         assert_eq!(report.caches[0].bytes, 8);
+    }
+
+    #[test]
+    fn git_managed_epic_and_release_worktree_targets_are_discovered_but_unrelated_are_ignored() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        let cas_root = repo.join(".cas");
+        fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "--quiet"]);
+        git(&repo, &["config", "user.email", "cassy@example.invalid"]);
+        git(&repo, &["config", "user.name", "Cassy"]);
+        fs::write(repo.join("README"), b"fixture").unwrap();
+        git(&repo, &["add", "README"]);
+        git(&repo, &["commit", "--quiet", "-m", "fixture"]);
+        fs::create_dir_all(&cas_root).unwrap();
+
+        let epic = temp.path().join("external-epic");
+        git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                "-b",
+                "epic/cas-868-gc",
+                epic.to_str().unwrap(),
+            ],
+        );
+        fs::create_dir_all(epic.join("target")).unwrap();
+        fs::write(epic.join("target/epic-artifact"), b"epic").unwrap();
+
+        let release = cas_root.join("release-v3.25.5");
+        git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                "--detach",
+                release.to_str().unwrap(),
+                "HEAD",
+            ],
+        );
+        fs::create_dir_all(release.join("target")).unwrap();
+        fs::write(release.join("target/release-artifact"), b"release").unwrap();
+
+        let unrelated = temp.path().join("feature-worktree");
+        git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                "-b",
+                "feature/unrelated",
+                unrelated.to_str().unwrap(),
+            ],
+        );
+        fs::create_dir_all(unrelated.join("target")).unwrap();
+        fs::write(unrelated.join("target/unrelated-artifact"), b"noise").unwrap();
+
+        let caches = discover_caches(&repo, &cas_root, &[]);
+        let worktrees: HashSet<_> = caches.iter().map(|cache| cache.worktree.clone()).collect();
+        assert!(worktrees.contains(&epic.canonicalize().unwrap()));
+        assert!(worktrees.contains(&release.canonicalize().unwrap()));
+        assert!(!worktrees.contains(&unrelated.canonicalize().unwrap()));
+        assert_eq!(caches.len(), 2);
+    }
+
+    #[test]
+    fn stale_git_worktree_path_reuse_is_not_treated_as_owned() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        let cas_root = repo.join(".cas");
+        fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "--quiet"]);
+        git(&repo, &["config", "user.email", "cassy@example.invalid"]);
+        git(&repo, &["config", "user.name", "Cassy"]);
+        fs::write(repo.join("README"), b"fixture").unwrap();
+        git(&repo, &["add", "README"]);
+        git(&repo, &["commit", "--quiet", "-m", "fixture"]);
+        fs::create_dir_all(&cas_root).unwrap();
+
+        let reused = temp.path().join("reused-epic");
+        git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                "-b",
+                "epic/cas-868-reused",
+                reused.to_str().unwrap(),
+            ],
+        );
+        fs::remove_dir_all(&reused).unwrap();
+        fs::create_dir_all(reused.join("target")).unwrap();
+        fs::write(reused.join("target/unrelated-artifact"), b"keep").unwrap();
+
+        let report = inspect(
+            &cas_root,
+            TargetCachePolicy {
+                high_watermark_percent: 1,
+                low_watermark_percent: 0,
+                min_idle_secs: 0,
+                retention_count: 0,
+            },
+            &[],
+            &[],
+            true,
+        )
+        .unwrap();
+        assert!(report.caches.is_empty());
+        assert!(reused.join("target/unrelated-artifact").exists());
+    }
+
+    // Git-linked worktrees are task-owned fixtures. The explicit live root
+    // models an active worker; the detached release checkout is stale and is
+    // safe to reclaim after normal liveness/recency revalidation.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn git_discovered_stale_release_target_is_reclaimed_while_active_epic_is_preserved() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        let cas_root = repo.join(".cas");
+        fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "--quiet"]);
+        git(&repo, &["config", "user.email", "cassy@example.invalid"]);
+        git(&repo, &["config", "user.name", "Cassy"]);
+        fs::write(repo.join("README"), b"fixture").unwrap();
+        git(&repo, &["add", "README"]);
+        git(&repo, &["commit", "--quiet", "-m", "fixture"]);
+        fs::create_dir_all(&cas_root).unwrap();
+
+        let epic = temp.path().join("external-epic");
+        git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                "-b",
+                "epic/cas-868-active",
+                epic.to_str().unwrap(),
+            ],
+        );
+        fs::create_dir_all(epic.join("target")).unwrap();
+        fs::write(epic.join("target/active-artifact"), b"keep").unwrap();
+
+        let release = cas_root.join("release-v3.25.5");
+        git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                "--detach",
+                release.to_str().unwrap(),
+                "HEAD",
+            ],
+        );
+        fs::create_dir_all(release.join("target")).unwrap();
+        fs::write(release.join("target/stale-artifact"), b"drop").unwrap();
+
+        let policy = TargetCachePolicy {
+            high_watermark_percent: 1,
+            low_watermark_percent: 0,
+            min_idle_secs: 0,
+            retention_count: 0,
+        };
+        let mut report =
+            inspect(&cas_root, policy, &[], std::slice::from_ref(&epic), false).unwrap();
+        assert_eq!(report.caches.len(), 2);
+        assert!(report.caches.iter().any(|cache| {
+            cache.worktree == epic.canonicalize().unwrap()
+                && cache.disposition == CacheDisposition::LiveProcess
+        }));
+        assert!(report.caches.iter().any(|cache| {
+            cache.worktree == release.canonicalize().unwrap()
+                && cache.disposition == CacheDisposition::Selected
+        }));
+
+        cleanup_selected(&cas_root, &mut report, policy, std::slice::from_ref(&epic)).unwrap();
+        assert!(epic.join("target/active-artifact").exists());
+        assert!(!release.join("target").exists());
+        assert!(release.join("README").exists());
     }
 
     // Process liveness is read from Linux `/proc`; other platforms

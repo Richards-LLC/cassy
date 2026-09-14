@@ -148,6 +148,23 @@ impl TaskStore for MockTaskStore {
         Ok(now)
     }
 
+    fn append_note(&self, task_id: &str, formatted_note: &str) -> Result<DateTime<Utc>> {
+        self.check_error()?;
+        let mut tasks = self.tasks.write().unwrap();
+        let task = tasks
+            .get_mut(task_id)
+            .ok_or_else(|| StoreError::NotFound(task_id.to_string()))?;
+        if task.notes.is_empty() {
+            task.notes = formatted_note.to_string();
+        } else {
+            task.notes.push_str("\n\n");
+            task.notes.push_str(formatted_note);
+        }
+        let now = Utc::now();
+        task.updated_at = now;
+        Ok(now)
+    }
+
     fn delete(&self, id: &str) -> Result<()> {
         self.check_error()?;
         let mut tasks = self.tasks.write().unwrap();

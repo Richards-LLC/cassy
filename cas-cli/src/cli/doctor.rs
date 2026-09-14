@@ -8393,6 +8393,13 @@ mod tests {
         ) -> crate::store::Result<chrono::DateTime<chrono::Utc>> {
             self.inner.update(task)
         }
+        fn append_note(
+            &self,
+            task_id: &str,
+            formatted_note: &str,
+        ) -> crate::store::Result<chrono::DateTime<chrono::Utc>> {
+            self.inner.append_note(task_id, formatted_note)
+        }
         fn delete(&self, id: &str) -> crate::store::Result<()> {
             self.inner.delete(id)
         }

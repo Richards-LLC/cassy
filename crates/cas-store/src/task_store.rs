@@ -1041,6 +1041,40 @@ impl TaskStore for SqliteTaskStore {
         }) // with_write_retry
     }
 
+    fn append_note(&self, task_id: &str, formatted_note: &str) -> Result<DateTime<Utc>> {
+        self.append_note_with_mutation_receipt(task_id, formatted_note, "")
+    }
+
+    fn append_note_with_mutation_receipt(
+        &self,
+        task_id: &str,
+        formatted_note: &str,
+        receipt_id: &str,
+    ) -> Result<DateTime<Utc>> {
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        crate::shared_db::with_immediate_write_txn(&conn, |tx| {
+            let now = Utc::now();
+            let rows = tx.execute(
+                "UPDATE tasks
+                 SET notes = CASE
+                     WHEN notes = '' THEN ?1
+                     ELSE notes || char(10) || char(10) || ?1
+                 END,
+                 updated_at = ?2
+                 WHERE id = ?3",
+                params![formatted_note, now.to_rfc3339(), task_id],
+            )?;
+            if rows == 0 {
+                return Err(StoreError::TaskNotFound(task_id.to_string()));
+            }
+
+            if !receipt_id.is_empty() {
+                Self::record_mutation_receipt_with_conn(tx, receipt_id, task_id)?;
+            }
+            Ok(now)
+        })
+    }
+
     fn delete(&self, id: &str) -> Result<()> {
         crate::shared_db::with_write_retry(|| {
             let conn = crate::shared_db::lock_connection(&self.conn)?;

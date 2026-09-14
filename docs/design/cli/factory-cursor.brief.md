@@ -40,16 +40,20 @@ fixture or snapshot evidence is not a substitute for that flow.
 
 Implementation receipt:
 
-`terminal-qa: PASS cas-31fa-version-surface · 11 runs · 0 fail · 0 warn · 0 allowed · /home/pippenz/.cas/artifacts/cas-31fa/terminal-qa-version2/report.json`
+`terminal-qa: PASS cas-31fa-version-final · 11 runs · 0 fail · 0 warn · 0 allowed · /home/pippenz/.cas/artifacts/cas-31fa/terminal-qa-version-final/report.json`
 
-The real built binary (`target/debug/cas`, revision `a2e6338` plus the task
-changes) was exercised at 80 and 120 columns, all four palette hints, C
-locale, and `NO_COLOR`. The feature-specific factory TUI requires an
-interactive harness/PTY and was not available to this worker; the scoped
-operator-flow regression therefore remains the durable Rust render capture,
-not a live Codex observation. An exploratory `cas --help` capture was
-rejected by terminal QA for pre-existing help-surface overflow/locale output
-and is not used as evidence for this cursor change.
+The real built binary (`target/debug/cas`, revision
+`e9ae7c89b7ca0f347b7ff4b9da94ad1ff0c1618f`) was exercised at 80 and 120
+columns, all four palette hints, C locale, and `NO_COLOR`. The feature-specific
+factory TUI was also booted in a disposable 120x40 PTY. A hosted prompt could
+not be reached safely: the Linux headful target contains zero tests, strict
+Codex launch rejects the isolated account without `auth.json`, and the isolated
+Claude run timed out during boot before a hosted pane appeared. The durable
+capability record is `/home/pippenz/.cas/artifacts/cas-31fa/capability-work/capability-discovery.md`.
+The render tests remain fixture evidence and do not claim a live Codex
+observation. An exploratory `cas --help` capture was rejected by terminal QA
+for pre-existing help-surface overflow/locale output and is not used as
+evidence for this cursor change.
 
 | Surface | Verdict | Evidence |
 | --- | --- | --- |
@@ -58,4 +62,4 @@ and is not used as evidence for this cursor change.
 | Compact hosted focused pane | PASS | `compact_supervisor_cursor_uses_borderless_content_origin` |
 | Hidden child and modal overlay | PASS | `hidden_child_cursor_stays_hidden_on_the_host`; `modal_overlay_suppresses_host_cursor` |
 | Pane + host resize | PASS | `focused_cursor_survives_pane_and_host_resize` |
-| Live Codex PTY operator flow | NOT EXERCISED | No harness/interactive PTY was available in this worker |
+| Live Codex/Claude PTY operator flow | NOT EXERCISED | Rebuilt boot reached a disposable PTY, but no hosted prompt reached a focused pane; see capability discovery record |

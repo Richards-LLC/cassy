@@ -268,6 +268,11 @@ fn closed_to_non_closed_update_clears_close_cycle_authority() {
         reopened.deliverables.factory_branch_anchor.is_none(),
         "the prior close cycle's commit receipt must be invalidated"
     );
+    assert_eq!(
+        reopened.deliverables.historical_factory_branch_anchors,
+        vec!["old-close-sha"],
+        "invalidated close-cycle identity remains attributable to the task"
+    );
     assert!(
         reopened.deliverables.negative_result.is_none(),
         "reopening must not let a prior negative-result decision exempt fresh work from delivery gates"
@@ -316,6 +321,10 @@ fn awaiting_merge_conflict_rework_clears_all_parked_merge_state() {
     let resumed = store.get(&task.id).unwrap();
     assert_eq!(resumed.status, TaskStatus::InProgress);
     assert!(resumed.deliverables.factory_branch_anchor.is_none());
+    assert_eq!(
+        resumed.deliverables.historical_factory_branch_anchors,
+        vec!["conflicted-sha"]
+    );
     assert!(resumed.deliverables.parked_branch.is_none());
     assert!(!resumed.deliverables.merge_conflicted);
 }

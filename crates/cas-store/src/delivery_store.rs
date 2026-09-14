@@ -776,6 +776,10 @@ mod tests {
         assert_eq!(reopened.status, TaskStatus::Open);
         assert_eq!(reopened.assignee.as_deref(), Some("worker"));
         assert!(reopened.deliverables.factory_branch_anchor.is_none());
+        assert_eq!(
+            reopened.deliverables.historical_factory_branch_anchors,
+            vec!["a".repeat(40)]
+        );
         assert!(reopened.deliverables.parked_branch.is_none());
         assert!(!reopened.pending_worktree_merge);
         assert!(reopened.notes.contains("Decision: changes requested"));
@@ -879,6 +883,10 @@ mod tests {
         assert_eq!(reopened.status, TaskStatus::Open);
         assert_eq!(reopened.assignee.as_deref(), Some("worker"));
         assert!(reopened.deliverables.factory_branch_anchor.is_none());
+        assert_eq!(
+            reopened.deliverables.historical_factory_branch_anchors,
+            vec!["a".repeat(40)]
+        );
         assert!(reopened.notes.contains("Decision: changes requested"));
         assert!(reopened.notes.contains("already merged"));
         assert!(reopened.notes.contains("trailing summary row"));

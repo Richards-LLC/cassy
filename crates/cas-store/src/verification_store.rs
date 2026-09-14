@@ -1928,7 +1928,11 @@ pub fn request_changes_for_parked_delivery(
         .as_deref()
         .unwrap_or("the factory branch")
         .to_string();
-    deliverables.factory_branch_anchor = None;
+    // The active anchor is intentionally invalidated so a new close cycle
+    // cannot reuse it as merge authority. Preserve it separately as task
+    // identity: the declined delivery is still this task's work, and a later
+    // lease must not reclassify its unmerged commit as unrelated lane residue.
+    deliverables.retain_factory_branch_anchor_as_history();
     deliverables.parked_branch = None;
     deliverables.merge_conflicted = false;
     deliverables.review_envelope = None;

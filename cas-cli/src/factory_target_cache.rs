@@ -132,6 +132,7 @@ struct ScannedCache {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 enum CacheOwnership {
     #[default]
+    Unknown,
     Durable,
     GitConventionOnly,
 }
@@ -644,6 +645,12 @@ fn managed_worktree_path(path: &Path, cas_root: &Path) -> bool {
 }
 
 fn ownership_is_current(cas_root: &Path, record: &TargetCacheRecord) -> bool {
+    if matches!(
+        record.ownership,
+        CacheOwnership::Unknown | CacheOwnership::GitConventionOnly
+    ) {
+        return false;
+    }
     let Some(expected_git_admin_dir) = record.git_admin_dir.as_ref() else {
         return true;
     };
@@ -1197,7 +1204,7 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn cleanup_rechecks_git_ownership_after_report_before_rename() {
+    fn cleanup_rechecks_git_ownership_after_report_and_deserialization_before_rename() {
         let temp = tempfile::tempdir().unwrap();
         let repo = temp.path().join("repo");
         let cas_root = repo.join(".cas");
@@ -1231,10 +1238,12 @@ mod tests {
             min_idle_secs: 0,
             retention_count: 0,
         };
-        let mut report =
-            inspect(&cas_root, policy, std::slice::from_ref(&owned), &[], false).unwrap();
+        let report = inspect(&cas_root, policy, std::slice::from_ref(&owned), &[], false).unwrap();
         assert_eq!(report.caches.len(), 1);
         assert_eq!(report.caches[0].disposition, CacheDisposition::Selected);
+        let serialized = serde_json::to_string(&report).unwrap();
+        let mut deserialized: TargetCacheReport = serde_json::from_str(&serialized).unwrap();
+        let mut trusted_report = report;
         git(
             &repo,
             &["worktree", "remove", "--force", owned.to_str().unwrap()],
@@ -1253,9 +1262,14 @@ mod tests {
         fs::create_dir_all(owned.join("target")).unwrap();
         fs::write(owned.join("target/after-replacement"), b"keep").unwrap();
 
-        cleanup_selected(&cas_root, &mut report, policy, &[]).unwrap();
+        cleanup_selected(&cas_root, &mut trusted_report, policy, &[]).unwrap();
         assert_eq!(
-            report.caches[0].disposition,
+            trusted_report.caches[0].disposition,
+            CacheDisposition::OwnershipChanged
+        );
+        cleanup_selected(&cas_root, &mut deserialized, policy, &[]).unwrap();
+        assert_eq!(
+            deserialized.caches[0].disposition,
             CacheDisposition::OwnershipChanged
         );
         assert!(owned.join("target/after-replacement").exists());

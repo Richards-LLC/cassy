@@ -140,6 +140,29 @@ impl TaskStore for NotifyingTaskStore {
         Ok(persisted_at)
     }
 
+    fn append_note(&self, task_id: &str, formatted_note: &str) -> Result<DateTime<Utc>> {
+        let task = self.inner.get(task_id)?;
+        let persisted_at = self.inner.append_note(task_id, formatted_note)?;
+        self.notify_updated(&task, Some(task.status));
+        Ok(persisted_at)
+    }
+
+    fn append_note_with_mutation_receipt(
+        &self,
+        task_id: &str,
+        formatted_note: &str,
+        receipt_id: &str,
+    ) -> Result<DateTime<Utc>> {
+        let task = self.inner.get(task_id)?;
+        let persisted_at = self.inner.append_note_with_mutation_receipt(
+            task_id,
+            formatted_note,
+            receipt_id,
+        )?;
+        self.notify_updated(&task, Some(task.status));
+        Ok(persisted_at)
+    }
+
     fn update_with_mutation_receipt(&self, task: &Task, receipt_id: &str) -> Result<DateTime<Utc>> {
         let old_status = self.inner.get(&task.id).ok().map(|t| t.status);
         let persisted_at = self.inner.update_with_mutation_receipt(task, receipt_id)?;

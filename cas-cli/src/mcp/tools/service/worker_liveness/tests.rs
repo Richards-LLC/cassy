@@ -17,6 +17,22 @@ fn run(cli: SupervisorCli, text: &str, alive: bool) -> Observation {
     std::fs::write(&path, text).unwrap();
     observe(cli, Some(&path), process(alive), now(), 300)
 }
+fn run_with_unresolved_process(cli: SupervisorCli, text: &str) -> Observation {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("transcript.jsonl");
+    std::fs::write(&path, text).unwrap();
+    observe(
+        cli,
+        Some(&path),
+        ProcessEvidence {
+            alive: None,
+            cpu_busy: None,
+            detail: "worker harness pid unresolved; registered pid is MCP server".into(),
+        },
+        now(),
+        300,
+    )
+}
 #[test]
 fn recorded_codex_completion_beats_fresh_heartbeat_and_file_write() {
     let fixture =
@@ -114,6 +130,20 @@ fn missing_evidence_never_claims_execution_or_death() {
     assert!(got.evidence.contains("unavailable"));
 }
 #[test]
+fn unresolved_codex_process_keeps_recent_execution_evidence() {
+    let started = "{\"timestamp\":\"2026-09-10T19:00:59Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"}}\n";
+    assert_eq!(
+        run_with_unresolved_process(SupervisorCli::Codex, started).state,
+        Liveness::Executing
+    );
+
+    let completed = "{\"timestamp\":\"2026-09-10T19:00:59Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\"}}\n";
+    assert_eq!(
+        run_with_unresolved_process(SupervisorCli::Codex, completed).state,
+        Liveness::WaitingForInput
+    );
+}
+#[test]
 fn bounded_tail_recovers_after_large_utf8_record_and_ignores_sidechain() {
     let mut text = "λ".repeat(TAIL_BYTES as usize);
     text.push_str("\n{\"timestamp\":\"2026-09-10T18:00:00Z\",\"type\":\"system\",\"subtype\":\"turn_duration\"}\n");
@@ -208,4 +238,124 @@ fn sidecars_cannot_stand_in_for_the_interactive_harness() {
     assert!(!is_harness_command(b"/vendor/bin/codex-code-mode-host\0"));
     assert!(!is_harness_command(b"cas\0serve\0"));
     assert!(!is_harness_command(b"cargo\0test\0codex\0"));
+}
+
+#[test]
+fn unresolved_mcp_pid_is_not_a_dead_harness() {
+    let selection = select_harness_process(
+        Some(ProcessCandidate {
+            pid: 11,
+            alive: false,
+            harness: false,
+        }),
+        None,
+        None,
+    );
+    assert_eq!(
+        selection,
+        ProcessSelection::Exited("registered worker harness exited"),
+        "a direct hook row still preserves genuine harness exit"
+    );
+
+    let selection = select_harness_process(
+        None,
+        Some(ProcessCandidate {
+            pid: 22,
+            alive: true,
+            harness: false,
+        }),
+        None,
+    );
+    assert_eq!(
+        selection,
+        ProcessSelection::Unavailable("worker harness parent is not an identified harness"),
+        "an alive but unrecognized parent must not be declared dead"
+    );
+
+    let selection = select_harness_process(
+        Some(ProcessCandidate {
+            pid: 33,
+            alive: true,
+            harness: false,
+        }),
+        None,
+        None,
+    );
+    assert_eq!(
+        selection,
+        ProcessSelection::Unavailable(
+            "worker harness unavailable; registered process is not an identified harness",
+        ),
+        "a recycled live registered PID must remain unresolved"
+    );
+}
+
+#[test]
+fn mcp_parent_ownership_preserves_live_and_dead_classifications() {
+    let live = select_harness_process(
+        None,
+        Some(ProcessCandidate {
+            pid: 42,
+            alive: true,
+            harness: true,
+        }),
+        Some(ProcessCandidate {
+            pid: 43,
+            alive: true,
+            harness: false,
+        }),
+    );
+    assert_eq!(live, ProcessSelection::Found(42));
+
+    let dead = select_harness_process(
+        None,
+        Some(ProcessCandidate {
+            pid: 42,
+            alive: false,
+            harness: false,
+        }),
+        None,
+    );
+    assert_eq!(
+        dead,
+        ProcessSelection::Exited("worker harness parent exited")
+    );
+}
+
+#[test]
+fn process_evidence_adapter_rejects_a_reused_parent_pid() {
+    let mut agent = cas_types::Agent::new("session".into(), "worker".into());
+    agent.pid = Some(10);
+    agent.ppid = Some(20);
+    agent.pid_starttime = Some(123);
+
+    let pid_alive = |pid| matches!(pid, 10 | 20);
+    let pid_matches_fingerprint = |pid, starttime| pid == 10 && starttime == 123;
+    let is_harness = |pid| matches!(pid, 10 | 20);
+    let reused_parent_pid = |_child| Some(99);
+    let probes = ProcessProbes {
+        pid_alive: &pid_alive,
+        pid_matches_fingerprint: &pid_matches_fingerprint,
+        is_harness: &is_harness,
+        parent_pid: &reused_parent_pid,
+    };
+
+    assert_eq!(
+        process_selection_for_agent(&agent, None, &probes),
+        ProcessSelection::Unavailable("worker harness parent is not an identified harness"),
+        "a live parent with a generic harness command is not enough without the MCP child relation"
+    );
+
+    let current_parent_pid = |_child| Some(20);
+    let probes = ProcessProbes {
+        pid_alive: &pid_alive,
+        pid_matches_fingerprint: &pid_matches_fingerprint,
+        is_harness: &is_harness,
+        parent_pid: &current_parent_pid,
+    };
+    assert_eq!(
+        process_selection_for_agent(&agent, None, &probes),
+        ProcessSelection::Found(20),
+        "the recorded MCP child's current parent may prove the live harness"
+    );
 }

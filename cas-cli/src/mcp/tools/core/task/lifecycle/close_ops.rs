@@ -506,59 +506,84 @@ fn contains_word(text: &str, word: &str) -> bool {
         .any(|token| token == word)
 }
 
-fn number_near_label(text: &str, label: &str) -> Option<u32> {
-    for (index, _) in text.match_indices(label) {
-        let after = text[index + label.len()..].trim_start_matches(|character: char| {
-            !character.is_ascii_digit()
-        });
-        if let Some(number) = after
-            .chars()
-            .take_while(|character| character.is_ascii_digit())
-            .collect::<String>()
-            .parse()
-            .ok()
-        {
-            return Some(number);
-        }
+fn proof_field_tokens(field: &str) -> Vec<&str> {
+    field
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .collect()
+}
 
-        let before = text[..index].trim_end_matches(|character: char| {
-            !character.is_ascii_digit()
-        });
-        let mut digits = before
-            .chars()
-            .rev()
-            .take_while(|character| character.is_ascii_digit())
-            .collect::<Vec<_>>();
-        if !digits.is_empty() {
-            digits.reverse();
-            return digits.into_iter().collect::<String>().parse().ok();
-        }
-    }
-    None
+fn has_adjacent_number<F>(text: &str, label: &str, predicate: F) -> bool
+where
+    F: Fn(u32) -> bool,
+{
+    text.split([';', ',', '|']).any(|field| {
+        proof_field_tokens(field).windows(2).any(|window| {
+            let number_matches = |token: &str| token.parse::<u32>().ok().is_some_and(&predicate);
+            (window[0] == label && number_matches(window[1]))
+                || (window[1] == label && number_matches(window[0]))
+        })
+    })
+}
+
+fn has_adjacent_words(text: &str, words: &[&str]) -> bool {
+    text.split([';', ',', '|']).any(|field| {
+        let tokens = proof_field_tokens(field);
+        tokens.windows(words.len()).any(|window| window == words)
+    })
+}
+
+fn has_explicit_nonzero_status(text: &str) -> bool {
+    has_adjacent_words(text, &["exit", "nonzero"])
+        || has_adjacent_words(text, &["status", "nonzero"])
+        || has_adjacent_words(text, &["exit", "non", "zero"])
+        || has_adjacent_words(text, &["status", "non", "zero"])
+        || text.split([';', ',', '|']).any(|field| {
+            let tokens = proof_field_tokens(field);
+            tokens.iter().enumerate().any(|(index, token)| {
+                if *token != "exit" && *token != "status" {
+                    return false;
+                }
+                let value = tokens
+                    .get(index + 1)
+                    .filter(|value| **value == "code")
+                    .and_then(|_| tokens.get(index + 2))
+                    .or_else(|| tokens.get(index + 1))
+                    .and_then(|value| value.parse::<u32>().ok());
+                value.is_some_and(|value| value != 0)
+            })
+        })
+}
+
+fn has_failure_token(text: &str) -> bool {
+    text.split([';', ',', '|']).any(|field| {
+        let tokens = proof_field_tokens(field);
+        tokens.iter().enumerate().any(|(index, token)| {
+            if !matches!(*token, "fail" | "failed" | "failure" | "error" | "errors") {
+                return false;
+            }
+            tokens
+                .get(index.wrapping_sub(1))
+                .and_then(|value| value.parse::<u32>().ok())
+                != Some(0)
+        })
+    })
 }
 
 fn has_passing_result(lower: &str) -> bool {
-    let explicit_failure = [
-        "result: fail",
-        "result=fail",
-        "result: failed",
-        "result=failed",
-        "exit 1",
-        "status 1",
-        "not pass",
-        "no pass",
-    ]
-    .iter()
-    .any(|phrase| lower.contains(phrase));
-    if explicit_failure {
+    if has_explicit_nonzero_status(lower)
+        || has_failure_token(lower)
+        || has_adjacent_words(lower, &["not", "pass"])
+        || has_adjacent_words(lower, &["no", "pass"])
+    {
         return false;
     }
 
     ["pass", "passed", "passing", "success", "successful", "green"]
         .iter()
         .any(|word| contains_word(lower, word))
-        || lower.contains("exit 0")
-        || lower.contains("status 0")
+        || has_adjacent_number(lower, "exit", |value| value == 0)
+        || has_adjacent_number(lower, "status", |value| value == 0)
 }
 
 fn has_platform_command(lower: &str) -> bool {
@@ -570,21 +595,26 @@ fn has_platform_command(lower: &str) -> bool {
         "just", "make", "meson", "mix", "mvn", "node", "npm", "ninja", "pnpm", "pytest",
         "python", "python3", "ruby", "swift", "swiftc", "xcodebuild", "xcrun", "yarn",
     ];
-    if COMMANDS.iter().any(|command| contains_word(lower, command)) {
+    if COMMANDS
+        .iter()
+        .any(|command| proof_field_tokens(lower).contains(command))
+    {
         return true;
     }
 
-    ["command:", "command="]
-        .iter()
-        .filter_map(|marker| lower.split_once(marker).map(|(_, remainder)| remainder))
-        .map(|remainder| remainder.trim_start())
-        .map(|remainder| remainder.split([';', ',', '|']).next().unwrap_or(remainder).trim())
-        .any(|command| {
-            !command.is_empty()
-                && !["pass", "passed", "success", "successful", "exit", "status", "result"]
-                    .iter()
-                    .any(|prefix| command == *prefix || command.starts_with(&format!("{prefix} ")))
-        })
+    lower.split([';', ',', '|']).any(|field| {
+        ["command:", "command="]
+            .iter()
+            .find_map(|marker| field.split_once(marker).map(|(_, remainder)| remainder))
+            .map(str::trim)
+            .and_then(|command| proof_field_tokens(command).first().copied())
+            .is_some_and(|command| {
+                !matches!(
+                    command,
+                    "pass" | "passed" | "success" | "successful" | "exit" | "status" | "result"
+                )
+            })
+    })
 }
 
 fn has_platform_proof_note(notes: &str) -> bool {
@@ -599,37 +629,42 @@ fn has_platform_proof_note(notes: &str) -> bool {
 
 fn has_target_scope(lower: &str) -> bool {
     [
-        "whole target",
-        "entire target",
-        "full target",
-        "all target",
-        "non-rust target",
-        "non rust target",
-        "whole suite",
-        "entire suite",
-        "full suite",
+        &["whole", "target"][..],
+        &["entire", "target"],
+        &["full", "target"],
+        &["all", "target"],
+        &["non", "rust", "target"],
+        &["whole", "suite"],
+        &["entire", "suite"],
+        &["full", "suite"],
     ]
     .iter()
-    .any(|phrase| lower.contains(phrase))
+    .any(|words| has_adjacent_words(lower, words))
 }
 
 fn has_parallelism_16(lower: &str) -> bool {
-    lower.contains("-j16")
-        || lower.contains("-j 16")
-        || number_near_label(lower, "jobs").is_some_and(|number| number == 16)
-        || number_near_label(lower, "parallelism").is_some_and(|number| number == 16)
-        || number_near_label(lower, "concurrency").is_some_and(|number| number == 16)
+    lower.split([';', ',', '|']).any(|field| {
+        let tokens = proof_field_tokens(field);
+        tokens.iter().any(|token| *token == "j16")
+            || tokens
+                .windows(2)
+                .any(|window| window[0] == "j" && window[1] == "16")
+    }) || has_adjacent_number(lower, "jobs", |number| number == 16)
+        || has_adjacent_number(lower, "parallelism", |number| number == 16)
+        || has_adjacent_number(lower, "concurrency", |number| number == 16)
 }
 
 fn has_at_least_three_runs(lower: &str) -> bool {
-    if lower.contains("1 2 3") {
+    if has_adjacent_words(lower, &["1", "2", "3"]) {
         return true;
     }
-    if lower.split(|character: char| !character.is_ascii_alphanumeric()).any(|token| {
-        token
-            .strip_suffix('x')
-            .and_then(|number| number.parse::<u32>().ok())
-            .is_some_and(|number| number >= 3)
+    if lower.split([';', ',', '|']).any(|field| {
+        proof_field_tokens(field).iter().any(|token| {
+            token
+                .strip_suffix('x')
+                .and_then(|number| number.parse::<u32>().ok())
+                .is_some_and(|number| number >= 3)
+        })
     }) {
         return true;
     }
@@ -637,8 +672,8 @@ fn has_at_least_three_runs(lower: &str) -> bool {
     ["loop", "loops", "run", "runs", "iteration", "iterations", "time", "times"]
         .iter()
         .any(|label| {
-            number_near_label(lower, label).is_some_and(|number| number >= 3)
-                || lower.contains(&format!("three {label}"))
+            has_adjacent_number(lower, label, |number| number >= 3)
+                || has_adjacent_words(lower, &["three", label])
         })
 }
 
@@ -1320,6 +1355,55 @@ mod risk_proof_tests {
             error.contains("at least 3 loops/runs"),
             "loaded diagnostics must identify the missing repetition evidence: {error}"
         );
+    }
+
+    #[test]
+    fn proof_receipts_bound_numeric_fields_and_reject_contradictions() {
+        let loaded_negatives = [
+            "whole target; -j16; 2 runs; receipt=1234; PASS",
+            "whole target; -j16; runs; receipt=1234; PASS",
+            "whole target; -j160; 3 runs; PASS",
+            "whole target; -j16; 3 runs; PASS; exit 2",
+            "whole target; -j16; 3 runs; PASS; status=2",
+            "whole target; -j16; 3 runs; PASS; exit code 2",
+        ];
+        for receipt in loaded_negatives {
+            let mut task = Task::new("cas-loaded-negative".into(), "loaded proof".into());
+            task.risk = vec![TaskRisk::Concurrency];
+            task.notes = format!("[2026-09-14] 🧪 LOADED_PROOF {receipt}");
+            assert!(
+                validate_risk_close_proofs(&task, &[], std::path::Path::new(".")).is_err(),
+                "ambiguous or contradictory loaded receipt must be rejected: {receipt}"
+            );
+        }
+
+        let platform_negatives = [
+            "macOS xcodebuild; PASS; exit 2",
+            "macOS npm test; PASS; status=3",
+            "macOS xcodebuild; PASS; exit code 2",
+            "macOS xcodebuild; not pass; result=PASS",
+        ];
+        for receipt in platform_negatives {
+            let mut task = Task::new("cas-platform-negative".into(), "platform proof".into());
+            task.risk = vec![TaskRisk::Platform];
+            task.notes = format!("[2026-09-14] 🧪 PLATFORM_PROOF {receipt}");
+            assert!(
+                validate_risk_close_proofs(&task, &[], std::path::Path::new(".")).is_err(),
+                "contradictory platform receipt must be rejected: {receipt}"
+            );
+        }
+
+        let positive_receipts = [
+            "whole target; cargo test -j16; loops: 4; result=SUCCESS",
+            "non-Rust target: pnpm test --jobs=16; three runs; status 0",
+        ];
+        for receipt in positive_receipts {
+            let mut task = Task::new("cas-loaded-positive".into(), "loaded proof".into());
+            task.risk = vec![TaskRisk::Concurrency];
+            task.notes = format!("[2026-09-14] 🧪 LOADED_PROOF {receipt}");
+            validate_risk_close_proofs(&task, &[], std::path::Path::new("."))
+                .expect("valid cross-ecosystem loaded receipt should pass");
+        }
     }
 
     fn scoped_proof_fixture() -> tempfile::TempDir {

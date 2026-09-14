@@ -1,5 +1,4 @@
 use crate::config::Config;
-use crate::store::find_cas_root;
 use crate::ui::factory::{
     BootConfig, DaemonConfig, FactoryConfig, ForkFirstResult, NotifyBackend, NotifyConfig, attach,
     daemon_log_path, daemonize, fork_first_daemon, run_boot_screen_client,
@@ -28,7 +27,12 @@ pub(super) fn execute_daemon(
     worker_spec_jsons: Vec<String>,
     supervisor_spec_json: Option<String>,
 ) -> Result<()> {
-    let cas_root = find_cas_root()?;
+    // The daemon command is an internal launch path, but it can still be
+    // invoked directly from a repository subdirectory. Carry the same
+    // git-toplevel project root as the normal factory command so its config
+    // cascade and FactoryConfig cannot point at a second nested `.cas`.
+    let project_root = crate::store::find_git_toplevel(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+    let cas_root = crate::store::find_cas_root_from(&project_root)?;
     let cas_config = Config::load(&cas_root).unwrap_or_default();
 
     // Register the project root in the host-scoped known_repos registry so
@@ -88,7 +92,7 @@ pub(super) fn execute_daemon(
             worker_spec_jsons,
             supervisor_spec_json: None,
             user_config: None, // auto-resolve from home dir
-            project_config: Some(cwd.join(".cas").join("config.toml")),
+            project_config: Some(cas_root.join("config.toml")),
         };
         let mut specs = resolve_specs(effective_workers, sources.clone())
             .map_err(|e| anyhow::anyhow!("Failed to resolve worker specs: {e}"))?;
@@ -114,7 +118,7 @@ pub(super) fn execute_daemon(
             worker_spec_jsons: vec![],
             supervisor_spec_json,
             user_config: None, // auto-resolve from home dir
-            project_config: Some(cwd.join(".cas").join("config.toml")),
+            project_config: Some(cas_root.join("config.toml")),
         };
         let mut spec = resolve_supervisor_spec(sources.clone())
             .map_err(|e| anyhow::anyhow!("Failed to resolve supervisor spec: {e}"))?;
@@ -142,7 +146,7 @@ pub(super) fn execute_daemon(
         super::launch_fields_from_spec(&resolved_supervisor_spec);
 
     let config = FactoryConfig {
-        cwd: cwd.to_path_buf(),
+        cwd: project_root,
         workers: effective_workers,
         worker_names,
         supervisor_name: Some(resolved_supervisor_name),

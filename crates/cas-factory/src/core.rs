@@ -73,9 +73,9 @@ impl From<MuxEvent> for FactoryEvent {
     fn from(event: MuxEvent) -> Self {
         match event {
             MuxEvent::PaneOutput { pane_id, data } => FactoryEvent::PaneOutput { pane_id, data },
-            MuxEvent::PaneExited { pane_id, exit_code } => {
-                FactoryEvent::PaneExited { pane_id, exit_code }
-            }
+            MuxEvent::PaneExited {
+                pane_id, exit_code, ..
+            } => FactoryEvent::PaneExited { pane_id, exit_code },
             MuxEvent::FocusChanged { from, to } => FactoryEvent::FocusChanged { from, to },
             MuxEvent::PaneAdded { pane_id } => FactoryEvent::PaneAdded { pane_id },
             MuxEvent::PaneRemoved { pane_id } => FactoryEvent::PaneRemoved { pane_id },

@@ -1631,6 +1631,59 @@ fn kill_all_terminates_a_synthetic_long_lived_child_group() {
     panic!("factory-exit kill_all left synthetic child {child_pid} alive");
 }
 
+#[test]
+fn mux_pane_exit_event_carries_signal_status_from_the_real_pty_child() {
+    let config = crate::pty::PtyConfig {
+        command: "sh".to_string(),
+        args: vec!["-c".to_string(), "kill -TERM $$".to_string()],
+        cwd: Some(PathBuf::from("/tmp")),
+        env: vec![],
+        env_remove: vec![],
+        rows: 24,
+        cols: 80,
+    };
+    let pty = crate::pty::Pty::spawn("exit-signal-worker", config).expect("shell must spawn");
+    let pane = Pane::with_pty(
+        "exit-signal-worker",
+        PaneKind::Worker,
+        pty,
+        24,
+        80,
+        SupervisorCli::Claude,
+    )
+    .expect("worker pane must build");
+    let mut mux = Mux::new(24, 80);
+    mux.add_pane(pane);
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        if let Some(event) = mux.poll() {
+            if let MuxEvent::PaneExited {
+                pane_id,
+                exit_code,
+                exit_signal,
+            } = event
+            {
+                assert_eq!(pane_id, "exit-signal-worker");
+                assert!(
+                    exit_code.is_some(),
+                    "portable status code must remain available"
+                );
+                assert!(
+                    exit_signal.is_some_and(|signal| !signal.is_empty()),
+                    "Mux must preserve the PTY child's signal evidence"
+                );
+                return;
+            }
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "worker exit event did not arrive before deadline"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn graceful_kill_worker_waits_before_escalating_a_term_ignoring_group() {

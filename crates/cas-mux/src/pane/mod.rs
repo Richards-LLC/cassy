@@ -102,6 +102,8 @@ pub struct Pane {
     exited: bool,
     /// Exit code if exited
     exit_code: Option<i32>,
+    /// Signal name if exited due to a signal
+    exit_signal: Option<String>,
     /// Terminal dimensions
     pub(crate) rows: u16,
     pub(crate) cols: u16,
@@ -215,6 +217,7 @@ impl Pane {
             color: None,
             exited: false,
             exit_code: None,
+            exit_signal: None,
             rows,
             cols,
             recorder: None,
@@ -510,6 +513,10 @@ impl Pane {
 
     pub fn exit_code(&self) -> Option<i32> {
         self.exit_code
+    }
+
+    pub fn exit_signal(&self) -> Option<&str> {
+        self.exit_signal.as_deref()
     }
 
     pub fn size(&self) -> (u16, u16) {
@@ -933,8 +940,15 @@ impl Pane {
     /// next process (or simply a redraw of the pane) with mis-routed wheel
     /// events. (cas-e0b9 fix.)
     pub fn mark_exited(&mut self, code: Option<i32>) {
+        self.mark_exited_with_signal(code, None);
+    }
+
+    /// Record process termination with the optional signal supplied by the
+    /// PTY child wait status.
+    pub fn mark_exited_with_signal(&mut self, code: Option<i32>, signal: Option<String>) {
         self.exited = true;
         self.exit_code = code;
+        self.exit_signal = signal;
         self.in_alt_screen = false;
         // Drop any partial-sequence carry too: it belonged to the now-dead
         // process and cannot be completed by the next one.
@@ -946,6 +960,14 @@ impl Pane {
             PaneBackend::Pty(pty) => pty.try_recv(),
             PaneBackend::None => None,
         }?;
+        let exit_signal = if matches!(&event, PtyEvent::Exited(_)) {
+            match &mut self.backend {
+                PaneBackend::Pty(pty) => pty.take_exit_signal(),
+                PaneBackend::None => None,
+            }
+        } else {
+            None
+        };
 
         match &event {
             PtyEvent::Output(data) => {
@@ -955,7 +977,7 @@ impl Pane {
                 }
             }
             PtyEvent::Exited(code) => {
-                self.mark_exited(*code);
+                self.mark_exited_with_signal(*code, exit_signal);
             }
             PtyEvent::Error(_) => {
                 // Abnormal exit: mark exited but preserve any previously
@@ -983,7 +1005,11 @@ impl Pane {
                     self.drain_buf.extend_from_slice(&data);
                 }
                 PtyEvent::Exited(code) => {
-                    self.mark_exited(code);
+                    let signal = match &mut self.backend {
+                        PaneBackend::Pty(pty) => pty.take_exit_signal(),
+                        PaneBackend::None => None,
+                    };
+                    self.mark_exited_with_signal(code, signal);
                     other_events.push(PtyEvent::Exited(code));
                 }
                 PtyEvent::Error(e) => {

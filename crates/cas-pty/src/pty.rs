@@ -2161,6 +2161,9 @@ pub struct Pty {
     master: Box<dyn portable_pty::MasterPty + Send>,
     /// Whether this PTY is running Codex CLI
     is_codex: bool,
+    /// Signal name from the child wait status, when termination was caused by
+    /// a signal. Kept separate from `PtyEvent::Exited` for API compatibility.
+    exit_signal: Option<String>,
 }
 
 /// Whether a configured command ultimately launches the Codex harness.
@@ -2416,6 +2419,7 @@ impl Pty {
             child,
             master: pair.master,
             is_codex,
+            exit_signal: None,
         })
     }
 
@@ -2502,12 +2506,36 @@ impl Pty {
 
     /// Receive the next event from the PTY (blocking)
     pub async fn recv(&mut self) -> Option<PtyEvent> {
-        self.event_rx.recv().await
+        self.event_rx
+            .recv()
+            .await
+            .map(|event| self.enrich_exit_event(event))
     }
 
     /// Try to receive an event from the PTY (non-blocking)
     pub fn try_recv(&mut self) -> Option<PtyEvent> {
-        self.event_rx.try_recv().ok()
+        self.event_rx
+            .try_recv()
+            .ok()
+            .map(|event| self.enrich_exit_event(event))
+    }
+
+    /// Return the signal recorded while enriching the most recent exit event.
+    /// The value is consumed by the mux so it cannot leak into a later pane
+    /// event.
+    pub fn take_exit_signal(&mut self) -> Option<String> {
+        self.exit_signal.take()
+    }
+
+    fn enrich_exit_event(&mut self, event: PtyEvent) -> PtyEvent {
+        let PtyEvent::Exited(None) = event else {
+            return event;
+        };
+        let Ok(Some(status)) = self.child.try_wait() else {
+            return PtyEvent::Exited(None);
+        };
+        self.exit_signal = status.signal().map(str::to_owned);
+        PtyEvent::Exited(i32::try_from(status.exit_code()).ok())
     }
 
     /// Resize the PTY
@@ -2851,6 +2879,64 @@ mod tests {
         assert_eq!(config.command, "bash");
         assert_eq!(config.rows, 24);
         assert_eq!(config.cols, 80);
+    }
+
+    #[tokio::test]
+    async fn exited_event_preserves_child_exit_code() {
+        let config = PtyConfig {
+            command: "sh".to_string(),
+            args: vec![
+                "-c".to_string(),
+                "printf 'exit-evidence-tail\\n'; exit 23".to_string(),
+            ],
+            ..PtyConfig::default()
+        };
+        let mut pty = Pty::spawn("exit-code-probe", config).expect("shell probe must spawn");
+        let mut output = Vec::new();
+        let deadline = tokio::time::Instant::now() + PTY_CONTROL_EVENT_TIMEOUT;
+        let exit_code = loop {
+            match next_pty_event_until(&mut pty, deadline).await {
+                Some(PtyEvent::Output(data)) => output.extend(data),
+                Some(PtyEvent::Exited(code)) => break code,
+                Some(PtyEvent::Error(error)) => panic!("exit-code probe failed: {error}"),
+                None => panic!("exit-code probe did not exit before deadline"),
+            }
+        };
+
+        assert_eq!(exit_code, Some(23));
+        assert!(
+            String::from_utf8_lossy(&output).contains("exit-evidence-tail"),
+            "the PTY output must remain available for the bounded pane tail"
+        );
+    }
+
+    #[tokio::test]
+    async fn exited_event_preserves_signal_evidence() {
+        let config = PtyConfig {
+            command: "sh".to_string(),
+            args: vec!["-c".to_string(), "kill -TERM $$".to_string()],
+            ..PtyConfig::default()
+        };
+        let mut pty = Pty::spawn("exit-signal-probe", config).expect("shell probe must spawn");
+        let deadline = tokio::time::Instant::now() + PTY_CONTROL_EVENT_TIMEOUT;
+        let exit_code = loop {
+            match next_pty_event_until(&mut pty, deadline).await {
+                Some(PtyEvent::Exited(code)) => break code,
+                Some(PtyEvent::Output(_)) => {}
+                Some(PtyEvent::Error(error)) => panic!("exit-signal probe failed: {error}"),
+                None => panic!("exit-signal probe did not exit before deadline"),
+            }
+        };
+
+        assert!(
+            exit_code.is_some(),
+            "signal exits retain portable status code"
+        );
+        assert!(
+            pty.take_exit_signal()
+                .is_some_and(|signal| !signal.is_empty()),
+            "signal termination must retain the child wait-status signal"
+        );
     }
 
     #[tokio::test]

@@ -540,6 +540,25 @@ fn missing_package_setup(worktree: &Path, runner: &TestRunner) -> Option<String>
         return None;
     }
     let node_modules = worktree.join("node_modules");
+    let yarn_pnp = manager == "yarn"
+        && [".pnp.cjs", ".pnp.js"].into_iter().any(|loader| {
+            fs::metadata(worktree.join(loader)).is_ok_and(|metadata| metadata.is_file())
+        });
+    if yarn_pnp {
+        if let Ok(metadata) = fs::symlink_metadata(&node_modules)
+            && (metadata.file_type().is_symlink() || !metadata.is_dir())
+        {
+            return Some(package_setup_error(
+                worktree,
+                manager,
+                format_args!("target node_modules is not a private directory in this worktree"),
+            ));
+        }
+        // Yarn Plug'n'Play records the installed dependency graph in its
+        // loader rather than a node_modules tree. The Yarn runner loads this
+        // file when it executes the declared script.
+        return None;
+    }
     let Some(node_modules_metadata) = fs::symlink_metadata(&node_modules).ok() else {
         return Some(package_setup_error(
             worktree,
@@ -1345,9 +1364,73 @@ mod tests {
         assert!(result.failures.is_empty());
     }
 
-    #[cfg(unix)]
     #[test]
-    fn pnpm_runner_executes_declared_script_with_real_dependency_in_detached_worktree() {
+    fn yarn_pnp_loader_is_valid_dependency_setup_without_node_modules() {
+        for loader in [".pnp.cjs", ".pnp.js"] {
+            let temp = tempfile::tempdir().unwrap();
+            fs::write(
+                temp.path().join("package.json"),
+                r#"{"packageManager":"yarn@4.9.2","dependencies":{"fixture-dependency":"1.0.0"},"scripts":{"test":"node test.mjs"}}"#,
+            )
+            .unwrap();
+            fs::write(temp.path().join(loader), "// Yarn PnP loader\n").unwrap();
+            let runner = TestRunner {
+                kind: TestRunnerKind::Package,
+                program: "yarn".to_owned(),
+                args: vec!["test".to_owned()],
+                package_manager: Some("yarn"),
+            };
+
+            assert!(
+                missing_package_setup(temp.path(), &runner).is_none(),
+                "{loader}"
+            );
+        }
+    }
+
+    #[test]
+    fn yarn_pnp_without_loader_is_unavailable_with_install_remedy() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("package.json"),
+            r#"{"packageManager":"yarn@4.9.2","dependencies":{"fixture-dependency":"1.0.0"},"scripts":{"test":"node test.mjs"}}"#,
+        )
+        .unwrap();
+        let runner = TestRunner {
+            kind: TestRunnerKind::Package,
+            program: "yarn".to_owned(),
+            args: vec!["test".to_owned()],
+            package_manager: Some("yarn"),
+        };
+
+        let error = missing_package_setup(temp.path(), &runner).unwrap();
+        assert!(error.contains("dependencies are not installed"), "{error}");
+        assert!(error.contains("yarn install"), "{error}");
+    }
+
+    #[test]
+    fn unrelated_pnp_loader_does_not_satisfy_non_yarn_dependency_setup() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("package.json"),
+            r#"{"packageManager":"npm@11.0.0","dependencies":{"fixture-dependency":"1.0.0"},"scripts":{"test":"node test.mjs"}}"#,
+        )
+        .unwrap();
+        fs::write(temp.path().join(".pnp.cjs"), "// unrelated loader\n").unwrap();
+        let runner = TestRunner {
+            kind: TestRunnerKind::Package,
+            program: "npm".to_owned(),
+            args: vec!["test".to_owned()],
+            package_manager: Some("npm"),
+        };
+
+        let error = missing_package_setup(temp.path(), &runner).unwrap();
+        assert!(error.contains("dependencies are not installed"), "{error}");
+        assert!(error.contains("npm install"), "{error}");
+    }
+
+    #[test]
+    fn npm_runner_executes_declared_script_with_real_dependency_in_detached_worktree() {
         let temp = tempfile::tempdir().unwrap();
         let git = |args: &[&str]| {
             let output = Command::new("git")
@@ -1364,7 +1447,7 @@ mod tests {
         fs::write(temp.path().join(".gitignore"), "node_modules/\n").unwrap();
         fs::write(
             temp.path().join("package.json"),
-            r#"{"name":"runner-fixture","private":true,"packageManager":"pnpm@11.20.0","scripts":{"test":"node test-runner.mjs"},"dependencies":{"fixture-dependency":"file:fixture-dependency"}}"#,
+            r#"{"name":"runner-fixture","private":true,"packageManager":"npm@11.0.0","scripts":{"test":"node test-runner.mjs"},"dependencies":{"fixture-dependency":"file:fixture-dependency"}}"#,
         )
         .unwrap();
         fs::create_dir_all(temp.path().join("fixture-dependency")).unwrap();
@@ -1387,20 +1470,35 @@ mod tests {
         git(&["commit", "-m", "real package runner fixture"]);
         let commit = git(&["rev-parse", "HEAD"]);
         let request = SweepRequest {
-            epic_id: "cas-real-pnpm".to_owned(),
-            target_branch: "epic/real-pnpm".to_owned(),
+            epic_id: "cas-real-npm".to_owned(),
+            target_branch: "epic/real-npm".to_owned(),
             commit,
         };
         let detached = prepare_merge_worktree(temp.path(), &request).unwrap();
         fs::create_dir_all(detached.join("node_modules")).unwrap();
+        #[cfg(unix)]
         std::os::unix::fs::symlink(
             "../fixture-dependency",
             detached.join("node_modules/fixture-dependency"),
         )
         .unwrap();
+        #[cfg(not(unix))]
+        fs::create_dir_all(detached.join("node_modules/fixture-dependency")).unwrap();
+        #[cfg(not(unix))]
+        fs::copy(
+            detached.join("fixture-dependency/package.json"),
+            detached.join("node_modules/fixture-dependency/package.json"),
+        )
+        .unwrap();
+        #[cfg(not(unix))]
+        fs::copy(
+            detached.join("fixture-dependency/index.mjs"),
+            detached.join("node_modules/fixture-dependency/index.mjs"),
+        )
+        .unwrap();
         let result_output = temp.path().join("runner-result");
         let _env = crate::test_support::TestEnvGuard::with_optional_vars(&[
-            ("PNPM", None),
+            ("NPM", None),
             ("SWEEP_RUNNER_RESULT", Some(result_output.to_str().unwrap())),
         ]);
 
@@ -1420,7 +1518,7 @@ mod tests {
         );
         assert!(result_text.contains("dependency-loaded"), "{result_text}");
         let log = fs::read_to_string(result.log_path).unwrap();
-        assert!(log.contains("sweep: pnpm test"), "{log}");
+        assert!(log.contains("sweep: npm test"), "{log}");
         assert!(result.failures.is_empty());
     }
 

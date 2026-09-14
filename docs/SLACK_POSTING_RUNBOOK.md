@@ -76,9 +76,13 @@ Save `release-report.receipt` under the release-train run directory with
 `HTML_SHA256`, `PAGE_COUNT`, `PDF_FILE_PERMALINK`, `PDF_FILE_ID`,
 `HTML_FILE_ID`, `USER_THREAD_TS` and `DEV_THREAD_TS`, alongside the returned
 thread permalinks. The remote PDF fields are written only after the adapter
-downloads the transport-returned file URL and proves exact bytes plus PDF
-decode/page count; a local-only hash or successful upload response is not
-enough. The existing `*_THREAD_TS` adapter fields carry the returned hub parent
+downloads the transport-returned explicit `download_url` and proves exact bytes
+plus PDF decode/page count; a local-only hash, message permalink, or successful
+upload response is not enough. The adapter sends hub Authorization and Vercel
+bypass headers only to the configured MCP origin (with the explicit same-origin
+loopback exception used by tests). External signed or private-provider HTTPS
+URLs receive no hub credentials, and cross-origin or scheme-changing redirects
+are rejected before following them. The existing `*_THREAD_TS` adapter fields carry the returned hub parent
 `message_id` values; MechaCassy has no `ts` response field. Never mark the
 release announced without all report and publication receipts.
 

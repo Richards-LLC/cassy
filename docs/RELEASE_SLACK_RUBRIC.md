@@ -102,8 +102,13 @@ local audit host cannot build Darwin.
    Preserve the returned file permalink, User/Dev thread receipts, local PDF
    SHA-256/size, verified remote PDF SHA-256/size/page count, the HTML SHA-256,
    both file IDs and the local page count in `release-report.receipt` in the run
-   directory. The adapter must download the returned file URL and compare the
-   bytes and decoded page count before writing that receipt. The train also
+   directory. The adapter must download the returned explicit `download_url` and
+   compare the bytes and decoded page count before writing that receipt. A message
+   permalink is not a PDF endpoint. The adapter sends hub credentials only to the
+   configured MCP origin (with the explicit same-origin loopback exception used by
+   tests), never to external signed/private-provider URLs; it rejects plaintext
+   endpoints outside that test exception and cross-origin or scheme-changing
+   redirects before following them. The train also
    re-hashes the local PDF and checks every remote evidence field agrees with
    the local artifact; local checks alone do not prove uploaded-file integrity.
    Preserve partial receipts and stop on failure; never retry an uncertain write.

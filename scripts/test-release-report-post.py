@@ -4,12 +4,14 @@
 from __future__ import annotations
 
 import base64
+import importlib.util
 import json
 import os
 import subprocess
 import sys
 import tempfile
 import threading
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -25,6 +27,8 @@ class StubState:
         self.remote_pdf = pdf
         self.requests: list[dict] = []
         self.download_requests: list[str] = []
+        self.include_file_block = True
+        self.include_download_url = True
 
 
 def envelope(result: dict) -> bytes:
@@ -39,6 +43,7 @@ def handler_for(state: StubState):
         def do_GET(self) -> None:  # noqa: N802
             state.download_requests.append(self.path)
             assert self.headers.get("Authorization") == "Bearer stub-token"
+            assert self.headers.get("x-vercel-protection-bypass") == "stub-bypass"
             if self.path != "/download/report.pdf":
                 self.send_error(404)
                 return
@@ -49,6 +54,8 @@ def handler_for(state: StubState):
             self.wfile.write(state.remote_pdf)
 
         def do_POST(self) -> None:  # noqa: N802
+            assert self.headers.get("Authorization") == "Bearer stub-token"
+            assert self.headers.get("x-vercel-protection-bypass") == "stub-bypass"
             size = int(self.headers.get("Content-Length", "0"))
             request = json.loads(self.rfile.read(size))
             state.requests.append(request)
@@ -94,28 +101,32 @@ def handler_for(state: StubState):
                     assert arguments["reply_to"] == "user-thread"
                     assert arguments["file"]["content_encoding"] == "base64"
                     assert base64.b64decode(arguments["file"]["content"]) == state.pdf
+                    file_receipt = {
+                        "file_id": "F-report",
+                        "permalink": "https://example.test/files/report.pdf",
+                    }
+                    if state.include_download_url:
+                        file_receipt["download_url"] = (
+                            f"http://127.0.0.1:{self.server.server_port}/download/report.pdf"
+                        )
+                    receipt = {
+                        "ok": True,
+                        "schema_version": 1,
+                        "kind": "file",
+                        "message": {
+                            "message_id": "file-message",
+                            "thread_id": "user-thread",
+                            "permalink": "https://example.test/files/report.pdf",
+                        },
+                    }
+                    if state.include_file_block:
+                        receipt["file"] = file_receipt
                     result = {
                         "_id": request_id,
                         "content": [
                             {
                                 "type": "text",
-                                "text": json.dumps(
-                                    {
-                                        "ok": True,
-                                        "schema_version": 1,
-                                        "kind": "file",
-                                        "message": {
-                                            "message_id": "file-message",
-                                            "thread_id": "user-thread",
-                                            "permalink": "https://example.test/files/report.pdf",
-                                        },
-                                        "file": {
-                                            "file_id": "F-report",
-                                            "permalink": "https://example.test/files/report.pdf",
-                                            "download_url": f"http://127.0.0.1:{self.server.server_port}/download/report.pdf",
-                                        },
-                                    }
-                                ),
+                                "text": json.dumps(receipt),
                             }
                         ],
                     }
@@ -153,6 +164,116 @@ def handler_for(state: StubState):
             self.send_error(400, f"unexpected method {method}")
 
     return Handler
+
+
+class FakeResponse:
+    def __init__(self, status: int, body: bytes = b"", headers: dict[str, str] | None = None) -> None:
+        self.status = status
+        self.body = body
+        self.headers = headers or {}
+        self.closed = False
+
+    def read(self, _limit: int = -1) -> bytes:
+        return self.body
+
+    def getcode(self) -> int:
+        return self.status
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class FakeOpener:
+    def __init__(self, responses: list[FakeResponse]) -> None:
+        self.responses = responses
+        self.requests: list[urllib.request.Request] = []
+
+    def open(self, request: urllib.request.Request, timeout: float):
+        del timeout
+        self.requests.append(request)
+        if not self.responses:
+            raise AssertionError("unexpected request reached the fake sink")
+        return self.responses.pop(0)
+
+
+def adapter_module():
+    spec = importlib.util.spec_from_file_location("release_report_post", ADAPTER)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def request_headers(request: urllib.request.Request) -> dict[str, str]:
+    return {key.lower(): value for key, value in request.header_items()}
+
+
+def expect_adapter_error(module, action, label: str) -> None:
+    try:
+        action()
+    except module.AdapterError:
+        return
+    raise AssertionError(f"{label} must fail closed")
+
+
+def run_download_policy_proof() -> None:
+    """Exercise production download auth and redirect policy with fake sinks."""
+
+    module = adapter_module()
+    client = module.McpClient("https://hub.example.test/mcp", "stub-token", "stub-bypass", 1)
+    external = FakeOpener([FakeResponse(200, b"signed-pdf")])
+    client.opener = external
+    assert client.download("https://signed.example.test/report.pdf") == b"signed-pdf"
+    headers = request_headers(external.requests[0])
+    assert "authorization" not in headers
+    assert "x-vercel-protection-bypass" not in headers
+
+    downgrade = FakeOpener([])
+    client.opener = downgrade
+    expect_adapter_error(
+        module,
+        lambda: client.download("http://signed.example.test/report.pdf"),
+        "plaintext external PDF URL",
+    )
+    assert downgrade.requests == []
+
+    external_redirect = FakeOpener(
+        [FakeResponse(302, headers={"Location": "https://sink.example.test/report.pdf"})]
+    )
+    client.opener = external_redirect
+    expect_adapter_error(
+        module,
+        lambda: client.download("https://signed.example.test/report.pdf"),
+        "cross-origin signed URL redirect",
+    )
+    assert len(external_redirect.requests) == 1
+    assert "authorization" not in request_headers(external_redirect.requests[0])
+
+    authenticated_redirect = FakeOpener(
+        [FakeResponse(302, headers={"Location": "https://sink.example.test/report.pdf"})]
+    )
+    client.opener = authenticated_redirect
+    expect_adapter_error(
+        module,
+        lambda: client.download("https://hub.example.test/files/report.pdf"),
+        "cross-origin authenticated redirect",
+    )
+    assert len(authenticated_redirect.requests) == 1
+    assert request_headers(authenticated_redirect.requests[0])["authorization"].startswith(
+        "Bearer "
+    )
+
+    downgrade_redirect = FakeOpener(
+        [FakeResponse(302, headers={"Location": "http://hub.example.test/report.pdf"})]
+    )
+    client.opener = downgrade_redirect
+    expect_adapter_error(
+        module,
+        lambda: client.download("https://hub.example.test/files/report.pdf"),
+        "downgrade redirect",
+    )
+    assert len(downgrade_redirect.requests) == 1
+    print("release-report-post transport policy: 5 boundary cases passed")
 
 
 def run_adapter(server: ThreadingHTTPServer, state: StubState, remote_pdf: bytes):
@@ -200,6 +321,7 @@ def run_adapter(server: ThreadingHTTPServer, state: StubState, remote_pdf: bytes
 
 def main() -> int:
     pdf = PDF.read_bytes()
+    run_download_policy_proof()
     state = StubState(pdf)
     server = ThreadingHTTPServer(("127.0.0.1", 0), handler_for(state))
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -236,7 +358,26 @@ def main() -> int:
             assert state.download_requests == ["/download/report.pdf"]
             methods = [request.get("method") for request in state.requests]
             assert methods == ["initialize", "notifications/initialized", "tools/list", "tools/call"], label
-        print("release-report-post stub: 4 scenarios passed")
+
+        state.include_file_block = False
+        state.include_download_url = False
+        result, fields = run_adapter(server, state, pdf)
+        assert result.returncode != 0
+        assert "message permalink is not a PDF endpoint" in result.stderr
+        assert fields is None
+        assert state.download_requests == []
+        methods = [request.get("method") for request in state.requests]
+        assert methods == ["initialize", "notifications/initialized", "tools/list", "tools/call"]
+
+        state.include_file_block = True
+        result, fields = run_adapter(server, state, pdf)
+        assert result.returncode != 0
+        assert "file permalink is not a PDF endpoint" in result.stderr
+        assert fields is None
+        assert state.download_requests == []
+        methods = [request.get("method") for request in state.requests]
+        assert methods == ["initialize", "notifications/initialized", "tools/list", "tools/call"]
+        print("release-report-post stub: 6 integrity and endpoint scenarios passed")
     finally:
         server.shutdown()
         thread.join(timeout=5)

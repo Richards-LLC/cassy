@@ -170,6 +170,10 @@ name the blocking step in the operator timeline, and require its receipt.
    `MECHA_VERCEL_BYPASS`). Use only the MechaCassy hub/bot;
    never use Claude.ai Slack or a personal connector. Upload through `mecha_post`
    and accept the file only after download, source-hash and decode checks pass.
+   The adapter sends hub credentials only to the configured MCP origin (with the
+   explicit same-origin loopback exception used by tests); external signed or
+   private-provider URLs receive no hub credentials, message permalinks are not
+   PDF endpoints, and cross-origin or scheme-changing redirects are rejected.
    If the hub cannot complete publication, preserve the draft and partial
    receipts and report blocked. Use MechaCassy's default `cas-internal` channel,
    retain `C0B44GUKDK2` only for verification, and save four Slack POSTED

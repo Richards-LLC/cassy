@@ -919,7 +919,7 @@ impl TaskStore for SqliteTaskStore {
                 // recovery, and future callers) gets the same protection.
                 // cas-5054 extends that invariant to conflict rework: the parked
                 // anchor must not satisfy or false-reject the eventual re-close.
-                persisted_deliverables.factory_branch_anchor = None;
+                persisted_deliverables.retain_factory_branch_anchor_as_history();
                 if reopening_terminal {
                     persisted_deliverables.negative_result = None;
                     persisted_terminal_outcome = None;

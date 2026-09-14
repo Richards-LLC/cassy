@@ -6556,13 +6556,13 @@ impl CasCore {
             task.terminal_outcome = None;
             // cas-cf64 (P2, anchor freshness — Scenario B): a stale
             // `factory_branch_anchor` from a PRIOR close/park cycle must not
-            // survive a reopen. Without this, `run_factory_branch_merge_gate`
-            // would keep trusting the OLD anchor sha (already merged, from
-            // before the reopen) forever — `park_task_awaiting_merge`'s
-            // `is_none()` guard never overwrites an existing anchor, so any
-            // NEW commits made after rework would be invisible to the gate and
-            // the task would false-Proceed on reworked-but-unmerged code.
-            task.deliverables.factory_branch_anchor = None;
+            // survive a reopen as active authority. Preserve it as historical
+            // task identity so an unmerged prior delivery cannot be relabeled
+            // lane residue after a fresh lease, while
+            // `park_task_awaiting_merge` starts the new cycle without an active
+            // anchor.
+            task.deliverables
+                .retain_factory_branch_anchor_as_history();
         }
         task.updated_at = chrono::Utc::now();
 
@@ -6881,9 +6881,10 @@ pub(crate) struct AdditiveOnlyViolation {
 pub(crate) struct TaskCommitIdentity {
     /// The task id, matched as a whole token against commit messages.
     pub task_id: Option<String>,
-    /// Commit ids Cassy durably recorded for this task (parked factory anchor,
-    /// worker delivery receipts), plus any server-validated current delivery
-    /// tip supplied by the close path. Exact evidence that needs no convention.
+    /// Commit ids Cassy durably recorded for this task (active and historical
+    /// parked factory anchors, worker delivery receipts), plus any
+    /// server-validated current delivery tip supplied by the close path.
+    /// Exact evidence that needs no convention.
     pub known_commits: Vec<String>,
 }
 
@@ -6918,16 +6919,29 @@ pub(crate) fn task_commit_identity(
     task: &Task,
     latest_delivery_commit: Option<String>,
 ) -> TaskCommitIdentity {
-    let mut known_commits: Vec<String> = task
+    let mut known_commits = Vec::new();
+    for commit in task
         .deliverables
         .factory_branch_anchor
         .iter()
         .cloned()
+        .chain(
+            task.deliverables
+                .historical_factory_branch_anchors
+                .iter()
+                .cloned(),
+        )
         .chain(latest_delivery_commit)
         .map(|commit| commit.trim().to_string())
         .filter(|commit| !commit.is_empty())
-        .collect();
-    known_commits.dedup();
+    {
+        if !known_commits
+            .iter()
+            .any(|known: &String| known.eq_ignore_ascii_case(&commit))
+        {
+            known_commits.push(commit);
+        }
+    }
     TaskCommitIdentity {
         task_id: Some(task.id.clone()),
         known_commits,
@@ -14561,12 +14575,15 @@ mod additive_only_tests {
     fn task_commit_identity_collects_every_durable_task_commit() {
         let mut task = Task::new("cas-f1b1".to_string(), "same-task WIP".to_string());
         task.deliverables.factory_branch_anchor = Some("a".repeat(40));
+        task.deliverables
+            .historical_factory_branch_anchors
+            .push("c".repeat(40));
         let identity = task_commit_identity(&task, Some("b".repeat(40)));
         assert_eq!(identity.task_id.as_deref(), Some("cas-f1b1"));
         assert_eq!(
             identity.known_commits,
-            vec!["a".repeat(40), "b".repeat(40)],
-            "anchor and delivery receipt are both task-owned commit evidence"
+            vec!["a".repeat(40), "c".repeat(40), "b".repeat(40)],
+            "active anchor, historical anchor, and delivery receipt are all task-owned commit evidence"
         );
 
         let bare = Task::new("cas-f1b1".to_string(), "no durable commits".to_string());
@@ -18642,6 +18659,110 @@ mod merge_state_gate_tests {
             }
             other => panic!("unmerged task-own commits must still reject, got {other:?}"),
         }
+    }
+
+    /// GH #849: `request_changes` deliberately clears the active parked
+    /// anchor before the worker starts a fresh lease.  The declined delivery
+    /// is still this task's work, however; it must not become anonymous lane
+    /// residue merely because its commit predates the new lease.  This is the
+    /// pure gate shape from the production report (the factory tip is
+    /// unmerged on the target, regardless of whether an external PR is open).
+    #[test]
+    fn request_changes_fresh_cycle_still_rejects_prior_unmerged_delivery_gh_849() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        commit_file_at(
+            p,
+            "declined.rs",
+            "// declined delivery remains unmerged\n",
+            "2026-08-17T21:00:00Z",
+        );
+
+        let cas_root = tempfile::tempdir().unwrap();
+        let task_store = cas_store::SqliteTaskStore::open(cas_root.path()).unwrap();
+        cas_store::TaskStore::init(&task_store).unwrap();
+        let mut parked = worker_task("worker");
+        parked.status = TaskStatus::AwaitingMerge;
+        parked.deliverables.factory_branch_anchor = Some(head_sha(p));
+        parked.deliverables.parked_branch = Some("factory/worker".to_string());
+        cas_store::TaskStore::add(&task_store, &parked).unwrap();
+        cas_store::request_changes_for_parked_delivery(
+            cas_root.path(),
+            &parked.id,
+            "supervisor",
+            "The delivery needs correction before re-delivery.",
+        )
+        .unwrap();
+
+        // Model the real worker start after the supervisor's request_changes:
+        // the active anchor is gone, but this remains the same task and the
+        // existing delivery commit is still on its factory branch.
+        let mut task = cas_store::TaskStore::get(&task_store, &parked.id).unwrap();
+        assert!(task.deliverables.factory_branch_anchor.is_none());
+        assert_eq!(
+            task.deliverables
+                .historical_factory_branch_anchors
+                .as_slice(),
+            [parked.deliverables.factory_branch_anchor.clone().unwrap()]
+        );
+        task.status = TaskStatus::InProgress;
+        cas_store::TaskStore::update(&task_store, &task).unwrap();
+        task = cas_store::TaskStore::get(&task_store, &parked.id).unwrap();
+
+        let req = base_req(&task.id);
+        // `request_changes` clears the active anchor and `task start` moves
+        // the attribution window past this already-produced commit.  The
+        // current implementation therefore reproduces the production false
+        // Proceed unless this commit remains durable task identity.
+        let mut window = window_at(1_800_000_000, "latest task lease claim/transfer");
+        window.identity = task_commit_identity(&task, None);
+        let out = run_factory_branch_merge_gate_with_attribution(
+            &task,
+            &req,
+            "main",
+            p,
+            TaskCommitAttribution {
+                receipt: None,
+                window: Some(&window),
+            },
+        );
+        assert!(
+            matches!(out, MergeStateGateOutcome::Reject(_)),
+            "a declined delivery still unmerged after request_changes/start must reject close, got {out:?}"
+        );
+
+        // The historical identity is not an approval shortcut: once the
+        // target actually contains the delivery, the same fresh-cycle task
+        // may proceed through the ordinary proof/review gates.
+        git(p, &["checkout", "-q", "main"]);
+        git(
+            p,
+            &[
+                "merge",
+                "-q",
+                "--no-ff",
+                "factory/worker",
+                "-m",
+                "merge declined delivery after fresh proof",
+            ],
+        );
+        git(p, &["checkout", "-q", "factory/worker"]);
+        assert!(
+            matches!(
+                run_factory_branch_merge_gate_with_attribution(
+                    &task,
+                    &req,
+                    "main",
+                    p,
+                    TaskCommitAttribution {
+                        receipt: None,
+                        window: Some(&window),
+                    },
+                ),
+                MergeStateGateOutcome::Proceed
+            ),
+            "after the target merge, the fresh-cycle task must pass the merge gate"
+        );
     }
 
     /// A receipt that does not validate (here: not reachable from the parent)

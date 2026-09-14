@@ -370,11 +370,65 @@ enum StrayReason {
     OrphanedManagedCopy,
 }
 
+/// Filesystem identity captured while a stale skill is reported. Paths and
+/// canonical strings are not enough for a destructive follow-up: the same
+/// path can be retargeted to a different root between the report and `--yes`.
+/// Unix device/inode pairs identify the directory and marker object that were
+/// actually scanned. Platforms without a stable identity primitive fail
+/// closed at cleanup rather than treating a path as ownership proof.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FileIdentity {
+    device: u64,
+    inode: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct StaleSkillIdentity {
+    root: FileIdentity,
+    skill_dir: FileIdentity,
+    ownership_file: FileIdentity,
+}
+
+fn file_identity(path: &Path) -> io::Result<FileIdentity> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+
+        let metadata = fs::metadata(path)?;
+        return Ok(FileIdentity {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        });
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "filesystem identity is unavailable on this platform",
+        ))
+    }
+}
+
+fn stale_skill_identity(
+    root: &Path,
+    skill_dir: &Path,
+    ownership_file: &Path,
+) -> Option<StaleSkillIdentity> {
+    Some(StaleSkillIdentity {
+        root: file_identity(root).ok()?,
+        skill_dir: file_identity(skill_dir).ok()?,
+        ownership_file: file_identity(ownership_file).ok()?,
+    })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct StrayUserSkill {
     name: String,
     path: PathBuf,
     reason: StrayReason,
+    scan_identity: Option<StaleSkillIdentity>,
 }
 
 /// Decide a single skill directory's fate from its name and `SKILL.md` body.
@@ -449,6 +503,7 @@ fn scan_user_skill_dirs(
                     name: name.to_string(),
                     path: skill_file,
                     reason,
+                    scan_identity: stale_skill_identity(dir, &path, &path.join("SKILL.md")),
                 });
             }
         }
@@ -709,6 +764,9 @@ fn remove_stale_managed_user_skills(
         if !matches!(stray.reason, StrayReason::OrphanedManagedCopy) {
             continue;
         }
+        let Some(scan_identity) = stray.scan_identity else {
+            continue;
+        };
         let Some(skill_dir) = stray.path.parent() else {
             continue;
         };
@@ -719,6 +777,12 @@ fn remove_stale_managed_user_skills(
             continue;
         };
         if !trusted_roots.iter().any(|candidate| *candidate == canonical_root) {
+            continue;
+        }
+        let Ok(current_root_identity) = file_identity(root) else {
+            continue;
+        };
+        if current_root_identity != scan_identity.root {
             continue;
         }
         let Ok(metadata) = fs::symlink_metadata(skill_dir) else {
@@ -754,6 +818,17 @@ fn remove_stale_managed_user_skills(
         if canonical_ownership_file != canonical_skill_dir.join("SKILL.md") {
             continue;
         }
+        let Ok(current_skill_identity) = file_identity(skill_dir) else {
+            continue;
+        };
+        let Ok(current_ownership_identity) = file_identity(&stray.path) else {
+            continue;
+        };
+        if current_skill_identity != scan_identity.skill_dir
+            || current_ownership_identity != scan_identity.ownership_file
+        {
+            continue;
+        }
         let Ok(content) = fs::read_to_string(&stray.path) else {
             continue;
         };
@@ -778,6 +853,15 @@ fn remove_stale_managed_user_skills(
         let Ok(final_ownership_file) = stray.path.canonicalize() else {
             continue;
         };
+        let Ok(final_root_identity) = file_identity(root) else {
+            continue;
+        };
+        let Ok(final_skill_identity) = file_identity(skill_dir) else {
+            continue;
+        };
+        let Ok(final_ownership_identity) = file_identity(&stray.path) else {
+            continue;
+        };
         if !final_skill_metadata.file_type().is_dir()
             || final_skill_metadata.file_type().is_symlink()
             || !final_ownership_metadata.file_type().is_file()
@@ -785,6 +869,9 @@ fn remove_stale_managed_user_skills(
             || final_root != canonical_root
             || final_skill_dir != canonical_skill_dir
             || final_ownership_file != canonical_skill_dir.join("SKILL.md")
+            || final_root_identity != scan_identity.root
+            || final_skill_identity != scan_identity.skill_dir
+            || final_ownership_identity != scan_identity.ownership_file
         {
             continue;
         }
@@ -7384,14 +7471,10 @@ mod tests {
         );
 
         let strays = scan_user_skill_dirs(&[(skills, claude_names())]);
-        assert_eq!(
-            strays,
-            vec![StrayUserSkill {
-                name: "mecha-cassy-post".to_string(),
-                path: retired,
-                reason: StrayReason::RetiredBy("mecha-cassy"),
-            }]
-        );
+        assert_eq!(strays.len(), 1);
+        assert_eq!(strays[0].name, "mecha-cassy-post");
+        assert_eq!(strays[0].path, retired);
+        assert_eq!(strays[0].reason, StrayReason::RetiredBy("mecha-cassy"));
 
         let check = stray_user_skills_check(&strays);
         assert!(matches!(check.status, CheckStatus::Warning));
@@ -7465,6 +7548,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn stale_skill_cleanup_removes_only_managed_entries_in_scanned_roots() {
         let dir = TempDir::new().unwrap();
@@ -7487,6 +7571,7 @@ mod tests {
         assert!(user.parent().unwrap().exists());
     }
 
+    #[cfg(unix)]
     #[test]
     fn retired_managed_skill_is_actionable_but_retired_user_skill_is_preserved() {
         let dir = TempDir::new().unwrap();
@@ -7568,6 +7653,44 @@ mod tests {
             .unwrap()
             .is_empty());
         assert!(managed.parent().unwrap().exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stale_cleanup_refuses_same_path_root_replacement() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().join("skills");
+        write_skill(
+            &root,
+            "retired-managed",
+            "---\nname: retired-managed\nmanaged_by: cas\n---\n\noriginal\n",
+        );
+        let scanned = scan_user_skill_dirs(&[(
+            root.clone(),
+            std::collections::HashSet::new(),
+        )]);
+
+        let replacement_root = dir.path().join("replacement-skills");
+        write_skill(
+            &replacement_root,
+            "retired-managed",
+            "---\nname: retired-managed\nmanaged_by: cas\n---\n\nuser replacement\n",
+        );
+        let old_root = dir.path().join("original-skills");
+        fs::rename(&root, &old_root).unwrap();
+        fs::rename(&replacement_root, &root).unwrap();
+
+        let identical_targets = vec![(root.clone(), std::collections::HashSet::new())];
+        assert!(remove_stale_managed_user_skills(&scanned, &identical_targets)
+            .unwrap()
+            .is_empty());
+        let replacement_marker = root.join("retired-managed/SKILL.md");
+        assert!(replacement_marker.exists());
+        assert_eq!(
+            fs::read_to_string(replacement_marker).unwrap(),
+            "---\nname: retired-managed\nmanaged_by: cas\n---\n\nuser replacement\n"
+        );
+        assert!(old_root.join("retired-managed/SKILL.md").exists());
     }
 
     #[test]

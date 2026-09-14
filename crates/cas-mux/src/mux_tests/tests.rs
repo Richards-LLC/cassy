@@ -1684,6 +1684,87 @@ fn mux_pane_exit_event_carries_signal_status_from_the_real_pty_child() {
     }
 }
 
+#[test]
+fn mux_retries_wait_status_after_pty_eof_without_blocking_poll() {
+    let temp = std::env::temp_dir().join(format!(
+        "cas-mux-delayed-wait-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock must be after epoch")
+            .as_nanos()
+    ));
+    std::fs::create_dir(&temp).expect("temporary Mux evidence directory");
+    let ready = temp.join("eof-ready");
+    let done = temp.join("wait-status-ready");
+    let ready_shell = shell_quote(&ready.to_string_lossy());
+    let done_shell = shell_quote(&done.to_string_lossy());
+    let config = crate::pty::PtyConfig {
+        command: "sh".to_string(),
+        args: vec![
+            "-c".to_string(),
+            format!(
+                "printf ready > {ready_shell}; exec 0<&- 1>&- 2>&-; sleep 2; printf done > {done_shell}; exit 37"
+            ),
+        ],
+        cwd: Some(PathBuf::from("/tmp")),
+        env: vec![],
+        env_remove: vec![],
+        rows: 24,
+        cols: 80,
+    };
+    let pty = crate::pty::Pty::spawn("delayed-wait-status-worker", config)
+        .expect("delayed wait-status worker must spawn");
+    let pane = Pane::with_pty(
+        "delayed-wait-status-worker",
+        PaneKind::Worker,
+        pty,
+        24,
+        80,
+        SupervisorCli::Claude,
+    )
+    .expect("worker pane must build");
+    let mut mux = Mux::new(24, 80);
+    mux.add_pane(pane);
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !ready.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "worker must close its PTY after writing the readiness marker"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+
+    loop {
+        if let Some(MuxEvent::PaneExited {
+            pane_id,
+            exit_code,
+            exit_signal,
+        }) = mux.poll()
+        {
+            assert_eq!(pane_id, "delayed-wait-status-worker");
+            assert_eq!(exit_code, Some(37));
+            assert!(
+                exit_signal.is_none(),
+                "normal delayed exit must not invent signal evidence"
+            );
+            assert!(
+                done.exists(),
+                "Mux must deliver wait status after PTY EOF, not finalize early"
+            );
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "Mux did not deliver delayed wait status before deadline"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+
+    std::fs::remove_dir_all(&temp).expect("remove temporary Mux evidence directory");
+}
+
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn graceful_kill_worker_waits_before_escalating_a_term_ignoring_group() {

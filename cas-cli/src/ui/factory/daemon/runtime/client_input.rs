@@ -24,7 +24,10 @@ impl FactoryDaemon {
 
                     // Send initial screen setup to new client (before inserting)
                     // Temporarily switch to blocking for the init sequence write
-                    let init = b"\x1b[?1049h\x1b[?25l\x1b[2J\x1b[H";
+                    // The first rendered frame owns host cursor visibility and
+                    // position; do not hide a child cursor before that state is
+                    // available (GH #869).
+                    let init = b"\x1b[?1049h\x1b[2J\x1b[H";
                     let _ = stream.set_nonblocking(false);
                     let write_result = stream.write_all(init);
                     let _ = stream.set_nonblocking(true);

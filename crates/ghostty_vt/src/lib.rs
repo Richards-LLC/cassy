@@ -71,6 +71,22 @@ pub struct CellStyle {
     pub strikethrough: bool,
 }
 
+/// The visual shape used by a terminal cursor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CursorShape {
+    Block,
+    Underline,
+    Bar,
+}
+
+/// Terminal cursor state reported by the VT parser.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CursorState {
+    pub visible: bool,
+    pub shape: CursorShape,
+    pub blinking: bool,
+}
+
 impl From<sys::GhosttyVtCellStyle> for CellStyle {
     fn from(s: sys::GhosttyVtCellStyle) -> Self {
         Self {
@@ -230,6 +246,20 @@ impl Terminal {
             sys::ghostty_vt_terminal_cursor_position(self.ptr.as_ptr(), &mut col, &mut row);
         }
         (col, row)
+    }
+
+    /// Get the cursor visibility, shape, and blink state.
+    pub fn cursor_state(&self) -> CursorState {
+        let shape = match unsafe { sys::ghostty_vt_terminal_cursor_shape(self.ptr.as_ptr()) } {
+            1 => CursorShape::Underline,
+            2 => CursorShape::Bar,
+            _ => CursorShape::Block,
+        };
+        CursorState {
+            visible: unsafe { sys::ghostty_vt_terminal_cursor_visible(self.ptr.as_ptr()) },
+            shape,
+            blinking: unsafe { sys::ghostty_vt_terminal_cursor_blinking(self.ptr.as_ptr()) },
+        }
     }
 
     /// Set default foreground and background colors
@@ -567,6 +597,42 @@ mod tests {
         // Initial position is (1, 1) since it's 1-indexed
         assert_eq!(col, 1);
         assert_eq!(row, 1);
+    }
+
+    #[test]
+    fn test_cursor_state_tracks_visibility_shape_and_blink() {
+        let mut term = Terminal::new(24, 80).unwrap();
+
+        assert_eq!(
+            term.cursor_state(),
+            CursorState {
+                visible: true,
+                shape: CursorShape::Block,
+                blinking: false,
+            }
+        );
+
+        term.feed(b"\x1b[?25l\x1b[3 q").unwrap();
+        assert_eq!(
+            term.cursor_state(),
+            CursorState {
+                visible: false,
+                shape: CursorShape::Underline,
+                blinking: true,
+            }
+        );
+
+        // A split DECSCUSR sequence is still handled by the VT parser.
+        term.feed(b"\x1b[?25h\x1b[6").unwrap();
+        term.feed(b" q").unwrap();
+        assert_eq!(
+            term.cursor_state(),
+            CursorState {
+                visible: true,
+                shape: CursorShape::Bar,
+                blinking: false,
+            }
+        );
     }
 
     #[test]

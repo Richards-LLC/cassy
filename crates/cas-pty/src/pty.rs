@@ -9,7 +9,7 @@ use crate::error::{Error, Result};
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use std::io::{Read, Write};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use tokio::sync::Mutex;
 use tokio::sync::mpsc;
 
@@ -389,7 +389,8 @@ pub struct PtyConfig {
 
 /// Operator credentials that never cross the factory worker boundary through
 /// inherited environment state. A task-scoped provider or proxy grant is
-/// explicit when its value is present in the worker config env entries.
+/// explicit only when the factory builder adds authenticated grant metadata;
+/// an environment value by itself is never authorization.
 pub const PROTECTED_OPERATOR_ENV: &[&str] = &[
     "CAPAWESOME_TOKEN",
     "CAS_CLOUD_TOKEN",
@@ -400,6 +401,18 @@ pub const PROTECTED_OPERATOR_ENV: &[&str] = &[
     "VERCEL_TOKEN",
     "BROWSERLESS_API_KEY",
 ];
+
+// This metadata entry carries credential provenance through PtyConfig without
+// exposing a credential value or adding a public struct field. Pty::spawn
+// consumes it as launch metadata rather than passing it to the child process.
+const WORKER_CREDENTIAL_GRANT_ENV: &str = "CAS_FACTORY_WORKER_CREDENTIAL_GRANT";
+
+fn worker_credential_grant_nonce() -> &'static str {
+    static NONCE: OnceLock<String> = OnceLock::new();
+    NONCE
+        .get_or_init(|| uuid::Uuid::new_v4().to_string())
+        .as_str()
+}
 
 fn push_factory_worker_metadata_env(
     env: &mut Vec<(String, String)>,
@@ -908,6 +921,26 @@ fn push_codex_machine_credential_env(args: &mut Vec<String>) {
 }
 
 impl PtyConfig {
+    /// Mark a protected environment name as an explicit worker credential grant.
+    ///
+    /// Only the factory config builder should call this for names authorized by
+    /// a project/task proxy definition. A value placed directly in `env` is not
+    /// a grant and is removed from a worker unless this marker is present.
+    pub fn grant_worker_credential(&mut self, key: &str) {
+        if !PROTECTED_OPERATOR_ENV.contains(&key) {
+            return;
+        }
+        let marker = format!("{key}:{}", worker_credential_grant_nonce());
+        if !self
+            .env
+            .iter()
+            .any(|(candidate, value)| candidate == WORKER_CREDENTIAL_GRANT_ENV && value == &marker)
+        {
+            self.env
+                .push((WORKER_CREDENTIAL_GRANT_ENV.to_string(), marker));
+        }
+    }
+
     /// Remove protected operator credentials from a worker's inherited
     /// environment while retaining explicit task-scoped grants.
     ///
@@ -931,8 +964,19 @@ impl PtyConfig {
         if role != Some("worker") && !is_factory_without_supervisor {
             return;
         }
+        let grants = self
+            .env
+            .iter()
+            .filter_map(|(candidate, value)| {
+                let (key, nonce) = value.split_once(':')?;
+                (candidate == WORKER_CREDENTIAL_GRANT_ENV
+                    && nonce == worker_credential_grant_nonce()
+                    && PROTECTED_OPERATOR_ENV.contains(&key))
+                .then_some(key)
+            })
+            .collect::<Vec<_>>();
         for key in PROTECTED_OPERATOR_ENV {
-            if self.env.iter().any(|(candidate, _)| candidate == key) {
+            if grants.contains(key) {
                 continue;
             }
             if !self.env_remove.iter().any(|candidate| candidate == key) {
@@ -2254,7 +2298,9 @@ impl Pty {
         }
 
         for (key, value) in &config.env {
-            cmd.env(key, value);
+            if key != WORKER_CREDENTIAL_GRANT_ENV {
+                cmd.env(key, value);
+            }
         }
         for key in &config.env_remove {
             cmd.env_remove(key);
@@ -2767,6 +2813,10 @@ mod tests {
         }
     }
 
+    fn shell_quote(value: &str) -> String {
+        format!("'{}'", value.replace('\'', "'\"'\"'"))
+    }
+
     impl ScopedEnv {
         pub(crate) fn new() -> Self {
             let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -2875,14 +2925,12 @@ mod tests {
             .join(format!("cas-b3e1-{}", uuid::Uuid::new_v4()));
         let worker_marker = marker_root.with_extension("worker");
         let descendant_marker = marker_root.with_extension("descendant");
+        let worker_marker_shell = shell_quote(&worker_marker.to_string_lossy());
+        let descendant_marker_shell = shell_quote(&descendant_marker.to_string_lossy());
         std::fs::create_dir_all(marker_root.parent().expect("marker parent"))
             .expect("marker directory");
         let script = format!(
-            "if {probe}; then printf worker-present > {}; else printf worker-clear > {}; fi; sh -c 'if {probe}; then printf descendant-present > {}; else printf descendant-clear > {}; fi'; sleep 1",
-            worker_marker.display(),
-            worker_marker.display(),
-            descendant_marker.display(),
-            descendant_marker.display()
+            "if {probe}; then printf worker-present > {worker_marker_shell}; else printf worker-clear > {worker_marker_shell}; fi; sh -c 'if {probe}; then printf descendant-present > \"$1\"; else printf descendant-clear > \"$1\"; fi' sh {descendant_marker_shell}; sleep 1",
         );
         let config = PtyConfig {
             command: "sh".to_string(),
@@ -2891,8 +2939,8 @@ mod tests {
             env: vec![("CAS_AGENT_ROLE".to_string(), "worker".to_string())],
             ..PtyConfig::default()
         };
-        let mut pty = Pty::spawn("credential-isolation-probe", config)
-            .expect("shell probe must spawn");
+        let mut pty =
+            Pty::spawn("credential-isolation-probe", config).expect("shell probe must spawn");
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
             match next_pty_event_until(&mut pty, deadline).await {
@@ -2901,12 +2949,11 @@ mod tests {
                 Some(PtyEvent::Output(_)) => {}
                 None => panic!("credential probe did not exit before deadline"),
             }
-        };
+        }
         pty.kill();
-        let worker_result = std::fs::read_to_string(&worker_marker)
-            .expect("worker probe marker");
-        let descendant_result = std::fs::read_to_string(&descendant_marker)
-            .expect("descendant probe marker");
+        let worker_result = std::fs::read_to_string(&worker_marker).expect("worker probe marker");
+        let descendant_result =
+            std::fs::read_to_string(&descendant_marker).expect("descendant probe marker");
         let _ = std::fs::remove_file(worker_marker);
         let _ = std::fs::remove_file(descendant_marker);
         assert_eq!(worker_result, "worker-clear");
@@ -2941,26 +2988,70 @@ mod tests {
             env: vec![
                 ("CAS_AGENT_ROLE".to_string(), "worker".to_string()),
                 ("NEON_API_KEY".to_string(), "scoped-grant".to_string()),
+                ("CONTEXT7_API_KEY".to_string(), "scoped-grant".to_string()),
+            ],
+            ..PtyConfig::default()
+        };
+        config.grant_worker_credential("NEON_API_KEY");
+        config.grant_worker_credential("CONTEXT7_API_KEY");
+        config.apply_worker_credential_policy();
+        assert!(
+            !config
+                .env_remove
+                .iter()
+                .any(|candidate| candidate == "NEON_API_KEY")
+        );
+        assert!(
+            !config
+                .env_remove
+                .iter()
+                .any(|candidate| candidate == "CONTEXT7_API_KEY")
+        );
+        assert!(
+            config
+                .env_remove
+                .iter()
+                .any(|candidate| candidate == "GITHUB_TOKEN")
+        );
+    }
+
+    #[test]
+    fn worker_credential_policy_rejects_unmarked_explicit_protected_env() {
+        let mut config = PtyConfig {
+            env: vec![
+                ("CAS_AGENT_ROLE".to_string(), "worker".to_string()),
+                ("NEON_API_KEY".to_string(), "unmarked-fixture".to_string()),
+            ],
+            ..PtyConfig::default()
+        };
+        config.apply_worker_credential_policy();
+        assert!(
+            config
+                .env_remove
+                .iter()
+                .any(|candidate| candidate == "NEON_API_KEY")
+        );
+    }
+
+    #[test]
+    fn worker_credential_policy_rejects_inherited_grant_marker() {
+        let mut config = PtyConfig {
+            env: vec![
+                ("CAS_AGENT_ROLE".to_string(), "worker".to_string()),
                 (
-                    "CONTEXT7_API_KEY".to_string(),
-                    "scoped-grant".to_string(),
+                    WORKER_CREDENTIAL_GRANT_ENV.to_string(),
+                    "NEON_API_KEY:operator-fixture".to_string(),
                 ),
             ],
             ..PtyConfig::default()
         };
         config.apply_worker_credential_policy();
-        assert!(!config
-            .env_remove
-            .iter()
-            .any(|candidate| candidate == "NEON_API_KEY"));
-        assert!(!config
-            .env_remove
-            .iter()
-            .any(|candidate| candidate == "CONTEXT7_API_KEY"));
-        assert!(config
-            .env_remove
-            .iter()
-            .any(|candidate| candidate == "GITHUB_TOKEN"));
+        assert!(
+            config
+                .env_remove
+                .iter()
+                .any(|candidate| candidate == "NEON_API_KEY")
+        );
     }
 
     #[test]
@@ -3949,7 +4040,10 @@ mod tests {
             &home,
             Some(format!("/usr/bin:{}", local_bin.display()).into()),
         );
-        assert!(already.is_empty(), "present PATH entry must not be duplicated");
+        assert!(
+            already.is_empty(),
+            "present PATH entry must not be duplicated"
+        );
 
         let mut missing = Vec::new();
         push_local_bin_path_env_with(&mut missing, &bare, Some("/usr/bin".into()));

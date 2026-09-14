@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use crate::harness::{HarnessCapabilities, SupervisorCli};
-use crate::pty::{PtyConfig, TeamsSpawnConfig};
+use crate::pty::{PROTECTED_OPERATOR_ENV, PtyConfig, TeamsSpawnConfig};
 use crate::{Effort, Result};
 
 pub(crate) use claude::CLAUDE;
@@ -117,8 +117,40 @@ pub(super) fn finish_worker_config(
             account_dir.to_string(),
         ));
     }
-    config.env.extend(proxy_credential_environment(cas_root));
+    let project_grants = project_proxy_credential_names(cas_root);
+    config.env.extend(
+        proxy_credential_environment(cas_root)
+            .into_iter()
+            .filter(|(name, _)| {
+                !PROTECTED_OPERATOR_ENV.contains(&name.as_str()) || project_grants.contains(name)
+            }),
+    );
+    for name in &project_grants {
+        config.grant_worker_credential(name);
+    }
     config.apply_worker_credential_policy();
+}
+
+/// Return protected credential names authorized by the project proxy config.
+///
+/// User-level proxy definitions and shell/profile values remain useful for
+/// the supervisor, but they are machine-global state rather than a grant to a
+/// worker in this project. Only the project `.cas/proxy.toml` is an auditable
+/// worker grant source.
+fn project_proxy_credential_names(cas_root: Option<&PathBuf>) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    let Some(cas_root) = cas_root else {
+        return names;
+    };
+    let path = cas_root.join("proxy.toml");
+    let Ok(contents) = std::fs::read_to_string(path) else {
+        return names;
+    };
+    let Ok(document) = toml::from_str::<toml::Value>(&contents) else {
+        return names;
+    };
+    collect_env_references(&document, &mut names);
+    names
 }
 
 /// Pass configured proxy credentials to each worker.

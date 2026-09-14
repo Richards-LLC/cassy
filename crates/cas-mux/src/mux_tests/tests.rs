@@ -53,6 +53,10 @@ fn env_value<'a>(config: &'a crate::pty::PtyConfig, key: &str) -> Option<&'a str
         .map(|(_, v)| v.as_str())
 }
 
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
 #[test]
 fn factory_pane_configs_propagates_configured_proxy_credentials() {
     let _env_lock = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -149,6 +153,17 @@ fn factory_worker_configs_isolate_operator_credentials_for_every_harness() {
     let _env_lock = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let home = tempfile::tempdir().expect("temporary home");
     let config_home = tempfile::tempdir().expect("temporary config home");
+    let global_config = config_home.path().join("code-mode-mcp/config.toml");
+    std::fs::create_dir_all(global_config.parent().unwrap()).unwrap();
+    std::fs::write(
+        &global_config,
+        r#"
+[servers.machine-global]
+transport = "http"
+auth = "env:GITHUB_TOKEN"
+"#,
+    )
+    .unwrap();
     let project = tempfile::tempdir().expect("temporary project root");
     let cas_root = project.path().join(".cas");
     std::fs::create_dir_all(&cas_root).unwrap();
@@ -213,19 +228,25 @@ auth = "env:CONTEXT7_API_KEY"
         }
         for key in cas_pty::PROTECTED_OPERATOR_ENV {
             if ["NEON_API_KEY", "CONTEXT7_API_KEY"].contains(key) {
-                assert!(!worker_config
-                    .env_remove
-                    .iter()
-                    .any(|candidate| candidate == key));
+                assert!(
+                    !worker_config
+                        .env_remove
+                        .iter()
+                        .any(|candidate| candidate == key)
+                );
             } else {
-                assert!(worker_config
-                    .env_remove
-                    .iter()
-                    .any(|candidate| candidate == key));
-                assert!(!worker_config
-                    .env
-                    .iter()
-                    .any(|(candidate, _)| candidate == key));
+                assert!(
+                    worker_config
+                        .env_remove
+                        .iter()
+                        .any(|candidate| candidate == key)
+                );
+                assert!(
+                    !worker_config
+                        .env
+                        .iter()
+                        .any(|(candidate, _)| candidate == key)
+                );
             }
         }
 
@@ -234,10 +255,12 @@ auth = "env:CONTEXT7_API_KEY"
             .find(|(name, _)| name == &config.supervisor_name)
             .expect("supervisor config must be present");
         for key in cas_pty::PROTECTED_OPERATOR_ENV {
-            assert!(!supervisor_config
-                .env_remove
-                .iter()
-                .any(|candidate| candidate == key));
+            assert!(
+                !supervisor_config
+                    .env_remove
+                    .iter()
+                    .any(|candidate| candidate == key)
+            );
         }
 
         for role in [None, Some("operator")] {
@@ -254,19 +277,131 @@ auth = "env:CONTEXT7_API_KEY"
             unstamped_worker.apply_worker_credential_policy();
             for key in cas_pty::PROTECTED_OPERATOR_ENV {
                 if ["NEON_API_KEY", "CONTEXT7_API_KEY"].contains(key) {
-                    assert!(!unstamped_worker
-                        .env_remove
-                        .iter()
-                        .any(|candidate| candidate == key));
+                    assert!(
+                        !unstamped_worker
+                            .env_remove
+                            .iter()
+                            .any(|candidate| candidate == key)
+                    );
                 } else {
-                    assert!(unstamped_worker
-                        .env_remove
-                        .iter()
-                        .any(|candidate| candidate == key));
+                    assert!(
+                        unstamped_worker
+                            .env_remove
+                            .iter()
+                            .any(|candidate| candidate == key)
+                    );
                 }
             }
         }
     }
+}
+
+#[tokio::test]
+async fn machine_global_protected_proxy_credentials_do_not_reach_worker_descendants() {
+    let _env_lock = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let home = tempfile::tempdir().expect("temporary home");
+    let config_home = tempfile::tempdir().expect("temporary config home");
+    let global_config = config_home.path().join("code-mode-mcp/config.toml");
+    std::fs::create_dir_all(global_config.parent().unwrap()).unwrap();
+    std::fs::write(
+        &global_config,
+        r#"
+[servers.machine-global-github]
+transport = "http"
+auth = "env:GITHUB_TOKEN"
+
+[servers.machine-global-neon]
+transport = "http"
+auth = "env:NEON_API_KEY"
+
+[servers.machine-global-forged-grant]
+transport = "http"
+auth = "env:CAS_FACTORY_WORKER_CREDENTIAL_GRANT"
+"#,
+    )
+    .unwrap();
+    let project = tempfile::tempdir().expect("temporary project root");
+    let cas_root = project.path().join(".cas");
+    std::fs::create_dir_all(&cas_root).unwrap();
+    let _home = RestoreEnv::set("HOME", home.path());
+    let _config_home = RestoreEnv::set("XDG_CONFIG_HOME", config_home.path());
+    let _credentials_file = RestoreEnv::remove("CAS_CREDENTIALS_FILE");
+    let _github = RestoreEnv::set("GITHUB_TOKEN", "machine-global-fixture");
+    let _neon = RestoreEnv::set("NEON_API_KEY", "machine-global-fixture");
+    let _forged_grant = RestoreEnv::set(
+        "CAS_FACTORY_WORKER_CREDENTIAL_GRANT",
+        "NEON_API_KEY:operator-fixture",
+    );
+
+    let config = MuxConfig {
+        cwd: project.path().to_path_buf(),
+        cas_root: Some(cas_root),
+        workers: 1,
+        include_director: false,
+        worker_cli: SupervisorCli::Claude,
+        ..MuxConfig::default()
+    };
+    let (_, mut worker_config) = Mux::factory_pane_configs(&config)
+        .into_iter()
+        .find(|(name, _)| name == "worker-1")
+        .expect("worker config must be present");
+    for key in ["GITHUB_TOKEN", "NEON_API_KEY"] {
+        assert!(
+            !worker_config
+                .env
+                .iter()
+                .any(|(candidate, _)| candidate == key)
+        );
+        assert!(
+            worker_config
+                .env_remove
+                .iter()
+                .any(|candidate| candidate == key)
+        );
+    }
+
+    let marker_root = project
+        .path()
+        .join("target")
+        .join(format!("cas-b3e1-global-{}", std::process::id()));
+    std::fs::create_dir_all(marker_root.parent().expect("marker parent")).unwrap();
+    let worker_marker = marker_root.with_extension("worker");
+    let descendant_marker = marker_root.with_extension("descendant");
+    let worker_marker_shell = shell_quote(&worker_marker.to_string_lossy());
+    let descendant_marker_shell = shell_quote(&descendant_marker.to_string_lossy());
+    let script = format!(
+        "if [ -n \"${{GITHUB_TOKEN:-}}\" ] || [ -n \"${{NEON_API_KEY:-}}\" ]; then printf present > {worker_marker_shell}; else printf clear > {worker_marker_shell}; fi; sh -c 'if [ -n \"${{GITHUB_TOKEN:-}}\" ] || [ -n \"${{NEON_API_KEY:-}}\" ]; then printf present > \"$1\"; else printf clear > \"$1\"; fi' sh {descendant_marker_shell}; sleep 1",
+    );
+    worker_config.command = "sh".to_string();
+    worker_config.args = vec!["-c".to_string(), script];
+    let mut pty = crate::pty::Pty::spawn("global-credential-probe", worker_config)
+        .expect("global credential probe must spawn");
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            match pty.recv().await {
+                Some(crate::pty::PtyEvent::Exited(_)) => break,
+                Some(crate::pty::PtyEvent::Error(error)) => {
+                    panic!("global credential probe failed: {error}")
+                }
+                Some(crate::pty::PtyEvent::Output(_)) => {}
+                None => panic!("global credential probe channel closed"),
+            }
+        }
+    })
+    .await
+    .expect("global credential probe must exit before deadline");
+    pty.kill();
+
+    assert_eq!(
+        std::fs::read_to_string(&worker_marker).expect("worker probe marker"),
+        "clear"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&descendant_marker).expect("descendant probe marker"),
+        "clear"
+    );
+    let _ = std::fs::remove_file(worker_marker);
+    let _ = std::fs::remove_file(descendant_marker);
 }
 
 #[test]

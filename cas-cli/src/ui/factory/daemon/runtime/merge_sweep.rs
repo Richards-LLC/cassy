@@ -17,6 +17,7 @@ use std::sync::{
 use std::time::{Duration, Instant};
 
 use serde::Deserialize;
+use serde_json::Value;
 use tokio::task::JoinHandle;
 
 use crate::config::FactoryConfig;
@@ -49,6 +50,7 @@ struct SweepRequest {
 enum SweepStatus {
     Passed,
     Failed,
+    Unavailable,
     TimedOut,
     SetupFailed,
     Superseded,
@@ -82,6 +84,19 @@ struct SweepSettings {
     nice_cargo: bool,
     max_concurrent_builders: usize,
     nextest_filter: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TestRunnerKind {
+    Cargo,
+    Package,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TestRunner {
+    kind: TestRunnerKind,
+    program: String,
+    args: Vec<String>,
 }
 
 impl From<&FactoryConfig> for SweepSettings {
@@ -371,6 +386,100 @@ fn settings_to_config(settings: &SweepSettings) -> FactoryConfig {
     config
 }
 
+/// Resolve the target project's declared test entry point in the detached
+/// merge checkout. Rust keeps the existing configured `CARGO` path; Node
+/// projects use the repository's lockfile/package-manager convention and
+/// invoke only the declared `test` script. No install or shell interpolation
+/// is performed by the sweep.
+fn resolve_test_runner(worktree: &Path) -> Result<TestRunner, String> {
+    if worktree.join("Cargo.toml").is_file() {
+        return Ok(TestRunner {
+            kind: TestRunnerKind::Cargo,
+            program: std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned()),
+            args: vec![
+                "nextest".to_owned(),
+                "run".to_owned(),
+                "--workspace".to_owned(),
+                "--no-fail-fast".to_owned(),
+            ],
+        });
+    }
+
+    let manifest_path = worktree.join("package.json");
+    let contents = fs::read_to_string(&manifest_path).map_err(|error| {
+        format!(
+            "sweep unavailable: target has no supported test runner; expected Cargo.toml or a readable package.json ({error})"
+        )
+    })?;
+    let manifest: Value = serde_json::from_str(&contents).map_err(|error| {
+        format!(
+            "sweep unavailable: cannot parse target package.json; expected a JSON manifest with scripts.test ({error})"
+        )
+    })?;
+    let has_test_script = manifest
+        .get("scripts")
+        .and_then(Value::as_object)
+        .and_then(|scripts| scripts.get("test"))
+        .and_then(Value::as_str)
+        .is_some_and(|script| !script.trim().is_empty());
+    if !has_test_script {
+        return Err(
+            "sweep unavailable: target package.json must declare a non-empty scripts.test entry"
+                .to_owned(),
+        );
+    }
+
+    let manager = package_manager(worktree, &manifest)?;
+    let env_name = manager.to_ascii_uppercase();
+    let program = std::env::var(&env_name).unwrap_or_else(|_| manager.to_owned());
+    Ok(TestRunner {
+        kind: TestRunnerKind::Package,
+        program,
+        args: vec!["test".to_owned()],
+    })
+}
+
+/// Keep this in lockstep with the worktree dependency setup resolver. A
+/// committed lockfile wins over `packageManager`; without either, the
+/// existing canonical fallback is npm.
+fn package_manager(worktree: &Path, manifest: &Value) -> Result<&'static str, String> {
+    let manager = if worktree.join("package-lock.json").is_file()
+        || worktree.join("npm-shrinkwrap.json").is_file()
+    {
+        "npm".to_owned()
+    } else if worktree.join("pnpm-lock.yaml").is_file() {
+        "pnpm".to_owned()
+    } else if worktree.join("yarn.lock").is_file() {
+        "yarn".to_owned()
+    } else if worktree.join("bun.lock").is_file() || worktree.join("bun.lockb").is_file() {
+        "bun".to_owned()
+    } else {
+        manifest
+            .get("packageManager")
+            .and_then(Value::as_str)
+            .and_then(|value| value.split('@').next())
+            .filter(|value| !value.is_empty())
+            .unwrap_or("npm")
+            .to_owned()
+    };
+    match manager.as_str() {
+        "npm" => Ok("npm"),
+        "pnpm" => Ok("pnpm"),
+        "yarn" => Ok("yarn"),
+        "bun" => Ok("bun"),
+        other => Err(format!(
+            "sweep unavailable: unsupported package manager `{other}`; use npm, pnpm, yarn, or bun in the target package.json/lockfile"
+        )),
+    }
+}
+
+fn format_command(program: &str, args: &[String]) -> String {
+    std::iter::once(program.to_owned())
+        .chain(args.iter().cloned())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn execute_sweep(
     project_root: &Path,
     cas_dir: &Path,
@@ -417,18 +526,40 @@ fn execute_sweep(
             };
         }
     };
+    let runner = match resolve_test_runner(&worktree) {
+        Ok(runner) => runner,
+        Err(error) => {
+            let _ = writeln!(log, "{error}");
+            return SweepResult {
+                request,
+                status: SweepStatus::Unavailable,
+                log_path,
+                summary: error,
+                failures: Vec::new(),
+                integration_epics: Vec::new(),
+                base_failure: None,
+            };
+        }
+    };
+    let mut command_display = format_command(&runner.program, &runner.args);
+    if runner.kind == TestRunnerKind::Cargo && settings.nice_cargo {
+        command_display = format!("nice -n {} {command_display}", nice_level());
+    }
     let _ = writeln!(
         log,
-        "sweep: cargo nextest run --workspace --no-fail-fast\nworktree: {}\ntarget: {}",
+        "sweep: {command_display}\nworktree: {}\ntarget: {}",
         worktree.display(),
         request.commit
     );
-    let Some(mut child) = spawn_nextest(&worktree, &settings, &log) else {
-        let summary = "could not start cargo nextest".to_string();
+    let Some(mut child) = spawn_test_runner(&worktree, &settings, &log, &runner) else {
+        let summary = format!(
+            "sweep unavailable: could not start `{}`; ensure the target project's configured test runner is installed and on PATH",
+            runner.program
+        );
         let _ = writeln!(log, "{summary}");
         return SweepResult {
             request,
-            status: SweepStatus::SetupFailed,
+            status: SweepStatus::Unavailable,
             log_path,
             summary,
             failures: Vec::new(),
@@ -458,7 +589,7 @@ fn execute_sweep(
             }
             Ok(None) => std::thread::sleep(POLL_INTERVAL),
             Err(error) => {
-                let _ = writeln!(log, "failed polling cargo nextest: {error}");
+                let _ = writeln!(log, "failed polling test runner: {error}");
                 terminate_child(&mut child);
                 break SweepStatus::Failed;
             }
@@ -582,28 +713,36 @@ fn hardlink_tree(source: &Path, destination: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn spawn_nextest(worktree: &Path, settings: &SweepSettings, log: &File) -> Option<Child> {
-    let cargo_binary = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
-    let mut command = if settings.nice_cargo {
+fn spawn_test_runner(
+    worktree: &Path,
+    settings: &SweepSettings,
+    log: &File,
+    runner: &TestRunner,
+) -> Option<Child> {
+    let mut command = if runner.kind == TestRunnerKind::Cargo && settings.nice_cargo {
         let level = nice_level();
         let mut command = Command::new("nice");
-        command.args(["-n", level.as_str()]).arg(&cargo_binary);
+        command.args(["-n", level.as_str()]).arg(&runner.program);
         command
     } else {
-        Command::new(cargo_binary)
+        Command::new(&runner.program)
     };
     command
         .current_dir(worktree)
-        .args(["nextest", "run", "--workspace", "--no-fail-fast"])
+        .args(&runner.args)
         .env("CARGO_BUILD_JOBS", effective_build_jobs(settings))
         .stdin(Stdio::null())
         .stdout(Stdio::from(log.try_clone().ok()?))
         .stderr(Stdio::from(log.try_clone().ok()?));
-    if let Some(filter) = &settings.nextest_filter {
-        command.args(["-E", filter]);
+    if runner.kind == TestRunnerKind::Cargo {
+        if let Some(filter) = &settings.nextest_filter {
+            command.args(["-E", filter]);
+        }
     }
-    if let Some(zig) = resolve_zig(worktree) {
-        command.env("ZIG", zig);
+    if runner.kind == TestRunnerKind::Cargo {
+        if let Some(zig) = resolve_zig(worktree) {
+            command.env("ZIG", zig);
+        }
     }
     #[cfg(unix)]
     {
@@ -719,7 +858,7 @@ fn summarize_log(path: &Path) -> (String, Vec<String>) {
         }
     }
     if summary.is_empty() {
-        summary = "cargo nextest completed; see sweep log".to_string();
+        summary = "test runner completed; see sweep log".to_string();
     }
     (summary, failures)
 }
@@ -777,6 +916,7 @@ fn status_text(status: SweepStatus) -> &'static str {
     match status {
         SweepStatus::Passed => "PASSED",
         SweepStatus::Failed => "FAILED",
+        SweepStatus::Unavailable => "SWEEP_UNAVAILABLE",
         SweepStatus::TimedOut => "TIMED OUT",
         SweepStatus::SetupFailed => "SETUP FAILED",
         SweepStatus::Superseded => "SUPERSEDED",
@@ -908,5 +1048,270 @@ mod tests {
         };
         assert_ne!(old.commit, request.commit);
         assert_eq!(request.epic_id, old.epic_id);
+    }
+
+    #[test]
+    fn runner_resolution_uses_the_declared_pnpm_test_script() {
+        let _env = crate::test_support::TestEnvGuard::with_optional_vars(&[("PNPM", None)]);
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("package.json"),
+            r#"{"packageManager":"pnpm@10.4.0","scripts":{"test":"pnpm -r test"}}"#,
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("pnpm-lock.yaml"),
+            "lockfileVersion: '9.0'\n",
+        )
+        .unwrap();
+
+        let runner = resolve_test_runner(temp.path()).unwrap();
+
+        assert_eq!(runner.kind, TestRunnerKind::Package);
+        assert_eq!(runner.program, "pnpm");
+        assert_eq!(runner.args, ["test"]);
+        assert_eq!(format_command(&runner.program, &runner.args), "pnpm test");
+    }
+
+    #[test]
+    fn runner_resolution_rejects_missing_test_script_as_unavailable() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("package.json"),
+            r#"{"scripts":{"build":"vite build"}}"#,
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("pnpm-lock.yaml"),
+            "lockfileVersion: '9.0'\n",
+        )
+        .unwrap();
+
+        let error = resolve_test_runner(temp.path()).unwrap_err();
+
+        assert!(
+            error.contains("package.json") && error.contains("scripts.test"),
+            "{error}"
+        );
+        assert!(error.contains("sweep unavailable"), "{error}");
+    }
+
+    #[test]
+    fn runner_resolution_rejects_unsupported_package_manager() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("package.json"),
+            r#"{"packageManager":"deno@2.0.0","scripts":{"test":"deno test"}}"#,
+        )
+        .unwrap();
+
+        let error = resolve_test_runner(temp.path()).unwrap_err();
+
+        assert!(
+            error.contains("unsupported package manager `deno`"),
+            "{error}"
+        );
+        assert!(error.contains("npm, pnpm, yarn, or bun"), "{error}");
+    }
+
+    #[test]
+    fn runner_resolution_preserves_configured_cargo_path() {
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[("CARGO", "/owned/cargo")]);
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("Cargo.toml"),
+            "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+        )
+        .unwrap();
+
+        let runner = resolve_test_runner(temp.path()).unwrap();
+
+        assert_eq!(runner.kind, TestRunnerKind::Cargo);
+        assert_eq!(runner.program, "/owned/cargo");
+        assert_eq!(
+            runner.args,
+            ["nextest", "run", "--workspace", "--no-fail-fast"]
+        );
+    }
+
+    #[test]
+    fn missing_package_runner_is_not_spawned_as_a_test_failure() {
+        let temp = tempfile::tempdir().unwrap();
+        let log_path = temp.path().join("runner.log");
+        let log = File::create(log_path).unwrap();
+        let settings = SweepSettings::from(&FactoryConfig::default());
+        let runner = TestRunner {
+            kind: TestRunnerKind::Package,
+            program: temp
+                .path()
+                .join("missing-pnpm")
+                .to_string_lossy()
+                .into_owned(),
+            args: vec!["test".to_owned()],
+        };
+
+        assert!(spawn_test_runner(temp.path(), &settings, &log, &runner).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn execute_sweep_runs_pnpm_from_the_detached_target_worktree() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .current_dir(temp.path())
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "git {args:?}: {:?}", output.stderr);
+            String::from_utf8_lossy(&output.stdout).trim().to_owned()
+        };
+        git(&["init", "-b", "main"]);
+        git(&["config", "user.name", "Runner Fixture"]);
+        git(&["config", "user.email", "runner@example.invalid"]);
+        fs::write(
+            temp.path().join("package.json"),
+            r#"{"packageManager":"pnpm@10.4.0","scripts":{"test":"pnpm -r test"}}"#,
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("pnpm-lock.yaml"),
+            "lockfileVersion: '9.0'\n",
+        )
+        .unwrap();
+        git(&["add", "package.json", "pnpm-lock.yaml"]);
+        git(&["commit", "-m", "package runner fixture"]);
+        let commit = git(&["rev-parse", "HEAD"]);
+        let runner_script = temp.path().join("pnpm-fixture.sh");
+        let cwd_output = temp.path().join("runner-cwd");
+        let args_output = temp.path().join("runner-args");
+        fs::write(
+            &runner_script,
+            "#!/bin/sh\nprintf '%s\\n' \"$PWD\" > \"$SWEEP_RUNNER_CWD\"\nprintf '%s\\n' \"$@\" > \"$SWEEP_RUNNER_ARGS\"\necho 'Summary: 1 passed'\n",
+        )
+        .unwrap();
+        fs::set_permissions(&runner_script, fs::Permissions::from_mode(0o755)).unwrap();
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[
+            ("PNPM", runner_script.to_str().unwrap()),
+            ("SWEEP_RUNNER_CWD", cwd_output.to_str().unwrap()),
+            ("SWEEP_RUNNER_ARGS", args_output.to_str().unwrap()),
+        ]);
+        let cas_dir = temp.path().join("cas-data");
+        let settings = SweepSettings::from(&FactoryConfig::default());
+        let result = execute_sweep(
+            temp.path(),
+            &cas_dir,
+            SweepRequest {
+                epic_id: "cas-pnpm".to_owned(),
+                target_branch: "epic/pnpm".to_owned(),
+                commit,
+            },
+            settings,
+            Arc::new(AtomicBool::new(false)),
+        );
+
+        assert_eq!(result.status, SweepStatus::Passed, "{}", result.summary);
+        let expected_worktree = temp.path().join(".cas/epic-cas-pnpm-merge");
+        assert_eq!(
+            fs::read_to_string(cwd_output).unwrap().trim(),
+            expected_worktree.display().to_string()
+        );
+        assert_eq!(fs::read_to_string(args_output).unwrap().trim(), "test");
+        let log = fs::read_to_string(result.log_path).unwrap();
+        assert!(log.contains("sweep: "), "{log}");
+        assert!(log.contains(" test\nworktree: "), "{log}");
+    }
+
+    #[test]
+    fn execute_sweep_reports_missing_runner_as_configuration_unavailable() {
+        let temp = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .current_dir(temp.path())
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "git {args:?}: {:?}", output.stderr);
+            String::from_utf8_lossy(&output.stdout).trim().to_owned()
+        };
+        git(&["init", "-b", "main"]);
+        git(&["config", "user.name", "Runner Fixture"]);
+        git(&["config", "user.email", "runner@example.invalid"]);
+        fs::write(temp.path().join("README"), "no runner\n").unwrap();
+        git(&["add", "README"]);
+        git(&["commit", "-m", "missing runner fixture"]);
+        let commit = git(&["rev-parse", "HEAD"]);
+
+        let result = execute_sweep(
+            temp.path(),
+            &temp.path().join("cas-data"),
+            SweepRequest {
+                epic_id: "cas-no-runner".to_owned(),
+                target_branch: "epic/no-runner".to_owned(),
+                commit,
+            },
+            SweepSettings::from(&FactoryConfig::default()),
+            Arc::new(AtomicBool::new(false)),
+        );
+
+        assert_eq!(result.status, SweepStatus::Unavailable);
+        assert!(
+            result.summary.contains("sweep unavailable"),
+            "{}",
+            result.summary
+        );
+        let log = fs::read_to_string(result.log_path).unwrap();
+        assert_eq!(log.matches("sweep unavailable").count(), 1, "{log}");
+        assert!(result.failures.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pnpm_runner_executes_in_target_project_cwd() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("package.json"),
+            r#"{"packageManager":"pnpm@10.4.0","scripts":{"test":"echo declared"}}"#,
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("pnpm-lock.yaml"),
+            "lockfileVersion: '9.0'\n",
+        )
+        .unwrap();
+        let runner_script = temp.path().join("pnpm-fixture.sh");
+        let cwd_output = temp.path().join("runner-cwd");
+        let args_output = temp.path().join("runner-args");
+        fs::write(
+            &runner_script,
+            "#!/bin/sh\nprintf '%s\\n' \"$PWD\" > \"$SWEEP_RUNNER_CWD\"\nprintf '%s\\n' \"$@\" > \"$SWEEP_RUNNER_ARGS\"\necho 'Summary: 1 passed'\n",
+        )
+        .unwrap();
+        fs::set_permissions(&runner_script, fs::Permissions::from_mode(0o755)).unwrap();
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[
+            ("PNPM", runner_script.to_str().unwrap()),
+            ("SWEEP_RUNNER_CWD", cwd_output.to_str().unwrap()),
+            ("SWEEP_RUNNER_ARGS", args_output.to_str().unwrap()),
+        ]);
+        let runner = resolve_test_runner(temp.path()).unwrap();
+        let log_path = temp.path().join("runner.log");
+        let log = File::create(&log_path).unwrap();
+        let settings = SweepSettings::from(&FactoryConfig::default());
+        let mut child = spawn_test_runner(temp.path(), &settings, &log, &runner).unwrap();
+
+        assert!(child.wait().unwrap().success());
+        assert_eq!(
+            fs::read_to_string(cwd_output).unwrap().trim(),
+            temp.path().display().to_string()
+        );
+        assert_eq!(fs::read_to_string(args_output).unwrap().trim(), "test");
+        assert_eq!(
+            fs::read_to_string(log_path).unwrap().trim(),
+            "Summary: 1 passed"
+        );
     }
 }

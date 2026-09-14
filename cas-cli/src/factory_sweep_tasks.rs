@@ -134,7 +134,14 @@ fn build_report_from_contents(
     affected_epics: &[String],
     contents: &str,
 ) -> SweepTaskReport {
-    let failures = parse_failures(contents);
+    // A missing/unsupported project runner is a configuration outcome, not a
+    // test failure. Do not turn diagnostic text that happens to contain
+    // `FAIL` into fileable test proposals.
+    let failures = if status == "SWEEP_UNAVAILABLE" {
+        Vec::new()
+    } else {
+        parse_failures(contents)
+    };
     let mut grouped: BTreeMap<String, (FailureClass, Vec<FailureRecord>)> = BTreeMap::new();
     for failure in failures.iter().cloned() {
         let class = classify_failure(project_root, &failure);
@@ -482,5 +489,24 @@ mod tests {
         assert_eq!(report.classes.len(), 1);
         assert_eq!(report.classes[0].failure_class, "unclassified");
         assert_eq!(report.classes[0].class_name, "unclassified");
+    }
+
+    #[test]
+    fn unavailable_runner_does_not_become_a_test_failure_class() {
+        let temp = tempfile::tempdir().unwrap();
+        let report = build_report_from_contents(
+            temp.path(),
+            Path::new("/artifacts/sweep.log"),
+            "SWEEP_UNAVAILABLE",
+            "integration/fixture",
+            "tip",
+            "cas-861",
+            &[],
+            "sweep unavailable: could not start `pnpm`; ensure pnpm is installed\nFAIL [diagnostic] missing runner\n",
+        );
+
+        assert_eq!(report.status, "SWEEP_UNAVAILABLE");
+        assert_eq!(report.failure_count, 0);
+        assert!(report.classes.is_empty());
     }
 }

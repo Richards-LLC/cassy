@@ -95,8 +95,43 @@ def handler_for(state: StubState):
                 self.wfile.write(body)
                 return
             if method == "tools/call":
+                tool_name = request["params"]["name"]
+                if tool_name == "mecha_read":
+                    arguments = request["params"]["arguments"]
+                    assert arguments["channel"] == "cas-internal"
+                    assert arguments["include_files"] is True
+                    assert arguments["max_file_bytes"] == 4 * 1024 * 1024
+                    assert arguments["max_files"] == 50
+                    result = {
+                        "_id": request_id,
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": json.dumps(
+                                    {
+                                        "files": [
+                                            {
+                                                "file_id": "F-report",
+                                                "size_bytes": len(state.remote_pdf),
+                                                "content_base64": base64.b64encode(
+                                                    state.remote_pdf
+                                                ).decode("ascii"),
+                                            }
+                                        ]
+                                    }
+                                ),
+                            }
+                        ],
+                    }
+                    body = envelope(result)
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
                 arguments = request["params"]["arguments"]
-                assert request["params"]["name"] == "mecha_post"
+                assert tool_name == "mecha_post"
                 if arguments["kind"] == "file":
                     assert arguments["reply_to"] == "user-thread"
                     assert arguments["file"]["content_encoding"] == "base64"
@@ -371,12 +406,21 @@ def main() -> int:
 
         state.include_file_block = True
         result, fields = run_adapter(server, state, pdf)
-        assert result.returncode != 0
-        assert "file permalink is not a PDF endpoint" in result.stderr
-        assert fields is None
+        assert result.returncode == 0, f"hub file read fallback failed: {result.stderr!r}"
+        assert fields is not None
+        assert fields["PDF_REMOTE_SHA256"] == fields["PDF_SHA256"]
+        assert fields["PDF_REMOTE_SIZE_BYTES"] == fields["PDF_SIZE_BYTES"]
+        assert fields["PDF_REMOTE_PAGE_COUNT"] == fields["PAGE_COUNT"]
         assert state.download_requests == []
         methods = [request.get("method") for request in state.requests]
-        assert methods == ["initialize", "notifications/initialized", "tools/list", "tools/call"]
+        assert methods == [
+            "initialize",
+            "notifications/initialized",
+            "tools/list",
+            "tools/call",
+            "tools/call",
+            "tools/call",
+        ]
         print("release-report-post stub: 6 integrity and endpoint scenarios passed")
     finally:
         server.shutdown()

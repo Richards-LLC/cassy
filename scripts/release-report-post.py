@@ -11,6 +11,7 @@ receipts.  Credentials are resolved from the environment or the standard
 from __future__ import annotations
 
 import base64
+import binascii
 import hashlib
 import http.client
 import ipaddress
@@ -33,6 +34,7 @@ DEFAULT_CHANNEL = "cas-internal"
 DEFAULT_REPO = "Richards-LLC/cassy"
 MCP_PROTOCOL_VERSION = "2025-06-18"
 MAX_REMOTE_PDF_BYTES = 32 * 1024 * 1024
+MAX_HUB_FILE_BYTES = 4 * 1024 * 1024
 
 
 class AdapterError(RuntimeError):
@@ -348,6 +350,40 @@ class McpClient:
                     return decoded
         fail(f"MechaCassy tool {name} returned no JSON envelope")
 
+    def read_file(self, channel: str, file_id: str) -> bytes:
+        """Read an uploaded file through the hub's authenticated file packer."""
+
+        result = self.tool(
+            "mecha_read",
+            {
+                "channel": channel,
+                "include_files": True,
+                "include_threads": True,
+                "max_messages": 500,
+                "max_files": 50,
+                "max_file_bytes": MAX_HUB_FILE_BYTES,
+                "max_bytes": 8 * 1024 * 1024,
+            },
+        )
+        files = result.get("files")
+        if not isinstance(files, list):
+            fail("MechaCassy file read returned no file receipts")
+        for file in files:
+            if not isinstance(file, dict) or file.get("file_id") != file_id:
+                continue
+            content = file.get("content_base64")
+            if not isinstance(content, str) or not content:
+                fail("MechaCassy file read returned no uploaded PDF bytes")
+            try:
+                raw = base64.b64decode(content, validate=True)
+            except (ValueError, binascii.Error):
+                fail("MechaCassy file read returned invalid uploaded PDF bytes")
+            size = file.get("size_bytes")
+            if not isinstance(size, int) or size != len(raw):
+                fail("MechaCassy file read returned inconsistent uploaded PDF size")
+            return raw
+        fail("MechaCassy file read returned no receipt for the uploaded PDF")
+
 
 def message_receipt(envelope: dict[str, Any], label: str) -> tuple[str, str]:
     message = envelope.get("message")
@@ -362,7 +398,7 @@ def message_receipt(envelope: dict[str, Any], label: str) -> tuple[str, str]:
     return message_id, permalink
 
 
-def file_receipt(envelope: dict[str, Any]) -> tuple[str, str, str]:
+def file_receipt(envelope: dict[str, Any]) -> tuple[str, str, str | None]:
     message_id, message_permalink = message_receipt(envelope, "PDF")
     file_block = envelope.get("file")
     if not isinstance(file_block, dict):
@@ -377,9 +413,7 @@ def file_receipt(envelope: dict[str, Any]) -> tuple[str, str, str]:
     if not isinstance(file_permalink, str) or not file_permalink.startswith("https://"):
         fail("PDF post returned no HTTPS file permalink")
     download_url = file_block.get("download_url")
-    if download_url is None:
-        fail("PDF post returned no verified PDF download URL; file permalink is not a PDF endpoint")
-    return file_id, file_permalink, checked_download_url(download_url)
+    return file_id, file_permalink, checked_download_url(download_url) if download_url is not None else None
 
 
 def checked_download_url(value: Any) -> str:
@@ -423,14 +457,20 @@ def sha256(data: bytes) -> str:
 
 def verify_remote_pdf(
     client: McpClient,
-    download_url: str,
+    channel: str,
+    file_id: str,
+    download_url: str | None,
     local_bytes: bytes,
     local_sha: str,
     local_pages: int,
 ) -> tuple[str, int, int]:
     """Prove the transport's stored PDF is the exact local, decodable PDF."""
 
-    remote_bytes = client.download(download_url)
+    remote_bytes = (
+        client.download(download_url)
+        if download_url
+        else client.read_file(channel, file_id)
+    )
     remote_size = len(remote_bytes)
     if remote_size != len(local_bytes):
         fail(
@@ -561,7 +601,7 @@ def main(argv: list[str]) -> int:
         )
         pdf_file_id, pdf_permalink, pdf_download_url = file_receipt(pdf_envelope)
         remote_pdf_sha, remote_pdf_size, remote_pdf_pages = verify_remote_pdf(
-            client, pdf_download_url, pdf_bytes, pdf_sha, pages
+            client, channel, pdf_file_id, pdf_download_url, pdf_bytes, pdf_sha, pages
         )
         html_envelope = client.tool(
             "mecha_post",

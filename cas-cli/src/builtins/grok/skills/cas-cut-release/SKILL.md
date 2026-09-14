@@ -174,6 +174,9 @@ name the blocking step in the operator timeline, and require its receipt.
    explicit same-origin loopback exception used by tests); external signed or
    private-provider URLs receive no hub credentials, message permalinks are not
    PDF endpoints, and cross-origin or scheme-changing redirects are rejected.
+   When the current hub file receipt omits `download_url`, the adapter may use
+   authenticated `mecha_read` by the returned file ID; otherwise it fails
+   explicitly before treating the upload as verified.
    If the hub cannot complete publication, preserve the draft and partial
    receipts and report blocked. Use MechaCassy's default `cas-internal` channel,
    retain `C0B44GUKDK2` only for verification, and save four Slack POSTED

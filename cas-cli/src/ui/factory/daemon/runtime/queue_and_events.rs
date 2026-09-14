@@ -55,15 +55,51 @@ fn registration_timeout_detail(
 /// Return a bounded, readable final pane excerpt for a timeout diagnosis.
 /// The pane buffer has already been capped at 256 KiB; the error detail must
 /// stay small enough for the spawn-lifecycle row and supervisor relay.
+const WORKER_EXIT_TAIL_MAX_CHARS: usize = 2_000;
+
+fn bounded_tail_text(text: &str) -> String {
+    let tail: String = text
+        .chars()
+        .rev()
+        .take(WORKER_EXIT_TAIL_MAX_CHARS)
+        .collect();
+    tail.chars().rev().collect()
+}
+
 fn timeout_pane_tail(buffer: Option<&super::relay::PaneBuffer>) -> Option<String> {
-    const MAX_CHARS: usize = 2_000;
     let text = buffer?.as_plain_text();
     let trimmed = text.trim();
     if trimmed.is_empty() {
         return None;
     }
-    let tail: String = trimmed.chars().rev().take(MAX_CHARS).collect();
-    Some(tail.chars().rev().collect())
+    Some(bounded_tail_text(trimmed))
+}
+
+/// Render only child-wait evidence for a genuine PTY exit. The pane tail is
+/// already bounded by `timeout_pane_tail`; keeping it alongside the status
+/// makes a crash actionable after the pane is removed and the live process
+/// disappears. Missing status remains explicitly unavailable rather than
+/// being converted into a guessed exit code.
+fn worker_exit_info(
+    exit_code: Option<i32>,
+    exit_signal: Option<&str>,
+    pane_tail: Option<&str>,
+) -> String {
+    let status = match exit_signal.filter(|signal| !signal.trim().is_empty()) {
+        Some(signal) => format!("terminated by signal {signal}"),
+        None => match exit_code {
+            Some(code) => format!("exited with code {code}"),
+            None => "exit status unavailable".to_string(),
+        },
+    };
+    let tail = pane_tail
+        .filter(|tail| !tail.trim().is_empty())
+        .map(|tail| {
+            let tail = bounded_tail_text(tail.trim());
+            format!("\n\nLast worker PTY output (bounded):\n{tail}")
+        })
+        .unwrap_or_else(|| "\n\nLast worker PTY output: unavailable".to_string());
+    format!("{status}{tail}")
 }
 
 /// Return a bounded pane excerpt when a harness reports a model rejection
@@ -2433,7 +2469,11 @@ impl FactoryDaemon {
                 self.forward_pane_output_to_gui(&pane_id, &data);
                 self.forward_pane_output_to_ws(&pane_id, &data);
             }
-            cas_mux::MuxEvent::PaneExited { pane_id, exit_code } => {
+            cas_mux::MuxEvent::PaneExited {
+                pane_id,
+                exit_code,
+                exit_signal,
+            } => {
                 // Notify GUI and WS clients
                 self.gui_notify_pane_exited(&pane_id, exit_code);
                 let is_supervisor = pane_id == self.app.supervisor_name();
@@ -2444,7 +2484,9 @@ impl FactoryDaemon {
                     tracing::info!("Supervisor exited with code {exit_code:?}, shutting down");
                     self.shutdown.store(true, Ordering::Relaxed);
                 } else if is_worker {
-                    let _ = self.handle_worker_crash(&pane_id, exit_code).await;
+                    let _ = self
+                        .handle_worker_crash(&pane_id, exit_code, exit_signal)
+                        .await;
                 }
             }
             _ => {}
@@ -2456,6 +2498,7 @@ impl FactoryDaemon {
         &mut self,
         worker_name: &str,
         exit_code: Option<i32>,
+        exit_signal: Option<String>,
     ) -> anyhow::Result<()> {
         let verification =
             take_unverified_spawn_on_exit(&mut self.spawn_verifications, worker_name);
@@ -2465,19 +2508,15 @@ impl FactoryDaemon {
             .is_some();
         let pane_tail = timeout_pane_tail(self.pane_buffers.get(worker_name));
 
+        let exit_info = worker_exit_info(exit_code, exit_signal.as_deref(), pane_tail.as_deref());
+
         // A registered worker can still be a dead harness whose MCP child
         // answered first. Mark the durable agent stale before removing the
         // pane so task leases are parked and worker_status cannot retain the
         // transcript-backed active row.
-        self.mark_registered_worker_stale(worker_name, "worker PTY exited");
+        self.mark_registered_worker_stale(worker_name, &exit_info);
         self.app.mark_worker_crashed(worker_name).await;
         self.dead_workers.insert(worker_name.to_string());
-
-        let exit_info = match exit_code {
-            Some(0) => "exited normally".to_string(),
-            Some(code) => format!("crashed with exit code {code}"),
-            None => "was terminated".to_string(),
-        };
 
         self.app
             .set_error(format!("Worker '{worker_name}' {exit_info}"));
@@ -7197,7 +7236,7 @@ mod tests {
         reminder_matches_factory_session, report_stale_reminder_expiry, shutdown_targets,
         spawn_predates_shutdown, spawn_provisioning_timed_out, stalled_spawn_requests,
         take_next_pending_spawn, take_spawn_cancellation, take_unverified_spawn_on_exit,
-        timeout_pane_tail,
+        timeout_pane_tail, worker_exit_info,
     };
     use crate::ui::factory::app::render_and_ops::epic_workers::release_preassign_if_bound;
     use crate::ui::factory::daemon::{FactoryDaemon, PendingSpawn, SpawnVerification};
@@ -7391,6 +7430,41 @@ mod tests {
         assert_eq!(tail.chars().count(), 2_000, "tail must remain bounded");
         assert!(tail.ends_with("tail from Claude"), "tail: {tail}");
         assert!(!tail.contains("\x1b["), "ANSI must be stripped: {tail}");
+    }
+
+    #[test]
+    fn worker_exit_info_reports_status_and_bounded_tail_without_guessing() {
+        let code = worker_exit_info(Some(23), None, Some("last worker line"));
+        assert!(code.contains("exited with code 23"), "{code}");
+        assert!(code.contains("Last worker PTY output (bounded):"), "{code}");
+        assert!(code.contains("last worker line"), "{code}");
+
+        let signal = worker_exit_info(Some(143), Some("Terminated"), None);
+        assert!(
+            signal.contains("terminated by signal Terminated"),
+            "{signal}"
+        );
+        assert!(
+            signal.contains("Last worker PTY output: unavailable"),
+            "{signal}"
+        );
+
+        let bounded = worker_exit_info(Some(1), None, Some(&"tail".repeat(2_100)));
+        assert!(
+            bounded.chars().count() < 2_100,
+            "worker exit evidence must bound a caller-provided tail"
+        );
+
+        let unavailable = worker_exit_info(None, None, None);
+        assert!(
+            unavailable.contains("exit status unavailable"),
+            "{unavailable}"
+        );
+        assert!(
+            !unavailable.contains("exited with code")
+                && !unavailable.contains("terminated by signal"),
+            "missing child wait status must not be invented: {unavailable}"
+        );
     }
 
     /// GH #589: the registration-time assignment brief must wake the daemon

@@ -1196,9 +1196,17 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
     }
 
     let cwd = std::env::current_dir()?;
+    // Resolve the launch project once from Git's toplevel. Every default
+    // factory path below (config, session matching, and worker cwd) must agree
+    // with worker-status, even when the operator starts in a repository
+    // subdirectory. Explicit CAS_ROOT / --cas-root remains authoritative.
+    let project_root = crate::store::find_git_toplevel(&cwd).unwrap_or_else(|_| cwd.clone());
+    let resolved_cas_root = cas_root
+        .map(std::path::PathBuf::from)
+        .or_else(|| crate::store::find_cas_root_from(&cwd).ok());
 
     if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
-        let hints = noninteractive_factory_hints(args, &cwd, cas_root);
+        let hints = noninteractive_factory_hints(args, &project_root, resolved_cas_root.as_deref());
         let mut msg = String::from(
             "Factory mode requires an interactive terminal.\n\n\
              Run this command in a terminal (not a non-interactive shell/pipe).\n\
@@ -1224,8 +1232,8 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
     // persisted — the config value always won, even though the user asked for
     // Claude.
     let mut effective_args = args.clone();
-    let cas_dir_buf = cwd.join(".cas");
-    let effective_cas_dir = cas_root.or_else(|| {
+    let cas_dir_buf = project_root.join(".cas");
+    let effective_cas_dir = resolved_cas_root.as_deref().or_else(|| {
         if cas_dir_buf.exists() {
             Some(cas_dir_buf.as_path())
         } else {
@@ -1270,7 +1278,7 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
     }
     let args = &effective_args;
 
-    let preflight = preflight_factory_launch(args, &cwd, cas_root)?;
+    let preflight = preflight_factory_launch(args, &project_root, resolved_cas_root.as_deref())?;
     if !preflight.notices.is_empty() {
         let theme = crate::ui::theme::ActiveTheme::default();
         let mut stdout = std::io::stdout();
@@ -1289,7 +1297,7 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
 
     // Auto-attach to existing session, or kill it if --new
     if !args.legacy && args.name.is_none() {
-        let project_dir = cwd.to_string_lossy();
+        let project_dir = project_root.to_string_lossy();
         if let Ok(Some(session)) = find_session_for_project(&project_dir, None) {
             if session.can_attach() {
                 if args.start_new {
@@ -1353,8 +1361,8 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
 
     // Determine theme variant early so we can use themed names
     let theme_variant = {
-        let cd = cwd.join(".cas");
-        let cr = cas_root.or_else(|| {
+        let cd = project_root.join(".cas");
+        let cr = resolved_cas_root.as_deref().or_else(|| {
             if cd.exists() {
                 Some(cd.as_path())
             } else {
@@ -1382,7 +1390,7 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
     let session_name = args
         .name
         .clone()
-        .unwrap_or_else(|| generate_session_name(Some(&cwd.to_string_lossy())));
+        .unwrap_or_else(|| generate_session_name(Some(&project_root.to_string_lossy())));
 
     let orphans_killed = lifecycle::cleanup_orphaned_daemons();
     if orphans_killed > 0 {
@@ -1456,7 +1464,7 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
                 worker_spec_jsons: args.worker_spec.clone(),
                 supervisor_spec_json: None,
                 user_config: None, // auto-resolve from home dir
-                project_config: Some(cwd.join(".cas").join("config.toml")),
+                project_config: Some(preflight.cas_root.join("config.toml")),
             };
             let fallback_model = cas_factory::configured_factory_default_model(&sources)
                 .map_err(|e| anyhow::anyhow!("Failed to resolve factory defaults: {e}"))?;
@@ -1529,7 +1537,7 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
             worker_spec_jsons: vec![],
             supervisor_spec_json: args.supervisor_spec.clone(),
             user_config: None, // auto-resolve from home dir
-            project_config: Some(cwd.join(".cas").join("config.toml")),
+            project_config: Some(preflight.cas_root.join("config.toml")),
         };
         let fallback_model = cas_factory::configured_factory_default_model(&sources)
             .map_err(|e| anyhow::anyhow!("Failed to resolve factory defaults: {e}"))?;
@@ -1585,7 +1593,7 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
         launch_fields_from_spec(&resolved_supervisor_spec);
 
     let config = FactoryConfig {
-        cwd: cwd.clone(),
+        cwd: project_root.clone(),
         workers: args.workers as usize,
         worker_names: worker_names.clone(),
         supervisor_name: Some(supervisor_name),
@@ -1626,9 +1634,11 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
 }
 
 fn execute_unified_preflight(cli: &Cli, cas_root: Option<&std::path::Path>) -> Result<()> {
-    let project_root = std::env::current_dir()?;
-    let default_cas_root = project_root.join(".cas");
-    let cas_root = cas_root.unwrap_or(&default_cas_root);
+    let cwd = std::env::current_dir()?;
+    let project_root = crate::store::find_git_toplevel(&cwd).unwrap_or(cwd);
+    let detected_cas_root = crate::store::find_cas_root_from(&project_root)
+        .unwrap_or_else(|_| project_root.join(".cas"));
+    let cas_root = cas_root.unwrap_or(&detected_cas_root);
     let report =
         crate::factory_preflight::collect_factory_preflight(&project_root, cas_root, false, None);
     if cli.json {
@@ -1718,6 +1728,9 @@ fn validate_cas_root(
             Ok(root)
         }
         None => {
+            if let Ok(root) = crate::store::find_cas_root_from(cwd) {
+                return Ok(root);
+            }
             bail!(
                 "Cassy is not initialized in this directory.\n\n\
                 Factory mode requires Cassy for task coordination.\n\n\

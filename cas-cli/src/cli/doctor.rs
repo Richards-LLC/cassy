@@ -387,11 +387,11 @@ fn classify_user_skill(
     content: &str,
     builtin_skill_names: &std::collections::HashSet<String>,
 ) -> Option<StrayReason> {
-    if let Some((_, superseded_by)) = RETIRED_USER_SKILLS.iter().find(|(n, _)| *n == name) {
-        return Some(StrayReason::RetiredBy(superseded_by));
-    }
     if crate::builtins::is_managed_by_cas(content) && !builtin_skill_names.contains(name) {
         return Some(StrayReason::OrphanedManagedCopy);
+    }
+    if let Some((_, superseded_by)) = RETIRED_USER_SKILLS.iter().find(|(n, _)| *n == name) {
+        return Some(StrayReason::RetiredBy(superseded_by));
     }
     None
 }
@@ -665,12 +665,28 @@ fn stray_user_skills_check(strays: &[StrayUserSkill]) -> Check {
         })
         .collect::<Vec<_>>()
         .join(", ");
+    let managed_count = strays
+        .iter()
+        .filter(|stray| matches!(stray.reason, StrayReason::OrphanedManagedCopy))
+        .count();
+    let retired_user_count = strays
+        .iter()
+        .filter(|stray| matches!(stray.reason, StrayReason::RetiredBy(_)))
+        .count();
+    let remediation = if managed_count > 0 && retired_user_count > 0 {
+        format!(
+            "Review then run `cas doctor --fix --yes` to remove the {managed_count} managed_by: cas entry; {retired_user_count} retired user-authored skill(s) require manual review and are preserved"
+        )
+    } else if managed_count > 0 {
+        "Review then run `cas doctor --fix --yes` to remove only managed_by: cas entries; unmarked user skills are preserved".to_string()
+    } else {
+        "Review and remove retired user-authored skill directories manually after confirming they are no longer needed; `cas doctor --fix --yes` preserves unmarked user skills".to_string()
+    };
     Check::new(
         "user skills",
         CheckStatus::Warning,
         format!(
-            "{} stale user-level skill file(s) no `cas update` will ever refresh: {detail}. \
-             Review then run `cas doctor --fix --yes` to remove only managed_by: cas entries; unmarked user skills are preserved",
+            "{} stale user-level skill file(s) no `cas update` will ever refresh: {detail}. {remediation}",
             strays.len()
         ),
     )
@@ -684,7 +700,10 @@ fn remove_stale_managed_user_skills(
     strays: &[StrayUserSkill],
     targets: &[(PathBuf, std::collections::HashSet<String>)],
 ) -> std::io::Result<Vec<String>> {
-    let roots: Vec<&Path> = targets.iter().map(|(root, _)| root.as_path()).collect();
+    let trusted_roots: Vec<PathBuf> = targets
+        .iter()
+        .filter_map(|(root, _)| root.canonicalize().ok())
+        .collect();
     let mut removed = Vec::new();
     for stray in strays {
         if !matches!(stray.reason, StrayReason::OrphanedManagedCopy) {
@@ -696,7 +715,10 @@ fn remove_stale_managed_user_skills(
         let Some(root) = skill_dir.parent() else {
             continue;
         };
-        if !roots.iter().any(|candidate| *candidate == root) {
+        let Ok(canonical_root) = root.canonicalize() else {
+            continue;
+        };
+        if !trusted_roots.iter().any(|candidate| *candidate == canonical_root) {
             continue;
         }
         let Ok(metadata) = fs::symlink_metadata(skill_dir) else {
@@ -705,10 +727,65 @@ fn remove_stale_managed_user_skills(
         if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
             continue;
         }
+        let Ok(canonical_skill_dir) = skill_dir.canonicalize() else {
+            continue;
+        };
+        let Ok(relative) = canonical_skill_dir.strip_prefix(&canonical_root) else {
+            continue;
+        };
+        if relative.components().count() != 1 {
+            continue;
+        }
+        // Ownership must be an ordinary file in the selected directory. A
+        // symlink can point at a managed marker elsewhere while the enclosing
+        // directory remains user-owned; following it would make --yes delete
+        // that user's directory.
+        let Ok(ownership_metadata) = fs::symlink_metadata(&stray.path) else {
+            continue;
+        };
+        if !ownership_metadata.file_type().is_file()
+            || ownership_metadata.file_type().is_symlink()
+        {
+            continue;
+        }
+        let Ok(canonical_ownership_file) = stray.path.canonicalize() else {
+            continue;
+        };
+        if canonical_ownership_file != canonical_skill_dir.join("SKILL.md") {
+            continue;
+        }
         let Ok(content) = fs::read_to_string(&stray.path) else {
             continue;
         };
         if !crate::builtins::is_managed_by_cas(&content) {
+            continue;
+        }
+        // Revalidate both the ownership file and the root immediately before
+        // the destructive operation. This keeps a report from authorizing a
+        // replacement file, symlink, or moved root after it was scanned.
+        let Ok(final_skill_metadata) = fs::symlink_metadata(skill_dir) else {
+            continue;
+        };
+        let Ok(final_ownership_metadata) = fs::symlink_metadata(&stray.path) else {
+            continue;
+        };
+        let Ok(final_root) = root.canonicalize() else {
+            continue;
+        };
+        let Ok(final_skill_dir) = skill_dir.canonicalize() else {
+            continue;
+        };
+        let Ok(final_ownership_file) = stray.path.canonicalize() else {
+            continue;
+        };
+        if !final_skill_metadata.file_type().is_dir()
+            || final_skill_metadata.file_type().is_symlink()
+            || !final_ownership_metadata.file_type().is_file()
+            || final_ownership_metadata.file_type().is_symlink()
+            || final_root != canonical_root
+            || final_skill_dir != canonical_skill_dir
+            || final_ownership_file != canonical_skill_dir.join("SKILL.md")
+        {
             continue;
         }
         fs::remove_dir_all(skill_dir)?;
@@ -744,7 +821,7 @@ fn stale_user_skills_autofix(args: &DoctorArgs, cli: &Cli) -> Option<Check> {
     }
 
     match remove_stale_managed_user_skills(&strays, &targets) {
-        Ok(removed) => Some(Check::new(
+        Ok(removed) if removed.len() == managed_count => Some(Check::new(
             "auto-fix",
             CheckStatus::Ok,
             format!(
@@ -755,6 +832,15 @@ fn stale_user_skills_autofix(args: &DoctorArgs, cli: &Cli) -> Option<Check> {
                 } else {
                     "directories"
                 }
+            ),
+        )),
+        Ok(removed) => Some(Check::new(
+            "auto-fix",
+            CheckStatus::Warning,
+            format!(
+                "stale managed skill cleanup skipped {} candidate(s) because ownership or scan-root safety could not be verified; removed {} and preserved the rest",
+                managed_count.saturating_sub(removed.len()),
+                removed.len()
             ),
         )),
         Err(error) => Some(Check::new(
@@ -7399,6 +7485,89 @@ mod tests {
         assert_eq!(removed, vec!["retired-managed"]);
         assert!(!managed.parent().unwrap().exists());
         assert!(user.parent().unwrap().exists());
+    }
+
+    #[test]
+    fn retired_managed_skill_is_actionable_but_retired_user_skill_is_preserved() {
+        let dir = TempDir::new().unwrap();
+        let managed_root = dir.path().join("managed-skills");
+        let user_root = dir.path().join("user-skills");
+        let managed = write_skill(
+            &managed_root,
+            "mecha-cassy-post",
+            "---\nname: mecha-cassy-post\nmanaged_by: cas\n---\n\nold\n",
+        );
+        let user = write_skill(
+            &user_root,
+            "mecha-cassy-post",
+            "---\nname: mecha-cassy-post\n---\n\noperator notes\n",
+        );
+        let targets = vec![
+            (managed_root.clone(), claude_names()),
+            (user_root.clone(), claude_names()),
+        ];
+        let strays = scan_user_skill_dirs(&targets);
+        assert!(strays.iter().any(|stray| {
+            stray.path == managed && stray.reason == StrayReason::OrphanedManagedCopy
+        }));
+        assert!(strays.iter().any(|stray| {
+            stray.path == user && stray.reason == StrayReason::RetiredBy("mecha-cassy")
+        }));
+        let message = stray_user_skills_check(&strays).message;
+        assert!(message.contains("cas doctor --fix --yes"), "{message}");
+        assert!(message.contains("manual review"), "{message}");
+
+        let removed = remove_stale_managed_user_skills(&strays, &targets).unwrap();
+        assert_eq!(removed, vec!["mecha-cassy-post"]);
+        assert!(!managed.parent().unwrap().exists());
+        assert!(user.parent().unwrap().exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stale_cleanup_preserves_user_directory_with_symlinked_ownership_file() {
+        let dir = TempDir::new().unwrap();
+        let skills = dir.path().join("skills");
+        let outside = dir.path().join("outside");
+        let managed_marker = write_skill(
+            &outside,
+            "managed-source",
+            "---\nname: managed-source\nmanaged_by: cas\n---\n\nowned elsewhere\n",
+        );
+        let linked_dir = skills.join("user-owned");
+        fs::create_dir_all(&linked_dir).unwrap();
+        std::os::unix::fs::symlink(&managed_marker, linked_dir.join("SKILL.md")).unwrap();
+
+        let targets = vec![(skills.clone(), std::collections::HashSet::new())];
+        let strays = scan_user_skill_dirs(&targets);
+        assert_eq!(strays.len(), 1, "{strays:?}");
+        assert_eq!(strays[0].reason, StrayReason::OrphanedManagedCopy);
+        assert!(remove_stale_managed_user_skills(&strays, &targets)
+            .unwrap()
+            .is_empty());
+        assert!(linked_dir.exists(), "user-owned directory must survive");
+        assert!(managed_marker.exists(), "external managed marker must survive");
+    }
+
+    #[test]
+    fn stale_cleanup_refuses_when_scan_root_changes_before_cleanup() {
+        let dir = TempDir::new().unwrap();
+        let original_root = dir.path().join("original-skills");
+        let changed_root = dir.path().join("changed-skills");
+        let managed = write_skill(
+            &original_root,
+            "retired-managed",
+            "---\nname: retired-managed\nmanaged_by: cas\n---\n\nold\n",
+        );
+        let scanned = scan_user_skill_dirs(&[(
+            original_root.clone(),
+            std::collections::HashSet::new(),
+        )]);
+        let changed_targets = vec![(changed_root, std::collections::HashSet::new())];
+        assert!(remove_stale_managed_user_skills(&scanned, &changed_targets)
+            .unwrap()
+            .is_empty());
+        assert!(managed.parent().unwrap().exists());
     }
 
     #[test]

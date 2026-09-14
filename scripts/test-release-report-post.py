@@ -29,6 +29,8 @@ class StubState:
         self.download_requests: list[str] = []
         self.include_file_block = True
         self.include_download_url = True
+        self.read_mode = "valid"
+        self.read_pdf = pdf
 
 
 def envelope(result: dict) -> bytes:
@@ -102,6 +104,18 @@ def handler_for(state: StubState):
                     assert arguments["include_files"] is True
                     assert arguments["max_file_bytes"] == 4 * 1024 * 1024
                     assert arguments["max_files"] == 50
+                    read_file = {
+                        "file_id": "F-report",
+                        "size_bytes": len(state.read_pdf),
+                    }
+                    if state.read_mode == "wrong_file_id":
+                        read_file["file_id"] = "F-other"
+                    if state.read_mode == "invalid_base64":
+                        read_file["content_base64"] = "not-base64"
+                    elif state.read_mode != "missing_base64":
+                        read_file["content_base64"] = base64.b64encode(state.read_pdf).decode("ascii")
+                    if state.read_mode == "size_mismatch":
+                        read_file["size_bytes"] += 1
                     result = {
                         "_id": request_id,
                         "content": [
@@ -110,13 +124,7 @@ def handler_for(state: StubState):
                                 "text": json.dumps(
                                     {
                                         "files": [
-                                            {
-                                                "file_id": "F-report",
-                                                "size_bytes": len(state.remote_pdf),
-                                                "content_base64": base64.b64encode(
-                                                    state.remote_pdf
-                                                ).decode("ascii"),
-                                            }
+                                            read_file
                                         ]
                                     }
                                 ),
@@ -421,7 +429,33 @@ def main() -> int:
             "tools/call",
             "tools/call",
         ]
-        print("release-report-post stub: 6 integrity and endpoint scenarios passed")
+
+        fallback_negatives = {
+            "wrong_file_id": (pdf, "no receipt for the uploaded PDF"),
+            "missing_base64": (pdf, "no uploaded PDF bytes"),
+            "invalid_base64": (pdf, "invalid uploaded PDF bytes"),
+            "size_mismatch": (pdf, "inconsistent uploaded PDF size"),
+            "substituted_same_length": (bytes([pdf[0] ^ 1]) + pdf[1:], "SHA-256 does not match"),
+        }
+        for mode, (read_pdf, expected_failure) in fallback_negatives.items():
+            state.read_mode = mode
+            state.read_pdf = read_pdf
+            result, fields = run_adapter(server, state, pdf)
+            assert result.returncode != 0, f"{mode} hub read must fail closed"
+            assert expected_failure in result.stderr, mode
+            assert fields is None, f"{mode} must not write a delivery receipt"
+            assert state.download_requests == []
+            methods = [request.get("method") for request in state.requests]
+            assert methods == [
+                "initialize",
+                "notifications/initialized",
+                "tools/list",
+                "tools/call",
+                "tools/call",
+            ], mode
+        state.read_mode = "valid"
+        state.read_pdf = pdf
+        print("release-report-post stub: 6 integrity/endpoint + 5 hub-read scenarios passed")
     finally:
         server.shutdown()
         thread.join(timeout=5)

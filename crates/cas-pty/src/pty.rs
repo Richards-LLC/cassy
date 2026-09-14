@@ -2513,8 +2513,14 @@ impl Pty {
     /// Receive the next event from the PTY (blocking)
     pub async fn recv(&mut self) -> Option<PtyEvent> {
         loop {
-            if let Some(event) = self.poll_pending_exit() {
-                return Some(event);
+            // A prior `try_recv` may have consumed the reader's EOF and left
+            // the child wait status pending. Poll before awaiting the reader
+            // channel, which is already disconnected in that case.
+            while self.exit_status_pending {
+                if let Some(event) = self.poll_pending_exit() {
+                    return Some(event);
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }
 
             let event = self.event_rx.recv().await?;
@@ -2525,12 +2531,8 @@ impl Pty {
             // The reader has observed terminal EOF, but the child may still
             // be alive. `recv` is the blocking API, so yield between
             // non-blocking wait probes until the real status is available.
-            while self.exit_status_pending {
-                if let Some(event) = self.poll_pending_exit() {
-                    return Some(event);
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            }
+            // The next loop iteration performs those probes before touching
+            // the now-exhausted reader channel.
         }
     }
 
@@ -2901,6 +2903,40 @@ mod tests {
         format!("'{}'", value.replace('\'', "'\"'\"'"))
     }
 
+    fn spawn_delayed_wait_status_probe() -> (
+        std::path::PathBuf,
+        std::path::PathBuf,
+        std::path::PathBuf,
+        Pty,
+    ) {
+        let temp = std::env::temp_dir().join(format!(
+            "cas-pty-delayed-wait-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock must be after epoch")
+                .as_nanos()
+        ));
+        std::fs::create_dir(&temp).expect("temporary PTY evidence directory");
+        let ready = temp.join("eof-ready");
+        let done = temp.join("wait-status-ready");
+        let ready_shell = shell_quote(&ready.to_string_lossy());
+        let done_shell = shell_quote(&done.to_string_lossy());
+        let config = PtyConfig {
+            command: "sh".to_string(),
+            args: vec![
+                "-c".to_string(),
+                format!(
+                    "printf ready > {ready_shell}; exec 0<&- 1>&- 2>&-; sleep 2; printf done > {done_shell}; exit 37"
+                ),
+            ],
+            ..PtyConfig::default()
+        };
+        let pty = Pty::spawn("delayed-wait-status-probe", config)
+            .expect("delayed wait-status probe must spawn");
+        (temp, ready, done, pty)
+    }
+
     impl ScopedEnv {
         pub(crate) fn new() -> Self {
             let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -2997,31 +3033,7 @@ mod tests {
 
     #[tokio::test]
     async fn eof_before_wait_status_retries_without_blocking_try_recv() {
-        let temp = std::env::temp_dir().join(format!(
-            "cas-pty-delayed-wait-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("system clock must be after epoch")
-                .as_nanos()
-        ));
-        std::fs::create_dir(&temp).expect("temporary PTY evidence directory");
-        let ready = temp.join("eof-ready");
-        let done = temp.join("wait-status-ready");
-        let ready_shell = shell_quote(&ready.to_string_lossy());
-        let done_shell = shell_quote(&done.to_string_lossy());
-        let config = PtyConfig {
-            command: "sh".to_string(),
-            args: vec![
-                "-c".to_string(),
-                format!(
-                    "printf ready > {ready_shell}; exec 0<&- 1>&- 2>&-; sleep 2; printf done > {done_shell}; exit 37"
-                ),
-            ],
-            ..PtyConfig::default()
-        };
-        let mut pty = Pty::spawn("delayed-wait-status-probe", config)
-            .expect("delayed wait-status probe must spawn");
+        let (temp, ready, done, mut pty) = spawn_delayed_wait_status_probe();
         let deadline = tokio::time::Instant::now() + PTY_CONTROL_EVENT_TIMEOUT;
 
         while !ready.exists() {
@@ -3050,6 +3062,73 @@ mod tests {
         }
 
         assert_eq!(exit_code, Some(37));
+        assert!(
+            done.exists(),
+            "the delayed wait-status marker proves EOF preceded process exit"
+        );
+        std::fs::remove_dir_all(&temp).expect("remove temporary PTY evidence directory");
+    }
+
+    #[tokio::test]
+    async fn recv_after_try_recv_consumes_eof_retries_wait_status() {
+        let (temp, ready, done, mut pty) = spawn_delayed_wait_status_probe();
+        let deadline = tokio::time::Instant::now() + PTY_CONTROL_EVENT_TIMEOUT;
+        while !ready.exists() {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "probe must close its PTY after writing the readiness marker"
+            );
+            tokio::time::sleep(PTY_EVENT_POLL_INTERVAL).await;
+        }
+
+        // Drive try_recv until it consumes EOF and records the pending state,
+        // then switch APIs. The reader channel is disconnected by this point,
+        // so recv must poll the child rather than await that channel forever.
+        while !pty.exit_status_pending {
+            let _ = pty.try_recv();
+            assert!(
+                !done.exists(),
+                "the child must remain alive while try_recv records EOF"
+            );
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "try_recv must observe the PTY EOF before the delayed wait status"
+            );
+            tokio::time::sleep(PTY_EVENT_POLL_INTERVAL).await;
+        }
+
+        let event = tokio::time::timeout(PTY_CONTROL_EVENT_TIMEOUT, pty.recv())
+            .await
+            .expect("recv must retain the pending wait status")
+            .expect("child wait status must produce an event");
+        assert!(
+            matches!(event, PtyEvent::Exited(Some(37))),
+            "mixed try_recv/recv use must preserve the eventual exit code"
+        );
+        assert!(
+            done.exists(),
+            "the delayed wait-status marker proves EOF preceded process exit"
+        );
+        std::fs::remove_dir_all(&temp).expect("remove temporary PTY evidence directory");
+    }
+
+    #[tokio::test]
+    async fn recv_only_retries_wait_status_after_pty_eof() {
+        let (temp, ready, done, mut pty) = spawn_delayed_wait_status_probe();
+        let deadline = tokio::time::Instant::now() + PTY_CONTROL_EVENT_TIMEOUT;
+        while !ready.exists() {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "probe must close its PTY after writing the readiness marker"
+            );
+            tokio::time::sleep(PTY_EVENT_POLL_INTERVAL).await;
+        }
+
+        let event = tokio::time::timeout(PTY_CONTROL_EVENT_TIMEOUT, pty.recv())
+            .await
+            .expect("recv-only path must retain the pending wait status")
+            .expect("child wait status must produce an event");
+        assert!(matches!(event, PtyEvent::Exited(Some(37))));
         assert!(
             done.exists(),
             "the delayed wait-status marker proves EOF preceded process exit"

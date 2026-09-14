@@ -21,6 +21,24 @@ fn test_post_tool_use_stores_attribution_without_dev_mode() {
     assert_eq!(changes[0].session_id, session_id);
     assert_eq!(changes[0].tool_name, "Write");
     assert_eq!(changes[0].file_path, file_path);
+    assert!(
+        buffered_observations(&temp).is_empty(),
+        "dev_mode=false must not persist raw tracer observations"
+    );
+}
+
+#[test]
+fn test_post_tool_use_without_session_does_not_create_orphan_observation() {
+    let temp = TempDir::new().unwrap();
+    init_cas_dev_mode(&temp);
+
+    send_hook(&temp, "PostToolUse", &bash_tool_input("", "cargo test", 1));
+
+    assert_eq!(
+        count_buffered_observations(&temp),
+        0,
+        "a missing harness session must not create an unconsumable buffer row"
+    );
 }
 
 #[test]
@@ -203,7 +221,7 @@ fn test_stop_handles_empty_session() {
 }
 
 #[test]
-fn test_stop_creates_session_summary() {
+fn test_stop_synthesizes_matching_buffered_observations_component() {
     let temp = TempDir::new().unwrap();
     init_cas_dev_mode(&temp);
 
@@ -327,9 +345,10 @@ fn test_session_start_plan_mode() {
 #[test]
 fn test_e2e_tool_use_to_entry() {
     let temp = TempDir::new().unwrap();
-    init_cas(&temp);
+    init_cas_dev_mode(&temp);
 
     let session_id = "e2e-session";
+    let other_session_id = "other-e2e-session";
 
     // Simulate session with tool uses
     send_hook(
@@ -347,19 +366,11 @@ fn test_e2e_tool_use_to_entry() {
         "PostToolUse",
         &bash_tool_input(session_id, "cargo test", 1),
     ); // error
-
-    // The production tracer owns a process-local generated session ID, while
-    // Stop matches the harness session ID. Seed the matching row through the
-    // current trace-store fixture so this end-to-end test reaches synthesis.
-    enable_cas_dev_mode(&temp);
-    seed_buffered_observation(
+    send_hook(
         &temp,
-        session_id,
-        "Bash",
-        "Bash: cargo test [ERROR]",
-        Some(1),
-        true,
-    );
+        "PostToolUse",
+        &bash_tool_input(other_session_id, "cargo check", 1),
+    ); // must survive the first session's Stop
 
     // End session
     send_hook(&temp, "Stop", &stop_input(session_id));
@@ -375,10 +386,29 @@ fn test_e2e_tool_use_to_entry() {
         }),
         "E2E flow should retain Write attribution"
     );
-    let observations = buffered_observations(&temp);
+    let observations = buffered_observations_with_sessions(&temp);
     assert!(
-        observations.is_empty(),
-        "E2E Stop should clear the matching buffered observation"
+        observations
+            .iter()
+            .all(|(session, ..)| session == other_session_id),
+        "E2E Stop should clear only the matching buffered observations: {observations:?}"
+    );
+    assert_eq!(
+        observations.len(),
+        1,
+        "E2E Stop should retain one unrelated session row"
+    );
+    assert!(
+        observations
+            .iter()
+            .any(|(session, tool, content, is_error, exit_code)| {
+                session == other_session_id
+                    && tool == "Bash"
+                    && content.contains("cargo check")
+                    && *is_error
+                    && *exit_code == Some(1)
+            }),
+        "unrelated session observation should retain its error metadata"
     );
     let entries = open_entries(&temp);
     assert!(
@@ -462,19 +492,20 @@ fn test_e2e_error_observation_captured() {
     );
     send_hook(&temp, "Stop", &stop_input(session_id));
 
-    // Error should remain in the durable tracer buffer after the hook process
-    // exits, with content and failure metadata intact.
-    let observations = buffered_observations(&temp);
+    // Stop should consume the matching error row and synthesize a durable
+    // learning with the failed command content.
+    let observations = buffered_observations_with_sessions(&temp);
     assert!(
-        observations
-            .iter()
-            .any(|(tool, content, is_error, exit_code)| {
-                tool == "Bash"
-                    && content.contains("cargo test")
-                    && *is_error
-                    && *exit_code == Some(1)
-            }),
-        "Error observation should be captured with its metadata"
+        observations.is_empty(),
+        "Stop should consume the matching error observation"
+    );
+    assert!(
+        open_entries(&temp).iter().any(|entry| {
+            entry.session_id.as_deref() == Some(session_id)
+                && entry.tags.iter().any(|tag| tag == "session-errors")
+                && entry.content.contains("Bash: cargo test")
+        }),
+        "Stop should synthesize the failed Bash observation"
     );
 }
 

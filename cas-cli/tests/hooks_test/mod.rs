@@ -180,11 +180,27 @@ pub(crate) fn count_buffered_observations(dir: &TempDir) -> usize {
 
 /// Return buffered tool observations, including content and error metadata.
 pub(crate) fn buffered_observations(dir: &TempDir) -> Vec<(String, String, bool, Option<i32>)> {
-    let db = rusqlite::Connection::open(dir.path().join(".cas/traces.db"))
-        .expect("trace store should open");
+    buffered_observations_with_sessions(dir)
+        .into_iter()
+        .map(|(_, tool_name, content, is_error, exit_code)| {
+            (tool_name, content, is_error, exit_code)
+        })
+        .collect()
+}
+
+/// Return buffered tool observations with their persisted session identity.
+pub(crate) fn buffered_observations_with_sessions(
+    dir: &TempDir,
+) -> Vec<(String, String, String, bool, Option<i32>)> {
+    let trace_path = dir.path().join(".cas/traces.db");
+    if !trace_path.exists() {
+        return Vec::new();
+    }
+
+    let db = rusqlite::Connection::open(trace_path).expect("trace store should open");
     let mut stmt = db
         .prepare(
-            "SELECT tool_name, content, is_error, exit_code
+            "SELECT session_id, tool_name, content, is_error, exit_code
              FROM observation_buffer ORDER BY id",
         )
         .expect("buffer query should prepare");
@@ -192,8 +208,9 @@ pub(crate) fn buffered_observations(dir: &TempDir) -> Vec<(String, String, bool,
         Ok((
             row.get(0)?,
             row.get(1)?,
-            row.get::<_, i32>(2)? != 0,
-            row.get(3)?,
+            row.get(2)?,
+            row.get::<_, i32>(3)? != 0,
+            row.get(4)?,
         ))
     })
     .expect("buffer rows should query")

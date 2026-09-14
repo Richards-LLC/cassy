@@ -216,7 +216,14 @@ fn handle_post_tool_use_with_guardrail(
     // Buffer for session-end synthesis (only when DevTracer is available)
     // Raw observations without synthesis are noise — skip if no tracer
     if let Some(tracer) = DevTracer::get() {
-        let _ = tracer.buffer_observation(tool_name, file_path, &content, exit_code, is_error);
+        let _ = tracer.buffer_observation_for_session(
+            &input.session_id,
+            tool_name,
+            file_path,
+            &content,
+            exit_code,
+            is_error,
+        );
     }
 
     // Silent success - don't clutter Claude's output

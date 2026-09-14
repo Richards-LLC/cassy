@@ -425,6 +425,99 @@ async fn test_verdict_survives_the_worker_branch_advancing_after_dispatch() {
     );
 }
 
+/// GH #846: a worker can fast-forward its factory branch to the supervisor's
+/// merge commit after an approved delivery. The close retry supplies the
+/// original content commit as `commit_receipt`; the mutable merge tip must not
+/// replace that durable evidence with a contentless first-parent merge.
+#[tokio::test]
+async fn test_recorded_delivery_receipt_survives_worker_ref_advance_to_supervisor_merge_cas_ba62() {
+    let (temp, service, cas_dir, task_id, worker_dir, _env_lock) =
+        delivered_worktree_fixture("factory/ba62-worker").await;
+
+    // Add the receipt-bearing content after task start so its commit is
+    // unambiguously inside the task's work window.
+    std::fs::write(
+        worker_dir.path().join("receipt-delivery.txt"),
+        "recorded delivery\n",
+    )
+    .unwrap();
+    proof_boundary_git(worker_dir.path(), &["add", "receipt-delivery.txt"]);
+    proof_boundary_git(
+        worker_dir.path(),
+        &["commit", "-q", "-m", "recorded delivery receipt"],
+    );
+    let receipt = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(worker_dir.path())
+        .output()
+        .expect("resolve delivery receipt");
+    assert!(receipt.status.success());
+    let receipt = String::from_utf8_lossy(&receipt.stdout).trim().to_string();
+
+    let first = extract_text(
+        service
+            .cas_task_close(Parameters(close_request(&task_id, "review recorded delivery")))
+            .await
+            .expect("first close"),
+    );
+    assert!(first.contains("VERIFICATION REQUIRED"), "{first}");
+    let dispatch = cas_store::get_latest_verification_dispatch(&cas_dir, &task_id)
+        .unwrap()
+        .expect("dispatch");
+
+    // Supervisor merges the worker's delivery, then the worker advances its
+    // local factory ref to that merge commit before retrying close.
+    proof_boundary_git(
+        temp.path(),
+        &[
+            "merge",
+            "--no-ff",
+            "factory/ba62-worker",
+            "-m",
+            "supervisor merge recorded delivery",
+        ],
+    );
+    proof_boundary_git(worker_dir.path(), &["merge", "--ff-only", "main"]);
+    let factory_tip = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(worker_dir.path())
+        .output()
+        .expect("resolve advanced factory ref");
+    assert!(factory_tip.status.success());
+    let factory_tip = String::from_utf8_lossy(&factory_tip.stdout).trim().to_string();
+    assert_ne!(factory_tip, receipt, "worker ref must advance beyond receipt");
+
+    let supervisor = registered_supervisor(&cas_dir, "ba62-supervisor").await;
+    supervisor
+        .cas_verification_add(Parameters(VerificationAddRequest {
+            task_id: task_id.clone(),
+            status: "approved".to_string(),
+            summary: "approved recorded delivery before worker ref advance".to_string(),
+            confidence: Some(0.99),
+            issues: None,
+            files_reviewed: Some("receipt-delivery.txt".to_string()),
+            duration_ms: Some(5),
+            verification_type: None,
+            verifier_capability: None,
+            dispatch_id: Some(dispatch.id),
+        }))
+        .await
+        .expect("approve recorded delivery");
+
+    let mut retry = close_request(&task_id, "close recorded delivery after supervisor merge");
+    retry.commit_receipt = Some(receipt);
+    let second = extract_text(
+        service
+            .cas_task_close(Parameters(retry))
+            .await
+            .expect("close after worker ref advance"),
+    );
+    assert!(
+        second.contains("Closed task:"),
+        "approved recorded delivery must close after the factory ref advances to the supervisor merge: {second}"
+    );
+}
+
 #[tokio::test]
 async fn test_close_remints_a_fresh_dispatch_when_the_bound_proof_is_dead() {
     let (_temp, service, cas_dir, task_id, worker_dir, _env_lock) =

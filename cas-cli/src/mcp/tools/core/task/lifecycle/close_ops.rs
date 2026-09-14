@@ -7959,7 +7959,22 @@ fn delivery_content_anchor_at_close<'a>(
     recorded_anchor: &'a str,
     factory_branch: &'a str,
     parent_branch: &str,
+    validated_receipt: Option<&'a str>,
 ) -> &'a str {
+    // GH #846: a supervisor merge can advance the worker's mutable factory
+    // ref to the target merge commit before the worker retries close. A
+    // validated non-merge commit receipt is durable delivery evidence and is
+    // the narrowest content anchor in that shape; the merge tip's
+    // first-parent history does not contain the worker commit. Do not accept
+    // an arbitrary receipt here: callers provide this only after the normal
+    // receipt validator has proved its topology, attribution, diff, and
+    // target content predicates.
+    if let Some(receipt) = validated_receipt
+        && git_commit_parent_count(repo_path, receipt) < 2
+        && commit_is_merged_into_parent(repo_path, receipt, parent_branch)
+    {
+        return receipt;
+    }
     if git_ref_exists(repo_path, factory_branch)
         && git_commit_is_ancestor(repo_path, recorded_anchor, factory_branch)
         && commit_is_merged_into_parent(repo_path, factory_branch, parent_branch)
@@ -8215,6 +8230,7 @@ pub(crate) fn run_factory_branch_merge_gate_with_attribution(
                 recorded_anchor,
                 factory_branch.as_str(),
                 parent_branch,
+                validated_content_receipt,
             );
             if let Some(rejection) = anchored_delivery_content_gate(
                 &task.id,
@@ -8276,6 +8292,7 @@ pub(crate) fn run_factory_branch_merge_gate_with_attribution(
                 recorded_anchor,
                 factory_branch.as_str(),
                 parent_branch,
+                validated_content_receipt,
             );
             if let Some(rejection) = anchored_delivery_content_gate(
                 &task.id,
@@ -8312,6 +8329,7 @@ pub(crate) fn run_factory_branch_merge_gate_with_attribution(
                 recorded_anchor,
                 factory_branch.as_str(),
                 parent_branch,
+                validated_content_receipt,
             );
             if let Some(rejection) = anchored_delivery_content_gate(
                 &task.id,
@@ -19573,6 +19591,75 @@ mod merge_state_gate_tests {
                 MergeStateGateOutcome::Proceed
             ),
             "same-task descendant tip merged intact must close rather than claim content loss"
+        );
+    }
+
+    /// GH #846: after a supervisor merges a delivery, the worker's local
+    /// factory ref may be advanced to that supervisor merge commit before the
+    /// worker retries close. The recorded content commit remains the durable
+    /// receipt, but the live ref is now a merge whose first-parent history
+    /// does not contain the delivery commit. The close gate must honor that
+    /// receipt rather than treating the moved ref as an unprovable delivery.
+    #[test]
+    fn recorded_delivery_survives_worker_ref_advanced_to_supervisor_merge_gh_846() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+
+        std::fs::write(p.join("delivered.rs"), "// recorded delivery\n").unwrap();
+        git(p, &["add", "delivered.rs"]);
+        git(
+            p,
+            &["commit", "-q", "-m", "feat(cas-test1): recorded delivery"],
+        );
+        let delivery = rev_parse_local(p, "HEAD");
+
+        // The supervisor merges the worker delivery into the target. The
+        // worker's task receipt still names the non-merge content commit.
+        git(p, &["checkout", "-q", "main"]);
+        git(
+            p,
+            &[
+                "merge",
+                "-q",
+                "--no-ff",
+                "factory/worker",
+                "-m",
+                "merge recorded worker delivery",
+            ],
+        );
+        let supervisor_merge = rev_parse_local(p, "HEAD");
+        assert!(git_commit_is_ancestor(p, &delivery, "main"));
+
+        // Reproduce the mutable worker ref moving to the supervisor's merge
+        // tip. `update-ref` is used while `main` is checked out, avoiding a
+        // worktree checkout that would alter the fixture's target branch.
+        git(
+            p,
+            &["update-ref", "refs/heads/factory/worker", &supervisor_merge],
+        );
+        assert_eq!(rev_parse_local(p, "factory/worker"), supervisor_merge);
+
+        let mut task = worker_task("worker");
+        task.status = TaskStatus::AwaitingMerge;
+        task.deliverables.factory_branch_anchor = Some(delivery.clone());
+        let req = TaskCloseRequest {
+            commit_receipt: Some(delivery.clone()),
+            ..base_req(&task.id)
+        };
+        let window = window_at(0, "recorded delivery receipt");
+        let out = run_factory_branch_merge_gate_with_attribution(
+            &task,
+            &req,
+            "main",
+            p,
+            TaskCommitAttribution {
+                receipt: req.commit_receipt.as_deref(),
+                window: Some(&window),
+            },
+        );
+        assert!(
+            matches!(out, MergeStateGateOutcome::Proceed),
+            "a recorded delivery receipt must survive a worker ref move to the supervisor merge, got {out:?}"
         );
     }
 

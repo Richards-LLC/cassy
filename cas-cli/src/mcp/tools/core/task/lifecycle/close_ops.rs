@@ -526,6 +526,23 @@ where
     })
 }
 
+fn has_adjacent_status_number<F>(text: &str, label: &str, predicate: F) -> bool
+where
+    F: Fn(u32) -> bool,
+{
+    text.split([';', ',', '|']).any(|field| {
+        let tokens = proof_field_tokens(field);
+        tokens.windows(2).any(|window| {
+            let number_matches = |token: &str| token.parse::<u32>().ok().is_some_and(&predicate);
+            window[0] == label && number_matches(window[1])
+        }) || tokens.windows(3).any(|window| {
+            window[0] == label
+                && window[1] == "code"
+                && window[2].parse::<u32>().ok().is_some_and(&predicate)
+        })
+    })
+}
+
 fn has_adjacent_words(text: &str, words: &[&str]) -> bool {
     text.split([';', ',', '|']).any(|field| {
         let tokens = proof_field_tokens(field);
@@ -571,19 +588,24 @@ fn has_failure_token(text: &str) -> bool {
 }
 
 fn has_passing_result(lower: &str) -> bool {
+    const SUCCESS_WORDS: &[&str] = &[
+        "pass", "passed", "passing", "success", "successful", "green",
+    ];
     if has_explicit_nonzero_status(lower)
         || has_failure_token(lower)
-        || has_adjacent_words(lower, &["not", "pass"])
-        || has_adjacent_words(lower, &["no", "pass"])
+        || SUCCESS_WORDS.iter().any(|word| {
+            has_adjacent_words(lower, &["not", word])
+                || has_adjacent_words(lower, &["no", word])
+        })
     {
         return false;
     }
 
-    ["pass", "passed", "passing", "success", "successful", "green"]
+    SUCCESS_WORDS
         .iter()
         .any(|word| contains_word(lower, word))
-        || has_adjacent_number(lower, "exit", |value| value == 0)
-        || has_adjacent_number(lower, "status", |value| value == 0)
+        || has_adjacent_status_number(lower, "exit", |value| value == 0)
+        || has_adjacent_status_number(lower, "status", |value| value == 0)
 }
 
 fn has_platform_command(lower: &str) -> bool {
@@ -1382,6 +1404,9 @@ mod risk_proof_tests {
             "macOS npm test; PASS; status=3",
             "macOS xcodebuild; PASS; exit code 2",
             "macOS xcodebuild; not pass; result=PASS",
+            "macOS xcodebuild; not passed",
+            "macOS xcodebuild; not successful",
+            "macOS xcodebuild; not green",
         ];
         for receipt in platform_negatives {
             let mut task = Task::new("cas-platform-negative".into(), "platform proof".into());
@@ -1403,6 +1428,18 @@ mod risk_proof_tests {
             task.notes = format!("[2026-09-14] 🧪 LOADED_PROOF {receipt}");
             validate_risk_close_proofs(&task, &[], std::path::Path::new("."))
                 .expect("valid cross-ecosystem loaded receipt should pass");
+        }
+
+        let platform_positives = [
+            "macOS xcodebuild; PASS; exit code 0",
+            "macOS npm test; status code 0",
+        ];
+        for receipt in platform_positives {
+            let mut task = Task::new("cas-platform-positive".into(), "platform proof".into());
+            task.risk = vec![TaskRisk::Platform];
+            task.notes = format!("[2026-09-14] 🧪 PLATFORM_PROOF {receipt}");
+            validate_risk_close_proofs(&task, &[], std::path::Path::new("."))
+                .expect("valid coded-zero platform receipt should pass");
         }
     }
 

@@ -70,9 +70,12 @@ The 6 checks below apply to every task type. These gates sit on top of them:
   `SCOPED_PROOF: targets=<complete target set> result=PASS` in a progress note.
   Close rejects a target list narrower than the attributed delivery diff and
   names the uncovered modules. For `risk=platform`, add a
-  `note_type=platform_proof` note containing a macOS command and a passing
-  result. For `risk=concurrency`, add a `note_type=loaded_proof` note proving
-  the whole target under `-j16` for at least three loops with a passing result.
+  `note_type=platform_proof` note containing an explicit macOS marker, the
+  command that ran (such as `cargo`, `xcodebuild`, or an executable after
+  `command:`), and a passing result. For `risk=concurrency`, add a
+  `note_type=loaded_proof` note proving the whole, entire, or full target (or an
+  explicit non-Rust target) under `-j16`/`--jobs 16` for at least three loops or
+  runs with a passing result.
   Combined declarations require both typed receipts; `risk=none` adds no
   receipt gate.
 

@@ -26,9 +26,11 @@ When the task declares `risk=blast-radius`, the final receipt must cover every
 source module named by the attributed diff. Record the exact target list and
 pass count in a progress note as `SCOPED_PROOF: targets=... result=PASS` so the
 close reviewer can compare it with `Proof Targets:`. Platform and concurrency
-risk use typed task notes: `platform_proof` must include a passing macOS
-command; `loaded_proof` must include the whole target, `-j16`, and at least
-three passing loops.
+risk use typed task notes: `platform_proof` must include an explicit macOS
+marker, a platform command such as `cargo` or `xcodebuild`, and a passing
+result; `loaded_proof` must include the whole/entire/full target (or an
+explicit non-Rust target), `-j16`/`--jobs 16`, and at least three passing
+loops or runs.
 
 ## The test loop: inner loop vs final proof
 

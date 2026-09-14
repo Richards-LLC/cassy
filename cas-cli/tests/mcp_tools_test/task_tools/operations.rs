@@ -1007,6 +1007,64 @@ async fn test_task_notes() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn task_notes_flow_waits_through_a_foreign_write_lock() {
+    let (temp, core) = setup_cas();
+    let cas_dir = temp.path().join(".cas");
+    let task_store = open_task_store(&cas_dir).expect("open task store");
+    let task = Task::new("cas-note-contention-flow".to_string(), "Notes task".to_string());
+    task_store.add(&task).expect("add task");
+
+    let holder = Connection::open(cas_dir.join("cas.db")).expect("open lock holder");
+    holder
+        .execute_batch("PRAGMA journal_mode=WAL; BEGIN IMMEDIATE;")
+        .expect("hold a foreign write lock");
+
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+    let worker_core = core.clone();
+    let task_id = task.id.clone();
+    let worker = std::thread::spawn(move || {
+        started_tx.send(()).unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build worker runtime");
+        let result = runtime.block_on(worker_core.cas_task_notes(Parameters(TaskNotesRequest {
+            id: task_id,
+            note: "note after factory contention".to_string(),
+            note_type: "progress".to_string(),
+            supervisor_override: None,
+            reason: None,
+        })));
+        finished_tx.send(result).unwrap();
+    });
+
+    started_rx.recv().expect("worker started");
+    assert!(
+        finished_rx
+            .recv_timeout(std::time::Duration::from_millis(100))
+            .is_err(),
+        "real task notes flow must wait while a foreign writer holds the lock"
+    );
+    holder
+        .execute_batch("COMMIT")
+        .expect("release foreign write lock");
+
+    let result = finished_rx
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .expect("task notes flow should finish after lock release")
+        .expect("task notes flow should succeed after transient contention");
+    assert!(extract_text(result).contains("Added progress note"));
+    worker.join().unwrap();
+
+    let persisted = task_store.get(&task.id).expect("read persisted task");
+    assert_eq!(
+        persisted.notes.matches("note after factory contention").count(),
+        1
+    );
+}
+
 #[tokio::test]
 async fn task_note_cap_rejects_without_mutating_the_task() {
     let (temp, core) = setup_cas();

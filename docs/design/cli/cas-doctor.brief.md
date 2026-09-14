@@ -75,3 +75,20 @@ with no new failure or overflow.
 | Machine contract | 5 | The JSON run is one document and includes `name`, `status`, `message`, `phase`, and timing fields. |
 
 Scored by Codex on 2026-09-09; hierarchy, fit, and craft floors hold.
+
+Task capture: `terminal-qa: PASS cas-doctor-866 · 12 runs · 0 fail · 0 warn · 0 allowed · /home/pippenz/.cas/artifacts/cas-35be/terminal-qa/cas-doctor/report.json`.
+The rebuilt healthy-baseline host report stayed within 80/120 columns across four palettes,
+pipe, `NO_COLOR`, C locale, and JSON. Fixture captures at
+`/home/pippenz/.cas/artifacts/cas-35be/qa/` separately show managed stale-skill cleanup,
+preserved unmarked user skills, intentional Claude/Codex/Grok twins, unexpected drift, and
+the attributed scratchpad policy row.
+
+| Dimension | Score | Evidence |
+| --- | --- | --- |
+| Hierarchy | 5 | Verdict first; host skill and scratchpad rows are grouped, with remedies under `→`. |
+| Fit | 5 | Intentional namespace twins collapse to a healthy row; only unexpected drift and stale ownership need action. |
+| Craft | 4 | Safe remedies are copyable and the real-build captures have no terminal-qa failures or overflow. |
+| Theme safety | 5 | Four palettes, piped, `NO_COLOR`, and C-locale runs pass without colour or Unicode defects. |
+| Machine contract | 5 | JSON remains one document and carries the normalized duplicate, stale-skill, and scratchpad statuses. |
+
+Scored by Codex on 2026-09-14; hierarchy, fit, and craft floors hold.

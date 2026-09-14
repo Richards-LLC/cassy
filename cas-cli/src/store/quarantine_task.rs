@@ -112,6 +112,20 @@ impl TaskStore for QuarantineFilteringTaskStore {
         self.inner.update(task)
     }
 
+    fn append_note(&self, task_id: &str, formatted_note: &str) -> Result<DateTime<Utc>> {
+        self.inner.append_note(task_id, formatted_note)
+    }
+
+    fn append_note_with_mutation_receipt(
+        &self,
+        task_id: &str,
+        formatted_note: &str,
+        receipt_id: &str,
+    ) -> Result<DateTime<Utc>> {
+        self.inner
+            .append_note_with_mutation_receipt(task_id, formatted_note, receipt_id)
+    }
+
     fn update_with_mutation_receipt(&self, task: &Task, receipt_id: &str) -> Result<DateTime<Utc>> {
         self.inner.update_with_mutation_receipt(task, receipt_id)
     }

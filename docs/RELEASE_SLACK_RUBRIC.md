@@ -99,10 +99,24 @@ local audit host cannot build Darwin.
    to the existing User thread through MechaCassy `mecha_post` with `kind: file`
    and link the HTML from the existing Dev thread. Require uploaded-PDF
    download, decode, page-count and source-hash checks before accepting delivery.
-   Preserve the returned file permalink, User/Dev thread receipts, PDF and HTML
-   SHA-256 values, both file IDs and page count in `release-report.receipt` in
-   the run directory. The train also re-hashes the local PDF and verifies its
-   page count; local checks alone do not prove uploaded-file integrity.
+   Preserve the returned file permalink, User/Dev thread receipts, local PDF
+   SHA-256/size, verified remote PDF SHA-256/size/page count, the HTML SHA-256,
+   both file IDs and the local page count in `release-report.receipt` in the run
+   directory. The adapter must download the returned explicit `download_url`, or
+   re-read the uploaded file by its returned ID through authenticated `mecha_read`
+   when the current hub receipt omits a download URL, and compare the bytes and
+   decoded page count before writing that receipt. Bound that fallback read
+   inclusively from the User root Slack timestamp as RFC3339 `since`, preserving
+   fractional precision so old channel history is excluded while its replies are
+   included. A message permalink is not a PDF endpoint; if neither verified path
+   is available, fail explicitly. The
+   adapter sends hub credentials only to the configured MCP origin (with the
+   explicit same-origin loopback exception used by tests), never to external
+   signed/private-provider URLs; it rejects plaintext endpoints outside that test
+   exception and cross-origin or scheme-changing redirects before following them.
+   The train also
+   re-hashes the local PDF and checks every remote evidence field agrees with
+   the local artifact; local checks alone do not prove uploaded-file integrity.
    Preserve partial receipts and stop on failure; never retry an uncertain write.
    Publication completion requires all message, installation, published-asset
    and verified report receipts. A missing receipt keeps completion pending.
@@ -274,9 +288,10 @@ compatibility snapshot. Neither includes factory plumbing or ticket IDs.
   PDF and QA receipt under `docs/release-reports/`; A4/Letter pagination and
   source fidelity passed.
 - [ ] The PDF is attached to the User thread, the HTML is linked from the Dev
-  thread, and `release-report.receipt` records both paths, both SHA-256
-  values, both file ids, the User/Dev thread timestamps, file permalink and
-  PDF page count.
+  thread, and `release-report.receipt` records both paths, local PDF
+  SHA-256/size, verified remote PDF SHA-256/size/page count, HTML SHA-256, both
+  file ids, the User/Dev thread timestamps, file permalink and local PDF page
+  count.
 - [ ] Post 1 (user): punch (was→now) + plain-language details
 - [ ] Post 2 (dev): punch (was→now) + technical details
 - [ ] Both: zero ticket numbers, zero internal-agent narration

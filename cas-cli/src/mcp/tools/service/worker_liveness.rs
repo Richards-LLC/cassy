@@ -231,8 +231,6 @@ pub(crate) fn observe(
         .map(|at| (now - DateTime::<Utc>::from(at)).num_seconds().max(0));
     let state = if process.alive == Some(false) {
         Liveness::Dead
-    } else if process.alive.is_none() {
-        Liveness::Stalled
     } else if let Some(event) = &last {
         if event.state == Liveness::Executing
             && (now - event.at).num_seconds() > stall_secs
@@ -262,18 +260,126 @@ pub(crate) fn observe(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ProcessCandidate {
+    pid: u32,
+    alive: bool,
+    harness: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProcessSelection {
+    Found(u32),
+    Exited(&'static str),
+    Unavailable(&'static str),
+}
+
+struct ProcessProbes<'a> {
+    pid_alive: &'a dyn Fn(u32) -> bool,
+    pid_matches_fingerprint: &'a dyn Fn(u32, u64) -> bool,
+    is_harness: &'a dyn Fn(u32) -> bool,
+    parent_pid: &'a dyn Fn(u32) -> Option<u32>,
+}
+
+/// Select a harness process without treating a registered MCP-server PID as
+/// the harness. An MCP registration records its own PID in `Agent.pid` and
+/// the interactive parent's PID in `Agent.ppid`; only the latter can prove
+/// that the Codex/Claude process exited. A live-but-unidentified PID is
+/// deliberately unavailable rather than dead because it may be a recycled
+/// PID or an MCP child.
+fn select_harness_process(
+    registered: Option<ProcessCandidate>,
+    parent: Option<ProcessCandidate>,
+    scanned: Option<ProcessCandidate>,
+) -> ProcessSelection {
+    if let Some(candidate) = parent.filter(|candidate| candidate.alive && candidate.harness) {
+        return ProcessSelection::Found(candidate.pid);
+    }
+    if let Some(candidate) = registered.filter(|candidate| candidate.alive && candidate.harness) {
+        return ProcessSelection::Found(candidate.pid);
+    }
+    if let Some(candidate) = scanned.filter(|candidate| candidate.alive && candidate.harness) {
+        return ProcessSelection::Found(candidate.pid);
+    }
+
+    if let Some(parent) = parent {
+        if !parent.alive {
+            return ProcessSelection::Exited("worker harness parent exited");
+        }
+        return ProcessSelection::Unavailable("worker harness parent is not an identified harness");
+    }
+    if let Some(registered) = registered {
+        if !registered.alive {
+            return ProcessSelection::Exited("registered worker harness exited");
+        }
+        return ProcessSelection::Unavailable(
+            "worker harness unavailable; registered process is not an identified harness",
+        );
+    }
+    ProcessSelection::Unavailable("worker harness pid unavailable")
+}
+
+fn process_selection_for_agent(
+    agent: &cas_types::Agent,
+    scanned: Option<ProcessCandidate>,
+    probes: &ProcessProbes<'_>,
+) -> ProcessSelection {
+    let registered = if agent.ppid.is_none() {
+        agent.pid.map(|pid| {
+            let fingerprint_matches = super::agent_liveness::agent_process_is_alive_with(
+                agent,
+                probes.pid_alive,
+                probes.pid_matches_fingerprint,
+            );
+            ProcessCandidate {
+                // Keep raw existence separate from the PID-start fingerprint:
+                // a recycled, still-live PID is unavailable identity evidence,
+                // not proof that the registered harness exited.
+                alive: (probes.pid_alive)(pid),
+                harness: fingerprint_matches && (probes.is_harness)(pid),
+                pid,
+            }
+        })
+    } else {
+        None
+    };
+    let parent = agent.ppid.map(|pid| {
+        // `pid` is the MCP child for server registrations. Accept its parent
+        // as the worker harness only when the child still has the recorded
+        // parent and its own start-time fingerprint is valid. This blocks a
+        // recycled parent PID that happens to run another Codex/Claude.
+        let child_owned = agent.pid.is_some_and(|child| {
+            (probes.pid_alive)(child)
+                && super::agent_liveness::agent_process_is_alive_with(
+                    agent,
+                    probes.pid_alive,
+                    probes.pid_matches_fingerprint,
+                )
+                && (probes.parent_pid)(child) == Some(pid)
+        });
+        ProcessCandidate {
+            alive: (probes.pid_alive)(pid),
+            harness: child_owned && (probes.is_harness)(pid),
+            pid,
+        }
+    });
+    select_harness_process(registered, parent, scanned)
+}
+
+fn process_parent_pid(pid: u32) -> Option<u32> {
+    if !cfg!(target_os = "linux") {
+        return None;
+    }
+    let raw = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let (_, tail) = raw.rsplit_once(')')?;
+    tail.split_whitespace().nth(1)?.parse().ok()
+}
+
 /// Nonblocking process sample. CPU is a delta across polls, never a sleep.
 /// A stdin reader exists even mid-turn in threaded harnesses: display it as
 /// corroboration only; it must never override a turn-start or terminal event.
 pub(crate) fn process_evidence(agent: &cas_types::Agent) -> ProcessEvidence {
     use crate::cli::factory::wedged;
-    let registered = agent.pid.filter(|_| {
-        super::agent_liveness::agent_process_is_alive_with(
-            agent,
-            crate::mcp::daemon::pid_alive,
-            crate::mcp::daemon::pid_matches_fingerprint,
-        )
-    });
     let is_harness = |pid| {
         if !cfg!(target_os = "linux") {
             return true;
@@ -282,21 +388,43 @@ pub(crate) fn process_evidence(agent: &cas_types::Agent) -> ProcessEvidence {
             .ok()
             .is_some_and(|raw| is_harness_command(&raw))
     };
-    let pid = registered.filter(|pid| is_harness(*pid)).or_else(|| {
-        wedged::find_worker_pid(&wedged::RealProcessTable, &agent.name)
-            .filter(|pid| is_harness(*pid))
+
+    let scanned = wedged::find_worker_pid(&wedged::RealProcessTable, &agent.name).map(|pid| {
+        ProcessCandidate {
+            // `find_worker_pid` only returns a currently visible process.
+            alive: true,
+            harness: is_harness(pid),
+            pid,
+        }
     });
-    let Some(pid) = pid else {
-        return ProcessEvidence {
-            alive: agent.pid.map(|_| false),
-            cpu_busy: None,
-            detail: if agent.pid.is_some() {
-                "pid exited"
-            } else {
-                "pid unavailable"
-            }
-            .into(),
-        };
+    let pid_alive = crate::mcp::daemon::pid_alive;
+    let pid_matches_fingerprint = crate::mcp::daemon::pid_matches_fingerprint;
+    let parent_pid = process_parent_pid;
+    let probes = ProcessProbes {
+        pid_alive: &pid_alive,
+        pid_matches_fingerprint: &pid_matches_fingerprint,
+        is_harness: &is_harness,
+        parent_pid: &parent_pid,
+    };
+    let selection = process_selection_for_agent(agent, scanned, &probes);
+    let pid = match selection {
+        ProcessSelection::Found(pid) => pid,
+        ProcessSelection::Exited(detail) => {
+            return ProcessEvidence {
+                alive: Some(false),
+                cpu_busy: None,
+                detail: detail.into(),
+            };
+        }
+        ProcessSelection::Unavailable(detail) => {
+            return ProcessEvidence {
+                // Missing identity evidence is not evidence of exit. Turn
+                // records may still establish execution below in `observe`.
+                alive: None,
+                cpu_busy: None,
+                detail: detail.into(),
+            };
+        }
     };
     let raw = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
     let fields: Vec<_> = raw

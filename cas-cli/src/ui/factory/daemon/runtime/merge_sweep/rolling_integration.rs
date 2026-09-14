@@ -597,6 +597,12 @@ fn write_sweep_row_receipt(
     row: &str,
 ) -> Result<(), String> {
     let worktree = prepare_merge_worktree(project_root, request)?;
+    // The release gate's row-cache contract is Rust/Cargo-specific. A
+    // package-manager sweep has its own durable integration receipt and must
+    // not be turned into a setup failure by probing Cargo-only files/tools.
+    if !worktree.join("Cargo.toml").is_file() {
+        return Ok(());
+    }
     let common_dir = git_output(
         &worktree,
         &["rev-parse", "--path-format=absolute", "--git-common-dir"],
@@ -912,6 +918,13 @@ mod tests {
         git(temp.path(), &["config", "commit.gpgsign", "false"]);
         fs::create_dir_all(temp.path().join("scripts")).unwrap();
         fs::write(temp.path().join("scripts/release-gate.sh"), "#!/bin/sh\n").unwrap();
+        // The sweep fixture represents a Rust target; declare its manifest so
+        // runner resolution exercises the same Cargo boundary as production.
+        fs::write(
+            temp.path().join("Cargo.toml"),
+            "[package]\nname = \"integration-fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+        )
+        .unwrap();
         fs::write(temp.path().join("shared"), "base\n").unwrap();
         git(temp.path(), &["add", "."]);
         git(temp.path(), &["commit", "-m", "base"]);

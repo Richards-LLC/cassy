@@ -11,7 +11,11 @@ receipts.  Credentials are resolved from the environment or the standard
 from __future__ import annotations
 
 import base64
+import binascii
+from datetime import datetime, timezone
 import hashlib
+import http.client
+import ipaddress
 import json
 import os
 import re
@@ -20,6 +24,7 @@ import subprocess
 import sys
 import tempfile
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any, NoReturn
@@ -29,6 +34,9 @@ DEFAULT_MCP_URL = "https://mecha-cassy.vercel.app/mcp/slack"
 DEFAULT_CHANNEL = "cas-internal"
 DEFAULT_REPO = "Richards-LLC/cassy"
 MCP_PROTOCOL_VERSION = "2025-06-18"
+MAX_REMOTE_PDF_BYTES = 32 * 1024 * 1024
+MAX_HUB_FILE_BYTES = 4 * 1024 * 1024
+SLACK_TIMESTAMP = re.compile(r"^(\d+)(?:\.(\d{1,6}))?$")
 
 
 class AdapterError(RuntimeError):
@@ -37,6 +45,55 @@ class AdapterError(RuntimeError):
 
 def fail(message: str) -> NoReturn:
     raise AdapterError(message)
+
+
+def parsed_http_url(url: str, label: str) -> urllib.parse.SplitResult:
+    try:
+        parsed = urllib.parse.urlsplit(url)
+        host = parsed.hostname
+        parsed.port
+    except ValueError:
+        fail(f"{label} is not a valid HTTP(S) URL")
+    if parsed.scheme.lower() not in {"http", "https"} or not host:
+        fail(f"{label} is not a valid HTTP(S) URL")
+    if parsed.username or parsed.password or parsed.fragment:
+        fail(f"{label} has unsupported URL credentials or fragment")
+    return parsed
+
+
+def url_origin(parsed: urllib.parse.SplitResult) -> tuple[str, str, int]:
+    return (
+        parsed.scheme.lower(),
+        (parsed.hostname or "").lower(),
+        parsed.port or (443 if parsed.scheme.lower() == "https" else 80),
+    )
+
+
+def is_loopback(host: str) -> bool:
+    if host.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def slack_timestamp_since(value: str) -> str:
+    match = SLACK_TIMESTAMP.fullmatch(value)
+    if not match:
+        fail("USER_THREAD_TS must be a valid Slack timestamp (seconds[.fraction])")
+    seconds, fraction = match.groups()
+    try:
+        timestamp = datetime.fromtimestamp(int(seconds), tz=timezone.utc)
+    except (OverflowError, OSError, ValueError):
+        fail("USER_THREAD_TS must be a valid Slack timestamp (seconds[.fraction])")
+    timestamp = timestamp.replace(microsecond=int((fraction or "").ljust(6, "0")))
+    return timestamp.isoformat(timespec="microseconds").replace("+00:00", "Z")
+
+
+class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *_args: Any, **_kwargs: Any) -> None:
+        return None
 
 
 def credential_file() -> Path:
@@ -109,11 +166,15 @@ def request_json(
     headers: dict[str, str],
     payload: dict[str, Any],
     timeout: float,
+    opener: urllib.request.OpenerDirector | None = None,
 ) -> tuple[dict[str, Any], dict[str, str]]:
     body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
     request = urllib.request.Request(url, data=body, headers=headers, method="POST")
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        request_open = (
+            opener if opener is not None else urllib.request.build_opener(NoRedirectHandler())
+        ).open
+        with request_open(request, timeout=timeout) as response:
             raw = response.read()
             response_headers = {key.lower(): value for key, value in response.headers.items()}
     except urllib.error.HTTPError as exc:
@@ -147,6 +208,10 @@ class McpClient:
     def __init__(self, url: str, token: str, bypass: str, timeout: float) -> None:
         self.url = url
         self.timeout = timeout
+        self.mcp_url = parsed_http_url(url, "MechaCassy MCP URL")
+        if self.mcp_url.scheme.lower() == "http" and not is_loopback(self.mcp_url.hostname or ""):
+            fail("MechaCassy MCP URL must use HTTPS outside a loopback test endpoint")
+        self.opener = urllib.request.build_opener(NoRedirectHandler())
         self.headers = {
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/json",
@@ -162,7 +227,9 @@ class McpClient:
         payload: dict[str, Any] = {"jsonrpc": "2.0", "id": request_id, "method": method}
         if params is not None:
             payload["params"] = params
-        result, response_headers = request_json(self.url, self.headers, payload, self.timeout)
+        result, response_headers = request_json(
+            self.url, self.headers, payload, self.timeout, self.opener
+        )
         session_id = response_headers.get("mcp-session-id")
         if session_id:
             self.headers["Mcp-Session-Id"] = session_id
@@ -181,7 +248,105 @@ class McpClient:
 
     def notify_initialized(self) -> None:
         payload = {"jsonrpc": "2.0", "method": "notifications/initialized"}
-        request_json(self.url, self.headers, payload, self.timeout)
+        request_json(self.url, self.headers, payload, self.timeout, self.opener)
+
+    def download(self, url: str) -> bytes:
+        """Download a verified endpoint without crossing its credential boundary."""
+
+        current_url = url
+        opener = self.opener
+        for redirect_count in range(4):
+            current = parsed_http_url(current_url, "PDF download URL")
+            current_origin = url_origin(current)
+            mcp_origin = url_origin(self.mcp_url)
+            same_origin = current_origin == mcp_origin
+            if current.scheme.lower() == "http" and not (
+                same_origin
+                and self.mcp_url.scheme.lower() == "http"
+                and is_loopback(current.hostname or "")
+            ):
+                fail("PDF download URL must use HTTPS outside a same-origin loopback test endpoint")
+            authenticated = same_origin
+            headers = {
+                "Accept": "application/pdf, application/octet-stream",
+            }
+            if authenticated:
+                headers["Authorization"] = self.headers["Authorization"]
+                if "x-vercel-protection-bypass" in self.headers:
+                    headers["x-vercel-protection-bypass"] = self.headers[
+                        "x-vercel-protection-bypass"
+                    ]
+            request = urllib.request.Request(current_url, headers=headers, method="GET")
+            try:
+                response = opener.open(request, timeout=self.timeout)
+            except urllib.error.HTTPError as exc:
+                if 300 <= exc.code < 400:
+                    headers = getattr(exc, "headers", None) or {}
+                    exc.close()
+                    current_url = self._redirect_url(
+                        current_url,
+                        current,
+                        current_origin,
+                        authenticated,
+                        headers.get("Location", ""),
+                    )
+                    continue
+                fail(f"MechaCassy PDF download returned HTTP {exc.code}")
+            except urllib.error.URLError as exc:
+                fail(f"MechaCassy PDF download failed: {exc.reason}")
+            except (http.client.HTTPException, OSError) as exc:
+                fail(f"MechaCassy PDF download failed ({type(exc).__name__})")
+
+            status = getattr(response, "status", None)
+            if status is None:
+                status = response.getcode()
+            if status is not None and 300 <= status < 400:
+                location = response.headers.get("Location", "")
+                response.close()
+                current_url = self._redirect_url(
+                    current_url,
+                    current,
+                    current_origin,
+                    authenticated,
+                    location,
+                )
+                continue
+            if status is not None and not 200 <= status < 300:
+                response.close()
+                fail(f"MechaCassy PDF download returned HTTP {status}")
+            try:
+                raw = response.read(MAX_REMOTE_PDF_BYTES + 1)
+            except (http.client.HTTPException, OSError) as exc:
+                fail(f"MechaCassy PDF download failed ({type(exc).__name__})")
+            finally:
+                response.close()
+            if len(raw) > MAX_REMOTE_PDF_BYTES:
+                fail("MechaCassy PDF download exceeded the safety limit")
+            if not raw:
+                fail("MechaCassy PDF download returned no bytes")
+            return raw
+        fail("PDF download followed too many same-origin redirects")
+
+    def _redirect_url(
+        self,
+        current_url: str,
+        current: urllib.parse.SplitResult,
+        current_origin: tuple[str, str, int],
+        authenticated: bool,
+        location: str,
+    ) -> str:
+        if not location:
+            fail("PDF download redirect had no Location")
+        next_url = urllib.parse.urljoin(current_url, location)
+        next_parsed = parsed_http_url(next_url, "PDF download redirect")
+        next_origin = url_origin(next_parsed)
+        if authenticated and next_origin != url_origin(self.mcp_url):
+            fail("authenticated PDF download redirect left the MCP origin")
+        if next_origin != current_origin:
+            fail("PDF download redirect changed its origin")
+        if next_parsed.scheme.lower() != current.scheme.lower():
+            fail("PDF download redirect changed its scheme")
+        return next_url
 
     def tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         result = self.call("tools/call", {"name": name, "arguments": arguments})
@@ -200,6 +365,41 @@ class McpClient:
                     return decoded
         fail(f"MechaCassy tool {name} returned no JSON envelope")
 
+    def read_file(self, channel: str, file_id: str, since: str) -> bytes:
+        """Read an uploaded file through the hub's authenticated file packer."""
+
+        result = self.tool(
+            "mecha_read",
+            {
+                "channel": channel,
+                "since": since,
+                "include_files": True,
+                "include_threads": True,
+                "max_messages": 500,
+                "max_files": 50,
+                "max_file_bytes": MAX_HUB_FILE_BYTES,
+                "max_bytes": 8 * 1024 * 1024,
+            },
+        )
+        files = result.get("files")
+        if not isinstance(files, list):
+            fail("MechaCassy file read returned no file receipts")
+        for file in files:
+            if not isinstance(file, dict) or file.get("file_id") != file_id:
+                continue
+            content = file.get("content_base64")
+            if not isinstance(content, str) or not content:
+                fail("MechaCassy file read returned no uploaded PDF bytes")
+            try:
+                raw = base64.b64decode(content, validate=True)
+            except (ValueError, binascii.Error):
+                fail("MechaCassy file read returned invalid uploaded PDF bytes")
+            size = file.get("size_bytes")
+            if not isinstance(size, int) or size != len(raw):
+                fail("MechaCassy file read returned inconsistent uploaded PDF size")
+            return raw
+        fail("MechaCassy file read returned no receipt for the uploaded PDF")
+
 
 def message_receipt(envelope: dict[str, Any], label: str) -> tuple[str, str]:
     message = envelope.get("message")
@@ -214,18 +414,32 @@ def message_receipt(envelope: dict[str, Any], label: str) -> tuple[str, str]:
     return message_id, permalink
 
 
-def file_receipt(envelope: dict[str, Any]) -> tuple[str, str]:
+def file_receipt(envelope: dict[str, Any]) -> tuple[str, str, str | None]:
     message_id, message_permalink = message_receipt(envelope, "PDF")
     file_block = envelope.get("file")
     if not isinstance(file_block, dict):
-        return message_id, message_permalink
+        download_url = envelope.get("download_url")
+        if download_url is None:
+            fail("PDF post returned no verified PDF download URL; message permalink is not a PDF endpoint")
+        return message_id, message_permalink, checked_download_url(download_url)
     file_id = file_block.get("file_id") or file_block.get("id") or message_id
     file_permalink = file_block.get("permalink") or file_block.get("url") or message_permalink
     if not isinstance(file_id, str) or not file_id.strip():
         fail("PDF post returned no file id")
     if not isinstance(file_permalink, str) or not file_permalink.startswith("https://"):
         fail("PDF post returned no HTTPS file permalink")
-    return file_id, file_permalink
+    download_url = file_block.get("download_url")
+    return file_id, file_permalink, checked_download_url(download_url) if download_url is not None else None
+
+
+def checked_download_url(value: Any) -> str:
+    if (
+        not isinstance(value, str)
+        or any(character.isspace() for character in value)
+    ):
+        fail("PDF post returned no usable HTTP(S) download URL")
+    parsed_http_url(value, "PDF download URL")
+    return value
 
 
 def page_count(pdf_path: Path, pdf_bytes: bytes) -> int:
@@ -255,6 +469,45 @@ def page_count(pdf_path: Path, pdf_bytes: bytes) -> int:
 
 def sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def verify_remote_pdf(
+    client: McpClient,
+    channel: str,
+    file_id: str,
+    download_url: str | None,
+    since: str,
+    local_bytes: bytes,
+    local_sha: str,
+    local_pages: int,
+) -> tuple[str, int, int]:
+    """Prove the transport's stored PDF is the exact local, decodable PDF."""
+
+    remote_bytes = (
+        client.download(download_url)
+        if download_url
+        else client.read_file(channel, file_id, since)
+    )
+    remote_size = len(remote_bytes)
+    if remote_size != len(local_bytes):
+        fail(
+            "uploaded PDF byte count mismatch "
+            f"(local={len(local_bytes)}, remote={remote_size})"
+        )
+    remote_sha = sha256(remote_bytes)
+    if remote_sha != local_sha:
+        fail("uploaded PDF SHA-256 does not match the local PDF")
+
+    with tempfile.NamedTemporaryFile(prefix="cassy-release-report-", suffix=".pdf") as remote_file:
+        remote_file.write(remote_bytes)
+        remote_file.flush()
+        remote_pages = page_count(Path(remote_file.name), remote_bytes)
+    if remote_pages != local_pages:
+        fail(
+            "uploaded PDF page count mismatch "
+            f"(local={local_pages}, remote={remote_pages})"
+        )
+    return remote_sha, remote_size, remote_pages
 
 
 def html_url(tag: str) -> str:
@@ -319,6 +572,7 @@ def main(argv: list[str]) -> int:
             return 2
 
     try:
+        read_since = slack_timestamp_since(user_thread)
         pdf_bytes = pdf_path.read_bytes()
         html_bytes = html_path.read_bytes()
         pdf_sha = sha256(pdf_bytes)
@@ -363,7 +617,10 @@ def main(argv: list[str]) -> int:
                 },
             },
         )
-        pdf_file_id, pdf_permalink = file_receipt(pdf_envelope)
+        pdf_file_id, pdf_permalink, pdf_download_url = file_receipt(pdf_envelope)
+        remote_pdf_sha, remote_pdf_size, remote_pdf_pages = verify_remote_pdf(
+            client, channel, pdf_file_id, pdf_download_url, read_since, pdf_bytes, pdf_sha, pages
+        )
         html_envelope = client.tool(
             "mecha_post",
             {
@@ -381,6 +638,10 @@ def main(argv: list[str]) -> int:
                 "PDF_PATH": str(pdf_path),
                 "HTML_PATH": str(html_path),
                 "PDF_SHA256": pdf_sha,
+                "PDF_SIZE_BYTES": str(len(pdf_bytes)),
+                "PDF_REMOTE_SHA256": remote_pdf_sha,
+                "PDF_REMOTE_SIZE_BYTES": str(remote_pdf_size),
+                "PDF_REMOTE_PAGE_COUNT": str(remote_pdf_pages),
                 "HTML_SHA256": html_sha,
                 "PAGE_COUNT": str(pages),
                 "PDF_FILE_PERMALINK": pdf_permalink,

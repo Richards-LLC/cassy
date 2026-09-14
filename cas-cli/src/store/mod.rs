@@ -160,7 +160,8 @@ mod syncing_task;
 
 // Re-export local wrappers
 pub use detect::{
-    StoreType, detect_store_type, find_cas_root, find_cas_root_from, has_project_cas, init_cas_dir,
+    StoreType, detect_store_type, find_cas_root, find_cas_root_from, find_git_toplevel,
+    has_project_cas, init_cas_dir,
     open_agent_store, open_code_store, open_commit_link_store, open_entity_store, open_event_store,
     open_file_change_store, open_loop_store, open_prompt_queue_store, open_prompt_store,
     open_recording_store, open_reminder_store, open_rule_store, open_rule_store_local,

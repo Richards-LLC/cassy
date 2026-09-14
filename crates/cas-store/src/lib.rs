@@ -665,6 +665,24 @@ pub trait TaskStore: Send + Sync {
         ))
     }
 
+    /// Append one already-formatted note without exposing a stale
+    /// read-modify-write window to concurrent callers.
+    fn append_note(&self, task_id: &str, formatted_note: &str) -> Result<DateTime<Utc>>;
+
+    /// Append one note and bind a generic durable mutation receipt in the same
+    /// store transaction. Syncing wrappers use this to keep the local note and
+    /// its outbox intent atomic.
+    fn append_note_with_mutation_receipt(
+        &self,
+        _task_id: &str,
+        _formatted_note: &str,
+        _receipt_id: &str,
+    ) -> Result<DateTime<Utc>> {
+        Err(StoreError::Other(
+            "atomic task note mutation receipts are unsupported by this store".to_string(),
+        ))
+    }
+
     /// Delete a task
     fn delete(&self, id: &str) -> Result<()>;
 

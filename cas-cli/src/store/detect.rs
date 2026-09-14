@@ -160,6 +160,17 @@ pub fn find_cas_root_from(start: &Path) -> Result<PathBuf> {
     find_cas_root_ignoring_env(start)
 }
 
+/// Resolve the repository root for a path using Git's worktree-aware
+/// toplevel resolver.
+///
+/// Callers that need a project root must use this seam instead of walking
+/// parent directories themselves. In particular, a repository can contain a
+/// nested `.cas/` directory; that directory is not the project's store when
+/// the caller is launched from below the Git toplevel.
+pub fn find_git_toplevel(start: &Path) -> Result<PathBuf> {
+    crate::worktree::GitOperations::detect_repo_root(start).map_err(|_| CasError::NotInitialized)
+}
+
 /// The root `start` resolves to when `CAS_ROOT` is not consulted at all:
 /// Cassy worktree detection, then git-worktree detection, then a directory walk.
 ///
@@ -186,7 +197,17 @@ pub(crate) fn find_cas_root_ignoring_env(start: &Path) -> Result<PathBuf> {
         }
     }
 
-    // If not in a worktree (or main repo has no .cas), walk up the directory tree
+    // Prefer Git's canonical toplevel before the legacy parent walk. This keeps
+    // a nested `.cas/` from shadowing the project store when a factory command
+    // starts in a repository subdirectory.
+    if let Ok(repo_root) = find_git_toplevel(start) {
+        let cas_dir = repo_root.join(".cas");
+        if cas_dir.exists() && cas_dir.is_dir() {
+            return Ok(cas_dir);
+        }
+    }
+
+    // If Git is unavailable or the toplevel has no store, walk up the directory tree
     let mut current = start.to_path_buf();
 
     loop {
@@ -853,6 +874,26 @@ mod tests {
         std::fs::create_dir_all(&subdir).unwrap();
 
         // Should find .cas from subdirectory
+        let found = find_cas_root_from(&subdir).unwrap();
+        assert_eq!(found, temp.path().join(".cas"));
+    }
+
+    #[test]
+    fn git_toplevel_wins_over_nested_cas_directory() {
+        let _env = TestEnvGuard::with_optional_vars(&[("CAS_ROOT", None)]);
+        let temp = TempDir::new().unwrap();
+        let output = std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(temp.path())
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "git init failed: {output:?}");
+        init_cas_dir(temp.path()).unwrap();
+
+        let subdir = temp.path().join("packages/widget/src");
+        std::fs::create_dir_all(&subdir).unwrap();
+        init_cas_dir(&temp.path().join("packages/widget")).unwrap();
+
         let found = find_cas_root_from(&subdir).unwrap();
         assert_eq!(found, temp.path().join(".cas"));
     }

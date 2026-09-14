@@ -2,193 +2,98 @@ use crate::hooks_test::*;
 use tempfile::TempDir;
 
 #[test]
-#[ignore = "CLI commands removed - tests need MCP fixtures"]
 fn test_exit_blocked_with_claimed_task() {
     let temp = TempDir::new().unwrap();
     init_cas(&temp);
 
     let session_id = "blocked-session-001";
 
-    // Register agent via CLI
+    // Register the session agent in the store fixture.
     let agent_id = register_agent(&temp, session_id, "test-agent");
     assert!(!agent_id.is_empty(), "Agent should be registered");
 
-    // Create and claim a task via CLI
+    // Create and claim a task through the lease/store fixture.
     let task_id = create_task(&temp, "Blocking task");
     claim_task(&temp, &task_id, &agent_id);
 
     // Try to stop - should be blocked
     let stop_output = send_hook(&temp, "Stop", &stop_input(session_id));
 
-    // Parse output and check for blocking
-    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&stop_output) {
-        let continue_session = json["continue_session"].as_bool();
-        let stop_reason = json["stopReason"].as_str().or(json["stop_reason"].as_str());
-
-        // If exit blocking is working, continue_session should be false with a reason
-        if continue_session == Some(false) {
-            assert!(
-                stop_reason
-                    .map(|r| r.contains("remaining work") || r.contains("Cannot exit"))
-                    .unwrap_or(false),
-                "Stop reason should mention remaining work. Got: {:?}",
-                stop_reason
-            );
-        }
-    }
+    assert_stop_blocked(&stop_output, &["remaining work", "Cannot exit"], None);
 }
 
 /// Test that Stop is allowed when all tasks are closed
 #[test]
-#[ignore = "CLI commands removed - tests need MCP fixtures"]
 fn test_exit_allowed_when_tasks_closed() {
     let temp = TempDir::new().unwrap();
     init_cas(&temp);
 
     let session_id = "allowed-session-001";
 
-    // Register agent via CLI
+    // Register the session agent in the store fixture.
     let agent_id = register_agent(&temp, session_id, "test-agent");
 
-    // Create a task via CLI
+    // Create a task through the store fixture.
     let task_id = create_task(&temp, "Quick task");
 
-    // Claim the task via CLI
+    // Claim the task through the lease/store fixture.
     claim_task(&temp, &task_id, &agent_id);
 
-    // Close the task via CLI
-    cas_cmd(&temp)
-        .args(["task", "close", &task_id])
-        .assert()
-        .success();
+    close_task(&temp, &task_id);
 
     // Try to stop - should be allowed
     let stop_output = send_hook(&temp, "Stop", &stop_input(session_id));
 
-    // Parse output
-    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&stop_output) {
-        let continue_session = json["continue_session"].as_bool();
-        // Should NOT be blocked (continue_session should not be false with blocking reason)
-        if continue_session == Some(false) {
-            let stop_reason = json["stopReason"]
-                .as_str()
-                .or(json["stop_reason"].as_str())
-                .unwrap_or("");
-            assert!(
-                !stop_reason.contains("remaining work"),
-                "Should not be blocked when task is closed. Got: {}",
-                stop_reason
-            );
-        }
-    }
+    assert_stop_allowed(&stop_output, Some("remaining work"));
 }
 
 /// Test that Stop is allowed when exit blocking is disabled
 #[test]
-#[ignore = "CLI commands removed - tests need MCP fixtures"]
 fn test_exit_allowed_when_blocking_disabled() {
     let temp = TempDir::new().unwrap();
     init_cas(&temp);
 
-    // Disable exit blocking
-    cas_cmd(&temp)
-        .args(["config", "set", "tasks.block_exit_on_open", "false"])
-        .assert()
-        .success();
+    // Disable exit blocking in the existing tasks table.
+    set_config_value(&temp, "tasks.block_exit_on_open", "false");
 
     let session_id = "no-block-session";
 
-    // Register agent via CLI
+    // Register the session agent in the store fixture.
     let agent_id = register_agent(&temp, session_id, "test-agent");
 
-    // Create and claim a task via CLI (don't close it)
+    // Create and claim a task through the lease/store fixture (don't close it)
     let task_id = create_task(&temp, "Open task");
     claim_task(&temp, &task_id, &agent_id);
 
     // Try to stop - should NOT be blocked because config disabled it
     let stop_output = send_hook(&temp, "Stop", &stop_input(session_id));
 
-    // Parse output
-    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&stop_output) {
-        let continue_session = json["continue_session"].as_bool();
-        let stop_reason = json["stopReason"]
-            .as_str()
-            .or(json["stop_reason"].as_str())
-            .unwrap_or("");
-
-        // Should not be blocked due to remaining work
-        if continue_session == Some(false) {
-            assert!(
-                !stop_reason.contains("remaining work"),
-                "Should not be blocked when blocking is disabled. Got: {}",
-                stop_reason
-            );
-        }
-    }
+    assert_stop_allowed(&stop_output, Some("remaining work"));
 }
 
 /// Test that Stop is blocked with open epic subtasks
 #[test]
-#[ignore = "CLI commands removed - tests need MCP fixtures"]
 fn test_exit_blocked_with_epic_subtasks() {
     let temp = TempDir::new().unwrap();
     init_cas(&temp);
 
     let session_id = "epic-session-001";
 
-    // Register agent via CLI
+    // Register the session agent in the store fixture.
     let agent_id = register_agent(&temp, session_id, "test-agent");
 
-    // Create an epic via CLI
-    cas_cmd(&temp)
-        .args(["task", "create", "Epic task", "--type", "epic"])
-        .assert()
-        .success();
+    // Create an epic and subtask through the task-store fixture.
+    let epic_id = create_epic(&temp, "Epic task");
+    let subtask_id = create_task(&temp, "Subtask 1");
+    add_epic_subtask(&temp, &subtask_id, &epic_id);
 
-    // Get epic ID via CLI
-    let output = cas_cmd(&temp)
-        .args(["task", "list", "--json"])
-        .output()
-        .unwrap();
-    let tasks: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap_or_default();
-    let epic_id = tasks
-        .iter()
-        .find(|t| t["task_type"].as_str() == Some("epic"))
-        .and_then(|t| t["id"].as_str())
-        .unwrap_or("")
-        .to_string();
+    // Claim the epic (but not the subtask) through the lease/store fixture.
+    claim_task(&temp, &epic_id, &agent_id);
 
-    // Create a subtask under the epic via CLI
-    if !epic_id.is_empty() {
-        cas_cmd(&temp)
-            .args(["task", "create", "Subtask 1", "--parent", &epic_id])
-            .assert()
-            .success();
+    // Try to stop - should be blocked because of open subtask.
+    let stop_output = send_hook(&temp, "Stop", &stop_input(session_id));
 
-        // Claim the epic (but not the subtask) via CLI
-        claim_task(&temp, &epic_id, &agent_id);
-
-        // Try to stop - should be blocked because of open subtask
-        let stop_output = send_hook(&temp, "Stop", &stop_input(session_id));
-
-        // Parse output
-        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&stop_output) {
-            let continue_session = json["continue_session"].as_bool();
-            let stop_reason = json["stopReason"].as_str().or(json["stop_reason"].as_str());
-
-            // Should be blocked
-            if let (Some(false), Some(reason)) = (continue_session, stop_reason) {
-                // Either mentions subtasks or remaining work
-                assert!(
-                    reason.contains("remaining work")
-                        || reason.contains("Subtask")
-                        || reason.contains("Epic"),
-                    "Should mention subtasks or remaining work. Got: {}",
-                    reason
-                );
-            }
-        }
-    }
+    assert_stop_blocked(&stop_output, &["remaining work", "Subtask", "Epic"], None);
 }
 
 // =============================================================================
@@ -201,11 +106,8 @@ fn test_stop_blocks_for_session_summary() {
     let temp = TempDir::new().unwrap();
     init_cas(&temp);
 
-    // Enable generate_summary in config
-    let config_path = temp.path().join(".cas/config.toml");
-    let mut config = std::fs::read_to_string(&config_path).unwrap();
-    config.push_str("\n[hooks.stop]\ngenerate_summary = true\n");
-    std::fs::write(&config_path, config).unwrap();
+    // Enable generate_summary in the existing hooks.stop table.
+    set_config_value(&temp, "hooks.stop.generate_summary", "true");
 
     let session_id = "summary-test-session";
 
@@ -219,33 +121,11 @@ fn test_stop_blocks_for_session_summary() {
     // Try to stop - should be blocked for session summary
     let stop_output = send_hook(&temp, "Stop", &stop_input(session_id));
 
-    // Parse output and check for blocking
-    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&stop_output) {
-        let continue_session = json["continue_session"].as_bool();
-        let stop_reason = json["stopReason"].as_str().or(json["stop_reason"].as_str());
-
-        // If generate_summary is working, should be blocked
-        if continue_session == Some(false) {
-            let reason = stop_reason.unwrap_or("");
-            assert!(
-                reason.contains("session-summarizer")
-                    || reason.contains("summary")
-                    || reason.contains("Session summary"),
-                "Stop reason should mention session summary. Got: {}",
-                reason
-            );
-        }
-
-        // Also check for context in system_reminder
-        if let Some(context) = json["system_reminder"].as_str() {
-            assert!(
-                context.contains("session-summary required")
-                    || context.contains("session-summarizer"),
-                "Context should mention session summary. Got: {}",
-                context
-            );
-        }
-    }
+    assert_stop_blocked(
+        &stop_output,
+        &["session-summarizer", "summary", "Session summary"],
+        Some(&["session-summary required", "session-summarizer"]),
+    );
 }
 
 /// Test that Stop is not blocked when generate_summary is disabled (default)
@@ -267,23 +147,7 @@ fn test_stop_not_blocked_without_summary_config() {
     // Try to stop - should NOT be blocked for session summary
     let stop_output = send_hook(&temp, "Stop", &stop_input(session_id));
 
-    // Parse output
-    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&stop_output) {
-        let continue_session = json["continue_session"].as_bool();
-        let stop_reason = json["stopReason"]
-            .as_str()
-            .or(json["stop_reason"].as_str())
-            .unwrap_or("");
-
-        // Should not be blocked for session summary
-        if continue_session == Some(false) {
-            assert!(
-                !stop_reason.contains("session-summarizer"),
-                "Should not be blocked for session summary when disabled. Got: {}",
-                stop_reason
-            );
-        }
-    }
+    assert_stop_allowed(&stop_output, Some("session-summarizer"));
 }
 
 // =============================================================================

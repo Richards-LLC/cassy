@@ -2,7 +2,6 @@ use crate::hooks_test::*;
 use tempfile::TempDir;
 
 #[test]
-#[ignore = "CLI commands removed - tests need MCP fixtures"]
 fn test_stop_blocks_for_learning_review() {
     let temp = TempDir::new().unwrap();
     init_cas(&temp);
@@ -64,7 +63,6 @@ fn test_stop_blocks_for_learning_review() {
 
 /// Test that Stop is NOT blocked when learnings are below threshold
 #[test]
-#[ignore = "CLI commands removed - tests need MCP fixtures"]
 fn test_stop_not_blocked_below_learning_threshold() {
     let temp = TempDir::new().unwrap();
     init_cas(&temp);
@@ -105,7 +103,6 @@ fn test_stop_not_blocked_below_learning_threshold() {
 
 /// Test that Stop is not blocked when learning_review is disabled (default)
 #[test]
-#[ignore = "CLI commands removed - tests need MCP fixtures"]
 fn test_stop_not_blocked_without_learning_review_config() {
     let temp = TempDir::new().unwrap();
     init_cas(&temp);
@@ -141,19 +138,8 @@ fn test_stop_not_blocked_without_learning_review_config() {
 // Part I: Rule Review Tests
 // =============================================================================
 
-/// Helper to add a draft rule via CLI
-fn add_draft_rule(dir: &TempDir, content: &str) {
-    cas_cmd(dir)
-        .args(["rules", "add", content])
-        .assert()
-        .success();
-    // Delay to avoid ID collision (timestamp-based)
-    std::thread::sleep(std::time::Duration::from_millis(20));
-}
-
 /// Test that Stop blocks when rule_review is enabled and threshold is exceeded
 #[test]
-#[ignore = "CLI commands removed - tests need MCP fixtures"]
 fn test_stop_blocks_for_rule_review() {
     let temp = TempDir::new().unwrap();
     init_cas(&temp);
@@ -213,7 +199,6 @@ fn test_stop_blocks_for_rule_review() {
 
 /// Test that Stop is NOT blocked when draft rules are below threshold
 #[test]
-#[ignore = "CLI commands removed - tests need MCP fixtures"]
 fn test_stop_not_blocked_below_rule_threshold() {
     let temp = TempDir::new().unwrap();
     init_cas(&temp);
@@ -252,7 +237,6 @@ fn test_stop_not_blocked_below_rule_threshold() {
 
 /// Test that Stop is not blocked when rule_review is explicitly disabled.
 #[test]
-#[ignore = "CLI commands removed - tests need MCP fixtures"]
 fn test_stop_not_blocked_with_rule_review_disabled() {
     let temp = TempDir::new().unwrap();
     init_cas(&temp);
@@ -293,16 +277,8 @@ fn test_stop_not_blocked_with_rule_review_disabled() {
 // Part J: Duplicate Detection Tests
 // =============================================================================
 
-/// Helper to add an entry via CLI
-fn add_entry(dir: &TempDir, content: &str) {
-    cas_cmd(dir).args(["add", content]).assert().success();
-    // Delay to avoid ID collision (timestamp-based)
-    std::thread::sleep(std::time::Duration::from_millis(20));
-}
-
 /// Test that Stop blocks when duplicate_detection is enabled and threshold is exceeded
 #[test]
-#[ignore = "CLI commands removed - tests need MCP fixtures"]
 fn test_stop_blocks_for_duplicate_detection() {
     let temp = TempDir::new().unwrap();
     init_cas(&temp);
@@ -364,7 +340,6 @@ fn test_stop_blocks_for_duplicate_detection() {
 
 /// Test that Stop is NOT blocked when entries are below threshold
 #[test]
-#[ignore = "CLI commands removed - tests need MCP fixtures"]
 fn test_stop_not_blocked_below_duplicate_threshold() {
     let temp = TempDir::new().unwrap();
     init_cas(&temp);
@@ -405,7 +380,6 @@ fn test_stop_not_blocked_below_duplicate_threshold() {
 
 /// Test that Stop is not blocked when duplicate_detection is disabled (default)
 #[test]
-#[ignore = "CLI commands removed - tests need MCP fixtures"]
 fn test_stop_not_blocked_without_duplicate_detection_config() {
     let temp = TempDir::new().unwrap();
     init_cas(&temp);

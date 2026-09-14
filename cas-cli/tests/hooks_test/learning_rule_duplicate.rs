@@ -6,13 +6,9 @@ fn test_stop_blocks_for_learning_review() {
     let temp = TempDir::new().unwrap();
     init_cas(&temp);
 
-    // Enable learning_review in config with threshold of 3
-    let config_path = temp.path().join(".cas/config.toml");
-    let mut config = std::fs::read_to_string(&config_path).unwrap();
-    config.push_str(
-        "\n[hooks.stop]\nlearning_review_enabled = true\nlearning_review_threshold = 3\n",
-    );
-    std::fs::write(&config_path, config).unwrap();
+    // Enable learning_review in the existing hooks.stop table.
+    set_config_value(&temp, "hooks.stop.learning_review_enabled", "true");
+    set_config_value(&temp, "hooks.stop.learning_review_threshold", "3");
 
     let session_id = "learning-review-test-session";
 
@@ -31,34 +27,15 @@ fn test_stop_blocks_for_learning_review() {
     // Try to stop - should be blocked for learning review
     let stop_output = send_hook(&temp, "Stop", &stop_input(session_id));
 
-    // Parse output and check for blocking
-    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&stop_output) {
-        let continue_session = json["continue_session"].as_bool();
-        let stop_reason = json["stopReason"].as_str().or(json["stop_reason"].as_str());
-
-        // If learning_review is working, should be blocked
-        if continue_session == Some(false) {
-            let reason = stop_reason.unwrap_or("");
-            assert!(
-                reason.contains("learning-reviewer")
-                    || reason.contains("learning")
-                    || reason.contains("Learning review"),
-                "Stop reason should mention learning review. Got: {}",
-                reason
-            );
-        }
-
-        // Also check for context in system_reminder
-        if let Some(context) = json["system_reminder"].as_str() {
-            assert!(
-                context.contains("learning-review required")
-                    || context.contains("learning-reviewer")
-                    || context.contains("Unreviewed Learnings"),
-                "Context should mention learning review. Got: {}",
-                context
-            );
-        }
-    }
+    assert_stop_blocked(
+        &stop_output,
+        &["learning-reviewer", "learning", "Learning review"],
+        Some(&[
+            "learning-review required",
+            "learning-reviewer",
+            "Unreviewed Learnings",
+        ]),
+    );
 }
 
 /// Test that Stop is NOT blocked when learnings are below threshold
@@ -67,13 +44,9 @@ fn test_stop_not_blocked_below_learning_threshold() {
     let temp = TempDir::new().unwrap();
     init_cas(&temp);
 
-    // Enable learning_review with threshold of 10
-    let config_path = temp.path().join(".cas/config.toml");
-    let mut config = std::fs::read_to_string(&config_path).unwrap();
-    config.push_str(
-        "\n[hooks.stop]\nlearning_review_enabled = true\nlearning_review_threshold = 10\n",
-    );
-    std::fs::write(&config_path, config).unwrap();
+    // Enable learning_review in the existing hooks.stop table.
+    set_config_value(&temp, "hooks.stop.learning_review_enabled", "true");
+    set_config_value(&temp, "hooks.stop.learning_review_threshold", "10");
 
     let session_id = "below-threshold-session";
 
@@ -85,20 +58,7 @@ fn test_stop_not_blocked_below_learning_threshold() {
     // Try to stop - should NOT be blocked
     let stop_output = send_hook(&temp, "Stop", &stop_input(session_id));
 
-    // Parse output
-    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&stop_output) {
-        let stop_reason = json["stopReason"]
-            .as_str()
-            .or(json["stop_reason"].as_str())
-            .unwrap_or("");
-
-        // Should NOT mention learning review
-        assert!(
-            !stop_reason.contains("learning-review"),
-            "Should not be blocked for learning review when below threshold. Got: {}",
-            stop_reason
-        );
-    }
+    assert_stop_allowed(&stop_output, Some("learning-review"));
 }
 
 /// Test that Stop is not blocked when learning_review is disabled (default)
@@ -118,20 +78,7 @@ fn test_stop_not_blocked_without_learning_review_config() {
     // Try to stop - should NOT be blocked for learning review
     let stop_output = send_hook(&temp, "Stop", &stop_input(session_id));
 
-    // Parse output
-    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&stop_output) {
-        let stop_reason = json["stopReason"]
-            .as_str()
-            .or(json["stop_reason"].as_str())
-            .unwrap_or("");
-
-        // Should not be blocked for learning review
-        assert!(
-            !stop_reason.contains("learning-review"),
-            "Should not be blocked for learning review when disabled. Got: {}",
-            stop_reason
-        );
-    }
+    assert_stop_allowed(&stop_output, Some("learning-review"));
 }
 
 // =============================================================================
@@ -144,11 +91,9 @@ fn test_stop_blocks_for_rule_review() {
     let temp = TempDir::new().unwrap();
     init_cas(&temp);
 
-    // Enable rule_review in config with threshold of 3
-    let config_path = temp.path().join(".cas/config.toml");
-    let mut config = std::fs::read_to_string(&config_path).unwrap();
-    config.push_str("\n[hooks.stop]\nrule_review_enabled = true\nrule_review_threshold = 3\n");
-    std::fs::write(&config_path, config).unwrap();
+    // Enable rule_review in the existing hooks.stop table.
+    set_config_value(&temp, "hooks.stop.rule_review_enabled", "true");
+    set_config_value(&temp, "hooks.stop.rule_review_threshold", "3");
 
     let session_id = "rule-review-test-session";
 
@@ -167,34 +112,11 @@ fn test_stop_blocks_for_rule_review() {
     // Try to stop - should be blocked for rule review
     let stop_output = send_hook(&temp, "Stop", &stop_input(session_id));
 
-    // Parse output and check for blocking
-    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&stop_output) {
-        let continue_session = json["continue_session"].as_bool();
-        let stop_reason = json["stopReason"].as_str().or(json["stop_reason"].as_str());
-
-        // If rule_review is working, should be blocked
-        if continue_session == Some(false) {
-            let reason = stop_reason.unwrap_or("");
-            assert!(
-                reason.contains("rule-reviewer")
-                    || reason.contains("rule")
-                    || reason.contains("Rule review"),
-                "Stop reason should mention rule review. Got: {}",
-                reason
-            );
-        }
-
-        // Also check for context in system_reminder
-        if let Some(context) = json["system_reminder"].as_str() {
-            assert!(
-                context.contains("rule-review required")
-                    || context.contains("rule-reviewer")
-                    || context.contains("Draft Rules"),
-                "Context should mention rule review. Got: {}",
-                context
-            );
-        }
-    }
+    assert_stop_blocked(
+        &stop_output,
+        &["rule-reviewer", "rule", "Rule review"],
+        Some(&["rule-review required", "rule-reviewer", "Draft Rules"]),
+    );
 }
 
 /// Test that Stop is NOT blocked when draft rules are below threshold
@@ -203,11 +125,9 @@ fn test_stop_not_blocked_below_rule_threshold() {
     let temp = TempDir::new().unwrap();
     init_cas(&temp);
 
-    // Enable rule_review with threshold of 10
-    let config_path = temp.path().join(".cas/config.toml");
-    let mut config = std::fs::read_to_string(&config_path).unwrap();
-    config.push_str("\n[hooks.stop]\nrule_review_enabled = true\nrule_review_threshold = 10\n");
-    std::fs::write(&config_path, config).unwrap();
+    // Enable rule_review in the existing hooks.stop table.
+    set_config_value(&temp, "hooks.stop.rule_review_enabled", "true");
+    set_config_value(&temp, "hooks.stop.rule_review_threshold", "10");
 
     let session_id = "below-rule-threshold-session";
 
@@ -219,20 +139,7 @@ fn test_stop_not_blocked_below_rule_threshold() {
     // Try to stop - should NOT be blocked
     let stop_output = send_hook(&temp, "Stop", &stop_input(session_id));
 
-    // Parse output
-    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&stop_output) {
-        let stop_reason = json["stopReason"]
-            .as_str()
-            .or(json["stop_reason"].as_str())
-            .unwrap_or("");
-
-        // Should NOT mention rule review
-        assert!(
-            !stop_reason.contains("rule-review"),
-            "Should not be blocked for rule review when below threshold. Got: {}",
-            stop_reason
-        );
-    }
+    assert_stop_allowed(&stop_output, Some("rule-review"));
 }
 
 /// Test that Stop is not blocked when rule_review is explicitly disabled.
@@ -242,10 +149,7 @@ fn test_stop_not_blocked_with_rule_review_disabled() {
     init_cas(&temp);
 
     // Preserve the explicit opt-out contract while the default is enabled.
-    let config_path = temp.path().join(".cas/config.toml");
-    let mut config = std::fs::read_to_string(&config_path).unwrap();
-    config.push_str("\n[hooks.stop]\nrule_review_enabled = false\n");
-    std::fs::write(&config_path, config).unwrap();
+    set_config_value(&temp, "hooks.stop.rule_review_enabled", "false");
 
     let session_id = "no-rule-review-session";
 
@@ -257,20 +161,7 @@ fn test_stop_not_blocked_with_rule_review_disabled() {
     // Try to stop - should NOT be blocked for rule review
     let stop_output = send_hook(&temp, "Stop", &stop_input(session_id));
 
-    // Parse output
-    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&stop_output) {
-        let stop_reason = json["stopReason"]
-            .as_str()
-            .or(json["stop_reason"].as_str())
-            .unwrap_or("");
-
-        // Should not be blocked for rule review when explicitly disabled.
-        assert!(
-            !stop_reason.contains("rule-review"),
-            "Should not be blocked for rule review when disabled. Got: {}",
-            stop_reason
-        );
-    }
+    assert_stop_allowed(&stop_output, Some("rule-review"));
 }
 
 // =============================================================================
@@ -283,13 +174,9 @@ fn test_stop_blocks_for_duplicate_detection() {
     let temp = TempDir::new().unwrap();
     init_cas(&temp);
 
-    // Enable duplicate_detection in config with threshold of 5
-    let config_path = temp.path().join(".cas/config.toml");
-    let mut config = std::fs::read_to_string(&config_path).unwrap();
-    config.push_str(
-        "\n[hooks.stop]\nduplicate_detection_enabled = true\nduplicate_detection_threshold = 5\n",
-    );
-    std::fs::write(&config_path, config).unwrap();
+    // Enable duplicate_detection in the existing hooks.stop table.
+    set_config_value(&temp, "hooks.stop.duplicate_detection_enabled", "true");
+    set_config_value(&temp, "hooks.stop.duplicate_detection_threshold", "5");
 
     let session_id = "duplicate-detection-test-session";
 
@@ -308,34 +195,15 @@ fn test_stop_blocks_for_duplicate_detection() {
     // Try to stop - should be blocked for duplicate detection
     let stop_output = send_hook(&temp, "Stop", &stop_input(session_id));
 
-    // Parse output and check for blocking
-    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&stop_output) {
-        let continue_session = json["continue_session"].as_bool();
-        let stop_reason = json["stopReason"].as_str().or(json["stop_reason"].as_str());
-
-        // If duplicate_detection is working, should be blocked
-        if continue_session == Some(false) {
-            let reason = stop_reason.unwrap_or("");
-            assert!(
-                reason.contains("duplicate-detector")
-                    || reason.contains("duplicate")
-                    || reason.contains("Duplicate detection"),
-                "Stop reason should mention duplicate detection. Got: {}",
-                reason
-            );
-        }
-
-        // Also check for context in system_reminder
-        if let Some(context) = json["system_reminder"].as_str() {
-            assert!(
-                context.contains("duplicate-detection required")
-                    || context.contains("duplicate-detector")
-                    || context.contains("Memory Cleanup"),
-                "Context should mention duplicate detection. Got: {}",
-                context
-            );
-        }
-    }
+    assert_stop_blocked(
+        &stop_output,
+        &["duplicate-detector", "duplicate", "Duplicate detection"],
+        Some(&[
+            "duplicate-detection required",
+            "duplicate-detector",
+            "Memory Cleanup",
+        ]),
+    );
 }
 
 /// Test that Stop is NOT blocked when entries are below threshold
@@ -344,13 +212,9 @@ fn test_stop_not_blocked_below_duplicate_threshold() {
     let temp = TempDir::new().unwrap();
     init_cas(&temp);
 
-    // Enable duplicate_detection with threshold of 20
-    let config_path = temp.path().join(".cas/config.toml");
-    let mut config = std::fs::read_to_string(&config_path).unwrap();
-    config.push_str(
-        "\n[hooks.stop]\nduplicate_detection_enabled = true\nduplicate_detection_threshold = 20\n",
-    );
-    std::fs::write(&config_path, config).unwrap();
+    // Enable duplicate_detection in the existing hooks.stop table.
+    set_config_value(&temp, "hooks.stop.duplicate_detection_enabled", "true");
+    set_config_value(&temp, "hooks.stop.duplicate_detection_threshold", "20");
 
     let session_id = "below-duplicate-threshold-session";
 
@@ -362,20 +226,7 @@ fn test_stop_not_blocked_below_duplicate_threshold() {
     // Try to stop - should NOT be blocked
     let stop_output = send_hook(&temp, "Stop", &stop_input(session_id));
 
-    // Parse output
-    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&stop_output) {
-        let stop_reason = json["stopReason"]
-            .as_str()
-            .or(json["stop_reason"].as_str())
-            .unwrap_or("");
-
-        // Should NOT mention duplicate detection
-        assert!(
-            !stop_reason.contains("duplicate-detection"),
-            "Should not be blocked for duplicate detection when below threshold. Got: {}",
-            stop_reason
-        );
-    }
+    assert_stop_allowed(&stop_output, Some("duplicate-detection"));
 }
 
 /// Test that Stop is not blocked when duplicate_detection is disabled (default)
@@ -395,18 +246,5 @@ fn test_stop_not_blocked_without_duplicate_detection_config() {
     // Try to stop - should NOT be blocked for duplicate detection
     let stop_output = send_hook(&temp, "Stop", &stop_input(session_id));
 
-    // Parse output
-    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&stop_output) {
-        let stop_reason = json["stopReason"]
-            .as_str()
-            .or(json["stop_reason"].as_str())
-            .unwrap_or("");
-
-        // Should not be blocked for duplicate detection
-        assert!(
-            !stop_reason.contains("duplicate-detection"),
-            "Should not be blocked for duplicate detection when disabled. Got: {}",
-            stop_reason
-        );
-    }
+    assert_stop_allowed(&stop_output, Some("duplicate-detection"));
 }

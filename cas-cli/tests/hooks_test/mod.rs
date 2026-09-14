@@ -32,6 +32,19 @@ pub(crate) fn cas_cmd(dir: &TempDir) -> Command {
     cmd.current_dir(dir.path());
     // Clear CAS_ROOT to prevent env pollution from parent shell
     cmd.env_remove("CAS_ROOT");
+    // Hook integration fixtures exercise end-user Stop semantics, not the
+    // factory-worker exemptions. Keep ambient factory identity out of every
+    // subprocess so maintenance blockers and attribution use the payload's
+    // session ID deterministically.
+    for variable in [
+        "CAS_AGENT_ROLE",
+        "CAS_FACTORY_MODE",
+        "CAS_SESSION_ID",
+        "CAS_AGENT_NAME",
+        "CAS_FACTORY_SESSION",
+    ] {
+        cmd.env_remove(variable);
+    }
     cmd.env("CAS_SKIP_FACTORY_TOOLING", "1");
     cmd
 }
@@ -50,11 +63,38 @@ pub(crate) fn init_cas_dev_mode(dir: &TempDir) {
 
 /// Enable the current dev-tracer config in an initialized fixture.
 pub(crate) fn enable_cas_dev_mode(dir: &TempDir) {
-    // Config is now saved as TOML (auto-migrated from YAML if it existed)
+    // Update the existing TOML table through the config writer so fixtures do
+    // not silently create duplicate tables.
+    set_config_value(dir, "dev.dev_mode", "true");
+}
+
+/// Update one existing config key through Cassy's config writer.
+pub(crate) fn set_config_value(dir: &TempDir, key: &str, value: &str) {
     let config_path = dir.path().join(".cas/config.toml");
-    let mut config = std::fs::read_to_string(&config_path).unwrap();
-    config.push_str("\n[dev]\ndev_mode = true\n");
-    std::fs::write(&config_path, config).unwrap();
+    let raw = std::fs::read_to_string(&config_path).expect("fixture config should exist");
+    let mut document = raw
+        .parse::<toml_edit::DocumentMut>()
+        .expect("fixture config should be valid TOML");
+    let mut parts = key.split('.').peekable();
+    let leaf = parts.next_back().expect("config key should not be empty");
+    let mut item = document.as_item_mut();
+    for part in parts {
+        if item.get(part).is_none() {
+            item[part] = toml_edit::table();
+        }
+        item = item
+            .get_mut(part)
+            .unwrap_or_else(|| panic!("config table should exist for {part}"));
+    }
+    let value = value
+        .parse::<toml_edit::Value>()
+        .unwrap_or_else(|error| panic!("config value should be valid TOML: {error}"));
+    item[leaf] = toml_edit::value(value);
+
+    let updated = document.to_string();
+    toml::from_str::<cas::config::Config>(&updated)
+        .unwrap_or_else(|error| panic!("fixture config should remain valid after {key}: {error}"));
+    std::fs::write(config_path, updated).expect("fixture config should be writable");
 }
 
 /// Send hook event via stdin and return stdout
@@ -171,9 +211,8 @@ pub(crate) fn file_changes(dir: &TempDir) -> Vec<cas::types::FileChange> {
 /// Count observations in the dev tracer's durable buffer.
 ///
 /// PostToolUse intentionally buffers raw observations only when dev mode is
-/// enabled. The public TraceStore API requires a session ID, while each hook
-/// process owns a generated tracer session, so this fixture queries the
-/// bounded buffer table directly to verify persistence across hook processes.
+/// enabled. This fixture queries the bounded buffer table directly so tests
+/// can inspect persisted rows across sessions without changing their identity.
 pub(crate) fn count_buffered_observations(dir: &TempDir) -> usize {
     buffered_observations(dir).len()
 }
@@ -218,12 +257,11 @@ pub(crate) fn buffered_observations_with_sessions(
     .expect("buffer rows should decode")
 }
 
-/// Seed a buffer row under the harness session ID used by a Stop fixture.
+/// Seed a buffer row under a known session ID for Stop component coverage.
 ///
-/// The production tracer generates a process-local ID, so a multi-process
-/// hook integration test cannot otherwise create a row that Stop will match.
-/// This keeps the fixture on the real SQLite schema while exercising the
-/// production synthesis and clear path unchanged.
+/// Real subprocess E2E tests use PostToolUse to create rows. This helper
+/// intentionally bypasses that caller path so the Stop synthesis/clear
+/// component can be tested with a deterministic SQLite fixture.
 pub(crate) fn seed_buffered_observation(
     dir: &TempDir,
     session_id: &str,
@@ -250,6 +288,78 @@ pub(crate) fn seed_buffered_observation(
         ],
     )
     .expect("buffered observation should seed");
+}
+
+/// Parse a Stop hook response using the serialized HookOutput schema.
+pub(crate) fn parse_stop_output(output: &str) -> serde_json::Value {
+    serde_json::from_str(output).unwrap_or_else(|error| {
+        panic!("Stop hook output must be valid JSON: {error}; got {output:?}")
+    })
+}
+
+/// Assert the serialized Stop response blocks and includes the expected
+/// reason/context. `decision: "block"` and `reason` are the current
+/// HookOutput schema; Stop context is carried in `systemMessage`.
+pub(crate) fn assert_stop_blocked(
+    output: &str,
+    reason_fragments: &[&str],
+    context_fragments: Option<&[&str]>,
+) {
+    let json = parse_stop_output(output);
+    assert_eq!(
+        json.get("decision").and_then(|value| value.as_str()),
+        Some("block"),
+        "Stop should serialize decision=block; got {json}"
+    );
+
+    let reason = json
+        .get("reason")
+        .and_then(|value| value.as_str())
+        .unwrap_or_else(|| panic!("blocked Stop must serialize reason; got {json}"));
+    assert!(
+        reason_fragments
+            .iter()
+            .any(|fragment| reason.contains(fragment)),
+        "Stop reason {reason:?} should contain one of {reason_fragments:?}"
+    );
+
+    if let Some(context_fragments) = context_fragments {
+        let context = json
+            .get("systemMessage")
+            .and_then(|value| value.as_str())
+            .unwrap_or_else(|| panic!("blocked Stop should serialize systemMessage; got {json}"));
+        assert!(
+            context_fragments
+                .iter()
+                .any(|fragment| context.contains(fragment)),
+            "Stop context {context:?} should contain one of {context_fragments:?}"
+        );
+    }
+}
+
+/// Assert an allowed Stop response. The HookOutput schema represents allow by
+/// omitting `decision`, not by a `continue_session` or `continue_session=true`
+/// field.
+pub(crate) fn assert_stop_allowed(output: &str, forbidden_reason: Option<&str>) {
+    let json = parse_stop_output(output);
+    assert!(
+        json.get("decision").is_none(),
+        "allowed Stop must omit decision; got {json}"
+    );
+    assert!(
+        json.get("reason").is_none(),
+        "allowed Stop must omit reason; got {json}"
+    );
+    if let Some(fragment) = forbidden_reason {
+        let context = json
+            .get("systemMessage")
+            .and_then(|value| value.as_str())
+            .unwrap_or("");
+        assert!(
+            !context.contains(fragment),
+            "allowed Stop context must not contain {fragment:?}; got {context:?}"
+        );
+    }
 }
 
 // Check if entries contain a specific substring

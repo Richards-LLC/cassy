@@ -1503,6 +1503,53 @@ mod tests {
     }
 
     #[test]
+    fn hosted_cursor_matches_raw_ghostty_position_after_pane_resize() {
+        use crate::ui::factory::buffer_backend::BufferBackend;
+        use cas_mux::Pane;
+
+        let mut app = FactoryApp::for_test();
+        let mut pane = Pane::director("test-supervisor", 24, 80).unwrap();
+        pane.feed(b"\x1b[?1049h\x1b[2J\x1b[?25h\x1b[3 qFAKE_CODEX_HOSTED_PANE\x1b[5;9H")
+            .unwrap();
+        assert_eq!(
+            pane.cursor_position(),
+            (9, 5),
+            "raw Ghostty cursor before resize"
+        );
+
+        pane.resize(38, 58).unwrap();
+        assert_eq!(
+            pane.cursor_position(),
+            (9, 5),
+            "raw Ghostty cursor after resize"
+        );
+        app.mux.add_pane(pane);
+
+        let mut terminal = Terminal::new(BufferBackend::new(120, 40)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        if let Some(state) = app.full_host_cursor_state() {
+            terminal.backend_mut().set_cursor_style(state).unwrap();
+        }
+
+        let content = *app
+            .full_pty_content_areas
+            .get("test-supervisor")
+            .expect("render stores supervisor content geometry");
+        let expected_move = format!(
+            "\x1b[{};{}H",
+            content.y.saturating_add(5),
+            content.x.saturating_add(9)
+        );
+        let output = terminal.backend_mut().take_buffer();
+        assert!(
+            output
+                .windows(expected_move.len())
+                .any(|bytes| bytes == expected_move.as_bytes()),
+            "host cursor should equal the post-resize Ghostty position (9,5) translated by content {content:?}; expected {expected_move:?}"
+        );
+    }
+
+    #[test]
     fn hidden_child_cursor_stays_hidden_on_the_host() {
         use crate::ui::factory::buffer_backend::BufferBackend;
         use cas_mux::Pane;
@@ -1565,6 +1612,62 @@ mod tests {
                 .windows(b"\x1b[?25h".len())
                 .any(|window| window == b"\x1b[?25h"),
             "sidecar focus must leave the host cursor hidden"
+        );
+    }
+
+    #[test]
+    fn sidecar_focus_hides_host_cursor_after_focus_transition() {
+        use crate::ui::factory::buffer_backend::BufferBackend;
+        use cas_mux::Pane;
+
+        let mut app = FactoryApp::for_test();
+        let mut pane = Pane::director("test-supervisor", 24, 80).unwrap();
+        pane.feed(b"\x1b[?1049h\x1b[2J\x1b[?25h\x1b[3 qFAKE_CODEX_HOSTED_PANE\x1b[5;9H")
+            .unwrap();
+        app.mux.add_pane(pane);
+
+        let mut terminal = Terminal::new(BufferBackend::new(120, 24)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        if let Some(state) = app.full_host_cursor_state() {
+            terminal.backend_mut().set_cursor_style(state).unwrap();
+        }
+        let focused_output = terminal.backend_mut().take_buffer();
+        assert!(
+            focused_output
+                .windows(b"\x1b[?25h".len())
+                .any(|bytes| bytes == b"\x1b[?25h")
+        );
+        assert!(
+            focused_output
+                .windows(b"\x1b[3 q".len())
+                .any(|bytes| bytes == b"\x1b[3 q")
+        );
+
+        app.toggle_sidecar_focus();
+        assert!(app.sidecar_is_focused());
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        if let Some(state) = app.full_host_cursor_state() {
+            terminal.backend_mut().set_cursor_style(state).unwrap();
+        }
+        let sidecar_output = terminal.backend_mut().take_buffer();
+
+        assert!(
+            !sidecar_output
+                .windows(b"\x1b[?25h".len())
+                .any(|bytes| bytes == b"\x1b[?25h"),
+            "sidecar focus after a visible pane frame must not re-show the host cursor"
+        );
+        assert!(
+            sidecar_output
+                .windows(b"\x1b[?25l".len())
+                .any(|bytes| bytes == b"\x1b[?25l"),
+            "sidecar focus must explicitly hide the cursor that was visible in the prior frame"
+        );
+        assert!(
+            !sidecar_output
+                .windows(b"\x1b[3 q".len())
+                .any(|bytes| bytes == b"\x1b[3 q"),
+            "sidecar focus must not forward the child's cursor style"
         );
     }
 

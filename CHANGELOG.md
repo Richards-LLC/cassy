@@ -14,6 +14,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - Focused hosted terminal panes display the cursor at the harness-reported
   position, with cursor visibility and shape preserved through redraw and
   resize. Unfocused panes and modal behavior retain their intended state.
+- Rolling integration follows session logs across UTC-day rollover, retains
+  incomplete lines until complete, filters by session, and processes each
+  matching merge event once.
 
 ## [3.25.6] - 2026-09-15
 

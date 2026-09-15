@@ -5,13 +5,14 @@
 
 use crossterm::{
     Command,
-    cursor::{Hide, MoveTo, Show},
+    cursor::{Hide, MoveTo, SetCursorStyle, Show},
     style::{
         Attribute, Color as CrosstermColor, Print, SetAttribute, SetBackgroundColor,
         SetForegroundColor,
     },
     terminal::{Clear, ClearType},
 };
+use ghostty_vt::{CursorShape, CursorState};
 use ratatui::backend::ClearType as RatatuiClearType;
 use ratatui::backend::{Backend, WindowSize};
 use ratatui::buffer::Cell;
@@ -72,6 +73,19 @@ impl BufferBackend {
     pub fn resize(&mut self, width: u16, height: u16) {
         self.width = width;
         self.height = height;
+    }
+
+    /// Forward the child PTY's cursor shape and blink mode to the host.
+    pub(crate) fn set_cursor_style(&mut self, state: CursorState) -> io::Result<()> {
+        let style = match (state.shape, state.blinking) {
+            (CursorShape::Block, true) => SetCursorStyle::BlinkingBlock,
+            (CursorShape::Block, false) => SetCursorStyle::SteadyBlock,
+            (CursorShape::Underline, true) => SetCursorStyle::BlinkingUnderScore,
+            (CursorShape::Underline, false) => SetCursorStyle::SteadyUnderScore,
+            (CursorShape::Bar, true) => SetCursorStyle::BlinkingBar,
+            (CursorShape::Bar, false) => SetCursorStyle::SteadyBar,
+        };
+        self.write_command(style)
     }
 
     /// Write a crossterm command to the buffer (reuses scratch Vec to avoid per-call allocation)
@@ -271,6 +285,7 @@ impl Backend for BufferBackend {
 #[cfg(test)]
 mod tests {
     use super::{BufferBackend, new_hyperlink_map};
+    use ghostty_vt::{CursorShape, CursorState};
     use ratatui::backend::Backend;
     use ratatui::buffer::Cell;
     use std::sync::Arc;
@@ -383,5 +398,33 @@ mod tests {
                 .windows(b"com/\x07bad".len())
                 .any(|w| w == b"com/\x07bad")
         );
+    }
+
+    #[test]
+    fn cursor_style_sequences_forward_shape_and_blink() {
+        let cases = [
+            (CursorShape::Block, false, b"\x1b[2 q".as_slice()),
+            (CursorShape::Block, true, b"\x1b[1 q".as_slice()),
+            (CursorShape::Underline, false, b"\x1b[4 q".as_slice()),
+            (CursorShape::Underline, true, b"\x1b[3 q".as_slice()),
+            (CursorShape::Bar, false, b"\x1b[6 q".as_slice()),
+            (CursorShape::Bar, true, b"\x1b[5 q".as_slice()),
+        ];
+
+        for (shape, blinking, expected) in cases {
+            let mut backend = BufferBackend::new(10, 2);
+            backend
+                .set_cursor_style(CursorState {
+                    visible: true,
+                    shape,
+                    blinking,
+                })
+                .unwrap();
+            assert_eq!(
+                backend.take_buffer(),
+                expected,
+                "shape={shape:?} blinking={blinking}"
+            );
+        }
     }
 }

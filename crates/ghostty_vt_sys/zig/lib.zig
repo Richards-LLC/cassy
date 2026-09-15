@@ -170,6 +170,28 @@ export fn ghostty_vt_terminal_cursor_position(
     return true;
 }
 
+export fn ghostty_vt_terminal_cursor_visible(terminal_ptr: ?*anyopaque) callconv(.c) bool {
+    if (terminal_ptr == null) return false;
+    const handle: *TerminalHandle = @ptrCast(@alignCast(terminal_ptr.?));
+    return handle.terminal.modes.get(.cursor_visible);
+}
+
+export fn ghostty_vt_terminal_cursor_shape(terminal_ptr: ?*anyopaque) callconv(.c) u8 {
+    if (terminal_ptr == null) return 0;
+    const handle: *TerminalHandle = @ptrCast(@alignCast(terminal_ptr.?));
+    return switch (handle.terminal.screens.active.cursor.cursor_style) {
+        .block, .block_hollow => 0,
+        .underline => 1,
+        .bar => 2,
+    };
+}
+
+export fn ghostty_vt_terminal_cursor_blinking(terminal_ptr: ?*anyopaque) callconv(.c) bool {
+    if (terminal_ptr == null) return false;
+    const handle: *TerminalHandle = @ptrCast(@alignCast(terminal_ptr.?));
+    return handle.terminal.modes.get(.cursor_blinking);
+}
+
 export fn ghostty_vt_terminal_dump_viewport(terminal_ptr: ?*anyopaque) callconv(.c) ghostty_vt_bytes_t {
     if (terminal_ptr == null) return .{ .ptr = null, .len = 0 };
     const handle: *TerminalHandle = @ptrCast(@alignCast(terminal_ptr.?));

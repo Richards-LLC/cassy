@@ -153,6 +153,15 @@ unsafe extern "C" {
         row_out: *mut u16,
     ) -> bool;
 
+    /// Return whether the terminal cursor is visible.
+    pub fn ghostty_vt_terminal_cursor_visible(terminal: *mut GhosttyVtTerminal) -> bool;
+
+    /// Return the terminal cursor shape: 0 = block, 1 = underline, 2 = bar.
+    pub fn ghostty_vt_terminal_cursor_shape(terminal: *mut GhosttyVtTerminal) -> u8;
+
+    /// Return whether the terminal cursor is blinking.
+    pub fn ghostty_vt_terminal_cursor_blinking(terminal: *mut GhosttyVtTerminal) -> bool;
+
     /// Dump viewport content as UTF-8
     pub fn ghostty_vt_terminal_dump_viewport(
         terminal: *mut GhosttyVtTerminal,

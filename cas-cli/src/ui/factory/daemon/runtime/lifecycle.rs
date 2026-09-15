@@ -2293,6 +2293,9 @@ impl FactoryDaemon {
                 let has_relay = self.has_relay_clients();
                 if has_full_clients || has_relay {
                     terminal.draw(|f| self.app.render(f))?;
+                    if let Some(state) = self.app.full_host_cursor_state() {
+                        terminal.backend_mut().set_cursor_style(state)?;
+                    }
                     let output = terminal.backend_mut().take_buffer();
                     if !output.is_empty() {
                         if has_full_clients {
@@ -2312,6 +2315,9 @@ impl FactoryDaemon {
                 if has_compact_clients {
                     if let Some(ref mut ct) = self.compact_terminal {
                         ct.draw(|f| self.app.render_compact(f))?;
+                        if let Some(state) = self.app.compact_host_cursor_state() {
+                            ct.backend_mut().set_cursor_style(state)?;
+                        }
                         let output = ct.backend_mut().take_buffer();
                         if !output.is_empty() {
                             self.broadcast_output_to(&output, ClientViewMode::Compact);

@@ -1,5 +1,7 @@
 use crate::ui::factory::app::imports::*;
 use crate::ui::factory::buffer_backend::HyperlinkMap;
+use ghostty_vt::CursorState;
+use ratatui::layout::Position;
 use std::sync::Arc;
 
 const IDENTITY_HEADER_MIN_HEIGHT: u16 = 20;
@@ -32,6 +34,85 @@ pub(crate) fn bordered_pty_content(outer: Rect) -> Rect {
 }
 
 impl FactoryApp {
+    /// Return the focused pane cursor translated into full-screen host cells.
+    ///
+    /// The host cursor is a property of the pane currently painted by this
+    /// client, not of the mux focus alone. This keeps compact clients from
+    /// showing a worker cursor while they are painting only the supervisor.
+    fn host_cursor_for_area(
+        &self,
+        pane_name: &str,
+        content: Rect,
+    ) -> Option<(Position, CursorState)> {
+        if content.width == 0 || content.height == 0 {
+            return None;
+        }
+        let pane = self.mux.get(pane_name)?;
+        let state = pane.cursor_state();
+        if !state.visible {
+            return None;
+        }
+        let (col, row) = pane.cursor_position();
+        if col == 0 || row == 0 {
+            return None;
+        }
+        Some((
+            Position::new(
+                content
+                    .x
+                    .saturating_add(col.saturating_sub(1).min(content.width - 1)),
+                content
+                    .y
+                    .saturating_add(row.saturating_sub(1).min(content.height - 1)),
+            ),
+            state,
+        ))
+    }
+
+    fn host_cursor_allowed(&self) -> bool {
+        use crate::ui::factory::renderer::FactoryViewMode;
+
+        self.factory_view_mode == FactoryViewMode::Panes
+            && matches!(self.input_mode, InputMode::Normal)
+            && self.sidecar_focus == SidecarFocus::None
+            && matches!(self.view_mode, ViewMode::Overview)
+            && !self.show_help
+            && !self.show_changes_dialog
+            && !self.show_task_dialog
+            && !self.show_reminder_dialog
+            && !self.show_terminal_dialog
+            && !self.show_feedback_dialog
+    }
+
+    fn full_host_cursor(&self) -> Option<(Position, CursorState)> {
+        if !self.host_cursor_allowed() {
+            return None;
+        }
+        let pane_name = self.mux.focused_id()?;
+        let content = self.full_pty_content_areas.get(pane_name).copied()?;
+        self.host_cursor_for_area(pane_name, content)
+    }
+
+    fn compact_host_cursor(&self) -> Option<(Position, CursorState)> {
+        if !self.host_cursor_allowed() {
+            return None;
+        }
+        let pane_name = self.mux.focused_id()?;
+        if pane_name != self.supervisor_name {
+            return None;
+        }
+        let content = self.compact_pty_content_areas.get(pane_name).copied()?;
+        self.host_cursor_for_area(pane_name, content)
+    }
+
+    pub(crate) fn full_host_cursor_state(&self) -> Option<CursorState> {
+        self.full_host_cursor().map(|(_, state)| state)
+    }
+
+    pub(crate) fn compact_host_cursor_state(&self) -> Option<CursorState> {
+        self.compact_host_cursor().map(|(_, state)| state)
+    }
+
     pub(crate) fn full_pane_hyperlink_map(&self) -> HyperlinkMap {
         self.full_pane_hyperlinks.clone()
     }
@@ -181,6 +262,10 @@ impl FactoryApp {
         self.render_error_banner(frame, layout.status_bar);
 
         self.render_overlays(frame);
+
+        if let Some((position, _)) = self.full_host_cursor() {
+            frame.set_cursor_position(position);
+        }
     }
 
     pub(crate) fn identity_header_rows(area: Rect) -> u16 {
@@ -508,6 +593,10 @@ impl FactoryApp {
             let content = Paragraph::new(lines);
             frame.render_widget(content, supervisor_area);
             self.record_pane_hyperlinks(&self.compact_pane_hyperlinks, pane, supervisor_area);
+        }
+
+        if let Some((position, _)) = self.compact_host_cursor() {
+            frame.set_cursor_position(position);
         }
     }
 
@@ -1279,8 +1368,8 @@ mod tests {
     use super::*;
     use cas_factory::TaskSummary;
     use cas_types::{Priority, TaskStatus, TaskType};
-    use ratatui::backend::TestBackend;
     use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
 
     fn epic_task(id: &str, title: &str, branch: &str) -> TaskSummary {
         TaskSummary {
@@ -1373,6 +1462,281 @@ mod tests {
         assert!(
             text.contains("01:30"),
             "elapsed session time must render without a focused epic"
+        );
+    }
+
+    #[test]
+    fn focused_pane_cursor_is_forwarded_to_the_host_terminal() {
+        use crate::ui::factory::buffer_backend::BufferBackend;
+        use cas_mux::Pane;
+
+        let mut app = FactoryApp::for_test();
+        let mut pane = Pane::director("test-supervisor", 24, 80).unwrap();
+        pane.feed(b"\x1b[3;4H").unwrap();
+        app.mux.add_pane(pane);
+
+        let mut terminal = Terminal::new(BufferBackend::new(120, 24)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+
+        let content = *app
+            .full_pty_content_areas
+            .get("test-supervisor")
+            .expect("render stores supervisor content geometry");
+        let expected_move = format!(
+            "\x1b[{};{}H",
+            content.y.saturating_add(3),
+            content.x.saturating_add(4)
+        );
+        let output = terminal.backend_mut().take_buffer();
+        assert!(
+            output
+                .windows(b"\x1b[?25h".len())
+                .any(|window| window == b"\x1b[?25h"),
+            "focused pane must show the host cursor"
+        );
+        assert!(
+            output
+                .windows(expected_move.len())
+                .any(|window| window == expected_move.as_bytes()),
+            "focused pane cursor must be translated into the pane content area"
+        );
+    }
+
+    #[test]
+    fn hosted_cursor_matches_raw_ghostty_position_after_pane_resize() {
+        use crate::ui::factory::buffer_backend::BufferBackend;
+        use cas_mux::Pane;
+
+        let mut app = FactoryApp::for_test();
+        let mut pane = Pane::director("test-supervisor", 24, 80).unwrap();
+        pane.feed(b"\x1b[?1049h\x1b[2J\x1b[?25h\x1b[3 qFAKE_CODEX_HOSTED_PANE\x1b[5;9H")
+            .unwrap();
+        assert_eq!(
+            pane.cursor_position(),
+            (9, 5),
+            "raw Ghostty cursor before resize"
+        );
+
+        pane.resize(38, 58).unwrap();
+        assert_eq!(
+            pane.cursor_position(),
+            (9, 5),
+            "raw Ghostty cursor after resize"
+        );
+        app.mux.add_pane(pane);
+
+        let mut terminal = Terminal::new(BufferBackend::new(120, 40)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        if let Some(state) = app.full_host_cursor_state() {
+            terminal.backend_mut().set_cursor_style(state).unwrap();
+        }
+
+        let content = *app
+            .full_pty_content_areas
+            .get("test-supervisor")
+            .expect("render stores supervisor content geometry");
+        let expected_move = format!(
+            "\x1b[{};{}H",
+            content.y.saturating_add(5),
+            content.x.saturating_add(9)
+        );
+        let output = terminal.backend_mut().take_buffer();
+        assert!(
+            output
+                .windows(expected_move.len())
+                .any(|bytes| bytes == expected_move.as_bytes()),
+            "host cursor should equal the post-resize Ghostty position (9,5) translated by content {content:?}; expected {expected_move:?}"
+        );
+    }
+
+    #[test]
+    fn hidden_child_cursor_stays_hidden_on_the_host() {
+        use crate::ui::factory::buffer_backend::BufferBackend;
+        use cas_mux::Pane;
+
+        let mut app = FactoryApp::for_test();
+        let mut pane = Pane::director("test-supervisor", 24, 80).unwrap();
+        pane.feed(b"\x1b[?25l").unwrap();
+        app.mux.add_pane(pane);
+
+        let mut terminal = Terminal::new(BufferBackend::new(120, 24)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let output = terminal.backend_mut().take_buffer();
+
+        assert!(
+            !output
+                .windows(b"\x1b[?25h".len())
+                .any(|window| window == b"\x1b[?25h"),
+            "a hidden child cursor must not be made visible by the host"
+        );
+    }
+
+    #[test]
+    fn modal_overlay_suppresses_host_cursor() {
+        use crate::ui::factory::buffer_backend::BufferBackend;
+        use cas_mux::Pane;
+
+        let mut app = FactoryApp::for_test();
+        app.show_help = true;
+        app.mux
+            .add_pane(Pane::director("test-supervisor", 24, 80).unwrap());
+
+        let mut terminal = Terminal::new(BufferBackend::new(120, 24)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let output = terminal.backend_mut().take_buffer();
+
+        assert!(
+            !output
+                .windows(b"\x1b[?25h".len())
+                .any(|window| window == b"\x1b[?25h"),
+            "modal overlays must leave the host cursor hidden"
+        );
+    }
+
+    #[test]
+    fn sidecar_focus_suppresses_host_cursor() {
+        use crate::ui::factory::buffer_backend::BufferBackend;
+        use cas_mux::Pane;
+
+        let mut app = FactoryApp::for_test();
+        app.sidecar_focus = SidecarFocus::Tasks;
+        app.mux
+            .add_pane(Pane::director("test-supervisor", 24, 80).unwrap());
+
+        let mut terminal = Terminal::new(BufferBackend::new(120, 24)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let output = terminal.backend_mut().take_buffer();
+
+        assert!(
+            !output
+                .windows(b"\x1b[?25h".len())
+                .any(|window| window == b"\x1b[?25h"),
+            "sidecar focus must leave the host cursor hidden"
+        );
+    }
+
+    #[test]
+    fn sidecar_focus_hides_host_cursor_after_focus_transition() {
+        use crate::ui::factory::buffer_backend::BufferBackend;
+        use cas_mux::Pane;
+
+        let mut app = FactoryApp::for_test();
+        let mut pane = Pane::director("test-supervisor", 24, 80).unwrap();
+        pane.feed(b"\x1b[?1049h\x1b[2J\x1b[?25h\x1b[3 qFAKE_CODEX_HOSTED_PANE\x1b[5;9H")
+            .unwrap();
+        app.mux.add_pane(pane);
+
+        let mut terminal = Terminal::new(BufferBackend::new(120, 24)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        if let Some(state) = app.full_host_cursor_state() {
+            terminal.backend_mut().set_cursor_style(state).unwrap();
+        }
+        let focused_output = terminal.backend_mut().take_buffer();
+        assert!(
+            focused_output
+                .windows(b"\x1b[?25h".len())
+                .any(|bytes| bytes == b"\x1b[?25h")
+        );
+        assert!(
+            focused_output
+                .windows(b"\x1b[3 q".len())
+                .any(|bytes| bytes == b"\x1b[3 q")
+        );
+
+        app.toggle_sidecar_focus();
+        assert!(app.sidecar_is_focused());
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        if let Some(state) = app.full_host_cursor_state() {
+            terminal.backend_mut().set_cursor_style(state).unwrap();
+        }
+        let sidecar_output = terminal.backend_mut().take_buffer();
+
+        assert!(
+            !sidecar_output
+                .windows(b"\x1b[?25h".len())
+                .any(|bytes| bytes == b"\x1b[?25h"),
+            "sidecar focus after a visible pane frame must not re-show the host cursor"
+        );
+        assert!(
+            sidecar_output
+                .windows(b"\x1b[?25l".len())
+                .any(|bytes| bytes == b"\x1b[?25l"),
+            "sidecar focus must explicitly hide the cursor that was visible in the prior frame"
+        );
+        assert!(
+            !sidecar_output
+                .windows(b"\x1b[3 q".len())
+                .any(|bytes| bytes == b"\x1b[3 q"),
+            "sidecar focus must not forward the child's cursor style"
+        );
+    }
+
+    #[test]
+    fn compact_supervisor_cursor_uses_borderless_content_origin() {
+        use crate::ui::factory::buffer_backend::BufferBackend;
+        use cas_mux::Pane;
+
+        let mut app = FactoryApp::for_test();
+        let mut pane = Pane::director("test-supervisor", 24, 80).unwrap();
+        pane.feed(b"\x1b[3;4H").unwrap();
+        app.mux.add_pane(pane);
+
+        let mut terminal = Terminal::new(BufferBackend::new(120, 24)).unwrap();
+        terminal.draw(|frame| app.render_compact(frame)).unwrap();
+        let output = terminal.backend_mut().take_buffer();
+
+        assert!(
+            output
+                .windows(b"\x1b[?25h".len())
+                .any(|window| window == b"\x1b[?25h"),
+            "compact focused supervisor must show the host cursor"
+        );
+        assert!(
+            output
+                .windows(b"\x1b[4;5H".len())
+                .any(|window| window == b"\x1b[4;4H"),
+            "compact cursor must use the borderless supervisor origin"
+        );
+    }
+
+    #[test]
+    fn focused_cursor_survives_pane_and_host_resize() {
+        use crate::ui::factory::buffer_backend::BufferBackend;
+        use cas_mux::Pane;
+
+        let mut app = FactoryApp::for_test();
+        let mut pane = Pane::director("test-supervisor", 24, 80).unwrap();
+        pane.feed(b"\x1b[3;4H").unwrap();
+        app.mux.add_pane(pane);
+
+        let mut terminal = Terminal::new(BufferBackend::new(120, 24)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let _ = terminal.backend_mut().take_buffer();
+
+        app.mux
+            .get_mut("test-supervisor")
+            .unwrap()
+            .resize(30, 100)
+            .unwrap();
+        terminal.backend_mut().resize(80, 20);
+        terminal.autoresize().unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+
+        let content = *app
+            .full_pty_content_areas
+            .get("test-supervisor")
+            .expect("resized render stores supervisor content geometry");
+        let expected_move = format!(
+            "\x1b[{};{}H",
+            content.y.saturating_add(3),
+            content.x.saturating_add(4)
+        );
+        let output = terminal.backend_mut().take_buffer();
+        assert!(
+            output
+                .windows(expected_move.len())
+                .any(|window| window == expected_move.as_bytes()),
+            "pane cursor must remain translated after pane and host resize"
         );
     }
 

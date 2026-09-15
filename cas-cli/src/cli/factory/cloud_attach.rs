@@ -175,8 +175,9 @@ async fn relay_loop(endpoint: &str, token: &str, factory_id: &str) -> Result<()>
 
     // Enter raw terminal mode
     enable_raw_mode()?;
-    // Enter alternate screen, hide cursor
-    write!(io::stdout(), "\x1b[?1049h\x1b[?25l\x1b[2J\x1b[H")?;
+    // Enter alternate screen. The daemon's first rendered frame owns host
+    // cursor visibility and position (GH #869).
+    write!(io::stdout(), "\x1b[?1049h\x1b[2J\x1b[H")?;
     let _ = io::stdout().flush();
 
     // Main relay loop

@@ -12,6 +12,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <stdbool.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -128,6 +129,21 @@ int ghostty_vt_terminal_resize(ghostty_vt_terminal_t terminal,
 void ghostty_vt_terminal_cursor_position(ghostty_vt_terminal_t terminal,
                                           uint32_t* row,
                                           uint32_t* col);
+
+/**
+ * Return whether the terminal cursor is visible.
+ */
+bool ghostty_vt_terminal_cursor_visible(ghostty_vt_terminal_t terminal);
+
+/**
+ * Return the terminal cursor shape: 0 = block, 1 = underline, 2 = bar.
+ */
+uint8_t ghostty_vt_terminal_cursor_shape(ghostty_vt_terminal_t terminal);
+
+/**
+ * Return whether the terminal cursor is blinking.
+ */
+bool ghostty_vt_terminal_cursor_blinking(ghostty_vt_terminal_t terminal);
 
 /* ============================================================================
  * Color Palette

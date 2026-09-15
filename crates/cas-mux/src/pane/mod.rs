@@ -527,6 +527,10 @@ impl Pane {
         self.terminal.cursor_position()
     }
 
+    pub fn cursor_state(&self) -> ghostty_vt::CursorState {
+        self.terminal.cursor_state()
+    }
+
     pub fn resize(&mut self, rows: u16, cols: u16) -> Result<()> {
         if debug_log_enabled() {
             tracing::debug!(

@@ -99,6 +99,12 @@ pub(crate) fn preferred_epic_id_from_session_metadata() -> Option<String> {
 pub(crate) fn preferred_epic_id_from_session_metadata_named(session: &str) -> Option<String> {
     app::preferred_epic_focus_from_session_metadata_named(session).epic_id
 }
+
+/// Resolve the durable metadata path for an explicitly named factory session.
+/// Callers must still validate the session/project binding in the file.
+pub(crate) fn session_metadata_path_named(session: &str) -> std::path::PathBuf {
+    session::metadata_path(session)
+}
 // cas-bd9d: the parity conformance gate drives these launch intro-prompt paths.
 pub use app::{FactoryApp, FactoryConfig};
 #[cfg(test)]

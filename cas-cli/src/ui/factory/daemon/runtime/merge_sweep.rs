@@ -116,9 +116,10 @@ impl From<&FactoryConfig> for SweepSettings {
 /// Process-local state for the daemon-owned post-merge sweeps.
 #[derive(Debug)]
 pub(crate) struct MergeSweepCoordinator {
-    log_path: PathBuf,
+    cas_dir: PathBuf,
     session_name: String,
-    offset: u64,
+    first_log_day: chrono::NaiveDate,
+    log_offsets: HashMap<PathBuf, u64>,
     active: HashMap<String, ActiveSweep>,
     completed: HashMap<String, String>,
     retry_after: Option<(Instant, SweepRequest)>,
@@ -126,12 +127,19 @@ pub(crate) struct MergeSweepCoordinator {
 
 impl MergeSweepCoordinator {
     pub(crate) fn new(cas_dir: &Path, session_name: &str) -> Self {
-        let log_path = factory_session_log_path(cas_dir);
-        let offset = fs::metadata(&log_path).map(|meta| meta.len()).unwrap_or(0);
+        Self::new_at(cas_dir, session_name, chrono::Utc::now().date_naive())
+    }
+
+    fn new_at(cas_dir: &Path, session_name: &str, first_log_day: chrono::NaiveDate) -> Self {
+        let first_log_path = factory_session_log_path_for_date(cas_dir, first_log_day);
+        let first_log_offset = fs::metadata(&first_log_path)
+            .map(|meta| meta.len())
+            .unwrap_or(0);
         Self {
-            log_path,
+            cas_dir: cas_dir.to_path_buf(),
             session_name: session_name.to_string(),
-            offset,
+            first_log_day,
+            log_offsets: HashMap::from([(first_log_path, first_log_offset)]),
             active: HashMap::new(),
             completed: HashMap::new(),
             retry_after: None,
@@ -158,8 +166,68 @@ impl MergeSweepCoordinator {
 
         let settings = SweepSettings::from(config);
         for request in requests {
-            self.schedule(project_root, cas_dir, request, &settings);
+            self.schedule(project_root, cas_dir, request, &settings, false);
         }
+    }
+
+    async fn recover_once(
+        &mut self,
+        project_root: &Path,
+        cas_dir: &Path,
+        request: SweepRequest,
+        settings: &SweepSettings,
+    ) -> Result<SweepResult, String> {
+        let deadline = settings
+            .timeout
+            .saturating_mul(4)
+            .min(Duration::from_secs(4 * 60 * 60));
+        self.recover_once_with_deadline(project_root, cas_dir, request, settings, deadline)
+            .await
+    }
+
+    async fn recover_once_with_deadline(
+        &mut self,
+        project_root: &Path,
+        cas_dir: &Path,
+        request: SweepRequest,
+        settings: &SweepSettings,
+        deadline: Duration,
+    ) -> Result<SweepResult, String> {
+        if !settings.enabled {
+            return Err("recovery refused: factory.merge_sweep=false".to_owned());
+        }
+        if !self.active.is_empty() {
+            return Err(
+                "recovery refused: this coordinator already has an active sweep".to_owned(),
+            );
+        }
+
+        self.schedule(project_root, cas_dir, request, settings, true);
+        let mut active = self
+            .active
+            .remove("integration")
+            .ok_or("recovery coordinator did not start the requested sweep")?;
+        let result = match tokio::time::timeout(deadline, &mut active.handle).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(error)) => failed_join_result(cas_dir, &active.request, error.to_string()),
+            Err(_) => {
+                active.cancel.store(true, Ordering::Relaxed);
+                match active.handle.await {
+                    Ok(mut result) => {
+                        if result.status == SweepStatus::Superseded {
+                            result.status = SweepStatus::TimedOut;
+                            result.summary = format!(
+                                "recovery exceeded its bounded {deadline:?} deadline; execution cancellation completed"
+                            );
+                        }
+                        result
+                    }
+                    Err(error) => failed_join_result(cas_dir, &active.request, error.to_string()),
+                }
+            }
+        };
+        self.record_result(cas_dir, &result);
+        Ok(result)
     }
 
     pub(super) async fn shutdown(&mut self) {
@@ -173,18 +241,32 @@ impl MergeSweepCoordinator {
     }
 
     fn read_merge_events(&mut self) -> Vec<SweepRequest> {
-        let Ok(bytes) = fs::read(&self.log_path) else {
+        self.read_merge_events_at(chrono::Utc::now().date_naive())
+    }
+
+    fn read_merge_events_at(&mut self, through_day: chrono::NaiveDate) -> Vec<SweepRequest> {
+        session_log_paths_between(&self.cas_dir, self.first_log_day, through_day)
+            .into_iter()
+            .flat_map(|path| self.read_merge_events_from_path(&path))
+            .collect()
+    }
+
+    fn read_merge_events_from_path(&mut self, path: &Path) -> Vec<SweepRequest> {
+        let Ok(bytes) = fs::read(path) else {
             return Vec::new();
         };
-        if self.offset > bytes.len() as u64 {
-            self.offset = 0;
+        let offset = self.log_offsets.entry(path.to_path_buf()).or_default();
+        if *offset > bytes.len() as u64 {
+            *offset = 0;
         }
-        let start = self.offset as usize;
+        let start = *offset as usize;
         let Some(last_newline) = bytes[start..].iter().rposition(|byte| *byte == b'\n') else {
+            // Keep the cursor before a partial JSONL line; the next poll will
+            // retry it with the appended bytes instead of discarding it.
             return Vec::new();
         };
         let consumed = start + last_newline + 1;
-        self.offset = consumed as u64;
+        *offset = consumed as u64;
         String::from_utf8_lossy(&bytes[start..consumed])
             .lines()
             .filter_map(|line| parse_merge_event(line, &self.session_name))
@@ -238,6 +320,7 @@ impl MergeSweepCoordinator {
         cas_dir: &Path,
         request: SweepRequest,
         settings: &SweepSettings,
+        strict_target: bool,
     ) {
         if let Some(active) = self.active.get_mut("integration") {
             if active.request != request {
@@ -270,6 +353,7 @@ impl MergeSweepCoordinator {
                 worker_request,
                 sweep_settings,
                 worker_cancel,
+                strict_target,
             )
         });
         tracing::info!(
@@ -332,7 +416,60 @@ impl MergeSweepCoordinator {
     }
 }
 
+fn failed_join_result(cas_dir: &Path, request: &SweepRequest, error: String) -> SweepResult {
+    SweepResult {
+        request: request.clone(),
+        status: SweepStatus::Failed,
+        log_path: cas_dir.join(LOG_DIR).join("integration.json"),
+        summary: format!("sweep task join failed: {error}"),
+        failures: Vec::new(),
+        integration_epics: vec![request.epic_id.clone()],
+        base_failure: None,
+    }
+}
+
 impl crate::ui::factory::daemon::FactoryDaemon {
+    /// Fresh-process entrypoint for a one-shot recovery. It constructs a local
+    /// coordinator and uses the same rolling integration execution/recording
+    /// path as daemon polling, without reaching into another process's state.
+    pub(crate) fn recover_focused_integration(
+        project_root: &Path,
+        cas_dir: &Path,
+        session_name: &str,
+        epic_id: &str,
+        config: &FactoryConfig,
+    ) -> Result<String, String> {
+        let request = rolling_integration::recovery_request_for_focus(
+            project_root,
+            cas_dir,
+            session_name,
+            epic_id,
+        )?;
+        let mut coordinator = MergeSweepCoordinator::new(cas_dir, session_name);
+        let settings = SweepSettings::from(config);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|error| format!("could not initialize bounded recovery runtime: {error}"))?;
+        let result = runtime.block_on(coordinator.recover_once(
+            project_root,
+            cas_dir,
+            request,
+            &settings,
+        ))?;
+        let receipt_path = cas_dir.join(LOG_DIR).join("integration.json");
+        let summary = format!(
+            "{}: {}; receipt: {}",
+            status_text(result.status),
+            result.summary,
+            receipt_path.display()
+        );
+        if result.status != SweepStatus::Passed {
+            return Err(summary);
+        }
+        Ok(summary)
+    }
+
     pub(super) async fn poll_merge_sweep(&mut self) {
         let config = crate::config::Config::load(self.app.cas_dir())
             .unwrap_or_default()
@@ -372,11 +509,38 @@ fn nonempty_event_value(value: Option<&str>) -> Option<String> {
     (!value.is_empty() && value != "none").then(|| value.to_string())
 }
 
-fn factory_session_log_path(cas_dir: &Path) -> PathBuf {
-    cas_dir.join("logs").join(format!(
-        "factory-session-{}.log",
-        chrono::Utc::now().format("%Y-%m-%d")
-    ))
+fn factory_session_log_path_for_date(cas_dir: &Path, day: chrono::NaiveDate) -> PathBuf {
+    cas_dir
+        .join("logs")
+        .join(format!("factory-session-{day}.log"))
+}
+
+fn session_log_paths_between(
+    cas_dir: &Path,
+    first_day: chrono::NaiveDate,
+    through_day: chrono::NaiveDate,
+) -> Vec<PathBuf> {
+    if through_day < first_day {
+        return Vec::new();
+    }
+    let log_dir = cas_dir.join("logs");
+    let Ok(entries) = fs::read_dir(log_dir) else {
+        return Vec::new();
+    };
+    let mut dated_paths: Vec<(chrono::NaiveDate, PathBuf)> = entries
+        .filter_map(|entry| entry.ok())
+        .filter_map(|entry| {
+            let name = entry.file_name();
+            let name = name.to_str()?;
+            let date = name
+                .strip_prefix("factory-session-")?
+                .strip_suffix(".log")?;
+            let day = chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d").ok()?;
+            (first_day <= day && day <= through_day).then(|| (day, entry.path()))
+        })
+        .collect();
+    dated_paths.sort_by_key(|(day, _)| *day);
+    dated_paths.into_iter().map(|(_, path)| path).collect()
 }
 
 fn settings_to_config(settings: &SweepSettings) -> FactoryConfig {
@@ -1144,6 +1308,50 @@ fn first_output_line(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn old_coordinator_reads_next_day_merge_once_after_partial_line_and_filters_sessions() {
+        let temp = tempfile::tempdir().unwrap();
+        let cas_dir = temp.path();
+        let start_day = chrono::NaiveDate::from_ymd_opt(2026, 9, 14).unwrap();
+        let next_day = chrono::NaiveDate::from_ymd_opt(2026, 9, 15).unwrap();
+        let logs = cas_dir.join("logs");
+        fs::create_dir_all(&logs).unwrap();
+
+        let old_day_path = factory_session_log_path_for_date(cas_dir, start_day);
+        fs::write(
+            &old_day_path,
+            "{\"event\":\"worktree_merged\",\"factory_session\":\"s1\",\"epic_id\":\"cas-old1\",\"target_branch\":\"epic/release\",\"target_tip\":\"old-tip\"}\n",
+        )
+        .unwrap();
+        let mut coordinator = MergeSweepCoordinator::new_at(cas_dir, "s1", start_day);
+
+        let next_day_path = factory_session_log_path_for_date(cas_dir, next_day);
+        let other_session = r#"{"event":"worktree_merged","factory_session":"s2","epic_id":"cas-nope","target_branch":"epic/release","target_tip":"wrong-session"}"#;
+        let expected = SweepRequest {
+            epic_id: "cas-new1".to_owned(),
+            target_branch: "epic/release".to_owned(),
+            commit: "new-tip".to_owned(),
+        };
+        let own_event = r#"{"event":"worktree_merged","factory_session":"s1","epic_id":"cas-new1","target_branch":"epic/release","target_tip":"new-tip"}"#;
+        fs::write(
+            &next_day_path,
+            format!("{other_session}\n{}", &own_event[..30]),
+        )
+        .unwrap();
+
+        assert!(coordinator.read_merge_events_at(next_day).is_empty());
+        use std::io::Write as _;
+        OpenOptions::new()
+            .append(true)
+            .open(&next_day_path)
+            .unwrap()
+            .write_all(format!("{}\n", &own_event[30..]).as_bytes())
+            .unwrap();
+
+        assert_eq!(coordinator.read_merge_events_at(next_day), vec![expected]);
+        assert!(coordinator.read_merge_events_at(next_day).is_empty());
+    }
 
     #[test]
     fn merge_event_requires_current_session_epic_target_and_tip() {

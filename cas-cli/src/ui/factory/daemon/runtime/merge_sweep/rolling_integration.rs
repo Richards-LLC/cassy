@@ -221,8 +221,16 @@ pub(super) fn execute(
     request: SweepRequest,
     settings: SweepSettings,
     cancel: Arc<AtomicBool>,
+    strict_target: bool,
 ) -> SweepResult {
-    match integrate(project_root, cas_dir, &request, &settings, &cancel) {
+    match integrate(
+        project_root,
+        cas_dir,
+        &request,
+        &settings,
+        &cancel,
+        strict_target,
+    ) {
         Ok(result) => result,
         Err(error) => SweepResult {
             integration_epics: vec![request.epic_id.clone()],
@@ -242,6 +250,7 @@ fn integrate(
     request: &SweepRequest,
     settings: &SweepSettings,
     cancel: &Arc<AtomicBool>,
+    strict_target: bool,
 ) -> Result<SweepResult, String> {
     let common = PathBuf::from(git_output(
         project_root,
@@ -282,6 +291,12 @@ fn integrate(
         }
         std::thread::sleep(POLL_INTERVAL);
     };
+    // Recovery is deliberately stricter than the ordinary daemon path: after
+    // taking the shared integration lock, confirm the event still names the
+    // exact current local epic ref before touching receipts or integration refs.
+    if strict_target {
+        validate_recovery_target_under_lock(project_root, request)?;
+    }
     let receipt_path = shared_cas.join(LOG_DIR).join("integration.json");
     // Invalidate an old green receipt before any fallible setup, so a failed
     // fetch or missing epic can never leave release assembly looking green.
@@ -545,6 +560,111 @@ fn integrate(
     Ok(result)
 }
 
+fn validate_recovery_target_under_lock(
+    project_root: &Path,
+    request: &SweepRequest,
+) -> Result<(), String> {
+    let reference = format!("refs/heads/{}", request.target_branch);
+    git_output(project_root, &["check-ref-format", &reference])?;
+    let current = git_output(
+        project_root,
+        &["rev-parse", "--verify", &format!("{reference}^{{commit}}")],
+    )?;
+    if current != request.commit {
+        return Err(format!(
+            "stale recovery event: {} currently points to {}, event target was {}",
+            request.target_branch, current, request.commit
+        ));
+    }
+    Ok(())
+}
+
+/// Resolve exactly one durable merge event for the registered session's
+/// focused open epic. A current local ref must match the event's explicit
+/// `target_tip`; legacy `commit` fallback is intentionally insufficient for
+/// recovery because it does not prove the delivery ref that was merged.
+pub(super) fn recovery_request_for_focus(
+    project_root: &Path,
+    cas_dir: &Path,
+    session_name: &str,
+    epic_id: &str,
+) -> Result<SweepRequest, String> {
+    let tasks = crate::store::open_task_store(cas_dir).map_err(|error| error.to_string())?;
+    let task = tasks
+        .get(epic_id)
+        .map_err(|error| format!("recovery focus {epic_id} is not a known task: {error}"))?;
+    if task.task_type != TaskType::Epic
+        || matches!(task.status, TaskStatus::Closed | TaskStatus::Cancelled)
+    {
+        return Err(format!("recovery focus {epic_id} is not an open epic"));
+    }
+    let branch = epic_branch(&task)
+        .ok_or_else(|| format!("recovery focus {epic_id} has no epic coordination branch"))?
+        .to_owned();
+    let reference = format!("refs/heads/{branch}");
+    git_output(project_root, &["check-ref-format", &reference])?;
+    let current = git_output(
+        project_root,
+        &["rev-parse", "--verify", &format!("{reference}^{{commit}}")],
+    )?;
+    let latest_day = chrono::Utc::now().date_naive();
+    let earliest_day = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).expect("valid epoch date");
+    let mut candidates = Vec::new();
+    for path in super::session_log_paths_between(cas_dir, earliest_day, latest_day) {
+        let Ok(bytes) = fs::read(path) else {
+            continue;
+        };
+        let complete_len = bytes
+            .iter()
+            .rposition(|byte| *byte == b'\n')
+            .map(|index| index + 1)
+            .unwrap_or(0);
+        for line in String::from_utf8_lossy(&bytes[..complete_len]).lines() {
+            let Ok(event) = serde_json::from_str::<MergeEvent>(line) else {
+                continue;
+            };
+            if event.event.as_deref() != Some("worktree_merged")
+                || event.factory_session.as_deref() != Some(session_name)
+                || event.epic_id.as_deref() != Some(epic_id)
+                || event.target_branch.as_deref() != Some(branch.as_str())
+            {
+                continue;
+            }
+            let Some(tip) = event
+                .target_tip
+                .as_deref()
+                .map(str::trim)
+                .filter(|tip| !tip.is_empty() && *tip != "none")
+            else {
+                continue;
+            };
+            candidates.push(tip.to_owned());
+        }
+    }
+    let matching = candidates
+        .iter()
+        .filter(|tip| tip.as_str() == current)
+        .count();
+    if matching != 1 {
+        let detail = if matching > 1 {
+            format!("{} merge events match current tip {current}", matching)
+        } else if candidates.is_empty() {
+            "no complete authentic worktree_merged event matches the focused session, epic, and branch".to_owned()
+        } else {
+            format!(
+                "recorded event tip {} is stale or mismatched with current ref {current}",
+                candidates.last().expect("nonempty candidates")
+            )
+        };
+        return Err(format!("recovery refused: {detail}"));
+    }
+    Ok(SweepRequest {
+        epic_id: epic_id.to_owned(),
+        target_branch: branch,
+        commit: current,
+    })
+}
+
 fn resolve_epic_tip(root: &Path, branch: &str) -> Result<String, String> {
     let local = ref_tip(root, &format!("refs/heads/{branch}"));
     let remote = ref_tip(root, &format!("refs/remotes/origin/{branch}"));
@@ -742,10 +862,7 @@ fn failing_filter(failures: &[String]) -> Option<String> {
         .iter()
         .filter_map(|line| failure_target(line))
         .map(|name| {
-            format!(
-                "test(/^{}$/)",
-                regex::escape(&name).replace('/', "\\/")
-            )
+            format!("test(/^{}$/)", regex::escape(&name).replace('/', "\\/"))
         })
         .collect();
     (!names.is_empty()).then(|| names.join(" | "))
@@ -926,6 +1043,34 @@ mod tests {
         )
         .unwrap();
         fs::write(temp.path().join("shared"), "base\n").unwrap();
+        git(temp.path(), &["add", "."]);
+        git(temp.path(), &["commit", "-m", "base"]);
+        temp
+    }
+    fn package_fixture() -> tempfile::TempDir {
+        let temp = tempfile::tempdir().unwrap();
+        git(temp.path(), &["init", "-b", "main"]);
+        git(temp.path(), &["config", "user.name", "Integration Test"]);
+        git(
+            temp.path(),
+            &["config", "user.email", "test@example.invalid"],
+        );
+        git(temp.path(), &["config", "commit.gpgsign", "false"]);
+        fs::write(
+            temp.path().join("package.json"),
+            r#"{"name":"integration-recovery-fixture","version":"1.0.0","scripts":{"test":"node smoke-test.js"}}"#,
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("package-lock.json"),
+            r#"{"name":"integration-recovery-fixture","version":"1.0.0","lockfileVersion":3,"requires":true,"packages":{"":{"name":"integration-recovery-fixture","version":"1.0.0"}}}"#,
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("smoke-test.js"),
+            "const fs = require('node:fs');\nif (!fs.existsSync('recovery-feature.txt')) process.exit(1);\n",
+        )
+        .unwrap();
         git(temp.path(), &["add", "."]);
         git(temp.path(), &["commit", "-m", "base"]);
         temp
@@ -1262,6 +1407,7 @@ echo 'Summary: 1 passed'
                 request.clone(),
                 settings.clone(),
                 Arc::new(AtomicBool::new(false)),
+                false,
             );
             assert_eq!(result.status, expected, "{}", result.summary);
             let receipt: IntegrationReceipt = serde_json::from_slice(
@@ -1307,7 +1453,358 @@ echo 'Summary: 1 passed'
             assert!(receipt.tip.is_some());
             let tip = receipt.tip.as_deref().unwrap();
             assert_ne!(receipt.base, tip);
-            git(repo.path(), &["merge-base", "--is-ancestor", &receipt.base, tip]);
+            git(
+                repo.path(),
+                &["merge-base", "--is-ancestor", &receipt.base, tip],
+            );
         }
+    }
+
+    #[test]
+    fn stale_recovery_refuses_under_shared_lock_without_invalidating_receipt() {
+        let repo = fixture();
+        let initial = epic(repo.path(), "cas-stale1", "feature", "initial\n");
+        git(repo.path(), &["checkout", &initial.branch]);
+        fs::write(repo.path().join("feature"), "advanced\n").unwrap();
+        git(repo.path(), &["add", "feature"]);
+        git(
+            repo.path(),
+            &["commit", "-m", "advance epic after recorded event"],
+        );
+        let current = git(repo.path(), &["rev-parse", "HEAD"]);
+        git(repo.path(), &["checkout", "--detach", "main"]);
+        let cas_dir = crate::store::init_cas_dir(repo.path()).unwrap();
+        let tasks = crate::store::open_task_store(&cas_dir).unwrap();
+        let mut task = Task::new(initial.id.clone(), initial.id.clone());
+        task.task_type = TaskType::Epic;
+        task.branch = Some(initial.branch.clone());
+        tasks.add(&task).unwrap();
+
+        let log_path = super::super::factory_session_log_path_for_date(
+            &cas_dir,
+            chrono::Utc::now().date_naive(),
+        );
+        fs::create_dir_all(log_path.parent().unwrap()).unwrap();
+        fs::write(
+            &log_path,
+            format!(
+                "{{\"event\":\"worktree_merged\",\"factory_session\":\"s1\",\"epic_id\":\"{}\",\"target_branch\":\"{}\",\"target_tip\":\"{}\"}}\n",
+                initial.id, initial.branch, initial.tip
+            ),
+        )
+        .unwrap();
+        let error =
+            recovery_request_for_focus(repo.path(), &cas_dir, "s1", &initial.id).unwrap_err();
+        assert!(error.contains("stale or mismatched"), "{error}");
+
+        let receipt_path = cas_dir.join(LOG_DIR).join("integration.json");
+        fs::create_dir_all(receipt_path.parent().unwrap()).unwrap();
+        fs::write(&receipt_path, "prior-receipt-must-remain-byte-identical").unwrap();
+        let mut settings = SweepSettings::from(&FactoryConfig::default());
+        settings.timeout = Duration::from_secs(3);
+        let result = execute(
+            repo.path(),
+            &cas_dir,
+            SweepRequest {
+                epic_id: initial.id,
+                target_branch: initial.branch.clone(),
+                commit: initial.tip,
+            },
+            settings,
+            Arc::new(AtomicBool::new(false)),
+            true,
+        );
+        assert_eq!(result.status, SweepStatus::SetupFailed);
+        assert!(
+            result.summary.contains("stale recovery event"),
+            "{}",
+            result.summary
+        );
+        assert_eq!(
+            fs::read_to_string(&receipt_path).unwrap(),
+            "prior-receipt-must-remain-byte-identical"
+        );
+        assert_eq!(git(repo.path(), &["rev-parse", &initial.branch]), current);
+        let common = PathBuf::from(git(
+            repo.path(),
+            &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        ));
+        let project = common
+            .parent()
+            .unwrap()
+            .file_name()
+            .unwrap()
+            .to_string_lossy();
+        let integration_ref = format!("refs/heads/integration/{}", sanitize_component(&project));
+        assert!(git_output(repo.path(), &["rev-parse", "--verify", &integration_ref]).is_err());
+    }
+
+    #[test]
+    fn ordinary_daemon_sweep_still_accepts_merge_event_behind_current_ref() {
+        let repo = fixture();
+        let initial = epic(repo.path(), "cas-normal1", "feature", "initial\n");
+        git(repo.path(), &["checkout", &initial.branch]);
+        fs::write(repo.path().join("feature"), "advanced\n").unwrap();
+        git(repo.path(), &["add", "feature"]);
+        git(repo.path(), &["commit", "-m", "advance epic after event"]);
+        let current = git(repo.path(), &["rev-parse", "HEAD"]);
+        git(repo.path(), &["checkout", "--detach", "main"]);
+        git(
+            repo.path(),
+            &["remote", "add", "origin", repo.path().to_str().unwrap()],
+        );
+        let stub = repo.path().join("cargo-stub.sh");
+        fs::write(&stub, "#!/bin/sh\necho 'Summary: 1 passed'\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[
+            ("CARGO", stub.to_str().unwrap()),
+            ("CAS_FACTORY_BUILD_GUARD", "off"),
+        ]);
+        let cas_dir = crate::store::init_cas_dir(repo.path()).unwrap();
+        let tasks = crate::store::open_task_store(&cas_dir).unwrap();
+        let mut task = Task::new(initial.id.clone(), initial.id.clone());
+        task.task_type = TaskType::Epic;
+        task.branch = Some(initial.branch.clone());
+        tasks.add(&task).unwrap();
+        let mut settings = SweepSettings::from(&FactoryConfig::default());
+        settings.nice_cargo = false;
+
+        let result = execute(
+            repo.path(),
+            &cas_dir,
+            SweepRequest {
+                epic_id: initial.id,
+                target_branch: initial.branch,
+                commit: initial.tip,
+            },
+            settings,
+            Arc::new(AtomicBool::new(false)),
+            false,
+        );
+
+        assert_eq!(result.status, SweepStatus::Passed, "{}", result.summary);
+        let receipt: IntegrationReceipt = serde_json::from_slice(
+            &fs::read(cas_dir.join(LOG_DIR).join("integration.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(receipt.status, "PASSED");
+        assert_eq!(receipt.epics[0].tip, current);
+    }
+
+    #[test]
+    fn recovery_runs_the_recorded_tip_through_the_production_npm_runner() {
+        let _env =
+            crate::test_support::TestEnvGuard::with_optional_vars(&[("CAS_FACTORY_SESSION", None)]);
+        let repo = package_fixture();
+        git(repo.path(), &["checkout", "-b", "epic/cas-recov1", "main"]);
+        fs::write(repo.path().join("recovery-feature.txt"), "merged\n").unwrap();
+        git(repo.path(), &["add", "."]);
+        git(repo.path(), &["commit", "-m", "merged feature"]);
+        let tip = git(repo.path(), &["rev-parse", "HEAD"]);
+        git(repo.path(), &["checkout", "--detach", "main"]);
+        git(
+            repo.path(),
+            &["remote", "add", "origin", repo.path().to_str().unwrap()],
+        );
+        let cas_dir = crate::store::init_cas_dir(repo.path()).unwrap();
+        let tasks = crate::store::open_task_store(&cas_dir).unwrap();
+        let mut task = Task::new("cas-recov1".to_owned(), "recovery epic".to_owned());
+        task.task_type = TaskType::Epic;
+        task.branch = Some("epic/cas-recov1".to_owned());
+        tasks.add(&task).unwrap();
+        let log_path = super::super::factory_session_log_path_for_date(
+            &cas_dir,
+            chrono::Utc::now().date_naive(),
+        );
+        fs::create_dir_all(log_path.parent().unwrap()).unwrap();
+        fs::write(
+            &log_path,
+            format!(
+                "{{\"event\":\"worktree_merged\",\"factory_session\":\"recovery-session\",\"epic_id\":\"cas-recov1\",\"target_branch\":\"epic/cas-recov1\",\"target_tip\":\"{tip}\"}}\n"
+            ),
+        )
+        .unwrap();
+
+        let summary = crate::ui::factory::daemon::FactoryDaemon::recover_focused_integration(
+            repo.path(),
+            &cas_dir,
+            "recovery-session",
+            "cas-recov1",
+            &FactoryConfig::default(),
+        )
+        .unwrap();
+
+        assert!(summary.starts_with("PASSED:"), "{summary}");
+        let receipt: IntegrationReceipt = serde_json::from_slice(
+            &fs::read(cas_dir.join(LOG_DIR).join("integration.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(receipt.status, "PASSED");
+        assert_eq!(receipt.epics.len(), 1);
+        assert_eq!(receipt.epics[0].tip, tip);
+        let run_log = fs::read_dir(cas_dir.join(LOG_DIR))
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().is_some_and(|extension| extension == "log"))
+            .find_map(|path| {
+                let contents = fs::read_to_string(path).ok()?;
+                contents.contains("sweep: npm test").then_some(contents)
+            })
+            .expect("the production integration path must record its npm runner log");
+        assert!(run_log.contains("sweep: npm test"), "{run_log}");
+        assert!(run_log.contains("node smoke-test.js"), "{run_log}");
+    }
+
+    #[test]
+    fn recovery_refuses_foreign_session_wrong_branch_and_ambiguous_events() {
+        let repo = fixture();
+        let epic = epic(repo.path(), "cas-ambig1", "feature", "merged\n");
+        git(repo.path(), &["checkout", "--detach", "main"]);
+        let cas_dir = crate::store::init_cas_dir(repo.path()).unwrap();
+        let tasks = crate::store::open_task_store(&cas_dir).unwrap();
+        let mut task = Task::new(epic.id.clone(), epic.id.clone());
+        task.task_type = TaskType::Epic;
+        task.branch = Some(epic.branch.clone());
+        tasks.add(&task).unwrap();
+        let log_path = super::super::factory_session_log_path_for_date(
+            &cas_dir,
+            chrono::Utc::now().date_naive(),
+        );
+        fs::create_dir_all(log_path.parent().unwrap()).unwrap();
+        let make_event = |session: &str, branch: &str| {
+            format!(
+                "{{\"event\":\"worktree_merged\",\"factory_session\":\"{session}\",\"epic_id\":\"{}\",\"target_branch\":\"{branch}\",\"target_tip\":\"{}\"}}\n",
+                epic.id, epic.tip
+            )
+        };
+        fs::write(&log_path, make_event("other-session", &epic.branch)).unwrap();
+        let error = recovery_request_for_focus(repo.path(), &cas_dir, "recovery-session", &epic.id)
+            .unwrap_err();
+        assert!(error.contains("no complete authentic"), "{error}");
+
+        fs::write(&log_path, make_event("recovery-session", "epic/wrong")).unwrap();
+        let error = recovery_request_for_focus(repo.path(), &cas_dir, "recovery-session", &epic.id)
+            .unwrap_err();
+        assert!(error.contains("no complete authentic"), "{error}");
+
+        fs::write(
+            &log_path,
+            format!(
+                "{}{}",
+                make_event("recovery-session", &epic.branch),
+                make_event("recovery-session", &epic.branch)
+            ),
+        )
+        .unwrap();
+        let error = recovery_request_for_focus(repo.path(), &cas_dir, "recovery-session", &epic.id)
+            .unwrap_err();
+        assert!(error.contains("2 merge events match"), "{error}");
+    }
+
+    #[test]
+    fn recovery_cancellation_terminates_the_owned_test_runner() {
+        use std::os::unix::fs::PermissionsExt;
+        let repo = fixture();
+        let cas_dir = crate::store::init_cas_dir(repo.path()).unwrap();
+        let marker = cas_dir.join("runner-started");
+        let stub = repo.path().join("cargo-stub.sh");
+        fs::write(
+            &stub,
+            format!(
+                "#!/bin/sh\nprintf started > '{}'\nexec sleep 30\n",
+                marker.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[
+            ("CARGO", stub.to_str().unwrap()),
+            ("CAS_FACTORY_BUILD_GUARD", "off"),
+        ]);
+        let request = SweepRequest {
+            epic_id: "cas-runnerkill".to_owned(),
+            target_branch: "main".to_owned(),
+            commit: git(repo.path(), &["rev-parse", "HEAD"]),
+        };
+        let mut settings = SweepSettings::from(&FactoryConfig::default());
+        settings.timeout = Duration::from_secs(30);
+        settings.nice_cargo = false;
+        let cancel = Arc::new(AtomicBool::new(false));
+        let worker_cancel = Arc::clone(&cancel);
+        let worker_root = repo.path().to_path_buf();
+        let worker_cas = cas_dir.clone();
+        let worker_request = request.clone();
+        let worker_settings = settings.clone();
+        let worker = std::thread::spawn(move || {
+            super::super::execute_sweep(
+                &worker_root,
+                &worker_cas,
+                worker_request,
+                worker_settings,
+                worker_cancel,
+            )
+        });
+        let started = Instant::now();
+        while !marker.exists() && started.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(marker.exists(), "the owned runner did not start");
+        let cancelled_at = Instant::now();
+        cancel.store(true, Ordering::Relaxed);
+        let result = worker.join().unwrap();
+        assert_eq!(result.status, SweepStatus::Superseded);
+        assert!(cancelled_at.elapsed() < Duration::from_secs(3));
+    }
+
+    #[test]
+    fn recovery_deadline_cancels_while_waiting_for_the_shared_lock() {
+        let repo = fixture();
+        let cas_dir = crate::store::init_cas_dir(repo.path()).unwrap();
+        let common = PathBuf::from(git(
+            repo.path(),
+            &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        ));
+        let project = common
+            .parent()
+            .unwrap()
+            .file_name()
+            .unwrap()
+            .to_string_lossy();
+        let lock_branch = format!("integration/{}", sanitize_component(&project));
+        let held =
+            crate::worktree::target_lock::try_lock_delivery_target(&cas_dir, &common, &lock_branch)
+                .unwrap()
+                .expect("fixture owns the recovery lock");
+        let request = SweepRequest {
+            epic_id: "cas-lockwait".to_owned(),
+            target_branch: "epic/cas-lockwait".to_owned(),
+            commit: git(repo.path(), &["rev-parse", "HEAD"]),
+        };
+        let mut settings = SweepSettings::from(&FactoryConfig::default());
+        settings.timeout = Duration::from_secs(10);
+        let mut coordinator = super::super::MergeSweepCoordinator::new(&cas_dir, "s1");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        let started = Instant::now();
+        let result = runtime
+            .block_on(coordinator.recover_once_with_deadline(
+                repo.path(),
+                &cas_dir,
+                request,
+                &settings,
+                Duration::from_millis(40),
+            ))
+            .unwrap();
+        drop(held);
+        assert_eq!(result.status, SweepStatus::TimedOut);
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(result.summary.contains("execution cancellation completed"));
     }
 }

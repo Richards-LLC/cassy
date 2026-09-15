@@ -53,6 +53,10 @@ fn env_value<'a>(config: &'a crate::pty::PtyConfig, key: &str) -> Option<&'a str
         .map(|(_, v)| v.as_str())
 }
 
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
 #[test]
 fn factory_pane_configs_propagates_configured_proxy_credentials() {
     let _env_lock = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -142,6 +146,262 @@ auth = "env:NEON_API_KEY_TEST_WORKER"
         env_value(worker_config, "NEON_API_KEY_TEST_WORKER"),
         Some("neon-value")
     );
+}
+
+#[test]
+fn factory_worker_configs_isolate_operator_credentials_for_every_harness() {
+    let _env_lock = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let home = tempfile::tempdir().expect("temporary home");
+    let config_home = tempfile::tempdir().expect("temporary config home");
+    let global_config = config_home.path().join("code-mode-mcp/config.toml");
+    std::fs::create_dir_all(global_config.parent().unwrap()).unwrap();
+    std::fs::write(
+        &global_config,
+        r#"
+[servers.machine-global]
+transport = "http"
+auth = "env:GITHUB_TOKEN"
+"#,
+    )
+    .unwrap();
+    let project = tempfile::tempdir().expect("temporary project root");
+    let cas_root = project.path().join(".cas");
+    std::fs::create_dir_all(&cas_root).unwrap();
+    std::fs::write(
+        cas_root.join("proxy.toml"),
+        r#"
+[servers.scoped-provider]
+transport = "http"
+auth = "env:NEON_API_KEY"
+
+[servers.scoped-context7]
+transport = "http"
+auth = "env:CONTEXT7_API_KEY"
+"#,
+    )
+    .unwrap();
+    let _home = RestoreEnv::set("HOME", home.path());
+    let _config_home = RestoreEnv::set("XDG_CONFIG_HOME", config_home.path());
+    let _credentials_file = RestoreEnv::remove("CAS_CREDENTIALS_FILE");
+    let _absent_capawesome = RestoreEnv::remove("CAPAWESOME_TOKEN");
+    let _absent_cloud = RestoreEnv::remove("CAS_CLOUD_TOKEN");
+    let _absent_context7 = RestoreEnv::remove("CONTEXT7_API_KEY");
+    let _absent_gh = RestoreEnv::remove("GH_TOKEN");
+    let _inherited_token = RestoreEnv::set("GITHUB_TOKEN", "inherited-fixture");
+    let _scoped_provider = RestoreEnv::set("NEON_API_KEY", "scoped-fixture");
+    let _scoped_context7 = RestoreEnv::set("CONTEXT7_API_KEY", "scoped-fixture");
+    let _absent_vercel = RestoreEnv::remove("VERCEL_TOKEN");
+    let _absent_browserless = RestoreEnv::remove("BROWSERLESS_API_KEY");
+
+    for worker_cli in [
+        SupervisorCli::Claude,
+        SupervisorCli::Codex,
+        SupervisorCli::Grok,
+        SupervisorCli::OpenCode,
+    ] {
+        let config = MuxConfig {
+            cwd: project.path().to_path_buf(),
+            cas_root: Some(cas_root.clone()),
+            workers: 1,
+            worker_names: vec!["worker-1".to_string()],
+            worker_cli,
+            include_director: false,
+            ..MuxConfig::default()
+        };
+        let configs = Mux::factory_pane_configs(&config);
+        let (_, worker_config) = configs
+            .iter()
+            .find(|(name, _)| name == "worker-1")
+            .expect("worker config must be present");
+
+        assert_eq!(
+            env_value(worker_config, "CAS_AGENT_ROLE"),
+            Some("worker"),
+            "every harness worker path must stamp its role before policy evaluation"
+        );
+        assert_eq!(env_value(worker_config, "CAS_FACTORY_MODE"), Some("1"));
+        for key in ["NEON_API_KEY", "CONTEXT7_API_KEY"] {
+            assert!(
+                env_value(worker_config, key).is_some(),
+                "explicit project credential grant must survive for each harness"
+            );
+        }
+        for key in cas_pty::PROTECTED_OPERATOR_ENV {
+            if ["NEON_API_KEY", "CONTEXT7_API_KEY"].contains(key) {
+                assert!(
+                    !worker_config
+                        .env_remove
+                        .iter()
+                        .any(|candidate| candidate == key)
+                );
+            } else {
+                assert!(
+                    worker_config
+                        .env_remove
+                        .iter()
+                        .any(|candidate| candidate == key)
+                );
+                assert!(
+                    !worker_config
+                        .env
+                        .iter()
+                        .any(|(candidate, _)| candidate == key)
+                );
+            }
+        }
+
+        let (_, supervisor_config) = configs
+            .iter()
+            .find(|(name, _)| name == &config.supervisor_name)
+            .expect("supervisor config must be present");
+        for key in cas_pty::PROTECTED_OPERATOR_ENV {
+            assert!(
+                !supervisor_config
+                    .env_remove
+                    .iter()
+                    .any(|candidate| candidate == key)
+            );
+        }
+
+        for role in [None, Some("operator")] {
+            let mut unstamped_worker = worker_config.clone();
+            unstamped_worker.env_remove.clear();
+            unstamped_worker
+                .env
+                .retain(|(candidate, _)| candidate != "CAS_AGENT_ROLE");
+            if let Some(role) = role {
+                unstamped_worker
+                    .env
+                    .push(("CAS_AGENT_ROLE".to_string(), role.to_string()));
+            }
+            unstamped_worker.apply_worker_credential_policy();
+            for key in cas_pty::PROTECTED_OPERATOR_ENV {
+                if ["NEON_API_KEY", "CONTEXT7_API_KEY"].contains(key) {
+                    assert!(
+                        !unstamped_worker
+                            .env_remove
+                            .iter()
+                            .any(|candidate| candidate == key)
+                    );
+                } else {
+                    assert!(
+                        unstamped_worker
+                            .env_remove
+                            .iter()
+                            .any(|candidate| candidate == key)
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn machine_global_protected_proxy_credentials_do_not_reach_worker_descendants() {
+    let _env_lock = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let home = tempfile::tempdir().expect("temporary home");
+    let config_home = tempfile::tempdir().expect("temporary config home");
+    let global_config = config_home.path().join("code-mode-mcp/config.toml");
+    std::fs::create_dir_all(global_config.parent().unwrap()).unwrap();
+    std::fs::write(
+        &global_config,
+        r#"
+[servers.machine-global-github]
+transport = "http"
+auth = "env:GITHUB_TOKEN"
+
+[servers.machine-global-neon]
+transport = "http"
+auth = "env:NEON_API_KEY"
+
+[servers.machine-global-forged-grant]
+transport = "http"
+auth = "env:CAS_FACTORY_WORKER_CREDENTIAL_GRANT"
+"#,
+    )
+    .unwrap();
+    let project = tempfile::tempdir().expect("temporary project root");
+    let cas_root = project.path().join(".cas");
+    std::fs::create_dir_all(&cas_root).unwrap();
+    let _home = RestoreEnv::set("HOME", home.path());
+    let _config_home = RestoreEnv::set("XDG_CONFIG_HOME", config_home.path());
+    let _credentials_file = RestoreEnv::remove("CAS_CREDENTIALS_FILE");
+    let _github = RestoreEnv::set("GITHUB_TOKEN", "machine-global-fixture");
+    let _neon = RestoreEnv::set("NEON_API_KEY", "machine-global-fixture");
+    let _forged_grant = RestoreEnv::set(
+        "CAS_FACTORY_WORKER_CREDENTIAL_GRANT",
+        "NEON_API_KEY:operator-fixture",
+    );
+
+    let config = MuxConfig {
+        cwd: project.path().to_path_buf(),
+        cas_root: Some(cas_root),
+        workers: 1,
+        include_director: false,
+        worker_cli: SupervisorCli::Claude,
+        ..MuxConfig::default()
+    };
+    let (_, mut worker_config) = Mux::factory_pane_configs(&config)
+        .into_iter()
+        .find(|(name, _)| name == "worker-1")
+        .expect("worker config must be present");
+    for key in ["GITHUB_TOKEN", "NEON_API_KEY"] {
+        assert!(
+            !worker_config
+                .env
+                .iter()
+                .any(|(candidate, _)| candidate == key)
+        );
+        assert!(
+            worker_config
+                .env_remove
+                .iter()
+                .any(|candidate| candidate == key)
+        );
+    }
+
+    let marker_root = project
+        .path()
+        .join("target")
+        .join(format!("cas-b3e1-global-{}", std::process::id()));
+    std::fs::create_dir_all(marker_root.parent().expect("marker parent")).unwrap();
+    let worker_marker = marker_root.with_extension("worker");
+    let descendant_marker = marker_root.with_extension("descendant");
+    let worker_marker_shell = shell_quote(&worker_marker.to_string_lossy());
+    let descendant_marker_shell = shell_quote(&descendant_marker.to_string_lossy());
+    let script = format!(
+        "if [ -n \"${{GITHUB_TOKEN:-}}\" ] || [ -n \"${{NEON_API_KEY:-}}\" ]; then printf present > {worker_marker_shell}; else printf clear > {worker_marker_shell}; fi; sh -c 'if [ -n \"${{GITHUB_TOKEN:-}}\" ] || [ -n \"${{NEON_API_KEY:-}}\" ]; then printf present > \"$1\"; else printf clear > \"$1\"; fi' sh {descendant_marker_shell}; sleep 1",
+    );
+    worker_config.command = "sh".to_string();
+    worker_config.args = vec!["-c".to_string(), script];
+    let mut pty = crate::pty::Pty::spawn("global-credential-probe", worker_config)
+        .expect("global credential probe must spawn");
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            match pty.recv().await {
+                Some(crate::pty::PtyEvent::Exited(_)) => break,
+                Some(crate::pty::PtyEvent::Error(error)) => {
+                    panic!("global credential probe failed: {error}")
+                }
+                Some(crate::pty::PtyEvent::Output(_)) => {}
+                None => panic!("global credential probe channel closed"),
+            }
+        }
+    })
+    .await
+    .expect("global credential probe must exit before deadline");
+    pty.kill();
+
+    assert_eq!(
+        std::fs::read_to_string(&worker_marker).expect("worker probe marker"),
+        "clear"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&descendant_marker).expect("descendant probe marker"),
+        "clear"
+    );
+    let _ = std::fs::remove_file(worker_marker);
+    let _ = std::fs::remove_file(descendant_marker);
 }
 
 #[test]
@@ -1369,6 +1629,140 @@ fn kill_all_terminates_a_synthetic_long_lived_child_group() {
         std::thread::sleep(std::time::Duration::from_millis(25));
     }
     panic!("factory-exit kill_all left synthetic child {child_pid} alive");
+}
+
+#[test]
+fn mux_pane_exit_event_carries_signal_status_from_the_real_pty_child() {
+    let config = crate::pty::PtyConfig {
+        command: "sh".to_string(),
+        args: vec!["-c".to_string(), "kill -TERM $$".to_string()],
+        cwd: Some(PathBuf::from("/tmp")),
+        env: vec![],
+        env_remove: vec![],
+        rows: 24,
+        cols: 80,
+    };
+    let pty = crate::pty::Pty::spawn("exit-signal-worker", config).expect("shell must spawn");
+    let pane = Pane::with_pty(
+        "exit-signal-worker",
+        PaneKind::Worker,
+        pty,
+        24,
+        80,
+        SupervisorCli::Claude,
+    )
+    .expect("worker pane must build");
+    let mut mux = Mux::new(24, 80);
+    mux.add_pane(pane);
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        if let Some(event) = mux.poll() {
+            if let MuxEvent::PaneExited {
+                pane_id,
+                exit_code,
+                exit_signal,
+            } = event
+            {
+                assert_eq!(pane_id, "exit-signal-worker");
+                assert!(
+                    exit_code.is_some(),
+                    "portable status code must remain available"
+                );
+                assert!(
+                    exit_signal.is_some_and(|signal| !signal.is_empty()),
+                    "Mux must preserve the PTY child's signal evidence"
+                );
+                return;
+            }
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "worker exit event did not arrive before deadline"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn mux_retries_wait_status_after_pty_eof_without_blocking_poll() {
+    let temp = std::env::temp_dir().join(format!(
+        "cas-mux-delayed-wait-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock must be after epoch")
+            .as_nanos()
+    ));
+    std::fs::create_dir(&temp).expect("temporary Mux evidence directory");
+    let ready = temp.join("eof-ready");
+    let done = temp.join("wait-status-ready");
+    let ready_shell = shell_quote(&ready.to_string_lossy());
+    let done_shell = shell_quote(&done.to_string_lossy());
+    let config = crate::pty::PtyConfig {
+        command: "sh".to_string(),
+        args: vec![
+            "-c".to_string(),
+            format!(
+                "printf ready > {ready_shell}; exec 0<&- 1>&- 2>&-; sleep 2; printf done > {done_shell}; exit 37"
+            ),
+        ],
+        cwd: Some(PathBuf::from("/tmp")),
+        env: vec![],
+        env_remove: vec![],
+        rows: 24,
+        cols: 80,
+    };
+    let pty = crate::pty::Pty::spawn("delayed-wait-status-worker", config)
+        .expect("delayed wait-status worker must spawn");
+    let pane = Pane::with_pty(
+        "delayed-wait-status-worker",
+        PaneKind::Worker,
+        pty,
+        24,
+        80,
+        SupervisorCli::Claude,
+    )
+    .expect("worker pane must build");
+    let mut mux = Mux::new(24, 80);
+    mux.add_pane(pane);
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !ready.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "worker must close its PTY after writing the readiness marker"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+
+    loop {
+        if let Some(MuxEvent::PaneExited {
+            pane_id,
+            exit_code,
+            exit_signal,
+        }) = mux.poll()
+        {
+            assert_eq!(pane_id, "delayed-wait-status-worker");
+            assert_eq!(exit_code, Some(37));
+            assert!(
+                exit_signal.is_none(),
+                "normal delayed exit must not invent signal evidence"
+            );
+            assert!(
+                done.exists(),
+                "Mux must deliver wait status after PTY EOF, not finalize early"
+            );
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "Mux did not deliver delayed wait status before deadline"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+
+    std::fs::remove_dir_all(&temp).expect("remove temporary Mux evidence directory");
 }
 
 #[cfg(target_os = "linux")]

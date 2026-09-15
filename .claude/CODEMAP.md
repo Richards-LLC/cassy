@@ -75,8 +75,10 @@ Rust workspace for the CAS coding-agent system. Product/domain material belongs 
 ## MCP service and tool tree
 - `cas-cli/src/mcp/{daemon.rs,socket.rs,server/}` — daemon lifecycle, Unix transport, runtime, parent watchdog, prompts, and resources.
 - `cas-cli/src/mcp/tools/core/` — task, memory, knowledge, search, rules, skills, workflow, system, opinion, maintenance, and coordination handlers.
+- `cas-cli/src/mcp/tools/core/guidance.rs` — request-local caller and supervisor prefixes for executable recovery hints.
 - `cas-cli/src/mcp/tools/core/task/` — task queries, notes, proposals, dependencies, updates, and lifecycle proof/close gates.
 - `cas-cli/src/mcp/tools/service/` — factory/reminder ops, liveness, orphan recovery, external verification, server/worktree ops, patterns/specs, and panic containment.
+- `cas-cli/src/mcp/tools/service/recovery_guidance_tests.rs` — recovery-hint contracts across Claude, Codex, Grok, and OpenCode callers.
 - `cas-cli/src/mcp/tools/service/agent_search_system/` — agent search, code/history/context retrieval, messaging, and supervisor queue operations.
 - `cas-cli/src/mcp/tools/service/worker_liveness/` — worker receipt parsing and liveness tests; `cas-cli/src/mcp/tools/service/opencode_liveness.rs` covers OpenCode probes.
 - `cas-cli/src/mcp/tools/types/` — shared request/response schemas for task, search, system, looping, rules/skills, verification, and worktrees.
@@ -88,6 +90,7 @@ Rust workspace for the CAS coding-agent system. Product/domain material belongs 
 - `cas-cli/src/builtins/{codex,grok}/{agents,skills}/` — provider-specific prompt trees; `cas-cli/src/builtins/codex/` also carries factory-supervisor prompts.
 - `cas-cli/src/builtins/skills/` — canonical shared skills, references, examples, scripts, and design/release assets rendered to harness mirrors.
 - `cas-cli/tests/` — integration targets for CLI, hooks, cloud, factory/MCP, hub, search, verification, e2e, and multi-agent behavior.
+- `cas-cli/tests/hooks_test/main.rs` — integration-test entrypoint that includes the hooks test module tree.
 - `cas-cli/tests/mcp_tools_test/` — MCP action coverage; `cas-cli/tests/mcp_tools_test/task_tools/` holds lifecycle, dependency, close-gate, and verification suites.
 - `cas-cli/tests/e2e/` — factory, hooks, memory/rules, multi-agent, tasks, teams, verification, and worktree flows.
 - `cas-cli/tests/{factory_parity,factory_codex_skill_guardrails,factory_mcp_ops}_test.rs` — factory parity and worker-facing contract gates.
@@ -95,6 +98,9 @@ Rust workspace for the CAS coding-agent system. Product/domain material belongs 
 - `cas-cli/tests/{retrieval_eval,retrieval_parity,project_identity_parity}_test.rs` — retrieval and cross-surface parity checks.
 - `cas-cli/tests/{common,e2e,fixtures,support,snapshots,proptest}/` — shared fixtures, helpers, snapshots, and property tests.
 - `hub-web/src/` — Commander SPA state, pairing, sessions, panes, attention, messaging, terminal adapters, and Vitest tests.
+- `hub-web/src/{build.d.ts,paired-machines.ts}` — injected Hub build identity and keyed paired-machine footer/register UI.
+- `hub-web/polish.brief.md` — operator-polish concept, acceptance budgets, and visual QA handoff.
+- `hub-web/scripts/polish-qa.mjs` — production-bundle fixture journeys for paired machines and conversation recovery.
 - `slack-bridge/src/` — Slack router/daemon entrypoints, commands, sessions, filtering, formatting, and tests.
 
 ## Crates — key module roots
@@ -115,6 +121,7 @@ Rust workspace for the CAS coding-agent system. Product/domain material belongs 
 - **Managed files:** sources live in `cas-cli/src/builtins/`; sync renders `.claude/`, `.codex/`, and Grok mirrors.
 - **Docs:** `cas-cli/docs/` holds architecture/contributing/migration/proxy/TUI/worktree material; `docs/` holds durable project records.
 - **CI/release:** `.github/`, `scripts/`, `CHANGELOG.md`, `docs/release-notes/`, and `docs/release-reports/` hold gates and receipts.
+- **Recent release records:** `docs/release-notes/2026-09-11-coordination-contracts-slack.md` records the coordination-contracts source announcement.
 - **Operations:** `migration/`, `ops/systemd/`, `docs/branch-protection/`, `docs/ci/`, and `docs/factory/` hold host/runbook material.
 - **Tests:** colocated Rust tests, crate `tests/`, `cas-cli/tests/`, and Vitest suites under `hub-web/src/`.
 - **Test isolation:** use `TestEnvGuard` from `cas-cli/src/lib.rs`; do not add a second HOME/environment helper.

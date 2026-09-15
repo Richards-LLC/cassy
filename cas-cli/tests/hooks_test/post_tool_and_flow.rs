@@ -2,21 +2,42 @@ use crate::hooks_test::*;
 use tempfile::TempDir;
 
 #[test]
-#[ignore = "CLI commands removed - tests need MCP fixtures"]
-fn test_post_tool_use_stores_observation_without_dev_mode() {
+fn test_post_tool_use_stores_attribution_without_dev_mode() {
     let temp = TempDir::new().unwrap();
     init_cas(&temp); // dev_mode=false (default)
 
-    // Send Write tool event (always captured per should_buffer_observation)
-    let input = write_tool_input("test-session-001", "/project/src/main.rs");
+    // Write attribution is durable independently of the optional dev tracer.
+    let session_id = "test-session-001";
+    let file_path = "/project/src/main.rs";
+    let input = write_tool_input(session_id, file_path);
     send_hook(&temp, "PostToolUse", &input);
 
-    // Verify observation was stored
-    let count = count_entries(&temp);
+    let changes = file_changes(&temp);
+    assert_eq!(
+        changes.len(),
+        1,
+        "Write should create one attribution record"
+    );
+    assert_eq!(changes[0].session_id, session_id);
+    assert_eq!(changes[0].tool_name, "Write");
+    assert_eq!(changes[0].file_path, file_path);
     assert!(
-        count > 0,
-        "Observation should be stored even without dev_mode. Got {} entries",
-        count
+        buffered_observations(&temp).is_empty(),
+        "dev_mode=false must not persist raw tracer observations"
+    );
+}
+
+#[test]
+fn test_post_tool_use_without_session_does_not_create_orphan_observation() {
+    let temp = TempDir::new().unwrap();
+    init_cas_dev_mode(&temp);
+
+    send_hook(&temp, "PostToolUse", &bash_tool_input("", "cargo test", 1));
+
+    assert_eq!(
+        count_buffered_observations(&temp),
+        0,
+        "a missing harness session must not create an unconsumable buffer row"
     );
 }
 
@@ -52,26 +73,29 @@ fn test_post_tool_use_filters_simple_commands() {
 }
 
 #[test]
-#[ignore = "CLI commands removed - tests need MCP fixtures"]
 fn test_post_tool_use_captures_errors() {
     let temp = TempDir::new().unwrap();
-    init_cas(&temp);
+    init_cas_dev_mode(&temp);
 
     // Send failed Bash command
     let input = bash_tool_input("test-session-err", "cargo test", 1);
     send_hook(&temp, "PostToolUse", &input);
 
-    // Errors should always be captured
-    let count = count_entries(&temp);
+    // Raw observations are buffered by the enabled dev tracer. The error
+    // flag, exit code, and useful command content must survive the hook.
+    let observations = buffered_observations(&temp);
+    assert_eq!(observations.len(), 1, "failed Bash should be buffered once");
+    let (tool, content, is_error, exit_code) = &observations[0];
+    assert_eq!(tool, "Bash");
     assert!(
-        count > 0,
-        "Errors should always be captured. Got {} entries",
-        count
+        content.contains("cargo test"),
+        "buffered content: {content}"
     );
+    assert!(*is_error, "failed Bash must retain error metadata");
+    assert_eq!(*exit_code, Some(1));
 }
 
 #[test]
-#[ignore = "CLI commands removed - tests need MCP fixtures"]
 fn test_post_tool_use_captures_significant_edits() {
     let temp = TempDir::new().unwrap();
     init_cas(&temp);
@@ -80,13 +104,15 @@ fn test_post_tool_use_captures_significant_edits() {
     let input = edit_tool_input("test-session-edit", "/project/big_change.rs", 5, 20);
     send_hook(&temp, "PostToolUse", &input);
 
-    // Significant edits (10+ line diff) should be captured
-    let count = count_entries(&temp);
-    assert!(
-        count > 0,
-        "Significant edits should be captured. Got {} entries",
-        count
+    let changes = file_changes(&temp);
+    assert_eq!(
+        changes.len(),
+        1,
+        "Edit should create one attribution record"
     );
+    assert_eq!(changes[0].session_id, "test-session-edit");
+    assert_eq!(changes[0].tool_name, "Edit");
+    assert_eq!(changes[0].file_path, "/project/big_change.rs");
 }
 
 #[test]
@@ -108,7 +134,6 @@ fn test_post_tool_use_ignores_small_edits() {
 }
 
 #[test]
-#[ignore = "CLI commands removed - tests need MCP fixtures"]
 fn test_post_tool_use_captures_writes() {
     let temp = TempDir::new().unwrap();
     init_cas(&temp);
@@ -117,20 +142,21 @@ fn test_post_tool_use_captures_writes() {
     let input = write_tool_input("test-session-write", "/project/new_file.rs");
     send_hook(&temp, "PostToolUse", &input);
 
-    // All Write operations should be captured
-    let count = count_entries(&temp);
-    assert!(
-        count > 0,
-        "Write operations should be captured. Got {} entries",
-        count
+    let changes = file_changes(&temp);
+    assert_eq!(
+        changes.len(),
+        1,
+        "Write should create one attribution record"
     );
+    assert_eq!(changes[0].session_id, "test-session-write");
+    assert_eq!(changes[0].tool_name, "Write");
+    assert_eq!(changes[0].file_path, "/project/new_file.rs");
 }
 
 #[test]
-#[ignore = "CLI commands removed - tests need MCP fixtures"]
 fn test_post_tool_use_captures_significant_bash() {
     let temp = TempDir::new().unwrap();
-    init_cas(&temp);
+    init_cas_dev_mode(&temp);
 
     // Send significant bash commands
     send_hook(
@@ -149,13 +175,29 @@ fn test_post_tool_use_captures_significant_bash() {
         &bash_tool_input("test-session", "git commit -m 'test'", 0),
     );
 
-    // Significant commands should be captured
-    let count = count_entries(&temp);
-    assert!(
-        count > 0,
-        "Significant bash commands should be captured. Got {} entries",
-        count
+    let observations = buffered_observations(&temp);
+    assert_eq!(
+        observations.len(),
+        3,
+        "each significant Bash should be buffered"
     );
+    for expected_command in ["cargo build", "cargo test", "git commit"] {
+        let observation = observations
+            .iter()
+            .find(|(_, content, _, _)| content.contains(expected_command));
+        let (tool, content, is_error, exit_code) =
+            observation.unwrap_or_else(|| panic!("missing buffered command {expected_command:?}"));
+        assert_eq!(tool, "Bash");
+        assert!(
+            !content.is_empty(),
+            "buffered Bash content must be retained"
+        );
+        assert!(
+            !is_error,
+            "successful Bash should not be marked as an error"
+        );
+        assert_eq!(*exit_code, Some(0));
+    }
 }
 
 // =============================================================================
@@ -179,34 +221,55 @@ fn test_stop_handles_empty_session() {
 }
 
 #[test]
-#[ignore = "CLI commands removed - tests need MCP fixtures"]
-fn test_stop_creates_session_summary() {
+fn test_stop_synthesizes_matching_buffered_observations_component() {
     let temp = TempDir::new().unwrap();
-    init_cas(&temp);
+    init_cas_dev_mode(&temp);
 
     let session_id = "summary-session";
 
-    // Create some observations
-    send_hook(
+    // Seed matching-session observations in the current tracer store. Stop's
+    // production path reads these rows, synthesizes learnings, and clears the
+    // buffer after processing it.
+    seed_buffered_observation(
         &temp,
-        "PostToolUse",
-        &write_tool_input(session_id, "/src/main.rs"),
+        session_id,
+        "Write",
+        "Write: /src/main.rs",
+        None,
+        false,
     );
-    send_hook(
+    seed_buffered_observation(
         &temp,
-        "PostToolUse",
-        &bash_tool_input(session_id, "cargo build", 0),
+        session_id,
+        "Bash",
+        "Bash: cargo build",
+        Some(0),
+        false,
     );
+    let before_stop = count_entries(&temp);
 
     // End session
     send_hook(&temp, "Stop", &stop_input(session_id));
 
-    // Should have created entries (observations or summary)
+    // Stop should synthesize a durable learning from matching rows and clear
+    // only the rows it consumed.
     let count = count_entries(&temp);
     assert!(
-        count > 0,
-        "Stop should create session entries. Got {} entries",
-        count
+        count > before_stop,
+        "Stop should create a session learning. Before: {before_stop}, after: {count}"
+    );
+    assert_eq!(
+        count_buffered_observations(&temp),
+        0,
+        "Stop should clear the matching observation buffer"
+    );
+    let entries = open_entries(&temp);
+    assert!(
+        entries.iter().any(|entry| {
+            entry.session_id.as_deref() == Some(session_id)
+                && entry.tags.iter().any(|tag| tag == "build-success")
+        }),
+        "Stop synthesis should retain the source session"
     );
 }
 
@@ -233,16 +296,12 @@ fn test_session_start_returns_json() {
 }
 
 #[test]
-#[ignore = "CLI commands removed - tests need MCP fixtures"]
 fn test_session_start_includes_tasks() {
     let temp = TempDir::new().unwrap();
     init_cas(&temp);
 
-    // Create a task
-    cas_cmd(&temp)
-        .args(["task", "create", "Test task for context"])
-        .assert()
-        .success();
+    // Create a task through the local task-store fixture.
+    create_task(&temp, "Test task for context");
 
     // Send SessionStart
     let input = session_start_input("task-context-session");
@@ -284,12 +343,12 @@ fn test_session_start_plan_mode() {
 // =============================================================================
 
 #[test]
-#[ignore = "CLI commands removed - tests need MCP fixtures"]
 fn test_e2e_tool_use_to_entry() {
     let temp = TempDir::new().unwrap();
-    init_cas(&temp);
+    init_cas_dev_mode(&temp);
 
     let session_id = "e2e-session";
+    let other_session_id = "other-e2e-session";
 
     // Simulate session with tool uses
     send_hook(
@@ -307,21 +366,61 @@ fn test_e2e_tool_use_to_entry() {
         "PostToolUse",
         &bash_tool_input(session_id, "cargo test", 1),
     ); // error
+    send_hook(
+        &temp,
+        "PostToolUse",
+        &bash_tool_input(other_session_id, "cargo check", 1),
+    ); // must survive the first session's Stop
 
     // End session
     send_hook(&temp, "Stop", &stop_input(session_id));
 
-    // Verify entries were created
-    let count = count_entries(&temp);
+    // Write attribution and dev-tracer buffering are the current durable
+    // capture paths exercised by this full hook flow.
+    let changes = file_changes(&temp);
     assert!(
-        count > 0,
-        "E2E session should produce entries. Got {} entries",
-        count
+        changes.iter().any(|change| {
+            change.session_id == session_id
+                && change.tool_name == "Write"
+                && change.file_path == "/src/main.rs"
+        }),
+        "E2E flow should retain Write attribution"
+    );
+    let observations = buffered_observations_with_sessions(&temp);
+    assert!(
+        observations
+            .iter()
+            .all(|(session, ..)| session == other_session_id),
+        "E2E Stop should clear only the matching buffered observations: {observations:?}"
+    );
+    assert_eq!(
+        observations.len(),
+        1,
+        "E2E Stop should retain one unrelated session row"
+    );
+    assert!(
+        observations
+            .iter()
+            .any(|(session, tool, content, is_error, exit_code)| {
+                session == other_session_id
+                    && tool == "Bash"
+                    && content.contains("cargo check")
+                    && *is_error
+                    && *exit_code == Some(1)
+            }),
+        "unrelated session observation should retain its error metadata"
+    );
+    let entries = open_entries(&temp);
+    assert!(
+        entries.iter().any(|entry| {
+            entry.session_id.as_deref() == Some(session_id)
+                && entry.tags.iter().any(|tag| tag == "session-errors")
+        }),
+        "E2E Stop should synthesize the failed Bash observation"
     );
 }
 
 #[test]
-#[ignore = "CLI commands removed - tests need MCP fixtures"]
 fn test_e2e_multiple_sessions() {
     let temp = TempDir::new().unwrap();
     init_cas(&temp);
@@ -334,7 +433,7 @@ fn test_e2e_multiple_sessions() {
     );
     send_hook(&temp, "Stop", &stop_input("session-1"));
 
-    let count_after_s1 = count_entries(&temp);
+    let session_1_changes = file_changes(&temp);
 
     // Session 2
     send_hook(
@@ -344,27 +443,44 @@ fn test_e2e_multiple_sessions() {
     );
     send_hook(&temp, "Stop", &stop_input("session-2"));
 
-    let count_after_s2 = count_entries(&temp);
+    let all_changes = file_changes(&temp);
 
-    // Both sessions should create entries
+    // File attribution is session-scoped; the second session must add its own
+    // row without changing the first session's identity.
     assert!(
-        count_after_s1 > 0,
-        "Session 1 should produce entries. Got {}",
-        count_after_s1
+        session_1_changes
+            .iter()
+            .any(|change| change.session_id == "session-1" && change.file_path == "/src/a.rs"),
+        "Session 1 should produce its own attribution record"
     );
     assert!(
-        count_after_s2 >= count_after_s1,
-        "Session 2 should add entries. S1: {}, S2: {}",
-        count_after_s1,
-        count_after_s2
+        all_changes
+            .iter()
+            .any(|change| change.session_id == "session-2" && change.file_path == "/src/b.rs"),
+        "Session 2 should produce its own attribution record"
+    );
+    assert_eq!(
+        all_changes
+            .iter()
+            .filter(|change| change.session_id == "session-1")
+            .count(),
+        1,
+        "Session 1 records must not be duplicated by Session 2"
+    );
+    assert_eq!(
+        all_changes
+            .iter()
+            .filter(|change| change.session_id == "session-2")
+            .count(),
+        1,
+        "Session 2 records must remain isolated"
     );
 }
 
 #[test]
-#[ignore = "CLI commands removed - tests need MCP fixtures"]
 fn test_e2e_error_observation_captured() {
     let temp = TempDir::new().unwrap();
-    init_cas(&temp);
+    init_cas_dev_mode(&temp);
 
     let session_id = "error-session";
 
@@ -376,12 +492,20 @@ fn test_e2e_error_observation_captured() {
     );
     send_hook(&temp, "Stop", &stop_input(session_id));
 
-    // Error should be captured
-    let count = count_entries(&temp);
+    // Stop should consume the matching error row and synthesize a durable
+    // learning with the failed command content.
+    let observations = buffered_observations_with_sessions(&temp);
     assert!(
-        count > 0,
-        "Error observation should be captured. Got {} entries",
-        count
+        observations.is_empty(),
+        "Stop should consume the matching error observation"
+    );
+    assert!(
+        open_entries(&temp).iter().any(|entry| {
+            entry.session_id.as_deref() == Some(session_id)
+                && entry.tags.iter().any(|tag| tag == "session-errors")
+                && entry.content.contains("Bash: cargo test")
+        }),
+        "Stop should synthesize the failed Bash observation"
     );
 }
 

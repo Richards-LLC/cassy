@@ -19,6 +19,7 @@
 //! `agent_worktree_block`'s env-fallback test.
 
 use crate::hooks::handlers::handle_pre_tool_use;
+use crate::hooks::handlers::handlers_events::is_harness_session_scratchpad;
 use crate::store::open_agent_store;
 use crate::types::{Agent, AgentRole};
 use cas_core::hooks::types::HookInput;
@@ -269,6 +270,25 @@ fn factory_write_under_harness_session_scratchpad_is_allowed() {
         allow_reason(&out).is_some(),
         "the harness-advertised per-session scratchpad must be sanctioned"
     );
+}
+
+#[test]
+fn harness_session_scratchpad_accepts_macos_private_tmp_alias() {
+    let path = std::path::Path::new(
+        "/private/tmp/claude-501/project/f54c4e08-831c-4cb6-ae05-5bd663ec1fed/scratchpad/req.json",
+    );
+    assert!(is_harness_session_scratchpad(
+        path,
+        "f54c4e08-831c-4cb6-ae05-5bd663ec1fed"
+    ));
+    assert!(!is_harness_session_scratchpad(
+        path,
+        "another-session"
+    ));
+    assert!(!is_harness_session_scratchpad(
+        std::path::Path::new("/private/tmp/claude-501/project/session/scratchpad"),
+        "session"
+    ));
 }
 
 #[test]

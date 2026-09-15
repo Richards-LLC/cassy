@@ -9,7 +9,7 @@ use crate::error::{Error, Result};
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use std::io::{Read, Write};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use tokio::sync::Mutex;
 use tokio::sync::mpsc;
 
@@ -385,6 +385,33 @@ pub struct PtyConfig {
     /// Initial terminal size
     pub rows: u16,
     pub cols: u16,
+}
+
+/// Operator credentials that never cross the factory worker boundary through
+/// inherited environment state. A task-scoped provider or proxy grant is
+/// explicit only when the factory builder adds authenticated grant metadata;
+/// an environment value by itself is never authorization.
+pub const PROTECTED_OPERATOR_ENV: &[&str] = &[
+    "CAPAWESOME_TOKEN",
+    "CAS_CLOUD_TOKEN",
+    "CONTEXT7_API_KEY",
+    "GITHUB_TOKEN",
+    "GH_TOKEN",
+    "NEON_API_KEY",
+    "VERCEL_TOKEN",
+    "BROWSERLESS_API_KEY",
+];
+
+// This metadata entry carries credential provenance through PtyConfig without
+// exposing a credential value or adding a public struct field. Pty::spawn
+// consumes it as launch metadata rather than passing it to the child process.
+const WORKER_CREDENTIAL_GRANT_ENV: &str = "CAS_FACTORY_WORKER_CREDENTIAL_GRANT";
+
+fn worker_credential_grant_nonce() -> &'static str {
+    static NONCE: OnceLock<String> = OnceLock::new();
+    NONCE
+        .get_or_init(|| uuid::Uuid::new_v4().to_string())
+        .as_str()
 }
 
 fn push_factory_worker_metadata_env(
@@ -894,6 +921,70 @@ fn push_codex_machine_credential_env(args: &mut Vec<String>) {
 }
 
 impl PtyConfig {
+    /// Mark a protected environment name as an explicit worker credential grant.
+    ///
+    /// Only the factory config builder should call this for names authorized by
+    /// a project/task proxy definition. A value placed directly in `env` is not
+    /// a grant and is removed from a worker unless this marker is present.
+    pub fn grant_worker_credential(&mut self, key: &str) {
+        if !PROTECTED_OPERATOR_ENV.contains(&key) {
+            return;
+        }
+        let marker = format!("{key}:{}", worker_credential_grant_nonce());
+        if !self
+            .env
+            .iter()
+            .any(|(candidate, value)| candidate == WORKER_CREDENTIAL_GRANT_ENV && value == &marker)
+        {
+            self.env
+                .push((WORKER_CREDENTIAL_GRANT_ENV.to_string(), marker));
+        }
+    }
+
+    /// Remove protected operator credentials from a worker's inherited
+    /// environment while retaining explicit task-scoped grants.
+    ///
+    /// CommandBuilder inherits the launching daemon's environment. The
+    /// factory's explicit env entries are the auditable allowlist for
+    /// provider/proxy credentials requested by the task; no parent-process
+    /// value is treated as a grant.
+    pub fn apply_worker_credential_policy(&mut self) {
+        let role = self
+            .env
+            .iter()
+            .rev()
+            .find_map(|(key, value)| (key == "CAS_AGENT_ROLE").then_some(value.as_str()));
+        let is_factory_without_supervisor = self
+            .env
+            .iter()
+            .rev()
+            .find_map(|(key, value)| (key == "CAS_FACTORY_MODE").then_some(value.as_str()))
+            == Some("1")
+            && role != Some("supervisor");
+        if role != Some("worker") && !is_factory_without_supervisor {
+            return;
+        }
+        let grants = self
+            .env
+            .iter()
+            .filter_map(|(candidate, value)| {
+                let (key, nonce) = value.split_once(':')?;
+                (candidate == WORKER_CREDENTIAL_GRANT_ENV
+                    && nonce == worker_credential_grant_nonce()
+                    && PROTECTED_OPERATOR_ENV.contains(&key))
+                .then_some(key)
+            })
+            .collect::<Vec<_>>();
+        for key in PROTECTED_OPERATOR_ENV {
+            if grants.contains(key) {
+                continue;
+            }
+            if !self.env_remove.iter().any(|candidate| candidate == key) {
+                self.env_remove.push((*key).to_string());
+            }
+        }
+    }
+
     /// Apply the Codex account home override to this worker config.
     ///
     /// `Pty::spawn` detects the resulting marker and removes inherited API keys
@@ -2070,6 +2161,13 @@ pub struct Pty {
     master: Box<dyn portable_pty::MasterPty + Send>,
     /// Whether this PTY is running Codex CLI
     is_codex: bool,
+    /// Signal name from the child wait status, when termination was caused by
+    /// a signal. Kept separate from `PtyEvent::Exited` for API compatibility.
+    exit_signal: Option<String>,
+    /// The PTY stream reached EOF before the child wait status was available.
+    /// Keep polling the non-blocking child handle so a delayed status is not
+    /// lost when a process closes its terminal descriptors before exiting.
+    exit_status_pending: bool,
 }
 
 /// Whether a configured command ultimately launches the Codex harness.
@@ -2156,7 +2254,8 @@ fn worker_spawn_audit(
 
 impl Pty {
     /// Spawn a new PTY with the given configuration
-    pub fn spawn(id: impl Into<String>, config: PtyConfig) -> Result<Self> {
+    pub fn spawn(id: impl Into<String>, mut config: PtyConfig) -> Result<Self> {
+        config.apply_worker_credential_policy();
         let id = id.into();
         let is_codex = command_launches_codex(&config.command, &config.args);
 
@@ -2206,7 +2305,9 @@ impl Pty {
         }
 
         for (key, value) in &config.env {
-            cmd.env(key, value);
+            if key != WORKER_CREDENTIAL_GRANT_ENV {
+                cmd.env(key, value);
+            }
         }
         for key in &config.env_remove {
             cmd.env_remove(key);
@@ -2322,6 +2423,8 @@ impl Pty {
             child,
             master: pair.master,
             is_codex,
+            exit_signal: None,
+            exit_status_pending: false,
         })
     }
 
@@ -2338,7 +2441,8 @@ impl Pty {
         loop {
             match reader.read(&mut buf) {
                 Ok(0) => {
-                    // EOF - process exited
+                    // PTY EOF can precede the child's wait status when a
+                    // process closes its terminal descriptors before exit.
                     if !carry.is_empty() {
                         let _ =
                             event_tx.blocking_send(PtyEvent::Output(std::mem::take(&mut carry)));
@@ -2408,12 +2512,88 @@ impl Pty {
 
     /// Receive the next event from the PTY (blocking)
     pub async fn recv(&mut self) -> Option<PtyEvent> {
-        self.event_rx.recv().await
+        loop {
+            // A prior `try_recv` may have consumed the reader's EOF and left
+            // the child wait status pending. Poll before awaiting the reader
+            // channel, which is already disconnected in that case.
+            while self.exit_status_pending {
+                if let Some(event) = self.poll_pending_exit() {
+                    return Some(event);
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+
+            let event = self.event_rx.recv().await?;
+            if let Some(event) = self.enrich_exit_event(event) {
+                return Some(event);
+            }
+
+            // The reader has observed terminal EOF, but the child may still
+            // be alive. `recv` is the blocking API, so yield between
+            // non-blocking wait probes until the real status is available.
+            // The next loop iteration performs those probes before touching
+            // the now-exhausted reader channel.
+        }
     }
 
     /// Try to receive an event from the PTY (non-blocking)
     pub fn try_recv(&mut self) -> Option<PtyEvent> {
-        self.event_rx.try_recv().ok()
+        if self.exit_status_pending {
+            return self.poll_pending_exit();
+        }
+        self.event_rx
+            .try_recv()
+            .ok()
+            .and_then(|event| self.enrich_exit_event(event))
+    }
+
+    /// Return the signal recorded while enriching the most recent exit event.
+    /// The value is consumed by the mux so it cannot leak into a later pane
+    /// event.
+    pub fn take_exit_signal(&mut self) -> Option<String> {
+        self.exit_signal.take()
+    }
+
+    fn poll_pending_exit(&mut self) -> Option<PtyEvent> {
+        if !self.exit_status_pending {
+            return None;
+        }
+        match self.child.try_wait() {
+            Ok(Some(status)) => Some(self.exit_event_from_status(status)),
+            Ok(None) => None,
+            Err(error) => {
+                // The wait status is unavailable, so preserve the existing
+                // explicit-unknown contract instead of inventing a code or
+                // signal. Do not spin forever after a permanently failed
+                // child-handle probe.
+                tracing::debug!(error = %error, "pty child wait status unavailable");
+                self.exit_status_pending = false;
+                Some(PtyEvent::Exited(None))
+            }
+        }
+    }
+
+    fn exit_event_from_status(&mut self, status: portable_pty::ExitStatus) -> PtyEvent {
+        self.exit_status_pending = false;
+        self.exit_signal = status.signal().map(str::to_owned);
+        PtyEvent::Exited(i32::try_from(status.exit_code()).ok())
+    }
+
+    fn enrich_exit_event(&mut self, event: PtyEvent) -> Option<PtyEvent> {
+        let PtyEvent::Exited(None) = event else {
+            return Some(event);
+        };
+        match self.child.try_wait() {
+            Ok(Some(status)) => Some(self.exit_event_from_status(status)),
+            Ok(None) => {
+                self.exit_status_pending = true;
+                None
+            }
+            Err(error) => {
+                tracing::debug!(error = %error, "pty child wait status unavailable");
+                Some(PtyEvent::Exited(None))
+            }
+        }
     }
 
     /// Resize the PTY
@@ -2693,6 +2873,70 @@ mod tests {
         _guard: MutexGuard<'static, ()>,
     }
 
+    struct RestoreVar {
+        key: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl RestoreVar {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var_os(key);
+            // SAFETY: the surrounding ScopedEnv holds ENV_LOCK for this test.
+            unsafe { std::env::set_var(key, value) };
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for RestoreVar {
+        fn drop(&mut self) {
+            // SAFETY: the surrounding ScopedEnv still holds ENV_LOCK.
+            unsafe {
+                match &self.previous {
+                    Some(value) => std::env::set_var(self.key, value),
+                    None => std::env::remove_var(self.key),
+                }
+            }
+        }
+    }
+
+    fn shell_quote(value: &str) -> String {
+        format!("'{}'", value.replace('\'', "'\"'\"'"))
+    }
+
+    fn spawn_delayed_wait_status_probe() -> (
+        std::path::PathBuf,
+        std::path::PathBuf,
+        std::path::PathBuf,
+        Pty,
+    ) {
+        let temp = std::env::temp_dir().join(format!(
+            "cas-pty-delayed-wait-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock must be after epoch")
+                .as_nanos()
+        ));
+        std::fs::create_dir(&temp).expect("temporary PTY evidence directory");
+        let ready = temp.join("eof-ready");
+        let done = temp.join("wait-status-ready");
+        let ready_shell = shell_quote(&ready.to_string_lossy());
+        let done_shell = shell_quote(&done.to_string_lossy());
+        let config = PtyConfig {
+            command: "sh".to_string(),
+            args: vec![
+                "-c".to_string(),
+                format!(
+                    "printf ready > {ready_shell}; exec 0<&- 1>&- 2>&-; sleep 2; printf done > {done_shell}; exit 37"
+                ),
+            ],
+            ..PtyConfig::default()
+        };
+        let pty = Pty::spawn("delayed-wait-status-probe", config)
+            .expect("delayed wait-status probe must spawn");
+        (temp, ready, done, pty)
+    }
+
     impl ScopedEnv {
         pub(crate) fn new() -> Self {
             let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -2727,6 +2971,169 @@ mod tests {
         assert_eq!(config.command, "bash");
         assert_eq!(config.rows, 24);
         assert_eq!(config.cols, 80);
+    }
+
+    #[tokio::test]
+    async fn exited_event_preserves_child_exit_code() {
+        let config = PtyConfig {
+            command: "sh".to_string(),
+            args: vec![
+                "-c".to_string(),
+                "printf 'exit-evidence-tail\\n'; exit 23".to_string(),
+            ],
+            ..PtyConfig::default()
+        };
+        let mut pty = Pty::spawn("exit-code-probe", config).expect("shell probe must spawn");
+        let mut output = Vec::new();
+        let deadline = tokio::time::Instant::now() + PTY_CONTROL_EVENT_TIMEOUT;
+        let exit_code = loop {
+            match next_pty_event_until(&mut pty, deadline).await {
+                Some(PtyEvent::Output(data)) => output.extend(data),
+                Some(PtyEvent::Exited(code)) => break code,
+                Some(PtyEvent::Error(error)) => panic!("exit-code probe failed: {error}"),
+                None => panic!("exit-code probe did not exit before deadline"),
+            }
+        };
+
+        assert_eq!(exit_code, Some(23));
+        assert!(
+            String::from_utf8_lossy(&output).contains("exit-evidence-tail"),
+            "the PTY output must remain available for the bounded pane tail"
+        );
+    }
+
+    #[tokio::test]
+    async fn exited_event_preserves_signal_evidence() {
+        let config = PtyConfig {
+            command: "sh".to_string(),
+            args: vec!["-c".to_string(), "kill -TERM $$".to_string()],
+            ..PtyConfig::default()
+        };
+        let mut pty = Pty::spawn("exit-signal-probe", config).expect("shell probe must spawn");
+        let deadline = tokio::time::Instant::now() + PTY_CONTROL_EVENT_TIMEOUT;
+        let exit_code = loop {
+            match next_pty_event_until(&mut pty, deadline).await {
+                Some(PtyEvent::Exited(code)) => break code,
+                Some(PtyEvent::Output(_)) => {}
+                Some(PtyEvent::Error(error)) => panic!("exit-signal probe failed: {error}"),
+                None => panic!("exit-signal probe did not exit before deadline"),
+            }
+        };
+
+        assert!(
+            exit_code.is_some(),
+            "signal exits retain portable status code"
+        );
+        assert!(
+            pty.take_exit_signal()
+                .is_some_and(|signal| !signal.is_empty()),
+            "signal termination must retain the child wait-status signal"
+        );
+    }
+
+    #[tokio::test]
+    async fn eof_before_wait_status_retries_without_blocking_try_recv() {
+        let (temp, ready, done, mut pty) = spawn_delayed_wait_status_probe();
+        let deadline = tokio::time::Instant::now() + PTY_CONTROL_EVENT_TIMEOUT;
+
+        while !ready.exists() {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "probe must close its PTY after writing the readiness marker"
+            );
+            tokio::time::sleep(PTY_EVENT_POLL_INTERVAL).await;
+        }
+
+        let mut exit_code = None;
+        while tokio::time::Instant::now() < deadline {
+            match pty.try_recv() {
+                Some(PtyEvent::Exited(code)) => {
+                    assert!(
+                        code.is_some(),
+                        "PTY EOF must not finalize before a delayed child wait status"
+                    );
+                    exit_code = code;
+                    break;
+                }
+                Some(PtyEvent::Output(_)) => {}
+                Some(PtyEvent::Error(error)) => panic!("delayed wait-status probe failed: {error}"),
+                None => tokio::time::sleep(PTY_EVENT_POLL_INTERVAL).await,
+            }
+        }
+
+        assert_eq!(exit_code, Some(37));
+        assert!(
+            done.exists(),
+            "the delayed wait-status marker proves EOF preceded process exit"
+        );
+        std::fs::remove_dir_all(&temp).expect("remove temporary PTY evidence directory");
+    }
+
+    #[tokio::test]
+    async fn recv_after_try_recv_consumes_eof_retries_wait_status() {
+        let (temp, ready, done, mut pty) = spawn_delayed_wait_status_probe();
+        let deadline = tokio::time::Instant::now() + PTY_CONTROL_EVENT_TIMEOUT;
+        while !ready.exists() {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "probe must close its PTY after writing the readiness marker"
+            );
+            tokio::time::sleep(PTY_EVENT_POLL_INTERVAL).await;
+        }
+
+        // Drive try_recv until it consumes EOF and records the pending state,
+        // then switch APIs. The reader channel is disconnected by this point,
+        // so recv must poll the child rather than await that channel forever.
+        while !pty.exit_status_pending {
+            let _ = pty.try_recv();
+            assert!(
+                !done.exists(),
+                "the child must remain alive while try_recv records EOF"
+            );
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "try_recv must observe the PTY EOF before the delayed wait status"
+            );
+            tokio::time::sleep(PTY_EVENT_POLL_INTERVAL).await;
+        }
+
+        let event = tokio::time::timeout(PTY_CONTROL_EVENT_TIMEOUT, pty.recv())
+            .await
+            .expect("recv must retain the pending wait status")
+            .expect("child wait status must produce an event");
+        assert!(
+            matches!(event, PtyEvent::Exited(Some(37))),
+            "mixed try_recv/recv use must preserve the eventual exit code"
+        );
+        assert!(
+            done.exists(),
+            "the delayed wait-status marker proves EOF preceded process exit"
+        );
+        std::fs::remove_dir_all(&temp).expect("remove temporary PTY evidence directory");
+    }
+
+    #[tokio::test]
+    async fn recv_only_retries_wait_status_after_pty_eof() {
+        let (temp, ready, done, mut pty) = spawn_delayed_wait_status_probe();
+        let deadline = tokio::time::Instant::now() + PTY_CONTROL_EVENT_TIMEOUT;
+        while !ready.exists() {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "probe must close its PTY after writing the readiness marker"
+            );
+            tokio::time::sleep(PTY_EVENT_POLL_INTERVAL).await;
+        }
+
+        let event = tokio::time::timeout(PTY_CONTROL_EVENT_TIMEOUT, pty.recv())
+            .await
+            .expect("recv-only path must retain the pending wait status")
+            .expect("child wait status must produce an event");
+        assert!(matches!(event, PtyEvent::Exited(Some(37))));
+        assert!(
+            done.exists(),
+            "the delayed wait-status marker proves EOF preceded process exit"
+        );
+        std::fs::remove_dir_all(&temp).expect("remove temporary PTY evidence directory");
     }
 
     #[tokio::test]
@@ -2779,6 +3186,173 @@ mod tests {
                 .any(|(k, v)| k == "CLAUDE_PROJECT_DIR" && v == "/tmp"),
             "a worker must explicitly scope Claude file-history and skill loading to its clone"
         );
+    }
+
+    #[tokio::test]
+    async fn worker_spawn_strips_operator_credentials_from_process_and_descendant() {
+        let _e = ScopedEnv::new();
+        let protected = PROTECTED_OPERATOR_ENV;
+        let _vars: Vec<_> = protected
+            .iter()
+            .copied()
+            .map(|key| RestoreVar::set(key, "fixture-value-not-for-output"))
+            .collect();
+        let probe = protected
+            .iter()
+            .map(|key| format!("[ -n \"${{{key}:-}}\" ]"))
+            .collect::<Vec<_>>()
+            .join(" || ");
+        let marker_root = std::env::current_dir()
+            .expect("test worktree")
+            .join("target")
+            .join(format!("cas-b3e1-{}", uuid::Uuid::new_v4()));
+        let worker_marker = marker_root.with_extension("worker");
+        let descendant_marker = marker_root.with_extension("descendant");
+        let worker_marker_shell = shell_quote(&worker_marker.to_string_lossy());
+        let descendant_marker_shell = shell_quote(&descendant_marker.to_string_lossy());
+        std::fs::create_dir_all(marker_root.parent().expect("marker parent"))
+            .expect("marker directory");
+        let script = format!(
+            "if {probe}; then printf worker-present > {worker_marker_shell}; else printf worker-clear > {worker_marker_shell}; fi; sh -c 'if {probe}; then printf descendant-present > \"$1\"; else printf descendant-clear > \"$1\"; fi' sh {descendant_marker_shell}; sleep 1",
+        );
+        let config = PtyConfig {
+            command: "sh".to_string(),
+            args: vec!["-c".to_string(), script],
+            cwd: std::env::current_dir().ok(),
+            env: vec![("CAS_AGENT_ROLE".to_string(), "worker".to_string())],
+            ..PtyConfig::default()
+        };
+        let mut pty =
+            Pty::spawn("credential-isolation-probe", config).expect("shell probe must spawn");
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            match next_pty_event_until(&mut pty, deadline).await {
+                Some(PtyEvent::Exited(_)) => break,
+                Some(PtyEvent::Error(error)) => panic!("credential probe failed: {error}"),
+                Some(PtyEvent::Output(_)) => {}
+                None => panic!("credential probe did not exit before deadline"),
+            }
+        }
+        pty.kill();
+        let worker_result = std::fs::read_to_string(&worker_marker).expect("worker probe marker");
+        let descendant_result =
+            std::fs::read_to_string(&descendant_marker).expect("descendant probe marker");
+        let _ = std::fs::remove_file(worker_marker);
+        let _ = std::fs::remove_file(descendant_marker);
+        assert_eq!(worker_result, "worker-clear");
+        assert!(
+            descendant_result == "descendant-clear",
+            "descendant result was {descendant_result:?}"
+        );
+    }
+
+    #[test]
+    fn worker_credential_policy_removes_inherited_operator_names_but_not_supervisor() {
+        let mut worker = PtyConfig {
+            env: vec![("CAS_AGENT_ROLE".to_string(), "worker".to_string())],
+            ..PtyConfig::default()
+        };
+        worker.apply_worker_credential_policy();
+        for key in PROTECTED_OPERATOR_ENV {
+            assert!(worker.env_remove.iter().any(|candidate| candidate == key));
+        }
+
+        let mut supervisor = PtyConfig {
+            env: vec![("CAS_AGENT_ROLE".to_string(), "supervisor".to_string())],
+            ..PtyConfig::default()
+        };
+        supervisor.apply_worker_credential_policy();
+        assert!(supervisor.env_remove.is_empty());
+    }
+
+    #[test]
+    fn worker_credential_policy_preserves_explicit_scoped_provider_env() {
+        let mut config = PtyConfig {
+            env: vec![
+                ("CAS_AGENT_ROLE".to_string(), "worker".to_string()),
+                ("NEON_API_KEY".to_string(), "scoped-grant".to_string()),
+                ("CONTEXT7_API_KEY".to_string(), "scoped-grant".to_string()),
+            ],
+            ..PtyConfig::default()
+        };
+        config.grant_worker_credential("NEON_API_KEY");
+        config.grant_worker_credential("CONTEXT7_API_KEY");
+        config.apply_worker_credential_policy();
+        assert!(
+            !config
+                .env_remove
+                .iter()
+                .any(|candidate| candidate == "NEON_API_KEY")
+        );
+        assert!(
+            !config
+                .env_remove
+                .iter()
+                .any(|candidate| candidate == "CONTEXT7_API_KEY")
+        );
+        assert!(
+            config
+                .env_remove
+                .iter()
+                .any(|candidate| candidate == "GITHUB_TOKEN")
+        );
+    }
+
+    #[test]
+    fn worker_credential_policy_rejects_unmarked_explicit_protected_env() {
+        let mut config = PtyConfig {
+            env: vec![
+                ("CAS_AGENT_ROLE".to_string(), "worker".to_string()),
+                ("NEON_API_KEY".to_string(), "unmarked-fixture".to_string()),
+            ],
+            ..PtyConfig::default()
+        };
+        config.apply_worker_credential_policy();
+        assert!(
+            config
+                .env_remove
+                .iter()
+                .any(|candidate| candidate == "NEON_API_KEY")
+        );
+    }
+
+    #[test]
+    fn worker_credential_policy_rejects_inherited_grant_marker() {
+        let mut config = PtyConfig {
+            env: vec![
+                ("CAS_AGENT_ROLE".to_string(), "worker".to_string()),
+                (
+                    WORKER_CREDENTIAL_GRANT_ENV.to_string(),
+                    "NEON_API_KEY:operator-fixture".to_string(),
+                ),
+            ],
+            ..PtyConfig::default()
+        };
+        config.apply_worker_credential_policy();
+        assert!(
+            config
+                .env_remove
+                .iter()
+                .any(|candidate| candidate == "NEON_API_KEY")
+        );
+    }
+
+    #[test]
+    fn factory_credential_policy_fails_closed_for_missing_or_alternate_role() {
+        for role in [None, Some("operator")] {
+            let mut env = vec![("CAS_FACTORY_MODE".to_string(), "1".to_string())];
+            if let Some(role) = role {
+                env.push(("CAS_AGENT_ROLE".to_string(), role.to_string()));
+            }
+            let mut config = PtyConfig {
+                env,
+                ..PtyConfig::default()
+            };
+            config.apply_worker_credential_policy();
+            for key in PROTECTED_OPERATOR_ENV {
+                assert!(config.env_remove.iter().any(|candidate| candidate == key));
+            }
+        }
     }
 
     #[test]
@@ -3749,7 +4323,10 @@ mod tests {
             &home,
             Some(format!("/usr/bin:{}", local_bin.display()).into()),
         );
-        assert!(already.is_empty(), "present PATH entry must not be duplicated");
+        assert!(
+            already.is_empty(),
+            "present PATH entry must not be duplicated"
+        );
 
         let mut missing = Vec::new();
         push_local_bin_path_env_with(&mut missing, &bare, Some("/usr/bin".into()));

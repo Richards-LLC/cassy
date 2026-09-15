@@ -115,6 +115,8 @@ pub enum MuxEvent {
     PaneExited {
         pane_id: PaneId,
         exit_code: Option<i32>,
+        /// Signal name when the PTY child was terminated by a signal.
+        exit_signal: Option<String>,
     },
     /// Focus changed
     FocusChanged { from: Option<PaneId>, to: PaneId },
@@ -1339,6 +1341,7 @@ impl Mux {
                         return Some(MuxEvent::PaneExited {
                             pane_id: id.clone(),
                             exit_code: code,
+                            exit_signal: pane.exit_signal().map(str::to_owned),
                         });
                     }
                     PtyEvent::Error(e) => {
@@ -1388,6 +1391,7 @@ impl Mux {
                         events.push(MuxEvent::PaneExited {
                             pane_id: id.clone(),
                             exit_code: code,
+                            exit_signal: pane.exit_signal().map(str::to_owned),
                         });
                     }
                     PtyEvent::Error(e) => {

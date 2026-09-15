@@ -617,8 +617,17 @@ pub fn format_recently_died_while_leased(
                 } else {
                     format!(" → Open (orphaned: {recovered})")
                 };
+                let evidence = meta
+                    .and_then(|m| m.get("reason"))
+                    .and_then(|v| v.as_str())
+                    .filter(|reason| !reason.trim().is_empty())
+                    .map(|reason| {
+                        let bounded: String = reason.chars().take(2_000).collect();
+                        format!("\n    exit evidence: {}", bounded.replace('\n', "\n    "))
+                    })
+                    .unwrap_or_default();
                 lines.push(format!(
-                    "  • {name} (last heartbeat: {since}) [stale]\n    held: {held}{rec_note}"
+                    "  • {name} (last heartbeat: {since}) [stale]\n    held: {held}{rec_note}{evidence}"
                 ));
             }
         }
@@ -1200,6 +1209,49 @@ mod cas_3dcb_death_relay_tests {
         assert!(
             rendered.is_empty(),
             "a current live row and a historical death for the same name must not render together: {rendered}"
+        );
+    }
+
+    #[test]
+    fn recently_died_section_renders_bounded_exit_evidence() {
+        let fixture = Fixture::new();
+        let worker = fixture.dead_worker("evidence-worker", 900);
+        let event = Event::new(
+            EventType::WorkerDied,
+            EventEntityType::Agent,
+            worker.id.clone(),
+            "evidence worker exited",
+        )
+        .with_metadata(serde_json::json!({
+            "worker_name": worker.name,
+            "held_tasks": ["cas-held1"],
+            "last_heartbeat": worker.last_heartbeat.to_rfc3339(),
+            "reason": format!(
+                "exited with code 23\\n\\nLast worker PTY output (bounded):\\n{}",
+                "x".repeat(2_100)
+            ),
+        }));
+        open_event_store(&fixture.cas_root)
+            .unwrap()
+            .record(&event)
+            .unwrap();
+
+        let rendered = format_recently_died_while_leased(
+            &fixture.cas_root,
+            fixture.agent_store.as_ref(),
+            None,
+            3600,
+            &std::collections::HashSet::new(),
+        );
+        assert!(rendered.contains("exited with code 23"), "{rendered}");
+        assert!(
+            rendered.contains("Last worker PTY output (bounded)"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.chars().count() < 2_500,
+            "status evidence must stay bounded: {} chars",
+            rendered.chars().count()
         );
     }
 }

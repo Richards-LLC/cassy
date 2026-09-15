@@ -33,7 +33,7 @@ impl CasCore {
     ) -> Result<CallToolResult, McpError> {
         let task_store = self.open_task_store()?;
 
-        let mut task = task_store.get(&req.id).map_err(|e| McpError {
+        task_store.get(&req.id).map_err(|e| McpError {
             code: ErrorCode::INVALID_PARAMS,
             message: Cow::from(format!("Task not found: {e}")),
             data: None,
@@ -81,18 +81,9 @@ impl CasCore {
 
         let formatted_note = format!("[{}] {} {}", timestamp, type_prefix, req.note);
 
-        // Append to existing notes
-        if task.notes.is_empty() {
-            task.notes = formatted_note;
-        } else {
-            task.notes = format!("{}\n\n{}", task.notes, formatted_note);
-        }
-
-        task.updated_at = chrono::Utc::now();
-
-        task_store.update(&task).map_err(|e| McpError {
+        task_store.append_note(&req.id, &formatted_note).map_err(|e| McpError {
             code: ErrorCode::INTERNAL_ERROR,
-            message: Cow::from(format!("Failed to update task: {e}")),
+            message: Cow::from(format!("Failed to append task note: {e}")),
             data: None,
         })?;
 

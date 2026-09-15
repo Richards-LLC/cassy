@@ -459,6 +459,17 @@ pub struct TaskDeliverables {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub factory_branch_anchor: Option<String>,
 
+    /// Commit anchors from declined delivery cycles. `request_changes` clears
+    /// `factory_branch_anchor` so a new cycle cannot reuse it as an active
+    /// merge proof, but the declined commits remain this task's work and must
+    /// stay attributable when a later lease starts after their commit time.
+    ///
+    /// This is task identity only; close never treats these historical tips as
+    /// an active anchor. They are checked for current target ancestry through
+    /// the live factory branch and the normal merge-state gate.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub historical_factory_branch_anchors: Vec<String>,
+
     /// cas-a844: the `factory/<assignee>` branch name recorded alongside
     /// `factory_branch_anchor` at commit time, with MERGE REQUIRED parking as
     /// a fallback. `factory_branch_anchor` is only useful if you already know
@@ -505,6 +516,8 @@ struct TaskDeliverablesObject {
     #[serde(default)]
     factory_branch_anchor: Option<String>,
     #[serde(default)]
+    historical_factory_branch_anchors: Vec<String>,
+    #[serde(default)]
     parked_branch: Option<String>,
     #[serde(default)]
     merge_conflicted: bool,
@@ -521,6 +534,7 @@ impl From<TaskDeliverablesObject> for TaskDeliverables {
             merge_commit: value.merge_commit,
             review_envelope: value.review_envelope,
             factory_branch_anchor: value.factory_branch_anchor,
+            historical_factory_branch_anchors: value.historical_factory_branch_anchors,
             parked_branch: value.parked_branch,
             merge_conflicted: value.merge_conflicted,
         }
@@ -708,6 +722,27 @@ fn validate_state_string_array(field: &str, value: &Value) -> Result<(), String>
 }
 
 impl TaskDeliverables {
+    /// Move the active factory anchor out of close authority while retaining
+    /// it as task-owned commit identity for later merge-gate attribution.
+    ///
+    /// Lifecycle recovery paths call this before reopening a delivery cycle.
+    /// The anchor is never retained as active authority, and blank values are
+    /// ignored so an empty recovery record cannot create identity.
+    pub fn retain_factory_branch_anchor_as_history(&mut self) {
+        let Some(anchor) = self.factory_branch_anchor.take() else {
+            return;
+        };
+        let anchor = anchor.trim().to_string();
+        if !anchor.is_empty()
+            && !self
+                .historical_factory_branch_anchors
+                .iter()
+                .any(|known| known.eq_ignore_ascii_case(&anchor))
+        {
+            self.historical_factory_branch_anchors.push(anchor);
+        }
+    }
+
     pub fn is_empty(&self) -> bool {
         self.work_target.is_none()
             && self.pre_close_hook.is_none()
@@ -717,6 +752,7 @@ impl TaskDeliverables {
             && self.merge_commit.is_none()
             && self.review_envelope.is_none()
             && self.factory_branch_anchor.is_none()
+            && self.historical_factory_branch_anchors.is_empty()
             && self.parked_branch.is_none()
             && !self.merge_conflicted
     }
@@ -1065,6 +1101,49 @@ mod tests {
             Some("deadbeef")
         );
         assert!(serde_json::to_value(task).unwrap()["deliverables"].is_object());
+    }
+
+    #[test]
+    fn historical_factory_anchors_round_trip_without_affecting_legacy_rows() {
+        let mut task = Task::new(
+            "cas-historical-anchor".to_string(),
+            "Retain declined delivery identity".to_string(),
+        );
+        task.deliverables
+            .historical_factory_branch_anchors
+            .push("a".repeat(40));
+        let encoded = serde_json::to_value(&task).unwrap();
+        assert_eq!(
+            encoded["deliverables"]["historical_factory_branch_anchors"][0],
+            "a".repeat(40)
+        );
+        let decoded: Task = serde_json::from_value(encoded).unwrap();
+        assert_eq!(
+            decoded.deliverables.historical_factory_branch_anchors,
+            vec!["a".repeat(40)]
+        );
+
+        let legacy: TaskDeliverables = serde_json::from_str("{}").unwrap();
+        assert!(legacy.historical_factory_branch_anchors.is_empty());
+    }
+
+    #[test]
+    fn factory_anchor_history_clears_authority_and_deduplicates() {
+        let anchor = "A".repeat(40);
+        let mut deliverables = TaskDeliverables {
+            factory_branch_anchor: Some(format!("  {anchor}  ")),
+            historical_factory_branch_anchors: vec![anchor.to_ascii_lowercase()],
+            ..Default::default()
+        };
+
+        deliverables.retain_factory_branch_anchor_as_history();
+
+        assert!(deliverables.factory_branch_anchor.is_none());
+        assert_eq!(deliverables.historical_factory_branch_anchors.len(), 1);
+
+        deliverables.factory_branch_anchor = Some("  ".to_string());
+        deliverables.retain_factory_branch_anchor_as_history();
+        assert_eq!(deliverables.historical_factory_branch_anchors.len(), 1);
     }
 
     #[test]

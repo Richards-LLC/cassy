@@ -153,21 +153,33 @@ name the blocking step in the operator timeline, and require its receipt.
    carry them into the next prep commit. Keep the published tag unchanged.
    `--report` is fail-closed until a posting adapter has written
    `release-report.receipt` with `TAG`, `PDF_PATH`, `HTML_PATH`,
-   `PDF_SHA256`, `HTML_SHA256`, `PAGE_COUNT`, `PDF_FILE_PERMALINK`,
-   `PDF_FILE_ID`, `HTML_FILE_ID`, `USER_THREAD_TS`, and `DEV_THREAD_TS`;
-   the train re-hashes the local PDF/HTML and verifies the PDF page count before
-   accepting the receipt.
+   `PDF_SHA256`, `PDF_SIZE_BYTES`, `PDF_REMOTE_SHA256`,
+   `PDF_REMOTE_SIZE_BYTES`, `PDF_REMOTE_PAGE_COUNT`, `HTML_SHA256`,
+   `PAGE_COUNT`, `PDF_FILE_PERMALINK`, `PDF_FILE_ID`, `HTML_FILE_ID`,
+   `USER_THREAD_TS`, and `DEV_THREAD_TS`; the adapter downloads and verifies
+   the transport-returned PDF before writing the remote evidence, and the train
+   re-hashes the local PDF/HTML and checks that evidence before accepting it.
 14. The default posting adapter owns the authenticated MechaCassy HTTP MCP
    call. It accepts `TAG PDF_PATH HTML_PATH USER_THREAD_TS DEV_THREAD_TS`, reads
    the report bytes locally, uploads the PDF as a file attached to the User
    thread, and posts a GitHub permalink for the HTML from the Dev thread. It
-   writes the receipt only after both thread receipts and the PDF/HTML SHA-256
-   and PDF page-count checks are available; report bytes never enter agent
-   context. Load the bearer and bypass from the configured credentials file or
+   writes the receipt only after both thread receipts, local PDF/HTML evidence,
+   and exact remote PDF byte/hash/decode/page-count checks are available; report
+   bytes never enter agent context. Load the bearer and bypass from the configured credentials file or
    named environment variables (`MECHA_SLACK_TOKEN_ENV` and
    `MECHA_VERCEL_BYPASS`). Use only the MechaCassy hub/bot;
    never use Claude.ai Slack or a personal connector. Upload through `mecha_post`
    and accept the file only after download, source-hash and decode checks pass.
+   The adapter sends hub credentials only to the configured MCP origin (with the
+   explicit same-origin loopback exception used by tests); external signed or
+   private-provider URLs receive no hub credentials, message permalinks are not
+   PDF endpoints, and cross-origin or scheme-changing redirects are rejected.
+   When the current hub file receipt omits `download_url`, the adapter may use
+   authenticated `mecha_read` by the returned file ID; otherwise it fails
+   explicitly before treating the upload as verified. Bound that fallback read
+   inclusively from the User root Slack timestamp as RFC3339 `since`, preserving
+   fractional precision so old channel history is excluded while its replies
+   remain available; reject an invalid root timestamp before any post.
    If the hub cannot complete publication, preserve the draft and partial
    receipts and report blocked. Use MechaCassy's default `cas-internal` channel,
    retain `C0B44GUKDK2` only for verification, and save four Slack POSTED

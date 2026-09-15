@@ -1,6 +1,8 @@
 use crate::TaskStore;
 use crate::task_store::*;
 use serde_json::json;
+use std::sync::{Arc, Barrier, mpsc};
+use std::time::Duration;
 use tempfile::TempDir;
 
 fn create_test_store() -> (TempDir, SqliteTaskStore) {
@@ -47,6 +49,113 @@ fn test_task_crud() {
     // Delete task
     store.delete(&id).unwrap();
     assert!(store.get(&id).is_err());
+}
+
+#[test]
+fn task_note_append_preserves_concurrent_appends() {
+    let (temp, store) = create_test_store();
+    let task = Task::new("task-note-contention".to_string(), "Task notes".to_string());
+    store.add(&task).unwrap();
+
+    let stores: Vec<_> = (0..8)
+        .map(|_| Arc::new(SqliteTaskStore::open(temp.path()).unwrap()))
+        .collect();
+    let barrier = Arc::new(Barrier::new(stores.len()));
+    let handles: Vec<_> = stores
+        .into_iter()
+        .enumerate()
+        .map(|(index, store)| {
+            let barrier = Arc::clone(&barrier);
+            let task_id = task.id.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                store.append_note(&task_id, &format!("concurrent note {index}"))
+            })
+        })
+        .collect();
+    for handle in handles {
+        handle
+            .join()
+            .expect("concurrent note append thread should not panic")
+            .expect("concurrent note append should succeed");
+    }
+
+    let persisted = store.get(&task.id).unwrap();
+    for index in 0..8 {
+        let note = format!("concurrent note {index}");
+        assert_eq!(persisted.notes.matches(&note).count(), 1, "{note}");
+    }
+}
+
+#[test]
+fn task_note_append_waits_through_a_foreign_write_lock() {
+    let (temp, store) = create_test_store();
+    let task = Task::new("task-note-wait".to_string(), "Task notes".to_string());
+    store.add(&task).unwrap();
+
+    let holder = rusqlite::Connection::open(temp.path().join("cas.db")).unwrap();
+    holder
+        .execute_batch("PRAGMA journal_mode=WAL; BEGIN IMMEDIATE;")
+        .unwrap();
+
+    let (started_tx, started_rx) = mpsc::channel();
+    let (finished_tx, finished_rx) = mpsc::channel();
+    let task_id = task.id.clone();
+    let worker = std::thread::spawn(move || {
+        started_tx.send(()).unwrap();
+        let result = store.append_note(&task_id, "note after contention");
+        finished_tx.send(result).unwrap();
+    });
+
+    started_rx.recv().unwrap();
+    assert!(
+        finished_rx.recv_timeout(Duration::from_millis(100)).is_err(),
+        "task note append must wait while a foreign writer holds the lock"
+    );
+    holder.execute_batch("COMMIT").unwrap();
+
+    finished_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("task note append should finish after lock release")
+        .expect("task note append should succeed after transient contention");
+    worker.join().unwrap();
+    assert_eq!(
+        SqliteTaskStore::open(temp.path())
+            .unwrap()
+            .get(&task.id)
+            .unwrap()
+            .notes
+            .matches("note after contention")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn task_note_append_reports_bounded_contention_exhaustion() {
+    let (temp, store) = create_test_store();
+    let task = Task::new("task-note-exhaustion".to_string(), "Task notes".to_string());
+    store.add(&task).unwrap();
+    store
+        .conn
+        .lock()
+        .unwrap()
+        .busy_timeout(Duration::from_millis(20))
+        .unwrap();
+
+    let holder = rusqlite::Connection::open(temp.path().join("cas.db")).unwrap();
+    holder
+        .execute_batch("PRAGMA journal_mode=WAL; BEGIN IMMEDIATE;")
+        .unwrap();
+    let error = store
+        .append_note(&task.id, "must not append while permanently locked")
+        .expect_err("a lock held through the retry budget must fail clearly");
+    holder.execute_batch("COMMIT").unwrap();
+
+    let message = error.to_string();
+    assert!(message.contains("database busy"), "{message}");
+    assert!(message.contains("attempt(s)"), "{message}");
+    assert_eq!(store.get(&task.id).unwrap().notes, "");
 }
 
 #[test]
@@ -268,6 +377,11 @@ fn closed_to_non_closed_update_clears_close_cycle_authority() {
         reopened.deliverables.factory_branch_anchor.is_none(),
         "the prior close cycle's commit receipt must be invalidated"
     );
+    assert_eq!(
+        reopened.deliverables.historical_factory_branch_anchors,
+        vec!["old-close-sha"],
+        "invalidated close-cycle identity remains attributable to the task"
+    );
     assert!(
         reopened.deliverables.negative_result.is_none(),
         "reopening must not let a prior negative-result decision exempt fresh work from delivery gates"
@@ -316,6 +430,10 @@ fn awaiting_merge_conflict_rework_clears_all_parked_merge_state() {
     let resumed = store.get(&task.id).unwrap();
     assert_eq!(resumed.status, TaskStatus::InProgress);
     assert!(resumed.deliverables.factory_branch_anchor.is_none());
+    assert_eq!(
+        resumed.deliverables.historical_factory_branch_anchors,
+        vec!["conflicted-sha"]
+    );
     assert!(resumed.deliverables.parked_branch.is_none());
     assert!(!resumed.deliverables.merge_conflicted);
 }

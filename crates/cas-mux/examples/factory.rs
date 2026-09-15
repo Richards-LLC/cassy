@@ -118,7 +118,9 @@ async fn run_app(
                 MuxEvent::PaneOutput { pane_id: _, .. } => {
                     // Terminal state already updated, just redraw
                 }
-                MuxEvent::PaneExited { pane_id, exit_code } => {
+                MuxEvent::PaneExited {
+                    pane_id, exit_code, ..
+                } => {
                     eprintln!("Pane {pane_id} exited with code {exit_code:?}");
                 }
                 _ => {}

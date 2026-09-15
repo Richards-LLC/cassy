@@ -1,5 +1,5 @@
 use crate::mcp::daemon::*;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
 use crate::cloud::{CloudConfig, EntityType, SyncOperation, SyncQueue};
@@ -1109,27 +1109,40 @@ fn all_agent_registration_sites_stamp_pid_fingerprint() {
 // AC from cas-389c: "temporarily comment the stamp at one real site → the
 // new test must fail." Verified before ship.
 
-#[test]
-fn every_production_agent_pid_assignment_has_nearby_fingerprint_stamp() {
-    use std::fs;
-    use std::path::{Path, PathBuf};
-
-    /// Recursively collect all .rs files under `dir`.
-    fn collect_rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
-        let Ok(entries) = fs::read_dir(dir) else {
-            return;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                collect_rs_files(&path, out);
-            } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
-                out.push(path);
-            }
+/// Recursively collect all .rs files under `dir`.
+fn collect_rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_rs_files(&path, out);
+        } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+            out.push(path);
         }
     }
+}
 
-    let src_root = crate::test_paths::crate_root().join("src");
+/// Return whether `path`, relative to the scanned source root, is a test
+/// source file rather than production code. Classification intentionally uses
+/// relative path components: parent checkout names must not change which
+/// source files the invariant scans.
+fn is_test_source_file(path: &Path, src_root: &Path) -> bool {
+    let relative_path = path.strip_prefix(src_root).unwrap_or(path);
+    let file_name = relative_path.file_name().and_then(|name| name.to_str());
+    file_name == Some("tests.rs")
+        || file_name.is_some_and(|name| name.ends_with("_tests.rs"))
+        || relative_path
+            .components()
+            .any(|component| component.as_os_str() == std::ffi::OsStr::new("_tests"))
+}
+
+fn scan_production_pid_assignments(src_root: &Path) -> (usize, Vec<String>) {
+    const WINDOW: usize = 10;
+    const STAMP_NEEDLE: &str = "stamp_pid_fingerprint";
+    const PID_NEEDLE: &str = "agent.pid = Some(";
+
     assert!(
         src_root.exists(),
         "cas-cli/src must exist at {}",
@@ -1144,28 +1157,17 @@ fn every_production_agent_pid_assignment_has_nearby_fingerprint_stamp() {
         src_root.display()
     );
 
-    // How many lines AFTER an `agent.pid = Some(` line can the stamp call
-    // appear? 10 is comfortable — real sites today stamp within 2 lines.
-    const WINDOW: usize = 10;
-    // The regex-free needle we search for. Exact spelling tolerates
-    // trailing whitespace but nothing else. If the helper is ever renamed,
-    // update this constant and the test message.
-    const STAMP_NEEDLE: &str = "stamp_pid_fingerprint";
-    const PID_NEEDLE: &str = "agent.pid = Some(";
-
     let mut violations: Vec<String> = Vec::new();
     let mut sites_checked = 0usize;
 
     for path in &rs_files {
         // Skip test modules and the source-scanning test itself — the
         // invariant applies to production registration sites only.
-        let path_str = path.to_string_lossy();
-        let is_test_file = path_str.contains("_tests/") || path_str.ends_with("_tests.rs");
-        if is_test_file {
+        if is_test_source_file(path, src_root) {
             continue;
         }
 
-        let Ok(contents) = fs::read_to_string(path) else {
+        let Ok(contents) = std::fs::read_to_string(path) else {
             continue;
         };
         let lines: Vec<&str> = contents.lines().collect();
@@ -1200,21 +1202,57 @@ fn every_production_agent_pid_assignment_has_nearby_fingerprint_stamp() {
         }
     }
 
+    (sites_checked, violations)
+}
+
+#[test]
+fn source_scan_classifies_test_modules_by_relative_boundary() {
+    let temp = TempDir::new().expect("create source fixture");
+    // The checkout itself contains `_tests/` to prove classification does not
+    // use an absolute-path substring that can hide the entire source tree.
+    let src_root = temp.path().join("_tests").join("checkout").join("src");
+    let test_module = src_root
+        .join("mcp/tools/service/worker_liveness")
+        .join("tests.rs");
+    let nested_test = src_root.join("mcp/tools/service/_tests/fixture.rs");
+    let production = src_root.join("mcp/tools/service/worker_liveness.rs");
+
+    for path in [&test_module, &nested_test, &production] {
+        std::fs::create_dir_all(path.parent().expect("fixture parent"))
+            .expect("create fixture parent");
+    }
+    let unstamped_assignment = "fn fixture() {\n    agent.pid = Some(pid);\n}\n";
+    std::fs::write(&test_module, unstamped_assignment).expect("write tests.rs fixture");
+    std::fs::write(&nested_test, unstamped_assignment).expect("write _tests fixture");
+    std::fs::write(&production, unstamped_assignment).expect("write production fixture");
+
+    let (sites_checked, violations) = scan_production_pid_assignments(&src_root);
+
+    assert_eq!(sites_checked, 1, "only the production assignment is scanned");
+    assert_eq!(
+        violations.len(),
+        1,
+        "the unstamped production site is caught"
+    );
+    assert_eq!(
+        violations[0],
+        "mcp/tools/service/worker_liveness.rs:2 — `agent.pid = Some(` without `stamp_pid_fingerprint` within 10 lines below"
+    );
+}
+
+#[test]
+fn every_production_agent_pid_assignment_has_nearby_fingerprint_stamp() {
+    let src_root = crate::test_paths::crate_root().join("src");
+    let (sites_checked, violations) = scan_production_pid_assignments(&src_root);
+
     assert!(
         sites_checked > 0,
-        "scan must find at least one `{PID_NEEDLE}` occurrence — either the \
-         needle drifted (rename?), the scan path is wrong, or all sites were \
-         refactored out (update this test)"
+        "scan must find at least one `agent.pid = Some(` occurrence — either the needle drifted (rename?), the scan path is wrong, or all sites were refactored out (update this test)"
     );
 
     assert!(
         violations.is_empty(),
-        "cas-389c invariant violated: {} production site(s) set `agent.pid` \
-         without a nearby `{STAMP_NEEDLE}` call — adding a pid without a \
-         fingerprint silently disables PID-reuse protection for that agent. \
-         Violations:\n  {}\n\n\
-         Fix: call `crate::mcp::daemon::stamp_pid_fingerprint(&mut agent, pid)` \
-         immediately after the `agent.pid = Some(pid);` line.",
+        "cas-389c invariant violated: {} production site(s) set `agent.pid` without a nearby `stamp_pid_fingerprint` call — adding a pid without a fingerprint silently disables PID-reuse protection for that agent. Violations:\n  {}\n\nFix: call `crate::mcp::daemon::stamp_pid_fingerprint(&mut agent, pid)` immediately after the `agent.pid = Some(pid);` line.",
         violations.len(),
         violations.join("\n  ")
     );

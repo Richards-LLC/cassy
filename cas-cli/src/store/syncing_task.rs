@@ -401,6 +401,34 @@ impl TaskStore for SyncingTaskStore {
         Ok(persisted_at)
     }
 
+    fn append_note(&self, task_id: &str, formatted_note: &str) -> Result<DateTime<Utc>> {
+        let _sync_guard = self
+            .queue
+            .lock_task_sync_mutations()
+            .map_err(queue_error_before_local_commit)?;
+        let previous = self.inner.get(task_id)?;
+        let previous_updated_at = previous.updated_at.to_rfc3339();
+        let intent = self.stage_upsert(
+            &previous,
+            "append_note",
+            Some(&previous_updated_at),
+            Some(&previous),
+        )?;
+        let persisted_at = match self.inner.append_note_with_mutation_receipt(
+            task_id,
+            formatted_note,
+            &intent.mutation_id,
+        ) {
+            Ok(persisted_at) => persisted_at,
+            Err(error) => {
+                self.cancel_staged_after_local_failure(&intent);
+                return Err(error);
+            }
+        };
+        self.fulfill_upsert(&intent)?;
+        Ok(persisted_at)
+    }
+
     fn delete(&self, id: &str) -> Result<()> {
         let task = self.inner.get(id)?;
         let mut dependencies = self.inner.get_dependencies(id)?;
@@ -1046,6 +1074,34 @@ mod tests {
                 .unwrap()
                 .contains("Updated title")
         );
+    }
+
+    #[test]
+    fn test_append_note_queues_the_canonical_task_once() {
+        let (temp, store) = create_test_store();
+        let queue = SyncQueue::open(temp.path()).unwrap();
+        let task = Task::new("task-note-sync".to_string(), "Task notes".to_string());
+        store.add(&task).unwrap();
+        queue.clear().unwrap();
+
+        store
+            .append_note(&task.id, "synced task note")
+            .expect("append note should commit locally and stage sync");
+
+        let pending = queue.pending(10, 5).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].entity_id, task.id);
+        assert_eq!(pending[0].operation, SyncOperation::Upsert);
+        assert_eq!(
+            pending[0]
+                .payload
+                .as_ref()
+                .unwrap()
+                .matches("synced task note")
+                .count(),
+            1
+        );
+        assert_eq!(store.get(&task.id).unwrap().notes.matches("synced task note").count(), 1);
     }
 
     #[test]

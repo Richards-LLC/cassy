@@ -566,9 +566,10 @@ pdf_page_count() {
 
 print_release_report_status() {
     local receipt="$run_dir/release-report.receipt"
-    local tag pdf_path html_path pdf_sha html_sha page_count file_permalink
+    local tag pdf_path html_path pdf_sha pdf_size html_sha page_count file_permalink
+    local remote_pdf_sha remote_pdf_size remote_pdf_pages
     local pdf_file_id html_file_id user_thread dev_thread
-    local actual_sha actual_html_sha actual_pages resolved_pdf resolved_html
+    local actual_sha actual_size actual_html_sha actual_pages resolved_pdf resolved_html
 
     if [[ ! -s "$receipt" ]]; then
         printf 'release report: pending (run `cas release report %s --pdf`, post its PDF in the User thread, and save %s)\n' \
@@ -584,9 +585,13 @@ print_release_report_status() {
     [[ -n "$html_path" ]] || html_path="docs/release-reports/v$version.html"
     pdf_sha="$(receipt_field "$receipt" PDF_SHA256)"
     [[ -n "$pdf_sha" ]] || pdf_sha="$(receipt_field "$receipt" SHA256)"
+    pdf_size="$(receipt_field "$receipt" PDF_SIZE_BYTES)"
     html_sha="$(receipt_field "$receipt" HTML_SHA256)"
     page_count="$(receipt_field "$receipt" PDF_PAGE_COUNT)"
     [[ -n "$page_count" ]] || page_count="$(receipt_field "$receipt" PAGE_COUNT)"
+    remote_pdf_sha="$(receipt_field "$receipt" PDF_REMOTE_SHA256)"
+    remote_pdf_size="$(receipt_field "$receipt" PDF_REMOTE_SIZE_BYTES)"
+    remote_pdf_pages="$(receipt_field "$receipt" PDF_REMOTE_PAGE_COUNT)"
     file_permalink="$(receipt_field "$receipt" PDF_FILE_PERMALINK)"
     [[ -n "$file_permalink" ]] || file_permalink="$(receipt_field "$receipt" FILE_PERMALINK)"
     pdf_file_id="$(receipt_field "$receipt" PDF_FILE_ID)"
@@ -598,6 +603,10 @@ print_release_report_status() {
     [[ -n "$dev_thread" ]] || dev_thread="$(receipt_field "$receipt" DEV_THREAD_ID)"
 
     if [[ "$tag" != "v$version" || ! "$pdf_sha" =~ ^[0-9a-f]{64}$ \
+        || ! "$pdf_size" =~ ^[1-9][0-9]*$ \
+        || ! "$remote_pdf_sha" =~ ^[0-9a-f]{64}$ \
+        || ! "$remote_pdf_size" =~ ^[1-9][0-9]*$ \
+        || ! "$remote_pdf_pages" =~ ^[1-9][0-9]*$ \
         || ! "$html_sha" =~ ^[0-9a-f]{64}$ \
         || ! "$page_count" =~ ^[1-9][0-9]*$ \
         || ! "$file_permalink" =~ ^https://[^[:space:]]+$ \
@@ -605,7 +614,7 @@ print_release_report_status() {
         || ! "$pdf_file_id" =~ ^[^[:space:]]+$ || ! "$html_file_id" =~ ^[^[:space:]]+$ \
         || -z "$user_thread" || -z "$dev_thread" \
         || ! "$user_thread" =~ ^[^[:space:]]+$ || ! "$dev_thread" =~ ^[^[:space:]]+$ ]]; then
-        printf 'release report: pending (receipt is incomplete; require TAG, PDF_PATH, HTML_PATH, PDF_SHA256, HTML_SHA256, PAGE_COUNT, PDF_FILE_PERMALINK, PDF_FILE_ID, HTML_FILE_ID, USER_THREAD_TS, and DEV_THREAD_TS)\n'
+        printf 'release report: pending (receipt is incomplete; require TAG, PDF_PATH, HTML_PATH, PDF_SHA256, PDF_SIZE_BYTES, PDF_REMOTE_SHA256, PDF_REMOTE_SIZE_BYTES, PDF_REMOTE_PAGE_COUNT, HTML_SHA256, PAGE_COUNT, PDF_FILE_PERMALINK, PDF_FILE_ID, HTML_FILE_ID, USER_THREAD_TS, and DEV_THREAD_TS)\n'
         return 1
     fi
 
@@ -638,12 +647,16 @@ print_release_report_status() {
     fi
 
     actual_sha="$(sha256sum "$resolved_pdf" | awk '{print $1}')"
+    actual_size="$(wc -c <"$resolved_pdf" | tr -d '[:space:]')"
     actual_html_sha="$(sha256sum "$resolved_html" | awk '{print $1}')"
     actual_pages="$(pdf_page_count "$resolved_pdf" || true)"
-    if [[ "$actual_sha" != "$pdf_sha" || "$actual_html_sha" != "$html_sha" \
+    if [[ "$actual_sha" != "$pdf_sha" || "$actual_size" != "$pdf_size" \
+        || "$remote_pdf_sha" != "$pdf_sha" || "$remote_pdf_size" != "$pdf_size" \
+        || "$remote_pdf_pages" != "$page_count" \
+        || "$actual_html_sha" != "$html_sha" \
         || "$actual_pages" != "$page_count" ]]; then
-        printf 'release report: unavailable (PDF receipt does not match bytes/pages; expected sha=%s pages=%s, got sha=%s pages=%s)\n' \
-            "$pdf_sha" "$page_count" "$actual_sha" "${actual_pages:-unknown}"
+        printf 'release report: unavailable (PDF receipt does not match local or verified remote bytes/pages; expected sha=%s size=%s pages=%s, got sha=%s size=%s pages=%s)\n' \
+            "$pdf_sha" "$pdf_size" "$page_count" "$actual_sha" "${actual_size:-unknown}" "${actual_pages:-unknown}"
         return 1
     fi
 

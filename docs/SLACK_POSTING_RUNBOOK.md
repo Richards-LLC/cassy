@@ -71,12 +71,26 @@ permalink alone never proves integrity; preserve partial receipts and stop on
 the first weak receipt rather than changing or shrinking the artifact.
 
 Save `release-report.receipt` under the release-train run directory with
-`TAG`, `PDF_PATH`, `HTML_PATH`, `PDF_SHA256`, `HTML_SHA256`, `PAGE_COUNT`,
-`PDF_FILE_PERMALINK`, `PDF_FILE_ID`, `HTML_FILE_ID`, `USER_THREAD_TS` and
-`DEV_THREAD_TS`, alongside the returned thread permalinks. The existing
-`*_THREAD_TS` adapter fields carry the returned hub parent `message_id` values;
-MechaCassy has no `ts` response field. Never mark the release announced without
-all report and publication receipts.
+`TAG`, `PDF_PATH`, `HTML_PATH`, `PDF_SHA256`, `PDF_SIZE_BYTES`,
+`PDF_REMOTE_SHA256`, `PDF_REMOTE_SIZE_BYTES`, `PDF_REMOTE_PAGE_COUNT`,
+`HTML_SHA256`, `PAGE_COUNT`, `PDF_FILE_PERMALINK`, `PDF_FILE_ID`,
+`HTML_FILE_ID`, `USER_THREAD_TS` and `DEV_THREAD_TS`, alongside the returned
+thread permalinks. The remote PDF fields are written only after the adapter
+downloads the transport-returned explicit `download_url`, or re-reads the
+uploaded file by its returned ID through authenticated `mecha_read` when the
+current hub receipt omits a download URL, and proves exact bytes plus PDF
+decode/page count. That fallback read uses an inclusive RFC3339 `since` derived
+from the User root Slack timestamp, preserving its fractional precision so old
+channel history is not scanned while replies to that root remain available. A
+local-only hash, message permalink, or successful upload response is not
+enough; if neither verified path is available, fail explicitly.
+The adapter sends hub Authorization and Vercel
+bypass headers only to the configured MCP origin (with the explicit same-origin
+loopback exception used by tests). External signed or private-provider HTTPS
+URLs receive no hub credentials, and cross-origin or scheme-changing redirects
+are rejected before following them. The existing `*_THREAD_TS` adapter fields carry the returned hub parent
+`message_id` values; MechaCassy has no `ts` response field. Never mark the
+release announced without all report and publication receipts.
 
 ## Worker handoff and one-shots
 

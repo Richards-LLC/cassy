@@ -2365,17 +2365,25 @@ fn bash_write_targets(command: &str) -> Vec<String> {
 }
 
 /// Claude Code advertises this exact per-session ephemeral root to agents:
-/// `/tmp/claude-<uid>/<project-slug>/<session-id>/scratchpad/...`.
+/// `/tmp/claude-<uid>/<project-slug>/<session-id>/scratchpad/...` (or the
+/// macOS canonical spelling `/private/tmp/...`).
 /// Bind the exemption to the hook's own session ID and reject traversal so it
 /// cannot become a general `/tmp` escape hatch.
-fn is_harness_session_scratchpad(path: &std::path::Path, session_id: &str) -> bool {
+pub(crate) fn is_harness_session_scratchpad(path: &std::path::Path, session_id: &str) -> bool {
     use std::path::Component;
 
     let mut components = path.components();
-    if components.next() != Some(Component::RootDir)
-        || components.next() != Some(Component::Normal(std::ffi::OsStr::new("tmp")))
-    {
+    if components.next() != Some(Component::RootDir) {
         return false;
+    }
+    match components.next() {
+        Some(Component::Normal(component)) if component == std::ffi::OsStr::new("tmp") => {}
+        Some(Component::Normal(component)) if component == std::ffi::OsStr::new("private") => {
+            if components.next() != Some(Component::Normal(std::ffi::OsStr::new("tmp"))) {
+                return false;
+            }
+        }
+        _ => return false,
     }
     let Some(Component::Normal(claude_user)) = components.next() else {
         return false;

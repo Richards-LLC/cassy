@@ -7,6 +7,49 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.25.7] - 2026-09-15
+
+### Fixed
+
+- Focused hosted terminal panes display the cursor at the harness-reported
+  position, with cursor visibility and shape preserved through redraw and
+  resize. Unfocused panes and modal behavior retain their intended state.
+
+## [3.25.6] - 2026-09-15
+
+### Added
+
+- `cas doctor` distinguishes intentional Codex skill twins from stale
+  Cassy-managed skills and reports scratchpad policy with ownership-safe
+  remedies.
+- Worker status validates process identity and Git roots, keeps active Codex
+  work distinct from dead sessions, and retains available exit status with a
+  bounded terminal tail.
+- Typed platform and loaded-work proof receipts are supported across
+  repositories; bounded parsing rejects ambiguous counts and contradictory or
+  failing results.
+
+### Changed
+
+- Worker launches no longer inherit protected operator credentials by default;
+  documented task/project grants remain explicit and provider authentication is
+  preserved.
+- Factory target cleanup discovers Cassy-managed epic and release directories,
+  revalidates ownership before reclamation, and leaves active, recent, or
+  uncertain user-owned targets untouched.
+
+### Fixed
+
+- Task close verification preserves delivered-content identity across
+  request-changes cycles and refuses to close while the delivery is absent from
+  its target branch.
+- Concurrent task-note appends no longer overwrite one another, and hook
+  observations remain bound to their originating harness session with visible
+  stop outcomes.
+- Release-report receipts now require verified uploaded PDF bytes, matching
+  size and SHA-256, and successful PDF decode/page-count checks; the hub-read
+  fallback is bounded from the User thread root.
+
 ## [3.25.5] - 2026-09-11
 
 ### Fixed

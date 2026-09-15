@@ -7,6 +7,14 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.25.7] - 2026-09-15
+
+### Fixed
+
+- Focused hosted terminal panes display the cursor at the harness-reported
+  position, with cursor visibility and shape preserved through redraw and
+  resize. Unfocused panes and modal behavior retain their intended state.
+
 ## [3.25.6] - 2026-09-15
 
 ### Added

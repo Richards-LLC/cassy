@@ -10793,6 +10793,43 @@ fn preferred_live_target_ref(
     }
 }
 
+/// Resolve the code anchor for an Epic's declared pre-close hook when the
+/// caller omits `commit_receipt`. Epic tasks do not have worker-owned
+/// worktrees, so their own branch is the durable delivery boundary. Prefer
+/// that branch tip when the live integration target contains it; otherwise
+/// accept the target's first-parent merge commit whose second parent is the
+/// epic tip. The latter keeps the hook executable when the target ref is the
+/// only fresh view of a just-published merge.
+fn resolve_epic_close_anchor(
+    repo_path: &std::path::Path,
+    epic_branch: &str,
+    target_branch: &str,
+) -> Option<String> {
+    if !is_safe_git_refname(epic_branch) || !is_safe_git_refname(target_branch) {
+        return None;
+    }
+    let epic_ref = preferred_diff_target_ref(repo_path, epic_branch);
+    let epic_tip = resolve_branch_sha(repo_path, &epic_ref)?;
+    let target_ref = preferred_live_target_ref(repo_path, target_branch).0;
+    if !git_ref_exists(repo_path, &target_ref) {
+        return None;
+    }
+    if git_commit_is_ancestor(repo_path, &epic_tip, &target_ref) {
+        return Some(epic_tip);
+    }
+
+    git_stdout_lines(
+        repo_path,
+        &["rev-list", "--first-parent", "--parents", &target_ref],
+    )
+    .ok()?
+    .into_iter()
+    .find_map(|line| {
+        let commits = line.split_whitespace().collect::<Vec<_>>();
+        (commits.len() >= 3 && commits[2] == epic_tip).then(|| commits[0].to_string())
+    })
+}
+
 fn render_close_diff_stat(
     repo_path: &std::path::Path,
     parent_branch: &str,
@@ -15355,6 +15392,18 @@ pub(crate) fn run_declared_pre_close_hook(
         .map(|receipt| resolve_task_commit_receipt_sha(receipt_repo, receipt))
         .transpose()
         .map_err(|error| format!("PRE-CLOSE HOOK CONTEXT REJECTED: commit_receipt {error}"))?;
+    let derived_epic_anchor = (worker_worktree_path.is_none()
+        && task.task_type == TaskType::Epic
+        && normalized_receipt.is_none())
+        .then(|| task.branch.as_deref())
+        .flatten()
+        .and_then(|epic_branch| {
+            resolve_epic_close_anchor(
+                receipt_repo,
+                epic_branch,
+                &repo_context.target_branch,
+            )
+        });
     let (execution_root, worktree_branch, task_tip, lint_parent) = match worker_worktree_path {
         Some(path) => {
             let branch = git_branch_name(path).ok_or_else(|| {
@@ -15471,6 +15520,7 @@ pub(crate) fn run_declared_pre_close_hook(
         None => {
             let tip = normalized_receipt
                 .as_deref()
+                .or(derived_epic_anchor.as_deref())
                 .or(task.deliverables.factory_branch_anchor.as_deref())
                 .ok_or_else(|| {
                     "PRE-CLOSE HOOK CONTEXT REJECTED: declared task repository resolved, but no \
@@ -15507,7 +15557,7 @@ pub(crate) fn run_declared_pre_close_hook(
                     supervisor_override,
                 ));
             }
-            let lint_parent = if normalized_receipt.is_some() {
+            let lint_parent = if normalized_receipt.is_some() || derived_epic_anchor.is_some() {
                 target_only_receipt_lint_parent(&repo_context.repo_root, tip)?
             } else {
                 live_target_ref.clone()
@@ -25404,6 +25454,75 @@ mod zero_change_close_tests {
         )
         .expect("the existing worktree-reachable receipt path must remain valid");
         assert_eq!(evidence.task_tip.as_deref(), Some(receipt.as_str()));
+    }
+
+    #[test]
+    fn cas892_epic_pre_close_derives_anchor_from_epic_branch_without_receipt() {
+        let dir = init_worker_repo();
+        let p = dir.path();
+        git(p, &["checkout", "-q", "-b", "epic/cas-892"]);
+        std::fs::write(p.join("epic-delivery.rs"), "pub fn epic_delivery() {}\n").unwrap();
+        git(p, &["add", "epic-delivery.rs"]);
+        git(p, &["commit", "-q", "-m", "feat: epic delivery"]);
+        let epic_tip = head_sha(p);
+        git(p, &["checkout", "-q", "main"]);
+        git(p, &["merge", "-q", "--ff-only", "epic/cas-892"]);
+
+        let mut task = Task::new("cas-892".to_string(), "epic close anchor".to_string());
+        task.task_type = TaskType::Epic;
+        task.branch = Some("epic/cas-892".to_string());
+        let evidence = run_declared_pre_close_hook(
+            &task,
+            &declared_main_context(p),
+            None,
+            None,
+            false,
+        )
+        .expect("an epic close must derive its merged branch tip without a receipt");
+
+        assert_eq!(evidence.task_tip.as_deref(), Some(epic_tip.as_str()));
+    }
+
+    #[test]
+    fn cas892_epic_pre_close_accepts_target_receipt_when_epic_ref_lags() {
+        let (dir, _origin) = init_worker_repo_with_origin();
+        let p = dir.path();
+        let old_epic_tip = head_sha(p);
+        git(p, &["checkout", "-q", "-b", "epic/cas-892-receipt"]);
+        std::fs::write(p.join("epic-receipt.rs"), "pub fn epic_receipt() {}\n").unwrap();
+        git(p, &["add", "epic-receipt.rs"]);
+        git(p, &["commit", "-q", "-m", "feat: epic receipt"]);
+        let epic_tip = head_sha(p);
+        git(p, &["checkout", "-q", "main"]);
+        git(
+            p,
+            &[
+                "merge",
+                "-q",
+                "--no-ff",
+                "epic/cas-892-receipt",
+                "-m",
+                "merge epic receipt",
+            ],
+        );
+        let merge_tip = head_sha(p);
+        git(p, &["push", "-q", "origin", "main"]);
+        git(p, &["branch", "-f", "epic/cas-892-receipt", &old_epic_tip]);
+
+        let mut task = Task::new("cas-892-receipt".to_string(), "epic receipt".to_string());
+        task.task_type = TaskType::Epic;
+        task.branch = Some("epic/cas-892-receipt".to_string());
+        let evidence = run_declared_pre_close_hook(
+            &task,
+            &declared_main_context(p),
+            None,
+            Some(&merge_tip),
+            false,
+        )
+        .expect("a target-reachable merge receipt must remain accepted for a lagging epic ref");
+
+        assert_eq!(evidence.task_tip.as_deref(), Some(merge_tip.as_str()));
+        assert_ne!(epic_tip, old_epic_tip);
     }
 
     #[test]

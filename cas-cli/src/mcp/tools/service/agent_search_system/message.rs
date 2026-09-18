@@ -1114,16 +1114,16 @@ impl CasService {
             use crate::prompt_revalidation::{
                 MergeRequestDecision, MergeRequestEnvelope, attach_merge_request_envelope,
                 merge_landed_guidance, merge_request_anchor_advanced_note,
-                revalidate_merge_request, select_unambiguous_merge_task,
+                merge_request_request_changes_guidance, revalidate_merge_request,
+                select_merge_request_task,
             };
             use crate::store::open_task_store_local;
-            use cas_types::TaskStatus;
 
             let merge_task = open_task_store_local(&self.inner.cas_root)
                 .ok()
                 .and_then(|store| {
-                    let parked = store.list(Some(TaskStatus::AwaitingMerge)).ok()?;
-                    select_unambiguous_merge_task(&parked, &display_name, req.task_id.as_deref())
+                    let tasks = store.list(None).ok()?;
+                    select_merge_request_task(&tasks, &display_name, req.task_id.as_deref())
                         .cloned()
                 });
 
@@ -1188,6 +1188,19 @@ impl CasService {
                         recorded_anchor.as_deref(),
                     )
                 {
+                    if task.status != cas_types::TaskStatus::AwaitingMerge
+                        && task
+                            .deliverables
+                            .historical_factory_branch_anchors
+                            .iter()
+                            .any(|anchor| anchor == &branch_tip)
+                    {
+                        return Ok(Self::success(merge_request_request_changes_guidance(
+                            &task.id,
+                            &branch_tip,
+                            task.status,
+                        )));
+                    }
                     match revalidate_merge_request(
                         &repo.repo_root,
                         &branch_tip,

@@ -2825,10 +2825,11 @@ impl CasCore {
         // worker; re-fetch and inspect the live branch immediately before
         // creating the immutable delivery boundary so a straggler commit
         // cannot hide behind an earlier receipt or parked anchor.
-        if let Err(message) = validate_current_factory_branch_tip_ancestry(
+        if let Err(message) = validate_current_factory_branch_tip_ancestry_with_delivery_mode(
             &context.repo_root,
             &input.source_branch,
             &input.target_branch,
+            task.delivery_mode,
         ) {
             return Ok(Self::tool_error(format!(
                 "DELIVERY RECEIPT REJECTED: task {} cannot accept a completion receipt until the current source tip is merged.\n\n{message}",
@@ -5757,10 +5758,11 @@ impl CasCore {
         {
             if let Some(assignee) = task.assignee.as_deref() {
                 // cas-7efe: single close-time resolver, not a bare "main".
-                match check_factory_branch_merge_reality(
+                match check_factory_branch_merge_reality_with_delivery_mode(
                     &close_project_root,
                     assignee,
                     &resolved_parent_branch,
+                    task.delivery_mode,
                 ) {
                     MergeRealityOutcome::Proceed => {}
                     MergeRealityOutcome::Refuse(msg) => {
@@ -8394,14 +8396,28 @@ fn delivery_content_anchor_at_close<'a>(
 /// branch tip must itself be reachable from the current target.
 ///
 /// `fetch_parent_branch_best_effort` refreshes `origin/<parent_branch>` before
-/// the target ref is selected. When that remote-tracking ref exists it is the
-/// authoritative target view; local-only repositories retain their local
-/// target behavior. Missing or unresolvable Git state fails closed because a
-/// delivery transition must never be based on a cached anchor alone.
+/// the target ref is selected. Push-branch delivery uses that remote-tracking
+/// ref when it exists; local_merge deliberately uses the checked-out target
+/// branch as its authority. Missing or unresolvable Git state fails closed
+/// because a delivery transition must never be based on a cached anchor alone.
 pub(crate) fn validate_current_factory_branch_tip_ancestry(
     repo_path: &std::path::Path,
     factory_branch: &str,
     parent_branch: &str,
+) -> Result<String, String> {
+    validate_current_factory_branch_tip_ancestry_with_delivery_mode(
+        repo_path,
+        factory_branch,
+        parent_branch,
+        cas_types::DeliveryMode::PushBranch,
+    )
+}
+
+pub(crate) fn validate_current_factory_branch_tip_ancestry_with_delivery_mode(
+    repo_path: &std::path::Path,
+    factory_branch: &str,
+    parent_branch: &str,
+    delivery_mode: cas_types::DeliveryMode,
 ) -> Result<String, String> {
     if !is_safe_git_refname(factory_branch) || !is_safe_git_refname(parent_branch) {
         return Err(format!(
@@ -8415,7 +8431,8 @@ pub(crate) fn validate_current_factory_branch_tip_ancestry(
             "current factory branch tip {factory_branch} could not be resolved after the target fetch (fetch_attempted={fetch_attempted})."
         )
     })?;
-    let target_ref = preferred_diff_target_ref(repo_path, parent_branch);
+    let target_ref =
+        preferred_diff_target_ref_for_delivery(repo_path, parent_branch, delivery_mode);
     let target_tip = resolve_branch_sha(repo_path, &target_ref).ok_or_else(|| {
         format!(
             "current integration target {target_ref} could not be resolved after the target fetch (fetch_attempted={fetch_attempted})."
@@ -8585,6 +8602,7 @@ pub(crate) fn run_factory_branch_merge_gate_with_attribution(
         _ => None,
     };
     let commit_ish = trusted_anchor.unwrap_or(factory_branch.as_str());
+    let local_merge = task.delivery_mode == cas_types::DeliveryMode::LocalMerge;
     let origin_parent_branch = format!("origin/{parent_branch}");
     let mut origin_fetch_attempted = false;
     let mut stranded = count_unmerged_factory_commits(repo_path, commit_ish, parent_branch);
@@ -8596,7 +8614,8 @@ pub(crate) fn run_factory_branch_merge_gate_with_attribution(
         // and close successfully while origin/main remains untouched.
         origin_fetch_attempted = fetch_parent_branch_best_effort(repo_path, parent_branch);
         let local_epic_merge = parent_branch.starts_with("epic/");
-        let origin_required = !local_epic_merge && origin_remote_configured(repo_path);
+        let origin_required =
+            !local_merge && !local_epic_merge && origin_remote_configured(repo_path);
         let origin_proves_delivery = git_ref_exists(repo_path, &origin_parent_branch)
             && matches!(
                 known_unmerged_factory_commits(repo_path, commit_ish, &origin_parent_branch),
@@ -8675,10 +8694,11 @@ pub(crate) fn run_factory_branch_merge_gate_with_attribution(
     // origin Git state masquerade as integration. Missing origin ref
     // simply skips this block (no rescue); KnownPositive and Unknown
     // fall through to Reject.
-    if !origin_fetch_attempted {
+    if !local_merge && !origin_fetch_attempted {
         origin_fetch_attempted = fetch_parent_branch_best_effort(repo_path, parent_branch);
     }
-    if git_ref_exists(repo_path, &origin_parent_branch)
+    if !local_merge
+        && git_ref_exists(repo_path, &origin_parent_branch)
         && matches!(
             known_unmerged_factory_commits(repo_path, commit_ish, &origin_parent_branch),
             KnownUnmergedCount::KnownZero
@@ -8715,7 +8735,7 @@ pub(crate) fn run_factory_branch_merge_gate_with_attribution(
     // this branch's stranded work. Unknowable git state keeps the local
     // measurement (fail closed), and a partially-merged branch now reports the
     // real remainder instead of stale-base arithmetic.
-    let remote_aware_stranded = if local_only_trunk_target {
+    let remote_aware_stranded = if local_merge || local_only_trunk_target {
         None
     } else {
         count_unmerged_against_targets(repo_path, commit_ish, parent_branch)
@@ -8759,19 +8779,22 @@ pub(crate) fn run_factory_branch_merge_gate_with_attribution(
         if commit_tip_tree_reachable_from(repo_path, commit_ish, parent_branch) {
             return MergeStateGateOutcome::Proceed;
         }
-        if git_ref_exists(repo_path, &origin_parent_branch)
+        if !local_merge
+            && git_ref_exists(repo_path, &origin_parent_branch)
             && commit_tip_tree_reachable_from(repo_path, commit_ish, &origin_parent_branch)
         {
             return MergeStateGateOutcome::Proceed;
         }
 
         // cas-2938 P0 / cas-5485: live factory tip KnownZero after rewrite.
-        if live_factory_tip_known_fully_merged(
-            repo_path,
-            factory_branch.as_str(),
-            parent_branch,
-            &origin_parent_branch,
-        ) {
+        if !local_merge
+            && live_factory_tip_known_fully_merged(
+                repo_path,
+                factory_branch.as_str(),
+                parent_branch,
+                &origin_parent_branch,
+            )
+        {
             return MergeStateGateOutcome::Proceed;
         }
 
@@ -8781,7 +8804,8 @@ pub(crate) fn run_factory_branch_merge_gate_with_attribution(
         if commit_patches_cherry_equivalent_on_parent(repo_path, commit_ish, parent_branch) {
             return MergeStateGateOutcome::Proceed;
         }
-        if git_ref_exists(repo_path, &origin_parent_branch)
+        if !local_merge
+            && git_ref_exists(repo_path, &origin_parent_branch)
             && commit_patches_cherry_equivalent_on_parent(
                 repo_path,
                 commit_ish,
@@ -9772,6 +9796,20 @@ pub(crate) fn check_factory_branch_merge_reality(
     assignee: &str,
     parent_branch: &str,
 ) -> MergeRealityOutcome {
+    check_factory_branch_merge_reality_with_delivery_mode(
+        repo_path,
+        assignee,
+        parent_branch,
+        cas_types::DeliveryMode::PushBranch,
+    )
+}
+
+pub(crate) fn check_factory_branch_merge_reality_with_delivery_mode(
+    repo_path: &std::path::Path,
+    assignee: &str,
+    parent_branch: &str,
+    delivery_mode: cas_types::DeliveryMode,
+) -> MergeRealityOutcome {
     let factory_branch = format!("factory/{assignee}");
 
     // Branch absent locally → push+merge+prune path; treat as merged.
@@ -9782,6 +9820,16 @@ pub(crate) fn check_factory_branch_merge_reality(
     // ≥1 unmerged commits: cas-95ce (run earlier in the pipeline) already
     // blocks this case. Return Proceed so B2 doesn't double-reject.
     if count_unmerged_factory_commits(repo_path, &factory_branch, parent_branch) > 0 {
+        return MergeRealityOutcome::Proceed;
+    }
+
+    // local_merge has no publication step by design. A locally reachable
+    // factory tip on the local integration target is positive delivery proof;
+    // requiring origin/factory/<worker> here would reject every valid local
+    // supervisor merge after the ordinary merge-state gate already passed.
+    if delivery_mode == cas_types::DeliveryMode::LocalMerge
+        && git_commit_is_ancestor(repo_path, &factory_branch, parent_branch)
+    {
         return MergeRealityOutcome::Proceed;
     }
 
@@ -10733,6 +10781,18 @@ fn preferred_diff_target_ref(repo_path: &std::path::Path, parent_branch: &str) -
     }
 }
 
+fn preferred_diff_target_ref_for_delivery(
+    repo_path: &std::path::Path,
+    parent_branch: &str,
+    delivery_mode: cas_types::DeliveryMode,
+) -> String {
+    if delivery_mode == cas_types::DeliveryMode::LocalMerge {
+        parent_branch.to_string()
+    } else {
+        preferred_diff_target_ref(repo_path, parent_branch)
+    }
+}
+
 /// Resolve the live target ref used by the pre-close context gate.
 ///
 /// A worker checkout's local target branch can be stale after a supervisor
@@ -10748,6 +10808,18 @@ fn preferred_live_target_ref(
         (origin_parent, "origin")
     } else {
         (parent_branch.to_string(), "local")
+    }
+}
+
+fn preferred_live_target_ref_for_delivery(
+    repo_path: &std::path::Path,
+    parent_branch: &str,
+    delivery_mode: cas_types::DeliveryMode,
+) -> (String, &'static str) {
+    if delivery_mode == cas_types::DeliveryMode::LocalMerge {
+        (parent_branch.to_string(), "local_merge")
+    } else {
+        preferred_live_target_ref(repo_path, parent_branch)
     }
 }
 
@@ -15344,8 +15416,11 @@ pub(crate) fn run_declared_pre_close_hook(
     // remain behind a supervisor merge, while origin/<target_branch> carries
     // the live delivery. The resolver below then prefers origin/ when present.
     fetch_parent_branch_best_effort(receipt_repo, &repo_context.target_branch);
-    let (live_target_ref, live_target_source) =
-        preferred_live_target_ref(receipt_repo, &repo_context.target_branch);
+    let (live_target_ref, live_target_source) = preferred_live_target_ref_for_delivery(
+        receipt_repo,
+        &repo_context.target_branch,
+        task.delivery_mode,
+    );
     let normalized_receipt = commit_receipt
         .map(|receipt| resolve_task_commit_receipt_sha(receipt_repo, receipt))
         .transpose()
@@ -25284,6 +25359,42 @@ mod zero_change_close_tests {
         }
     }
 
+    /// GH #887: local_merge uses the local target checkout as its authority.
+    /// A stale remote-tracking ref must not turn a locally merged parked
+    /// anchor into a pre-close reachability failure.
+    #[test]
+    fn local_merge_pre_close_uses_local_target_for_parked_anchor_gh_887() {
+        let dir = init_worker_repo();
+        let p = dir.path();
+        let base = head_sha(p);
+        std::fs::write(p.join("local-merge.rs"), "pub fn local_merge() {}\n").unwrap();
+        git(p, &["add", "local-merge.rs"]);
+        git(p, &["commit", "-q", "-m", "local merge delivery"]);
+        let anchor = head_sha(p);
+        git(p, &["checkout", "-q", "main"]);
+        git(
+            p,
+            &["merge", "--no-ff", "-q", "factory/test-worker", "-m", "supervisor local merge"],
+        );
+        // A local_merge session does not publish to origin, but a stale
+        // remote-tracking ref can still exist in a shared clone.
+        git(p, &["update-ref", "refs/remotes/origin/main", &base]);
+
+        let mut task = Task::new("cas-887-local-preclose".to_string(), "local merge".to_string());
+        task.status = TaskStatus::AwaitingMerge;
+        task.delivery_mode = cas_types::DeliveryMode::LocalMerge;
+        task.deliverables.factory_branch_anchor = Some(anchor.clone());
+        let evidence = run_declared_pre_close_hook(
+            &task,
+            &declared_main_context(p),
+            None,
+            None,
+            false,
+        )
+        .expect("local target merge must satisfy the local_merge pre-close hook");
+        assert_eq!(evidence.task_tip.as_deref(), Some(anchor.as_str()));
+    }
+
     #[test]
     fn cas92da_pre_close_accepts_receipt_reachable_only_from_fresh_target() {
         let (dir, origin) = init_worker_repo_with_origin();
@@ -27419,6 +27530,36 @@ mod merge_reality_tests {
         assert!(
             matches!(outcome, MergeRealityOutcome::Proceed),
             "when remote tracking ref exists, branch was pushed — must PROCEED"
+        );
+    }
+
+    /// GH #887: local_merge deliberately keeps the factory branch local. Once
+    /// the supervisor merges it into the local target, the absence of an
+    /// origin/factory ref is not evidence that the worker committed to the
+    /// wrong branch.
+    #[test]
+    fn local_merge_branch_merged_without_remote_ref_proceeds_gh_887() {
+        let dir = init_repo_worker_branch_with_commit();
+        let p = dir.path();
+        let base = git_output(p, &["rev-parse", "main"]);
+        git(p, &["checkout", "-q", "main"]);
+        git(
+            p,
+            &["merge", "--no-ff", "-q", "factory/test-worker", "-m", "local merge"],
+        );
+        // Even if a stale remote-tracking target exists, local_merge must
+        // judge the supervisor's checked-out target rather than origin/main.
+        git(p, &["update-ref", "refs/remotes/origin/main", &base]);
+
+        let outcome = check_factory_branch_merge_reality_with_delivery_mode(
+            p,
+            "test-worker",
+            "main",
+            cas_types::DeliveryMode::LocalMerge,
+        );
+        assert!(
+            matches!(outcome, MergeRealityOutcome::Proceed),
+            "a locally merged local_merge lane must not require remote push evidence: {outcome:?}"
         );
     }
 

@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Option A · Ledger — the conversation as a ruled timeline</title>
+<link rel="stylesheet" href="../../../../hub-web/src/tokens.css">
+<link rel="stylesheet" href="shared.css">
+<style>
+
+  /* Mockup for cas-c3c5. Hub tokens come from hub-web/src/tokens.css; the two additions the
+     proposal needs are declared here and mapped to the house tokens (design-tokens.json). */
+  :root { --surface-hero: #F1E7DD; --tint-ok: rgba(34,104,69,0.10); }
+  .shell { display: grid; grid-template-columns: 320px minmax(0,1fr) 240px; min-height: 100vh; }
+  .shell.pane-open { grid-template-columns: 320px minmax(0,1fr) 420px; }
+  .shell.pane-open .rail { display: none; }
+  .shell.pane-open .pane { display: block; }
+  .sidebar { background: var(--bg-panel); border-right: var(--line-width) solid var(--line-subtle); padding: var(--space-6); }
+  .sidebar h1 { font: var(--weight-regular) 34px/38px var(--font-display); margin: var(--space-6) 0 var(--space-4); }
+  .row { padding: var(--space-4) 0; border-top: var(--line-width) solid var(--line-subtle); display: grid; gap: var(--space-1); }
+  .row.current { border-left: var(--rule-hero) solid var(--color-verdict); padding-left: var(--space-3); margin-left: calc(-1 * var(--space-3)); }
+  .rail { border-left: var(--line-width) solid var(--line-subtle); padding: var(--space-6); font-size: var(--fs-base); }
+  .rail h2 { font: var(--weight-medium) var(--fs-base)/var(--line-ui) var(--font-ui); margin: var(--space-6) 0 var(--space-2); }
+  .rail .brand { font-size: var(--fs-base); } .rail .brand svg { width: 24px; height: 24px; }
+  main { display: flex; flex-direction: column; min-width: 0; }
+  .heading { padding: var(--space-4) var(--space-6); border-bottom: var(--line-width) solid var(--line-subtle); background: var(--bg-panel); display: grid; gap: var(--space-2); }
+  .topline { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); }
+  .identity { display: flex; align-items: center; gap: var(--space-3); font: var(--weight-medium) var(--fs-md)/1.4 var(--font-mono); }
+  .reading { padding: var(--space-6); }
+  .flow { max-width: 74ch; margin: 0 auto; display: grid; grid-template-columns: 64px minmax(0,1fr); column-gap: var(--space-4); row-gap: var(--space-6); }
+  .t { font: var(--weight-regular) var(--fs-meta)/22px var(--font-mono); color: var(--text-mid); text-align: right; padding-top: 2px; }
+  .t small { display: block; font-size: 11px; color: var(--text-mid); }
+  /* YOU — unchanged from today's from-you turn */
+  .you { margin-left: var(--space-8); background: var(--bg-active); color: var(--text-hi); border-left: var(--state-rule-width) solid var(--color-action); border-radius: var(--radius-pane); padding: var(--space-3) var(--space-4); }
+  /* RECEIPT — verdict line + ledger */
+  .receipt { border-left: var(--state-rule-width) solid var(--line-strong); padding-left: var(--space-4); }
+  /* STATUS — coalesced hairline row, never a block */
+  .status { display: flex; gap: var(--space-2); align-items: baseline; flex-wrap: wrap; padding: var(--space-2) 0; border-top: var(--line-width) solid var(--line-subtle); border-bottom: var(--line-width) solid var(--line-subtle); color: var(--text-mid); font-size: var(--fs-base); }
+  /* BLOCKER — danger tint, labelled */
+  .blocker { background: var(--tint-crit); color: var(--text-hi); border-left: var(--state-rule-width) solid var(--state-crit); border-radius: 0 var(--radius-card) var(--radius-card) 0; padding: var(--space-3) var(--space-4); }
+  /* ASK — the one verdict-marked element; sandstone; pinned while unanswered */
+  .ask { background: var(--surface-hero); color: var(--text-hi); border-left: var(--rule-hero) solid var(--color-verdict); border-radius: 0 var(--radius-pane) var(--radius-pane) 0; padding: var(--space-4) var(--space-4) var(--space-3); }
+  /* EVIDENCE — a table that scrolls in its own box */
+  .evidence .scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  /* WORKING — the live line, not a message */
+  .working { display: grid; grid-template-columns: auto minmax(0,1fr) auto; gap: var(--space-2); align-items: center; margin: var(--space-4) auto 0; max-width: 74ch; padding: var(--space-2) 0; color: var(--text-mid); font: var(--weight-regular) var(--fs-meta)/18px var(--font-mono); border-top: var(--line-width) solid var(--line-strong); }
+  .composer { margin-top: auto; }
+  /* PANE — the escape hatch, opened beside the thread on desktop */
+  .pane { display: none; background: var(--bg-terminal); color: #E9E6E0; font: var(--weight-regular) var(--fs-terminal)/var(--line-terminal) var(--font-mono); padding: var(--space-4); overflow: hidden; }
+  .sheet { display: none; }
+  @media (max-width: 53rem) {
+    .shell, .shell.pane-open { display: block; }
+    .sidebar, .rail, .pane { display: none; }
+    .heading { padding: var(--space-3) var(--space-4); }
+    .heading .brand { font-size: var(--fs-base); } .heading .brand svg { width: 24px; height: 24px; }
+    .reading { padding: var(--space-4); }
+    .flow { grid-template-columns: minmax(0,1fr); row-gap: var(--space-4); }
+    .t { display: none; }
+    .kind .stamp { display: inline; }
+    body.show-sheet .sheet { display: block; position: fixed; inset: 0; background: var(--bg-root); color: var(--text-hi); padding: var(--space-4); overflow: auto; z-index: 2; }
+    .sheet .topline { margin-bottom: var(--space-3); }
+    .sheet .ledger thead { position: absolute; left: -9999px; }
+    .sheet .ledger tbody, .sheet .ledger tr { display: block; }
+    .sheet .ledger tr { border-top: var(--line-width) solid var(--line-strong); padding: var(--space-2) 0; }
+    .sheet .ledger td { display: grid; grid-template-columns: 8ch minmax(0,1fr); gap: var(--space-2); border: 0; padding: 2px 0; text-align: left; }
+    .sheet .ledger td::before { content: attr(data-k); font: var(--weight-semibold) var(--fs-xs)/22px var(--font-mono); letter-spacing: var(--tracking-label); text-transform: uppercase; color: var(--text-mid); }
+    .sheet .ledger tr.decisive td { background: transparent; box-shadow: none; }
+    .sheet .ledger tr.decisive { background: var(--bg-active); box-shadow: inset var(--state-rule-width) 0 0 var(--color-verdict); padding-left: var(--space-2); }
+  }
+  @media (min-width: 53.01rem) { .kind .stamp { display: none; } }
+</style>
+</head>
+<body>
+<div class="shell" id="shell">
+  <aside class="sidebar" aria-label="Conversations">
+    <div class="brand"><svg viewBox="0 0 32 32" aria-hidden="true"><path d="M16 4a12 12 0 1 0 0 24 12 12 0 0 0 0-24zm0 4a8 8 0 1 1 0 16 8 8 0 0 1 0-16z" fill="currentColor"/></svg>Cassy Cloud</div>
+    <h1>Conversations</h1>
+    <div class="row current"><span class="badge">cas-src</span><span class="mono">patient-pelican-9</span><span class="mid">Atlas · Linux · Live</span><span class="warnline">● 1 waiting on you · 4 min</span><span class="mid">Last message 09:58</span></div>
+    <div class="row"><span class="badge">gabber-studio</span><span class="mono">calm-otter-4</span><span class="mid">Studio Mac · macOS · Live</span><span class="mid">Working · testing · last message 09:31</span></div>
+  </aside>
+  <main>
+    <header class="heading">
+      <div class="topline"><button type="button">‹ Conversations</button><div class="brand"><svg viewBox="0 0 32 32" aria-hidden="true"><path d="M16 4a12 12 0 1 0 0 24 12 12 0 0 0 0-24zm0 4a8 8 0 1 1 0 16 8 8 0 0 1 0-16z" fill="currentColor"/></svg>Cassy Cloud</div><button type="button" id="pane-toggle">Pane ▸</button></div>
+      <div class="identity"><span class="badge">cas-src</span><span>patient-pelican-9</span></div>
+      <div class="mid">Atlas · Linux · 3.26.0 train</div>
+    </header>
+    <section class="reading" aria-label="Conversation">
+      <div class="flow">
+        <div class="t">09:41</div>
+        <article class="turn you"><div class="kind"><span class="who">You</span><span class="stamp">09:41</span><span class="anchor">delivered</span></div><p>Merge the two green lanes, then cut 3.26.0 once the gate is green.</p></article>
+
+        <div class="t">09:41<small>+20 s</small></div>
+        <article class="turn answer"><div class="kind"><span class="who">patient-pelican-9</span><span>Answer</span><span class="stamp">09:41</span><span class="anchor">↩ your 09:41</span></div><p>Merging now. Both lanes are green on their own CI; the release gate starts after the second merge lands.</p></article>
+
+        <div class="t">09:47</div>
+        <article class="turn receipt stack"><div class="kind"><span class="who">patient-pelican-9</span><span>Receipt</span><span class="stamp">09:47</span></div>
+          <p class="verdict">Both lanes are on the epic branch; the release gate is running.</p>
+          <table class="ledger"><caption>Merge receipt · two lanes into epic/one-command-release</caption>
+            <thead><tr><th scope="col">Lane</th><th scope="col">PR</th><th scope="col">Tip</th><th scope="col">Landed</th></tr></thead>
+            <tbody>
+              <tr><td data-k="lane">calm-stork-91</td><td data-k="pr">#907</td><td data-k="tip">c0e2c7b5</td><td data-k="landed" class="num">09:45</td></tr>
+              <tr><td data-k="lane">gentle-hound-12</td><td data-k="pr">#908</td><td data-k="tip">23c65d63</td><td data-k="landed" class="num">09:46</td></tr>
+              <tr class="decisive"><td data-k="lane">release gate</td><td data-k="pr">run 33512</td><td data-k="tip">f9f8e60f</td><td data-k="landed" class="num">running</td></tr>
+            </tbody></table>
+          <div class="source">receipt · coordination message 09:47:12 · pane line 1 482 ▸</div>
+        </article>
+
+        <div class="t">09:48<small>–09:55</small></div>
+        <div class="turn status"><span class="disc">▸ 3 statuses</span><span>latest 09:55 · gate: tests running, 11 of 14 targets green</span></div>
+
+        <div class="t">09:56</div>
+        <article class="turn you"><div class="kind"><span class="who">You</span><span class="stamp">09:56</span><span class="anchor">delivered</span></div><p>Did the tokens drift test move?</p></article>
+
+        <div class="t">09:56<small>+40 s</small></div>
+        <article class="turn answer"><div class="kind"><span class="who">patient-pelican-9</span><span>Answer</span><span class="stamp">09:57</span><span class="anchor">↩ your 09:56</span></div><p>No. <code>tokens.test.ts</code> is unchanged since 3.25.3. The gate's only new failure is one Clippy warning, below.</p></article>
+
+        <div class="t">09:58</div>
+        <article class="turn blocker"><div class="kind"><span>■ Blocker</span><span class="stamp">09:58</span></div><p>Gate run 33512 failed: <code>needless_borrow</code> at <code>cas-cli/src/hub/attention.rs:212</code>. The train is held; nothing was tagged or pushed to main.</p></article>
+
+        <div class="t">09:58<small>4 min</small></div>
+        <article class="turn ask" id="ask"><div class="kind"><span>Waiting on you</span><span class="stamp">09:58 · 4 min</span></div>
+          <p class="q">Fix the warning in-train (one worker, about ten minutes) or ship 3.26.0 with it allowlisted?</p>
+          <div class="quick"><button type="button">Fix in-train</button><button type="button">Ship with allowlist</button><button type="button">Show me the pane</button></div>
+        </article>
+      </div>
+      <div class="working"><span class="dot" aria-hidden="true"></span><span>Working · holding the train, watching run 33512 · 2 min ago</span><a href="#pane">Pane ▸</a></div>
+    </section>
+    <form class="composer" onsubmit="return false">
+      <div class="replying">Replying to · fix in-train or ship with allowlist?</div>
+      <textarea aria-label="Your message" placeholder="Write to patient-pelican-9…"></textarea>
+      <div class="actions"><span class="btn primary">Send to patient-pelican-9</span></div>
+    </form>
+  </main>
+  <aside class="rail" aria-label="Context">
+    <div class="brand"><svg viewBox="0 0 32 32" aria-hidden="true"><path d="M16 4a12 12 0 1 0 0 24 12 12 0 0 0 0-24zm0 4a8 8 0 1 1 0 16 8 8 0 0 1 0-16z" fill="currentColor"/></svg>Cassy Cloud</div>
+    <h2>In this conversation</h2><span class="badge">cas-src</span><div class="mono" style="margin-top:8px">patient-pelican-9</div><div class="mid">Atlas · Linux</div>
+    <h2>Waiting on you</h2><div class="warnline">1 ask · 4 min</div><div class="mid">Fix in-train or allowlist?</div>
+    <h2>Since you last looked</h2><div class="mid">2 receipts · 1 blocker · 3 statuses</div>
+    <h2>Pane</h2><div class="mid">Live · 1 512 lines · <a href="#pane" style="color:var(--color-action)">open</a></div>
+  </aside>
+  <aside class="pane" id="pane" aria-label="Supervisor pane">
+    <div class="pane-head"><span>pane · patient-pelican-9</span><span>at 09:47:12 · line 1 482</span></div>
+<pre><span class="dim">⏺ Bash(gh pr merge 908 --merge)</span>
+<span class="dim">  ⎿  ✓ Merged pull request #908</span>
+<span class="dim">⏺ mcp__cas__coordination(remind…)</span>
+<span class="dim">  ⎿  Reminder 214 set (600 s)</span>
+<span class="mark">⏺ Both lanes are on the epic branch; the release
+  gate is running. PR #907 c0e2c7b5 09:45 · PR #908
+  23c65d63 09:46 · gate run 33512 started 09:47.</span>
+<span class="dim">⏺ Bash(gh run watch 33512 --exit-status)</span>
+<span class="dim">  ⎿  ★ Build · 2m14s … (32 lines)</span>
+<span class="dim">Message from gentle-hound-12: status: ready …</span>
+<span class="dim">⏺ mcp__cas__task(notes …)</span>
+<span class="dim">  ⎿  Note added to cas-d1d0</span>
+<span class="dim">⏺ Bash(gh run view 33512 --log-failed)</span>
+<span class="dim">  ⎿  warning: this expression creates a reference …</span>
+<span class="dim">     --> cas-cli/src/hub/attention.rs:212:9</span></pre>
+  </aside>
+</div>
+<div class="sheet stack" id="sheet" aria-label="Evidence, full width">
+  <div class="topline"><button type="button">‹ Back</button><span class="meta">evidence · 09:47</span></div>
+  <p class="verdict">Worker status at 09:47 — five lanes, two green, one held.</p>
+  <table class="ledger"><caption>Worker status · 5 rows</caption>
+    <thead><tr><th scope="col">Worker</th><th scope="col">Task</th><th scope="col">Phase</th><th scope="col">Tip</th><th scope="col">CI</th></tr></thead>
+    <tbody>
+      <tr><td data-k="worker">calm-stork-91</td><td data-k="task">cas-c3c5 design study</td><td data-k="phase">awaiting merge</td><td data-k="tip">c0e2c7b5</td><td data-k="ci"><span class="ok">● green</span></td></tr>
+      <tr><td data-k="worker">gentle-hound-12</td><td data-k="task">cas-d1d0 release notes</td><td data-k="phase">merged</td><td data-k="tip">23c65d63</td><td data-k="ci"><span class="ok">● green</span></td></tr>
+      <tr class="decisive"><td data-k="worker">bright-otter-3</td><td data-k="task">cas-b29f gate</td><td data-k="phase">held</td><td data-k="tip">f9f8e60f</td><td data-k="ci"><span class="crit">■ failed</span></td></tr>
+      <tr><td data-k="worker">quiet-marten-7</td><td data-k="task">cas-e0e2 hub polish</td><td data-k="phase">testing</td><td data-k="tip">aedd9a1a</td><td data-k="ci"><span class="mid">○ running</span></td></tr>
+      <tr><td data-k="worker">zen-otter-40</td><td data-k="task">idle</td><td data-k="phase">idle</td><td data-k="tip">—</td><td data-k="ci"><span class="mid">—</span></td></tr>
+    </tbody></table>
+</div>
+<script>
+  // State switches for rendering; the mock has no behaviour of its own.
+  const q = new URLSearchParams(location.search);
+  if (q.get('state') === 'evidence') {
+    document.getElementById('shell').classList.add('pane-open');
+    const ev = document.createElement('article');
+    ev.className = 'turn evidence';
+    ev.innerHTML = '<div class="kind"><span class="who">patient-pelican-9</span><span>Evidence</span><span class="stamp">09:47</span></div>' +
+      '<p class="verdict">Worker status at 09:47 — five lanes, two green, one held.</p>' +
+      '<div class="scroll">' + document.querySelector('#sheet table').outerHTML + '</div>' +
+      '<div class="source">worker_status · 09:47:20 · <a href="#sheet" style="color:var(--color-action)">open full width ▸</a></div>';
+    const flow = document.querySelector('.flow');
+    const t = document.createElement('div'); t.className = 't'; t.textContent = '09:47';
+    const anchor = flow.children[6]; // before the status row
+    flow.insertBefore(t, anchor); flow.insertBefore(ev, anchor);
+    if (q.get('vp') === 'phone') document.body.classList.add('show-sheet');
+  }
+</script>
+</body>
+</html>

@@ -1,0 +1,164 @@
+[
+  {
+    "id": "01",
+    "slug": "imessage",
+    "title": "Apple Messages",
+    "category": "consumer",
+    "url": "https://support.apple.com/guide/messages/welcome/mac",
+    "mode": "element",
+    "selector": "img[alt^='The Messages window with several conversations listed in the sidebar on the left']",
+    "scrollTo": "img[alt^='The Messages window with several conversations listed in the sidebar on the left']",
+    "delay": 2500
+  },
+  {
+    "id": "02",
+    "slug": "whatsapp",
+    "title": "WhatsApp",
+    "category": "consumer",
+    "url": "https://www.whatsapp.com/",
+    "mode": "element",
+    "selector": "img[alt^='screenshot of whatsapp feature group conversation']",
+    "scrollTo": "img[alt^='screenshot of whatsapp feature group conversation']",
+    "delay": 2500
+  },
+  {
+    "id": "03",
+    "slug": "signal",
+    "title": "Signal (Android chat, signal.org hero)",
+    "category": "consumer",
+    "url": "https://signal.org/",
+    "mode": "element",
+    "selector": "img.screenshot2",
+    "scrollTo": "img.screenshot2",
+    "delay": 2500
+  },
+  {
+    "id": "04",
+    "slug": "telegram",
+    "title": "Telegram",
+    "category": "consumer",
+    "url": "https://t.me/s/telegram",
+    "mode": "page",
+    "viewport": {
+      "width": 1280,
+      "height": 800
+    },
+    "delay": 2500
+  },
+  {
+    "id": "05",
+    "slug": "slack",
+    "title": "Slack",
+    "category": "team",
+    "url": "https://slack.com/features/channels",
+    "mode": "element",
+    "selector": "img[alt='A simplified example of what channels look like in Slack.']",
+    "scrollTo": "img[alt='A simplified example of what channels look like in Slack.']",
+    "delay": 2500,
+    "dismiss": [
+      "#onetrust-accept-btn-handler"
+    ]
+  },
+  {
+    "id": "06",
+    "slug": "discord",
+    "title": "Discord thread (support article)",
+    "category": "team",
+    "url": "https://support.discord.com/hc/en-us/articles/4403205878423-Threads-FAQ",
+    "mode": "element",
+    "selector": "img[src*='lh7-rt.googleusercontent.com']",
+    "scrollTo": "img[src*='lh7-rt.googleusercontent.com']",
+    "delay": 2500,
+    "dismiss": [
+      "#onetrust-accept-btn-handler"
+    ]
+  },
+  {
+    "id": "07",
+    "slug": "linear-inbox",
+    "title": "Linear Inbox",
+    "category": "team",
+    "url": "https://linear.app/docs/inbox",
+    "mode": "element",
+    "selector": "img[alt^='Linear Inbox in dark mode']",
+    "scrollTo": "img[alt^='Linear Inbox in dark mode']",
+    "delay": 2500
+  },
+  {
+    "id": "08",
+    "slug": "height",
+    "title": "Height task chat (TechRepublic review)",
+    "category": "team",
+    "url": "https://www.techrepublic.com/article/height-app-review/",
+    "mode": "element",
+    "selector": "img[alt='Height Copilot AI chat feature.']",
+    "scrollTo": "img[alt='Height Copilot AI chat feature.']",
+    "delay": 3000,
+    "dismiss": [
+      "#onetrust-accept-btn-handler"
+    ]
+  },
+  {
+    "id": "09",
+    "slug": "claude",
+    "title": "Claude.ai shared chat",
+    "category": "ai-assistant",
+    "url": "https://claude.ai/share/4b3a1a9d-4f5a-4ca6-ba4f-76ffc3f29971",
+    "mode": "page",
+    "viewport": {
+      "width": 1280,
+      "height": 800
+    },
+    "delay": 5000
+  },
+  {
+    "id": "10",
+    "slug": "chatgpt",
+    "title": "ChatGPT",
+    "category": "ai-assistant",
+    "url": "https://chatgpt.com/share/6aad22c5-7cfc-83e8-b69e-93b72a4e1805",
+    "mode": "page",
+    "viewport": {
+      "width": 1280,
+      "height": 800
+    },
+    "delay": 5000,
+    "scrollTo": "[data-message-author-role='user']"
+  },
+  {
+    "id": "11",
+    "slug": "cursor",
+    "title": "Cursor 2.0 agent interface",
+    "category": "ai-assistant",
+    "url": "https://cursor.com/blog/2-0",
+    "mode": "element",
+    "selector": "img[src*='2-0-1.jpg']",
+    "scrollTo": "img[src*='2-0-1.jpg']",
+    "delay": 3000
+  },
+  {
+    "id": "12",
+    "slug": "devin",
+    "title": "Devin",
+    "category": "ai-assistant",
+    "url": "https://devin.ai/",
+    "mode": "element",
+    "selector": "img[alt='Devin, the AI software engineer']",
+    "scrollTo": "img[alt='Devin, the AI software engineer']",
+    "delay": 2500
+  },
+  {
+    "id": "13",
+    "slug": "copilot-agent",
+    "title": "GitHub Copilot coding agent PR",
+    "category": "ai-assistant",
+    "url": "https://github.com/dotnet/runtime/pull/124271",
+    "mode": "page",
+    "viewport": {
+      "width": 1280,
+      "height": 800
+    },
+    "delay": 3000,
+    "scrollTo": ".TimelineItem:has-text('finished work')"
+  }
+]

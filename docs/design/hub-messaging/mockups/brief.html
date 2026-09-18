@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Option C · Brief — the conversation as a page the supervisor keeps current</title>
+<link rel="stylesheet" href="../../../../hub-web/src/tokens.css">
+<link rel="stylesheet" href="shared.css">
+<style>
+  .top { background: var(--bg-panel); border-bottom: var(--line-width) solid var(--line-subtle); padding: var(--space-3) var(--space-6); display: flex; justify-content: space-between; align-items: center; gap: var(--space-3); flex-wrap: wrap; }
+  .page { max-width: 1120px; margin: 0 auto; padding: var(--space-8) var(--space-6) var(--space-12); display: grid; grid-template-columns: minmax(0, 68ch) 300px; column-gap: var(--space-12); align-items: start; }
+  .doc { min-width: 0; display: grid; gap: var(--space-8); }
+  .doc header h1 { font: var(--weight-regular) 34px/38px var(--font-display); margin: 0 0 var(--space-2); }
+  .doc header .meta { display: block; }
+  .doc section h2 { font: var(--weight-semibold) var(--fs-xs)/16px var(--font-mono); letter-spacing: var(--tracking-label); text-transform: uppercase; color: var(--text-mid); margin: 0 0 var(--space-3); padding-bottom: var(--space-2); border-bottom: var(--line-width) solid var(--line-strong); }
+  .doc section { display: grid; gap: var(--space-4); }
+  .now .working { border-top: 0; padding: 0; font-size: var(--fs-md); grid-template-columns: auto minmax(0,1fr) auto; }
+  .outcome { display: grid; grid-template-columns: 6ch minmax(0,1fr); gap: var(--space-3); padding: var(--space-2) 0; border-bottom: var(--line-width) solid var(--line-subtle); }
+  .outcome .when { font: var(--weight-regular) var(--fs-meta)/22px var(--font-mono); color: var(--text-mid); }
+  .outcome .what { font-size: var(--fs-md); line-height: 22px; }
+  .outcome .what a { color: var(--color-action); font-family: var(--font-mono); font-size: var(--fs-meta); text-decoration: none; margin-left: var(--space-2); }
+  .outcome.open { grid-column: 1 / -1; display: block; border-bottom: 0; padding: 0; }
+  .qa { display: grid; gap: var(--space-2); }
+  .qa .q { font: var(--weight-medium) var(--fs-md)/22px var(--font-ui); color: var(--text-hi); }
+  .qa .q .kind { display: inline; margin: 0 var(--space-2) 0 0; }
+  .qa .a { font-size: var(--fs-md); line-height: 1.6; margin: 0; }
+  .margin { display: grid; gap: var(--space-4); position: sticky; top: var(--space-6); }
+  .margin h2 { font: var(--weight-semibold) var(--fs-xs)/16px var(--font-mono); letter-spacing: var(--tracking-label); text-transform: uppercase; color: var(--text-mid); margin: 0 0 var(--space-2); }
+  .margin .composer { border: var(--line-width) solid var(--line-subtle); border-radius: var(--radius-pane); padding: var(--space-3); }
+  .note { font-size: var(--fs-base); line-height: 20px; border-left: var(--state-rule-width) solid var(--color-action); background: var(--bg-active); color: var(--text-hi); padding: var(--space-2) var(--space-3); border-radius: 0 var(--radius-card) var(--radius-card) 0; }
+  .note .when { font: var(--weight-regular) var(--fs-xs)/16px var(--font-mono); color: var(--text-mid); display: block; }
+  .note .to { font: var(--weight-regular) var(--fs-xs)/16px var(--font-mono); color: var(--color-action); display: block; margin-top: 2px; }
+  .inline-note { display: none; }
+  .history { display: none; }
+  .shell-history .margin { display: none; } .shell-history .history { display: grid; gap: var(--space-3); border-left: var(--line-width) solid var(--line-subtle); padding-left: var(--space-6); }
+  .history h2 { font: var(--weight-semibold) var(--fs-xs)/16px var(--font-mono); letter-spacing: var(--tracking-label); text-transform: uppercase; color: var(--text-mid); margin: 0; }
+  .hist { display: grid; grid-template-columns: 6ch minmax(0,1fr); gap: var(--space-2); font-size: var(--fs-base); line-height: 20px; padding: var(--space-2) 0; border-bottom: var(--line-width) solid var(--line-subtle); }
+  .hist .when { font: var(--weight-regular) var(--fs-meta)/20px var(--font-mono); color: var(--text-mid); }
+  .hist .kind { margin: 0 0 2px; }
+  .hist.replaced .what { color: var(--text-mid); text-decoration: line-through; text-decoration-color: var(--line-strong); }
+  .phone-composer { display: none; }
+  @media (max-width: 53rem) {
+    .top { padding: var(--space-3) var(--space-4); }
+    .page { display: block; padding: var(--space-4) var(--space-4) 0; }
+    .margin, .shell-history .history { display: none; }
+    .inline-note { display: block; }
+    .doc { gap: var(--space-6); }
+    .doc header h1 { font-size: 28px; line-height: 32px; }
+    .phone-composer { display: grid; position: static; margin: var(--space-6) 0 0; padding-bottom: max(var(--space-3), env(safe-area-inset-bottom)); }
+    body.show-history .doc { display: none; }
+    body.show-history .history { display: grid; gap: var(--space-3); }
+    body.show-history .phone-composer { display: none; }
+  }
+</style>
+</head>
+<body>
+<header class="top"><button type="button">‹ Conversations</button><div class="brand"><svg viewBox="0 0 32 32" aria-hidden="true"><path d="M16 4a12 12 0 1 0 0 24 12 12 0 0 0 0-24zm0 4a8 8 0 1 1 0 16 8 8 0 0 1 0-16z" fill="currentColor"/></svg>Cassy Cloud</div><div><button type="button" id="hist-toggle">Earlier ▾</button> <button type="button">Pane ▸</button></div></header>
+<div class="page" id="page">
+  <article class="doc">
+    <header><span class="badge">cas-src</span><h1 style="margin-top:8px"><span class="mono" style="font-size:var(--fs-lg)">patient-pelican-9</span> · 3.26.0 train</h1><span class="meta">Kept current by patient-pelican-9 · Atlas · Linux · updated 09:58 · 6 statements replaced today</span></header>
+    <section class="now"><h2>Now</h2>
+      <div class="working"><span class="dot" aria-hidden="true"></span><span>Working · holding the train, watching run 33512 · 2 min ago</span><a href="#pane">Pane ▸</a></div>
+      <article class="turn blocker"><div class="kind"><span>■ Held since 09:58</span></div><p>Gate run 33512 failed: <code>needless_borrow</code> at <code>cas-cli/src/hub/attention.rs:212</code>. Nothing was tagged or pushed to main.</p></article>
+    </section>
+    <section><h2>Decisions needed · 1</h2>
+      <article class="turn ask"><div class="kind"><span>Waiting on you</span><span>since 09:58 · 4 min</span></div><p class="q">Fix the warning in-train (one worker, about ten minutes) or ship 3.26.0 with it allowlisted?</p><div class="quick"><button type="button">Fix in-train</button><button type="button">Ship with allowlist</button></div></article>
+      <div class="inline-note note"><span class="when">Your directive · 09:41</span>Merge the two green lanes, then cut 3.26.0 once the gate is green.<span class="to">→ outcomes 09:47, decision 09:58</span></div>
+    </section>
+    <section><h2>Outcomes since 09:30 · 2</h2>
+      <div class="outcome"><span class="when">09:31</span><span class="what">Release notes for gabber-studio posted to #gabber-releases.<a href="#o1">details ▸</a></span></div>
+      <div class="outcome"><span class="when">09:47</span><span class="what">Both lanes are on the epic branch; the release gate is running.<a href="#o2">details ▾</a></span></div>
+      <div class="outcome open"><article class="turn receipt stack"><table class="ledger"><caption>Merge receipt · two lanes into epic/one-command-release</caption><thead><tr><th scope="col">Lane</th><th scope="col">PR</th><th scope="col">Tip</th><th scope="col">Landed</th></tr></thead>
+        <tbody><tr><td data-k="lane">calm-stork-91</td><td data-k="pr">#907</td><td data-k="tip">c0e2c7b5</td><td data-k="landed" class="num">09:45</td></tr><tr><td data-k="lane">gentle-hound-12</td><td data-k="pr">#908</td><td data-k="tip">23c65d63</td><td data-k="landed" class="num">09:46</td></tr><tr class="decisive"><td data-k="lane">release gate</td><td data-k="pr">run 33512</td><td data-k="tip">f9f8e60f</td><td data-k="landed" class="num">failed 09:58</td></tr></tbody></table>
+        <div class="source">receipt 09:47:12 · pane line 1 482 ▸ · evidence: worker status, 5 rows ▸</div></article></div>
+    </section>
+    <section><h2>Answers · 1</h2>
+      <div class="qa"><p class="q"><span class="kind">You · 09:56</span>Did the tokens drift test move?</p><p class="a">No. <code>tokens.test.ts</code> is unchanged since 3.25.3. The gate's only new failure is the Clippy warning under <em>Now</em>. <span class="meta">answered 09:57 · 40 s</span></p></div>
+      <div class="inline-note note"><span class="when">Your question · 09:56</span>Did the tokens drift test move?<span class="to">→ answered 09:57</span></div>
+    </section>
+    <section><h2>Status</h2>
+      <div class="turn status"><span>latest 09:55 · gate: tests running, 11 of 14 targets green</span><span class="disc">▸ 3 earlier</span></div>
+    </section>
+  </article>
+  <aside class="margin" aria-label="Your directives">
+    <form class="composer" onsubmit="return false"><h2>Add a directive</h2><textarea aria-label="Your directive" placeholder="Write to patient-pelican-9…"></textarea><div class="actions"><span class="btn primary" style="height:36px">Send</span></div></form>
+    <h2>Your directives today</h2>
+    <div class="note"><span class="when">09:56</span>Did the tokens drift test move?<span class="to">→ answered 09:57</span></div>
+    <div class="note"><span class="when">09:41</span>Merge the two green lanes, then cut 3.26.0 once the gate is green.<span class="to">→ outcomes 09:47 · decision 09:58</span></div>
+  </aside>
+  <aside class="history" aria-label="Earlier statements">
+    <h2>Earlier · what this page said before</h2>
+    <div class="hist"><span class="when">09:58</span><div><div class="kind" style="color:var(--color-verdict)">Ask · current</div><div class="what">Fix in-train or ship with allowlist?</div></div></div>
+    <div class="hist"><span class="when">09:58</span><div><div class="kind" style="color:var(--state-crit)">Blocker · current</div><div class="what">Gate run 33512 failed: needless_borrow at attention.rs:212.</div></div></div>
+    <div class="hist replaced"><span class="when">09:55</span><div><div class="kind">Status · replaced 09:58</div><div class="what">Gate: tests running, 11 of 14 targets green.</div></div></div>
+    <div class="hist replaced"><span class="when">09:52</span><div><div class="kind">Status · replaced 09:55</div><div class="what">Gate: build 4 min, tests starting.</div></div></div>
+    <div class="hist replaced"><span class="when">09:48</span><div><div class="kind">Status · replaced 09:52</div><div class="what">Gate run 33512 queued.</div></div></div>
+    <div class="hist"><span class="when">09:47</span><div><div class="kind">Receipt · kept</div><div class="what">Both lanes are on the epic branch; the release gate is running.</div></div></div>
+    <div class="hist replaced"><span class="when">09:41</span><div><div class="kind">Now · replaced 09:47</div><div class="what">Working · merging calm-stork-91 and gentle-hound-12.</div></div></div>
+    <div class="hist"><span class="when">09:41</span><div><div class="kind">Answer · kept</div><div class="what">Merging now. Both lanes are green on their own CI.</div></div></div>
+  </aside>
+</div>
+<form class="composer phone-composer" onsubmit="return false"><textarea aria-label="Your directive" placeholder="Write to patient-pelican-9…" style="min-height:44px"></textarea><div class="actions"><span class="btn primary" style="height:40px">Send to patient-pelican-9</span></div></form>
+<script>
+  const q = new URLSearchParams(location.search);
+  if (q.get('state') === 'history') { document.getElementById('page').classList.add('shell-history'); document.body.classList.add('show-history'); }
+</script>
+</body>
+</html>

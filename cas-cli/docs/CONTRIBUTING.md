@@ -92,6 +92,7 @@ Integration tests are in `cas-cli/tests/`. Key test files:
 - `memory_share_test.rs` — `cas memory share|unshare` CLI behavior
 - `team_memories_e2e_test.rs` — end-to-end team-memories flow (share → push → pull)
 - `artifact_publish_test.rs` — `cas artifact publish` path guard, size ceiling, and the assertion that a signed upload URL never reaches disk or stdout
+- `credential_debug_guard_test.rs` — repo-wide guard: no struct holding a token, API key or pre-signed URL may derive `Debug` (a derived one prints the credential verbatim). Add a redacting `impl fmt::Debug` plus a test rather than an allowlist entry.
 
 ### Terminal output gate
 

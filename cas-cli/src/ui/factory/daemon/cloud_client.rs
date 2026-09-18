@@ -10,6 +10,7 @@
 
 use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
+use std::fmt;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
@@ -103,7 +104,7 @@ pub enum RelayEvent {
 }
 
 /// Configuration for the cloud client
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct CloudClientConfig {
     /// Cloud API endpoint (e.g., "https://petra-stella-cloud.vercel.app")
     pub endpoint: String,
@@ -1072,3 +1073,37 @@ pub fn serialize_factory_state(
 }
 
 // Phoenix protocol tests (ws_url, encode_msg, refs) are in ui::factory::phoenix::tests
+
+// Carries the Cassy Cloud bearer into every daemon cloud call.
+impl fmt::Debug for CloudClientConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CloudClientConfig")
+            .field("endpoint", &self.endpoint)
+            .field("token", &"[redacted]")
+            .field("factory_id", &self.factory_id)
+            .field("device_id", &self.device_id)
+            .field("cas_dir", &self.cas_dir)
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(test)]
+mod credential_redaction_tests {
+    use super::*;
+
+    #[test]
+    fn the_cloud_client_config_debug_never_prints_the_bearer() {
+        let config = CloudClientConfig {
+            endpoint: "https://cloud.example".to_string(),
+            token: "SECRET-tok-9f3a1c".to_string(),
+            factory_id: "fact-1".to_string(),
+            device_id: None,
+            cas_dir: None,
+            factory_session: None,
+        };
+        let rendered = format!("{config:?}");
+        assert!(!rendered.contains("SECRET-tok-9f3a1c"), "{rendered}");
+        assert!(rendered.contains("[redacted]"), "{rendered}");
+        assert!(rendered.contains("fact-1"), "{rendered}");
+    }
+}

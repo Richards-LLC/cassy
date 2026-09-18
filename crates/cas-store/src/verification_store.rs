@@ -17,6 +17,8 @@ use crate::TaskStore;
 use crate::agent_store::register_agent_with_conn;
 use crate::error::StoreError;
 use crate::event_store::record_event_with_conn;
+use std::fmt;
+
 use crate::recording_store::capture_task_event;
 use crate::shared_db::ImmediateTx;
 use crate::supervisor_queue_store::{
@@ -248,7 +250,7 @@ const SERVER_HANDOFF_ID_PREFIX: &str = "vhnd-";
 
 /// Newly issued capability. The bearer token exists only in this return value
 /// and must be delivered directly to the verifier child; it is never stored.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct IssuedVerifierCapability {
     pub capability: VerifierCapability,
     pub token: String,
@@ -3086,6 +3088,17 @@ impl VerificationStore for SqliteVerificationStore {
     }
 }
 
+// The bearer exists only in this value on its way to the verifier child; a
+// derived Debug would put it in any log line that formats the issue result.
+impl fmt::Debug for IssuedVerifierCapability {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("IssuedVerifierCapability")
+            .field("capability", &self.capability)
+            .field("token", &"[redacted]")
+            .finish()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::verification_store::*;
@@ -4331,5 +4344,39 @@ mod tests {
         assert_eq!(row.provenance, VerificationProvenance::Legacy);
         assert!(row.capability_id.is_none());
         assert!(row.issuer_agent_id.is_none());
+    }
+}
+
+#[cfg(test)]
+mod credential_redaction_tests {
+    use super::*;
+
+    #[test]
+    fn the_issued_capability_debug_never_prints_the_bearer() {
+        let issued = IssuedVerifierCapability {
+            capability: cas_types::VerifierCapability {
+                id: "cap-1".to_string(),
+                task_id: "cas-c75d".to_string(),
+                dispatch_id: None,
+                issuer_agent_id: "sup-1".to_string(),
+                verifier_agent_id: None,
+                token_hash: "hash-only".to_string(),
+                issued_at: chrono::Utc::now(),
+                expires_at: chrono::Utc::now(),
+                bound_at: None,
+                consumed_at: None,
+            },
+            token: "SECRET-tok-9f3a1c".to_string(),
+        };
+        let rendered = format!("{issued:?}");
+        assert!(
+            !rendered.contains("SECRET-tok-9f3a1c"),
+            "the bearer exists only on its way to the verifier child: {rendered}"
+        );
+        assert!(rendered.contains("[redacted]"), "{rendered}");
+        assert!(
+            rendered.contains("cap-1") && rendered.contains("hash-only"),
+            "the capability and its token HASH stay visible; only the bearer goes: {rendered}"
+        );
     }
 }

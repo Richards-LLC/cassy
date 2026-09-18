@@ -4,6 +4,7 @@ use anyhow::Result;
 use clap::{Args, Subcommand};
 
 use crate::cli::Cli;
+use std::fmt;
 
 #[derive(Args, Debug, Clone)]
 pub struct BridgeArgs {
@@ -17,7 +18,7 @@ pub enum BridgeCommands {
     Serve(ServeArgs),
 }
 
-#[derive(Args, Debug, Clone)]
+#[derive(Args, Clone)]
 pub struct ServeArgs {
     /// Bind address (default: 127.0.0.1)
     #[arg(long, default_value = "127.0.0.1")]
@@ -54,5 +55,39 @@ pub struct ServeArgs {
 pub fn execute(args: &BridgeArgs, cli: &Cli) -> Result<()> {
     match &args.command {
         BridgeCommands::Serve(s) => crate::bridge::server::serve(s, cli),
+    }
+}
+
+// `--token` is a bearer; clap's derived Debug would print it whenever these
+// args are logged or included in a panic message.
+impl fmt::Debug for ServeArgs {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ServeArgs")
+            .field("bind", &self.bind)
+            .field("port", &self.port)
+            .field("cas_root", &self.cas_root)
+            .field("token", &self.token.as_ref().map(|_| "[redacted]"))
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(test)]
+mod credential_redaction_tests {
+    use super::*;
+
+    #[test]
+    fn the_serve_args_debug_never_prints_the_bearer() {
+        let args = ServeArgs {
+            bind: "127.0.0.1".to_string(),
+            port: 0,
+            cas_root: None,
+            token: Some("SECRET-tok-9f3a1c".to_string()),
+            no_auth: false,
+            cors_allow_origin: None,
+        };
+        let rendered = format!("{args:?}");
+        assert!(!rendered.contains("SECRET-tok-9f3a1c"), "{rendered}");
+        assert!(rendered.contains("[redacted]"), "{rendered}");
+        assert!(rendered.contains("127.0.0.1"), "{rendered}");
     }
 }

@@ -142,7 +142,7 @@ pub struct BeginRequest {
 }
 
 /// What `begin` answers.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct BeginResponse {
     /// The server's id for this artifact; the local row records it.
     pub artifact_id: String,
@@ -415,6 +415,18 @@ fn check_upload_url(url: &str) -> Result<(), UploadFailure> {
                 .unwrap_or("<none>")
         ),
     ))
+}
+
+// The upload URL is a short-lived credential; the derived Debug would print it
+// into any error chain or tracing field that formats this response.
+impl fmt::Debug for BeginResponse {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BeginResponse")
+            .field("artifact_id", &self.artifact_id)
+            .field("upload_url", &"[redacted]")
+            .field("required_headers", &self.required_headers)
+            .finish()
+    }
 }
 
 #[cfg(test)]
@@ -755,5 +767,26 @@ mod tests {
         assert!(check_upload_url("http://localhost:8080/o").is_ok());
         assert!(check_upload_url("http://store.example/o").is_err());
         assert!(check_upload_url("ftp://store.example/o").is_err());
+    }
+}
+
+#[cfg(test)]
+mod credential_redaction_tests {
+    use super::*;
+
+    #[test]
+    fn the_begin_response_debug_never_prints_the_upload_url() {
+        let response = BeginResponse {
+            artifact_id: "cloud-42".to_string(),
+            upload_url: "https://store.example/o?X-Amz-Signature=SECRET-tok-9f3a1c".to_string(),
+            required_headers: Default::default(),
+        };
+        let rendered = format!("{response:?}");
+        assert!(!rendered.contains("SECRET-tok-9f3a1c"), "{rendered}");
+        assert!(rendered.contains("[redacted]"), "{rendered}");
+        assert!(
+            rendered.contains("cloud-42"),
+            "non-secret fields stay useful: {rendered}"
+        );
     }
 }

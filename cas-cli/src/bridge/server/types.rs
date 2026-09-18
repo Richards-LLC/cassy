@@ -1,7 +1,9 @@
+use std::fmt;
+
 use cas_types::Event;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) struct ServeInfo {
     pub(crate) schema_version: u32,
@@ -13,6 +15,23 @@ pub(crate) struct ServeInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) token: Option<String>,
     pub(crate) auth_enabled: bool,
+}
+
+// `token` is the bridge's bearer: this struct is what `cas bridge serve`
+// reports about itself, so a derived Debug would print the credential into any
+// diagnostic that formats it.
+impl fmt::Debug for ServeInfo {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ServeInfo")
+            .field("schema_version", &self.schema_version)
+            .field("bind", &self.bind)
+            .field("port", &self.port)
+            .field("base_url", &self.base_url)
+            .field("cas_root", &self.cas_root)
+            .field("token", &self.token.as_ref().map(|_| "[redacted]"))
+            .field("auth_enabled", &self.auth_enabled)
+            .finish()
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -254,5 +273,45 @@ pub(crate) fn session_json(s: &crate::ui::factory::SessionInfo) -> SessionJson {
         is_running: s.is_running,
         socket_exists: s.socket_exists,
         can_attach: s.can_attach(),
+    }
+}
+
+#[cfg(test)]
+mod credential_redaction_tests {
+    use super::*;
+
+    #[test]
+    fn the_serve_info_debug_never_prints_the_bridge_bearer() {
+        let info = ServeInfo {
+            schema_version: 1,
+            bind: "127.0.0.1".to_string(),
+            port: 8117,
+            base_url: "http://127.0.0.1:8117".to_string(),
+            cas_root: None,
+            token: Some("SECRET-tok-9f3a1c".to_string()),
+            auth_enabled: true,
+        };
+        let rendered = format!("{info:?}");
+        assert!(!rendered.contains("SECRET-tok-9f3a1c"), "{rendered}");
+        assert!(rendered.contains("[redacted]"), "{rendered}");
+        assert!(rendered.contains("8117"), "{rendered}");
+    }
+
+    #[test]
+    fn the_serialized_form_still_carries_the_token_for_the_client() {
+        let info = ServeInfo {
+            schema_version: 1,
+            bind: "127.0.0.1".to_string(),
+            port: 8117,
+            base_url: "http://127.0.0.1:8117".to_string(),
+            cas_root: None,
+            token: Some("SECRET-tok-9f3a1c".to_string()),
+            auth_enabled: true,
+        };
+        let json = serde_json::to_value(&info).unwrap();
+        assert_eq!(
+            json["token"], "SECRET-tok-9f3a1c",
+            "redaction is a Debug concern; the serve receipt must still hand the client its token"
+        );
     }
 }

@@ -99,6 +99,24 @@ pub struct DistillReport {
     pub notes: Vec<String>,
 }
 
+/// A human-readable transition for one source in a distillation pass.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceProgress {
+    pub source_path: String,
+    pub ordinal: usize,
+    pub total: usize,
+    pub phase: SourceProgressPhase,
+    pub elapsed: Duration,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceProgressPhase {
+    Started,
+    Finished,
+    Failed,
+}
+
 impl DistillReport {
     /// Did this pass change anything durable?
     pub fn is_noop(&self) -> bool {
@@ -123,7 +141,7 @@ pub fn run_distillation(
     sources: &[LoadedSource],
     config: &DistillConfig,
 ) -> Result<DistillReport> {
-    Ok(run_distillation_inner(store, runner, sources, config, None)?.report)
+    Ok(run_distillation_inner(store, runner, sources, config, None, None)?.report)
 }
 
 /// Run one pass with a single wall-clock deadline shared by every source,
@@ -140,20 +158,31 @@ pub fn run_distillation_with_timeout(
     timeout: Duration,
 ) -> Result<DistillReport> {
     let deadline = Instant::now() + timeout;
-    run_distillation_until(store, runner, sources, config, deadline)
+    run_distillation_until_with_progress(store, runner, sources, config, deadline, None)
 }
 
-/// Run one pass until an absolute wall-clock deadline.
-pub(crate) fn run_distillation_until(
+/// Run one pass until an absolute deadline and report source transitions to the
+/// caller. The callback is deliberately synchronous: CLI progress must stay in
+/// source order and the pipeline never needs to own a renderer or a terminal.
+pub(crate) fn run_distillation_until_with_progress(
     store: &dyn KnowledgeStore,
     runner: &dyn LlmRunner,
     sources: &[LoadedSource],
     config: &DistillConfig,
     deadline: Instant,
+    progress: Option<&dyn Fn(SourceProgress)>,
 ) -> Result<DistillReport> {
-    let outcome = run_distillation_inner(store, runner, sources, config, Some(deadline))?;
+    let started = Instant::now();
+    let outcome = run_distillation_inner(store, runner, sources, config, Some(deadline), progress)?;
     if outcome.timed_out {
-        anyhow::bail!("knowledge build timed out before completion");
+        let source = outcome
+            .timed_out_source
+            .as_deref()
+            .unwrap_or("unknown source");
+        anyhow::bail!(
+            "knowledge build timed out after {:.1}s while processing source '{source}'",
+            started.elapsed().as_secs_f32()
+        );
     }
     Ok(outcome.report)
 }
@@ -161,6 +190,7 @@ pub(crate) fn run_distillation_until(
 struct DistillOutcome {
     report: DistillReport,
     timed_out: bool,
+    timed_out_source: Option<String>,
 }
 
 fn run_distillation_inner(
@@ -169,6 +199,7 @@ fn run_distillation_inner(
     sources: &[LoadedSource],
     config: &DistillConfig,
     deadline: Option<Instant>,
+    progress: Option<&dyn Fn(SourceProgress)>,
 ) -> Result<DistillOutcome> {
     let calls_before = runner.calls();
     let mut report = DistillReport {
@@ -206,6 +237,7 @@ fn run_distillation_inner(
         return Ok(DistillOutcome {
             report,
             timed_out: false,
+            timed_out_source: None,
         });
     }
 
@@ -221,6 +253,7 @@ fn run_distillation_inner(
         return Ok(DistillOutcome {
             report,
             timed_out: false,
+            timed_out_source: None,
         });
     }
 
@@ -249,16 +282,42 @@ fn run_distillation_inner(
     let mut writes: BTreeMap<String, PageWrite> = BTreeMap::new();
     let mut outcomes: Vec<SourceOutcome> = Vec::new();
     let mut timed_out = false;
+    let mut timed_out_source = None;
+    let total_pending = pending.len();
 
-    for candidate in &pending {
+    for (index, candidate) in pending.iter().enumerate() {
         if deadline_expired(deadline) {
             timed_out = true;
+            timed_out_source = Some(candidate.source.file_path.clone());
+            emit_progress(
+                progress,
+                SourceProgress {
+                    source_path: candidate.source.file_path.clone(),
+                    ordinal: index + 1,
+                    total: total_pending,
+                    phase: SourceProgressPhase::Failed,
+                    elapsed: Duration::ZERO,
+                    error: Some("knowledge build deadline exhausted".to_string()),
+                },
+            );
             break;
         }
         let path = candidate.source.file_path.as_str();
         let Some(loaded) = by_path.get(path).copied() else {
             continue;
         };
+        let source_started = Instant::now();
+        emit_progress(
+            progress,
+            SourceProgress {
+                source_path: loaded.path.clone(),
+                ordinal: index + 1,
+                total: total_pending,
+                phase: SourceProgressPhase::Started,
+                elapsed: Duration::ZERO,
+                error: None,
+            },
+        );
 
         let (pages, mut failure, source_timed_out) =
             distill_source(runner, loaded, config, &mut report, deadline);
@@ -307,6 +366,7 @@ fn run_distillation_inner(
 
         timed_out |= deadline_expired(deadline);
         if timed_out {
+            timed_out_source = Some(loaded.path.clone());
             failure.get_or_insert_with(|| "knowledge build deadline exhausted".to_string());
         }
 
@@ -324,6 +384,27 @@ fn run_distillation_inner(
             status,
             ingest_error: failure,
         });
+        let phase = if outcomes
+            .last()
+            .is_some_and(|outcome| outcome.status == SourceStatus::Failed)
+        {
+            SourceProgressPhase::Failed
+        } else {
+            SourceProgressPhase::Finished
+        };
+        emit_progress(
+            progress,
+            SourceProgress {
+                source_path: loaded.path.clone(),
+                ordinal: index + 1,
+                total: total_pending,
+                phase,
+                elapsed: source_started.elapsed(),
+                error: outcomes
+                    .last()
+                    .and_then(|outcome| outcome.ingest_error.clone()),
+            },
+        );
         if timed_out {
             break;
         }
@@ -345,18 +426,28 @@ fn run_distillation_inner(
     let deleted_ids: BTreeSet<&String> = commit.cascade_deleted_page_ids.iter().collect();
     timed_out |= deadline_expired(deadline);
     if !timed_out {
-        timed_out = repair_after_deletions(
-            store,
-            &cascade_watch,
-            &deleted_ids,
-            &mut report,
-            deadline,
-        )?;
+        timed_out =
+            repair_after_deletions(store, &cascade_watch, &deleted_ids, &mut report, deadline)?;
     }
 
     report.llm_calls = runner.calls().saturating_sub(calls_before);
     timed_out |= deadline_expired(deadline);
-    Ok(DistillOutcome { report, timed_out })
+    if timed_out && timed_out_source.is_none() {
+        timed_out_source = pending
+            .last()
+            .map(|candidate| candidate.source.file_path.clone());
+    }
+    Ok(DistillOutcome {
+        report,
+        timed_out,
+        timed_out_source,
+    })
+}
+
+fn emit_progress(progress: Option<&dyn Fn(SourceProgress)>, event: SourceProgress) {
+    if let Some(progress) = progress {
+        progress(event);
+    }
 }
 
 fn deadline_expired(deadline: Option<Instant>) -> bool {

@@ -487,7 +487,7 @@ pub struct TaskRequest {
 
     /// Supervisor-only proof-scope correction for `action=update`.
     #[schemars(
-        description = "For update only: supervisor-authorized correction of target_repo/target_branch after MERGE REQUIRED. For a task already marked execution_note=no-code, target_repo=\"\" clears a stale code anchor. Requires a non-empty reason, invalidates the stale proof cycle, records a decision note, and reopens the task without review-failed semantics."
+        description = "For update only: supervisor-authorized correction of target_repo/target_branch after MERGE REQUIRED, or strict widening of proof_targets when a parked delivery's merged diff exceeds its declared blast-radius scope. For a task already marked execution_note=no-code, target_repo=\"\" clears a stale code anchor. Requires a non-empty reason, invalidates the stale proof cycle, records a decision note, and reopens the task without review-failed semantics."
     )]
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub proof_scope_fix: Option<bool>,

@@ -1680,6 +1680,48 @@ pub fn correct_parked_delivery_proof_scope(
     supervisor_agent_id: &str,
     reason: &str,
 ) -> Result<ProofScopeCorrectionOutcome> {
+    correct_parked_delivery_proof_scope_inner(
+        cas_dir,
+        corrected_task,
+        expected_updated_at,
+        supervisor_agent_id,
+        reason,
+        false,
+        false,
+    )
+}
+
+/// Atomically widen the proof-target declaration for a parked task whose
+/// delivery has already merged. The merge transaction is an immutable fact,
+/// so this administrative correction invalidates only the stale proof cycle
+/// and reopens the task; it must not rewrite the merged delivery transaction.
+pub fn correct_parked_delivery_proof_targets(
+    cas_dir: &Path,
+    corrected_task: &Task,
+    expected_updated_at: DateTime<Utc>,
+    supervisor_agent_id: &str,
+    reason: &str,
+) -> Result<ProofScopeCorrectionOutcome> {
+    correct_parked_delivery_proof_scope_inner(
+        cas_dir,
+        corrected_task,
+        expected_updated_at,
+        supervisor_agent_id,
+        reason,
+        true,
+        true,
+    )
+}
+
+fn correct_parked_delivery_proof_scope_inner(
+    cas_dir: &Path,
+    corrected_task: &Task,
+    expected_updated_at: DateTime<Utc>,
+    supervisor_agent_id: &str,
+    reason: &str,
+    allow_merged_delivery: bool,
+    require_merged_delivery: bool,
+) -> Result<ProofScopeCorrectionOutcome> {
     if reason.trim().is_empty() || supervisor_agent_id.trim().is_empty() {
         return Err(StoreError::Parse(
             "proof-scope correction requires an authenticated supervisor and non-empty reason"
@@ -1716,9 +1758,20 @@ pub fn correct_parked_delivery_proof_scope(
         })
         .transpose()?;
 
-    if delivery
-        .as_ref()
-        .is_some_and(|(_, state)| *state == WorkerDeliveryState::Merged)
+    if require_merged_delivery
+        && !delivery
+            .as_ref()
+            .is_some_and(|(_, state)| *state == WorkerDeliveryState::Merged)
+    {
+        return Err(StoreError::Parse(
+            "proof-target correction requires an already-merged delivery transaction".to_string(),
+        ));
+    }
+
+    if !allow_merged_delivery
+        && delivery
+            .as_ref()
+            .is_some_and(|(_, state)| *state == WorkerDeliveryState::Merged)
     {
         return Err(StoreError::Parse(
             "proof-scope correction cannot rewrite a merged delivery transaction; the merge is an immutable delivery fact"
@@ -1755,7 +1808,9 @@ pub fn correct_parked_delivery_proof_scope(
                 "proof-scope correction cannot rewrite a delivered transaction".to_string(),
             ));
         }
-        if *state != WorkerDeliveryState::Stale {
+        if *state != WorkerDeliveryState::Stale
+            && !(*state == WorkerDeliveryState::Merged && allow_merged_delivery)
+        {
             let changed = tx.execute(
                 "UPDATE worker_delivery_transactions
                  SET state = 'stale', supervisor_agent_id = ?2,
@@ -1792,8 +1847,8 @@ pub fn correct_parked_delivery_proof_scope(
 
     let changed = tx.execute(
         "UPDATE tasks SET status = 'open', notes = ?2, deliverables = ?3,
-         pending_verification = 0, pending_worktree_merge = 0, updated_at = ?4
-         WHERE id = ?1 AND status = 'awaiting_merge' AND updated_at = ?5",
+         proof_targets = ?4, pending_verification = 0, pending_worktree_merge = 0, updated_at = ?5
+         WHERE id = ?1 AND status = 'awaiting_merge' AND updated_at = ?6",
         params![
             corrected_task.id,
             corrected_task.notes,
@@ -1802,6 +1857,11 @@ pub fn correct_parked_delivery_proof_scope(
                     "failed to serialize corrected deliverables: {error}"
                 ))
             })?,
+            if corrected_task.proof_targets.is_empty() {
+                None
+            } else {
+                Some(corrected_task.proof_targets.join(","))
+            },
             now.to_rfc3339(),
             expected_updated_at.to_rfc3339(),
         ],

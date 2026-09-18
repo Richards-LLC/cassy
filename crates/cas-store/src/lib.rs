@@ -186,6 +186,7 @@ pub use verification_store::{
     bind_verifier_capability, cancel_unbound_server_verifier_handoff, claim_verification_dispatch,
     claim_verification_dispatch_bound, consume_server_verifier_handoff_with_conn,
     consume_verifier_capability_with_conn, correct_parked_delivery_proof_scope,
+    correct_parked_delivery_proof_targets,
     create_verification_dispatch, create_verification_dispatch_bound,
     create_verification_dispatch_bound_with_conn, get_latest_verification_dispatch,
     get_latest_verification_dispatch_with_conn, get_verification_dispatch,

@@ -481,15 +481,43 @@ impl CasCore {
                     data: None,
                 });
             }
-            if target_repo.is_none() && target_branch.is_none() {
+            let proof_targets_fix = req.proof_targets.is_some();
+            if target_repo.is_none() && target_branch.is_none() && !proof_targets_fix {
                 return Err(McpError {
                     code: ErrorCode::INVALID_PARAMS,
                     message: Cow::from(
-                        "PROOF-SCOPE FIX REJECTED: supply target_repo and/or target_branch to correct the stale delivery scope."
+                        "PROOF-SCOPE FIX REJECTED: supply target_repo/target_branch or widened proof_targets to correct the stale delivery scope."
                             .to_string(),
                     ),
                     data: None,
                 });
+            }
+            if proof_targets_fix && (target_repo.is_some() || target_branch.is_some()) {
+                return Err(McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(
+                        "PROOF-SCOPE FIX REJECTED: proof_targets widening cannot be combined with target_repo/target_branch correction in one call."
+                            .to_string(),
+                    ),
+                    data: None,
+                });
+            }
+            if proof_targets_fix {
+                let widened = &effective_proof_targets;
+                let preserves_existing = task
+                    .proof_targets
+                    .iter()
+                    .all(|target| widened.iter().any(|candidate| candidate == target));
+                if widened.len() <= task.proof_targets.len() || !preserves_existing {
+                    return Err(McpError {
+                        code: ErrorCode::INVALID_PARAMS,
+                        message: Cow::from(
+                            "PROOF-SCOPE FIX REJECTED: proof_targets must strictly widen the existing declaration while preserving every existing target."
+                                .to_string(),
+                        ),
+                        data: None,
+                    });
+                }
             }
             let unrelated = [
                 ("title", req.title.is_some()),
@@ -503,7 +531,10 @@ impl CasCore {
                 ("demo_statement", req.demo_statement.is_some()),
                 ("execution_note", req.execution_note.is_some()),
                 ("risk", req.risk.is_some()),
-                ("proof_targets", req.proof_targets.is_some()),
+                (
+                    "proof_targets",
+                    req.proof_targets.is_some() && !proof_targets_fix,
+                ),
                 ("external_ref", req.external_ref.is_some()),
                 ("assignee", req.assignee.is_some()),
                 ("status", req.status.is_some()),
@@ -548,7 +579,9 @@ impl CasCore {
                 data: None,
             })?;
 
-            let corrected_target = if target_repo.is_some_and(|repo| repo.trim().is_empty()) {
+            let corrected_target = if proof_targets_fix {
+                task.deliverables.work_target.clone()
+            } else if target_repo.is_some_and(|repo| repo.trim().is_empty()) {
                 if task.execution_note.as_deref() != Some("no-code") {
                     return Err(McpError {
                         code: ErrorCode::INVALID_PARAMS,
@@ -620,7 +653,9 @@ impl CasCore {
                     target_branch: branch,
                 })
             };
-            if task.deliverables.work_target.as_ref() == corrected_target.as_ref() {
+            if !proof_targets_fix
+                && task.deliverables.work_target.as_ref() == corrected_target.as_ref()
+            {
                 return Err(McpError {
                     code: ErrorCode::INVALID_PARAMS,
                     message: Cow::from(
@@ -632,23 +667,31 @@ impl CasCore {
             }
 
             task.deliverables.work_target = corrected_target.clone();
+            if proof_targets_fix {
+                task.proof_targets = effective_proof_targets.clone();
+            }
             task.deliverables.review_envelope = None;
             task.deliverables.pre_close_hook = None;
             task.status = TaskStatus::Open;
             task.pending_verification = false;
             task.pending_worktree_merge = false;
             task.updated_at = chrono::Utc::now();
-            let target_description = corrected_target
-                .as_ref()
-                .map(|target| {
-                    format!(
-                        "Work target is now {} @ {}.",
-                        target.repo_selector, target.target_branch
-                    )
-                })
-                .unwrap_or_else(|| {
-                    "The stale code work target was cleared for this no-code task.".to_string()
-                });
+            let target_description = if proof_targets_fix {
+                format!(
+                    "Proof targets widened to {}.",
+                    task.proof_targets.join(", ")
+                )
+            } else {
+                corrected_target
+                    .as_ref()
+                    .map(|target| {
+                        format!(
+                            "Work target is now {} @ {}.",
+                            target.repo_selector, target.target_branch
+                        )
+                    })
+                    .unwrap_or_else(|| "The stale code work target was cleared for this no-code task.".to_string())
+            };
             let note = format!(
                 "[{}] DECISION: proof scope corrected by supervisor {} ({}): {} {} The prior exact proof cycle was invalidated; no failed-review verdict was recorded.",
                 task.updated_at.format("%Y-%m-%d %H:%M"),
@@ -662,27 +705,44 @@ impl CasCore {
             } else {
                 format!("{}\n\n{}", task.notes, note)
             };
-            cas_store::correct_parked_delivery_proof_scope(
-                &self.cas_root,
-                &task,
-                original_updated_at,
-                &supervisor.id,
-                reason,
-            )
-            .map_err(|error| McpError {
+            let correction = if proof_targets_fix {
+                cas_store::correct_parked_delivery_proof_targets(
+                    &self.cas_root,
+                    &task,
+                    original_updated_at,
+                    &supervisor.id,
+                    reason,
+                )
+            } else {
+                cas_store::correct_parked_delivery_proof_scope(
+                    &self.cas_root,
+                    &task,
+                    original_updated_at,
+                    &supervisor.id,
+                    reason,
+                )
+            };
+            correction.map_err(|error| McpError {
                 code: ErrorCode::INVALID_PARAMS,
                 message: Cow::from(format!("PROOF-SCOPE FIX REJECTED: {error}")),
                 data: None,
             })?;
-            let result_target = corrected_target
-                .as_ref()
-                .map(|target| {
-                    format!(
-                        "New work target: {} @ {}.",
-                        target.repo_selector, target.target_branch
-                    )
-                })
-                .unwrap_or_else(|| "The stale code work target was cleared.".to_string());
+            let result_target = if proof_targets_fix {
+                format!(
+                    "Proof targets widened to {}.",
+                    task.proof_targets.join(", ")
+                )
+            } else {
+                corrected_target
+                    .as_ref()
+                    .map(|target| {
+                        format!(
+                            "New work target: {} @ {}.",
+                            target.repo_selector, target.target_branch
+                        )
+                    })
+                    .unwrap_or_else(|| "The stale code work target was cleared.".to_string())
+            };
             return Ok(Self::success(format!(
                 "Corrected proof scope for task {}. The task is Open with assignee {} preserved; the stale proof cycle was invalidated without recording review failure. {}",
                 task.id,

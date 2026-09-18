@@ -1241,6 +1241,20 @@ pub(crate) fn uncovered_blast_radius_modules(
         .collect()
 }
 
+fn proof_targets_scope_fix_command(task: &Task, uncovered: &[String]) -> String {
+    let mut targets = task.proof_targets.clone();
+    for module in uncovered {
+        if !targets.iter().any(|target| target == module) {
+            targets.push(module.clone());
+        }
+    }
+    format!(
+        "Ask a live registered supervisor to run `task action=update id={} proof_targets=\"{}\" proof_scope_fix=true reason=\"widen proof scope for delivered modules\"`, then record scoped proof for every module and retry close.",
+        task.id,
+        targets.join(",")
+    )
+}
+
 fn validate_risk_close_proofs(
     task: &Task,
     changed_paths: &[String],
@@ -1273,9 +1287,10 @@ fn validate_risk_close_proofs_with_base(
         let uncovered = uncovered_blast_radius_modules(changed_paths, &task.proof_targets);
         if !uncovered.is_empty() {
             return Err(format!(
-                "TASK CLOSE REJECTED: task {} declares blast-radius proof narrower than its delivery diff; uncovered source modules: {}. Expand proof_targets and record scoped proof for every module, then retry close.",
+                "TASK CLOSE REJECTED: task {} declares blast-radius proof narrower than its delivery diff; uncovered source modules: {}. {}",
                 task.id,
-                uncovered.join(", ")
+                uncovered.join(", "),
+                proof_targets_scope_fix_command(task, &uncovered),
             ));
         }
     }
@@ -1320,6 +1335,23 @@ mod risk_proof_tests {
             uncovered_blast_radius_modules(&changed, &["lifecycle".to_string()]),
             ["core"]
         );
+    }
+
+    #[test]
+    fn blast_radius_close_guides_supervisor_proof_target_widening() {
+        let mut task = Task::new("cas-d86d-guidance".into(), "proof guidance".into());
+        task.risk = vec![TaskRisk::BlastRadius];
+        task.proof_targets = vec!["lifecycle".into()];
+        let error = validate_risk_close_proofs(
+            &task,
+            &["cas-cli/src/mcp/tools/service/core.rs".into()],
+            std::path::Path::new("."),
+        )
+        .expect_err("a missing blast-radius module must refuse close");
+        assert!(error.contains("task action=update id=cas-d86d-guidance"));
+        assert!(error.contains("proof_targets=\"lifecycle,core\""));
+        assert!(error.contains("proof_scope_fix=true"));
+        assert!(error.contains("live registered supervisor"));
     }
 
     #[test]

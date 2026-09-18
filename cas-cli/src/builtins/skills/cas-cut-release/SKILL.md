@@ -1,235 +1,54 @@
 ---
 name: cas-cut-release
-description: Use when cutting a Cassy runtime release from an assembled epic; follow this fail-closed train.
+description: Use when cutting a Cassy runtime release from an assembled epic.
 managed_by: cas
 ---
 
-# Cassy release train
+# One-command release train
 
-This is the only supervisor release procedure. Stop at the first failed step,
-name the blocking step in the operator timeline, and require its receipt.
+This is the supervisor's only release procedure. The train fails closed at the
+first named blocker and leaves its receipt in a per-run directory keyed by
+version and worktree, never a version-keyed path.
 
-1. Read references/failure-log.md in full. Learn an absent failure with
-   `scripts/release-gate.sh --learn "<symptom>" "<cause>" "<check-id>"`, add
-   its executable row and self-test fixture in the same commit, and store the
-   same text with `mcp__cas__memory action=remember entry_type=learning
-   tags=release`. `--learn` regenerates the builtin reference ledger.
-2. Before `worktree_merge` on any release-bound lane, run
-   `scripts/release-train.sh <version> <epic-worktree> --check-lane <branch>`
-   and require the `Scoped Validation (factory/PR)` job inside that branch tip's
-   exact-SHA, push-triggered `CI` workflow run to be GREEN. Missing or malformed evidence,
-   API errors, pending, skipped, cancelled, or red is a refusal. The only
-   substitute is the supervisor running the affected caller modules in the gate
-   worktree. The supervisor monitors CI; workers never poll CI.
-3. A stalled worker with green proofs gets one urgent interrupt; if it remains
-   stalled, the supervisor pushes from its worktree. When a rebase makes the
-   anchor stale, close the handoff with `commit_receipt` instead of spending
-   another worker turn rebasing it.
-4. Start a dedicated detached or `release/` worktree from `origin/main`, then
-   run `scripts/release-train.sh <version> <release-worktree> --assemble`.
-   Require PASS: it consumes the daemon's tested `integration/<project>` tip
-   under the shared merge lock and refuses stale inputs or an unfinished/red
-   sweep. Resolve reported conflicts in the owning epics and merge again until
-   integration is green. Run the release gate on the assembled tree; inspect
-   guardrail/marker and counted-field tests, and commit every trim or move. Real-project fixtures use
-   `cas::test_paths::runtime_fixture_parent()`, never `/tmp`, `/var/tmp`, or
-   `env!("CARGO_MANIFEST_DIR")`. `cas init` and serve registration remain
-   unconditional; only discovery/cloud behavior skips disposable roots.
-5. Treat an intentional doctor row change as a reviewed snapshot update in the
-   prep commit and name the row in that commit message; an unexplained snapshot
-   change is a bug. Fixture versions use the unmistakable `9.99.x` range,
-   never a plausible current or next release such as an `-rc.1` value.
-6. After the final merge and after every `--learn`, regenerate
-   `cas-cli/src/builtins/reference-history.json` and commit it before the gate.
-   The ledger is the last prep step. For builtin agent changes, update root
-   projections and run the flavor/projection drift tests; do not use
-   `cas update --sync` in the source worktree.
-7. Configure `CAS_RELEASE_GATE_HOME_DIR` on the release host to a large base on
-   the checkout mount with a writable parent and no `.cas` ancestor. On
-   soundwave use `/home/cas-release-gate/base`, not `/`, which was 97% full.
-   The scratch-base row runs first and requires free space at least twice
-   the last recorded archive size and records the new archive size per run. A
-   failure aborts before Cargo or archive rows. Archive mode builds outside the
-   checkout with a remap rooted at `Cargo.toml` plus every package path from
-   `git ls-files '*/Cargo.toml'`, symlinks only cargo/rustc/git/sh/bash/jq/python3,
-   removes `rg`, and uses `--workspace-remap`; exclude `component_output_test`
-   only when its source snapshots require the checkout.
-8. Before changing a version, prove there is no competing release with
-   `gh pr list --state open --search release`, the merge-queue GraphQL query,
-   and `git ls-remote --tags origin`. A competing release from another supervisor lands
-   first and this train takes the next patch number. Then prepare the source
-   commit with `scripts/bump-release-version.sh <version>`,
-   `cargo update --workspace --offline`, CHANGELOG, release draft, and prior
-   POSTED receipt. Start the gate with `scripts/release-train.sh <version>
-   <epic-worktree> --gate`; it regenerates and refuses an uncommitted ledger,
-   then launches a nohup detached process group. Schedule a `coordination
-   remind`, end the turn, and inspect once with `--status`; never run a shell
-   watcher. `--stop` terminates the recorded process group, including nextest
-   and git children. After a targeted fix rerun only failed rows with `--gate
-   --only <row,row>`; row order and the selected-row summary are preserved.
-   These are diagnostic receipts in append-only per-attempt directories: they
-   never overwrite or authorize the exact-SHA full gate required by pipeline.
-   The main per-run directory is keyed by version and worktree, never only by
-   version, and every gate is located by its recorded PID, never `pgrep`.
-9. Create `pr-body.md` in the printed run directory, then use `--pipeline`.
-   It refuses unless `gate.done`, `gate.full.sha`, and the current tree prove a
-   successful full gate on the exact commit about to be pushed. Require
-   pull-request Fast Validation and macOS Check pass rows before queue admission;
-   skipped push rows prove nothing. The train records the PR, merge-queue
-   terminal state, and landed main SHA. It detects a missing `mergeQueueEntry`
-   with no new `merge_group` run and re-enqueues at most three times before
-   failing; stale queue runs from before this attempt prove nothing.
-10. Add one epic note per gate run containing tip, failed rows, cause class
-    (`product`, `fixture`, `environment`, or `procedure`), and blocking step.
-    The final pane summary names green-to-published latency only from saved,
-    verified publication receipts; `--status` is bounded and read-only, prints
-    the note template, and otherwise reports publication pending or unavailable.
-11. Publish the recorded landed SHA with `--publish`. Require origin/main and
-   the landed commit's `cas-cli/Cargo.toml` to match before the detached tag
-   worktree is created. Hardlink `.context/zig`, source
-   `CAS_RELEASE_ENV_FILE` (default `$HOME/.cas/release.env`) without printing
-   values, and print only the set/unset state of `CAS_POSTHOG_API_KEY` and
-   `CAS_SENTRY_DSN`. Let `release.sh --publish-tag` create the annotated tag and
-   run local preflight. Keep `release.log`, the recorded PID, and numeric done
-   receipt in the train's external run directory. A zero publisher status writes
-   `release.tag-complete.epoch`, never a publication timestamp: tag push
-   completion is separate from GitHub release and asset publication. The detached wrapper must
-   capture status without changing the caller's errexit state:
-
-   ```bash
-   cd "$TAG_WORKTREE"
-   test -x "$PWD/.context/zig/zig"
-   export ZIG="$PWD/.context/zig/zig"
-   RELEASE_ENV_FILE="${CAS_RELEASE_ENV_FILE:-$HOME/.cas/release.env}"
-   test -r "$RELEASE_ENV_FILE"
-   set -a; source "$RELEASE_ENV_FILE"; set +a
-   for name in CAS_POSTHOG_API_KEY CAS_SENTRY_DSN; do
-     if [[ -v "$name" ]]; then printf '%s: set\n' "$name"; else printf '%s: unset\n' "$name"; fi
-   done
-   EVIDENCE_DIR="$(scripts/release-train.sh "$VERSION" "$EPIC_WORKTREE" --print-run-dir)"
-   mkdir -p "$EVIDENCE_DIR"
-   LOG="$EVIDENCE_DIR/release.log"
-   PID_FILE="$EVIDENCE_DIR/release.pid"; DONE="$EVIDENCE_DIR/release.done"
-   nohup bash -c '
-     set +e
-     "$1" --publish-tag >"$2" 2>&1
-     status=$?
-     case "$status" in (""|*[!0-9]*) status=1;; esac
-     printf "%s\n" "$status" >"$3"
-     exit "$status"
-   ' bash "$PWD/scripts/release.sh" "$LOG" "$DONE" &
-   PUBLISH_PID=$!; printf '%s\n' "$PUBLISH_PID" >"$PID_FILE"
-   ```
-
-   At reminder wakeups use `kill -0` on that PID and inspect the done receipt;
-   never `wait`, foreground-poll, or use `pkill -f`.
-12. Before announcing, require the annotated tag peels to the landed SHA and
-   `git ls-remote --exit-code --refs origin "refs/tags/$TAG"` succeeds. The
-   release workflow explicitly dispatches `install-path-proof.yml` with
-   `version=$TAG` after publication because its release-created `GITHUB_TOKEN`
-   does not fan out `release.published`; save that matching `workflow_dispatch`
-   run id in the release receipt and require its success. Save the exact
-   matching `gh run list --workflow release.yml --limit 20 --json
-   databaseId,headBranch,headSha,status,conclusion` row as `release-workflow.json` and
-   require success. Save `release-published-receipt.sh "$TAG" --write-draft
-   <draft-path>` output as `release-published.receipt` and
-   `release-latency-receipt.sh "$TAG"` output as `release-latency.receipt` in
-   the run directory. Only the published receipt's matching tag, SHA, actual
-   `PUBLISHED_AT`, and both required asset digests authorize `--status` to name
-   green-to-published latency.
-13. After the published receipt exists, set
-   `CAS_RELEASE_TRAIN_REPORT_USER_THREAD_TS` and
-   `CAS_RELEASE_TRAIN_REPORT_DEV_THREAD_TS` to the existing User and Dev parent
-   timestamps, then run `scripts/release-train.sh <version> <epic-worktree>
-   --report`. The train defaults to the checked-in
-   `scripts/release-report-post.py` adapter; set
-   `CAS_RELEASE_TRAIN_REPORT_POST_CMD` only for an explicitly approved alternate
-   route or a stub. This runs
-   `cas release report <version> --pdf` (or the executable named by
-   `CAS_RELEASE_TRAIN_REPORT_CMD`), requires the Markdown, standalone HTML and
-   PDF under `docs/release-reports/`, and records its log and exit status in
-   the run directory. Commit the report, concept brief, HTML, PDF and QA receipt
-   with their sources; link both report formats in the announcement draft and
-   carry them into the next prep commit. Keep the published tag unchanged.
-   `--report` is fail-closed until a posting adapter has written
-   `release-report.receipt` with `TAG`, `PDF_PATH`, `HTML_PATH`,
-   `PDF_SHA256`, `PDF_SIZE_BYTES`, `PDF_REMOTE_SHA256`,
-   `PDF_REMOTE_SIZE_BYTES`, `PDF_REMOTE_PAGE_COUNT`, `HTML_SHA256`,
-   `PAGE_COUNT`, `PDF_FILE_PERMALINK`, `PDF_FILE_ID`, `HTML_FILE_ID`,
-   `USER_THREAD_TS`, and `DEV_THREAD_TS`; the adapter downloads and verifies
-   the transport-returned PDF before writing the remote evidence, and the train
-   re-hashes the local PDF/HTML and checks that evidence before accepting it.
-14. The default posting adapter owns the authenticated MechaCassy HTTP MCP
-   call. It accepts `TAG PDF_PATH HTML_PATH USER_THREAD_TS DEV_THREAD_TS`, reads
-   the report bytes locally, uploads the PDF as a file attached to the User
-   thread, and posts a GitHub permalink for the HTML from the Dev thread. It
-   writes the receipt only after both thread receipts, local PDF/HTML evidence,
-   and exact remote PDF byte/hash/decode/page-count checks are available; report
-   bytes never enter agent context. Load the bearer and bypass from the configured credentials file or
-   named environment variables (`MECHA_SLACK_TOKEN_ENV` and
-   `MECHA_VERCEL_BYPASS`). Use only the MechaCassy hub/bot;
-   never use Claude.ai Slack or a personal connector. Upload through `mecha_post`
-   and accept the file only after download, source-hash and decode checks pass.
-   The adapter sends hub credentials only to the configured MCP origin (with the
-   explicit same-origin loopback exception used by tests); external signed or
-   private-provider URLs receive no hub credentials, message permalinks are not
-   PDF endpoints, and cross-origin or scheme-changing redirects are rejected.
-   When the current hub file receipt omits `download_url`, the adapter may use
-   authenticated `mecha_read` by the returned file ID; otherwise it fails
-   explicitly before treating the upload as verified. Bound that fallback read
-   inclusively from the User root Slack timestamp as RFC3339 `since`, preserving
-   fractional precision so old channel history is excluded while its replies
-   remain available; reject an invalid root timestamp before any post.
-   If the hub cannot complete publication, preserve the draft and partial
-   receipts and report blocked. Use MechaCassy's default `cas-internal` channel,
-   retain `C0B44GUKDK2` only for verification, and save four Slack POSTED
-   entries with timestamps and permalinks. If the live proxy lacks registration,
-   use the configured direct mecha-cassy MCP or a bounded one-shot
-   using that same authenticated hub; do not retry an authenticated-session
-   rejection. Save `cas update`,
-   `cas --version`, and `cas hub` proof and require `refresh_binary_version`
-   in the host update JSON to equal the released version. Carry the POSTED
-   receipt into the next prep commit. Close only after merge and stranded-branch
-   inspection; use `stranded_branch_override` only with proof on main.
-
-## Release-gate timing and full retries
-
-A full `scripts/release-train.sh <version> <epic-worktree> --gate` retains every
-row's raw log, visual-QA evidence and `timing.tsv` under the run directory's
-`rows/<UTC>-<pid>/`. The table records UTC boundaries, wall seconds, user CPU
-seconds, system CPU seconds, status and source SHA. Successful logs survive a
-retry; `gate.log` remains the current attempt's summary.
-
-After a fix, use `--gate --reuse` for a complete gate that may reuse eligible
-PASS rows. It requires the same tool/environment fingerprint, row input content
-and checkout identity, with evidence no older than 24 hours. Rust rows depend
-on the whole commit; web rows depend on `hub-web`, `scripts`, and `.github`, so
-a Rust-only fix can retain web evidence while Rust tests rerun. Scratch and
-identity checks, procedure checks, ledger regeneration and final cleanliness
-always execute. Unknown tool identity, dirty trees, missing, corrupt, future or
-expired receipts force execution. Default full gates populate this cache but
-rerun each row; `--reuse` is explicit and cannot combine with `--only`.
-
-An incremental full gate still writes the exact-SHA `gate.full.sha` only after
-all rows pass and the current SHA remains unchanged. The pipeline checks that
-same full receipt against the current clean tree. Individual row receipts and
-`--only` diagnostics never authorize pipeline; diagnostics do not populate or
-read the full-gate cache. Logs mark reused rows with their original source SHA.
-
-When archive-mode is selected, the in-tree nextest row executes only the
-`component_output_test` complement and archive-mode runs the rest of the whole
-workspace once. A focused `--only nextest` still executes the entire in-tree
-workspace. Preserve the five-variable factory identity scrub in both paths,
-CI's `--no-fail-fast`, the verified nonzero-test wrapper, and the archive
-consumer's `INSTA_WORKSPACE_ROOT` remap. Full suite coverage is the union of
-these complementary rows; neither row alone supplies full-gate authorization.
-
-Report green-to-pipeline and merged-to-publisher hand-off delays separately
-from execution. A green receipt is not a publication receipt. Bare
-`release.sh` remains audit-only: Linux currently cleans its release target on
-each invocation, so running it early alone does not make later publication a
-warm build. Any future automated continuation must be explicitly requested,
-PID-recorded, and must invoke the existing exact-SHA authorization checks.
-
-Require a nonzero-test receipt for doctests as CI does; the gate scrubs
-inherited factory identity before executing that row.
+1. Read `references/failure-log.md in full`. Learn an absent failure with
+   `scripts/release-gate.sh --learn "<symptom>" "<cause>" "<check-id>"`, mirror
+   the entry, and store the same text with `mcp__cas__memory action=remember
+   entry_type=learning tags=release`. The learn command regenerates the builtin
+   reference ledger; regenerate it again after the final merge as the last prep
+   step.
+2. Before merging a release-bound lane, run `scripts/release-train.sh <version>
+   <epic-worktree> --check-lane <branch>`. Require the exact branch-tip,
+   push-triggered `Scoped Validation` job to be green; missing, skipped, red,
+   pending, or malformed evidence refuses the merge. Supervisors monitor CI;
+   workers never poll CI.
+3. Start a clean detached or `release/` worktree from `origin/main`. Confirm
+   the preflight prerequisites: no competing release (open PRs, the
+   merge-queue GraphQL query, and remote tags); a writable `scratch-base` with
+   space for twice the last archive; readable `CAS_RELEASE_ENV_FILE` (names
+   only); resolvable Zig; a dated CHANGELOG heading and draft; and a passing
+   integration receipt. Real-project fixtures use
+   `cas::test_paths::runtime_fixture_parent()`, and fixture versions use
+   `9.99.x`. An intentional doctor row change is a reviewed snapshot update.
+4. Run one command:
+   `scripts/release-train.sh <version> <release-worktree> --cut`.
+   It runs `preflight, assemble, prep, ledger, gate, pr-body, pipeline,
+   publish, post-publication, announce, report, receipts, host-update` in that
+   order. The ledger is the last prep step. `assemble` invokes stale-base heal
+   when required. The gate is a detached process group; inspect its recorded PID
+   with `kill -0`, never by process-name search. Every stage writes a SHA
+   receipt, and the train preserves pipeline/publisher hand-off epochs.
+5. If the command stops, answer only the named blocker, then rerun the exact
+   printed `--cut --resume` command. Use `scripts/release-train.sh <version>
+   <release-worktree> --status` for bounded, read-only state. A targeted
+   `--gate --only <row,row>` is diagnostic and never authorizes pipeline.
+6. Require the receipt checklist before calling the release published: the
+   full exact-SHA gate, queue/pipeline landed SHA, `annotated tag peels`,
+   `release.tag-complete.epoch`, `release-published.receipt`, the matching
+   workflow and asset proofs, `four Slack POSTED` entries through the
+   `MechaCassy` hub (never a personal Slack route), report HTML/PDF evidence,
+   `cas --version`, and host JSON with `refresh_binary_version`.
+   The report's green-to-published latency is named only from verified receipts.
+7. Add one epic note per gate run with tip, failed rows, cause class, and
+   blocking step. Close only after merge and stranded-branch inspection;
+   `stranded_branch_override` requires supervisor proof. Preserve the draft and
+   partial receipts on an uncertain post; never retry an uncertain write.

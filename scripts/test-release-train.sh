@@ -248,6 +248,31 @@ for invalid in '' not-a-row; do
     fi
 done
 
+# Every invocation leaves an attributable intervention record. Calls made by
+# the --cut dispatcher mark themselves internal; an operator's targeted gate
+# is manual and contributes one intervention for the gate stage.
+wt_metrics="$(new_worktree epic-intervention-metrics)"
+dir_metrics="$("$train" 9.99.3 "$wt_metrics" --print-run-dir)"
+CAS_RELEASE_TRAIN_INVOCATION_KIND=internal CAS_RELEASE_TRAIN_GATE_CMD="$gate_ok" \
+    "$train" 9.99.3 "$wt_metrics" --gate >/dev/null 2>&1
+wait_gate_done "$dir_metrics" || true
+CAS_SESSION_ID=manual-session CAS_RELEASE_TRAIN_GATE_CMD="$gate_ok" "$train" 9.99.3 "$wt_metrics" \
+    --gate --only nextest >/dev/null 2>&1
+wait_for_file "$dir_metrics/diagnostics/*/gate.done" || true
+if grep -q 'subcommand=--gate stage=gate .*kind=internal' "$dir_metrics/interventions.log" \
+    && grep -q 'subcommand=--gate stage=gate .*caller=manual-session .*kind=manual' "$dir_metrics/interventions.log"; then
+    ok 'intervention log records internal and manual gate callers'
+else
+    bad "intervention log did not distinguish gate callers: $(cat "$dir_metrics/interventions.log" 2>/dev/null || echo absent)"
+fi
+metrics_status="$($train 9.99.3 "$wt_metrics" --status 2>&1 || true)"
+if [[ "$metrics_status" == *'INTERVENTIONS=1'* ]] \
+    && [[ "$metrics_status" == *'BLOCKERS=gate'* ]]; then
+    ok '--status prints intervention count and stage names'
+else
+    bad "--status omitted intervention metrics: $metrics_status"
+fi
+
 # --check-lane binds the branch name and exact tip to the Scoped Validation JOB
 # inside the real CI workflow's push run. Missing evidence and API errors refuse.
 wt_lane="$(new_worktree lane-ci)"
@@ -456,7 +481,11 @@ git -C "$wt_a" rev-parse HEAD >"$dir_a/landed-main.sha"
 status="$("$train" 9.99.0 "$wt_a" --status 2>&1 || true)"
 if [[ "$status" == *'rows_failed=nextest,archive-mode'* ]] \
     && [[ "$status" == *'cause_class=<product|fixture|environment|procedure>'* ]] \
-    && [[ "$status" == *'blocking_step=<step>'* ]]; then
+    && [[ "$status" == *'blocking_step=<step>'* ]] \
+    && [[ "$status" == *'INTERVENTIONS=<n>'* ]] \
+    && [[ "$status" == *'BLOCKERS=<stage,...>'* ]] \
+    && [[ "$status" == *'GREEN_TO_PIPELINE_SECS=<n>'* ]] \
+    && [[ "$status" == *'MERGED_TO_PUBLISHER_SECS=<n>'* ]]; then
     ok '--status prints the required per-run epic-note template'
 else
     bad "--status omitted timeline fields: $status"
@@ -594,6 +623,141 @@ if [[ "$report_out" == *'release report: verified PDF=docs/release-reports/v9.99
     ok '--report requires and accepts the posting adapter receipt after publication'
 else
     bad "--report did not complete through the receipt adapter: $report_out"
+fi
+
+# ---------------------------------------------------------------------------
+# Release-train docs stages: prep, announce, and receipts own the draft and
+# report handoff. These fixtures assert the public stage seams with a local
+# adapter and bare origin; no Slack or GitHub service is contacted.
+# ---------------------------------------------------------------------------
+stage_wt="$(new_worktree release-stages)"
+stage_date='2099-01-02'
+fence="$(printf '\x60\x60\x60')"
+mkdir -p "$stage_wt/docs/release-notes" "$stage_wt/docs/release-reports"
+cat >"$stage_wt/docs/release-notes/2098-12-31-v9.99.7-slack.md" <<'EOF'
+# Slack draft — prior
+
+## v9.99.7 POSTED
+
+- **User top-level:** message_id=old-user · https://example.test/old-user
+- **User reply:** message_id=old-user-reply · https://example.test/old-user-reply
+- **Dev top-level:** message_id=old-dev · https://example.test/old-dev
+- **Dev reply:** message_id=old-dev-reply · https://example.test/old-dev-reply
+EOF
+{
+    printf '%s\n' '# Slack draft — fixture' '' '## User thread' '' '**Top-level:**' ''
+    printf '%s\n' "$fence"'text'
+    printf '%s\n' '*Live on production — User — Cassy v9.99.8*' \
+        'Was: the release handoff was manual. → Now: the train carries it through.'
+    printf '%s\n' "$fence" '' '**Only reply:**' ''
+    printf '%s\n' "$fence"'text'
+    printf '%s\n' '• *Release handoff* — Was: the draft was copied by hand. → Now: the train carries it.'
+    printf '%s\n' "$fence" '' '## Dev thread' '' '**Top-level:**' ''
+    printf '%s\n' "$fence"'text'
+    printf '%s\n' '*Live on production — Dev — Cassy v9.99.8*' \
+        'Was: receipts were split across commits. → Now: one docs change carries them.'
+    printf '%s\n' "$fence" '' '**Only reply:**' ''
+    printf '%s\n' "$fence"'text'
+    printf '%s\n' '• *Receipts* — Was: evidence was split. → Now: the report and receipt land together.'
+    printf '%s\n' "$fence"
+} >"$stage_wt/docs/release-notes/$stage_date-v9.99.8-slack.md"
+git -C "$stage_wt" add docs/release-notes
+git -C "$stage_wt" -c commit.gpgsign=false commit -qm 'seed release stage draft'
+prep_stage_out="$(CAS_RELEASE_TRAIN_DATE="$stage_date" "$train" 9.99.8 "$stage_wt" --prep 2>&1 || true)"
+if [[ "$prep_stage_out" == *'prep complete'* ]] \
+    && git -C "$stage_wt" log -1 --format=%s | grep -q 'release: prepare v9.99.8' \
+    && grep -q 'Prior release receipt carried forward\|v9.99.7 POSTED' \
+        "$stage_wt/docs/release-notes/$stage_date-v9.99.8-slack.md"; then
+    ok '--prep commits the current draft and carries the prior POSTED receipt'
+else
+    bad "--prep did not carry the draft/receipt: $prep_stage_out"
+fi
+
+announce_stub="$tmp/announce-stub.sh"
+cat >"$announce_stub" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$CAS_RELEASE_TRAIN_ANNOUNCE_BODY_DIR" >"$CAS_RELEASE_TRAIN_ANNOUNCE_STUB_LOG"
+cat >"$CAS_RELEASE_TRAIN_ANNOUNCE_RECEIPT" <<'RECEIPT'
+POSTED_AT=2099-01-02T00:00:00Z
+CHANNEL=cas-internal
+USER_TOP_LEVEL_ID=user-1
+USER_TOP_LEVEL_PERMALINK=https://example.test/user-1
+USER_REPLY_ID=user-2
+USER_REPLY_PERMALINK=https://example.test/user-2
+DEV_TOP_LEVEL_ID=dev-1
+DEV_TOP_LEVEL_PERMALINK=https://example.test/dev-1
+DEV_REPLY_ID=dev-2
+DEV_REPLY_PERMALINK=https://example.test/dev-2
+RECEIPT
+EOF
+chmod +x "$announce_stub"
+announce_log="$tmp/announce-stub.log"
+announce_stage_out="$(CAS_RELEASE_TRAIN_DATE="$stage_date" \
+    CAS_RELEASE_TRAIN_ANNOUNCE_POST_CMD="$announce_stub" \
+    CAS_RELEASE_TRAIN_ANNOUNCE_STUB_LOG="$announce_log" \
+    "$train" 9.99.8 "$stage_wt" --announce 2>&1 || true)"
+stage_dir="$("$train" 9.99.8 "$stage_wt" --print-run-dir)"
+if [[ "$announce_stage_out" == *'announce complete'* ]] \
+    && [[ "$(grep -c . "$announce_log" 2>/dev/null || true)" == 1 ]] \
+    && [[ "$(grep -c '^USER_TOP_LEVEL_ID=' "$stage_dir/announce.receipt" 2>/dev/null || true)" == 1 ]]; then
+    ok '--announce validates and records the four-message adapter receipt'
+else
+    bad "--announce did not record the adapter receipt: $announce_stage_out"
+fi
+
+bad_draft="$tmp/bad-slack.md"
+cp "$stage_wt/docs/release-notes/$stage_date-v9.99.8-slack.md" "$bad_draft"
+sed -i '0,/\\*Release handoff\\*/s//**bad**/' "$bad_draft"
+bad_announce_stub="$tmp/bad-announce-stub.sh"
+cat >"$bad_announce_stub" <<'EOF'
+#!/usr/bin/env bash
+touch "$CAS_RELEASE_TRAIN_ANNOUNCE_STUB_LOG"
+EOF
+chmod +x "$bad_announce_stub"
+bad_announce_log="$tmp/bad-announce.log"
+bad_out="$(CAS_RELEASE_TRAIN_DATE="$stage_date" \
+    CAS_RELEASE_TRAIN_DRAFT="$bad_draft" \
+    CAS_RELEASE_TRAIN_ANNOUNCE_POST_CMD="$bad_announce_stub" \
+    CAS_RELEASE_TRAIN_ANNOUNCE_STUB_LOG="$bad_announce_log" \
+    "$train" 9.99.9 "$stage_wt" --announce 2>&1 || true)"
+if [[ "$bad_out" == *'lint failed'* ]] && [[ ! -e "$bad_announce_log" ]]; then
+    ok '--announce rejects invalid mrkdwn before any adapter write'
+else
+    bad "--announce posted or accepted invalid mrkdwn: $bad_out"
+fi
+
+stage_origin="$tmp/stage-origin.git"
+git init -q --bare "$stage_origin"
+git -C "$stage_wt" remote add origin "$stage_origin"
+git -C "$stage_wt" push -q origin HEAD:main
+printf 'report\n' >"$stage_wt/docs/release-reports/v9.99.8.md"
+printf '<html>report</html>\n' >"$stage_wt/docs/release-reports/v9.99.8.html"
+cp "$repo_root/docs/release-reports/v3.19.0.pdf" "$stage_wt/docs/release-reports/v9.99.8.pdf"
+printf '%s\n' "$(git -C "$stage_wt" rev-parse HEAD)" >"$stage_dir/landed-main.sha"
+receipts_gh="$tmp/receipts-gh.sh"
+cat >"$receipts_gh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+case "$1 $2" in
+  "pr create") printf 'https://example.test/Richards-LLC/cassy/pull/998\n' ;;
+  "pr view") printf '{"id":"PR_kwDOFIXTURE998"}\n' ;;
+  "api graphql") printf '{"data":{"enqueuePullRequest":{"mergeQueueEntry":{"state":"QUEUED"}}}}\n' ;;
+  *) printf 'unexpected gh call: %s\n' "$*" >&2; exit 2 ;;
+esac
+EOF
+chmod +x "$receipts_gh"
+receipts_stage_out="$(CAS_RELEASE_TRAIN_DATE="$stage_date" \
+    CAS_RELEASE_TRAIN_GH="$receipts_gh" "$train" 9.99.8 "$stage_wt" --receipts 2>&1 || true)"
+receipt_branch="docs/release-receipts-v9.99.8"
+if [[ "$receipts_stage_out" == *'receipts PR #998 queued'* ]] \
+    && grep -q '^PR_NUMBER=998$' "$stage_dir/receipts.pr" 2>/dev/null \
+    && git --git-dir="$stage_origin" show "refs/heads/$receipt_branch:docs/release-reports/v9.99.8.md" >/dev/null 2>&1 \
+    && git --git-dir="$stage_origin" show "refs/heads/$receipt_branch:docs/release-notes/$stage_date-v9.99.8-slack.md" \
+        | grep -q '^## POSTED$'; then
+    ok '--receipts commits POSTED and report files in one queued docs PR'
+else
+    bad "--receipts did not queue the docs PR: $receipts_stage_out"
 fi
 
 # ---------------------------------------------------------------------------
@@ -1088,8 +1252,405 @@ else
     bad "publish did not use the recorded landed sha: $(cat "$run_default_dir/release.done" 2>/dev/null || echo absent)"
 fi
 
+# ===========================================================================
+# --cut — the preflight and stage-ledger contract.
+#
+# Every stage is replaceable by a fixture command. The gate itself remains
+# the real detached train action so this proves the cut waits for, and resumes
+# from, its durable gate receipt rather than merely calling a stub in-process.
+# ===========================================================================
+new_cut_fixture() {
+    local name="$1" version="$2" include_heading="${3:-1}"
+    local dir="$tmp/$name" remote="$tmp/$name-remote.git" base
+    git init -q --bare "$remote"
+    mkdir -p "$dir"
+    ( cd "$dir"
+      git init -q -b main .
+      git config user.email test@test.invalid
+      git config user.name 'Release Train Test'
+      mkdir -p scripts cas-cli/src/builtins .context/zig .cas/merge-sweeps
+      printf '# release fixture\n\n## [Unreleased]\n\n- pending\n' > CHANGELOG.md
+      if [[ "$include_heading" == 1 ]]; then
+          printf '\n## [%s] - %s\n\n- fixture release\n' "$version" "$(date -u +%F)" >> CHANGELOG.md
+      fi
+      printf 'draft\n' > "docs-placeholder"
+      mkdir -p "docs/release-notes"
+      printf 'draft\n' > "docs/release-notes/$(date -u +%F)-v${version}-slack.md"
+      printf 'CAS_TEST_TOKEN=fixture-secret\n' > release.env
+      : > cas-cli/src/builtins/reference-history.json
+      printf '#!/usr/bin/env bash\nexit 0\n' > .context/zig/zig
+      chmod +x .context/zig/zig
+      git add -A
+      git -c commit.gpgsign=false commit -q -m seed
+      git remote add origin "$remote"
+      git push -q origin main
+      git branch -m "release/$version"
+      base="$(git rev-parse HEAD)"
+      printf '{"status":"PASSED","base":"%s","tip":"%s","epics":[]}\n' "$base" "$base" > .cas/merge-sweeps/integration.json
+      git add .cas/merge-sweeps/integration.json
+      git -c commit.gpgsign=false commit -q -m 'record integration receipt'
+      git push -q origin "HEAD:refs/heads/release/$version"
+      git update-ref refs/remotes/origin/main "$base"
+    )
+    printf '%s\n' "$dir"
+}
+
+new_combined_cut_fixture() {
+    local name="$1" version="$2"
+    local dir="$tmp/$name" remote="$tmp/$name-remote.git"
+    local project base main_tip fence date_stamp
+    project="$(basename "$dir")"
+    date_stamp='2099-01-02'
+    git init -q --bare "$remote"
+    mkdir -p "$dir"
+    ( cd "$dir"
+      git init -q -b main .
+      git config user.email test@test.invalid
+      git config user.name 'Release Train Combined Fixture'
+      git config core.hooksPath /dev/null
+      mkdir -p scripts cas-cli/src/builtins .context/zig .cas/merge-sweeps docs/release-notes
+      printf '.cas/\n' > .gitignore
+      printf '# fixture\n\n## [Unreleased]\n\n- pending\n\n## [%s] - %s\n\n- combined fixture\n' \
+          "$version" "$date_stamp" > CHANGELOG.md
+      printf 'CAS_TEST_TOKEN=fixture-secret\n' > release.env
+      printf '#!/usr/bin/env bash\nexit 0\n' > .context/zig/zig
+      chmod +x .context/zig/zig
+      : > cas-cli/src/builtins/reference-history.json
+cat > scripts/gen-builtin-reference-history.sh <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'combined ledger\n' > cas-cli/src/builtins/reference-history.json
+[[ -z "${CUT_LOG:-}" ]] || printf '%s\n' ledger >>"$CUT_LOG"
+EOF
+      chmod +x scripts/gen-builtin-reference-history.sh
+      fence="$(printf '\x60\x60\x60')"
+      {
+          printf '%s\n' '# Combined release draft' '' '## User thread' '' "$fence"'text'
+          printf '%s\n' "*Live on production — User — Cassy v$version*" \
+              'Was: the handoff was manual. → Now: the train carries every stage.'
+          printf '%s\n' "$fence" '' '## User reply' '' "$fence"'text'
+          printf '%s\n' '• *Release* — Was: the handoff was split. → Now: the train carries it.'
+          printf '%s\n' "$fence" '' '## Dev thread' '' "$fence"'text'
+          printf '%s\n' "*Live on production — Dev — Cassy v$version*" \
+              'Was: the receipts were manual. → Now: the train records them.'
+          printf '%s\n' "$fence" '' '## Dev reply' '' "$fence"'text'
+          printf '%s\n' '• *Evidence* — Was: evidence was scattered. → Now: the train commits it.'
+          printf '%s\n' "$fence"
+      } >"docs/release-notes/$date_stamp-v${version}-slack.md"
+      git add -A
+      git -c commit.gpgsign=false commit -qm seed
+      git remote add origin "$remote"
+      git push -q origin main
+      base="$(git rev-parse HEAD)"
+      git branch "integration/$project" "$base"
+      git branch "release/$version" "$base"
+      printf 'main-forward\n' > main-forward.txt
+      git add main-forward.txt
+      git -c commit.gpgsign=false commit -qm 'advance origin main for stale-base recovery'
+      main_tip="$(git rev-parse HEAD)"
+      git update-ref refs/remotes/origin/main "$main_tip"
+      git checkout -q "release/$version"
+      printf '{"status":"PASSED","base":"%s","tip":"%s","epics":[]}\n' \
+          "$base" "$base" > .cas/merge-sweeps/integration.json
+      cat > .cas/fake-cas <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "\$1 \$2 \$3" == 'factory integration-recover --base-only' ]]
+current="\$(git rev-parse refs/remotes/origin/main)"
+git update-ref refs/heads/integration/$project "\$current"
+python3 - "\$current" <<'PY'
+import json
+from pathlib import Path
+import sys
+path = Path('.cas/merge-sweeps/integration.json')
+data = json.loads(path.read_text())
+data['base'] = sys.argv[1]
+data['tip'] = sys.argv[1]
+path.write_text(json.dumps(data))
+Path('.cas/healed').write_text('yes\\n')
+PY
+EOF
+      chmod +x .cas/fake-cas
+    )
+    printf '%s\n' "$dir"
+}
+
+cut_version=9.99.10
+cut_wt="$(new_cut_fixture cut-e2e "$cut_version")"
+cut_log="$tmp/cut-stages.log"
+cut_cmd="$tmp/cut-stage.sh"
+cat >"$cut_cmd" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "${CUT_STAGE:?}" >>"${CUT_LOG:?}"
+case "$CUT_STAGE" in
+    pipeline) printf '%s\n' "$(git rev-parse HEAD)" >"${CAS_RELEASE_TRAIN_RUN_DIR:?}/landed-main.sha"; printf 'MERGED\n' >"$CAS_RELEASE_TRAIN_RUN_DIR/pipeline.done" ;;
+    publish) printf '0\n' >"${CAS_RELEASE_TRAIN_RUN_DIR:?}/release.done" ;;
+    post-publication) : >"$CAS_RELEASE_TRAIN_RUN_DIR/release-workflow.json"; : >"$CAS_RELEASE_TRAIN_RUN_DIR/release-published.receipt"; : >"$CAS_RELEASE_TRAIN_RUN_DIR/release-latency.receipt" ;;
+esac
+EOF
+chmod +x "$cut_cmd"
+cut_gate="$tmp/cut-gate.sh"
+new_gate_stub "$cut_gate" 0
+cut_run_dir="$("$train" "$cut_version" "$cut_wt" --print-run-dir)"
+out="$(CAS_RELEASE_ENV_FILE="$cut_wt/release.env" \
+    CAS_RELEASE_TRAIN_PREFLIGHT_SKIP_COMPETING=1 \
+    CAS_RELEASE_TRAIN_GATE_CMD="$cut_gate" CAS_RELEASE_TRAIN_CUT_STOP_AFTER=gate \
+    CAS_RELEASE_TRAIN_ASSEMBLE_CMD="$cut_cmd" CAS_RELEASE_TRAIN_PREP_CMD="$cut_cmd" \
+    CAS_RELEASE_TRAIN_LEDGER_CMD="$cut_cmd" CAS_RELEASE_TRAIN_PIPELINE_CMD="$cut_cmd" \
+    CAS_RELEASE_TRAIN_PUBLISH_CMD="$cut_cmd" CAS_RELEASE_TRAIN_POST_PUBLICATION_CMD="$cut_cmd" \
+    CAS_RELEASE_TRAIN_ANNOUNCE_CMD="$cut_cmd" CAS_RELEASE_TRAIN_REPORT_CMD="$cut_cmd" \
+    CAS_RELEASE_TRAIN_RECEIPTS_CMD="$cut_cmd" CAS_RELEASE_TRAIN_HOST_UPDATE_CMD="$cut_cmd" \
+    CUT_STAGE=gate CUT_LOG="$cut_log" CAS_RELEASE_TRAIN_RUN_DIR="$cut_run_dir" \
+    "$train" "$cut_version" "$cut_wt" --cut 2>&1 || true)"
+if [[ "$out" == *'stopped after stage gate'* && -s "$cut_run_dir/stage.gate.done" ]]; then
+    ok '--cut stops after gate with a durable stage receipt'
+else
+    bad "--cut did not stop with the gate receipt: $out"
+fi
+gate_runs_before="$(grep -c '^gate$' "$cut_log" 2>/dev/null || true)"
+CAS_RELEASE_ENV_FILE="$cut_wt/release.env" \
+    CAS_RELEASE_TRAIN_PREFLIGHT_SKIP_COMPETING=1 \
+    CAS_RELEASE_TRAIN_GATE_CMD="$cut_gate" \
+    CAS_RELEASE_TRAIN_ASSEMBLE_CMD="$cut_cmd" CAS_RELEASE_TRAIN_PREP_CMD="$cut_cmd" \
+    CAS_RELEASE_TRAIN_LEDGER_CMD="$cut_cmd" CAS_RELEASE_TRAIN_PIPELINE_CMD="$cut_cmd" \
+    CAS_RELEASE_TRAIN_PUBLISH_CMD="$cut_cmd" CAS_RELEASE_TRAIN_POST_PUBLICATION_CMD="$cut_cmd" \
+    CAS_RELEASE_TRAIN_ANNOUNCE_CMD="$cut_cmd" CAS_RELEASE_TRAIN_REPORT_CMD="$cut_cmd" \
+    CAS_RELEASE_TRAIN_RECEIPTS_CMD="$cut_cmd" CAS_RELEASE_TRAIN_HOST_UPDATE_CMD="$cut_cmd" \
+    CUT_STAGE=gate CUT_LOG="$cut_log" CAS_RELEASE_TRAIN_RUN_DIR="$cut_run_dir" \
+    "$train" "$cut_version" "$cut_wt" --cut --resume >/dev/null
+gate_runs_after="$(grep -c '^gate$' "$cut_log" 2>/dev/null || true)"
+if [[ "$gate_runs_before" == "$gate_runs_after" ]] \
+    && [[ -s "$cut_run_dir/stage.host-update.done" ]]; then
+    ok '--cut --resume skips the completed gate and reaches the final stage'
+else
+    bad "--cut --resume did not preserve gate idempotence (before=$gate_runs_before after=$gate_runs_after)"
+fi
+
+missing_wt="$(new_cut_fixture cut-missing-heading 9.99.11 0)"
+missing_log="$tmp/missing-stage.log"
+missing_out="$(CAS_RELEASE_ENV_FILE="$missing_wt/release.env" \
+    CAS_RELEASE_TRAIN_PREFLIGHT_SKIP_COMPETING=1 \
+    CAS_RELEASE_TRAIN_ASSEMBLE_CMD="$cut_cmd" CUT_LOG="$missing_log" \
+    "$train" 9.99.11 "$missing_wt" --cut 2>&1 || true)"
+if [[ "$missing_out" == *'BLOCKER changelog-heading'* ]] \
+    && [[ ! -e "$missing_log" ]]; then
+    ok 'missing CHANGELOG heading blocks before any build stage'
+else
+    bad "missing CHANGELOG heading was not a named preflight blocker: $missing_out"
+fi
+
+# The assembled train must use the real prep/announce/receipts bodies while
+# only the external gate, pipeline, publisher, report, host, and adapters are
+# stubbed. This is deliberately separate from the seam tests above: it catches
+# a stage function that exists for standalone use but is invisible to --cut.
+combined_log="$tmp/combined-stages.log"
+combined_cmd="$tmp/combined-stage.sh"
+cat >"$combined_cmd" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "${CUT_STAGE:?}" >>"${CUT_LOG:?}"
+case "$CUT_STAGE" in
+    pipeline)
+        date -u +%s >"$CAS_RELEASE_TRAIN_RUN_DIR/pipeline.start.epoch"
+        git rev-parse HEAD >"$CAS_RELEASE_TRAIN_RUN_DIR/landed-main.sha"
+        date -u +%s >"$CAS_RELEASE_TRAIN_RUN_DIR/pipeline.merged.epoch"
+        printf 'MERGED\n' >"$CAS_RELEASE_TRAIN_RUN_DIR/pipeline.done"
+        ;;
+    publish)
+        date -u +%s >"$CAS_RELEASE_TRAIN_RUN_DIR/publisher.start.epoch"
+        printf '0\n' >"$CAS_RELEASE_TRAIN_RUN_DIR/release.done"
+        ;;
+    post-publication)
+        printf '{}\n' >"$CAS_RELEASE_TRAIN_RUN_DIR/release-workflow.json"
+        printf 'TAG=vfixture\n' >"$CAS_RELEASE_TRAIN_RUN_DIR/release-published.receipt"
+        printf 'TAG=vfixture\n' >"$CAS_RELEASE_TRAIN_RUN_DIR/release-latency.receipt"
+        ;;
+    report)
+        mkdir -p "$CAS_RELEASE_TRAIN_WORKTREE/docs/release-reports"
+        printf '# report\n' >"$CAS_RELEASE_TRAIN_WORKTREE/docs/release-reports/v${CAS_RELEASE_TRAIN_VERSION}.md"
+        printf '<html>report</html>\n' >"$CAS_RELEASE_TRAIN_WORKTREE/docs/release-reports/v${CAS_RELEASE_TRAIN_VERSION}.html"
+        printf 'fixture pdf\n' >"$CAS_RELEASE_TRAIN_WORKTREE/docs/release-reports/v${CAS_RELEASE_TRAIN_VERSION}.pdf"
+        ;;
+esac
+EOF
+chmod +x "$combined_cmd"
+combined_gate="$tmp/combined-gate.sh"
+cat >"$combined_gate" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' gate >>"${CUT_LOG:?}"
+if [[ -n "${COMBINED_GATE_FAIL_MARKER:-}" && ! -e "$COMBINED_GATE_FAIL_MARKER" ]]; then
+    : >"$COMBINED_GATE_FAIL_MARKER"
+    exit 17
+fi
+EOF
+chmod +x "$combined_gate"
+combined_announce="$tmp/combined-announce.sh"
+cat >"$combined_announce" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' announce >>"${CUT_LOG:?}"
+if [[ -n "${COMBINED_ANNOUNCE_FAIL_MARKER:-}" && ! -e "$COMBINED_ANNOUNCE_FAIL_MARKER" ]]; then
+    : >"$COMBINED_ANNOUNCE_FAIL_MARKER"
+    exit 23
+fi
+cat >"$CAS_RELEASE_TRAIN_ANNOUNCE_RECEIPT" <<'RECEIPT'
+POSTED_AT=2099-01-02T00:00:00Z
+CHANNEL=cas-internal
+USER_TOP_LEVEL_ID=user-1
+USER_TOP_LEVEL_PERMALINK=https://example.test/user-1
+USER_REPLY_ID=user-2
+USER_REPLY_PERMALINK=https://example.test/user-2
+DEV_TOP_LEVEL_ID=dev-1
+DEV_TOP_LEVEL_PERMALINK=https://example.test/dev-1
+DEV_REPLY_ID=dev-2
+DEV_REPLY_PERMALINK=https://example.test/dev-2
+RECEIPT
+EOF
+chmod +x "$combined_announce"
+combined_gh="$tmp/combined-gh.sh"
+cat >"$combined_gh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+case "$1 $2" in
+  "pr create") printf 'https://example.test/Richards-LLC/cassy/pull/997\n' ;;
+  "pr view") printf '{"id":"PR_kwDOFIXTURE997"}\n' ;;
+  "api graphql") printf '{"data":{"enqueuePullRequest":{"mergeQueueEntry":{"state":"QUEUED"}}}}\n' ;;
+  *) printf 'unexpected gh call: %s\n' "$*" >&2; exit 2 ;;
+esac
+EOF
+chmod +x "$combined_gh"
+
+combined_gate_fail_marker=''
+combined_announce_fail_marker=''
+run_combined_cut() {
+    local combined_version="$1" combined_worktree="$2"
+    shift 2
+    CAS_RELEASE_ENV_FILE="$combined_worktree/release.env" \
+    CAS_RELEASE_GATE_HOME_DIR="$tmp/combined-scratch" \
+    CAS_RELEASE_TRAIN_DATE=2099-01-02 \
+    CAS_RELEASE_TRAIN_CAS="$combined_worktree/.cas/fake-cas" \
+    CAS_RELEASE_TRAIN_GH="$combined_gh" \
+    CAS_RELEASE_TRAIN_PREFLIGHT_SKIP_COMPETING=1 \
+    CAS_RELEASE_TRAIN_GATE_CMD="$combined_gate" \
+    CAS_RELEASE_TRAIN_PIPELINE_CMD="$combined_cmd" \
+    CAS_RELEASE_TRAIN_PUBLISH_CMD="$combined_cmd" \
+    CAS_RELEASE_TRAIN_POST_PUBLICATION_CMD="$combined_cmd" \
+    CAS_RELEASE_TRAIN_ANNOUNCE_POST_CMD="$combined_announce" \
+    CAS_RELEASE_TRAIN_REPORT_CMD="$combined_cmd" \
+    CAS_RELEASE_TRAIN_HOST_UPDATE_CMD="$combined_cmd" \
+    CAS_RELEASE_TRAIN_CUT_POLL_SECS=0.01 \
+    CAS_RELEASE_TRAIN_CUT_GATE_TRIES=100 \
+    COMBINED_GATE_FAIL_MARKER="$combined_gate_fail_marker" \
+    COMBINED_ANNOUNCE_FAIL_MARKER="$combined_announce_fail_marker" \
+    CUT_LOG="$combined_log" \
+        "$train" "$combined_version" "$combined_worktree" "$@"
+}
+
+combined_clean_version=9.99.12
+combined_clean_wt="$(new_combined_cut_fixture combined-clean "$combined_clean_version")"
+combined_clean_dir="$($train "$combined_clean_version" "$combined_clean_wt" --print-run-dir)"
+combined_clean_out="$(run_combined_cut "$combined_clean_version" "$combined_clean_wt" --cut 2>&1)"
+combined_expected='preflight assemble prep ledger gate pr-body pipeline publish post-publication announce report receipts host-update'
+combined_actual="$(printf '%s\n' "$combined_clean_out" | sed -n 's/^stage \([^:]*\): start$/\1/p' | paste -sd' ' -)"
+if [[ "$combined_clean_out" == *'cut complete'* ]] \
+    && [[ "$combined_actual" == "$combined_expected" ]] \
+    && [[ -s "$combined_clean_dir/receipts.pr" ]] \
+    && grep -q '^PR_NUMBER=997$' "$combined_clean_dir/receipts.pr"; then
+    ok '--cut runs the assembled stage bodies in canonical order and records receipts PR'
+else
+    bad "combined clean cut did not complete in order: stages=$combined_actual output=$combined_clean_out"
+fi
+if [[ -e "$combined_clean_wt/.cas/healed" ]]; then
+    ok '--cut assemble invokes stale-base recovery before the stage receipt'
+else
+    bad 'combined --cut assemble did not invoke stale-base recovery'
+fi
+combined_clean_status="$($train "$combined_clean_version" "$combined_clean_wt" --status 2>&1)"
+if [[ "$combined_clean_status" == *'INTERVENTIONS=0'* ]]; then
+    ok '--cut clean run reports zero manual interventions'
+else
+    bad "clean --cut reported unexpected interventions: $combined_clean_status"
+fi
+
+# One manual targeted gate against the same run is recorded as an intervention,
+# while its diagnostic receipt cannot replace the full-gate authorization.
+CAS_RELEASE_TRAIN_GATE_CMD="$combined_gate" \
+CAS_RELEASE_TRAIN_INVOCATION_KIND=manual \
+CAS_RELEASE_TRAIN_STAGE=gate \
+CAS_RELEASE_TRAIN_BLOCKER_STAGES=gate \
+CAS_RELEASE_TRAIN_RUN_DIR="$combined_clean_dir" \
+CAS_RELEASE_TRAIN_PREFLIGHT_SKIP_COMPETING=1 \
+CAS_RELEASE_GATE_HOME_DIR="$tmp/combined-scratch" \
+    "$train" "$combined_clean_version" "$combined_clean_wt" --gate --only scratch-base >/dev/null 2>&1 || true
+manual_status="$($train "$combined_clean_version" "$combined_clean_wt" --status 2>&1)"
+if [[ "$manual_status" == *'INTERVENTIONS=1'* ]]; then
+    ok 'one manual --gate --only is counted as one intervention'
+else
+    bad "manual --gate --only did not update intervention count: $manual_status"
+fi
+
+combined_resume_version=9.99.13
+combined_resume_wt="$(new_combined_cut_fixture combined-resume "$combined_resume_version")"
+combined_gate_fail_marker="$tmp/combined-gate-fail-once"
+combined_announce_fail_marker="$tmp/combined-announce-fail-once"
+combined_resume_dir="$($train "$combined_resume_version" "$combined_resume_wt" --print-run-dir)"
+if run_combined_cut "$combined_resume_version" "$combined_resume_wt" --cut >"$tmp/combined-gate-blocker.out" 2>&1; then
+    bad 'gate blocker unexpectedly allowed the first cut to complete'
+else
+    gate_blocker_out="$(cat "$tmp/combined-gate-blocker.out")"
+    if [[ "$gate_blocker_out" == *'BLOCKER gate'* ]] && [[ ! -s "$combined_resume_dir/stage.gate.done" ]]; then
+        ok '--cut names an injected gate blocker before recording its receipt'
+    else
+        bad "gate blocker receipt contract failed: $gate_blocker_out"
+    fi
+fi
+if run_combined_cut "$combined_resume_version" "$combined_resume_wt" --cut --resume >"$tmp/combined-announce-blocker.out" 2>&1; then
+    bad 'announce blocker unexpectedly allowed the resumed cut to complete'
+else
+    announce_blocker_out="$(cat "$tmp/combined-announce-blocker.out")"
+    if [[ "$announce_blocker_out" == *'BLOCKER announce'* ]] \
+        && [[ -s "$combined_resume_dir/stage.gate.done" ]] \
+        && [[ ! -s "$combined_resume_dir/stage.announce.done" ]]; then
+        ok '--cut --resume skips gate and names an injected announce blocker'
+    else
+        bad "announce blocker receipt contract failed: $announce_blocker_out"
+    fi
+fi
+if run_combined_cut "$combined_resume_version" "$combined_resume_wt" --cut --resume >/dev/null 2>&1 \
+    && [[ -s "$combined_resume_dir/stage.host-update.done" ]] \
+    && [[ "$(grep -c '^gate$' "$combined_log")" == 3 ]]; then
+    ok '--cut --resume is idempotent after gate and announce blockers'
+else
+    bad 'final --cut --resume did not finish or reran the gate'
+fi
+
+combined_lint_version=9.99.14
+combined_lint_wt="$(new_combined_cut_fixture combined-lint "$combined_lint_version")"
+combined_bad_draft="$tmp/combined-bad-draft.md"
+cp "$combined_lint_wt/docs/release-notes/2099-01-02-v${combined_lint_version}-slack.md" "$combined_bad_draft"
+sed -i '0,/\*Release\*/s//**bad**/' "$combined_bad_draft"
+combined_lint_log="$tmp/combined-lint-adapter.log"
+cat >"$tmp/combined-lint-adapter.sh" <<'EOF'
+#!/usr/bin/env bash
+touch "$COMBINED_LINT_LOG"
+EOF
+chmod +x "$tmp/combined-lint-adapter.sh"
+if CAS_RELEASE_TRAIN_DATE=2099-01-02 \
+    CAS_RELEASE_TRAIN_DRAFT="$combined_bad_draft" \
+    CAS_RELEASE_TRAIN_ANNOUNCE_POST_CMD="$tmp/combined-lint-adapter.sh" \
+    COMBINED_LINT_LOG="$combined_lint_log" \
+        "$train" "$combined_lint_version" "$combined_lint_wt" --announce >"$tmp/combined-lint.out" 2>&1; then
+    bad 'announce lint refusal unexpectedly succeeded'
+elif grep -q 'lint failed' "$tmp/combined-lint.out" && [[ ! -e "$combined_lint_log" ]]; then
+    ok '--announce refuses invalid mrkdwn before any adapter write'
+else
+    bad "announce lint refusal was not fail-closed: $(cat "$tmp/combined-lint.out")"
+fi
+
 if python3 "$script_dir/test-release-integration.py"; then
-    ok 'rolling integration assembly: clean, stale, red, dirty and locked fixtures'
+    ok 'rolling integration assembly: clean, stale-base heal, red, dirty and locked fixtures'
 else
     bad 'rolling integration assembly fixture suite'
 fi

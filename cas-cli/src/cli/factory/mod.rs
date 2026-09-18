@@ -659,7 +659,12 @@ pub enum FactoryCommands {
 
     /// Recover a missed rolling integration event in a bounded fresh process.
     #[command(hide = true)]
-    IntegrationRecover,
+    IntegrationRecover {
+        /// Re-sweep origin/main plus all currently open epic branches without
+        /// requiring a focused epic merge event.
+        #[arg(long)]
+        base_only: bool,
+    },
 
     /// Run as a factory daemon (internal use)
     #[command(hide = true)]
@@ -1018,7 +1023,9 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
             FactoryCommands::Preflight {
                 cas_root: sub_cas_root,
             } => execute_unified_preflight(cli, sub_cas_root.as_deref().or(cas_root)),
-            FactoryCommands::IntegrationRecover => execute_integration_recover(cas_root),
+            FactoryCommands::IntegrationRecover { base_only } => {
+                execute_integration_recover(cas_root, *base_only)
+            }
             FactoryCommands::Daemon {
                 session,
                 cwd,
@@ -1641,7 +1648,10 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
 /// Authenticate a one-shot integration recovery against registered supervisor
 /// state, then run the existing production coordinator in this fresh process.
 /// Environment role/name hints are deliberately not authority inputs.
-fn execute_integration_recover(cas_root: Option<&std::path::Path>) -> Result<()> {
+fn execute_integration_recover(
+    cas_root: Option<&std::path::Path>,
+    base_only: bool,
+) -> Result<()> {
     let cas_root = cas_root.context("Cassy project root is unavailable")?;
     let session = std::env::var("CAS_FACTORY_SESSION")
         .ok()
@@ -1676,22 +1686,34 @@ fn execute_integration_recover(cas_root: Option<&std::path::Path>) -> Result<()>
             .with_context(|| format!("factory session metadata unavailable for {session}"))?,
     )
     .context("factory session metadata is malformed")?;
-    let focus = validate_recovery_supervisor_binding(
-        Some(&caller),
-        &session,
-        &metadata.name,
-        metadata.project_dir.as_deref(),
-        &project_root,
-        metadata.pinned_epic_id.or(metadata.epic_id),
-    )?;
+    let focus = metadata.pinned_epic_id.or(metadata.epic_id);
+    if base_only || focus.is_none() {
+        validate_recovery_supervisor_identity(
+            Some(&caller),
+            &session,
+            &metadata.name,
+            metadata.project_dir.as_deref(),
+            &project_root,
+        )?;
+    } else {
+        validate_recovery_supervisor_binding(
+            Some(&caller),
+            &session,
+            &metadata.name,
+            metadata.project_dir.as_deref(),
+            &project_root,
+            focus.clone(),
+        )?;
+    }
     let config = crate::config::Config::load(cas_root)
         .context("could not load factory recovery settings")?
         .factory();
-    let summary = crate::ui::factory::daemon::FactoryDaemon::recover_focused_integration(
+    let summary = crate::ui::factory::daemon::FactoryDaemon::recover_integration(
         &project_root,
         cas_root,
         &session,
-        &focus,
+        focus.as_deref(),
+        base_only,
         &config,
     )
     .map_err(|error| anyhow::anyhow!("integration recovery failed: {error}"))?;
@@ -1707,6 +1729,25 @@ fn validate_recovery_supervisor_binding(
     project_root: &std::path::Path,
     focus: Option<String>,
 ) -> Result<String> {
+    validate_recovery_supervisor_identity(
+        caller,
+        requested_session,
+        metadata_session,
+        metadata_project,
+        project_root,
+    )?;
+    focus
+        .filter(|epic| !epic.trim().is_empty())
+        .context("recovery authorization refused: factory session has no focused epic")
+}
+
+fn validate_recovery_supervisor_identity(
+    caller: Option<&cas_types::Agent>,
+    requested_session: &str,
+    metadata_session: &str,
+    metadata_project: Option<&str>,
+    project_root: &std::path::Path,
+) -> Result<()> {
     let caller = caller.context("recovery authorization refused: caller is unknown")?;
     if caller.role != cas_types::AgentRole::Supervisor || !caller.is_alive() {
         bail!("recovery authorization refused: caller is not a live registered supervisor");
@@ -1730,9 +1771,7 @@ fn validate_recovery_supervisor_binding(
     if metadata_project != project_root {
         bail!("recovery authorization refused: factory session belongs to a different project");
     }
-    focus
-        .filter(|epic| !epic.trim().is_empty())
-        .context("recovery authorization refused: factory session has no focused epic")
+    Ok(())
 }
 
 fn execute_unified_preflight(cli: &Cli, cas_root: Option<&std::path::Path>) -> Result<()> {
@@ -2311,6 +2350,18 @@ mod tests {
     }
 
     #[test]
+    fn integration_recover_accepts_explicit_base_only_mode() {
+        let parsed = crate::cli::try_parse_from_with_wordmark([
+            "cas",
+            "factory",
+            "integration-recover",
+            "--base-only",
+        ])
+        .unwrap();
+        assert!(parsed.command.is_some(), "expected factory command");
+    }
+
+    #[test]
     fn recovery_cli_rejects_unknown_and_registered_worker_even_with_supervisor_env_hint() {
         let temp = tempfile::tempdir().unwrap();
         let cas_root = crate::store::init_cas_dir(temp.path()).unwrap();
@@ -2328,7 +2379,7 @@ mod tests {
             ("CAS_AGENT_ROLE", "supervisor"),
             ("CAS_AGENT_NAME", "claimed-supervisor"),
         ]);
-        let error = execute_integration_recover(Some(&cas_root)).unwrap_err();
+        let error = execute_integration_recover(Some(&cas_root), false).unwrap_err();
         assert!(
             error.to_string().contains("recovery authorization refused"),
             "{error:#}"
@@ -2341,7 +2392,7 @@ mod tests {
             ("CAS_AGENT_ROLE", "supervisor"),
             ("CAS_AGENT_NAME", "claimed-supervisor"),
         ]);
-        let error = execute_integration_recover(Some(&cas_root)).unwrap_err();
+        let error = execute_integration_recover(Some(&cas_root), false).unwrap_err();
         assert!(
             error.to_string().contains("recovery authorization refused"),
             "{error:#}"

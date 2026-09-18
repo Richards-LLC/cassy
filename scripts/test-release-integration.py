@@ -51,6 +51,33 @@ class IntegrationAssembly(unittest.TestCase):
         return subprocess.run([str(TRAIN), "0.0.0", str(self.root), "--assemble"],
                               capture_output=True, text=True)
 
+    def install_recovery_stub(self):
+        stub = self.root / ".cas/fake-cas"
+        stub.write_text("""#!/bin/sh
+set -eu
+test \"$1\" = factory
+test \"$2\" = integration-recover
+test \"$3\" = --base-only
+base=$(git rev-parse refs/remotes/origin/main)
+git update-ref refs/heads/integration/project \"$base\"
+python3 - \"$base\" <<'PY'
+import json
+from pathlib import Path
+import sys
+path = Path('.cas/merge-sweeps/integration.json')
+receipt = json.loads(path.read_text())
+receipt['base'] = sys.argv[1]
+receipt['tip'] = sys.argv[1]
+receipt['status'] = 'PASSED'
+receipt['epics'] = []
+receipt['detail'] = 'base-only recovery passed'
+path.write_text(json.dumps(receipt))
+Path('.cas/healed').write_text('yes\\n')
+PY
+""")
+        stub.chmod(0o755)
+        return stub
+
     def refused(self, text):
         result = self.assemble()
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
@@ -81,9 +108,48 @@ class IntegrationAssembly(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.git("rev-parse", "HEAD"), self.tip)
 
-    def test_changed_main_refuses_stale_union(self):
+    def test_changed_main_heals_stale_union_once(self):
         self.git("update-ref", "refs/remotes/origin/main", self.tip)
-        self.refused("Main changed")
+        self.install_recovery_stub()
+        old_env = os.environ.get("CAS_RELEASE_TRAIN_CAS")
+        os.environ["CAS_RELEASE_TRAIN_CAS"] = str(self.root / ".cas/fake-cas")
+        try:
+            result = self.assemble()
+        finally:
+            if old_env is None:
+                os.environ.pop("CAS_RELEASE_TRAIN_CAS", None)
+            else:
+                os.environ["CAS_RELEASE_TRAIN_CAS"] = old_env
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.git("rev-parse", "HEAD"), self.tip)
+        self.assertTrue((self.root / ".cas/healed").exists())
+
+    def test_docs_only_receipts_base_names_the_receipts_pr(self):
+        self.git("checkout", "main")
+        docs = self.root / "docs"
+        docs.mkdir()
+        (docs / "receipt.md").write_text("posted\n")
+        self.git("add", "docs/receipt.md")
+        self.git("commit", "-m", "docs receipt")
+        docs_tip = self.git("rev-parse", "HEAD")
+        self.git("update-ref", "refs/remotes/origin/main", docs_tip)
+        self.git("checkout", "release/test")
+        artifacts = Path(self.temp.name) / "artifacts"
+        run_dir = artifacts / "v0.0.0-release-test"
+        run_dir.mkdir(parents=True)
+        (run_dir / "receipts.pr").write_text(
+            f"PR_NUMBER=123\nBASE_SHA={self.base}\n"
+        )
+        result = subprocess.run(
+            [str(TRAIN), "0.0.0", str(self.root), "--assemble"],
+            capture_output=True,
+            text=True,
+            env={**os.environ, "CAS_RELEASE_ARTIFACTS_ROOT": str(artifacts)},
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("only under docs/", result.stderr)
+        self.assertIn("receipts PR #123", result.stderr)
+        self.assertEqual(self.git("rev-parse", "HEAD"), self.base)
 
     def test_changed_integration_refuses_wrong_receipt(self):
         self.git("update-ref", "refs/heads/integration/project", self.base)

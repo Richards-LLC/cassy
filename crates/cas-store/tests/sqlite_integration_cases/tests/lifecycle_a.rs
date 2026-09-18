@@ -280,10 +280,12 @@ fn test_sqlite_task_store_dependencies() {
     assert_eq!(blockers.len(), 1);
     assert_eq!(blockers[0].id, "task-2");
 
-    // Ready tasks (t1 should not be ready, t2 and t3 should be)
+    // Ready tasks: an open `blocks` edge is a close gate, not a start gate.
+    // t1 remains startable while list_blocked still reports the advisory
+    // blocker above.
     let ready = store.list_ready().expect("Failed to list ready");
-    assert_eq!(ready.len(), 2);
-    assert!(ready.iter().all(|t| t.id != "task-1"));
+    assert_eq!(ready.len(), 3);
+    assert!(ready.iter().any(|t| t.id == "task-1"));
 
     // Blocked tasks
     let blocked = store.list_blocked().expect("Failed to list blocked");
@@ -299,6 +301,14 @@ fn test_sqlite_task_store_dependencies() {
         .get_dependencies("task-1")
         .expect("Failed to get dependencies after");
     assert_eq!(deps_after.len(), 0);
+    assert!(store
+        .get_blockers("task-1")
+        .expect("Failed to get blockers after")
+        .is_empty());
+    assert!(store
+        .list_blocked()
+        .expect("Failed to list blocked tasks after")
+        .is_empty());
 }
 
 #[test]

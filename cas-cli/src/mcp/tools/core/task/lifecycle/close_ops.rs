@@ -20005,6 +20005,68 @@ mod merge_state_gate_tests {
         );
     }
 
+    /// GH #873: after the supervisor merges the parked factory tip, the lane
+    /// ref may be fast-forwarded to that merge commit before the worker retries
+    /// close. The parked anchor remains the task's content boundary even when
+    /// the live ref is a merge whose first-parent effect is empty.
+    #[test]
+    fn parked_delivery_survives_lane_fast_forward_to_supervisor_merge_without_receipt_gh_873() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+
+        for (name, body) in [
+            ("first.rs", "// first delivery\n"),
+            ("second.rs", "// second delivery\n"),
+            ("third.rs", "// third delivery\n"),
+        ] {
+            std::fs::write(p.join(name), body).unwrap();
+            git(p, &["add", name]);
+            git(
+                p,
+                &["commit", "-q", "-m", &format!("feat(cas-test1): {name}")],
+            );
+        }
+        let parked_anchor = rev_parse_local(p, "factory/worker");
+
+        git(p, &["checkout", "-q", "main"]);
+        git(
+            p,
+            &[
+                "merge",
+                "-q",
+                "--no-ff",
+                "factory/worker",
+                "-m",
+                "merge parked worker delivery",
+            ],
+        );
+        let supervisor_merge = rev_parse_local(p, "main");
+        git(
+            p,
+            &[
+                "update-ref",
+                "refs/heads/factory/worker",
+                &supervisor_merge,
+            ],
+        );
+
+        assert!(git_commit_is_ancestor(p, &parked_anchor, "main"));
+        assert!(git_commit_parent_count(p, &supervisor_merge) >= 2);
+        assert_eq!(rev_parse_local(p, "factory/worker"), supervisor_merge);
+
+        let mut task = worker_task("worker");
+        task.status = TaskStatus::AwaitingMerge;
+        task.deliverables.factory_branch_anchor = Some(parked_anchor);
+        let req = base_req(&task.id);
+        assert!(
+            matches!(
+                run_factory_branch_merge_gate(&task, &req, "main", p),
+                MergeStateGateOutcome::Proceed
+            ),
+            "a parked delivery must close from its recorded content commit even when the lane ref is a supervisor merge"
+        );
+    }
+
     /// GH #819: the worker syncs the current target into its factory branch
     /// before `worktree_merge`, leaving a merge tip with no first-parent tree
     /// effect. The task's earlier first-parent content commits are the

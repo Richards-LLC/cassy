@@ -420,6 +420,77 @@ fn test_e2e_tool_use_to_entry() {
     );
 }
 
+/// GH #875's reproduction: each hook invocation is a separate `cas` process,
+/// but PostToolUse rows must use the harness session that Stop receives rather
+/// than the process-local DevTracer session.
+#[test]
+fn test_gh_875_issue_repro_binds_post_tool_rows_to_stop_session() {
+    let temp = TempDir::new().unwrap();
+    init_cas_dev_mode(&temp);
+
+    let session_id = "same-harness-session";
+    let other_session_id = "unrelated-harness-session";
+    let file_path = temp.path().join("src/main.rs");
+    let cwd = temp.path().to_string_lossy().into_owned();
+
+    send_hook(
+        &temp,
+        "PostToolUse",
+        &serde_json::json!({
+            "session_id": session_id,
+            "cwd": cwd,
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Write",
+            "tool_input": {
+                "file_path": file_path,
+                "content": "fn main() {}\n"
+            },
+            "tool_response": {}
+        }),
+    );
+    send_hook(
+        &temp,
+        "PostToolUse",
+        &serde_json::json!({
+            "session_id": session_id,
+            "cwd": cwd,
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "cargo test"},
+            "tool_response": {"exitCode": 1, "stderr": "error: command failed"}
+        }),
+    );
+    send_hook(
+        &temp,
+        "PostToolUse",
+        &bash_tool_input(other_session_id, "cargo check", 1),
+    );
+
+    let before_stop = buffered_observations_with_sessions(&temp);
+    assert_eq!(before_stop.len(), 3);
+    assert!(before_stop.iter().take(2).all(|(session, ..)| {
+        session == session_id
+    }));
+    assert_eq!(
+        before_stop[2].0, other_session_id,
+        "the unrelated row must be distinguishable before Stop consumes the harness rows"
+    );
+
+    send_hook(&temp, "Stop", &stop_input(session_id));
+
+    let after_stop = buffered_observations_with_sessions(&temp);
+    assert_eq!(after_stop.len(), 1);
+    assert_eq!(after_stop[0].0, other_session_id);
+    assert!(
+        open_entries(&temp).iter().any(|entry| {
+            entry.session_id.as_deref() == Some(session_id)
+                && entry.tags.iter().any(|tag| tag == "session-errors")
+                && entry.content.contains("Bash: cargo test")
+        }),
+        "Stop must synthesize the matching failed Bash observation"
+    );
+}
+
 #[test]
 fn test_e2e_multiple_sessions() {
     let temp = TempDir::new().unwrap();

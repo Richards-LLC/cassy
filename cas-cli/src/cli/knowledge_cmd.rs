@@ -7,8 +7,8 @@ use std::time::{Duration, Instant};
 use clap::{Args, Subcommand};
 
 use crate::knowledge::{
-    ClaudeCliRunner, DistillConfig, LlmRunner, ScriptedLlm, SymbolLite, scan_sources,
-    run_distillation_until,
+    ClaudeCliRunner, DistillConfig, LlmRunner, ScriptedLlm, SourceProgress, SourceProgressPhase,
+    SymbolLite, run_distillation_until_with_progress, scan_sources,
 };
 use cas_store::{KnowledgeStore, SqliteKnowledgeStore};
 
@@ -76,12 +76,12 @@ pub struct ReadArgs {
 
 pub fn execute(
     command: &KnowledgeCommands,
-    _cli: &crate::cli::Cli,
+    cli: &crate::cli::Cli,
     cas_root: &Path,
 ) -> anyhow::Result<()> {
     match command {
-        KnowledgeCommands::Build(args) => execute_build(args, cas_root),
-        KnowledgeCommands::Status => execute_status(cas_root),
+        KnowledgeCommands::Build(args) => execute_build(args, cas_root, cli.verbose),
+        KnowledgeCommands::Status => execute_status(cas_root, cli.full, cli.json),
         KnowledgeCommands::List(args) => execute_list(args, cas_root),
         KnowledgeCommands::Search(args) => execute_search(args, cas_root),
         KnowledgeCommands::Read(args) => execute_read(args, cas_root),
@@ -178,7 +178,7 @@ pub fn load_symbols(cas_root: &Path, limit: usize) -> SymbolLoad {
     SymbolLoad { symbols, truncated }
 }
 
-fn execute_build(args: &BuildArgs, cas_root: &Path) -> anyhow::Result<()> {
+fn execute_build(args: &BuildArgs, cas_root: &Path, verbose: bool) -> anyhow::Result<()> {
     let build_deadline = Instant::now() + Duration::from_secs(args.timeout_secs);
     let project_root = project_root_of(cas_root)?;
     let store = SqliteKnowledgeStore::open(cas_root)?;
@@ -221,12 +221,40 @@ fn execute_build(args: &BuildArgs, cas_root: &Path) -> anyhow::Result<()> {
         )
     };
 
-    let mut report =
-        run_distillation_until(&store, runner.as_ref(), &sources, &config, build_deadline)?;
+    let progress = |event: SourceProgress| {
+        let prefix = format!("[knowledge] source {}/{}", event.ordinal, event.total);
+        match event.phase {
+            SourceProgressPhase::Started => {
+                eprintln!("{prefix}: distilling {}", event.source_path);
+            }
+            SourceProgressPhase::Finished => {
+                eprintln!(
+                    "{prefix}: finished {} ({:.1}s)",
+                    event.source_path,
+                    event.elapsed.as_secs_f32()
+                );
+            }
+            SourceProgressPhase::Failed => {
+                eprintln!(
+                    "{prefix}: failed {} - {}",
+                    event.source_path,
+                    event.error.as_deref().unwrap_or("unknown failure")
+                );
+            }
+        }
+    };
+    let mut report = run_distillation_until_with_progress(
+        &store,
+        runner.as_ref(),
+        &sources,
+        &config,
+        build_deadline,
+        if verbose { Some(&progress) } else { None },
+    )?;
     report.notes.extend(skip_notes);
 
     if args.dry_run {
-        println!("Knowledge distillation (dry run — nothing was written)");
+        println!("Knowledge distillation (dry run -- nothing was written)");
         println!("  sources scanned:    {}", report.sources_scanned);
         println!("  unchanged (skipped):{}", report.sources_skipped);
         println!("  would distill:      {}", report.sources_pending);
@@ -236,6 +264,18 @@ fn execute_build(args: &BuildArgs, cas_root: &Path) -> anyhow::Result<()> {
         return Ok(());
     }
 
+    if report.sources_failed > 0 {
+        println!(
+            "[ERROR] knowledge build failed - {} source(s) failed",
+            report.sources_failed
+        );
+        println!("  -> cas knowledge status --full");
+    } else {
+        println!(
+            "[OK] knowledge build complete - {} source(s) distilled",
+            report.sources_distilled
+        );
+    }
     println!("Knowledge distillation ({})", runner.label());
     println!("  sources scanned:    {}", report.sources_scanned);
     println!("  unchanged (skipped):{}", report.sources_skipped);
@@ -273,23 +313,89 @@ fn execute_build(args: &BuildArgs, cas_root: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn execute_status(cas_root: &Path) -> anyhow::Result<()> {
+fn execute_status(cas_root: &Path, full: bool, json: bool) -> anyhow::Result<()> {
     let store = SqliteKnowledgeStore::open(cas_root)?;
     let pages = store.list_pages()?;
     let ledger = store.list_sources()?;
     let locked = pages.iter().filter(|page| page.locked).count();
 
-    println!("Knowledge store: {}", store.knowledge_dir().display());
-    println!("  pages:   {} ({locked} locked)", pages.len());
-    println!("  sources: {}", ledger.len());
-    for status in [
+    let counts = [
         cas_store::SourceStatus::Ingested,
         cas_store::SourceStatus::Uploaded,
         cas_store::SourceStatus::Failed,
-    ] {
-        let count = ledger.iter().filter(|row| row.status == status).count();
-        if count > 0 {
-            println!("    {}: {count}", status.as_str());
+    ]
+    .into_iter()
+    .map(|status| {
+        (
+            status.as_str(),
+            ledger.iter().filter(|row| row.status == status).count(),
+        )
+    })
+    .collect::<std::collections::BTreeMap<_, _>>();
+
+    if json {
+        let failed_sources = if full {
+            ledger
+                .iter()
+                .filter(|row| row.status == cas_store::SourceStatus::Failed)
+                .map(|row| {
+                    serde_json::json!({
+                        "path": row.file_path,
+                        "status": row.status.as_str(),
+                        "error": row.ingest_error,
+                    })
+                })
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        println!(
+            "{}",
+            serde_json::json!({
+                "knowledge_dir": store.knowledge_dir(),
+                "pages": pages.len(),
+                "locked_pages": locked,
+                "sources": ledger.len(),
+                "counts": counts,
+                "failed_sources": failed_sources,
+            })
+        );
+        return Ok(());
+    }
+
+    let failed = counts.get("failed").copied().unwrap_or_default();
+    if failed > 0 {
+        println!("[ERROR] knowledge status - {failed} failed source(s)");
+        if !full {
+            println!("  -> cas knowledge status --full");
+        } else {
+            println!("  -> cas knowledge build");
+        }
+    } else {
+        println!(
+            "[OK] knowledge status - {} page(s) - {} source(s)",
+            pages.len(),
+            ledger.len()
+        );
+    }
+    println!("Knowledge store: {}", store.knowledge_dir().display());
+    println!("  pages:   {} ({locked} locked)", pages.len());
+    println!("  sources: {}", ledger.len());
+    for (status, count) in &counts {
+        if *count > 0 {
+            println!("    {status}: {count}");
+        }
+    }
+    if full {
+        for source in ledger
+            .iter()
+            .filter(|row| row.status == cas_store::SourceStatus::Failed)
+        {
+            println!(
+                "  failed source: {} - {}",
+                source.file_path,
+                source.ingest_error.as_deref().unwrap_or("unknown failure")
+            );
         }
     }
     Ok(())

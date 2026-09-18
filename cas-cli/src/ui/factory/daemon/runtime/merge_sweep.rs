@@ -28,6 +28,14 @@ const LOG_DIR: &str = "merge-sweeps";
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 const MAX_FAILURE_LINES: usize = 12;
 const MAX_NOTE_CHARS: usize = 1400;
+pub(super) const TEST_PROCESS_IDENTITY_ENV: &[&str] = &[
+    "CAS_AGENT_NAME",
+    "CAS_AGENT_ROLE",
+    "CAS_SESSION_ID",
+    "CAS_AGENT_ID",
+    "CAS_SUPERVISOR_NAME",
+    "CAS_ROOT",
+];
 
 #[derive(Debug, Clone, Deserialize)]
 struct MergeEvent {
@@ -176,12 +184,20 @@ impl MergeSweepCoordinator {
         cas_dir: &Path,
         request: SweepRequest,
         settings: &SweepSettings,
+        strict_target: bool,
     ) -> Result<SweepResult, String> {
         let deadline = settings
             .timeout
             .saturating_mul(4)
             .min(Duration::from_secs(4 * 60 * 60));
-        self.recover_once_with_deadline(project_root, cas_dir, request, settings, deadline)
+        self.recover_once_with_deadline(
+            project_root,
+            cas_dir,
+            request,
+            settings,
+            strict_target,
+            deadline,
+        )
             .await
     }
 
@@ -191,6 +207,7 @@ impl MergeSweepCoordinator {
         cas_dir: &Path,
         request: SweepRequest,
         settings: &SweepSettings,
+        strict_target: bool,
         deadline: Duration,
     ) -> Result<SweepResult, String> {
         if !settings.enabled {
@@ -202,7 +219,7 @@ impl MergeSweepCoordinator {
             );
         }
 
-        self.schedule(project_root, cas_dir, request, settings, true);
+        self.schedule(project_root, cas_dir, request, settings, strict_target);
         let mut active = self
             .active
             .remove("integration")
@@ -439,12 +456,74 @@ impl crate::ui::factory::daemon::FactoryDaemon {
         epic_id: &str,
         config: &FactoryConfig,
     ) -> Result<String, String> {
-        let request = rolling_integration::recovery_request_for_focus(
+        Self::recover_integration(
             project_root,
             cas_dir,
             session_name,
-            epic_id,
-        )?;
+            Some(epic_id),
+            false,
+            config,
+        )
+    }
+
+    /// Fresh-process recovery that can either validate one authentic merge
+    /// event or deliberately re-sweep origin/main plus every open epic. The
+    /// latter is the safe fallback when an event's owning epic is closed or no
+    /// longer has a matching event; closed epics never enter the union.
+    pub(crate) fn recover_integration(
+        project_root: &Path,
+        cas_dir: &Path,
+        session_name: &str,
+        focus: Option<&str>,
+        base_only: bool,
+        config: &FactoryConfig,
+    ) -> Result<String, String> {
+        let (request, strict_target) = if base_only {
+            (rolling_integration::base_only_recovery_request(project_root)?, false)
+        } else if let Some(epic_id) = focus {
+            match rolling_integration::recovery_request_for_focus(
+                project_root,
+                cas_dir,
+                session_name,
+                epic_id,
+            ) {
+                Ok(request) => (request, true),
+                Err(error)
+                    if error.contains("is not an open epic")
+                        || error.contains("no complete authentic") =>
+                {
+                    match rolling_integration::recovery_request_for_any_open_epic(
+                        project_root,
+                        cas_dir,
+                        session_name,
+                    ) {
+                        Ok(request) => (request, true),
+                        Err(any_error) if any_error.contains("no complete authentic") => {
+                            tracing::info!(%error, %any_error, "falling back to base-only integration recovery");
+                            (
+                                rolling_integration::base_only_recovery_request(project_root)?,
+                                false,
+                            )
+                        }
+                        Err(any_error) => return Err(any_error),
+                    }
+                }
+                Err(error) => return Err(error),
+            }
+        } else {
+            match rolling_integration::recovery_request_for_any_open_epic(
+                project_root,
+                cas_dir,
+                session_name,
+            ) {
+                Ok(request) => (request, true),
+                Err(error) if error.contains("no complete authentic") => {
+                    tracing::info!(%error, "falling back to base-only integration recovery");
+                    (rolling_integration::base_only_recovery_request(project_root)?, false)
+                }
+                Err(error) => return Err(error),
+            }
+        };
         let mut coordinator = MergeSweepCoordinator::new(cas_dir, session_name);
         let settings = SweepSettings::from(config);
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -456,6 +535,7 @@ impl crate::ui::factory::daemon::FactoryDaemon {
             cas_dir,
             request,
             &settings,
+            strict_target,
         ))?;
         let receipt_path = cas_dir.join(LOG_DIR).join("integration.json");
         let summary = format!(
@@ -1053,6 +1133,7 @@ fn spawn_test_runner(
             command.env("ZIG", zig);
         }
     }
+    scrub_test_process_identity(&mut command);
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -1069,6 +1150,26 @@ fn spawn_test_runner(
         }
     }
     command.spawn().ok()
+}
+
+pub(super) fn scrubbed_test_process_identity_names() -> Vec<String> {
+    TEST_PROCESS_IDENTITY_ENV
+        .iter()
+        .map(|name| (*name).to_owned())
+        .collect()
+}
+
+pub(super) fn test_process_identity_receipt_note() -> String {
+    format!(
+        "test process identity scrubbed: {}",
+        TEST_PROCESS_IDENTITY_ENV.join(", ")
+    )
+}
+
+fn scrub_test_process_identity(command: &mut Command) {
+    for variable in TEST_PROCESS_IDENTITY_ENV {
+        command.env_remove(variable);
+    }
 }
 
 fn resolve_zig(worktree: &Path) -> Option<PathBuf> {

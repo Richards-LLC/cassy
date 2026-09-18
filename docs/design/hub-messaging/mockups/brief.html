@@ -32,7 +32,7 @@
   .note .to { font: var(--weight-regular) var(--fs-xs)/16px var(--font-mono); color: var(--color-action); display: block; margin-top: 2px; }
   .inline-note { display: none; }
   .history { display: none; }
-  .shell-history .margin { display: none; } .shell-history .history { display: grid; gap: var(--space-3); border-left: var(--line-width) solid var(--line-subtle); padding-left: var(--space-6); }
+  body:has(#state-history:target) .margin { display: none; } body:has(#state-history:target) .history { display: grid; gap: var(--space-3); border-left: var(--line-width) solid var(--line-subtle); padding-left: var(--space-6); }
   .history h2 { font: var(--weight-semibold) var(--fs-xs)/16px var(--font-mono); letter-spacing: var(--tracking-label); text-transform: uppercase; color: var(--text-mid); margin: 0; }
   .hist { display: grid; grid-template-columns: 6ch minmax(0,1fr); gap: var(--space-2); font-size: var(--fs-base); line-height: 20px; padding: var(--space-2) 0; border-bottom: var(--line-width) solid var(--line-subtle); }
   .hist .when { font: var(--weight-regular) var(--fs-meta)/20px var(--font-mono); color: var(--text-mid); }
@@ -42,18 +42,19 @@
   @media (max-width: 53rem) {
     .top { padding: var(--space-3) var(--space-4); }
     .page { display: block; padding: var(--space-4) var(--space-4) 0; }
-    .margin, .shell-history .history { display: none; }
+    .margin, body:has(#state-history:target) .history { display: none; }
     .inline-note { display: block; }
     .doc { gap: var(--space-6); }
     .doc header h1 { font-size: 28px; line-height: 32px; }
     .phone-composer { display: grid; position: static; margin: var(--space-6) 0 0; padding-bottom: max(var(--space-3), env(safe-area-inset-bottom)); }
-    body.show-history .doc { display: none; }
-    body.show-history .history { display: grid; gap: var(--space-3); }
-    body.show-history .phone-composer { display: none; }
+    body:has(#state-history:target) .doc { display: none; }
+    body:has(#state-history:target) .history { display: grid; gap: var(--space-3); }
+    body:has(#state-history:target) .phone-composer { display: none; }
   }
 </style>
 </head>
 <body>
+<span id="state-history" hidden></span>
 <header class="top"><button type="button">‹ Conversations</button><div class="brand"><svg viewBox="0 0 32 32" aria-hidden="true"><path d="M16 4a12 12 0 1 0 0 24 12 12 0 0 0 0-24zm0 4a8 8 0 1 1 0 16 8 8 0 0 1 0-16z" fill="currentColor"/></svg>Cassy Cloud</div><div><button type="button" id="hist-toggle">Earlier ▾</button> <button type="button">Pane ▸</button></div></header>
 <div class="page" id="page">
   <article class="doc">
@@ -70,7 +71,7 @@
       <div class="outcome"><span class="when">09:31</span><span class="what">Release notes for gabber-studio posted to #gabber-releases.<a href="#o1">details ▸</a></span></div>
       <div class="outcome"><span class="when">09:47</span><span class="what">Both lanes are on the epic branch; the release gate is running.<a href="#o2">details ▾</a></span></div>
       <div class="outcome open"><article class="turn receipt stack"><table class="ledger"><caption>Merge receipt · two lanes into epic/one-command-release</caption><thead><tr><th scope="col">Lane</th><th scope="col">PR</th><th scope="col">Tip</th><th scope="col">Landed</th></tr></thead>
-        <tbody><tr><td data-k="lane">calm-stork-91</td><td data-k="pr">#907</td><td data-k="tip">c0e2c7b5</td><td data-k="landed" class="num">09:45</td></tr><tr><td data-k="lane">gentle-hound-12</td><td data-k="pr">#908</td><td data-k="tip">23c65d63</td><td data-k="landed" class="num">09:46</td></tr><tr class="decisive"><td data-k="lane">release gate</td><td data-k="pr">run 33512</td><td data-k="tip">f9f8e60f</td><td data-k="landed" class="num">failed 09:58</td></tr></tbody></table>
+        <tbody><tr><td data-k="lane">calm-stork-91</td><td data-k="pr">#907</td><td data-k="tip">c0e2c7b5</td><td data-k="landed" class="num">09:45</td></tr><tr><td data-k="lane">gentle-hound-12</td><td data-k="pr">#908</td><td data-k="tip">23c65d63</td><td data-k="landed" class="num">09:46</td></tr><tr class="decisive"><td data-k="lane">release gate</td><td data-k="pr">run 33512</td><td data-k="tip">f9f8e60f</td><td data-k="landed" class="num">running</td></tr></tbody></table>
         <div class="source">receipt 09:47:12 · pane line 1 482 ▸ · evidence: worker status, 5 rows ▸</div></article></div>
     </section>
     <section><h2>Answers · 1</h2>
@@ -100,9 +101,5 @@
   </aside>
 </div>
 <form class="composer phone-composer" onsubmit="return false"><textarea aria-label="Your directive" placeholder="Write to patient-pelican-9…" style="min-height:44px"></textarea><div class="actions"><span class="btn primary" style="height:40px">Send to patient-pelican-9</span></div></form>
-<script>
-  const q = new URLSearchParams(location.search);
-  if (q.get('state') === 'history') { document.getElementById('page').classList.add('shell-history'); document.body.classList.add('show-history'); }
-</script>
 </body>
 </html>

@@ -23,8 +23,8 @@
   .item .age { font: var(--weight-regular) var(--fs-meta)/22px var(--font-mono); color: var(--text-mid); white-space: nowrap; }
   .item.selected { background: var(--surface-hero); border-left: var(--rule-hero) solid var(--color-verdict); margin-left: calc(-1 * var(--space-4)); padding-left: calc(var(--space-4) + var(--space-2) - var(--rule-hero)); border-radius: 0 var(--radius-card) var(--radius-card) 0; }
   .item.selected.receipt-sel { background: var(--bg-active); border-left-color: var(--line-strong); }
-  .done-list { display: none; } .shell.done .done-list { display: block; }
-  .shell.done .item.ask-sel { background: transparent; border-left: 0; margin-left: 0; padding-left: var(--space-2); }
+  .done-list { display: none; } body:has(#state-item:target) .done-list { display: block; }
+  body:has(#state-item:target) .item.ask-sel { background: transparent; border-left: 0; margin-left: 0; padding-left: var(--space-2); }
   main { display: flex; flex-direction: column; min-width: 0; }
   .heading { padding: var(--space-4) var(--space-6); border-bottom: var(--line-width) solid var(--line-subtle); background: var(--bg-panel); display: flex; justify-content: space-between; align-items: center; gap: var(--space-3); flex-wrap: wrap; }
   .reading { padding: var(--space-6); display: grid; gap: var(--space-6); max-width: 78ch; }
@@ -36,29 +36,31 @@
   .rail .brand { font-size: var(--fs-base); } .rail .brand svg { width: 24px; height: 24px; }
   .rail .working { grid-template-columns: auto minmax(0,1fr); }
   .page-b { display: none; }
-  .shell.done .page-a { display: none; } .shell.done .page-b { display: grid; }
+  body:has(#state-item:target) .page-a { display: none; } body:has(#state-item:target) .page-b { display: grid; }
   .pair { border-left: var(--state-rule-width) solid var(--line-strong); padding-left: var(--space-4); display: grid; gap: var(--space-3); }
   .phone-only { display: none; }
   .host { color: var(--text-mid); }
   @media (max-width: 53rem) {
-    .shell, .shell.done { display: block; }
+    .shell { display: block; }
     .rail { display: none; }
     .queue { border: 0; padding: var(--space-3) var(--space-4) var(--space-6); }
     .queue h1 { font-size: 28px; line-height: 32px; margin: var(--space-3) 0; }
-    body[data-vp="phone"] main { display: none; }
-    body[data-vp="phone"].open-item .queue { display: none; }
-    body[data-vp="phone"].open-item main { display: flex; min-height: 100vh; }
+    main { display: none; }
+    body:has(#state-item:target) .queue { display: none; }
+    body:has(#state-item:target) main { display: flex; min-height: 100vh; }
+    body:has(#state-item:target) .page-a { display: grid; } body:has(#state-item:target) .page-b { display: none; }
     .phone-only { display: flex; }
     .desk-brand, .host { display: none; }
     .heading { display: grid; grid-template-columns: auto minmax(0,1fr) auto; }
     .reading { padding: var(--space-4); }
     .heading { padding: var(--space-3) var(--space-4); }
-    .shell.done .item.ask-sel { background: var(--surface-hero); border-left: var(--rule-hero) solid var(--color-verdict); margin-left: calc(-1 * var(--space-4)); padding-left: calc(var(--space-4) + var(--space-2) - var(--rule-hero)); }
+    body:has(#state-item:target) .item.ask-sel { background: var(--surface-hero); border-left: var(--rule-hero) solid var(--color-verdict); margin-left: calc(-1 * var(--space-4)); padding-left: calc(var(--space-4) + var(--space-2) - var(--rule-hero)); }
     .done-list { display: block; }
   }
 </style>
 </head>
 <body>
+<span id="state-item" hidden></span>
 <div class="shell" id="shell">
   <aside class="queue" aria-label="Needs you">
     <div class="phone-only" style="justify-content:space-between;align-items:center"><div class="brand"><svg viewBox="0 0 32 32" aria-hidden="true"><path d="M16 4a12 12 0 1 0 0 24 12 12 0 0 0 0-24zm0 4a8 8 0 1 1 0 16 8 8 0 0 1 0-16z" fill="currentColor"/></svg>Cassy Cloud</div><button type="button">Machines</button></div>
@@ -86,7 +88,7 @@
         <article class="turn blocker"><div class="kind"><span>■ Blocker</span><span>09:58</span></div><p>Gate run 33512 failed: <code>needless_borrow</code> at <code>cas-cli/src/hub/attention.rs:212</code>. The train is held; nothing was tagged or pushed to main.</p></article>
         <article class="turn receipt stack"><div class="kind"><span>Receipt</span><span>09:47</span></div><p class="verdict">Both lanes are on the epic branch; the release gate is running.</p>
           <table class="ledger"><caption>Merge receipt · two lanes into epic/one-command-release</caption><thead><tr><th scope="col">Lane</th><th scope="col">PR</th><th scope="col">Tip</th><th scope="col">Landed</th></tr></thead>
-          <tbody><tr><td data-k="lane">calm-stork-91</td><td data-k="pr">#907</td><td data-k="tip">c0e2c7b5</td><td data-k="landed" class="num">09:45</td></tr><tr><td data-k="lane">gentle-hound-12</td><td data-k="pr">#908</td><td data-k="tip">23c65d63</td><td data-k="landed" class="num">09:46</td></tr><tr class="decisive"><td data-k="lane">release gate</td><td data-k="pr">run 33512</td><td data-k="tip">f9f8e60f</td><td data-k="landed" class="num">failed</td></tr></tbody></table>
+          <tbody><tr><td data-k="lane">calm-stork-91</td><td data-k="pr">#907</td><td data-k="tip">c0e2c7b5</td><td data-k="landed" class="num">09:45</td></tr><tr><td data-k="lane">gentle-hound-12</td><td data-k="pr">#908</td><td data-k="tip">23c65d63</td><td data-k="landed" class="num">09:46</td></tr><tr class="decisive"><td data-k="lane">release gate</td><td data-k="pr">run 33512</td><td data-k="tip">f9f8e60f</td><td data-k="landed" class="num">running</td></tr></tbody></table>
           <div class="source">receipt · 09:47:12 · pane line 1 482 ▸ · evidence: worker status, 5 rows ▸</div></article>
       </div>
       <div><h2>Since then</h2><div class="turn status"><span class="disc">▸ 3 statuses</span><span>latest 09:55 · gate: tests running, 11 of 14 targets green</span></div></div>
@@ -117,10 +119,5 @@
     <h2>Pane</h2><div class="mid">Live · 1 512 lines · <a href="#pane" style="color:var(--color-action)">open</a></div>
   </aside>
 </div>
-<script>
-  const q = new URLSearchParams(location.search);
-  document.body.dataset.vp = q.get('vp') || 'desktop';
-  if (q.get('state') === 'item') { if (document.body.dataset.vp !== 'phone') document.getElementById('shell').classList.add('done'); document.body.classList.add('open-item'); }
-</script>
 </body>
 </html>

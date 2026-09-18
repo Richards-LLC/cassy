@@ -8,9 +8,6 @@
 <link rel="stylesheet" href="shared.css">
 <style>
 
-  /* Mockup for cas-c3c5. Hub tokens come from hub-web/src/tokens.css; the two additions the
-     proposal needs are declared here and mapped to the house tokens (design-tokens.json). */
-  :root { --surface-hero: #F1E7DD; --tint-ok: rgba(34,104,69,0.10); }
   .shell { display: grid; grid-template-columns: 320px minmax(0,1fr) 240px; min-height: 100vh; }
   .shell.pane-open { grid-template-columns: 320px minmax(0,1fr) 420px; }
   .shell.pane-open .rail { display: none; }
@@ -48,8 +45,14 @@
   /* PANE — the escape hatch, opened beside the thread on desktop */
   .pane { display: none; background: var(--bg-terminal); color: #E9E6E0; font: var(--weight-regular) var(--fs-terminal)/var(--line-terminal) var(--font-mono); padding: var(--space-4); overflow: hidden; }
   .sheet { display: none; }
+  .evidence-turn, .evidence-t { display: none; }
+  body:has(#state-evidence:target) .shell { grid-template-columns: 320px minmax(0,1fr) 420px; }
+  body:has(#state-evidence:target) .rail { display: none; }
+  body:has(#state-evidence:target) .pane { display: block; }
+  body:has(#state-evidence:target) .evidence-turn { display: block; }
+  body:has(#state-evidence:target) .evidence-t { display: block; }
   @media (max-width: 53rem) {
-    .shell, .shell.pane-open { display: block; }
+    .shell, body:has(#state-evidence:target) .shell { display: block; }
     .sidebar, .rail, .pane { display: none; }
     .heading { padding: var(--space-3) var(--space-4); }
     .heading .brand { font-size: var(--fs-base); } .heading .brand svg { width: 24px; height: 24px; }
@@ -57,7 +60,7 @@
     .flow { grid-template-columns: minmax(0,1fr); row-gap: var(--space-4); }
     .t { display: none; }
     .kind .stamp { display: inline; }
-    body.show-sheet .sheet { display: block; position: fixed; inset: 0; background: var(--bg-root); color: var(--text-hi); padding: var(--space-4); overflow: auto; z-index: 2; }
+    body:has(#state-evidence:target) .sheet { display: block; position: fixed; inset: 0; background: var(--bg-root); color: var(--text-hi); padding: var(--space-4); overflow: auto; z-index: 2; }
     .sheet .topline { margin-bottom: var(--space-3); }
     .sheet .ledger thead { position: absolute; left: -9999px; }
     .sheet .ledger tbody, .sheet .ledger tr { display: block; }
@@ -71,6 +74,7 @@
 </style>
 </head>
 <body>
+<span id="state-evidence" hidden></span>
 <div class="shell" id="shell">
   <aside class="sidebar" aria-label="Conversations">
     <div class="brand"><svg viewBox="0 0 32 32" aria-hidden="true"><path d="M16 4a12 12 0 1 0 0 24 12 12 0 0 0 0-24zm0 4a8 8 0 1 1 0 16 8 8 0 0 1 0-16z" fill="currentColor"/></svg>Cassy Cloud</div>
@@ -103,6 +107,21 @@
               <tr class="decisive"><td data-k="lane">release gate</td><td data-k="pr">run 33512</td><td data-k="tip">f9f8e60f</td><td data-k="landed" class="num">running</td></tr>
             </tbody></table>
           <div class="source">receipt · coordination message 09:47:12 · pane line 1 482 ▸</div>
+        </article>
+
+        <div class="t evidence-t">09:47</div>
+        <article class="turn evidence evidence-turn stack"><div class="kind"><span class="who">patient-pelican-9</span><span>Evidence</span><span class="stamp">09:47</span></div>
+          <p class="verdict">Worker status at 09:47 — five lanes, two green, one held.</p>
+          <div class="scroll"><table class="ledger"><caption>Worker status · 5 rows</caption>
+            <thead><tr><th scope="col">Worker</th><th scope="col">Task</th><th scope="col">Phase</th><th scope="col">Tip</th><th scope="col">CI</th></tr></thead>
+            <tbody>
+              <tr><td data-k="worker">calm-stork-91</td><td data-k="task">cas-c3c5 design study</td><td data-k="phase">awaiting merge</td><td data-k="tip">c0e2c7b5</td><td data-k="ci"><span class="ok">● green</span></td></tr>
+              <tr><td data-k="worker">gentle-hound-12</td><td data-k="task">cas-d1d0 release notes</td><td data-k="phase">merged</td><td data-k="tip">23c65d63</td><td data-k="ci"><span class="ok">● green</span></td></tr>
+              <tr class="decisive"><td data-k="worker">bright-otter-3</td><td data-k="task">cas-b29f gate</td><td data-k="phase">held</td><td data-k="tip">f9f8e60f</td><td data-k="ci"><span class="crit">■ failed</span></td></tr>
+              <tr><td data-k="worker">quiet-marten-7</td><td data-k="task">cas-e0e2 hub polish</td><td data-k="phase">testing</td><td data-k="tip">aedd9a1a</td><td data-k="ci"><span class="mid">○ running</span></td></tr>
+              <tr><td data-k="worker">zen-otter-40</td><td data-k="task">idle</td><td data-k="phase">idle</td><td data-k="tip">—</td><td data-k="ci"><span class="mid">—</span></td></tr>
+            </tbody></table></div>
+          <div class="source">worker_status · 09:47:20 · <a href="#sheet" style="color:var(--color-action)">open full width ▸</a></div>
         </article>
 
         <div class="t">09:48<small>–09:55</small></div>
@@ -170,23 +189,5 @@
       <tr><td data-k="worker">zen-otter-40</td><td data-k="task">idle</td><td data-k="phase">idle</td><td data-k="tip">—</td><td data-k="ci"><span class="mid">—</span></td></tr>
     </tbody></table>
 </div>
-<script>
-  // State switches for rendering; the mock has no behaviour of its own.
-  const q = new URLSearchParams(location.search);
-  if (q.get('state') === 'evidence') {
-    document.getElementById('shell').classList.add('pane-open');
-    const ev = document.createElement('article');
-    ev.className = 'turn evidence';
-    ev.innerHTML = '<div class="kind"><span class="who">patient-pelican-9</span><span>Evidence</span><span class="stamp">09:47</span></div>' +
-      '<p class="verdict">Worker status at 09:47 — five lanes, two green, one held.</p>' +
-      '<div class="scroll">' + document.querySelector('#sheet table').outerHTML + '</div>' +
-      '<div class="source">worker_status · 09:47:20 · <a href="#sheet" style="color:var(--color-action)">open full width ▸</a></div>';
-    const flow = document.querySelector('.flow');
-    const t = document.createElement('div'); t.className = 't'; t.textContent = '09:47';
-    const anchor = flow.children[6]; // before the status row
-    flow.insertBefore(t, anchor); flow.insertBefore(ev, anchor);
-    if (q.get('vp') === 'phone') document.body.classList.add('show-sheet');
-  }
-</script>
 </body>
 </html>

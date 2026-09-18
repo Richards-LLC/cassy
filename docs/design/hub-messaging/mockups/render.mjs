@@ -5,6 +5,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { launchBrowser } from '../../hub-mobile/browser-tools.mjs';
 const here = dirname(fileURLToPath(import.meta.url));
 const OPTIONS = { ledger: ['thread', 'evidence'], desk: ['queue', 'item'], brief: ['now', 'history'] };
+const HASH = { thread: '', evidence: '#state-evidence', queue: '', item: '#state-item', now: '', history: '#state-history' };
 const only = process.argv[2];
 const out = resolve(here, 'png');
 if (!only) await rm(out, { recursive: true, force: true });
@@ -16,7 +17,7 @@ try {
     for (const state of states) for (const vp of [{ name: 'desktop', width: 1280, height: 800 }, { name: 'phone', width: 390, height: 844 }]) for (const scheme of ['light', 'dark']) {
       const context = await browser.newContext({ viewport: vp, deviceScaleFactor: 2, colorScheme: scheme });
       const page = await context.newPage();
-      await page.goto(pathToFileURL(resolve(here, `${option}.html`)).href + `?state=${state}&vp=${vp.name}`);
+      await page.goto(pathToFileURL(resolve(here, `${option}.html`)).href + HASH[state]);
       await page.waitForTimeout(300);
       const fixedSheet = (option === 'ledger' && state === 'evidence' && vp.name === 'phone');
       const file = resolve(out, `${option}-${state}-${vp.name}-${scheme}.png`);

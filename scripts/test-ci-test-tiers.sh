@@ -154,6 +154,38 @@ require_text "$docs_lint_job" 'markdownlint-cli2' 'docs-only lane runs Markdown 
 require_text "$docs_lint_job" '--config .markdownlint-cli2.jsonc' 'docs-only lane uses the repository Markdown lint policy'
 require_text "$docs_lint_job" 'scripts/release-train-announce.py --validate' 'docs-only lane validates release-note drafts'
 
+# Docs design directories intentionally carry CSS, JavaScript, HTML, and image
+# assets beside Markdown. Keep the markdownlint input contract narrowed to real
+# Markdown paths; a docs-only classification must not turn those assets into
+# Markdown just because they live under docs/ (cas-58c0).
+docs_lint_markdown_step="$(named_step_block "$docs_lint_job" "Markdown lint")"
+require_text "$docs_lint_markdown_step" 'case "$path" in' 'Docs Lint filters each changed path before markdownlint'
+require_text "$docs_lint_markdown_step" '*.md) printf' 'Docs Lint passes only Markdown paths to markdownlint'
+require_absent "$docs_lint_markdown_step" 'docs/*|*.md)' 'Docs Lint does not pass every docs asset to markdownlint'
+
+docs_only_asset_fixture=(
+    docs/round-3/schemes.css
+    docs/round-3/schemes.mjs
+    docs/round-3/thread-a.html
+    docs/round-3/thread-a.png
+    docs/round-3/visual-qa.md
+)
+mapfile -t fixture_markdown_files < <(
+    printf '%s\n' "${docs_only_asset_fixture[@]}" |
+        while IFS= read -r path; do
+            case "$path" in
+                *.md) printf '%s\n' "$path" ;;
+            esac
+        done
+)
+if [[ "${fixture_markdown_files[*]}" == 'docs/round-3/visual-qa.md' ]]; then
+    printf 'ok   docs-only asset fixture keeps only its Markdown path\n'
+    pass=$((pass + 1))
+else
+    printf 'FAIL docs-only asset fixture leaked non-Markdown paths: %s\n' "${fixture_markdown_files[*]}"
+    fail=$((fail + 1))
+fi
+
 for job in scoped-validation-fast scoped-validation fast-validation-runner-route fast-validation-main-push-dedupe fast-validation-preflight fast-validation-suite-build fast-validation-suite-shards fast-validation-suite fast-validation-docs fast-validation macos-check clippy test-compile-guard; do
     require_text "$(job_block "$job")" "needs.ci-diff.outputs.class != 'docs-only'" \
         "$job skips docs-only diffs before allocating its full-tier work"

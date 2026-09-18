@@ -169,7 +169,7 @@ cut_preflight_check_draft() {
 }
 
 cut_preflight_check_integration() {
-    local common receipt origin_main receipt_base heal
+    local common receipt origin_main receipt_base
     common="$(git -C "$worktree" rev-parse --path-format=absolute --git-common-dir 2>/dev/null \
         | sed 's#/\.git$##')"
     receipt="$common/.cas/merge-sweeps/integration.json"
@@ -183,27 +183,13 @@ cut_preflight_check_integration() {
         return $?
     }
     receipt_base="$(jq -r '.base // empty' "$receipt" 2>/dev/null || true)"
-    if [[ -n "$origin_main" && "$origin_main" != "$receipt_base" ]]; then
-        heal="${CAS_RELEASE_TRAIN_HEAL_CMD:-}"
-        if [[ -z "$heal" && -x "$(command -v cas 2>/dev/null || true)" ]]; then
-            heal="cas factory integration-recover --base-only"
-        fi
-        if [[ -z "$heal" ]]; then
-            cut_preflight_block integration-base-stale \
-                "origin/main=$origin_main differs from integration receipt base=${receipt_base:-missing}; run cas factory integration-recover --base-only"
-            return $?
-        fi
-        if ! (cd "$worktree" && bash -c "$heal"); then
-            cut_preflight_block integration-base-stale \
-                "self-heal failed for origin/main=$origin_main and receipt base=${receipt_base:-missing}"
-            return $?
-        fi
-        receipt_base="$(jq -r '.base // empty' "$receipt" 2>/dev/null || true)"
-        [[ "$origin_main" == "$receipt_base" ]] || {
-            cut_preflight_block integration-base-stale \
-                "self-heal did not produce a receipt for origin/main=$origin_main"
-            return $?
-        }
+    [[ "$receipt_base" =~ ^[0-9a-f]{40}$ ]] || {
+        cut_preflight_block integration-receipt "integration receipt has no valid base SHA"
+        return $?
+    }
+    if [[ "$origin_main" != "$receipt_base" ]]; then
+        printf 'preflight: origin/main=%s differs from receipt base=%s; assemble will invoke bounded self-heal\n' \
+            "$origin_main" "$receipt_base"
     fi
 }
 

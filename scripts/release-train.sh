@@ -80,6 +80,39 @@ readonly -a gate_rows=(
     procedure-guardrails working-tree
 )
 
+# Cross-cutting audit hook. The --cut dispatcher marks nested calls with
+# CAS_RELEASE_TRAIN_INVOCATION_KIND=internal and its current canonical stage;
+# direct --gate/--only invocations are manual by default.
+invocation_stage="${CAS_RELEASE_TRAIN_STAGE:-${action#--}}"
+[[ "$action" == --cut && -z "${CAS_RELEASE_TRAIN_STAGE:-}" ]] && invocation_stage=preflight
+invocation_kind="${CAS_RELEASE_TRAIN_INVOCATION_KIND:-}"
+invocation_resume=false
+for invocation_arg in "$@"; do
+    [[ "$invocation_arg" == --resume ]] && invocation_resume=true
+done
+[[ "${CAS_RELEASE_TRAIN_INTERNAL:-}" == 1 ]] && invocation_kind=internal
+if [[ -z "$invocation_kind" ]]; then
+    case "$action" in
+        --cut|--status|--print-run-dir) invocation_kind=internal ;;
+        *) invocation_kind=manual ;;
+    esac
+    if [[ "$action" == --cut && "$invocation_resume" == true \
+        && -n "${CAS_RELEASE_TRAIN_BLOCKER_STAGES:-${CAS_RELEASE_TRAIN_BLOCKERS:-}}" ]]; then
+        invocation_kind=manual
+    fi
+fi
+invocation_blockers="${CAS_RELEASE_TRAIN_BLOCKER_STAGES:-${CAS_RELEASE_TRAIN_BLOCKERS:-none}}"
+if [[ "$invocation_kind" == manual && "$invocation_blockers" == none \
+    && "$invocation_stage" =~ ^(preflight|assemble|prep|ledger|gate|pr-body|pipeline|publish|post-publication|announce|report|receipts|host-update)$ ]]; then
+    invocation_blockers="$invocation_stage"
+fi
+mkdir -p "$run_dir"
+printf '%s subcommand=%s stage=%s caller=%s kind=%s source=%s resume=%s blockers=%s\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$action" "$invocation_stage" \
+    "${CAS_SESSION_ID:-unknown}" "${invocation_kind:-manual}" "${invocation_kind:-manual}" \
+    "$invocation_resume" "$invocation_blockers" \
+    >>"$run_dir/interventions.log"
+
 valid_gate_row() {
     local candidate="$1" row
     for row in "${gate_rows[@]}"; do
@@ -282,6 +315,9 @@ pipeline_log() { printf '%s %s\n' "$(date -u +%H:%M:%SZ)" "$*"; }
 pipeline_finish() {
     local state="$1"
     printf '%s\n' "$state" >"$run_dir/pipeline.done"
+    if [[ "$state" == MERGED ]]; then
+        date -u +%s >"$run_dir/pipeline.merged.epoch"
+    fi
     pipeline_log "pipeline terminal state: $state"
 }
 
@@ -327,6 +363,7 @@ run_pipeline() {
     local check_tries="${CAS_RELEASE_TRAIN_CHECK_TRIES:-40}"
     local watch_tries="${CAS_RELEASE_TRAIN_WATCH_TRIES:-60}"
 
+    date -u +%s >"$run_dir/pipeline.start.epoch"
     pipeline_log "pipeline start branch=$branch tip=$(git -C "$worktree" rev-parse --short HEAD)"
     git -C "$worktree" push -q origin "HEAD:refs/heads/$branch" && pipeline_log "pushed $branch"
 
@@ -523,6 +560,7 @@ run_publish() {
         return 7
     fi
 
+    date -u +%s >"$run_dir/publisher.start.epoch"
     printf 'publisher start %s sha=%s tag=%s worktree=%s\n' \
         "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$landed" "$tag" "$tag_worktree"
     printf 'run directory: %s\n' "$run_dir"
@@ -550,6 +588,71 @@ run_publish() {
 receipt_field() {
     local path="$1" key="$2"
     sed -n "s/^${key}=//p" "$path" 2>/dev/null | head -n1
+}
+
+release_intervention_count() {
+    local log="$run_dir/interventions.log"
+    [[ -s "$log" ]] || { printf '0\n'; return; }
+    awk '
+        function field(prefix,    i) {
+            for (i = 1; i <= NF; i++) if (index($i, prefix) == 1) return substr($i, length(prefix) + 1)
+            return ""
+        }
+        {
+            kind = field("kind="); command = field("subcommand="); resume = field("resume="); blockers = field("blockers=")
+            if (kind != "manual") next
+            if (command == "--cut" && resume == "true" && blockers != "" && blockers != "none") {
+                count = split(blockers, names, ",")
+                for (i = 1; i <= count; i++) if (names[i] ~ /^(preflight|assemble|prep|ledger|gate|pr-body|pipeline|publish|post-publication|announce|report|receipts|host-update)$/) seen[names[i]]++
+            } else count_manual++
+        }
+        END { for (name in seen) count_manual++; print count_manual + 0 }
+    ' "$log"
+}
+
+release_intervention_stages() {
+    local log="$run_dir/interventions.log"
+    [[ -s "$log" ]] || { printf 'none\n'; return; }
+    awk '
+        function field(prefix,    i) {
+            for (i = 1; i <= NF; i++) if (index($i, prefix) == 1) return substr($i, length(prefix) + 1)
+            return ""
+        }
+        function canonical(name) { return name ~ /^(preflight|assemble|prep|ledger|gate|pr-body|pipeline|publish|post-publication|announce|report|receipts|host-update)$/ }
+        function add(name) { if (canonical(name) && !seen[name]++) names[++n] = name }
+        {
+            if (field("kind=") != "manual") next
+            add(field("stage=")); blockers = field("blockers=")
+            if (blockers != "" && blockers != "none") {
+                count = split(blockers, values, ",")
+                for (i = 1; i <= count; i++) add(values[i])
+            }
+        }
+        END {
+            if (n == 0) print "none"
+            else { for (i = 1; i <= n; i++) printf "%s%s", (i == 1 ? "" : ","), names[i]; printf "\n" }
+        }
+    ' "$log"
+}
+
+release_epoch_delta() {
+    local start_file="$1" end_file="$2" start end
+    if [[ -r "$start_file" ]]; then start="$(tr -d '[:space:]' <"$start_file")"; else start=''; fi
+    if [[ -r "$end_file" ]]; then end="$(tr -d '[:space:]' <"$end_file")"; else end=''; fi
+    if [[ "$start" =~ ^[0-9]+$ && "$end" =~ ^[0-9]+$ && "$end" -ge "$start" ]]; then
+        printf '%s\n' "$((end - start))"
+    else
+        printf 'unavailable\n'
+    fi
+}
+
+release_print_metrics() {
+    printf 'release metrics: INTERVENTIONS=%s\n' "$(release_intervention_count)"
+    printf 'release blockers: BLOCKERS=%s\n' "$(release_intervention_stages)"
+    printf 'release handoff: GREEN_TO_PIPELINE_SECS=%s\n' \
+        "$(release_epoch_delta "$run_dir/gate.green.epoch" "$run_dir/pipeline.start.epoch")"
+    printf 'release handoff: MERGED_TO_PUBLISHER_SECS=%s\n' \
+        "$(release_epoch_delta "$run_dir/pipeline.merged.epoch" "$run_dir/publisher.start.epoch")"
 }
 
 pdf_page_count() {
@@ -699,7 +802,7 @@ print_publication_status() {
     fi
 
     if [[ ! -s "$published_file" || ! -s "$latency_file" || ! -s "$workflow_file" ]]; then
-        printf 'publication: pending (save verified release-workflow.json, release-published.receipt, and release-latency.receipt)\n'
+        printf 'publication: pending (save workflow, published, and latency receipts)\n'
         return
     fi
 
@@ -838,10 +941,11 @@ case "$action" in
         if [[ -s "$run_dir/gate.log" ]]; then
             failed_rows="$(sed -n 's/^FAIL \([^ ]*\).*/\1/p' "$run_dir/gate.log" | paste -sd, -)"
             tip="$(sed -n 's/^tip=//p' "$run_dir/run.env" 2>/dev/null || printf unknown)"
-            printf 'epic-note template: tip=%s rows_failed=%s cause_class=<product|fixture|environment|procedure> blocking_step=<step>\n' \
+            printf 'epic-note template: tip=%s rows_failed=%s cause_class=<product|fixture|environment|procedure> blocking_step=<step> INTERVENTIONS=<n> BLOCKERS=<stage,...> GREEN_TO_PIPELINE_SECS=<n> MERGED_TO_PUBLISHER_SECS=<n>\n' \
                 "${tip:-unknown}" "${failed_rows:-none}"
         fi
         print_publication_status
+        release_print_metrics
         exit 0
         ;;
     --report)

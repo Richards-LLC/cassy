@@ -1045,7 +1045,7 @@ impl PushRowResult {
 pub(crate) fn push_reason_is_permanent(reason: &str) -> bool {
     matches!(
         reason.trim().to_ascii_lowercase().as_str(),
-        "project_mismatch" | "scope_mismatch"
+        "project_mismatch" | "project_identity_conflict" | "scope_mismatch"
     )
 }
 
@@ -1057,6 +1057,9 @@ pub fn push_reason_hint(reason: &str) -> &'static str {
     match reason.trim().to_ascii_lowercase().as_str() {
         "project_mismatch" => {
             "another project already owns this id in the cloud; re-link with `cas cloud link`, then `cas cloud queue --retry-reason project_mismatch`"
+        }
+        "project_identity_conflict" => {
+            "the git remote is not registered as this project's alias; run `cas cloud project --adopt-aliases`, then `cas cloud queue --retry-reason project_identity_conflict` and `cas cloud push`"
         }
         "scope_mismatch" => {
             "the cloud row belongs to a different sync scope (personal vs team); push it from the owning scope, then `cas cloud queue --retry-reason scope_mismatch`"

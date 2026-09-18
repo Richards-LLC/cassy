@@ -1088,6 +1088,114 @@ else
     bad "publish did not use the recorded landed sha: $(cat "$run_default_dir/release.done" 2>/dev/null || echo absent)"
 fi
 
+# ===========================================================================
+# --cut — the preflight and stage-ledger contract.
+#
+# Every stage is replaceable by a fixture command. The gate itself remains
+# the real detached train action so this proves the cut waits for, and resumes
+# from, its durable gate receipt rather than merely calling a stub in-process.
+# ===========================================================================
+new_cut_fixture() {
+    local name="$1" version="$2" include_heading="${3:-1}"
+    local dir="$tmp/$name" remote="$tmp/$name-remote.git" base
+    git init -q --bare "$remote"
+    mkdir -p "$dir"
+    ( cd "$dir"
+      git init -q -b main .
+      git config user.email test@test.invalid
+      git config user.name 'Release Train Test'
+      mkdir -p scripts cas-cli/src/builtins .context/zig .cas/merge-sweeps
+      printf '# release fixture\n\n## [Unreleased]\n\n- pending\n' > CHANGELOG.md
+      if [[ "$include_heading" == 1 ]]; then
+          printf '\n## [%s] - %s\n\n- fixture release\n' "$version" "$(date -u +%F)" >> CHANGELOG.md
+      fi
+      printf 'draft\n' > "docs-placeholder"
+      mkdir -p "docs/release-notes"
+      printf 'draft\n' > "docs/release-notes/$(date -u +%F)-v${version}-slack.md"
+      printf 'CAS_TEST_TOKEN=fixture-secret\n' > release.env
+      : > cas-cli/src/builtins/reference-history.json
+      printf '#!/usr/bin/env bash\nexit 0\n' > .context/zig/zig
+      chmod +x .context/zig/zig
+      git add -A
+      git -c commit.gpgsign=false commit -q -m seed
+      git remote add origin "$remote"
+      git push -q origin main
+      git branch -m "release/$version"
+      base="$(git rev-parse HEAD)"
+      printf '{"status":"PASSED","base":"%s","tip":"%s","epics":[]}\n' "$base" "$base" > .cas/merge-sweeps/integration.json
+      git add .cas/merge-sweeps/integration.json
+      git -c commit.gpgsign=false commit -q -m 'record integration receipt'
+      git push -q origin "HEAD:refs/heads/release/$version"
+      git update-ref refs/remotes/origin/main "$base"
+    )
+    printf '%s\n' "$dir"
+}
+
+cut_version=9.99.10
+cut_wt="$(new_cut_fixture cut-e2e "$cut_version")"
+cut_log="$tmp/cut-stages.log"
+cut_cmd="$tmp/cut-stage.sh"
+cat >"$cut_cmd" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "${CUT_STAGE:?}" >>"${CUT_LOG:?}"
+case "$CUT_STAGE" in
+    pipeline) printf '%s\n' "$(git rev-parse HEAD)" >"${CAS_RELEASE_TRAIN_RUN_DIR:?}/landed-main.sha"; printf 'MERGED\n' >"$CAS_RELEASE_TRAIN_RUN_DIR/pipeline.done" ;;
+    publish) printf '0\n' >"${CAS_RELEASE_TRAIN_RUN_DIR:?}/release.done" ;;
+    post-publication) : >"$CAS_RELEASE_TRAIN_RUN_DIR/release-workflow.json"; : >"$CAS_RELEASE_TRAIN_RUN_DIR/release-published.receipt"; : >"$CAS_RELEASE_TRAIN_RUN_DIR/release-latency.receipt" ;;
+esac
+EOF
+chmod +x "$cut_cmd"
+cut_gate="$tmp/cut-gate.sh"
+new_gate_stub "$cut_gate" 0
+cut_run_dir="$("$train" "$cut_version" "$cut_wt" --print-run-dir)"
+out="$(CAS_RELEASE_ENV_FILE="$cut_wt/release.env" \
+    CAS_RELEASE_TRAIN_PREFLIGHT_SKIP_COMPETING=1 \
+    CAS_RELEASE_TRAIN_GATE_CMD="$cut_gate" CAS_RELEASE_TRAIN_CUT_STOP_AFTER=gate \
+    CAS_RELEASE_TRAIN_ASSEMBLE_CMD="$cut_cmd" CAS_RELEASE_TRAIN_PREP_CMD="$cut_cmd" \
+    CAS_RELEASE_TRAIN_LEDGER_CMD="$cut_cmd" CAS_RELEASE_TRAIN_PIPELINE_CMD="$cut_cmd" \
+    CAS_RELEASE_TRAIN_PUBLISH_CMD="$cut_cmd" CAS_RELEASE_TRAIN_POST_PUBLICATION_CMD="$cut_cmd" \
+    CAS_RELEASE_TRAIN_ANNOUNCE_CMD="$cut_cmd" CAS_RELEASE_TRAIN_REPORT_CMD="$cut_cmd" \
+    CAS_RELEASE_TRAIN_RECEIPTS_CMD="$cut_cmd" CAS_RELEASE_TRAIN_HOST_UPDATE_CMD="$cut_cmd" \
+    CUT_STAGE=gate CUT_LOG="$cut_log" CAS_RELEASE_TRAIN_RUN_DIR="$cut_run_dir" \
+    "$train" "$cut_version" "$cut_wt" --cut 2>&1 || true)"
+if [[ "$out" == *'stopped after stage gate'* && -s "$cut_run_dir/stage.gate.done" ]]; then
+    ok '--cut stops after gate with a durable stage receipt'
+else
+    bad "--cut did not stop with the gate receipt: $out"
+fi
+gate_runs_before="$(grep -c '^gate$' "$cut_log" 2>/dev/null || true)"
+CAS_RELEASE_ENV_FILE="$cut_wt/release.env" \
+    CAS_RELEASE_TRAIN_PREFLIGHT_SKIP_COMPETING=1 \
+    CAS_RELEASE_TRAIN_GATE_CMD="$cut_gate" \
+    CAS_RELEASE_TRAIN_ASSEMBLE_CMD="$cut_cmd" CAS_RELEASE_TRAIN_PREP_CMD="$cut_cmd" \
+    CAS_RELEASE_TRAIN_LEDGER_CMD="$cut_cmd" CAS_RELEASE_TRAIN_PIPELINE_CMD="$cut_cmd" \
+    CAS_RELEASE_TRAIN_PUBLISH_CMD="$cut_cmd" CAS_RELEASE_TRAIN_POST_PUBLICATION_CMD="$cut_cmd" \
+    CAS_RELEASE_TRAIN_ANNOUNCE_CMD="$cut_cmd" CAS_RELEASE_TRAIN_REPORT_CMD="$cut_cmd" \
+    CAS_RELEASE_TRAIN_RECEIPTS_CMD="$cut_cmd" CAS_RELEASE_TRAIN_HOST_UPDATE_CMD="$cut_cmd" \
+    CUT_STAGE=gate CUT_LOG="$cut_log" CAS_RELEASE_TRAIN_RUN_DIR="$cut_run_dir" \
+    "$train" "$cut_version" "$cut_wt" --cut --resume >/dev/null
+gate_runs_after="$(grep -c '^gate$' "$cut_log" 2>/dev/null || true)"
+if [[ "$gate_runs_before" == "$gate_runs_after" ]] \
+    && [[ -s "$cut_run_dir/stage.host-update.done" ]]; then
+    ok '--cut --resume skips the completed gate and reaches the final stage'
+else
+    bad "--cut --resume did not preserve gate idempotence (before=$gate_runs_before after=$gate_runs_after)"
+fi
+
+missing_wt="$(new_cut_fixture cut-missing-heading 9.99.11 0)"
+missing_log="$tmp/missing-stage.log"
+missing_out="$(CAS_RELEASE_ENV_FILE="$missing_wt/release.env" \
+    CAS_RELEASE_TRAIN_PREFLIGHT_SKIP_COMPETING=1 \
+    CAS_RELEASE_TRAIN_ASSEMBLE_CMD="$cut_cmd" CUT_LOG="$missing_log" \
+    "$train" 9.99.11 "$missing_wt" --cut 2>&1 || true)"
+if [[ "$missing_out" == *'BLOCKER changelog-heading'* ]] \
+    && [[ ! -e "$missing_log" ]]; then
+    ok 'missing CHANGELOG heading blocks before any build stage'
+else
+    bad "missing CHANGELOG heading was not a named preflight blocker: $missing_out"
+fi
+
 if python3 "$script_dir/test-release-integration.py"; then
     ok 'rolling integration assembly: clean, stale, red, dirty and locked fixtures'
 else

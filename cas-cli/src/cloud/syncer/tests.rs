@@ -2244,7 +2244,10 @@ async fn top_level_rows_ack_lww_skips_and_park_rejections_by_reason() {
         "the cloud's reason is persisted for reporting"
     );
     assert!(
-        result.remaining_backlog.failed_errors[0].contains("cas cloud link"),
+        result
+            .remaining_backlog
+            .failed_errors[0]
+            .contains("cas cloud projects"),
         "the diagnostic carries the remediation for its reason: {:?}",
         result.remaining_backlog.failed_errors
     );
@@ -2318,6 +2321,7 @@ async fn responses_without_rows_keep_the_legacy_aggregate_behaviour() {
 fn every_push_reason_has_its_own_remediation() {
     for reason in [
         "project_mismatch",
+        "project_identity_conflict",
         "scope_mismatch",
         "revision_conflict",
         "version_gate",
@@ -2331,8 +2335,20 @@ fn every_push_reason_has_its_own_remediation() {
     }
     assert!(push_reason_hint("brand_new_server_reason").starts_with("unrecognized"));
     assert!(push_reason_is_permanent("project_mismatch"));
+    assert!(push_reason_is_permanent("project_identity_conflict"));
     assert!(push_reason_is_permanent("SCOPE_MISMATCH"));
     assert!(!push_reason_is_permanent("revision_conflict"));
+}
+
+#[test]
+fn batch_identity_error_recovers_its_structured_reason() {
+    let error = crate::error::CasError::Other(
+        r#"Push failed with status 409: {"error":"project_identity_conflict"}"#.to_string(),
+    );
+    assert_eq!(
+        push_reason_from_error(&error).as_deref(),
+        Some("project_identity_conflict")
+    );
 }
 
 // ---------------------------------------------------------------------------

@@ -92,3 +92,18 @@ the attributed scratchpad policy row.
 | Machine contract | 5 | JSON remains one document and carries the normalized duplicate, stale-skill, and scratchpad statuses. |
 
 Scored by Codex on 2026-09-14; hierarchy, fit, and craft floors hold.
+
+Task capture: `terminal-qa: PASS cas-af06 · 12 runs · 0 fail · 4 warn · 0 allowed · /home/pippenz/.cas/artifacts/cas-af06/terminal-qa/report.json`.
+The new project-alias warning and dry-run/apply messages preserve the existing doctor
+renderer contract; the four warnings are the pre-existing 120-column quarantine-remedy
+word-split heuristic.
+
+| Dimension | Score | Evidence |
+| --- | --- | --- |
+| Hierarchy | 5 | The doctor verdict remains first; project-alias findings put the missing alias and one copyable remediation sequence in the finding/remedy pair. |
+| Fit | 4 | Healthy alias checks collapse; drift and queue reasons expand only when actionable. |
+| Craft | 4 | Remote slugs and reason counts remain whole tokens, with existing width truncation and `--verbose` escape. |
+| Theme safety | 5 | Terminal QA passed all four palettes, piped, `NO_COLOR`, C-locale, and JSON runs. |
+| Machine contract | 5 | `--json` remains one check array with stable `name`, `status`, `message`, and `remediation` fields. |
+
+Scored by Codex on 2026-09-18; hierarchy, fit, and craft floors hold.

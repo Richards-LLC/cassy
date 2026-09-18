@@ -489,14 +489,14 @@ fn test_ready_tasks() {
     let ready = store.list_ready().unwrap();
     assert_eq!(ready.len(), 3);
 
-    // Add blocking dependency: task2 blocks task1
+    // Add blocking dependency: task1 remains startable while task2 is open.
     let dep = Dependency::new(task1.id.clone(), task2.id.clone(), DependencyType::Blocks);
     store.add_dependency(&dep).unwrap();
 
-    // task1 should not be ready
+    // task1 is still ready for parallel preparation.
     let ready = store.list_ready().unwrap();
-    assert_eq!(ready.len(), 2);
-    assert!(!ready.iter().any(|t| t.id == task1.id));
+    assert_eq!(ready.len(), 3);
+    assert!(ready.iter().any(|t| t.id == task1.id));
 
     // Close task2, task1 should be ready again
     let mut task2_updated = store.get(&task2.id).unwrap();
@@ -506,6 +506,36 @@ fn test_ready_tasks() {
     let ready = store.list_ready().unwrap();
     assert_eq!(ready.len(), 2); // task1 and task3 (task2 is closed)
     assert!(ready.iter().any(|t| t.id == task1.id));
+}
+
+#[test]
+fn test_requires_start_tasks_are_not_ready_until_prerequisite_closes() {
+    let (_temp, store) = create_test_store();
+
+    let prerequisite = Task::new(store.generate_id().unwrap(), "Prerequisite".to_string());
+    let dependent = Task::new(store.generate_id().unwrap(), "Dependent".to_string());
+    store.add(&prerequisite).unwrap();
+    store.add(&dependent).unwrap();
+
+    store
+        .add_dependency(&Dependency::new(
+            dependent.id.clone(),
+            prerequisite.id.clone(),
+            DependencyType::RequiresStart,
+        ))
+        .unwrap();
+
+    let ready = store.list_ready().unwrap();
+    assert_eq!(ready.len(), 1);
+    assert!(ready.iter().any(|task| task.id == prerequisite.id));
+    assert!(!ready.iter().any(|task| task.id == dependent.id));
+
+    let mut closed = store.get(&prerequisite.id).unwrap();
+    closed.status = TaskStatus::Closed;
+    store.update(&closed).unwrap();
+
+    let ready = store.list_ready().unwrap();
+    assert!(ready.iter().any(|task| task.id == dependent.id));
 }
 
 #[test]

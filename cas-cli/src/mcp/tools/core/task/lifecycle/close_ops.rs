@@ -3496,6 +3496,22 @@ impl CasCore {
             data: None,
         })?;
 
+        // GH #886: local `blocks` edges no longer serialize task start, but
+        // they remain a close/merge gate. Check before any close disposition,
+        // verification dispatch, or completion-receipt projection so every
+        // close path (including awaiting-merge re-close) observes the same
+        // invariant. Terminal tasks retain their existing idempotent close
+        // behavior even if a dependency was added after they closed.
+        if !task.is_terminal()
+            && let Err(error) = super::super::ensure_no_open_blockers(
+                task_store.as_ref(),
+                &req.id,
+                "close",
+            )
+        {
+            return Ok(Self::tool_error(error.message.to_string()));
+        }
+
         let supervisor_override = req
             .supervisor_override
             .or(req.legacy_bypass_code_review)

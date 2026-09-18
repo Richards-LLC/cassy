@@ -223,17 +223,11 @@ pub(crate) fn ensure_task_origin(
     })
 }
 
-/// Reject lifecycle actions while a task still has open `blocks` dependencies.
-///
-/// `TaskStore::get_blockers` deliberately filters to `dep_type = 'blocks'`, so
-/// parent-child, related, discovered-from, and extracted-from edges never enter
-/// this gate. Keep this shared between `start` and manual `claim` so neither
-/// path can acquire a lease or move the task to in-progress prematurely.
-pub(crate) fn ensure_no_open_blockers(
+/// Return the ids of open local `blocks` dependencies for a task.
+pub(crate) fn open_blocker_ids(
     task_store: &dyn cas_store::TaskStore,
     task_id: &str,
-    action: &str,
-) -> Result<(), rmcp::ErrorData> {
+) -> Result<Vec<String>, rmcp::ErrorData> {
     let mut blocker_ids = task_store
         .get_blockers(task_id)
         .map_err(|error| rmcp::ErrorData {
@@ -249,6 +243,21 @@ pub(crate) fn ensure_no_open_blockers(
 
     blocker_ids.sort();
     blocker_ids.dedup();
+    Ok(blocker_ids)
+}
+
+/// Reject lifecycle actions while a task still has open `blocks` dependencies.
+///
+/// `TaskStore::get_blockers` deliberately filters to `dep_type = 'blocks'`, so
+/// parent-child, requires-start, related, discovered-from, and extracted-from
+/// edges never enter this gate. Keep this shared with manual `claim`, whose
+/// lease acquisition still remains hard-blocked by a `blocks` edge.
+pub(crate) fn ensure_no_open_blockers(
+    task_store: &dyn cas_store::TaskStore,
+    task_id: &str,
+    action: &str,
+) -> Result<(), rmcp::ErrorData> {
+    let blocker_ids = open_blocker_ids(task_store, task_id)?;
     if blocker_ids.is_empty() {
         return Ok(());
     }
@@ -260,6 +269,64 @@ pub(crate) fn ensure_no_open_blockers(
              Close those blocker tasks first, or remove an incorrect `blocks` dependency \
              with `task action=dep_remove id={task_id} to_id=<blocker-id> dep_type=blocks`.",
             blocker_ids.join(", ")
+        )),
+        data: None,
+    })
+}
+
+/// Return the ids of unresolved explicit `requires_start` dependencies.
+pub(crate) fn open_start_gate_ids(
+    task_store: &dyn cas_store::TaskStore,
+    task_id: &str,
+) -> Result<Vec<String>, rmcp::ErrorData> {
+    let dependencies = task_store
+        .get_dependencies(task_id)
+        .map_err(|error| rmcp::ErrorData {
+            code: rmcp::model::ErrorCode::INTERNAL_ERROR,
+            message: std::borrow::Cow::from(format!(
+                "Failed to check explicit start gates for task {task_id}: {error}"
+            )),
+            data: None,
+        })?;
+    let mut gate_ids = Vec::new();
+    for dependency in dependencies {
+        if dependency.dep_type != cas_types::DependencyType::RequiresStart {
+            continue;
+        }
+        let prerequisite = task_store
+            .get(&dependency.to_id)
+            .map_err(|error| rmcp::ErrorData {
+                code: rmcp::model::ErrorCode::INTERNAL_ERROR,
+                message: std::borrow::Cow::from(format!(
+                    "Failed to check explicit start gate {} for task {task_id}: {error}",
+                    dependency.to_id
+                )),
+                data: None,
+            })?;
+        if !prerequisite.is_terminal() {
+            gate_ids.push(prerequisite.id);
+        }
+    }
+    gate_ids.sort();
+    gate_ids.dedup();
+    Ok(gate_ids)
+}
+
+/// Reject `start` while an explicit `requires_start` prerequisite is open.
+pub(crate) fn ensure_no_start_gates(
+    task_store: &dyn cas_store::TaskStore,
+    task_id: &str,
+) -> Result<(), rmcp::ErrorData> {
+    let gate_ids = open_start_gate_ids(task_store, task_id)?;
+    if gate_ids.is_empty() {
+        return Ok(());
+    }
+
+    Err(rmcp::ErrorData {
+        code: rmcp::model::ErrorCode::INVALID_PARAMS,
+        message: std::borrow::Cow::from(format!(
+            "Cannot start task {task_id}: explicit requires_start dependencies are still open: {}. Close those prerequisite tasks first, or remove an incorrect `requires_start` dependency with `task action=dep_remove id={task_id} to_id=<prerequisite-id> dep_type=requires_start`.",
+            gate_ids.join(", ")
         )),
         data: None,
     })

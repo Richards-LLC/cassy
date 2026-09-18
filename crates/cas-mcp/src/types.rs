@@ -422,8 +422,10 @@ pub struct TaskRequest {
     #[serde(default)]
     pub to_id: Option<String>,
 
-    /// Dependency type: blocks, related, parent, duplicate
-    #[schemars(description = "Dependency type: 'blocks', 'related', 'parent', 'duplicate'")]
+    /// Dependency type: blocks, requires_start, related, parent, duplicate
+    #[schemars(
+        description = "Dependency type: 'blocks' (close-gates and warns on start), 'requires_start' (hard start gate), 'related', 'parent', or 'duplicate'"
+    )]
     #[serde(default)]
     pub dep_type: Option<String>,
 

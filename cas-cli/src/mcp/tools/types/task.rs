@@ -546,8 +546,11 @@ pub struct DependencyRequest {
     #[schemars(description = "Task that blocks/relates to the first")]
     pub to_id: String,
 
-    /// Dependency type
-    #[schemars(description = "Type: 'blocks' (default), 'related', 'parent', 'duplicate'")]
+    /// Dependency type: blocks close-gates and warn on start; requires_start
+    /// remains a hard start gate.
+    #[schemars(
+        description = "Type: 'blocks' (default; close-gates and warns on start), 'requires_start' (hard start gate), 'related', 'parent', or 'duplicate'"
+    )]
     #[serde(default = "default_dep_type")]
     pub dep_type: String,
 }

@@ -90,6 +90,18 @@ fn render_dependency_sections(
         ));
     }
 
+    let requires_start: Vec<&str> = outgoing
+        .iter()
+        .filter(|d| d.dep_type == DependencyType::RequiresStart)
+        .map(|d| d.to_id.as_str())
+        .collect();
+    if !requires_start.is_empty() {
+        output.push_str(&format!(
+            "Requires start (hard gate before this task starts): {}\n",
+            requires_start.join(", ")
+        ));
+    }
+
     let blocks: Vec<&str> = incoming
         .iter()
         .filter(|d| d.dep_type == DependencyType::Blocks)

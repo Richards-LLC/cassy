@@ -2384,6 +2384,114 @@ async fn test_shutdown_workers_supervisor_scoping() {
     assert_eq!(entries[0].worker_names, vec!["owned-1"]);
 }
 
+/// GH #889: recycling is one lifecycle request from the supervisor's point
+/// of view; the daemon must receive a named request carrying the worker's
+/// original recipe and account selector.
+#[tokio::test]
+async fn test_recycle_worker_preserves_name_worktree_and_recipe() {
+    let _guard = EnvGuard::set(&[("CAS_FACTORY_SESSION", "session-recycle")]);
+    let env = FactoryTestEnv::new();
+    let worker_path = init_sync_repo(&env, "codex-worker");
+    let account_dir = env.cas_root.join("codex-account");
+    let mut metadata = HashMap::new();
+    metadata.insert("clone_path".to_string(), worker_path.display().to_string());
+    metadata.insert("worker_cli".to_string(), "codex".to_string());
+    metadata.insert("worker_model".to_string(), "gpt-5".to_string());
+    metadata.insert("worker_effort".to_string(), "medium".to_string());
+    metadata.insert(
+        "worker_account_dir".to_string(),
+        account_dir.display().to_string(),
+    );
+    let worker_id = env.register_worker_with_metadata("codex-worker", metadata);
+    let mut worker = env.agent_store().get(&worker_id).expect("worker");
+    worker.factory_session = Some("session-recycle".to_string());
+    env.agent_store().update(&worker).expect("scope worker");
+
+    let mut req = factory_req("recycle_worker");
+    req.target = Some("codex-worker".to_string());
+    let result = env
+        .service
+        .factory(Parameters(req))
+        .await
+        .expect("idle clean worker should be recyclable");
+    let text = get_text(&result);
+    assert!(text.contains("codex-worker"), "receipt must name worker: {text}");
+    assert!(text.contains("recycle"), "receipt must identify recycle: {text}");
+
+    let entries = env.spawn_queue().peek(10).expect("peek recycle queue");
+    assert_eq!(entries.len(), 1, "recycle must queue one atomic lifecycle request");
+    assert_eq!(entries[0].action, cas_store::SpawnAction::Recycle);
+    assert_eq!(entries[0].worker_names, vec!["codex-worker"]);
+    assert!(entries[0].isolate, "recycle must retain worktree isolation");
+    let spec = entries[0]
+        .worker_spec
+        .as_deref()
+        .and_then(|json| serde_json::from_str::<cas_mux::WorkerSpec>(json).ok())
+        .expect("recycle spawn must carry the original WorkerSpec");
+    assert_eq!(spec.name.as_deref(), Some("codex-worker"));
+    assert_eq!(spec.cli, SupervisorCli::Codex);
+    assert_eq!(spec.model.as_deref(), Some("gpt-5"));
+    assert_eq!(spec.effort, Some(cas_mux::Effort::Medium));
+    assert_eq!(spec.config_dir.as_deref(), Some(account_dir.to_str().unwrap()));
+}
+
+/// GH #889: recycling must not turn an in-progress task into a silent worker
+/// loss. The preflight refusal must leave both queue rows absent.
+#[tokio::test]
+async fn test_recycle_worker_refuses_in_progress_task() {
+    let _guard = EnvGuard::set(&[("CAS_FACTORY_SESSION", "session-recycle-busy")]);
+    let env = FactoryTestEnv::new();
+    let worker_id = env.register_worker_in_session("busy-worker", "session-recycle-busy");
+    let mut task = Task::new("cas-recycle-busy".to_string(), "busy task".to_string());
+    task.status = TaskStatus::InProgress;
+    task.assignee = Some("busy-worker".to_string());
+    env.task_store().add(&task).expect("add task");
+    env.agent_store()
+        .try_claim(&task.id, &worker_id, 600, Some("working"))
+        .expect("claim task")
+        .is_success();
+
+    let mut req = factory_req("recycle_worker");
+    req.target = Some("busy-worker".to_string());
+    let error = env
+        .service
+        .factory(Parameters(req))
+        .await
+        .expect_err("in-progress worker must not be recycled");
+    assert!(error.message.contains("force=true"), "{error:?}");
+    assert!(
+        env.spawn_queue().peek(10).expect("peek queue").is_empty(),
+        "refusal must not queue shutdown or spawn"
+    );
+}
+
+#[tokio::test]
+async fn test_recycle_worker_refuses_dirty_worktree() {
+    let _guard = EnvGuard::set(&[("CAS_FACTORY_SESSION", "session-recycle-dirty")]);
+    let env = FactoryTestEnv::new();
+    let worker_path = init_sync_repo(&env, "dirty-worker");
+    std::fs::write(worker_path.join("uncommitted.txt"), "keep me\n").expect("dirty worktree");
+    let mut metadata = HashMap::new();
+    metadata.insert("clone_path".to_string(), worker_path.display().to_string());
+    let worker_id = env.register_worker_with_metadata("dirty-worker", metadata);
+    let mut worker = env.agent_store().get(&worker_id).expect("worker");
+    worker.factory_session = Some("session-recycle-dirty".to_string());
+    env.agent_store().update(&worker).expect("scope worker");
+
+    let mut req = factory_req("recycle_worker");
+    req.target = Some("dirty-worker".to_string());
+    let error = env
+        .service
+        .factory(Parameters(req))
+        .await
+        .expect_err("dirty worker must not be recycled");
+    assert!(error.message.contains("force=true"), "{error:?}");
+    assert!(
+        env.spawn_queue().peek(10).expect("peek queue").is_empty(),
+        "dirty refusal must not queue a lifecycle action"
+    );
+}
+
 // =============================================================================
 // worker_status tests
 // =============================================================================
@@ -3607,6 +3715,75 @@ async fn test_9829_worker_status_marks_stalled_worker_with_in_progress_task() {
     );
 }
 
+/// GH #889: near-limit context is actionable only for an idle Codex worker;
+/// the status row must name the one-shot in-place recycle action and honor the
+/// configured occupancy threshold.
+#[tokio::test]
+async fn test_worker_status_recommends_recycle_for_idle_near_limit_codex() {
+    let codex_home = tempfile::tempdir().expect("codex home");
+    let clone = tempfile::tempdir().expect("worker clone");
+    let clone_path = clone.path().to_string_lossy().to_string();
+    let rollout = codex_home
+        .path()
+        .join("sessions/2026/09/17/rollout-near-limit.jsonl");
+    std::fs::create_dir_all(rollout.parent().expect("rollout parent"))
+        .expect("create rollout directory");
+    std::fs::write(
+        &rollout,
+        format!(
+            "{}\n{}\n",
+            serde_json::json!({
+                "type": "session_meta",
+                "payload": {"session_id": "near-limit-session", "cwd": clone_path}
+            }),
+            serde_json::json!({
+                "type": "event_msg",
+                "payload": {
+                    "type": "token_count",
+                    "info": {
+                        "last_token_usage": {"input_tokens": 850_000},
+                        "model_context_window": 1_000_000
+                    }
+                }
+            })
+        ),
+    )
+    .expect("write rollout");
+    let _guard = EnvGuard::set(&[(
+        "CODEX_HOME",
+        codex_home.path().to_str().expect("utf-8 codex home"),
+    )]);
+    let env = FactoryTestEnv::new();
+    std::fs::write(
+        env.cas_root.join("config.toml"),
+        "[factory]\ncontext_recycle_threshold_percent = 80\n",
+    )
+    .expect("write factory config");
+
+    let mut worker = Agent::new("near-limit-session".to_string(), "near-limit-codex".to_string());
+    worker.role = AgentRole::Worker;
+    worker
+        .metadata
+        .insert("worker_cli".to_string(), "codex".to_string());
+    worker.metadata.insert("clone_path".to_string(), clone_path);
+    worker.metadata.insert(
+        "worker_account_dir".to_string(),
+        codex_home.path().to_string_lossy().to_string(),
+    );
+    env.agent_store().register(&worker).expect("register worker");
+
+    let text = get_text(
+        &env.service
+            .factory(Parameters(factory_req("worker_status")))
+            .await
+            .expect("worker_status should succeed"),
+    );
+    let row = worker_status_block(&text, "near-limit-codex").expect("worker row");
+    assert!(row.contains("context: near-limit"), "{row}");
+    assert!(row.contains("RECYCLE RECOMMENDED"), "{row}");
+    assert!(row.contains("action=recycle_worker target=near-limit-codex"), "{row}");
+}
+
 // =============================================================================
 // cas-2e81: orphan InProgress + death/lease-expiry signal
 // =============================================================================
@@ -4534,10 +4711,10 @@ async fn test_clear_context_confirms_reset_from_new_session_transcript() {
     );
 }
 
-/// cas-dffe AC2: a harness with no verified in-place reset is refused up front.
-/// Nothing is queued, and the error names the harness and the alternative.
+/// cas-dffe AC2 / GH #889: a harness with no verified in-place reset falls
+/// through to the durable recycle path rather than queueing a fake reset.
 #[tokio::test]
-async fn test_clear_context_refuses_harness_without_verified_reset() {
+async fn test_clear_context_recycles_harness_without_verified_reset() {
     let (guard, fixture) = clear_context_fixture("badger", "codex", "0");
     let env = FactoryTestEnv::with_agent_id_and_env("test-sup", Some(guard));
 
@@ -4548,27 +4725,28 @@ async fn test_clear_context_refuses_harness_without_verified_reset() {
             "supervisor".to_string(),
         ))
         .expect("register supervisor");
-    store.register(&fixture.worker).expect("register worker");
+    let mut worker = fixture.worker.clone();
+    // The recycle fallback only needs the durable worker identity and recipe;
+    // this fixture's temp directory is intentionally not a Git checkout.
+    worker.metadata.remove("clone_path");
+    store.register(&worker).expect("register worker");
 
     let mut req = factory_req("clear_context");
     req.target = Some("badger".to_string());
-    let error = env
+    let result = env
         .service
         .factory(Parameters(req))
         .await
-        .expect_err("an impossible reset must not report success");
-    let message = error.message.to_string();
-    assert!(message.contains("codex"), "{message}");
-    assert!(
-        message.contains("unsupported"),
-        "the explicit fail-closed outcome must name Codex reset as unsupported: {message}"
-    );
-    assert!(message.contains("shutdown_workers"), "{message}");
-    assert!(message.contains("spawn_workers"), "{message}");
+        .expect("Codex clear_context should recycle the worker");
+    let message = get_text(&result);
+    assert!(message.contains("recycle"), "{message}");
 
+    let requests = env.spawn_queue().peek(10).expect("peek recycle queue");
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].action, cas_store::SpawnAction::Recycle);
     assert!(
         env.prompt_queue().peek_all(10).expect("peek").is_empty(),
-        "nothing may be queued for a harness that cannot be reset"
+        "Codex recycle must not queue readable prompt text"
     );
 }
 

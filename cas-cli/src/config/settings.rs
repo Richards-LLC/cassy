@@ -398,6 +398,12 @@ pub struct FactoryConfig {
     #[serde(default = "default_stall_threshold_secs")]
     pub stall_threshold_secs: u64,
 
+    /// Context-window occupancy percentage at which an idle worker status row
+    /// recommends in-place recycling. Codex reports the actual model window;
+    /// no recommendation is emitted when that window is unavailable.
+    #[serde(default = "default_context_recycle_threshold_percent")]
+    pub context_recycle_threshold_percent: u8,
+
     /// Supervisor MCP silence required before actionable focused-epic state
     /// produces a forward-motion wake. Default: 600 seconds.
     #[serde(default = "default_supervisor_stall_after_secs")]
@@ -540,6 +546,10 @@ fn default_stall_threshold_secs() -> u64 {
     cas_factory::DEFAULT_STALL_THRESHOLD_SECS
 }
 
+fn default_context_recycle_threshold_percent() -> u8 {
+    80
+}
+
 fn default_supervisor_stall_after_secs() -> u64 {
     cas_factory::DEFAULT_SUPERVISOR_STALL_AFTER_SECS
 }
@@ -586,6 +596,7 @@ impl Default for FactoryConfig {
             nice_cargo: true,
             max_concurrent_builders: default_max_concurrent_builders(),
             stall_threshold_secs: default_stall_threshold_secs(),
+            context_recycle_threshold_percent: default_context_recycle_threshold_percent(),
             stall_after_secs: default_supervisor_stall_after_secs(),
             delivery_stalled_priority_secs: default_delivery_stalled_priority_secs(),
             delivery_stalled_normal_secs: default_delivery_stalled_normal_secs(),
@@ -1513,6 +1524,16 @@ mod tests {
             FactoryConfig::default().stall_threshold_secs,
             cas_factory::DEFAULT_STALL_THRESHOLD_SECS
         );
+    }
+
+    #[test]
+    fn factory_config_context_recycle_threshold_is_configurable() {
+        let toml_str = "[factory]\ncontext_recycle_threshold_percent = 90\n";
+        let parsed: std::collections::HashMap<String, FactoryConfig> =
+            toml::from_str(toml_str).expect("valid toml");
+        let fc = parsed.get("factory").expect("section present");
+        assert_eq!(fc.context_recycle_threshold_percent, 90);
+        assert_eq!(FactoryConfig::default().context_recycle_threshold_percent, 80);
     }
 
     #[test]

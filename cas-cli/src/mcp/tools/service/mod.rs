@@ -523,7 +523,7 @@ impl CasService {
     // ========================================================================
 
     #[tool(
-        description = "Coordination operations combining agent, factory, and worktree management. Agent actions: register, unregister, whoami, heartbeat, agent_list, agent_cleanup, session_start, session_end, loop_start, loop_cancel, loop_status, lease_history, queue_notify, queue_poll, queue_peek, queue_ack, inbox_poll, message, message_ack, message_status. Factory actions: spawn_workers, shutdown_workers, hold_worker, release_worker, worker_status, worker_activity, sweep_tasks (preview or accept one fix task per integration failure class), clear_context (real harness context reset: types the recipient harness's own reset command into its pane and confirms it against the new session transcript — a reset Cassy cannot prove is returned as an error, never as success), my_context, sync_all_workers, gc_report, gc_cleanup, epic_status (per-child branch merge state for an epic), focus_epic, remind, remind_list, remind_cancel, server_start (run a long-lived server under Cassy instead of a raw `npm run dev &` — registered servers are the only ones that survive worker teardown), server_stop, server_list (what is listening and who started it). spawn_workers normally requires an open EPIC so workers are never summoned without stated work; passing task_id for a single open task satisfies that on its own, so post-epic follow-ups need no ceremonial epic. spawn_workers accepts config_dir for an account directory: explicit config_dir wins, otherwise the requesting supervisor's own account directory is captured at enqueue time (CLAUDE_CONFIG_DIR for Claude workers, CODEX_HOME for Codex workers — never crossed between providers); Grok has no account plumbing and reports that instead of silently dropping the value. Worktree actions: worktree_create, worktree_list, worktree_show, worktree_cleanup, worktree_merge, worktree_status. Only available in factory mode. For shutdown_workers, supervisor should verify worktree cleanliness/policy before issuing shutdown. sync_all_workers skips dirty or mid-task worktrees unless force=true, but always skips a supervision-live worker-owned worktree and refuses one already mid-rebase."
+        description = "Coordination operations combining agent, factory, and worktree management. Agent actions: register, unregister, whoami, heartbeat, agent_list, agent_cleanup, session_start, session_end, loop_start, loop_cancel, loop_status, lease_history, queue_notify, queue_poll, queue_peek, queue_ack, inbox_poll, message, message_ack, message_status. Factory actions: spawn_workers, shutdown_workers, recycle_worker, hold_worker, release_worker, worker_status, worker_activity, sweep_tasks (preview or accept one fix task per integration failure class), clear_context (real harness context reset: types the recipient harness's own reset command into its pane and confirms it against the new session transcript — a reset Cassy cannot prove is returned as an error, never as success), my_context, sync_all_workers, gc_report, gc_cleanup, epic_status (per-child branch merge state for an epic), focus_epic, remind, remind_list, remind_cancel, server_start (run a long-lived server under Cassy instead of a raw `npm run dev &` — registered servers are the only ones that survive worker teardown), server_stop, server_list (what is listening and who started it). spawn_workers normally requires an open EPIC so workers are never summoned without stated work; passing task_id for a single open task satisfies that on its own, so post-epic follow-ups need no ceremonial epic. spawn_workers accepts config_dir for an account directory: explicit config_dir wins, otherwise the requesting supervisor's own account directory is captured at enqueue time (CLAUDE_CONFIG_DIR for Claude workers, CODEX_HOME for Codex workers — never crossed between providers); Grok has no account plumbing and reports that instead of silently dropping the value. Worktree actions: worktree_create, worktree_list, worktree_show, worktree_cleanup, worktree_merge, worktree_status. Only available in factory mode. For shutdown_workers, supervisor should verify worktree cleanliness/policy before issuing shutdown. sync_all_workers skips dirty or mid-task worktrees unless force=true, but always skips a supervision-live worker-owned worktree and refuses one already mid-rebase."
     )]
     pub async fn coordination(
         &self,
@@ -542,6 +542,7 @@ impl CasService {
             // action would otherwise silently discard (the GH #197 incident
             // was exactly `shutdown_workers id=...` falling through to ALL).
             let allowed: Option<&[&str]> = match action.as_str() {
+                "recycle_worker" => Some(&["action", "target"]),
                 "shutdown_workers" => {
                     Some(&["action", "id", "count", "worker_names", "force"])
                 }
@@ -647,7 +648,7 @@ impl CasService {
                 }
 
                 // ---- Factory domain ----
-                "spawn_workers" | "shutdown_workers" | "hold_worker" | "release_worker"
+                "spawn_workers" | "shutdown_workers" | "recycle_worker" | "hold_worker" | "release_worker"
                 | "worker_status" | "worker_activity" | "sweep_tasks"
                 | "clear_context" | "my_context" | "sync_all_workers" | "gc_report"
                 | "gc_cleanup" | "epic_status" | "focus_epic" | "remind" | "remind_list"
@@ -656,6 +657,7 @@ impl CasService {
                     match action.as_str() {
                         "spawn_workers" => this.factory_spawn_workers(factory_req).await,
                         "shutdown_workers" => this.factory_shutdown_workers(factory_req).await,
+                        "recycle_worker" => this.factory_recycle_worker(factory_req).await,
                         "hold_worker" => this.factory_set_worker_hold(factory_req, true).await,
                         "release_worker" => this.factory_set_worker_hold(factory_req, false).await,
                         "worker_status" => this.factory_worker_status(factory_req).await,
@@ -783,7 +785,7 @@ impl CasService {
                     format!(
                         "Unknown coordination action: '{action}'. Valid actions:\n\
                          Agent: register, unregister, whoami, heartbeat, agent_list, agent_cleanup, session_start, session_end, loop_start, loop_cancel, loop_status, lease_history, queue_notify, queue_poll, queue_peek, queue_ack, inbox_poll, message, message_ack, message_status\n\
-                         Factory: spawn_workers, shutdown_workers, hold_worker, release_worker, worker_status, worker_activity, clear_context, my_context, sync_all_workers, gc_report, gc_cleanup, epic_status, focus_epic, remind, remind_list, remind_cancel\n\
+                         Factory: spawn_workers, shutdown_workers, recycle_worker, hold_worker, release_worker, worker_status, worker_activity, clear_context, my_context, sync_all_workers, gc_report, gc_cleanup, epic_status, focus_epic, remind, remind_list, remind_cancel\n\
                          Factory extra: sweep_tasks (preview or accept one fix task per integration failure class)
                          Worktree: worktree_create, worktree_list, worktree_show, worktree_cleanup, worktree_merge, worktree_status"
                     ),
@@ -811,6 +813,7 @@ impl CasService {
                 action.as_str(),
                 "spawn_workers"
                     | "shutdown_workers"
+                    | "recycle_worker"
                     | "hold_worker"
                     | "release_worker"
                     | "worker_status"
@@ -1317,6 +1320,7 @@ impl CasService {
         let result = match action.as_str() {
             "spawn_workers" => self.factory_spawn_workers(req).await,
             "shutdown_workers" => self.factory_shutdown_workers(req).await,
+            "recycle_worker" => self.factory_recycle_worker(req).await,
             "hold_worker" => self.factory_set_worker_hold(req, true).await,
             "release_worker" => self.factory_set_worker_hold(req, false).await,
             "worker_status" => self.factory_worker_status(req).await,

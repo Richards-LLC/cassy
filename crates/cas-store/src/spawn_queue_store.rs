@@ -21,6 +21,8 @@ pub enum SpawnAction {
     Shutdown,
     /// Respawn crashed workers (reuse existing clone)
     Respawn,
+    /// Recycle an idle worker in place (preserve its worktree and recipe).
+    Recycle,
 }
 
 impl SpawnAction {
@@ -29,6 +31,7 @@ impl SpawnAction {
             Self::Spawn => "spawn",
             Self::Shutdown => "shutdown",
             Self::Respawn => "respawn",
+            Self::Recycle => "recycle",
         }
     }
 
@@ -38,6 +41,7 @@ impl SpawnAction {
             "spawn" => Some(Self::Spawn),
             "shutdown" => Some(Self::Shutdown),
             "respawn" => Some(Self::Respawn),
+            "recycle" => Some(Self::Recycle),
             _ => None,
         }
     }
@@ -325,6 +329,15 @@ pub trait SpawnQueueStore: Send + Sync {
         factory_session: Option<&str>,
     ) -> Result<i64>;
 
+    /// Queue an in-place worker recycle. The daemon stops the worker without
+    /// reclaiming its worktree, then starts the same name with this recipe.
+    fn enqueue_recycle(
+        &self,
+        worker_name: &str,
+        spec_json: Option<&str>,
+        factory_session: Option<&str>,
+    ) -> Result<i64>;
+
     /// Poll for pending requests owned by this session, plus legacy unscoped rows.
     fn poll(&self, factory_session: &str, limit: usize) -> Result<Vec<SpawnRequest>>;
 
@@ -596,6 +609,26 @@ impl SpawnQueueStore for SqliteSpawnQueueStore {
             false,
             false,
             None,
+            factory_session,
+            None,
+            None,
+            None,
+        )
+    }
+
+    fn enqueue_recycle(
+        &self,
+        worker_name: &str,
+        spec_json: Option<&str>,
+        factory_session: Option<&str>,
+    ) -> Result<i64> {
+        self.enqueue(
+            SpawnAction::Recycle,
+            None,
+            &[worker_name.to_string()],
+            false,
+            true,
+            spec_json,
             factory_session,
             None,
             None,
@@ -916,12 +949,14 @@ mod tests {
         assert_eq!(SpawnAction::Spawn.as_str(), "spawn");
         assert_eq!(SpawnAction::Shutdown.as_str(), "shutdown");
         assert_eq!(SpawnAction::Respawn.as_str(), "respawn");
+        assert_eq!(SpawnAction::Recycle.as_str(), "recycle");
         assert_eq!(SpawnAction::from_str("spawn"), Some(SpawnAction::Spawn));
         assert_eq!(
             SpawnAction::from_str("SHUTDOWN"),
             Some(SpawnAction::Shutdown)
         );
         assert_eq!(SpawnAction::from_str("respawn"), Some(SpawnAction::Respawn));
+        assert_eq!(SpawnAction::from_str("recycle"), Some(SpawnAction::Recycle));
         assert_eq!(SpawnAction::from_str("invalid"), None);
     }
 

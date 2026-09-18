@@ -2187,6 +2187,26 @@ impl FactoryApp {
     /// * `force` - `true` → SIGKILL the process group immediately;
     ///             `false` → SIGTERM with group-wide SIGKILL escalation
     pub async fn shutdown_worker(&mut self, name: &str, force: bool) -> anyhow::Result<()> {
+        self.shutdown_worker_inner(name, force, false).await
+    }
+
+    /// Stop a worker while retaining its existing isolated worktree for an
+    /// immediate in-place recycle. Ordinary shutdowns reclaim a clean tree
+    /// once all tasks are terminal; recycling must preserve that path so the
+    /// replacement starts from the same checkout and branch.
+    pub async fn shutdown_worker_for_recycle(
+        &mut self,
+        name: &str,
+    ) -> anyhow::Result<()> {
+        self.shutdown_worker_inner(name, false, true).await
+    }
+
+    async fn shutdown_worker_inner(
+        &mut self,
+        name: &str,
+        force: bool,
+        preserve_worktree: bool,
+    ) -> anyhow::Result<()> {
         // Check if worker exists
         if !self.worker_names.contains(&name.to_string()) {
             anyhow::bail!("Worker '{name}' not found");
@@ -2322,7 +2342,7 @@ impl FactoryApp {
         // work. Dirty trees are preserved for the daemon reaper (Unit 3) to
         // salvage later, and we flag the agent record + warn the supervisor so
         // nothing is silently abandoned.
-        if !has_open_tasks {
+        if !preserve_worktree && !has_open_tasks {
             self.finalize_worker_worktree(&agent_store, &agent_id, name);
         }
 
@@ -2474,6 +2494,18 @@ impl FactoryApp {
         name: &str,
         teams: Option<cas_mux::TeamsSpawnConfig>,
     ) -> anyhow::Result<()> {
+        self.respawn_worker_with_spec(name, teams, None)
+    }
+
+    /// Respawn a worker, optionally overriding the daemon's default recipe.
+    /// The optional spec is used by in-place recycling to retain the worker's
+    /// provider, model, effort, and account directory.
+    pub fn respawn_worker_with_spec(
+        &mut self,
+        name: &str,
+        teams: Option<cas_mux::TeamsSpawnConfig>,
+        requested_spec: Option<cas_mux::WorkerSpec>,
+    ) -> anyhow::Result<()> {
         // cas-9bc6: re-read live LlmConfig so harness/model/effort changes made
         // via `cas config set` after daemon boot are reflected in this respawn.
         self.sync_worker_config_from_live_settings();
@@ -2482,7 +2514,9 @@ impl FactoryApp {
         // effective per-worker/default spec after the live config sync. Keep
         // the same shared validator on this recovery path before any worktree
         // or PTY launch occurs.
-        let effective_spec = self.mux.effective_worker_spec(name, None);
+        let effective_spec = requested_spec
+            .clone()
+            .unwrap_or_else(|| self.mux.effective_worker_spec(name, None));
         cas_factory::validate_explicit(
             &effective_spec,
             &cas_factory::CapabilitySnapshot::default(),
@@ -2531,7 +2565,7 @@ impl FactoryApp {
             cas_root.as_ref(),
             &self.supervisor_name,
             teams.as_ref(),
-            None, // spec: use Mux default (T3 will supply per-spawn overrides)
+            requested_spec,
         ) {
             crate::telemetry::track(
                 "factory_worker_respawn_result",
@@ -2546,7 +2580,7 @@ impl FactoryApp {
         crate::ui::factory::app::queue_codex_worker_intro_prompt(
             self.cas_dir(),
             name,
-            self.worker_cli,
+            effective_spec.cli,
         );
 
         // Update pane grid for navigation

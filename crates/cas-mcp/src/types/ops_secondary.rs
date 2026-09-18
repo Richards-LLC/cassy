@@ -533,7 +533,7 @@ pub struct TeamRequest {
 pub struct FactoryRequest {
     /// Action to perform
     #[schemars(
-        description = "Action: 'spawn_workers', 'shutdown_workers', 'hold_worker', 'release_worker', 'worker_status', 'worker_activity', 'sweep_tasks' (preview or accept one fix task per integration failure class), 'clear_context' (real harness context reset — confirmed against the recipient's new session id, or it errors; never reports an unverified success), 'my_context', 'sync_all_workers', 'gc_report', 'gc_cleanup', 'epic_status' (per-child branch merge state), 'focus_epic' (pin or clear displayed epic focus), 'remind' (create reminder), 'remind_list' (list reminders), 'remind_cancel' (cancel a reminder), 'server_start' (run a long-lived server under CAS), 'server_stop', 'server_list' (what is listening and who started it)"
+        description = "Action: 'spawn_workers', 'shutdown_workers', 'recycle_worker' (recycle one idle worker in place while preserving its name, worktree, and recipe), 'hold_worker', 'release_worker', 'worker_status', 'worker_activity', 'sweep_tasks' (preview or accept one fix task per integration failure class), 'clear_context' (real harness context reset — confirmed against the recipient's new session id, or it errors; never reports an unverified success), 'my_context', 'sync_all_workers', 'gc_report', 'gc_cleanup', 'epic_status' (per-child branch merge state), 'focus_epic' (pin or clear displayed epic focus), 'remind' (create reminder), 'remind_list' (list reminders), 'remind_cancel' (cancel a reminder), 'server_start' (run a long-lived server under CAS), 'server_stop', 'server_list' (what is listening and who started it)"
     )]
     pub action: String,
 
@@ -600,9 +600,9 @@ pub struct FactoryRequest {
     #[serde(default)]
     pub delivery_mode: Option<String>,
 
-    /// Target agent for hold_worker, release_worker, clear_context, or remind
+    /// Target agent for hold_worker, release_worker, recycle_worker, clear_context, or remind
     #[schemars(
-        description = "Target agent name for hold_worker/release_worker/clear_context/remind (or 'all_workers' for broadcast where supported). For remind: agent who receives the reminder (defaults to self)"
+        description = "Target agent name for hold_worker/release_worker/recycle_worker/clear_context/remind (or 'all_workers' for broadcast where supported). For remind: agent who receives the reminder (defaults to self)"
     )]
     #[serde(default)]
     pub target: Option<String>,
@@ -784,7 +784,7 @@ pub struct FactoryRequest {
 ///   session_start, session_end, loop_start, loop_cancel, loop_status, lease_history,
 ///   queue_notify, queue_poll, queue_peek, queue_ack, inbox_poll, message,
 ///   message_ack, message_status.
-/// Factory actions: spawn_workers, shutdown_workers, hold_worker, release_worker, worker_status, worker_activity, sweep_tasks,
+/// Factory actions: spawn_workers, shutdown_workers, recycle_worker, hold_worker, release_worker, worker_status, worker_activity, sweep_tasks,
 ///   clear_context, my_context, sync_all_workers, gc_report, gc_cleanup, focus_epic,
 ///   remind, remind_list, remind_cancel.
 /// Worktree actions: worktree_create, worktree_list, worktree_show, worktree_cleanup,
@@ -794,7 +794,7 @@ pub struct FactoryRequest {
 pub struct CoordinationRequest {
     /// Action to perform
     #[schemars(
-        description = "Action: agent ops (register, unregister, whoami, heartbeat, agent_list, agent_cleanup, session_start, session_end, loop_start, loop_cancel, loop_status, lease_history, queue_notify, queue_poll, queue_peek, queue_ack, inbox_poll, message, interrupt, message_ack, message_status), factory ops (spawn_workers, shutdown_workers, hold_worker, release_worker, worker_status, worker_activity, sweep_tasks, clear_context, my_context, sync_all_workers, gc_report, gc_cleanup, focus_epic, remind, remind_list, remind_cancel), worktree ops (worktree_create, worktree_list, worktree_show, worktree_cleanup, worktree_merge, worktree_status). Only available in factory mode. 'interrupt' is shorthand for 'message' with urgent=true (breaks the target's in-flight turn, then injects). shutdown_workers requires force=true for mid-task or dirty/unpushed workers. sync_all_workers skips worktrees that are dirty or whose assignee is mid-task unless force=true, and always refuses one already mid-rebase."
+        description = "Action: agent ops (register, unregister, whoami, heartbeat, agent_list, agent_cleanup, session_start, session_end, loop_start, loop_cancel, loop_status, lease_history, queue_notify, queue_poll, queue_peek, queue_ack, inbox_poll, message, interrupt, message_ack, message_status), factory ops (spawn_workers, shutdown_workers, recycle_worker, hold_worker, release_worker, worker_status, worker_activity, sweep_tasks, clear_context, my_context, sync_all_workers, gc_report, gc_cleanup, focus_epic, remind, remind_list, remind_cancel), worktree ops (worktree_create, worktree_list, worktree_show, worktree_cleanup, worktree_merge, worktree_status). Only available in factory mode. 'interrupt' is shorthand for 'message' with urgent=true (breaks the target's in-flight turn, then injects). shutdown_workers requires force=true for mid-task or dirty/unpushed workers. sync_all_workers skips worktrees that are dirty or whose assignee is mid-task unless force=true, and always refuses one already mid-rebase."
     )]
     pub action: String,
 

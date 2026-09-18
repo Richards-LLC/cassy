@@ -213,9 +213,12 @@ fn take_next_pending_spawn(
     if !spawn_in_flight {
         return pending.pop_front();
     }
-    let shutdown_index = pending
-        .iter()
-        .position(|action| matches!(action, PendingSpawn::Shutdown { .. }))?;
+    let shutdown_index = pending.iter().position(|action| {
+        matches!(
+            action,
+            PendingSpawn::Shutdown { .. } | PendingSpawn::Recycle { .. }
+        )
+    })?;
     pending.remove(shutdown_index)
 }
 
@@ -5892,6 +5895,18 @@ impl FactoryDaemon {
                         self.pending_spawns.push_back(PendingSpawn::Respawn(name));
                     }
                 }
+                SpawnAction::Recycle => {
+                    let spec = request.worker_spec.as_deref().and_then(|json| {
+                        serde_json::from_str::<cas_mux::WorkerSpec>(json).ok()
+                    });
+                    for name in request.worker_names {
+                        self.pending_spawns.push_back(PendingSpawn::Recycle {
+                            request_id: request.id,
+                            name,
+                            spec: spec.clone(),
+                        });
+                    }
+                }
             }
         }
 
@@ -6690,6 +6705,71 @@ impl FactoryDaemon {
                     }
                     Err(e) => {
                         self.app.set_error(format!("Failed to respawn {name}: {e}"));
+                    }
+                }
+            }
+            PendingSpawn::Recycle {
+                request_id,
+                name,
+                spec,
+            } => {
+                let teams_config = self.teams.as_ref().map(|t| {
+                    use super::teams::TeamsManager;
+                    let color_idx = self.app.worker_names().len();
+                    t.spawn_config_for(
+                        &name,
+                        "general-purpose",
+                        TeamsManager::color_for_index(color_idx),
+                        None,
+                    )
+                });
+                if let Some(ref tc) = teams_config {
+                    crate::ui::theme::register_agent_color(&tc.agent_name, &tc.agent_color);
+                }
+                let result = async {
+                    let spec = spec.ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "Recycle request {request_id} for {name} has no valid worker recipe"
+                        )
+                    })?;
+                    self.app.shutdown_worker_for_recycle(&name).await?;
+                    self.app
+                        .respawn_worker_with_spec(&name, teams_config, Some(spec))
+                }
+                .await;
+                match result {
+                    Ok(()) => {
+                        self.dead_workers.remove(&name);
+                        append_spawn_audit(
+                            self.app.cas_dir(),
+                            &self.session_name,
+                            Some(request_id),
+                            Some(&name),
+                            "recycle",
+                            "completed",
+                            "Worker recycled in place with its existing worktree and recipe.",
+                        );
+                        if self.app.record_enabled() {
+                            if let Err(e) = self.app.start_recording_for_pane(&name).await {
+                                tracing::error!(
+                                    "Failed to start recording for recycled {}: {}",
+                                    name, e
+                                );
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        let detail = format!("Failed to recycle {name}: {e}");
+                        self.app.set_error(detail.clone());
+                        append_spawn_audit(
+                            self.app.cas_dir(),
+                            &self.session_name,
+                            Some(request_id),
+                            Some(&name),
+                            "recycle",
+                            "failed",
+                            &detail,
+                        );
                     }
                 }
             }

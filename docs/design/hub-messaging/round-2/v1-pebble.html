@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Variant 1 — Pebble</title>
+<link rel="stylesheet" href="../../../../hub-web/src/tokens.css">
+<link rel="stylesheet" href="chat.css">
+<style>
+/* VARIANT 1 — PEBBLE
+   One bold idea: big soft pebbles with a spoken corner, lifted off a warm
+   paper thread. Comfortable density. Machine identity = round monogram plus
+   "machine · project" on the row's headline. Action colour = a solid amber
+   pebble with outlined reply pills beneath it. */
+
+.app { display: grid; grid-template-columns: 374px 1fr; min-height: 100vh; }
+
+/* rail */
+.rail { background: var(--panel); border-right: 1px solid var(--hair); padding: 22px 14px 22px 18px; }
+.rail h1 { margin: 0 6px 18px; font: var(--weight-semibold) 22px/1.2 var(--font-ui); letter-spacing: -0.015em; }
+.row { display: grid; grid-template-columns: 42px 1fr auto; column-gap: 13px; row-gap: 3px; align-items: center;
+       padding: 12px 14px; border-radius: 20px; text-decoration: none; color: inherit; }
+.row + .row { margin-top: 4px; }
+.row.on { background: var(--accent-soft); box-shadow: var(--lift); }
+.row .mono { grid-row: span 2; }
+.who { display: flex; align-items: center; gap: 7px; min-width: 0; flex-wrap: nowrap; }
+.who b { font: var(--weight-semibold) 15px/1.35 var(--font-ui); white-space: nowrap; }
+.who .dot { width: 3px; height: 3px; border-radius: 50%; background: var(--ink-soft); flex: none; }
+.who .proj { font: var(--weight-medium) 12px/1.35 var(--font-mono); color: var(--ink-soft); white-space: nowrap; }
+.when { font-size: 12px; color: var(--ink-soft); white-space: nowrap; }
+.prev { grid-column: 2; font-size: 13px; line-height: 1.35; color: var(--ink-soft); }
+.flag { grid-column: 3; justify-self: end; width: 9px; height: 9px; border-radius: 50%; background: var(--ask-edge); }
+
+/* thread */
+.thread { display: flex; flex-direction: column; background: var(--canvas); }
+.thead { display: flex; align-items: center; gap: 13px; padding: 17px 30px; border-bottom: 1px solid var(--hair); }
+.thead b { display: block; font: var(--weight-semibold) 16px/1.25 var(--font-ui); }
+.thead .id span { display: block; margin-top: 1px; font: var(--weight-regular) 13px/1.25 var(--font-mono); color: var(--ink-mid); }
+
+.msgs { flex: 1; padding: 22px 30px 10px; display: flex; flex-direction: column; gap: 16px; }
+.day { align-self: center; font-size: 12px; color: var(--ink-mid); margin-bottom: 2px; }
+.turn { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; max-width: 70%; }
+.turn.you { align-self: flex-end; align-items: flex-end; }
+.bub { padding: 12px 19px; border-radius: 22px 22px 22px 8px; background: var(--sup-bg); color: var(--sup-fg);
+       box-shadow: var(--lift); }
+.turn.you .bub { border-radius: 22px 22px 8px 22px; background: var(--you-bg); color: var(--you-fg); }
+.bub p { margin: 0; }
+.bub.receipt { display: flex; align-items: center; gap: 9px; }
+.bub.file { padding: 9px; border-radius: 22px 22px 22px 8px; }
+.bub.ask { background: var(--ask-bg); color: var(--ask-fg); padding: 14px 21px; box-shadow: var(--lift-strong); }
+.chips { display: flex; gap: 9px; flex-wrap: wrap; }
+.chip { padding: 8px 17px; border-radius: 999px; background: var(--panel); color: var(--accent);
+        border: 1.5px solid var(--accent); font: var(--weight-medium) 13px/1.2 var(--font-ui); }
+time { font-size: 12px; color: var(--ink-mid); padding: 0 4px; }
+
+.composer { display: flex; align-items: center; gap: 11px; padding: 14px 30px 22px; }
+.field { padding: 13px 22px; border-radius: 999px; border: 1px solid var(--hair); box-shadow: var(--lift); }
+
+@media (max-width: 560px) {
+  .app { grid-template-columns: 1fr; }
+  .rail { display: none; }
+  .thead { padding: 14px 16px; }
+  .msgs { padding: 16px 16px 8px; gap: 14px; }
+  .turn { max-width: 84%; }
+  .composer { padding: 12px 16px 20px; }
+}
+</style>
+</head>
+<body>
+<div class="app">
+
+  <aside class="rail">
+    <h1>Conversations</h1>
+    <a class="row on" href="#">
+      <span class="mono">A</span>
+      <span class="who"><b>Atlas</b><span class="dot"></span><span class="proj">cas-src</span></span>
+      <span class="when">09:58</span>
+      <span class="prev">Fix the warning in-train, or ship allowlisted?</span>
+      <span class="flag"></span>
+    </a>
+    <a class="row" href="#">
+      <span class="mono b">S</span>
+      <span class="who"><b>Studio Mac</b><span class="dot"></span><span class="proj">gabber-studio</span></span>
+      <span class="when">09:31</span>
+      <span class="prev">Both packs green on the second pass.</span>
+    </a>
+    <a class="row" href="#">
+      <span class="mono">A</span>
+      <span class="who"><b>Atlas</b><span class="dot"></span><span class="proj">petra-stella-cloud</span></span>
+      <span class="when">Tue</span>
+      <span class="prev">Preview is up for the alias merge.</span>
+    </a>
+    <a class="row" href="#">
+      <span class="mono c">B</span>
+      <span class="who"><b>Bench</b><span class="dot"></span><span class="proj">openclaw</span></span>
+      <span class="when">Mon</span>
+      <span class="prev">Nothing waiting on you.</span>
+    </a>
+  </aside>
+
+  <main class="thread">
+    <header class="thead">
+      <span class="mono">A</span>
+      <div class="id"><b>Atlas</b><span>cas-src</span></div>
+    </header>
+
+    <div class="msgs">
+      <p class="day">Today</p>
+
+      <div class="turn you">
+        <div class="bub"><p>Merge the two green lanes, then cut 3.26.0 once the gate is green.</p></div>
+        <time>09:41</time>
+      </div>
+
+      <div class="turn">
+        <div class="bub"><p>On it. Both lanes are green on their own CI — the gate starts after the second merge lands.</p></div>
+      </div>
+
+      <div class="turn">
+        <div class="bub receipt">
+          <svg class="tick" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M2.6 8.6l3.3 3.3L13.4 4.4"/></svg>
+          <p>Both lanes are on the epic branch. The release gate is running.</p>
+        </div>
+        <time>09:47</time>
+      </div>
+
+      <div class="turn">
+        <div class="bub file">
+          <div class="card">
+            <span class="pdf">PDF</span>
+            <span>
+              <span class="name">3.26.0 release brief.pdf</span>
+              <span class="sub">1.4 MB
+                <span class="verified">
+                  <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 1.6l5 2v4.1c0 3-2 5.6-5 6.7-3-1.1-5-3.7-5-6.7V3.6z"/><path d="M5.7 7.9L7.4 9.6l3.1-3.4"/></svg>
+                  hash verified
+                </span>
+              </span>
+            </span>
+          </div>
+        </div>
+      </div>
+
+      <div class="turn you">
+        <div class="bub"><p>Did the tokens drift test move?</p></div>
+        <time>09:56</time>
+      </div>
+
+      <div class="turn">
+        <div class="bub"><p>No — unchanged since 3.25.3. The gate's only new failure is one lint warning.</p></div>
+      </div>
+
+      <div class="turn">
+        <div class="bub ask"><p>Gate run 33512 failed on that one warning. Fix it in-train — one worker, about ten minutes — or ship 3.26.0 with it allowlisted?</p></div>
+        <div class="chips">
+          <span class="chip">Fix in-train</span>
+          <span class="chip">Ship with allowlist</span>
+        </div>
+        <time>09:58</time>
+      </div>
+
+      <div class="turn">
+        <div class="working"><span class="dots"><i></i><i></i><i></i></span>working</div>
+      </div>
+    </div>
+
+    <div class="composer">
+      <div class="field">Message Atlas</div>
+      <div class="send">
+        <svg viewBox="0 0 20 20" fill="currentColor"><path d="M2.4 9.1l14.3-6.4c.7-.3 1.4.4 1.1 1.1l-6.4 14.3c-.3.7-1.4.6-1.5-.2l-.8-5.3-5.3-.8c-.8-.1-.9-1.2-.2-1.5z"/></svg>
+      </div>
+    </div>
+  </main>
+
+</div>
+</body>
+</html>

@@ -169,7 +169,8 @@ computed output returns null and the pair is recorded as
   itself, not only on the inner body, so the drop shadow is cast from the
   object's own silhouette. An earlier revision cast a square shadow behind a
   rounded body; fixed before these renders.
-- The dog-eared sheet uses two complementary `clip-path` triangles (canvas cut
-  + fold) rather than `overflow: hidden`, so it adds no clipping findings.
+- The dog-eared sheet uses two complementary `clip-path` triangles — a canvas
+  cut plus a fold — rather than `overflow: hidden`, so it adds no clipping
+  findings.
 - Treatment B's speech tail is a pseudo-element, invisible to the probe's
   element walk, and carries no text.

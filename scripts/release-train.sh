@@ -19,6 +19,7 @@
 #     and a sibling run survives.
 #
 # Usage:
+#   scripts/release-train.sh <version> <release-worktree> --cut [--resume]
 #   scripts/release-train.sh <version> <release-worktree> --assemble
 #   scripts/release-train.sh <version> <epic-worktree> --check-lane <branch> [proof-receipt]
 #   scripts/release-train.sh <version> <epic-worktree> --gate [--reuse | --only <row,row>]
@@ -52,7 +53,7 @@
 set -euo pipefail
 
 usage() {
-    printf 'Usage: %s <version> <epic-worktree> [--assemble|--prep|--announce|--check-lane <branch>|--gate [--reuse | --only <row,row>]|--pipeline|--publish [sha]|--report|--receipts|--status|--stop|--print-run-dir]\n' "$0"
+    printf 'Usage: %s <version> <epic-worktree> [--cut [--resume]|--assemble|--prep|--announce|--check-lane <branch>|--gate [--reuse | --only <row,row>]|--pipeline|--publish [sha]|--report|--receipts|--status|--stop|--print-run-dir]\n' "$0"
 }
 
 version="${1:-}"
@@ -75,6 +76,15 @@ artifacts_root="${CAS_RELEASE_ARTIFACTS_ROOT:-$HOME/.cas/artifacts/release}"
 # The identity of a run: which version, from which worktree. Two supervisors
 # cutting the same version from different epics get different directories.
 run_dir="$artifacts_root/v$version-$worktree_name"
+stage_dir="$script_dir/release-train.d"
+if [[ -d "$stage_dir" ]]; then
+    shopt -s nullglob
+    for stage_file in "$stage_dir"/*.sh; do
+        # shellcheck disable=SC1090
+        . "$stage_file"
+    done
+    shopt -u nullglob
+fi
 pid_file="$run_dir/gate.pid"
 readonly -a gate_rows=(
     scratch-base epic-worktree-fresh epic-worktree-zig failure-log ancestor-proxy-config
@@ -105,6 +115,10 @@ if [[ -z "$invocation_kind" ]]; then
     fi
 fi
 invocation_blockers="${CAS_RELEASE_TRAIN_BLOCKER_STAGES:-${CAS_RELEASE_TRAIN_BLOCKERS:-none}}"
+if [[ "$invocation_resume" == true && "$invocation_blockers" == none \
+    && -s "$run_dir/blockers.log" ]]; then
+    invocation_blockers="$(paste -sd, "$run_dir/blockers.log")"
+fi
 if [[ "$invocation_kind" == manual && "$invocation_blockers" == none \
     && "$invocation_stage" =~ ^(preflight|assemble|prep|ledger|gate|pr-body|pipeline|publish|post-publication|announce|report|receipts|host-update)$ ]]; then
     invocation_blockers="$invocation_stage"
@@ -929,6 +943,17 @@ case "$action" in
         # shellcheck disable=SC1091
         source "$script_dir/release-train.d/announce.sh"
         release_train_announce
+        exit $?
+        ;;
+    --cut)
+        resume_cut=false
+        if [[ "${4:-}" == --resume && "$#" -eq 4 ]]; then
+            resume_cut=true
+        elif [[ "$#" -ne 3 ]]; then
+            usage >&2
+            exit 2
+        fi
+        cut_run "$resume_cut"
         exit $?
         ;;
     --assemble)

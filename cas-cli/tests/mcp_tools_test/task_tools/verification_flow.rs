@@ -6547,7 +6547,7 @@ async fn test_task_lifecycle_with_verification() {
 }
 
 #[tokio::test]
-async fn test_task_close_blocked_with_rejected_verification() {
+async fn test_task_close_reopens_after_rejected_verification() {
     use cas::types::VerificationIssue;
 
     let (temp, service) = setup_cas();
@@ -6604,9 +6604,10 @@ async fn test_task_close_blocked_with_rejected_verification() {
         "Found incomplete work".to_string(),
         issues,
     );
-    add_exact_supervisor_fixture_verdict(&cas_dir, verification, None);
+    let rejected_dispatch = add_exact_supervisor_fixture_verdict(&cas_dir, verification, None);
 
-    // Try to close task - should be blocked due to rejected verification
+    // Retry close after rejection: the old dispatch is terminal, so this must
+    // open a fresh verification cycle instead of replaying D1's failure.
     let close_req = TaskCloseRequest {
         stranded_branch_override: None,
         id: id.to_string(),
@@ -6623,10 +6624,21 @@ async fn test_task_close_blocked_with_rejected_verification() {
 
     let text = extract_text(result);
     assert!(
-        text.contains("VERIFICATION FAILED"),
-        "Close should be blocked with rejected verification: {text}"
+        text.contains("VERIFICATION REQUIRED"),
+        "Close should mint a fresh verification dispatch: {text}"
     );
-    assert!(text.contains("1 issue"), "Should show issue count: {text}");
+    assert!(
+        !text.contains("VERIFICATION FAILED"),
+        "Close must not replay the rejected dispatch: {text}"
+    );
+    let latest_dispatch = cas_store::get_latest_verification_dispatch(&cas_dir, id)
+        .unwrap()
+        .expect("fresh verification dispatch");
+    assert_ne!(latest_dispatch.id, rejected_dispatch.id);
+    assert_eq!(
+        latest_dispatch.state,
+        cas::types::VerificationDispatchState::Pending
+    );
 }
 
 /// Regression test for cas-7de3: `task.close` must either dispatch a verifier

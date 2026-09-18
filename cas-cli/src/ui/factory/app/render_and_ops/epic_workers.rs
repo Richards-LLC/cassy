@@ -492,8 +492,17 @@ pub(crate) fn target_seed_receipt(
 ) -> Option<String> {
     result.target_seed.as_ref().map(|stats| {
         format!(
-            "Cargo target seed: snapshot='{}'; hardlinked_files={}; hardlinked_bytes={}",
-            stats.snapshot, stats.files, stats.bytes
+            "Cargo target seed: snapshot='{}'; source_commit='{}'; age_secs={}; skipped_crates='{}'; hardlinked_files={}; hardlinked_bytes={}",
+            stats.snapshot,
+            stats.source_commit,
+            stats.age_secs,
+            if stats.skipped_crates.is_empty() {
+                "none".to_string()
+            } else {
+                stats.skipped_crates.join(",")
+            },
+            stats.files,
+            stats.bytes
         )
     })
 }
@@ -3057,6 +3066,33 @@ mod spawn_base_tests {
         assert!(receipt.contains("merge-back parent 'main'"), "{receipt}");
     }
 
+    #[test]
+    fn target_seed_receipt_names_provenance_age_and_skipped_crates() {
+        use crate::ui::factory::app::TargetSeedStats;
+
+        let result = WorkerSpawnResult {
+            worker_name: "receipt-worker".into(),
+            cwd: std::path::PathBuf::from("/workspace/target-repo"),
+            cas_root: None,
+            worktree: None,
+            worktree_created: false,
+            target_seed: Some(TargetSeedStats {
+                snapshot: "target-old".into(),
+                source_commit: "abc123".into(),
+                age_secs: 86_400,
+                skipped_crates: vec!["cas-pty".into()],
+                files: 2,
+                bytes: 42,
+            }),
+            target_seed_warning: Some("refresh".into()),
+        };
+        let receipt = target_seed_receipt(&result).expect("target seed receipt");
+        assert!(receipt.contains("snapshot='target-old'"), "{receipt}");
+        assert!(receipt.contains("source_commit='abc123'"), "{receipt}");
+        assert!(receipt.contains("age_secs=86400"), "{receipt}");
+        assert!(receipt.contains("skipped_crates='cas-pty'"), "{receipt}");
+    }
+
     /// GH #122 repro, end to end: focus pinned to epic A, spawn requested with
     /// a task belonging to epic B. Pre-fix the worktree was cut from epic A's
     /// branch; it must now be cut from epic B's, and the resulting worktree
@@ -4149,6 +4185,7 @@ mod spawn_base_tests {
             worktree: Some(worktree),
             worktree_created: true,
             target_seed: None,
+            target_seed_warning: None,
         };
 
         assert!(
@@ -4197,6 +4234,7 @@ mod spawn_base_tests {
             worktree: Some(worktree),
             worktree_created: false,
             target_seed: None,
+            target_seed_warning: None,
         };
 
         assert!(
@@ -4226,6 +4264,7 @@ mod spawn_base_tests {
             worktree: None,
             worktree_created: true,
             target_seed: None,
+            target_seed_warning: None,
         };
 
         assert!(
@@ -4266,6 +4305,7 @@ mod spawn_base_tests {
             worktree: Some(worktree),
             worktree_created: true,
             target_seed: None,
+            target_seed_warning: None,
         };
 
         let error = cleanup_cancelled_spawn_worktree_with_manager(None, &mut result)

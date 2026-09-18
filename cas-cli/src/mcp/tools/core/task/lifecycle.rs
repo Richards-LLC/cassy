@@ -1079,9 +1079,18 @@ impl CasCore {
         let mut output =
             crate::mcp::tools::truncated_list_header("Ready tasks", total, shown, &sort_opts);
         for task in tasks.iter().take(limit) {
+            let open_blocker_ids = super::open_blocker_ids(task_store.as_ref(), &task.id)?;
+            let blocker_warning = if open_blocker_ids.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    " ⚠️ open blockers: {}",
+                    open_blocker_ids.join(", ")
+                )
+            };
             output.push_str(&format!(
-                "- [{}] P{} {} - {}\n",
-                task.id, task.priority.0, task.task_type, task.title
+                "- [{}] P{} {} - {}{}\n",
+                task.id, task.priority.0, task.task_type, task.title, blocker_warning
             ));
         }
         output.push_str(&crate::mcp::tools::truncated_list_footer(total, shown));
@@ -1152,8 +1161,17 @@ impl CasCore {
             ));
         }
 
-        super::ensure_no_open_blockers(task_store.as_ref(), &req.id, "start")?;
+        let open_blocker_ids = super::open_blocker_ids(task_store.as_ref(), &req.id)?;
+        super::ensure_no_start_gates(task_store.as_ref(), &req.id)?;
         super::ensure_no_external_blockers(&self.cas_root, &req.id, "start")?;
+        let blocker_warning = if open_blocker_ids.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "\n⚠️ STARTING WITH OPEN BLOCKERS: {}. Start is allowed for parallel preparation, but close remains gated until these tasks are done.",
+                open_blocker_ids.join(", ")
+            )
+        };
 
         if let Some(target) = task.deliverables.work_target.as_ref() {
             super::repo_context::resolve_repo_context(&self.cas_root, target).map_err(
@@ -1791,11 +1809,12 @@ impl CasCore {
                 )
             };
             let response = format!(
-                "Started task: {} - {}\nDelivery mode: {}{}{}{}{}{}{}",
+                "Started task: {} - {}\nDelivery mode: {}{}{}{}{}{}{}{}",
                 req.id,
                 crate::mcp::tools::truncate_str(&task.title, 509),
                 task.delivery_mode,
                 claim_info.unwrap_or_default(),
+                blocker_warning,
                 crate::mcp::tools::truncate_str(&unanchored_warning.unwrap_or_default(), 765,),
                 execution_state.unwrap_or_default(),
                 own_notes,
@@ -1810,11 +1829,12 @@ impl CasCore {
         }
 
         Ok(Self::success(format!(
-            "Started task: {} - {}\nDelivery mode: {}{}{}{}{}{}{}{}{}",
+            "Started task: {} - {}\nDelivery mode: {}{}{}{}{}{}{}{}{}{}",
             req.id,
             task.title,
             task.delivery_mode,
             claim_info.unwrap_or_default(),
+            blocker_warning,
             // cas-156b: placed directly after the claim line so the nativity
             // warning cannot be pushed out of view by long sibling-note or
             // worktree blocks.

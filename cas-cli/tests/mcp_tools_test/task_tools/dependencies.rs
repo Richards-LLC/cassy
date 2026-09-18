@@ -223,7 +223,7 @@ async fn test_task_show_with_deps_has_no_arrows_and_names_both_directions() {
 /// explicitly attempts both normal start and manual claim while the blocker is
 /// still in progress.
 #[tokio::test]
-async fn late_blocker_rearms_reopened_task_and_rejects_start_and_claim() {
+async fn late_blocker_rearms_reopened_task_allows_start_with_warning_and_rejects_claim() {
     let (temp, service) = setup_cas();
     let task_store = open_task_store(&temp.path().join(".cas")).expect("task store");
 
@@ -272,21 +272,9 @@ async fn late_blocker_rearms_reopened_task_and_rejects_start_and_claim() {
         .update(&stale_open)
         .expect("restore stale open status fixture");
 
-    let start_error = service
-        .cas_task_start(Parameters(IdRequest {
-            id: target_id.clone(),
-        }))
-        .await
-        .expect_err("start must reject an open blocking dependency");
-    assert!(
-        start_error.message.contains(&blocker_id),
-        "start guidance must identify the actionable blocker: {}",
-        start_error.message
-    );
-
     let claim_error = service
         .cas_task_claim(Parameters(TaskClaimRequest {
-            task_id: target_id,
+            task_id: target_id.clone(),
             duration_secs: 600,
             reason: Some("manual recovery claim".to_string()),
         }))
@@ -296,6 +284,137 @@ async fn late_blocker_rearms_reopened_task_and_rejects_start_and_claim() {
         claim_error.message.contains(&blocker_id),
         "claim guidance must identify the actionable blocker: {}",
         claim_error.message
+    );
+
+    let started = service
+        .cas_task_start(Parameters(IdRequest { id: target_id }))
+        .await
+        .expect("start must allow an open blocking dependency");
+    let started = extract_text(started);
+    assert!(
+        started.contains(&blocker_id),
+        "start warning must identify the actionable blocker: {started}"
+    );
+    assert!(
+        started.to_ascii_lowercase().contains("warning")
+            || started.contains("⚠️"),
+        "start response must visibly warn about the open blocker: {started}"
+    );
+}
+
+#[tokio::test]
+async fn open_blocks_allow_start_but_reject_close_and_ready_flags_cas_0487() {
+    let (_temp, service) = setup_cas();
+
+    let blocker_id = create_task(&service, "Open blocker").await;
+    let dependent_id = create_task(&service, "Startable dependent").await;
+    service
+        .cas_task_dep_add(Parameters(DependencyRequest {
+            from_id: dependent_id.clone(),
+            to_id: blocker_id.clone(),
+            dep_type: "blocks".to_string(),
+        }))
+        .await
+        .expect("blocks dependency should be added");
+
+    let ready = extract_text(
+        service
+            .cas_task_ready(Parameters(TaskReadyBlockedRequest {
+                limit: None,
+                scope: "all".to_string(),
+                sort: None,
+                sort_order: None,
+                epic: None,
+                include_foreign: false,
+            }))
+            .await
+            .expect("ready should succeed"),
+    );
+    assert!(
+        ready.contains(&dependent_id),
+        "dependent with an open blocks edge must remain startable: {ready}"
+    );
+    assert!(
+        ready.contains(&blocker_id),
+        "ready output must flag the open blocker by id: {ready}"
+    );
+
+    let started = extract_text(
+        service
+            .cas_task_start(Parameters(IdRequest {
+                id: dependent_id.clone(),
+            }))
+            .await
+            .expect("start should succeed with an open blocks edge"),
+    );
+    assert!(
+        started.contains(&blocker_id),
+        "start warning must name the open blocker: {started}"
+    );
+
+    let close = extract_text(
+        service
+            .cas_task_close(Parameters(TaskCloseRequest {
+                id: dependent_id,
+                reason: Some("delivered despite blocker".to_string()),
+                supervisor_override: None,
+                legacy_bypass_code_review: None,
+                stranded_branch_override: None,
+                search_manifest: None,
+                commit_receipt: None,
+            }))
+            .await
+            .expect("close should return a refusal result"),
+    );
+    assert!(
+        close.contains(&blocker_id) && close.to_ascii_lowercase().contains("blocking"),
+        "close must refuse while the blocker remains open: {close}"
+    );
+}
+
+#[tokio::test]
+async fn requires_start_dependency_remains_a_hard_start_gate_cas_0487() {
+    let (_temp, service) = setup_cas();
+
+    let prerequisite_id = create_task(&service, "Required prerequisite").await;
+    let dependent_id = create_task(&service, "Requires prerequisite").await;
+    service
+        .cas_task_dep_add(Parameters(DependencyRequest {
+            from_id: dependent_id.clone(),
+            to_id: prerequisite_id.clone(),
+            dep_type: "requires_start".to_string(),
+        }))
+        .await
+        .expect("requires_start dependency should be added");
+
+    let start_error = service
+        .cas_task_start(Parameters(IdRequest {
+            id: dependent_id.clone(),
+        }))
+        .await
+        .expect_err("requires_start must refuse start while prerequisite is open");
+    assert!(
+        start_error.message.contains(&prerequisite_id),
+        "start gate must identify the prerequisite: {}",
+        start_error.message
+    );
+
+    let ready = extract_text(
+        service
+            .cas_task_ready(Parameters(TaskReadyBlockedRequest {
+                limit: None,
+                scope: "all".to_string(),
+                sort: None,
+                sort_order: None,
+                epic: None,
+                include_foreign: false,
+            }))
+            .await
+            .expect("ready should succeed"),
+    );
+    assert!(
+        !ready.contains(&dependent_id),
+        "requires_start must keep a dependent out of ready: {ready}"
     );
 }
 

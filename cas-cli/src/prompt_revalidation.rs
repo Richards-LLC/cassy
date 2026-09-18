@@ -199,6 +199,9 @@ pub(crate) enum MergeRequestDelivery {
     SuppressLanded { target_tip: String },
     /// The task left `AwaitingMerge` — the request is moot whatever git says.
     SuppressResolved { status: TaskStatus },
+    /// The task was reopened by `request_changes`, and this immutable tip is
+    /// one of the delivery boundaries the supervisor explicitly declined.
+    SuppressRequestChanges { status: TaskStatus },
     /// The task may have entered a later merge cycle, but the immutable tip
     /// this message asked the supervisor to merge was invalidated. This is
     /// deliberately distinct from `SuppressResolved`: a task can return to
@@ -224,9 +227,28 @@ pub(crate) fn merge_request_delivery_decision(
 ) -> MergeRequestDelivery {
     if let Some(task) = task {
         if task.status != TaskStatus::AwaitingMerge {
-            return MergeRequestDelivery::SuppressResolved {
-                status: task.status,
-            };
+            if task
+                .deliverables
+                .historical_factory_branch_anchors
+                .iter()
+                .any(|anchor| anchor == &envelope.branch_tip)
+            {
+                return MergeRequestDelivery::SuppressRequestChanges {
+                    status: task.status,
+                };
+            }
+            // A task with historical declined tips may have started a fresh
+            // cycle. Its new branch tip is actionable; the old no-history
+            // behavior remains moot for tasks that simply left AwaitingMerge.
+            if task
+                .deliverables
+                .historical_factory_branch_anchors
+                .is_empty()
+            {
+                return MergeRequestDelivery::SuppressResolved {
+                    status: task.status,
+                };
+            }
         }
         let current_anchor = task.deliverables.factory_branch_anchor.as_deref();
         if current_anchor != Some(&envelope.branch_tip)
@@ -288,11 +310,29 @@ pub(crate) fn merge_request_moot_guidance(task_id: &str, status: TaskStatus) -> 
     )
 }
 
+/// Guidance sent when a worker retries the exact delivery tip a supervisor
+/// already declined with `request_changes`.
+pub(crate) fn merge_request_request_changes_guidance(
+    task_id: &str,
+    branch_tip: &str,
+    status: TaskStatus,
+) -> String {
+    format!(
+        "Cassy suppressed your merge request for {task_id}: delivery tip {branch_tip} was already declined by the supervisor with request_changes (task is {status}). Do not ask the supervisor to merge that reviewed tip again; start a fresh task cycle and send only a new corrective tip."
+    )
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct LifecycleEnvelope {
     pub task_id: String,
     pub new_status: TaskStatus,
     pub occurrence: DateTime<Utc>,
+    /// The lifecycle kind is optional for compatibility with envelopes from
+    /// before the relay supersession contract was added.
+    pub transition: Option<String>,
+    /// Merge-boundary tip captured when an awaiting-merge/close-rejected relay
+    /// was emitted. A later close cycle must not revive the old relay.
+    pub branch_tip: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -642,6 +682,45 @@ pub(crate) fn select_unambiguous_merge_task<'a>(
     matches.next().is_none().then_some(only)
 }
 
+/// Select the one task that can own an explicit merge request, including a
+/// reopened task whose historical delivery anchors prove a prior
+/// request_changes cycle. Fresh-cycle tasks remain eligible when their live
+/// branch tip differs from those historical anchors.
+pub(crate) fn select_merge_request_task<'a>(
+    tasks: &'a [Task],
+    worker: &str,
+    explicit_task_id: Option<&str>,
+) -> Option<&'a Task> {
+    if let Some(task) = select_unambiguous_merge_task(tasks, worker, explicit_task_id) {
+        return Some(task);
+    }
+    // Preserve the old fail-closed behavior when several parked tasks could
+    // own an implicit request. A reopened task must not become a surprising
+    // fallback merely because an unrelated AwaitingMerge row made the normal
+    // selector ambiguous.
+    if tasks.iter().any(|task| {
+        task.status == TaskStatus::AwaitingMerge
+            && task
+                .assignee
+                .as_deref()
+                .is_some_and(|name| name.eq_ignore_ascii_case(worker))
+            && explicit_task_id.is_none_or(|id| task.id == id)
+    }) {
+        return None;
+    }
+    let mut matches = tasks.iter().filter(|task| {
+        task.status != TaskStatus::AwaitingMerge
+            && !task.deliverables.historical_factory_branch_anchors.is_empty()
+            && task
+                .assignee
+                .as_deref()
+                .is_some_and(|name| name.eq_ignore_ascii_case(worker))
+            && explicit_task_id.is_none_or(|id| task.id == id)
+    });
+    let only = matches.next()?;
+    matches.next().is_none().then_some(only)
+}
+
 /// The branch a task's merge request is about: the parked branch it was
 /// delivered on, else the worker's own `factory/<assignee>`.
 ///
@@ -826,7 +905,7 @@ pub(crate) struct VerificationDispatchEnvelope {
 /// id or worker name is still data. Dropping the quote and angle characters
 /// keeps a hostile value from closing the tag early and inventing attributes —
 /// the parse would otherwise read a forged `task_id` out of the body.
-fn xml_attribute_value(value: &str) -> String {
+pub(crate) fn xml_attribute_value(value: &str) -> String {
     value
         .chars()
         .filter(|c| !matches!(c, '"' | '<' | '>' | '\n' | '\r'))
@@ -970,6 +1049,8 @@ pub(crate) fn parse_lifecycle_envelope(prompt: &str) -> Option<LifecycleEnvelope
         task_id,
         new_status,
         occurrence,
+        transition: xml_attribute(tag, "transition").map(str::to_string),
+        branch_tip: xml_attribute(tag, "branch_tip").map(str::to_string),
     })
 }
 
@@ -977,6 +1058,34 @@ pub(crate) fn revalidate_lifecycle_prompt(
     prompt: &str,
     current_status: TaskStatus,
     current_updated_at: DateTime<Utc>,
+) -> LifecyclePromptDecision {
+    revalidate_lifecycle_prompt_with_anchor(prompt, current_status, current_updated_at, None)
+}
+
+/// Revalidate a lifecycle relay against the complete current task record.
+///
+/// `AwaitingMerge` is a reusable status: `request_changes` can reopen a task
+/// and a later close can park it there again. Status equality alone therefore
+/// cannot prove that an old relay is still current. Anchored parked relays are
+/// also tied to the merge boundary they announced; a changed or cleared anchor
+/// is positive evidence that a later decision superseded that relay.
+pub(crate) fn revalidate_lifecycle_prompt_against_task(
+    prompt: &str,
+    task: &Task,
+) -> LifecyclePromptDecision {
+    revalidate_lifecycle_prompt_with_anchor(
+        prompt,
+        task.status,
+        task.updated_at,
+        task.deliverables.factory_branch_anchor.as_deref(),
+    )
+}
+
+fn revalidate_lifecycle_prompt_with_anchor(
+    prompt: &str,
+    current_status: TaskStatus,
+    current_updated_at: DateTime<Utc>,
+    current_branch_tip: Option<&str>,
 ) -> LifecyclePromptDecision {
     let Some(envelope) = parse_lifecycle_envelope(prompt) else {
         return LifecyclePromptDecision::Unstructured;
@@ -1020,6 +1129,14 @@ pub(crate) fn revalidate_lifecycle_prompt(
     // a write that is not in this task's history (replayed, rewound, or
     // addressed to a recycled id). That is genuinely stale.
     if current_updated_at < envelope.occurrence {
+        return LifecyclePromptDecision::SuppressStale {
+            task_id: envelope.task_id,
+        };
+    }
+    if envelope.new_status == TaskStatus::AwaitingMerge
+        && let Some(relay_tip) = envelope.branch_tip.as_deref()
+        && current_branch_tip != Some(relay_tip)
+    {
         return LifecyclePromptDecision::SuppressStale {
             task_id: envelope.task_id,
         };
@@ -1172,6 +1289,20 @@ mod cas_7787_relay_honesty_tests {
         )
     }
 
+    fn anchored_awaiting_merge_prompt(
+        transition: &str,
+        task_id: &str,
+        branch_tip: &str,
+        occurrence: DateTime<Utc>,
+    ) -> String {
+        format!(
+            "<task-lifecycle transition=\"{transition}\" task_id=\"{task_id}\" \
+             old=\"in_progress\" new=\"awaiting_merge\" actor=\"worker\" \
+             notification_id=\"3386\" occurrence=\"{}\" branch_tip=\"{branch_tip}\">\nparked\n</task-lifecycle>",
+            occurrence.to_rfc3339()
+        )
+    }
+
     /// The reported incident, reduced to its decision.
     ///
     /// Replays the exact cas-fe23 shape from session cas-src-fast-pelican-83:
@@ -1264,6 +1395,51 @@ mod cas_7787_relay_honesty_tests {
         assert_eq!(
             lifecycle_stale_outcome(&decision, true, false),
             LifecycleStaleOutcome::Deliver
+        );
+    }
+
+    #[test]
+    fn a_later_awaiting_merge_decision_supersedes_the_old_tip() {
+        let occurrence = Utc.with_ymd_and_hms(2026, 9, 17, 18, 51, 51).unwrap();
+        let prompt = anchored_awaiting_merge_prompt(
+            "task_awaiting_merge",
+            "cas-f002",
+            "old-tip",
+            occurrence,
+        );
+        let mut task = Task::new("cas-f002".to_string(), "stale relay".to_string());
+        task.status = TaskStatus::AwaitingMerge;
+        task.updated_at = occurrence + chrono::Duration::seconds(90);
+        task.deliverables.factory_branch_anchor = Some("new-tip".to_string());
+
+        assert_eq!(
+            revalidate_lifecycle_prompt_against_task(&prompt, &task),
+            LifecyclePromptDecision::SuppressStale {
+                task_id: "cas-f002".to_string(),
+            },
+            "a relay for the old merge boundary must not become actionable after a later decision"
+        );
+    }
+
+    #[test]
+    fn a_close_rejected_relay_is_superseded_when_request_changes_clears_its_anchor() {
+        let occurrence = Utc.with_ymd_and_hms(2026, 9, 17, 19, 0, 0).unwrap();
+        let prompt = anchored_awaiting_merge_prompt(
+            "task_close_rejected",
+            "cas-f002",
+            "rejected-tip",
+            occurrence,
+        );
+        let mut task = Task::new("cas-f002".to_string(), "stale rejection".to_string());
+        task.status = TaskStatus::Open;
+        task.updated_at = occurrence + chrono::Duration::seconds(30);
+        task.deliverables.factory_branch_anchor = None;
+
+        assert_eq!(
+            revalidate_lifecycle_prompt_against_task(&prompt, &task),
+            LifecyclePromptDecision::SuppressStale {
+                task_id: "cas-f002".to_string(),
+            }
         );
     }
 
@@ -1893,6 +2069,28 @@ mod tests {
         let guidance = merge_request_moot_guidance("cas-test", TaskStatus::Closed);
         assert!(guidance.contains("cas-test"));
         assert!(guidance.contains("no longer awaiting a merge"));
+    }
+
+    /// GH #887: request_changes reopens the task and moves its reviewed tip
+    /// into historical identity. A merge request for that same tip must not
+    /// be emitted again as a fresh supervisor action.
+    #[test]
+    fn request_changes_reviewed_tip_is_suppressed_after_reopen_gh_887() {
+        let mut task = merge_task(TaskStatus::Open, None);
+        task.deliverables
+            .historical_factory_branch_anchors
+            .push("worker-tip".to_string());
+        assert_eq!(
+            merge_request_delivery_decision(
+                Some(&task),
+                &merge_envelope(),
+                &MergeRequestDecision::Pending {
+                    target_tip: "abc123".to_string(),
+                },
+            ),
+            MergeRequestDelivery::SuppressRequestChanges { status: TaskStatus::Open },
+            "request_changes must suppress the reviewed tip after reopening the task"
+        );
     }
 
     /// A genuinely outstanding merge must still reach the supervisor — and so

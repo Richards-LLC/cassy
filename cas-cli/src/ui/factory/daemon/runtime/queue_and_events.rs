@@ -3981,7 +3981,8 @@ impl FactoryDaemon {
                 use crate::prompt_revalidation::{
                     MergeRequestDecision, MergeRequestDelivery, merge_landed_guidance,
                     merge_request_anchor_invalidated_guidance, merge_request_delivery_decision,
-                    merge_request_moot_guidance, revalidate_merge_request,
+                    merge_request_moot_guidance, merge_request_request_changes_guidance,
+                    revalidate_merge_request,
                 };
 
                 let task = crate::store::open_task_store_local(self.app.cas_dir())
@@ -4066,6 +4067,18 @@ impl FactoryDaemon {
                             Some(merge_request_moot_guidance(&envelope.task_id, status)),
                             "merge request no longer applies",
                         ),
+                        MergeRequestDelivery::SuppressRequestChanges { status } => (
+                            Some(
+                                "merge request repeats a delivery tip declined by request_changes"
+                                    .to_string(),
+                            ),
+                            Some(merge_request_request_changes_guidance(
+                                &envelope.task_id,
+                                &envelope.branch_tip,
+                                status,
+                            )),
+                            "reviewed merge request suppressed — fresh corrective tip required",
+                        ),
                         MergeRequestDelivery::SuppressInvalidatedAnchor { current_anchor } => (
                             Some("merge request delivery anchor was invalidated".to_string()),
                             Some(merge_request_anchor_invalidated_guidance(
@@ -4138,10 +4151,9 @@ impl FactoryDaemon {
                 // relay would be a false alarm.
                 let queued_row_was_transported = queued.acked_at.is_some();
                 let decision = match store.get(&envelope.task_id) {
-                    Ok(task) => crate::prompt_revalidation::revalidate_lifecycle_prompt(
+                    Ok(task) => crate::prompt_revalidation::revalidate_lifecycle_prompt_against_task(
                         &queued.prompt,
-                        task.status,
-                        task.updated_at,
+                        &task,
                     ),
                     Err(cas_store::StoreError::TaskNotFound(_)) => {
                         LifecyclePromptDecision::SuppressStale {

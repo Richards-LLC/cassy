@@ -491,6 +491,7 @@ fn factory_req(action: &str) -> FactoryRequest {
         target: None,
         message: None,
         force: None,
+        reason: None,
         dry_run: None,
         // allow_trunk is CoordinationRequest/worktree_merge only — not FactoryRequest
         clear: None,
@@ -5555,6 +5556,63 @@ async fn inbox_poll_claims_a_transport_delivered_row_after_a_declined_wake() {
         get_text(&second),
         "No unread messages for registered-worker",
         "the explicit poll must claim the row exactly once"
+    );
+}
+
+/// GH #888: an old parked lifecycle relay must not be redelivered after a
+/// later close decision advances the task's merge boundary.
+#[tokio::test]
+async fn inbox_poll_withholds_superseded_awaiting_merge_relay() {
+    let _guard = EnvGuard::set_optional(&[
+        ("CAS_AGENT_NAME", None),
+        ("CAS_SESSION_ID", None),
+        ("CAS_FACTORY_SESSION", None),
+    ]);
+    let env = FactoryTestEnv::with_agent_id("registered-supervisor-id");
+    let mut supervisor = Agent::new(
+        "registered-supervisor-id".to_string(),
+        "registered-supervisor".to_string(),
+    );
+    supervisor.role = AgentRole::Supervisor;
+    env.agent_store()
+        .register(&supervisor)
+        .expect("register supervisor");
+
+    let task_id = "cas-f002-inbox";
+    let mut task = Task::new(task_id.to_string(), "stale lifecycle relay".to_string());
+    task.status = TaskStatus::AwaitingMerge;
+    task.deliverables.factory_branch_anchor = Some("new-tip".to_string());
+    env.task_store().add(&task).expect("add current task");
+
+    let occurrence = (chrono::Utc::now() - chrono::Duration::minutes(1)).to_rfc3339();
+    let prompt = format!(
+        "<task-lifecycle transition=\"task_awaiting_merge\" task_id=\"{task_id}\" \
+         old=\"in_progress\" new=\"awaiting_merge\" actor=\"worker\" \
+         notification_id=\"1\" occurrence=\"{occurrence}\" branch_tip=\"old-tip\">\n\
+         MERGE REQUIRED\n</task-lifecycle>"
+    );
+    env.prompt_queue()
+        .enqueue("lifecycle-wake:old", "supervisor", &prompt)
+        .expect("enqueue old lifecycle relay");
+
+    let result = env
+        .service
+        .coordination(Parameters(coord_req("inbox_poll")))
+        .await
+        .expect("inbox poll");
+    let text = get_text(&result);
+    assert!(
+        text.contains("withheld"),
+        "stale relay must be withheld: {text}"
+    );
+    assert!(text.contains(task_id), "withheld row must be named: {text}");
+    assert!(
+        text.contains("already done"),
+        "stale reason must be explicit: {text}"
+    );
+    assert!(
+        !text.contains("MERGE REQUIRED"),
+        "superseded relay body must not be redelivered: {text}"
     );
 }
 

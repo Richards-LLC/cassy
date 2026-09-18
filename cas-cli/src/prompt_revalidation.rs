@@ -199,6 +199,9 @@ pub(crate) enum MergeRequestDelivery {
     SuppressLanded { target_tip: String },
     /// The task left `AwaitingMerge` — the request is moot whatever git says.
     SuppressResolved { status: TaskStatus },
+    /// The task was reopened by `request_changes`, and this immutable tip is
+    /// one of the delivery boundaries the supervisor explicitly declined.
+    SuppressRequestChanges { status: TaskStatus },
     /// The task may have entered a later merge cycle, but the immutable tip
     /// this message asked the supervisor to merge was invalidated. This is
     /// deliberately distinct from `SuppressResolved`: a task can return to
@@ -224,9 +227,28 @@ pub(crate) fn merge_request_delivery_decision(
 ) -> MergeRequestDelivery {
     if let Some(task) = task {
         if task.status != TaskStatus::AwaitingMerge {
-            return MergeRequestDelivery::SuppressResolved {
-                status: task.status,
-            };
+            if task
+                .deliverables
+                .historical_factory_branch_anchors
+                .iter()
+                .any(|anchor| anchor == &envelope.branch_tip)
+            {
+                return MergeRequestDelivery::SuppressRequestChanges {
+                    status: task.status,
+                };
+            }
+            // A task with historical declined tips may have started a fresh
+            // cycle. Its new branch tip is actionable; the old no-history
+            // behavior remains moot for tasks that simply left AwaitingMerge.
+            if task
+                .deliverables
+                .historical_factory_branch_anchors
+                .is_empty()
+            {
+                return MergeRequestDelivery::SuppressResolved {
+                    status: task.status,
+                };
+            }
         }
         let current_anchor = task.deliverables.factory_branch_anchor.as_deref();
         if current_anchor != Some(&envelope.branch_tip)
@@ -285,6 +307,18 @@ pub(crate) fn merge_request_moot_guidance(task_id: &str, status: TaskStatus) -> 
         "Cassy suppressed your merge request for {task_id}: the task is no longer awaiting a \
          merge (current status: {status}). Nothing is queued for the supervisor. Re-read the \
          task with `task action=show id={task_id}` before sending anything further about it."
+    )
+}
+
+/// Guidance sent when a worker retries the exact delivery tip a supervisor
+/// already declined with `request_changes`.
+pub(crate) fn merge_request_request_changes_guidance(
+    task_id: &str,
+    branch_tip: &str,
+    status: TaskStatus,
+) -> String {
+    format!(
+        "Cassy suppressed your merge request for {task_id}: delivery tip {branch_tip} was already declined by the supervisor with request_changes (task is {status}). Do not ask the supervisor to merge that reviewed tip again; start a fresh task cycle and send only a new corrective tip."
     )
 }
 
@@ -638,6 +672,45 @@ pub(crate) fn select_unambiguous_merge_task<'a>(
 ) -> Option<&'a Task> {
     let mut matches = parked_tasks.iter().filter(|task| {
         task.status == TaskStatus::AwaitingMerge
+            && task
+                .assignee
+                .as_deref()
+                .is_some_and(|name| name.eq_ignore_ascii_case(worker))
+            && explicit_task_id.is_none_or(|id| task.id == id)
+    });
+    let only = matches.next()?;
+    matches.next().is_none().then_some(only)
+}
+
+/// Select the one task that can own an explicit merge request, including a
+/// reopened task whose historical delivery anchors prove a prior
+/// request_changes cycle. Fresh-cycle tasks remain eligible when their live
+/// branch tip differs from those historical anchors.
+pub(crate) fn select_merge_request_task<'a>(
+    tasks: &'a [Task],
+    worker: &str,
+    explicit_task_id: Option<&str>,
+) -> Option<&'a Task> {
+    if let Some(task) = select_unambiguous_merge_task(tasks, worker, explicit_task_id) {
+        return Some(task);
+    }
+    // Preserve the old fail-closed behavior when several parked tasks could
+    // own an implicit request. A reopened task must not become a surprising
+    // fallback merely because an unrelated AwaitingMerge row made the normal
+    // selector ambiguous.
+    if tasks.iter().any(|task| {
+        task.status == TaskStatus::AwaitingMerge
+            && task
+                .assignee
+                .as_deref()
+                .is_some_and(|name| name.eq_ignore_ascii_case(worker))
+            && explicit_task_id.is_none_or(|id| task.id == id)
+    }) {
+        return None;
+    }
+    let mut matches = tasks.iter().filter(|task| {
+        task.status != TaskStatus::AwaitingMerge
+            && !task.deliverables.historical_factory_branch_anchors.is_empty()
             && task
                 .assignee
                 .as_deref()
@@ -1996,6 +2069,28 @@ mod tests {
         let guidance = merge_request_moot_guidance("cas-test", TaskStatus::Closed);
         assert!(guidance.contains("cas-test"));
         assert!(guidance.contains("no longer awaiting a merge"));
+    }
+
+    /// GH #887: request_changes reopens the task and moves its reviewed tip
+    /// into historical identity. A merge request for that same tip must not
+    /// be emitted again as a fresh supervisor action.
+    #[test]
+    fn request_changes_reviewed_tip_is_suppressed_after_reopen_gh_887() {
+        let mut task = merge_task(TaskStatus::Open, None);
+        task.deliverables
+            .historical_factory_branch_anchors
+            .push("worker-tip".to_string());
+        assert_eq!(
+            merge_request_delivery_decision(
+                Some(&task),
+                &merge_envelope(),
+                &MergeRequestDecision::Pending {
+                    target_tip: "abc123".to_string(),
+                },
+            ),
+            MergeRequestDelivery::SuppressRequestChanges { status: TaskStatus::Open },
+            "request_changes must suppress the reviewed tip after reopening the task"
+        );
     }
 
     /// A genuinely outstanding merge must still reach the supervisor — and so

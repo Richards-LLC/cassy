@@ -477,7 +477,7 @@ impl CasService {
             // the unified `task` tool can reach the epic close override.
             stranded_branch_override: req.stranded_branch_override,
             id: req.id.ok_or_else(|| self.missing_id("task", "close"))?,
-            reason: req.reason,
+            reason: req.reason.or(req.notes),
             supervisor_override: effective_supervisor_override,
             legacy_bypass_code_review: req.legacy_bypass_code_review,
             search_manifest: req.search_manifest,
@@ -624,9 +624,12 @@ impl CasService {
         use crate::mcp::tools::DependencyRequest;
         let inner_req = DependencyRequest {
             from_id: req.id.ok_or_else(|| self.missing_id("task", "dep_add"))?,
-            to_id: req
-                .to_id
-                .ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "to_id required"))?,
+            to_id: req.to_id.or(req.blocked_by).ok_or_else(|| {
+                Self::error(
+                    ErrorCode::INVALID_PARAMS,
+                    "to_id required for dependency operation (blocked_by is accepted as an alias)",
+                )
+            })?,
             dep_type: req.dep_type.unwrap_or_else(|| "blocks".to_string()),
         };
         self.inner.cas_task_dep_add(Parameters(inner_req)).await
@@ -641,9 +644,12 @@ impl CasService {
             from_id: req
                 .id
                 .ok_or_else(|| self.missing_id("task", "dep_remove"))?,
-            to_id: req
-                .to_id
-                .ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "to_id required"))?,
+            to_id: req.to_id.or(req.blocked_by).ok_or_else(|| {
+                Self::error(
+                    ErrorCode::INVALID_PARAMS,
+                    "to_id required for dependency operation (blocked_by is accepted as an alias)",
+                )
+            })?,
             dep_type: req.dep_type.unwrap_or_else(|| "blocks".to_string()),
         };
         self.inner.cas_task_dep_remove(Parameters(inner_req)).await

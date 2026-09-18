@@ -44,8 +44,9 @@ version and worktree, never a version-keyed path.
 6. Require the receipt checklist before calling the release published: the
    full exact-SHA gate, queue/pipeline landed SHA, `annotated tag peels`,
    `release.tag-complete.epoch`, `release-published.receipt`, the matching
-   workflow and asset proofs, `four Slack POSTED` entries, report HTML/PDF
-   evidence, `cas --version`, and host JSON with `refresh_binary_version`.
+   workflow and asset proofs, `four Slack POSTED` entries through the
+   `MechaCassy` hub (never a personal Slack route), report HTML/PDF evidence,
+   `cas --version`, and host JSON with `refresh_binary_version`.
    The report's green-to-published latency is named only from verified receipts.
 7. Add one epic note per gate run with tip, failed rows, cause class, and
    blocking step. Close only after merge and stranded-branch inspection;

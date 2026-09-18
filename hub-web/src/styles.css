@@ -1749,6 +1749,23 @@ main {
   text-transform: uppercase;
 }
 
+.operator-attachment,
+.conversation-attachment {
+  margin-top: var(--space-2);
+}
+
+.operator-attachment a,
+.conversation-attachment a {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--rail-item-min);
+  padding: var(--space-1) var(--space-2);
+  border: var(--line-width) solid var(--line-subtle);
+  border-radius: var(--radius-card);
+  color: inherit;
+  text-decoration: underline;
+}
+
 .operator-reply {
   padding: var(--space-2) var(--space-3);
   background: var(--bg-panel);

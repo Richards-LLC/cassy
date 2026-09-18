@@ -63,6 +63,27 @@ describe('conversation evidence', () => {
     view.element.click(); expect(focus).not.toHaveBeenCalled();
     view.update(); expect(view.element.querySelectorAll('.conversation-pane')).toHaveLength(1);
   });
+  it('keeps typed supervisor turns and renders artifact link rows', () => {
+    const color = { r: 200, g: 200, b: 200 };
+    const row = { cells: [], text: '', isWrapContinuation: false, wrapsToNext: false } as unknown as GhosttyRow;
+    const source = { rows: () => [row], theme: () => ({ foreground: color, background: color }), hasScrollbackAbove: () => false, scrollRows: vi.fn(), scrollToBottom: vi.fn(), focus: vi.fn() };
+    const history = new ConversationHistory();
+    const view = new ConversationView(document, source, history, 'real-supervisor'); document.body.replaceChildren(view.element);
+    history.reply({
+      notification_id: 44,
+      reply_to: null,
+      message: 'A report is ready.',
+      summary: 'receipt',
+      device_id: 'device',
+      kind: 'receipt',
+      attachments: [{ artifact_id: 'report/1', name: 'report.pdf', mime: 'application/pdf', size_bytes: 42, sha256: 'a'.repeat(64) }],
+    });
+    view.update();
+    const turn = view.element.querySelector<HTMLElement>('.conversation-turn');
+    expect(turn?.dataset.kind).toBe('receipt');
+    expect(turn?.querySelector('a')?.getAttribute('href')).toBe('#artifact:report%2F1');
+    expect(turn?.querySelector('a')?.textContent).toBe('report.pdf');
+  });
 });
 
 // The gateway can reject before the daemon accepts a message. These are a

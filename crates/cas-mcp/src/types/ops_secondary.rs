@@ -881,6 +881,16 @@ pub struct CoordinationRequest {
     #[serde(default, deserialize_with = "deser::option_i64")]
     pub in_reply_to: Option<i64>,
 
+    /// Typed Commander turn kind for supervisor messages to `target=operator`.
+    #[schemars(description = "Commander turn kind: answer, status, receipt, ask, or blocker")]
+    #[serde(default)]
+    pub kind: Option<String>,
+
+    /// Published artifact id to attach to a Commander turn.
+    #[schemars(description = "Published artifact id to attach to a Commander turn")]
+    #[serde(default)]
+    pub attachment: Option<String>,
+
     /// Target agent name for hold_worker/release_worker/clear_context/message/remind.
     /// `worker_names` is accepted as an alias for hold_worker/release_worker.
     #[schemars(
@@ -1267,6 +1277,8 @@ impl CoordinationRequest {
             merge_request: self.merge_request,
             blocker: self.blocker,
             in_reply_to: self.in_reply_to,
+            kind: self.kind.clone(),
+            attachment: self.attachment.clone(),
             prompt: self.prompt.clone(),
             max_iterations: self.max_iterations,
             completion_promise: self.completion_promise.clone(),

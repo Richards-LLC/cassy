@@ -38,9 +38,15 @@ export class ConversationHistory {
   }
   reply(reply: OperatorReply): void {
     if (this.events.some((event) => event.kind === "reply" && event.value.notification_id === reply.notification_id)) return;
-    this.events.push({ kind: "reply", value: reply });
+    const normalized: OperatorReply = {
+      ...reply,
+      reply_to: reply.reply_to ?? null,
+      kind: reply.kind ?? "answer",
+      attachments: reply.attachments ?? [],
+    };
+    this.events.push({ kind: "reply", value: normalized });
     for (const event of this.events) {
-      if (event.kind === "send" && event.value.notificationId === reply.reply_to) event.value.state = "replied";
+      if (event.kind === "send" && normalized.reply_to !== null && event.value.notificationId === normalized.reply_to) event.value.state = "replied";
     }
   }
 }

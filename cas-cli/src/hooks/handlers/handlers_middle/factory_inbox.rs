@@ -254,6 +254,8 @@ mod tests {
             origin: None,
             operator: None,
             recipient_device_id: None,
+            kind: None,
+            attachments: Vec::new(),
         }
     }
 

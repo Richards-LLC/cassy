@@ -4536,6 +4536,29 @@ impl CasCore {
                 // was recorded. This prevents an approval from authorizing file
                 // or Git changes made after the verifier finished. Invalidation
                 // is exact and task-scoped; this close can create a fresh cycle.
+                // A rejected verdict is also terminal, but it is not reusable
+                // close authority: preserve its audit narrative and clear the
+                // typed slot so the retry below mints a new dispatch. This is
+                // especially important for no-code tasks, where the proof
+                // boundary and external_ref can remain byte-for-byte unchanged.
+                if let Some(dispatch) = typed_dispatch.as_ref()
+                    && dispatch.state == cas_types::VerificationDispatchState::Resolved
+                    && let Ok(Some(verdict)) =
+                        cas_store::get_verification_for_dispatch(&self.cas_root, &dispatch.id)
+                    && verdict.status == VerificationStatus::Rejected
+                {
+                    let rejection_note = format!(
+                        "Verification rejected (dispatch {}; verdict {}): {}",
+                        dispatch.id, verdict.id, verdict.summary
+                    );
+                    append_close_decision_note(
+                        task_store.as_ref(),
+                        &mut task,
+                        &rejection_note,
+                    );
+                    typed_dispatch = None;
+                }
+
                 if let Some(dispatch) = typed_dispatch.as_ref()
                     && let Some(repository) = dispatch.repository.as_ref()
                     && crate::mcp::tools::core::task::lifecycle::repository_proof::verify_repository_proof(

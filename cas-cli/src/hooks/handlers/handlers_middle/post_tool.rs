@@ -39,6 +39,11 @@ fn handle_post_tool_use_with_guardrail(
         None => return Ok(HookOutput::empty()),
     };
 
+    // A supervisor's PostToolUse hook is forward-motion evidence even when
+    // the tool did not call Cassy MCP. Record it before the read-like hot path
+    // returns so Bash/Read review activity resets actionable-idle detection.
+    crate::ui::factory::record_supervisor_mcp_call();
+
     // Outcome capture is independent of observation filtering: read-like tool
     // calls are often the strongest evidence that an injected card was used.
     // The helper is bounded and fail-open, so it cannot alter hook behavior.
@@ -1064,6 +1069,53 @@ mod post_tool_wiring_tests {
         assert!(
             !tmp.path().join("tmpfs_guardrail").exists(),
             "Read hot path must not touch guardrail state"
+        );
+    }
+
+    #[test]
+    fn supervisor_post_tool_use_resets_factory_progress_clock() {
+        let mut env = TestEnvGuard::temp_home();
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        env.set("CAS_FACTORY_SESSION", "post-tool-supervisor");
+        env.set("CAS_AGENT_NAME", "supervisor");
+
+        let metadata_path = crate::ui::factory::metadata_path("post-tool-supervisor");
+        std::fs::create_dir_all(metadata_path.parent().unwrap()).unwrap();
+        let metadata = crate::ui::factory::create_metadata(
+            "post-tool-supervisor",
+            std::process::id(),
+            "supervisor",
+            &[],
+            None,
+            Some("/tmp/project"),
+            None,
+        );
+        std::fs::write(
+            &metadata_path,
+            serde_json::to_string_pretty(&metadata).unwrap(),
+        )
+        .unwrap();
+
+        let input = HookInput {
+            session_id: "post-tool-supervisor-session".to_string(),
+            cwd: "/tmp/project".to_string(),
+            hook_event_name: "PostToolUse".to_string(),
+            tool_name: Some("Read".to_string()),
+            tool_input: Some(json!({ "file_path": "src/lib.rs" })),
+            ..Default::default()
+        };
+        handle_post_tool_use_with_guardrail(&input, Some(&env.home().join(".cas")), |_, _, _| {
+            None
+        })
+        .unwrap();
+
+        let updated: crate::ui::factory::SessionMetadata = serde_json::from_str(
+            &std::fs::read_to_string(metadata_path).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            updated.last_supervisor_mcp_call_at.is_some(),
+            "a supervisor Read PostToolUse event must refresh factory progress"
         );
     }
 

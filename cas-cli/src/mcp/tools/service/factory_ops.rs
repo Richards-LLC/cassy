@@ -614,6 +614,8 @@ fn shutdown_worker_snapshot(
     cas_root: &std::path::Path,
     worker: &cas_types::Agent,
     tasks: &[cas_types::Task],
+    local_merge_delivery: bool,
+    pinned_epic_branch: Option<&str>,
 ) -> ShutdownWorkerSnapshot {
     let assigned: Vec<&cas_types::Task> = tasks
         .iter()
@@ -627,49 +629,26 @@ fn shutdown_worker_snapshot(
     let has_in_progress_task = assigned
         .iter()
         .any(|task| task.status == cas_types::TaskStatus::InProgress);
+    let local_merge_delivery = local_merge_delivery
+        || assigned
+            .iter()
+            .any(|task| task.delivery_mode == cas_types::DeliveryMode::LocalMerge);
     let task_states = assigned
         .iter()
         .map(|task| format!("{} [{}]", task.id, task.status))
         .collect();
+    let target_branches = assigned
+        .iter()
+        .filter_map(|task| task.deliverables.work_target.as_ref())
+        .map(|target| target.target_branch.trim())
+        .chain(pinned_epic_branch)
+        .filter(|branch| !branch.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
 
     let (worktree_state, unsafe_worktree) = match resolve_worker_clone_path(cas_root, worker) {
         WorkerClonePathResolve::Ready(path) => {
-            let dirty = dirty_file_count(&path);
-            let unpushed = run_git(
-                &path,
-                &["rev-list", "--count", "HEAD", "--not", "--remotes"],
-            )
-            .and_then(|count| {
-                count
-                    .parse::<usize>()
-                    .map_err(|error| format!("invalid unpushed count {count:?}: {error}"))
-            });
-            match (dirty, unpushed) {
-                (Ok(dirty), Ok(unpushed)) => (
-                    format!(
-                        "worktree={} (dirty_files={dirty}, unpushed_commits={unpushed})",
-                        path.display()
-                    ),
-                    dirty > 0 || unpushed > 0,
-                ),
-                (dirty, unpushed) => {
-                    let mut errors = Vec::new();
-                    if let Err(error) = dirty {
-                        errors.push(format!("dirty-state probe failed: {error}"));
-                    }
-                    if let Err(error) = unpushed {
-                        errors.push(format!("unpushed-state probe failed: {error}"));
-                    }
-                    (
-                        format!(
-                            "worktree={} (STATE UNKNOWN: {})",
-                            path.display(),
-                            errors.join("; ")
-                        ),
-                        true,
-                    )
-                }
-            }
+            shutdown_worktree_safety(&path, local_merge_delivery, &target_branches)
         }
         WorkerClonePathResolve::NotOnDisk { candidate, .. } => (
             format!("worktree={} (not present)", candidate.display()),
@@ -684,6 +663,136 @@ fn shutdown_worker_snapshot(
         has_in_progress_task,
         worktree_state,
         unsafe_worktree,
+    }
+}
+
+/// Evaluate the destructive-shutdown safety policy for a real worker checkout.
+///
+/// Remote push branches retain the historical `unpushed_commits` check. Local
+/// delivery has a different contract: the worker branch is intentionally not
+/// pushed, so safety is whether its tip is reachable from the repository's
+/// target branch. A repository without any remote has the same local contract
+/// even for legacy push-branch task rows.
+fn shutdown_worktree_safety(
+    path: &std::path::Path,
+    local_merge_delivery: bool,
+    target_branches: &[String],
+) -> (String, bool) {
+    let dirty = dirty_file_count(path);
+    let remote = run_git(path, &["remote"]);
+    let use_target_reachability = local_merge_delivery
+        || remote
+            .as_ref()
+            .is_ok_and(|remotes| remotes.lines().all(|remote| remote.trim().is_empty()));
+
+    if use_target_reachability {
+        return shutdown_local_worktree_safety(path, dirty, target_branches);
+    }
+
+    let unpushed =
+        run_git(path, &["rev-list", "--count", "HEAD", "--not", "--remotes"]).and_then(|count| {
+            count
+                .parse::<usize>()
+                .map_err(|error| format!("invalid unpushed count {count:?}: {error}"))
+        });
+    match (dirty, unpushed, remote) {
+        (Ok(dirty), Ok(unpushed), Ok(_)) => (
+            format!(
+                "worktree={} (dirty_files={dirty}, unpushed_commits={unpushed})",
+                path.display()
+            ),
+            dirty > 0 || unpushed > 0,
+        ),
+        (dirty, unpushed, remote) => {
+            let mut errors = Vec::new();
+            if let Err(error) = dirty {
+                errors.push(format!("dirty-state probe failed: {error}"));
+            }
+            if let Err(error) = unpushed {
+                errors.push(format!("unpushed-state probe failed: {error}"));
+            }
+            if let Err(error) = remote {
+                errors.push(format!("remote-state probe failed: {error}"));
+            }
+            (
+                format!(
+                    "worktree={} (STATE UNKNOWN: {})",
+                    path.display(),
+                    errors.join("; ")
+                ),
+                true,
+            )
+        }
+    }
+}
+
+fn shutdown_local_worktree_safety(
+    path: &std::path::Path,
+    dirty: std::result::Result<usize, String>,
+    target_branches: &[String],
+) -> (String, bool) {
+    let repo_root = match crate::worktree::GitOperations::detect_repo_root(path) {
+        Ok(repo_root) => repo_root,
+        Err(error) => {
+            let dirty_error = dirty
+                .err()
+                .map(|error| format!("dirty-state probe failed: {error}"));
+            let mut errors = vec![format!("target branch probe failed: {error}")];
+            if let Some(error) = dirty_error {
+                errors.push(error);
+            }
+            return (
+                format!(
+                    "worktree={} (STATE UNKNOWN: {})",
+                    path.display(),
+                    errors.join("; ")
+                ),
+                true,
+            );
+        }
+    };
+    let default_branch = crate::worktree::GitOperations::new(repo_root).detect_default_branch();
+    let mut candidates = target_branches.to_vec();
+    if !candidates.iter().any(|branch| branch == &default_branch) {
+        candidates.push(default_branch.clone());
+    }
+    let merged_into = candidates.iter().find(|target| {
+        run_git(
+            path,
+            &["merge-base", "--is-ancestor", "HEAD", target.as_str()],
+        )
+        .is_ok()
+    });
+
+    match (dirty, merged_into) {
+        (Ok(dirty), Some(target)) => (
+            format!(
+                "worktree={} (dirty_files={dirty}, merged_into={target})",
+                path.display()
+            ),
+            dirty > 0,
+        ),
+        (Ok(dirty), None) => (
+            format!(
+                "worktree={} (dirty_files={dirty}, unmerged_from={default_branch})",
+                path.display()
+            ),
+            true,
+        ),
+        (Err(error), Some(target)) => (
+            format!(
+                "worktree={} (STATE UNKNOWN: dirty-state probe failed: {error}; tip reachable from {target})",
+                path.display()
+            ),
+            true,
+        ),
+        (Err(error), None) => (
+            format!(
+                "worktree={} (STATE UNKNOWN: dirty-state probe failed: {error}; no target reachability)",
+                path.display()
+            ),
+            true,
+        ),
     }
 }
 
@@ -1164,6 +1273,47 @@ fn current_factory_session() -> Option<String> {
     std::env::var("CAS_FACTORY_SESSION")
         .ok()
         .filter(|s| !s.trim().is_empty())
+}
+
+fn factory_session_uses_local_merge(session: Option<&str>) -> bool {
+    let Some(session) = session else {
+        return false;
+    };
+    let Ok(raw) = std::fs::read_to_string(crate::ui::factory::metadata_path(session)) else {
+        return false;
+    };
+    serde_json::from_str::<crate::ui::factory::SessionMetadata>(&raw)
+        .map(|metadata| metadata.delivery_mode == cas_types::DeliveryMode::LocalMerge)
+        .unwrap_or(false)
+}
+
+fn factory_session_pinned_epic_branch(
+    session: Option<&str>,
+    tasks: &[cas_types::Task],
+) -> Option<String> {
+    let session = session?;
+    let raw = std::fs::read_to_string(crate::ui::factory::metadata_path(session)).ok()?;
+    let metadata = serde_json::from_str::<crate::ui::factory::SessionMetadata>(&raw).ok()?;
+    let epic_id = metadata
+        .pinned_epic_id
+        .as_deref()
+        .or(metadata.epic_id.as_deref())
+        .map(str::trim)
+        .filter(|id| !id.is_empty())?;
+    let epic = tasks.iter().find(|task| task.id == epic_id)?;
+    epic.deliverables
+        .work_target
+        .as_ref()
+        .map(|target| target.target_branch.trim())
+        .filter(|branch| !branch.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            epic.branch
+                .as_deref()
+                .map(str::trim)
+                .filter(|branch| !branch.is_empty())
+                .map(str::to_string)
+        })
 }
 
 /// How long a spawn request may sit in a non-terminal state before
@@ -2683,9 +2833,20 @@ impl CasService {
                 format!("Failed to list tasks for shutdown safety check: {e}"),
             )
         })?;
+        let local_merge_delivery = factory_session_uses_local_merge(factory_session.as_deref());
+        let pinned_epic_branch =
+            factory_session_pinned_epic_branch(factory_session.as_deref(), &tasks);
         let snapshots: Vec<ShutdownWorkerSnapshot> = selected
             .iter()
-            .map(|worker| shutdown_worker_snapshot(&self.inner.cas_root, worker, &tasks))
+            .map(|worker| {
+                shutdown_worker_snapshot(
+                    &self.inner.cas_root,
+                    worker,
+                    &tasks,
+                    local_merge_delivery,
+                    pinned_epic_branch.as_deref(),
+                )
+            })
             .collect();
         let force = req.force.unwrap_or(false);
         let unsafe_snapshots: Vec<&ShutdownWorkerSnapshot> = snapshots
@@ -5140,6 +5301,21 @@ impl CasService {
         for worker in workers {
             let binding = bindings.get(&worker.name);
 
+            // cas-6cdc (GH #884/#885): `sync_worker_clone` runs `git rebase`
+            // in the registered worker path. Git temporarily detaches HEAD
+            // while rebasing, so even a force sync that appears successful can
+            // race the worker's commit/push and leave its worktree parked at a
+            // merge-base. A live worker owns its checkout; Cassy must never
+            // initiate a checkout/rebase there. Force only overrides the WIP
+            // and in-progress-task gates for stale/offline worker records.
+            if crate::mcp::tools::service::agent_liveness::is_live_factory_worker(&worker) {
+                skipped.push(format!(
+                    "{} (live worker owns this worktree — refusing Cassy-driven rebase/checkout, even with force=true)",
+                    worker.name
+                ));
+                continue;
+            }
+
             // cas-5884: branch affinity first — it is decided from task state
             // alone and is the most decisive reason not to touch a worktree.
             if let SyncGate::Refuse(reason) = sync_affinity_gate(
@@ -5215,9 +5391,9 @@ impl CasService {
             "Worker Sync Report\n==================\n\nSync target: {sync_ref}\nTrunk: \
              {default_branch}\nMode: {}\nBranch affinity: {}\n",
             if force {
-                "force=true (dirty worktrees stashed; mid-task workers rebased)"
+                "force=true (stale-worker dirty worktrees stashed; live worker worktrees always skipped)"
             } else {
-                "safe (dirty or mid-task worktrees are skipped — pass force=true to include them)"
+                "safe (dirty, mid-task, or live-worker worktrees are skipped — force=true never overrides live ownership)"
             },
             if explicitly_targeted {
                 "bypassed (workers named explicitly in worker_names=)"
@@ -7095,13 +7271,17 @@ fn worker_task_bindings(
     map
 }
 
-/// Why `sync_all_workers` must not touch a given worktree (cas-0a6f / GH #103).
+/// Why `sync_all_workers` must not touch a given worktree (cas-0a6f / GH #103,
+/// cas-6cdc / GH #884/#885).
 ///
 /// Sync used to rebase every worker worktree unconditionally: uncommitted WIP
 /// was stashed without consent, a failed stash pop stranded it silently, and a
 /// conflicting rebase left the worktree mid-rebase in a state the worker never
-/// initiated. The decision is a pure function so every branch is testable
-/// without a git fixture.
+/// initiated. A supervision-live worker is also never a safe rebase target:
+/// `git rebase` temporarily detaches its HEAD while the worker may be
+/// committing or pushing. The live-owner guard runs before this pure gate; the
+/// decision here remains pure so every consent branch is testable without a
+/// git fixture.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SyncGate {
     Proceed,
@@ -7112,9 +7292,9 @@ pub(crate) enum SyncGate {
 /// Decide whether a worker worktree may be rebased.
 ///
 /// `force` covers exactly the two consent-shaped cases — dirty tree and a
-/// worker mid-task. It deliberately does NOT cover an in-flight rebase: that
-/// state was not created by sync, a second rebase on top of it destroys the
-/// resolution in progress, and no automated recovery is safe.
+/// stale worker record with a mid-task. It deliberately does NOT cover a live
+/// worker or an in-flight rebase: a second rebase on top of an in-flight
+/// resolution destroys progress, and no automated recovery is safe.
 pub(crate) fn sync_gate_for_worker(
     worker_name: &str,
     dirty_files: usize,

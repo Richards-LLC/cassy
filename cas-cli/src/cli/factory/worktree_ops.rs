@@ -1,10 +1,13 @@
 use std::io::{self, Write};
+use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
+use cas_types::{Agent, AgentRole};
 
 use crate::cli::factory::FactoryArgs;
 use crate::config::{Config, WorktreesConfig};
-use crate::store::find_cas_root;
+use crate::mcp::tools::service::agent_liveness;
+use crate::store::{find_cas_root, open_agent_store};
 use crate::ui::components::{Formatter, Renderable, StatusLine};
 use crate::ui::theme::ActiveTheme;
 use crate::worktree::{GitOperations, WorktreeConfig, WorktreeManager};
@@ -258,6 +261,7 @@ pub(super) fn execute_sync(branch: Option<&str>) -> Result<()> {
     use std::process::Command;
 
     let cwd = std::env::current_dir()?;
+    refuse_live_worker_sync(&cwd)?;
     let sync_ref = resolve_sync_ref(&cwd, branch)?;
 
     let theme = ActiveTheme::default();
@@ -297,6 +301,51 @@ pub(super) fn execute_sync(branch: Option<&str>) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Return the live factory worker that owns `cwd`, if any.
+///
+/// `cas factory sync` runs in the caller's checkout and invokes `git rebase`.
+/// Rebase can temporarily detach HEAD, so a registered live worker's checkout
+/// must be treated as owned even when the caller passes no explicit worker name.
+/// The MCP factory sync path uses the same authoritative liveness predicate;
+/// keeping this lookup name/path based avoids confusing a worker name with its
+/// opaque agent-store ID.
+fn live_worker_name_for_worktree<'a>(
+    agents: impl IntoIterator<Item = &'a Agent>,
+    cwd: &Path,
+) -> Option<String> {
+    let cwd = canonical_path_for_comparison(cwd);
+    agents.into_iter().find_map(|agent| {
+        if agent.role != AgentRole::Worker || !agent_liveness::is_live_factory_worker(agent) {
+            return None;
+        }
+        let registered_path = agent.metadata.get("clone_path")?;
+        if registered_path.trim().is_empty() {
+            return None;
+        }
+        let registered_path = canonical_path_for_comparison(Path::new(registered_path));
+        (registered_path == cwd).then(|| agent.name.clone())
+    })
+}
+
+/// Refuse the CLI sync actor before it can fetch or invoke `git rebase` in a
+/// live worker-owned checkout. Missing CAS state means this is an ordinary
+/// repository invocation and preserves the historical command behavior.
+fn refuse_live_worker_sync(cwd: &Path) -> Result<()> {
+    let Ok(cas_root) = find_cas_root() else {
+        return Ok(());
+    };
+    let agent_store = open_agent_store(&cas_root)?;
+    let agents = agent_store.list(None)?;
+    if let Some(owner) = live_worker_name_for_worktree(agents.iter(), cwd) {
+        bail!("Refusing `cas factory sync`: live worker `{owner}` owns this worktree; Cassy-driven rebase is disabled in live worker worktrees.");
+    }
+    Ok(())
+}
+
+fn canonical_path_for_comparison(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
 /// Detect the target branch to check against.
@@ -390,5 +439,37 @@ fn remote_for_ref(cwd: &std::path::Path, reference: &str) -> Result<Option<Strin
         Ok(Some(candidate.to_string()))
     } else {
         Ok(None)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Duration;
+
+    #[test]
+    fn live_worker_owning_cli_sync_worktree_is_refused_cas_6cdc() {
+        let worktree = tempfile::tempdir().expect("worktree");
+        let mut worker = Agent::new_with_role(
+            "worker-id".to_string(),
+            "live-worker".to_string(),
+            AgentRole::Worker,
+        );
+        worker.metadata.insert(
+            "clone_path".to_string(),
+            worktree.path().display().to_string(),
+        );
+
+        assert_eq!(
+            live_worker_name_for_worktree([&worker], worktree.path()).as_deref(),
+            Some("live-worker")
+        );
+
+        worker.last_heartbeat =
+            chrono::Utc::now() - Duration::seconds(agent_liveness::WORKER_STALE_SECS + 1);
+        assert_eq!(
+            live_worker_name_for_worktree([&worker], worktree.path()),
+            None
+        );
     }
 }

@@ -4135,10 +4135,9 @@ impl FactoryDaemon {
                 // relay would be a false alarm.
                 let queued_row_was_transported = queued.acked_at.is_some();
                 let decision = match store.get(&envelope.task_id) {
-                    Ok(task) => crate::prompt_revalidation::revalidate_lifecycle_prompt(
+                    Ok(task) => crate::prompt_revalidation::revalidate_lifecycle_prompt_against_task(
                         &queued.prompt,
-                        task.status,
-                        task.updated_at,
+                        &task,
                     ),
                     Err(cas_store::StoreError::TaskNotFound(_)) => {
                         LifecyclePromptDecision::SuppressStale {

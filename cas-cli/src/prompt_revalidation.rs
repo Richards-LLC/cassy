@@ -293,6 +293,12 @@ pub(crate) struct LifecycleEnvelope {
     pub task_id: String,
     pub new_status: TaskStatus,
     pub occurrence: DateTime<Utc>,
+    /// The lifecycle kind is optional for compatibility with envelopes from
+    /// before the relay supersession contract was added.
+    pub transition: Option<String>,
+    /// Merge-boundary tip captured when an awaiting-merge/close-rejected relay
+    /// was emitted. A later close cycle must not revive the old relay.
+    pub branch_tip: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -826,7 +832,7 @@ pub(crate) struct VerificationDispatchEnvelope {
 /// id or worker name is still data. Dropping the quote and angle characters
 /// keeps a hostile value from closing the tag early and inventing attributes —
 /// the parse would otherwise read a forged `task_id` out of the body.
-fn xml_attribute_value(value: &str) -> String {
+pub(crate) fn xml_attribute_value(value: &str) -> String {
     value
         .chars()
         .filter(|c| !matches!(c, '"' | '<' | '>' | '\n' | '\r'))
@@ -970,6 +976,8 @@ pub(crate) fn parse_lifecycle_envelope(prompt: &str) -> Option<LifecycleEnvelope
         task_id,
         new_status,
         occurrence,
+        transition: xml_attribute(tag, "transition").map(str::to_string),
+        branch_tip: xml_attribute(tag, "branch_tip").map(str::to_string),
     })
 }
 
@@ -977,6 +985,34 @@ pub(crate) fn revalidate_lifecycle_prompt(
     prompt: &str,
     current_status: TaskStatus,
     current_updated_at: DateTime<Utc>,
+) -> LifecyclePromptDecision {
+    revalidate_lifecycle_prompt_with_anchor(prompt, current_status, current_updated_at, None)
+}
+
+/// Revalidate a lifecycle relay against the complete current task record.
+///
+/// `AwaitingMerge` is a reusable status: `request_changes` can reopen a task
+/// and a later close can park it there again. Status equality alone therefore
+/// cannot prove that an old relay is still current. Anchored parked relays are
+/// also tied to the merge boundary they announced; a changed or cleared anchor
+/// is positive evidence that a later decision superseded that relay.
+pub(crate) fn revalidate_lifecycle_prompt_against_task(
+    prompt: &str,
+    task: &Task,
+) -> LifecyclePromptDecision {
+    revalidate_lifecycle_prompt_with_anchor(
+        prompt,
+        task.status,
+        task.updated_at,
+        task.deliverables.factory_branch_anchor.as_deref(),
+    )
+}
+
+fn revalidate_lifecycle_prompt_with_anchor(
+    prompt: &str,
+    current_status: TaskStatus,
+    current_updated_at: DateTime<Utc>,
+    current_branch_tip: Option<&str>,
 ) -> LifecyclePromptDecision {
     let Some(envelope) = parse_lifecycle_envelope(prompt) else {
         return LifecyclePromptDecision::Unstructured;
@@ -1020,6 +1056,14 @@ pub(crate) fn revalidate_lifecycle_prompt(
     // a write that is not in this task's history (replayed, rewound, or
     // addressed to a recycled id). That is genuinely stale.
     if current_updated_at < envelope.occurrence {
+        return LifecyclePromptDecision::SuppressStale {
+            task_id: envelope.task_id,
+        };
+    }
+    if envelope.new_status == TaskStatus::AwaitingMerge
+        && let Some(relay_tip) = envelope.branch_tip.as_deref()
+        && current_branch_tip != Some(relay_tip)
+    {
         return LifecyclePromptDecision::SuppressStale {
             task_id: envelope.task_id,
         };

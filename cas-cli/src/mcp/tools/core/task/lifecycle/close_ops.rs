@@ -3109,7 +3109,7 @@ impl CasCore {
                     .map(|a| a.name)
                     .unwrap_or_else(|| actor.clone());
                 let occurrence = super::supervisor_push::occurrence_from_updated_at(persisted_at);
-                if let Err(e) = self.push_task_lifecycle(
+                if let Err(e) = self.push_task_lifecycle_with_branch_tip(
                     &task.id,
                     &task.title,
                     task.status,
@@ -3118,6 +3118,7 @@ impl CasCore {
                     Some(reason),
                     super::supervisor_push::LifecycleTransition::AwaitingMerge,
                     &occurrence,
+                    parked.deliverables.factory_branch_anchor.as_deref(),
                 ) {
                     tracing::error!(
                         task_id = %task.id,
@@ -3125,7 +3126,7 @@ impl CasCore {
                         "supervisor lifecycle push failed after AwaitingMerge park (task remains AwaitingMerge; replay outbox)"
                     );
                 }
-                if let Err(e) = self.push_task_lifecycle(
+                if let Err(e) = self.push_task_lifecycle_with_branch_tip(
                     &task.id,
                     &task.title,
                     task.status,
@@ -3134,6 +3135,7 @@ impl CasCore {
                     Some(reason),
                     super::supervisor_push::LifecycleTransition::CloseRejected,
                     &occurrence,
+                    parked.deliverables.factory_branch_anchor.as_deref(),
                 ) {
                     tracing::error!(
                         task_id = %task.id,
@@ -3199,7 +3201,7 @@ impl CasCore {
                     .unwrap_or_else(|| actor.clone());
                 let occurrence =
                     super::supervisor_push::occurrence_from_updated_at(persisted_at);
-                if let Err(error) = self.push_task_lifecycle(
+                if let Err(error) = self.push_task_lifecycle_with_branch_tip(
                     &task.id,
                     &task.title,
                     TaskStatus::AwaitingMerge,
@@ -3208,6 +3210,7 @@ impl CasCore {
                     Some(&audit),
                     super::supervisor_push::LifecycleTransition::AwaitingMerge,
                     &occurrence,
+                    advanced.deliverables.factory_branch_anchor.as_deref(),
                 ) {
                     tracing::error!(
                         task_id = %task.id,

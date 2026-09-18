@@ -1046,39 +1046,37 @@ impl CasService {
                         "attachment must be a non-empty published artifact id",
                     ));
                 }
-                let conn = rusqlite::Connection::open(self.inner.cas_root.join("cas.db"))
+                let store = cas_store::SqliteArtifactStore::open(&self.inner.cas_root)
                     .map_err(|error| {
                         Self::error(
                             ErrorCode::INTERNAL_ERROR,
                             format!("Failed to open the artifact store: {error}"),
                         )
                     })?;
-                let artifact = conn
-                    .query_row(
-                        "SELECT id, name, mime, size_bytes, sha256 FROM artifacts WHERE id = ?",
-                        rusqlite::params![artifact_id],
-                        |row| {
-                            Ok(cas_types::ArtifactRef {
-                                artifact_id: row.get(0)?,
-                                name: row.get(1)?,
-                                mime: row.get(2)?,
-                                size_bytes: row.get::<_, i64>(3)?.try_into().map_err(|_| {
-                                    rusqlite::Error::InvalidColumnType(
-                                        3,
-                                        "size_bytes".into(),
-                                        rusqlite::types::Type::Integer,
-                                    )
-                                })?,
-                                sha256: row.get(4)?,
-                            })
-                        },
+                let stored = store.get(artifact_id).map_err(|error| {
+                    Self::error(
+                        ErrorCode::INTERNAL_ERROR,
+                        format!("Failed to inspect published artifact '{artifact_id}': {error}"),
                     )
-                    .map_err(|_| {
-                        Self::error(
-                            ErrorCode::INVALID_PARAMS,
-                            format!("published artifact '{artifact_id}' does not exist"),
-                        )
-                    })?;
+                })?.ok_or_else(|| {
+                    Self::error(
+                        ErrorCode::INVALID_PARAMS,
+                        format!("published artifact '{artifact_id}' does not exist"),
+                    )
+                })?;
+                let artifact = cas_types::ArtifactRef {
+                    artifact_id: stored.id,
+                    name: stored.name,
+                    mime: stored.mime,
+                    size_bytes: stored.size_bytes,
+                    sha256: stored.sha256,
+                };
+                artifact.validate().map_err(|error| {
+                    Self::error(
+                        ErrorCode::INVALID_PARAMS,
+                        format!("published artifact '{artifact_id}' is invalid: {error}"),
+                    )
+                })?;
                 vec![artifact]
             } else {
                 Vec::new()
@@ -3857,6 +3855,17 @@ mod cas_89e1_post_merge_message_type_tests {
         supervisor.role = AgentRole::Supervisor;
         supervisor.factory_session = Some("factory-unprompted".to_string());
         agents.register(&supervisor).expect("register supervisor");
+        let artifacts = cas_store::SqliteArtifactStore::open(&cas_root).expect("artifact store");
+        artifacts
+            .record_local(&cas_store::NewArtifact {
+                id: "artifact-1".into(),
+                task_id: "cas-ad6e".into(),
+                name: "status.pdf".into(),
+                mime: "application/pdf".into(),
+                size_bytes: 42,
+                sha256: "ab".repeat(32),
+            })
+            .expect("published artifact");
 
         let core = crate::mcp::server::CasCore::with_daemon(cas_root.clone(), None, None);
         core.set_agent_id_for_testing(supervisor.id);
@@ -3870,6 +3879,7 @@ mod cas_89e1_post_merge_message_type_tests {
             "kind": "status",
             "summary": "build status",
             "message": "The build is green.",
+            "attachment": "artifact-1",
         }))
         .expect("unprompted operator request");
 
@@ -3893,6 +3903,9 @@ mod cas_89e1_post_merge_message_type_tests {
         assert_eq!(payload.reply_to, None);
         assert_eq!(payload.device_id, "*");
         assert_eq!(payload.kind, crate::ui::factory::OperatorTurnKind::Status);
+        assert_eq!(payload.attachments.len(), 1);
+        assert_eq!(payload.attachments[0].artifact_id, "artifact-1");
+        assert_eq!(payload.attachments[0].name, "status.pdf");
     }
 
     #[tokio::test(flavor = "current_thread")]

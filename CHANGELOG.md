@@ -7,6 +7,53 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.25.8] - 2026-09-18
+
+### Added
+
+- `requires_start` dependency type: an explicit hard start gate. Ordinary
+  `blocks` edges now gate close and merge, warn on start, and `ready` lists
+  blocked dependents with an open-blocker flag.
+- `recycle_worker` coordination action (and the `clear_context` fallback for
+  Codex workers) restarts a near-limit idle worker in place with the same name,
+  worktree and recipe; `worker_status` recommends it above a configurable
+  `factory.context_recycle_threshold_percent`.
+- MCP parameter aliases: `get` for `show`, `blocked_by` for `to_id`,
+  `summary` for `notes` on close, `target` and `worker_names` interchangeably
+  on worker actions, `reason` on `shutdown_workers`, `inbox` for `inbox_poll`.
+- `cas knowledge build --verbose` reports per-source progress; a timeout names
+  the in-flight source and elapsed time; `knowledge status --full` and
+  `--json --full` list failed sources with their reasons.
+
+### Fixed
+
+- A parked delivery anchor survives the lane being fast-forwarded onto the
+  supervisor's merge commit, and the original content commit is accepted as a
+  close receipt.
+- A rejected verification verdict is never re-bound; the retry mints a fresh
+  dispatch for both code and no-code tasks.
+- Epic close derives its anchor from the epic tip or the target merge, so
+  `commit_receipt` is optional and target-reachable receipts are accepted when
+  the epic ref lags.
+- `local_merge` delivery resolves the local target: a worker re-close succeeds
+  after a local merge, and merge requests for tips already declined via
+  `request_changes` are suppressed.
+- Lifecycle relays carry the parked branch tip; stale `awaiting_merge` and
+  `close_rejected` redeliveries are suppressed once a later decision
+  supersedes them.
+- Supervisor actionable-idle resets on any supervisor tool activity.
+- `sync_all_workers` and `cas factory sync` refuse to rebase or check out
+  inside a live worker's worktree (root cause of detached-HEAD worktrees after
+  push).
+- `shutdown_workers` in no-remote or `local_merge` repositories checks tip
+  reachability against the task target, pinned epic and default branch instead
+  of counting unpushed commits.
+- Worker target seeding records snapshot provenance, skips crates changed
+  since the snapshot commit, refuses non-ancestor snapshots and warns when the
+  snapshot is stale.
+- Regression coverage for hook observations binding to the Stop harness
+  session (fix shipped in 3.25.7).
+
 ## [3.25.7] - 2026-09-15
 
 ### Fixed

@@ -197,6 +197,11 @@ pub struct SupervisorStallTracker {
     /// Last wake accepted for delivery in this session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_wake_at: Option<DateTime<Utc>>,
+    /// Last supervisor activity timestamp consumed by the detector. A newer
+    /// tool call starts a fresh actionable-idle span even when the same item
+    /// remains actionable in the next snapshot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_supervisor_activity_at: Option<DateTime<Utc>>,
     /// Stable merged-delivery state most recently delivered. A changed anchor
     /// or target tip must wake immediately, while an unchanged merged
     /// delivery must not refire the same close demand every ten minutes.
@@ -222,6 +227,15 @@ impl SupervisorStallTracker {
         now: DateTime<Utc>,
         stall_after_secs: u64,
     ) -> SupervisorStallObservation {
+        let activity_changed = self.last_supervisor_activity_at != last_supervisor_mcp_call_at;
+        if activity_changed {
+            self.actionable_idle_secs = 0;
+            self.actionable_idle_started_at = None;
+            self.last_wake_at = None;
+            self.last_merged_close_blocked_key = None;
+            self.last_supervisor_activity_at = last_supervisor_mcp_call_at;
+        }
+
         let silent = last_supervisor_mcp_call_at
             .map(|last| (now - last).num_seconds() >= stall_after_secs as i64)
             .unwrap_or(false);

@@ -24,6 +24,9 @@ pub enum TypeError {
     #[error("invalid spec type: {0}")]
     InvalidSpecType(String),
 
+    #[error("invalid artifact reference: {0}")]
+    InvalidArtifact(String),
+
     #[error("parse error: {0}")]
     Parse(String),
 }

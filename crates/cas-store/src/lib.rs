@@ -42,6 +42,7 @@ mod code_store;
 mod code_vector_store;
 mod commit_link_store;
 mod delegation_receipt_store;
+mod artifact_store;
 mod delivery_store;
 mod entity_store;
 pub mod error;
@@ -113,6 +114,10 @@ pub use delegation_receipt_store::{
     DELEGATION_RECEIPT_SCHEMA, DelegationBudget, DelegationReceipt, DelegationReceiptState,
     DelegationReserveOutcome, DelegationReserveRequest, DelegationVerdict,
     SqliteDelegationReceiptStore,
+};
+pub use artifact_store::{
+    ARTIFACT_SCHEMA, ARTIFACT_SCHEMA_STATEMENTS, NewArtifact, PublishedArtifact,
+    SqliteArtifactStore, looks_like_signed_upload_url,
 };
 pub use delivery_store::{
     DELIVERY_SCHEMA, build_worker_completion_receipt, create_worker_delivery,

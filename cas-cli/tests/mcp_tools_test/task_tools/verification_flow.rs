@@ -658,6 +658,218 @@ async fn test_close_retry_keeps_live_dispatch_for_original_supervisor_verdict() 
     assert!(closed.contains("Closed task:"), "{closed}");
 }
 
+/// GH #883 / cas-04eb: a rejected verdict resolves its dispatch, but it does
+/// not authorize a later close attempt. The retry must preserve D1 for audit,
+/// mint D2 against the worker's current head, and leave the rejection history
+/// on the task instead of replaying D1's VERIFICATION FAILED response.
+#[tokio::test]
+async fn test_rejected_verdict_mints_fresh_dispatch_for_code_close_retry_cas_04eb() {
+    let (_temp, service, cas_dir, task_id, worker_dir, _env_lock) =
+        delivered_worktree_fixture("factory/rejected-verdict-retry").await;
+
+    let first = extract_text(
+        service
+            .cas_task_close(Parameters(close_request(&task_id, "delivered work")))
+            .await
+            .expect("first close"),
+    );
+    assert!(first.contains("VERIFICATION REQUIRED"), "{first}");
+    let first_dispatch = cas_store::get_latest_verification_dispatch(&cas_dir, &task_id)
+        .unwrap()
+        .expect("first dispatch");
+    let first_head = first_dispatch
+        .repository
+        .as_ref()
+        .expect("code task dispatch is repository-bound")
+        .head_commit
+        .clone();
+
+    let supervisor = registered_supervisor(&cas_dir, "rejected-code-supervisor").await;
+    supervisor
+        .cas_verification_add(Parameters(VerificationAddRequest {
+            task_id: task_id.clone(),
+            status: "rejected".to_string(),
+            summary: "D1 rejected: fix the incomplete delivery".to_string(),
+            confidence: Some(0.99),
+            issues: None,
+            files_reviewed: Some("delivered.txt".to_string()),
+            duration_ms: Some(1),
+            verification_type: None,
+            verifier_capability: None,
+            dispatch_id: Some(first_dispatch.id.clone()),
+        }))
+        .await
+        .expect("reject first dispatch");
+
+    // The worker fixes the finding before retrying close, so D2 must bind the
+    // current repository head rather than the resolved D1 snapshot.
+    std::fs::write(worker_dir.path().join("repaired.txt"), "repaired\n").unwrap();
+    proof_boundary_git(worker_dir.path(), &["add", "repaired.txt"]);
+    proof_boundary_git(
+        worker_dir.path(),
+        &["commit", "-q", "-m", "repair rejected delivery"],
+    );
+
+    let second = extract_text(
+        service
+            .cas_task_close(Parameters(close_request(&task_id, "repaired delivery")))
+            .await
+            .expect("retry close"),
+    );
+    assert!(second.contains("VERIFICATION REQUIRED"), "{second}");
+    assert!(
+        !second.contains("VERIFICATION FAILED"),
+        "retry must not replay D1's rejection: {second}"
+    );
+
+    let second_dispatch = cas_store::get_latest_verification_dispatch(&cas_dir, &task_id)
+        .unwrap()
+        .expect("fresh dispatch");
+    assert_ne!(
+        second_dispatch.id, first_dispatch.id,
+        "a terminal rejected dispatch must never be reused"
+    );
+    assert_eq!(
+        second_dispatch.state,
+        cas::types::VerificationDispatchState::Pending
+    );
+    assert_ne!(
+        second_dispatch
+            .repository
+            .as_ref()
+            .expect("fresh code dispatch is repository-bound")
+            .head_commit,
+        first_head,
+        "fresh dispatch must bind the repaired worker head"
+    );
+    assert_eq!(
+        cas_store::get_verification_dispatch(&cas_dir, &first_dispatch.id)
+            .unwrap()
+            .state,
+        cas::types::VerificationDispatchState::Resolved,
+        "D1 remains resolved for rejection history"
+    );
+    let task = open_task_store(&cas_dir).unwrap().get(&task_id).unwrap();
+    assert!(
+        task.notes.contains("D1 rejected: fix the incomplete delivery"),
+        "the rejected verdict must remain in task notes: {}",
+        task.notes
+    );
+}
+
+/// GH #883 / cas-04eb: no-code retries have no changed commit to distinguish
+/// proof cycles, so the same portable external_ref must still produce a fresh
+/// dispatch after D1 is rejected.
+#[tokio::test]
+async fn test_rejected_verdict_mints_fresh_dispatch_for_no_code_close_retry_cas_04eb() {
+    let (temp, core) = setup_cas();
+    let _env_lock = env_test_lock();
+    let cas_dir = temp.path().join(".cas");
+    std::fs::write(
+        cas_dir.join("config.toml"),
+        "[verification]\nenabled = true\n[worktrees]\nenabled = false\n",
+    )
+    .expect("verification config");
+    let service = CasService::new(core, None);
+    let proof = "artifact:cas-04eb/no-code-retry";
+    let task_id = extract_task_id(&extract_text(
+        service
+            .task(Parameters(task_req(serde_json::json!({
+                "action": "create",
+                "title": "No-code rejected verification retry",
+                "priority": 2,
+                "task_type": "chore",
+                "risk": "none",
+                "depth": "deep",
+                "execution_note": "no-code"
+            }))))
+            .await
+            .expect("create no-code task"),
+    ))
+    .expect("task id")
+    .to_string();
+    service
+        .task(Parameters(task_req(serde_json::json!({
+            "action": "start",
+            "id": task_id.clone()
+        }))))
+        .await
+        .expect("start no-code task");
+
+    let first = extract_text(
+        service
+            .task(Parameters(task_req(serde_json::json!({
+                "action": "close",
+                "id": task_id.clone(),
+                "reason": "Published the no-code disposition",
+                "external_ref": proof
+            }))))
+            .await
+            .expect("first no-code close"),
+    );
+    assert!(first.contains("VERIFICATION REQUIRED"), "{first}");
+    let first_dispatch = cas_store::get_latest_verification_dispatch(&cas_dir, &task_id)
+        .unwrap()
+        .expect("first no-code dispatch");
+
+    let supervisor = registered_supervisor(&cas_dir, "rejected-no-code-supervisor").await;
+    supervisor
+        .cas_verification_add(Parameters(VerificationAddRequest {
+            task_id: task_id.clone(),
+            status: "rejected".to_string(),
+            summary: "D1 rejected: revise the operational disposition".to_string(),
+            confidence: Some(0.99),
+            issues: None,
+            files_reviewed: None,
+            duration_ms: Some(1),
+            verification_type: None,
+            verifier_capability: None,
+            dispatch_id: Some(first_dispatch.id.clone()),
+        }))
+        .await
+        .expect("reject first no-code dispatch");
+
+    let second = extract_text(
+        service
+            .task(Parameters(task_req(serde_json::json!({
+                "action": "close",
+                "id": task_id.clone(),
+                "reason": "Published the revised no-code disposition",
+                "external_ref": proof
+            }))))
+            .await
+            .expect("retry no-code close"),
+    );
+    assert!(second.contains("VERIFICATION REQUIRED"), "{second}");
+    assert!(
+        !second.contains("VERIFICATION FAILED"),
+        "no-code retry must not replay D1's rejection: {second}"
+    );
+
+    let second_dispatch = cas_store::get_latest_verification_dispatch(&cas_dir, &task_id)
+        .unwrap()
+        .expect("fresh no-code dispatch");
+    assert_ne!(
+        second_dispatch.id, first_dispatch.id,
+        "same-head no-code retry must mint a fresh dispatch"
+    );
+    assert_eq!(
+        second_dispatch.state,
+        cas::types::VerificationDispatchState::Pending
+    );
+    assert_eq!(
+        second_dispatch.repository, first_dispatch.repository,
+        "same-head no-code retry preserves the unchanged repository boundary"
+    );
+    let task = open_task_store(&cas_dir).unwrap().get(&task_id).unwrap();
+    assert!(
+        task.notes
+            .contains("D1 rejected: revise the operational disposition"),
+        "the no-code rejection must remain in task notes: {}",
+        task.notes
+    );
+}
+
 #[tokio::test]
 async fn test_supervisor_verdict_follows_superseded_dispatch_with_unchanged_proof() {
     let (_temp, service, cas_dir, task_id, _worker_dir, _env_lock) =

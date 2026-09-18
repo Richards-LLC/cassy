@@ -2140,6 +2140,15 @@ async fn test_shutdown_workers_dirty_or_unpushed_worktree_requires_force() {
     let _guard = EnvGuard::set(&[]);
     let env = FactoryTestEnv::new();
     let worker_path = init_sync_repo(&env, "alice");
+    let remote_path = worker_path.parent().unwrap().join("origin.git");
+    git_stdout(
+        &worker_path,
+        &["init", "--bare", remote_path.to_str().unwrap()],
+    );
+    git_stdout(
+        &worker_path,
+        &["remote", "add", "origin", remote_path.to_str().unwrap()],
+    );
     let mut metadata = HashMap::new();
     metadata.insert("clone_path".to_string(), worker_path.display().to_string());
     env.register_worker_with_metadata("alice", metadata);
@@ -2163,6 +2172,60 @@ async fn test_shutdown_workers_dirty_or_unpushed_worktree_requires_force() {
     assert!(
         err.message.contains("unpushed_commits="),
         "unpushed state missing: {err:?}"
+    );
+    assert!(env.spawn_queue().peek(10).expect("peek").is_empty());
+}
+
+#[tokio::test]
+async fn test_shutdown_workers_no_remote_merged_tip_is_safe_without_force_cas_2254() {
+    let _guard = EnvGuard::set(&[]);
+    let env = FactoryTestEnv::new();
+    let worker_path = init_sync_repo(&env, "alice");
+    let mut metadata = HashMap::new();
+    metadata.insert("clone_path".to_string(), worker_path.display().to_string());
+    env.register_worker_with_metadata("alice", metadata);
+
+    let mut req = factory_req("shutdown_workers");
+    req.worker_names = Some("alice".to_string());
+    let result = env
+        .service
+        .factory(Parameters(req))
+        .await
+        .expect("a clean tip reachable from main must be safe without force");
+    let text = get_text(&result);
+    assert!(
+        text.contains("merged_into=main"),
+        "no-remote safety receipt must name the reachable target: {text}"
+    );
+    assert_eq!(env.spawn_queue().peek(10).expect("peek").len(), 1);
+}
+
+#[tokio::test]
+async fn test_shutdown_workers_no_remote_unmerged_tip_still_requires_force_cas_2254() {
+    let _guard = EnvGuard::set(&[]);
+    let env = FactoryTestEnv::new();
+    let worker_path = init_sync_repo(&env, "alice");
+    std::fs::write(worker_path.join("worker-only.txt"), "worker change\n").unwrap();
+    git_stdout(&worker_path, &["add", "worker-only.txt"]);
+    git_stdout(&worker_path, &["commit", "-m", "worker-only"]);
+    let mut metadata = HashMap::new();
+    metadata.insert("clone_path".to_string(), worker_path.display().to_string());
+    env.register_worker_with_metadata("alice", metadata);
+
+    let mut req = factory_req("shutdown_workers");
+    req.worker_names = Some("alice".to_string());
+    let err = env
+        .service
+        .factory(Parameters(req))
+        .await
+        .expect_err("an unmerged no-remote tip must still require force");
+    assert!(
+        err.message.contains("force=true"),
+        "unexpected error: {err:?}"
+    );
+    assert!(
+        err.message.contains("unmerged_from=main"),
+        "unmerged target evidence missing: {err:?}"
     );
     assert!(env.spawn_queue().peek(10).expect("peek").is_empty());
 }

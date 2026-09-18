@@ -181,6 +181,7 @@ the merge action after fetching the PR landing so Cassy can reconcile delivery.
   - **No Cassy-internal agent actions.** Do not narrate supervisor/worker/factory/director orchestration, task lifecycle bookkeeping, who-closed-what, epics, etc.
   - **No ticket numbers.** No `cas-xxxx`, no epic IDs. Describe the change, not the tracking artifact.
   - Lead with the before→after punch; keep it tight.
+  - The Dev announcement's final trailer line carries `INTERVENTIONS=N`, `GREEN_TO_PIPELINE_SECS=N`, `MERGED_TO_PUBLISHER_SECS=N`, and the verified green-to-published latency; include `BLOCKERS=<stage,...>` when the receipt names blocker stages.
 
 ### User thread first: plain language
 

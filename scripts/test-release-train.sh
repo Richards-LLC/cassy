@@ -248,6 +248,31 @@ for invalid in '' not-a-row; do
     fi
 done
 
+# Every invocation leaves an attributable intervention record. Calls made by
+# the --cut dispatcher mark themselves internal; an operator's targeted gate
+# is manual and contributes one intervention for the gate stage.
+wt_metrics="$(new_worktree epic-intervention-metrics)"
+dir_metrics="$("$train" 9.99.3 "$wt_metrics" --print-run-dir)"
+CAS_RELEASE_TRAIN_INVOCATION_KIND=internal CAS_RELEASE_TRAIN_GATE_CMD="$gate_ok" \
+    "$train" 9.99.3 "$wt_metrics" --gate >/dev/null 2>&1
+wait_gate_done "$dir_metrics" || true
+CAS_SESSION_ID=manual-session CAS_RELEASE_TRAIN_GATE_CMD="$gate_ok" "$train" 9.99.3 "$wt_metrics" \
+    --gate --only nextest >/dev/null 2>&1
+wait_for_file "$dir_metrics/diagnostics/*/gate.done" || true
+if grep -q 'subcommand=--gate stage=gate .*kind=internal' "$dir_metrics/interventions.log" \
+    && grep -q 'subcommand=--gate stage=gate .*caller=manual-session .*kind=manual' "$dir_metrics/interventions.log"; then
+    ok 'intervention log records internal and manual gate callers'
+else
+    bad "intervention log did not distinguish gate callers: $(cat "$dir_metrics/interventions.log" 2>/dev/null || echo absent)"
+fi
+metrics_status="$($train 9.99.3 "$wt_metrics" --status 2>&1 || true)"
+if [[ "$metrics_status" == *'INTERVENTIONS=1'* ]] \
+    && [[ "$metrics_status" == *'BLOCKERS=gate'* ]]; then
+    ok '--status prints intervention count and stage names'
+else
+    bad "--status omitted intervention metrics: $metrics_status"
+fi
+
 # --check-lane binds the branch name and exact tip to the Scoped Validation JOB
 # inside the real CI workflow's push run. Missing evidence and API errors refuse.
 wt_lane="$(new_worktree lane-ci)"
@@ -456,7 +481,11 @@ git -C "$wt_a" rev-parse HEAD >"$dir_a/landed-main.sha"
 status="$("$train" 9.99.0 "$wt_a" --status 2>&1 || true)"
 if [[ "$status" == *'rows_failed=nextest,archive-mode'* ]] \
     && [[ "$status" == *'cause_class=<product|fixture|environment|procedure>'* ]] \
-    && [[ "$status" == *'blocking_step=<step>'* ]]; then
+    && [[ "$status" == *'blocking_step=<step>'* ]] \
+    && [[ "$status" == *'INTERVENTIONS=<n>'* ]] \
+    && [[ "$status" == *'BLOCKERS=<stage,...>'* ]] \
+    && [[ "$status" == *'GREEN_TO_PIPELINE_SECS=<n>'* ]] \
+    && [[ "$status" == *'MERGED_TO_PUBLISHER_SECS=<n>'* ]]; then
     ok '--status prints the required per-run epic-note template'
 else
     bad "--status omitted timeline fields: $status"
@@ -1224,7 +1253,7 @@ else
 fi
 
 if python3 "$script_dir/test-release-integration.py"; then
-    ok 'rolling integration assembly: clean, stale, red, dirty and locked fixtures'
+    ok 'rolling integration assembly: clean, stale-base heal, red, dirty and locked fixtures'
 else
     bad 'rolling integration assembly fixture suite'
 fi

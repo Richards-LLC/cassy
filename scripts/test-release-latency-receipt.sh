@@ -60,6 +60,35 @@ expect_field "$out" TAG_RUN_ID 111 'receipt names the original tag run, not a re
 expect_field "$out" BUDGET_SECONDS 600 'default budget is the ten-minute target'
 expect_field "$out" WITHIN_BUDGET true 'a fast release reports within budget'
 
+# Release-train hand-off and intervention metrics come from the run directory,
+# not from GitHub's tag workflow timestamps. A manual targeted gate is one
+# intervention and names the canonical stage in BLOCKERS.
+run_dir="$tmp/release-run"
+mkdir -p "$run_dir"
+cat >"$run_dir/interventions.log" <<'EOF'
+2026-08-20T12:00:00Z subcommand=--cut stage=preflight caller=session-cut kind=internal resume=false blockers=none
+2026-08-20T12:00:05Z subcommand=--gate stage=gate caller=session-operator kind=manual resume=false blockers=none
+EOF
+printf '100\n' >"$run_dir/gate.green.epoch"
+printf '130\n' >"$run_dir/pipeline.start.epoch"
+printf '200\n' >"$run_dir/pipeline.merged.epoch"
+printf '245\n' >"$run_dir/publisher.start.epoch"
+out="$(CAS_RELEASE_TRAIN_RUN_DIR="$run_dir" FAKE_PUBLISHED_AT=2026-08-20T12:04:10Z \
+    "$receipt" v3.4.0)"
+expect_field "$out" INTERVENTIONS 1 'receipt counts manual interventions'
+expect_field "$out" BLOCKERS gate 'receipt names the intervened stage'
+expect_field "$out" GREEN_TO_PIPELINE_SECS 30 'receipt records green-to-pipeline hand-off delay'
+expect_field "$out" MERGED_TO_PUBLISHER_SECS 45 'receipt records merged-to-publisher hand-off delay'
+cat >>"$run_dir/interventions.log" <<'EOF'
+2026-08-20T12:01:00Z subcommand=--cut stage=gate caller=session-operator kind=manual resume=true blockers=gate
+2026-08-20T12:02:00Z subcommand=--cut stage=gate caller=session-operator kind=manual resume=true blockers=gate
+2026-08-20T12:03:00Z subcommand=--cut stage=pipeline caller=session-operator kind=manual resume=true blockers=pipeline
+EOF
+out="$(CAS_RELEASE_TRAIN_RUN_DIR="$run_dir" FAKE_PUBLISHED_AT=2026-08-20T12:04:10Z \
+    "$receipt" v3.4.0)"
+expect_field "$out" INTERVENTIONS 3 'resume interventions count each blocker once'
+expect_field "$out" BLOCKERS gate,pipeline 'receipt preserves distinct blocker stages'
+
 # 2. A slow release must fail, not merely report.
 set +e
 slow_out="$(FAKE_PUBLISHED_AT=2026-08-20T12:21:00Z "$receipt" v3.4.0 2>&1)"

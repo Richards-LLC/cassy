@@ -29,6 +29,8 @@ struct IntegrationReceipt {
     status: String,
     detail: String,
     affected: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(super) test_process_env_scrubbed: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     base_failure: Option<BaseFailure>,
 }
@@ -305,8 +307,14 @@ fn integrate(
         epics: Vec::new(),
         tip: None,
         status: "RUNNING".to_owned(),
-        detail: format!("Triggered by {} at {}", request.epic_id, request.commit),
+        detail: format!(
+            "Triggered by {} at {}; {}",
+            request.epic_id,
+            request.commit,
+            super::test_process_identity_receipt_note()
+        ),
         affected: vec![request.epic_id.clone()],
+        test_process_env_scrubbed: super::scrubbed_test_process_identity_names(),
         base_failure: None,
     };
     write_receipt(&receipt_path, &receipt)?;
@@ -511,7 +519,11 @@ fn integrate(
     }
     result.integration_epics = affected.clone();
     receipt.status = status_text(result.status).to_owned();
-    receipt.detail = sweep_detail(&result);
+    receipt.detail = format!(
+        "{}; {}",
+        sweep_detail(&result),
+        super::test_process_identity_receipt_note()
+    );
     receipt.affected = affected;
     receipt.base_failure = base_failure;
     // Keep the raw sweep log and the machine-readable fix queue together. A
@@ -662,6 +674,105 @@ pub(super) fn recovery_request_for_focus(
         epic_id: epic_id.to_owned(),
         target_branch: branch,
         commit: current,
+    })
+}
+
+/// Resolve exactly one durable merge event for any open epic owned by the
+/// registered session. This is the recovery path when session metadata points
+/// at a stale or closed focus: the event itself, its canonical epic branch,
+/// and the current branch tip must still agree before it can be trusted.
+pub(super) fn recovery_request_for_any_open_epic(
+    project_root: &Path,
+    cas_dir: &Path,
+    session_name: &str,
+) -> Result<SweepRequest, String> {
+    let tasks = crate::store::open_task_store(cas_dir).map_err(|error| error.to_string())?;
+    let open_epics = open_epics(tasks.list(None).map_err(|error| error.to_string())?)
+        .into_iter()
+        .filter_map(|task| {
+            let branch = epic_branch(&task)?.to_owned();
+            Some((task.id, branch))
+        })
+        .collect::<Vec<_>>();
+    let latest_day = chrono::Utc::now().date_naive();
+    let earliest_day = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).expect("valid epoch date");
+    let mut candidates = Vec::new();
+    for path in super::session_log_paths_between(cas_dir, earliest_day, latest_day) {
+        let Ok(bytes) = fs::read(path) else {
+            continue;
+        };
+        let complete_len = bytes
+            .iter()
+            .rposition(|byte| *byte == b'\n')
+            .map(|index| index + 1)
+            .unwrap_or(0);
+        for line in String::from_utf8_lossy(&bytes[..complete_len]).lines() {
+            let Ok(event) = serde_json::from_str::<MergeEvent>(line) else {
+                continue;
+            };
+            if event.event.as_deref() != Some("worktree_merged")
+                || event.factory_session.as_deref() != Some(session_name)
+            {
+                continue;
+            }
+            let Some(epic_id) = event.epic_id.as_deref() else {
+                continue;
+            };
+            let Some(target_branch) = event.target_branch.as_deref() else {
+                continue;
+            };
+            let Some((_, branch)) = open_epics
+                .iter()
+                .find(|(id, branch)| id == epic_id && branch == target_branch)
+            else {
+                continue;
+            };
+            let Some(tip) = event
+                .target_tip
+                .as_deref()
+                .map(str::trim)
+                .filter(|tip| !tip.is_empty() && *tip != "none")
+            else {
+                continue;
+            };
+            let current = ref_tip(project_root, &format!("refs/heads/{branch}"));
+            candidates.push((epic_id.to_owned(), branch.clone(), tip.to_owned(), current));
+        }
+    }
+    let matching = candidates
+        .iter()
+        .filter(|(_, _, tip, current)| current.as_deref() == Some(tip.as_str()))
+        .collect::<Vec<_>>();
+    if matching.len() == 1 {
+        let (epic_id, target_branch, commit, _) = matching[0];
+        return Ok(SweepRequest {
+            epic_id: epic_id.clone(),
+            target_branch: target_branch.clone(),
+            commit: commit.clone(),
+        });
+    }
+    let detail = if matching.len() > 1 {
+        format!(
+            "{} merge events match current open-epic tips",
+            matching.len()
+        )
+    } else if candidates.is_empty() {
+        "no complete authentic worktree_merged event matches an open epic".to_owned()
+    } else {
+        "recorded open-epic event tip is stale or mismatched with its current ref".to_owned()
+    };
+    Err(format!("recovery refused: {detail}"))
+}
+
+/// A base-only recovery has no event-owned branch to validate. The rolling
+/// integration path fetches origin/main before it constructs the union, so
+/// this request only identifies the recovery mode in logs and receipts.
+pub(super) fn base_only_recovery_request(project_root: &Path) -> Result<SweepRequest, String> {
+    let _ = project_root;
+    Ok(SweepRequest {
+        epic_id: "base-only".to_owned(),
+        target_branch: "main".to_owned(),
+        commit: "base-only".to_owned(),
     })
 }
 
@@ -1707,6 +1818,115 @@ echo 'Summary: 1 passed'
     }
 
     #[test]
+    fn recovery_finds_authentic_event_for_any_open_epic_after_stale_focus() {
+        let repo = fixture();
+        let closed_focus = epic(repo.path(), "cas-closed-focus", "closed", "closed\n");
+        let open_delivery = epic(repo.path(), "cas-open-delivery", "open", "open\n");
+        git(repo.path(), &["checkout", "--detach", "main"]);
+        let cas_dir = crate::store::init_cas_dir(repo.path()).unwrap();
+        let tasks = crate::store::open_task_store(&cas_dir).unwrap();
+        let mut closed_task = Task::new(closed_focus.id.clone(), closed_focus.id.clone());
+        closed_task.task_type = TaskType::Epic;
+        closed_task.status = TaskStatus::Closed;
+        closed_task.branch = Some(closed_focus.branch.clone());
+        tasks.add(&closed_task).unwrap();
+        let mut open_task = Task::new(open_delivery.id.clone(), open_delivery.id.clone());
+        open_task.task_type = TaskType::Epic;
+        open_task.branch = Some(open_delivery.branch.clone());
+        tasks.add(&open_task).unwrap();
+
+        let log_path = super::super::factory_session_log_path_for_date(
+            &cas_dir,
+            chrono::Utc::now().date_naive(),
+        );
+        fs::create_dir_all(log_path.parent().unwrap()).unwrap();
+        fs::write(
+            &log_path,
+            format!(
+                "{{\"event\":\"worktree_merged\",\"factory_session\":\"recovery-session\",\"epic_id\":\"{}\",\"target_branch\":\"{}\",\"target_tip\":\"{}\"}}\n",
+                open_delivery.id, open_delivery.branch, open_delivery.tip
+            ),
+        )
+        .unwrap();
+
+        let request = recovery_request_for_any_open_epic(
+            repo.path(),
+            &cas_dir,
+            "recovery-session",
+        )
+        .unwrap();
+        assert_eq!(request.epic_id, open_delivery.id);
+        assert_eq!(request.target_branch, open_delivery.branch);
+        assert_eq!(request.commit, open_delivery.tip);
+    }
+
+    #[test]
+    fn base_only_recovery_sweeps_origin_main_and_open_epics_without_closed_epics() {
+        let repo = fixture();
+        let open = epic(repo.path(), "cas-base-open", "open", "open\n");
+        let closed = epic(repo.path(), "cas-base-closed", "closed", "closed\n");
+        git(repo.path(), &["checkout", "--detach", "main"]);
+        git(
+            repo.path(),
+            &["remote", "add", "origin", repo.path().to_str().unwrap()],
+        );
+        let stub = repo.path().join("cargo-stub.sh");
+        fs::write(&stub, "#!/bin/sh\necho 'Summary: 1 passed'\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[
+            ("CARGO", stub.to_str().unwrap()),
+            ("CAS_FACTORY_BUILD_GUARD", "off"),
+        ]);
+        let cas_dir = crate::store::init_cas_dir(repo.path()).unwrap();
+        let tasks = crate::store::open_task_store(&cas_dir).unwrap();
+        let mut open_task = Task::new(open.id.clone(), open.id.clone());
+        open_task.task_type = TaskType::Epic;
+        open_task.branch = Some(open.branch.clone());
+        tasks.add(&open_task).unwrap();
+        let mut closed_task = Task::new(closed.id.clone(), closed.id.clone());
+        closed_task.task_type = TaskType::Epic;
+        closed_task.status = TaskStatus::Closed;
+        closed_task.branch = Some(closed.branch.clone());
+        tasks.add(&closed_task).unwrap();
+
+        let summary = crate::ui::factory::daemon::FactoryDaemon::recover_integration(
+            repo.path(),
+            &cas_dir,
+            "base-only-session",
+            None,
+            true,
+            &FactoryConfig::default(),
+        )
+        .unwrap();
+        assert!(summary.starts_with("PASSED:"), "{summary}");
+        let receipt: IntegrationReceipt = serde_json::from_slice(
+            &fs::read(cas_dir.join(LOG_DIR).join("integration.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(receipt.status, "PASSED");
+        assert_eq!(
+            receipt
+                .epics
+                .iter()
+                .map(|epic| epic.id.as_str())
+                .collect::<Vec<_>>(),
+            [open.id.as_str()]
+        );
+        assert!(!receipt
+            .epics
+            .iter()
+            .any(|epic| epic.id == closed.id));
+        assert_eq!(
+            receipt.test_process_env_scrubbed,
+            scrubbed_test_process_identity_names()
+        );
+    }
+
+    #[test]
     fn recovery_cancellation_terminates_the_owned_test_runner() {
         use std::os::unix::fs::PermissionsExt;
         let repo = fixture();
@@ -1799,6 +2019,7 @@ echo 'Summary: 1 passed'
                 &cas_dir,
                 request,
                 &settings,
+                true,
                 Duration::from_millis(40),
             ))
             .unwrap();

@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Variant 3 — Capsule</title>
+<link rel="stylesheet" href="../../../../hub-web/src/tokens.css">
+<link rel="stylesheet" href="chat.css">
+<style>
+/* VARIANT 3 — CAPSULE
+   One bold idea: capsules floating on bare paper. Short messages are true
+   999px pills, longer ones deep 30px lozenges; nothing sits inside a panel or
+   behind a divider, so the only shapes on screen are the capsules themselves.
+   Maximum air, centred reading column, larger type. Machine identity = an
+   oversized round avatar with the machine as the row title and the project as
+   a periwinkle pill beneath it. Action colour = a solid terracotta capsule
+   that also claims the send button and the rail's waiting count. */
+
+.app { display: grid; grid-template-columns: 356px 1fr; min-height: 100vh; }
+
+/* rail */
+.rail { padding: 30px 20px; }
+.rail h1 { margin: 0 8px 22px; font: var(--weight-semibold) 24px/1.2 var(--font-ui); letter-spacing: -0.02em; }
+.row { display: grid; grid-template-columns: 52px 1fr auto; column-gap: 15px; row-gap: 6px;
+       padding: 14px 16px; border-radius: 26px; text-decoration: none; color: inherit; }
+.row + .row { margin-top: 10px; }
+.row.on { background: var(--panel); box-shadow: var(--lift-strong); }
+.row .mono { width: 52px; height: 52px; font-size: 20px; grid-row: span 3; align-self: start; }
+.name2 { font: var(--weight-semibold) 17px/1.2 var(--font-ui); letter-spacing: -0.01em; align-self: center; }
+.when { font-size: 12px; color: var(--ink-soft); white-space: nowrap; align-self: center; }
+.count { justify-self: end; min-width: 22px; padding: 2px 7px; border-radius: 999px; text-align: center;
+         background: var(--crit-bg); color: var(--crit-fg); font: var(--weight-semibold) 12px/1.4 var(--font-ui); }
+.tag { grid-column: 2 / 4; justify-self: start; padding: 3px 11px; border-radius: 999px;
+       background: var(--accent-soft); color: var(--accent);
+       font: var(--weight-semibold) 12px/1.5 var(--font-mono); }
+.prev { grid-column: 2 / 4; font-size: 13px; line-height: 1.4; color: var(--ink-soft); }
+
+/* thread */
+.thread { display: flex; flex-direction: column; }
+.thead { width: 100%; max-width: 700px; margin: 0 auto; display: flex; align-items: center; gap: 15px;
+         padding: 26px 40px 10px; }
+.thead .mono { width: 46px; height: 46px; font-size: 18px; }
+.thead b { display: block; font: var(--weight-semibold) 19px/1.2 var(--font-ui); letter-spacing: -0.015em; }
+.thead .id span { display: block; margin-top: 2px; font: var(--weight-regular) 13px/1.3 var(--font-mono); color: var(--ink-mid); }
+
+.msgs { flex: 1; width: 100%; max-width: 700px; margin: 0 auto;
+        padding: 22px 40px 14px; display: flex; flex-direction: column; gap: 22px; }
+.turn { display: flex; flex-direction: column; align-items: flex-start; gap: 9px; max-width: 78%; }
+.turn.you { align-self: flex-end; align-items: flex-end; }
+.bub { font-size: 16px; line-height: 1.5; padding: 15px 26px; border-radius: 30px;
+       background: var(--sup-bg); color: var(--sup-fg); box-shadow: var(--lift-strong); }
+.bub.pill { border-radius: 999px; padding: 13px 28px; }
+.turn.you .bub { background: var(--you-bg); color: var(--you-fg); }
+.bub p { margin: 0; }
+.bub.receipt { display: flex; gap: 11px; }
+.bub.file { padding: 10px; border-radius: 30px; }
+.card { border-radius: 22px; padding: 14px 20px 14px 14px; gap: 14px; }
+.card .name { font-size: 15px; }
+.card .sub { font-size: 12.5px; }
+.bub.ask { background: var(--crit-bg); color: var(--crit-fg); padding: 17px 28px; }
+.chips { display: flex; gap: 10px; flex-wrap: wrap; }
+.chip { padding: 10px 20px; border-radius: 999px; background: var(--canvas); color: var(--crit-bg);
+        border: 1.5px solid var(--crit-bg); font: var(--weight-semibold) 13px/1.2 var(--font-ui); }
+time { font-size: 12px; color: var(--ink-mid); padding: 0 8px; }
+.working { padding: 11px 22px; border-radius: 999px; background: var(--sup-bg); font-size: 14px; }
+
+.composer { width: 100%; max-width: 700px; margin: 0 auto; display: flex; align-items: center; gap: 14px;
+            padding: 10px 40px 30px; }
+.field { padding: 16px 26px; border-radius: 999px; background: var(--panel); box-shadow: var(--lift); font-size: 15px; }
+.send { width: 54px; height: 54px; background: var(--crit-bg); color: var(--crit-fg); box-shadow: var(--lift-strong); }
+.send svg { width: 22px; height: 22px; }
+
+@media (max-width: 560px) {
+  .app { grid-template-columns: 1fr; }
+  .rail { display: none; }
+  .thead { padding: 18px 18px 6px; gap: 13px; }
+  .thead .mono { width: 40px; height: 40px; font-size: 16px; }
+  .thead b { font-size: 17px; }
+  .msgs { padding: 16px 18px 10px; gap: 18px; }
+  .turn { max-width: 88%; }
+  .bub { font-size: 15px; padding: 13px 22px; }
+  .bub.pill { padding: 12px 24px; }
+  .composer { padding: 8px 18px 24px; gap: 11px; }
+  .field { padding: 14px 22px; }
+  .send { width: 48px; height: 48px; }
+}
+</style>
+</head>
+<body>
+<div class="app">
+
+  <aside class="rail">
+    <h1>Conversations</h1>
+    <a class="row on" href="#">
+      <span class="mono">A</span>
+      <span class="name2">Atlas</span>
+      <span class="count">1</span>
+      <span class="tag">cas-src</span>
+      <span class="prev">Fix the warning in-train, or ship allowlisted?</span>
+    </a>
+    <a class="row" href="#">
+      <span class="mono b">S</span>
+      <span class="name2">Studio Mac</span>
+      <span class="when">09:31</span>
+      <span class="tag">gabber-studio</span>
+      <span class="prev">Both packs green on the second pass.</span>
+    </a>
+    <a class="row" href="#">
+      <span class="mono">A</span>
+      <span class="name2">Atlas</span>
+      <span class="when">Tue</span>
+      <span class="tag">petra-stella-cloud</span>
+      <span class="prev">Preview is up for the alias merge.</span>
+    </a>
+    <a class="row" href="#">
+      <span class="mono c">B</span>
+      <span class="name2">Bench</span>
+      <span class="when">Mon</span>
+      <span class="tag">openclaw</span>
+      <span class="prev">Nothing waiting on you.</span>
+    </a>
+  </aside>
+
+  <main class="thread">
+    <header class="thead">
+      <span class="mono">A</span>
+      <div class="id"><b>Atlas</b><span>cas-src</span></div>
+    </header>
+
+    <div class="msgs">
+
+      <div class="turn you">
+        <div class="bub"><p>Merge the two green lanes, then cut 3.26.0 once the gate is green.</p></div>
+        <time>09:41</time>
+      </div>
+
+      <div class="turn">
+        <div class="bub"><p>On it. Both lanes are green on their own CI — the gate starts after the second merge lands.</p></div>
+      </div>
+
+      <div class="turn">
+        <div class="bub receipt">
+          <svg class="tick" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M2.6 8.6l3.3 3.3L13.4 4.4"/></svg>
+          <p>Both lanes are on the epic branch. The gate is running.</p>
+        </div>
+        <time>09:47</time>
+      </div>
+
+      <div class="turn">
+        <div class="bub file">
+          <div class="card">
+            <span class="pdf">PDF</span>
+            <span>
+              <span class="name">3.26.0 release brief.pdf</span>
+              <span class="sub">1.4 MB
+                <span class="verified">
+                  <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 1.6l5 2v4.1c0 3-2 5.6-5 6.7-3-1.1-5-3.7-5-6.7V3.6z"/><path d="M5.7 7.9L7.4 9.6l3.1-3.4"/></svg>
+                  hash verified
+                </span>
+              </span>
+            </span>
+          </div>
+        </div>
+      </div>
+
+      <div class="turn you">
+        <div class="bub pill"><p>Did the tokens drift test move?</p></div>
+        <time>09:56</time>
+      </div>
+
+      <div class="turn">
+        <div class="bub"><p>No — unchanged since 3.25.3. The gate's only new failure is one lint warning.</p></div>
+      </div>
+
+      <div class="turn">
+        <div class="bub ask"><p>Gate run 33512 failed on that one warning. Fix it in-train — one worker, about ten minutes — or ship 3.26.0 with it allowlisted?</p></div>
+        <div class="chips">
+          <span class="chip">Fix in-train</span>
+          <span class="chip">Ship with allowlist</span>
+        </div>
+        <time>09:58</time>
+      </div>
+
+      <div class="turn">
+        <div class="working"><span class="dots"><i></i><i></i><i></i></span>working</div>
+      </div>
+    </div>
+
+    <div class="composer">
+      <div class="field">Message Atlas</div>
+      <div class="send">
+        <svg viewBox="0 0 20 20" fill="currentColor"><path d="M2.4 9.1l14.3-6.4c.7-.3 1.4.4 1.1 1.1l-6.4 14.3c-.3.7-1.4.6-1.5-.2l-.8-5.3-5.3-.8c-.8-.1-.9-1.2-.2-1.5z"/></svg>
+      </div>
+    </div>
+  </main>
+
+</div>
+</body>
+</html>

@@ -133,6 +133,12 @@ enum PendingSpawn {
     },
     /// Respawn a crashed worker
     Respawn(String),
+    /// Recycle an idle worker while retaining its worktree and recipe.
+    Recycle {
+        request_id: i64,
+        name: String,
+        spec: Option<cas_mux::WorkerSpec>,
+    },
     /// Spawn a shell pane
     Shell { name: String, shell: Option<String> },
     /// Kill a shell pane

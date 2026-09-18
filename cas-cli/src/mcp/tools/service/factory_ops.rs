@@ -426,6 +426,22 @@ fn worker_effort_from_agent(agent: &cas_types::Agent) -> Option<cas_mux::Effort>
         .and_then(|effort| effort.parse::<cas_mux::Effort>().ok())
 }
 
+/// Reconstruct the launch recipe persisted on a registered factory worker.
+/// Recycling must not silently switch a Codex worker to the supervisor's
+/// default harness or account, so every provider selector is copied from the
+/// agent row rather than re-resolved from current process environment.
+fn worker_spec_from_agent(agent: &cas_types::Agent) -> cas_mux::WorkerSpec {
+    cas_mux::WorkerSpec {
+        name: Some(agent.name.clone()),
+        cli: worker_cli_from_agent(agent),
+        model: agent.metadata.get("worker_model").cloned(),
+        effort: worker_effort_from_agent(agent),
+        config_dir: agent.metadata.get("worker_account_dir").cloned(),
+        requester_config_dir: None,
+        requester_secure_storage_dir: None,
+    }
+}
+
 fn parse_spawn_cli(cli: Option<&str>) -> Result<Option<cas_mux::SupervisorCli>, String> {
     cli.map(|s| {
         s.parse::<cas_mux::SupervisorCli>().map_err(|_| {
@@ -2918,6 +2934,165 @@ impl CasService {
         Ok(Self::success(msg))
     }
 
+    /// Recycle one idle worker without losing its isolated checkout. The
+    /// daemon owns the stop/start sequence so no second spawn can race ahead
+    /// of the shutdown, and the durable WorkerSpec keeps provider/account
+    /// routing identical across the replacement process.
+    pub(super) async fn factory_recycle_worker(
+        &self,
+        req: FactoryRequest,
+    ) -> Result<CallToolResult, McpError> {
+        use crate::store::{open_agent_store, open_spawn_queue_store, open_task_store};
+        use cas_types::{AgentRole, AgentStatus};
+
+        let worker_name = req
+            .target
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .ok_or_else(|| {
+                Self::error(
+                    ErrorCode::INVALID_PARAMS,
+                    "recycle_worker requires target=<worker-name>",
+                )
+            })?;
+        let factory_session = current_factory_session();
+        let owned = supervisor_owned_workers();
+        if let Some(owned) = owned.as_ref() {
+            if !owned.contains(worker_name) {
+                return Err(Self::error(
+                    ErrorCode::INVALID_PARAMS,
+                    format!(
+                        "Worker '{worker_name}' is not owned by this supervisor; recycle refused"
+                    ),
+                ));
+            }
+        }
+
+        let agent_store = open_agent_store(&self.inner.cas_root).map_err(|error| {
+            Self::error(
+                ErrorCode::INTERNAL_ERROR,
+                format!("Failed to open agent store: {error}"),
+            )
+        })?;
+        let worker = agent_store
+            .list(None)
+            .map_err(|error| {
+                Self::error(
+                    ErrorCode::INTERNAL_ERROR,
+                    format!("Failed to list workers: {error}"),
+                )
+            })?
+            .into_iter()
+            .find(|agent| {
+                agent.role == AgentRole::Worker
+                    && matches!(agent.status, AgentStatus::Active | AgentStatus::Idle)
+                    && agent.name == worker_name
+                    && agent.visible_to_factory_session(factory_session.as_deref())
+            })
+            .ok_or_else(|| {
+                Self::error(
+                    ErrorCode::INVALID_PARAMS,
+                    format!(
+                        "Worker '{worker_name}' is not a live worker in this factory session; recycle refused"
+                    ),
+                )
+            })?;
+
+        let task_store = open_task_store(&self.inner.cas_root).map_err(|error| {
+            Self::error(
+                ErrorCode::INTERNAL_ERROR,
+                format!("Failed to open task store for recycle safety check: {error}"),
+            )
+        })?;
+        let tasks = task_store.list(None).map_err(|error| {
+            Self::error(
+                ErrorCode::INTERNAL_ERROR,
+                format!("Failed to list tasks for recycle safety check: {error}"),
+            )
+        })?;
+        let local_merge_delivery = factory_session_uses_local_merge(factory_session.as_deref());
+        let pinned_epic_branch =
+            factory_session_pinned_epic_branch(factory_session.as_deref(), &tasks);
+        let snapshot = shutdown_worker_snapshot(
+            &self.inner.cas_root,
+            &worker,
+            &tasks,
+            local_merge_delivery,
+            pinned_epic_branch.as_deref(),
+        );
+        if snapshot.requires_force() {
+            return Err(Self::error(
+                ErrorCode::INVALID_PARAMS,
+                format!(
+                    "recycle_worker refused: selected worker state requires force=true, but recycling never force-destroys work.\n- {}",
+                    snapshot.render()
+                ),
+            ));
+        }
+
+        let queue = open_spawn_queue_store(&self.inner.cas_root).map_err(|error| {
+            Self::error(
+                ErrorCode::INTERNAL_ERROR,
+                format!("Failed to open spawn queue: {error}"),
+            )
+        })?;
+        let already_queued = queue
+            .peek(64)
+            .map_err(|error| {
+                Self::error(
+                    ErrorCode::INTERNAL_ERROR,
+                    format!("Failed to inspect spawn queue: {error}"),
+                )
+            })?
+            .into_iter()
+            .any(|entry| {
+                entry.worker_names.iter().any(|name| name == worker_name)
+                    && matches!(
+                        entry.action,
+                        cas_store::SpawnAction::Shutdown
+                            | cas_store::SpawnAction::Spawn
+                            | cas_store::SpawnAction::Recycle
+                    )
+            });
+        if already_queued {
+            return Err(Self::error(
+                ErrorCode::INVALID_REQUEST,
+                format!(
+                    "Worker '{worker_name}' already has a lifecycle request queued; recycle refused"
+                ),
+            ));
+        }
+
+        let spec = worker_spec_from_agent(&worker);
+        let spec_json = serde_json::to_string(&spec).map_err(|error| {
+            Self::error(
+                ErrorCode::INTERNAL_ERROR,
+                format!("Failed to serialize worker recipe: {error}"),
+            )
+        })?;
+        let request_id = queue
+            .enqueue_recycle(worker_name, Some(&spec_json), factory_session.as_deref())
+            .map_err(|error| {
+                Self::error(
+                    ErrorCode::INTERNAL_ERROR,
+                    format!("Failed to queue worker recycle: {error}"),
+                )
+            })?;
+        let _ = crate::hooks::handlers::session_hygiene::append_factory_session_event(
+            &self.inner.cas_root,
+            "worker_recycle_queued",
+            &[
+                ("request_id", &request_id.to_string()),
+                ("worker", worker_name),
+            ],
+        );
+
+        Ok(Self::success(format!(
+            "Queued recycle for worker {worker_name} (request ID: {request_id}); the daemon will stop it without reclaiming its worktree and restart the same name with its recorded provider/model/effort/account recipe."
+        )))
+    }
+
     /// Arm or release the director's session-scoped worker hold gate.
     ///
     /// The environment-derived role check is the same workflow guardrail used
@@ -3136,6 +3311,14 @@ impl CasService {
                 .unwrap_or_default()
                 .factory()
                 .stall_threshold_secs as i64
+        };
+        let context_recycle_threshold_percent: u8 = {
+            use crate::config::Config;
+            Config::load(&self.inner.cas_root)
+                .unwrap_or_default()
+                .factory()
+                .context_recycle_threshold_percent
+                .min(100)
         };
 
         // cas-86c5: wider activity window (10 min) for the per-worker "last
@@ -4008,15 +4191,12 @@ impl CasService {
                 // same resolved path can also feed the in-flight-tool-call
                 // check below — one resolution, two consumers, instead of
                 // globbing/reading the transcript twice per worker.
-                let context_info = {
-                    match transcript_path_for_worker
+                let context_usage = transcript_path_for_worker
                         .as_deref()
-                        .and_then(|path| read_context_usage_from_tail_for_cli(path, worker_cli))
-                    {
-                        Some(usage) => format_context_usage(usage),
-                        None => String::new(),
-                    }
-                };
+                    .and_then(|path| read_context_usage_from_tail_for_cli(path, worker_cli));
+                let context_info = context_usage
+                    .map(format_context_usage)
+                    .unwrap_or_default();
                 let compaction_info = format_context_checkpoint_status(&agent.metadata);
                 // cas-86c5: surface per-worker "last activity" age so the
                 // supervisor can distinguish an actively-investigating worker
@@ -4167,6 +4347,16 @@ impl CasService {
                     task.assignee.as_deref() == Some(agent.name.as_str())
                         || task.assignee.as_deref() == Some(agent.id.as_str())
                 });
+                let recycle_info = context_recycle_recommendation(
+                    &agent.name,
+                    worker_cli,
+                    context_usage,
+                    context_recycle_threshold_percent,
+                    !has_in_progress_task
+                        && assigned_open_task.is_none()
+                        && !has_active_work
+                        && !approval_hang,
+                );
                 let effective_stall_threshold = crate::ui::factory::effective_stall_threshold_secs(
                     stall_threshold_secs as u64,
                     worker_effort_from_agent(agent),
@@ -4209,7 +4399,7 @@ impl CasService {
                         }
                     }
                 };
-                let rehome_info = factory_rehome_label(agent);
+                let rehome_info = format!("{}{}", factory_rehome_label(agent), recycle_info);
                 let priority_alert = format_priority_worker_status_alert(
                     stalled,
                     last_activity,
@@ -4712,7 +4902,7 @@ impl CasService {
         use crate::store::{open_agent_store, open_prompt_queue_store};
         use cas_types::{AgentRole, AgentStatus};
 
-        let target = req.target.ok_or_else(|| {
+        let target = req.target.clone().ok_or_else(|| {
             Self::error(
                 ErrorCode::INVALID_PARAMS,
                 "target required for clear_context",
@@ -4782,6 +4972,20 @@ impl CasService {
                 ErrorCode::INVALID_PARAMS,
                 "No live workers to reset.".to_string(),
             ));
+        }
+
+        // Codex has no verified in-place reset command. Recycle the worker in
+        // place instead of fabricating a `/clear` control message that its
+        // harness would not interpret. Mixed `all_workers` calls retain the
+        // existing fail-closed behavior below; supervisors can recycle the
+        // named Codex worker explicitly and reset Claude recipients together.
+        if recipients.len() == 1
+            && worker_cli_from_agent(&recipients[0]) == cas_mux::SupervisorCli::Codex
+        {
+            let mut recycle_req = req;
+            recycle_req.action = "recycle_worker".to_string();
+            recycle_req.target = Some(recipients[0].name.clone());
+            return self.factory_recycle_worker(recycle_req).await;
         }
 
         let queue = open_prompt_queue_store(&self.inner.cas_root).map_err(|e| {
@@ -9609,6 +9813,34 @@ fn format_context_usage(usage: ContextUsage) -> String {
         }
         _ => format!("\n    context input: ~{ktok}k tk (model window unavailable)"),
     }
+}
+
+/// Recommend recycle only when the worker is genuinely idle. Context pressure
+/// on an assigned or active worker is information, not permission to interrupt
+/// it; the supervisor can choose the lifecycle action after reviewing the row.
+fn context_recycle_recommendation(
+    worker_name: &str,
+    cli: cas_mux::SupervisorCli,
+    usage: Option<ContextUsage>,
+    threshold_percent: u8,
+    idle: bool,
+) -> String {
+    let Some(usage) = usage else {
+        return String::new();
+    };
+    let Some(window) = usage.model_context_window.filter(|window| *window > 0) else {
+        return String::new();
+    };
+    if cli != cas_mux::SupervisorCli::Codex || !idle {
+        return String::new();
+    }
+    let occupancy = usage.input_tokens.saturating_mul(100) / window;
+    if occupancy < u64::from(threshold_percent) {
+        return String::new();
+    }
+    format!(
+        "\n    ⚠ RECYCLE RECOMMENDED: idle Codex context is ~{occupancy}% occupied (threshold {threshold_percent}%) — use coordination action=recycle_worker target={worker_name}"
+    )
 }
 
 /// Render the short-lived state left by Claude's PreCompact hook.  This is
@@ -15273,6 +15505,37 @@ effort = "high"
             "\n    context input: ~203k tk (model window unavailable)"
         );
         assert!(!display.contains("near-limit"));
+    }
+
+    #[test]
+    fn idle_near_limit_codex_gets_recycle_recommendation() {
+        let recommendation = context_recycle_recommendation(
+            "near-limit-codex",
+            cas_mux::SupervisorCli::Codex,
+            Some(ContextUsage {
+                input_tokens: 850_000,
+                model_context_window: Some(1_000_000),
+            }),
+            80,
+            true,
+        );
+        assert!(recommendation.contains("RECYCLE RECOMMENDED"));
+        assert!(recommendation.contains("target=near-limit-codex"));
+    }
+
+    #[test]
+    fn assigned_near_limit_codex_has_no_recycle_recommendation() {
+        let recommendation = context_recycle_recommendation(
+            "busy-codex",
+            cas_mux::SupervisorCli::Codex,
+            Some(ContextUsage {
+                input_tokens: 850_000,
+                model_context_window: Some(1_000_000),
+            }),
+            80,
+            false,
+        );
+        assert!(recommendation.is_empty());
     }
 
     /// `read_context_usage_from_tail` must extract the correct total from a

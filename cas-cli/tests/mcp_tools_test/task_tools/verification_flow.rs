@@ -5,7 +5,10 @@ use cas::store::{
     EventStore, init_cas_dir, open_agent_store, open_event_store, open_task_store,
     open_verification_store, open_worktree_store,
 };
-use cas::types::{AgentRole, EventType, TaskStatus, Verification, VerificationType, Worktree};
+use cas::types::{
+    AgentRole, EventType, TaskStatus, TaskType, Verification, VerificationType, WorkTarget,
+    Worktree,
+};
 use rmcp::handler::server::wrapper::Parameters;
 use std::process::Command;
 use tempfile::TempDir;
@@ -6251,6 +6254,188 @@ async fn test_epic_close_requires_epic_verification_type() {
         text.contains("Closed") || text.contains("closed"),
         "Epic should close with epic verification: {text}"
     );
+}
+
+/// GH #892: an Epic has no worker-owned worktree or factory delivery anchor,
+/// but its declared epic branch is the durable code boundary. Closing without
+/// a commit_receipt must derive that branch tip and run the pre-close hook
+/// against the merged target.
+#[tokio::test]
+async fn test_epic_close_derives_anchor_from_epic_branch_gh_892() {
+    let (temp, service) = setup_cas();
+    let _env_lock = env_test_lock();
+    let cas_dir = temp.path().join(".cas");
+    std::fs::write(cas_dir.join("config.toml"), "[verification]\nenabled = false\n")
+        .expect("disable verification for anchor-focused close");
+
+    let repo = temp.path();
+    proof_boundary_git(repo, &["init", "-q", "-b", "main"]);
+    proof_boundary_git(
+        repo,
+        &["remote", "add", "origin", "git@github.com:org/cas-892.git"],
+    );
+    std::fs::write(repo.join("seed.txt"), "seed\n").unwrap();
+    proof_boundary_git(repo, &["add", "seed.txt"]);
+    proof_boundary_git(repo, &["commit", "-q", "-m", "seed"]);
+    proof_boundary_git(repo, &["checkout", "-q", "-b", "epic/cas-892"]);
+    std::fs::write(repo.join("epic-delivery.rs"), "pub fn epic_delivery() {}\n").unwrap();
+    proof_boundary_git(repo, &["add", "epic-delivery.rs"]);
+    proof_boundary_git(repo, &["commit", "-q", "-m", "feat: epic delivery"]);
+    let epic_tip = String::from_utf8_lossy(
+        &Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(repo)
+            .output()
+            .expect("resolve epic tip")
+            .stdout,
+    )
+    .trim()
+    .to_string();
+    proof_boundary_git(repo, &["checkout", "-q", "main"]);
+    proof_boundary_git(repo, &["merge", "-q", "--ff-only", "epic/cas-892"]);
+
+    let task_store = open_task_store(&cas_dir).expect("open task store");
+    let mut epic = cas::types::Task::new(
+        "cas-a5ad-hook".to_string(),
+        "GH #892 epic anchor".to_string(),
+    );
+    epic.status = TaskStatus::InProgress;
+    epic.task_type = TaskType::Epic;
+    epic.branch = Some("epic/cas-892".to_string());
+    epic.deliverables.work_target = Some(WorkTarget {
+        repo_selector: "remote:github.com/org/cas-892".to_string(),
+        target_branch: "main".to_string(),
+    });
+    task_store.add(&epic).expect("persist epic fixture");
+
+    let close_text = extract_text(
+        service
+            .cas_task_close(Parameters(TaskCloseRequest {
+                stranded_branch_override: None,
+                id: epic.id.clone(),
+                reason: Some("merged epic branch is ready to close".to_string()),
+                supervisor_override: None,
+                legacy_bypass_code_review: None,
+                search_manifest: None,
+                commit_receipt: None,
+            }))
+            .await
+            .expect("epic close returns"),
+    );
+    assert!(
+        close_text.contains("Closed task:"),
+        "epic close without a receipt must use its branch tip as the hook anchor: {close_text}"
+    );
+    assert_eq!(
+        task_store.get(&epic.id).expect("read closed epic").status,
+        TaskStatus::Closed
+    );
+    assert!(!epic_tip.is_empty());
+}
+
+/// GH #892: a merge receipt belongs to the declared target even when the
+/// epic ref still points at the pre-merge tip. The close gate must validate
+/// that receipt against `main`, rather than requiring it on `epic/*`.
+#[tokio::test]
+async fn test_epic_close_accepts_target_receipt_when_epic_branch_lags_gh_892() {
+    let (temp, service) = setup_cas();
+    let _env_lock = env_test_lock();
+    let cas_dir = temp.path().join(".cas");
+    std::fs::write(cas_dir.join("config.toml"), "[verification]\nenabled = false\n")
+        .expect("disable verification for target receipt close");
+
+    let repo = temp.path();
+    proof_boundary_git(repo, &["init", "-q", "-b", "main"]);
+    proof_boundary_git(
+        repo,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "git@github.com:org/cas-892-receipt.git",
+        ],
+    );
+    std::fs::write(repo.join("seed.txt"), "seed\n").unwrap();
+    proof_boundary_git(repo, &["add", "seed.txt"]);
+    proof_boundary_git(repo, &["commit", "-q", "-m", "seed"]);
+    let old_epic_tip = String::from_utf8_lossy(
+        &Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(repo)
+            .output()
+            .expect("resolve pre-merge epic tip")
+            .stdout,
+    )
+    .trim()
+    .to_string();
+    proof_boundary_git(repo, &["checkout", "-q", "-b", "epic/cas-892-receipt"]);
+    std::fs::write(repo.join("epic-receipt.rs"), "pub fn epic_receipt() {}\n").unwrap();
+    proof_boundary_git(repo, &["add", "epic-receipt.rs"]);
+    proof_boundary_git(repo, &["commit", "-q", "-m", "feat: epic receipt"]);
+    proof_boundary_git(repo, &["checkout", "-q", "main"]);
+    proof_boundary_git(
+        repo,
+        &[
+            "merge",
+            "-q",
+            "--no-ff",
+            "epic/cas-892-receipt",
+            "-m",
+            "merge epic receipt",
+        ],
+    );
+    let merge_tip = String::from_utf8_lossy(
+        &Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(repo)
+            .output()
+            .expect("resolve target merge tip")
+            .stdout,
+    )
+    .trim()
+    .to_string();
+    proof_boundary_git(
+        repo,
+        &["branch", "-f", "epic/cas-892-receipt", &old_epic_tip],
+    );
+
+    let task_store = open_task_store(&cas_dir).expect("open task store");
+    let mut epic = cas::types::Task::new(
+        "cas-a5ad-receipt-hook".to_string(),
+        "GH #892 target receipt".to_string(),
+    );
+    epic.status = TaskStatus::InProgress;
+    epic.task_type = TaskType::Epic;
+    epic.branch = Some("epic/cas-892-receipt".to_string());
+    epic.deliverables.work_target = Some(WorkTarget {
+        repo_selector: "remote:github.com/org/cas-892-receipt".to_string(),
+        target_branch: "main".to_string(),
+    });
+    task_store.add(&epic).expect("persist epic fixture");
+
+    let close_text = extract_text(
+        service
+            .cas_task_close(Parameters(TaskCloseRequest {
+                stranded_branch_override: None,
+                id: epic.id.clone(),
+                reason: Some("target merge receipt proves the epic delivery".to_string()),
+                supervisor_override: None,
+                legacy_bypass_code_review: None,
+                search_manifest: None,
+                commit_receipt: Some(merge_tip.clone()),
+            }))
+            .await
+            .expect("epic close returns"),
+    );
+    assert!(
+        close_text.contains("Closed task:"),
+        "epic close must accept a target-reachable receipt while its branch lags: {close_text}"
+    );
+    assert_eq!(
+        task_store.get(&epic.id).expect("read closed epic").status,
+        TaskStatus::Closed
+    );
+    assert_ne!(merge_tip, old_epic_tip);
 }
 
 #[tokio::test]

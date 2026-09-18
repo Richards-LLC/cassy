@@ -1285,7 +1285,7 @@ fn validate_risk_close_proofs_with_base(
             let actual_base = scoped_proof_note_base(&task.notes);
             if actual_base.as_deref() != Some(expected_base) {
                 return Err(format!(
-                    "TASK CLOSE REJECTED: task {} scoped proof receipt has base {:?}, but its declared WorkTarget requires SCOPED_PROOF_BASE={expected_base}. Run `{}` and add the resulting passing receipt to a progress note.",
+                    "TASK CLOSE REJECTED: task {} scoped proof receipt has base {:?}, but this delivery must be proven against SCOPED_PROOF_BASE={expected_base} — the first parent of its earliest commit, which is the diff the required targets were derived from. Run `{}` and add the resulting passing receipt to a progress note.",
                     task.id,
                     actual_base.as_deref(),
                     scoped_proof_command(&required_targets, Some(expected_base)),
@@ -1630,6 +1630,40 @@ mod risk_proof_tests {
                 );
         assert!(error.contains("SCOPED_PROOF_BASE"), "{error}");
         assert!(error.contains(&expected_base), "{error}");
+    }
+
+    #[test]
+    fn scoped_proof_rejection_explains_which_base_the_delivery_must_use() {
+        // cas-9c1e: a worker hitting this used to be told only *what* base to
+        // use, while the command it was told to run produced a receipt the very
+        // next check rejected. The message must say what the base is.
+        let dir = scoped_proof_fixture();
+        let expected_base = "c".repeat(40);
+        let mut task = Task::new("cas-base-guidance".into(), "base guidance".into());
+        task.notes = format!(
+            "[2026-09-18] 📝 PROGRESS SCOPED_PROOF: targets=lib:factory_ops,test:factory_mcp_ops_test result=PASS base={}",
+            "d".repeat(40)
+        );
+        let changed = vec!["cas-cli/src/mcp/tools/service/factory_ops.rs".to_string()];
+
+        let error =
+            validate_risk_close_proofs_with_base(&task, &changed, dir.path(), Some(&expected_base))
+                .expect_err("a receipt from another base must not satisfy this delivery");
+        assert!(error.contains(&expected_base), "{error}");
+        assert!(
+            error.contains("first parent of its earliest commit"),
+            "the rejection must say what the base IS, not only its value: {error}"
+        );
+        assert!(
+            error.contains("the required targets were derived from"),
+            "and why that base is the one the targets came from: {error}"
+        );
+
+        task.notes = format!(
+            "[2026-09-18] 📝 PROGRESS SCOPED_PROOF: targets=lib:factory_ops,test:factory_mcp_ops_test result=PASS base={expected_base}"
+        );
+        validate_risk_close_proofs_with_base(&task, &changed, dir.path(), Some(&expected_base))
+            .expect("a receipt on the delivery's own base closes");
     }
 
     #[test]
@@ -5739,12 +5773,32 @@ impl CasCore {
                 })
                 .filter(|paths| !paths.is_empty())
                 .unwrap_or_else(|| task.deliverables.files_changed.clone());
+            // cas-9c1e: take the baseline from the same delivery ranges that
+            // produced `changed_paths` above. The required proof targets are
+            // derived from those paths, so deriving the base from anything
+            // else lets the two disagree — and `merge-base(HEAD, target)` does
+            // exactly that once the supervisor merges the branch before close:
+            // it collapses onto the delivery commit, the proof surface becomes
+            // empty, and no run can satisfy both checks. Fall back to the
+            // merge-base only when the delivery cannot be attributed at all.
             let scoped_proof_base = declared_repo_context.as_ref().and_then(|context| {
-                scoped_proof_base_for_work_target(
-                    proof_repo,
-                    &context.repo_root,
-                    &context.target_branch,
-                )
+                commit_receipt_window
+                    .as_ref()
+                    .and_then(|window| {
+                        task_attribution::delivery_base(
+                            proof_repo,
+                            &resolved_parent_branch,
+                            window,
+                            req.commit_receipt.as_deref(),
+                        )
+                    })
+                    .or_else(|| {
+                        scoped_proof_base_for_work_target(
+                            proof_repo,
+                            &context.repo_root,
+                            &context.target_branch,
+                        )
+                    })
             });
             if let Err(message) = validate_risk_close_proofs_with_base(
                 &task,

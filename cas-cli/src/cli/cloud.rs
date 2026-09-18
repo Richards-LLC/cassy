@@ -7252,7 +7252,7 @@ mod team_cmd_tests {
             output.contains("3 rejected by cloud (project_mismatch ×2, revision_conflict ×1)"),
             "{output}"
         );
-        assert!(output.contains("cas cloud link"), "{output}");
+        assert!(output.contains("cas cloud projects"), "{output}");
         assert!(
             !output.contains("rows failed"),
             "every terminal row here has a named reason: {output}"

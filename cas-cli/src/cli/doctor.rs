@@ -3777,7 +3777,7 @@ fn canonical_alias_fix(cas_root: &Path, args: &DoctorArgs, cli: &Cli) -> Option<
             "project aliases",
             CheckStatus::Ok,
             format!(
-                "appended git origin alias `{remote}` to `.cas/config.toml`; run `cas cloud project --adopt-aliases`, `cas cloud queue --retry-reason project_identity_conflict`, then `cas cloud push`"
+                "appended git origin alias `{remote}` to `.cas/config.toml`; local config alone does not register it server-side. Inspect `cas cloud projects`, have the cloud owner register the alias, then run `cas cloud project --adopt-aliases`, `cas cloud queue --retry --retry-reason project_identity_conflict`, and `cas cloud push`"
             ),
         )),
         Err(error) => Some(Check::new(
@@ -3809,7 +3809,7 @@ fn canonical_alias_checks(cas_root: &Path) -> Vec<Check> {
             name: "project aliases".to_string(),
             status: CheckStatus::Warning,
             message: format!(
-                "Git origin resolves to `{remote}`, which is neither canonical id `{current_project}` nor a configured alias. Add this exact line under `[project]` in `.cas/config.toml`: `aliases = [\"{remote}\"]`. Then run `cas cloud project --adopt-aliases`, `cas cloud queue --retry-reason project_identity_conflict`, and `cas cloud push`."
+                "Git origin resolves to `{remote}`, which is neither canonical id `{current_project}` nor a configured alias. Add this exact line under `[project]` in `.cas/config.toml`: `aliases = [\"{remote}\"]`. Local config alone does not register an alias server-side: inspect `cas cloud projects` and have the cloud owner register `{remote}`, then run `cas cloud project --adopt-aliases`, `cas cloud queue --retry --retry-reason project_identity_conflict`, and `cas cloud push`."
             ),
         });
     }
@@ -6687,7 +6687,7 @@ mod tests {
             check.message
         );
         assert!(
-            check.message.contains("cas cloud link"),
+            check.message.contains("cas cloud projects"),
             "{}",
             check.message
         );
@@ -6743,7 +6743,7 @@ mod tests {
         assert!(
             check
                 .message
-                .contains("cas cloud queue --retry-reason project_identity_conflict"),
+                .contains("cas cloud queue --retry --retry-reason project_identity_conflict"),
             "{}",
             check.message
         );
@@ -7401,7 +7401,7 @@ mod tests {
             .contains("cas cloud project --adopt-aliases"));
         assert!(check
             .message
-            .contains("cas cloud queue --retry-reason project_identity_conflict"));
+            .contains("cas cloud queue --retry --retry-reason project_identity_conflict"));
         assert!(check.message.contains("cas cloud push"));
     }
 

@@ -82,7 +82,13 @@ lanes. The non-required full/heavy tier (Clippy, Test Compile Guard, Build
 Benchmark, and both Panic Isolation profiles) belongs only to
 supervisor-controlled main pushes, schedules, or manual dispatches—never
 factory/*, epic/*, tags, or pull requests. Keep this policy pinned by
-`scripts/test-ci-test-tiers.sh`, rather than relying on convention.
+`scripts/test-ci-test-tiers.sh`, rather than relying on convention. Docs-only
+diffs (paths under `docs/` or Markdown files outside embedded
+`cas-cli/src/` content) on pull-request, push, and merge-group events route
+only to the `Docs Lint` job; it runs Markdown lint and validates any changed
+release-note drafts. The existing required Fast Validation and macOS Check
+contexts remain present and skip their full work for that class. Mixed and
+code diffs keep the full required tier.
 
 Local sccache 0.10.0 does not produce cross-worktree Rust hits because absolute
 checkout paths remain in its cache keys (measured 0/45 hits even with

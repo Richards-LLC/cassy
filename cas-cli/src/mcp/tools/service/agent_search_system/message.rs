@@ -356,11 +356,7 @@ pub(crate) fn lifecycle_relay_is_stale_at_inbox_pop(
         return false;
     };
     matches!(
-        crate::prompt_revalidation::revalidate_lifecycle_prompt(
-            prompt,
-            task.status,
-            task.updated_at,
-        ),
+        crate::prompt_revalidation::revalidate_lifecycle_prompt_against_task(prompt, task),
         crate::prompt_revalidation::LifecyclePromptDecision::SuppressStale { .. }
     )
 }

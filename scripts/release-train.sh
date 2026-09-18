@@ -24,7 +24,10 @@
 #   scripts/release-train.sh <version> <epic-worktree> --gate [--reuse | --only <row,row>]
 #   scripts/release-train.sh <version> <epic-worktree> --pipeline
 #   scripts/release-train.sh <version> <epic-worktree> --publish [<landed-sha>]
+#   scripts/release-train.sh <version> <epic-worktree> --prep
+#   scripts/release-train.sh <version> <epic-worktree> --announce
 #   scripts/release-train.sh <version> <epic-worktree> --report
+#   scripts/release-train.sh <version> <epic-worktree> --receipts
 #   scripts/release-train.sh <version> <epic-worktree> --status
 #   scripts/release-train.sh <version> <epic-worktree> --stop
 #   scripts/release-train.sh <version> <epic-worktree> --print-run-dir
@@ -49,7 +52,7 @@
 set -euo pipefail
 
 usage() {
-    printf 'Usage: %s <version> <epic-worktree> [--assemble|--check-lane <branch>|--gate [--reuse | --only <row,row>]|--pipeline|--publish [sha]|--report|--status|--stop|--print-run-dir]\n' "$0"
+    printf 'Usage: %s <version> <epic-worktree> [--assemble|--prep|--announce|--check-lane <branch>|--gate [--reuse | --only <row,row>]|--pipeline|--publish [sha]|--report|--receipts|--status|--stop|--print-run-dir]\n' "$0"
 }
 
 version="${1:-}"
@@ -813,8 +816,21 @@ run_report() {
 }
 
 case "$action" in
+    --prep)
+        # shellcheck disable=SC1091
+        source "$script_dir/release-train.d/prep.sh"
+        release_train_prep
+        exit $?
+        ;;
+    --announce)
+        # shellcheck disable=SC1091
+        source "$script_dir/release-train.d/announce.sh"
+        release_train_announce
+        exit $?
+        ;;
     --assemble)
-        python3 "$script_dir/release-integrate.py" "$worktree"
+        CAS_RELEASE_RECEIPTS_RUN_DIR="$run_dir" \
+            python3 "$script_dir/release-integrate.py" "$worktree"
         exit $?
         ;;
     --print-run-dir)
@@ -846,6 +862,12 @@ case "$action" in
         ;;
     --report)
         run_report
+        exit $?
+        ;;
+    --receipts)
+        # shellcheck disable=SC1091
+        source "$script_dir/release-train.d/receipts.sh"
+        release_train_receipts
         exit $?
         ;;
     --stop)

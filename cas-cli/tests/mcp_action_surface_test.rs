@@ -15,6 +15,7 @@ const TASK_ACTIONS: &[&str] = &[
     "proposal_reject",
     "proposal_reconcile",
     "show",
+    "get",
     "update",
     "start",
     "close",
@@ -138,7 +139,8 @@ fn function_section<'a>(source: &'a str, function: &str, next_marker: &str) -> &
 
 fn dispatch_actions(section: &str) -> Vec<String> {
     let match_start = section
-        .find("let result = match req.action.as_str() {")
+        .find("let result = match action.as_str() {")
+        .or_else(|| section.find("let result = match req.action.as_str() {"))
         .expect("dispatch result match");
     let arms = &section[match_start..];
     let arms = arms
@@ -146,14 +148,27 @@ fn dispatch_actions(section: &str) -> Vec<String> {
         .expect("dispatch match opening brace")
         .1;
 
-    arms.lines()
+    let mut actions: Vec<String> = arms
+        .lines()
         .take_while(|line| !line.trim_start().starts_with("_ =>"))
         .filter_map(|line| line.split_once("=>").map(|(left, _)| left))
         .flat_map(|left| left.split('|'))
         .map(str::trim)
         .filter(|token| token.starts_with('"') && token.ends_with('"'))
         .map(|token| token.trim_matches('"').to_string())
-        .collect()
+        .collect();
+
+    // Aliases are canonicalized before the dispatch match, so they are not
+    // represented by a second match arm. Keep them in the pinned/documented
+    // surface immediately beside their canonical action.
+    if section.contains("canonical_task_action") {
+        let show = actions
+            .iter()
+            .position(|action| action == "show")
+            .expect("task dispatch show action");
+        actions.insert(show + 1, "get".to_string());
+    }
+    actions
 }
 
 fn section<'a>(content: &'a str, heading: &str) -> &'a str {
@@ -163,6 +178,34 @@ fn section<'a>(content: &'a str, heading: &str) -> &'a str {
     let body = &content[start + heading.len()..];
     let end = body.find("\n## ").unwrap_or(body.len());
     &body[..end]
+}
+
+#[test]
+fn canonicalized_aliases_are_pinned_and_described() {
+    let source = service_source();
+    let task = function_section(&source, "task", "// cas_rule -");
+    assert_eq!(
+        dispatch_actions(task)
+            .into_iter()
+            .find(|action| action == "get"),
+        Some("get".to_string())
+    );
+    assert!(
+        source.contains("\"get\" => \"show\""),
+        "task get alias must remain canonicalized to show"
+    );
+    assert!(
+        source.contains("show (also accepted as get)"),
+        "task description must document the get alias"
+    );
+    assert!(
+        source.contains("\"inbox\" => \"inbox_poll\""),
+        "coordination inbox alias must remain canonicalized to inbox_poll"
+    );
+    assert!(
+        source.contains("inbox_poll (also accepted as inbox)"),
+        "coordination description must document the inbox alias"
+    );
 }
 
 fn documented_actions(content: &str) -> Vec<String> {

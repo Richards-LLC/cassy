@@ -314,7 +314,7 @@ impl CasService {
     // ========================================================================
 
     #[tool(
-        description = "Task operations. Actions: create (local, or cross-project proposal with explicit project), proposal_inbox, proposal_accept, proposal_reject, proposal_reconcile, show, update, start, close, cancel, reopen, request_changes, delete, list, ready (actionable), blocked, notes, dep_add, dep_remove, dep_list, claim, release, reset, transfer, available, mine. For notes: pass only id to read that task's notes without the full task record; supply notes= to append, with optional note_type. Pending proposals are a dedicated cloud inbox, never TaskStatus rows. cancel is the supervisor-authorized, reason-required terminal path for work intentionally ended without delivery; it preserves history and accepts an optional superseded_by pointer. Supervisors use request_changes as the sanctioned exit from AwaitingMerge whenever review fails — declined merge, amendment required after merge, or rejected work — reopening the task with its assignee preserved (use reset only for tasks orphaned by a dead session). Prefer `start` for normal worker execution; use `claim` for manual lease control/recovery; use `reset` to revive a task orphaned by a dead session (atomic: force-releases lease, clears assignee, forces status=open). IMPORTANT for 'close': verification must pass first. Workers should attempt close; if close returns verification-required guidance, follow the indicated verifier ownership workflow."
+        description = "Task operations. Actions: create (local, or cross-project proposal with explicit project), proposal_inbox, proposal_accept, proposal_reject, proposal_reconcile, show (also accepted as get), update, start, close, cancel, reopen, request_changes, delete, list, ready (actionable), blocked, notes, dep_add, dep_remove, dep_list, claim, release, reset, transfer, available, mine. For dep_add/dep_remove, blocked_by is accepted as an alias for to_id. For notes: pass only id to read that task's notes without the full task record; supply notes= to append, with optional note_type. For close, summary is accepted as an alias for notes. Pending proposals are a dedicated cloud inbox, never TaskStatus rows. cancel is the supervisor-authorized, reason-required terminal path for work intentionally ended without delivery; it preserves history and accepts an optional superseded_by pointer. Supervisors use request_changes as the sanctioned exit from AwaitingMerge whenever review fails — declined merge, amendment required after merge, or rejected work — reopening the task with its assignee preserved (use reset only for tasks orphaned by a dead session). Prefer `start` for normal worker execution; use `claim` for manual lease control/recovery; use `reset` to revive a task orphaned by a dead session (atomic: force-releases lease, clears assignee, forces status=open). IMPORTANT for 'close': verification must pass first. Workers should attempt close; if close returns verification-required guidance, follow the indicated verifier ownership workflow."
     )]
     pub async fn task(
         &self,
@@ -323,10 +323,12 @@ impl CasService {
         let this = self.clone();
         panic_catch::dispatch_with_guidance("task", this.inner.clone(), async move {
             crate::ui::factory::record_supervisor_mcp_call();
-            let action = req.action.clone();
+            let mut req = req;
+            let action = canonical_task_action(&req.action).to_string();
+            req.action.clone_from(&action);
             let event_task_id = req.id.clone().unwrap_or_default();
             let is_mutating = matches!(
-                req.action.as_str(),
+                action.as_str(),
                 "create"
                     | "update"
                     | "start"
@@ -344,9 +346,9 @@ impl CasService {
                     | "release"
                     | "reset"
                     | "transfer"
-            ) || (req.action == "notes" && req.notes.is_some());
+            ) || (action == "notes" && req.notes.is_some());
 
-            let result = match req.action.as_str() {
+            let result = match action.as_str() {
                 "create" => this.task_create(req).await,
                 "proposal_inbox" => this.task_proposal_inbox(req).await,
                 "proposal_accept" => this.task_proposal_accept(req).await,
@@ -377,7 +379,7 @@ impl CasService {
                     ErrorCode::INVALID_PARAMS,
                     format!(
                         "Unknown task action: {}. Valid: create, proposal_inbox, proposal_accept, proposal_reject, proposal_reconcile, show, update, start, close, cancel, reopen, request_changes, delete, list, ready, blocked, notes, dep_add, dep_remove, dep_list, claim, release, reset, transfer, available, mine",
-                        req.action
+                        action
                     ),
                 )),
             };
@@ -523,7 +525,7 @@ impl CasService {
     // ========================================================================
 
     #[tool(
-        description = "Coordination operations combining agent, factory, and worktree management. Agent actions: register, unregister, whoami, heartbeat, agent_list, agent_cleanup, session_start, session_end, loop_start, loop_cancel, loop_status, lease_history, queue_notify, queue_poll, queue_peek, queue_ack, inbox_poll, message, message_ack, message_status. Factory actions: spawn_workers, shutdown_workers, hold_worker, release_worker, worker_status, worker_activity, sweep_tasks (preview or accept one fix task per integration failure class), clear_context (real harness context reset: types the recipient harness's own reset command into its pane and confirms it against the new session transcript — a reset Cassy cannot prove is returned as an error, never as success), my_context, sync_all_workers, gc_report, gc_cleanup, epic_status (per-child branch merge state for an epic), focus_epic, remind, remind_list, remind_cancel, server_start (run a long-lived server under Cassy instead of a raw `npm run dev &` — registered servers are the only ones that survive worker teardown), server_stop, server_list (what is listening and who started it). spawn_workers normally requires an open EPIC so workers are never summoned without stated work; passing task_id for a single open task satisfies that on its own, so post-epic follow-ups need no ceremonial epic. spawn_workers accepts config_dir for an account directory: explicit config_dir wins, otherwise the requesting supervisor's own account directory is captured at enqueue time (CLAUDE_CONFIG_DIR for Claude workers, CODEX_HOME for Codex workers — never crossed between providers); Grok has no account plumbing and reports that instead of silently dropping the value. Worktree actions: worktree_create, worktree_list, worktree_show, worktree_cleanup, worktree_merge, worktree_status. Only available in factory mode. For shutdown_workers, supervisor should verify worktree cleanliness/policy before issuing shutdown. sync_all_workers skips dirty or mid-task worktrees unless force=true, but always skips a supervision-live worker-owned worktree and refuses one already mid-rebase."
+        description = "Coordination operations combining agent, factory, and worktree management. Agent actions: register, unregister, whoami, heartbeat, agent_list, agent_cleanup, session_start, session_end, loop_start, loop_cancel, loop_status, lease_history, queue_notify, queue_poll, queue_peek, queue_ack, inbox_poll (also accepted as inbox), message, message_ack, message_status. Factory actions: spawn_workers, shutdown_workers, hold_worker, release_worker, worker_status, worker_activity, sweep_tasks (preview or accept one fix task per integration failure class), clear_context (real harness context reset: types the recipient harness's own reset command into its pane and confirms it against the new session transcript — a reset Cassy cannot prove is returned as an error, never as success), my_context, sync_all_workers, gc_report, gc_cleanup, epic_status (per-child branch merge state for an epic), focus_epic, remind, remind_list, remind_cancel, server_start (run a long-lived server under Cassy instead of a raw `npm run dev &` — registered servers are the only ones that survive worker teardown), server_stop, server_list (what is listening and who started it). Aliases: shutdown_workers accepts target for worker_names and reason; hold_worker/release_worker accept worker_names for target. spawn_workers normally requires an open EPIC so workers are never summoned without stated work; passing task_id for a single open task satisfies that on its own, so post-epic follow-ups need no ceremonial epic. spawn_workers accepts config_dir for an account directory: explicit config_dir wins, otherwise the requesting supervisor's own account directory is captured at enqueue time (CLAUDE_CONFIG_DIR for Claude workers, CODEX_HOME for Codex workers — never crossed between providers); Grok has no account plumbing and reports that instead of silently dropping the value. Worktree actions: worktree_create, worktree_list, worktree_show, worktree_cleanup, worktree_merge, worktree_status. Only available in factory mode. For shutdown_workers, supervisor should verify worktree cleanliness/policy before issuing shutdown. sync_all_workers skips dirty or mid-task worktrees unless force=true, but always skips a supervision-live worker-owned worktree and refuses one already mid-rebase."
     )]
     pub async fn coordination(
         &self,
@@ -532,7 +534,10 @@ impl CasService {
         let this = self.clone();
         panic_catch::dispatch_with_guidance("coordination", this.inner.clone(), async move {
             crate::ui::factory::record_supervisor_mcp_call();
-            let action = req.action.clone();
+            let mut req = req;
+            let action = canonical_coordination_action(&req.action).to_string();
+            req.action.clone_from(&action);
+            normalize_coordination_aliases(&mut req, &action);
             let event_target = req.target.clone().unwrap_or_default();
             let event_task_id = req.task_id.clone().unwrap_or_default();
 
@@ -543,7 +548,7 @@ impl CasService {
             // was exactly `shutdown_workers id=...` falling through to ALL).
             let allowed: Option<&[&str]> = match action.as_str() {
                 "shutdown_workers" => {
-                    Some(&["action", "id", "count", "worker_names", "force"])
+                    Some(&["action", "id", "count", "worker_names", "force", "reason"])
                 }
                 "sync_all_workers" => {
                     Some(&["action", "id", "branch", "worker_names", "force"])
@@ -1283,6 +1288,44 @@ impl CasService {
     }
 }
 
+fn canonical_task_action(action: &str) -> &str {
+    match action {
+        "get" => "show",
+        other => other,
+    }
+}
+
+fn canonical_coordination_action(action: &str) -> &str {
+    match action {
+        "inbox" => "inbox_poll",
+        other => other,
+    }
+}
+
+fn normalize_coordination_aliases(req: &mut CoordinationRequest, action: &str) {
+    match action {
+        "shutdown_workers" if req.worker_names.is_none() => {
+            req.worker_names = req.target.take();
+        }
+        "hold_worker" | "release_worker" if req.target.is_none() => {
+            req.target = req.worker_names.take();
+        }
+        _ => {}
+    }
+}
+
+fn normalize_factory_aliases(req: &mut FactoryRequest) {
+    match req.action.as_str() {
+        "shutdown_workers" if req.worker_names.is_none() => {
+            req.worker_names = req.target.take();
+        }
+        "hold_worker" | "release_worker" if req.target.is_none() => {
+            req.target = req.worker_names.take();
+        }
+        _ => {}
+    }
+}
+
 /// Return explicitly supplied fields outside an action's allow-list.
 ///
 /// Serialization keeps this fail-closed when a new union field is added: a
@@ -1313,6 +1356,8 @@ impl CasService {
         &self,
         Parameters(req): Parameters<FactoryRequest>,
     ) -> Result<CallToolResult, McpError> {
+        let mut req = req;
+        normalize_factory_aliases(&mut req);
         let action = req.action.clone();
         let result = match action.as_str() {
             "spawn_workers" => self.factory_spawn_workers(req).await,

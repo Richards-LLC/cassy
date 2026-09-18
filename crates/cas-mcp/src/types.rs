@@ -144,7 +144,7 @@ pub struct MemoryRequest {
 pub struct TaskRequest {
     /// Action to perform
     #[schemars(
-        description = "Action: 'create', 'proposal_inbox', 'proposal_accept', 'proposal_reject', 'proposal_reconcile', 'show', 'update', 'start', 'close', 'cancel', 'reopen', 'delete', 'list', 'ready', 'blocked', 'notes', 'dep_add', 'dep_remove', 'dep_list', 'claim', 'release', 'transfer', 'available', 'mine'"
+        description = "Action: 'create', 'proposal_inbox', 'proposal_accept', 'proposal_reject', 'proposal_reconcile', 'show' (also accepted as 'get'), 'update', 'start', 'close', 'cancel', 'reopen', 'delete', 'list', 'ready', 'blocked', 'notes', 'dep_add', 'dep_remove', 'dep_list', 'claim', 'release', 'transfer', 'available', 'mine'"
     )]
     pub action: String,
 
@@ -243,12 +243,13 @@ pub struct TaskRequest {
     #[serde(default)]
     pub labels: Option<String>,
 
-    /// Notes (for create, update, notes). For `action=notes`, omission reads
-    /// only the task's notes; presence appends the supplied value.
+    /// Notes (for create, update, notes, and close). For `action=notes`,
+    /// omission reads only the task's notes; presence appends the supplied
+    /// value. `summary` is accepted as a compatibility alias for close notes.
     #[schemars(
-        description = "Notes content. For action=notes: omit to read only the task's notes; supply to append"
+        description = "Notes content. For action=notes: omit to read only the task's notes; supply to append. For action=close, summary is accepted as an alias."
     )]
-    #[serde(default)]
+    #[serde(default, alias = "summary")]
     pub notes: Option<String>,
 
     /// Merge patch for the compact structured task resume state. The patch is
@@ -417,8 +418,11 @@ pub struct TaskRequest {
     #[serde(default)]
     pub blocked_by: Option<String>,
 
-    /// Target task ID (for dep_add, dep_remove)
-    #[schemars(description = "Target task ID for dependency operations")]
+    /// Target task ID (for dep_add, dep_remove). `blocked_by` is accepted as
+    /// a compatibility alias on those actions.
+    #[schemars(
+        description = "Target task ID for dependency operations; blocked_by is accepted as an alias for dep_add and dep_remove"
+    )]
     #[serde(default)]
     pub to_id: Option<String>,
 

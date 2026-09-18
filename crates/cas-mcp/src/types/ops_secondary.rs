@@ -579,9 +579,10 @@ pub struct FactoryRequest {
     #[serde(default)]
     pub summary: Option<bool>,
 
-    /// Specific worker names (comma-separated)
+    /// Specific worker names (comma-separated). `target` is accepted as an
+    /// alias for shutdown_workers.
     #[schemars(
-        description = "Comma-separated worker names (optional for spawn, specific targets for shutdown)"
+        description = "Comma-separated worker names (optional for spawn, specific targets for shutdown); target is accepted as an alias for shutdown_workers"
     )]
     #[serde(default)]
     pub worker_names: Option<String>,
@@ -600,12 +601,18 @@ pub struct FactoryRequest {
     #[serde(default)]
     pub delivery_mode: Option<String>,
 
-    /// Target agent for hold_worker, release_worker, clear_context, or remind
+    /// Target agent for hold_worker, release_worker, clear_context, or remind.
+    /// `worker_names` is accepted as an alias for hold_worker/release_worker.
     #[schemars(
-        description = "Target agent name for hold_worker/release_worker/clear_context/remind (or 'all_workers' for broadcast where supported). For remind: agent who receives the reminder (defaults to self)"
+        description = "Target agent name for hold_worker/release_worker/clear_context/remind (or 'all_workers' for broadcast where supported). For hold_worker/release_worker, worker_names is accepted as an alias. For remind: agent who receives the reminder (defaults to self)"
     )]
     #[serde(default)]
     pub target: Option<String>,
+
+    /// Optional audit reason for shutdown_workers.
+    #[schemars(description = "shutdown_workers only: optional audit reason")]
+    #[serde(default)]
+    pub reason: Option<String>,
 
     /// Message text for remind
     #[schemars(description = "Message text for remind operations")]
@@ -794,7 +801,7 @@ pub struct FactoryRequest {
 pub struct CoordinationRequest {
     /// Action to perform
     #[schemars(
-        description = "Action: agent ops (register, unregister, whoami, heartbeat, agent_list, agent_cleanup, session_start, session_end, loop_start, loop_cancel, loop_status, lease_history, queue_notify, queue_poll, queue_peek, queue_ack, inbox_poll, message, interrupt, message_ack, message_status), factory ops (spawn_workers, shutdown_workers, hold_worker, release_worker, worker_status, worker_activity, sweep_tasks, clear_context, my_context, sync_all_workers, gc_report, gc_cleanup, focus_epic, remind, remind_list, remind_cancel), worktree ops (worktree_create, worktree_list, worktree_show, worktree_cleanup, worktree_merge, worktree_status). Only available in factory mode. 'interrupt' is shorthand for 'message' with urgent=true (breaks the target's in-flight turn, then injects). shutdown_workers requires force=true for mid-task or dirty/unpushed workers. sync_all_workers skips worktrees that are dirty or whose assignee is mid-task unless force=true, and always refuses one already mid-rebase."
+        description = "Action: agent ops (register, unregister, whoami, heartbeat, agent_list, agent_cleanup, session_start, session_end, loop_start, loop_cancel, loop_status, lease_history, queue_notify, queue_poll, queue_peek, queue_ack, inbox_poll (also accepted as inbox), message, interrupt, message_ack, message_status), factory ops (spawn_workers, shutdown_workers, hold_worker, release_worker, worker_status, worker_activity, sweep_tasks, clear_context, my_context, sync_all_workers, gc_report, gc_cleanup, focus_epic, remind, remind_list, remind_cancel), worktree ops (worktree_create, worktree_list, worktree_show, worktree_cleanup, worktree_merge, worktree_status). Only available in factory mode. 'interrupt' is shorthand for 'message' with urgent=true (breaks the target's in-flight turn, then injects). shutdown_workers accepts target as an alias for worker_names and requires force=true for mid-task or dirty/unpushed workers. hold_worker/release_worker accept worker_names as an alias for target. sync_all_workers skips worktrees that are dirty or whose assignee is mid-task unless force=true, and always refuses one already mid-rebase."
     )]
     pub action: String,
 
@@ -844,9 +851,10 @@ pub struct CoordinationRequest {
     #[serde(default, deserialize_with = "deser::option_i64")]
     pub in_reply_to: Option<i64>,
 
-    /// Target agent name for hold_worker/release_worker/clear_context/message/remind
+    /// Target agent name for hold_worker/release_worker/clear_context/message/remind.
+    /// `worker_names` is accepted as an alias for hold_worker/release_worker.
     #[schemars(
-        description = "Target agent name for hold_worker/release_worker/clear_context/message/remind (or 'all_workers' for broadcast where supported). For remind: agent who receives the reminder (defaults to self)"
+        description = "Target agent name for hold_worker/release_worker/clear_context/message/remind (or 'all_workers' for broadcast where supported). For hold_worker/release_worker, worker_names is accepted as an alias. For remind: agent who receives the reminder (defaults to self)"
     )]
     #[serde(default)]
     pub target: Option<String>,
@@ -1015,9 +1023,10 @@ pub struct CoordinationRequest {
     #[serde(default)]
     pub accept: Option<bool>,
 
-    /// Comma-separated worker names
+    /// Comma-separated worker names. `target` is accepted as an alias for
+    /// shutdown_workers.
     #[schemars(
-        description = "Comma-separated worker names (optional for spawn, specific targets for shutdown)"
+        description = "Comma-separated worker names (optional for spawn, specific targets for shutdown); target is accepted as an alias for shutdown_workers"
     )]
     #[serde(default)]
     pub worker_names: Option<String>,
@@ -1256,12 +1265,21 @@ impl CoordinationRequest {
             limit: self.limit,
             offset: self.offset,
             summary: self.summary_mode,
-            worker_names: self.worker_names.clone(),
+            worker_names: self.worker_names.clone().or_else(|| {
+                (self.action == "shutdown_workers")
+                    .then(|| self.target.clone())
+                    .flatten()
+            }),
             task_id: self.task_id.clone(),
             delivery_mode: self.delivery_mode.clone(),
-            target: self.target.clone(),
+            target: self.target.clone().or_else(|| {
+                matches!(self.action.as_str(), "hold_worker" | "release_worker")
+                    .then(|| self.worker_names.clone())
+                    .flatten()
+            }),
             message: self.message.clone(),
             force: self.force,
+            reason: self.reason.clone(),
             dry_run: self.dry_run,
             clear: self.clear,
             branch: self.branch.clone(),

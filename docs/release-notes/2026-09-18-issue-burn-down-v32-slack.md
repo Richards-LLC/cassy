@@ -12,31 +12,27 @@ Review basis: the actual source diff at `2adae618`. The four fenced blocks below
 
 ```text
 *Source on main — User — Cassy*
-Was: finishing a change could depend on how it arrived. → Now: the right change stays attached through review and handoff.
+Was: after a reviewer merged your work, closing the task could fail with a confusing error. → Now: the task closes from the merged work.
 ```
 
 ## User reply
 
 ```text
-• *Reliable handoffs* — Was: a finished change could lose its place after review or handoff. → Now: it stays tied to the right result.
+• *Closing after review* — Was: after a reviewer merged your work, closing could reject the recorded change. → Now: the task closes from that merged work.
 
-• *Fresh retries* — Was: a failed check could repeat old feedback. → Now: each retry checks repaired work and keeps earlier feedback for reference.
+• *Retrying a rejected check* — Was: retrying could replay the same rejection. → Now: retry checks the repaired change while keeping prior feedback.
 
-• *Independent starts* — Was: one prerequisite could block unrelated work. → Now: independent work starts while final ordering stays protected.
+• *Starting independent work* — Was: an open prerequisite could block unrelated work from starting. → Now: unrelated work can start while the prerequisite remains open.
 
-• *Current reminders* — Was: stale updates or activity could trigger an old reminder. → Now: current changes and activity reset the reminder clock.
+• *Fresh reminders* — Was: a recent action could still trigger an old reminder. → Now: recent activity resets the reminder quiet period.
 
-• *Safer workspaces* — Was: maintenance could disturb a workspace or miss landed work. → Now: active work is protected and cleanup checks relevant locations.
+• *Protected workspace* — Was: maintenance could pull the workspace out from under active work. → Now: active work keeps its workspace intact.
 
-• *Visible build progress* — Was: a knowledge update could fail without naming its source. → Now: progress and next steps identify what needs attention.
+• *Clear build failures* — Was: a knowledge build could fail without naming the file. → Now: it identifies the file that failed and explains next steps.
 
-• *Fresh build inputs* — Was: a workspace could start from outdated build files. → Now: old files are rejected or called out before misleading a build.
+• *Workspace-preserving restart* — Was: restarting a near-limit session could lose its workspace. → Now: an idle session restarts in place with its workspace and setup.
 
-• *In-place recovery* — Was: a nearly full coding session needed a restart. → Now: an idle session refreshes without losing its workspace or setup.
-
-• *Session-local activity* — Was: activity from one coding session could be attributed to another. → Now: each session keeps its own activity and summary.
-
-• *Consistent shortcuts* — Was: shortcuts could be accepted inconsistently. → Now: documented shortcuts resolve to the same actions everywhere.
+• *Shortcut names* — Was: shortcut names could behave differently from their documentation. → Now: documented names resolve consistently.
 ```
 
 ## Dev top-level

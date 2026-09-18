@@ -50,6 +50,9 @@ new_fixture() {
     mkdir -p "$repo/scripts" "$repo/hub-web/scripts" "$repo/cas-cli/src" "$repo/cas-cli/tests" "$repo/crates" \
         "$repo/.context/zig"
     cp "$gate" "$repo/scripts/release-gate.sh"
+    cp "$script_dir/release-integrate.py" "$repo/scripts/release-integrate.py"
+    cp "$script_dir/release-train.sh" "$repo/scripts/release-train.sh"
+    cp "$script_dir/test-release-integration.py" "$repo/scripts/test-release-integration.py"
     cp "$script_dir/run-verified-tests.sh" "$repo/scripts/run-verified-tests.sh"
 cat >"$repo/.gitignore" <<'EOF'
 .context/zig/
@@ -259,7 +262,7 @@ assert_named_failure() {
 
 assert_all_pass() {
     local output="$1"
-    for name in scratch-base epic-worktree-fresh epic-worktree-zig failure-log ancestor-proxy-config \
+    for name in scratch-base epic-worktree-fresh epic-worktree-zig failure-log ancestor-proxy-config assemble-stale-base \
         version-literals fixture-paths workspace-tests macos-check nextest doctests archive-mode snapshot-portability \
         builtin-projections changelog-and-versions release-script procedure-guardrails working-tree \
         hub-web-dist-drift hub-web-visual-qa; do
@@ -287,6 +290,17 @@ repo="$(new_fixture version-literal)"
 printf 'const VERSION: &str = "9.99.7-rc.1";\n' >"$repo/cas-cli/src/version.rs"
 output="$(run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 2>&1 || true)"
 assert_named_failure version-literals "$output"
+
+# The learned assemble-stale-base diagnosis must remain an executable,
+# independently selectable row, not only a parsed failure-log marker.
+repo="$(new_fixture assemble-stale-base-row)"
+output="$(run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 --only assemble-stale-base 2>&1 || true)"
+if grep -qF 'PASS assemble-stale-base' <<<"$output" \
+    && grep -qF 'RELEASE GATE PASSED: selected checks are green' <<<"$output"; then
+    ok 'assemble-stale-base runs the identity-safe stale-base fixture as an executable row'
+else
+    bad "assemble-stale-base row did not pass its fixture (output: $output)"
+fi
 
 # A gitignored build cache that embeds the checkout path (for example a worktree
 # named after the release) must not trip version-literals in a git checkout.
@@ -1018,7 +1032,7 @@ repo="$(new_fixture row-cache)"
 export CAS_RELEASE_GATE_CACHE_DIR="$tmp/pass-cache"
 export CAS_RELEASE_GATE_LOG_DIR="$tmp/row-logs"
 run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 >"$tmp/cache-first.log" 2>&1 || { cat "$tmp/cache-first.log"; exit 1; }
-if [[ "$(wc -l <"$CAS_RELEASE_GATE_LOG_DIR/timing.tsv")" == 21 ]] \
+if [[ "$(wc -l <"$CAS_RELEASE_GATE_LOG_DIR/timing.tsv")" == 22 ]] \
     && [[ -s "$CAS_RELEASE_GATE_LOG_DIR/archive-mode.log" ]] \
     && grep -qE '^  timing: wall=[0-9]+\.[0-9]+s user=' "$tmp/cache-first.log"; then
     ok 'every row retains wall/CPU timing and successful raw logs'

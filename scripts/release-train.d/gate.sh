@@ -3,6 +3,7 @@
 cut_stage_gate() {
     local gate_done="$run_dir/gate.done" poll="${CAS_RELEASE_TRAIN_CUT_POLL_SECS:-1}"
     local tries="${CAS_RELEASE_TRAIN_CUT_GATE_TRIES:-3600}" pid i rc
+    local dead_checks=0 dead_grace_checks="${CAS_RELEASE_TRAIN_CUT_EXIT_GRACE_CHECKS:-20}"
     CAS_RELEASE_TRAIN_INVOCATION_KIND=internal \
     CAS_RELEASE_TRAIN_STAGE=gate CAS_RELEASE_TRAIN_RUN_DIR="$run_dir" \
     CAS_RELEASE_TRAIN_BLOCKER_STAGES="${CAS_RELEASE_TRAIN_BLOCKER_STAGES:-none}" \
@@ -18,6 +19,14 @@ cut_stage_gate() {
         fi
         pid="$(cat "$run_dir/gate.pid" 2>/dev/null || true)"
         if [[ -n "$pid" ]] && ! kill -0 "$pid" 2>/dev/null; then
+            # The detached wrapper writes gate.done after its child exits. A
+            # fast fixture or a short gate can make kill -0 observe the child
+            # boundary before that durable write reaches the filesystem.
+            if ((dead_checks < dead_grace_checks)); then
+                dead_checks=$((dead_checks + 1))
+                sleep "$poll"
+                continue
+            fi
             printf 'gate exited without a receipt; inspect %s/gate.log\n' "$run_dir" >&2
             return 1
         fi

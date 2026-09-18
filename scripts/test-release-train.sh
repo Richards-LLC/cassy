@@ -1556,12 +1556,16 @@ combined_expected='preflight assemble prep ledger gate pr-body pipeline publish 
 combined_actual="$(printf '%s\n' "$combined_clean_out" | sed -n 's/^stage \([^:]*\): start$/\1/p' | paste -sd' ' -)"
 if [[ "$combined_clean_out" == *'cut complete'* ]] \
     && [[ "$combined_actual" == "$combined_expected" ]] \
-    && [[ -e "$combined_clean_wt/.cas/healed" ]] \
     && [[ -s "$combined_clean_dir/receipts.pr" ]] \
     && grep -q '^PR_NUMBER=997$' "$combined_clean_dir/receipts.pr"; then
     ok '--cut runs the assembled stage bodies in canonical order and records receipts PR'
 else
     bad "combined clean cut did not complete in order: stages=$combined_actual output=$combined_clean_out"
+fi
+if [[ -e "$combined_clean_wt/.cas/healed" ]]; then
+    ok '--cut assemble invokes stale-base recovery before the stage receipt'
+else
+    bad 'combined --cut assemble did not invoke stale-base recovery'
 fi
 combined_clean_status="$($train "$combined_clean_version" "$combined_clean_wt" --status 2>&1)"
 if [[ "$combined_clean_status" == *'INTERVENTIONS=0'* ]]; then

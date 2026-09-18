@@ -19,6 +19,7 @@
 #     and a sibling run survives.
 #
 # Usage:
+#   scripts/release-train.sh <version> <release-worktree> --cut [--resume]
 #   scripts/release-train.sh <version> <release-worktree> --assemble
 #   scripts/release-train.sh <version> <epic-worktree> --check-lane <branch> [proof-receipt]
 #   scripts/release-train.sh <version> <epic-worktree> --gate [--reuse | --only <row,row>]
@@ -49,7 +50,7 @@
 set -euo pipefail
 
 usage() {
-    printf 'Usage: %s <version> <epic-worktree> [--assemble|--check-lane <branch>|--gate [--reuse | --only <row,row>]|--pipeline|--publish [sha]|--report|--status|--stop|--print-run-dir]\n' "$0"
+    printf 'Usage: %s <version> <epic-worktree> [--cut [--resume]|--assemble|--check-lane <branch>|--gate [--reuse | --only <row,row>]|--pipeline|--publish [sha]|--report|--status|--stop|--print-run-dir]\n' "$0"
 }
 
 version="${1:-}"
@@ -72,6 +73,15 @@ artifacts_root="${CAS_RELEASE_ARTIFACTS_ROOT:-$HOME/.cas/artifacts/release}"
 # The identity of a run: which version, from which worktree. Two supervisors
 # cutting the same version from different epics get different directories.
 run_dir="$artifacts_root/v$version-$worktree_name"
+stage_dir="$script_dir/release-train.d"
+if [[ -d "$stage_dir" ]]; then
+    shopt -s nullglob
+    for stage_file in "$stage_dir"/*.sh; do
+        # shellcheck disable=SC1090
+        . "$stage_file"
+    done
+    shopt -u nullglob
+fi
 pid_file="$run_dir/gate.pid"
 readonly -a gate_rows=(
     scratch-base epic-worktree-fresh epic-worktree-zig failure-log ancestor-proxy-config
@@ -813,6 +823,17 @@ run_report() {
 }
 
 case "$action" in
+    --cut)
+        resume_cut=false
+        if [[ "${4:-}" == --resume && "$#" -eq 4 ]]; then
+            resume_cut=true
+        elif [[ "$#" -ne 3 ]]; then
+            usage >&2
+            exit 2
+        fi
+        cut_run "$resume_cut"
+        exit $?
+        ;;
     --assemble)
         python3 "$script_dir/release-integrate.py" "$worktree"
         exit $?

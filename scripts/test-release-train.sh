@@ -727,6 +727,42 @@ else
     bad "--announce posted or accepted invalid mrkdwn: $bad_out"
 fi
 
+# The validator accepts every rubric deploy target for both audiences, with an
+# optional runtime version suffix, and rejects labels outside that contract.
+label_draft="$tmp/announce-labels.md"
+write_label_draft() {
+    local label="$1" dev_suffix="${2:-}"
+    {
+        printf '%s\n' "$fence"'text'
+        printf '*%s — User — Cassy*\n' "$label"
+        printf '%s\n' 'Was: a release needed separate steps. → Now: one command owns the train.'
+        printf '%s\n' "$fence" "$fence"'text'
+        printf '%s\n' '• *One command* — Was: steps were separate. → Now: the train owns them.'
+        printf '%s\n' "$fence" "$fence"'text'
+        printf '*%s — Dev — Cassy%s*\n' "$label" "$dev_suffix"
+        printf '%s\n' 'Was: release state was implicit. → Now: every stage writes evidence.'
+        printf '%s\n' "$fence" "$fence"'text'
+        printf '%s\n' '• *Evidence* — Was: state was implicit. → Now: receipts make it explicit.'
+        printf '%s\n' "$fence"
+    } >"$label_draft"
+}
+for accepted_label in 'Live on production' 'Staging' 'Source on main'; do
+    write_label_draft "$accepted_label" ' v3.25.8'
+    if python3 "$repo_root/scripts/release-train-announce.py" --validate \
+        "$label_draft" "$tmp/announce-label-${accepted_label// /-}" >/dev/null 2>&1; then
+        ok "announce validator accepts rubric label: $accepted_label"
+    else
+        bad "announce validator rejected rubric label: $accepted_label"
+    fi
+done
+write_label_draft 'Preview' ' v3.25.8'
+if python3 "$repo_root/scripts/release-train-announce.py" --validate \
+    "$label_draft" "$tmp/announce-label-rejected" >/dev/null 2>&1; then
+    bad 'announce validator accepted an unknown deploy label'
+else
+    ok 'announce validator rejects an unknown deploy label'
+fi
+
 stage_origin="$tmp/stage-origin.git"
 git init -q --bare "$stage_origin"
 git -C "$stage_wt" remote add origin "$stage_origin"

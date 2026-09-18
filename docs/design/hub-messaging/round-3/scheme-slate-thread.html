@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en" data-scheme="slate">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pebble — slate thread</title>
+<link rel="stylesheet" href="../../../../hub-web/src/tokens.css">
+<link rel="stylesheet" href="pebble.css">
+<link rel="stylesheet" href="schemes.css">
+</head>
+<body>
+  <div class="app show-thread m-atlas">
+    <aside class="rail">
+      <h1>Conversations</h1>
+      <a class="row m-atlas on" href="#">
+        <span class="mono">A</span>
+        <span class="who"><b>Atlas</b><span class="sep"></span><span class="proj">cas-src</span></span>
+        <span class="when hot">09:58</span>
+        <span class="prev bold">Fix the warning in-train, or ship allowlisted?</span>
+        <span class="flag"></span>
+      </a>
+      <a class="row m-studio" href="#">
+        <span class="mono">S</span>
+        <span class="who"><b>Studio Mac</b><span class="sep"></span><span class="proj">gabber-studio</span></span>
+        <span class="pipcount">2</span>
+        <span class="prev bold">Pass two is green — every pack in one place.</span>
+        
+      </a>
+      <a class="row m-atlas" href="#">
+        <span class="mono">A</span>
+        <span class="who"><b>Atlas</b><span class="sep"></span><span class="proj">petra-stella-cloud</span></span>
+        <span class="when">Tue</span>
+        <span class="prev">Preview is up for the alias merge.</span>
+        
+      </a>
+      <a class="row m-studio" href="#">
+        <span class="mono">S</span>
+        <span class="who"><b>Studio Mac</b><span class="sep"></span><span class="proj">openclaw</span></span>
+        <span class="when">Tue</span>
+        <span class="prev">Rebased and pushed; nothing waiting.</span>
+        
+      </a>
+      <a class="row m-bench" href="#">
+        <span class="mono">B</span>
+        <span class="who"><b>Bench</b><span class="sep"></span><span class="proj">mecha-cassy</span></span>
+        <span class="when">Mon</span>
+        <span class="prev">Posted both threads to the channel.</span>
+        
+      </a>
+      <a class="row m-bench" href="#">
+        <span class="mono">B</span>
+        <span class="who"><b>Bench</b><span class="sep"></span><span class="proj">cas-hub-static</span></span>
+        <span class="when">Mon</span>
+        <span class="prev">Nothing waiting on you.</span>
+        
+      </a>
+    </aside>
+    <main class="thread">
+      <header class="thead">
+        <span class="mono">A</span>
+        <div class="id"><b>Atlas</b><span>cas-src</span></div>
+      </header>
+      <div class="msgs">
+        <p class="day">Today</p>
+        <div class="turn you">
+          <div class="bub"><p>Merge the two green lanes, then cut 3.26.0 once the gate is green.</p></div>
+          <time>09:41</time>
+        </div>
+        <div class="turn">
+          <div class="bub"><p>On it. Both lanes are green on their own CI — the gate starts after the second merge lands.</p></div>
+          <div class="bub receipt"><svg class="tick" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M2.6 8.6l3.3 3.3L13.4 4.4"/></svg><p>Both lanes are on the epic branch. The release gate is running.</p></div>
+          <time>09:47</time>
+        </div>
+        <div class="coalesce">3 more updates · gate 11 of 14 targets green</div>
+        <div class="turn">
+          <div class="sheet">
+            <span class="plate">PDF</span>
+            <span>
+              <span class="fname">3.26.0 release brief.pdf</span>
+              <span class="fsub">1.4 MB<span class="verified"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 1.6l5 2v4.1c0 3-2 5.6-5 6.7-3-1.1-5-3.7-5-6.7V3.6z"/><path d="M5.7 7.9L7.4 9.6l3.1-3.4"/></svg>hash verified</span></span>
+            </span>
+          </div>
+          <time>09:52</time>
+        </div>
+        <div class="turn you">
+          <div class="bub"><p>Did the tokens drift test move?</p></div>
+          <time>09:56</time>
+        </div>
+        <div class="turn">
+          <div class="bub"><p>No — unchanged since 3.25.3. The gate's only new failure is one lint warning.</p></div>
+        </div>
+        <div class="turn">
+          <div class="obj t-a blk">
+            <div class="obj-body"><p>The release gate went red. The train is held; nothing was tagged or pushed to main.</p></div>
+            <div class="obj-foot"><code class="window">attention.rs:212 · needless_borrow</code></div>
+          </div>
+        </div>
+        <div class="turn">
+          <div class="obj t-a">
+            <div class="obj-body"><p>Gate run 33512 failed on that one warning. Fix it in-train — one worker, about ten minutes — or ship 3.26.0 with it allowlisted?</p></div>
+            <div class="obj-foot"><span class="chip">Fix in-train</span><span class="chip">Ship with allowlist</span></div>
+          </div>
+          <time>09:58</time>
+        </div>
+        <div class="turn">
+          <div class="working"><span class="dots"><i></i><i></i><i></i></span>working</div>
+        </div>
+      </div>
+      <div class="composer">
+        <div class="clip"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M14.8 9.1l-5 5a3.2 3.2 0 01-4.6-4.6l6-6a2.1 2.1 0 013 3l-6 6a1 1 0 01-1.4-1.4l5.3-5.3"/></svg></div>
+        <div class="field">Message Atlas</div>
+        <div class="send"><svg viewBox="0 0 20 20" fill="currentColor"><path d="M2.4 9.1l14.3-6.4c.7-.3 1.4.4 1.1 1.1l-6.4 14.3c-.3.7-1.4.6-1.5-.2l-.8-5.3-5.3-.8c-.8-.1-.9-1.2-.2-1.5z"/></svg></div>
+      </div>
+    </main>
+  </div>
+</body>
+</html>

@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Option B · Desk — the conversation as a queue of things that need you</title>
+<link rel="stylesheet" href="../../../../hub-web/src/tokens.css">
+<link rel="stylesheet" href="shared.css">
+<style>
+  .shell { display: grid; grid-template-columns: 360px minmax(0,1fr) 260px; min-height: 100vh; }
+  .queue { background: var(--bg-panel); border-right: var(--line-width) solid var(--line-subtle); padding: var(--space-4) var(--space-4) var(--space-6); }
+  .queue h1 { font: var(--weight-regular) 34px/38px var(--font-display); margin: var(--space-4) 0 var(--space-3); }
+  .qhead { display: flex; justify-content: space-between; align-items: baseline; margin: var(--space-6) 0 var(--space-2); }
+  .qhead .kind { margin: 0; }
+  .item { display: grid; grid-template-columns: 20px minmax(0,1fr) auto; gap: var(--space-2) var(--space-3); padding: var(--space-3) var(--space-2); border-top: var(--line-width) solid var(--line-subtle); min-height: 44px; align-items: start; }
+  .item .g { font-family: var(--font-mono); font-size: var(--fs-md); line-height: 22px; }
+  .item .g.ask { color: var(--color-verdict); background: none; border: 0; padding: 0; border-radius: 0; }
+  .item .g.crit { color: var(--state-crit); } .item .g.you { color: var(--color-action); background: none; border: 0; padding: 0; margin: 0; }
+  .item .g.done { color: var(--state-ok); }
+  .item .line { font-size: var(--fs-md); line-height: 22px; overflow-wrap: anywhere; }
+  .item .from { display: flex; gap: var(--space-2); align-items: center; flex-wrap: wrap; }
+  .item .badge { font-size: var(--fs-meta); padding: 2px var(--space-2); }
+  .item .age { font: var(--weight-regular) var(--fs-meta)/22px var(--font-mono); color: var(--text-mid); white-space: nowrap; }
+  .item.selected { background: var(--surface-hero); border-left: var(--rule-hero) solid var(--color-verdict); margin-left: calc(-1 * var(--space-4)); padding-left: calc(var(--space-4) + var(--space-2) - var(--rule-hero)); border-radius: 0 var(--radius-card) var(--radius-card) 0; }
+  .item.selected.receipt-sel { background: var(--bg-active); border-left-color: var(--line-strong); }
+  .done-list { display: none; } body:has(#state-item:target) .done-list { display: block; }
+  body:has(#state-item:target) .item.ask-sel { background: transparent; border-left: 0; margin-left: 0; padding-left: var(--space-2); }
+  main { display: flex; flex-direction: column; min-width: 0; }
+  .heading { padding: var(--space-4) var(--space-6); border-bottom: var(--line-width) solid var(--line-subtle); background: var(--bg-panel); display: flex; justify-content: space-between; align-items: center; gap: var(--space-3); flex-wrap: wrap; }
+  .reading { padding: var(--space-6); display: grid; gap: var(--space-6); max-width: 78ch; }
+  .reading h2 { font: var(--weight-semibold) var(--fs-xs)/16px var(--font-mono); letter-spacing: var(--tracking-label); text-transform: uppercase; color: var(--text-mid); margin: 0 0 var(--space-2); }
+  .why { display: grid; gap: var(--space-4); }
+  .composer { margin-top: auto; }
+  .rail { border-left: var(--line-width) solid var(--line-subtle); padding: var(--space-6) var(--space-4); font-size: var(--fs-base); }
+  .rail h2 { font: var(--weight-medium) var(--fs-base)/var(--line-ui) var(--font-ui); margin: var(--space-6) 0 var(--space-2); }
+  .rail .brand { font-size: var(--fs-base); } .rail .brand svg { width: 24px; height: 24px; }
+  .rail .working { grid-template-columns: auto minmax(0,1fr); }
+  .page-b { display: none; }
+  body:has(#state-item:target) .page-a { display: none; } body:has(#state-item:target) .page-b { display: grid; }
+  .pair { border-left: var(--state-rule-width) solid var(--line-strong); padding-left: var(--space-4); display: grid; gap: var(--space-3); }
+  .phone-only { display: none; }
+  .host { color: var(--text-mid); }
+  @media (max-width: 53rem) {
+    .shell { display: block; }
+    .rail { display: none; }
+    .queue { border: 0; padding: var(--space-3) var(--space-4) var(--space-6); }
+    .queue h1 { font-size: 28px; line-height: 32px; margin: var(--space-3) 0; }
+    main { display: none; }
+    body:has(#state-item:target) .queue { display: none; }
+    body:has(#state-item:target) main { display: flex; min-height: 100vh; }
+    body:has(#state-item:target) .page-a { display: grid; } body:has(#state-item:target) .page-b { display: none; }
+    .phone-only { display: flex; }
+    .desk-brand, .host { display: none; }
+    .heading { display: grid; grid-template-columns: auto minmax(0,1fr) auto; }
+    .reading { padding: var(--space-4); }
+    .heading { padding: var(--space-3) var(--space-4); }
+    body:has(#state-item:target) .item.ask-sel { background: var(--surface-hero); border-left: var(--rule-hero) solid var(--color-verdict); margin-left: calc(-1 * var(--space-4)); padding-left: calc(var(--space-4) + var(--space-2) - var(--rule-hero)); }
+    .done-list { display: block; }
+  }
+</style>
+</head>
+<body>
+<span id="state-item" hidden></span>
+<div class="shell" id="shell">
+  <aside class="queue" aria-label="Needs you">
+    <div class="phone-only" style="justify-content:space-between;align-items:center"><div class="brand"><svg viewBox="0 0 32 32" aria-hidden="true"><path d="M16 4a12 12 0 1 0 0 24 12 12 0 0 0 0-24zm0 4a8 8 0 1 1 0 16 8 8 0 0 1 0-16z" fill="currentColor"/></svg>Cassy Cloud</div><button type="button">Machines</button></div>
+    <div class="brand desk-brand"><svg viewBox="0 0 32 32" aria-hidden="true"><path d="M16 4a12 12 0 1 0 0 24 12 12 0 0 0 0-24zm0 4a8 8 0 1 1 0 16 8 8 0 0 1 0-16z" fill="currentColor"/></svg>Cassy Cloud</div>
+    <h1>Needs you</h1>
+    <p class="mid" style="margin:0 0 var(--space-2)">3 items across 2 machines · oldest 27 min</p>
+    <div class="item selected ask-sel"><span class="g ask" aria-hidden="true">●</span><div><div class="line">Fix the warning in-train or ship 3.26.0 with it allowlisted?</div><div class="from"><span class="badge">cas-src</span><span class="mono mid">patient-pelican-9</span><span class="kind" style="margin:0;color:var(--color-verdict)">Ask</span></div></div><span class="age">4 min</span></div>
+    <div class="item"><span class="g crit" aria-hidden="true">■</span><div><div class="line">Gate run 33512 failed: <code>needless_borrow</code> at <code>attention.rs:212</code>; train held.</div><div class="from"><span class="badge">cas-src</span><span class="mono mid">patient-pelican-9</span><span class="kind" style="margin:0;color:var(--state-crit)">Blocker</span></div></div><span class="age">4 min</span></div>
+    <div class="item"><span class="g you" aria-hidden="true">↩</span><div><div class="line">Is the export flake fixed?</div><div class="from"><span class="badge">gabber-studio</span><span class="mono mid">calm-otter-4</span><span class="kind" style="margin:0">Your question · awaiting</span></div></div><span class="age">27 min</span></div>
+    <div class="qhead"><span class="kind">Done today · 3</span><button type="button">Show</button></div>
+    <div class="done-list">
+      <div class="item selected receipt-sel"><span class="g done" aria-hidden="true">✓</span><div><div class="line">Both lanes are on the epic branch; the release gate is running.</div><div class="from"><span class="badge">cas-src</span><span class="kind" style="margin:0">Receipt</span></div></div><span class="age">09:47</span></div>
+      <div class="item"><span class="g done" aria-hidden="true">✓</span><div><div class="line">Did the tokens drift test move? → No, unchanged since 3.25.3.</div><div class="from"><span class="badge">cas-src</span><span class="kind" style="margin:0">Your question · answered</span></div></div><span class="age">09:57</span></div>
+      <div class="item"><span class="g done" aria-hidden="true">✓</span><div><div class="line">Release notes posted to #gabber-releases.</div><div class="from"><span class="badge">gabber-studio</span><span class="kind" style="margin:0">Receipt</span></div></div><span class="age">09:31</span></div>
+    </div>
+  </aside>
+  <main>
+    <header class="heading"><button type="button" class="phone-only">‹ Needs you</button><div class="mono"><span class="badge">cas-src</span> patient-pelican-9 <span class="host">· Atlas · Linux</span></div><button type="button">Pane ▸</button></header>
+    <section class="reading page-a" aria-label="Selected item">
+      <article class="turn ask"><div class="kind"><span>Waiting on you</span><span>09:58 · 4 min</span></div>
+        <p class="q">Fix the warning in-train (one worker, about ten minutes) or ship 3.26.0 with it allowlisted?</p>
+        <div class="quick"><button type="button">Fix in-train</button><button type="button">Ship with allowlist</button></div>
+      </article>
+      <div class="why"><h2>Why · attached by the supervisor</h2>
+        <article class="turn blocker"><div class="kind"><span>■ Blocker</span><span>09:58</span></div><p>Gate run 33512 failed: <code>needless_borrow</code> at <code>cas-cli/src/hub/attention.rs:212</code>. The train is held; nothing was tagged or pushed to main.</p></article>
+        <article class="turn receipt stack"><div class="kind"><span>Receipt</span><span>09:47</span></div><p class="verdict">Both lanes are on the epic branch; the release gate is running.</p>
+          <table class="ledger"><caption>Merge receipt · two lanes into epic/one-command-release</caption><thead><tr><th scope="col">Lane</th><th scope="col">PR</th><th scope="col">Tip</th><th scope="col">Landed</th></tr></thead>
+          <tbody><tr><td data-k="lane">calm-stork-91</td><td data-k="pr">#907</td><td data-k="tip">c0e2c7b5</td><td data-k="landed" class="num">09:45</td></tr><tr><td data-k="lane">gentle-hound-12</td><td data-k="pr">#908</td><td data-k="tip">23c65d63</td><td data-k="landed" class="num">09:46</td></tr><tr class="decisive"><td data-k="lane">release gate</td><td data-k="pr">run 33512</td><td data-k="tip">f9f8e60f</td><td data-k="landed" class="num">running</td></tr></tbody></table>
+          <div class="source">receipt · 09:47:12 · pane line 1 482 ▸ · evidence: worker status, 5 rows ▸</div></article>
+      </div>
+      <div><h2>Since then</h2><div class="turn status"><span class="disc">▸ 3 statuses</span><span>latest 09:55 · gate: tests running, 11 of 14 targets green</span></div></div>
+      <div class="working"><span class="dot" aria-hidden="true"></span><span>Working · holding the train, watching run 33512 · 2 min ago</span><a href="#pane">Pane ▸</a></div>
+    </section>
+    <section class="reading page-b" aria-label="Selected receipt">
+      <article class="turn receipt stack"><div class="kind"><span class="who">patient-pelican-9</span><span>Receipt</span><span>09:47</span></div><p class="verdict">Both lanes are on the epic branch; the release gate is running.</p>
+        <table class="ledger"><caption>Merge receipt · two lanes into epic/one-command-release</caption><thead><tr><th scope="col">Lane</th><th scope="col">PR</th><th scope="col">Tip</th><th scope="col">Landed</th></tr></thead>
+        <tbody><tr><td data-k="lane">calm-stork-91</td><td data-k="pr">#907</td><td data-k="tip">c0e2c7b5</td><td data-k="landed" class="num">09:45</td></tr><tr><td data-k="lane">gentle-hound-12</td><td data-k="pr">#908</td><td data-k="tip">23c65d63</td><td data-k="landed" class="num">09:46</td></tr><tr class="decisive"><td data-k="lane">release gate</td><td data-k="pr">run 33512</td><td data-k="tip">f9f8e60f</td><td data-k="landed" class="num">running</td></tr></tbody></table>
+        <div class="source">receipt · coordination message 09:47:12 · pane line 1 482 ▸</div></article>
+      <div class="pair"><h2>Led here</h2><article class="turn you" style="margin-left:0"><div class="kind"><span class="who">You</span><span>09:41 · delivered</span></div><p>Merge the two green lanes, then cut 3.26.0 once the gate is green.</p></article><p class="meta">directive 09:41 → receipt 09:47 · 6 min</p></div>
+      <article class="turn evidence stack"><div class="kind"><span>Evidence</span><span>09:47</span></div><p class="verdict">Worker status at 09:47 — five lanes, two green, one held.</p>
+        <div class="scroll"><table class="ledger"><caption>Worker status · 5 rows</caption><thead><tr><th scope="col">Worker</th><th scope="col">Task</th><th scope="col">Phase</th><th scope="col">Tip</th><th scope="col">CI</th></tr></thead>
+        <tbody><tr><td data-k="worker">calm-stork-91</td><td data-k="task">cas-c3c5 design study</td><td data-k="phase">awaiting merge</td><td data-k="tip">c0e2c7b5</td><td data-k="ci"><span class="ok">● green</span></td></tr><tr><td data-k="worker">gentle-hound-12</td><td data-k="task">cas-d1d0 release notes</td><td data-k="phase">merged</td><td data-k="tip">23c65d63</td><td data-k="ci"><span class="ok">● green</span></td></tr><tr class="decisive"><td data-k="worker">bright-otter-3</td><td data-k="task">cas-b29f gate</td><td data-k="phase">held</td><td data-k="tip">f9f8e60f</td><td data-k="ci"><span class="crit">■ failed</span></td></tr></tbody></table></div>
+        <div class="source">worker_status · 09:47:20 · open full width ▸</div></article>
+    </section>
+    <form class="composer" onsubmit="return false">
+      <div class="replying">Answering · fix in-train or ship with allowlist?</div>
+      <textarea aria-label="Your answer" placeholder="Answer patient-pelican-9…"></textarea>
+      <div class="actions"><span class="btn primary">Send answer</span></div>
+    </form>
+  </main>
+  <aside class="rail" aria-label="This session">
+    <div class="brand"><svg viewBox="0 0 32 32" aria-hidden="true"><path d="M16 4a12 12 0 1 0 0 24 12 12 0 0 0 0-24zm0 4a8 8 0 1 1 0 16 8 8 0 0 1 0-16z" fill="currentColor"/></svg>Cassy Cloud</div>
+    <h2>This session</h2><span class="badge">cas-src</span><div class="mono" style="margin-top:8px">patient-pelican-9</div><div class="mid">Atlas · Linux · 3.26.0 train</div>
+    <h2>Now</h2><div class="working"><span class="dot" aria-hidden="true"></span><span>Working · holding the train · 2 min ago</span></div>
+    <h2>Counts</h2><div class="warnline">2 need you</div><div class="mid">3 done today · 3 statuses</div>
+    <h2>Pane</h2><div class="mid">Live · 1 512 lines · <a href="#pane" style="color:var(--color-action)">open</a></div>
+  </aside>
+</div>
+</body>
+</html>

@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hub messaging — round 2</title>
+<style>
+:root { color-scheme: light dark; --bg: #F7F4EE; --fg: #1B1D24; --mid: #5A5F6E; --edge: #DAD3C7; }
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #12141A; --fg: #E9E6E0; --mid: #A3A7B4; --edge: #2B3040; }
+}
+* { box-sizing: border-box; }
+body { margin: 0; padding: 40px 32px 64px; background: var(--bg); color: var(--fg);
+       font: 400 15px/1.5 Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+h1 { margin: 0 0 32px; font-size: 24px; font-weight: 600; letter-spacing: -0.02em; }
+h2 { margin: 36px 0 14px; font-size: 15px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: var(--mid); }
+.grid { display: grid; gap: 22px; grid-template-columns: repeat(auto-fill, minmax(420px, 1fr)); }
+.grid.small { grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 16px; }
+figure { margin: 0; }
+img { display: block; width: 100%; height: auto; border: 1px solid var(--edge); border-radius: 8px; background: var(--bg); }
+.grid.small img { height: 190px; object-fit: contain; }
+figcaption { margin-top: 8px; font-size: 13px; color: var(--mid); }
+@media (max-width: 560px) {
+  body { padding: 24px 16px 48px; }
+  .grid, .grid.small { grid-template-columns: 1fr; }
+}
+</style>
+</head>
+<body>
+<h1>Hub messaging — round 2</h1>
+
+<h2>Inspiration · generated, not a design</h2>
+<div class="grid small">
+  <figure><img src="inspiration/01-desktop-light.jpg" alt=""><figcaption>Generated · two-pane desktop, light</figcaption></figure>
+  <figure><img src="inspiration/02-desktop-dark.jpg" alt=""><figcaption>Generated · two-pane desktop, dark</figcaption></figure>
+  <figure><img src="inspiration/03-phone-light.jpg" alt=""><figcaption>Generated · phone thread, light</figcaption></figure>
+  <figure><img src="inspiration/04-phone-dark.jpg" alt=""><figcaption>Generated · phone thread, dark</figcaption></figure>
+  <figure><img src="inspiration/05-ask-bubble.jpg" alt=""><figcaption>Generated · ask bubble beside a calm bubble</figcaption></figure>
+  <figure><img src="inspiration/06-report-card.jpg" alt=""><figcaption>Generated · report card attachment</figcaption></figure>
+  <figure><img src="inspiration/07-conversation-list.jpg" alt=""><figcaption>Generated · conversation list rows</figcaption></figure>
+  <figure><img src="inspiration/08-list-phone.jpg" alt=""><figcaption>Generated · phone conversation list</figcaption></figure>
+  <figure><img src="inspiration/09-receipt-working.jpg" alt=""><figcaption>Generated · receipt bubble and working dots</figcaption></figure>
+</div>
+
+<h2>Variant 1 · Pebble</h2>
+<div class="grid">
+  <figure><img src="png/v1-pebble-desktop-light.png" alt=""><figcaption>Pebble · desktop 1280 · light</figcaption></figure>
+  <figure><img src="png/v1-pebble-desktop-dark.png" alt=""><figcaption>Pebble · desktop 1280 · dark</figcaption></figure>
+  <figure><img src="png/v1-pebble-mobile-light.png" alt=""><figcaption>Pebble · mobile 390 · light</figcaption></figure>
+  <figure><img src="png/v1-pebble-mobile-dark.png" alt=""><figcaption>Pebble · mobile 390 · dark</figcaption></figure>
+</div>
+
+<h2>Variant 2 · Stack</h2>
+<div class="grid">
+  <figure><img src="png/v2-stack-desktop-light.png" alt=""><figcaption>Stack · desktop 1280 · light</figcaption></figure>
+  <figure><img src="png/v2-stack-desktop-dark.png" alt=""><figcaption>Stack · desktop 1280 · dark</figcaption></figure>
+  <figure><img src="png/v2-stack-mobile-light.png" alt=""><figcaption>Stack · mobile 390 · light</figcaption></figure>
+  <figure><img src="png/v2-stack-mobile-dark.png" alt=""><figcaption>Stack · mobile 390 · dark</figcaption></figure>
+</div>
+
+<h2>Variant 3 · Capsule</h2>
+<div class="grid">
+  <figure><img src="png/v3-capsule-desktop-light.png" alt=""><figcaption>Capsule · desktop 1280 · light</figcaption></figure>
+  <figure><img src="png/v3-capsule-desktop-dark.png" alt=""><figcaption>Capsule · desktop 1280 · dark</figcaption></figure>
+  <figure><img src="png/v3-capsule-mobile-light.png" alt=""><figcaption>Capsule · mobile 390 · light</figcaption></figure>
+  <figure><img src="png/v3-capsule-mobile-dark.png" alt=""><figcaption>Capsule · mobile 390 · dark</figcaption></figure>
+</div>
+
+</body>
+</html>

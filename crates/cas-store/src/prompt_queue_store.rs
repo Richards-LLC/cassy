@@ -242,6 +242,12 @@ pub struct QueuedPrompt {
     /// the principal that wrote the row.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recipient_device_id: Option<String>,
+    /// Typed supervisor turn kind for Commander replies (hub protocol v2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// URL-free artifact references carried by a Commander reply.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<cas_types::ArtifactRef>,
 }
 
 /// Who the hub says sent a Commander message (cas-e8df, EPIC cas-fbc8).
@@ -487,6 +493,14 @@ ALTER TABLE prompt_queue ADD COLUMN operator_verified INTEGER;
 /// recipient routing, not sender provenance, so it stays in its own column.
 const PROMPT_QUEUE_RECIPIENT_DEVICE_MIGRATION: &str = r#"
 ALTER TABLE prompt_queue ADD COLUMN recipient_device_id TEXT;
+"#;
+/// Typed Commander turn kind (hub protocol v2).
+const PROMPT_QUEUE_KIND_MIGRATION: &str = r#"
+ALTER TABLE prompt_queue ADD COLUMN kind TEXT;
+"#;
+/// URL-free artifact references carried by a Commander turn.
+const PROMPT_QUEUE_ATTACHMENTS_MIGRATION: &str = r#"
+ALTER TABLE prompt_queue ADD COLUMN attachments TEXT;
 "#;
 
 /// Preserve the device identity alongside recipient-side transport receipts.
@@ -1921,6 +1935,15 @@ pub trait PromptQueueStore: Send + Sync {
     /// reply. The write is only accepted for an existing `operator` row.
     fn stamp_recipient_device(&self, prompt_id: i64, device_id: &str) -> Result<()>;
 
+    /// Stamp the additive protocol-v2 fields after the queue row has received
+    /// its durable id and recipient routing.
+    fn stamp_operator_reply(
+        &self,
+        prompt_id: i64,
+        kind: &str,
+        attachments: &[cas_types::ArtifactRef],
+    ) -> Result<()>;
+
     /// Pending operator replies for this factory session. These rows stay
     /// pending while the hub/device is offline and are drained only after the
     /// daemon has a Commander transport to hand them to.
@@ -1929,6 +1952,10 @@ pub trait PromptQueueStore: Send + Sync {
         factory_session: &str,
         limit: usize,
     ) -> Result<Vec<QueuedPrompt>>;
+
+    /// Most recent verified Commander device for a factory session. This is
+    /// the recipient affinity for unprompted supervisor turns.
+    fn latest_verified_operator_device(&self, factory_session: &str) -> Result<Option<String>>;
 
     /// Record that the daemon selected/peeked this message for a delivery attempt.
     fn record_selected(&self, prompt_id: i64) -> Result<()>;
@@ -2145,6 +2172,15 @@ impl SqlitePromptQueueStore {
         );
         // Column 18 = the reply recipient device; absent on older SELECTs.
         let recipient_device_id: Option<String> = row.get(18).unwrap_or(None);
+        // Columns 19/20 = protocol-v2 Commander turn metadata; absent on
+        // older SELECTs and legacy rows. Invalid historical JSON is treated
+        // as an empty attachment list and remains visible in `prompt`.
+        let kind: Option<String> = row.get(19).unwrap_or(None);
+        let attachments = row
+            .get::<_, Option<String>>(20)
+            .unwrap_or(None)
+            .and_then(|raw| serde_json::from_str::<Vec<cas_types::ArtifactRef>>(&raw).ok())
+            .unwrap_or_default();
 
         Ok(QueuedPrompt {
             id: row.get(0)?,
@@ -2161,6 +2197,8 @@ impl SqlitePromptQueueStore {
             origin,
             operator,
             recipient_device_id,
+            kind,
+            attachments,
         })
     }
 
@@ -2680,6 +2718,8 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                     "recipient_device_id",
                     PROMPT_QUEUE_RECIPIENT_DEVICE_MIGRATION,
                 ),
+                ("kind", PROMPT_QUEUE_KIND_MIGRATION),
+                ("attachments", PROMPT_QUEUE_ATTACHMENTS_MIGRATION),
                 ("selected_at", PROMPT_QUEUE_SELECTED_AT_MIGRATION),
                 ("last_pending_reason", PROMPT_QUEUE_PENDING_REASON_MIGRATION),
                 ("last_pending_detail", PROMPT_QUEUE_PENDING_DETAIL_MIGRATION),
@@ -4353,7 +4393,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                         summary, priority, acked_at, urgent, factory_session,
                         origin_agent_id, origin_kind, operator_label,
                         operator_device_id, operator_device_label, operator_scopes,
-                        operator_verified, recipient_device_id
+                        operator_verified, recipient_device_id, kind, attachments
                  FROM prompt_queue WHERE id = ?",
                 params![prompt_id],
                 Self::prompt_from_row,
@@ -4386,6 +4426,36 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         })
     }
 
+    fn stamp_operator_reply(
+        &self,
+        prompt_id: i64,
+        kind: &str,
+        attachments: &[cas_types::ArtifactRef],
+    ) -> Result<()> {
+        let kind = kind.trim();
+        if kind.is_empty() {
+            return Err(StoreError::Other(
+                "operator reply kind cannot be empty".to_string(),
+            ));
+        }
+        let attachments = serde_json::to_string(attachments)?;
+        crate::shared_db::with_write_retry(|| {
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
+            let changed = conn.execute(
+                "UPDATE prompt_queue
+                    SET kind = ?, attachments = ?
+                  WHERE id = ? AND lower(target) = 'operator'",
+                params![kind, attachments, prompt_id],
+            )?;
+            if changed == 0 {
+                return Err(StoreError::Other(format!(
+                    "prompt_queue id={prompt_id} is not an operator reply row"
+                )));
+            }
+            Ok(())
+        })
+    }
+
     fn peek_operator_replies(
         &self,
         factory_session: &str,
@@ -4400,12 +4470,11 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                     summary, priority, acked_at, urgent, factory_session,
                     origin_agent_id, origin_kind, operator_label,
                     operator_device_id, operator_device_label, operator_scopes,
-                    operator_verified, recipient_device_id
+                    operator_verified, recipient_device_id, kind, attachments
              FROM prompt_queue
              WHERE lower(target) = 'operator'
                AND factory_session = ?
                AND processed_at IS NULL
-               AND recipient_device_id IS NOT NULL
                AND (selected_at IS NULL OR julianday(selected_at) < julianday('now', '-1 second'))
              ORDER BY priority ASC, id ASC
              LIMIT ?",
@@ -4414,6 +4483,25 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             .query_map(params![factory_session, limit as i64], Self::prompt_from_row)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(prompts)
+    }
+
+    fn latest_verified_operator_device(&self, factory_session: &str) -> Result<Option<String>> {
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        conn.query_row(
+            "SELECT operator_device_id
+               FROM prompt_queue
+              WHERE factory_session = ?
+                AND source LIKE 'commander:%'
+                AND origin_kind = 'paired_device'
+                AND operator_verified = 1
+                AND operator_device_id IS NOT NULL
+              ORDER BY id DESC
+              LIMIT 1",
+            params![factory_session],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(Into::into)
     }
 
     fn record_selected(&self, prompt_id: i64) -> Result<()> {
@@ -5249,7 +5337,7 @@ mod tests {
     use crate::prompt_queue_store::*;
     use crate::task_store::SqliteTaskStore;
     use crate::TaskStore;
-    use cas_types::{Task, TaskStatus};
+    use cas_types::{ArtifactRef, Task, TaskStatus};
     use rusqlite::params;
     use tempfile::TempDir;
 
@@ -5352,6 +5440,67 @@ mod tests {
         assert_eq!(
             report.recipient_transport_device_id.as_deref(),
             Some("device-7")
+        );
+    }
+
+    #[test]
+    fn operator_reply_kind_and_attachments_round_trip_without_a_recipient_stamp() {
+        let (_temp, store) = create_test_store();
+        let operator = OperatorStamp {
+            operator: "Daniel".into(),
+            device_id: "device-7".into(),
+            device_label: "phone-7".into(),
+            scopes: vec!["message:send".into()],
+            verified: true,
+        };
+        store
+            .enqueue_operator_message(
+                "commander:Daniel@phone-7",
+                "supervisor",
+                "Status please",
+                Some("factory-7"),
+                Some("status"),
+                Some(NotificationPriority::Normal),
+                false,
+                None,
+                &operator,
+            )
+            .unwrap();
+        let reply = store
+            .enqueue_urgent_with_outcome(
+                "supervisor",
+                "operator",
+                r#"{"schema_version":2,"reply_to":null,"message":"green","summary":"status","device_id":"*","kind":"status","attachments":[]}"#,
+                Some("factory-7"),
+                Some("status"),
+                Some(NotificationPriority::Normal),
+                false,
+                Some(&QueueOrigin::Daemon),
+            )
+            .unwrap();
+        let artifact = ArtifactRef {
+            artifact_id: "artifact-1".into(),
+            name: "report.pdf".into(),
+            mime: "application/pdf".into(),
+            size_bytes: 42,
+            sha256: "ab".repeat(32),
+        };
+        store
+            .stamp_operator_reply(reply.id(), "status", std::slice::from_ref(&artifact))
+            .unwrap();
+
+        let row = store
+            .peek_operator_replies("factory-7", 10)
+            .unwrap()
+            .into_iter()
+            .find(|row| row.id == reply.id())
+            .expect("unprompted operator reply remains peekable");
+        assert_eq!(row.recipient_device_id, None);
+        assert_eq!(row.kind.as_deref(), Some("status"));
+        assert_eq!(row.attachments, vec![artifact]);
+        assert_eq!(
+            store.latest_verified_operator_device("factory-7").unwrap(),
+            Some("device-7".into())
         );
     }
 
@@ -8688,6 +8837,8 @@ mod tests {
                 origin: None,
                 operator: None,
                 recipient_device_id: None,
+                kind: None,
+                attachments: Vec::new(),
             }
         }
 

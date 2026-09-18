@@ -2405,6 +2405,11 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
         &cas_root,
         collect_local_root_identities(),
     ));
+    if args.fix {
+        if let Some(check) = canonical_alias_fix(&cas_root, args, cli) {
+            checks.push(check);
+        }
+    }
     checks.extend(canonical_alias_checks(&cas_root));
     let cloud_identity_start = checks.len();
     checks.extend(cloud_identity_metadata_checks(&cas_root));
@@ -3717,6 +3722,76 @@ fn canonical_id_checks(
     checks
 }
 
+/// Apply the missing origin alias after explicit `doctor --fix` consent.
+///
+/// The normal doctor check remains report-only; this helper only runs from the
+/// fix path and uses the same normalized remote identity as cloud sync.
+fn canonical_alias_fix(cas_root: &Path, args: &DoctorArgs, cli: &Cli) -> Option<Check> {
+    let current_project = crate::cloud::resolve_canonical_id(cas_root)?;
+    let remote = crate::cloud::normalized_git_remote_for_push(cas_root)?;
+    let registered = crate::cloud::project_aliases_from_config_toml(cas_root);
+    let remote_is_known = remote == current_project
+        || registered
+            .iter()
+            .filter_map(|alias| crate::cloud::canonical_project_id(alias))
+            .any(|alias| alias == remote);
+    if remote_is_known {
+        return None;
+    }
+
+    let previous_line = format!(
+        "aliases = [{}]",
+        registered
+            .iter()
+            .map(|alias| format!("\"{alias}\""))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    let aliases = merged_project_aliases(registered, &remote);
+    let exact_line = format!(
+        "aliases = [{}]",
+        aliases
+            .iter()
+            .map(|alias| format!("\"{alias}\""))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    let summary = format!(
+        "Git origin resolves to `{remote}`, not canonical id `{current_project}`; append this exact line under `[project]` in `.cas/config.toml`: `{exact_line}`"
+    );
+    if !confirm_doctor_consent(cli, args.yes, &summary) {
+        return Some(Check::new(
+            "project aliases",
+            CheckStatus::Info,
+            format!(
+                "DRY RUN — no changes made. Diff for `.cas/config.toml`:\n- [project] {previous_line}\n+ [project] {exact_line}; re-run `cas doctor --fix --yes` to apply."
+            ),
+        ));
+    }
+
+    match crate::cloud::set_project_aliases_in_config_toml(cas_root, &aliases) {
+        Ok(_) => Some(Check::new(
+            "project aliases",
+            CheckStatus::Ok,
+            format!(
+                "appended git origin alias `{remote}` to `.cas/config.toml`; local config alone does not register it server-side. Inspect `cas cloud projects`, have the cloud owner register the alias, then run `cas cloud project --adopt-aliases` to merge server aliases without dropping local entries, `cas cloud queue --retry --retry-reason project_identity_conflict`, and `cas cloud push`"
+            ),
+        )),
+        Err(error) => Some(Check::new(
+            "project aliases",
+            CheckStatus::Warning,
+            format!("could not append git origin alias `{remote}`: {error}"),
+        )),
+    }
+}
+
+fn merged_project_aliases(mut aliases: Vec<String>, remote: &str) -> Vec<String> {
+    aliases.push(remote.to_string());
+    aliases.sort();
+    aliases.dedup();
+    aliases
+}
+
 /// Report persisted task origins that are equivalent to the current project
 /// but retain a legacy spelling. Doctor is intentionally report-only; users
 /// opt into the local rewrite with `cas cloud project --adopt-aliases`.
@@ -3724,7 +3799,33 @@ fn canonical_alias_checks(cas_root: &Path) -> Vec<Check> {
     let Some(current_project) = crate::cloud::resolve_canonical_id(cas_root) else {
         return Vec::new();
     };
+    let remote = crate::cloud::normalized_git_remote_for_push(cas_root);
+    let registered = crate::cloud::project_aliases_from_config_toml(cas_root);
     let mut checks = registered_alias_checks(cas_root, &current_project);
+    if let Some(remote) = remote
+        && remote != current_project
+        && !registered
+            .iter()
+            .filter_map(|alias| crate::cloud::canonical_project_id(alias))
+            .any(|alias| alias == remote)
+    {
+        let aliases = merged_project_aliases(registered.clone(), &remote);
+        let exact_line = format!(
+            "aliases = [{}]",
+            aliases
+                .iter()
+                .map(|alias| format!("\"{alias}\""))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        checks.push(Check {
+            name: "project aliases".to_string(),
+            status: CheckStatus::Warning,
+            message: format!(
+                "Git origin resolves to `{remote}`, which is neither canonical id `{current_project}` nor a configured alias. Add this exact line under `[project]` in `.cas/config.toml`: `{exact_line}`. Local config alone does not register an alias server-side: inspect `cas cloud projects` and have the cloud owner register `{remote}`, then run `cas cloud project --adopt-aliases` to merge server aliases without dropping local entries, `cas cloud queue --retry --retry-reason project_identity_conflict`, and `cas cloud push`."
+            ),
+        });
+    }
     let db_path = cas_root.join("cas.db");
     if !db_path.is_file() {
         return checks;
@@ -4820,21 +4921,29 @@ fn cloud_queue_check(cas_root: &Path) -> Check {
     if !registration_conflicts.is_empty() {
         let parked = registration_conflicts
             .iter()
-            .map(|(_, count, _)| *count)
+            .map(|(_, _, count)| *count)
             .sum::<usize>();
         let detail = registration_conflicts
             .iter()
-            .map(|(entity_type, count, _)| format!("{entity_type}: {count}"))
+            .map(|(reason, entity_type, count)| format!("{reason} ×{count} ({entity_type})"))
             .collect::<Vec<_>>()
             .join("; ");
         let remedy = "Resolve with `cas cloud project set <registered-canonical-id>` or a cloud-owner alias, then run `cas cloud sync`; parked rows are not transport retries.";
+        let mut message = format!(
+            "{} queued content change(s) block purge-foreign ({breakdown}); {parked} pending-with-registration-conflict row(s) are parked-with-reason: {detail}. {remedy}",
+            pending.len()
+        );
+        if !rejections.is_empty() {
+            message.push_str(&format!(
+                " The cloud refused {} parked row(s): {}",
+                rejections.iter().map(|(_, count)| count).sum::<usize>(),
+                describe_queue_rejections(&rejections)
+            ));
+        }
         return Check {
             name: "cloud sync queue".to_string(),
             status: CheckStatus::Warning,
-            message: format!(
-                "{} queued content change(s) block purge-foreign ({breakdown}); {parked} pending-with-registration-conflict row(s) are parked-with-reason: {detail}. {remedy}",
-                pending.len()
-            ),
+            message,
         };
     }
 
@@ -4880,7 +4989,7 @@ fn cloud_queue_check(cas_root: &Path) -> Check {
 /// but need identity repair, not a queue retry.
 fn cloud_queue_registration_conflicts(
     conn: &rusqlite::Connection,
-) -> Vec<(String, usize, String)> {
+) -> Vec<(String, String, usize)> {
     let has_columns: bool = conn
         .query_row(
             "SELECT COUNT(*) = 2 FROM pragma_table_info('sync_queue') WHERE name IN ('last_outcome', 'last_reason')",
@@ -4893,21 +5002,21 @@ fn cloud_queue_registration_conflicts(
     }
 
     let Ok(mut stmt) = conn.prepare(
-        "SELECT entity_type, COUNT(*), COALESCE(MAX(last_error), '')
+        "SELECT last_reason, entity_type, COUNT(*)
          FROM sync_queue
          WHERE retry_count < 5
            AND last_outcome = 'parked'
-           AND last_reason = 'project_registration_conflict'
-         GROUP BY entity_type
-         ORDER BY entity_type",
+           AND last_reason IN ('project_registration_conflict', 'project_identity_conflict')
+         GROUP BY last_reason, entity_type
+         ORDER BY last_reason, entity_type",
     ) else {
         return Vec::new();
     };
     let Ok(rows) = stmt.query_map([], |row| {
         Ok((
             row.get::<_, String>(0)?,
-            row.get::<_, i64>(1)? as usize,
-            row.get::<_, String>(2)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, i64>(2)? as usize,
         ))
     }) else {
         return Vec::new();
@@ -4933,9 +5042,26 @@ fn cloud_queue_rejections(conn: &rusqlite::Connection) -> Vec<(String, usize)> {
     }
 
     let Ok(mut stmt) = conn.prepare(
-        "SELECT COALESCE(NULLIF(TRIM(last_reason), ''), 'unspecified') AS reason, COUNT(*)
+        "SELECT CASE
+                   WHEN NULLIF(TRIM(last_reason), '') IS NOT NULL THEN TRIM(last_reason)
+                   WHEN instr(lower(COALESCE(last_error, '')), 'project_identity_conflict') > 0
+                       THEN 'project_identity_conflict'
+                   WHEN instr(lower(COALESCE(last_error, '')), 'project_mismatch') > 0
+                       THEN 'project_mismatch'
+                   WHEN instr(lower(COALESCE(last_error, '')), 'scope_mismatch') > 0
+                       THEN 'scope_mismatch'
+                   ELSE 'unspecified'
+               END AS reason, COUNT(*)
          FROM sync_queue
          WHERE last_outcome = 'rejected'
+            OR (
+                NULLIF(TRIM(last_reason), '') IS NULL
+                AND (
+                    instr(lower(COALESCE(last_error, '')), 'project_identity_conflict') > 0
+                    OR instr(lower(COALESCE(last_error, '')), 'project_mismatch') > 0
+                    OR instr(lower(COALESCE(last_error, '')), 'scope_mismatch') > 0
+                )
+            )
          GROUP BY reason",
     ) else {
         return Vec::new();
@@ -6591,13 +6717,107 @@ mod tests {
             check.message
         );
         assert!(
-            check.message.contains("cas cloud link"),
+            check.message.contains("cas cloud projects"),
             "{}",
             check.message
         );
         assert!(
             !check.message.contains("×3"),
             "a row with no cloud verdict is not a rejection: {}",
+            check.message
+        );
+    }
+
+    #[test]
+    fn doctor_queue_check_keeps_project_identity_conflict_separate_from_project_mismatch() {
+        use rusqlite::Connection;
+
+        let temp = TempDir::new().unwrap();
+        let cas_root = temp.path().join(".cas");
+        fs::create_dir_all(&cas_root).unwrap();
+        let conn = Connection::open(cas_root.join("cas.db")).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE sync_queue (
+                id INTEGER PRIMARY KEY,
+                entity_type TEXT NOT NULL,
+                entity_id TEXT NOT NULL,
+                operation TEXT NOT NULL,
+                payload TEXT,
+                team_id TEXT,
+                project_id TEXT,
+                created_at TEXT NOT NULL,
+                retry_count INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT,
+                last_outcome TEXT,
+                last_reason TEXT,
+                failed_client_version TEXT
+            );
+            INSERT INTO sync_queue
+                (id, entity_type, entity_id, operation, created_at, retry_count, last_outcome, last_reason)
+            VALUES
+                (1, 'task', 'task-mismatch', 'upsert', '2026-09-01T00:00:00Z', 5, 'rejected', 'project_mismatch'),
+                (2, 'task', 'task-identity', 'upsert', '2026-09-01T00:00:01Z', 5, 'rejected', 'project_identity_conflict');
+            "#,
+        )
+        .unwrap();
+
+        let check = cloud_queue_check(&cas_root);
+        assert!(matches!(check.status, CheckStatus::Warning));
+        assert!(check.message.contains("project_mismatch ×1"), "{}", check.message);
+        assert!(
+            check.message.contains("project_identity_conflict ×1"),
+            "{}",
+            check.message
+        );
+        assert!(
+            check
+                .message
+                .contains("cas cloud queue --retry --retry-reason project_identity_conflict"),
+            "{}",
+            check.message
+        );
+    }
+
+    #[test]
+    fn doctor_queue_check_falls_back_to_identity_conflict_in_last_error() {
+        use rusqlite::Connection;
+
+        let temp = TempDir::new().unwrap();
+        let cas_root = temp.path().join(".cas");
+        fs::create_dir_all(&cas_root).unwrap();
+        let conn = Connection::open(cas_root.join("cas.db")).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE sync_queue (
+                id INTEGER PRIMARY KEY,
+                entity_type TEXT NOT NULL,
+                entity_id TEXT NOT NULL,
+                operation TEXT NOT NULL,
+                payload TEXT,
+                team_id TEXT,
+                project_id TEXT,
+                created_at TEXT NOT NULL,
+                retry_count INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT,
+                last_outcome TEXT,
+                last_reason TEXT,
+                failed_client_version TEXT
+            );
+            INSERT INTO sync_queue
+                (id, entity_type, entity_id, operation, created_at, retry_count, last_error)
+            VALUES
+                (1, 'task', 'task-legacy-identity', 'upsert', '2026-09-01T00:00:00Z', 5,
+                 'Push failed with status 409: {"error":"project_identity_conflict"}');
+            "#,
+        )
+        .unwrap();
+
+        let check = cloud_queue_check(&cas_root);
+        assert!(matches!(check.status, CheckStatus::Warning), "{}", check.message);
+        assert!(
+            check.message.contains("project_identity_conflict ×1"),
+            "{}",
             check.message
         );
     }
@@ -7195,6 +7415,135 @@ mod tests {
             "got: {}",
             checks[0].message
         );
+    }
+
+    fn doctor_git_project(temp: &TempDir, name: &str, remote: &str) -> PathBuf {
+        let project = temp.path().join(name);
+        let cas_root = project.join(".cas");
+        fs::create_dir_all(&cas_root).unwrap();
+        for args in [
+            vec!["init", "-q"],
+            vec!["remote", "add", "origin", remote],
+        ] {
+            let status = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&project)
+                .args(&args)
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {args:?} failed");
+        }
+        cas_root
+    }
+
+    fn doctor_fix_args(yes: bool) -> DoctorArgs {
+        DoctorArgs {
+            fix: true,
+            host: false,
+            foreign_rows: false,
+            fix_cloud_rows: false,
+            release_cloud_rows: false,
+            yes,
+        }
+    }
+
+    #[test]
+    fn project_alias_check_fails_when_origin_is_not_canonical_or_registered() {
+        let temp = TempDir::new().unwrap();
+        let cas_root = doctor_git_project(
+            &temp,
+            "cassy",
+            "git@github.com:Richards-LLC/cassy.git",
+        );
+        fs::write(
+            cas_root.join("config.toml"),
+            "[project]\ncanonical_id = \"cas-src\"\naliases = [\"old\"]\n",
+        )
+        .unwrap();
+
+        let checks = canonical_alias_checks(&cas_root);
+        let check = checks
+            .iter()
+            .find(|check| matches!(check.status, CheckStatus::Warning))
+            .expect("origin drift must fail project aliases");
+        assert_eq!(check.name, "project aliases");
+        assert!(check.message.contains("github.com/richards-llc/cassy"));
+        assert!(check
+            .message
+            .contains("aliases = [\"github.com/richards-llc/cassy\", \"old\"]"));
+        assert!(check
+            .message
+            .contains("cas cloud project --adopt-aliases"));
+        assert!(check
+            .message
+            .contains("cas cloud queue --retry --retry-reason project_identity_conflict"));
+        assert!(check.message.contains("cas cloud push"));
+    }
+
+    #[test]
+    fn project_alias_check_accepts_origin_in_aliases_or_as_canonical_id() {
+        for (name, config) in [
+            (
+                "cached-alias",
+                "[project]\ncanonical_id = \"cas-src\"\naliases = [\"github.com/richards-llc/cassy\"]\n",
+            ),
+            (
+                "canonical-origin",
+                "[project]\ncanonical_id = \"github.com/richards-llc/cassy\"\n",
+            ),
+        ] {
+            let temp = TempDir::new().unwrap();
+            let cas_root = doctor_git_project(
+                &temp,
+                name,
+                "git@github.com:Richards-LLC/cassy.git",
+            );
+            fs::write(cas_root.join("config.toml"), config).unwrap();
+            let checks = canonical_alias_checks(&cas_root);
+            assert!(
+                !checks.iter().any(|check| matches!(check.status, CheckStatus::Warning)),
+                "origin should be accepted",
+            );
+        }
+    }
+
+    #[test]
+    fn project_alias_fix_dry_runs_then_appends_origin_alias() {
+        let temp = TempDir::new().unwrap();
+        let cas_root = doctor_git_project(
+            &temp,
+            "cassy",
+            "git@github.com:Richards-LLC/cassy.git",
+        );
+        let config_path = cas_root.join("config.toml");
+        fs::write(
+            &config_path,
+            "[project]\ncanonical_id = \"cas-src\"\naliases = [\"old\"]\n",
+        )
+        .unwrap();
+        let cli = Cli {
+            json: true,
+            full: false,
+            verbose: false,
+            command: None,
+        };
+
+        let dry_run = canonical_alias_fix(&cas_root, &doctor_fix_args(false), &cli).unwrap();
+        assert!(matches!(dry_run.status, CheckStatus::Info));
+        assert!(dry_run.message.contains("DRY RUN"));
+        assert!(dry_run.message.contains("- [project] aliases"));
+        assert!(dry_run.message.contains("+ [project] aliases"));
+        assert_eq!(crate::cloud::project_aliases_from_config_toml(&cas_root), vec!["old"]);
+
+        let applied = canonical_alias_fix(&cas_root, &doctor_fix_args(true), &cli).unwrap();
+        assert!(matches!(applied.status, CheckStatus::Ok));
+        assert_eq!(
+            crate::cloud::project_aliases_from_config_toml(&cas_root),
+            vec!["github.com/richards-llc/cassy", "old"]
+        );
+        assert!(fs::read_to_string(config_path)
+            .unwrap()
+            .contains("github.com/richards-llc/cassy"));
     }
 
     #[test]

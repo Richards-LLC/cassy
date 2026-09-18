@@ -152,7 +152,7 @@ pub fn authorize_registered_role(role: Option<AgentRole>) -> Result<AgentRole, T
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct TaskProposalClient {
     endpoint: String,
     token: String,
@@ -733,6 +733,18 @@ fn render_value(value: &str) -> String {
     serde_json::to_string(value).unwrap_or_else(|_| "\"(unrenderable)\"".to_string())
 }
 
+// Carries the Cassy Cloud bearer for the lifetime of the client.
+impl fmt::Debug for TaskProposalClient {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TaskProposalClient")
+            .field("endpoint", &self.endpoint)
+            .field("token", &"[redacted]")
+            .field("team_id", &self.team_id)
+            .field("timeout", &self.timeout)
+            .finish()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1219,5 +1231,20 @@ mod tests {
             1,
             "asserted text cannot forge a generated section delimiter line"
         );
+    }
+}
+
+#[cfg(test)]
+mod credential_redaction_tests {
+    use super::*;
+
+    #[test]
+    fn the_proposal_client_debug_never_prints_the_bearer() {
+        let client =
+            TaskProposalClient::new("https://cloud.example", "SECRET-tok-9f3a1c", "team-1");
+        let rendered = format!("{client:?}");
+        assert!(!rendered.contains("SECRET-tok-9f3a1c"), "{rendered}");
+        assert!(rendered.contains("[redacted]"), "{rendered}");
+        assert!(rendered.contains("team-1"), "{rendered}");
     }
 }

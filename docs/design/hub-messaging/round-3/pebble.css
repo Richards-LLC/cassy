@@ -1,0 +1,316 @@
+/* Pebble — round 3 (cas-9f69). The operator's pick from cas-bdc0, refined.
+ *
+ * Colours are hub tokens from hub-web/src/tokens.css (source of truth
+ * docs/design/design-tokens.json) restated as literals, because
+ * scripts/visual-qa.mjs cannot resolve color-mix() output and would skip those
+ * pairs as unverifiable instead of measuring them.
+ *
+ *   --canvas/--panel/--hair  = bg-root / bg-panel / line-subtle
+ *   --ink/--ink-mid/--ink-soft = text-hi / text-mid / text-mid one step darker
+ *   --you-bg/--you-fg        = color.action, inverse text. Constant: you are
+ *                              always you, whichever machine you are talking to.
+ *   --sup-bg/--sup-fg        = the MACHINE's accent tinted into the panel. Set
+ *                              by .m-atlas / .m-studio / .m-bench, so the
+ *                              accent lives in the thread and not just the list.
+ *   --ask-bg/--ask-fg        = state-warn's DARK value in both schemes; the
+ *                              light value (#7F5504) only clears 4.5:1 as a
+ *                              near-brown. Kept as --ask-deep for the tray and
+ *                              --warn-text for table cells.
+ *   --crit-bg/--crit-fg      = state-crit, inverse text
+ *   --sheet-bg               = a raised surface for objects laid on the thread
+ *   --ok                     = state-ok
+ *
+ * Shape system:
+ *   calm bubble      22px pebble, 8px spoken corner, solid fill, --lift
+ *   grouped turn     adjacent corners tighten to 8px; only the group's outer
+ *                    corner stays 22px, so consecutive turns read as one voice
+ *   attention object ask + blocker get their OWN silhouette, two treatments:
+ *                    .t-a = a fused stepped two-tone object (body + tray)
+ *                    .t-b = a flatter slab with a real pointed tail
+ *   attachment       not a bubble at all, two treatments:
+ *                    .t-a = a sheet with a dog-eared corner
+ *                    .t-b = a two-tone plate slab
+ */
+
+:root {
+  --canvas: #F7F4EE;
+  --panel: #FFFFFF;
+  --hair: #DAD3C7;
+  --ink: #1B1D24;
+  --ink-mid: #5A5F6E;
+  --ink-soft: #494E5C;
+  --you-bg: #2E3A9F;
+  --you-fg: #FFFFFF;
+  --ask-bg: #E2B14D;
+  --ask-fg: #1B1D24;
+  --ask-deep: #7F5504;
+  --warn-text: #7F5504;
+  --crit-bg: #B3261E;
+  --crit-fg: #FFFFFF;
+  --sheet-bg: #FFFFFF;
+  --fold: #EAE5DB;
+  --ok: #226845;
+  --m-fg: #FFFFFF;
+  --lift: 0 1px 2px rgba(18, 20, 26, 0.05), 0 6px 18px rgba(18, 20, 26, 0.06);
+  --lift-strong: 0 2px 4px rgba(18, 20, 26, 0.08), 0 14px 34px rgba(18, 20, 26, 0.10);
+  --lift-edge: 10px 0 30px -18px rgba(18, 20, 26, 0.22);
+  --lift-head: 0 8px 20px -14px rgba(18, 20, 26, 0.30);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --canvas: #12141A;
+    --panel: #191C24;
+    --hair: #2B3040;
+    --ink: #E9E6E0;
+    --ink-mid: #A3A7B4;
+    --ink-soft: #B4B8C4;
+    --you-bg: #A9B3FF;
+    --you-fg: #12141A;
+    --ask-bg: #E2B14D;
+    --ask-fg: #12141A;
+    --ask-deep: #6E551C;
+    --warn-text: #E2B14D;
+    --crit-bg: #EF7B72;
+    --crit-fg: #12141A;
+    --sheet-bg: #1F232D;
+    --fold: #262B35;
+    --ok: #5FC492;
+    --m-fg: #12141A;
+    --lift: 0 1px 2px rgba(0, 0, 0, 0.32), 0 6px 18px rgba(0, 0, 0, 0.34);
+    --lift-strong: 0 2px 4px rgba(0, 0, 0, 0.40), 0 14px 34px rgba(0, 0, 0, 0.46);
+    --lift-edge: 10px 0 30px -18px rgba(0, 0, 0, 0.60);
+    --lift-head: 0 8px 20px -14px rgba(0, 0, 0, 0.70);
+  }
+}
+
+/* ---- per-machine accent ------------------------------------------------ */
+
+.m-atlas { --accent: #2E3A9F; --accent-soft: #DDE1F7; --sup-bg: #E7EAF7; --sup-fg: #1B1D24; }
+.m-studio { --accent: #226845; --accent-soft: #D7E8DE; --sup-bg: #E3EFE8; --sup-fg: #1B1D24; }
+.m-bench { --accent: #5B3E8C; --accent-soft: #E2DAF1; --sup-bg: #EBE6F4; --sup-fg: #1B1D24; }
+
+@media (prefers-color-scheme: dark) {
+  .m-atlas { --accent: #A9B3FF; --accent-soft: #232838; --sup-bg: #262B38; --sup-fg: #E9E6E0; }
+  .m-studio { --accent: #5FC492; --accent-soft: #1C2A23; --sup-bg: #1F2E27; --sup-fg: #E9E6E0; }
+  .m-bench { --accent: #C0A3F0; --accent-soft: #262034; --sup-bg: #282334; --sup-fg: #E9E6E0; }
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  background: var(--canvas);
+  color: var(--ink);
+  font: var(--weight-regular) 15px/1.5 var(--font-ui);
+  -webkit-font-smoothing: antialiased;
+}
+
+.app { display: grid; grid-template-columns: 374px 1fr; min-height: 100vh; }
+
+/* ---- conversation list ------------------------------------------------- */
+
+.rail { background: var(--panel); box-shadow: var(--lift-edge); padding: 22px 14px 22px 18px; }
+.rail h1 { margin: 0 6px 18px; font: var(--weight-semibold) 22px/1.2 var(--font-ui); letter-spacing: -0.015em; }
+
+.row { display: grid; grid-template-columns: 42px 1fr auto; column-gap: 13px; row-gap: 3px;
+       align-items: center; padding: 12px 14px; border-radius: 20px; text-decoration: none; color: inherit; }
+.row + .row { margin-top: 4px; }
+.row.on { background: var(--accent-soft); box-shadow: var(--lift); }
+.row .mono { grid-row: span 2; }
+.who { display: flex; align-items: center; gap: 7px; min-width: 0; flex-wrap: nowrap; }
+.who b { font: var(--weight-semibold) 15px/1.35 var(--font-ui); white-space: nowrap; }
+.who .sep { width: 3px; height: 3px; border-radius: 50%; background: var(--ink-soft); flex: none; }
+.who .proj { font: var(--weight-medium) 12px/1.35 var(--font-mono); color: var(--ink-soft); white-space: nowrap; }
+.when { font-size: 12px; color: var(--ink-soft); white-space: nowrap; }
+.when.hot { color: var(--warn-text); font-weight: var(--weight-semibold); }
+.prev { grid-column: 2; font-size: 13px; line-height: 1.35; color: var(--ink-soft); }
+.prev.bold { color: var(--ink); font-weight: var(--weight-medium); }
+.flag { grid-column: 3; justify-self: end; width: 10px; height: 10px; border-radius: 50%; background: var(--ask-deep); }
+.pipcount { grid-column: 3; justify-self: end; min-width: 21px; padding: 2px 7px; border-radius: 999px;
+            text-align: center; background: var(--accent); color: var(--m-fg);
+            font: var(--weight-semibold) 12px/1.4 var(--font-ui); }
+
+/* machine monogram — fill is the machine accent */
+.mono { display: flex; align-items: center; justify-content: center; flex: none;
+        width: 42px; height: 42px; border-radius: 50%; background: var(--accent); color: var(--m-fg);
+        font: var(--weight-semibold) 17px/1 var(--font-ui); }
+
+/* compose is a YOU action, so the FAB takes the operator's colour, not a
+   machine accent — it also sits outside .app where no machine is in scope */
+.fab { position: fixed; right: 18px; bottom: 18px; width: 56px; height: 56px; border-radius: 50%;
+       background: var(--you-bg); color: var(--you-fg); box-shadow: var(--lift-strong);
+       display: flex; align-items: center; justify-content: center; }
+.fab svg { width: 24px; height: 24px; }
+
+/* ---- thread ------------------------------------------------------------ */
+
+.thread { display: flex; flex-direction: column; background: var(--canvas); }
+.thead { display: flex; align-items: center; gap: 13px; padding: 17px 30px; background: var(--canvas);
+         box-shadow: var(--lift-head); }
+.thead b { display: block; font: var(--weight-semibold) 16px/1.25 var(--font-ui); }
+.thead .id span { display: block; margin-top: 1px; font: var(--weight-regular) 13px/1.25 var(--font-mono);
+                  color: var(--ink-mid); }
+
+.msgs { flex: 1; padding: 22px 30px 10px; display: flex; flex-direction: column; gap: 16px; }
+.day { align-self: center; font-size: 12px; color: var(--ink-mid); margin-bottom: 2px; }
+
+.turn { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; max-width: 70%; }
+.turn.you { align-self: flex-end; align-items: flex-end; }
+.turn > time { font-size: 12px; color: var(--ink-mid); padding: 2px 6px 0; }
+
+/* calm pebble + grouped corners: the group's outer corner stays 22px, the
+   adjacent corners tighten to 8px, so a run of turns reads as one voice. */
+.bub { padding: 12px 19px; background: var(--sup-bg); color: var(--sup-fg);
+       border-radius: 8px 22px 22px 8px; box-shadow: var(--lift); }
+.bub:first-of-type { border-top-left-radius: 22px; }
+.turn.you .bub { background: var(--you-bg); color: var(--you-fg); border-radius: 22px 8px 8px 22px; }
+.turn.you .bub:first-of-type { border-top-right-radius: 22px; }
+.bub p { margin: 0; }
+.bub p + p { margin-top: 8px; }
+.bub.receipt { display: flex; gap: 9px; }
+.bub.receipt .tick { margin-top: 4px; }
+
+/* coalesced statuses — one quiet pebble, never a ledger */
+.coalesce { align-self: flex-start; background: var(--sup-bg); color: var(--ink-mid);
+            border-radius: 999px; padding: 8px 18px; font-size: 13px; }
+
+/* ---- attention objects (ask + blocker) --------------------------------- */
+/* Treatment A — one fused stepped object: body on top, tray below, a single
+   28px outline with the spoken notch at the tray's corner. */
+
+/* the outer radius lives on .obj so the shadow is cast from the object's own
+   silhouette, not from a square box behind it */
+.obj { border-radius: 28px 28px 28px 9px; box-shadow: var(--lift-strong); max-width: 100%; }
+.obj-body { padding: 15px 23px 14px; border-radius: 28px 28px 0 0; }
+.obj-foot { border-radius: 0 0 28px 9px; }
+.obj.t-a .obj-body { background: var(--ask-bg); color: var(--ask-fg); }
+.obj.t-a .obj-foot { background: var(--ask-deep); display: flex; gap: 9px; padding: 11px 13px; }
+.obj.t-a .obj-foot .chip { flex: 1; text-align: center; }
+/* in the thread an attention object is capped so its tray stays a tray */
+.msgs .obj { max-width: min(100%, 560px); }
+.msgs .slabobj { max-width: min(calc(100% - 13px), 547px); }
+.obj.t-a.blk .obj-body { background: var(--crit-bg); color: var(--crit-fg); }
+.obj.t-a.blk .obj-foot { background: var(--crit-bg); display: block; padding: 0 9px 9px; }
+.obj p { margin: 0; }
+
+.chip { padding: 8px 17px; border-radius: 999px; background: var(--panel); color: var(--ink);
+        font: var(--weight-medium) 13px/1.2 var(--font-ui); white-space: nowrap; }
+.window { display: block; background: var(--sheet-bg); color: var(--ink); border-radius: 20px;
+          padding: 10px 16px; font: var(--weight-regular) 12.5px/1.45 var(--font-mono); }
+
+/* Treatment B — a flatter slab with a real pointed tail; the choices sit
+   inside the field as outlined pills. */
+
+.slabobj { position: relative; margin-left: 13px; border-radius: 15px; padding: 15px 23px 14px;
+           box-shadow: var(--lift-strong); max-width: calc(100% - 13px); }
+.slabobj::before { content: ''; position: absolute; left: -12px; top: 21px; width: 0; height: 0;
+                   border-top: 11px solid transparent; border-bottom: 11px solid transparent;
+                   border-right: 12px solid currentColor; }
+.slabobj.ask { background: var(--ask-bg); color: var(--ask-fg); }
+.slabobj.blk { background: var(--crit-bg); color: var(--crit-fg); }
+.slabobj.ask::before { color: var(--ask-bg); }
+.slabobj.blk::before { color: var(--crit-bg); }
+.picks { display: flex; gap: 9px; flex-wrap: wrap; margin-top: 13px; }
+.pick { padding: 8px 17px; border-radius: 999px; border: 1.5px solid currentColor;
+        font: var(--weight-semibold) 13px/1.2 var(--font-ui); white-space: nowrap; }
+.wireline { display: block; margin-top: 12px; border: 1.5px solid currentColor; border-radius: 13px;
+            padding: 9px 14px; font: var(--weight-regular) 12.5px/1.45 var(--font-mono); }
+
+/* ---- attachment objects ------------------------------------------------ */
+/* Treatment A — a sheet laid on the thread, dog-eared at the top right. */
+
+.sheet { position: relative; display: flex; align-items: center; gap: 14px; background: var(--sheet-bg);
+         border-radius: 22px 0 22px 8px; padding: 12px 22px 12px 12px; box-shadow: var(--lift-strong); }
+.sheet::before { content: ''; position: absolute; top: 0; right: 0; width: 16px; height: 16px;
+                 background: var(--fold); clip-path: polygon(0 0, 100% 100%, 0 100%); }
+.sheet::after { content: ''; position: absolute; top: 0; right: 0; width: 16px; height: 16px;
+                background: var(--canvas); clip-path: polygon(0 0, 100% 0, 100% 100%); }
+
+/* Treatment B — a two-tone plate slab: the silhouette itself is split. */
+
+.slab { display: flex; background: var(--sheet-bg); border-radius: 22px 22px 22px 8px;
+        box-shadow: var(--lift-strong); }
+.slab-plate { display: flex; align-items: center; justify-content: center; flex: none; width: 76px;
+              background: var(--crit-bg); color: var(--crit-fg); border-radius: 22px 0 0 8px;
+              font: var(--weight-semibold) 13px/1 var(--font-mono); letter-spacing: 0.08em; }
+.slab-main { padding: 14px 24px 14px 18px; }
+
+.plate { display: flex; align-items: flex-end; justify-content: center; flex: none;
+         width: 38px; height: 46px; border-radius: 7px; background: var(--crit-bg); color: var(--crit-fg);
+         font: var(--weight-semibold) 9px/1 var(--font-ui); letter-spacing: 0.06em; padding-bottom: 7px; }
+.fname { display: block; font: var(--weight-semibold) 14.5px/1.35 var(--font-ui); color: var(--ink); }
+.fsub { display: flex; align-items: center; gap: 6px; margin-top: 3px;
+        font: var(--weight-regular) 12.5px/1.3 var(--font-ui); color: var(--ink-mid); }
+.verified { display: flex; align-items: center; gap: 4px; color: var(--ok); }
+.verified svg { width: 13px; height: 13px; }
+
+/* ---- evidence table inside a message ----------------------------------- */
+
+.evi { background: var(--sheet-bg); border-radius: 17px; padding: 11px 15px; margin-top: 12px; }
+.evi-row { display: grid; grid-template-columns: 1fr auto auto; column-gap: 14px; padding: 4px 0;
+           font: var(--weight-regular) 12.5px/1.45 var(--font-mono); font-variant-numeric: tabular-nums; }
+.evi-row span:nth-child(2), .evi-row span:nth-child(3) { text-align: right; }
+.evi-head { color: var(--ink-mid); font-size: 11.5px; }
+.evi .pass { color: var(--ok); }
+.evi .flake { color: var(--warn-text); }
+
+/* ---- working, empty, composer ------------------------------------------ */
+
+.working { display: flex; align-items: center; gap: 9px; color: var(--ink-mid); font-size: 13px; }
+.dots { display: flex; gap: 4px; }
+.dots i { width: 6px; height: 6px; border-radius: 50%; background: var(--ink-mid); }
+
+.empty { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center;
+         gap: 14px; padding: 60px 40px; text-align: center; }
+.empty .mono { width: 76px; height: 76px; font-size: 30px; box-shadow: var(--lift-strong); }
+.empty b { font: var(--weight-semibold) 21px/1.2 var(--font-ui); letter-spacing: -0.015em; }
+.empty .proj2 { font: var(--weight-regular) 13px/1.3 var(--font-mono); color: var(--ink-mid); }
+.empty .said { max-width: 34ch; color: var(--ink-mid); font-size: 15px; }
+.empty .quiet { background: var(--sup-bg); color: var(--sup-fg); border-radius: 22px;
+                padding: 12px 22px; box-shadow: var(--lift); }
+
+.composer { display: flex; align-items: center; gap: 11px; padding: 14px 30px 22px; }
+.field { flex: 1; min-width: 0; padding: 13px 22px; border-radius: 999px; background: var(--panel);
+         color: var(--ink-mid); font-size: 14px; box-shadow: var(--lift); }
+.clip { display: flex; align-items: center; justify-content: center; flex: none; width: 44px; height: 44px;
+        border-radius: 50%; background: var(--panel); color: var(--ink-mid); box-shadow: var(--lift); }
+.clip svg { width: 19px; height: 19px; }
+.send { display: flex; align-items: center; justify-content: center; flex: none; width: 46px; height: 46px;
+        border-radius: 50%; background: var(--accent); color: var(--m-fg); box-shadow: var(--lift-strong); }
+.send svg { width: 19px; height: 19px; }
+
+svg { display: block; }
+.tick { width: 15px; height: 15px; color: var(--ok); flex: none; }
+
+/* ---- A/B pair sheet ---------------------------------------------------- */
+
+.pairs { padding: 30px; display: flex; flex-direction: column; gap: 34px; }
+.pair { display: flex; flex-direction: column; gap: 14px; }
+.pair h2 { margin: 0; font: var(--weight-semibold) 13px/1.3 var(--font-ui); color: var(--ink-mid);
+           letter-spacing: 0.04em; }
+.pair .side { display: flex; flex-wrap: wrap; gap: 30px; align-items: flex-start; }
+.pair .one { display: flex; flex-direction: column; align-items: flex-start; gap: 9px;
+             max-width: 420px; min-width: 0; }
+.pair .cap { font-size: 12.5px; color: var(--ink-mid); }
+
+/* ---- phone ------------------------------------------------------------- */
+
+@media (max-width: 560px) {
+  .app { grid-template-columns: 1fr; }
+  .app.show-thread .rail { display: none; }
+  .app.show-list .thread { display: none; }
+  .app.show-list .rail { box-shadow: none; padding: 20px 12px 90px; }
+  .thead { padding: 14px 16px; }
+  .msgs { padding: 16px 16px 8px; gap: 14px; }
+  .turn { max-width: 88%; }
+  .composer { padding: 12px 16px 20px; gap: 9px; }
+  .field { padding: 12px 18px; }
+  .sheet { padding: 11px 18px 11px 11px; gap: 12px; }
+  .slab-plate { width: 64px; }
+  .slab-main { padding: 13px 18px 13px 15px; }
+  .evi-row { column-gap: 10px; font-size: 12px; }
+  .empty { padding: 40px 22px; }
+  .pairs { padding: 18px; gap: 26px; }
+  .pair .side { gap: 22px; }
+}

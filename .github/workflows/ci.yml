@@ -62,6 +62,101 @@ permissions:
   actions: read
 
 jobs:
+  # One fail-closed classifier feeds every event-specific job gate. Keeping
+  # this as a job (rather than a step) lets docs-only merge-group trees skip
+  # runner allocation for the full validation family while still producing a
+  # cheap docs check.
+  ci-diff:
+    name: Classify CI diff
+    runs-on: ubuntu-latest
+    outputs:
+      class: ${{ steps.classify-diff.outputs.class }}
+      docs-only: ${{ steps.classify-diff.outputs.class == 'docs-only' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - id: classify-diff
+        uses: ./.github/actions/classify-required-diff
+        with:
+          base-sha: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
+          zero-base-ref: origin/${{ github.event.repository.default_branch }}
+
+  # Docs-only changes keep the existing branch-protection contexts satisfiable without
+  # paying for Rust, web, or Darwin work. The full validation jobs remain the
+  # required path for mixed and code changes; this is the only job that does
+  # work for a docs-only PR, push, or merge-group tree.
+  docs-lint:
+    name: Docs Lint
+    if: >-
+      needs.ci-diff.outputs.class == 'docs-only'
+      && (github.event_name == 'pull_request'
+      || github.event_name == 'merge_group'
+      || github.event_name == 'push')
+    needs: ci-diff
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Markdown lint
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
+          ZERO_BASE_REF: origin/${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          comparison_base="$BASE_SHA"
+          if [[ "$comparison_base" =~ ^0+$ && -n "$ZERO_BASE_REF" ]]; then
+            comparison_base="$ZERO_BASE_REF"
+          fi
+          merge_base="$(git merge-base "$comparison_base" HEAD)"
+          mapfile -t markdown_files < <(
+            git diff --name-only "$merge_base" HEAD |
+              while IFS= read -r path; do
+                case "$path" in
+                  *.md) printf '%s\n' "$path" ;;
+                esac
+              done
+          )
+          if (( ${#markdown_files[@]} == 0 )); then
+            echo 'No Markdown files changed; docs-only paths are still valid.'
+          else
+            npx --yes markdownlint-cli2@0.18.1 --config .markdownlint-cli2.jsonc "${markdown_files[@]}"
+          fi
+
+      - name: Validate release-note drafts
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
+          ZERO_BASE_REF: origin/${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          comparison_base="$BASE_SHA"
+          if [[ "$comparison_base" =~ ^0+$ && -n "$ZERO_BASE_REF" ]]; then
+            comparison_base="$ZERO_BASE_REF"
+          fi
+          merge_base="$(git merge-base "$comparison_base" HEAD)"
+          mapfile -t drafts < <(
+            git diff --name-only "$merge_base" HEAD |
+              while IFS= read -r path; do
+                case "$path" in
+                  docs/release-notes/*draft*.md) printf '%s\n' "$path" ;;
+                esac
+              done
+          )
+          if (( ${#drafts[@]} == 0 )); then
+            echo 'No release-note drafts changed.'
+          else
+            for draft in "${drafts[@]}"; do
+              body_dir="$(mktemp -d)"
+              python3 scripts/release-train-announce.py --validate "$draft" "$body_dir"
+              rm -rf "$body_dir"
+            done
+          fi
+
   # GitHub Actions cannot fall back after it has assigned an offline
   # self-hosted runner: the job would simply remain queued. Select the runner
   # before assignment instead. The repository variable is deliberately
@@ -74,11 +169,13 @@ jobs:
   fast-validation-runner-route:
     name: Fast Validation — merge-queue runner route
     if: >-
-      github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+      needs.ci-diff.outputs.class != 'docs-only'
+      && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
       || github.event_name == 'merge_group'
       || (github.event_name == 'push'
       && (github.ref == 'refs/heads/main'
-      || startsWith(github.ref, 'refs/tags/')))
+      || startsWith(github.ref, 'refs/tags/'))))
+    needs: ci-diff
     runs-on: ubuntu-latest
     outputs:
       runner: ${{ steps.route.outputs.runner }}
@@ -105,11 +202,13 @@ jobs:
   fast-validation-main-push-dedupe:
     name: Fast Validation — main-push tree dedupe
     if: >-
-      github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+      needs.ci-diff.outputs.class != 'docs-only'
+      && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
       || github.event_name == 'merge_group'
       || (github.event_name == 'push'
       && (github.ref == 'refs/heads/main'
-      || startsWith(github.ref, 'refs/tags/')))
+      || startsWith(github.ref, 'refs/tags/'))))
+    needs: ci-diff
     runs-on: ubuntu-latest
     outputs:
       run-fast-validation: ${{ steps.tree-dedupe.outputs.run-fast-validation }}
@@ -152,8 +251,10 @@ jobs:
   scoped-validation-fast:
     name: Scoped Validation (fast)
     if: >-
-      github.event_name == 'push'
+      needs.ci-diff.outputs.class != 'docs-only'
+      && github.event_name == 'push'
       && startsWith(github.ref, 'refs/heads/factory/')
+    needs: ci-diff
     concurrency:
       group: scoped-validation-fast-${{ github.ref }}
       cancel-in-progress: true
@@ -251,10 +352,12 @@ jobs:
   scoped-validation:
     name: Scoped Validation (factory/PR)
     if: >-
-      (github.event_name == 'pull_request'
+      needs.ci-diff.outputs.class != 'docs-only'
+      && ((github.event_name == 'pull_request'
       && github.base_ref != github.event.repository.default_branch)
       || (github.event_name == 'push'
-      && startsWith(github.ref, 'refs/heads/factory/'))
+      && startsWith(github.ref, 'refs/heads/factory/')))
+    needs: ci-diff
     permissions:
       contents: read
       actions: read
@@ -406,7 +509,8 @@ jobs:
   fast-validation-preflight:
     name: Fast Validation — preflight (no test suite)
     if: >-
-      needs.fast-validation-main-push-dedupe.outputs.run-fast-validation == 'true'
+      needs.ci-diff.outputs.class != 'docs-only'
+      && needs.fast-validation-main-push-dedupe.outputs.run-fast-validation == 'true'
       && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
       || github.event_name == 'merge_group'
       || (github.event_name == 'push'
@@ -417,7 +521,7 @@ jobs:
       && github.repository == 'Richards-LLC/cassy'
       && github.event.repository.fork == false
       && vars.CASSY_MERGE_QUEUE_SELF_HOSTED == 'enabled'))
-    needs: [fast-validation-runner-route, fast-validation-main-push-dedupe]
+    needs: [ci-diff, fast-validation-runner-route, fast-validation-main-push-dedupe]
     runs-on: ${{ fromJSON(needs.fast-validation-runner-route.outputs.runner) }}
     steps:
       - uses: actions/checkout@v4
@@ -546,7 +650,8 @@ jobs:
   fast-validation-suite-build:
     name: Fast Validation — suite archive build
     if: >-
-      needs.fast-validation-main-push-dedupe.outputs.run-fast-validation == 'true'
+      needs.ci-diff.outputs.class != 'docs-only'
+      && needs.fast-validation-main-push-dedupe.outputs.run-fast-validation == 'true'
       && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
       || github.event_name == 'merge_group'
       || (github.event_name == 'push'
@@ -557,7 +662,7 @@ jobs:
       && github.repository == 'Richards-LLC/cassy'
       && github.event.repository.fork == false
       && vars.CASSY_MERGE_QUEUE_SELF_HOSTED == 'enabled'))
-    needs: [fast-validation-runner-route, fast-validation-main-push-dedupe]
+    needs: [ci-diff, fast-validation-runner-route, fast-validation-main-push-dedupe]
     runs-on: ${{ fromJSON(needs.fast-validation-runner-route.outputs.runner) }}
     steps:
       - uses: actions/checkout@v4
@@ -693,13 +798,14 @@ jobs:
   fast-validation-suite-shards:
     name: Fast Validation — suite shard ${{ matrix.shard }}/3
     if: >-
-      needs.fast-validation-main-push-dedupe.outputs.run-fast-validation == 'true'
+      needs.ci-diff.outputs.class != 'docs-only'
+      && needs.fast-validation-main-push-dedupe.outputs.run-fast-validation == 'true'
       && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
       || github.event_name == 'merge_group'
       || (github.event_name == 'push'
       && (github.ref == 'refs/heads/main'
       || startsWith(github.ref, 'refs/tags/'))))
-    needs: [fast-validation-suite-build, fast-validation-main-push-dedupe]
+    needs: [ci-diff, fast-validation-suite-build, fast-validation-main-push-dedupe]
     strategy:
       fail-fast: false
       matrix:
@@ -755,13 +861,14 @@ jobs:
   fast-validation-suite:
     name: Fast Validation — full suite
     if: >-
-      always() && needs.fast-validation-main-push-dedupe.outputs.run-fast-validation == 'true'
+      always() && needs.ci-diff.outputs.class != 'docs-only'
+      && needs.fast-validation-main-push-dedupe.outputs.run-fast-validation == 'true'
       && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
       || github.event_name == 'merge_group'
       || (github.event_name == 'push'
       && (github.ref == 'refs/heads/main'
       || startsWith(github.ref, 'refs/tags/'))))
-    needs: [fast-validation-suite-shards, fast-validation-main-push-dedupe]
+    needs: [ci-diff, fast-validation-suite-shards, fast-validation-main-push-dedupe]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -786,7 +893,8 @@ jobs:
   fast-validation-docs:
     name: Fast Validation — doctests
     if: >-
-      needs.fast-validation-main-push-dedupe.outputs.run-fast-validation == 'true'
+      needs.ci-diff.outputs.class != 'docs-only'
+      && needs.fast-validation-main-push-dedupe.outputs.run-fast-validation == 'true'
       && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
       || github.event_name == 'merge_group'
       || (github.event_name == 'push'
@@ -797,7 +905,7 @@ jobs:
       && github.repository == 'Richards-LLC/cassy'
       && github.event.repository.fork == false
       && vars.CASSY_MERGE_QUEUE_SELF_HOSTED == 'enabled'))
-    needs: [fast-validation-runner-route, fast-validation-main-push-dedupe]
+    needs: [ci-diff, fast-validation-runner-route, fast-validation-main-push-dedupe]
     runs-on: ${{ fromJSON(needs.fast-validation-runner-route.outputs.runner) }}
     steps:
       - uses: actions/checkout@v4
@@ -886,7 +994,8 @@ jobs:
   fast-validation:
     name: Fast Validation
     if: >-
-      always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+      always() && needs.ci-diff.outputs.class != 'docs-only'
+      && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
       || github.event_name == 'merge_group'
       || (github.event_name == 'pull_request'
       && github.base_ref == github.event.repository.default_branch)
@@ -894,6 +1003,7 @@ jobs:
       && (github.ref == 'refs/heads/main'
       || startsWith(github.ref, 'refs/tags/'))))
     needs:
+      - ci-diff
       - fast-validation-main-push-dedupe
       - fast-validation-preflight
       - fast-validation-suite
@@ -977,10 +1087,12 @@ jobs:
   clippy:
     name: Clippy (advisory, compiles only — no test suite)
     if: >-
-      github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+      needs.ci-diff.outputs.class != 'docs-only'
+      && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
       || (github.event_name == 'push'
       && (github.ref == 'refs/heads/main'
-      || github.ref == 'refs/heads/staging'))
+      || github.ref == 'refs/heads/staging')))
+    needs: ci-diff
     # Keep each heavy lane separate, but collapse superseded commits on the
     # same integration ref. Event type keeps scheduled/manual runs independent
     # of a rapid main or staging push.
@@ -1034,7 +1146,8 @@ jobs:
   macos-check:
     name: macOS Check
     if: >-
-      always() && (github.event_name == 'pull_request'
+      always() && needs.ci-diff.outputs.class != 'docs-only'
+      && (github.event_name == 'pull_request'
       || needs.fast-validation-main-push-dedupe.outputs.run-fast-validation == 'true')
       && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
       || github.event_name == 'merge_group'
@@ -1043,7 +1156,7 @@ jobs:
       || (github.event_name == 'push'
       && (github.ref == 'refs/heads/main'
       || startsWith(github.ref, 'refs/tags/'))))
-    needs: fast-validation-main-push-dedupe
+    needs: [ci-diff, fast-validation-main-push-dedupe]
     # cas-59d3: key on the PULL REQUEST (falling back to the branch ref for
     # push events) and cancel superseded runs. Keying on the head SHA put every
     # push in its own group, so a rapid second push left the first run's full
@@ -1172,13 +1285,14 @@ jobs:
   record-pr-validation:
     name: Record protected PR tree validation
     if: >-
-      github.event_name == 'pull_request'
+      needs.ci-diff.outputs.class != 'docs-only'
+      && github.event_name == 'pull_request'
       && github.base_ref == github.event.repository.default_branch
       && needs.fast-validation.result == 'success'
       && needs.macos-check.result == 'success'
       && needs.clippy.result == 'success'
       && needs.test-compile-guard.result == 'success'
-    needs: [fast-validation, macos-check, clippy, test-compile-guard]
+    needs: [ci-diff, fast-validation, macos-check, clippy, test-compile-guard]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -1218,10 +1332,12 @@ jobs:
   test-compile-guard:
     name: Test Compile Guard (compile-only, executes nothing)
     if: >-
-      github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+      needs.ci-diff.outputs.class != 'docs-only'
+      && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
       || (github.event_name == 'push'
       && (github.ref == 'refs/heads/main'
-      || github.ref == 'refs/heads/staging'))
+      || github.ref == 'refs/heads/staging')))
+    needs: ci-diff
     # See clippy: a newer integration commit cancels only this lane's stale
     # work, while scheduled/manual work uses an event-distinct group.
     concurrency:

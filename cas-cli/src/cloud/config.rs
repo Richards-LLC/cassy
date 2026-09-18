@@ -17,6 +17,7 @@ use url::Url;
 
 use crate::error::CasError;
 use crate::store::find_cas_root;
+use std::fmt;
 
 // `dirs` used by `user_config_path()` / `load_user()` / `save_user()`
 
@@ -807,7 +808,7 @@ pub struct TeamInfo {
 }
 
 /// Cloud configuration stored in .cas/cloud.json
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct CloudConfig {
     /// Cloud API endpoint
     #[serde(default = "default_endpoint")]
@@ -1736,6 +1737,22 @@ impl CloudConfig {
     pub fn set_team_memory_sync(&mut self, canonical_id: &str, timestamp: &str) {
         self.team_memory_sync_timestamps
             .insert(canonical_id.to_string(), timestamp.to_string());
+    }
+}
+
+// The Cassy Cloud bearer lives here and this struct is formatted in
+// diagnostics; the derived Debug printed the credential in clear.
+impl fmt::Debug for CloudConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CloudConfig")
+            .field("endpoint", &self.endpoint)
+            .field("token", &self.token.as_ref().map(|_| "[redacted]"))
+            .field("email", &self.email)
+            .field("plan", &self.plan)
+            .field("org_id", &self.org_id)
+            .field("team_id", &self.team_id)
+            .field("default_team_id", &self.default_team_id)
+            .finish_non_exhaustive()
     }
 }
 
@@ -4054,6 +4071,49 @@ mod tests {
             cfg.active_team_id_with_user_config(Some(&user_cfg)),
             None,
             "after clear_team, project must be personal even with user-level default_team_id"
+        );
+    }
+}
+
+#[cfg(test)]
+mod credential_redaction_tests {
+    use super::*;
+
+    #[test]
+    fn the_cloud_config_debug_never_prints_the_bearer() {
+        let config = CloudConfig {
+            endpoint: "https://cloud.example".to_string(),
+            token: Some("SECRET-tok-9f3a1c".to_string()),
+            email: Some("a@example.com".to_string()),
+            ..CloudConfig::default()
+        };
+        let rendered = format!("{config:?}");
+        assert!(!rendered.contains("SECRET-tok-9f3a1c"), "{rendered}");
+        assert!(rendered.contains("[redacted]"), "{rendered}");
+        assert!(
+            rendered.contains("cloud.example"),
+            "the endpoint is diagnostic: {rendered}"
+        );
+
+        // A config with no token must not claim a redacted one exists.
+        let anonymous = CloudConfig::default();
+        assert!(
+            format!("{anonymous:?}").contains("token: None"),
+            "an absent credential reads as absent: {anonymous:?}"
+        );
+    }
+
+    #[test]
+    fn serialization_is_unchanged_by_the_debug_impl() {
+        let config = CloudConfig {
+            endpoint: "https://cloud.example".to_string(),
+            token: Some("SECRET-tok-9f3a1c".to_string()),
+            ..CloudConfig::default()
+        };
+        let json = serde_json::to_value(&config).unwrap();
+        assert_eq!(
+            json["token"], "SECRET-tok-9f3a1c",
+            "redaction is a Debug concern only; cloud.json must still round-trip the real token"
         );
     }
 }

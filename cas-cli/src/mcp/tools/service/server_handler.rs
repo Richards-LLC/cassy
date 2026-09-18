@@ -309,7 +309,9 @@ fn potentially_mutating_call(tool_name: &str, action: &str) -> bool {
         ),
         "memory" => !matches!(action, "get" | "list" | "recent"),
         "rule" | "skill" | "spec" | "verification" | "coordination" | "system" | "team"
-        | "pattern" | "knowledge" => !matches!(action, "show" | "list" | "status" | "members"),
+        | "pattern" | "knowledge" | "artifact" => {
+            !matches!(action, "show" | "list" | "status" | "members")
+        }
         // Unknown tool/action schemas must be treated as write-capable: an
         // optimistic "not committed" answer would invite a duplicate write.
         _ => true,

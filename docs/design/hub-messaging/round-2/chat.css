@@ -1,0 +1,181 @@
+/* Round-2 chat surface — shared palette and atoms (cas-bdc0).
+ *
+ * Every colour below is a hub token from hub-web/src/tokens.css (source of truth
+ * docs/design/design-tokens.json), restated as a literal so the render is
+ * measurable by scripts/visual-qa.mjs (its contrast probe cannot resolve
+ * color-mix() output, which is why --bg-raised/--bg-hover are not used here).
+ *
+ *   --canvas   = color.bg-root        --panel   = color.bg-panel
+ *   --hair     = color.line-subtle    --ink     = color.text-hi
+ *   --ink-mid  = color.text-mid       --ink-soft= text-mid darkened one step (rail secondary)
+ *   --you-*    = color.action on bg-root/bg-panel inverse
+ *   --sup-bg   = action mixed into panel (light) / panel raised toward text-hi (dark)
+ *   --ask-bg   = color.state-warn DARK value in BOTH schemes: an amber that has to
+ *                read as "your turn" must stay bright, and the light-scheme
+ *                state-warn (#7F5504) only clears contrast as a near-brown. The
+ *                light-scheme value is kept as --ask-edge for borders and dots.
+ *   --crit-*   = color.state-crit
+ *   --ok       = color.state-ok       --accent  = color.action
+ *   --m-a/b/c  = action / state-ok / a violet of the same value family (per machine)
+ */
+
+:root {
+  --canvas: #F7F4EE;
+  --panel: #FFFFFF;
+  --hair: #DAD3C7;
+  --ink: #1B1D24;
+  --ink-mid: #5A5F6E;
+  --ink-soft: #494E5C;
+  --you-bg: #2E3A9F;
+  --you-fg: #FFFFFF;
+  --sup-bg: #E7EAF7;
+  --sup-fg: #1B1D24;
+  --ask-bg: #E2B14D;
+  --ask-fg: #1B1D24;
+  --ask-soft-bg: #FAF3E4;
+  --ask-edge: #7F5504;
+  --crit-bg: #B3261E;
+  --crit-fg: #FFFFFF;
+  --ok: #226845;
+  --accent: #2E3A9F;
+  --accent-soft: #DDE1F7;
+  --inner: #FFFFFF;
+  --m-a: #2E3A9F;
+  --m-b: #226845;
+  --m-c: #5B3E8C;
+  --m-fg: #FFFFFF;
+  --lift: 0 1px 2px rgba(18, 20, 26, 0.05), 0 6px 18px rgba(18, 20, 26, 0.06);
+  --lift-strong: 0 2px 4px rgba(18, 20, 26, 0.08), 0 14px 34px rgba(18, 20, 26, 0.10);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --canvas: #12141A;
+    --panel: #191C24;
+    --hair: #2B3040;
+    --ink: #E9E6E0;
+    --ink-mid: #A3A7B4;
+    --ink-soft: #B4B8C4;
+    --you-bg: #A9B3FF;
+    --you-fg: #12141A;
+    --sup-bg: #262B38;
+    --sup-fg: #E9E6E0;
+    --ask-bg: #E2B14D;
+    --ask-fg: #12141A;
+    --ask-soft-bg: #2E2A1F;
+    --ask-edge: #E2B14D;
+    --crit-bg: #EF7B72;
+    --crit-fg: #12141A;
+    --ok: #5FC492;
+    --accent: #A9B3FF;
+    --accent-soft: #232838;
+    --inner: #12141A;
+    --m-a: #A9B3FF;
+    --m-b: #5FC492;
+    --m-c: #C0A3F0;
+    --m-fg: #12141A;
+    --lift: 0 1px 2px rgba(0, 0, 0, 0.32), 0 6px 18px rgba(0, 0, 0, 0.34);
+    --lift-strong: 0 2px 4px rgba(0, 0, 0, 0.40), 0 14px 34px rgba(0, 0, 0, 0.46);
+  }
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  background: var(--canvas);
+  color: var(--ink);
+  font: var(--weight-regular) 15px/1.5 var(--font-ui);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ---- machine identity -------------------------------------------------- */
+
+.mono {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  color: var(--m-fg);
+  background: var(--m-a);
+  font: var(--weight-semibold) 17px/1 var(--font-ui);
+  letter-spacing: 0.01em;
+  width: 42px;
+  height: 42px;
+  border-radius: 50%;
+}
+.mono.b { background: var(--m-b); }
+.mono.c { background: var(--m-c); }
+
+/* ---- attachment (report card) ----------------------------------------- */
+
+.card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: var(--inner);
+  border-radius: 14px;
+  padding: 12px 16px 12px 12px;
+  min-width: 0;
+}
+.pdf {
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  flex: none;
+  width: 32px;
+  height: 40px;
+  border-radius: 5px 5px 5px 5px;
+  background: var(--crit-bg);
+  color: var(--crit-fg);
+  font: var(--weight-semibold) 9px/1 var(--font-ui);
+  letter-spacing: 0.06em;
+  padding-bottom: 6px;
+}
+.card .name {
+  font: var(--weight-semibold) 14px/1.35 var(--font-ui);
+  color: var(--ink);
+}
+.card .sub {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 3px;
+  font: var(--weight-regular) 12px/1.3 var(--font-ui);
+  color: var(--ink-mid);
+}
+.card .verified { display: flex; align-items: center; gap: 3px; color: var(--ok); }
+.card .verified svg { width: 12px; height: 12px; }
+
+/* ---- working indicator ------------------------------------------------- */
+
+.working { display: flex; align-items: center; gap: 9px; color: var(--ink-mid); font-size: 13px; }
+.dots { display: flex; gap: 4px; }
+.dots i { width: 6px; height: 6px; border-radius: 50%; background: var(--ink-mid); }
+
+/* ---- composer ---------------------------------------------------------- */
+
+.field {
+  flex: 1;
+  min-width: 0;
+  color: var(--ink-mid);
+  background: var(--panel);
+  font-size: 14px;
+}
+.send {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: var(--panel);
+}
+.send svg { width: 19px; height: 19px; }
+
+svg { display: block; }
+.tick { width: 15px; height: 15px; color: var(--ok); flex: none; }
+.bub.receipt { align-items: flex-start; }
+.bub.receipt .tick { margin-top: 4px; }

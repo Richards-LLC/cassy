@@ -535,8 +535,14 @@ impl CloudSyncer {
                     synced += accepted;
                 }
                 Err(e) => {
+                    let reason = crate::cloud::syncer::push_reason_from_error(&e);
                     for item in &batch_items {
                         let _ = self.queue.mark_failed(item.id, &e.to_string());
+                        if let Some(reason) = reason.as_deref() {
+                            let _ = self
+                                .queue
+                                .record_row_outcome(item.id, "rejected", Some(reason));
+                        }
                     }
                     errors.push(format!("{entity_key} push failed: {e}"));
                 }

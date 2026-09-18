@@ -1,0 +1,6 @@
+[OK] 2026-09-18-release-brief.pdf - 70 KB - art-acaa50db
+     task    cas-b72a
+     type    application/pdf
+     sha256  dd67bddbe03e26ddfab5385e61cec1df0ea4f5add3716adb5ca4f383a6ca3638
+     status  local
+     created 2026-09-18T20:27:05.179606823+00:00

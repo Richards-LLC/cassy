@@ -56,6 +56,23 @@ pub(crate) enum DegradationPriority {
 /// passed this gate over the real limit.
 pub(crate) const SESSION_START_BUDGET_BYTES: usize = 9 * 1024;
 
+/// Minimum share of the budget that must remain for everything other than the
+/// supervisor's own role guidance.
+///
+/// cas-8ad7d. `test_supervisor_guidance_under_8kb` bounds the guidance as a
+/// *component*; nothing bounded what it leaves for the rest of the payload. In
+/// cas-caaf that gap let protected text grow until a real evidence section —
+/// the GitHub issue titles — was silently compacted instead, and the only
+/// signal was a test failing on one machine and not in CI.
+///
+/// The remainder has to cover the protected Cassy context header and agent
+/// coordination line (~1.1KB together) plus the evidence sections a supervisor
+/// actually reads: the issue triage with its titles and the bug-routing table
+/// (~0.8KB). 2 400 B is that need with a deliberate alarm margin, so the pin
+/// fires while there is still room to act rather than after a section has
+/// already collapsed.
+pub(crate) const SESSION_START_GUIDANCE_REMAINDER_FLOOR_BYTES: usize = 2_400;
+
 /// Minimum un-compacted payload headroom required by the self-test/doctor
 /// guard. A payload closer than this to the harness boundary is one small
 /// guidance edit away from invoking compaction.
@@ -78,6 +95,18 @@ const DEGRADABLE_BASE_SECTIONS: &[(&str, &str, DegradationPriority)] = &[
     ("## Related to Current Work", "search action=context", DegradationPriority::Context),
     ("## Available Skills", "skill action=list", DegradationPriority::Static),
     ("## Connected MCP Tools", "system action=status", DegradationPriority::Static),
+    // cas-caaf: the Codex worker note is static boilerplate appended to the
+    // supervisor guidance when `CAS_FACTORY_WORKER_CLI=codex`. Left protected
+    // it cost ~1.1KB of a 9KB budget and pushed the GitHub issue triage into
+    // its collapsed form — a supervisor coordinating Codex workers lost the
+    // open-issue titles so that advice it can re-read on demand could be shown
+    // in full. It is exactly the class this list exists for: retrievable,
+    // unchanging, and carrying no session evidence or safety assertion.
+    (
+        "## Codex Worker Coordination Note",
+        "skill action=get name=cas-supervisor",
+        DegradationPriority::Static,
+    ),
 ];
 
 /// Split the base context into budget segments at its `## ` headings.
@@ -586,6 +615,46 @@ mod tests {
     /// a 198-change codemap staleness with long paths, a 240-file prior-factory
     /// WIP tree, and a full GitHub issue-triage list. Before the budget these
     /// summed to ~12KB and the harness silently filed the payload away.
+    #[test]
+    fn the_codex_worker_note_yields_before_the_issue_triage_titles() {
+        // cas-caaf: the note is appended to the *supervisor guidance*, so it
+        // used to ride in the protected tier and cost ~1.1KB of the 9KB budget.
+        // A supervisor coordinating Codex workers therefore lost the open-issue
+        // titles — the triage section's entire payload — so that static advice
+        // could be shown in full. Static boilerplate must compact first.
+        let guidance = format!(
+            "## 📋 CAS Context\n{}\n\n## Codex Worker Coordination Note\nWorkers are running Codex. {}",
+            // Sized so the assembled payload is just over budget *only* because
+            // of the note: 8_000 + triage fits, 8_000 + note + triage does not.
+            "x".repeat(8_000),
+            "y".repeat(1_100),
+        );
+        let mut assembler = SessionContextAssembler::new(guidance);
+        assembler.append_degradable(
+            "## GitHub issue triage — owner/cas\n7 open (checked just now)\n- #105 Newest report\n- #104 Second report\n- #103 Third report".to_string(),
+            "## GitHub issue triage — owner/cas\n7 open — run `gh issue list --repo owner/cas` for the list.".to_string(),
+        );
+
+        let payload = assembler.render();
+        assert!(
+            payload.len() <= SESSION_START_BUDGET_BYTES,
+            "payload {} is over the {SESSION_START_BUDGET_BYTES}B budget",
+            payload.len()
+        );
+        assert!(
+            payload.contains("#105 Newest report"),
+            "the issue titles are the triage section's whole point and must survive: {payload}"
+        );
+        assert!(
+            payload.contains("omitted to fit the session-start size budget"),
+            "the Codex note must be the thing that compacts: {payload}"
+        );
+        assert!(
+            !payload.contains("Workers are running Codex. yyy"),
+            "the Codex note body must not survive at the titles' expense"
+        );
+    }
+
     #[test]
     fn assembled_worst_case_payload_stays_under_the_inline_cap() {
         use crate::hooks::handlers::handlers_events::codemap::CodemapStaleness;

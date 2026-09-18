@@ -769,8 +769,14 @@ impl CloudSyncer {
                     }
                     Err(e) => {
                         // Mark this sub-batch as failed but continue with others
+                        let reason = crate::cloud::syncer::push_reason_from_error(&e);
                         for item in &batch_items {
                             let _ = self.queue.mark_failed(item.id, &e.to_string());
+                            if let Some(reason) = reason.as_deref() {
+                                let _ = self
+                                    .queue
+                                    .record_row_outcome(item.id, "rejected", Some(reason));
+                            }
                         }
                         // If any sub-batch fails, report the error
                         return Err(e);

@@ -45,6 +45,7 @@ use crate::error::CasError;
 use cas_search::VectorStore;
 use cas_search::lmdb_store::LmdbVectorStore;
 use cas_store::{KnowledgePage, KnowledgeStore};
+use std::fmt;
 
 /// Provider name recorded in [`EmbeddingMeta`] for vectors produced here.
 pub const CLOUD_PROVIDER: &str = "cas-cloud";
@@ -202,7 +203,7 @@ impl EmbedReport {
 ///
 /// Construct via [`KnowledgeEmbedder::from_config`], which is the capability
 /// gate: no token, no embedder, no cloud calls.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct KnowledgeEmbedder {
     endpoint: String,
     token: String,
@@ -1309,6 +1310,19 @@ fn count_pending(store: &dyn KnowledgeStore) -> Result<usize, CasError> {
         .map_err(|e| CasError::Other(format!("Failed to count pending pages: {e}")))
 }
 
+// Carries the Cassy Cloud bearer for the lifetime of the embedder.
+impl fmt::Debug for KnowledgeEmbedder {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("KnowledgeEmbedder")
+            .field("endpoint", &self.endpoint)
+            .field("token", &"[redacted]")
+            .field("model", &self.model)
+            .field("dims", &self.dims)
+            .field("timeout", &self.timeout)
+            .finish()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1872,5 +1886,19 @@ mod tests {
             still_pending, 1,
             "the page must stay pending so the next run retries it"
         );
+    }
+}
+
+#[cfg(test)]
+mod credential_redaction_tests {
+    use super::*;
+
+    #[test]
+    fn the_embedder_debug_never_prints_the_bearer() {
+        let embedder = KnowledgeEmbedder::new("https://cloud.example", "SECRET-tok-9f3a1c");
+        let rendered = format!("{embedder:?}");
+        assert!(!rendered.contains("SECRET-tok-9f3a1c"), "{rendered}");
+        assert!(rendered.contains("[redacted]"), "{rendered}");
+        assert!(rendered.contains("cloud.example"), "{rendered}");
     }
 }

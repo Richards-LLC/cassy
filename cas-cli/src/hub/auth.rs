@@ -22,6 +22,7 @@ use subtle::ConstantTimeEq;
 use tokio::sync::broadcast;
 
 use crate::ui::factory::ClientMessage;
+use std::fmt;
 
 const PAIRING_TTL_MINUTES: i64 = 10;
 const WS_TICKET_TTL_MINUTES: i64 = 5;
@@ -186,7 +187,7 @@ impl PublicJwk {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct PairingExchange {
     pub token: String,
     pub hub_id: String,
@@ -224,7 +225,7 @@ impl PairingExchange {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Clone, Serialize)]
 pub struct PairingInvitation {
     #[serde(skip_serializing)]
     pub token: String,
@@ -275,13 +276,55 @@ fn pairing_invitation_url(
     url
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Clone, Serialize)]
 pub struct DeviceCredential {
     pub device_id: String,
     pub credential_id: String,
     pub credential: String,
     pub expires_at: DateTime<Utc>,
     pub scopes: BTreeSet<Scope>,
+}
+
+// Every one of these carries a pairing capability: the token IS the authority to
+// pair a device, so a derived Debug leaks an actionable credential.
+impl fmt::Debug for PairingExchange {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PairingExchange")
+            .field("token", &"[redacted]")
+            .field("hub_id", &self.hub_id)
+            .field("controller_origin", &self.controller_origin)
+            .field("device_label", &self.device_label)
+            .field("operator_label", &self.operator_label)
+            .field("requested_scopes", &self.requested_scopes)
+            .field("source", &self.source)
+            .finish_non_exhaustive()
+    }
+}
+
+impl fmt::Debug for PairingInvitation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // `url` embeds the same token, so it is redacted with it.
+        f.debug_struct("PairingInvitation")
+            .field("token", &"[redacted]")
+            .field("url", &"[redacted]")
+            .field("expires_at", &self.expires_at)
+            .field("scopes", &self.scopes)
+            .field("controller_origin", &self.controller_origin)
+            .field("hub_id", &self.hub_id)
+            .finish()
+    }
+}
+
+impl fmt::Debug for DeviceCredential {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DeviceCredential")
+            .field("device_id", &self.device_id)
+            .field("credential_id", &self.credential_id)
+            .field("credential", &"[redacted]")
+            .field("expires_at", &self.expires_at)
+            .field("scopes", &self.scopes)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1253,4 +1296,71 @@ fn sanitize_label(value: &str) -> String {
         .filter(|ch| !ch.is_control())
         .take(80)
         .collect()
+}
+
+#[cfg(test)]
+mod credential_redaction_tests {
+    use super::*;
+
+    fn jwk() -> PublicJwk {
+        PublicJwk {
+            kty: "EC".to_string(),
+            crv: "P-256".to_string(),
+            x: "x".to_string(),
+            y: "y".to_string(),
+        }
+    }
+
+    #[test]
+    fn the_pairing_exchange_debug_never_prints_the_pairing_token() {
+        let exchange = PairingExchange {
+            token: "SECRET-tok-9f3a1c".to_string(),
+            hub_id: "hub-1".to_string(),
+            controller_origin: "https://hub.example".to_string(),
+            public_key_jwk: jwk(),
+            device_label: "Laptop".to_string(),
+            operator_label: "Daniel".to_string(),
+            requested_scopes: Default::default(),
+            source: "local".to_string(),
+        };
+        let rendered = format!("{exchange:?}");
+        assert!(!rendered.contains("SECRET-tok-9f3a1c"), "{rendered}");
+        assert!(rendered.contains("[redacted]"), "{rendered}");
+        assert!(rendered.contains("hub-1"), "{rendered}");
+    }
+
+    #[test]
+    fn the_pairing_invitation_debug_redacts_the_url_as_well_as_the_token() {
+        let invitation = PairingInvitation {
+            token: "SECRET-tok-9f3a1c".to_string(),
+            url: "https://hub.example/pair#SECRET-tok-9f3a1c".to_string(),
+            expires_at: chrono::Utc::now(),
+            scopes: Default::default(),
+            controller_origin: "https://hub.example".to_string(),
+            hub_id: "hub-1".to_string(),
+        };
+        let rendered = format!("{invitation:?}");
+        assert!(
+            !rendered.contains("SECRET-tok-9f3a1c"),
+            "the URL embeds the same token, so redacting only the field would still leak: {rendered}"
+        );
+        assert!(rendered.contains("hub-1"), "{rendered}");
+    }
+
+    #[test]
+    fn the_device_credential_debug_never_prints_the_credential() {
+        let credential = DeviceCredential {
+            device_id: "dev-1".to_string(),
+            credential_id: "cred-1".to_string(),
+            credential: "SECRET-tok-9f3a1c".to_string(),
+            expires_at: chrono::Utc::now(),
+            scopes: Default::default(),
+        };
+        let rendered = format!("{credential:?}");
+        assert!(!rendered.contains("SECRET-tok-9f3a1c"), "{rendered}");
+        assert!(
+            rendered.contains("cred-1"),
+            "the credential ID is a handle, not the secret: {rendered}"
+        );
+    }
 }

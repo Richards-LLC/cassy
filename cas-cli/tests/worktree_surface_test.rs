@@ -214,6 +214,8 @@ fn coord_req(action: &str) -> CoordinationRequest {
         merge_request: None,
         blocker: None,
         in_reply_to: None,
+        kind: None,
+        attachment: None,
         target: None,
         message: None,
         summary: None,

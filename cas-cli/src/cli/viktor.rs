@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use crate::cli::Cli;
+use std::fmt;
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct ViktorArgs {
@@ -27,7 +28,7 @@ enum ViktorCommand {
     Key,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Deserialize, Serialize)]
 struct StoredCredential {
     api_key: String,
 }
@@ -321,4 +322,28 @@ fn restrict_credential_permissions(path: &Path) -> anyhow::Result<()> {
 #[cfg(not(unix))]
 fn restrict_credential_permissions(_path: &Path) -> anyhow::Result<()> {
     Ok(())
+}
+
+// The stored Viktor API key.
+impl fmt::Debug for StoredCredential {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("StoredCredential")
+            .field("api_key", &"[redacted]")
+            .finish()
+    }
+}
+
+#[cfg(test)]
+mod credential_redaction_tests {
+    use super::*;
+
+    #[test]
+    fn the_stored_credential_debug_never_prints_the_api_key() {
+        let stored = StoredCredential {
+            api_key: "SECRET-tok-9f3a1c".to_string(),
+        };
+        let rendered = format!("{stored:?}");
+        assert!(!rendered.contains("SECRET-tok-9f3a1c"), "{rendered}");
+        assert!(rendered.contains("[redacted]"), "{rendered}");
+    }
 }

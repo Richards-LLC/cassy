@@ -25,6 +25,8 @@ mod search_tools;
 mod server_protocol;
 #[path = "mcp_tools_test/skill_tools.rs"]
 mod skill_tools;
+#[path = "mcp_tools_test/artifact_tools.rs"]
+mod artifact_tools;
 #[path = "mcp_tools_test/spec_tools.rs"]
 mod spec_tools;
 #[path = "mcp_tools_test/system_tools.rs"]

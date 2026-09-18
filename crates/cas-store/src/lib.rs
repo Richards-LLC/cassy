@@ -42,6 +42,7 @@ mod code_store;
 mod code_vector_store;
 mod commit_link_store;
 mod delegation_receipt_store;
+mod artifact_store;
 mod delivery_store;
 mod entity_store;
 pub mod error;
@@ -114,6 +115,10 @@ pub use delegation_receipt_store::{
     DelegationReserveOutcome, DelegationReserveRequest, DelegationVerdict,
     SqliteDelegationReceiptStore,
 };
+pub use artifact_store::{
+    ARTIFACT_SCHEMA, ARTIFACT_SCHEMA_STATEMENTS, NewArtifact, PublishedArtifact,
+    SqliteArtifactStore, looks_like_signed_upload_url,
+};
 pub use delivery_store::{
     DELIVERY_SCHEMA, build_worker_completion_receipt, create_worker_delivery,
     create_worker_delivery_with_dispatch, create_worker_delivery_with_dispatch_for_lease,
@@ -181,6 +186,7 @@ pub use verification_store::{
     bind_verifier_capability, cancel_unbound_server_verifier_handoff, claim_verification_dispatch,
     claim_verification_dispatch_bound, consume_server_verifier_handoff_with_conn,
     consume_verifier_capability_with_conn, correct_parked_delivery_proof_scope,
+    correct_parked_delivery_proof_targets,
     create_verification_dispatch, create_verification_dispatch_bound,
     create_verification_dispatch_bound_with_conn, get_latest_verification_dispatch,
     get_latest_verification_dispatch_with_conn, get_verification_dispatch,

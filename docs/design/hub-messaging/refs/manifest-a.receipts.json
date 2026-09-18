@@ -1,0 +1,301 @@
+[
+  {
+    "id": "01",
+    "file": "01-imessage.png",
+    "title": "Apple Messages",
+    "category": "consumer",
+    "url": "https://support.apple.com/guide/messages/welcome/mac",
+    "finalUrl": "https://support.apple.com/guide/messages/welcome/mac",
+    "mode": "element",
+    "selector": "img[alt^='The Messages window with several conversations listed in the sidebar on the left']",
+    "viewport": {
+      "width": 1280,
+      "height": 800
+    },
+    "scheme": "light",
+    "size": {
+      "width": 407,
+      "height": 306
+    },
+    "status": "ok",
+    "error": null,
+    "capturedAt": "2026-09-18T16:05:24.346Z",
+    "ms": 4585
+  },
+  {
+    "id": "02",
+    "file": "02-whatsapp.png",
+    "title": "WhatsApp",
+    "category": "consumer",
+    "url": "https://www.whatsapp.com/",
+    "finalUrl": "https://www.whatsapp.com/",
+    "mode": "element",
+    "selector": "img[alt^='screenshot of whatsapp feature group conversation']",
+    "viewport": {
+      "width": 1280,
+      "height": 800
+    },
+    "scheme": "light",
+    "size": {
+      "width": 400,
+      "height": 408
+    },
+    "status": "ok",
+    "error": null,
+    "capturedAt": "2026-09-18T16:02:57.294Z",
+    "ms": 4223
+  },
+  {
+    "id": "03",
+    "file": "03-signal.png",
+    "title": "Signal (Android chat, signal.org hero)",
+    "category": "consumer",
+    "url": "https://signal.org/",
+    "finalUrl": "https://signal.org/",
+    "mode": "element",
+    "selector": "img.screenshot2",
+    "viewport": {
+      "width": 1280,
+      "height": 800
+    },
+    "scheme": "light",
+    "size": {
+      "width": 506,
+      "height": 667
+    },
+    "status": "ok",
+    "error": null,
+    "capturedAt": "2026-09-18T16:13:02.212Z",
+    "ms": 3881
+  },
+  {
+    "id": "04",
+    "file": "04-telegram.png",
+    "title": "Telegram",
+    "category": "consumer",
+    "url": "https://t.me/s/telegram",
+    "finalUrl": "https://t.me/s/telegram",
+    "mode": "page",
+    "selector": null,
+    "viewport": {
+      "width": 1280,
+      "height": 800
+    },
+    "scheme": "light",
+    "size": {
+      "width": 1280,
+      "height": 800
+    },
+    "status": "ok",
+    "error": null,
+    "capturedAt": "2026-09-18T15:57:36.603Z",
+    "ms": 5529
+  },
+  {
+    "id": "05",
+    "file": "05-slack.png",
+    "title": "Slack",
+    "category": "team",
+    "url": "https://slack.com/features/channels",
+    "finalUrl": "https://slack.com/features/channels",
+    "mode": "element",
+    "selector": "img[alt='A simplified example of what channels look like in Slack.']",
+    "viewport": {
+      "width": 1280,
+      "height": 800
+    },
+    "scheme": "light",
+    "size": {
+      "width": 559,
+      "height": 383
+    },
+    "status": "ok",
+    "error": null,
+    "capturedAt": "2026-09-18T16:03:19.114Z",
+    "ms": 21764
+  },
+  {
+    "id": "06",
+    "file": "06-discord.png",
+    "title": "Discord thread (support article)",
+    "category": "team",
+    "url": "https://support.discord.com/hc/en-us/articles/4403205878423-Threads-FAQ",
+    "finalUrl": "https://support.discord.com/hc/en-us/articles/4403205878423-Threads-FAQ",
+    "mode": "element",
+    "selector": "img[src*='lh7-rt.googleusercontent.com']",
+    "viewport": {
+      "width": 1280,
+      "height": 800
+    },
+    "scheme": "light",
+    "size": {
+      "width": 624,
+      "height": 351
+    },
+    "status": "ok",
+    "error": null,
+    "capturedAt": "2026-09-18T16:18:16.626Z",
+    "ms": 7231
+  },
+  {
+    "id": "07",
+    "file": "07-linear-inbox.png",
+    "title": "Linear Inbox",
+    "category": "team",
+    "url": "https://linear.app/docs/inbox",
+    "finalUrl": "https://linear.app/docs/inbox",
+    "mode": "element",
+    "selector": "img[alt^='Linear Inbox in dark mode']",
+    "viewport": {
+      "width": 1280,
+      "height": 800
+    },
+    "scheme": "light",
+    "size": {
+      "width": 670,
+      "height": 387
+    },
+    "status": "ok",
+    "error": null,
+    "capturedAt": "2026-09-18T16:01:07.405Z",
+    "ms": 14350
+  },
+  {
+    "id": "08",
+    "file": "08-height.png",
+    "title": "Height task chat (TechRepublic review)",
+    "category": "team",
+    "url": "https://www.techrepublic.com/article/height-app-review/",
+    "finalUrl": "https://www.techrepublic.com/article/height-app-review/",
+    "mode": "element",
+    "selector": "img[alt='Height Copilot AI chat feature.']",
+    "viewport": {
+      "width": 1280,
+      "height": 800
+    },
+    "scheme": "light",
+    "size": {
+      "width": 805,
+      "height": 459
+    },
+    "status": "ok",
+    "error": null,
+    "capturedAt": "2026-09-18T16:11:13.290Z",
+    "ms": 21911
+  },
+  {
+    "id": "09",
+    "file": "09-claude.png",
+    "title": "Claude.ai shared chat",
+    "category": "ai-assistant",
+    "url": "https://claude.ai/share/4b3a1a9d-4f5a-4ca6-ba4f-76ffc3f29971",
+    "finalUrl": "https://claude.ai/share/4b3a1a9d-4f5a-4ca6-ba4f-76ffc3f29971",
+    "mode": "page",
+    "selector": null,
+    "viewport": {
+      "width": 1280,
+      "height": 800
+    },
+    "scheme": "light",
+    "size": {
+      "width": 1280,
+      "height": 800
+    },
+    "status": "ok",
+    "error": null,
+    "capturedAt": "2026-09-18T16:14:07.222Z",
+    "ms": 6384
+  },
+  {
+    "id": "10",
+    "file": "10-chatgpt.png",
+    "title": "ChatGPT",
+    "category": "ai-assistant",
+    "url": "https://chatgpt.com/share/6aad22c5-7cfc-83e8-b69e-93b72a4e1805",
+    "finalUrl": "https://chatgpt.com/share/6aad22c5-7cfc-83e8-b69e-93b72a4e1805",
+    "mode": "page",
+    "selector": null,
+    "viewport": {
+      "width": 1280,
+      "height": 800
+    },
+    "scheme": "light",
+    "size": {
+      "width": 1280,
+      "height": 800
+    },
+    "status": "ok",
+    "error": null,
+    "capturedAt": "2026-09-18T16:09:34.152Z",
+    "ms": 8407
+  },
+  {
+    "id": "11",
+    "file": "11-cursor.png",
+    "title": "Cursor 2.0 agent interface",
+    "category": "ai-assistant",
+    "url": "https://cursor.com/blog/2-0",
+    "finalUrl": "https://cursor.com/blog/2-0",
+    "mode": "element",
+    "selector": "img[src*='2-0-1.jpg']",
+    "viewport": {
+      "width": 1280,
+      "height": 800
+    },
+    "scheme": "light",
+    "size": {
+      "width": 615,
+      "height": 359
+    },
+    "status": "ok",
+    "error": null,
+    "capturedAt": "2026-09-18T16:15:30.353Z",
+    "ms": 5709
+  },
+  {
+    "id": "12",
+    "file": "12-devin.png",
+    "title": "Devin",
+    "category": "ai-assistant",
+    "url": "https://devin.ai/",
+    "finalUrl": "https://devin.ai/",
+    "mode": "element",
+    "selector": "img[alt='Devin, the AI software engineer']",
+    "viewport": {
+      "width": 1280,
+      "height": 800
+    },
+    "scheme": "light",
+    "size": {
+      "width": 1203,
+      "height": 694
+    },
+    "status": "ok",
+    "error": null,
+    "capturedAt": "2026-09-18T16:01:11.882Z",
+    "ms": 4422
+  },
+  {
+    "id": "13",
+    "file": "13-copilot-agent.png",
+    "title": "GitHub Copilot coding agent PR",
+    "category": "ai-assistant",
+    "url": "https://github.com/dotnet/runtime/pull/124271",
+    "finalUrl": "https://github.com/dotnet/runtime/pull/124271",
+    "mode": "page",
+    "selector": null,
+    "viewport": {
+      "width": 1280,
+      "height": 800
+    },
+    "scheme": "light",
+    "size": {
+      "width": 1280,
+      "height": 800
+    },
+    "status": "ok",
+    "error": null,
+    "capturedAt": "2026-09-18T15:59:03.361Z",
+    "ms": 7063
+  }
+]

@@ -647,9 +647,11 @@ release_epoch_delta() {
 }
 
 release_print_metrics() {
-    printf 'release metrics: INTERVENTIONS=%s BLOCKERS=%s GREEN_TO_PIPELINE_SECS=%s MERGED_TO_PUBLISHER_SECS=%s\n' \
-        "$(release_intervention_count)" "$(release_intervention_stages)" \
-        "$(release_epoch_delta "$run_dir/gate.green.epoch" "$run_dir/pipeline.start.epoch")" \
+    printf 'release metrics: INTERVENTIONS=%s\n' "$(release_intervention_count)"
+    printf 'release blockers: BLOCKERS=%s\n' "$(release_intervention_stages)"
+    printf 'release handoff: GREEN_TO_PIPELINE_SECS=%s\n' \
+        "$(release_epoch_delta "$run_dir/gate.green.epoch" "$run_dir/pipeline.start.epoch")"
+    printf 'release handoff: MERGED_TO_PUBLISHER_SECS=%s\n' \
         "$(release_epoch_delta "$run_dir/pipeline.merged.epoch" "$run_dir/publisher.start.epoch")"
 }
 
@@ -800,7 +802,7 @@ print_publication_status() {
     fi
 
     if [[ ! -s "$published_file" || ! -s "$latency_file" || ! -s "$workflow_file" ]]; then
-        printf 'publication: pending (save verified release-workflow.json, release-published.receipt, and release-latency.receipt)\n'
+        printf 'publication: pending (save workflow, published, and latency receipts)\n'
         return
     fi
 

@@ -2311,6 +2311,18 @@ mod tests {
     }
 
     #[test]
+    fn integration_recover_accepts_explicit_base_only_mode() {
+        let parsed = crate::cli::try_parse_from_with_wordmark([
+            "cas",
+            "factory",
+            "integration-recover",
+            "--base-only",
+        ])
+        .unwrap();
+        assert!(parsed.command.is_some(), "expected factory command");
+    }
+
+    #[test]
     fn recovery_cli_rejects_unknown_and_registered_worker_even_with_supervisor_env_hint() {
         let temp = tempfile::tempdir().unwrap();
         let cas_root = crate::store::init_cas_dir(temp.path()).unwrap();

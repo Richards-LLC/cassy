@@ -1376,6 +1376,55 @@ mod tests {
     }
 
     #[test]
+    fn sweep_test_process_identity_is_scrubbed_without_mutating_the_parent() {
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[
+            ("CAS_AGENT_NAME", "caller-name"),
+            ("CAS_AGENT_ROLE", "supervisor"),
+            ("CAS_SESSION_ID", "caller-session"),
+            ("CAS_AGENT_ID", "caller-id"),
+            ("CAS_SUPERVISOR_NAME", "caller-supervisor"),
+            ("CAS_ROOT", "/caller/cas"),
+        ]);
+        let temp = tempfile::tempdir().unwrap();
+        let log_path = temp.path().join("child.log");
+        let log = File::create(&log_path).unwrap();
+        let settings = SweepSettings::from(&FactoryConfig::default());
+        let runner = TestRunner {
+            kind: TestRunnerKind::Package,
+            program: "sh".to_owned(),
+            args: vec![
+                "-c".to_owned(),
+                "if env | grep -E '^CAS_(AGENT_NAME|AGENT_ROLE|SESSION_ID|AGENT_ID|SUPERVISOR_NAME|ROOT)='; then exit 17; fi".to_owned(),
+            ],
+            package_manager: Some("npm"),
+        };
+        let mut child = spawn_test_runner(temp.path(), &settings, &log, &runner)
+            .expect("the scrubbed child should start");
+        let status = child.wait().unwrap();
+        assert!(status.success(), "child leaked sweep identity: {status}");
+        assert_eq!(std::env::var("CAS_AGENT_NAME").as_deref(), Ok("caller-name"));
+        assert_eq!(std::env::var("CAS_AGENT_ROLE").as_deref(), Ok("supervisor"));
+        assert_eq!(std::env::var("CAS_SESSION_ID").as_deref(), Ok("caller-session"));
+        assert_eq!(std::env::var("CAS_ROOT").as_deref(), Ok("/caller/cas"));
+    }
+
+    #[test]
+    fn sweep_receipt_names_every_scrubbed_test_process_identity_variable() {
+        let names = scrubbed_test_process_identity_names();
+        assert_eq!(
+            names,
+            [
+                "CAS_AGENT_NAME",
+                "CAS_AGENT_ROLE",
+                "CAS_SESSION_ID",
+                "CAS_AGENT_ID",
+                "CAS_SUPERVISOR_NAME",
+                "CAS_ROOT",
+            ]
+        );
+    }
+
+    #[test]
     fn summary_preserves_failed_rows_and_summary_line() {
         let temp = tempfile::NamedTempFile::new().unwrap();
         fs::write(

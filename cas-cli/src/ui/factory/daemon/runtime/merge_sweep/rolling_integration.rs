@@ -1707,6 +1707,72 @@ echo 'Summary: 1 passed'
     }
 
     #[test]
+    fn base_only_recovery_sweeps_origin_main_and_open_epics_without_closed_epics() {
+        let repo = fixture();
+        let open = epic(repo.path(), "cas-base-open", "open", "open\n");
+        let closed = epic(repo.path(), "cas-base-closed", "closed", "closed\n");
+        git(repo.path(), &["checkout", "--detach", "main"]);
+        git(
+            repo.path(),
+            &["remote", "add", "origin", repo.path().to_str().unwrap()],
+        );
+        let stub = repo.path().join("cargo-stub.sh");
+        fs::write(&stub, "#!/bin/sh\necho 'Summary: 1 passed'\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[
+            ("CARGO", stub.to_str().unwrap()),
+            ("CAS_FACTORY_BUILD_GUARD", "off"),
+        ]);
+        let cas_dir = crate::store::init_cas_dir(repo.path()).unwrap();
+        let tasks = crate::store::open_task_store(&cas_dir).unwrap();
+        let mut open_task = Task::new(open.id.clone(), open.id.clone());
+        open_task.task_type = TaskType::Epic;
+        open_task.branch = Some(open.branch.clone());
+        tasks.add(&open_task).unwrap();
+        let mut closed_task = Task::new(closed.id.clone(), closed.id.clone());
+        closed_task.task_type = TaskType::Epic;
+        closed_task.status = TaskStatus::Closed;
+        closed_task.branch = Some(closed.branch.clone());
+        tasks.add(&closed_task).unwrap();
+
+        let summary = crate::ui::factory::daemon::FactoryDaemon::recover_integration(
+            repo.path(),
+            &cas_dir,
+            "base-only-session",
+            None,
+            true,
+            &FactoryConfig::default(),
+        )
+        .unwrap();
+        assert!(summary.starts_with("PASSED:"), "{summary}");
+        let receipt: IntegrationReceipt = serde_json::from_slice(
+            &fs::read(cas_dir.join(LOG_DIR).join("integration.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(receipt.status, "PASSED");
+        assert_eq!(
+            receipt
+                .epics
+                .iter()
+                .map(|epic| epic.id.as_str())
+                .collect::<Vec<_>>(),
+            [open.id.as_str()]
+        );
+        assert!(!receipt
+            .epics
+            .iter()
+            .any(|epic| epic.id == closed.id));
+        assert_eq!(
+            receipt.test_process_env_scrubbed,
+            scrubbed_test_process_identity_names()
+        );
+    }
+
+    #[test]
     fn recovery_cancellation_terminates_the_owned_test_runner() {
         use std::os::unix::fs::PermissionsExt;
         let repo = fixture();

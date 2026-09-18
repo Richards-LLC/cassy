@@ -19,12 +19,13 @@ use super::Cli;
 use super::auth::{AuthCommands, LoginArgs};
 use super::interactive;
 use crate::cloud::{CloudConfig, DeviceConfig};
+use std::fmt;
 
 const PATH_MARKER_BEGIN: &str = "# >>> cassy path >>>";
 const PATH_MARKER_END: &str = "# <<< cassy path <<<";
 
 /// Run the complete machine setup flow.
-#[derive(Args, Debug, Clone, Default)]
+#[derive(Args, Clone, Default)]
 pub struct SetupArgs {
     /// Accept safe defaults without prompting. Authentication still reports
     /// action-needed when no token or existing login is available.
@@ -879,6 +880,20 @@ fn append_path_guard(dir: &Path, path: &Path) -> Result<()> {
     Ok(())
 }
 
+// `--token` (and `CAS_CLOUD_TOKEN`) is a bearer; the derived Debug would print
+// it wherever setup args are logged.
+impl fmt::Debug for SetupArgs {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SetupArgs")
+            .field("yes", &self.yes)
+            .field("dry_run", &self.dry_run)
+            .field("token", &self.token.as_ref().map(|_| "[redacted]"))
+            .field("endpoint", &self.endpoint)
+            .field("project", &self.project)
+            .finish()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -900,5 +915,23 @@ mod tests {
         let before = fs::read_to_string(&path).unwrap();
         append_path_guard(Path::new("/tmp/cas-bin"), &path).unwrap();
         assert_eq!(before, fs::read_to_string(&path).unwrap());
+    }
+}
+
+#[cfg(test)]
+mod credential_redaction_tests {
+    use super::*;
+
+    #[test]
+    fn the_setup_args_debug_never_prints_the_bearer() {
+        let args = SetupArgs {
+            token: Some("SECRET-tok-9f3a1c".to_string()),
+            endpoint: "https://cloud.example".to_string(),
+            ..Default::default()
+        };
+        let rendered = format!("{args:?}");
+        assert!(!rendered.contains("SECRET-tok-9f3a1c"), "{rendered}");
+        assert!(rendered.contains("[redacted]"), "{rendered}");
+        assert!(rendered.contains("cloud.example"), "{rendered}");
     }
 }

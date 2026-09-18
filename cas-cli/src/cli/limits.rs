@@ -13,6 +13,7 @@ use serde_json::Value;
 use walkdir::WalkDir;
 
 use crate::cli::Cli;
+use std::fmt;
 
 const CLAUDE_USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 
@@ -53,7 +54,7 @@ struct ClaudeCredentials {
     oauth: Option<ClaudeOauth>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 struct ClaudeOauth {
     #[serde(rename = "accessToken")]
     access_token: String,
@@ -412,6 +413,16 @@ fn print_human(report: &LimitsReport) {
     }
 }
 
+// Holds a live Claude OAuth access token read off disk.
+impl fmt::Debug for ClaudeOauth {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ClaudeOauth")
+            .field("access_token", &"[redacted]")
+            .field("subscription_type", &self.subscription_type)
+            .finish()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -455,5 +466,22 @@ mod tests {
         let legacy: Value = serde_json::json!({"costDollars":0.003});
         assert_eq!(parse_exa_cost(&v2), Some(0.007));
         assert_eq!(parse_exa_cost(&legacy), Some(0.003));
+    }
+}
+
+#[cfg(test)]
+mod credential_redaction_tests {
+    use super::*;
+
+    #[test]
+    fn the_claude_oauth_debug_never_prints_the_access_token() {
+        let oauth = ClaudeOauth {
+            access_token: "SECRET-tok-9f3a1c".to_string(),
+            subscription_type: Some("max".to_string()),
+        };
+        let rendered = format!("{oauth:?}");
+        assert!(!rendered.contains("SECRET-tok-9f3a1c"), "{rendered}");
+        assert!(rendered.contains("[redacted]"), "{rendered}");
+        assert!(rendered.contains("max"), "{rendered}");
     }
 }

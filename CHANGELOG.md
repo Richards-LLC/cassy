@@ -7,6 +7,15 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed
+
+- Credential-bearing structs no longer derive `Debug`. Fourteen types across the
+  cloud clients, hub pairing, the bridge server, factory daemon and the
+  verification store printed a live bearer token, API key, pairing capability or
+  pre-signed upload URL verbatim into any `{:?}`, tracing field, panic message or
+  error chain that formatted them. Each now has a redacting `Debug` and a test,
+  and a repo-wide guard test fails if a new one is added.
+
 ### Added
 
 - `cas artifact publish|show|list` and the matching `artifact` MCP tool: hand the

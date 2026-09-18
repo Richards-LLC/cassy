@@ -1161,20 +1161,28 @@ impl TaskStore for SqliteTaskStore {
     fn list_ready(&self) -> Result<Vec<Task>> {
         let conn = crate::shared_db::lock_connection(&self.conn)?;
 
-        // Ready = open tasks with no open blocking dependencies
+        // Ready = open tasks, plus tasks projected Blocked by an open `blocks`
+        // edge because those remain startable for parallel preparation. An
+        // explicit `requires-start` edge is still a hard start gate.
         let mut stmt = conn.prepare_cached(
             "SELECT t.id, t.title, t.description, t.design, t.acceptance_criteria, t.notes,
              t.status, t.priority, t.task_type, t.assignee, t.labels, t.created_at, t.updated_at,
              t.closed_at, t.close_reason, t.external_ref, t.content_hash, t.branch, t.worktree_id,
              t.pending_verification, t.pending_worktree_merge, t.epic_verification_owner, t.team_id, t.deliverables, t.demo_statement, t.execution_note, t.share, t.depth, t.terminal_outcome, t.origin_project, t.delivery_mode, t.risk, t.proof_targets
              FROM tasks t
-             WHERE t.status = 'open'
-             AND NOT EXISTS (
+             WHERE (t.status = 'open' OR (t.status = 'blocked' AND EXISTS (
                  SELECT 1 FROM dependencies d
                  JOIN tasks blocker ON d.to_id = blocker.id
                  WHERE d.from_id = t.id
                  AND d.dep_type = 'blocks'
                  AND blocker.status NOT IN ('closed', 'cancelled')
+             )))
+             AND NOT EXISTS (
+                 SELECT 1 FROM dependencies d
+                 JOIN tasks prerequisite ON d.to_id = prerequisite.id
+                 WHERE d.from_id = t.id
+                 AND d.dep_type = 'requires-start'
+                 AND prerequisite.status NOT IN ('closed', 'cancelled')
              )
              AND NOT EXISTS (
                  SELECT 1 FROM external_task_dependencies external

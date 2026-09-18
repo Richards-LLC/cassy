@@ -57,12 +57,12 @@ async fn supervisor_gate_closes_on_decision_and_unblocks_dependent_without_commi
     let store = open_task_store(&cas_dir).unwrap();
     assert_eq!(store.get(&gate_id).unwrap().task_type, TaskType::Gate);
     assert!(
-        !store
+        store
             .list_ready()
             .unwrap()
             .iter()
             .any(|task| task.id == dependent_id),
-        "an open Gate must remain a normal dependency blocker"
+        "an open Gate may be prepared in parallel while close remains gated"
     );
 
     let started = unified_task(

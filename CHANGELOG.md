@@ -7,6 +7,17 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Added
+
+- `cas artifact publish|show|list` and the matching `artifact` MCP tool: hand the
+  runtime a local path and it records a durable, citable artifact for a task.
+  Cassy resolves the path against the task's artifacts directory and the
+  checkout (refusing symlinks that escape either, and the `.cas`/`.git`
+  directories outright), measures and hashes the bytes, enforces a 25 MiB
+  ceiling before any network call, and uploads to Cloud storage when it is
+  available. A publish still succeeds and returns an `artifact_id` when storage
+  is unreachable, so the record can be cited either way.
+
 ## [3.25.8] - 2026-09-18
 
 ### Added

@@ -9,6 +9,8 @@ and a before/after capture set under `captures/`.
 | `cas doctor` | [cas-doctor.brief.md](cas-doctor.brief.md) | [captures/before/cas-doctor](captures/before/cas-doctor/report.md) | [captures/after/cas-doctor](captures/after/cas-doctor/report.md) |
 | `cas known-repos prune-missing` | [cas-known-repos.brief.md](cas-known-repos.brief.md) | — | [captures/after/cas-known-repos/report.md](captures/after/cas-known-repos/report.md) |
 | `cas update --check` | [cas-update.brief.md](cas-update.brief.md) | [captures/before/cas-update-check](captures/before/cas-update-check/report.md) | [captures/after/cas-update-check](captures/after/cas-update-check/report.md) |
+| `cas artifact list` | [cas-artifact.brief.md](cas-artifact.brief.md) | — | [captures/after/cas-artifact-list](captures/after/cas-artifact-list/report.md) |
+| `cas artifact show` | [cas-artifact.brief.md](cas-artifact.brief.md) | — | [captures/after/cas-artifact-show](captures/after/cas-artifact-show/report.md) |
 | `cas factory status` | [cas-factory-status.brief.md](cas-factory-status.brief.md) | [captures/before/cas-factory-status](captures/before/cas-factory-status/report.md) | [captures/after/cas-factory-status](captures/after/cas-factory-status/report.md) |
 
 Each capture directory keeps the 80-column `.html` that stacks the four palettes (open it in a
@@ -28,6 +30,10 @@ node scripts/terminal-qa.mjs --label cas-update-check --json-flag --json \
   --out docs/design/cli/captures/after/cas-update-check -- cas update --check
 node scripts/terminal-qa.mjs --label cas-factory-status --json-flag --json \
   --out docs/design/cli/captures/after/cas-factory-status -- cas factory status
+node scripts/terminal-qa.mjs --label cas-artifact-list --json-flag --json \
+  --out docs/design/cli/captures/after/cas-artifact-list -- cas artifact list --task <task-id>
+node scripts/terminal-qa.mjs --label cas-artifact-show --json-flag --json \
+  --out docs/design/cli/captures/after/cas-artifact-show -- cas artifact show <artifact-id>
 ```
 
 The `before` set was produced the same way from the binary built at `eda3dfd1`, the last

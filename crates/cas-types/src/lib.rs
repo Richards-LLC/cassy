@@ -33,6 +33,7 @@
 pub mod error;
 
 mod agent;
+mod artifact;
 mod commit_link;
 mod delivery;
 mod dependency;
@@ -62,6 +63,7 @@ pub use agent::{
     Agent, AgentCapability, AgentRole, AgentStatus, AgentType, DEFAULT_HEARTBEAT_INTERVAL_SECS,
     DEFAULT_HEARTBEAT_TIMEOUT_SECS, DEFAULT_LEASE_DURATION_SECS, DEFAULT_MAX_CONCURRENT_TASKS,
 };
+pub use artifact::{ARTIFACT_MAX_BYTES, ArtifactRef, ArtifactStatus};
 pub use commit_link::{CommitLink, LINK_METHOD_HOOK_OBSERVED};
 pub use delivery::{
     WorkerCompletionReceipt, WorkerCompletionReceiptInput, WorkerDeliveryEvent,

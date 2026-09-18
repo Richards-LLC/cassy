@@ -191,7 +191,8 @@
       "mcp__cas__spec",
       "mcp__cas__verification",
       "mcp__cas__system",
-      "mcp__cas__pattern"
+      "mcp__cas__pattern",
+      "mcp__cas__artifact"
     ]
   },
   "statusLine": {

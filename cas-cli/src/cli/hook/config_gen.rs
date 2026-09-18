@@ -630,6 +630,7 @@ pub fn get_cas_mcp_permissions() -> Vec<String> {
         "mcp__cas__verification".to_string(),
         "mcp__cas__system".to_string(),
         "mcp__cas__pattern".to_string(),
+        "mcp__cas__artifact".to_string(),
     ]
 }
 

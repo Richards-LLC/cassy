@@ -43,11 +43,12 @@ Rust workspace for the CAS coding-agent system. Product/domain material belongs 
 
 ## cas-cli/src — application hub
 `cas-cli/src/{main.rs,lib.rs}` start and export the CLI; `cas-cli/src/lib.rs` owns the `panic = "unwind"` guard and test-environment boundaries.
-- `cas-cli/src/cli/` — clap dispatch for auth, cloud, config, factory, hub, knowledge, memory, provider, status, update, and worktree flows.
+- `cas-cli/src/cli/` — clap dispatch for artifact, auth, cloud, config, factory, hub, knowledge, memory, provider, status, update, and worktree flows.
 - `cas-cli/src/cli/factory/` — factory lifecycle, daemon attach, probes, parity checks, queries, worktrees, and wedged-worker recovery.
 - `cas-cli/src/cli/{hook,sync}/` — hook event dispatch, generated hook configuration, and managed agent-file rendering.
 - `cas-cli/src/cli/{codemap_cmd,project_overview_cmd,knowledge_cmd}.rs` — documentation freshness gates and knowledge operations.
 - `cas-cli/src/cli/{history_cmd,index_cmd,retrieval_parity}.rs` — Git history search, code indexes, and retrieval parity commands.
+- `cas-cli/src/artifacts/` — publishable-path guard, streaming digest, and the Cloud begin/PUT/complete upload client for published artifacts.
 - `cas-cli/src/cloud/` — cloud sync, devices, teams, proposals, embeddings, aliases, and queued push/pull coordination.
 - `cas-cli/src/config/` — settings, runtime hooks, access policy, metadata registry, and seeded coordination/daemon/history/QA sections.
 - `cas-cli/src/daemon/` — background maintenance, decay, observation, source watching, indexing, and bounded relevance evaluation.
@@ -74,7 +75,7 @@ Rust workspace for the CAS coding-agent system. Product/domain material belongs 
 
 ## MCP service and tool tree
 - `cas-cli/src/mcp/{daemon.rs,socket.rs,server/}` — daemon lifecycle, Unix transport, runtime, parent watchdog, prompts, and resources.
-- `cas-cli/src/mcp/tools/core/` — task, memory, knowledge, search, rules, skills, workflow, system, opinion, maintenance, and coordination handlers.
+- `cas-cli/src/mcp/tools/core/` — task, memory, knowledge, artifact, search, rules, skills, workflow, system, opinion, maintenance, and coordination handlers.
 - `cas-cli/src/mcp/tools/core/guidance.rs` — request-local caller and supervisor prefixes for executable recovery hints.
 - `cas-cli/src/mcp/tools/core/task/` — task queries, notes, proposals, dependencies, updates, and lifecycle proof/close gates.
 - `cas-cli/src/mcp/tools/service/` — factory/reminder ops, liveness, orphan recovery, external verification, server/worktree ops, patterns/specs, and panic containment.
@@ -106,7 +107,8 @@ Rust workspace for the CAS coding-agent system. Product/domain material belongs 
 ## Crates — key module roots
 - `crates/cas-store/src/{task_store,prompt_queue_store,supervisor_queue_store,spawn_queue_store}.rs` — durable task and coordination queues.
 - `crates/cas-store/src/agent_store/` plus `crates/cas-store/src/{knowledge_store,history_store,code_vector_store,retrieval_store}.rs` — agents, knowledge, history, vectors, and retrieval outcomes.
-- `crates/cas-store/src/{verification_store,external_verification_gate,surfaced_artifact_store,version_store}.rs` — verification, artifacts, and rule/skill versions.
+- `crates/cas-store/src/{verification_store,external_verification_gate,surfaced_artifact_store,version_store}.rs` — verification, injected-context artifacts, and rule/skill versions.
+- `crates/cas-store/src/artifact_store.rs` — published-artifact ledger and its signed-upload-URL guard.
 - `crates/cas-core/src/{hooks,memory,search/temporal,sync,extraction}/` — hook input, memory hygiene, temporal search, managed sync, and extraction.
 - `crates/cas-search/src/{bm25,code_search,lmdb_store,grep,parallel,scorer,traits}.rs` — text/code indexes, persistence, grep, retrieval parallelism, and scoring.
 - `crates/cas-types/src/{provenance,task,agent,delivery,verification,spec}.rs` — lineage and core coordination records.

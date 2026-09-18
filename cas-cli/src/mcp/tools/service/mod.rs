@@ -12,6 +12,7 @@
 //! - cas_team: Team collaboration
 //! - cas_pattern: Personal patterns
 //! - cas_spec: Specifications
+//! - cas_artifact: Publish and inspect durable task artifacts
 //! - mcp_search: Search tools across connected upstream MCP servers
 //! - mcp_execute: Execute tool calls across connected upstream MCP servers
 
@@ -28,9 +29,9 @@ mod imports;
 
 // Re-export types from cas-mcp for MCP tool parameters
 pub use cas_mcp::{
-    AgentRequest, CoordinationRequest, ExecuteRequest, FactoryRequest, KnowledgeRequest,
-    MemoryRequest, PatternRequest, RuleRequest, SearchContextRequest, SkillRequest, SpecRequest,
-    SystemRequest, TaskRequest, TeamRequest, VerificationRequest,
+    AgentRequest, ArtifactRequest, CoordinationRequest, ExecuteRequest, FactoryRequest,
+    KnowledgeRequest, MemoryRequest, PatternRequest, RuleRequest, SearchContextRequest,
+    SkillRequest, SpecRequest, SystemRequest, TaskRequest, TeamRequest, VerificationRequest,
 };
 
 // ============================================================================
@@ -1002,6 +1003,44 @@ impl CasService {
     }
 
     // ========================================================================
+    // cas_artifact - Publish durable task artifacts (cassy#910)
+    // ========================================================================
+
+    #[tool(
+        description = "Published artifact operations. Actions: publish (turn a local file into a durable, citable artifact for a task — the runtime resolves the path, hashes and measures the bytes, enforces the 25 MiB ceiling, records the artifact, and uploads it when Cloud storage is live), show (one artifact record by id), list (a task's artifacts). Supply a local path; never compute a digest or handle an upload URL yourself. A publish succeeds and returns a citable artifact_id even when Cloud storage is unreachable."
+    )]
+    pub async fn artifact(
+        &self,
+        Parameters(req): Parameters<ArtifactRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let this = self.clone();
+        panic_catch::dispatch_with_catch("artifact", async move {
+            crate::ui::factory::record_supervisor_mcp_call();
+            let action = req.action.clone();
+            let is_mutating = action == "publish";
+
+            let result = match action.as_str() {
+                "publish" => this.inner.artifact_publish(Parameters(req)).await,
+                "show" => this.inner.artifact_show(Parameters(req)).await,
+                "list" => this.inner.artifact_list(Parameters(req)).await,
+                _ => Err(Self::error(
+                    ErrorCode::INVALID_PARAMS,
+                    format!("Unknown artifact action: {action}. Valid: publish, show, list"),
+                )),
+            };
+
+            if is_mutating && result.is_ok() {
+                this.inner.notify_resources_changed().await;
+            }
+
+            crate::telemetry::track_mcp_tool("artifact", &action, result.is_ok());
+
+            result
+        })
+        .await
+    }
+
+    // ========================================================================
     // cas_knowledge - Distilled project wiki (pages, not opinions)
     // ========================================================================
 
@@ -1495,6 +1534,7 @@ mod tests {
             "team",
             "pattern",
             "spec",
+            "artifact",
         ] {
             assert!(
                 names.iter().any(|n| n == required),

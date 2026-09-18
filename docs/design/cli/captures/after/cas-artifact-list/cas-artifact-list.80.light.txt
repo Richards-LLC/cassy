@@ -1,0 +1,4 @@
+[OK] 2 artifact(s) for cas-b72a
+     gate-log.txt                       5 KB  local      art-5cceb0fd
+     2026-09-18-release-brief.pdf      70 KB  local      art-acaa50db
+  -> cas artifact show art-5cceb0fd

@@ -261,6 +261,7 @@ cas init              # initialize Cassy in the current project
 cas serve             # run the MCP server
 cas doctor            # diagnostics (see below)
 cas knowledge ...     # distilled project wiki
+cas artifact publish  # publish a file as a durable task artifact
 cas attach|list|kill  # factory session control
 cas status            # session status snapshot
 cas config list       # every setting, current vs default

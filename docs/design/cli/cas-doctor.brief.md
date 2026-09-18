@@ -107,3 +107,8 @@ word-split heuristic.
 | Machine contract | 5 | `--json` remains one check array with stable `name`, `status`, `message`, and `remediation` fields. |
 
 Scored by Codex on 2026-09-18; hierarchy, fit, and craft floors hold.
+
+Task capture: `cas doctor --fix --json` keeps nested foreign-scope purge previews
+inside the top-level checks array; strict decoding now accepts both `--fix` and
+`--fix --yes` as exactly one JSON document. The nested purge/sync renderers stay
+silent when doctor owns the report.

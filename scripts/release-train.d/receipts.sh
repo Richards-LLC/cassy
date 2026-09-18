@@ -156,3 +156,11 @@ EOF
 stage_receipts() {
     release_train_receipts "$@"
 }
+
+cut_stage_receipts() {
+    if cut_has_external_stage receipts; then
+        cut_run_external_stage receipts
+    else
+        release_train_receipts "$@"
+    fi
+}

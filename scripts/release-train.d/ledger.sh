@@ -98,6 +98,24 @@ cut_run_stage() {
         "$stage" "$(tr -d '[:space:]' <"$receipt")" "$receipt"
 }
 
+cut_stage_ledger() {
+    if cut_has_external_stage ledger; then
+        cut_run_external_stage ledger
+        return
+    fi
+    local generator="$worktree/scripts/gen-builtin-reference-history.sh"
+    [[ -x "$generator" ]] || return 0
+    (
+        cd "$worktree"
+        "$generator"
+    )
+    if ! git -C "$worktree" diff --quiet -- cas-cli/src/builtins/reference-history.json; then
+        git -C "$worktree" add -- cas-cli/src/builtins/reference-history.json
+        git -C "$worktree" -c core.hooksPath=/dev/null commit \
+            -m "build: regenerate builtin reference ledger" >/dev/null
+    fi
+}
+
 cut_run() {
     local resume="${1:-false}" stage
     mkdir -p "$run_dir"

@@ -71,3 +71,11 @@ release_train_announce() {
 stage_announce() {
     release_train_announce "$@"
 }
+
+cut_stage_announce() {
+    if cut_has_external_stage announce; then
+        cut_run_external_stage announce
+    else
+        release_train_announce "$@"
+    fi
+}

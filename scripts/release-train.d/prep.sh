@@ -61,3 +61,11 @@ release_train_prep() {
 stage_prep() {
     release_train_prep "$@"
 }
+
+cut_stage_prep() {
+    if cut_has_external_stage prep; then
+        cut_run_external_stage prep
+    else
+        release_train_prep "$@"
+    fi
+}

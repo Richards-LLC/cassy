@@ -517,6 +517,114 @@ async fn cas525c_supervisor_proof_scope_fix_reopens_with_decision_not_review_fai
 }
 
 #[tokio::test]
+async fn casd86d_supervisor_widens_targets_on_merged_delivery_without_review_failure() {
+    let (temp, core) = setup_cas();
+    let _env_lock = env_test_lock();
+    let cas_dir = temp.path().join(".cas");
+    let service = CasService::new(core.clone(), None);
+
+    let created = unified_task(
+        &service,
+        serde_json::json!({
+            "action": "create",
+            "risk": "blast-radius",
+            "proof_targets": "protocol",
+            "depth": "light",
+            "title": "Widen merged delivery proof"
+        }),
+    )
+    .await;
+    let task_id = extract_task_id(&created).unwrap().to_string();
+    let store = open_task_store(&cas_dir).unwrap();
+    let mut task = store.get(&task_id).unwrap();
+    task.status = TaskStatus::AwaitingMerge;
+    task.assignee = Some("test-agent".to_string());
+    store.update(&task).unwrap();
+
+    let receipt = cas_store::build_worker_completion_receipt(
+        &WorkerCompletionReceiptInput {
+            task_id: task_id.clone(),
+            worker_agent_id: "worker-session".into(),
+            repo_selector: "remote:github.com/example/casd86d".into(),
+            source_branch: "factory/worker".into(),
+            commit_sha: "a".repeat(40),
+            merge_base_sha: "b".repeat(40),
+            target_branch: "main".into(),
+            target_sha: "c".repeat(40),
+            proof_reference: "scoped proof".into(),
+            scope_summary: "merged proof scope regression".into(),
+            artifact_path: None,
+        },
+        "worker",
+        chrono::Utc::now(),
+    );
+    let delivery = cas_store::create_worker_delivery(
+        &cas_dir,
+        &receipt,
+        WorkerDeliveryState::AwaitingMerge,
+        "worker-session",
+    )
+    .unwrap();
+    cas_store::transition_worker_delivery(
+        &cas_dir,
+        &delivery.id,
+        &[WorkerDeliveryState::AwaitingMerge],
+        WorkerDeliveryState::Merged,
+        "supervisor-session",
+        Some("supervisor-session"),
+        None,
+        Some(&"d".repeat(40)),
+        None,
+    )
+    .unwrap();
+
+    set_test_agent_role(&cas_dir, AgentRole::Supervisor);
+    let fixed = unified_task(
+        &service,
+        serde_json::json!({
+            "action": "update",
+            "id": task_id,
+            "proof_targets": "protocol,queue_and_events",
+            "proof_scope_fix": true,
+            "reason": "The merged delivery changed queue_and_events but the original proof declaration omitted it."
+        }),
+    )
+    .await;
+    assert!(fixed.contains("Corrected proof scope"), "{fixed}");
+
+    let corrected = store.get(&task_id).unwrap();
+    assert_eq!(corrected.status, TaskStatus::Open);
+    assert_eq!(corrected.proof_targets, ["protocol", "queue_and_events"]);
+    assert!(corrected.notes.contains("Proof targets widened"));
+    assert!(!corrected.notes.contains("changes requested by supervisor"));
+    assert_eq!(
+        cas_store::get_latest_worker_delivery(&cas_dir, &task_id)
+            .unwrap()
+            .unwrap()
+            .1
+            .state,
+        WorkerDeliveryState::Merged,
+        "scope correction must preserve the immutable merged delivery fact"
+    );
+
+    // The parked delivery is now scoped correctly. The worker can re-close
+    // the reopened task without a synthetic request_changes/review-failed
+    // record; the immutable merged transaction remains the delivery proof.
+    set_test_agent_role(&cas_dir, AgentRole::Worker);
+    let reclosed = unified_task(
+        &service,
+        serde_json::json!({
+            "action": "close",
+            "id": task_id,
+            "reason": "The merged delivery is now covered by the corrected proof scope."
+        }),
+    )
+    .await;
+    assert!(reclosed.contains("Closed task"), "{reclosed}");
+    assert_eq!(store.get(&task_id).unwrap().status, TaskStatus::Closed);
+}
+
+#[tokio::test]
 async fn casb123_proof_scope_fix_rejects_immutable_merged_delivery() {
     let (temp, core) = setup_cas();
     let _env_lock = env_test_lock();

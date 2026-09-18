@@ -3168,6 +3168,7 @@ impl CasCore {
         &self,
         task_store: &dyn cas_store::TaskStore,
         task: &Task,
+        repo_path: &std::path::Path,
         factory_branch_anchor: Option<&str>,
     ) {
         let Some(factory_branch_anchor) = factory_branch_anchor else {
@@ -3175,8 +3176,12 @@ impl CasCore {
         };
         let mut advanced = task.clone();
         let now = chrono::Utc::now();
-        let Some(audit) =
-            Self::apply_awaiting_merge_anchor_advance(&mut advanced, factory_branch_anchor, now)
+        let Some(audit) = Self::apply_awaiting_merge_anchor_advance(
+            &mut advanced,
+            factory_branch_anchor,
+            now,
+            Some(repo_path),
+        )
         else {
             return;
         };
@@ -3223,10 +3228,25 @@ impl CasCore {
         task: &mut Task,
         factory_branch_anchor: &str,
         now: chrono::DateTime<chrono::Utc>,
+        repo_path: Option<&std::path::Path>,
     ) -> Option<String> {
         if task.status != TaskStatus::AwaitingMerge
             || task.deliverables.factory_branch_anchor.as_deref()
                 == Some(factory_branch_anchor)
+        {
+            return None;
+        }
+
+        // GH #873: the supervisor may merge the parked worker tip into the
+        // target and then fast-forward the mutable factory ref to that merge
+        // commit before the worker retries close. That merge is a delivery
+        // container, not a new task boundary; replacing the recorded anchor
+        // would make content proof inspect the merge's first-parent effect,
+        // which is often empty. Keep the historical anchor in that shape.
+        if let (Some(repo_path), Some(recorded_anchor)) = (
+            repo_path,
+            task.deliverables.factory_branch_anchor.as_deref(),
+        ) && merge_tip_contains_recorded_anchor(repo_path, factory_branch_anchor, recorded_anchor)
         {
             return None;
         }
@@ -4352,6 +4372,7 @@ impl CasCore {
                         self.advance_awaiting_merge_anchor(
                             task_store.as_ref(),
                             &task,
+                            &close_project_root,
                             anchor.as_deref(),
                         );
                         if merge_conflicted && !task.deliverables.merge_conflicted {
@@ -7742,6 +7763,40 @@ fn git_commit_parent_count(repo_path: &std::path::Path, commit: &str) -> usize {
         .saturating_sub(1)
 }
 
+/// Return whether a merge tip carries the recorded delivery anchor on a
+/// non-first-parent side. A supervisor merge has the worker tip as its second
+/// parent in the normal `--no-ff` shape, but accepting ancestry here also
+/// covers a merge whose side branch added commits after the parked anchor.
+fn merge_tip_contains_recorded_anchor(
+    repo_path: &std::path::Path,
+    merge_tip: &str,
+    recorded_anchor: &str,
+) -> bool {
+    if git_commit_parent_count(repo_path, merge_tip) < 2
+        || recorded_anchor.trim().is_empty()
+        || merge_tip.starts_with('-')
+        || recorded_anchor.starts_with('-')
+    {
+        return false;
+    }
+
+    let output = match std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .args(["rev-list", "--parents", "-n", "1", merge_tip])
+        .output()
+    {
+        Ok(output) if output.status.success() => output,
+        _ => return false,
+    };
+    let output = String::from_utf8_lossy(&output.stdout);
+    let mut parents = output.split_whitespace();
+    let _merge = parents.next();
+    parents.any(|parent| {
+        parent == recorded_anchor || git_commit_is_ancestor(repo_path, recorded_anchor, parent)
+    })
+}
+
 /// Two commit ids refer to the same commit when one is a prefix of the
 /// other — `commit_receipt` accepts unambiguous abbreviations, so a literal
 /// `==` would report a false discrepancy for `abc1234` vs its full SHA.
@@ -8320,6 +8375,7 @@ fn delivery_content_anchor_at_close<'a>(
     if git_ref_exists(repo_path, factory_branch)
         && git_commit_is_ancestor(repo_path, recorded_anchor, factory_branch)
         && commit_is_merged_into_parent(repo_path, factory_branch, parent_branch)
+        && !merge_tip_contains_recorded_anchor(repo_path, factory_branch, recorded_anchor)
     {
         factory_branch
     } else {
@@ -10084,7 +10140,7 @@ mod awaiting_merge_anchor_tests {
             .single()
             .expect("fixed timestamp");
 
-        let audit = CasCore::apply_awaiting_merge_anchor_advance(&mut task, "second-tip", now)
+        let audit = CasCore::apply_awaiting_merge_anchor_advance(&mut task, "second-tip", now, None)
             .expect("a pushed tip advances the parked anchor");
 
         assert_eq!(
@@ -10103,7 +10159,8 @@ mod awaiting_merge_anchor_tests {
         assert_eq!(task.updated_at, now);
 
         assert!(
-            CasCore::apply_awaiting_merge_anchor_advance(&mut task, "second-tip", now).is_none(),
+            CasCore::apply_awaiting_merge_anchor_advance(&mut task, "second-tip", now, None)
+                .is_none(),
             "repeating close at the same tip is idempotent"
         );
     }
@@ -10117,6 +10174,7 @@ mod awaiting_merge_anchor_tests {
                 &mut in_progress,
                 "new-tip",
                 chrono::Utc::now(),
+                None,
             )
             .is_none()
         );
@@ -20002,6 +20060,106 @@ mod merge_state_gate_tests {
         assert!(
             matches!(out, MergeStateGateOutcome::Proceed),
             "a recorded delivery receipt must survive a worker ref move to the supervisor merge, got {out:?}"
+        );
+    }
+
+    /// GH #873: after the supervisor merges the parked factory tip, the lane
+    /// ref may be fast-forwarded to that merge commit before the worker retries
+    /// close. The parked anchor remains the task's content boundary even when
+    /// the live ref is a merge whose first-parent effect is empty.
+    #[test]
+    fn parked_delivery_survives_lane_fast_forward_to_supervisor_merge_without_receipt_gh_873() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+
+        for (name, body) in [
+            ("first.rs", "// first delivery\n"),
+            ("second.rs", "// second delivery\n"),
+            ("third.rs", "// third delivery\n"),
+        ] {
+            std::fs::write(p.join(name), body).unwrap();
+            git(p, &["add", name]);
+            git(
+                p,
+                &["commit", "-q", "-m", &format!("feat(cas-test1): {name}")],
+            );
+        }
+        let parked_anchor = rev_parse_local(p, "factory/worker");
+
+        git(p, &["checkout", "-q", "main"]);
+        git(
+            p,
+            &[
+                "merge",
+                "-q",
+                "--no-ff",
+                "factory/worker",
+                "-m",
+                "merge parked worker delivery",
+            ],
+        );
+        let supervisor_merge = rev_parse_local(p, "main");
+        git(
+            p,
+            &[
+                "update-ref",
+                "refs/heads/factory/worker",
+                &supervisor_merge,
+            ],
+        );
+
+        assert!(git_commit_is_ancestor(p, &parked_anchor, "main"));
+        assert!(git_commit_parent_count(p, &supervisor_merge) >= 2);
+        assert_eq!(rev_parse_local(p, "factory/worker"), supervisor_merge);
+
+        let mut advanced = worker_task("worker");
+        advanced.status = TaskStatus::AwaitingMerge;
+        advanced.deliverables.factory_branch_anchor = Some(parked_anchor.clone());
+        assert!(
+            CasCore::apply_awaiting_merge_anchor_advance(
+                &mut advanced,
+                &supervisor_merge,
+                chrono::Utc::now(),
+                Some(p),
+            )
+            .is_none(),
+            "a supervisor merge carrying the parked anchor must not become a new delivery boundary"
+        );
+        assert_eq!(
+            advanced.deliverables.factory_branch_anchor.as_deref(),
+            Some(parked_anchor.as_str())
+        );
+
+        let mut task = worker_task("worker");
+        task.status = TaskStatus::AwaitingMerge;
+        task.deliverables.factory_branch_anchor = Some(parked_anchor.clone());
+        let req = base_req(&task.id);
+        assert!(
+            matches!(
+                run_factory_branch_merge_gate(&task, &req, "main", p),
+                MergeStateGateOutcome::Proceed
+            ),
+            "a parked delivery must close from its recorded content commit even when the lane ref is a supervisor merge"
+        );
+
+        let req = TaskCloseRequest {
+            commit_receipt: Some(parked_anchor.clone()),
+            ..base_req(&task.id)
+        };
+        let window = window_at(0, "recorded delivery receipt");
+        let out = run_factory_branch_merge_gate_with_attribution(
+            &task,
+            &req,
+            "main",
+            p,
+            TaskCommitAttribution {
+                receipt: req.commit_receipt.as_deref(),
+                window: Some(&window),
+            },
+        );
+        assert!(
+            matches!(out, MergeStateGateOutcome::Proceed),
+            "an original content commit receipt must be accepted when it is an ancestor of the merged target, got {out:?}"
         );
     }
 

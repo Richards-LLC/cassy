@@ -28,7 +28,7 @@ use cas::types::{
 };
 use cas_mcp::types::{CoordinationRequest, FactoryRequest, TaskRequest};
 use cas_mux::{Mux, MuxConfig, SupervisorCli};
-use cas_types::AgentRole;
+use cas_types::{AgentRole, DeliveryMode};
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::RawContent;
 use tempfile::TempDir;
@@ -2140,6 +2140,15 @@ async fn test_shutdown_workers_dirty_or_unpushed_worktree_requires_force() {
     let _guard = EnvGuard::set(&[]);
     let env = FactoryTestEnv::new();
     let worker_path = init_sync_repo(&env, "alice");
+    let remote_path = worker_path.parent().unwrap().join("origin.git");
+    git_stdout(
+        &worker_path,
+        &["init", "--bare", remote_path.to_str().unwrap()],
+    );
+    git_stdout(
+        &worker_path,
+        &["remote", "add", "origin", remote_path.to_str().unwrap()],
+    );
     let mut metadata = HashMap::new();
     metadata.insert("clone_path".to_string(), worker_path.display().to_string());
     env.register_worker_with_metadata("alice", metadata);
@@ -2165,6 +2174,136 @@ async fn test_shutdown_workers_dirty_or_unpushed_worktree_requires_force() {
         "unpushed state missing: {err:?}"
     );
     assert!(env.spawn_queue().peek(10).expect("peek").is_empty());
+}
+
+#[tokio::test]
+async fn test_shutdown_workers_no_remote_merged_tip_is_safe_without_force_cas_2254() {
+    let _guard = EnvGuard::set(&[]);
+    let env = FactoryTestEnv::new();
+    let worker_path = init_sync_repo(&env, "alice");
+    let mut metadata = HashMap::new();
+    metadata.insert("clone_path".to_string(), worker_path.display().to_string());
+    env.register_worker_with_metadata("alice", metadata);
+
+    let mut req = factory_req("shutdown_workers");
+    req.worker_names = Some("alice".to_string());
+    let result = env
+        .service
+        .factory(Parameters(req))
+        .await
+        .expect("a clean tip reachable from main must be safe without force");
+    let text = get_text(&result);
+    assert!(
+        text.contains("merged_into=main"),
+        "no-remote safety receipt must name the reachable target: {text}"
+    );
+    assert_eq!(env.spawn_queue().peek(10).expect("peek").len(), 1);
+}
+
+#[tokio::test]
+async fn test_shutdown_workers_no_remote_unmerged_tip_still_requires_force_cas_2254() {
+    let _guard = EnvGuard::set(&[]);
+    let env = FactoryTestEnv::new();
+    let worker_path = init_sync_repo(&env, "alice");
+    std::fs::write(worker_path.join("worker-only.txt"), "worker change\n").unwrap();
+    git_stdout(&worker_path, &["add", "worker-only.txt"]);
+    git_stdout(&worker_path, &["commit", "-m", "worker-only"]);
+    let mut metadata = HashMap::new();
+    metadata.insert("clone_path".to_string(), worker_path.display().to_string());
+    env.register_worker_with_metadata("alice", metadata);
+
+    let mut req = factory_req("shutdown_workers");
+    req.worker_names = Some("alice".to_string());
+    let err = env
+        .service
+        .factory(Parameters(req))
+        .await
+        .expect_err("an unmerged no-remote tip must still require force");
+    assert!(
+        err.message.contains("force=true"),
+        "unexpected error: {err:?}"
+    );
+    assert!(
+        err.message.contains("unmerged_from=main"),
+        "unmerged target evidence missing: {err:?}"
+    );
+    assert!(env.spawn_queue().peek(10).expect("peek").is_empty());
+}
+
+#[tokio::test]
+async fn test_shutdown_workers_local_merge_accepts_epic_target_ahead_of_main_cas_2254() {
+    let home = TempDir::new().expect("home tempdir");
+    let _guard = EnvGuard::set(&[
+        ("CAS_FACTORY_SESSION", "session-shutdown-epic-target"),
+        ("HOME", home.path().to_str().unwrap()),
+    ]);
+    let env = FactoryTestEnv::new();
+    let worker_path = init_sync_repo(&env, "alice");
+    let project = env.cas_root.parent().expect("project root");
+    std::fs::write(worker_path.join("worker.txt"), "merged into epic\n").unwrap();
+    git_stdout(&worker_path, &["add", "worker.txt"]);
+    git_stdout(&worker_path, &["commit", "-m", "worker change"]);
+    git_stdout(project, &["checkout", "epic/requested"]);
+    git_stdout(
+        project,
+        &[
+            "merge",
+            "--no-ff",
+            "factory/alice",
+            "-m",
+            "merge worker into epic",
+        ],
+    );
+    git_stdout(project, &["checkout", "main"]);
+
+    let mut epic = Task::new("cas-2254-epic".to_string(), "shutdown epic".to_string());
+    epic.task_type = TaskType::Epic;
+    epic.status = TaskStatus::Open;
+    epic.branch = Some("epic/requested".to_string());
+    epic.deliverables.work_target = Some(WorkTarget {
+        repo_selector: "project:active-project".to_string(),
+        target_branch: "epic/requested".to_string(),
+    });
+    env.task_store().add(&epic).expect("add epic fixture");
+    write_session_metadata_for_project(
+        "session-shutdown-epic-target",
+        Some(&epic.id),
+        project.to_str().unwrap(),
+    );
+    let metadata_path = cas::ui::factory::metadata_path("session-shutdown-epic-target");
+    let mut metadata: cas::ui::factory::SessionMetadata =
+        serde_json::from_str(&std::fs::read_to_string(&metadata_path).unwrap()).unwrap();
+    metadata.delivery_mode = DeliveryMode::LocalMerge;
+    metadata.pinned_epic_id = Some(epic.id.clone());
+    std::fs::write(&metadata_path, serde_json::to_string_pretty(&metadata).unwrap()).unwrap();
+
+    let mut task = Task::new("cas-2254-child".to_string(), "shutdown child".to_string());
+    task.status = TaskStatus::Open;
+    task.assignee = Some("alice".to_string());
+    task.delivery_mode = DeliveryMode::LocalMerge;
+    task.deliverables.work_target = Some(WorkTarget {
+        repo_selector: "project:active-project".to_string(),
+        target_branch: "epic/requested".to_string(),
+    });
+    env.task_store().add(&task).expect("add assigned task fixture");
+
+    let mut worker_metadata = HashMap::new();
+    worker_metadata.insert("clone_path".to_string(), worker_path.display().to_string());
+    env.register_worker_with_metadata("alice", worker_metadata);
+
+    let mut req = factory_req("shutdown_workers");
+    req.worker_names = Some("alice".to_string());
+    let result = env
+        .service
+        .factory(Parameters(req))
+        .await
+        .expect("a tip reachable from the local epic target must be safe");
+    let text = get_text(&result);
+    assert!(
+        text.contains("merged_into=epic/requested"),
+        "local-merge safety must report the reachable epic target: {text}"
+    );
+    assert_eq!(env.spawn_queue().peek(10).expect("peek").len(), 1);
 }
 
 #[tokio::test]

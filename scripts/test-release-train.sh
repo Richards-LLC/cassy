@@ -1118,7 +1118,7 @@ else
 fi
 
 if python3 "$script_dir/test-release-integration.py"; then
-    ok 'rolling integration assembly: clean, stale, red, dirty and locked fixtures'
+    ok 'rolling integration assembly: clean, stale-base heal, red, dirty and locked fixtures'
 else
     bad 'rolling integration assembly fixture suite'
 fi

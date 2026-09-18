@@ -17,10 +17,12 @@ h2 { margin: 36px 0 14px; font-size: 15px; font-weight: 600; letter-spacing: 0.0
      text-transform: uppercase; color: var(--mid); }
 .grid { display: grid; gap: 22px; grid-template-columns: repeat(auto-fill, minmax(420px, 1fr)); }
 .grid.small { grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 16px; }
+.grid.phones { grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 18px; }
 figure { margin: 0; }
 img { display: block; width: 100%; height: auto; border: 1px solid var(--edge); border-radius: 8px;
       background: var(--bg); }
 .grid.small img { height: 190px; object-fit: contain; }
+.grid.phones img { height: 440px; object-fit: contain; object-position: top; }
 figcaption { margin-top: 8px; font-size: 13px; color: var(--mid); }
 @media (max-width: 560px) {
   body { padding: 24px 16px 48px; }
@@ -30,6 +32,31 @@ figcaption { margin-top: 8px; font-size: 13px; color: var(--mid); }
 </head>
 <body>
 <h1>Pebble — round 3</h1>
+
+<h2>Colour schemes · same thread screen, five palettes · PAPER is primary</h2>
+<div class="grid">
+  <figure><img src="png/scheme-paper-thread-desktop.png" alt=""><figcaption>PAPER (primary) · warm paper, indigo operator, amber ask · desktop 1280</figcaption></figure>
+  <figure><img src="png/scheme-graphite-thread-desktop.png" alt=""><figcaption>Graphite · cool slate, steel operator, a graphite fleet · desktop 1280</figcaption></figure>
+  <figure><img src="png/scheme-mono-thread-desktop.png" alt=""><figcaption>Mono · near-monochrome; the only saturated hue is the one that wants you · desktop 1280</figcaption></figure>
+  <figure><img src="png/scheme-ember-thread-desktop.png" alt=""><figcaption>Ember · dark-first, jade operator on warm black, luminous gold ask · desktop 1280</figcaption></figure>
+  <figure><img src="png/scheme-slate-thread-desktop.png" alt=""><figcaption>Slate · cool dark, periwinkle operator, barely-raised wells · desktop 1280</figcaption></figure>
+</div>
+<div class="grid phones">
+  <figure><img src="png/scheme-paper-thread-mobile.png" alt=""><figcaption>PAPER (primary) · mobile 390</figcaption></figure>
+  <figure><img src="png/scheme-graphite-thread-mobile.png" alt=""><figcaption>Graphite · mobile 390</figcaption></figure>
+  <figure><img src="png/scheme-mono-thread-mobile.png" alt=""><figcaption>Mono · mobile 390</figcaption></figure>
+  <figure><img src="png/scheme-ember-thread-mobile.png" alt=""><figcaption>Ember · mobile 390</figcaption></figure>
+  <figure><img src="png/scheme-slate-thread-mobile.png" alt=""><figcaption>Slate · mobile 390</figcaption></figure>
+</div>
+
+<h2>Colour schemes · conversation list in each palette</h2>
+<div class="grid">
+  <figure><img src="png/scheme-paper-list-desktop.png" alt=""><figcaption>PAPER (primary) · list · desktop 1280</figcaption></figure>
+  <figure><img src="png/scheme-graphite-list-desktop.png" alt=""><figcaption>Graphite · list · desktop 1280</figcaption></figure>
+  <figure><img src="png/scheme-mono-list-desktop.png" alt=""><figcaption>Mono · list · desktop 1280</figcaption></figure>
+  <figure><img src="png/scheme-ember-list-desktop.png" alt=""><figcaption>Ember · list · desktop 1280</figcaption></figure>
+  <figure><img src="png/scheme-slate-list-desktop.png" alt=""><figcaption>Slate · list · desktop 1280</figcaption></figure>
+</div>
 
 <h2>Inspiration · generated, not a design</h2>
 <div class="grid small">
@@ -41,7 +68,7 @@ figcaption { margin-top: 8px; font-size: 13px; color: var(--mid); }
   <figure><img src="inspiration/06-machine-accent.jpg" alt=""><figcaption>Generated · one thread in three machine accents</figcaption></figure>
 </div>
 
-<h2>A / B pairs · ask, blocker, attachment</h2>
+<h2>PAPER · A/B pairs, ask and blocker silhouette and attachment object</h2>
 <div class="grid">
   <figure><img src="png/pairs-desktop-light.png" alt=""><figcaption>Pairs · desktop 1280 · light</figcaption></figure>
   <figure><img src="png/pairs-desktop-dark.png" alt=""><figcaption>Pairs · desktop 1280 · dark</figcaption></figure>
@@ -49,7 +76,7 @@ figcaption { margin-top: 8px; font-size: 13px; color: var(--mid); }
   <figure><img src="png/pairs-mobile-dark.png" alt=""><figcaption>Pairs · mobile 390 · dark</figcaption></figure>
 </div>
 
-<h2>Thread A · fused tray ask, dog-eared sheet</h2>
+<h2>PAPER · full state set · thread A, fused tray ask and dog-eared sheet</h2>
 <div class="grid">
   <figure><img src="png/thread-a-desktop-light.png" alt=""><figcaption>Thread A · desktop 1280 · light</figcaption></figure>
   <figure><img src="png/thread-a-desktop-dark.png" alt=""><figcaption>Thread A · desktop 1280 · dark</figcaption></figure>
@@ -57,7 +84,7 @@ figcaption { margin-top: 8px; font-size: 13px; color: var(--mid); }
   <figure><img src="png/thread-a-mobile-dark.png" alt=""><figcaption>Thread A · mobile 390 · dark</figcaption></figure>
 </div>
 
-<h2>Thread B · tailed slab ask, plate slab attachment</h2>
+<h2>PAPER · thread B, tailed slab ask and plate slab attachment</h2>
 <div class="grid">
   <figure><img src="png/thread-b-desktop-light.png" alt=""><figcaption>Thread B · desktop 1280 · light</figcaption></figure>
   <figure><img src="png/thread-b-desktop-dark.png" alt=""><figcaption>Thread B · desktop 1280 · dark</figcaption></figure>
@@ -65,7 +92,7 @@ figcaption { margin-top: 8px; font-size: 13px; color: var(--mid); }
   <figure><img src="png/thread-b-mobile-dark.png" alt=""><figcaption>Thread B · mobile 390 · dark</figcaption></figure>
 </div>
 
-<h2>Conversation list · six projects, three machines, waiting and unread</h2>
+<h2>PAPER · conversation list, six projects over three machines, waiting and unread</h2>
 <div class="grid">
   <figure><img src="png/list-desktop-light.png" alt=""><figcaption>List · desktop 1280 · light</figcaption></figure>
   <figure><img src="png/list-desktop-dark.png" alt=""><figcaption>List · desktop 1280 · dark</figcaption></figure>
@@ -73,7 +100,7 @@ figcaption { margin-top: 8px; font-size: 13px; color: var(--mid); }
   <figure><img src="png/list-mobile-dark.png" alt=""><figcaption>List · mobile 390 · dark</figcaption></figure>
 </div>
 
-<h2>Long evidence table · Studio Mac accent</h2>
+<h2>PAPER · long evidence table, Studio Mac accent</h2>
 <div class="grid">
   <figure><img src="png/evidence-desktop-light.png" alt=""><figcaption>Evidence · desktop 1280 · light</figcaption></figure>
   <figure><img src="png/evidence-desktop-dark.png" alt=""><figcaption>Evidence · desktop 1280 · dark</figcaption></figure>
@@ -81,7 +108,7 @@ figcaption { margin-top: 8px; font-size: 13px; color: var(--mid); }
   <figure><img src="png/evidence-mobile-dark.png" alt=""><figcaption>Evidence · mobile 390 · dark</figcaption></figure>
 </div>
 
-<h2>Nothing waiting · Bench accent</h2>
+<h2>PAPER · nothing waiting, Bench accent</h2>
 <div class="grid">
   <figure><img src="png/empty-desktop-light.png" alt=""><figcaption>Empty · desktop 1280 · light</figcaption></figure>
   <figure><img src="png/empty-desktop-dark.png" alt=""><figcaption>Empty · desktop 1280 · dark</figcaption></figure>

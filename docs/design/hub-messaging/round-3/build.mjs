@@ -19,16 +19,20 @@ const ARROW = `<svg viewBox="0 0 20 20" fill="currentColor"><path d="M2.4 9.1l14
 const PAPERCLIP = `<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M14.8 9.1l-5 5a3.2 3.2 0 01-4.6-4.6l6-6a2.1 2.1 0 013 3l-6 6a1 1 0 01-1.4-1.4l5.3-5.3"/></svg>`;
 const PLUS = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>`;
 
-const page = (title, body, klass = '') => `<!doctype html>
-<html lang="en">
+// scheme = undefined -> Paper, the primary palette, which follows the hub
+// tokens and therefore has both a light and a dark variant. Any other value
+// pins one of the palettes in schemes.css via html[data-scheme].
+const page = (title, body, scheme) => `<!doctype html>
+<html lang="en"${scheme ? ` data-scheme="${scheme}"` : ''}>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${title}</title>
 <link rel="stylesheet" href="../../../../hub-web/src/tokens.css">
 <link rel="stylesheet" href="pebble.css">
+<link rel="stylesheet" href="schemes.css">
 </head>
-<body${klass ? ` class="${klass}"` : ''}>
+<body>
 ${body}
 </body>
 </html>
@@ -189,7 +193,7 @@ ${EVI.map(([p, c, r]) => `              <div class="evi-row"><span>${p}</span><s
 
 // ---- pages ---------------------------------------------------------------
 
-const threadPage = (t) => page(`Pebble — thread ${t.toUpperCase()}`, `  <div class="app show-thread m-atlas">
+const threadBody = (t) => `  <div class="app show-thread m-atlas">
 ${rail(0)}
     <main class="thread">
 ${thead('atlas', 'cas-src')}
@@ -198,9 +202,9 @@ ${atlasThread(t)}
       </div>
 ${composer('atlas')}
     </main>
-  </div>`);
+  </div>`;
 
-const listPage = page('Pebble — conversation list', `  <div class="app show-list m-atlas">
+const listBody = `  <div class="app show-list m-atlas">
 ${rail(0)}
     <main class="thread">
 ${thead('atlas', 'cas-src')}
@@ -210,7 +214,10 @@ ${atlasTail('a')}
 ${composer('atlas')}
     </main>
   </div>
-${fab}`);
+${fab}`;
+
+const threadPage = (t) => page(`Pebble — thread ${t.toUpperCase()}`, threadBody(t));
+const listPage = page('Pebble — conversation list', listBody);
 
 const evidencePage = page('Pebble — long evidence', `  <div class="app show-thread m-studio">
 ${rail(1)}
@@ -283,6 +290,17 @@ const FILES = {
   'empty.html': emptyPage,
   'pairs.html': pairsPage,
 };
+
+// The same two screens in every palette, for glance comparison. Treatment A
+// throughout so the only thing that varies between them is colour. Paper is
+// the primary palette and takes no data-scheme.
+for (const [key, scheme] of [
+  ['paper', undefined], ['graphite', 'graphite'], ['mono', 'mono'],
+  ['ember', 'ember'], ['slate', 'slate'],
+]) {
+  FILES[`scheme-${key}-thread.html`] = page(`Pebble — ${key} thread`, threadBody('a'), scheme);
+  FILES[`scheme-${key}-list.html`] = page(`Pebble — ${key} list`, listBody, scheme);
+}
 
 for (const [name, html] of Object.entries(FILES)) {
   await writeFile(resolve(here, name), html, 'utf8');

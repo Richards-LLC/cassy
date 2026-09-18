@@ -1,15 +1,15 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-scheme="slate">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Pebble — thread A</title>
+<title>Pebble — slate list</title>
 <link rel="stylesheet" href="../../../../hub-web/src/tokens.css">
 <link rel="stylesheet" href="pebble.css">
 <link rel="stylesheet" href="schemes.css">
 </head>
 <body>
-  <div class="app show-thread m-atlas">
+  <div class="app show-list m-atlas">
     <aside class="rail">
       <h1>Conversations</h1>
       <a class="row m-atlas on" href="#">
@@ -61,16 +61,6 @@
         <div class="id"><b>Atlas</b><span>cas-src</span></div>
       </header>
       <div class="msgs">
-        <p class="day">Today</p>
-        <div class="turn you">
-          <div class="bub"><p>Merge the two green lanes, then cut 3.26.0 once the gate is green.</p></div>
-          <time>09:41</time>
-        </div>
-        <div class="turn">
-          <div class="bub"><p>On it. Both lanes are green on their own CI — the gate starts after the second merge lands.</p></div>
-          <div class="bub receipt"><svg class="tick" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M2.6 8.6l3.3 3.3L13.4 4.4"/></svg><p>Both lanes are on the epic branch. The release gate is running.</p></div>
-          <time>09:47</time>
-        </div>
         <div class="coalesce">3 more updates · gate 11 of 14 targets green</div>
         <div class="turn">
           <div class="sheet">
@@ -90,12 +80,6 @@
           <div class="bub"><p>No — unchanged since 3.25.3. The gate's only new failure is one lint warning.</p></div>
         </div>
         <div class="turn">
-          <div class="obj t-a blk">
-            <div class="obj-body"><p>The release gate went red. The train is held; nothing was tagged or pushed to main.</p></div>
-            <div class="obj-foot"><code class="window">attention.rs:212 · needless_borrow</code></div>
-          </div>
-        </div>
-        <div class="turn">
           <div class="obj t-a">
             <div class="obj-body"><p>Gate run 33512 failed on that one warning. Fix it in-train — one worker, about ten minutes — or ship 3.26.0 with it allowlisted?</p></div>
             <div class="obj-foot"><span class="chip">Fix in-train</span><span class="chip">Ship with allowlist</span></div>
@@ -113,5 +97,6 @@
       </div>
     </main>
   </div>
+    <div class="fab"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg></div>
 </body>
 </html>

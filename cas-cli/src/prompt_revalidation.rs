@@ -1172,6 +1172,20 @@ mod cas_7787_relay_honesty_tests {
         )
     }
 
+    fn anchored_awaiting_merge_prompt(
+        transition: &str,
+        task_id: &str,
+        branch_tip: &str,
+        occurrence: DateTime<Utc>,
+    ) -> String {
+        format!(
+            "<task-lifecycle transition=\"{transition}\" task_id=\"{task_id}\" \
+             old=\"in_progress\" new=\"awaiting_merge\" actor=\"worker\" \
+             notification_id=\"3386\" occurrence=\"{}\" branch_tip=\"{branch_tip}\">\nparked\n</task-lifecycle>",
+            occurrence.to_rfc3339()
+        )
+    }
+
     /// The reported incident, reduced to its decision.
     ///
     /// Replays the exact cas-fe23 shape from session cas-src-fast-pelican-83:
@@ -1264,6 +1278,51 @@ mod cas_7787_relay_honesty_tests {
         assert_eq!(
             lifecycle_stale_outcome(&decision, true, false),
             LifecycleStaleOutcome::Deliver
+        );
+    }
+
+    #[test]
+    fn a_later_awaiting_merge_decision_supersedes_the_old_tip() {
+        let occurrence = Utc.with_ymd_and_hms(2026, 9, 17, 18, 51, 51).unwrap();
+        let prompt = anchored_awaiting_merge_prompt(
+            "task_awaiting_merge",
+            "cas-f002",
+            "old-tip",
+            occurrence,
+        );
+        let mut task = Task::new("cas-f002".to_string(), "stale relay".to_string());
+        task.status = TaskStatus::AwaitingMerge;
+        task.updated_at = occurrence + chrono::Duration::seconds(90);
+        task.deliverables.factory_branch_anchor = Some("new-tip".to_string());
+
+        assert_eq!(
+            revalidate_lifecycle_prompt_against_task(&prompt, &task),
+            LifecyclePromptDecision::SuppressStale {
+                task_id: "cas-f002".to_string(),
+            },
+            "a relay for the old merge boundary must not become actionable after a later decision"
+        );
+    }
+
+    #[test]
+    fn a_close_rejected_relay_is_superseded_when_request_changes_clears_its_anchor() {
+        let occurrence = Utc.with_ymd_and_hms(2026, 9, 17, 19, 0, 0).unwrap();
+        let prompt = anchored_awaiting_merge_prompt(
+            "task_close_rejected",
+            "cas-f002",
+            "rejected-tip",
+            occurrence,
+        );
+        let mut task = Task::new("cas-f002".to_string(), "stale rejection".to_string());
+        task.status = TaskStatus::Open;
+        task.updated_at = occurrence + chrono::Duration::seconds(30);
+        task.deliverables.factory_branch_anchor = None;
+
+        assert_eq!(
+            revalidate_lifecycle_prompt_against_task(&prompt, &task),
+            LifecyclePromptDecision::SuppressStale {
+                task_id: "cas-f002".to_string(),
+            }
         );
     }
 

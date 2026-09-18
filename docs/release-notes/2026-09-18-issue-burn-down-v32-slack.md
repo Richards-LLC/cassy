@@ -4,7 +4,7 @@ Channel: `#cas-internal` (`C0B44GUKDK2`)
 
 Deploy target: Source on main. This is a source-merge announcement, not a runtime release.
 
-Publication status: Draft only; no messages have been posted.
+Publication status: POSTED (receipts below).
 
 Review basis: the actual source diff at `2adae618`. The four fenced blocks below are the complete postable text, in order: User top-level, User reply, Dev top-level, Dev reply.
 
@@ -78,3 +78,12 @@ Availability: These changes are on the source branch for the main merge; this an
 - #883 → `7d647c45`; #884/#885 → `99f4206d`; #886 → `d7ff53ad` and `f37c2d3a`.
 - #887 → `53f442f6`; #888 → `d32087f6`; #889 → `b642e3c9`.
 - #890 → `16113313`; #891 → `57a0761a`; #892 → `6651c536`; #893 → `41d19588`; #897 → `433fae5e`.
+
+## POSTED
+
+- **Posted at (UTC):** `2026-09-18T04:24:53Z` – `04:25:11Z`
+- **Channel:** `#cas-internal` (`C0B44GUKDK2`)
+- **User top-level:** `message_id=1789705493.156639` · https://petra-stella.slack.com/archives/C0B44GUKDK2/p1789705493156639
+- **User reply:** `message_id=1789705498.826059` · https://petra-stella.slack.com/archives/C0B44GUKDK2/p1789705498826059?thread_ts=1789705493.156639&cid=C0B44GUKDK2
+- **Dev top-level:** `message_id=1789705501.661959` · https://petra-stella.slack.com/archives/C0B44GUKDK2/p1789705501661959
+- **Dev reply:** `message_id=1789705511.488129` · https://petra-stella.slack.com/archives/C0B44GUKDK2/p1789705511488129?thread_ts=1789705501.661959&cid=C0B44GUKDK2

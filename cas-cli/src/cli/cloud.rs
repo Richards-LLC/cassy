@@ -6247,6 +6247,18 @@ pub(crate) fn execute_purge_foreign(
     cli: &Cli,
     cas_root: &Path,
 ) -> anyhow::Result<()> {
+    execute_purge_foreign_with_output(args, cli, cas_root, true)
+}
+
+/// Execute a foreign-row purge while optionally leaving rendering to the
+/// caller. Doctor embeds this operation in its checks array, so a nested
+/// purge must not print a second JSON document (or a second human report).
+fn execute_purge_foreign_with_output(
+    args: &CloudPurgeForeignArgs,
+    cli: &Cli,
+    cas_root: &Path,
+    emit_output: bool,
+) -> anyhow::Result<()> {
     use std::sync::Arc;
 
     use crate::cloud::{CloudSyncer, CloudSyncerConfig, SyncQueue, resolve_canonical_id_for_sync};
@@ -6332,7 +6344,7 @@ pub(crate) fn execute_purge_foreign(
 
     let delete_set = &analysis.delete_set;
 
-    if cli.json {
+    if emit_output && cli.json {
         if args.dry_run {
             println!(
                 "{}",
@@ -6385,7 +6397,7 @@ pub(crate) fn execute_purge_foreign(
             );
             return Ok(());
         }
-    } else {
+    } else if emit_output {
         let theme = ActiveTheme::default();
         let mut out = io::stdout();
         let mut fmt = Formatter::stdout(&mut out, theme);
@@ -6599,7 +6611,7 @@ Re-run 'cas cloud pull' first, or pass --force to purge anyway (destructive).",
 
     let purged = deleted;
 
-    if cli.json {
+    if emit_output && cli.json {
         println!(
             "{}",
             serde_json::json!({
@@ -6639,7 +6651,7 @@ Re-run 'cas cloud pull' first, or pass --force to purge anyway (destructive).",
                 "pull_errors": pull_result.errors,
             })
         );
-    } else {
+    } else if emit_output {
         let theme = ActiveTheme::default();
         let mut out = io::stdout();
         let mut fmt = Formatter::stdout(&mut out, theme);
@@ -6719,7 +6731,7 @@ pub(crate) fn doctor_purge_foreign(
         yes: false,
         stale_days: PURGE_STALE_THRESHOLD_DAYS,
     };
-    execute_purge_foreign(&dry_run, cli, cas_root)?;
+    execute_purge_foreign_with_output(&dry_run, cli, cas_root, false)?;
 
     let project_id = crate::cloud::resolve_canonical_id_for_sync(cas_root)
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
@@ -6742,8 +6754,8 @@ pub(crate) fn doctor_purge_foreign(
         yes: true,
         stale_days: PURGE_STALE_THRESHOLD_DAYS,
     };
-    execute_purge_foreign(&apply_args, cli, cas_root)?;
-    execute_sync(
+    execute_purge_foreign_with_output(&apply_args, cli, cas_root, false)?;
+    execute_sync_with_output(
         &CloudSyncArgs {
             dry_run: false,
             full: false,
@@ -6751,6 +6763,7 @@ pub(crate) fn doctor_purge_foreign(
         },
         cli,
         cas_root,
+        false,
     )?;
     Ok(true)
 }

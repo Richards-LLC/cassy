@@ -626,6 +626,141 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Release-train docs stages: prep, announce, and receipts own the draft and
+# report handoff. These fixtures assert the public stage seams with a local
+# adapter and bare origin; no Slack or GitHub service is contacted.
+# ---------------------------------------------------------------------------
+stage_wt="$(new_worktree release-stages)"
+stage_date='2099-01-02'
+fence="$(printf '\x60\x60\x60')"
+mkdir -p "$stage_wt/docs/release-notes" "$stage_wt/docs/release-reports"
+cat >"$stage_wt/docs/release-notes/2098-12-31-v9.99.7-slack.md" <<'EOF'
+# Slack draft — prior
+
+## v9.99.7 POSTED
+
+- **User top-level:** message_id=old-user · https://example.test/old-user
+- **User reply:** message_id=old-user-reply · https://example.test/old-user-reply
+- **Dev top-level:** message_id=old-dev · https://example.test/old-dev
+- **Dev reply:** message_id=old-dev-reply · https://example.test/old-dev-reply
+EOF
+{
+    printf '%s\n' '# Slack draft — fixture' '' '## User thread' '' '**Top-level:**' ''
+    printf '%s\n' "$fence"'text'
+    printf '%s\n' '*Live on production — User — Cassy v9.99.8*' \
+        'Was: the release handoff was manual. → Now: the train carries it through.'
+    printf '%s\n' "$fence" '' '**Only reply:**' ''
+    printf '%s\n' "$fence"'text'
+    printf '%s\n' '• *Release handoff* — Was: the draft was copied by hand. → Now: the train carries it.'
+    printf '%s\n' "$fence" '' '## Dev thread' '' '**Top-level:**' ''
+    printf '%s\n' "$fence"'text'
+    printf '%s\n' '*Live on production — Dev — Cassy v9.99.8*' \
+        'Was: receipts were split across commits. → Now: one docs change carries them.'
+    printf '%s\n' "$fence" '' '**Only reply:**' ''
+    printf '%s\n' "$fence"'text'
+    printf '%s\n' '• *Receipts* — Was: evidence was split. → Now: the report and receipt land together.'
+    printf '%s\n' "$fence"
+} >"$stage_wt/docs/release-notes/$stage_date-v9.99.8-slack.md"
+git -C "$stage_wt" add docs/release-notes
+git -C "$stage_wt" -c commit.gpgsign=false commit -qm 'seed release stage draft'
+prep_stage_out="$(CAS_RELEASE_TRAIN_DATE="$stage_date" "$train" 9.99.8 "$stage_wt" --prep 2>&1 || true)"
+if [[ "$prep_stage_out" == *'prep complete'* ]] \
+    && git -C "$stage_wt" log -1 --format=%s | grep -q 'release: prepare v9.99.8' \
+    && grep -q 'Prior release receipt carried forward\|v9.99.7 POSTED' \
+        "$stage_wt/docs/release-notes/$stage_date-v9.99.8-slack.md"; then
+    ok '--prep commits the current draft and carries the prior POSTED receipt'
+else
+    bad "--prep did not carry the draft/receipt: $prep_stage_out"
+fi
+
+announce_stub="$tmp/announce-stub.sh"
+cat >"$announce_stub" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$CAS_RELEASE_TRAIN_ANNOUNCE_BODY_DIR" >"$CAS_RELEASE_TRAIN_ANNOUNCE_STUB_LOG"
+cat >"$CAS_RELEASE_TRAIN_ANNOUNCE_RECEIPT" <<'RECEIPT'
+POSTED_AT=2099-01-02T00:00:00Z
+CHANNEL=cas-internal
+USER_TOP_LEVEL_ID=user-1
+USER_TOP_LEVEL_PERMALINK=https://example.test/user-1
+USER_REPLY_ID=user-2
+USER_REPLY_PERMALINK=https://example.test/user-2
+DEV_TOP_LEVEL_ID=dev-1
+DEV_TOP_LEVEL_PERMALINK=https://example.test/dev-1
+DEV_REPLY_ID=dev-2
+DEV_REPLY_PERMALINK=https://example.test/dev-2
+RECEIPT
+EOF
+chmod +x "$announce_stub"
+announce_log="$tmp/announce-stub.log"
+announce_stage_out="$(CAS_RELEASE_TRAIN_DATE="$stage_date" \
+    CAS_RELEASE_TRAIN_ANNOUNCE_POST_CMD="$announce_stub" \
+    CAS_RELEASE_TRAIN_ANNOUNCE_STUB_LOG="$announce_log" \
+    "$train" 9.99.8 "$stage_wt" --announce 2>&1 || true)"
+stage_dir="$("$train" 9.99.8 "$stage_wt" --print-run-dir)"
+if [[ "$announce_stage_out" == *'announce complete'* ]] \
+    && [[ "$(grep -c . "$announce_log" 2>/dev/null || true)" == 1 ]] \
+    && [[ "$(grep -c '^USER_TOP_LEVEL_ID=' "$stage_dir/announce.receipt" 2>/dev/null || true)" == 1 ]]; then
+    ok '--announce validates and records the four-message adapter receipt'
+else
+    bad "--announce did not record the adapter receipt: $announce_stage_out"
+fi
+
+bad_draft="$tmp/bad-slack.md"
+cp "$stage_wt/docs/release-notes/$stage_date-v9.99.8-slack.md" "$bad_draft"
+sed -i '0,/\\*Release handoff\\*/s//**bad**/' "$bad_draft"
+bad_announce_stub="$tmp/bad-announce-stub.sh"
+cat >"$bad_announce_stub" <<'EOF'
+#!/usr/bin/env bash
+touch "$CAS_RELEASE_TRAIN_ANNOUNCE_STUB_LOG"
+EOF
+chmod +x "$bad_announce_stub"
+bad_announce_log="$tmp/bad-announce.log"
+bad_out="$(CAS_RELEASE_TRAIN_DATE="$stage_date" \
+    CAS_RELEASE_TRAIN_DRAFT="$bad_draft" \
+    CAS_RELEASE_TRAIN_ANNOUNCE_POST_CMD="$bad_announce_stub" \
+    CAS_RELEASE_TRAIN_ANNOUNCE_STUB_LOG="$bad_announce_log" \
+    "$train" 9.99.9 "$stage_wt" --announce 2>&1 || true)"
+if [[ "$bad_out" == *'lint failed'* ]] && [[ ! -e "$bad_announce_log" ]]; then
+    ok '--announce rejects invalid mrkdwn before any adapter write'
+else
+    bad "--announce posted or accepted invalid mrkdwn: $bad_out"
+fi
+
+stage_origin="$tmp/stage-origin.git"
+git init -q --bare "$stage_origin"
+git -C "$stage_wt" remote add origin "$stage_origin"
+git -C "$stage_wt" push -q origin HEAD:main
+printf 'report\n' >"$stage_wt/docs/release-reports/v9.99.8.md"
+printf '<html>report</html>\n' >"$stage_wt/docs/release-reports/v9.99.8.html"
+cp "$repo_root/docs/release-reports/v3.19.0.pdf" "$stage_wt/docs/release-reports/v9.99.8.pdf"
+printf '%s\n' "$(git -C "$stage_wt" rev-parse HEAD)" >"$stage_dir/landed-main.sha"
+receipts_gh="$tmp/receipts-gh.sh"
+cat >"$receipts_gh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+case "$1 $2" in
+  "pr create") printf 'https://example.test/Richards-LLC/cassy/pull/998\n' ;;
+  "pr view") printf '{"id":"PR_kwDOFIXTURE998"}\n' ;;
+  "api graphql") printf '{"data":{"enqueuePullRequest":{"mergeQueueEntry":{"state":"QUEUED"}}}}\n' ;;
+  *) printf 'unexpected gh call: %s\n' "$*" >&2; exit 2 ;;
+esac
+EOF
+chmod +x "$receipts_gh"
+receipts_stage_out="$(CAS_RELEASE_TRAIN_DATE="$stage_date" \
+    CAS_RELEASE_TRAIN_GH="$receipts_gh" "$train" 9.99.8 "$stage_wt" --receipts 2>&1 || true)"
+receipt_branch="docs/release-receipts-v9.99.8"
+if [[ "$receipts_stage_out" == *'receipts PR #998 queued'* ]] \
+    && grep -q '^PR_NUMBER=998$' "$stage_dir/receipts.pr" 2>/dev/null \
+    && git --git-dir="$stage_origin" show "refs/heads/$receipt_branch:docs/release-reports/v9.99.8.md" >/dev/null 2>&1 \
+    && git --git-dir="$stage_origin" show "refs/heads/$receipt_branch:docs/release-notes/$stage_date-v9.99.8-slack.md" \
+        | grep -q '^## POSTED$'; then
+    ok '--receipts commits POSTED and report files in one queued docs PR'
+else
+    bad "--receipts did not queue the docs PR: $receipts_stage_out"
+fi
+
+# ---------------------------------------------------------------------------
 # The rule itself: nothing in the release path may locate a process by pattern.
 # This is the guard that stops a future wrapper from reintroducing
 # `pgrep -f 'release-gate.sh <version>' | head -1`.

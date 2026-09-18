@@ -39,6 +39,49 @@ def resolve(root, branch):
     return tips[0]
 
 
+def receipts_pr_for_base(root, base):
+    run_dir = os.environ.get("CAS_RELEASE_RECEIPTS_RUN_DIR")
+    candidates = []
+    if run_dir:
+        candidates.append(Path(run_dir) / "receipts.pr")
+    common = Path(git(root, "rev-parse", "--path-format=absolute", "--git-common-dir")).resolve()
+    artifacts = Path(os.environ.get("CAS_RELEASE_ARTIFACTS_ROOT", common.parent / ".cas" / "artifacts" / "release"))
+    candidates.extend(sorted(artifacts.glob("v*-*/receipts.pr")))
+    for path in candidates:
+        try:
+            fields = dict(
+                line.split("=", 1)
+                for line in path.read_text(encoding="utf-8").splitlines()
+                if "=" in line
+            )
+        except OSError:
+            continue
+        if fields.get("BASE_SHA") == base:
+            return fields.get("PR_NUMBER", "unknown")
+    return None
+
+
+def warn_receipts_ahead(root, base, main_tip):
+    if base == main_tip:
+        return
+    ancestor = subprocess.run(
+        ["git", "-C", str(root), "merge-base", "--is-ancestor", base, main_tip],
+        capture_output=True,
+    )
+    if ancestor.returncode != 0:
+        return
+    changed = git(root, "diff", "--name-only", base, main_tip).splitlines()
+    if not changed or not all(path.startswith("docs/") for path in changed):
+        return
+    pr_number = receipts_pr_for_base(root, base) or "unknown"
+    print(
+        "WARN assemble receipt docs: origin/main is ahead of the integration base "
+        f"only under docs/; receipts PR #{pr_number} is the cause. "
+        "Run the stale-base heal before assembling.",
+        file=sys.stderr,
+    )
+
+
 def recovery_timeout_secs():
     raw = os.environ.get("CAS_RELEASE_TRAIN_RECOVERY_TIMEOUT_SECS", "")
     if not raw:
@@ -94,7 +137,9 @@ def _assemble_locked(root, lock, allow_heal=True):
     if tip != receipt.get("tip"):
         raise RuntimeError("Integration tip changed since its sweep; rerun the merge sweep")
     try:
-        if git(root, "rev-parse", "refs/remotes/origin/main") != receipt.get("base"):
+        main_tip = git(root, "rev-parse", "refs/remotes/origin/main")
+        if main_tip != receipt.get("base"):
+            warn_receipts_ahead(root, receipt.get("base", ""), main_tip)
             raise RuntimeError(STALE_BASE_ERROR)
     except RuntimeError as exc:
         if not allow_heal or str(exc) != STALE_BASE_ERROR:

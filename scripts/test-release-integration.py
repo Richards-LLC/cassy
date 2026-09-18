@@ -124,6 +124,33 @@ PY
         self.assertEqual(self.git("rev-parse", "HEAD"), self.tip)
         self.assertTrue((self.root / ".cas/healed").exists())
 
+    def test_docs_only_receipts_base_names_the_receipts_pr(self):
+        self.git("checkout", "main")
+        docs = self.root / "docs"
+        docs.mkdir()
+        (docs / "receipt.md").write_text("posted\n")
+        self.git("add", "docs/receipt.md")
+        self.git("commit", "-m", "docs receipt")
+        docs_tip = self.git("rev-parse", "HEAD")
+        self.git("update-ref", "refs/remotes/origin/main", docs_tip)
+        self.git("checkout", "release/test")
+        artifacts = Path(self.temp.name) / "artifacts"
+        run_dir = artifacts / "v0.0.0-release-test"
+        run_dir.mkdir(parents=True)
+        (run_dir / "receipts.pr").write_text(
+            f"PR_NUMBER=123\nBASE_SHA={self.base}\n"
+        )
+        result = subprocess.run(
+            [str(TRAIN), "0.0.0", str(self.root), "--assemble"],
+            capture_output=True,
+            text=True,
+            env={**os.environ, "CAS_RELEASE_ARTIFACTS_ROOT": str(artifacts)},
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("only under docs/", result.stderr)
+        self.assertIn("receipts PR #123", result.stderr)
+        self.assertEqual(self.git("rev-parse", "HEAD"), self.base)
+
     def test_changed_integration_refuses_wrong_receipt(self):
         self.git("update-ref", "refs/heads/integration/project", self.base)
         self.refused("tip changed")

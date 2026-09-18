@@ -71,6 +71,13 @@ name the blocking step in the operator timeline, and require its receipt.
    never overwrite or authorize the exact-SHA full gate required by pipeline.
    The main per-run directory is keyed by version and worktree, never only by
    version, and every gate is located by its recorded PID, never `pgrep`.
+   The `--cut` stage order is preflight, assemble, prep, ledger, gate, pr-body,
+   pipeline, publish, post-publication, announce, report, receipts, host-update.
+   Stage bodies are sourced from `scripts/release-train.d/<stage>.sh`; `--prep`,
+   `--announce`, and `--receipts` remain independently rerunnable seams.
+   `--prep` refuses without `docs/release-notes/<date>-v<version>-slack.md`,
+   commits that draft with the prep inputs, and carries the prior draft's
+   POSTED block forward without treating it as current evidence.
 9. Create `pr-body.md` in the printed run directory, then use `--pipeline`.
    It refuses unless `gate.done`, `gate.full.sha`, and the current tree prove a
    successful full gate on the exact commit about to be pushed. Require
@@ -191,6 +198,20 @@ name the blocking step in the operator timeline, and require its receipt.
    in the host update JSON to equal the released version. Carry the POSTED
    receipt into the next prep commit. Close only after merge and stranded-branch
    inspection; use `stranded_branch_override` only with proof on main.
+15. Run `--announce` only after publication proof. It extracts and lints the
+   four fenced bodies, rejects `**`, heading lines, hyphen bullets, missing
+   blank lines, and unlabeled reply bullets before any write, then posts User
+   top-level → User reply → Dev top-level → Dev reply through MechaCassy at
+   least one second apart. The adapter reads `auth = "env:..."` from
+   `.cas/proxy.toml` when `MECHA_SLACK_TOKEN_ENV` is unset, preserves partial
+   `announce.receipt` entries, and never retries an uncertain write.
+16. Run `--receipts` after `--report`. It appends the four returned POSTED
+   receipts to the draft, copies the report files, commits both on
+   `docs/release-receipts-v<version>` from the landed main SHA, opens the
+   standard docs PR, queues it, and records `receipts.pr` with the PR number,
+   base SHA, commit SHA, and queue receipt. `--assemble` warns when that base
+   is behind origin/main only under `docs/` and names the receipts PR so the
+   stale-base heal can act on the correct cause.
 
 ## Release-gate timing and full retries
 

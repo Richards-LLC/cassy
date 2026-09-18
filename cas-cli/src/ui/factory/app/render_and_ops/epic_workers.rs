@@ -492,8 +492,17 @@ pub(crate) fn target_seed_receipt(
 ) -> Option<String> {
     result.target_seed.as_ref().map(|stats| {
         format!(
-            "Cargo target seed: snapshot='{}'; hardlinked_files={}; hardlinked_bytes={}",
-            stats.snapshot, stats.files, stats.bytes
+            "Cargo target seed: snapshot='{}'; source_commit='{}'; age_secs={}; skipped_crates='{}'; hardlinked_files={}; hardlinked_bytes={}",
+            stats.snapshot,
+            stats.source_commit,
+            stats.age_secs,
+            if stats.skipped_crates.is_empty() {
+                "none".to_string()
+            } else {
+                stats.skipped_crates.join(",")
+            },
+            stats.files,
+            stats.bytes
         )
     })
 }
@@ -2187,6 +2196,26 @@ impl FactoryApp {
     /// * `force` - `true` → SIGKILL the process group immediately;
     ///             `false` → SIGTERM with group-wide SIGKILL escalation
     pub async fn shutdown_worker(&mut self, name: &str, force: bool) -> anyhow::Result<()> {
+        self.shutdown_worker_inner(name, force, false).await
+    }
+
+    /// Stop a worker while retaining its existing isolated worktree for an
+    /// immediate in-place recycle. Ordinary shutdowns reclaim a clean tree
+    /// once all tasks are terminal; recycling must preserve that path so the
+    /// replacement starts from the same checkout and branch.
+    pub async fn shutdown_worker_for_recycle(
+        &mut self,
+        name: &str,
+    ) -> anyhow::Result<()> {
+        self.shutdown_worker_inner(name, false, true).await
+    }
+
+    async fn shutdown_worker_inner(
+        &mut self,
+        name: &str,
+        force: bool,
+        preserve_worktree: bool,
+    ) -> anyhow::Result<()> {
         // Check if worker exists
         if !self.worker_names.contains(&name.to_string()) {
             anyhow::bail!("Worker '{name}' not found");
@@ -2322,7 +2351,7 @@ impl FactoryApp {
         // work. Dirty trees are preserved for the daemon reaper (Unit 3) to
         // salvage later, and we flag the agent record + warn the supervisor so
         // nothing is silently abandoned.
-        if !has_open_tasks {
+        if !preserve_worktree && !has_open_tasks {
             self.finalize_worker_worktree(&agent_store, &agent_id, name);
         }
 
@@ -2474,6 +2503,18 @@ impl FactoryApp {
         name: &str,
         teams: Option<cas_mux::TeamsSpawnConfig>,
     ) -> anyhow::Result<()> {
+        self.respawn_worker_with_spec(name, teams, None)
+    }
+
+    /// Respawn a worker, optionally overriding the daemon's default recipe.
+    /// The optional spec is used by in-place recycling to retain the worker's
+    /// provider, model, effort, and account directory.
+    pub fn respawn_worker_with_spec(
+        &mut self,
+        name: &str,
+        teams: Option<cas_mux::TeamsSpawnConfig>,
+        requested_spec: Option<cas_mux::WorkerSpec>,
+    ) -> anyhow::Result<()> {
         // cas-9bc6: re-read live LlmConfig so harness/model/effort changes made
         // via `cas config set` after daemon boot are reflected in this respawn.
         self.sync_worker_config_from_live_settings();
@@ -2482,7 +2523,9 @@ impl FactoryApp {
         // effective per-worker/default spec after the live config sync. Keep
         // the same shared validator on this recovery path before any worktree
         // or PTY launch occurs.
-        let effective_spec = self.mux.effective_worker_spec(name, None);
+        let effective_spec = requested_spec
+            .clone()
+            .unwrap_or_else(|| self.mux.effective_worker_spec(name, None));
         cas_factory::validate_explicit(
             &effective_spec,
             &cas_factory::CapabilitySnapshot::default(),
@@ -2531,7 +2574,7 @@ impl FactoryApp {
             cas_root.as_ref(),
             &self.supervisor_name,
             teams.as_ref(),
-            None, // spec: use Mux default (T3 will supply per-spawn overrides)
+            requested_spec,
         ) {
             crate::telemetry::track(
                 "factory_worker_respawn_result",
@@ -2546,7 +2589,7 @@ impl FactoryApp {
         crate::ui::factory::app::queue_codex_worker_intro_prompt(
             self.cas_dir(),
             name,
-            self.worker_cli,
+            effective_spec.cli,
         );
 
         // Update pane grid for navigation
@@ -3021,6 +3064,33 @@ mod spawn_base_tests {
         assert!(receipt.contains("Worktree repository: /workspace/target-repo"), "{receipt}");
         assert!(receipt.contains("Spawn base: 'main'"), "{receipt}");
         assert!(receipt.contains("merge-back parent 'main'"), "{receipt}");
+    }
+
+    #[test]
+    fn target_seed_receipt_names_provenance_age_and_skipped_crates() {
+        use crate::ui::factory::app::TargetSeedStats;
+
+        let result = WorkerSpawnResult {
+            worker_name: "receipt-worker".into(),
+            cwd: std::path::PathBuf::from("/workspace/target-repo"),
+            cas_root: None,
+            worktree: None,
+            worktree_created: false,
+            target_seed: Some(TargetSeedStats {
+                snapshot: "target-old".into(),
+                source_commit: "abc123".into(),
+                age_secs: 86_400,
+                skipped_crates: vec!["cas-pty".into()],
+                files: 2,
+                bytes: 42,
+            }),
+            target_seed_warning: Some("refresh".into()),
+        };
+        let receipt = target_seed_receipt(&result).expect("target seed receipt");
+        assert!(receipt.contains("snapshot='target-old'"), "{receipt}");
+        assert!(receipt.contains("source_commit='abc123'"), "{receipt}");
+        assert!(receipt.contains("age_secs=86400"), "{receipt}");
+        assert!(receipt.contains("skipped_crates='cas-pty'"), "{receipt}");
     }
 
     /// GH #122 repro, end to end: focus pinned to epic A, spawn requested with
@@ -4115,6 +4185,7 @@ mod spawn_base_tests {
             worktree: Some(worktree),
             worktree_created: true,
             target_seed: None,
+            target_seed_warning: None,
         };
 
         assert!(
@@ -4163,6 +4234,7 @@ mod spawn_base_tests {
             worktree: Some(worktree),
             worktree_created: false,
             target_seed: None,
+            target_seed_warning: None,
         };
 
         assert!(
@@ -4192,6 +4264,7 @@ mod spawn_base_tests {
             worktree: None,
             worktree_created: true,
             target_seed: None,
+            target_seed_warning: None,
         };
 
         assert!(
@@ -4232,6 +4305,7 @@ mod spawn_base_tests {
             worktree: Some(worktree),
             worktree_created: true,
             target_seed: None,
+            target_seed_warning: None,
         };
 
         let error = cleanup_cancelled_spawn_worktree_with_manager(None, &mut result)

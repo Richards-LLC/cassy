@@ -15,9 +15,11 @@ use crate::error::TypeError;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum DependencyType {
-    /// Hard blocker - task A blocks task B from starting
+    /// Close-gating dependency; start warns so parallel preparation can proceed
     #[default]
     Blocks,
+    /// Explicit hard start gate - task A cannot start until task B is done
+    RequiresStart,
     /// Soft link - tasks are related but not blocking
     Related,
     /// Hierarchical - epic/subtask relationship
@@ -32,6 +34,7 @@ impl fmt::Display for DependencyType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             DependencyType::Blocks => write!(f, "blocks"),
+            DependencyType::RequiresStart => write!(f, "requires-start"),
             DependencyType::Related => write!(f, "related"),
             DependencyType::ParentChild => write!(f, "parent-child"),
             DependencyType::DiscoveredFrom => write!(f, "discovered-from"),
@@ -46,6 +49,7 @@ impl FromStr for DependencyType {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().replace('_', "-").as_str() {
             "blocks" => Ok(DependencyType::Blocks),
+            "requires-start" | "requiresstart" => Ok(DependencyType::RequiresStart),
             "related" => Ok(DependencyType::Related),
             "parent-child" | "parentchild" => Ok(DependencyType::ParentChild),
             "discovered-from" | "discoveredfrom" => Ok(DependencyType::DiscoveredFrom),
@@ -92,6 +96,11 @@ impl Dependency {
         self.dep_type == DependencyType::Blocks
     }
 
+    /// Check if this dependency is an explicit start gate.
+    pub fn is_start_gate(&self) -> bool {
+        self.dep_type == DependencyType::RequiresStart
+    }
+
     /// Check if this is a hierarchical relationship
     pub fn is_hierarchical(&self) -> bool {
         self.dep_type == DependencyType::ParentChild
@@ -125,6 +134,10 @@ mod tests {
             DependencyType::Related
         );
         assert_eq!(
+            DependencyType::from_str("requires_start").unwrap(),
+            DependencyType::RequiresStart
+        );
+        assert_eq!(
             DependencyType::from_str("parent-child").unwrap(),
             DependencyType::ParentChild
         );
@@ -142,6 +155,10 @@ mod tests {
     #[test]
     fn test_dependency_type_display() {
         assert_eq!(DependencyType::Blocks.to_string(), "blocks");
+        assert_eq!(
+            DependencyType::RequiresStart.to_string(),
+            "requires-start"
+        );
         assert_eq!(DependencyType::ParentChild.to_string(), "parent-child");
     }
 

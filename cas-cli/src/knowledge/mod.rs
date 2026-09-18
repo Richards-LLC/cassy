@@ -22,8 +22,11 @@ use std::path::Path;
 pub use chunk::{Chunk, ChunkOptions, chunk_markdown};
 pub use llm::{ClaudeCliRunner, LlmError, LlmRunner, ScriptedLlm};
 pub use merge::{MergeTier, StripOutcome};
-pub use pipeline::{DistillConfig, DistillReport, run_distillation, run_distillation_with_timeout};
-pub(crate) use pipeline::run_distillation_until;
+pub(crate) use pipeline::run_distillation_until_with_progress;
+pub use pipeline::{
+    DistillConfig, DistillReport, SourceProgress, SourceProgressPhase, run_distillation,
+    run_distillation_with_timeout,
+};
 pub use sources::{
     LoadedSource, SkippedSource, SourceKind, SourceScan, SymbolLite, collect_file_sources,
     scan_file_sources,

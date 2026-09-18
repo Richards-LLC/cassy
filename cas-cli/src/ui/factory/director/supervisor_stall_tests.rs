@@ -273,7 +273,7 @@ fn stall_gate_fires_once_per_ten_minutes_and_accumulates_actionable_idle_time() 
 
     let early = tracker.observe(
         Some(actionable.clone()),
-        Some(start - Duration::seconds(1_199)),
+        Some(start - Duration::seconds(600)),
         false,
         start + Duration::seconds(599),
         600,
@@ -283,7 +283,7 @@ fn stall_gate_fires_once_per_ten_minutes_and_accumulates_actionable_idle_time() 
 
     let refire = tracker.observe(
         Some(actionable),
-        Some(start - Duration::seconds(1_200)),
+        Some(start - Duration::seconds(600)),
         false,
         start + Duration::seconds(600),
         600,
@@ -293,12 +293,57 @@ fn stall_gate_fires_once_per_ten_minutes_and_accumulates_actionable_idle_time() 
 
     let cleared = tracker.observe(
         None,
-        Some(start + Duration::seconds(601)),
+        Some(start - Duration::seconds(600)),
         false,
         start + Duration::seconds(720),
         600,
     );
     assert_eq!(cleared.actionable_idle_secs, 720);
+    assert!(cleared.wake.is_none());
+}
+
+#[test]
+fn supervisor_tool_activity_resets_actionable_idle_clock() {
+    let start = Utc.with_ymd_and_hms(2026, 9, 5, 12, 0, 0).unwrap();
+    let actionable = SupervisorActionableState::AssembleGatePipeline {
+        epic_id: "cas-epic".into(),
+    };
+    let mut tracker = SupervisorStallTracker::default();
+
+    assert!(
+        tracker
+            .observe(
+                Some(actionable.clone()),
+                Some(start - Duration::seconds(600)),
+                false,
+                start,
+                600,
+            )
+            .wake
+            .is_some()
+    );
+
+    // A later supervisor tool call is forward motion even when the same
+    // actionable item remains in the snapshot. It must begin a fresh idle
+    // span instead of carrying the completed span into the next nag.
+    let after_activity = tracker.observe(
+        Some(actionable.clone()),
+        Some(start + Duration::seconds(1)),
+        false,
+        start + Duration::seconds(1),
+        600,
+    );
+    assert_eq!(after_activity.actionable_idle_secs, 0);
+    assert!(after_activity.wake.is_none());
+
+    let after_silence = tracker.observe(
+        Some(actionable),
+        Some(start + Duration::seconds(1)),
+        false,
+        start + Duration::seconds(601),
+        600,
+    );
+    assert!(after_silence.wake.is_some());
 }
 
 #[test]
@@ -332,7 +377,7 @@ fn merged_close_blocked_stall_wakes_for_changed_delivery_without_refiring_same_s
         tracker
             .observe(
                 Some(merged("target-a")),
-                Some(start - Duration::seconds(1_200)),
+                Some(start - Duration::seconds(600)),
                 false,
                 start + Duration::seconds(600),
                 600,
@@ -344,7 +389,7 @@ fn merged_close_blocked_stall_wakes_for_changed_delivery_without_refiring_same_s
         tracker
             .observe(
                 Some(merged("target-b")),
-                Some(start - Duration::seconds(1_201)),
+                Some(start - Duration::seconds(600)),
                 false,
                 start + Duration::seconds(601),
                 600,

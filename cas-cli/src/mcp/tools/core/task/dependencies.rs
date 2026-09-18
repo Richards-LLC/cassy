@@ -19,10 +19,11 @@ impl CasCore {
             data: None,
         })?;
 
-        let dep_type = match req.dep_type.to_lowercase().as_str() {
+        let dep_type = match req.dep_type.to_lowercase().replace('_', "-").as_str() {
             "related" => DependencyType::Related,
             "parent" | "parentchild" => DependencyType::ParentChild,
             "discovered" | "discoveredfrom" => DependencyType::DiscoveredFrom,
+            "requires-start" | "requiresstart" => DependencyType::RequiresStart,
             _ => DependencyType::Blocks,
         };
 
@@ -115,11 +116,12 @@ impl CasCore {
     ) -> Result<CallToolResult, McpError> {
         let task_store = self.open_task_store()?;
 
-        let dep_type = match req.dep_type.to_lowercase().as_str() {
+        let dep_type = match req.dep_type.to_lowercase().replace('_', "-").as_str() {
             "related" => DependencyType::Related,
             "parent" | "parentchild" | "parent-child" => DependencyType::ParentChild,
             "discovered" | "discoveredfrom" | "discovered-from" => DependencyType::DiscoveredFrom,
             "extracted" | "extractedfrom" | "extracted-from" => DependencyType::ExtractedFrom,
+            "requires-start" | "requiresstart" => DependencyType::RequiresStart,
             _ => DependencyType::Blocks,
         };
 
@@ -210,6 +212,9 @@ pub(crate) fn describe_dependency(dep: &Dependency) -> String {
     match dep.dep_type {
         DependencyType::Blocks => {
             format!("{a} will not start until {b} is done ({a} blocked_by {b}).")
+        }
+        DependencyType::RequiresStart => {
+            format!("{a} requires {b} to be done before starting ({a} requires_start {b}).")
         }
         DependencyType::ParentChild => {
             format!("{a} is a child of {b} ({b} is {a}'s parent).")

@@ -30,4 +30,4 @@ Use `mcp__cs__task` instead of built-in TodoWrite. Cassy tasks persist across se
 
 The list below is the dispatch order for `mcp__cs__task`; keep it synchronized with the live service.
 
-**Valid `mcp__cs__task` actions** (exact list — do not invent others): `create`, `proposal_inbox`, `proposal_accept`, `proposal_reject`, `proposal_reconcile`, `show`, `update`, `start`, `close`, `cancel`, `reopen`, `request_changes`, `delete`, `list`, `ready`, `blocked`, `notes`, `dep_add`, `dep_remove`, `dep_list`, `claim`, `release`, `reset`, `transfer`, `available`, `mine`.
+**Valid `mcp__cs__task` actions** (exact list — do not invent others): `create`, `proposal_inbox`, `proposal_accept`, `proposal_reject`, `proposal_reconcile`, `show`, `get`, `update`, `start`, `close`, `cancel`, `reopen`, `request_changes`, `delete`, `list`, `ready`, `blocked`, `notes`, `dep_add`, `dep_remove`, `dep_list`, `claim`, `release`, `reset`, `transfer`, `available`, `mine`.

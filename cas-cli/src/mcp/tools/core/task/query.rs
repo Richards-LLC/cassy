@@ -323,6 +323,11 @@ impl CasCore {
                     .filter(|dep| dep.dep_type == DependencyType::Blocks)
                     .map(|dep| dep.to_id.clone())
                     .collect();
+                let requires_start: Vec<String> = deps
+                    .iter()
+                    .filter(|dep| dep.dep_type == DependencyType::RequiresStart)
+                    .map(|dep| dep.to_id.clone())
+                    .collect();
                 let parent_epics: Vec<String> = deps
                     .iter()
                     .filter(|dep| dep.dep_type == DependencyType::ParentChild)
@@ -333,6 +338,7 @@ impl CasCore {
                     .filter(|dep| {
                         dep.dep_type != DependencyType::Blocks
                             && dep.dep_type != DependencyType::ParentChild
+                            && dep.dep_type != DependencyType::RequiresStart
                     })
                     .map(|dep| format!("{:?}: {}", dep.dep_type, dep.to_id))
                     .collect();
@@ -348,6 +354,7 @@ impl CasCore {
                 if !blocked_by.is_empty()
                     || !blocking.is_empty()
                     || !parent_epics.is_empty()
+                    || !requires_start.is_empty()
                     || !other_outgoing.is_empty()
                 {
                     output.push_str("\n\nDependencies:\n");
@@ -357,6 +364,12 @@ impl CasCore {
                 }
                 if !blocking.is_empty() {
                     output.push_str(&format!("  - Blocks: {}\n", blocking.join(", ")));
+                }
+                if !requires_start.is_empty() {
+                    output.push_str(&format!(
+                        "  - Requires start before this task: {}\n",
+                        requires_start.join(", ")
+                    ));
                 }
                 if !other_outgoing.is_empty() {
                     for dep in &other_outgoing {

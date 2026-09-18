@@ -1180,10 +1180,95 @@ fn knowledge_build_timeout_returns_nonzero_and_does_not_start_another_call() {
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("timed out"), "stderr: {stderr}");
+    assert!(
+        stderr.contains("source '") && stderr.contains(".md'"),
+        "timeout must identify the source in flight: {stderr}"
+    );
     assert_eq!(
         std::fs::read_to_string(calls).unwrap().lines().count(),
         1,
         "the command deadline must prevent later stage/source calls"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn knowledge_build_verbose_and_status_full_explain_a_failed_source() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = TempDir::new().unwrap();
+    cas_cmd(temp.path())
+        .current_dir(&temp)
+        .args(["init", "--yes"])
+        .assert()
+        .success();
+
+    std::fs::write(
+        temp.path().join("README.md"),
+        "# Failing source\n\ncontent\n",
+    )
+    .unwrap();
+    let provider = temp.path().join("provider");
+    std::fs::write(
+        &provider,
+        "#!/bin/sh\ncat >/dev/null\nprintf 'provider refused this source\\n' >&2\nexit 7\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&provider, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let build = cas_cmd(temp.path())
+        .current_dir(&temp)
+        .env("CAS_KNOWLEDGE_LLM_BIN", &provider)
+        .args([
+            "--verbose",
+            "knowledge",
+            "build",
+            "--timeout-secs",
+            "5",
+            "--max-sources",
+            "1",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        build.status.success(),
+        "a failed source is recorded for retry"
+    );
+    let progress = String::from_utf8_lossy(&build.stderr);
+    assert!(
+        progress.contains("distilling") && progress.contains(".md"),
+        "verbose build must name the source it starts: {progress}"
+    );
+    assert!(
+        progress.contains("failed") && progress.contains(".md"),
+        "verbose build must name the failed source: {progress}"
+    );
+
+    cas_cmd(temp.path())
+        .current_dir(&temp)
+        .args(["--full", "knowledge", "status"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            ".claude/agents/duplicate-detector.md",
+        ))
+        .stdout(predicate::str::contains("provider refused this source"));
+
+    let status_json = cas_cmd(temp.path())
+        .current_dir(&temp)
+        .args(["--json", "--full", "knowledge", "status"])
+        .output()
+        .unwrap();
+    assert!(status_json.status.success());
+    let status: serde_json::Value = serde_json::from_slice(&status_json.stdout).unwrap();
+    assert_eq!(
+        status["failed_sources"][0]["path"],
+        ".claude/agents/duplicate-detector.md"
+    );
+    assert!(
+        status["failed_sources"][0]["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("provider refused this source"))
     );
 }
 

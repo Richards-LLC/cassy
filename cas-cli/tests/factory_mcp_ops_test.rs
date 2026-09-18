@@ -28,7 +28,7 @@ use cas::types::{
 };
 use cas_mcp::types::{CoordinationRequest, FactoryRequest, TaskRequest};
 use cas_mux::{Mux, MuxConfig, SupervisorCli};
-use cas_types::AgentRole;
+use cas_types::{AgentRole, DeliveryMode};
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::RawContent;
 use tempfile::TempDir;
@@ -165,6 +165,31 @@ impl FactoryTestEnv {
         agent.factory_session = Some(factory_session.to_string());
         store.register(&agent).expect("register worker in session");
         id
+    }
+
+    fn backdate_worker_heartbeat(&self, name: &str, stale_secs: i64) {
+        let store = self.agent_store();
+        let mut agent = store
+            .list(None)
+            .expect("list agents")
+            .into_iter()
+            .find(|agent| agent.name == name)
+            .expect("find worker");
+        let staleness = chrono::Duration::seconds(stale_secs);
+        agent.last_heartbeat = chrono::Utc::now() - staleness;
+        agent.registered_at = chrono::Utc::now() - staleness;
+        store.update(&agent).expect("backdate worker heartbeat");
+    }
+
+    fn heartbeat_worker(&self, name: &str) {
+        let store = self.agent_store();
+        let agent = store
+            .list(None)
+            .expect("list agents")
+            .into_iter()
+            .find(|agent| agent.name == name)
+            .expect("find worker");
+        store.heartbeat(&agent.id).expect("heartbeat worker");
     }
 
     fn register_supervisor_in_session(&self, name: &str, factory_session: &str) -> String {
@@ -466,6 +491,7 @@ fn factory_req(action: &str) -> FactoryRequest {
         target: None,
         message: None,
         force: None,
+        reason: None,
         dry_run: None,
         // allow_trunk is CoordinationRequest/worktree_merge only — not FactoryRequest
         clear: None,
@@ -840,6 +866,7 @@ async fn test_sync_all_workers_explicit_id_beats_unrelated_in_progress_epic_cas_
     let worker = "sync-explicit-worker";
     let worker_path = init_sync_repo(&env, worker);
     env.register_worker_in_session(worker, "session-sync-explicit");
+    env.backdate_worker_heartbeat(worker, 90);
     add_epic_with_id(&env, "cas-3648", TaskStatus::InProgress, "epic/foreign");
     add_epic_with_id(&env, "cas-3b7c", TaskStatus::Open, "epic/requested");
     write_session_metadata_for_project(
@@ -2114,6 +2141,15 @@ async fn test_shutdown_workers_dirty_or_unpushed_worktree_requires_force() {
     let _guard = EnvGuard::set(&[]);
     let env = FactoryTestEnv::new();
     let worker_path = init_sync_repo(&env, "alice");
+    let remote_path = worker_path.parent().unwrap().join("origin.git");
+    git_stdout(
+        &worker_path,
+        &["init", "--bare", remote_path.to_str().unwrap()],
+    );
+    git_stdout(
+        &worker_path,
+        &["remote", "add", "origin", remote_path.to_str().unwrap()],
+    );
     let mut metadata = HashMap::new();
     metadata.insert("clone_path".to_string(), worker_path.display().to_string());
     env.register_worker_with_metadata("alice", metadata);
@@ -2139,6 +2175,136 @@ async fn test_shutdown_workers_dirty_or_unpushed_worktree_requires_force() {
         "unpushed state missing: {err:?}"
     );
     assert!(env.spawn_queue().peek(10).expect("peek").is_empty());
+}
+
+#[tokio::test]
+async fn test_shutdown_workers_no_remote_merged_tip_is_safe_without_force_cas_2254() {
+    let _guard = EnvGuard::set(&[]);
+    let env = FactoryTestEnv::new();
+    let worker_path = init_sync_repo(&env, "alice");
+    let mut metadata = HashMap::new();
+    metadata.insert("clone_path".to_string(), worker_path.display().to_string());
+    env.register_worker_with_metadata("alice", metadata);
+
+    let mut req = factory_req("shutdown_workers");
+    req.worker_names = Some("alice".to_string());
+    let result = env
+        .service
+        .factory(Parameters(req))
+        .await
+        .expect("a clean tip reachable from main must be safe without force");
+    let text = get_text(&result);
+    assert!(
+        text.contains("merged_into=main"),
+        "no-remote safety receipt must name the reachable target: {text}"
+    );
+    assert_eq!(env.spawn_queue().peek(10).expect("peek").len(), 1);
+}
+
+#[tokio::test]
+async fn test_shutdown_workers_no_remote_unmerged_tip_still_requires_force_cas_2254() {
+    let _guard = EnvGuard::set(&[]);
+    let env = FactoryTestEnv::new();
+    let worker_path = init_sync_repo(&env, "alice");
+    std::fs::write(worker_path.join("worker-only.txt"), "worker change\n").unwrap();
+    git_stdout(&worker_path, &["add", "worker-only.txt"]);
+    git_stdout(&worker_path, &["commit", "-m", "worker-only"]);
+    let mut metadata = HashMap::new();
+    metadata.insert("clone_path".to_string(), worker_path.display().to_string());
+    env.register_worker_with_metadata("alice", metadata);
+
+    let mut req = factory_req("shutdown_workers");
+    req.worker_names = Some("alice".to_string());
+    let err = env
+        .service
+        .factory(Parameters(req))
+        .await
+        .expect_err("an unmerged no-remote tip must still require force");
+    assert!(
+        err.message.contains("force=true"),
+        "unexpected error: {err:?}"
+    );
+    assert!(
+        err.message.contains("unmerged_from=main"),
+        "unmerged target evidence missing: {err:?}"
+    );
+    assert!(env.spawn_queue().peek(10).expect("peek").is_empty());
+}
+
+#[tokio::test]
+async fn test_shutdown_workers_local_merge_accepts_epic_target_ahead_of_main_cas_2254() {
+    let home = TempDir::new().expect("home tempdir");
+    let _guard = EnvGuard::set(&[
+        ("CAS_FACTORY_SESSION", "session-shutdown-epic-target"),
+        ("HOME", home.path().to_str().unwrap()),
+    ]);
+    let env = FactoryTestEnv::new();
+    let worker_path = init_sync_repo(&env, "alice");
+    let project = env.cas_root.parent().expect("project root");
+    std::fs::write(worker_path.join("worker.txt"), "merged into epic\n").unwrap();
+    git_stdout(&worker_path, &["add", "worker.txt"]);
+    git_stdout(&worker_path, &["commit", "-m", "worker change"]);
+    git_stdout(project, &["checkout", "epic/requested"]);
+    git_stdout(
+        project,
+        &[
+            "merge",
+            "--no-ff",
+            "factory/alice",
+            "-m",
+            "merge worker into epic",
+        ],
+    );
+    git_stdout(project, &["checkout", "main"]);
+
+    let mut epic = Task::new("cas-2254-epic".to_string(), "shutdown epic".to_string());
+    epic.task_type = TaskType::Epic;
+    epic.status = TaskStatus::Open;
+    epic.branch = Some("epic/requested".to_string());
+    epic.deliverables.work_target = Some(WorkTarget {
+        repo_selector: "project:active-project".to_string(),
+        target_branch: "epic/requested".to_string(),
+    });
+    env.task_store().add(&epic).expect("add epic fixture");
+    write_session_metadata_for_project(
+        "session-shutdown-epic-target",
+        Some(&epic.id),
+        project.to_str().unwrap(),
+    );
+    let metadata_path = cas::ui::factory::metadata_path("session-shutdown-epic-target");
+    let mut metadata: cas::ui::factory::SessionMetadata =
+        serde_json::from_str(&std::fs::read_to_string(&metadata_path).unwrap()).unwrap();
+    metadata.delivery_mode = DeliveryMode::LocalMerge;
+    metadata.pinned_epic_id = Some(epic.id.clone());
+    std::fs::write(&metadata_path, serde_json::to_string_pretty(&metadata).unwrap()).unwrap();
+
+    let mut task = Task::new("cas-2254-child".to_string(), "shutdown child".to_string());
+    task.status = TaskStatus::Open;
+    task.assignee = Some("alice".to_string());
+    task.delivery_mode = DeliveryMode::LocalMerge;
+    task.deliverables.work_target = Some(WorkTarget {
+        repo_selector: "project:active-project".to_string(),
+        target_branch: "epic/requested".to_string(),
+    });
+    env.task_store().add(&task).expect("add assigned task fixture");
+
+    let mut worker_metadata = HashMap::new();
+    worker_metadata.insert("clone_path".to_string(), worker_path.display().to_string());
+    env.register_worker_with_metadata("alice", worker_metadata);
+
+    let mut req = factory_req("shutdown_workers");
+    req.worker_names = Some("alice".to_string());
+    let result = env
+        .service
+        .factory(Parameters(req))
+        .await
+        .expect("a tip reachable from the local epic target must be safe");
+    let text = get_text(&result);
+    assert!(
+        text.contains("merged_into=epic/requested"),
+        "local-merge safety must report the reachable epic target: {text}"
+    );
+    assert_eq!(env.spawn_queue().peek(10).expect("peek").len(), 1);
 }
 
 #[tokio::test]
@@ -2217,6 +2383,114 @@ async fn test_shutdown_workers_supervisor_scoping() {
     let entries = env.spawn_queue().peek(10).expect("peek");
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].worker_names, vec!["owned-1"]);
+}
+
+/// GH #889: recycling is one lifecycle request from the supervisor's point
+/// of view; the daemon must receive a named request carrying the worker's
+/// original recipe and account selector.
+#[tokio::test]
+async fn test_recycle_worker_preserves_name_worktree_and_recipe() {
+    let _guard = EnvGuard::set(&[("CAS_FACTORY_SESSION", "session-recycle")]);
+    let env = FactoryTestEnv::new();
+    let worker_path = init_sync_repo(&env, "codex-worker");
+    let account_dir = env.cas_root.join("codex-account");
+    let mut metadata = HashMap::new();
+    metadata.insert("clone_path".to_string(), worker_path.display().to_string());
+    metadata.insert("worker_cli".to_string(), "codex".to_string());
+    metadata.insert("worker_model".to_string(), "gpt-5".to_string());
+    metadata.insert("worker_effort".to_string(), "medium".to_string());
+    metadata.insert(
+        "worker_account_dir".to_string(),
+        account_dir.display().to_string(),
+    );
+    let worker_id = env.register_worker_with_metadata("codex-worker", metadata);
+    let mut worker = env.agent_store().get(&worker_id).expect("worker");
+    worker.factory_session = Some("session-recycle".to_string());
+    env.agent_store().update(&worker).expect("scope worker");
+
+    let mut req = factory_req("recycle_worker");
+    req.target = Some("codex-worker".to_string());
+    let result = env
+        .service
+        .factory(Parameters(req))
+        .await
+        .expect("idle clean worker should be recyclable");
+    let text = get_text(&result);
+    assert!(text.contains("codex-worker"), "receipt must name worker: {text}");
+    assert!(text.contains("recycle"), "receipt must identify recycle: {text}");
+
+    let entries = env.spawn_queue().peek(10).expect("peek recycle queue");
+    assert_eq!(entries.len(), 1, "recycle must queue one atomic lifecycle request");
+    assert_eq!(entries[0].action, cas_store::SpawnAction::Recycle);
+    assert_eq!(entries[0].worker_names, vec!["codex-worker"]);
+    assert!(entries[0].isolate, "recycle must retain worktree isolation");
+    let spec = entries[0]
+        .worker_spec
+        .as_deref()
+        .and_then(|json| serde_json::from_str::<cas_mux::WorkerSpec>(json).ok())
+        .expect("recycle spawn must carry the original WorkerSpec");
+    assert_eq!(spec.name.as_deref(), Some("codex-worker"));
+    assert_eq!(spec.cli, SupervisorCli::Codex);
+    assert_eq!(spec.model.as_deref(), Some("gpt-5"));
+    assert_eq!(spec.effort, Some(cas_mux::Effort::Medium));
+    assert_eq!(spec.config_dir.as_deref(), Some(account_dir.to_str().unwrap()));
+}
+
+/// GH #889: recycling must not turn an in-progress task into a silent worker
+/// loss. The preflight refusal must leave both queue rows absent.
+#[tokio::test]
+async fn test_recycle_worker_refuses_in_progress_task() {
+    let _guard = EnvGuard::set(&[("CAS_FACTORY_SESSION", "session-recycle-busy")]);
+    let env = FactoryTestEnv::new();
+    let worker_id = env.register_worker_in_session("busy-worker", "session-recycle-busy");
+    let mut task = Task::new("cas-recycle-busy".to_string(), "busy task".to_string());
+    task.status = TaskStatus::InProgress;
+    task.assignee = Some("busy-worker".to_string());
+    env.task_store().add(&task).expect("add task");
+    env.agent_store()
+        .try_claim(&task.id, &worker_id, 600, Some("working"))
+        .expect("claim task")
+        .is_success();
+
+    let mut req = factory_req("recycle_worker");
+    req.target = Some("busy-worker".to_string());
+    let error = env
+        .service
+        .factory(Parameters(req))
+        .await
+        .expect_err("in-progress worker must not be recycled");
+    assert!(error.message.contains("force=true"), "{error:?}");
+    assert!(
+        env.spawn_queue().peek(10).expect("peek queue").is_empty(),
+        "refusal must not queue shutdown or spawn"
+    );
+}
+
+#[tokio::test]
+async fn test_recycle_worker_refuses_dirty_worktree() {
+    let _guard = EnvGuard::set(&[("CAS_FACTORY_SESSION", "session-recycle-dirty")]);
+    let env = FactoryTestEnv::new();
+    let worker_path = init_sync_repo(&env, "dirty-worker");
+    std::fs::write(worker_path.join("uncommitted.txt"), "keep me\n").expect("dirty worktree");
+    let mut metadata = HashMap::new();
+    metadata.insert("clone_path".to_string(), worker_path.display().to_string());
+    let worker_id = env.register_worker_with_metadata("dirty-worker", metadata);
+    let mut worker = env.agent_store().get(&worker_id).expect("worker");
+    worker.factory_session = Some("session-recycle-dirty".to_string());
+    env.agent_store().update(&worker).expect("scope worker");
+
+    let mut req = factory_req("recycle_worker");
+    req.target = Some("dirty-worker".to_string());
+    let error = env
+        .service
+        .factory(Parameters(req))
+        .await
+        .expect_err("dirty worker must not be recycled");
+    assert!(error.message.contains("force=true"), "{error:?}");
+    assert!(
+        env.spawn_queue().peek(10).expect("peek queue").is_empty(),
+        "dirty refusal must not queue a lifecycle action"
+    );
 }
 
 // =============================================================================
@@ -3442,6 +3716,75 @@ async fn test_9829_worker_status_marks_stalled_worker_with_in_progress_task() {
     );
 }
 
+/// GH #889: near-limit context is actionable only for an idle Codex worker;
+/// the status row must name the one-shot in-place recycle action and honor the
+/// configured occupancy threshold.
+#[tokio::test]
+async fn test_worker_status_recommends_recycle_for_idle_near_limit_codex() {
+    let codex_home = tempfile::tempdir().expect("codex home");
+    let clone = tempfile::tempdir().expect("worker clone");
+    let clone_path = clone.path().to_string_lossy().to_string();
+    let rollout = codex_home
+        .path()
+        .join("sessions/2026/09/17/rollout-near-limit.jsonl");
+    std::fs::create_dir_all(rollout.parent().expect("rollout parent"))
+        .expect("create rollout directory");
+    std::fs::write(
+        &rollout,
+        format!(
+            "{}\n{}\n",
+            serde_json::json!({
+                "type": "session_meta",
+                "payload": {"session_id": "near-limit-session", "cwd": clone_path}
+            }),
+            serde_json::json!({
+                "type": "event_msg",
+                "payload": {
+                    "type": "token_count",
+                    "info": {
+                        "last_token_usage": {"input_tokens": 850_000},
+                        "model_context_window": 1_000_000
+                    }
+                }
+            })
+        ),
+    )
+    .expect("write rollout");
+    let _guard = EnvGuard::set(&[(
+        "CODEX_HOME",
+        codex_home.path().to_str().expect("utf-8 codex home"),
+    )]);
+    let env = FactoryTestEnv::new();
+    std::fs::write(
+        env.cas_root.join("config.toml"),
+        "[factory]\ncontext_recycle_threshold_percent = 80\n",
+    )
+    .expect("write factory config");
+
+    let mut worker = Agent::new("near-limit-session".to_string(), "near-limit-codex".to_string());
+    worker.role = AgentRole::Worker;
+    worker
+        .metadata
+        .insert("worker_cli".to_string(), "codex".to_string());
+    worker.metadata.insert("clone_path".to_string(), clone_path);
+    worker.metadata.insert(
+        "worker_account_dir".to_string(),
+        codex_home.path().to_string_lossy().to_string(),
+    );
+    env.agent_store().register(&worker).expect("register worker");
+
+    let text = get_text(
+        &env.service
+            .factory(Parameters(factory_req("worker_status")))
+            .await
+            .expect("worker_status should succeed"),
+    );
+    let row = worker_status_block(&text, "near-limit-codex").expect("worker row");
+    assert!(row.contains("context: near-limit"), "{row}");
+    assert!(row.contains("RECYCLE RECOMMENDED"), "{row}");
+    assert!(row.contains("action=recycle_worker target=near-limit-codex"), "{row}");
+}
+
 // =============================================================================
 // cas-2e81: orphan InProgress + death/lease-expiry signal
 // =============================================================================
@@ -4369,10 +4712,10 @@ async fn test_clear_context_confirms_reset_from_new_session_transcript() {
     );
 }
 
-/// cas-dffe AC2: a harness with no verified in-place reset is refused up front.
-/// Nothing is queued, and the error names the harness and the alternative.
+/// cas-dffe AC2 / GH #889: a harness with no verified in-place reset falls
+/// through to the durable recycle path rather than queueing a fake reset.
 #[tokio::test]
-async fn test_clear_context_refuses_harness_without_verified_reset() {
+async fn test_clear_context_recycles_harness_without_verified_reset() {
     let (guard, fixture) = clear_context_fixture("badger", "codex", "0");
     let env = FactoryTestEnv::with_agent_id_and_env("test-sup", Some(guard));
 
@@ -4383,27 +4726,28 @@ async fn test_clear_context_refuses_harness_without_verified_reset() {
             "supervisor".to_string(),
         ))
         .expect("register supervisor");
-    store.register(&fixture.worker).expect("register worker");
+    let mut worker = fixture.worker.clone();
+    // The recycle fallback only needs the durable worker identity and recipe;
+    // this fixture's temp directory is intentionally not a Git checkout.
+    worker.metadata.remove("clone_path");
+    store.register(&worker).expect("register worker");
 
     let mut req = factory_req("clear_context");
     req.target = Some("badger".to_string());
-    let error = env
+    let result = env
         .service
         .factory(Parameters(req))
         .await
-        .expect_err("an impossible reset must not report success");
-    let message = error.message.to_string();
-    assert!(message.contains("codex"), "{message}");
-    assert!(
-        message.contains("unsupported"),
-        "the explicit fail-closed outcome must name Codex reset as unsupported: {message}"
-    );
-    assert!(message.contains("shutdown_workers"), "{message}");
-    assert!(message.contains("spawn_workers"), "{message}");
+        .expect("Codex clear_context should recycle the worker");
+    let message = get_text(&result);
+    assert!(message.contains("recycle"), "{message}");
 
+    let requests = env.spawn_queue().peek(10).expect("peek recycle queue");
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].action, cas_store::SpawnAction::Recycle);
     assert!(
         env.prompt_queue().peek_all(10).expect("peek").is_empty(),
-        "nothing may be queued for a harness that cannot be reset"
+        "Codex recycle must not queue readable prompt text"
     );
 }
 
@@ -5212,6 +5556,63 @@ async fn inbox_poll_claims_a_transport_delivered_row_after_a_declined_wake() {
         get_text(&second),
         "No unread messages for registered-worker",
         "the explicit poll must claim the row exactly once"
+    );
+}
+
+/// GH #888: an old parked lifecycle relay must not be redelivered after a
+/// later close decision advances the task's merge boundary.
+#[tokio::test]
+async fn inbox_poll_withholds_superseded_awaiting_merge_relay() {
+    let _guard = EnvGuard::set_optional(&[
+        ("CAS_AGENT_NAME", None),
+        ("CAS_SESSION_ID", None),
+        ("CAS_FACTORY_SESSION", None),
+    ]);
+    let env = FactoryTestEnv::with_agent_id("registered-supervisor-id");
+    let mut supervisor = Agent::new(
+        "registered-supervisor-id".to_string(),
+        "registered-supervisor".to_string(),
+    );
+    supervisor.role = AgentRole::Supervisor;
+    env.agent_store()
+        .register(&supervisor)
+        .expect("register supervisor");
+
+    let task_id = "cas-f002-inbox";
+    let mut task = Task::new(task_id.to_string(), "stale lifecycle relay".to_string());
+    task.status = TaskStatus::AwaitingMerge;
+    task.deliverables.factory_branch_anchor = Some("new-tip".to_string());
+    env.task_store().add(&task).expect("add current task");
+
+    let occurrence = (chrono::Utc::now() - chrono::Duration::minutes(1)).to_rfc3339();
+    let prompt = format!(
+        "<task-lifecycle transition=\"task_awaiting_merge\" task_id=\"{task_id}\" \
+         old=\"in_progress\" new=\"awaiting_merge\" actor=\"worker\" \
+         notification_id=\"1\" occurrence=\"{occurrence}\" branch_tip=\"old-tip\">\n\
+         MERGE REQUIRED\n</task-lifecycle>"
+    );
+    env.prompt_queue()
+        .enqueue("lifecycle-wake:old", "supervisor", &prompt)
+        .expect("enqueue old lifecycle relay");
+
+    let result = env
+        .service
+        .coordination(Parameters(coord_req("inbox_poll")))
+        .await
+        .expect("inbox poll");
+    let text = get_text(&result);
+    assert!(
+        text.contains("withheld"),
+        "stale relay must be withheld: {text}"
+    );
+    assert!(text.contains(task_id), "withheld row must be named: {text}");
+    assert!(
+        text.contains("already done"),
+        "stale reason must be explicit: {text}"
+    );
+    assert!(
+        !text.contains("MERGE REQUIRED"),
+        "superseded relay body must not be redelivered: {text}"
     );
 }
 
@@ -7560,6 +7961,9 @@ fn sync_env_with_worker(session: &str, worker: &str) -> (FactoryTestEnv, PathBuf
     let env = FactoryTestEnv::new();
     let worker_path = init_sync_repo(&env, worker);
     env.register_worker_in_session(worker, session);
+    // The fixture worker is otherwise offline; tests that exercise the live
+    // guard explicitly send a fresh heartbeat after setup.
+    env.backdate_worker_heartbeat(worker, 90);
     add_epic_with_id(&env, "cas-3b7c", TaskStatus::Open, "epic/requested");
     write_session_metadata_for_project(
         session,
@@ -7607,9 +8011,39 @@ async fn test_sync_all_workers_skips_dirty_worktree_without_force_cas_0a6f() {
 }
 
 #[tokio::test]
+async fn test_sync_all_workers_refuses_live_worker_even_with_force_cas_6cdc() {
+    let (env, worker_path, _guard) =
+        sync_env_with_worker("session-sync-live-guard", "sync-live-guard-worker");
+    env.heartbeat_worker("sync-live-guard-worker");
+
+    let mut req = factory_req("sync_all_workers");
+    req.id = Some("cas-3b7c".to_string());
+    req.force = Some(true);
+    let text = get_text(&env.service.factory(Parameters(req)).await.expect("sync"));
+
+    assert!(
+        text.contains("Skipped:") && text.contains("live worker"),
+        "a supervisor force sync must refuse a live worker-owned worktree: {text}"
+    );
+    assert!(
+        !worker_path.join("requested.txt").exists(),
+        "the live worker worktree must not be rebased or checked out by Cassy: {text}"
+    );
+    assert_eq!(
+        git_stdout(&worker_path, &["symbolic-ref", "--short", "HEAD"]),
+        "factory/sync-live-guard-worker",
+        "the worker HEAD must remain attached to its factory branch"
+    );
+}
+
+#[tokio::test]
 async fn test_sync_all_workers_force_syncs_dirty_worktree_and_restores_wip_cas_0a6f() {
     let (env, worker_path, _guard) =
         sync_env_with_worker("session-sync-force", "sync-force-worker");
+
+    // Force still covers a stale worker record. A supervision-live worker is
+    // intentionally refused by cas-6cdc, regardless of force=true.
+    env.backdate_worker_heartbeat("sync-force-worker", 90);
 
     std::fs::write(worker_path.join("wip.txt"), "precious uncommitted work").unwrap();
 

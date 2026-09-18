@@ -557,10 +557,27 @@ fn build_prompt_body(
     notification_id: i64,
     factory_session: Option<&str>,
     occurrence_id: &str,
+    branch_tip: Option<&str>,
 ) -> String {
+    let branch_tip_attribute = if matches!(
+        kind,
+        LifecycleTransition::AwaitingMerge | LifecycleTransition::CloseRejected
+    ) {
+        branch_tip
+            .filter(|tip| !tip.trim().is_empty())
+            .map(|tip| {
+                format!(
+                    " branch_tip=\"{}\"",
+                    crate::prompt_revalidation::xml_attribute_value(tip)
+                )
+            })
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
     format!(
         "<task-lifecycle transition=\"{}\" task_id=\"{}\" old=\"{}\" new=\"{}\" actor=\"{}\" \
-         notification_id=\"{}\" occurrence=\"{}\">\n\
+         notification_id=\"{}\" occurrence=\"{}\"{branch_tip_attribute}>\n\
          Task {} — {}\n\
          {}{}\
          </task-lifecycle>",
@@ -605,6 +622,40 @@ pub fn emit_task_lifecycle_transition(
     kind: LifecycleTransition,
     occurrence_id: &str,
 ) -> Result<LifecyclePushResult, String> {
+    emit_task_lifecycle_transition_with_branch_tip(
+        supervisor_queue,
+        prompt_queue,
+        agent_store,
+        task_id,
+        task_title,
+        old_status,
+        new_status,
+        actor,
+        reason,
+        kind,
+        occurrence_id,
+        None,
+    )
+}
+
+/// Emit a lifecycle relay with the merge boundary it describes. Parked
+/// transitions need this extra identity because `AwaitingMerge` is reusable
+/// after a supervisor requests changes.
+#[allow(clippy::too_many_arguments)]
+pub fn emit_task_lifecycle_transition_with_branch_tip(
+    supervisor_queue: &dyn SupervisorQueueStore,
+    prompt_queue: Option<&dyn PromptQueueStore>,
+    agent_store: &dyn AgentStore,
+    task_id: &str,
+    task_title: &str,
+    old_status: TaskStatus,
+    new_status: TaskStatus,
+    actor: &str,
+    reason: Option<&str>,
+    kind: LifecycleTransition,
+    occurrence_id: &str,
+    branch_tip: Option<&str>,
+) -> Result<LifecyclePushResult, String> {
     let factory_session = resolve_lifecycle_factory_session(agent_store, actor);
     let Some(supervisor) = resolve_owning_supervisor(agent_store, factory_session.as_deref())
     else {
@@ -632,6 +683,7 @@ pub fn emit_task_lifecycle_transition(
         "supervisor_id": supervisor.agent_id,
         "supervisor_name": supervisor.name,
         "occurrence_id": occurrence_id,
+        "branch_tip": branch_tip,
         "transition_key": key,
         "timestamp": now.to_rfc3339(),
     })
@@ -708,6 +760,7 @@ pub fn emit_task_lifecycle_transition(
         reason,
         factory_session.as_deref(),
         occurrence_id,
+        branch_tip,
     )
     .map_err(|error| error.to_string())?;
 
@@ -798,6 +851,7 @@ fn deliver_prompt_for_notification(
     reason: Option<&str>,
     factory_session: Option<&str>,
     occurrence_id: &str,
+    branch_tip: Option<&str>,
 ) -> Result<(), TaskLifecycleGateError> {
     let reject = |message: String| TaskLifecycleGateError::PromptDelivery { message };
     let body = build_prompt_body(
@@ -811,6 +865,7 @@ fn deliver_prompt_for_notification(
         notification_id,
         factory_session,
         occurrence_id,
+        branch_tip,
     );
     let summary = format!("{}: {} ({})", kind.as_event_type(), task_id, occurrence_id);
     let source = lifecycle_prompt_source(kind, notification_id);
@@ -967,6 +1022,16 @@ pub fn deliver_lifecycle_outbox_row(
     let kind = parse_lifecycle_kind(transition, notification.id)?;
     let old_status = parse_required_status(&payload, "old_status", notification.id)?;
     let new_status = parse_required_status(&payload, "new_status", notification.id)?;
+    let branch_tip = match payload.get("branch_tip") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(tip)) if !tip.is_empty() => Some(tip.as_str()),
+        Some(_) => {
+            return Err(format!(
+                "incomplete lifecycle payload id={}: invalid `branch_tip` (row left pending)",
+                notification.id
+            ));
+        }
+    };
 
     deliver_prompt_for_notification(
         supervisor_queue,
@@ -982,6 +1047,7 @@ pub fn deliver_lifecycle_outbox_row(
         reason,
         factory_session,
         occurrence_id,
+        branch_tip,
     )
     .map_err(|error| error.to_string())?;
 
@@ -1054,6 +1120,34 @@ impl CasCore {
         kind: LifecycleTransition,
         occurrence_id: &str,
     ) -> Result<LifecyclePushResult, String> {
+        self.push_task_lifecycle_with_branch_tip(
+            task_id,
+            task_title,
+            old_status,
+            new_status,
+            actor,
+            reason,
+            kind,
+            occurrence_id,
+            None,
+        )
+    }
+
+    /// Push a lifecycle transition with the merge boundary represented by the
+    /// relay. The branch tip is optional for legacy/non-merge transitions.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn push_task_lifecycle_with_branch_tip(
+        &self,
+        task_id: &str,
+        task_title: &str,
+        old_status: TaskStatus,
+        new_status: TaskStatus,
+        actor: &str,
+        reason: Option<&str>,
+        kind: LifecycleTransition,
+        occurrence_id: &str,
+        branch_tip: Option<&str>,
+    ) -> Result<LifecyclePushResult, String> {
         let agent_store = self
             .open_agent_store()
             .map_err(|e| format!("agent store: {e}"))?;
@@ -1067,7 +1161,7 @@ impl CasCore {
         let pq = pq_store
             .as_ref()
             .map(|a| a.as_ref() as &dyn PromptQueueStore);
-        match emit_task_lifecycle_transition(
+        match emit_task_lifecycle_transition_with_branch_tip(
             sq.as_ref(),
             pq,
             agent_store.as_ref(),
@@ -1079,6 +1173,7 @@ impl CasCore {
             reason,
             kind,
             occurrence_id,
+            branch_tip,
         ) {
             Err(e) if e.contains("prompt_queue unavailable") => {
                 if let Some(open_err) = open_err {
@@ -1426,8 +1521,9 @@ mod tests {
         sq.init().unwrap();
         let pq = SqlitePromptQueueStore::open(temp.path()).unwrap();
         pq.init().unwrap();
+        let occurrence = chrono::Utc::now().to_rfc3339();
 
-        let result = emit_task_lifecycle_transition(
+        let result = emit_task_lifecycle_transition_with_branch_tip(
             &sq,
             Some(&pq as &dyn PromptQueueStore),
             &agents,
@@ -1438,7 +1534,8 @@ mod tests {
             "swift-fox",
             Some("MERGE REQUIRED"),
             LifecycleTransition::AwaitingMerge,
-            "occ-wake",
+            &occurrence,
+            Some("old-tip"),
         )
         .expect("awaiting_merge push succeeds");
         assert!(matches!(result, LifecyclePushResult::Enqueued { .. }));
@@ -1458,6 +1555,12 @@ mod tests {
             "body must self-identify as a lifecycle signal (it is injected into \
              the supervisor pane, so it can never read as operator input): {}",
             rows[0].prompt
+        );
+        assert!(rows[0].prompt.contains("branch_tip=\"old-tip\""));
+        assert_eq!(
+            crate::prompt_revalidation::parse_lifecycle_envelope(&rows[0].prompt)
+                .and_then(|envelope| envelope.branch_tip),
+            Some("old-tip".to_string())
         );
     }
 

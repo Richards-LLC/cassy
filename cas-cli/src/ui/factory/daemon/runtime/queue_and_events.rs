@@ -213,9 +213,12 @@ fn take_next_pending_spawn(
     if !spawn_in_flight {
         return pending.pop_front();
     }
-    let shutdown_index = pending
-        .iter()
-        .position(|action| matches!(action, PendingSpawn::Shutdown { .. }))?;
+    let shutdown_index = pending.iter().position(|action| {
+        matches!(
+            action,
+            PendingSpawn::Shutdown { .. } | PendingSpawn::Recycle { .. }
+        )
+    })?;
     pending.remove(shutdown_index)
 }
 
@@ -3978,7 +3981,8 @@ impl FactoryDaemon {
                 use crate::prompt_revalidation::{
                     MergeRequestDecision, MergeRequestDelivery, merge_landed_guidance,
                     merge_request_anchor_invalidated_guidance, merge_request_delivery_decision,
-                    merge_request_moot_guidance, revalidate_merge_request,
+                    merge_request_moot_guidance, merge_request_request_changes_guidance,
+                    revalidate_merge_request,
                 };
 
                 let task = crate::store::open_task_store_local(self.app.cas_dir())
@@ -4063,6 +4067,18 @@ impl FactoryDaemon {
                             Some(merge_request_moot_guidance(&envelope.task_id, status)),
                             "merge request no longer applies",
                         ),
+                        MergeRequestDelivery::SuppressRequestChanges { status } => (
+                            Some(
+                                "merge request repeats a delivery tip declined by request_changes"
+                                    .to_string(),
+                            ),
+                            Some(merge_request_request_changes_guidance(
+                                &envelope.task_id,
+                                &envelope.branch_tip,
+                                status,
+                            )),
+                            "reviewed merge request suppressed — fresh corrective tip required",
+                        ),
                         MergeRequestDelivery::SuppressInvalidatedAnchor { current_anchor } => (
                             Some("merge request delivery anchor was invalidated".to_string()),
                             Some(merge_request_anchor_invalidated_guidance(
@@ -4135,10 +4151,9 @@ impl FactoryDaemon {
                 // relay would be a false alarm.
                 let queued_row_was_transported = queued.acked_at.is_some();
                 let decision = match store.get(&envelope.task_id) {
-                    Ok(task) => crate::prompt_revalidation::revalidate_lifecycle_prompt(
+                    Ok(task) => crate::prompt_revalidation::revalidate_lifecycle_prompt_against_task(
                         &queued.prompt,
-                        task.status,
-                        task.updated_at,
+                        &task,
                     ),
                     Err(cas_store::StoreError::TaskNotFound(_)) => {
                         LifecyclePromptDecision::SuppressStale {
@@ -5892,6 +5907,18 @@ impl FactoryDaemon {
                         self.pending_spawns.push_back(PendingSpawn::Respawn(name));
                     }
                 }
+                SpawnAction::Recycle => {
+                    let spec = request.worker_spec.as_deref().and_then(|json| {
+                        serde_json::from_str::<cas_mux::WorkerSpec>(json).ok()
+                    });
+                    for name in request.worker_names {
+                        self.pending_spawns.push_back(PendingSpawn::Recycle {
+                            request_id: request.id,
+                            name,
+                            spec: spec.clone(),
+                        });
+                    }
+                }
             }
         }
 
@@ -6078,11 +6105,11 @@ impl FactoryDaemon {
                     // non-isolated spawns, so the roster could disagree with the
                     // live process about which directory the worker is in.
                     let bound_cwd = result.cwd.clone();
-                    if let Some(seed_receipt) =
+                    let seed_receipt =
                         crate::ui::factory::app::render_and_ops::epic_workers::target_seed_receipt(
                             &result,
-                        )
-                    {
+                        );
+                    if let Some(seed_receipt) = seed_receipt.as_deref() {
                         append_spawn_audit(
                             self.app.cas_dir(),
                             &self.session_name,
@@ -6093,6 +6120,16 @@ impl FactoryDaemon {
                             &seed_receipt,
                         );
                     }
+                    if let Some(warning) = result.target_seed_warning.as_ref() {
+                        report_spawn_warnings(
+                            self.app.cas_dir(),
+                            self.app.supervisor_name(),
+                            &self.session_name,
+                            request_id,
+                            &pending_name,
+                            std::slice::from_ref(warning),
+                        );
+                    }
                     let task_id_for_finish = pending_task_id.clone();
                     match self.app.finish_worker_spawn(
                         result,
@@ -6101,6 +6138,13 @@ impl FactoryDaemon {
                         task_id_for_finish,
                     ) {
                         Ok(name) => {
+                            if let Some(seed_receipt) = seed_receipt.as_deref() {
+                                crate::ui::factory::app::queue_worker_target_seed_notice(
+                                    self.app.cas_dir(),
+                                    &name,
+                                    seed_receipt,
+                                );
+                            }
                             append_spawn_audit(
                                 self.app.cas_dir(),
                                 &self.session_name,
@@ -6690,6 +6734,71 @@ impl FactoryDaemon {
                     }
                     Err(e) => {
                         self.app.set_error(format!("Failed to respawn {name}: {e}"));
+                    }
+                }
+            }
+            PendingSpawn::Recycle {
+                request_id,
+                name,
+                spec,
+            } => {
+                let teams_config = self.teams.as_ref().map(|t| {
+                    use super::teams::TeamsManager;
+                    let color_idx = self.app.worker_names().len();
+                    t.spawn_config_for(
+                        &name,
+                        "general-purpose",
+                        TeamsManager::color_for_index(color_idx),
+                        None,
+                    )
+                });
+                if let Some(ref tc) = teams_config {
+                    crate::ui::theme::register_agent_color(&tc.agent_name, &tc.agent_color);
+                }
+                let result = async {
+                    let spec = spec.ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "Recycle request {request_id} for {name} has no valid worker recipe"
+                        )
+                    })?;
+                    self.app.shutdown_worker_for_recycle(&name).await?;
+                    self.app
+                        .respawn_worker_with_spec(&name, teams_config, Some(spec))
+                }
+                .await;
+                match result {
+                    Ok(()) => {
+                        self.dead_workers.remove(&name);
+                        append_spawn_audit(
+                            self.app.cas_dir(),
+                            &self.session_name,
+                            Some(request_id),
+                            Some(&name),
+                            "recycle",
+                            "completed",
+                            "Worker recycled in place with its existing worktree and recipe.",
+                        );
+                        if self.app.record_enabled() {
+                            if let Err(e) = self.app.start_recording_for_pane(&name).await {
+                                tracing::error!(
+                                    "Failed to start recording for recycled {}: {}",
+                                    name, e
+                                );
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        let detail = format!("Failed to recycle {name}: {e}");
+                        self.app.set_error(detail.clone());
+                        append_spawn_audit(
+                            self.app.cas_dir(),
+                            &self.session_name,
+                            Some(request_id),
+                            Some(&name),
+                            "recycle",
+                            "failed",
+                            &detail,
+                        );
                     }
                 }
             }

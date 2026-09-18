@@ -167,6 +167,31 @@ impl FactoryTestEnv {
         id
     }
 
+    fn backdate_worker_heartbeat(&self, name: &str, stale_secs: i64) {
+        let store = self.agent_store();
+        let mut agent = store
+            .list(None)
+            .expect("list agents")
+            .into_iter()
+            .find(|agent| agent.name == name)
+            .expect("find worker");
+        let staleness = chrono::Duration::seconds(stale_secs);
+        agent.last_heartbeat = chrono::Utc::now() - staleness;
+        agent.registered_at = chrono::Utc::now() - staleness;
+        store.update(&agent).expect("backdate worker heartbeat");
+    }
+
+    fn heartbeat_worker(&self, name: &str) {
+        let store = self.agent_store();
+        let agent = store
+            .list(None)
+            .expect("list agents")
+            .into_iter()
+            .find(|agent| agent.name == name)
+            .expect("find worker");
+        store.heartbeat(&agent.id).expect("heartbeat worker");
+    }
+
     fn register_supervisor_in_session(&self, name: &str, factory_session: &str) -> String {
         let store = self.agent_store();
         let id = Agent::generate_fallback_id();
@@ -840,6 +865,7 @@ async fn test_sync_all_workers_explicit_id_beats_unrelated_in_progress_epic_cas_
     let worker = "sync-explicit-worker";
     let worker_path = init_sync_repo(&env, worker);
     env.register_worker_in_session(worker, "session-sync-explicit");
+    env.backdate_worker_heartbeat(worker, 90);
     add_epic_with_id(&env, "cas-3648", TaskStatus::InProgress, "epic/foreign");
     add_epic_with_id(&env, "cas-3b7c", TaskStatus::Open, "epic/requested");
     write_session_metadata_for_project(
@@ -7560,6 +7586,9 @@ fn sync_env_with_worker(session: &str, worker: &str) -> (FactoryTestEnv, PathBuf
     let env = FactoryTestEnv::new();
     let worker_path = init_sync_repo(&env, worker);
     env.register_worker_in_session(worker, session);
+    // The fixture worker is otherwise offline; tests that exercise the live
+    // guard explicitly send a fresh heartbeat after setup.
+    env.backdate_worker_heartbeat(worker, 90);
     add_epic_with_id(&env, "cas-3b7c", TaskStatus::Open, "epic/requested");
     write_session_metadata_for_project(
         session,
@@ -7607,9 +7636,39 @@ async fn test_sync_all_workers_skips_dirty_worktree_without_force_cas_0a6f() {
 }
 
 #[tokio::test]
+async fn test_sync_all_workers_refuses_live_worker_even_with_force_cas_6cdc() {
+    let (env, worker_path, _guard) =
+        sync_env_with_worker("session-sync-live-guard", "sync-live-guard-worker");
+    env.heartbeat_worker("sync-live-guard-worker");
+
+    let mut req = factory_req("sync_all_workers");
+    req.id = Some("cas-3b7c".to_string());
+    req.force = Some(true);
+    let text = get_text(&env.service.factory(Parameters(req)).await.expect("sync"));
+
+    assert!(
+        text.contains("Skipped:") && text.contains("live worker"),
+        "a supervisor force sync must refuse a live worker-owned worktree: {text}"
+    );
+    assert!(
+        !worker_path.join("requested.txt").exists(),
+        "the live worker worktree must not be rebased or checked out by Cassy: {text}"
+    );
+    assert_eq!(
+        git_stdout(&worker_path, &["symbolic-ref", "--short", "HEAD"]),
+        "factory/sync-live-guard-worker",
+        "the worker HEAD must remain attached to its factory branch"
+    );
+}
+
+#[tokio::test]
 async fn test_sync_all_workers_force_syncs_dirty_worktree_and_restores_wip_cas_0a6f() {
     let (env, worker_path, _guard) =
         sync_env_with_worker("session-sync-force", "sync-force-worker");
+
+    // Force still covers a stale worker record. A supervision-live worker is
+    // intentionally refused by cas-6cdc, regardless of force=true.
+    env.backdate_worker_heartbeat("sync-force-worker", 90);
 
     std::fs::write(worker_path.join("wip.txt"), "precious uncommitted work").unwrap();
 

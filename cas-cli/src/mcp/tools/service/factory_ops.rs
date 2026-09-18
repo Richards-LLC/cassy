@@ -5140,6 +5140,21 @@ impl CasService {
         for worker in workers {
             let binding = bindings.get(&worker.name);
 
+            // cas-6cdc (GH #884/#885): `sync_worker_clone` runs `git rebase`
+            // in the registered worker path. Git temporarily detaches HEAD
+            // while rebasing, so even a force sync that appears successful can
+            // race the worker's commit/push and leave its worktree parked at a
+            // merge-base. A live worker owns its checkout; Cassy must never
+            // initiate a checkout/rebase there. Force only overrides the WIP
+            // and in-progress-task gates for stale/offline worker records.
+            if crate::mcp::tools::service::agent_liveness::is_live_factory_worker(&worker) {
+                skipped.push(format!(
+                    "{} (live worker owns this worktree — refusing Cassy-driven rebase/checkout, even with force=true)",
+                    worker.name
+                ));
+                continue;
+            }
+
             // cas-5884: branch affinity first — it is decided from task state
             // alone and is the most decisive reason not to touch a worktree.
             if let SyncGate::Refuse(reason) = sync_affinity_gate(
@@ -5215,9 +5230,9 @@ impl CasService {
             "Worker Sync Report\n==================\n\nSync target: {sync_ref}\nTrunk: \
              {default_branch}\nMode: {}\nBranch affinity: {}\n",
             if force {
-                "force=true (dirty worktrees stashed; mid-task workers rebased)"
+                "force=true (stale-worker dirty worktrees stashed; live worker worktrees always skipped)"
             } else {
-                "safe (dirty or mid-task worktrees are skipped — pass force=true to include them)"
+                "safe (dirty, mid-task, or live-worker worktrees are skipped — force=true never overrides live ownership)"
             },
             if explicitly_targeted {
                 "bypassed (workers named explicitly in worker_names=)"
@@ -7095,13 +7110,17 @@ fn worker_task_bindings(
     map
 }
 
-/// Why `sync_all_workers` must not touch a given worktree (cas-0a6f / GH #103).
+/// Why `sync_all_workers` must not touch a given worktree (cas-0a6f / GH #103,
+/// cas-6cdc / GH #884/#885).
 ///
 /// Sync used to rebase every worker worktree unconditionally: uncommitted WIP
 /// was stashed without consent, a failed stash pop stranded it silently, and a
 /// conflicting rebase left the worktree mid-rebase in a state the worker never
-/// initiated. The decision is a pure function so every branch is testable
-/// without a git fixture.
+/// initiated. A supervision-live worker is also never a safe rebase target:
+/// `git rebase` temporarily detaches its HEAD while the worker may be
+/// committing or pushing. The live-owner guard runs before this pure gate; the
+/// decision here remains pure so every consent branch is testable without a
+/// git fixture.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SyncGate {
     Proceed,
@@ -7112,9 +7131,9 @@ pub(crate) enum SyncGate {
 /// Decide whether a worker worktree may be rebased.
 ///
 /// `force` covers exactly the two consent-shaped cases — dirty tree and a
-/// worker mid-task. It deliberately does NOT cover an in-flight rebase: that
-/// state was not created by sync, a second rebase on top of it destroys the
-/// resolution in progress, and no automated recovery is safe.
+/// stale worker record with a mid-task. It deliberately does NOT cover a live
+/// worker or an in-flight rebase: a second rebase on top of an in-flight
+/// resolution destroys progress, and no automated recovery is safe.
 pub(crate) fn sync_gate_for_worker(
     worker_name: &str,
     dirty_files: usize,

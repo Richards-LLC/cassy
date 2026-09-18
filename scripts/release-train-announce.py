@@ -36,6 +36,10 @@ USER_FORBIDDEN = (
     "epic",
     "lane",
 )
+TOP_LEVEL_LABEL = re.compile(
+    r"^\*(?:Live on production|Staging|Source on main) — "
+    r"(?:User|Dev) — Cassy(?: v[0-9]+\.[0-9]+\.[0-9]+)?\*$"
+)
 
 
 def fail(message: str) -> None:
@@ -59,7 +63,7 @@ def lint_body(index: int, body: str) -> None:
             fail(f"body {BODY_NAMES[index]} line {line_number} uses a hyphen bullet")
     bullets = [number for number, line in enumerate(lines) if line.startswith("• ")]
     if index in (0, 2):
-        if len(lines) != 2 or not lines[0].startswith("*Live on "):
+        if len(lines) != 2 or not TOP_LEVEL_LABEL.fullmatch(lines[0]):
             fail(f"body {BODY_NAMES[index]} top-level must contain exactly two lines")
         if "Was:" not in lines[1] or "→ Now:" not in lines[1]:
             fail(f"body {BODY_NAMES[index]} top-level must use Was → Now")

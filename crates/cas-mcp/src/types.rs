@@ -992,6 +992,16 @@ pub struct AgentRequest {
     #[serde(default, deserialize_with = "deser::option_i64")]
     pub in_reply_to: Option<i64>,
 
+    /// Typed Commander turn kind for supervisor messages to `target=operator`.
+    #[schemars(description = "Commander turn kind: answer, status, receipt, ask, or blocker")]
+    #[serde(default)]
+    pub kind: Option<String>,
+
+    /// Published artifact id to attach to a Commander turn.
+    #[schemars(description = "Published artifact id to attach to a Commander turn")]
+    #[serde(default)]
+    pub attachment: Option<String>,
+
     /// Loop prompt (for loop_start)
     #[schemars(description = "The prompt to repeat each iteration")]
     #[serde(default)]

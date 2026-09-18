@@ -23,4 +23,21 @@ describe("Commander operator reply thread", () => {
     expect(markup).toContain("Ready &lt;now&gt; &amp; confirmed");
     expect(markup).toContain("reply to #41");
   });
+
+  it("renders typed turns and attachment link rows without redesigning the thread", () => {
+    const markup = operatorThreadMarkup([{
+      notification_id: 94,
+      reply_to: null,
+      message: "See the receipt.",
+      summary: "receipt",
+      device_id: "*",
+      kind: "receipt",
+      attachments: [{ artifact_id: "report/1", name: "report.pdf", mime: "application/pdf", size_bytes: 42, sha256: "a".repeat(64) }],
+    }]);
+
+    expect(markup).toContain('data-kind="receipt"');
+    expect(markup).toContain('href="#artifact:report%2F1"');
+    expect(markup).toContain('data-artifact-id="report/1"');
+    expect(markup).toContain("report.pdf");
+  });
 });

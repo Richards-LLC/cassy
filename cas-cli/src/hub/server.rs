@@ -1159,8 +1159,10 @@ pub(super) fn operator_reply_allowed(
     bytes: &[u8],
 ) -> bool {
     operator_reply_receipt(bytes).is_none_or(|(_, device_id)| {
-        auth.as_ref()
-            .is_some_and(|(_, context)| context.device_id == device_id)
+        (device_id == "*" && auth.is_some())
+            || auth
+                .as_ref()
+                .is_some_and(|(_, context)| context.device_id == device_id)
     })
 }
 

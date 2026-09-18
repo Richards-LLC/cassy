@@ -118,7 +118,7 @@ jobs:
             git diff --name-only "$merge_base" HEAD |
               while IFS= read -r path; do
                 case "$path" in
-                  docs/*|*.md) printf '%s\n' "$path" ;;
+                  *.md) printf '%s\n' "$path" ;;
                 esac
               done
           )

@@ -6077,11 +6077,11 @@ impl FactoryDaemon {
                     // non-isolated spawns, so the roster could disagree with the
                     // live process about which directory the worker is in.
                     let bound_cwd = result.cwd.clone();
-                    if let Some(seed_receipt) =
+                    let seed_receipt =
                         crate::ui::factory::app::render_and_ops::epic_workers::target_seed_receipt(
                             &result,
-                        )
-                    {
+                        );
+                    if let Some(seed_receipt) = seed_receipt.as_deref() {
                         append_spawn_audit(
                             self.app.cas_dir(),
                             &self.session_name,
@@ -6092,6 +6092,16 @@ impl FactoryDaemon {
                             &seed_receipt,
                         );
                     }
+                    if let Some(warning) = result.target_seed_warning.as_ref() {
+                        report_spawn_warnings(
+                            self.app.cas_dir(),
+                            self.app.supervisor_name(),
+                            &self.session_name,
+                            request_id,
+                            &pending_name,
+                            std::slice::from_ref(warning),
+                        );
+                    }
                     let task_id_for_finish = pending_task_id.clone();
                     match self.app.finish_worker_spawn(
                         result,
@@ -6100,6 +6110,13 @@ impl FactoryDaemon {
                         task_id_for_finish,
                     ) {
                         Ok(name) => {
+                            if let Some(seed_receipt) = seed_receipt.as_deref() {
+                                crate::ui::factory::app::queue_worker_target_seed_notice(
+                                    self.app.cas_dir(),
+                                    &name,
+                                    seed_receipt,
+                                );
+                            }
                             append_spawn_audit(
                                 self.app.cas_dir(),
                                 &self.session_name,

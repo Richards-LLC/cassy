@@ -166,13 +166,203 @@ pub struct WorkerSpawnResult {
     /// `None` means the target was reused, seeding was disabled/unavailable,
     /// or the worker was non-isolated.
     pub(crate) target_seed: Option<TargetSeedStats>,
+    /// Warning emitted when a usable seed is older than the configured age.
+    /// This is carried out of background preparation so the daemon can put it
+    /// in the normal spawn warning audit/inbox path.
+    pub(crate) target_seed_warning: Option<String>,
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct TargetSeedStats {
     pub(crate) snapshot: String,
+    pub(crate) source_commit: String,
+    pub(crate) age_secs: u64,
+    pub(crate) skipped_crates: Vec<String>,
     pub(crate) files: u64,
     pub(crate) bytes: u64,
+}
+
+const TARGET_SEED_METADATA_FILE: &str = ".cas-build-cache-metadata";
+const DEFAULT_TARGET_SEED_MAX_AGE_SECS: i64 = 7 * 24 * 60 * 60;
+
+#[derive(Debug, PartialEq, Eq)]
+struct TargetSeedMetadata {
+    source_commit: String,
+    created_at_unix: i64,
+}
+
+fn read_target_seed_metadata(source: &Path) -> anyhow::Result<TargetSeedMetadata> {
+    let path = source.join(TARGET_SEED_METADATA_FILE);
+    let contents = std::fs::read_to_string(&path).map_err(|error| {
+        anyhow::anyhow!(
+            "worker build-cache snapshot is missing {} at {}; refresh with scripts/refresh-worker-build-cache.sh: {error}",
+            TARGET_SEED_METADATA_FILE,
+            path.display()
+        )
+    })?;
+    let mut source_commit = None;
+    let mut created_at_unix = None;
+    for line in contents.lines() {
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        match key {
+            "source_commit" => source_commit = Some(value.trim().to_string()),
+            "created_at_unix" => {
+                created_at_unix = Some(value.trim().parse::<i64>().map_err(|error| {
+                    anyhow::anyhow!("invalid target seed created_at_unix: {error}")
+                })?)
+            }
+            _ => {}
+        }
+    }
+    let source_commit = source_commit
+        .filter(|commit| !commit.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("target seed metadata has no source_commit"))?;
+    let created_at_unix = created_at_unix
+        .ok_or_else(|| anyhow::anyhow!("target seed metadata has no created_at_unix"))?;
+    Ok(TargetSeedMetadata {
+        source_commit,
+        created_at_unix,
+    })
+}
+
+fn git_head(path: &Path) -> anyhow::Result<String> {
+    let output = std::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(path)
+        .output()?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "git rev-parse HEAD failed in {}: {}",
+            path.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8(output.stdout)?.trim().to_string())
+}
+
+fn git_changed_paths(repo: &Path, from: &str, to: &str) -> anyhow::Result<Vec<String>> {
+    let output = std::process::Command::new("git")
+        .args(["diff", "--name-only", from, to, "--"])
+        .current_dir(repo)
+        .output()?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "git diff between target seed commits failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8(output.stdout)?
+        .lines()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .map(ToOwned::to_owned)
+        .collect())
+}
+
+fn package_name(manifest: &Path) -> Option<String> {
+    let contents = std::fs::read_to_string(manifest).ok()?;
+    let in_package = contents.lines().scan(false, |seen, line| {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            *seen = trimmed == "[package]";
+        }
+        Some((*seen, trimmed.to_string()))
+    });
+    for (in_package, line) in in_package {
+        if in_package && line.starts_with("name") {
+            let value = line.split_once('=')?.1.trim();
+            return value
+                .strip_prefix('"')
+                .and_then(|value| value.strip_suffix('"'))
+                .map(ToOwned::to_owned);
+        }
+    }
+    None
+}
+
+fn workspace_crates(repo: &Path) -> Vec<(String, PathBuf)> {
+    let mut crates = Vec::new();
+    let candidates = [repo.join("cas-cli")].into_iter().chain(
+        repo.join("crates")
+            .read_dir()
+            .into_iter()
+            .flatten()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path()),
+    );
+    for root in candidates {
+        let manifest = root.join("Cargo.toml");
+        if let Some(name) = package_name(&manifest) {
+            crates.push((name, root));
+        }
+    }
+    crates
+}
+
+fn changed_workspace_crates(repo: &Path, from: &str, to: &str) -> anyhow::Result<Vec<String>> {
+    if !git_is_ancestor(repo, from, to) {
+        anyhow::bail!(
+            "target seed source commit '{from}' is not an ancestor of worker base '{to}'; refusing stale artifacts"
+        );
+    }
+    let crates = workspace_crates(repo);
+    let changed = git_changed_paths(repo, from, to)?;
+    let mut skipped = HashSet::new();
+    for path in changed {
+        if path == "Cargo.toml"
+            || path == "Cargo.lock"
+            || path.starts_with(".cargo/")
+            || path == "rust-toolchain.toml"
+            || path == "rust-toolchain"
+        {
+            anyhow::bail!(
+                "target seed workspace configuration changed between '{from}' and '{to}'; refusing stale artifacts"
+            );
+        }
+        let mut matched = false;
+        for (name, root) in &crates {
+            let relative = root.strip_prefix(repo).unwrap_or(root).to_string_lossy();
+            if path == relative || path.starts_with(&format!("{relative}/")) {
+                skipped.insert(name.clone());
+                matched = true;
+                break;
+            }
+        }
+        if !matched && (path.starts_with("cas-cli/") || path.starts_with("crates/")) {
+            anyhow::bail!(
+                "changed Rust workspace path '{path}' is not mapped to a crate; refusing stale artifacts"
+            );
+        }
+    }
+    let mut skipped: Vec<_> = skipped.into_iter().collect();
+    skipped.sort();
+    Ok(skipped)
+}
+
+fn target_seed_max_age_secs() -> i64 {
+    std::env::var("CAS_FACTORY_TARGET_SEED_MAX_AGE_SECS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(DEFAULT_TARGET_SEED_MAX_AGE_SECS)
+}
+
+fn target_seed_age(created_at_unix: i64) -> u64 {
+    Utc::now()
+        .timestamp()
+        .saturating_sub(created_at_unix)
+        .max(0) as u64
+}
+
+fn target_seed_staleness_warning(stats: &TargetSeedStats) -> Option<String> {
+    let max_age_secs = target_seed_max_age_secs().max(0) as u64;
+    (stats.age_secs > max_age_secs).then(|| {
+        format!(
+            "worker target seed snapshot '{}' from commit {} is {} seconds old (threshold {}); refresh with scripts/refresh-worker-build-cache.sh",
+            stats.snapshot, stats.source_commit, stats.age_secs, max_age_secs
+        )
+    })
 }
 
 /// Seed a new worker's private Cargo target from the immutable baseline named
@@ -213,6 +403,8 @@ fn seed_worker_target_from_baseline(
         );
     }
 
+    let metadata = read_target_seed_metadata(&source)?;
+
     let target = worktree_path.join("target");
     if target.exists() {
         return Ok(None);
@@ -222,11 +414,20 @@ fn seed_worker_target_from_baseline(
         std::fs::remove_dir_all(&staging)?;
     }
 
+    let base_commit = git_head(worktree_path)?;
+    let skipped_crates =
+        changed_workspace_crates(worktree_path, &metadata.source_commit, &base_commit)?;
+    let age_secs = target_seed_age(metadata.created_at_unix);
     let mut stats = TargetSeedStats {
         snapshot: snapshot_name.to_string(),
+        source_commit: metadata.source_commit,
+        age_secs,
+        skipped_crates: skipped_crates.clone(),
         ..TargetSeedStats::default()
     };
-    if let Err(error) = hardlink_seed_tree(&source, &staging, &target, &mut stats) {
+    if let Err(error) =
+        hardlink_seed_tree_with_skips(&source, &staging, &target, &mut stats, &skipped_crates)
+    {
         let _ = std::fs::remove_dir_all(&staging);
         return Err(error);
     }
@@ -240,7 +441,24 @@ fn hardlink_seed_tree(
     published_destination: &Path,
     stats: &mut TargetSeedStats,
 ) -> anyhow::Result<()> {
-    hardlink_seed_tree_inner(source, destination, source, published_destination, stats)
+    hardlink_seed_tree_with_skips(source, destination, published_destination, stats, &[])
+}
+
+fn hardlink_seed_tree_with_skips(
+    source: &Path,
+    destination: &Path,
+    published_destination: &Path,
+    stats: &mut TargetSeedStats,
+    skipped_crates: &[String],
+) -> anyhow::Result<()> {
+    hardlink_seed_tree_inner(
+        source,
+        destination,
+        source,
+        published_destination,
+        stats,
+        skipped_crates,
+    )
 }
 
 fn hardlink_seed_tree_inner(
@@ -249,6 +467,7 @@ fn hardlink_seed_tree_inner(
     source_root: &Path,
     destination_root: &Path,
     stats: &mut TargetSeedStats,
+    skipped_crates: &[String],
 ) -> anyhow::Result<()> {
     std::fs::create_dir(destination)?;
     for entry in std::fs::read_dir(source)? {
@@ -262,6 +481,7 @@ fn hardlink_seed_tree_inner(
                 source_root,
                 destination_root,
                 stats,
+                skipped_crates,
             )?;
         } else if file_type.is_file() {
             // Cargo coordinates writes through target/**/.cargo-lock.  A
@@ -269,6 +489,23 @@ fn hardlink_seed_tree_inner(
             // that inode, serializing their otherwise private builds. Cargo
             // recreates the lock file on first use, so omit it at every depth.
             if entry.file_name() == ".cargo-lock" {
+                continue;
+            }
+            if entry.file_name() == TARGET_SEED_METADATA_FILE
+                || skipped_crates.iter().any(|crate_name| {
+                    let normalized = crate_name.replace('-', "_");
+                    let file_name_binding = entry.file_name();
+                    let file_name = file_name_binding.to_string_lossy();
+                    let stem = file_name
+                        .rsplit_once('.')
+                        .map(|(stem, _)| stem)
+                        .unwrap_or(&file_name);
+                    let stem = stem.strip_prefix("lib").unwrap_or(stem);
+                    stem == normalized
+                        || stem.starts_with(&format!("{normalized}-"))
+                        || stem.starts_with(&format!("{normalized}_"))
+                })
+            {
                 continue;
             }
             let metadata = entry.metadata()?;
@@ -394,6 +631,7 @@ impl WorkerSpawnPrep {
                     worktree: Some(worktree),
                     worktree_created: false,
                     target_seed: None,
+                    target_seed_warning: None,
                 });
             }
 
@@ -412,6 +650,7 @@ impl WorkerSpawnPrep {
             git.create_worktree(&wt.worktree_path, &wt.branch_name, Some(&checkout_from))?;
 
             let mut target_seed = None;
+            let mut target_seed_warning = None;
             if std::env::var("CAS_FACTORY_DISABLE_TARGET_SEED").as_deref() != Ok("1") {
                 // A cross-repository worker keeps the session store as
                 // `CAS_ROOT`, but its Cargo target must come from the target
@@ -428,6 +667,7 @@ impl WorkerSpawnPrep {
                             bytes = stats.bytes,
                             "spawn prep: seeded private Cargo target from quiescent baseline"
                         );
+                        target_seed_warning = target_seed_staleness_warning(&stats);
                         target_seed = Some(stats);
                     }
                     Ok(None) => tracing::debug!(
@@ -479,6 +719,7 @@ impl WorkerSpawnPrep {
                 worktree: Some(worktree),
                 worktree_created: true,
                 target_seed,
+                target_seed_warning,
             })
         } else {
             // Non-isolated worker: cwd is wherever the daemon process is running.
@@ -498,6 +739,7 @@ impl WorkerSpawnPrep {
                 worktree: None,
                 worktree_created: false,
                 target_seed: None,
+                target_seed_warning: None,
             })
         }
     }
@@ -2523,6 +2765,22 @@ pub(crate) fn queue_codex_worker_intro_prompt(
         }
         // cas-a5da owns OpenCode spawn policy; PtyConfig already supplies --prompt.
         cas_mux::SupervisorCli::OpenCode => {}
+    }
+}
+
+/// Deliver immutable target-seed provenance as part of the worker startup
+/// prompt state. This is separate from the backend-specific role contract so
+/// every harness sees the same snapshot commit, age, and skipped-crate list.
+pub(crate) fn queue_worker_target_seed_notice(
+    cas_dir: &std::path::Path,
+    worker_name: &str,
+    receipt: &str,
+) {
+    let prompt = format!(
+        "Factory startup target-seed state (provenance, not a task): {receipt}"
+    );
+    if let Ok(queue) = open_prompt_queue_store(cas_dir) {
+        let _ = queue.enqueue("cas", worker_name, &prompt);
     }
 }
 
@@ -6087,6 +6345,21 @@ mod spawn_isolation_tests {
             "target-main-test\n",
         )
         .unwrap();
+        let source_commit = String::from_utf8(
+            Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(&repo)
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap();
+        let metadata = format!(
+            "source_commit={}created_at_unix={}\n",
+            source_commit,
+            0
+        );
+        std::fs::write(snapshot.join(".cas-build-cache-metadata"), metadata).unwrap();
 
         let worktree_path = cas_dir.join("worktrees").join("cache-worker");
         let prep = WorkerSpawnPrep {
@@ -6132,6 +6405,154 @@ mod spawn_isolation_tests {
             std::fs::metadata(cached_dep_info).unwrap().ino(),
             std::fs::metadata(seeded_dep_info).unwrap().ino(),
             "rebased dep-info must not mutate the immutable baseline hardlink"
+        );
+        let stats = result.target_seed.expect("target seed receipt");
+        assert_eq!(stats.source_commit, source_commit.trim());
+        assert!(stats.skipped_crates.is_empty());
+        assert!(
+            result
+                .target_seed_warning
+                .as_deref()
+                .is_some_and(|warning| warning.contains("scripts/refresh-worker-build-cache.sh"))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn target_seed_skips_artifacts_for_crates_changed_since_snapshot() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        init_repo(&repo);
+
+        let crate_root = repo.join("crates").join("cas-pty");
+        std::fs::create_dir_all(crate_root.join("src")).unwrap();
+        std::fs::write(
+            crate_root.join("Cargo.toml"),
+            "[package]\nname = \"cas-pty\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+        )
+        .unwrap();
+        std::fs::write(crate_root.join("src/lib.rs"), "pub fn before() {}\n").unwrap();
+        Command::new("git")
+            .args(["add", "crates/cas-pty"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "add fixture crate"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        let snapshot_commit = String::from_utf8(
+            Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(&repo)
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap();
+
+        std::fs::write(crate_root.join("src/lib.rs"), "pub fn after() {}\n").unwrap();
+        Command::new("git")
+            .args(["add", "crates/cas-pty/src/lib.rs"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "change fixture crate"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+
+        let cas_dir = repo.join(".cas");
+        let snapshot = cas_dir
+            .join("build-cache/snapshots")
+            .join("target-before");
+        let stale_crate_artifact = snapshot.join("debug/deps/libcas_pty-abc.rlib");
+        let unaffected_artifact = snapshot.join("debug/deps/libwarm.rlib");
+        std::fs::create_dir_all(stale_crate_artifact.parent().unwrap()).unwrap();
+        std::fs::write(&stale_crate_artifact, b"stale cas-pty artifact").unwrap();
+        std::fs::write(&unaffected_artifact, b"unaffected artifact").unwrap();
+        std::fs::write(
+            snapshot.join(".cas-build-cache-metadata"),
+            format!(
+                "source_commit={}created_at_unix={}\n",
+                snapshot_commit,
+                chrono::Utc::now().timestamp()
+            ),
+        )
+        .unwrap();
+        std::fs::write(cas_dir.join("build-cache/current"), "target-before\n").unwrap();
+
+        let worktree_path = cas_dir.join("worktrees/cache-worker");
+        let result = WorkerSpawnPrep {
+            worker_name: "cache-worker".to_string(),
+            worktree_info: Some(WorktreePrep {
+                worktree_path: worktree_path.clone(),
+                branch_name: "factory/cache-worker".to_string(),
+                parent_branch: "main".to_string(),
+                base_ref: None,
+                repo_root: repo,
+                cas_dir,
+            }),
+            warnings: Vec::new(),
+            base_provenance: None,
+        }
+        .run()
+        .expect("create worker worktree and filter stale crate artifacts");
+
+        assert!(!result.cwd.join("target/debug/deps/libcas_pty-abc.rlib").exists());
+        assert!(result.cwd.join("target/debug/deps/libwarm.rlib").is_file());
+        let stats = result.target_seed.expect("target seed receipt");
+        assert_eq!(stats.source_commit, snapshot_commit.trim());
+        assert_eq!(stats.skipped_crates, vec!["cas-pty"]);
+    }
+
+    #[test]
+    fn target_seed_refuses_snapshot_from_unrelated_history() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        init_repo(&repo);
+
+        let cas_dir = repo.join(".cas");
+        let snapshot = cas_dir.join("build-cache/snapshots/target-unrelated");
+        let artifact = snapshot.join("debug/deps/libwarm.rlib");
+        std::fs::create_dir_all(artifact.parent().unwrap()).unwrap();
+        std::fs::write(artifact, b"must not seed").unwrap();
+        std::fs::write(
+            snapshot.join(".cas-build-cache-metadata"),
+            "source_commit=0000000000000000000000000000000000000000\ncreated_at_unix=0\n",
+        )
+        .unwrap();
+        std::fs::write(cas_dir.join("build-cache/current"), "target-unrelated\n").unwrap();
+        std::fs::create_dir_all(repo.join("worker")).unwrap();
+
+        let err = seed_worker_target_from_baseline(&cas_dir, &repo.join("worker"))
+            .expect_err("a snapshot with no ancestry must be rejected");
+        assert!(err.to_string().contains("not an ancestor"), "{err}");
+        assert!(
+            !repo
+                .join("worker/target/debug/deps/libwarm.rlib")
+                .exists()
+        );
+    }
+
+    #[test]
+    fn target_seed_staleness_warning_names_refresh_command() {
+        let stats = TargetSeedStats {
+            snapshot: "target-old".to_string(),
+            source_commit: "abc123".to_string(),
+            age_secs: DEFAULT_TARGET_SEED_MAX_AGE_SECS as u64 + 1,
+            ..TargetSeedStats::default()
+        };
+        let warning = target_seed_staleness_warning(&stats).expect("old snapshot warning");
+        assert!(warning.contains("target-old"), "{warning}");
+        assert!(warning.contains("abc123"), "{warning}");
+        assert!(
+            warning.contains("scripts/refresh-worker-build-cache.sh"),
+            "{warning}"
         );
     }
 

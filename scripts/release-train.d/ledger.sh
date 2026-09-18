@@ -52,13 +52,25 @@ cut_run_external_stage() {
         export CAS_RELEASE_TRAIN_RUN_DIR="$run_dir"
         export CAS_RELEASE_TRAIN_VERSION="$version"
         export CAS_RELEASE_TRAIN_WORKTREE="$worktree"
+        export CAS_RELEASE_TRAIN_INVOCATION_KIND=internal
+        export CAS_RELEASE_TRAIN_STAGE="$stage"
+        export CAS_RELEASE_TRAIN_BLOCKER_STAGES="${CAS_RELEASE_TRAIN_BLOCKER_STAGES:-none}"
         export CUT_STAGE="$stage"
         bash -c "$command"
     )
 }
 
+cut_record_blocker() {
+    local stage="$1" blocker_file="$run_dir/blockers.log"
+    mkdir -p "$run_dir"
+    if ! grep -Fqx "$stage" "$blocker_file" 2>/dev/null; then
+        printf '%s\n' "$stage" >>"$blocker_file"
+    fi
+}
+
 cut_stage_failure() {
     local stage="$1" detail="$2"
+    cut_record_blocker "$stage"
     printf 'BLOCKER %s: %s\n' "$stage" "$detail" >&2
     printf 'receipt: %s\n' "$(cut_stage_file "$stage")" >&2
     printf 'resume: %q %q %q --cut --resume\n' "$0" "$version" "$worktree" >&2
@@ -72,6 +84,7 @@ cut_run_stage() {
         return 0
     fi
     printf 'stage %s: start\n' "$stage"
+    export CAS_RELEASE_TRAIN_STAGE="$stage"
     if declare -F "$function_name" >/dev/null 2>&1; then
         "$function_name" || return 1
     elif cut_has_external_stage "$stage"; then
@@ -89,6 +102,11 @@ cut_run() {
     local resume="${1:-false}" stage
     mkdir -p "$run_dir"
     write_run_env "$run_dir/run.env"
+    export CAS_RELEASE_TRAIN_INVOCATION_KIND=internal
+    export CAS_RELEASE_TRAIN_RUN_DIR="$run_dir"
+    if [[ "$resume" == true && -s "$run_dir/blockers.log" ]]; then
+        export CAS_RELEASE_TRAIN_BLOCKER_STAGES="$(paste -sd, "$run_dir/blockers.log")"
+    fi
     printf 'cut start version=%s worktree=%s resume=%s\n' "$version" "$worktree" "$resume"
     for stage in preflight assemble prep ledger gate pr-body pipeline publish \
         post-publication announce report receipts host-update; do

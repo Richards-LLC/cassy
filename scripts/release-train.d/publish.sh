@@ -10,6 +10,9 @@ cut_stage_publish() {
             printf 'pipeline did not record landed-main.sha\n' >&2
             return 1
         }
-        "$0" "$version" "$worktree" --publish "$landed"
+        CAS_RELEASE_TRAIN_INVOCATION_KIND=internal \
+        CAS_RELEASE_TRAIN_STAGE=publish CAS_RELEASE_TRAIN_RUN_DIR="$run_dir" \
+        CAS_RELEASE_TRAIN_BLOCKER_STAGES="${CAS_RELEASE_TRAIN_BLOCKER_STAGES:-none}" \
+            "$0" "$version" "$worktree" --publish "$landed"
     fi
 }

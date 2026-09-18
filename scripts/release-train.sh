@@ -112,6 +112,10 @@ if [[ -z "$invocation_kind" ]]; then
     fi
 fi
 invocation_blockers="${CAS_RELEASE_TRAIN_BLOCKER_STAGES:-${CAS_RELEASE_TRAIN_BLOCKERS:-none}}"
+if [[ "$invocation_resume" == true && "$invocation_blockers" == none \
+    && -s "$run_dir/blockers.log" ]]; then
+    invocation_blockers="$(paste -sd, "$run_dir/blockers.log")"
+fi
 if [[ "$invocation_kind" == manual && "$invocation_blockers" == none \
     && "$invocation_stage" =~ ^(preflight|assemble|prep|ledger|gate|pr-body|pipeline|publish|post-publication|announce|report|receipts|host-update)$ ]]; then
     invocation_blockers="$invocation_stage"

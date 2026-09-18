@@ -56,6 +56,23 @@ pub(crate) enum DegradationPriority {
 /// passed this gate over the real limit.
 pub(crate) const SESSION_START_BUDGET_BYTES: usize = 9 * 1024;
 
+/// Minimum share of the budget that must remain for everything other than the
+/// supervisor's own role guidance.
+///
+/// cas-8ad7d. `test_supervisor_guidance_under_8kb` bounds the guidance as a
+/// *component*; nothing bounded what it leaves for the rest of the payload. In
+/// cas-caaf that gap let protected text grow until a real evidence section —
+/// the GitHub issue titles — was silently compacted instead, and the only
+/// signal was a test failing on one machine and not in CI.
+///
+/// The remainder has to cover the protected Cassy context header and agent
+/// coordination line (~1.1KB together) plus the evidence sections a supervisor
+/// actually reads: the issue triage with its titles and the bug-routing table
+/// (~0.8KB). 2 400 B is that need with a deliberate alarm margin, so the pin
+/// fires while there is still room to act rather than after a section has
+/// already collapsed.
+pub(crate) const SESSION_START_GUIDANCE_REMAINDER_FLOOR_BYTES: usize = 2_400;
+
 /// Minimum un-compacted payload headroom required by the self-test/doctor
 /// guard. A payload closer than this to the harness boundary is one small
 /// guidance edit away from invoking compaction.

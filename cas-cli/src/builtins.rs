@@ -3882,6 +3882,72 @@ This is the body content."#;
         );
     }
 
+    /// cas-8ad7d: bound what the guidance *leaves behind*, not only its own size.
+    ///
+    /// `test_supervisor_guidance_under_8kb` above bounds this text as a
+    /// component. Nothing bounded the remainder of the 9KB SessionStart budget,
+    /// so in cas-caaf the protected content grew until the assembler compacted a
+    /// real evidence section — the GitHub issue titles — and the only signal was
+    /// a test that failed on one machine and passed in CI.
+    #[test]
+    fn supervisor_guidance_leaves_room_for_the_rest_of_the_session_start_payload() {
+        use crate::hooks::handlers::session_budget::{
+            SESSION_START_BUDGET_BYTES, SESSION_START_GUIDANCE_REMAINDER_FLOOR_BYTES,
+        };
+
+        let guidance = supervisor_guidance();
+        let remainder = SESSION_START_BUDGET_BYTES.saturating_sub(guidance.len());
+        assert!(
+            remainder >= SESSION_START_GUIDANCE_REMAINDER_FLOOR_BYTES,
+            "supervisor_guidance is {} bytes, leaving only {remainder}B of the \
+             {SESSION_START_BUDGET_BYTES}B SessionStart budget for everything else — under the \
+             {SESSION_START_GUIDANCE_REMAINDER_FLOOR_BYTES}B floor.\n\
+             The remainder pays for the protected Cassy context header and agent coordination \
+             line first, so the next thing to be compacted is the Static tier: Available Skills, \
+             Connected MCP Tools, then the Codex worker note — and after those the Context tier, \
+             which is where the GitHub issue triage titles and Ready Tasks live.\n\
+             Move detail into cas-supervisor/references/ rather than growing this body.",
+            guidance.len()
+        );
+    }
+
+    /// The matrix cas-8ad7d asks for: the same bound with the Codex worker note
+    /// present, which is appended to this guidance whenever a supervisor is
+    /// coordinating Codex workers. The note is degradable since cas-caaf, so it
+    /// must not push an evidence section out — but it still competes, and this
+    /// states the total the budget has to absorb.
+    #[test]
+    fn the_codex_worker_matrix_still_fits_the_session_start_budget() {
+        use crate::hooks::handlers::session_budget::SESSION_START_BUDGET_BYTES;
+        use cas_core::hooks::context::coordination::CODEX_WORKER_COORDINATION_NOTE;
+
+        let guidance = supervisor_guidance();
+        for (label, extra) in [
+            ("CAS_FACTORY_WORKER_CLI unset", ""),
+            (
+                "CAS_FACTORY_WORKER_CLI=codex",
+                CODEX_WORKER_COORDINATION_NOTE,
+            ),
+        ] {
+            let total = guidance.len() + extra.len();
+            assert!(
+                total < SESSION_START_BUDGET_BYTES,
+                "{label}: guidance plus role-note is {total}B, at or over the whole \
+                 {SESSION_START_BUDGET_BYTES}B budget — every other section would be dropped"
+            );
+            let remainder = SESSION_START_BUDGET_BYTES - total;
+            assert!(
+                remainder >= 1_400,
+                "{label}: only {remainder}B left of the {SESSION_START_BUDGET_BYTES}B budget \
+                 after guidance ({}B) and role note ({}B). The protected context header and \
+                 agent coordination line alone need about 1.1KB, so the evidence sections would \
+                 compact. Trim cas-supervisor.md or shorten the note.",
+                guidance.len(),
+                extra.len()
+            );
+        }
+    }
+
     #[test]
     fn test_worker_guidance_loads() {
         let guide = worker_guidance();

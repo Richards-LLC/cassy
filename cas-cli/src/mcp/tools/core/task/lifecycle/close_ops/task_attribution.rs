@@ -268,6 +268,37 @@ pub(super) fn paths(
     Some(paths)
 }
 
+/// The immutable baseline a scoped proof must be measured against: the first
+/// parent of the earliest commit in this task's delivery.
+///
+/// This is deliberately the *same* selection that [`paths`] uses, because the
+/// close gate derives the required proof targets from those paths. Computing
+/// the base any other way lets the two disagree — which is exactly what
+/// happened when the base came from `merge-base(HEAD, target)`: once the
+/// supervisor merged the branch into the target before close, that merge-base
+/// collapsed onto the delivery commit, the surface diff became empty, and the
+/// receipt said `targets=none` while the gate still demanded real targets. No
+/// honest run could satisfy both (cas-9c1e).
+///
+/// Unlike a merge-base against `HEAD`, this depends only on the target, the
+/// task window and the receipt, so it does not move when the worktree is
+/// rebased, when the branch is merged, or when the gate happens to inspect a
+/// checkout parked on another branch.
+pub(super) fn delivery_base(
+    repo: &Path,
+    target: &str,
+    window: &TaskCommitReceiptWindow,
+    receipt: Option<&str>,
+) -> Option<String> {
+    let receipt = receipt
+        .map(|receipt| resolve_task_commit_receipt_sha(repo, receipt))
+        .transpose()
+        .ok()?;
+    let ranges = task_delivery_ranges(repo, target, window, receipt.as_deref())?;
+    let base = ranges.first()?.base.clone();
+    (!base.is_empty()).then_some(base)
+}
+
 /// Prove the content of a merge-tip delivery from the task's first-parent
 /// commits rather than from the merge tip itself.
 ///
@@ -514,6 +545,106 @@ mod tests {
             },
         }
     }
+    #[test]
+    fn the_delivery_base_is_the_first_parent_of_the_earliest_task_commit() {
+        let dir = fixture();
+        let p = dir.path();
+        let parent = git(p, &["rev-parse", "HEAD"]);
+        let tip = commit(p, "work.rs", "own\n", "cas-taskb: the delivery");
+
+        let base = delivery_base(p, "main", &window(), Some(&tip))
+            .expect("an attributable delivery must yield a base");
+        assert_eq!(
+            base, parent,
+            "the base is the commit the delivery is measured against, not the delivery itself"
+        );
+    }
+
+    #[test]
+    fn the_delivery_base_survives_a_merge_into_the_target_before_close() {
+        // cas-9c1e: the exact shape that made the close gate unsatisfiable.
+        // `merge-base(HEAD, main)` becomes the delivery commit once the
+        // supervisor merges, which would leave an empty proof surface.
+        let dir = fixture();
+        let p = dir.path();
+        let parent = git(p, &["rev-parse", "HEAD"]);
+        let tip = commit(p, "work.rs", "own\n", "cas-taskb: the delivery");
+
+        git(p, &["checkout", "-q", "main"]);
+        git(
+            p,
+            &[
+                "merge",
+                "-q",
+                "--no-ff",
+                "-m",
+                "merge worker",
+                "factory/worker",
+            ],
+        );
+        git(p, &["checkout", "-q", "factory/worker"]);
+
+        assert_eq!(
+            git(p, &["merge-base", "HEAD", "main"]),
+            tip,
+            "precondition: the old merge-base rule would have returned the delivery commit"
+        );
+        assert_eq!(
+            delivery_base(p, "main", &window(), Some(&tip)).as_deref(),
+            Some(parent.as_str()),
+            "the base must still be the delivery's own first parent after the merge"
+        );
+        assert!(
+            !paths(p, "main", &window(), Some(&tip))
+                .expect("paths must resolve")
+                .is_empty(),
+            "the proof surface must not be empty: that is what made the gate unsatisfiable"
+        );
+    }
+
+    #[test]
+    fn the_delivery_base_does_not_move_when_the_checkout_does() {
+        // The second observed failure: with the worker idle, the gate inspected
+        // a checkout parked on another branch and demanded proof over that
+        // branch's whole diff. The base must depend on the delivery, not on
+        // whatever HEAD happens to be.
+        let dir = fixture();
+        let p = dir.path();
+        let parent = git(p, &["rev-parse", "HEAD"]);
+        let tip = commit(p, "work.rs", "own\n", "cas-taskb: the delivery");
+        let from_worker = delivery_base(p, "main", &window(), Some(&tip));
+
+        git(p, &["checkout", "-q", "main"]);
+        assert_eq!(
+            delivery_base(p, "main", &window(), Some(&tip)),
+            from_worker,
+            "the same delivery must resolve the same base from any checkout"
+        );
+        assert_eq!(from_worker.as_deref(), Some(parent.as_str()));
+    }
+
+    #[test]
+    fn a_multi_commit_unmerged_delivery_still_bases_on_its_branch_point() {
+        // Guards the unchanged case: the base spans the whole delivery, not
+        // just its last commit.
+        let dir = fixture();
+        let p = dir.path();
+        let branch_point = git(p, &["rev-parse", "HEAD"]);
+        commit(p, "first.rs", "one\n", "cas-taskb: first");
+        let tip = commit(p, "second.rs", "two\n", "cas-taskb: second");
+
+        assert_eq!(
+            delivery_base(p, "main", &window(), Some(&tip)).as_deref(),
+            Some(branch_point.as_str()),
+            "an unmerged multi-commit delivery is proven from its branch point"
+        );
+        let changed = paths(p, "main", &window(), Some(&tip)).unwrap();
+        assert!(
+            changed.contains(&"first.rs".to_string()) && changed.contains(&"second.rs".to_string()),
+            "both commits are in the surface: {changed:?}"
+        );
+    }
+
     #[test]
     fn crate_names_are_not_foreign_task_ids() {
         let dir = fixture();

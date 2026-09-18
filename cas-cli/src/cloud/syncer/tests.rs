@@ -2340,6 +2340,17 @@ fn every_push_reason_has_its_own_remediation() {
     assert!(!push_reason_is_permanent("revision_conflict"));
 }
 
+#[test]
+fn batch_identity_error_recovers_its_structured_reason() {
+    let error = crate::error::CasError::Other(
+        r#"Push failed with status 409: {"error":"project_identity_conflict"}"#.to_string(),
+    );
+    assert_eq!(
+        push_reason_from_error(&error).as_deref(),
+        Some("project_identity_conflict")
+    );
+}
+
 // ---------------------------------------------------------------------------
 // cas-c32f: revision-based conflict resolution.
 //

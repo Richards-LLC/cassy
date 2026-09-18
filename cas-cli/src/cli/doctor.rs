@@ -3747,10 +3747,7 @@ fn canonical_alias_fix(cas_root: &Path, args: &DoctorArgs, cli: &Cli) -> Option<
             .collect::<Vec<_>>()
             .join(", ")
     );
-    let mut aliases = registered;
-    aliases.push(remote.clone());
-    aliases.sort();
-    aliases.dedup();
+    let aliases = merged_project_aliases(registered, &remote);
     let exact_line = format!(
         "aliases = [{}]",
         aliases
@@ -3777,7 +3774,7 @@ fn canonical_alias_fix(cas_root: &Path, args: &DoctorArgs, cli: &Cli) -> Option<
             "project aliases",
             CheckStatus::Ok,
             format!(
-                "appended git origin alias `{remote}` to `.cas/config.toml`; local config alone does not register it server-side. Inspect `cas cloud projects`, have the cloud owner register the alias, then run `cas cloud project --adopt-aliases`, `cas cloud queue --retry --retry-reason project_identity_conflict`, and `cas cloud push`"
+                "appended git origin alias `{remote}` to `.cas/config.toml`; local config alone does not register it server-side. Inspect `cas cloud projects`, have the cloud owner register the alias, then run `cas cloud project --adopt-aliases` to merge server aliases without dropping local entries, `cas cloud queue --retry --retry-reason project_identity_conflict`, and `cas cloud push`"
             ),
         )),
         Err(error) => Some(Check::new(
@@ -3786,6 +3783,13 @@ fn canonical_alias_fix(cas_root: &Path, args: &DoctorArgs, cli: &Cli) -> Option<
             format!("could not append git origin alias `{remote}`: {error}"),
         )),
     }
+}
+
+fn merged_project_aliases(mut aliases: Vec<String>, remote: &str) -> Vec<String> {
+    aliases.push(remote.to_string());
+    aliases.sort();
+    aliases.dedup();
+    aliases
 }
 
 /// Report persisted task origins that are equivalent to the current project
@@ -3805,11 +3809,20 @@ fn canonical_alias_checks(cas_root: &Path) -> Vec<Check> {
             .filter_map(|alias| crate::cloud::canonical_project_id(alias))
             .any(|alias| alias == remote)
     {
+        let aliases = merged_project_aliases(registered.clone(), &remote);
+        let exact_line = format!(
+            "aliases = [{}]",
+            aliases
+                .iter()
+                .map(|alias| format!("\"{alias}\""))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
         checks.push(Check {
             name: "project aliases".to_string(),
             status: CheckStatus::Warning,
             message: format!(
-                "Git origin resolves to `{remote}`, which is neither canonical id `{current_project}` nor a configured alias. Add this exact line under `[project]` in `.cas/config.toml`: `aliases = [\"{remote}\"]`. Local config alone does not register an alias server-side: inspect `cas cloud projects` and have the cloud owner register `{remote}`, then run `cas cloud project --adopt-aliases`, `cas cloud queue --retry --retry-reason project_identity_conflict`, and `cas cloud push`."
+                "Git origin resolves to `{remote}`, which is neither canonical id `{current_project}` nor a configured alias. Add this exact line under `[project]` in `.cas/config.toml`: `{exact_line}`. Local config alone does not register an alias server-side: inspect `cas cloud projects` and have the cloud owner register `{remote}`, then run `cas cloud project --adopt-aliases` to merge server aliases without dropping local entries, `cas cloud queue --retry --retry-reason project_identity_conflict`, and `cas cloud push`."
             ),
         });
     }
@@ -5029,9 +5042,26 @@ fn cloud_queue_rejections(conn: &rusqlite::Connection) -> Vec<(String, usize)> {
     }
 
     let Ok(mut stmt) = conn.prepare(
-        "SELECT COALESCE(NULLIF(TRIM(last_reason), ''), 'unspecified') AS reason, COUNT(*)
+        "SELECT CASE
+                   WHEN NULLIF(TRIM(last_reason), '') IS NOT NULL THEN TRIM(last_reason)
+                   WHEN instr(lower(COALESCE(last_error, '')), 'project_identity_conflict') > 0
+                       THEN 'project_identity_conflict'
+                   WHEN instr(lower(COALESCE(last_error, '')), 'project_mismatch') > 0
+                       THEN 'project_mismatch'
+                   WHEN instr(lower(COALESCE(last_error, '')), 'scope_mismatch') > 0
+                       THEN 'scope_mismatch'
+                   ELSE 'unspecified'
+               END AS reason, COUNT(*)
          FROM sync_queue
          WHERE last_outcome = 'rejected'
+            OR (
+                NULLIF(TRIM(last_reason), '') IS NULL
+                AND (
+                    instr(lower(COALESCE(last_error, '')), 'project_identity_conflict') > 0
+                    OR instr(lower(COALESCE(last_error, '')), 'project_mismatch') > 0
+                    OR instr(lower(COALESCE(last_error, '')), 'scope_mismatch') > 0
+                )
+            )
          GROUP BY reason",
     ) else {
         return Vec::new();
@@ -6750,6 +6780,49 @@ mod tests {
     }
 
     #[test]
+    fn doctor_queue_check_falls_back_to_identity_conflict_in_last_error() {
+        use rusqlite::Connection;
+
+        let temp = TempDir::new().unwrap();
+        let cas_root = temp.path().join(".cas");
+        fs::create_dir_all(&cas_root).unwrap();
+        let conn = Connection::open(cas_root.join("cas.db")).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE sync_queue (
+                id INTEGER PRIMARY KEY,
+                entity_type TEXT NOT NULL,
+                entity_id TEXT NOT NULL,
+                operation TEXT NOT NULL,
+                payload TEXT,
+                team_id TEXT,
+                project_id TEXT,
+                created_at TEXT NOT NULL,
+                retry_count INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT,
+                last_outcome TEXT,
+                last_reason TEXT,
+                failed_client_version TEXT
+            );
+            INSERT INTO sync_queue
+                (id, entity_type, entity_id, operation, created_at, retry_count, last_error)
+            VALUES
+                (1, 'task', 'task-legacy-identity', 'upsert', '2026-09-01T00:00:00Z', 5,
+                 'Push failed with status 409: {"error":"project_identity_conflict"}');
+            "#,
+        )
+        .unwrap();
+
+        let check = cloud_queue_check(&cas_root);
+        assert!(matches!(check.status, CheckStatus::Warning), "{}", check.message);
+        assert!(
+            check.message.contains("project_identity_conflict ×1"),
+            "{}",
+            check.message
+        );
+    }
+
+    #[test]
     fn doctor_queue_check_does_not_prescribe_retry_for_pending_registration_conflicts() {
         use rusqlite::Connection;
 
@@ -7395,7 +7468,9 @@ mod tests {
             .expect("origin drift must fail project aliases");
         assert_eq!(check.name, "project aliases");
         assert!(check.message.contains("github.com/richards-llc/cassy"));
-        assert!(check.message.contains("aliases = [\"github.com/richards-llc/cassy\"]"));
+        assert!(check
+            .message
+            .contains("aliases = [\"github.com/richards-llc/cassy\", \"old\"]"));
         assert!(check
             .message
             .contains("cas cloud project --adopt-aliases"));

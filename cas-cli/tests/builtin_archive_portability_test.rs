@@ -148,6 +148,17 @@ const FIXTURE_SOURCES: &[(&str, &str)] = &[
         "cas-cli/tests/component_output_test.rs",
         "component_output_test.rs"
     ),
+    // cas-011dc: this file was missing from the list, so the compile-time
+    // checkout-read guard below never saw it and a `CARGO_MANIFEST_DIR` read
+    // shipped to the merge queue, where the shard had no checkout at that path.
+    source!(
+        "cas-cli/tests/credential_debug_guard_test.rs",
+        "credential_debug_guard_test.rs"
+    ),
+    source!(
+        "cas-cli/tests/artifact_publish_test.rs",
+        "artifact_publish_test.rs"
+    ),
     source!(
         "cas-cli/tests/delivery_target_cas_test.rs",
         "delivery_target_cas_test.rs"

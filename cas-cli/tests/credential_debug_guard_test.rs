@@ -12,6 +12,9 @@
 
 use std::path::{Path, PathBuf};
 
+#[path = "../src/test_env_guard.rs"]
+mod test_env_guard;
+
 /// Field names that hold a credential rather than a reference to one.
 ///
 /// Deliberately exact: `token_hash` and `credential_id` are handles, safe to
@@ -37,12 +40,56 @@ const CREDENTIAL_FIELDS: &[&str] = &[
 /// is recorded here rather than by loosening the rule.
 const ALLOWLIST: &[(&str, &str)] = &[];
 
-fn repo_root() -> PathBuf {
-    // CARGO_MANIFEST_DIR is `<root>/cas-cli`.
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("cas-cli must have a parent directory")
-        .to_path_buf()
+/// Locate the source tree **at run time**, or `None` when there is none.
+///
+/// cas-011dc: this used to read `CARGO_MANIFEST_DIR`, which records the path on
+/// the machine that *built* the test. A CI suite shard runs a prebuilt binary
+/// with no checkout at that path, so `crates/` was missing and the guard
+/// panicked — blocking a release on a scan that had nothing to scan. Locally it
+/// passed, because locally the build path and the checkout are the same
+/// directory.
+///
+/// `cas::test_paths::workspace_root()` resolves `CAS_TEST_WORKSPACE_ROOT`, then
+/// `NEXTEST_WORKSPACE_ROOT`, then the runtime tree, and only then falls back to
+/// the compile-time path — so the result is confirmed to exist here before it
+/// is used. A tree that is absent is a fact about the runner, not a finding.
+fn resolve_repo_root() -> Option<PathBuf> {
+    let root = cas::test_paths::workspace_root();
+    let sources = root.join("cas-cli").join("src");
+    let crates = root.join("crates");
+    (sources.is_dir() && crates.is_dir()).then_some(root)
+}
+
+/// Enumerate and scan a source tree laid out like this repository.
+///
+/// Shared by the real scan and by the synthetic-tree fixture, so the fixture
+/// proves the same code path that CI would skip rather than a parallel one.
+fn scan_tree(root: &Path) -> (usize, Vec<Violation>) {
+    let mut sources = Vec::new();
+    rust_sources(&root.join("cas-cli").join("src"), &mut sources);
+    if let Ok(entries) = std::fs::read_dir(root.join("crates")) {
+        for crate_dir in entries.flatten() {
+            rust_sources(&crate_dir.path().join("src"), &mut sources);
+        }
+    }
+    let violations = sources
+        .iter()
+        .flat_map(|path| scan(path, root))
+        .filter(|violation| {
+            !ALLOWLIST
+                .iter()
+                .any(|(allowed, _)| *allowed == violation.name)
+        })
+        .collect();
+    (sources.len(), violations)
+}
+
+fn render(violations: &[Violation]) -> String {
+    violations
+        .iter()
+        .map(|v| format!("  {} — struct {} holds `{}`", v.location, v.name, v.field))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn rust_sources(root: &Path, out: &mut Vec<PathBuf>) {
@@ -160,41 +207,124 @@ fn struct_name(line: &str) -> Option<&str> {
 
 #[test]
 fn no_struct_holding_a_credential_derives_debug() {
-    let repo = repo_root();
-    let mut sources = Vec::new();
-    rust_sources(&repo.join("cas-cli").join("src"), &mut sources);
-    for crate_dir in std::fs::read_dir(repo.join("crates"))
-        .expect("crates/ must exist")
-        .flatten()
-    {
-        rust_sources(&crate_dir.path().join("src"), &mut sources);
-    }
+    let Some(repo) = resolve_repo_root() else {
+        // Printed, not silent: a skip nobody can see is indistinguishable from
+        // a pass. The scanner itself is still proven on this runner by
+        // `the_guard_finds_a_planted_leak_in_a_synthetic_tree` below, which
+        // needs no checkout.
+        println!(
+            "SKIP no_struct_holding_a_credential_derives_debug: no source tree at {} \
+             (archive/shard run). The scan mechanism is covered by the synthetic-tree fixture; \
+             set CAS_TEST_WORKSPACE_ROOT to scan a checkout here.",
+            cas::test_paths::workspace_root().display()
+        );
+        return;
+    };
+
+    let (scanned, violations) = scan_tree(&repo);
     assert!(
-        sources.len() > 100,
-        "the scan found only {} files; it is not reaching the source tree",
-        sources.len()
+        scanned > 100,
+        "the scan reached {} at runtime but found only {scanned} files — it is not \
+         reaching the source tree, so an empty result proves nothing",
+        repo.display()
     );
-
-    let violations: Vec<Violation> = sources
-        .iter()
-        .flat_map(|path| scan(path, &repo))
-        .filter(|violation| {
-            !ALLOWLIST
-                .iter()
-                .any(|(allowed, _)| *allowed == violation.name)
-        })
-        .collect();
-
     assert!(
         violations.is_empty(),
         "a derived Debug prints the credential verbatim. Replace it with a redacting \
          `impl fmt::Debug` (see `ArtifactUploadClient` in cas-cli/src/artifacts/cloud.rs) \
          and add a test asserting the value never appears in `{{:?}}`:\n{}",
-        violations
-            .iter()
-            .map(|v| format!("  {} — struct {} holds `{}`", v.location, v.name, v.field))
-            .collect::<Vec<_>>()
-            .join("\n")
+        render(&violations)
+    );
+}
+
+/// The skip above must not be able to hide a real leak.
+///
+/// This builds a tree shaped like the repository — `cas-cli/src/` plus a
+/// `crates/*/src/` — plants a leaking struct in each half, and runs the *same*
+/// `scan_tree` the real test runs. It needs no checkout, so it executes on
+/// every runner including the shard that skips the scan above. If the
+/// enumeration or the matcher ever stops working, this fails there.
+#[test]
+fn the_guard_finds_a_planted_leak_in_a_synthetic_tree() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let root = dir.path();
+    let cli_src = root.join("cas-cli").join("src");
+    let crate_src = root.join("crates").join("cas-fixture").join("src");
+    std::fs::create_dir_all(&cli_src).unwrap();
+    std::fs::create_dir_all(&crate_src).unwrap();
+
+    // A clean file, so a scanner that flags everything also fails here.
+    std::fs::write(
+        cli_src.join("clean.rs"),
+        "#[derive(Debug)]\npub struct Endpoint {\n    pub url: String,\n    pub token_hash: String,\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        cli_src.join("leaky.rs"),
+        "#[derive(Debug, Clone)]\npub struct CliClient {\n    token: String,\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        crate_src.join("leaky.rs"),
+        "#[derive(Debug)]\npub struct StoreCapability {\n    pub credential: String,\n}\n",
+    )
+    .unwrap();
+
+    let (scanned, violations) = scan_tree(root);
+    assert_eq!(scanned, 3, "both halves of the tree must be enumerated");
+
+    let names: Vec<&str> = violations.iter().map(|v| v.name.as_str()).collect();
+    assert!(
+        names.contains(&"CliClient"),
+        "the cas-cli half of the scan is broken: {names:?}"
+    );
+    assert!(
+        names.contains(&"StoreCapability"),
+        "the crates/ half of the scan is broken: {names:?}"
+    );
+    assert!(
+        !names.contains(&"Endpoint"),
+        "a url and a token_hash are not credentials: {names:?}"
+    );
+    assert_eq!(violations.len(), 2, "{}", render(&violations));
+}
+
+/// The skip is reachable only when there is genuinely no tree — not because
+/// the resolver is wrong about a tree that exists.
+#[test]
+fn the_root_resolver_accepts_a_real_tree_and_rejects_a_bare_directory() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let bare = dir.path().join("bare");
+    std::fs::create_dir_all(&bare).unwrap();
+
+    // SAFETY: serialized by the shared test environment lock; restored below.
+    let previous = std::env::var_os("CAS_TEST_WORKSPACE_ROOT");
+    let _lock = test_env_guard::test_env_lock();
+    unsafe { std::env::set_var("CAS_TEST_WORKSPACE_ROOT", &bare) };
+    let resolved_bare = resolve_repo_root();
+
+    let shaped = dir.path().join("shaped");
+    std::fs::create_dir_all(shaped.join("cas-cli").join("src")).unwrap();
+    std::fs::create_dir_all(shaped.join("crates")).unwrap();
+    unsafe { std::env::set_var("CAS_TEST_WORKSPACE_ROOT", &shaped) };
+    let resolved_shaped = resolve_repo_root();
+
+    unsafe {
+        match previous {
+            Some(value) => std::env::set_var("CAS_TEST_WORKSPACE_ROOT", value),
+            None => std::env::remove_var("CAS_TEST_WORKSPACE_ROOT"),
+        }
+    }
+    drop(_lock);
+
+    assert!(
+        resolved_bare.is_none(),
+        "a directory without cas-cli/src and crates/ is not a source tree"
+    );
+    assert_eq!(
+        resolved_shaped.as_deref(),
+        Some(shaped.as_path()),
+        "a correctly shaped tree must resolve, so the skip cannot swallow a real scan"
     );
 }
 

@@ -487,7 +487,7 @@ pub struct TaskRequest {
 
     /// Supervisor-only proof-scope correction for `action=update`.
     #[schemars(
-        description = "For update only: supervisor-authorized correction of target_repo/target_branch after MERGE REQUIRED. For a task already marked execution_note=no-code, target_repo=\"\" clears a stale code anchor. Requires a non-empty reason, invalidates the stale proof cycle, records a decision note, and reopens the task without review-failed semantics."
+        description = "For update only: supervisor-authorized correction of target_repo/target_branch after MERGE REQUIRED, or strict widening of proof_targets when a parked delivery's merged diff exceeds its declared blast-radius scope. For a task already marked execution_note=no-code, target_repo=\"\" clears a stale code anchor. Requires a non-empty reason, invalidates the stale proof cycle, records a decision note, and reopens the task without review-failed semantics."
     )]
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub proof_scope_fix: Option<bool>,
@@ -992,6 +992,16 @@ pub struct AgentRequest {
     #[serde(default, deserialize_with = "deser::option_i64")]
     pub in_reply_to: Option<i64>,
 
+    /// Typed Commander turn kind for supervisor messages to `target=operator`.
+    #[schemars(description = "Commander turn kind: answer, status, receipt, ask, or blocker")]
+    #[serde(default)]
+    pub kind: Option<String>,
+
+    /// Published artifact id to attach to a Commander turn.
+    #[schemars(description = "Published artifact id to attach to a Commander turn")]
+    #[serde(default)]
+    pub attachment: Option<String>,
+
     /// Loop prompt (for loop_start)
     #[schemars(description = "The prompt to repeat each iteration")]
     #[serde(default)]
@@ -1184,8 +1194,8 @@ pub(crate) mod deser;
 mod ops_secondary;
 
 pub use crate::types::ops_secondary::{
-    CoordinationRequest, ExecuteRequest, FactoryRequest, KnowledgeRequest, SearchContextRequest,
-    SystemRequest, TeamRequest, VerificationRequest,
+    ArtifactRequest, CoordinationRequest, ExecuteRequest, FactoryRequest, KnowledgeRequest,
+    SearchContextRequest, SystemRequest, TeamRequest, VerificationRequest,
 };
 
 #[cfg(test)]

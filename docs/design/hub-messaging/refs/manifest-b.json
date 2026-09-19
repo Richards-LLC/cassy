@@ -1,0 +1,180 @@
+[
+  {
+    "id": "15",
+    "slug": "vercel-deploy-logs",
+    "title": "Vercel runtime logs",
+    "category": "ops-feed",
+    "url": "https://vercel.com/docs/logs/runtime",
+    "mode": "element",
+    "selector": "img[src*=\"request-log-overview-light\"]",
+    "scrollTo": "img[src*=\"request-log-overview-light\"]",
+    "delay": 2500
+  },
+  {
+    "id": "16",
+    "slug": "linear-activity",
+    "title": "Linear issue activity",
+    "category": "ops-feed",
+    "url": "https://linear.app/docs/comment-on-issues",
+    "mode": "element",
+    "selector": "img[alt=\"comments and reactions on a Linear issue\"]",
+    "scrollTo": "img[alt=\"comments and reactions on a Linear issue\"]",
+    "delay": 2500
+  },
+  {
+    "id": "17",
+    "slug": "sentry-issue",
+    "title": "Sentry issue details (activity sidebar)",
+    "category": "ops-feed",
+    "url": "https://raw.githubusercontent.com/getsentry/sentry-docs/master/docs/product/issues/issue-details/img/issue-details-breakdown.png",
+    "mode": "element",
+    "selector": "img",
+    "delay": 1500,
+    "note": "docs.sentry.io and sentry.io refuse connections from this host (curl/Chrome: connection refused); this is the figure embedded on https://docs.sentry.io/product/issues/issue-details/ served from the official getsentry/sentry-docs repo"
+  },
+  {
+    "id": "18",
+    "slug": "pagerduty-timeline",
+    "title": "PagerDuty incident timeline",
+    "category": "ops-feed",
+    "url": "https://support.pagerduty.com/main/docs/incidents#incident-timeline",
+    "mode": "element",
+    "dismiss": [
+      "#cas-noop-wait-for-hydration",
+      "img[alt=\"Incident timeline\"]"
+    ],
+    "selector": ".lightbox.open img",
+    "delay": 2500,
+    "note": "first dismiss selector never matches (3s wait for readme.io hydration); clicking the figure opens readme.io's lightbox clone (span.img.lightbox.open) holding the 2000px source image"
+  },
+  {
+    "id": "19",
+    "slug": "github-pr-timeline",
+    "title": "GitHub PR conversation",
+    "category": "ops-feed",
+    "url": "https://github.com/vercel/next.js/pull/98716#issuecomment-5697310466",
+    "mode": "page",
+    "delay": 3000
+  },
+  {
+    "id": "20",
+    "slug": "github-actions-log",
+    "title": "GitHub Actions job log (GitHub Docs figure)",
+    "category": "ops-feed",
+    "url": "https://docs.github.com/en/actions/how-tos/monitor-workflows/use-workflow-run-logs",
+    "mode": "element",
+    "selector": "img[src*=\"copy-link-button-updated-2\"]",
+    "scrollTo": "img[src*=\"copy-link-button-updated-2\"]",
+    "delay": 2500,
+    "note": "live job pages (https://github.com/vercel/next.js/actions/runs/35365565524/job/105667062556 and the /runs/<job> form) render 'Sign in to view logs' for anonymous users; official GitHub Docs screenshot used instead"
+  },
+  {
+    "id": "21",
+    "slug": "incident-io",
+    "title": "incident.io Slack incident channel",
+    "category": "ops-feed",
+    "url": "https://incident.io/",
+    "mode": "element",
+    "selector": "img[src*=\"response-slackteams\"]",
+    "scrollTo": "img[src*=\"response-slackteams\"]",
+    "delay": 3000
+  },
+  {
+    "id": "22",
+    "slug": "superhuman",
+    "title": "Superhuman Mail split inbox",
+    "category": "unconventional",
+    "url": "https://superhuman.com/mail",
+    "mode": "element",
+    "selector": "img[alt=\"Superhuman Mail Split Inbox\"]",
+    "scrollTo": "img[alt=\"Superhuman Mail Split Inbox\"]",
+    "delay": 2500,
+    "hide": [
+      "q-root",
+      "#qualified-multimodal-host",
+      "#q-messenger-frame"
+    ],
+    "note": "hides the Qualified live-chat widget (<q-root> under <html>) that overlaps the figure"
+  },
+  {
+    "id": "23",
+    "slug": "hey",
+    "title": "HEY Imbox",
+    "category": "unconventional",
+    "url": "https://www.hey.com/",
+    "mode": "element",
+    "selector": "img[src*=\"imbox.png\"]",
+    "scrollTo": "img[src*=\"imbox.png\"]",
+    "delay": 2500
+  },
+  {
+    "id": "24",
+    "slug": "things",
+    "title": "Things 3 Today",
+    "category": "unconventional",
+    "url": "https://culturedcode.com/things/features/",
+    "mode": "element",
+    "selector": "img[src*=\"2-today-mac.png\"]",
+    "scrollTo": "img[src*=\"2-today-mac.png\"]",
+    "delay": 2500
+  },
+  {
+    "id": "25",
+    "slug": "notion-inbox",
+    "title": "Notion Mail inbox (priority view)",
+    "category": "unconventional",
+    "url": "https://www.notion.com/help/guides/getting-started-with-notion-mail",
+    "mode": "element",
+    "selector": "img[alt^=\"The priority view\"]",
+    "scrollTo": "img[alt^=\"The priority view\"]",
+    "delay": 2500
+  },
+  {
+    "id": "26",
+    "slug": "apple-journal",
+    "title": "Apple Journal",
+    "category": "unconventional",
+    "url": "https://www.apple.com/newsroom/2023/12/apple-launches-journal-app-a-new-app-for-reflecting-on-everyday-moments/",
+    "mode": "element",
+    "selector": "img[src*=\"Apple-Journal-app-2-up_big\"]",
+    "scrollTo": "img[src*=\"Apple-Journal-app-2-up_big\"]",
+    "delay": 2500
+  },
+  {
+    "id": "27",
+    "slug": "arc",
+    "title": "Arc browser (sidebar + site)",
+    "category": "unconventional",
+    "url": "https://arc.net/",
+    "mode": "page",
+    "scrollTo": "img[src*=\"browser-mmmhome\"]",
+    "hide": [
+      ".c-kFyPaX-ihYZiFn-css",
+      ".c-kFyPaX-ikGFajo-css",
+      ".c-kXWSNC"
+    ],
+    "delay": 3000,
+    "note": "static product screenshot browser-mmmhome.png; hides the fixed nav layers and the scroll-following 'Meet Dia' hero strip (.c-kXWSNC) so nothing covers the window; the zero-chrome <video> demo was rejected because its frame is nondeterministic"
+  },
+  {
+    "id": "28",
+    "slug": "zulip",
+    "title": "Zulip topic-threaded channel",
+    "category": "team",
+    "url": "https://chat.zulip.org/#narrow/channel/101-design",
+    "mode": "page",
+    "waitFor": ".message_row",
+    "delay": 4000
+  },
+  {
+    "id": "29",
+    "slug": "twist-or-basecamp",
+    "title": "Basecamp message board",
+    "category": "team",
+    "url": "https://basecamp.com/features",
+    "mode": "element",
+    "selector": "img[src*=\"screenshots/message-board.webp\"]",
+    "scrollTo": "img[src*=\"screenshots/message-board.webp\"]",
+    "delay": 2500
+  }
+]

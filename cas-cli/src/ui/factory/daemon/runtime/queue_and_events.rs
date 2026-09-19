@@ -3619,17 +3619,18 @@ impl FactoryDaemon {
         }
         let replies = queue.peek_operator_replies(&self.session_name, 10)?;
         for queued in replies {
-            let Some(device_id) = queued.recipient_device_id.as_deref() else {
-                let _ = queue.mark_dropped(
-                    queued.id,
-                    Some("operator reply has no authenticated recipient device"),
-                );
-                continue;
-            };
+            // `*` is the deliberate v2 fallback when no verified Commander
+            // row exists yet. The hub filters nothing for this marker and
+            // every authenticated device holding the session lease receives
+            // the unprompted turn.
+            let device_id = queued.recipient_device_id.as_deref().unwrap_or("*");
             let payload = match serde_json::from_str::<crate::ui::factory::OperatorReplyPayload>(
                 &queued.prompt,
             ) {
-                Ok(payload) if payload.device_id == device_id && payload.schema_version == 1 => {
+                Ok(payload)
+                    if payload.device_id == device_id
+                        && (payload.schema_version == 1 || payload.schema_version == 2) =>
+                {
                     payload
                 }
                 Ok(_) => {
@@ -3642,7 +3643,7 @@ impl FactoryDaemon {
                 Err(error) => {
                     let _ = queue.mark_dropped(
                         queued.id,
-                        Some("operator reply payload is not a valid schema-1 message"),
+                        Some("operator reply payload is not a valid schema-1 or schema-2 message"),
                     );
                     tracing::warn!(
                         prompt_id = queued.id,
@@ -3660,13 +3661,15 @@ impl FactoryDaemon {
                 summary: payload.summary,
                 device_id: device_id.to_string(),
                 operator_label: payload.operator_label,
+                kind: payload.kind,
+                attachments: payload.attachments,
             };
             self.ws_broadcast(&reply);
             tracing::info!(
                 target: "cas::coordination",
                 stage = "operator_reply_forwarded",
                 prompt_id = queued.id,
-                reply_to = payload.reply_to,
+                reply_to = ?payload.reply_to,
                 device_id,
                 "supervisor reply forwarded to the Commander hub; awaiting paired-device receipt"
             );
@@ -3689,7 +3692,8 @@ impl FactoryDaemon {
         };
         anyhow::ensure!(
             row.target.eq_ignore_ascii_case("operator")
-                && row.recipient_device_id.as_deref() == Some(device_id),
+                && (row.recipient_device_id.as_deref() == Some(device_id)
+                    || (row.recipient_device_id.is_none() && device_id == "*")),
             "operator reply {notification_id} receipt does not match its paired device"
         );
         if row.processed_at.is_none() {

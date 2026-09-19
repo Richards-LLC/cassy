@@ -5,12 +5,33 @@ use std::time::{Duration, Instant};
 use assert_cmd::Command;
 use tempfile::TempDir;
 
+#[path = "../src/test_env_guard.rs"]
+mod test_env_guard;
+
+/// Build a `cas` invocation that cannot see this machine's factory session.
+///
+/// cas-caaf: overriding `HOME` is not enough. The SessionStart payload has a
+/// 9KB aggregate budget, and ambient `CAS_*` state changes what goes into it —
+/// `CAS_FACTORY_WORKER_CLI=codex` alone appends a ~1.1KB Codex coordination
+/// note to the supervisor guidance, which used to push the GitHub issue triage
+/// into its collapsed form and fail the assertions below. That made the test
+/// pass in CI (no factory env) and fail inside a real factory session. Scrub
+/// every ambient key the shared guard knows about, so the child process sees
+/// only what this test set.
 fn cas_cmd(project: &TempDir) -> Command {
     let mut cmd = Command::new(cas::test_paths::cas_binary());
     let home = project.path().join(".test-home");
     let xdg = project.path().join(".test-xdg-config");
     fs::create_dir_all(&home).unwrap();
     fs::create_dir_all(&xdg).unwrap();
+    for (key, _) in std::env::vars_os() {
+        if key
+            .to_str()
+            .is_some_and(test_env_guard::is_scrubbed_ambient_env_key)
+        {
+            cmd.env_remove(&key);
+        }
+    }
     cmd.current_dir(project.path())
         .env("HOME", home)
         .env("XDG_CONFIG_HOME", xdg)

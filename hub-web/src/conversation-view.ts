@@ -88,9 +88,20 @@ export class ConversationView {
       const send = event.value;
       node.dataset.state = send.state;
       state.textContent = send.state === "sending" ? "Sending · awaiting receipt" : send.state === "error" ? `Not sent · ${send.error}` : send.state === "replied" ? "Replied" : send.stamped ? "Acknowledged · sent from you" : "Acknowledged";
-    } else { node.dataset.replyTo = String(event.value.reply_to); state.textContent = "Reply to you"; }
+    } else {
+      node.dataset.replyTo = event.value.reply_to === null ? "" : String(event.value.reply_to);
+      node.dataset.kind = event.value.kind ?? "answer";
+      state.textContent = event.value.kind === "status" ? "Status" : event.value.kind === "receipt" ? "Receipt" : event.value.kind === "ask" ? "Ask" : event.value.kind === "blocker" ? "Blocker" : event.value.reply_to === null ? "Supervisor" : "Reply to you";
+    }
     const body = document.createElement("p"); body.textContent = event.kind === "send" ? event.value.text : event.value.message;
     header.append(sender, state); node.replaceChildren(header, body);
+    if (event.kind === "reply") {
+      for (const attachment of event.value.attachments ?? []) {
+        const row = document.createElement("div"); row.className = "conversation-attachment";
+        const link = document.createElement("a"); link.href = `#artifact:${encodeURIComponent(attachment.artifact_id)}`; link.dataset.artifactId = attachment.artifact_id; link.textContent = attachment.name; link.title = `${attachment.mime} · ${attachment.size_bytes} bytes`;
+        row.append(link); node.append(row);
+      }
+    }
     if (event.kind === "send" && event.value.state === "error" && this.editMessage) {
       const edit = document.createElement("button"); edit.type = "button"; edit.textContent = "Edit message";
       edit.onclick = () => this.editMessage?.(event.value.text);

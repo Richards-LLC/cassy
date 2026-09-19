@@ -146,6 +146,17 @@ pub fn fetch_project_alias_record(
     select_alias_record(&body, project_id)
 }
 
+fn union_project_aliases(local: &[String], server: &[String]) -> Vec<String> {
+    let mut aliases = local
+        .iter()
+        .chain(server)
+        .filter_map(|alias| canonical_project_id(alias))
+        .collect::<Vec<_>>();
+    aliases.sort();
+    aliases.dedup();
+    aliases
+}
+
 /// Best-effort refresh of `<cas_root>/.cas/config.toml [project] aliases` from
 /// the cloud, run on pull.
 ///
@@ -161,7 +172,13 @@ pub fn refresh_project_alias_record(
     timeout: Duration,
 ) -> Result<Vec<String>, CasError> {
     match fetch_project_alias_record(endpoint, token, project_id, timeout)? {
-        Some(record) => set_project_aliases_in_config_toml(cas_root, &record.aliases),
+        Some(record) => {
+            let local = crate::cloud::config::project_aliases_from_config_toml(cas_root);
+            set_project_aliases_in_config_toml(
+                cas_root,
+                &union_project_aliases(&local, &record.aliases),
+            )
+        }
         // No record for this project: leave whatever is cached alone rather
         // than erasing it on an endpoint that does not cover personal scope.
         None => Ok(crate::cloud::config::project_aliases_from_config_toml(
@@ -250,5 +267,19 @@ mod tests {
     #[test]
     fn a_malformed_body_is_an_error_rather_than_an_empty_record() {
         assert!(select_alias_record(&serde_json::json!({}), "cas-src").is_err());
+    }
+
+    #[test]
+    fn adopting_server_aliases_unions_the_local_cache() {
+        let local = vec!["github.com/richards-llc/cassy".to_string(), "old".to_string()];
+        let server = vec!["old".to_string(), "server-spelling".to_string()];
+        assert_eq!(
+            union_project_aliases(&local, &server),
+            vec![
+                "github.com/richards-llc/cassy".to_string(),
+                "old".to_string(),
+                "server-spelling".to_string()
+            ]
+        );
     }
 }

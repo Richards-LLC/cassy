@@ -1045,7 +1045,7 @@ impl PushRowResult {
 pub(crate) fn push_reason_is_permanent(reason: &str) -> bool {
     matches!(
         reason.trim().to_ascii_lowercase().as_str(),
-        "project_mismatch" | "scope_mismatch"
+        "project_mismatch" | "project_identity_conflict" | "scope_mismatch"
     )
 }
 
@@ -1056,7 +1056,10 @@ pub(crate) fn push_reason_is_permanent(reason: &str) -> bool {
 pub fn push_reason_hint(reason: &str) -> &'static str {
     match reason.trim().to_ascii_lowercase().as_str() {
         "project_mismatch" => {
-            "another project already owns this id in the cloud; re-link with `cas cloud link`, then `cas cloud queue --retry-reason project_mismatch`"
+            "the cloud project identity conflicts; inspect `cas cloud projects`, then pin with `cas cloud project set <registered-canonical-id>` or have the cloud owner register the remote alias, run `cas cloud project --adopt-aliases` to merge server aliases without dropping local entries, `cas cloud queue --retry --retry-reason project_mismatch`, and `cas cloud push`"
+        }
+        "project_identity_conflict" => {
+            "the git remote alias is not registered server-side; inspect `cas cloud projects`, have the cloud owner register it, run `cas cloud project --adopt-aliases` to merge server aliases without dropping local entries, `cas cloud queue --retry --retry-reason project_identity_conflict`, and `cas cloud push`"
         }
         "scope_mismatch" => {
             "the cloud row belongs to a different sync scope (personal vs team); push it from the owning scope, then `cas cloud queue --retry-reason scope_mismatch`"
@@ -1074,6 +1077,24 @@ pub fn push_reason_hint(reason: &str) -> &'static str {
             "unrecognized cloud reason; inspect `cas cloud queue --verbose` and report the diagnostic"
         }
     }
+}
+
+/// Recover a structured permanent rejection from a batch-level HTTP error.
+///
+/// Older cloud responses reject the whole batch with HTTP 409 instead of
+/// returning per-row results. Keep the reason on every affected queue row so
+/// doctor can report the same actionable identity failure as newer responses.
+pub(crate) fn push_reason_from_error(error: &CasError) -> Option<String> {
+    let rendered = error.to_string();
+    let lower = rendered.to_ascii_lowercase();
+    [
+        "project_identity_conflict",
+        "project_mismatch",
+        "scope_mismatch",
+    ]
+    .into_iter()
+    .find(|reason| lower.contains(reason))
+    .map(str::to_string)
 }
 
 /// Parse and validate a complete per-row result list for one entity response.

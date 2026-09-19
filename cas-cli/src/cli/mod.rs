@@ -11,6 +11,8 @@ mod claude_md;
 mod codex;
 mod codemap_cmd;
 mod history_cmd;
+mod artifact_cmd;
+pub use artifact_cmd::render_artifact_line;
 mod hub;
 mod hub_reverse_pairing;
 mod hub_service;
@@ -318,6 +320,10 @@ pub enum Commands {
     #[command(subcommand)]
     Index(index_cmd::IndexCommands),
 
+    /// Publish and inspect durable task artifacts (publish/show/list)
+    #[command(subcommand)]
+    Artifact(artifact_cmd::ArtifactCommands),
+
     /// Distilled project knowledge wiki (build/status/list)
     #[command(subcommand)]
     Knowledge(knowledge_cmd::KnowledgeCommands),
@@ -417,6 +423,7 @@ fn auth_requirement(command: &Option<Commands>) -> AuthRequirement {
         | Commands::Codemap(_)
         | Commands::History(_)
         | Commands::Index(_)
+        | Commands::Artifact(_)
         | Commands::Knowledge(_)
         | Commands::MemoryMigrate(_)
         | Commands::PurgeTestFixtures(_)
@@ -631,6 +638,7 @@ fn get_command_name(cmd: &Option<Commands>) -> String {
         Commands::Codemap(_) => "codemap".to_string(),
         Commands::History(_) => "history".to_string(),
         Commands::Index(_) => "index".to_string(),
+        Commands::Artifact(_) => "artifact".to_string(),
         Commands::Knowledge(_) => "knowledge".to_string(),
         Commands::MemoryMigrate(_) => "memory-migrate".to_string(),
         Commands::PurgeTestFixtures(_) => "purge-test-fixtures".to_string(),
@@ -718,6 +726,7 @@ fn run_command(cli: &Cli, cas_root: Option<&Path>) -> anyhow::Result<()> {
         Commands::Codemap(cmd) => codemap_cmd::execute(cmd, cli, require_cas_root(cas_root)?),
         Commands::History(cmd) => history_cmd::execute(cmd, cli, require_cas_root(cas_root)?),
         Commands::Index(cmd) => index_cmd::execute(cmd, cli, require_cas_root(cas_root)?),
+        Commands::Artifact(cmd) => artifact_cmd::execute(cmd, cli, require_cas_root(cas_root)?),
         Commands::Knowledge(cmd) => knowledge_cmd::execute(cmd, cli, require_cas_root(cas_root)?),
         Commands::MemoryMigrate(args) => memory_migrate::execute(args, require_cas_root(cas_root)?),
         Commands::PurgeTestFixtures(args) => {

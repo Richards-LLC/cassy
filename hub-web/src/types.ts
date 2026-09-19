@@ -58,14 +58,26 @@ export interface SessionState {
   rows: number;
 }
 
-/** Supervisor reply routed to this paired Commander device. */
+export type OperatorTurnKind = "answer" | "status" | "receipt" | "ask" | "blocker";
+
+export interface ArtifactRef {
+  artifact_id: string;
+  name: string;
+  mime: string;
+  size_bytes: number;
+  sha256: string;
+}
+
+/** Supervisor turn routed to this paired Commander device. */
 export interface OperatorReply {
   notification_id: number;
-  reply_to: number;
+  reply_to: number | null;
   message: string;
   summary: string;
   device_id: string;
   operator_label?: string;
+  kind?: OperatorTurnKind;
+  attachments?: ArtifactRef[];
 }
 
 /** Durable acknowledgment for a Commander SendMessage submission. */

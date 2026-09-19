@@ -1,0 +1,348 @@
+[
+  {
+    "id": "15",
+    "file": "15-vercel-deploy-logs.png",
+    "title": "Vercel runtime logs",
+    "category": "ops-feed",
+    "url": "https://vercel.com/docs/logs/runtime",
+    "finalUrl": "https://vercel.com/docs/logs/runtime",
+    "mode": "element",
+    "selector": "img[src*=\"request-log-overview-light\"]",
+    "viewport": {
+      "width": 1280,
+      "height": 800
+    },
+    "scheme": "light",
+    "size": {
+      "width": 649,
+      "height": 344
+    },
+    "status": "ok",
+    "error": null,
+    "capturedAt": "2026-09-18T16:01:53.302Z",
+    "ms": 5681
+  },
+  {
+    "id": "16",
+    "file": "16-linear-activity.png",
+    "title": "Linear issue activity",
+    "category": "ops-feed",
+    "url": "https://linear.app/docs/comment-on-issues",
+    "finalUrl": "https://linear.app/docs/comment-on-issues",
+    "mode": "element",
+    "selector": "img[alt=\"comments and reactions on a Linear issue\"]",
+    "viewport": {
+      "width": 1280,
+      "height": 800
+    },
+    "scheme": "light",
+    "size": {
+      "width": 670,
+      "height": 443
+    },
+    "status": "ok",
+    "error": null,
+    "capturedAt": "2026-09-18T16:01:58.180Z",
+    "ms": 4825
+  },
+  {
+    "id": "17",
+    "file": "17-sentry-issue.png",
+    "title": "Sentry issue details (activity sidebar)",
+    "category": "ops-feed",
+    "url": "https://raw.githubusercontent.com/getsentry/sentry-docs/master/docs/product/issues/issue-details/img/issue-details-breakdown.png",
+    "finalUrl": "https://raw.githubusercontent.com/getsentry/sentry-docs/master/docs/product/issues/issue-details/img/issue-details-breakdown.png",
+    "mode": "element",
+    "selector": "img",
+    "viewport": {
+      "width": 1280,
+      "height": 800
+    },
+    "scheme": "light",
+    "size": {
+      "width": 1280,
+      "height": 800
+    },
+    "status": "ok",
+    "error": null,
+    "capturedAt": "2026-09-18T16:15:56.779Z",
+    "ms": 2788
+  },
+  {
+    "id": "18",
+    "file": "18-pagerduty-timeline.png",
+    "title": "PagerDuty incident timeline",
+    "category": "ops-feed",
+    "url": "https://support.pagerduty.com/main/docs/incidents#incident-timeline",
+    "finalUrl": "https://support.pagerduty.com/main/docs/incidents#incident-timeline",
+    "mode": "element",
+    "selector": ".lightbox.open img",
+    "viewport": {
+      "width": 1280,
+      "height": 800
+    },
+    "scheme": "light",
+    "size": {
+      "width": 1248,
+      "height": 593
+    },
+    "status": "ok",
+    "error": null,
+    "capturedAt": "2026-09-18T16:18:30.619Z",
+    "ms": 8110
+  },
+  {
+    "id": "19",
+    "file": "19-github-pr-timeline.png",
+    "title": "GitHub PR conversation",
+    "category": "ops-feed",
+    "url": "https://github.com/vercel/next.js/pull/98716#issuecomment-5697310466",
+    "finalUrl": "https://github.com/vercel/next.js/pull/98716#issuecomment-5697310466",
+    "mode": "page",
+    "selector": null,
+    "viewport": {
+      "width": 1280,
+      "height": 800
+    },
+    "scheme": "light",
+    "size": {
+      "width": 1280,
+      "height": 800
+    },
+    "status": "ok",
+    "error": null,
+    "capturedAt": "2026-09-18T16:10:23.917Z",
+    "ms": 5581
+  },
+  {
+    "id": "20",
+    "file": "20-github-actions-log.png",
+    "title": "GitHub Actions job log (GitHub Docs figure)",
+    "category": "ops-feed",
+    "url": "https://docs.github.com/en/actions/how-tos/monitor-workflows/use-workflow-run-logs",
+    "finalUrl": "https://docs.github.com/en/actions/how-tos/monitor-workflows/use-workflow-run-logs",
+    "mode": "element",
+    "selector": "img[src*=\"copy-link-button-updated-2\"]",
+    "viewport": {
+      "width": 1280,
+      "height": 800
+    },
+    "scheme": "light",
+    "size": {
+      "width": 679,
+      "height": 279
+    },
+    "status": "ok",
+    "error": null,
+    "capturedAt": "2026-09-18T16:16:09.090Z",
+    "ms": 4017
+  },
+  {
+    "id": "21",
+    "file": "21-incident-io.png",
+    "title": "incident.io Slack incident channel",
+    "category": "ops-feed",
+    "url": "https://incident.io/",
+    "finalUrl": "https://incident.io/",
+    "mode": "element",
+    "selector": "img[src*=\"response-slackteams\"]",
+    "viewport": {
+      "width": 1280,
+      "height": 800
+    },
+    "scheme": "light",
+    "size": {
+      "width": 600,
+      "height": 455
+    },
+    "status": "ok",
+    "error": null,
+    "capturedAt": "2026-09-18T16:02:21.639Z",
+    "ms": 5586
+  },
+  {
+    "id": "22",
+    "file": "22-superhuman.png",
+    "title": "Superhuman Mail split inbox",
+    "category": "unconventional",
+    "url": "https://superhuman.com/mail",
+    "finalUrl": "https://superhuman.com/mail",
+    "mode": "element",
+    "selector": "img[alt=\"Superhuman Mail Split Inbox\"]",
+    "viewport": {
+      "width": 1280,
+      "height": 800
+    },
+    "scheme": "light",
+    "size": {
+      "width": 584,
+      "height": 508
+    },
+    "status": "ok",
+    "error": null,
+    "capturedAt": "2026-09-18T16:21:03.946Z",
+    "ms": 18515
+  },
+  {
+    "id": "23",
+    "file": "23-hey.png",
+    "title": "HEY Imbox",
+    "category": "unconventional",
+    "url": "https://www.hey.com/",
+    "finalUrl": "https://www.hey.com/",
+    "mode": "element",
+    "selector": "img[src*=\"imbox.png\"]",
+    "viewport": {
+      "width": 1280,
+      "height": 800
+    },
+    "scheme": "light",
+    "size": {
+      "width": 1025,
+      "height": 545
+    },
+    "status": "ok",
+    "error": null,
+    "capturedAt": "2026-09-18T16:02:25.761Z",
+    "ms": 4069
+  },
+  {
+    "id": "24",
+    "file": "24-things.png",
+    "title": "Things 3 Today",
+    "category": "unconventional",
+    "url": "https://culturedcode.com/things/features/",
+    "finalUrl": "https://culturedcode.com/things/features/",
+    "mode": "element",
+    "selector": "img[src*=\"2-today-mac.png\"]",
+    "viewport": {
+      "width": 1280,
+      "height": 800
+    },
+    "scheme": "light",
+    "size": {
+      "width": 441,
+      "height": 662
+    },
+    "status": "ok",
+    "error": null,
+    "capturedAt": "2026-09-18T16:02:29.632Z",
+    "ms": 3823
+  },
+  {
+    "id": "25",
+    "file": "25-notion-inbox.png",
+    "title": "Notion Mail inbox (priority view)",
+    "category": "unconventional",
+    "url": "https://www.notion.com/help/guides/getting-started-with-notion-mail",
+    "finalUrl": "https://www.notion.com/help/guides/getting-started-with-notion-mail",
+    "mode": "element",
+    "selector": "img[alt^=\"The priority view\"]",
+    "viewport": {
+      "width": 1280,
+      "height": 800
+    },
+    "scheme": "light",
+    "size": {
+      "width": 718,
+      "height": 449
+    },
+    "status": "ok",
+    "error": null,
+    "capturedAt": "2026-09-18T16:16:14.833Z",
+    "ms": 5689
+  },
+  {
+    "id": "26",
+    "file": "26-apple-journal.png",
+    "title": "Apple Journal",
+    "category": "unconventional",
+    "url": "https://www.apple.com/newsroom/2023/12/apple-launches-journal-app-a-new-app-for-reflecting-on-everyday-moments/",
+    "finalUrl": "https://www.apple.com/newsroom/2023/12/apple-launches-journal-app-a-new-app-for-reflecting-on-everyday-moments/",
+    "mode": "element",
+    "selector": "img[src*=\"Apple-Journal-app-2-up_big\"]",
+    "viewport": {
+      "width": 1280,
+      "height": 800
+    },
+    "scheme": "light",
+    "size": {
+      "width": 980,
+      "height": 700
+    },
+    "status": "ok",
+    "error": null,
+    "capturedAt": "2026-09-18T16:02:34.407Z",
+    "ms": 4732
+  },
+  {
+    "id": "27",
+    "file": "27-arc.png",
+    "title": "Arc browser (sidebar + site)",
+    "category": "unconventional",
+    "url": "https://arc.net/",
+    "finalUrl": "https://arc.net/",
+    "mode": "page",
+    "selector": null,
+    "viewport": {
+      "width": 1280,
+      "height": 800
+    },
+    "scheme": "light",
+    "size": {
+      "width": 1280,
+      "height": 800
+    },
+    "status": "ok",
+    "error": null,
+    "capturedAt": "2026-09-18T16:24:20.038Z",
+    "ms": 4859,
+    "note": " Post-capture: top 430 px cropped to remove the site's scroll-following promotional strip (calm-stork-91, 2026-09-18)."
+  },
+  {
+    "id": "28",
+    "file": "28-zulip.png",
+    "title": "Zulip topic-threaded channel",
+    "category": "team",
+    "url": "https://chat.zulip.org/#narrow/channel/101-design",
+    "finalUrl": "https://chat.zulip.org/#narrow/channel/101-design",
+    "mode": "page",
+    "selector": null,
+    "viewport": {
+      "width": 1280,
+      "height": 800
+    },
+    "scheme": "light",
+    "size": {
+      "width": 1280,
+      "height": 800
+    },
+    "status": "ok",
+    "error": null,
+    "capturedAt": "2026-09-18T16:13:37.525Z",
+    "ms": 14340
+  },
+  {
+    "id": "29",
+    "file": "29-twist-or-basecamp.png",
+    "title": "Basecamp message board",
+    "category": "team",
+    "url": "https://basecamp.com/features",
+    "finalUrl": "https://basecamp.com/features",
+    "mode": "element",
+    "selector": "img[src*=\"screenshots/message-board.webp\"]",
+    "viewport": {
+      "width": 1280,
+      "height": 800
+    },
+    "scheme": "light",
+    "size": {
+      "width": 704,
+      "height": 811
+    },
+    "status": "ok",
+    "error": null,
+    "capturedAt": "2026-09-18T16:16:23.874Z",
+    "ms": 4086
+  }
+]

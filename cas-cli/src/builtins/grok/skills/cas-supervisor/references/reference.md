@@ -32,6 +32,8 @@ cas__coordination action=message target=operator in_reply_to=N summary="..." mes
 
 The hub routes `operator` to the originating paired device and reports `queued for <device>` while offline; do not redirect this response to `supervisor`.
 
+For unprompted updates, send `target=operator kind=status|receipt|ask|blocker` and add `attachment=<artifact-id>` when needed instead of relying on pane prose.
+
 ## Supervisor override
 
 `supervisor_override=true` is the documented override for supervisor-only close and transfer operations. It is accepted only when the caller is a **registered supervisor**, the request supplies a **non-empty reason**, and the accepted decision is recorded as a **task decision note**. Review the task state and delivery evidence first; this flag does not waive data-integrity or merge-state checks.

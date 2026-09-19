@@ -2,6 +2,7 @@
 
 use assert_cmd::Command;
 use predicates::prelude::*;
+use serde::Deserialize;
 use tempfile::TempDir;
 
 fn cas_cmd(root: &std::path::Path) -> Command {
@@ -807,6 +808,46 @@ fn test_doctor_json() {
         .success()
         .stdout(predicate::str::contains(r#""name":"cas directory""#))
         .stdout(predicate::str::contains(r#""status":"ok""#));
+}
+
+#[test]
+fn test_doctor_fix_json_is_one_document_with_startup_checks() {
+    for args in [
+        &["doctor", "--fix", "--json"][..],
+        &["doctor", "--fix", "--yes", "--json"][..],
+    ] {
+        let temp = TempDir::new().unwrap();
+        cas_cmd(temp.path())
+            .current_dir(&temp)
+            .args(["init", "--yes"])
+            .assert()
+            .success();
+
+        let output = cas_cmd(temp.path())
+            .current_dir(&temp)
+            .args(args)
+            .output()
+            .expect("failed to run doctor --fix --json");
+        assert!(
+            output.status.success(),
+            "doctor failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let mut decoder = serde_json::Deserializer::from_slice(&output.stdout);
+        let checks = serde_json::Value::deserialize(&mut decoder)
+            .expect("doctor --fix --json must emit valid JSON");
+        decoder
+            .end()
+            .expect("doctor --fix --json must emit exactly one JSON document");
+        let checks = checks
+            .as_array()
+            .expect("doctor JSON output must be a checks array");
+        assert!(
+            checks.iter().any(|check| check["name"] == "auto-fix"),
+            "fix-path checks must remain in the single JSON document: {checks:?}"
+        );
+    }
 }
 
 #[test]

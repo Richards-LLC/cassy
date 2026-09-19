@@ -214,6 +214,15 @@ fn supervisor_owned_workers() -> Option<std::collections::HashSet<String>> {
     )
 }
 
+/// The Codex worker coordination note, named so its size can be measured.
+///
+/// cas-8ad7d: the SessionStart budget is 9KB and the supervisor guidance
+/// already occupies most of it. This note is appended to that guidance, so its
+/// length is part of what a headroom pin has to account for; a test that
+/// re-typed the string would measure a copy rather than what ships.
+pub const CODEX_WORKER_COORDINATION_NOTE: &str = "\n\n## Codex Worker Coordination Note\n\
+Workers are running Codex. Be explicit in assignments: include task id, acceptance criteria, required checks, and update cadence. Successful task action=start is authoritative assignment acceptance; no prose ACK is required. Ordinary worker updates surface through the inbox on the next turn; only authenticated typed blocker, merge, verification, or lifecycle events may wake an idle supervisor. Read task state and execution evidence before sending corrective prompts. For task closure, Codex workers must attempt task action=close first. Follow the returned verification-required or MERGE REQUIRED workflow: handle verification with task-verifier or mcp__cas__verification, or merge the delivery as requested. After the merge, the worker re-closes the task.";
+
 /// Inject role-specific guidance into context
 fn inject_role_guidance(
     context_parts: &mut Vec<String>,
@@ -245,10 +254,7 @@ fn inject_role_guidance(
             .map(|v| v.eq_ignore_ascii_case("codex"))
             .unwrap_or(false)
     {
-        guidance.push_str(
-            "\n\n## Codex Worker Coordination Note\n\
-Workers are running Codex. Be explicit in assignments: include task id, acceptance criteria, required checks, and update cadence. Successful task action=start is authoritative assignment acceptance; no prose ACK is required. Ordinary worker updates surface through the inbox on the next turn; only authenticated typed blocker, merge, verification, or lifecycle events may wake an idle supervisor. Read task state and execution evidence before sending corrective prompts. For task closure, Codex workers must attempt task action=close first. Follow the returned verification-required or MERGE REQUIRED workflow: handle verification with task-verifier or mcp__cas__verification, or merge the delivery as requested. After the merge, the worker re-closes the task.",
-        );
+        guidance.push_str(CODEX_WORKER_COORDINATION_NOTE);
     }
     *total_tokens += estimate_tokens(&guidance);
     context_parts.push(guidance);

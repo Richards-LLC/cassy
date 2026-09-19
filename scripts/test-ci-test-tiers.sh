@@ -131,6 +131,7 @@ require_text "$ci_text" 'merge_group:' 'CI accepts merge-queue merged-tree event
 require_text "$ci_text" 'make -C cas-cli test-ci-tiers' 'Fast Validation invokes release publication guard scripts'
 require_count "$ruleset_text" '"context": "Fast Validation"' 1 'ruleset requires the complete Fast Validation rollup once'
 require_count "$ruleset_text" '"context": "macOS Check"' 1 'ruleset requires macOS validation once'
+require_absent "$ruleset_text" '"context": "Docs Lint"' 'ruleset keeps Docs Lint out of operator-owned required contexts'
 require_absent "$ruleset_text" '"context": "Fast Validation — full suite"' 'ruleset does not mistake the lower suite fan-in for complete validation'
 require_absent "$ruleset_text" '"context": "Fast Validation — doctests"' 'ruleset does not duplicate Fast Validation doctest coverage'
 require_text "$ruleset_text" '"type": "merge_queue"' 'ruleset requires the GitHub merge queue'
@@ -138,6 +139,57 @@ require_text "$ruleset_text" '"grouping_strategy": "ALLGREEN"' 'merge queue vali
 require_text "$ruleset_text" '"max_entries_to_build": 1' 'merge queue avoids batching extra PRs into the latency path'
 require_text "$ruleset_text" '"max_entries_to_merge": 1' 'merge queue merges one proven PR at a time'
 require_text "$ruleset_text" '"min_entries_to_merge_wait_minutes": 0' 'merge queue adds no group-fill wait'
+
+# Docs-only routing is exercised by the same historical committed fixtures as
+# the classifier contract below. The workflow must keep its required contexts
+# present while routing the actual docs work through one cheap lane.
+diff_router_job="$(job_block ci-diff)"
+docs_lint_job="$(job_block docs-lint)"
+require_text "$diff_router_job" 'id: classify-diff' 'shared CI diff router classifies before job routing'
+require_text "$diff_router_job" 'class: ${{ steps.classify-diff.outputs.class }}' 'shared CI diff router publishes the diff class'
+require_text "$docs_lint_job" 'name: Docs Lint' 'docs-only lane has a stable required check name'
+require_text "$docs_lint_job" 'needs: ci-diff' 'docs-only lane uses the shared classification'
+require_text "$docs_lint_job" "needs.ci-diff.outputs.class == 'docs-only'" 'docs-only lane runs only for docs-only changes'
+require_text "$docs_lint_job" 'markdownlint-cli2' 'docs-only lane runs Markdown lint'
+require_text "$docs_lint_job" '--config .markdownlint-cli2.jsonc' 'docs-only lane uses the repository Markdown lint policy'
+require_text "$docs_lint_job" 'scripts/release-train-announce.py --validate' 'docs-only lane validates release-note drafts'
+
+# Docs design directories intentionally carry CSS, JavaScript, HTML, and image
+# assets beside Markdown. Keep the markdownlint input contract narrowed to real
+# Markdown paths; a docs-only classification must not turn those assets into
+# Markdown just because they live under docs/ (cas-58c0).
+docs_lint_markdown_step="$(named_step_block "$docs_lint_job" "Markdown lint")"
+require_text "$docs_lint_markdown_step" 'case "$path" in' 'Docs Lint filters each changed path before markdownlint'
+require_text "$docs_lint_markdown_step" '*.md) printf' 'Docs Lint passes only Markdown paths to markdownlint'
+require_absent "$docs_lint_markdown_step" 'docs/*|*.md)' 'Docs Lint does not pass every docs asset to markdownlint'
+
+docs_only_asset_fixture=(
+    docs/round-3/schemes.css
+    docs/round-3/schemes.mjs
+    docs/round-3/thread-a.html
+    docs/round-3/thread-a.png
+    docs/round-3/visual-qa.md
+)
+mapfile -t fixture_markdown_files < <(
+    printf '%s\n' "${docs_only_asset_fixture[@]}" |
+        while IFS= read -r path; do
+            case "$path" in
+                *.md) printf '%s\n' "$path" ;;
+            esac
+        done
+)
+if [[ "${fixture_markdown_files[*]}" == 'docs/round-3/visual-qa.md' ]]; then
+    printf 'ok   docs-only asset fixture keeps only its Markdown path\n'
+    pass=$((pass + 1))
+else
+    printf 'FAIL docs-only asset fixture leaked non-Markdown paths: %s\n' "${fixture_markdown_files[*]}"
+    fail=$((fail + 1))
+fi
+
+for job in scoped-validation-fast scoped-validation fast-validation-runner-route fast-validation-main-push-dedupe fast-validation-preflight fast-validation-suite-build fast-validation-suite-shards fast-validation-suite fast-validation-docs fast-validation macos-check clippy test-compile-guard; do
+    require_text "$(job_block "$job")" "needs.ci-diff.outputs.class != 'docs-only'" \
+        "$job skips docs-only diffs before allocating its full-tier work"
+done
 
 # Self-hosted pilot security contract (cas-f5638). This repo is public, so
 # fork/untrusted PR code must be unable to request the persistent runner. The
@@ -336,7 +388,7 @@ require_text "$route" 'mode=self-hosted' 'runner route exposes selected self-hos
 require_text "$route" 'mode=hosted' 'runner route exposes selected hosted fallback mode'
 require_absent "$route" 'actions/checkout' 'runner route does not execute merge-queue source before label selection'
 
-require_text "$suite_build" 'needs: [fast-validation-runner-route, fast-validation-main-push-dedupe]' 'required archive build waits for explicit runner routing and the main-push tree gate'
+require_text "$suite_build" 'needs: [ci-diff, fast-validation-runner-route, fast-validation-main-push-dedupe]' 'required archive build waits for diff routing, explicit runner routing, and the main-push tree gate'
 require_text "$suite_build" 'fromJSON(needs.fast-validation-runner-route.outputs.runner)' 'archive build receives the fail-safe selected runner labels'
 require_text "$suite_build" "needs.fast-validation-runner-route.outputs.mode != 'self-hosted'" 'archive rejects an untrusted self-hosted route before assignment'
 require_text "$suite_build" "github.event_name == 'merge_group'" 'self-hosted archive is restricted to merge-queue events'
@@ -350,7 +402,7 @@ suite_trust_step="$(named_step_block "$suite_build" 'Verify merge-queue self-hos
 require_text "$suite_trust_step" './scripts/check-cassy-actions-runner-isolation.sh' 'self-hosted archive fail-closed trust step pins an approved slot tuple'
 for job in fast-validation-preflight fast-validation-docs; do
     block="$(job_block "$job")"
-    require_text "$block" 'needs: [fast-validation-runner-route, fast-validation-main-push-dedupe]' "$job waits for explicit runner routing and the main-push tree gate"
+    require_text "$block" 'needs: [ci-diff, fast-validation-runner-route, fast-validation-main-push-dedupe]' "$job waits for diff routing, explicit runner routing, and the main-push tree gate"
     require_text "$block" 'fromJSON(needs.fast-validation-runner-route.outputs.runner)' "$job receives the fail-safe selected runner labels"
     require_text "$block" "needs.fast-validation-runner-route.outputs.mode != 'self-hosted'" "$job rejects an untrusted self-hosted route before assignment"
     require_text "$block" "github.event_name == 'merge_group'" "$job limits self-hosted execution to merge-queue events"
@@ -674,6 +726,8 @@ if [[ -x "$classifier" ]]; then
     require_text "$("$classifier" 967e85c7^ 967e85c7)" 'empty' 'empty ancestry merge fast-passes'
     require_text "$("$classifier" c6c4122f^ c6c4122f)" 'docs-only' 'docs-only change fast-passes'
     require_text "$("$classifier" 49b434bf^ 49b434bf)" 'docs-only' 'PR 630 CODEMAP-only change fast-passes'
+    require_text "$("$classifier" 66b059b4^ 66b059b4)" 'rust-touched' 'mixed version bump plus changelog runs Rust tier'
+    require_text "$("$classifier" bb7417ef^ bb7417ef)" 'rust-touched' 'code-only change runs Rust tier'
     require_text "$("$classifier" 7c233bef^ 7c233bef)" 'hub-web-only' 'hub-web-only change skips Rust work'
     require_text "$("$classifier" c070753a^ c070753a)" 'slack-bridge-only' 'slack-bridge-only change skips Rust work'
     require_text "$("$classifier" 15edf2ef^ 15edf2ef)" 'version-bump' 'two-file package version bump fast-passes'
@@ -891,7 +945,7 @@ for job in fast-validation-preflight fast-validation-docs clippy test-compile-gu
 done
 require_text "$suite_build" 'CARGO_TARGET_DIR:-target}/debug' 'suite packaging reads the configured Cargo target directory'
 require_text "$suite_build" "--transform='s,^cas$,target/debug/cas,'" 'suite packaging preserves the hosted runner archive layout'
-require_text "$suite_shards" 'needs: [fast-validation-suite-build, fast-validation-main-push-dedupe]' 'shards wait for the shared test archive and main-push tree gate'
+require_text "$suite_shards" 'needs: [ci-diff, fast-validation-suite-build, fast-validation-main-push-dedupe]' 'shards wait for diff routing, the shared test archive, and main-push tree gate'
 require_text "$suite_shards" 'actions/download-artifact@v4' 'shards download the shared nextest archive'
 require_text "$suite_shards" 'tar -xzf fast-validation-suite-runner.tar.gz' 'shards restore the executable CLI runner payload'
 require_text "$suite_shards" 'test -x target/debug/cas' 'shards verify the restored CLI runner remains executable'
@@ -901,7 +955,7 @@ require_absent "$suite_shards" '/var/lib/cassy-actions/' 'shards do not depend o
 require_text "$suite_shards" '--workspace-remap "$GITHUB_WORKSPACE"' 'shards remap the self-hosted archive workspace to their hosted checkout'
 require_text "$suite_shards" 'INSTA_WORKSPACE_ROOT: ${{ github.workspace }}' 'shards pin insta snapshot lookup to their hosted checkout'
 require_text "$suite_shards" 'scripts/run-verified-tests.sh nextest run --archive-file fast-validation-suite.tar.zst --workspace-remap "$GITHUB_WORKSPACE" --no-fail-fast --partition count:${{ matrix.shard }}/3' 'shards execute every archived workspace nextest binary exactly once'
-require_text "$suite" 'needs: [fast-validation-suite-shards, fast-validation-main-push-dedupe]' 'required full-suite context fans in every shard after the main-push tree gate'
+require_text "$suite" 'needs: [ci-diff, fast-validation-suite-shards, fast-validation-main-push-dedupe]' 'required full-suite context fans in every shard after diff routing and the main-push tree gate'
 require_text "$suite" 'test "$SHARDS" = success' 'required full-suite context rejects failed shards'
 require_text "$(<"$makefile")" '../scripts/run-verified-tests.sh nextest run --workspace --no-fail-fast' 'local make test verifies CI workspace nextest scope'
 require_text "$docs" 'scripts/run-verified-tests.sh test -p cas --doc' 'doctest coverage remains in Fast Validation with an execution receipt'
@@ -1105,7 +1159,7 @@ fi
 
 receipt_job="$(job_block record-pr-validation)"
 require_text "$ci_text" 'actions: read' 'CI may query validation receipt artifacts'
-require_text "$receipt_job" 'needs: [fast-validation, macos-check, clippy, test-compile-guard]' 'tree receipt waits for every per-tree validation lane'
+require_text "$receipt_job" 'needs: [ci-diff, fast-validation, macos-check, clippy, test-compile-guard]' 'tree receipt waits for diff routing and every per-tree validation lane'
 require_text "$receipt_job" "needs.fast-validation.result == 'success'" 'tree receipt requires successful Fast Validation'
 require_text "$receipt_job" "needs.macos-check.result == 'success'" 'tree receipt requires successful macOS Check'
 require_text "$receipt_job" "needs.clippy.result == 'success'" 'tree receipt requires successful Clippy'
@@ -1206,7 +1260,7 @@ for job in fast-validation-preflight fast-validation-suite-build fast-validation
     require_text "$block" 'fast-validation-main-push-dedupe' "$job waits for the main-push tree gate"
     require_text "$block" "needs.fast-validation-main-push-dedupe.outputs.run-fast-validation == 'true'" "$job skips only a successfully receipt-matched main tree"
 done
-require_text "$macos" 'needs: fast-validation-main-push-dedupe' 'macOS Check waits for the same main-push tree gate'
+require_text "$macos" 'needs: [ci-diff, fast-validation-main-push-dedupe]' 'macOS Check waits for diff routing and the same main-push tree gate'
 require_text "$macos" "needs.fast-validation-main-push-dedupe.outputs.run-fast-validation == 'true'" 'macOS Check skips only a successfully receipt-matched main tree'
 require_text "$fan_in" 'Report successful merge-queue validation reused by this main push' 'Fast Validation rollup gives the main-push shortcut a named receipt'
 require_text "$fan_in" 'needs.fast-validation-main-push-dedupe.outputs.validating-run-id' 'Fast Validation notice names the validating merge-queue run'

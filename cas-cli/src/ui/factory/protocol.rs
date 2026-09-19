@@ -6,6 +6,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+use cas_types::ArtifactRef;
+
 /// Original daemon protocol version used before explicit negotiation existed.
 pub const LEGACY_PROTOCOL_VERSION: u32 = 1;
 /// Current additive daemon protocol version.
@@ -63,18 +65,53 @@ pub struct MessageAttribution {
     pub operator_verified: bool,
 }
 
+/// The kind of a supervisor turn delivered to Commander.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OperatorTurnKind {
+    Answer,
+    Status,
+    Receipt,
+    Ask,
+    Blocker,
+}
+
+impl Default for OperatorTurnKind {
+    fn default() -> Self {
+        Self::Answer
+    }
+}
+
+impl OperatorTurnKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Answer => "answer",
+            Self::Status => "status",
+            Self::Receipt => "receipt",
+            Self::Ask => "ask",
+            Self::Blocker => "blocker",
+        }
+    }
+}
+
 /// Durable supervisor-to-Commander reply payload. The device id is included
 /// in the daemon frame so the hub can enforce recipient routing even when one
-/// machine has multiple paired browsers attached.
+/// machine has multiple paired browsers attached. Missing `kind` and
+/// `attachments` decode as the v1 answer shape.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OperatorReplyPayload {
     pub schema_version: u32,
-    pub reply_to: i64,
+    #[serde(default)]
+    pub reply_to: Option<i64>,
     pub message: String,
     pub summary: String,
     pub device_id: String,
     #[serde(default)]
     pub operator_label: Option<String>,
+    #[serde(default)]
+    pub kind: OperatorTurnKind,
+    #[serde(default)]
+    pub attachments: Vec<ArtifactRef>,
 }
 
 impl MessageAttribution {
@@ -296,12 +333,17 @@ pub enum DaemonMessage {
     /// handed to the daemon's connected hub transport.
     OperatorReply {
         notification_id: i64,
-        reply_to: i64,
+        #[serde(default)]
+        reply_to: Option<i64>,
         message: String,
         summary: String,
         device_id: String,
         #[serde(default)]
         operator_label: Option<String>,
+        #[serde(default)]
+        kind: OperatorTurnKind,
+        #[serde(default)]
+        attachments: Vec<ArtifactRef>,
     },
 
     /// Durable acknowledgment for a Commander semantic message.
@@ -867,6 +909,37 @@ mod tests {
             } if device_id == "phone-7"
         ));
         let _ = message;
+    }
+
+    #[test]
+    fn operator_reply_payload_keeps_v1_decode_and_v2_turn_metadata() {
+        let legacy: OperatorReplyPayload = serde_json::from_str(
+            r#"{"schema_version":1,"reply_to":41,"message":"ready","summary":"reply","device_id":"device-7"}"#,
+        )
+        .unwrap();
+        assert_eq!(legacy.reply_to, Some(41));
+        assert_eq!(legacy.kind, OperatorTurnKind::Answer);
+        assert!(legacy.attachments.is_empty());
+
+        let current = OperatorReplyPayload {
+            schema_version: 2,
+            reply_to: None,
+            message: "Build is green".into(),
+            summary: "status".into(),
+            device_id: "*".into(),
+            operator_label: None,
+            kind: OperatorTurnKind::Status,
+            attachments: vec![cas_types::ArtifactRef {
+                artifact_id: "art-1".into(),
+                name: "report.pdf".into(),
+                mime: "application/pdf".into(),
+                size_bytes: 42,
+                sha256: "ab".repeat(32),
+            }],
+        };
+        let encoded = serde_json::to_string(&current).unwrap();
+        let decoded: OperatorReplyPayload = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, current);
     }
 
     #[test]

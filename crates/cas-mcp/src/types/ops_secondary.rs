@@ -436,6 +436,36 @@ pub struct VerificationRequest {
     pub required_checks: Option<String>,
 }
 
+/// Unified published-artifact operations request (cassy#910).
+///
+/// One call, one local path: the runtime resolves the path against the task's
+/// publishable roots, hashes and measures the bytes, records the artifact, and
+/// uploads it when Cloud storage is live. A harness never computes a digest or
+/// touches an upload URL.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct ArtifactRequest {
+    /// Action to perform
+    #[schemars(description = "Action: 'publish', 'show', 'list'")]
+    pub action: String,
+
+    /// Task the artifact belongs to (publish, list)
+    #[schemars(description = "Task ID owning the artifact, e.g. 'cas-b72a' (publish, list)")]
+    #[serde(default)]
+    pub task_id: Option<String>,
+
+    /// Local file to publish (publish)
+    #[schemars(
+        description = "Absolute or relative path to the file to publish. Must resolve inside the task's artifacts directory ([factory] artifacts_root/<task-id>/) or the project checkout; symlinks that escape either root are refused (publish)"
+    )]
+    #[serde(default)]
+    pub path: Option<String>,
+
+    /// Artifact record ID (show)
+    #[schemars(description = "Artifact record ID, e.g. 'art-7f3a9c21' (show)")]
+    #[serde(default)]
+    pub id: Option<String>,
+}
+
 /// Unified distilled-knowledge (project wiki) operations request.
 ///
 /// This is the page surface of the knowledge store (EPIC cas-7d31). It is
@@ -851,6 +881,16 @@ pub struct CoordinationRequest {
     #[serde(default, deserialize_with = "deser::option_i64")]
     pub in_reply_to: Option<i64>,
 
+    /// Typed Commander turn kind for supervisor messages to `target=operator`.
+    #[schemars(description = "Commander turn kind: answer, status, receipt, ask, or blocker")]
+    #[serde(default)]
+    pub kind: Option<String>,
+
+    /// Published artifact id to attach to a Commander turn.
+    #[schemars(description = "Published artifact id to attach to a Commander turn")]
+    #[serde(default)]
+    pub attachment: Option<String>,
+
     /// Target agent name for hold_worker/release_worker/clear_context/message/remind.
     /// `worker_names` is accepted as an alias for hold_worker/release_worker.
     #[schemars(
@@ -1237,6 +1277,8 @@ impl CoordinationRequest {
             merge_request: self.merge_request,
             blocker: self.blocker,
             in_reply_to: self.in_reply_to,
+            kind: self.kind.clone(),
+            attachment: self.attachment.clone(),
             prompt: self.prompt.clone(),
             max_iterations: self.max_iterations,
             completion_promise: self.completion_promise.clone(),

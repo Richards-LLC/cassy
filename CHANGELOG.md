@@ -7,6 +7,28 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.26.0] - 2026-09-19
+
+### Fixed
+
+- Credential-bearing structs no longer derive `Debug`. Fourteen types across the
+  cloud clients, hub pairing, the bridge server, factory daemon and the
+  verification store printed a live bearer token, API key, pairing capability or
+  pre-signed upload URL verbatim into any `{:?}`, tracing field, panic message or
+  error chain that formatted them. Each now has a redacting `Debug` and a test,
+  and a repo-wide guard test fails if a new one is added.
+
+### Added
+
+- `cas artifact publish|show|list` and the matching `artifact` MCP tool: hand the
+  runtime a local path and it records a durable, citable artifact for a task.
+  Cassy resolves the path against the task's artifacts directory and the
+  checkout (refusing symlinks that escape either, and the `.cas`/`.git`
+  directories outright), measures and hashes the bytes, enforces a 25 MiB
+  ceiling before any network call, and uploads to Cloud storage when it is
+  available. A publish still succeeds and returns an `artifact_id` when storage
+  is unreachable, so the record can be cited either way.
+
 ## [3.25.8] - 2026-09-18
 
 ### Added

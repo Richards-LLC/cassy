@@ -91,6 +91,8 @@ Integration tests are in `cas-cli/tests/`. Key test files:
 - `team_sync_test.rs` — `cas cloud sync` team-queue drain path
 - `memory_share_test.rs` — `cas memory share|unshare` CLI behavior
 - `team_memories_e2e_test.rs` — end-to-end team-memories flow (share → push → pull)
+- `artifact_publish_test.rs` — `cas artifact publish` path guard, size ceiling, and the assertion that a signed upload URL never reaches disk or stdout
+- `credential_debug_guard_test.rs` — repo-wide guard: no struct holding a token, API key or pre-signed URL may derive `Debug` (a derived one prints the credential verbatim). Add a redacting `impl fmt::Debug` plus a test rather than an allowlist entry.
 
 ### Terminal output gate
 
@@ -138,6 +140,34 @@ Skill `preconditions` and `postconditions` are advisory metadata: Cassy does
 not execute or evaluate them. They are surfaced in `cas skill show` and in
 generated `SKILL.md` sections so consumers can evaluate them in their own
 runtime.
+
+### Editing supervisor or worker guidance: the SessionStart budget is a hard constraint
+
+`cas-supervisor.md` and `cas-worker.md` are not ordinary docs. Their bodies are
+injected verbatim into the SessionStart `additionalContext`, which has a **9 216 B
+aggregate budget** (`hooks::handlers::session_budget`). Role guidance is
+*protected*: it is never compacted. Everything else — Ready Tasks, Helpful
+Memories, Available Skills, the GitHub issue triage and its open-issue titles —
+is degradable, so when the guidance grows, one of those is silently replaced by a
+one-line "run this command instead" summary. Nobody sees an error; a section just
+stops being there.
+
+That is not hypothetical. In cas-caaf a 796 B role note pushed the payload over
+budget and a supervisor lost the open-issue titles in live sessions, while CI
+stayed green because the note only appears when `CAS_FACTORY_WORKER_CLI=codex`.
+
+Three tests hold the line; if you grow the body, expect to meet them:
+
+| Test | What it bounds |
+| --- | --- |
+| `test_supervisor_guidance_under_8kb` | the guidance as a component (8 000 B soft cap, 8 192 B ceiling) |
+| `supervisor_guidance_leaves_room_for_the_rest_of_the_session_start_payload` | what the guidance *leaves* — at least `SESSION_START_GUIDANCE_REMAINDER_FLOOR_BYTES` (2 400 B) of the budget for every other section |
+| `the_codex_worker_matrix_still_fits_the_session_start_budget` | the same bound with the Codex worker note appended (`CAS_FACTORY_WORKER_CLI` unset and `codex`) |
+
+The remedy when one fails is always the same: move detail into
+`cas-supervisor/references/` (or `cas-worker/references/`) and leave a pointer.
+The body is for rules that apply every session; everything else is one named
+command away.
 
 ### Builtin skill references
 

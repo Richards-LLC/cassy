@@ -731,7 +731,7 @@ pub struct ContextStats {
 pub type SurfacedItemCallback = Box<dyn Fn(&str, &str, Option<&str>)>;
 
 mod build_start;
-mod coordination;
+pub mod coordination;
 mod plan_mode;
 
 #[cfg(test)]

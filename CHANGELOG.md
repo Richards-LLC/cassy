@@ -7,6 +7,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.26.0] - 2026-09-19
+
 ### Fixed
 
 - Credential-bearing structs no longer derive `Debug`. Fourteen types across the

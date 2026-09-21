@@ -1,20 +1,42 @@
 import { machineFooterMarkup, pairedMachinesDialogMarkup, renderPairedMachines } from '../src/paired-machines';
-import { ConversationList } from '../src/conversation-list';
+import { ConversationList, type ConversationRow } from '../src/conversation-list';
 import { ConversationHistory } from '../src/conversation-history';
 import { ConversationView } from '../src/conversation-view';
 import { conversationShellMarkup } from '../src/conversation-shell';
 import type { GhosttyRow } from '../src/terminal/ghostty/core';
 
+// The Pebble list from docs/design/hub-messaging/round-3/list.html: three
+// machines across six projects, Atlas and Studio Mac each on two projects, the
+// selected Atlas row waiting on the operator, Studio Mac carrying two unread.
+// Machine ids are chosen so machine-accent.ts lands them on indigo, green and
+// violet in that order (see machine-accent.test.ts).
+export const FIXTURE_MACHINES = [
+  { id: 'atlas-linux', label: 'Atlas · Linux', address: 'atlas.test', connection: 'Connected', connected: true, lastSeen: 'Last seen just now', runtime: '3.26.0' },
+  { id: 'studio-mac', label: 'Studio Mac · macOS', address: 'studio.test', connection: 'Connected', connected: true, lastSeen: 'Last seen just now', runtime: '3.26.0' },
+  { id: 'bench-1', label: 'Bench · Linux', address: 'bench.test', connection: 'Connected', connected: true, lastSeen: 'Last seen 2h ago', runtime: '3.26.0' },
+];
+
+export const FIXTURE_SUPERVISOR = 'patient-pelican-9';
+
+export function fixtureConversationRows(selected: boolean): ConversationRow[] {
+  const base = { freshness: 'Catalog checked just now', connection: 'Live', attention: 0, unread: 0, selected: false };
+  return [
+    { ...base, key: 'atlas-linux:one', machineId: 'atlas-linux', session: 'one', supervisor: FIXTURE_SUPERVISOR, projectDir: '/projects/cas-src', host: 'Atlas · Linux', when: '09:58', preview: 'Fix the warning in-train, or ship allowlisted?', attention: 1, selected },
+    { ...base, key: 'studio-mac:two', machineId: 'studio-mac', session: 'two', supervisor: 'calm-otter-4', projectDir: '/projects/gabber-studio', host: 'Studio Mac · macOS', preview: 'Pass two is green — every pack in one place.', unread: 2 },
+    { ...base, key: 'atlas-linux:three', machineId: 'atlas-linux', session: 'three', supervisor: 'steady-heron-2', projectDir: '/projects/petra-stella-cloud', host: 'Atlas · Linux', when: 'Tue', freshness: 'Catalog checked 1m ago', preview: 'Preview is up for the alias merge.' },
+    { ...base, key: 'studio-mac:four', machineId: 'studio-mac', session: 'four', supervisor: 'quiet-marten-7', projectDir: '/projects/openclaw', host: 'Studio Mac · macOS', when: 'Tue', preview: 'Rebased and pushed; nothing waiting.' },
+    { ...base, key: 'bench-1:five', machineId: 'bench-1', session: 'five', supervisor: 'bright-otter-3', projectDir: '/projects/mecha-cassy', host: 'Bench · Linux', when: 'Mon', freshness: 'Catalog checked 2h ago', preview: 'Posted both threads to the channel.' },
+    { ...base, key: 'bench-1:six', machineId: 'bench-1', session: 'six', supervisor: 'calm-heron-5', projectDir: '/projects/cas-hub-static', host: 'Bench · Linux', when: 'Mon', freshness: 'Catalog checked 2h ago', preview: 'Nothing waiting on you.' },
+  ];
+}
+
 export function renderConversationFixture(app: HTMLElement, state: string): void {
-  const supervisor = 'patient-pelican-9';
+  const supervisor = FIXTURE_SUPERVISOR;
   const selected = !['conversations-list', 'paired-machines'].includes(state);
-  app.innerHTML = conversationShellMarkup({ selected, supervisor, projectDir: '/projects/cas-src', host: 'Atlas · Linux', loaded: true, paired: true });
-  new ConversationList().render(app.querySelector('#conversation-list')!, [
-    { key: 'atlas:one', machineId: 'atlas', session: 'one', supervisor, projectDir: '/projects/cas-src', host: 'Atlas · Linux', freshness: 'Catalog checked just now', connection: 'Live', attention: 1, selected },
-    { key: 'studio:two', machineId: 'studio', session: 'two', supervisor: 'calm-otter-4', projectDir: '/projects/gabber-studio', host: 'Studio Mac · macOS', freshness: 'Catalog checked 1m ago', connection: 'Live', attention: 0, selected: false },
-  ], () => {});
-  const machines = [{ id: 'atlas', label: 'Atlas · Linux', address: 'atlas.test', connection: 'Connected', connected: true, lastSeen: 'Last seen just now', runtime: '3.25.3' }, { id: 'studio', label: 'Studio Mac · macOS', address: 'studio.test', connection: 'Connected', connected: true, lastSeen: 'Last seen just now', runtime: '3.25.3' }];
-  app.querySelector('#hub-footer-badges')!.innerHTML = machineFooterMarkup(machines, 2, 'fixture');
+  app.innerHTML = conversationShellMarkup({ selected, supervisor, projectDir: '/projects/cas-src', host: 'Atlas · Linux', machineId: 'atlas-linux', loaded: true, paired: true });
+  new ConversationList().render(app.querySelector('#conversation-list')!, fixtureConversationRows(selected), () => {});
+  const machines = FIXTURE_MACHINES;
+  app.querySelector('#hub-footer-badges')!.innerHTML = machineFooterMarkup(machines, machines.length, 'fixture');
   app.insertAdjacentHTML('beforeend', pairedMachinesDialogMarkup());
   renderPairedMachines(app.querySelector('#paired-machines-list')!, machines, async () => {});
   const dialog = app.querySelector<HTMLDialogElement>('#paired-machines-dialog')!;

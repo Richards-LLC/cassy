@@ -2771,26 +2771,40 @@ dialog form > *,
 .cloud-brand { display: inline-flex; align-items: center; gap: var(--space-2); color: var(--text-hi); white-space: nowrap; font: var(--weight-medium) var(--fs-lg)/1.2 var(--font-display); }
 .cloud-brand svg { width: var(--space-8); height: var(--space-8); color: var(--color-action); flex: none; }
 .project-badge { display: inline-block; max-width: 100%; width: fit-content; padding: var(--space-1) var(--space-2); background: var(--bg-active); color: var(--color-action); font: var(--weight-semibold) var(--fs-md)/var(--line-ui) var(--font-ui); border-radius: var(--radius-card); overflow-wrap: anywhere; }
-.conversation-shell { display: grid; grid-template-columns: var(--context-panel-width) minmax(0, 1fr) var(--worker-collapsed-width); height: 100dvh; overflow: hidden; color: var(--text-hi); background: var(--bg-root); }
+.conversation-shell { display: grid; grid-template-columns: var(--conversation-rail-width) minmax(0, 1fr) var(--worker-collapsed-width); height: 100dvh; overflow: hidden; color: var(--ink); background: var(--canvas); }
 .conversation-shell button { min-height: var(--rail-item-min); }
-.conversation-sidebar { display: flex; flex-direction: column; min-width: 0; min-height: 0; border-inline-end: var(--line-width) solid var(--line-subtle); }
-.conversation-list-heading { padding: var(--space-6); padding-bottom: var(--space-4); }
-.conversation-list-title { display: flex; flex-direction: row; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-2); margin-top: var(--space-6); }
-.conversation-list-title h1 { font: var(--weight-medium) var(--fs-verdict)/1.1 var(--font-display); margin: 0; }
+/* == Pebble rail (EPIC cas-cac1) ==
+   The rail is a panel lifted off the canvas by --lift-edge, not a hairline.
+   Rows are 20px pebbles 4px apart with no separators; the selected row takes
+   the machine's --accent-soft and --lift. The machine accent is set by the
+   machine-accent-N class on each row (hub-web/src/machine-accent.ts). */
+.conversation-sidebar { display: flex; flex-direction: column; min-width: 0; min-height: 0; position: relative; z-index: 1; background: var(--panel); box-shadow: var(--lift-edge); }
+.conversation-list-heading { padding: 22px 18px 18px; }
+.conversation-list-title { display: flex; flex-direction: row; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-2); margin-top: var(--space-4); }
+.conversation-list-title h1 { font: var(--weight-semibold) 22px/1.2 var(--font-ui); letter-spacing: -0.015em; margin: 0 6px; }
 .conversation-list-title button { font-size: var(--fs-meta); }
-.conversation-list-heading p { color: var(--text-mid); margin: var(--space-3) 0 0; }
-#conversation-list { overflow-y: auto; min-height: 0; }
-.conversation-sidebar footer { padding: var(--space-4) var(--space-6); margin-top: auto; border-top: var(--line-width) solid var(--line-subtle); }
+.conversation-list-heading p { color: var(--ink-mid); margin: var(--space-3) 6px 0; }
+#conversation-list { overflow-y: auto; min-height: 0; display: flex; flex-direction: column; gap: var(--space-1); padding: 0 14px var(--space-4) 18px; }
+.conversation-sidebar footer { padding: var(--space-4) 18px; margin-top: auto; }
 .conversation-sidebar footer button { width: 100%; font-size: var(--fs-meta); }
-.conversation-row { display: flex; flex-direction: column; align-items: flex-start; text-align: left; width: 100%; padding: var(--space-6); gap: var(--space-2); border: 0; border-top: var(--line-width) solid var(--line-subtle); border-radius: 0; background: var(--bg-root); color: var(--text-hi); }
-.conversation-row:hover { background: var(--bg-hover); color: var(--text-hi); }
-.conversation-row[aria-current="true"] { background: var(--bg-panel); color: var(--text-hi); border-inline-start: var(--space-1) solid var(--color-action); padding-inline-start: calc(var(--space-6) - var(--space-1)); }
-.conversation-supervisor { font: var(--weight-medium) var(--fs-base)/var(--line-ui) var(--font-mono); overflow-wrap: anywhere; }
-.conversation-host, .conversation-freshness { color: var(--text-mid); font-size: var(--fs-meta); overflow-wrap: anywhere; }
-.conversation-row-state { display: flex; align-items: baseline; flex-wrap: wrap; gap: var(--space-3); width: 100%; font-size: var(--fs-meta); color: var(--text-mid); }
-.conversation-attention { color: var(--state-warn); font-weight: var(--weight-semibold); }
-.conversation-attention::before { content: "● "; }
-.conversation-empty { margin: var(--space-6); color: var(--text-mid); }
+.conversation-row { display: grid; grid-template-columns: 42px minmax(0, 1fr) auto; column-gap: 13px; row-gap: 3px; align-items: center; text-align: left; width: 100%; flex: none; padding: var(--space-3) 14px; border: 0; border-radius: 20px; background: var(--color-transparent); color: var(--ink); }
+.conversation-row:hover { background: var(--bg-hover); color: var(--ink); }
+.conversation-row[aria-current="true"] { background: var(--accent-soft); color: var(--ink); box-shadow: var(--lift); }
+.conversation-avatar { grid-row: span 2; display: flex; align-items: center; justify-content: center; width: 42px; height: 42px; border-radius: var(--radius-pill); background: var(--accent); color: var(--accent-fg); font: var(--weight-semibold) 17px/1 var(--font-ui); }
+.conversation-who { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; min-width: 0; }
+.conversation-supervisor { font: var(--weight-semibold) var(--fs-md)/1.35 var(--font-ui); overflow-wrap: anywhere; }
+.conversation-sep { width: 3px; height: 3px; border-radius: var(--radius-pill); background: var(--ink-soft); flex: none; }
+.conversation-row .project-badge { padding: 0; border-radius: 0; background: var(--color-transparent); color: var(--ink-soft); font: var(--weight-medium) var(--fs-xs)/1.35 var(--font-mono); }
+.conversation-when { justify-self: end; font-size: var(--fs-xs); color: var(--ink-soft); white-space: nowrap; }
+.conversation-when.hot { color: var(--warn-text); font-weight: var(--weight-semibold); }
+.conversation-preview { grid-column: 2; font-size: var(--fs-meta); line-height: 1.35; color: var(--ink-soft); overflow-wrap: anywhere; }
+.conversation-preview.bold { color: var(--ink); font-weight: var(--weight-medium); }
+.conversation-flag { grid-column: 3; justify-self: end; width: 10px; height: 10px; border-radius: var(--radius-pill); background: var(--ask-deep); }
+.conversation-unread { justify-self: end; min-width: 21px; padding: 2px 7px; border-radius: var(--radius-pill); text-align: center; background: var(--accent); color: var(--accent-fg); font: var(--weight-semibold) var(--fs-xs)/1.4 var(--font-ui); }
+.conversation-empty { margin: var(--space-6) 18px; color: var(--ink-mid); }
+.compose-fab { display: none; position: fixed; right: 18px; bottom: calc(18px + env(safe-area-inset-bottom)); z-index: 2; width: 56px; height: 56px; padding: 0; border: 0; border-radius: var(--radius-pill); background: var(--you-bg); color: var(--you-fg); box-shadow: var(--lift-strong); align-items: center; justify-content: center; }
+.compose-fab:hover { background: var(--you-bg); color: var(--you-fg); }
+.compose-fab svg { width: 24px; height: 24px; display: block; }
 .conversation-main { display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; }
 .conversation-heading { padding: var(--space-4) var(--space-6); border-bottom: var(--line-width) solid var(--line-subtle); }
 .conversation-topline { display: flex; justify-content: space-between; align-items: center; gap: var(--space-2); margin-bottom: var(--space-4); }
@@ -2842,7 +2856,13 @@ dialog form > *,
 .conversation-eyebrow { font-size: var(--fs-xs); letter-spacing: var(--tracking-label); color: var(--color-action); }
 @media (max-width: 53rem), (max-height: 30rem) and (pointer: coarse) {
   .conversation-shell { display: block; height: 100dvh; }
-  .conversation-sidebar { height: 100%; border-inline-end: 0; }
+  /* Phone: the list is the page — full width, no rail edge, and the compose
+     FAB floats bottom right above the footer while the list is showing. */
+  .conversation-sidebar { height: 100%; box-shadow: none; }
+  .conversation-list-heading { padding: 20px 12px 14px; }
+  #conversation-list { padding: 0 12px var(--space-4); }
+  .conversation-sidebar footer { padding: var(--space-3) 12px; padding-inline-end: calc(56px + 30px); }
+  .conversation-shell:not(.thread-open) .compose-fab { display: flex; }
   .conversation-main, .conversation-context { display: none; }
   .conversation-shell.thread-open .conversation-sidebar { display: none; }
   .conversation-shell.thread-open .conversation-main { display: flex; height: 100%; }
@@ -2888,7 +2908,9 @@ dialog form > *,
 .hub-footer-meta { display: flex; flex-wrap: wrap; justify-content: space-between; gap: var(--space-2); font-size: var(--fs-xs); color: var(--text-mid); }
 .machines-dialog-heading { display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); }
 .machines-dialog-heading button { min-width: var(--rail-item-min); min-height: var(--rail-item-min); }
-#paired-machines-dialog { padding: var(--space-6); overflow-y: auto; }
+/* Both axes scroll: dialog[open] hides x, and a hidden axis makes the strict
+   visual-qa probe read a third paired machine below the fold as clipped. */
+#paired-machines-dialog { padding: var(--space-6); overflow: auto; }
 #paired-machines-dialog h2 { margin-top: var(--space-3); margin-bottom: var(--space-2); font: var(--weight-medium) var(--fs-lg)/1.2 var(--font-display); }
 .machine-register-hint, .paired-machine p { color: var(--text-mid); font-size: var(--fs-meta); overflow-wrap: anywhere; }
 .paired-machine { border-top: var(--line-width) solid var(--line-subtle); padding: var(--space-4) 0; }

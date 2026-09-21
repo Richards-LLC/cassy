@@ -86,6 +86,10 @@ const surfaces = new Map<string, TerminalSurface>();
 const transcripts = new Map<string, TranscriptView>();
 const conversationViews = new Map<string, ConversationView>();
 const conversationHistories = new Map<string, ConversationHistory>();
+/** Supervisor turns per thread the operator had on screen the last time that thread was open. */
+const readReplies = new Map<string, number>();
+/** Rows as last rendered, so the compose FAB can pick the thread that most wants the operator. */
+let conversationRows: ConversationRow[] = [];
 const conversationList = new ConversationList();
 let hubPresentation: "conversation" | "terminal" = "conversation";
 const pendingSubmissions = new Set<string>();
@@ -2159,7 +2163,7 @@ function render(captureDraft = true): void {
     machineDialog.close(); machineDialog.showModal();
   }
   if (hubPresentation === "conversation") {
-    arrangeConversationShell(app, { selected: Boolean(selectedSession), supervisor, projectDir: selectedHubSession?.project_dir, host: selected?.label, loaded: machineCatalogLoaded, paired: machines.size > 0 });
+    arrangeConversationShell(app, { selected: Boolean(selectedSession), supervisor, projectDir: selectedHubSession?.project_dir, host: selected?.label, machineId: selectedSession ? selected?.id : undefined, loaded: machineCatalogLoaded, paired: machines.size > 0 });
   } else {
     const returnControl = app.querySelector<HTMLButtonElement>("#talk-supervisor");
     if (returnControl) { returnControl.id = "conversation-return"; returnControl.textContent = "Conversations"; }
@@ -2286,10 +2290,19 @@ function renderConversationList(): void {
   const container = document.querySelector<HTMLElement>("#conversation-list");
   if (!container) return;
   const rows: ConversationRow[] = [...machines.values()].flatMap((machine) => visibleSessions(machine.id).filter((session) => supervisorTarget(session)).map((session) => {
+    const key = sessionKey(machine.id, session.name);
     const updated = fleetCatalogUpdatedAt.get(machine.id);
     const counts = attentionCounts(attention.filter((item) => item.machineId === machine.id && item.session === session.name));
-    return { key: sessionKey(machine.id, session.name), machineId: machine.id, session: session.name, supervisor: session.supervisor, projectDir: session.project_dir, host: machine.label, freshness: updated ? `Catalog checked ${relativeTimestamp(Date.parse(updated))}` : "Catalog not yet checked", connection: session.unreachable ? "Unreachable · message pending" : session.dormant ? "Dormant" : session.liveness === "live" ? fleetConnectionLabel(connectionStates.get(machine.id)) : "Session unavailable", attention: counts.critical + counts.warning, selected: machine.id === selectedMachineId && session.name === selectedSession };
+    const selected = machine.id === selectedMachineId && session.name === selectedSession;
+    // Preview is the last turn this page has seen; unread counts supervisor
+    // turns that arrived while the thread was not open. Opening it reads them.
+    const events = conversationHistories.get(key)?.events ?? [];
+    const last = events.at(-1);
+    const replies = events.filter((event) => event.kind === "reply").length;
+    if (selected) readReplies.set(key, replies);
+    return { key, machineId: machine.id, session: session.name, supervisor: session.supervisor, projectDir: session.project_dir, host: machine.label, freshness: updated ? `Catalog checked ${relativeTimestamp(Date.parse(updated))}` : "Catalog not yet checked", when: updated ? relativeTimestamp(Date.parse(updated)) : undefined, preview: last ? (last.kind === "send" ? `You: ${last.value.text}` : last.value.message) : undefined, connection: session.unreachable ? "Unreachable · message pending" : session.dormant ? "Dormant" : session.liveness === "live" ? fleetConnectionLabel(connectionStates.get(machine.id)) : "Session unavailable", attention: counts.critical + counts.warning, unread: Math.max(0, replies - (readReplies.get(key) ?? 0)), selected };
   }));
+  conversationRows = rows;
   conversationList.render(container, rows, (row) => { void openSession(row.machineId, row.session); });
   const empty = document.querySelector<HTMLElement>("#conversation-empty");
   if (empty) { empty.hidden = rows.length > 0; empty.textContent = !machineCatalogLoaded ? "Loading paired machines…" : machines.size === 0 ? "Pair a machine to start your first conversation." : "No live supervisors listed. Use Appearance & commands to show dormant sessions for recovery."; }
@@ -2656,6 +2669,14 @@ function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | und
   if (terminal) terminal.onclick = () => { hubPresentation = "terminal"; const storage = paneLayoutStorage(); if (storage && selectedMachineId && selectedSession) saveTranscriptView(storage, sessionKey(selectedMachineId, selectedSession), "terminal"); render(); };
   const returning = document.querySelector<HTMLButtonElement>("#conversation-return");
   if (returning) returning.onclick = () => { hubPresentation = "conversation"; render(); };
+  // Phone compose FAB: open the thread that is waiting on the operator, else
+  // the first one, and land in its composer; with nothing paired, pair.
+  const compose = document.querySelector<HTMLButtonElement>("#compose-fab");
+  if (compose) compose.onclick = () => {
+    const row = conversationRows.find((candidate) => candidate.attention > 0) ?? conversationRows[0];
+    if (!row) { openPairDialog(); return; }
+    void openSession(row.machineId, row.session).then(() => queueMicrotask(() => document.querySelector<HTMLTextAreaElement>("#message-text")?.focus()));
+  };
 
   const paletteToggle = document.querySelector<HTMLButtonElement>("#command-palette-toggle");
   if (paletteToggle) paletteToggle.onclick = openCommandPalette;

@@ -18,6 +18,31 @@ colors:
   danger: "--state-crit #B3261E / #EF7B72"
   idle-mark: "--color-series-neutral #6B7280 / #9AA1AF"
   terminal: "--bg-terminal #0C0E13 / #0C0E13"
+pebble:
+  canvas: "--canvas #F7F4EE / #12141A"
+  panel: "--panel #FFFFFF / #191C24"
+  sheet: "--sheet-bg #FFFFFF / #1F232D"
+  fold: "--fold #EAE5DB / #262B35"
+  ink: "--ink #1B1D24 / #E9E6E0"
+  ink-mid: "--ink-mid #5A5F6E / #A3A7B4"
+  ink-soft: "--ink-soft #494E5C / #B4B8C4"
+  you: "--you-bg #2E3A9F / #A9B3FF"
+  you-text: "--you-fg #FFFFFF / #12141A"
+  accent-default: "--accent #2E3A9F / #A9B3FF"
+  accent-soft-default: "--accent-soft #DDE1F7 / #232838"
+  accent-text: "--accent-fg #FFFFFF / #12141A"
+  supervisor-default: "--sup-bg #E7EAF7 / #262B38"
+  supervisor-text: "--sup-fg #1B1D24 / #E9E6E0"
+  ask: "--ask-bg #E2B14D / #E2B14D"
+  ask-text: "--ask-fg #1B1D24 / #12141A"
+  ask-tray: "--ask-deep #7F5504 / #6E551C"
+  warn-text: "--warn-text #7F5504 / #E2B14D"
+  crit: "--crit-bg #B3261E / #EF7B72"
+  crit-text: "--crit-fg #FFFFFF / #12141A"
+  lift: "--lift 0 1px 2px rgba(18,20,26,0.05), 0 6px 18px rgba(18,20,26,0.06) / 0 1px 2px rgba(0,0,0,0.32), 0 6px 18px rgba(0,0,0,0.34)"
+  lift-strong: "--lift-strong 0 2px 4px rgba(18,20,26,0.08), 0 14px 34px rgba(18,20,26,0.10) / 0 2px 4px rgba(0,0,0,0.40), 0 14px 34px rgba(0,0,0,0.46)"
+  lift-edge: "--lift-edge 10px 0 30px -18px rgba(18,20,26,0.22) / 10px 0 30px -18px rgba(0,0,0,0.60)"
+  lift-head: "--lift-head 0 8px 20px -14px rgba(18,20,26,0.30) / 0 8px 20px -14px rgba(0,0,0,0.70)"
 typography:
   families:
     display: "--font-display \"Iowan Old Style\", \"Palatino Linotype\", Palatino, \"Book Antiqua\", Georgia, \"Times New Roman\", serif"
@@ -47,6 +72,7 @@ geometry:
   rail: "--machine-rail-width 48px"
   drawer: "--machine-drawer-width 280px"
   context: "--context-panel-width 320px"
+  conversation-rail: "--conversation-rail-width 374px"
   header: "--session-header-height 44px"
   pane-header: "--pane-header-height 32px"
   button: "--button-height 40px"
@@ -129,8 +155,9 @@ inherits the chosen page scheme; code scrolls locally without clipping prose.
 
 ## Elevation & Depth
 
-- Root, panel and raised surfaces separate regions by colour and the 8px shell gutter. The only shadows remain the `dialog` and `#toast` declarations in `hub-web/src/styles.css`.
-- Both shadows consume house `elevation.overlay` through `--shadow-overlay`; the shadow is identical in both schemes. Phone drawer and attention sheets stay shadowless.
+- Root, panel and raised surfaces separate regions by colour and the 8px shell gutter. The `dialog` and `#toast` declarations in `hub-web/src/styles.css` consume house `elevation.overlay` through `--shadow-overlay`, identical in both schemes. Phone drawer and attention sheets stay shadowless.
+- The Pebble conversation surface (EPIC cas-cac1, `docs/design/hub-messaging/round-3/`) uses elevation instead of hairlines: the rail edge is `--lift-edge`, the selected row and calm bubbles are `--lift`, attention objects and the compose FAB are `--lift-strong`, the thread header is `--lift-head`. All four are generated per scheme (ink-cast in light, black-cast in dark); `invariants.test.ts` pins every `box-shadow` to a token.
+- Pebble tokens live under `pebble:` above and are the contract every Pebble child consumes: `--canvas`/`--panel`/`--sheet-bg` surfaces, the `--ink` ramp, the constant operator pair `--you-bg`/`--you-fg`, the ask and blocker pairs, and the per-machine set `--accent`, `--accent-soft`, `--accent-fg`, `--sup-bg`, `--sup-fg`. The machine set is generated as `.machine-accent-N` (indigo, green, violet) and assigned by `hub-web/src/machine-accent.ts` from the machine id — FNV-1a into a jump consistent hash, so a fourth accent appended to `generate-tokens.mjs` recolours no existing machine. `machine-accent.test.ts` measures every rendered pair at ≥ 4.5:1 in both schemes.
 - Pane selection changes the reserved transparent border to `--line-strong`; it does not change geometry or add a glow.
 
 ## Shapes
@@ -161,7 +188,8 @@ inherits the chosen page scheme; code scrolls locally without clipping prose.
 - ❌ Never combine light-scheme ink with `--bg-terminal` or wire Ghostty ANSI entries to application state tokens.
 - ✅ Use `applyScheme()` at boot and `setScheme(system|light|dark)` for Appearance; storage denial still permits a page-local choice.
 - ❌ Never put scheme state in `shellSignature()` or remount terminals merely to change chrome colours.
-- ✅ Keep machine text mono, focus outlines visible and the two overlay shadows as the only shadow consumers.
+- ✅ Keep machine text mono, focus outlines visible and every shadow a token consumer (`--shadow-overlay` for overlays, `--lift*` for Pebble objects).
+- ❌ Never redefine a Pebble contract token in a component or put a machine accent on the compose FAB: compose is the operator's action and stays `--you-bg` at `:root`.
 - ❌ Never use accent as an info status, add a looping connection animation, or restore a low-contrast tertiary text step.
 - ✅ Let the integration owner rebuild `hub-web/dist` once; validate lane builds with a separate worktree output directory.
 - ❌ Never hand-edit or commit generated `hub-web/dist` output from a factory lane.

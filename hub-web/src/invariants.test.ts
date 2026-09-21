@@ -664,6 +664,9 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(main).toContain("Talk to supervisor");
     expect(main).toContain('id="message-mic"');
     expect(main).toContain('id="message-keyboard"');
+    expect(main).toContain('aria-description="Checking voice input support…"');
+    expect(main).not.toContain('Tap to talk');
+    expect(main).not.toContain('id="speech-status"');
     // Opening the composer focuses the composer on every layout. Focusing the
     // mic button first made the phone composer unusable by keyboard: the caret
     // was never in the textarea, so the operator's typing went nowhere and
@@ -673,8 +676,8 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(main).toContain("// Voice is one labelled tap away; focus belongs in the field that accepts text.");
     expect(css).toContain(".talk-supervisor {");
     expect(css).toContain("#message-mic {");
-    expect(css).toContain("grid-column: 1 / -1;");
-    expect(css).toContain("min-height: 48px;");
+    expect(css).toContain(".conversation-composer #message-mic {");
+    expect(css).toContain(".conversation-composer #message-mic.listening {");
   });
 
   it("keeps a focused terminal focused across steady-state renders", async () => {

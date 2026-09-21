@@ -37,11 +37,21 @@ release_train_carry_previous_posted() {
 }
 
 release_train_prep() {
-    local draft commit_sha
+    local draft commit_sha bump_cmd
     draft="$(release_train_draft_path)"
     if [[ ! -f "$draft" ]]; then
         printf 'ERROR prep draft: required draft is missing: %s\n' "$draft" >&2
         printf '  → create the draft, then rerun --prep\n' >&2
+        return 1
+    fi
+    bump_cmd="${CAS_RELEASE_TRAIN_BUMP_CMD:-$worktree/scripts/bump-release-version.sh}"
+    if [[ ! -x "$bump_cmd" ]]; then
+        printf 'ERROR prep version: bump command is not executable: %s\n' "$bump_cmd" >&2
+        printf '  → restore scripts/bump-release-version.sh, then rerun --prep\n' >&2
+        return 1
+    fi
+    if ! "$bump_cmd" "$version"; then
+        printf 'ERROR prep version: version bump failed for %s\n' "$version" >&2
         return 1
     fi
     release_train_carry_previous_posted "$draft"

@@ -513,12 +513,27 @@ run_publish() {
     fi
 
     git -C "$worktree" fetch -q origin main 2>/dev/null || true
-    local origin_main
+    local origin_main current
     origin_main="$(git -C "$worktree" rev-parse origin/main 2>/dev/null || true)"
     if [[ "$origin_main" != "$landed" ]]; then
         printf 'error: origin/main is %s, not the landed sha %s; refusing to publish\n' \
             "${origin_main:-unknown}" "$landed" >&2
         return 3
+    fi
+
+    current="$(git -C "$worktree" rev-parse HEAD 2>/dev/null || true)"
+    if [[ "$current" != "$landed" ]]; then
+        if [[ -z "$current" ]] || ! git -C "$worktree" merge-base --is-ancestor "$current" "$landed"; then
+            printf 'error: release worktree %s is at %s, which is not an ancestor of landed sha %s; refusing to publish\n' \
+                "$worktree" "${current:-unknown}" "$landed" >&2
+            return 5
+        fi
+        if ! git -C "$worktree" merge --ff-only "$landed" >/dev/null 2>&1; then
+            printf 'error: could not fast-forward release worktree %s to landed sha %s; refusing to publish\n' \
+                "$worktree" "$landed" >&2
+            return 5
+        fi
+        printf 'release worktree fast-forwarded from %s to landed sha %s before publish\n' "$current" "$landed"
     fi
 
     # Read the version out of the landed commit itself rather than the working
@@ -541,12 +556,12 @@ run_publish() {
     if [[ ! -d "$tag_worktree" ]]; then
         git -C "$worktree" worktree add --detach "$tag_worktree" "$landed" >/dev/null 2>&1 || {
             printf 'error: could not create the tag worktree at %s\n' "$tag_worktree" >&2
-            return 5
+            return 6
         }
     fi
     if [[ "$(git -C "$tag_worktree" rev-parse HEAD 2>/dev/null)" != "$landed" ]]; then
         printf 'error: tag worktree %s is not at %s; refusing to publish\n' "$tag_worktree" "$landed" >&2
-        return 6
+        return 7
     fi
 
     # The zig toolchain is hardlinked rather than copied: same bytes, no second
@@ -878,6 +893,14 @@ run_report() {
     local report_cmd="${CAS_RELEASE_TRAIN_REPORT_CMD:-cas}"
     local report_post_cmd="${CAS_RELEASE_TRAIN_REPORT_POST_CMD:-$script_dir/release-report-post.py}"
     local report_receipt="$run_dir/release-report.receipt"
+    local report_user_thread="${CAS_RELEASE_TRAIN_REPORT_USER_THREAD_TS:-}"
+    local report_dev_thread="${CAS_RELEASE_TRAIN_REPORT_DEV_THREAD_TS:-}"
+    local announce_receipt="$run_dir/announce.receipt"
+
+    if [[ -s "$announce_receipt" ]]; then
+        [[ -n "$report_user_thread" ]] || report_user_thread="$(sed -n 's/^USER_TOP_LEVEL_ID=//p' "$announce_receipt" | head -n1)"
+        [[ -n "$report_dev_thread" ]] || report_dev_thread="$(sed -n 's/^DEV_TOP_LEVEL_ID=//p' "$announce_receipt" | head -n1)"
+    fi
 
     if [[ ! -f "${report_prefix}.md" || ! -f "${report_prefix}.html" || ! -f "${report_prefix}.pdf" ]]; then
         if ! command -v "$report_cmd" >/dev/null 2>&1; then
@@ -923,10 +946,10 @@ run_report() {
         CAS_RELEASE_TRAIN_REPORT_HTML="${report_prefix}.html" \
         CAS_RELEASE_TRAIN_REPORT_RECEIPT="$report_receipt" \
         CAS_RELEASE_TRAIN_REPORT_CHANNEL="${CAS_RELEASE_TRAIN_REPORT_CHANNEL:-cas-internal}" \
-        CAS_RELEASE_TRAIN_REPORT_USER_THREAD_TS="${CAS_RELEASE_TRAIN_REPORT_USER_THREAD_TS:-}" \
-        CAS_RELEASE_TRAIN_REPORT_DEV_THREAD_TS="${CAS_RELEASE_TRAIN_REPORT_DEV_THREAD_TS:-}" \
+        CAS_RELEASE_TRAIN_REPORT_USER_THREAD_TS="$report_user_thread" \
+        CAS_RELEASE_TRAIN_REPORT_DEV_THREAD_TS="$report_dev_thread" \
             "$report_post_cmd" "v$version" "${report_prefix}.pdf" "${report_prefix}.html" \
-                "${CAS_RELEASE_TRAIN_REPORT_USER_THREAD_TS:-}" "${CAS_RELEASE_TRAIN_REPORT_DEV_THREAD_TS:-}"
+                "$report_user_thread" "$report_dev_thread"
     fi
 
     print_release_report_status

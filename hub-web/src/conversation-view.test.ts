@@ -76,6 +76,21 @@ describe("ConversationView (Pebble thread)", () => {
     expect(table.querySelector(".pass")?.textContent).toBe("pass"); expect(table.querySelector(".flake")?.textContent).toBe("1 flake");
     expect(view.element.querySelector(".bub p")?.textContent).toBe("Every pack:");
   });
+  it("renders the same markdown body for hydrated replies and pinned asks", () => {
+    const unregister = registerTurnRenderer("ask", (_reply, context) => {
+      const object = context.document.createElement("div"); object.className = "obj"; object.append(...context.body()); return object;
+    });
+    try {
+      const history = new ConversationHistory();
+      history.hydrateReply({ notification_id: 7, reply_to: null, message: "**Hydrated**\n\n- history", summary: "", device_id: "d", at: "2026-09-21T09:30:00Z" });
+      history.reply(reply(8, "ask", "**Pinned**\n\n- choose"), at(9, 31));
+      const view = new ConversationView(document, history, "sup"); document.body.replaceChildren(view.element, view.pinned); view.update();
+      expect(view.element.querySelector('.turn.sup strong')?.textContent).toBe("Hydrated");
+      expect(view.element.querySelector('.turn.sup .markdown-list li')?.textContent).toBe("history");
+      expect(view.pinned.querySelector('strong')?.textContent).toBe("Pinned");
+      expect(view.pinned.querySelector('.markdown-list li')?.textContent).toBe("choose");
+    } finally { unregister(); }
+  });
   it("shows sending and refused states on the operator pebble with an edit affordance", () => {
     const history = new ConversationHistory();
     const edit = vi.fn();

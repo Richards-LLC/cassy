@@ -2852,6 +2852,15 @@ dialog form > *,
 .thread .turn.you .bub.group-first { border-top-right-radius: 22px; }
 .thread .bub p { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 .thread .bub p + p { margin-top: 8px; }
+.thread .markdown-heading, .pinned-ask .markdown-heading { font-weight: var(--weight-semibold); }
+.thread .markdown-list, .pinned-ask .markdown-list { margin: 8px 0 0; padding-inline-start: 1.35em; }
+.thread .markdown-list:first-child, .pinned-ask .markdown-list:first-child { margin-top: 0; }
+.thread .markdown-list li, .pinned-ask .markdown-list li { min-width: 0; overflow-wrap: anywhere; }
+.thread .markdown-list li + li, .pinned-ask .markdown-list li + li { margin-top: 4px; }
+.thread .markdown-list-nested, .pinned-ask .markdown-list-nested { margin-top: 4px; padding-inline-start: 1.25em; }
+.thread .markdown-inline-code, .pinned-ask .markdown-inline-code { padding: 1px 5px; border-radius: 4px; background: color-mix(in srgb, currentColor 11%, transparent); font: var(--weight-medium) 0.9em/1.35 var(--font-mono); overflow-wrap: anywhere; }
+.thread .markdown-code, .pinned-ask .markdown-code { max-width: 100%; margin: 10px 0 0; padding: 10px 12px; border-radius: 8px; background: var(--sheet-bg); color: var(--ink); font: var(--weight-regular) 12.5px/1.45 var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; }
+.thread .markdown-link, .pinned-ask .markdown-link { color: inherit; text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 2px; overflow-wrap: anywhere; }
 .thread .bub.receipt { display: flex; gap: 9px; }
 .thread .bub.receipt .receipt-text { min-width: 0; }
 .thread .tick { width: 15px; height: 15px; margin-top: 4px; color: var(--state-ok); flex: none; display: block; }

@@ -118,6 +118,14 @@ describe('conversation evidence', () => {
     expect(quiet.querySelector('.conversation-preview')?.className).toBe('conversation-preview');
     expect(quiet.querySelector('.conversation-flag, .conversation-unread')).toBeNull();
   });
+  it('strips supervisor markdown from conversation-list previews', () => {
+    const list = new ConversationList(); const container = document.createElement('nav');
+    list.render(container, [{ key: 'a:s', machineId: 'a', session: 's', supervisor: 'sup', host: 'Atlas', freshness: 'now', connection: 'Live', attention: 0, preview: '**Ready**\n\n- `cargo check`', selected: false }], vi.fn());
+    const preview = container.querySelector('.conversation-preview');
+    expect(preview?.textContent).toBe('Ready cargo check');
+    expect(preview?.textContent).not.toContain('**');
+    expect(preview?.querySelector('code')).toBeNull();
+  });
   it('renders the fixture list with a footer count equal to the rows rendered', () => {
     const app = document.createElement('div'); document.body.replaceChildren(app);
     renderConversationFixture(app, 'conversations-list');

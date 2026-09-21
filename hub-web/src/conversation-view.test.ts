@@ -57,19 +57,13 @@ describe("ConversationView (Pebble thread)", () => {
     working = false; view.refreshWorking();
     expect(view.element.querySelector(".working")).toBeNull();
   });
-  it("routes ask and blocker through the render hook and falls back to data-kind bubbles", () => {
+  it("falls back to data-kind bubbles for ask and blocker when nothing is registered", () => {
     const history = new ConversationHistory();
-    const hook = vi.fn((kind: OperatorTurnKind, context: { document: Document; body: () => HTMLElement[] }) => {
-      if (kind !== "blocker") return undefined;
-      const node = context.document.createElement("div"); node.className = "obj"; node.append(...context.body()); return node;
-    });
-    const view = new ConversationView(document, history, { supervisor: "sup", renderTurn: hook }); document.body.replaceChildren(view.element);
+    const view = new ConversationView(document, history, "sup"); document.body.replaceChildren(view.element);
     history.reply(reply(1, "ask", "Fix in-train or ship?"), at(9, 58)); history.reply(reply(2, "blocker", "Gate red."), at(9, 59)); view.update();
-    expect(hook.mock.calls.map((call) => call[0])).toEqual(["ask", "blocker"]);
     const ask = view.element.querySelector<HTMLElement>('[data-kind="ask"]')!;
     expect(ask.classList.contains("bub")).toBe(true); expect(ask.textContent).toBe("Fix in-train or ship?");
-    const blocker = view.element.querySelector<HTMLElement>('[data-kind="blocker"]')!;
-    expect(blocker.classList.contains("obj")).toBe(true); expect(blocker.querySelector("p")?.textContent).toBe("Gate red.");
+    expect(view.element.querySelector<HTMLElement>('[data-kind="blocker"]')?.classList.contains("bub")).toBe(true);
   });
   it("renders a markdown table as an evidence table with toned cells", () => {
     const history = new ConversationHistory();

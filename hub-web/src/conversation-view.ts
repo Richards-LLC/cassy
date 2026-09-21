@@ -60,9 +60,6 @@ export function registerTurnRenderer(kind: RenderableKind, render: TurnRenderer)
   return () => { if (turnRenderers.get(kind) === render) turnRenderers.delete(kind); };
 }
 
-/** Instance-level variant of the same hook; wins over the registry when it returns an element. */
-export type TurnRenderHook = (kind: OperatorTurnKind, context: TurnRenderContext) => HTMLElement | undefined;
-
 export interface ConversationViewOptions {
   /** Supervisor codename; bold in the thread header and the accessible label. */
   supervisor: string;
@@ -75,7 +72,6 @@ export interface ConversationViewOptions {
   working?: () => boolean;
   /** Refused sends offer to put their text back into the composer. */
   editMessage?: (text: string) => void;
-  renderTurn?: TurnRenderHook;
 }
 
 const TICK = '<svg class="tick" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.6 8.6l3.3 3.3L13.4 4.4"/></svg>';
@@ -235,8 +231,7 @@ export class ConversationView {
   private renderReply(document: Document, turn: ThreadTurn, reply: OperatorReply): HTMLElement {
     const kind = reply.kind ?? "answer";
     const context: TurnRenderContext = { document, turn, reply, supervisor: this.options.supervisor, body: () => renderBody(document, reply, context) };
-    const registered = kind === "ask" || kind === "blocker" ? turnRenderers.get(kind) : undefined;
-    const custom = this.options.renderTurn?.(kind, context) ?? registered?.(reply, context);
+    const custom = kind === "ask" || kind === "blocker" ? turnRenderers.get(kind)?.(reply, context) : undefined;
     const body = context.body;
     const bubble = custom ?? document.createElement("div");
     if (!custom) {

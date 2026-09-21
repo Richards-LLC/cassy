@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from "vitest";
 import { ConversationHistory } from "./conversation-history";
-import { ConversationView } from "./conversation-view";
+import { ConversationView, registerTurnRenderer } from "./conversation-view";
 import type { OperatorReply, OperatorTurnKind } from "./types";
 
 const at = (hh: number, mm: number) => new Date(2026, 8, 21, hh, mm).getTime();
@@ -92,5 +92,23 @@ describe("ConversationView (Pebble thread)", () => {
     const refused = view.element.querySelector<HTMLElement>('.conversation-turn[data-state="error"]')!;
     expect(refused.querySelector(".conversation-delivery")?.textContent).toBe("Not sent · no access");
     refused.querySelector("button")!.click(); expect(edit).toHaveBeenCalledWith("Ship it");
+  });
+  it("lets siblings register kind renderers for ask, blocker and attachment", () => {
+    const unregisterAsk = registerTurnRenderer("ask", (reply, ctx) => { const node = ctx.document.createElement("div"); node.className = "obj t-a"; node.append(...ctx.body()); return node; });
+    const unregisterSheet = registerTurnRenderer("attachment", (reply, ctx) => { const node = ctx.document.createElement("div"); node.className = "sheet"; node.textContent = ctx.attachment!.name; return node; });
+    try {
+      const history = new ConversationHistory();
+      const view = new ConversationView(document, history, "sup"); document.body.replaceChildren(view.element);
+      history.reply({ ...reply(1, "ask", "Fix or ship?"), attachments: [{ artifact_id: "r/1", name: "brief.pdf", mime: "application/pdf", size_bytes: 1, sha256: "a".repeat(64) }] }, at(9, 58));
+      history.reply(reply(2, "blocker", "Gate red."), at(9, 59));
+      view.update();
+      const ask = view.element.querySelector<HTMLElement>('[data-kind="ask"]')!;
+      expect(ask.classList.contains("obj")).toBe(true); expect(ask.querySelector("p")?.textContent).toBe("Fix or ship?");
+      expect(ask.querySelector(".sheet")?.textContent).toBe("brief.pdf"); expect(ask.querySelector("a")).toBeNull();
+      expect(view.element.querySelector<HTMLElement>('[data-kind="blocker"]')?.classList.contains("bub")).toBe(true);
+    } finally { unregisterAsk(); unregisterSheet(); }
+    const history = new ConversationHistory(); const view = new ConversationView(document, history, "sup");
+    history.reply(reply(3, "ask"), at(10, 0)); view.update();
+    expect(view.element.querySelector<HTMLElement>('[data-kind="ask"]')?.classList.contains("bub")).toBe(true);
   });
 });

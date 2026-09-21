@@ -1,6 +1,6 @@
 import { shouldFollowTail } from "./transcript";
 import type { ConversationEvent, ConversationHistory, ConversationSend } from "./conversation-history";
-import type { OperatorReply, OperatorTurnKind } from "./types";
+import type { ArtifactRef, OperatorReply, OperatorTurnKind } from "./types";
 import {
   cellTone,
   coalesceText,
@@ -18,7 +18,7 @@ import {
  * terminal stays the explicit alternate view.
  */
 
-/** What a kind-specific renderer receives. Ask and blocker (Pebble 3) plug in here. */
+/** What a kind-specific renderer receives. */
 export interface TurnRenderContext {
   readonly document: Document;
   readonly turn: ThreadTurn;
@@ -26,14 +26,41 @@ export interface TurnRenderContext {
   readonly supervisor: string;
   /** Renders the message body (prose + evidence tables) the way a plain bubble would. */
   readonly body: () => HTMLElement[];
+  /** Set for the `attachment` kind: the artifact this call renders. */
+  readonly attachment?: ArtifactRef;
 }
 
 /**
- * Render hook keyed on the supervisor turn kind. Return an element to own the
- * turn's silhouette entirely; return `undefined` to fall back to a plain
- * bubble carrying `data-kind`. The view still wraps whatever comes back in the
- * group's `.turn` column, so alignment, timestamps and grouping stay its job.
+ * Kinds a sibling can own. `ask` and `blocker` are supervisor turn kinds
+ * (Pebble 3, the fused-tray objects); `attachment` is called once per artifact
+ * on any turn that carries one (Pebble 4, the dog-eared sheet).
  */
+export type RenderableKind = "ask" | "blocker" | "attachment";
+export type TurnRenderer = (event: OperatorReply, context: TurnRenderContext) => HTMLElement;
+
+const turnRenderers = new Map<RenderableKind, TurnRenderer>();
+
+/**
+ * Render hook keyed on kind — the extension point for Pebble 3 and 4.
+ *
+ *   registerTurnRenderer("ask", (reply, ctx) => …)        // owns the turn's silhouette
+ *   registerTurnRenderer("blocker", (reply, ctx) => …)
+ *   registerTurnRenderer("attachment", (reply, ctx) => …) // owns one artifact row; ctx.attachment is set
+ *
+ * For `ask`/`blocker` the returned element replaces the plain bubble; the view
+ * still wraps it in the group's `.turn` column, so alignment, grouping and the
+ * once-per-group timestamp stay the view's job, and it still stamps
+ * `data-kind`/`data-reply-to`. For `attachment` the returned element replaces
+ * the default link row inside the bubble. Without a registration, ask and
+ * blocker fall back to a plain `.bub[data-kind]` and attachments to a link.
+ * Returns a function that removes the registration.
+ */
+export function registerTurnRenderer(kind: RenderableKind, render: TurnRenderer): () => void {
+  turnRenderers.set(kind, render);
+  return () => { if (turnRenderers.get(kind) === render) turnRenderers.delete(kind); };
+}
+
+/** Instance-level variant of the same hook; wins over the registry when it returns an element. */
 export type TurnRenderHook = (kind: OperatorTurnKind, context: TurnRenderContext) => HTMLElement | undefined;
 
 export interface ConversationViewOptions {
@@ -207,8 +234,10 @@ export class ConversationView {
 
   private renderReply(document: Document, turn: ThreadTurn, reply: OperatorReply): HTMLElement {
     const kind = reply.kind ?? "answer";
-    const body = (): HTMLElement[] => renderBody(document, reply);
-    const custom = this.options.renderTurn?.(kind, { document, turn, reply, supervisor: this.options.supervisor, body });
+    const context: TurnRenderContext = { document, turn, reply, supervisor: this.options.supervisor, body: () => renderBody(document, reply, context) };
+    const registered = kind === "ask" || kind === "blocker" ? turnRenderers.get(kind) : undefined;
+    const custom = this.options.renderTurn?.(kind, context) ?? registered?.(reply, context);
+    const body = context.body;
     const bubble = custom ?? document.createElement("div");
     if (!custom) {
       bubble.className = kind === "receipt" ? "bub receipt" : "bub";
@@ -256,7 +285,7 @@ function paragraphs(document: Document, text: string): HTMLElement[] {
 }
 
 /** Prose paragraphs plus evidence tables; attachments keep their link rows for Pebble 4. */
-export function renderBody(document: Document, reply: OperatorReply): HTMLElement[] {
+export function renderBody(document: Document, reply: OperatorReply, context?: TurnRenderContext): HTMLElement[] {
   const nodes: HTMLElement[] = [];
   for (const block of messageBlocks(reply.message)) {
     if (block.type === "text") { nodes.push(...paragraphs(document, block.text)); continue; }
@@ -277,7 +306,9 @@ export function renderBody(document: Document, reply: OperatorReply): HTMLElemen
     for (const cells of block.table.rows) table.append(row(cells, false));
     nodes.push(table);
   }
+  const sheet = turnRenderers.get("attachment");
   for (const attachment of reply.attachments ?? []) {
+    if (sheet && context) { nodes.push(sheet(reply, { ...context, attachment })); continue; }
     const row = document.createElement("div"); row.className = "conversation-attachment";
     const link = document.createElement("a"); link.href = `#artifact:${encodeURIComponent(attachment.artifact_id)}`; link.dataset.artifactId = attachment.artifact_id; link.textContent = attachment.name; link.title = `${attachment.mime} · ${attachment.size_bytes} bytes`;
     row.append(link); nodes.push(row);

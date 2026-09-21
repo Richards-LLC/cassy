@@ -27,7 +27,11 @@ fn cas_cmd_at(project: &Path, home: &Path, xdg: &Path) -> Command {
 }
 
 fn assert_markdownlint_clean(repo_root: &Path, files: &[&Path]) {
-    let mut command = ProcessCommand::new("npx");
+    assert_markdownlint_clean_with_npx(repo_root, files, "npx");
+}
+
+fn assert_markdownlint_clean_with_npx(repo_root: &Path, files: &[&Path], npx: &str) {
+    let mut command = ProcessCommand::new(npx);
     command.args([
         "--yes",
         "markdownlint-cli2@0.18.1",
@@ -41,12 +45,12 @@ fn assert_markdownlint_clean(repo_root: &Path, files: &[&Path]) {
         Ok(output) => output,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             println!(
-                "SKIP: generated Markdown Docs Lint looked for `npx` on PATH \
-                 (markdownlint-cli2@0.18.1); npx is unavailable"
+                "SKIP: generated Markdown Docs Lint looked for `{npx}` on PATH \
+                 (markdownlint-cli2@0.18.1); `{npx}` is unavailable"
             );
             return;
         }
-        Err(error) => panic!("could not run generated Markdown Docs Lint via npx: {error}"),
+        Err(error) => panic!("could not run generated Markdown Docs Lint via `{npx}`: {error}"),
     };
     assert!(
         output.status.success(),
@@ -54,6 +58,13 @@ fn assert_markdownlint_clean(repo_root: &Path, files: &[&Path]) {
         String::from_utf8_lossy(&output.stderr),
         String::from_utf8_lossy(&output.stdout)
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn generated_docs_lint_skips_when_npx_is_missing() {
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    assert_markdownlint_clean_with_npx(repo_root, &[], "cas-test-missing-npx");
 }
 
 #[cfg(unix)]

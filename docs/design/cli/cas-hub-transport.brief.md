@@ -18,6 +18,11 @@
 - The doctor row reuses the hub transport classifier, keeping the status and doctor verdict,
   cause, and remedy identical.
 
+When a service definition is installed but inactive and a detached hub owns the lock, both
+`cas hub status` and the host doctor row add the compact warning `service installed but inactive,
+detached hub running`. JSON keeps this as the optional `service_warning` field, leaving the
+existing transport object stable.
+
 ## Critique
 
 terminal-qa: PASS cas-hub-status · 12 runs · 0 fail · 0 warn · 0 allowed · /home/pippenz/.cas/artifacts/cas-4c4b/terminal-qa/cas-hub-status/report.json
@@ -33,6 +38,13 @@ terminal-qa: PASS cas-doctor-hub-transport · 12 runs · 0 fail · 0 warn · 0 a
 | Machine contract | 5 | Both JSON runs produce one document and preserve the command exit verdict. |
 
 Scored by the worker on 2026-09-08; floor holds.
+
+### Inactive installed service warning
+
+`terminal-qa: PASS cas-hub-status-inactive-service · 11 runs · 0 fail · 0 warn · 13 allowed`
+against the built binary with scrubbed HOME/XDG state, a fixture unit, a stub `systemctl`, and a
+fixture lock holder. The 13 allowed findings are pre-existing wedged-holder overflow/unicode
+diagnostics; the new warning itself stays on one ASCII line.
 
 ### macOS app-bundle fallback and signed-in loopback warning
 

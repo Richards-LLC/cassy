@@ -14,6 +14,8 @@ pub const LEGACY_PROTOCOL_VERSION: u32 = 1;
 pub const PROTOCOL_VERSION: u32 = 3;
 /// Maximum recent PTY output replayed per active pane on client attach.
 pub(crate) const COMMANDER_REPLAY_BYTES_PER_PANE: usize = 64 * 1024;
+/// Default bounded page of durable Commander conversation turns.
+pub const COMMANDER_HISTORY_PAGE_SIZE: u16 = 50;
 
 /// Independently negotiable daemon protocol features.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -25,6 +27,8 @@ pub enum ProtocolCapability {
     AuthoritativePaneKeyframes,
     /// Historical rows can be requested independently from the live viewport.
     PagedScrollback,
+    /// Durable operator/supervisor conversation turns can be replayed.
+    ConversationHistory,
 }
 
 pub fn daemon_capabilities() -> Vec<ProtocolCapability> {
@@ -33,6 +37,7 @@ pub fn daemon_capabilities() -> Vec<ProtocolCapability> {
         ProtocolCapability::AttributedSendMessage,
         ProtocolCapability::AuthoritativePaneKeyframes,
         ProtocolCapability::PagedScrollback,
+        ProtocolCapability::ConversationHistory,
     ]
 }
 
@@ -112,6 +117,45 @@ pub struct OperatorReplyPayload {
     pub kind: OperatorTurnKind,
     #[serde(default)]
     pub attachments: Vec<ArtifactRef>,
+}
+
+/// A durable operator message replayed into the Commander conversation.
+///
+/// This is intentionally a send-shaped projection rather than a `QueuedPrompt`:
+/// the browser must never receive pane/transcript fields, and the durable
+/// notification id is the only stable identity available after a reconnect.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConversationHistoryMessage {
+    pub notification_id: i64,
+    pub target: String,
+    pub text: String,
+    pub state: String,
+    pub stamped: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_to: Option<i64>,
+    pub device_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operator_label: Option<String>,
+    pub at: String,
+}
+
+/// A supervisor turn replayed with the same fields as the live OperatorReply
+/// frame, plus its durable timestamp for chronological hydration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConversationHistoryReply {
+    pub notification_id: i64,
+    #[serde(default)]
+    pub reply_to: Option<i64>,
+    pub message: String,
+    pub summary: String,
+    pub device_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operator_label: Option<String>,
+    #[serde(default)]
+    pub kind: OperatorTurnKind,
+    #[serde(default)]
+    pub attachments: Vec<ArtifactRef>,
+    pub at: String,
 }
 
 impl MessageAttribution {
@@ -261,6 +305,13 @@ pub enum ClientMessage {
         /// Client-generated nonce used to correlate durable enqueue receipt.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         client_ref: Option<String>,
+        /// The supervisor Commander turn (its `notification_id`) this message
+        /// answers — an ask's quick reply or a composer reply to the pinned
+        /// ask (cas-a8ea8). The daemon binds the queued row to that turn and
+        /// confirms it, the same semantics as a worker reply's `in_reply_to`.
+        /// Older clients omit it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        in_reply_to: Option<i64>,
         attribution: MessageAttribution,
     },
 
@@ -268,6 +319,18 @@ pub enum ClientMessage {
     /// paired device. This is a hub-to-daemon receipt, not an operator command.
     OperatorReplyDelivered {
         notification_id: i64,
+        device_id: String,
+    },
+
+    /// Request a bounded page of durable operator/supervisor conversation
+    /// turns. The hub overwrites `device_id` from its authenticated session.
+    ConversationHistoryRequest {
+        request_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        before: Option<i64>,
+        #[serde(default)]
+        limit: u16,
+        #[serde(default)]
         device_id: String,
     },
 
@@ -344,6 +407,16 @@ pub enum DaemonMessage {
         kind: OperatorTurnKind,
         #[serde(default)]
         attachments: Vec<ArtifactRef>,
+    },
+
+    /// A private, request-correlated page of durable Commander turns.
+    ConversationHistory {
+        request_id: String,
+        messages: Vec<ConversationHistoryMessage>,
+        replies: Vec<ConversationHistoryReply>,
+        has_earlier: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        next_before: Option<i64>,
     },
 
     /// Durable acknowledgment for a Commander semantic message.
@@ -823,9 +896,11 @@ mod tests {
             summary: Some("checkpoint request".to_string()),
             urgent: false,
             client_ref: Some("send-42".to_string()),
+            in_reply_to: Some(52),
             attribution: attributed_remote_operator(),
         };
         let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains(r#""in_reply_to":52"#), "{json}");
         let decoded: ClientMessage = serde_json::from_str(&json).unwrap();
         match decoded {
             ClientMessage::SendMessage {
@@ -834,6 +909,7 @@ mod tests {
                 summary,
                 urgent,
                 client_ref,
+                in_reply_to,
                 attribution,
             } => {
                 assert_eq!(target, "worker-1");
@@ -841,6 +917,7 @@ mod tests {
                 assert_eq!(summary.as_deref(), Some("checkpoint request"));
                 assert!(!urgent);
                 assert_eq!(client_ref.as_deref(), Some("send-42"));
+                assert_eq!(in_reply_to, Some(52));
                 assert_eq!(attribution.device_id.as_deref(), Some("device-123"));
                 assert_eq!(attribution.operator_label.as_deref(), Some("Pippenz"));
             }
@@ -860,9 +937,14 @@ mod tests {
             decoded,
             ClientMessage::SendMessage {
                 client_ref: None,
+                in_reply_to: None,
                 ..
             }
         ));
+        // A frame without a reply reference serializes without the key, so
+        // older daemons see the exact wire shape they already accept.
+        let plain = serde_json::to_string(&decoded).unwrap();
+        assert!(!plain.contains("in_reply_to"), "{plain}");
     }
 
     #[test]
@@ -1009,6 +1091,43 @@ mod tests {
         assert!(daemon_capabilities().contains(&ProtocolCapability::AttributedSendMessage));
         assert!(daemon_capabilities().contains(&ProtocolCapability::AuthoritativePaneKeyframes));
         assert!(daemon_capabilities().contains(&ProtocolCapability::PagedScrollback));
+        assert!(daemon_capabilities().contains(&ProtocolCapability::ConversationHistory));
+    }
+
+    #[test]
+    fn conversation_history_request_and_page_keep_private_turn_shapes() {
+        let request = ClientMessage::ConversationHistoryRequest {
+            request_id: "history-1".into(),
+            before: Some(3139),
+            limit: 25,
+            device_id: "phone-7".into(),
+        };
+        let json = serde_json::to_value(&request).unwrap();
+        assert_eq!(json["ConversationHistoryRequest"]["before"], 3139);
+        let page = DaemonMessage::ConversationHistory {
+            request_id: "history-1".into(),
+            messages: vec![ConversationHistoryMessage {
+                notification_id: 3139,
+                target: "supervisor".into(),
+                text: "status?".into(),
+                state: "acknowledged".into(),
+                stamped: true,
+                reply_to: None,
+                device_id: "phone-7".into(),
+                operator_label: Some("Daniel".into()),
+                at: "2026-09-21T14:52:41Z".into(),
+            }],
+            replies: Vec::new(),
+            has_earlier: false,
+            next_before: None,
+        };
+        let json = serde_json::to_value(&page).unwrap();
+        assert_eq!(json["ConversationHistory"]["request_id"], "history-1");
+        assert!(
+            json["ConversationHistory"]["messages"][0]
+                .get("prompt")
+                .is_none()
+        );
     }
 
     #[test]
@@ -1099,6 +1218,7 @@ mod tests {
                 summary: None,
                 urgent: false,
                 client_ref: None,
+                in_reply_to: None,
                 attribution: attributed_remote_operator(),
             })
             .unwrap(),

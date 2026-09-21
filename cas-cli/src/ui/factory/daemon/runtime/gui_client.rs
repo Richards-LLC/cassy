@@ -310,6 +310,10 @@ impl FactoryDaemon {
                 // Delivery receipts are emitted by the authenticated hub
                 // connector, never by the local GUI client.
             }
+            ClientMessage::ConversationHistoryRequest { .. } => {
+                // Durable conversation history is a paired Commander surface;
+                // the local GUI has no authenticated device scope to attach.
+            }
             ClientMessage::Attach { request_scrollback } => {
                 let state = self.build_session_state();
                 let scrollback = request_scrollback.then(|| self.build_scrollback(&state));

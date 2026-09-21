@@ -3610,6 +3610,98 @@ impl FactoryDaemon {
     /// Forward pending supervisor replies to the authenticated Commander hub
     /// transport. The queue remains pending while no upstream hub socket is
     /// connected, which makes device offline/reconnect delivery durable.
+    pub(super) fn conversation_history_page(
+        &self,
+        request_id: String,
+        device_id: &str,
+        before: Option<i64>,
+        requested_limit: u16,
+    ) -> anyhow::Result<crate::ui::factory::DaemonMessage> {
+        let queue = crate::store::open_prompt_queue_store(self.app.cas_dir())?;
+        let limit = usize::from(
+            requested_limit.clamp(1, crate::ui::factory::protocol::COMMANDER_HISTORY_PAGE_SIZE),
+        );
+        let mut rows = queue.conversation_history(
+            &self.session_name,
+            device_id,
+            before,
+            limit.saturating_add(1),
+        )?;
+        let has_earlier = rows.len() > limit;
+        if has_earlier {
+            rows.truncate(limit);
+        }
+        // The store returns newest-first so the page can cheaply determine
+        // whether an earlier cursor exists. The browser hydrates oldest-first
+        // while retaining the durable id as its dedupe key.
+        let next_before = rows.last().map(|row| row.id);
+        rows.reverse();
+        let mut messages = Vec::new();
+        let mut replies = Vec::new();
+        for row in rows {
+            if row.target.eq_ignore_ascii_case("operator") {
+                let Ok(payload) =
+                    serde_json::from_str::<crate::ui::factory::OperatorReplyPayload>(&row.prompt)
+                else {
+                    tracing::warn!(
+                        prompt_id = row.id,
+                        "skipping malformed operator reply in Commander history"
+                    );
+                    continue;
+                };
+                let recipient = row.recipient_device_id.as_deref().unwrap_or("*");
+                if !matches!(payload.schema_version, 1 | 2)
+                    || payload.device_id != recipient
+                    || (recipient != "*" && payload.device_id != device_id)
+                {
+                    continue;
+                }
+                replies.push(crate::ui::factory::ConversationHistoryReply {
+                    notification_id: row.id,
+                    reply_to: payload.reply_to,
+                    message: payload.message,
+                    summary: payload.summary,
+                    device_id: payload.device_id,
+                    operator_label: payload.operator_label,
+                    kind: payload.kind,
+                    attachments: payload.attachments,
+                    at: row.created_at.to_rfc3339(),
+                });
+                continue;
+            }
+
+            let Some(operator) = row.operator.as_ref() else {
+                continue;
+            };
+            if !operator.verified || operator.device_id != device_id {
+                continue;
+            }
+            let (reply_to, text) = commander_history_message_text(&row.prompt);
+            messages.push(crate::ui::factory::ConversationHistoryMessage {
+                notification_id: row.id,
+                target: row.target,
+                text,
+                state: if row.processed_at.is_some() {
+                    "acknowledged".to_string()
+                } else {
+                    "sending".to_string()
+                },
+                stamped: true,
+                reply_to,
+                device_id: operator.device_id.clone(),
+                operator_label: Some(operator.operator.clone()),
+                at: row.created_at.to_rfc3339(),
+            });
+        }
+        Ok(crate::ui::factory::DaemonMessage::ConversationHistory {
+            request_id,
+            messages,
+            replies,
+            has_earlier,
+            next_before,
+        })
+    }
+
     fn process_operator_replies(
         &mut self,
         queue: &dyn cas_store::PromptQueueStore,
@@ -4284,10 +4376,15 @@ impl FactoryDaemon {
             // was queued at spawn but reaches the worker after a supervisor
             // reply must read as old spawn boilerplate, not a fresh reassignment.
             prompt_with_instructions = format!(
-                "{}\n\n{}",
+                "{}\n{}\n{}",
                 crate::mcp::tools::service::agent_search_system::message::queued_message_provenance(
                     &queued
                 ),
+                crate::mcp::tools::service::agent_search_system::message::commander_reply_command(
+                    &queued,
+                )
+                .map(|command| format!("Reply with: `{command}`"))
+                .unwrap_or_default(),
                 prompt_with_instructions,
             );
 
@@ -7141,6 +7238,20 @@ impl FactoryDaemon {
     }
 }
 
+/// Remove the durable reply marker from the operator's visible message while
+/// preserving the ask reference for ConversationHistory hydration.
+fn commander_history_message_text(text: &str) -> (Option<i64>, String) {
+    const PREFIX: &str = "[CAS reply: explicitly acknowledges notification_id=";
+    let Some(rest) = text.strip_prefix(PREFIX) else {
+        return (None, text.to_string());
+    };
+    let Some(end) = rest.find("]\n") else {
+        return (None, text.to_string());
+    };
+    let reply_to = rest[..end].parse::<i64>().ok();
+    (reply_to, rest[end + 2..].to_string())
+}
+
 /// Fire a reminder by delivering it to both the notification queue
 /// (for web UI / structured data) and the prompt queue (for PTY injection).
 ///
@@ -9279,6 +9390,7 @@ mod tests {
             "Status please",
             None,
             false,
+            None,
             &unpaired,
         )
         .unwrap()
@@ -9292,6 +9404,7 @@ mod tests {
             "Status please, really",
             None,
             false,
+            None,
             &unpaired,
         )
         .unwrap()
@@ -9308,6 +9421,108 @@ mod tests {
                 "{header}"
             );
         }
+    }
+
+    /// cas-a8ea8: a Commander frame answering a supervisor ask
+    /// (`in_reply_to = N`) lands as a coordination row bound to that ask —
+    /// the same explicit reply reference a worker reply carries — and the ask
+    /// itself is confirmed, so the supervisor's inbox shows the answer bound
+    /// to its question instead of a fresh unrelated message.
+    #[test]
+    fn commander_reply_to_an_ask_binds_the_row_and_confirms_the_ask() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+        let attribution = crate::ui::factory::protocol::MessageAttribution {
+            device_id: Some("device-123".to_string()),
+            credential_id: Some("credential-456".to_string()),
+            device_label: Some("Pippenz phone".to_string()),
+            operator_label: Some("Pippenz".to_string()),
+            controller_origin: Some("https://commander.example".to_string()),
+            request_id: Some("request-789".to_string()),
+            scopes: vec!["message:send".to_string()],
+            operator_verified: true,
+        };
+        // The supervisor's ask, stored exactly as message.rs stores a
+        // target='operator' Commander turn.
+        let ask_payload = serde_json::to_string(&crate::ui::factory::OperatorReplyPayload {
+            schema_version: 2,
+            reply_to: None,
+            message: "Fix in-train or ship with allowlist?".to_string(),
+            summary: "ask".to_string(),
+            device_id: "device-123".to_string(),
+            operator_label: Some("Pippenz".to_string()),
+            kind: crate::ui::factory::OperatorTurnKind::Ask,
+            attachments: Vec::new(),
+        })
+        .unwrap();
+        let ask_id = queue
+            .enqueue_urgent_with_outcome(
+                "supervisor",
+                "operator",
+                &ask_payload,
+                Some("factory-1"),
+                Some("ask"),
+                Some(cas_store::NotificationPriority::Normal),
+                false,
+                Some(&cas_store::QueueOrigin::Daemon),
+            )
+            .unwrap()
+            .id();
+        queue.stamp_operator_reply(ask_id, "ask", &[]).unwrap();
+        let before = queue.message_delivery_report(ask_id).unwrap().unwrap();
+        assert_eq!(before.confirmation_source, cas_store::ConfirmationSource::Unconfirmed);
+
+        let reply_id = super::super::delivery::enqueue_commander_message(
+            &cas_dir,
+            "factory-1",
+            "patient-pelican-9",
+            "Fix in-train",
+            Some("Cassy Cloud message"),
+            false,
+            Some(ask_id),
+            &attribution,
+        )
+        .unwrap()
+        .id();
+
+        let queued = queue.peek_all(10).unwrap();
+        let row = queued.iter().find(|row| row.id == reply_id).unwrap();
+        assert_eq!(row.target, "patient-pelican-9");
+        assert_eq!(
+            row.prompt,
+            format!("[CAS reply: explicitly acknowledges notification_id={ask_id}]\nFix in-train")
+        );
+        assert_eq!(row.origin.as_ref().and_then(cas_store::QueueOrigin::verified_device_id), Some("device-123"));
+        let after = queue.message_delivery_report(ask_id).unwrap().unwrap();
+        assert_eq!(after.confirmation_source, cas_store::ConfirmationSource::ExplicitAck);
+        assert!(after.confirmed_at.is_some(), "the ask is confirmed by the operator's answer");
+
+        // A reference that is not a supervisor→operator turn is refused, and
+        // nothing is queued for it.
+        let worker_row = queue
+            .enqueue_urgent_with_outcome("supervisor", "worker-1", "work", Some("factory-1"), None, None, false, None)
+            .unwrap()
+            .id();
+        for (reference, expected) in [
+            (worker_row, "not a supervisor turn addressed to the operator"),
+            (ask_id + 1_000, "does not exist"),
+        ] {
+            let error = super::super::delivery::enqueue_commander_message(
+                &cas_dir,
+                "factory-1",
+                "patient-pelican-9",
+                "Hold",
+                None,
+                false,
+                Some(reference),
+                &attribution,
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(error.contains(expected), "{error}");
+        }
+        assert_eq!(queue.peek_all(10).unwrap().len(), 3, "refused replies queue nothing");
     }
 
     /// cas-f65d: a Commander semantic message and the equivalent MCP
@@ -9337,6 +9552,7 @@ mod tests {
             "Please checkpoint now",
             Some("checkpoint request"),
             false,
+            None,
             &attribution,
         )
         .unwrap()

@@ -465,6 +465,8 @@ pub(super) enum CommanderControl {
         summary: Option<String>,
         urgent: bool,
         client_ref: Option<String>,
+        /// The supervisor Commander turn this message answers (cas-a8ea8).
+        in_reply_to: Option<i64>,
         attribution: crate::ui::factory::protocol::MessageAttribution,
     },
 }
@@ -504,6 +506,7 @@ pub(super) fn commander_control_from_message(
             summary,
             urgent,
             client_ref,
+            in_reply_to,
             attribution,
         } => Some(CommanderControl::SendMessage {
             target: target.clone(),
@@ -511,6 +514,7 @@ pub(super) fn commander_control_from_message(
             summary: summary.clone(),
             urgent: *urgent,
             client_ref: client_ref.clone(),
+            in_reply_to: *in_reply_to,
             attribution: attribution.clone(),
         }),
         _ => None,
@@ -520,6 +524,15 @@ pub(super) fn commander_control_from_message(
 /// Store one Commander semantic message in the exact prompt queue drained by
 /// coordination delivery. Split from the daemon method so parity tests can
 /// compare a Commander row with an MCP coordination row in one isolated DB.
+///
+/// `in_reply_to` (cas-a8ea8) names the supervisor's Commander turn — an ask —
+/// that this message answers. It gets the same treatment as a worker reply's
+/// `in_reply_to` in the coordination `message` tool: the referenced row must
+/// exist and be a supervisor→operator turn of this factory session, the
+/// queued text carries the explicit reply reference the supervisor's inbox
+/// renders, and the ask is confirmed (`acked_via = 'explicit_ack'`) so it
+/// stops reading as unanswered.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn enqueue_commander_message(
     cas_dir: &std::path::Path,
     factory_session: &str,
@@ -527,13 +540,44 @@ pub(super) fn enqueue_commander_message(
     text: &str,
     summary: Option<&str>,
     urgent: bool,
+    in_reply_to: Option<i64>,
     attribution: &crate::ui::factory::protocol::MessageAttribution,
 ) -> anyhow::Result<cas_store::EnqueueOutcome> {
+    use anyhow::Context as _;
+
     let queue = crate::store::open_prompt_queue_store(cas_dir)?;
     let attribution_json = serde_json::to_value(attribution)?;
     let priority = urgent.then_some(cas_store::NotificationPriority::Critical);
     let operator = operator_stamp(attribution);
-    Ok(queue.enqueue_operator_message(
+    let bound_text;
+    let text = if let Some(notification_id) = in_reply_to {
+        let prior = queue
+            .message_delivery_report(notification_id)
+            .with_context(|| format!("failed to inspect in_reply_to message {notification_id}"))?
+            .ok_or_else(|| anyhow::anyhow!("in_reply_to notification {notification_id} does not exist"))?;
+        if !prior.target.eq_ignore_ascii_case(OPERATOR_TARGET) {
+            anyhow::bail!(
+                "in_reply_to notification {notification_id} is {} -> {}, not a supervisor turn addressed to the operator",
+                prior.source,
+                prior.target
+            );
+        }
+        if prior
+            .factory_session
+            .as_deref()
+            .is_some_and(|session| session != factory_session)
+        {
+            anyhow::bail!(
+                "in_reply_to notification {notification_id} belongs to factory session {}, not {factory_session}",
+                prior.factory_session.as_deref().unwrap_or_default()
+            );
+        }
+        bound_text = commander_reply_text(notification_id, text);
+        bound_text.as_str()
+    } else {
+        text
+    };
+    let outcome = queue.enqueue_operator_message(
         &attribution.queue_source(),
         target,
         text,
@@ -543,7 +587,25 @@ pub(super) fn enqueue_commander_message(
         urgent,
         Some(&attribution_json),
         &operator,
-    )?)
+    )?;
+    if let Some(notification_id) = in_reply_to {
+        queue.ack(notification_id).with_context(|| {
+            format!(
+                "Commander reply {} queued but ask {notification_id} could not be confirmed",
+                outcome.id()
+            )
+        })?;
+    }
+    Ok(outcome)
+}
+
+/// Recipient name of supervisor→operator Commander turns (`message.rs`).
+const OPERATOR_TARGET: &str = "operator";
+
+/// The explicit reply reference a supervisor's inbox renders — byte-identical
+/// to the one the coordination `message` tool prefixes on a worker reply.
+pub(super) fn commander_reply_text(notification_id: i64, text: &str) -> String {
+    format!("[CAS reply: explicitly acknowledges notification_id={notification_id}]\n{text}")
 }
 
 /// The durable operator columns for one Commander row (cas-e8df).
@@ -627,6 +689,7 @@ impl FactoryDaemon {
                 summary,
                 urgent,
                 client_ref,
+                in_reply_to,
                 attribution,
             } => {
                 let outcome = self.enqueue_attributed_message(
@@ -634,6 +697,7 @@ impl FactoryDaemon {
                     &text,
                     summary.as_deref(),
                     urgent,
+                    in_reply_to,
                     &attribution,
                 )?;
                 Ok(Some(crate::ui::factory::DaemonMessage::MessageQueued {
@@ -655,6 +719,7 @@ impl FactoryDaemon {
         text: &str,
         summary: Option<&str>,
         urgent: bool,
+        in_reply_to: Option<i64>,
         attribution: &crate::ui::factory::protocol::MessageAttribution,
     ) -> anyhow::Result<cas_store::EnqueueOutcome> {
         let outcome = enqueue_commander_message(
@@ -664,6 +729,7 @@ impl FactoryDaemon {
             text,
             summary,
             urgent,
+            in_reply_to,
             attribution,
         )?;
 
@@ -1190,6 +1256,7 @@ mod tests {
                 summary: Some("checkpoint".to_string()),
                 urgent: true,
                 client_ref: None,
+                in_reply_to: Some(52),
                 attribution: commander_attribution(),
             },
         ];

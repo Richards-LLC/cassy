@@ -11,6 +11,9 @@ import { runVisualQa } from "../../scripts/visual-qa.mjs";
 
 export const FIXTURE_NAMES = [
   "paired-machines", "conversations-list", "conversation", "conversation-replied", "conversation-error",
+  "conversation-thread", "conversation-evidence",
+  "conversation-ask", "conversation-ask-answered", "conversation-blocker", "conversation-pairs",
+  "conversation-attachment", "conversation-empty", "conversation-composer", "conversation-keyboard",
   "fleet-populated",
   "fleet-empty",
   "session-canvas",
@@ -48,7 +51,7 @@ function contentType(path) {
   }[extname(path)] ?? "application/octet-stream";
 }
 
-async function buildFixtureSite(outputDir) {
+export async function buildFixtureSite(outputDir) {
   await build({
     configFile: false,
     logLevel: "silent",
@@ -70,7 +73,7 @@ async function buildFixtureSite(outputDir) {
   });
 }
 
-async function serveDirectory(root) {
+export async function serveDirectory(root) {
   const server = createServer(async (request, response) => {
     try {
       const requestUrl = new URL(request.url ?? "/", "http://127.0.0.1");
@@ -99,7 +102,7 @@ async function serveDirectory(root) {
   return { server, origin: `http://127.0.0.1:${address.port}` };
 }
 
-function closeServer(server) {
+export function closeServer(server) {
   return new Promise((resolvePromise, reject) => {
     server.close((error) => error ? reject(error) : resolvePromise());
   });

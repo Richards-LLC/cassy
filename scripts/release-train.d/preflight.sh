@@ -29,7 +29,7 @@ cut_preflight_check_competing_release() {
         cut_preflight_block competing-release "an open release PR already targets $version"
         return $?
     fi
-    if ! queue="$("$gh" api graphql -f query='query { repository(owner: "Richards-LLC", name: "cassy") { mergeQueueEntries(first: 100) { nodes { pullRequest { number title headRefName } } } } }' 2>/dev/null)"; then
+    if ! queue="$("$gh" api graphql -f query='query { repository(owner: "Richards-LLC", name: "cassy") { mergeQueue(branch: "main") { entries(first: 100) { nodes { pullRequest { number title headRefName } } } } } }' 2>/dev/null)"; then
         cut_preflight_block competing-release "could not inspect the merge queue with $gh"
         return $?
     fi

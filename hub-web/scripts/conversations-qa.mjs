@@ -1,9 +1,12 @@
 #!/usr/bin/env node
 // Production bundle + controlled protocol data. This is fixture evidence, not
 // proof of operator identity stamping or durable delivery by a running daemon.
-import { mkdir, writeFile } from 'node:fs/promises';
+import { createServer } from 'node:http';
+import { existsSync } from 'node:fs';
+import { extname } from 'node:path';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import assert from 'node:assert/strict';
 import { launchBrowser } from '../../docs/design/hub-mobile/browser-tools.mjs';
 
@@ -65,6 +68,24 @@ export async function installProtocolFixture(page, origin) {
   return { sends, sockets, liveSessions, setSessions(id, rows) { catalogs.set(id, rows); }, send(session, message) { assert(sockets.has(session), `No fixture socket for ${session}`); sockets.get(session).send(JSON.stringify(message)); } };
 }
 
+/** Serve hub-web/dist at /commander/ on a loopback port, the way the hub embeds it. */
+export async function serveDist() {
+  const dist = resolve(fileURLToPath(new URL('.', import.meta.url)), '../dist');
+  const types = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.wasm': 'application/wasm', '.woff2': 'font/woff2' };
+  const server = createServer(async (request, response) => {
+    const path = new URL(request.url ?? '/', 'http://127.0.0.1').pathname.replace(/^\/commander\/?/, '/');
+    const target = resolve(dist, `.${path === '/' ? '/index.html' : path}`);
+    if (!target.startsWith(dist) || !existsSync(target)) { response.writeHead(404); response.end(); return; }
+    response.writeHead(200, { 'content-type': types[extname(target)] ?? 'application/octet-stream', 'cache-control': 'no-store' });
+    response.end(await readFile(target));
+  });
+  await new Promise((ok, fail) => { server.once('error', fail); server.listen(0, '127.0.0.1', ok); });
+  return { server, origin: `http://127.0.0.1:${server.address().port}/commander/`, close: () => new Promise((ok, fail) => server.close((error) => error ? fail(error) : ok())) };
+}
+
+// Pebble surface (cas-cac1): the default conversation is the thread of
+// operator and supervisor turns — no pane mirror — with the machine named as
+// text on every row.
 export async function runConversationQa(origin, artifactDir) {
   await mkdir(artifactDir, { recursive: true });
   const browser = await launchBrowser();
@@ -78,9 +99,13 @@ export async function runConversationQa(origin, artifactDir) {
       await capture('list');
       const list = page.getByRole('navigation', { name: 'Choose a supervisor' });
       assert.equal(await list.locator('.project-badge').allTextContents().then(x => x.sort()).then(x => x.join(',')), 'cas-src,gabber-studio');
+      assert.equal(await list.locator('.conversation-machine').allTextContents().then(x => x.sort()).then(x => x.join(',')), 'Atlas,Studio Mac', 'machine named as text on every row');
       await list.getByRole('button', { name: /cas-src/ }).click();
       await page.getByRole('button', { name: `Send to ${SUPERVISOR}`, exact: true }).waitFor();
-      await page.getByText('The supervisor conversation is ready for review.', { exact: true }).waitFor();
+      await page.locator('.conversation-reading.thread').waitFor();
+      assert.equal(await page.locator('.conversation-pane, .conversation-pane-text').count(), 0, 'no pane article in the default view');
+      assert.equal((await page.content()).includes('The supervisor conversation is ready for review.'), false, 'pane scrollback is not mirrored into the thread');
+      assert.match(await page.locator('.conversation-heading .conversation-host').innerText(), /^cas-src · Atlas · Linux/);
       await capture('thread');
       const composer = page.getByRole('textbox', { name: 'Your message' });
       await composer.fill('Please keep the project badge prominent.');
@@ -89,11 +114,12 @@ export async function runConversationQa(origin, artifactDir) {
       const sent = fixture.sends.at(-1); assert(sent); assert.equal(sent.target, SUPERVISOR); assert.equal(sent.attribution.operator_label, null); assert(sent.client_ref);
       await capture('sending');
       fixture.send(SUPERVISOR, { MessageQueued: { client_ref: sent.client_ref, notification_id: 41, target: SUPERVISOR, stamped: true } });
-      await page.getByText('Acknowledged · sent from you', { exact: true }).waitFor();
+      await page.locator('.conversation-turn[data-state="acknowledged"]').waitFor();
       await capture('acknowledged');
       fixture.send(SUPERVISOR, { OperatorReply: { notification_id: 42, reply_to: 41, message: 'The project badge stays visible in the list and conversation header.', summary: 'Badge confirmed', device_id: 'fixture-device', operator_label: 'Daniel' } });
-      await page.getByText('The project badge stays visible in the list and conversation header.', { exact: true }).waitFor();
+      await page.locator('.thread .turn.sup .bub p', { hasText: 'The project badge stays visible in the list and conversation header.' }).waitFor();
       await page.locator('.conversation-turn[data-state="replied"]').waitFor();
+      assert.equal(await page.locator('.thread .turn.you .bub.group-first.group-last').count(), 1, 'one operator pebble with both outer corners');
       await capture('replied');
       await composer.fill('Keep my selection across a heartbeat');
       await composer.evaluate(node => { node.focus(); node.setSelectionRange(5, 9); });
@@ -123,13 +149,19 @@ export async function runConversationQa(origin, artifactDir) {
       await page.getByRole('button', { name: `Send to ${SUPERVISOR}`, exact: true }).waitFor();
       assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false, 'page overflow');
       assert.deepEqual(errors, []);
-      results.push({ viewport, scheme, status: 'PASS', evidence: 'fixture protocol against production bundle', checks: ['project badges', 'exact pane text', 'addressed send', 'client correlation', 'acknowledged', 'replied', 'draft isolation', 'terminal alternate'], errors });
+      results.push({ viewport, scheme, status: 'PASS', evidence: 'fixture protocol against production bundle', checks: ['project badges', 'machine named on rows', 'no pane article', 'header project · machine', 'addressed send', 'client correlation', 'acknowledged', 'replied', 'draft isolation', 'terminal alternate'], errors });
       await page.close();
     }
   } finally { await browser.close(); await writeFile(resolve(artifactDir, 'results.json'), JSON.stringify(results, null, 2)); }
   return results;
 }
+// Usage: node scripts/conversations-qa.mjs <origin|dist> <artifact-dir>
+// `dist` (or no origin) serves hub-web/dist itself; any http(s) origin is used as given.
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
-  const result = await runConversationQa(process.argv[2] || 'http://127.0.0.1:8421/commander/', resolve(process.argv[3]));
-  console.log(`PASS ${result.length} viewport/scheme combinations`);
+  const requested = process.argv[2] && process.argv[2] !== 'dist' ? process.argv[2] : undefined;
+  const served = requested ? undefined : await serveDist();
+  try {
+    const result = await runConversationQa(requested ?? served.origin, resolve(process.argv[3] || '.cas/conversations-qa'));
+    console.log(`PASS ${result.length} viewport/scheme combinations`);
+  } finally { await served?.close(); }
 }

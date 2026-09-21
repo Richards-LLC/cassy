@@ -232,7 +232,7 @@ pub fn execute(args: &UpdateArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
     if args.all_projects {
         let mut steps = UpdateStepTracker::new(1, !cli.json);
         let report = steps.run("Refreshing all local Cassy projects", || {
-            refresh_all_projects(args, cli, cas_root, None)
+            refresh_all_projects(args, cli, cas_root, None, None)
         })?;
         if !cli.json {
             let mut out = io::stdout();
@@ -297,6 +297,7 @@ pub fn execute(args: &UpdateArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
                     outcome.updated,
                     Some(&refresh),
                     hub_restart.transport_error.as_deref(),
+                    Some(&hub_restart),
                 )
             );
         }
@@ -311,13 +312,15 @@ pub fn execute(args: &UpdateArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
                 outcome.updated,
                 None,
                 hub_restart.transport_error.as_deref(),
+                Some(&hub_restart),
             )
         );
     }
 
+    let hub_proof = hub_restart.clone();
     let (report, hub_transport_error) = refresh_after_hub_restart(hub_restart, |error| {
         steps.run("Refreshing all local Cassy projects", || {
-            refresh_all_projects(args, cli, cas_root, error)
+            refresh_all_projects(args, cli, cas_root, error, Some(&hub_proof))
         })
     })?;
 
@@ -344,6 +347,7 @@ fn combined_update_receipt(
     updated: bool,
     refresh: Option<&serde_json::Value>,
     hub_transport_error: Option<&str>,
+    hub_restart: Option<&super::hub::HubRestartOutcome>,
 ) -> serde_json::Value {
     let mut receipt = serde_json::json!({
         "binary_updated": updated,
@@ -358,6 +362,18 @@ fn combined_update_receipt(
         receipt["hub_transport"] = serde_json::json!({
             "status": "error",
             "message": error,
+        });
+    }
+    if let Some(hub_restart) = hub_restart
+        && let (Some(previous), Some(current)) = (
+            hub_restart.previous_version.as_deref(),
+            hub_restart.current_version.as_deref(),
+        )
+    {
+        receipt["hub_restart"] = serde_json::json!({
+            "from_version": previous,
+            "to_version": current,
+            "via": if hub_restart.service_managed { "service" } else { "detached" },
         });
     }
     receipt
@@ -955,6 +971,7 @@ fn refresh_all_projects(
     cli: &Cli,
     current_cas_root: Option<&Path>,
     hub_transport_error: Option<&str>,
+    hub_restart: Option<&super::hub::HubRestartOutcome>,
 ) -> anyhow::Result<RefreshReport> {
     let started_at = Instant::now();
     let discovery = discover_local_projects(current_cas_root);
@@ -1027,6 +1044,7 @@ fn refresh_all_projects(
         &discovery.skipped_unregistered,
         cli,
         hub_transport_error,
+        hub_restart,
     );
 
     let failed_count = receipts.iter().filter(|receipt| receipt.failed()).count()
@@ -1036,6 +1054,7 @@ fn refresh_all_projects(
         &user_level,
         &discovery.skipped_unregistered,
         hub_transport_error,
+        hub_restart,
     );
     if let Some(path) = &args.refresh_receipt {
         write_refresh_receipt(path, &receipt)?;
@@ -1374,6 +1393,7 @@ fn project_refresh_receipt_json(
     user_level: &ProjectPhase,
     skipped_unregistered: &[SkippedProject],
     hub_transport_error: Option<&str>,
+    hub_restart: Option<&super::hub::HubRestartOutcome>,
 ) -> serde_json::Value {
     let projects = receipts
         .iter()
@@ -1424,6 +1444,18 @@ fn project_refresh_receipt_json(
             "message": error,
         });
     }
+    if let Some(hub_restart) = hub_restart
+        && let (Some(previous), Some(current)) = (
+            hub_restart.previous_version.as_deref(),
+            hub_restart.current_version.as_deref(),
+        )
+    {
+        receipt["hub_restart"] = serde_json::json!({
+            "from_version": previous,
+            "to_version": current,
+            "via": if hub_restart.service_managed { "service" } else { "detached" },
+        });
+    }
     receipt
 }
 
@@ -1441,6 +1473,7 @@ fn print_project_refresh_summary(
     skipped_unregistered: &[SkippedProject],
     cli: &Cli,
     hub_transport_error: Option<&str>,
+    hub_restart: Option<&super::hub::HubRestartOutcome>,
 ) {
     if cli.json {
         println!(
@@ -1450,6 +1483,7 @@ fn print_project_refresh_summary(
                 user_level,
                 skipped_unregistered,
                 hub_transport_error,
+                hub_restart,
             )
         );
         return;
@@ -2896,8 +2930,9 @@ fn execute_post_swap(args: &UpdateArgs, cli: &Cli, current_version: &str) -> any
     let hub_restart = super::hub::restart_stale_hub(current_version, cli)?;
 
     // These are the phases that must not run in the pre-update image.
+    let hub_proof = hub_restart.clone();
     let (report, hub_transport_error) = refresh_after_hub_restart(hub_restart, |error| {
-        refresh_all_projects(args, cli, None, error)
+        refresh_all_projects(args, cli, None, error, Some(&hub_proof))
     })?;
     if !cli.json {
         let mut out = io::stdout();

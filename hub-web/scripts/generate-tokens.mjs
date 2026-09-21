@@ -65,6 +65,7 @@ try {
     "--machine-rail-width": "48px",
     "--machine-drawer-width": "280px",
     "--context-panel-width": "320px",
+    "--conversation-rail-width": "374px",
     "--session-header-height": "44px",
     "--pane-secondary-min-width": "280px",
     "--pane-header-height": "32px",
@@ -84,6 +85,8 @@ try {
     "--rail-item-min": "44px",
     "--landscape-attention-rail-width": "80px",
     "--browser-notice-height": "32px",
+    // Layout viewport height; the visualViewport fallback overrides it inline while a phone keyboard is up (cas-edc9).
+    "--keyboard-viewport-height": "100dvh",
     "--attention-payload-max-height": "180px",
     "--attention-motion-duration": token("motion.reveal"),
     "--chrome-motion-duration": token("motion.chrome"),
@@ -105,15 +108,80 @@ try {
       "--color-series-neutral": token(`color.series-neutral.${scheme}`),
     };
   }
+  // Pebble (EPIC cas-cac1): the PAPER conversation surface. These names are the
+  // shared contract every Pebble child consumes and never redefines. House roles
+  // are read from design-tokens.json; the rest are hub-only literals ported from
+  // docs/design/hub-messaging/round-3/pebble.css (light) and its dark block.
+  const pebbleLiterals = {
+    light: {
+      "--sheet-bg": "#FFFFFF", "--fold": "#EAE5DB", "--ink-soft": "#494E5C",
+      "--you-fg": "#FFFFFF", "--ask-fg": "#1B1D24", "--ask-deep": "#7F5504", "--crit-fg": "#FFFFFF", "--accent-fg": "#FFFFFF",
+      "--lift": "0 1px 2px rgba(18,20,26,0.05), 0 6px 18px rgba(18,20,26,0.06)",
+      "--lift-strong": "0 2px 4px rgba(18,20,26,0.08), 0 14px 34px rgba(18,20,26,0.10)",
+      "--lift-edge": "10px 0 30px -18px rgba(18,20,26,0.22)",
+      "--lift-head": "0 8px 20px -14px rgba(18,20,26,0.30)",
+    },
+    dark: {
+      "--sheet-bg": "#1F232D", "--fold": "#262B35", "--ink-soft": "#B4B8C4",
+      "--you-fg": "#12141A", "--ask-fg": "#12141A", "--ask-deep": "#6E551C", "--crit-fg": "#12141A", "--accent-fg": "#12141A",
+      "--lift": "0 1px 2px rgba(0,0,0,0.32), 0 6px 18px rgba(0,0,0,0.34)",
+      "--lift-strong": "0 2px 4px rgba(0,0,0,0.40), 0 14px 34px rgba(0,0,0,0.46)",
+      "--lift-edge": "10px 0 30px -18px rgba(0,0,0,0.60)",
+      "--lift-head": "0 8px 20px -14px rgba(0,0,0,0.70)",
+    },
+  };
+  // Per-machine accent set. Index N is the class `machine-accent-N` chosen by
+  // hub-web/src/machine-accent.ts (FNV-1a → jump consistent hash), so a fourth
+  // accent is APPENDED here and MACHINE_ACCENT_COUNT bumped; never reorder the
+  // first three or every paired machine changes colour. Every pair rendered on
+  // these values is measured at >= 4.5:1 by machine-accent.test.ts.
+  const machineAccents = [
+    { name: "indigo", light: { accent: "#2E3A9F", soft: "#DDE1F7", sup: "#E7EAF7" }, dark: { accent: "#A9B3FF", soft: "#232838", sup: "#262B38" } },
+    { name: "green", light: { accent: "#226845", soft: "#D7E8DE", sup: "#E3EFE8" }, dark: { accent: "#5FC492", soft: "#1C2A23", sup: "#1F2E27" } },
+    { name: "violet", light: { accent: "#5B3E8C", soft: "#E2DAF1", sup: "#EBE6F4" }, dark: { accent: "#C0A3F0", soft: "#262034", sup: "#282334" } },
+  ];
+  const accent = (scheme, index) => ({
+    "--accent": machineAccents[index][scheme].accent,
+    "--accent-soft": machineAccents[index][scheme].soft,
+    "--sup-bg": machineAccents[index][scheme].sup,
+    "--sup-fg": token(`color.${scheme}.ink`),
+  });
+  function pebble(scheme) {
+    return {
+      "--canvas": token(`color.${scheme}.bg`),
+      "--panel": token(`color.${scheme}.surface`),
+      "--ink": token(`color.${scheme}.ink`),
+      "--ink-mid": token(`color.${scheme}.ink-muted`),
+      "--you-bg": token(`color.${scheme}.action`),
+      // The ask amber is the dark warning value in both schemes: the light value
+      // (#7F5504) only clears 4.5:1 as a near-brown, so it serves as the tray.
+      "--ask-bg": token("color.dark.warning"),
+      "--warn-text": token(`color.${scheme}.warning`),
+      "--crit-bg": token(`color.${scheme}.danger`),
+      ...pebbleLiterals[scheme],
+      // Unscoped default: the first accent, so a surface outside any machine
+      // still resolves; rows and thread roots carry machine-accent-N.
+      ...accent(scheme, 0),
+    };
+  }
   const declarations = (props) => Object.entries(props).map(([name, value]) => `  ${name}: ${value};`).join("\n");
   const block = (selector, props, scheme = "light dark") => `${selector} {\n  color-scheme: ${scheme};\n${declarations(props)}\n}\n`;
-  const light = { ...common, ...colors("light") };
-  const dark = { ...common, ...colors("dark") };
+  const plain = (selector, props) => `${selector} {\n${declarations(props)}\n}\n`;
+  const indent = (text) => text.trimEnd().split("\n").map((line) => `  ${line}`).join("\n");
+  const light = { ...common, ...colors("light"), ...pebble("light") };
+  const dark = { ...common, ...colors("dark"), ...pebble("dark") };
+  const accentBlocks = machineAccents.map((set, index) => `/* ${index}: ${set.name} */\n`
+    + plain(`.machine-accent-${index}`, accent("light", index))
+    + "@media (prefers-color-scheme: dark) {\n" + indent(plain(`.machine-accent-${index}`, accent("dark", index))) + "\n}\n"
+    + plain(`html[data-scheme="light"] .machine-accent-${index}`, accent("light", index))
+    + plain(`html[data-scheme="dark"] .machine-accent-${index}`, accent("dark", index))).join("\n");
   const output = "/* Generated by hub-web/scripts/generate-tokens.mjs. Do not edit.\n * Source: docs/design/design-tokens.json + docs/design/hub-web/token-map.md.\n */\n\n"
     + block(":root", light)
-    + "\n@media (prefers-color-scheme: dark) {\n" + block(":root", dark).trimEnd().split("\n").map((line) => `  ${line}`).join("\n") + "\n}\n\n"
+    + "\n@media (prefers-color-scheme: dark) {\n" + indent(block(":root", dark)) + "\n}\n\n"
     + block('html[data-scheme="light"]', light, "light") + "\n"
     + block('html[data-scheme="dark"]', dark, "dark") + "\n"
+    + "/* Pebble machine accents (hub-web/src/machine-accent.ts): append a set, never reorder. */\n"
+    + accentBlocks + "\n"
     + "/* Dark wells: color.dark.* + color.series-neutral.dark; derived surfaces use those roles. */\n"
     + ".terminal-mount:not(.conversation-active), .transcript, .terminal-search input, .attention-payload pre,\n.connection-log pre, dialog:not(.command-palette) input {\n  color-scheme: dark;\n"
     + declarations({ ...derived, ...colors("dark") }) + "\n}\n";

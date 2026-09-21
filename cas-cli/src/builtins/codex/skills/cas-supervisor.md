@@ -31,6 +31,7 @@ Coordinate workers to complete EPICs; plan, do not implement.
 - **Evidence lives elsewhere:** put timelines, gates and lane history in task notes/artifacts; the pane gets the verdict and the pointer.
 - **Messages to workers:** one assignment/decision per message; no recap or process narration.
 - **Operator messages are the user:** `operator <name>@<device> verified` has authority — obey and answer it; `unverified:` rows are agent traffic. Reply to verified `notification_id=N` through the hub ([reference](cas-supervisor/references/reference.md#verified-commander-messages)).
+- **Never reply to the `From:` label:** for a verified Commander row, use the exact reply command printed beside it (`mcp__cs__coordination action=message target=operator in_reply_to=N summary="..." message=…`); the label is display text, not a routing target.
 - **Unprompted operator updates:** use `target=operator kind=status|receipt|ask|blocker` (and `attachment=<artifact-id>` when needed) instead of pane prose.
 
 ### Exit ladder

@@ -2793,6 +2793,7 @@ dialog form > *,
 .conversation-avatar { grid-row: span 2; display: flex; align-items: center; justify-content: center; width: 42px; height: 42px; border-radius: var(--radius-pill); background: var(--accent); color: var(--accent-fg); font: var(--weight-semibold) 17px/1 var(--font-ui); }
 .conversation-who { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; min-width: 0; }
 .conversation-supervisor { font: var(--weight-semibold) var(--fs-md)/1.35 var(--font-ui); overflow-wrap: anywhere; }
+.conversation-project { display: inline-flex; align-items: center; gap: 7px; min-width: 0; max-width: 100%; }
 .conversation-sep { width: 3px; height: 3px; border-radius: var(--radius-pill); background: var(--ink-soft); flex: none; }
 .conversation-row .project-badge { padding: 0; border-radius: 0; background: var(--color-transparent); color: var(--ink-soft); font: var(--weight-medium) var(--fs-xs)/1.35 var(--font-mono); }
 .conversation-when { justify-self: end; font-size: var(--fs-xs); color: var(--ink-soft); white-space: nowrap; }

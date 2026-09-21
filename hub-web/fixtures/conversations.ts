@@ -37,9 +37,11 @@ export function renderConversationFixture(app: HTMLElement, state: string): void
     ? { id: 'studio-mac', label: 'Studio Mac', host: 'Studio Mac · macOS', projectDir: '/projects/gabber-studio', project: 'gabber-studio' }
     : { id: 'atlas-linux', label: 'Atlas', host: 'Atlas · Linux', projectDir: '/projects/cas-src', project: 'cas-src' };
   app.innerHTML = conversationShellMarkup({ selected, supervisor, projectDir: machine.projectDir, host: machine.host, machineId: machine.id, loaded: true, paired: true });
-  new ConversationList().render(app.querySelector('#conversation-list')!, fixtureConversationRows(selected), () => {});
+  const listRows = fixtureConversationRows(selected);
+  new ConversationList().render(app.querySelector('#conversation-list')!, listRows, () => {});
   const machines = FIXTURE_MACHINES;
-  app.querySelector('#hub-footer-badges')!.innerHTML = machineFooterMarkup(machines, machines.length, 'fixture');
+  // The footer counts conversations, not machines: it must equal the rows rendered above.
+  app.querySelector('#hub-footer-badges')!.innerHTML = machineFooterMarkup(machines, listRows.length, 'fixture');
   app.insertAdjacentHTML('beforeend', pairedMachinesDialogMarkup());
   renderPairedMachines(app.querySelector('#paired-machines-list')!, machines, async () => {});
   const dialog = app.querySelector<HTMLDialogElement>('#paired-machines-dialog')!;

@@ -32,6 +32,7 @@ mcp__cas__coordination action=message target=operator in_reply_to=N summary="...
 
 The hub routes `operator` to the originating paired device and reports `queued for <device>` while offline; do not redirect this response to `supervisor`.
 Never reply to the `From:` label: use the exact `mcp__cas__coordination action=message target=operator in_reply_to=N summary="..." message=…` command printed beside a verified Commander row.
+For phone-sized replies, follow the [phone reply contract](operator-reply.md).
 
 For unprompted updates, send `target=operator kind=status|receipt|ask|blocker` and add `attachment=<artifact-id>` when needed instead of relying on pane prose.
 

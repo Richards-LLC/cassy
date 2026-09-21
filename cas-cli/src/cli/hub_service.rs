@@ -15,7 +15,7 @@ use anyhow::{Context, Result, ensure};
 use serde::Serialize;
 
 use super::{Cli, hub::HubServiceCommands};
-use crate::hub::{DEFAULT_HUB_PORT, HubProcessRecord, HubRuntimePaths};
+use crate::hub::{DEFAULT_HUB_PORT, HubLockOwner, HubProcessRecord, HubRuntimePaths};
 
 const LAUNCHD_LABEL: &str = "dev.cas.commander-hub";
 const SYSTEMD_UNIT: &str = "cas-hub.service";
@@ -180,10 +180,8 @@ pub(super) fn restart_supervised(
                 return Ok(false);
             }
             let domain = launchd_domain()?;
-            let active = command_succeeds(
-                "launchctl",
-                ["print", &format!("{domain}/{LAUNCHD_LABEL}")],
-            );
+            let active =
+                command_succeeds("launchctl", ["print", &format!("{domain}/{LAUNCHD_LABEL}")]);
             let service_tailscale = service_file_requests_tailscale(&path)?;
             if tailscale_serve && !service_tailscale {
                 anyhow::bail!(
@@ -216,7 +214,15 @@ pub(super) fn restart_supervised(
             wait_for_supervised_hub(previous_pid)?;
             Ok(true)
         }
-        ServicePlatform::ManualLinux | ServicePlatform::Unsupported => Ok(false),
+        ServicePlatform::ManualLinux => {
+            if systemd_path()?.is_file() {
+                anyhow::bail!(
+                    "cas hub service is installed but the systemd user manager is unavailable; refusing to launch a detached hub"
+                );
+            }
+            Ok(false)
+        }
+        ServicePlatform::Unsupported => Ok(false),
     }
 }
 
@@ -226,7 +232,7 @@ fn stop_detached_hub_if_present(cli: &Cli, paths: &HubRuntimePaths) -> Result<()
             && super::hub::record_is_live(&record)
             && paths
                 .read_lock_owner()
-                .is_some_and(|owner| owner.pid == record.pid && owner.phase == "running")
+                .is_some_and(|owner| lock_owner_is_active(&owner) && owner.pid == record.pid)
     });
     if detached_running {
         super::hub::stop_for_service(cli)?;
@@ -290,12 +296,12 @@ pub(super) fn inactive_detached_warning(
             super::hub::record_is_live(record)
                 && paths
                     .read_lock_owner()
-                    .is_some_and(|owner| owner.pid == record.pid && owner.phase == "running")
+                    .is_some_and(|owner| lock_owner_is_active(&owner) && owner.pid == record.pid)
         }
         None => paths
             .lock_holders()
             .into_iter()
-            .any(|holder| holder.phase.as_deref() == Some("running")),
+            .any(|holder| holder.phase.as_deref() != Some("stopping")),
     };
     Ok(inactive_detached_warning_for(
         installed,
@@ -303,6 +309,10 @@ pub(super) fn inactive_detached_warning(
         hub_live,
         record.and_then(|record| record.launched_by.as_deref()),
     ))
+}
+
+fn lock_owner_is_active(owner: &HubLockOwner) -> bool {
+    owner.phase != "stopping"
 }
 
 pub(crate) fn doctor_warning() -> Result<Option<String>> {
@@ -317,11 +327,8 @@ pub(crate) fn inactive_detached_warning_for(
     hub_live: bool,
     launched_by: Option<&str>,
 ) -> Option<&'static str> {
-    (installed
-        && active == Some(false)
-        && hub_live
-        && launched_by != Some("service"))
-    .then_some(INACTIVE_DETACHED_HUB_WARNING)
+    (installed && active == Some(false) && hub_live && launched_by != Some("service"))
+        .then_some(INACTIVE_DETACHED_HUB_WARNING)
 }
 
 fn service_file_requests_tailscale(path: &Path) -> Result<bool> {
@@ -853,9 +860,10 @@ mod tests {
     fn launchd_tailscale_refusal_names_the_interactive_pairing_recovery() {
         assert!(LAUNCHD_TAILSCALE_REFUSAL.contains("bootstrap namespace"));
         assert!(LAUNCHD_TAILSCALE_REFUSAL.contains("cas hub service install`"));
-        assert!(LAUNCHD_TAILSCALE_REFUSAL.contains(
-            "cas hub service uninstall && cas hub start --tailscale-serve"
-        ));
+        assert!(
+            LAUNCHD_TAILSCALE_REFUSAL
+                .contains("cas hub service uninstall && cas hub start --tailscale-serve")
+        );
     }
 
     #[test]
@@ -922,9 +930,174 @@ mod tests {
             inactive_detached_warning_for(true, Some(false), true, Some("service")),
             None
         );
-        assert_eq!(inactive_detached_warning_for(true, Some(true), true, Some("update")), None);
-        assert_eq!(inactive_detached_warning_for(false, Some(false), true, Some("update")), None);
-        assert_eq!(inactive_detached_warning_for(true, Some(false), false, Some("update")), None);
+        assert_eq!(
+            inactive_detached_warning_for(true, Some(true), true, Some("update")),
+            None
+        );
+        assert_eq!(
+            inactive_detached_warning_for(false, Some(false), true, Some("update")),
+            None
+        );
+        assert_eq!(
+            inactive_detached_warning_for(true, Some(false), false, Some("update")),
+            None
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn installed_systemd_unit_owns_restart_and_receives_the_new_record() {
+        use std::ffi::OsString;
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::os::unix::fs::PermissionsExt;
+        use std::process::Command;
+
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let fixture = tempfile::tempdir().unwrap();
+        let bin = fixture.path().join("bin");
+        fs::create_dir(&bin).unwrap();
+        let systemctl = bin.join("systemctl");
+        fs::write(
+            &systemctl,
+            r#"#!/bin/sh
+printf '%s\n' "$*" >> "$CAS_SYSTEMCTL_LOG"
+if [ "$1" = "--user" ] && [ "$2" = "--version" ]; then
+  exit 0
+fi
+if [ "$1" = "--user" ] && [ "$2" = "restart" ] && [ "$3" = "cas-hub.service" ]; then
+  cp "$CAS_NEW_RECORD" "$CAS_HUB_ROOT/process.json"
+  cp "$CAS_NEW_LOCK" "$CAS_HUB_ROOT/hub.lock"
+  exit 0
+fi
+exit 1
+"#,
+        )
+        .unwrap();
+        fs::set_permissions(&systemctl, fs::Permissions::from_mode(0o700)).unwrap();
+        let inherited_path = std::env::var_os("PATH").unwrap_or_default();
+        let mut path = OsString::from(&bin);
+        path.push(":");
+        path.push(inherited_path);
+        env.set("PATH", path);
+
+        let log = fixture.path().join("systemctl.log");
+        env.set("CAS_SYSTEMCTL_LOG", &log);
+
+        let hub_root = env.home().join(".cas/hub");
+        crate::hub::ensure_private_dir(&hub_root).unwrap();
+        let service_path = env.home().join(".config/systemd/user/cas-hub.service");
+        write_service_file(
+            &service_path,
+            &systemd_unit(Path::new("/opt/cas/bin/cas"), false, 443),
+        )
+        .unwrap();
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let health = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0; 1024];
+            let _ = stream.read(&mut request);
+            let body = br#"{"schema_version":1,"ready":true}"#;
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                std::str::from_utf8(body).unwrap()
+            )
+            .unwrap();
+        });
+        let mut service_process = Command::new("sleep").arg("30").spawn().unwrap();
+        let new_record = HubProcessRecord {
+            pid: service_process.id(),
+            sid: None,
+            pgid: None,
+            bind: "127.0.0.1".into(),
+            port,
+            version: env!("CARGO_PKG_VERSION").into(),
+            started_at: "2026-09-21T15:30:00Z".into(),
+            cgroup: None,
+            launched_by: Some("service".into()),
+            launched_at: Some("2026-09-21T15:30:00Z".into()),
+            public_url: None,
+            tailscale_serve_port: None,
+            tailscale_cli: None,
+            tailscale_serve_target: None,
+            transport_warning: None,
+        };
+        let new_record_path = fixture.path().join("new-process.json");
+        fs::write(&new_record_path, serde_json::to_vec(&new_record).unwrap()).unwrap();
+        let new_lock_path = fixture.path().join("new-hub.lock");
+        fs::write(
+            &new_lock_path,
+            serde_json::json!({
+                "pid": service_process.id(),
+                "acquired_at": "2026-09-21T15:30:00Z",
+                "phase": "running"
+            })
+            .to_string(),
+        )
+        .unwrap();
+        env.set("CAS_HUB_ROOT", &hub_root);
+        env.set("CAS_NEW_RECORD", &new_record_path);
+        env.set("CAS_NEW_LOCK", &new_lock_path);
+
+        let old_record = HubProcessRecord {
+            pid: std::process::id(),
+            sid: None,
+            pgid: None,
+            bind: "127.0.0.1".into(),
+            port: DEFAULT_HUB_PORT,
+            version: "3.26.0".into(),
+            started_at: "2026-09-21T15:29:00Z".into(),
+            cgroup: None,
+            launched_by: Some("service".into()),
+            launched_at: Some("2026-09-21T15:29:00Z".into()),
+            public_url: None,
+            tailscale_serve_port: None,
+            tailscale_cli: None,
+            tailscale_serve_target: None,
+            transport_warning: None,
+        };
+        fs::write(
+            hub_root.join("process.json"),
+            serde_json::to_vec(&old_record).unwrap(),
+        )
+        .unwrap();
+
+        let cli = Cli {
+            json: false,
+            full: false,
+            verbose: false,
+            command: None,
+        };
+        let handled = restart_supervised(&cli, false, DEFAULT_HUB_PORT);
+        service_process.kill().unwrap();
+        let _ = service_process.wait();
+        health.join().unwrap();
+
+        assert!(handled.unwrap(), "installed service must handle restart");
+        let manager_log = fs::read_to_string(log).unwrap();
+        assert!(manager_log.lines().any(|line| line == "--user --version"));
+        assert!(
+            manager_log
+                .lines()
+                .any(|line| line == "--user restart cas-hub.service"),
+            "manager log: {manager_log}"
+        );
+        assert!(
+            !manager_log.contains("hub serve"),
+            "manager log: {manager_log}"
+        );
+        assert_eq!(
+            HubRuntimePaths::new(&hub_root)
+                .read_process_record()
+                .unwrap()
+                .launched_by
+                .as_deref(),
+            Some("service")
+        );
     }
 
     #[cfg(unix)]

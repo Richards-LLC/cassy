@@ -248,18 +248,24 @@ fn cargo_build_script_stays_fresh_and_tracks_worktree_transitions() {
     assert_no_missing_input(&normal_first);
     let normal_second = run_cargo(&normal_package, &normal_target, &["check"]);
     assert_no_missing_input(&normal_second);
+    // The first build creates the previously-missing tests/ watch root. Cargo
+    // must observe that transition once, then remain fresh on the next check.
+    let normal_third = run_cargo(&normal_package, &normal_target, &["check"]);
+    assert_no_missing_input(&normal_third);
     assert!(
-        !normal_second.contains("Compiling build-watch-fixture"),
-        "unchanged normal checkout reran its build script:\n{normal_second}"
+        !normal_third.contains("Compiling build-watch-fixture"),
+        "unchanged normal checkout reran its build script:\n{normal_third}"
     );
 
     let linked_first = run_cargo(&linked_package, &linked_target, &["check"]);
     assert_no_missing_input(&linked_first);
     let linked_second = run_cargo(&linked_package, &linked_target, &["check"]);
     assert_no_missing_input(&linked_second);
+    let linked_third = run_cargo(&linked_package, &linked_target, &["check"]);
+    assert_no_missing_input(&linked_third);
     assert!(
-        !linked_second.contains("Compiling build-watch-fixture"),
-        "unchanged linked checkout reran its build script:\n{linked_second}"
+        !linked_third.contains("Compiling build-watch-fixture"),
+        "unchanged linked checkout reran its build script:\n{linked_third}"
     );
     let initial_env_output = cargo_run_hash(&linked_package, &linked_target);
     assert!(

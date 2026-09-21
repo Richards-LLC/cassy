@@ -73,7 +73,31 @@ fn generate_archive_fixture_sources() {
     );
     let tests_dir = manifest_dir.join("tests");
     let mut paths = Vec::new();
-    collect_rust_sources(&tests_dir, &mut paths);
+    match fs::metadata(&tests_dir) {
+        Ok(metadata) if metadata.is_dir() => collect_rust_sources(&tests_dir, &mut paths),
+        Ok(_) => collect_rust_sources(&tests_dir, &mut paths),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            // Cargo treats a missing rerun input as perpetually dirty. Create
+            // the empty source root so the requested `rerun-if-changed=tests`
+            // watches a stable directory and notices files added later.
+            fs::create_dir_all(&tests_dir).unwrap_or_else(|create_error| {
+                panic!(
+                    "create test source directory {}: {create_error}",
+                    tests_dir.display()
+                )
+            });
+            fs::write(tests_dir.join(".cas-empty"), b"").unwrap_or_else(|write_error| {
+                panic!(
+                    "seed test source directory {}: {write_error}",
+                    tests_dir.display()
+                )
+            });
+        }
+        Err(error) => panic!(
+            "read test source directory {}: {error}",
+            tests_dir.display()
+        ),
+    }
     paths.sort();
 
     let mut generated = String::from(

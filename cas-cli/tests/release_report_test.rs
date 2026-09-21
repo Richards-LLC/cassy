@@ -26,6 +26,28 @@ fn cas_cmd_at(project: &Path, home: &Path, xdg: &Path) -> Command {
     command
 }
 
+fn assert_markdownlint_clean(repo_root: &Path, files: &[&Path]) {
+    let mut command = ProcessCommand::new("npx");
+    command.args([
+        "--yes",
+        "markdownlint-cli2@0.18.1",
+        "--config",
+        repo_root.join(".markdownlint-cli2.jsonc").to_str().unwrap(),
+    ]);
+    for file in files {
+        command.arg(file);
+    }
+    let output = command
+        .output()
+        .expect("markdownlint-cli2 must be available");
+    assert!(
+        output.status.success(),
+        "generated Markdown failed Docs Lint:\n{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 #[cfg(unix)]
 fn install_fake_gh(project: &TempDir) -> PathBuf {
     use std::os::unix::fs::PermissionsExt;
@@ -288,4 +310,126 @@ fn cli_release_report_resolves_main_config_from_a_git_worktree() {
         !developer_and_rest[..developer_and_rest.find("## Fixes ledger").unwrap()]
             .contains("one command builds the report.")
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn generated_release_report_and_receipts_draft_pass_docs_lint() {
+    let project = TempDir::new().unwrap();
+    fs::write(
+        project.path().join("CHANGELOG.md"),
+        "# Changelog\n\n## [3.19.0] - 2026-09-08\n\n### Added\n- A lint-clean release report (#767)\n",
+    )
+    .unwrap();
+    fs::create_dir_all(project.path().join("docs/release-notes")).unwrap();
+    fs::write(
+        project.path().join("docs/release-notes/v3.19.0.md"),
+        r#"# v3.19.0 release notes
+
+User top-level
+
+```text
+*Live on production — User — Cassy v3.19.0*
+Was: reports were hard to lint. Now: the generated report is clean.
+```
+
+User reply
+
+```text
+**Only reply:**
+
+• *Release report* — Was: reports were hard to lint. → Now: the report is clean.
+```
+
+Dev top-level
+
+```text
+*Live on production — Dev — Cassy v3.19.0*
+Was: receipts needed hand edits. Now: the generator emits valid Markdown.
+```
+
+Dev reply
+
+```text
+**Only reply:**
+
+• *Receipt template* — Was: links were bare. → Now: links are wrapped.
+```
+"#,
+    )
+    .unwrap();
+
+    cas_cmd(&project).args(["init", "--yes"]).assert().success();
+    cas_cmd(&project)
+        .args(["config", "set", "issues.repo", "example/project"])
+        .assert()
+        .success();
+    let fake_gh = install_followup_fake_gh(&project);
+    cas_cmd(&project)
+        .env("GH_BIN", &fake_gh)
+        .args([
+            "release",
+            "report",
+            "3.19.0",
+            "--out",
+            "docs/release-reports",
+        ])
+        .assert()
+        .success();
+
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    let receipt_script = repo_root.join("scripts/release-train.d/receipts.sh");
+    let receipt_block = ProcessCommand::new("bash")
+        .args([
+            "-c",
+            r#"
+source "$1"
+release_train_receipts_field() {
+    case "$1" in
+        POSTED_AT) printf '%s' '2099-01-02T00:00:00Z' ;;
+        CHANNEL) printf '%s' 'cas-internal' ;;
+        CHANNEL_ID) printf '%s' 'C01234567' ;;
+        USER_TOP_LEVEL_ID) printf '%s' 'user-1' ;;
+        USER_TOP_LEVEL_PERMALINK) printf '%s' 'https://example.test/user-1' ;;
+        USER_REPLY_ID) printf '%s' 'user-2' ;;
+        USER_REPLY_PERMALINK) printf '%s' 'https://example.test/user-2' ;;
+        DEV_TOP_LEVEL_ID) printf '%s' 'dev-1' ;;
+        DEV_TOP_LEVEL_PERMALINK) printf '%s' 'https://example.test/dev-1' ;;
+        DEV_REPLY_ID) printf '%s' 'dev-2' ;;
+        DEV_REPLY_PERMALINK) printf '%s' 'https://example.test/dev-2' ;;
+    esac
+}
+release_train_receipts_posted_block
+"#,
+            "receipt-block",
+            receipt_script.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        receipt_block.status.success(),
+        "receipt template failed: {}",
+        String::from_utf8_lossy(&receipt_block.stderr)
+    );
+
+    let announce_path = project.path().join("generated-announce.md");
+    fs::write(
+        &announce_path,
+        format!(
+            "# Slack draft — fixture\n\n## User thread\n\n{}\n",
+            String::from_utf8(receipt_block.stdout).unwrap()
+        ),
+    )
+    .unwrap();
+    let report_path = project.path().join("docs/release-reports/v3.19.0.md");
+    let report = fs::read_to_string(&report_path).unwrap();
+    assert!(report.contains("### Only reply (user)"));
+    assert!(report.contains("### Only reply (dev)"));
+    assert!(!report.contains("### Only reply:"));
+    assert!(
+        report
+            .contains("GitHub release: <https://github.com/example/project/releases/tag/v3.19.0>")
+    );
+    assert!(receipt_block.contains("<https://example.test/user-1>"));
+    assert_markdownlint_clean(repo_root, &[&report_path, &announce_path]);
 }

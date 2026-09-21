@@ -24,10 +24,10 @@ release_train_receipts_posted_block() {
 
 - **Posted at (UTC):** ${tick}${posted_at}${tick}
 - **Channel:** ${tick}${channel_display}${tick}
-- **User top-level:** ${tick}message_id=$(release_train_receipts_field USER_TOP_LEVEL_ID)${tick} · $(release_train_receipts_field USER_TOP_LEVEL_PERMALINK)
-- **User reply:** ${tick}message_id=$(release_train_receipts_field USER_REPLY_ID)${tick} · $(release_train_receipts_field USER_REPLY_PERMALINK)
-- **Dev top-level:** ${tick}message_id=$(release_train_receipts_field DEV_TOP_LEVEL_ID)${tick} · $(release_train_receipts_field DEV_TOP_LEVEL_PERMALINK)
-- **Dev reply:** ${tick}message_id=$(release_train_receipts_field DEV_REPLY_ID)${tick} · $(release_train_receipts_field DEV_REPLY_PERMALINK)
+- **User top-level:** ${tick}message_id=$(release_train_receipts_field USER_TOP_LEVEL_ID)${tick} · <$(release_train_receipts_field USER_TOP_LEVEL_PERMALINK)>
+- **User reply:** ${tick}message_id=$(release_train_receipts_field USER_REPLY_ID)${tick} · <$(release_train_receipts_field USER_REPLY_PERMALINK)>
+- **Dev top-level:** ${tick}message_id=$(release_train_receipts_field DEV_TOP_LEVEL_ID)${tick} · <$(release_train_receipts_field DEV_TOP_LEVEL_PERMALINK)>
+- **Dev reply:** ${tick}message_id=$(release_train_receipts_field DEV_REPLY_ID)${tick} · <$(release_train_receipts_field DEV_REPLY_PERMALINK)>
 EOF
 }
 

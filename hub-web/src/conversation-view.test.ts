@@ -12,14 +12,14 @@ function reply(id: number, kind: OperatorTurnKind, message = `m${id}`, reply_to:
 describe("ConversationView (Pebble thread)", () => {
   it("paints operator pebbles right, supervisor pebbles in the accent scope, grouped corners and one time per group", () => {
     const history = new ConversationHistory();
-    const view = new ConversationView(document, history, { supervisor: "atlas-sup", machine: "Atlas", project: "cas-src", accentClass: "m-atlas" });
+    const view = new ConversationView(document, history, { supervisor: "atlas-sup", machine: "Atlas", project: "cas-src", accentClass: "machine-accent-0" });
     document.body.replaceChildren(view.element);
     history.submit("a", "atlas-sup", "Merge the lanes.", at(9, 41));
     history.acknowledge({ client_ref: "a", notification_id: 41, target: "atlas-sup", stamped: true });
     history.reply(reply(1, "answer", "On it.", 41), at(9, 44));
     history.reply(reply(2, "receipt", "Both lanes are on the epic branch.", 41), at(9, 47));
     view.update();
-    expect(view.element.classList.contains("m-atlas")).toBe(true);
+    expect(view.element.classList.contains("machine-accent-0")).toBe(true);
     const groups = view.element.querySelectorAll(".msgs > .turn");
     expect(groups).toHaveLength(2);
     expect(groups[0]?.className).toBe("turn you");
@@ -70,7 +70,7 @@ describe("ConversationView (Pebble thread)", () => {
     const view = new ConversationView(document, history, "sup"); document.body.replaceChildren(view.element);
     history.reply(reply(1, "answer", "Every pack:\n\n| pack | cases | result |\n| --- | --- | --- |\n| core | 412 | pass |\n| cli | 318 | 1 flake |"), at(9, 30)); view.update();
     const table = view.element.querySelector<HTMLElement>(".evi")!;
-    expect(table.style.getPropertyValue("--evi-columns")).toBe("3");
+    expect(table.dataset.columns).toBe("3");
     expect(table.querySelectorAll(".evi-row")).toHaveLength(3);
     expect(table.querySelector(".evi-head span")?.textContent).toBe("pack");
     expect(table.querySelector(".pass")?.textContent).toBe("pass"); expect(table.querySelector(".flake")?.textContent).toBe("1 flake");

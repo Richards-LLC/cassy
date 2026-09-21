@@ -66,7 +66,11 @@ export interface ConversationViewOptions {
   /** Machine label and project name for the mono line beneath the name. */
   machine?: string;
   project?: string;
-  /** Machine accent class (from machine-accent.ts) applied on the thread root. */
+  /**
+   * Machine accent class (machineAccentClass from machine-accent.ts). The shell
+   * root already carries it (conversation-shell.ts) so the thread inherits the
+   * accent; pass it here only when the view is mounted outside that shell.
+   */
   accentClass?: string;
   /** True while the supervisor is executing: paints the working line. */
   working?: () => boolean;
@@ -286,9 +290,11 @@ export function renderBody(document: Document, reply: OperatorReply, context?: T
     if (block.type === "text") { nodes.push(...paragraphs(document, block.text)); continue; }
     const table = document.createElement("div"); table.className = "evi"; table.setAttribute("role", "table");
     const columns = Math.max(block.table.header?.length ?? 0, ...block.table.rows.map((row) => row.length));
-    table.style.setProperty("--evi-columns", String(columns));
+    table.dataset.columns = String(columns);
     const row = (cells: string[], head: boolean): HTMLElement => {
       const line = document.createElement("div"); line.className = head ? "evi-row evi-head" : "evi-row"; line.setAttribute("role", "row");
+      // First column takes the slack, the rest hug their numbers; widths beyond three columns are set here, not in CSS.
+      if (columns !== 3) line.style.gridTemplateColumns = `minmax(0, 1fr)${" auto".repeat(Math.max(0, columns - 1))}`;
       for (let index = 0; index < columns; index += 1) {
         const cell = document.createElement("span"); cell.setAttribute("role", head ? "columnheader" : "cell");
         const text = cells[index] ?? ""; cell.textContent = text;

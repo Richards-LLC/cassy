@@ -32,7 +32,11 @@ export function fixtureConversationRows(selected: boolean): ConversationRow[] {
 export function renderConversationFixture(app: HTMLElement, state: string): void {
   const supervisor = FIXTURE_SUPERVISOR;
   const selected = !['conversations-list', 'paired-machines'].includes(state);
-  app.innerHTML = conversationShellMarkup({ selected, supervisor, projectDir: '/projects/cas-src', host: 'Atlas · Linux', machineId: 'atlas-linux', loaded: true, paired: true });
+  // The evidence state opens the Studio Mac thread so the supervisor pebbles take the second accent.
+  const machine = state === 'conversation-evidence'
+    ? { id: 'studio-mac', label: 'Studio Mac', host: 'Studio Mac · macOS', projectDir: '/projects/gabber-studio', project: 'gabber-studio' }
+    : { id: 'atlas-linux', label: 'Atlas', host: 'Atlas · Linux', projectDir: '/projects/cas-src', project: 'cas-src' };
+  app.innerHTML = conversationShellMarkup({ selected, supervisor, projectDir: machine.projectDir, host: machine.host, machineId: machine.id, loaded: true, paired: true });
   new ConversationList().render(app.querySelector('#conversation-list')!, fixtureConversationRows(selected), () => {});
   const machines = FIXTURE_MACHINES;
   app.querySelector('#hub-footer-badges')!.innerHTML = machineFooterMarkup(machines, machines.length, 'fixture');
@@ -44,7 +48,6 @@ export function renderConversationFixture(app: HTMLElement, state: string): void
   if (state === 'paired-machines') dialog.showModal();
   if (!selected) return;
   const history = new ConversationHistory();
-  const machine = state === 'conversation-evidence' ? { id: 'studio', label: 'Studio Mac', project: 'gabber-studio' } : { id: 'atlas', label: 'Atlas', project: 'cas-src' };
   // Fixture clock: 09:41 today, so day and group timestamps are deterministic.
   const today = new Date(); today.setHours(9, 41, 0, 0);
   const at = (hh: number, mm: number) => new Date(today.getFullYear(), today.getMonth(), today.getDate(), hh, mm).getTime();
@@ -80,7 +83,7 @@ export function renderConversationFixture(app: HTMLElement, state: string): void
       reply(42, 41, 'The project badge stays visible in the list and conversation header.', 'answer', at(9, 43));
     }
   }
-  const view = new ConversationView(document, history, { supervisor, machine: machine.label, project: machine.project, accentClass: `m-${machine.id}`, working: () => working, editMessage: () => {} });
+  const view = new ConversationView(document, history, { supervisor, machine: machine.label, project: machine.project, working: () => working, editMessage: () => {} });
   app.querySelector('#conversation-pane-slot')!.append(view.element); view.update();
   app.querySelector('#conversation-composer-slot')!.innerHTML = `<div class="message conversation-composer"><h2><label for="message-text">Your message</label></h2><textarea id="message-text" placeholder="Write to ${supervisor}…"></textarea><div class="composer-actions"><button id="message-send" class="primary" type="button">Send to ${supervisor}</button></div></div>`;
   app.querySelector('#conversation-status-slot')!.innerHTML = '<p class="conversation-host">Supervisor conversations<br>In progress</p>';

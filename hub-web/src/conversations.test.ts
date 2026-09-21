@@ -84,7 +84,6 @@ describe('conversation evidence', () => {
     expect(conversationShellMarkup({ selected: false, loaded: true, paired: false })).toContain('class="conversation-shell">');
   });
   it('shows only turns — never pane text — escapes replies, and never presents the operator as the supervisor', () => {
->>>>>>> 29237055 (feat(hub): Pebble thread bubbles, typed turns, working line; pane mirror leaves the default view (cas-d167))
     const history = new ConversationHistory();
     const view = new ConversationView(document, history, { supervisor: 'real-supervisor', machine: 'Atlas', project: 'cas-src' }); document.body.replaceChildren(view.element); view.update();
     expect(view.element.querySelector('.thead b')?.textContent).toBe('real-supervisor');

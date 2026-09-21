@@ -12,7 +12,8 @@ import { launchBrowser } from '../../docs/design/hub-mobile/browser-tools.mjs';
 
 export const PANE_TEXT = 'The supervisor conversation is ready for review.\r\n\r\nI kept the project visible while you read and reply.\r\n\r\n    const project = "cas-src";\r\n    const instruction = "Keep the real supervisor text.";\r\n\r\nThe focused checks passed. I am waiting for your direction.';
 export const SUPERVISOR = 'patient-pelican-9';
-export async function installProtocolFixture(page, origin) {
+export async function installProtocolFixture(page, origin, options = {}) {
+  const history = options.history === true;
   const sockets = new Map();
   const sends = [];
   const liveSessions = id => {
@@ -47,8 +48,23 @@ export async function installProtocolFixture(page, origin) {
   await page.routeWebSocket(/\.test\/v1\//, ws => {
     const session = decodeURIComponent(new URL(ws.url()).pathname.split('/')[3]);
     sockets.set(session, ws);
-    ws.onMessage(data => { const message = JSON.parse(String(data)); if (message.SendMessage) sends.push({ session, ...message.SendMessage }); });
-    ws.send(JSON.stringify({ Welcome: { state: { panes: [{ id: 'supervisor', kind: 'Supervisor', title: session, focused: true, exited: false }], cols: 100, rows: 28 }, scrollback: { supervisor: [[...Buffer.from(PANE_TEXT)]] } } }));
+    ws.onMessage(data => {
+      const message = JSON.parse(String(data));
+      if (message.SendMessage) sends.push({ session, ...message.SendMessage });
+      if (history && message.ConversationHistoryRequest) {
+        ws.send(JSON.stringify({ ConversationHistory: {
+          request_id: message.ConversationHistoryRequest.request_id,
+          messages: [{ notification_id: 17, target: SUPERVISOR, text: 'Earlier question', state: 'acknowledged', stamped: true, device_id: 'fixture-device', operator_label: 'Daniel', at: '2026-09-21T09:00:00Z' }],
+          replies: [{ notification_id: 18, reply_to: 17, message: 'Earlier answer', summary: '', device_id: 'fixture-device', operator_label: 'Daniel', kind: 'answer', attachments: [], at: '2026-09-21T09:01:00Z' }],
+          has_earlier: false,
+        } }));
+      }
+    });
+    ws.send(JSON.stringify({ Welcome: {
+      state: { panes: [{ id: 'supervisor', kind: 'Supervisor', title: session, focused: true, exited: false }], cols: 100, rows: 28 },
+      scrollback: { supervisor: [[...Buffer.from(PANE_TEXT)]] },
+      ...(history ? { protocol_version: 3, capabilities: ['conversation_history'] } : {}),
+    } }));
   });
   await page.goto(origin);
   await page.evaluate(async () => {

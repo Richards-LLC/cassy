@@ -1,4 +1,5 @@
 import { machineMonogram } from "./machine-accent";
+import { renderMarkdown } from "./markdown-renderer";
 import { shouldFollowTail } from "./transcript";
 import type { ConversationEvent, ConversationHistory, ConversationSend } from "./conversation-history";
 import type { ArtifactRef, OperatorReply, OperatorTurnKind } from "./types";
@@ -440,7 +441,7 @@ function paragraphs(document: Document, text: string): HTMLElement[] {
 export function renderBody(document: Document, reply: OperatorReply, context?: TurnRenderContext, options: { attachments?: "inline" | "none" } = {}): HTMLElement[] {
   const nodes: HTMLElement[] = [];
   for (const block of messageBlocks(reply.message)) {
-    if (block.type === "text") { nodes.push(...paragraphs(document, block.text)); continue; }
+    if (block.type === "text") { nodes.push(...renderMarkdown(document, block.text)); continue; }
     const table = document.createElement("div"); table.className = "evi"; table.setAttribute("role", "table");
     const columns = Math.max(block.table.header?.length ?? 0, ...block.table.rows.map((row) => row.length));
     table.dataset.columns = String(columns);

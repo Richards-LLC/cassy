@@ -8,4 +8,8 @@ describe("Commander timestamps", () => {
     expect(relativeTimestamp(now - 3_600_000, now)).toBe("1h");
     expect(absoluteTimestamp(now)).toBe("2026-08-15T04:00:00.000Z");
   });
+
+  it("describes an undated activity value instead of presenting it as a turn state", () => {
+    expect(relativeTimestamp(undefined)).toBe("No activity yet");
+  });
 });

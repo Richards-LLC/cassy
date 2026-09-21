@@ -1757,37 +1757,35 @@ function restoreMessageDraft(): void {
   composer.setSelectionRange(caret, caret);
 }
 
-function speechStatusText(): string {
-  if (speechInputState === "listening") return "Listening… speak a short message, then review it before sending.";
-  if (speechInputState === "error") return speechInputDetail;
-  if (speechCapability?.mode === "local") return "On-device voice ready — tap the mic, review, then send.";
-  return "Voice ready — tap the mic, review, then send.";
-}
-
 function syncSpeechComposer(): void {
   const mic = document.querySelector<HTMLButtonElement>("#message-mic");
-  const status = document.querySelector<HTMLElement>("#speech-status");
-  if (!mic || !status) return;
-  const available = speechCapability !== undefined && speechCapability.mode !== "typing";
-  mic.hidden = !available;
-  status.hidden = !available && speechInputDetail.length === 0;
+  if (!mic) return;
+  const unavailable = speechCapability === undefined || speechCapability.mode === "typing";
+  const reason = speechCapability === undefined
+    ? "Checking voice input support…"
+    : speechInputDetail || "Voice input is not supported in this browser. Type your message instead.";
+  mic.disabled = unavailable;
   mic.classList.toggle("listening", speechInputState === "listening");
   mic.setAttribute("aria-pressed", String(speechInputState === "listening"));
-  mic.querySelector<HTMLElement>("[data-mic-label]")!.textContent = speechInputState === "listening" ? "Stop listening" : "Tap to talk";
-  status.textContent = speechStatusText();
+  const label = unavailable ? "Voice input unavailable" : speechInputState === "listening" ? "Stop listening" : "Start listening";
+  mic.setAttribute("aria-label", label);
+  mic.title = unavailable ? reason : speechInputState === "listening" ? "Stop listening" : speechInputDetail || "Start listening";
+  if (unavailable || speechInputDetail) mic.setAttribute("aria-description", reason);
+  else mic.removeAttribute("aria-description");
 }
 
 function createSpeechController(capability: SpeechInputCapability): SpeechDictationController {
   return new SpeechDictationController(capability, {
     read: () => document.querySelector<HTMLTextAreaElement>("#message-text")?.value ?? messageDraft,
-    write: (value) => {
+    caret: () => document.querySelector<HTMLTextAreaElement>("#message-text")?.selectionStart ?? messageDraftSelection,
+    write: (value, _interim, caret) => {
       messageDraft = value;
-      messageDraftSelection = value.length;
+      messageDraftSelection = caret ?? value.length;
       messageDelivery = undefined;
       const composer = document.querySelector<HTMLTextAreaElement>("#message-text");
       if (!composer) return;
       composer.value = value;
-      composer.setSelectionRange(value.length, value.length);
+      composer.setSelectionRange(messageDraftSelection, messageDraftSelection);
       const delivery = document.querySelector<HTMLElement>("#message-delivery");
       if (delivery) delivery.hidden = true;
     },
@@ -2213,7 +2211,7 @@ function render(captureDraft = true): void {
             <button id="context-panel-close" class="context-panel-close" type="button" aria-label="Close panel">×</button>
           </div>
           <section id="attention-panel" class="context-tab" data-context-content="attention" ${activeContextTab === "attention" ? "" : "hidden"}></section>
-          <section class="context-tab status-context" data-context-content="status" ${activeContextTab === "status" ? "" : "hidden"}><p class="status-stale" role="status" hidden></p><div id="status-view"></div><div class="message"><h2><label for="message-text">Talk to ${escapeHtml(supervisor ?? "supervisor")}</label></h2>${operatorThreadMarkup(thread)}<textarea aria-describedby="message-status" id="message-text" placeholder="Speak or type a message, then review it before sending"></textarea><p class="control-disabled-reason" role="note" hidden></p><div class="composer-actions"><button id="message-mic" type="button" hidden aria-label="Start voice input" aria-pressed="false"><span class="mic-mark" aria-hidden="true">●</span><span data-mic-label>Tap to talk</span></button><button id="message-keyboard" type="button">Keyboard</button><button id="message-send" class="primary">Send message</button></div><p id="speech-status" class="composer-status" role="status" hidden></p><p id="message-status" class="message-status" role="status" hidden></p><p id="message-delivery" class="message-delivery" role="status" hidden></p></div></section>
+          <section class="context-tab status-context" data-context-content="status" ${activeContextTab === "status" ? "" : "hidden"}><p class="status-stale" role="status" hidden></p><div id="status-view"></div><div class="message"><h2><label for="message-text">Talk to ${escapeHtml(supervisor ?? "supervisor")}</label></h2>${operatorThreadMarkup(thread)}<textarea aria-describedby="message-status" id="message-text" placeholder="Speak or type a message, then review it before sending"></textarea><p class="control-disabled-reason" role="note" hidden></p><div class="composer-actions"><button id="message-mic" type="button" disabled aria-label="Voice input unavailable" aria-description="Checking voice input support…" title="Checking voice input support…" aria-pressed="false"><svg class="mic-glyph" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="8" y="3" width="8" height="12" rx="4"></rect><path d="M5 11a7 7 0 0 0 14 0M12 18v3M9 21h6"></path></svg></button><button id="message-keyboard" type="button">Keyboard</button><button id="message-send" class="primary">Send message</button></div><p id="message-status" class="message-status" role="status" hidden></p><p id="message-delivery" class="message-delivery" role="status" hidden></p></div></section>
         </div>
       </aside>
     </div>

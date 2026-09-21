@@ -203,6 +203,10 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
         content: include_str!("builtins/skills/cas-supervisor/references/reference.md"),
     },
     BuiltinFile {
+        path: "skills/cas-supervisor/references/operator-reply.md",
+        content: include_str!("builtins/skills/cas-supervisor/references/operator-reply.md"),
+    },
+    BuiltinFile {
         path: "skills/cas-supervisor/references/filing-cas-bugs.md",
         content: include_str!("builtins/skills/cas-supervisor/references/filing-cas-bugs.md"),
     },
@@ -765,6 +769,10 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
         content: include_str!("builtins/codex/skills/cas-supervisor/references/reference.md"),
     },
     BuiltinFile {
+        path: "skills/cas-supervisor/references/operator-reply.md",
+        content: include_str!("builtins/codex/skills/cas-supervisor/references/operator-reply.md"),
+    },
+    BuiltinFile {
         path: "skills/cas-supervisor/references/filing-cas-bugs.md",
         content: include_str!("builtins/codex/skills/cas-supervisor/references/filing-cas-bugs.md"),
     },
@@ -1301,6 +1309,10 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-supervisor/references/reference.md",
         content: include_str!("builtins/grok/skills/cas-supervisor/references/reference.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-supervisor/references/operator-reply.md",
+        content: include_str!("builtins/grok/skills/cas-supervisor/references/operator-reply.md"),
     },
     BuiltinFile {
         path: "skills/cas-supervisor/references/filing-cas-bugs.md",
@@ -3740,6 +3752,57 @@ This is the body content."#;
                 guide.contains(keyword),
                 "supervisor_guidance() missing Hard Rule keyword: {keyword:?}"
             );
+        }
+    }
+
+    #[test]
+    fn supervisor_operator_reply_contract_is_registered_and_pinned_on_every_harness() {
+        let required = [
+            "# Phone reply contract",
+            "Answer first",
+            "first line is the answer in one sentence",
+            "Use at most 5 bullets, one line each",
+            "Bold the decision word",
+            "thing waiting on the operator",
+            "under ~600 characters",
+            "file paths or ticket IDs",
+            "Do not narrate the process",
+            "**bold**",
+            "numbered lists",
+            "`inline code`",
+            "links",
+        ];
+
+        for (label, catalog, source) in [
+            (
+                "claude",
+                BUILTIN_SKILLS,
+                include_str!("builtins/skills/cas-supervisor/references/operator-reply.md"),
+            ),
+            (
+                "codex",
+                CODEX_BUILTIN_SKILLS,
+                include_str!("builtins/codex/skills/cas-supervisor/references/operator-reply.md"),
+            ),
+            (
+                "grok",
+                GROK_BUILTIN_SKILLS,
+                include_str!("builtins/grok/skills/cas-supervisor/references/operator-reply.md"),
+            ),
+        ] {
+            let contract = catalog
+                .iter()
+                .find(|builtin| {
+                    builtin.path == "skills/cas-supervisor/references/operator-reply.md"
+                })
+                .unwrap_or_else(|| panic!("{label} catalog missing operator-reply.md"));
+            assert_eq!(contract.content, source, "{label} catalog source drifted");
+            for marker in required {
+                assert!(
+                    contract.content.contains(marker),
+                    "{label} operator-reply.md missing pinned contract marker {marker:?}"
+                );
+            }
         }
     }
 

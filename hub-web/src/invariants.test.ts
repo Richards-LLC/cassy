@@ -664,6 +664,9 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(main).toContain("Talk to supervisor");
     expect(main).toContain('id="message-mic"');
     expect(main).toContain('id="message-keyboard"');
+    expect(main).toContain('aria-description="Checking voice input support…"');
+    expect(main).not.toContain('Tap to talk');
+    expect(main).not.toContain('id="speech-status"');
     // Opening the composer focuses the composer on every layout. Focusing the
     // mic button first made the phone composer unusable by keyboard: the caret
     // was never in the textarea, so the operator's typing went nowhere and
@@ -673,8 +676,8 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(main).toContain("// Voice is one labelled tap away; focus belongs in the field that accepts text.");
     expect(css).toContain(".talk-supervisor {");
     expect(css).toContain("#message-mic {");
-    expect(css).toContain("grid-column: 1 / -1;");
-    expect(css).toContain("min-height: 48px;");
+    expect(css).toContain(".conversation-composer #message-mic {");
+    expect(css).toContain(".conversation-composer #message-mic.listening {");
   });
 
   it("keeps a focused terminal focused across steady-state renders", async () => {
@@ -1176,7 +1179,7 @@ describe("binding Cassy Cloud browser invariants", () => {
     const callbacks = {
       onState: vi.fn(), onAttachState: vi.fn(), onSessions: vi.fn(), onMachineEvent: vi.fn(),
       onSessionState: vi.fn(), onOutput: vi.fn(), onPaneKeyframe: vi.fn(),
-      onFlowControlReset: vi.fn(), onSocketError: vi.fn(),
+      onFlowControlReset: vi.fn(), onSocketError: vi.fn(), onConversationHistory: vi.fn(),
     } satisfies HubCallbacks;
     const supervisor = new HubConnectionSupervisor(machine, callbacks);
     const internals = supervisor as unknown as { desired: boolean; machineMultiplex: boolean };
@@ -1211,6 +1214,18 @@ describe("binding Cassy Cloud browser invariants", () => {
         capabilities: ["authoritative_pane_keyframes"],
       } },
     }));
+    const historyRequest = socket.sent
+      .map((value) => JSON.parse(value) as Record<string, any>)
+      .find((value) => value.channel === "pty:factory-a" && value.message?.ConversationHistoryRequest);
+    expect(historyRequest?.message.ConversationHistoryRequest).toMatchObject({ limit: 50, device_id: "device" });
+    const historyPage = {
+      request_id: historyRequest?.message.ConversationHistoryRequest.request_id,
+      messages: [{ notification_id: 17, target: "supervisor", text: "Earlier question", state: "acknowledged", stamped: true, device_id: "device", at: "2026-09-21T12:00:00Z" }],
+      replies: [{ notification_id: 18, reply_to: 17, message: "Earlier answer", summary: "", device_id: "device", kind: "answer", attachments: [], at: "2026-09-21T12:01:00Z" }],
+      has_earlier: false,
+    };
+    socket.receive(JSON.stringify({ channel: "pty:factory-a", message: { ConversationHistory: historyPage } }));
+    expect(callbacks.onConversationHistory).toHaveBeenCalledWith("factory-a", historyPage);
     const session = new TextEncoder().encode("factory-a");
     const pane = new TextEncoder().encode("supervisor");
     const payload = new Uint8Array([0x1b, 0x5b, 0x48, 0x4f, 0x4b]);

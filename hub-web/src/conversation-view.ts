@@ -74,6 +74,12 @@ export interface ConversationViewOptions {
   accentClass?: string;
   /** True while the supervisor is executing: paints the working line. */
   working?: () => boolean;
+  /**
+   * Render the thread's own header. Inside the conversation shell the shell
+   * supplies the single Pebble header (conversationHeaderMarkup), so main.ts
+   * and the fixture pass false; a standalone mount keeps the default.
+   */
+  header?: boolean;
   /** Refused sends offer to put their text back into the composer. */
   editMessage?: (text: string) => void;
 }
@@ -112,7 +118,7 @@ export class ConversationView {
     this.jump = document.createElement("button"); this.jump.type = "button";
     this.jump.className = "conversation-jump"; this.jump.textContent = "Jump to latest"; this.jump.hidden = true;
     this.jump.onclick = () => { this.following = true; this.update(); this.pin(); };
-    this.element.append(this.head, this.msgs, this.jump);
+    this.element.append(...(this.options.header === false ? [] : [this.head]), this.msgs, this.jump);
     this.element.addEventListener("scroll", () => {
       if (this.pinPending) return;
       this.following = shouldFollowTail(this.element);

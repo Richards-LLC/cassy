@@ -256,6 +256,7 @@ function applyPaneView(key: string, mount: HTMLElement, surface: TerminalSurface
         supervisor: target,
         machine: machines.get(selectedMachineId!)?.label,
         project: projectName(hubSession?.project_dir),
+        header: false,
         // The supervisor is executing while a send awaits its reply or the
         // pane produced output in the last half minute.
         working: () => history.hasPending() || [...paneLastActivity].some(([paneId, at]) => paneId.startsWith(`${threadKey}:`) && Date.now() - at < WORKING_WINDOW_MS),

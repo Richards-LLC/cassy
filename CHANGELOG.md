@@ -7,6 +7,55 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.27.3] - 2026-09-21
+
+### Added
+
+- Supervisor replies on the hub render as formatted text on the phone. The hub
+  now renders a small, safe Markdown subset in reply bubbles, replayed history
+  and pinned questions: bold, italics, bullet and numbered lists, inline and
+  fenced code, and `https` links. Everything is built as DOM nodes from the
+  reply text, so tags, entities and non-`https` link schemes stay literal.
+  Conversation-list previews strip the markers. Supervisors answering a
+  Commander message now read a phone reply contract (answer first, at most
+  five one-line bullets, bold the decision, keep it short) that the
+  Commander-row inbox framing points to.
+- The hub composer on a phone has a small round mic instead of the wide
+  "Tap to talk" pill: it lights while listening, a second tap stops and inserts
+  the transcript at the caret for review, and the text box takes the freed
+  width. Unsupported or permission-denied voice input is shown on the mic
+  itself; the standing "Voice ready" hint line is gone.
+- The hub logs each forwarded conversation-history request and the size of
+  the relayed response (request id and row counts only, never message text),
+  so a thread that opens empty can be traced to the hop that lost it.
+
+### Fixed
+
+- The hub requests conversation history from any protocol-3 daemon even when
+  the relayed welcome omits the capability list, and a pane with no recorded
+  activity is labelled "No activity yet" instead of "waiting".
+- The release train no longer needs hand interventions for the ten gaps
+  recorded across the 3.27.0 to 3.27.2 cuts: the merge-queue query goes
+  through one quoting path and its response shape is validated; the gate
+  scratch base is read from the release env file and checked with the gate's
+  own mount rule; Zig is linked as a toolchain directory; prep bumps the
+  version before staging; publish fast-forwards the release worktree to the
+  landed commit; post-publication waits for the Release workflow and writes
+  the workflow, published and latency receipts; report reads the two Slack
+  thread ids from the announce receipt; the receipts stage waits for
+  mergeability, retries the enqueue and resumes idempotently. Each gap has a
+  self-test row.
+- The release report and receipts generators emit Markdown that passes the
+  Docs Lint lane: Slack permalinks and the GitHub release URL are
+  angle-bracket links and the duplicated "Only reply:" heading is
+  disambiguated per audience. The checkout-dependency guard now derives its
+  list of test sources from the test tree (plus a runtime scan of the
+  checkout) instead of a hand-maintained list, so a new test file cannot slip
+  a compile-time checkout read past it.
+- The release report poster selects the MechaCassy token named by this
+  machine's registered Claude profile instead of failing when several token
+  variables are set; an explicit `MECHA_SLACK_TOKEN_ENV` still wins.
+
 ## [3.27.2] - 2026-09-21
 
 ### Added

@@ -28,6 +28,12 @@ export interface TurnRenderContext {
   readonly body: () => HTMLElement[];
   /** Set for the `attachment` kind: the artifact this call renders. */
   readonly attachment?: ArtifactRef;
+  /** The thread's history: lets an ask read the send that answered it. */
+  readonly history?: ConversationHistory;
+  /** Sends `text` as the operator's reply to `reply` (in_reply_to = its notification_id). Absent when this view cannot send. */
+  readonly respond?: (reply: OperatorReply, text: string) => void;
+  /** True when rendering the copy pinned above the composer rather than the one in the flow. */
+  readonly pinned?: boolean;
 }
 
 /**
@@ -82,12 +88,24 @@ export interface ConversationViewOptions {
   header?: boolean;
   /** Refused sends offer to put their text back into the composer. */
   editMessage?: (text: string) => void;
+  /**
+   * Quick replies and composer replies to an ask go through this; the caller
+   * sends with in_reply_to = the ask's notification_id and records the send
+   * in the history with the same replyTo, which is what marks the ask answered.
+   */
+  respond?: (ask: OperatorReply, text: string) => void;
 }
 
 const TICK = '<svg class="tick" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.6 8.6l3.3 3.3L13.4 4.4"/></svg>';
 
 export class ConversationView {
   readonly element: HTMLElement;
+  /**
+   * The unanswered ask, pinned directly above the composer as well as in the
+   * flow (Pebble 3). Mount it beside the composer; it hides itself when no ask
+   * is waiting and unpins on answer.
+   */
+  readonly pinned: HTMLElement;
   private readonly head: HTMLElement;
   private readonly msgs: HTMLElement;
   private readonly jump: HTMLButtonElement;
@@ -119,6 +137,9 @@ export class ConversationView {
     this.jump.className = "conversation-jump"; this.jump.textContent = "Jump to latest"; this.jump.hidden = true;
     this.jump.onclick = () => { this.following = true; this.update(); this.pin(); };
     this.element.append(...(this.options.header === false ? [] : [this.head]), this.msgs, this.jump);
+    this.pinned = document.createElement("div"); this.pinned.className = "pinned-ask"; this.pinned.hidden = true;
+    if (this.options.accentClass) this.pinned.classList.add(this.options.accentClass);
+    this.pinned.setAttribute("role", "region"); this.pinned.setAttribute("aria-label", `Waiting on you: question from ${supervisor}`);
     this.element.addEventListener("scroll", () => {
       if (this.pinPending) return;
       this.following = shouldFollowTail(this.element);
@@ -150,7 +171,47 @@ export class ConversationView {
     // scroll position and selection.
     const same = this.msgs.children.length === children.length && children.every((node, index) => this.msgs.children[index] === node);
     if (!same) this.msgs.replaceChildren(...children);
+    this.renderPinned(document);
     if (this.following && document.getSelection()?.isCollapsed !== false) this.pin();
+  }
+
+  /** The most recent unanswered ask, pinned above the composer; answering unpins it. */
+  private renderPinned(document: Document): void {
+    const ask = this.history.pinnedAsk();
+    const render = ask && turnRenderers.get("ask");
+    if (!ask || !render) {
+      this.pinned.hidden = true; this.pinned.replaceChildren(); delete this.pinned.dataset.signature;
+      return;
+    }
+    const signature = JSON.stringify([ask.notification_id, ask.message, ask.options]);
+    if (!this.pinned.hidden && this.pinned.dataset.signature === signature) return;
+    this.pinned.dataset.signature = signature;
+    const turn: ThreadTurn = { key: `reply:${ask.notification_id}`, side: "supervisor", kind: "ask", event: { kind: "reply", value: ask }, first: true, last: true };
+    const context = this.context(document, turn, ask, true);
+    const object = render(ask, context);
+    object.dataset.kind = "ask"; object.dataset.pinned = "true";
+    const label = document.createElement("span"); label.className = "pinned-label"; label.textContent = "Waiting on you";
+    this.pinned.replaceChildren(label, object);
+    this.pinned.hidden = false;
+  }
+
+  private context(document: Document, turn: ThreadTurn, reply: OperatorReply, pinned = false): TurnRenderContext {
+    const context: TurnRenderContext = {
+      document, turn, reply, supervisor: this.options.supervisor,
+      body: () => renderBody(document, reply, context),
+      history: this.history,
+      respond: this.options.respond,
+      pinned,
+    };
+    return context;
+  }
+
+  /** An ask or blocker repaints when the operator answers it, not only when its own event changes. */
+  private turnSignature(turn: ThreadTurn): string {
+    const reply = turn.event.kind === "reply" ? turn.event.value : undefined;
+    const answered = reply?.kind === "ask" ? this.history.answered(reply.notification_id) : undefined;
+    const waiting = reply?.kind === "blocker" ? this.history.waiting().some((item) => item.notification_id === reply.notification_id) : undefined;
+    return JSON.stringify([turn.event, answered && [answered.id, answered.state, answered.text], waiting]);
   }
 
   /** Cheap liveness poll: repaints only when the working state actually flipped. */
@@ -161,7 +222,7 @@ export class ConversationView {
   }
 
   private renderItem(node: HTMLElement, item: ThreadItem): void {
-    const signature = signatureOf(item);
+    const signature = signatureOf(item, (turn) => this.turnSignature(turn));
     if (node.dataset.signature === signature) return;
     node.dataset.signature = signature;
     switch (item.type) {
@@ -203,7 +264,7 @@ export class ConversationView {
     for (const child of node.querySelectorAll<HTMLElement>(":scope > [data-key]")) existing.set(child.dataset.key!, child);
     const children: HTMLElement[] = [];
     for (const turn of group.turns) {
-      const signature = JSON.stringify(turn.event);
+      const signature = this.turnSignature(turn);
       let bubble = existing.get(turn.key);
       if (!bubble || bubble.dataset.signature !== signature) {
         bubble = turn.event.kind === "send" ? this.renderSend(document, turn, turn.event.value) : this.renderReply(document, turn, turn.event.value);
@@ -240,7 +301,7 @@ export class ConversationView {
 
   private renderReply(document: Document, turn: ThreadTurn, reply: OperatorReply): HTMLElement {
     const kind = reply.kind ?? "answer";
-    const context: TurnRenderContext = { document, turn, reply, supervisor: this.options.supervisor, body: () => renderBody(document, reply, context) };
+    const context = this.context(document, turn, reply);
     const custom = kind === "ask" || kind === "blocker" ? turnRenderers.get(kind)?.(reply, context) : undefined;
     const body = context.body;
     const bubble = custom ?? document.createElement("div");
@@ -271,15 +332,15 @@ export class ConversationView {
     });
   }
 
-  dispose(): void { this.disposed = true; this.resize?.disconnect(); this.element.remove(); }
+  dispose(): void { this.disposed = true; this.resize?.disconnect(); this.element.remove(); this.pinned.remove(); }
 }
 
-function signatureOf(item: ThreadItem): string {
+function signatureOf(item: ThreadItem, turnSignature: (turn: ThreadTurn) => string): string {
   switch (item.type) {
     case "day": return `day:${item.label}`;
     case "working": return "working";
     case "coalesce": return JSON.stringify([item.count, item.latest, item.time, item.replies.map((reply) => reply.notification_id)]);
-    case "group": return JSON.stringify([item.side, item.time, item.turns.map((turn) => [turn.key, turn.first, turn.last, turn.event])]);
+    case "group": return JSON.stringify([item.side, item.time, item.turns.map((turn) => [turn.key, turn.first, turn.last, turnSignature(turn)])]);
   }
 }
 

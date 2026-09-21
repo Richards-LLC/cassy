@@ -1,0 +1,8 @@
+/* Fixture-only: the round-3 pairs sheet (docs/design/hub-messaging/round-3/pebble.css .pairs). */
+.pairs { height: 100%; overflow: auto; padding: 30px; display: flex; flex-direction: column; gap: 34px; background: var(--canvas); color: var(--ink); }
+.pair { display: flex; flex-direction: column; gap: 14px; }
+.pair h2 { margin: 0; font: var(--weight-semibold) 13px/1.3 var(--font-ui); color: var(--ink-mid); letter-spacing: 0.04em; }
+.pair .side { display: flex; flex-wrap: wrap; gap: 30px; align-items: flex-start; }
+.pair .one { display: flex; flex-direction: column; align-items: flex-start; gap: 9px; max-width: 420px; min-width: 0; }
+.pair .cap { font-size: 12.5px; color: var(--ink-mid); }
+@media (max-width: 560px) { .pairs { padding: 18px; gap: 26px; } .pair .side { gap: 22px; } }

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { ConversationHistory } from "./conversation-history";
-import { cellTone, coalesceText, dayLabel, messageBlocks, threadModel, type ThreadGroup } from "./thread-model";
+import { blockerEvidence, cellTone, coalesceText, dayLabel, messageBlocks, threadModel, type ThreadGroup } from "./thread-model";
 import type { OperatorReply, OperatorTurnKind } from "./types";
 
 const NOW = new Date(2026, 8, 21, 10, 0).getTime();
@@ -88,5 +88,18 @@ describe("messageBlocks", () => {
   });
   it("tones result cells", () => {
     expect(cellTone("pass")).toBe("pass"); expect(cellTone("1 flake")).toBe("flake"); expect(cellTone("failed")).toBe("fail"); expect(cellTone("412")).toBeUndefined();
+  });
+});
+
+describe("blockerEvidence", () => {
+  it("lifts a trailing file:line · label line into the evidence window", () => {
+    expect(blockerEvidence("The release gate went red. The train is held.\nattention.rs:212 · needless_borrow"))
+      .toEqual({ text: "The release gate went red. The train is held.", evidence: "attention.rs:212 · needless_borrow" });
+    expect(blockerEvidence("Gate red.\n\ncas-cli/src/hub/server.rs:883:5")).toEqual({ text: "Gate red.", evidence: "cas-cli/src/hub/server.rs:883:5" });
+    expect(blockerEvidence("Gate red.\n`cargo clippy -- -D warnings`")).toEqual({ text: "Gate red.", evidence: "cargo clippy -- -D warnings" });
+  });
+  it("leaves prose alone: no evidence without a reference line, and a lone line is the message", () => {
+    expect(blockerEvidence("The release gate went red.\nNothing was tagged.")).toEqual({ text: "The release gate went red.\nNothing was tagged.", evidence: undefined });
+    expect(blockerEvidence("attention.rs:212 · needless_borrow")).toEqual({ text: "attention.rs:212 · needless_borrow", evidence: undefined });
   });
 });

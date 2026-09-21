@@ -344,6 +344,83 @@ def run_download_policy_proof() -> None:
     print("release-report-post transport policy: 5 boundary cases passed")
 
 
+def run_token_selection_proof() -> None:
+    """Exercise registration-aware token selection without contacting the hub."""
+
+    module = adapter_module()
+    registered = "MECHA_SLACK_TOKEN_SOUNDWAVE_64AF90"
+    assert module.select_token_env(
+        {"MECHA_SLACK_TOKEN_CASSY_PROXY", "MECHA_SLACK_TOKEN_SOUNDWAVE"},
+        registered,
+    ) == registered
+    assert module.select_token_env({"MECHA_SLACK_TOKEN_ONLY"}, None) == "MECHA_SLACK_TOKEN_ONLY"
+    assert module.select_token_env(
+        {"MECHA_SLACK_TOKEN_FIRST", "MECHA_SLACK_TOKEN_SECOND"}, None
+    ) is None
+
+    with tempfile.TemporaryDirectory(prefix="release-report-post-config-") as directory:
+        config_dir = Path(directory)
+        (config_dir / ".claude.json").write_text(
+            json.dumps(
+                {
+                    "mcpServers": {
+                        "mecha-cassy": {
+                            "headers": {
+                                "Authorization": f"Bearer ${{{registered}}}",
+                            }
+                        }
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        names = {
+            "CLAUDE_CONFIG_DIR",
+            "CAS_RELEASE_TRAIN_MECHA_TOKEN_ENV",
+            "MECHA_SLACK_TOKEN_ENV",
+            "MECHA_SLACK_TOKEN",
+            "MECHA_SLACK_TOKEN_CASSY_PROXY",
+            "MECHA_SLACK_TOKEN_SOUNDWAVE",
+            registered,
+        }
+        previous = {name: os.environ.get(name) for name in names}
+        try:
+            for name in names:
+                os.environ.pop(name, None)
+            os.environ["CLAUDE_CONFIG_DIR"] = str(config_dir)
+            credentials = {
+                "MECHA_SLACK_TOKEN_CASSY_PROXY": "proxy-token",
+                "MECHA_SLACK_TOKEN_SOUNDWAVE": "soundwave-token",
+                registered: "registered-token",
+            }
+            assert module.registered_mecha_token_env() == registered
+            assert module.resolve_token(credentials) == "registered-token"
+
+            os.environ["MECHA_SLACK_TOKEN_ENV"] = "MECHA_SLACK_TOKEN_SOUNDWAVE"
+            assert module.resolve_token(credentials) == "soundwave-token"
+            os.environ.pop("MECHA_SLACK_TOKEN_ENV")
+
+            credentials.pop(registered)
+            try:
+                module.resolve_token(credentials)
+            except module.AdapterError as exc:
+                assert str(exc) == (
+                    f"registered MechaCassy token variable {registered} is unset or empty"
+                )
+            else:
+                raise AssertionError("missing registered token must fail")
+        finally:
+            for name in names:
+                os.environ.pop(name, None)
+            for name, value in previous.items():
+                if value is not None:
+                    os.environ[name] = value
+    print(
+        "release-report-post token selection: registered, explicit, and "
+        "missing-registration cases passed"
+    )
+
+
 def run_adapter(
     server: ThreadingHTTPServer,
     state: StubState,
@@ -395,6 +472,7 @@ def run_adapter(
 
 def main() -> int:
     pdf = PDF.read_bytes()
+    run_token_selection_proof()
     run_download_policy_proof()
     state = StubState(pdf)
     server = ThreadingHTTPServer(("127.0.0.1", 0), handler_for(state))

@@ -1,24 +1,80 @@
-import { cloudBrand, escapeHtml, projectBadge } from "./cloud-brand";
+import { cloudBrand, escapeHtml, projectBadge, projectName } from "./cloud-brand";
+import { machineAccentClass, machineMonogram } from "./machine-accent";
 
 export interface ConversationShellModel {
   supervisor?: string;
   projectDir?: string;
   host?: string;
+  /** Selected machine; its accent class goes on the shell root so the thread inherits it. */
+  machineId?: string;
   selected: boolean;
   loaded: boolean;
   paired: boolean;
 }
 
+/** Compose is a YOU action: the FAB takes the operator's constant colour
+ * (--you-bg at :root), never a machine accent, so it stays visible whatever
+ * machine scope the shell root carries. */
+export const composeFabMarkup = '<button id="compose-fab" class="compose-fab" type="button" aria-label="Write to a supervisor"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true" focusable="false"><path d="M12 5v14M5 12h14"/></svg></button>';
+
+/**
+ * The one header above the thread (cas-5b2d): the Pebble thead — machine
+ * monogram in the accent, supervisor bold with the project badge beside it,
+ * project · machine · connection in mono beneath (same order as a list row) — with the cas-11b01 back link and
+ * Terminal view control on the row above it. Elevated with --lift-head; the
+ * thread view itself renders no header inside this shell.
+ */
+export function conversationHeaderMarkup(model: ConversationShellModel): string {
+  const host = model.host || "";
+  return `<header class="conversation-heading thead"><div class="conversation-topline"><button id="conversation-back" type="button">‹ Conversations</button>${cloudBrand()}<button id="conversation-terminal" type="button">Terminal view</button></div><div class="conversation-identity"><span class="conversation-avatar" aria-hidden="true">${escapeHtml(machineMonogram(host || model.supervisor || "?"))}</span><div class="id"><h1><b>${escapeHtml(model.supervisor || "Supervisor unavailable")}</b>${projectBadge(model.projectDir)}</h1><span class="conversation-host">${escapeHtml([projectName(model.projectDir), host].filter(Boolean).join(" · "))}<span id="conversation-connection" role="status"></span></span></div></div></header>`;
+}
+
+/** Attach is a real affordance beside the field but has no transport yet, so it is disabled and says so. */
+export const ATTACH_DISABLED_REASON = "Attaching files from this device is not supported yet. Supervisors send reports to you; sending files to a supervisor is coming.";
+export const composerClipMarkup = `<button type="button" class="composer-clip" disabled aria-disabled="true" title="${ATTACH_DISABLED_REASON}" aria-label="Attach a file (not yet supported)"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M14.8 9.1l-5 5a3.2 3.2 0 01-4.6-4.6l6-6a2.1 2.1 0 013 3l-6 6a1 1 0 01-1.4-1.4l5.3-5.3"/></svg></button>`;
+const SEND_GLYPH = '<svg class="send-glyph" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true" focusable="false"><path d="M2.4 9.1l14.3-6.4c.7-.3 1.4.4 1.1 1.1l-6.4 14.3c-.3.7-1.4.6-1.5-.2l-.8-5.3-5.3-.8c-.8-.1-.9-1.2-.2-1.5z"/></svg>';
+
+/**
+ * Pebble composer (cas-3800): the field is a pill on --panel with --lift, the
+ * send button takes the machine accent from the shell root and names the
+ * supervisor, and the attach clip sits beside the field, present but
+ * disabled. Dresses the existing `.message` region in place so the ids the
+ * live-region updater and the send handler bind to are untouched.
+ */
+export function dressComposer(composer: HTMLElement, supervisor?: string): void {
+  const name = supervisor || "the supervisor";
+  composer.classList.add("conversation-composer");
+  composer.querySelector(".operator-thread")?.remove();
+  const label = composer.querySelector("label"); if (label) label.textContent = "Your message";
+  composer.querySelector("h2")?.classList.add("sr-only");
+  const input = composer.querySelector("textarea");
+  if (input) {
+    input.placeholder = `Message ${name}`;
+    input.rows = 1;
+    if (!composer.querySelector(".composer-clip")) input.insertAdjacentHTML("beforebegin", composerClipMarkup);
+  }
+  const button = composer.querySelector<HTMLElement>("#message-send");
+  if (button) {
+    button.classList.add("send");
+    button.setAttribute("aria-label", `Send to ${supervisor || "supervisor"}`);
+    button.replaceChildren();
+    button.insertAdjacentHTML("afterbegin", SEND_GLYPH);
+    const text = composer.ownerDocument.createElement("span"); text.className = "send-label"; text.textContent = `Send to ${supervisor || "supervisor"}`;
+    button.append(text);
+  }
+}
+
 export function conversationShellMarkup(model: ConversationShellModel): string {
-  return `<div class="conversation-shell${model.selected ? " thread-open" : ""}">
+  return `<div class="conversation-shell${model.selected ? " thread-open" : ""}${model.machineId ? ` ${machineAccentClass(model.machineId)}` : ""}">
     <aside class="conversation-sidebar" aria-label="Supervisor conversations">
       <header class="conversation-list-heading">${cloudBrand()}<div class="conversation-list-title"><h1>Conversations</h1><button id="pair-toggle" type="button">Pair a machine</button></div><p>Your projects. Your supervisors.</p></header>
       <nav id="conversation-list" aria-label="Choose a supervisor"></nav>
       <div id="conversation-empty" class="conversation-empty" hidden></div>
       <footer><div id="hub-footer-badges" class="hub-footer-badges" aria-label="Hub status"></div><button id="command-palette-toggle" type="button">Appearance &amp; commands</button></footer>
+      ${composeFabMarkup}
     </aside>
     <main class="conversation-main">
-      ${model.selected ? `<header class="conversation-heading"><div class="conversation-topline"><button id="conversation-back" type="button">‹ Conversations</button>${cloudBrand()}<button id="conversation-terminal" type="button">Terminal view</button></div><div class="conversation-identity">${projectBadge(model.projectDir)}<h1>${escapeHtml(model.supervisor || "Supervisor unavailable")}</h1></div><p class="conversation-host">${escapeHtml(model.host || "")}<span id="conversation-connection" role="status"></span></p></header><section id="conversation-pane-slot" class="conversation-pane-slot"></section><div id="conversation-composer-slot"></div>` : `<div class="conversation-welcome"><span class="conversation-eyebrow">SUPERVISOR CONVERSATIONS</span><h2>Stay close to the work.</h2><p>${!model.loaded ? "Loading your paired machines…" : !model.paired ? "Pair a machine to read your supervisors’ words and talk to them here." : "Choose a project to read its supervisor’s words and send an instruction."}</p>${!model.paired && model.loaded ? '<button id="empty-pair" class="primary" type="button">Pair a machine</button>' : ""}</div>`}
+      ${model.selected ? `${conversationHeaderMarkup(model)}<section id="conversation-pane-slot" class="conversation-pane-slot"></section><div id="conversation-composer-slot"></div>` : `<div class="conversation-welcome"><span class="conversation-eyebrow">SUPERVISOR CONVERSATIONS</span><h2>Stay close to the work.</h2><p>${!model.loaded ? "Loading your paired machines…" : !model.paired ? "Pair a machine to read your supervisors’ words and talk to them here." : "Choose a project to read its supervisor’s words and send an instruction."}</p>${!model.paired && model.loaded ? '<button id="empty-pair" class="primary" type="button">Pair a machine</button>' : ""}</div>`}
     </main>
     <aside class="conversation-context" aria-label="Conversation context">${cloudBrand()}<h2>In this conversation</h2>${model.selected ? `${projectBadge(model.projectDir)}<p class="conversation-context-name">${escapeHtml(model.supervisor || "Supervisor unavailable")}</p><p class="conversation-host">${escapeHtml(model.host || "")}</p><h2>Tasks &amp; progress</h2><p class="status-stale" role="status" hidden></p><div id="conversation-status-slot"></div><div id="conversation-attention-slot"></div>` : '<p class="conversation-host">Project context appears here when you open a conversation.</p>'}</aside>
   </div>`;
@@ -37,11 +93,7 @@ export function arrangeConversationShell(app: HTMLElement, model: ConversationSh
   if (model.selected) {
     if (grid) shell.querySelector("#conversation-pane-slot")!.append(grid);
     if (composer) {
-      composer.classList.add("conversation-composer");
-      composer.querySelector(".operator-thread")?.remove();
-      const label = composer.querySelector("label"); if (label) label.textContent = "Your message";
-      const input = composer.querySelector("textarea"); if (input) input.placeholder = `Write to ${model.supervisor || "the supervisor"}…`;
-      const button = composer.querySelector("#message-send"); if (button) button.textContent = `Send to ${model.supervisor || "supervisor"}`;
+      dressComposer(composer, model.supervisor);
       shell.querySelector("#conversation-composer-slot")!.append(composer);
     }
     if (status) shell.querySelector("#conversation-status-slot")!.append(status);

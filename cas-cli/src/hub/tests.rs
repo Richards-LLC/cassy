@@ -1950,6 +1950,7 @@ fn h2_scope_05_each_mutation_has_an_exact_scope_and_legacy_interrupt_is_forbidde
         summary: None,
         urgent: false,
         client_ref: None,
+        in_reply_to: None,
         attribution: MessageAttribution {
             device_id: None,
             credential_id: None,
@@ -1997,6 +1998,70 @@ fn h2_scope_05_each_mutation_has_an_exact_scope_and_legacy_interrupt_is_forbidde
     assert_eq!(required_scope(&targeted), Some(Scope::PaneInterrupt));
     assert_eq!(required_scope(&semantic), Some(Scope::MessageSend));
     assert_eq!(required_scope(&ClientMessage::Interrupt), None);
+}
+
+/// cas-a8ea8: the operator's `in_reply_to` survives the hub. handle_client_message
+/// re-parses the frame into `ClientMessage`, rebuilds only the attribution, and
+/// forwards the value through `connector.send` — so the reference the browser
+/// put on the frame is what the daemon binds the reply to. A legacy frame
+/// without it still decodes and forwards without the key.
+#[test]
+fn hub_forwards_the_operator_in_reply_to_reference_unchanged() {
+    use std::collections::BTreeSet;
+
+    let scopes: BTreeSet<Scope> = [Scope::MessageSend].into_iter().collect();
+    let context = AuthContext {
+        device_id: "device-real".into(),
+        credential_id: "credential-real".into(),
+        device_label: "Daniel's phone".into(),
+        operator_label: "Daniel".into(),
+        controller_origin: "https://controller.example".into(),
+        scopes,
+        request_id: "request-1".into(),
+    };
+    // The exact frame hub-web's supervisorMessage() emits for a quick reply.
+    let frame = serde_json::json!({
+        "SendMessage": {
+            "client_ref": "send-43",
+            "in_reply_to": 52,
+            "target": "patient-pelican-9",
+            "text": "Yes, go ahead",
+            "summary": "Cassy Cloud message",
+            "urgent": false,
+            "attribution": {
+                "device_id": null, "credential_id": null, "device_label": null,
+                "operator_label": null, "controller_origin": null, "request_id": null
+            }
+        }
+    });
+    let mut message: ClientMessage = serde_json::from_value(frame).unwrap();
+    assert_eq!(required_scope(&message), Some(Scope::MessageSend));
+    let ClientMessage::SendMessage { attribution, .. } = &mut message else {
+        panic!("fixture is a SendMessage");
+    };
+    *attribution = super::server::verified_attribution(&context);
+    let ClientMessage::SendMessage { in_reply_to, client_ref, attribution, .. } = &message else {
+        unreachable!()
+    };
+    assert_eq!(*in_reply_to, Some(52));
+    assert_eq!(client_ref.as_deref(), Some("send-43"));
+    assert!(attribution.operator_verified);
+    let forwarded = serde_json::to_value(&message).unwrap();
+    assert_eq!(forwarded["SendMessage"]["in_reply_to"], serde_json::json!(52));
+    assert_eq!(forwarded["SendMessage"]["client_ref"], serde_json::json!("send-43"));
+
+    let legacy = serde_json::json!({
+        "SendMessage": {
+            "target": "patient-pelican-9", "text": "Plain", "summary": null, "urgent": false,
+            "attribution": {
+                "device_id": null, "credential_id": null, "device_label": null,
+                "operator_label": null, "controller_origin": null, "request_id": null
+            }
+        }
+    });
+    let legacy: ClientMessage = serde_json::from_value(legacy).unwrap();
+    assert!(matches!(legacy, ClientMessage::SendMessage { in_reply_to: None, .. }));
+    assert!(serde_json::to_value(&legacy).unwrap()["SendMessage"].get("in_reply_to").is_none());
 }
 
 /// cas-e8df: the attribution a Commander send carries into the daemon is

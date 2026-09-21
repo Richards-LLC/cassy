@@ -51,7 +51,7 @@ function contentType(path) {
   }[extname(path)] ?? "application/octet-stream";
 }
 
-async function buildFixtureSite(outputDir) {
+export async function buildFixtureSite(outputDir) {
   await build({
     configFile: false,
     logLevel: "silent",
@@ -73,7 +73,7 @@ async function buildFixtureSite(outputDir) {
   });
 }
 
-async function serveDirectory(root) {
+export async function serveDirectory(root) {
   const server = createServer(async (request, response) => {
     try {
       const requestUrl = new URL(request.url ?? "/", "http://127.0.0.1");
@@ -102,7 +102,7 @@ async function serveDirectory(root) {
   return { server, origin: `http://127.0.0.1:${address.port}` };
 }
 
-function closeServer(server) {
+export function closeServer(server) {
   return new Promise((resolvePromise, reject) => {
     server.close((error) => error ? reject(error) : resolvePromise());
   });

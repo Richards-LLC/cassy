@@ -6,6 +6,7 @@ import { ConversationList, type ConversationRow } from "./conversation-list";
 import { ConversationHistory } from "./conversation-history";
 import { ConversationView } from "./conversation-view";
 import { installAttentionObjects } from "./attention-objects";
+import { installAttachmentSheet } from "./attachment-sheet";
 import { arrangeConversationShell } from "./conversation-shell";
 import { applyScheme, setScheme, type SchemePreference } from "./scheme";
 import { applyAttentionEnrichment, attentionCounts, attentionSummary, attentionUrl, createAttentionItem, dismissableInfoItems, machineEventAttention, mergeAttentionItem, type AttentionAction, type AttentionContent, type AttentionEnrichment } from "./attention";
@@ -88,6 +89,8 @@ const transcripts = new Map<string, TranscriptView>();
 // Pebble 3: ask and blocker render as the fused-tray objects on the Pebble 2 seam.
 installAttentionObjects();
 const conversationViews = new Map<string, ConversationView>();
+// Pebble 4: a supervisor's artifact is a dog-eared sheet on the thread, not a link row.
+installAttachmentSheet();
 const conversationHistories = new Map<string, ConversationHistory>();
 /** Supervisor turns per thread the operator had on screen the last time that thread was open. */
 const readReplies = new Map<string, number>();

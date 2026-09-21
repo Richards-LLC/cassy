@@ -1,3 +1,4 @@
+import { machineMonogram } from "./machine-accent";
 import { shouldFollowTail } from "./transcript";
 import type { ConversationEvent, ConversationHistory, ConversationSend } from "./conversation-history";
 import type { ArtifactRef, OperatorReply, OperatorTurnKind } from "./types";
@@ -86,6 +87,11 @@ export interface ConversationViewOptions {
    * and the fixture pass false; a standalone mount keeps the default.
    */
   header?: boolean;
+  /**
+   * The last thing said in this conversation, echoed faintly under the
+   * nothing-waiting line when the thread has no turns to show (Pebble 4).
+   */
+  echo?: () => string | undefined;
   /** Refused sends offer to put their text back into the composer. */
   editMessage?: (text: string) => void;
   /**
@@ -108,6 +114,7 @@ export class ConversationView {
   readonly pinned: HTMLElement;
   private readonly head: HTMLElement;
   private readonly msgs: HTMLElement;
+  private readonly empty: HTMLElement;
   private readonly jump: HTMLButtonElement;
   private readonly options: ConversationViewOptions;
   private nodes = new Map<string, HTMLElement>();
@@ -133,10 +140,11 @@ export class ConversationView {
     this.head.append(identity);
     this.msgs = document.createElement("div"); this.msgs.className = "msgs";
     this.msgs.setAttribute("role", "log");
+    this.empty = document.createElement("div"); this.empty.className = "empty"; this.empty.hidden = true;
     this.jump = document.createElement("button"); this.jump.type = "button";
     this.jump.className = "conversation-jump"; this.jump.textContent = "Jump to latest"; this.jump.hidden = true;
     this.jump.onclick = () => { this.following = true; this.update(); this.pin(); };
-    this.element.append(...(this.options.header === false ? [] : [this.head]), this.msgs, this.jump);
+    this.element.append(...(this.options.header === false ? [] : [this.head]), this.msgs, this.empty, this.jump);
     this.pinned = document.createElement("div"); this.pinned.className = "pinned-ask"; this.pinned.hidden = true;
     if (this.options.accentClass) this.pinned.classList.add(this.options.accentClass);
     this.pinned.setAttribute("role", "region"); this.pinned.setAttribute("aria-label", `Waiting on you: question from ${supervisor}`);
@@ -172,6 +180,7 @@ export class ConversationView {
     const same = this.msgs.children.length === children.length && children.every((node, index) => this.msgs.children[index] === node);
     if (!same) this.msgs.replaceChildren(...children);
     this.renderPinned(document);
+    this.renderEmpty(model.length === 0);
     if (this.following && document.getSelection()?.isCollapsed !== false) this.pin();
   }
 
@@ -212,6 +221,33 @@ export class ConversationView {
     const answered = reply?.kind === "ask" ? this.history.answered(reply.notification_id) : undefined;
     const waiting = reply?.kind === "blocker" ? this.history.waiting().some((item) => item.notification_id === reply.notification_id) : undefined;
     return JSON.stringify([turn.event, answered && [answered.id, answered.state, answered.text], waiting]);
+  }
+
+  /**
+   * Nothing waiting (empty.html): the machine's monogram in its accent, the
+   * supervisor's name, a quiet centred line, and the last message as a faint
+   * echo. Lives beside `.msgs`, never inside it, so the log stays a log.
+   */
+  private renderEmpty(show: boolean): void {
+    this.empty.hidden = !show;
+    this.msgs.hidden = show;
+    if (!show) { this.empty.replaceChildren(); delete this.empty.dataset.signature; return; }
+    const { supervisor, machine, project } = this.options;
+    const echo = this.options.echo?.()?.trim() || "";
+    const signature = JSON.stringify([supervisor, machine, project, echo]);
+    if (this.empty.dataset.signature === signature) return;
+    this.empty.dataset.signature = signature;
+    const document = this.element.ownerDocument;
+    const mono = document.createElement("span"); mono.className = "mono"; mono.setAttribute("aria-hidden", "true");
+    mono.textContent = machineMonogram(machine || supervisor);
+    const name = document.createElement("b"); name.textContent = supervisor;
+    const where = document.createElement("span"); where.className = "proj2";
+    where.textContent = [machine, project].filter(Boolean).join(" · ");
+    const said = document.createElement("p"); said.className = "said"; said.setAttribute("role", "status");
+    said.textContent = `Nothing waiting on you. ${supervisor} will write here when it needs a decision.`;
+    const children: HTMLElement[] = [mono, name, where, said];
+    if (echo) { const quiet = document.createElement("div"); quiet.className = "quiet"; quiet.textContent = echo; children.push(quiet); }
+    this.empty.replaceChildren(...children);
   }
 
   /** Cheap liveness poll: repaints only when the working state actually flipped. */
@@ -266,15 +302,20 @@ export class ConversationView {
     for (const turn of group.turns) {
       const signature = this.turnSignature(turn);
       let bubble = existing.get(turn.key);
-      if (!bubble || bubble.dataset.signature !== signature) {
-        bubble = turn.event.kind === "send" ? this.renderSend(document, turn, turn.event.value) : this.renderReply(document, turn, turn.event.value);
+      let sheets: HTMLElement[] = [];
+      if (bubble && bubble.dataset.signature === signature) {
+        for (let index = 0; ; index += 1) { const sheet = existing.get(`${turn.key}#${index}`); if (!sheet) break; sheets.push(sheet); }
+      } else {
+        if (turn.event.kind === "send") bubble = this.renderSend(document, turn, turn.event.value);
+        else ({ bubble, sheets } = this.renderReply(document, turn, turn.event.value));
         bubble.classList.add("conversation-turn");
         bubble.dataset.key = turn.key;
         bubble.dataset.signature = signature;
+        sheets.forEach((sheet, index) => { sheet.classList.add("conversation-sheet"); sheet.dataset.key = `${turn.key}#${index}`; });
       }
       bubble.classList.toggle("group-first", turn.first);
       bubble.classList.toggle("group-last", turn.last);
-      children.push(bubble);
+      children.push(bubble, ...sheets);
     }
     if (group.time) { const time = document.createElement("time"); time.textContent = group.time; children.push(time as unknown as HTMLElement); }
     node.replaceChildren(...children);
@@ -299,13 +340,22 @@ export class ConversationView {
     return bubble;
   }
 
-  private renderReply(document: Document, turn: ThreadTurn, reply: OperatorReply): HTMLElement {
+  /**
+   * A plain reply is a bubble; with a registered sheet renderer its artifacts
+   * are laid on the thread beside it, not inside it (Pebble 4: no bubble
+   * around a sheet). A custom ask/blocker object keeps its attachments inside,
+   * where its own body() put them. Without a sheet renderer the link rows stay
+   * in the bubble.
+   */
+  private renderReply(document: Document, turn: ThreadTurn, reply: OperatorReply): { bubble: HTMLElement; sheets: HTMLElement[] } {
     const kind = reply.kind ?? "answer";
     const context = this.context(document, turn, reply);
     const custom = kind === "ask" || kind === "blocker" ? turnRenderers.get(kind)?.(reply, context) : undefined;
-    const body = context.body;
+    const sheetRenderer = turnRenderers.get("attachment");
+    const sheets: HTMLElement[] = [];
     const bubble = custom ?? document.createElement("div");
     if (!custom) {
+      const body = () => renderBody(document, reply, context, { attachments: sheetRenderer ? "none" : "inline" });
       bubble.className = kind === "receipt" ? "bub receipt" : "bub";
       if (kind === "receipt") {
         const tick = document.createElement("template"); tick.innerHTML = TICK;
@@ -314,10 +364,13 @@ export class ConversationView {
       } else {
         bubble.append(...body());
       }
+      if (sheetRenderer) for (const attachment of reply.attachments ?? []) sheets.push(sheetRenderer(reply, { ...context, attachment }));
+      // An attachment-only turn is the sheet alone; an empty bubble would be a blank pebble.
+      if (sheets.length && !bubble.textContent?.trim() && !bubble.querySelector(".evi")) bubble.classList.add("bub-empty");
     }
     bubble.dataset.kind = kind;
     bubble.dataset.replyTo = reply.reply_to === null ? "" : String(reply.reply_to);
-    return bubble;
+    return { bubble, sheets };
   }
 
   private pin(): void {
@@ -350,8 +403,12 @@ function paragraphs(document: Document, text: string): HTMLElement[] {
   });
 }
 
-/** Prose paragraphs plus evidence tables; attachments keep their link rows for Pebble 4. */
-export function renderBody(document: Document, reply: OperatorReply, context?: TurnRenderContext): HTMLElement[] {
+/**
+ * Prose paragraphs plus evidence tables. Attachments follow: as sheets when a
+ * renderer is registered, as link rows otherwise, or not at all when the
+ * caller lays the sheets beside the bubble itself (`attachments: "none"`).
+ */
+export function renderBody(document: Document, reply: OperatorReply, context?: TurnRenderContext, options: { attachments?: "inline" | "none" } = {}): HTMLElement[] {
   const nodes: HTMLElement[] = [];
   for (const block of messageBlocks(reply.message)) {
     if (block.type === "text") { nodes.push(...paragraphs(document, block.text)); continue; }
@@ -374,6 +431,7 @@ export function renderBody(document: Document, reply: OperatorReply, context?: T
     for (const cells of block.table.rows) table.append(row(cells, false));
     nodes.push(table);
   }
+  if (options.attachments === "none") return nodes;
   const sheet = turnRenderers.get("attachment");
   for (const attachment of reply.attachments ?? []) {
     if (sheet && context) { nodes.push(sheet(reply, { ...context, attachment })); continue; }

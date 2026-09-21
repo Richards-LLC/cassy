@@ -87,6 +87,25 @@ describe("ConversationView (Pebble thread)", () => {
     expect(refused.querySelector(".conversation-delivery")?.textContent).toBe("Not sent · no access");
     refused.querySelector("button")!.click(); expect(edit).toHaveBeenCalledWith("Ship it");
   });
+  it("renders nothing-waiting beside the log with the monogram, the quiet line and the echo, and clears it when a turn arrives", () => {
+    const history = new ConversationHistory();
+    let echo: string | undefined = "Promoted the hub to production on Monday.";
+    const view = new ConversationView(document, history, { supervisor: "calm-heron-5", machine: "Bench", project: "cas-hub-static", echo: () => echo }); document.body.replaceChildren(view.element);
+    view.update();
+    const empty = view.element.querySelector<HTMLElement>(".empty")!;
+    expect(empty.hidden).toBe(false); expect(view.element.querySelector<HTMLElement>(".msgs")?.hidden).toBe(true);
+    expect(view.element.querySelector(".msgs")?.children).toHaveLength(0);
+    expect(empty.querySelector(".mono")?.textContent).toBe("B");
+    expect(empty.querySelector("b")?.textContent).toBe("calm-heron-5");
+    expect(empty.querySelector(".proj2")?.textContent).toBe("Bench · cas-hub-static");
+    expect(empty.querySelector(".said")?.textContent).toBe("Nothing waiting on you. calm-heron-5 will write here when it needs a decision.");
+    expect(empty.querySelector(".quiet")?.textContent).toBe("Promoted the hub to production on Monday.");
+    echo = undefined; view.update();
+    expect(empty.querySelector(".quiet")).toBeNull();
+    history.reply(reply(1, "answer", "Back on it."), at(10, 0)); view.update();
+    expect(empty.hidden).toBe(true); expect(view.element.querySelector<HTMLElement>(".msgs")?.hidden).toBe(false);
+    expect(empty.children).toHaveLength(0);
+  });
   it("lets siblings register kind renderers for ask, blocker and attachment", () => {
     const unregisterAsk = registerTurnRenderer("ask", (reply, ctx) => { const node = ctx.document.createElement("div"); node.className = "obj t-a"; node.append(...ctx.body()); return node; });
     const unregisterSheet = registerTurnRenderer("attachment", (reply, ctx) => { const node = ctx.document.createElement("div"); node.className = "sheet"; node.textContent = ctx.attachment!.name; return node; });

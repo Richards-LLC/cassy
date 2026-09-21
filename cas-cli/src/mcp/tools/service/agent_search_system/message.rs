@@ -1514,6 +1514,12 @@ impl CasService {
                                     )
                                 );
                             }
+                            let commits_not_on_target_base =
+                                crate::mcp::tools::core::task::lifecycle::close_ops::count_unmerged_factory_commits(
+                                    &repo.repo_root,
+                                    &branch_tip,
+                                    &repo.target_branch,
+                                );
                             message = attach_merge_request_envelope(
                                 &message,
                                 &MergeRequestEnvelope {
@@ -1525,6 +1531,7 @@ impl CasService {
                                     branch_tip,
                                     target_branch: repo.target_branch,
                                     target_branch_tip: target_tip,
+                                    commits_not_on_target_base,
                                 },
                             );
                         }

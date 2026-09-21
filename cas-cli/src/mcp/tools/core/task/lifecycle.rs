@@ -1,5 +1,6 @@
 use crate::mcp::tools::core::imports::*;
 use crate::mcp::tools::core::workflow::verification_tools::VERIFICATION_REJECTED_REOPEN_LABEL;
+use crate::worktree::GitOperations;
 use thiserror::Error;
 
 /// Typed failures from lifecycle gates. The MCP boundary renders these with
@@ -93,6 +94,160 @@ const EPIC_PLANNING_RACE_WINDOW: chrono::Duration = chrono::Duration::minutes(10
 const DUPLICATE_TITLE_SIMILARITY_THRESHOLD: f64 = 0.7;
 const DUPLICATE_DESCRIPTION_SIMILARITY_THRESHOLD: f64 = 0.2;
 const MIN_SHARED_DISTINCTIVE_IDENTIFIERS: usize = 2;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ReusedFactoryBranchStart {
+    Unchanged,
+    Reset,
+}
+
+/// Keep a reused worker branch from silently carrying a prior task into a new
+/// target. A branch whose old tip is already reachable from the target is safe
+/// to reset; an unrelated tip is refused with the exact repair command.
+fn reconcile_reused_factory_branch(
+    worktree_path: &std::path::Path,
+    expected_branch: &str,
+    target_branch: &str,
+) -> Result<ReusedFactoryBranchStart, String> {
+    if crate::factory_isolation::branch_at(worktree_path).as_deref() != Some(expected_branch) {
+        return Ok(ReusedFactoryBranchStart::Unchanged);
+    }
+
+    let repo_root = GitOperations::detect_repo_root(worktree_path).map_err(|error| {
+        format!("Cannot inspect reused factory branch {expected_branch}: {error}")
+    })?;
+    let git = GitOperations::new(repo_root);
+    let target_tip = git.ref_sha(target_branch).map_err(|error| {
+        format!("Cannot start task: target base `{target_branch}` could not be resolved: {error}")
+    })?;
+    let factory_tip = git.ref_sha(expected_branch).map_err(|error| {
+        format!("Cannot inspect reused factory branch {expected_branch}: {error}")
+    })?;
+
+    let status = std::process::Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(worktree_path)
+        .output()
+        .map_err(|error| {
+            format!("Cannot inspect reused factory branch {expected_branch}: {error}")
+        })?;
+    if !status.status.success() {
+        return Err(format!(
+            "Cannot inspect reused factory branch {expected_branch}: git status failed: {}",
+            String::from_utf8_lossy(&status.stderr).trim()
+        ));
+    }
+    if !status.stdout.is_empty() {
+        return Err(format!(
+            "Cannot start task: {expected_branch} has uncommitted changes. Commit or stash them before rebasing with `git rebase {target_branch}`."
+        ));
+    }
+
+    if target_tip == factory_tip {
+        return Ok(ReusedFactoryBranchStart::Unchanged);
+    }
+
+    if git.is_ancestor(&factory_tip, &target_tip) {
+        git.reset_hard_in_dir(worktree_path, target_branch)
+            .map_err(|error| {
+                format!(
+                    "Cannot reset reused factory branch {expected_branch} to `{target_branch}`: {error}"
+                )
+            })?;
+        return Ok(ReusedFactoryBranchStart::Reset);
+    }
+
+    Err(format!(
+        "Cannot start task: {expected_branch} carries commits not on target base `{target_branch}`. Rebase it before starting with `git rebase {target_branch}`."
+    ))
+}
+
+#[cfg(test)]
+mod reused_factory_branch_tests {
+    use super::{reconcile_reused_factory_branch, ReusedFactoryBranchStart};
+    use std::path::Path;
+    use std::process::Command;
+
+    fn git(path: &Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(path)
+            .output()
+            .expect("git runs");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    fn repo() -> tempfile::TempDir {
+        let repo = tempfile::tempdir().expect("temp repo");
+        git(repo.path(), &["init", "-b", "main"]);
+        git(repo.path(), &["config", "user.email", "cas-test@example.invalid"]);
+        git(repo.path(), &["config", "user.name", "Cassy Test"]);
+        std::fs::write(repo.path().join("base"), "base\n").expect("base file");
+        git(repo.path(), &["add", "base"]);
+        git(repo.path(), &["commit", "-m", "base"]);
+        repo
+    }
+
+    #[test]
+    fn merged_prior_delivery_is_reset_to_the_new_target_base() {
+        let repo = repo();
+        git(repo.path(), &["checkout", "-b", "factory/test-worker"]);
+        std::fs::write(repo.path().join("prior"), "prior\n").expect("prior file");
+        git(repo.path(), &["add", "prior"]);
+        git(repo.path(), &["commit", "-m", "prior delivery"]);
+        git(repo.path(), &["checkout", "main"]);
+        git(repo.path(), &["merge", "--no-ff", "factory/test-worker", "-m", "merge prior delivery"]);
+        git(repo.path(), &["checkout", "factory/test-worker"]);
+
+        let result = reconcile_reused_factory_branch(repo.path(), "factory/test-worker", "main")
+            .expect("merged prior delivery can be reset");
+
+        assert_eq!(result, ReusedFactoryBranchStart::Reset);
+        assert_eq!(
+            git(repo.path(), &["rev-parse", "HEAD"]),
+            git(repo.path(), &["rev-parse", "main"])
+        );
+    }
+
+    #[test]
+    fn unrelated_prior_delivery_is_refused_with_exact_rebase_command() {
+        let repo = repo();
+        git(repo.path(), &["checkout", "-b", "factory/test-worker"]);
+        std::fs::write(repo.path().join("prior"), "prior\n").expect("prior file");
+        git(repo.path(), &["add", "prior"]);
+        git(repo.path(), &["commit", "-m", "prior delivery"]);
+        let worker_tip = git(repo.path(), &["rev-parse", "HEAD"]);
+        git(repo.path(), &["checkout", "main"]);
+        std::fs::write(repo.path().join("target"), "target\n").expect("target file");
+        git(repo.path(), &["add", "target"]);
+        git(repo.path(), &["commit", "-m", "target work"]);
+        git(repo.path(), &["checkout", "factory/test-worker"]);
+
+        let error = reconcile_reused_factory_branch(repo.path(), "factory/test-worker", "main")
+            .expect_err("unrelated prior delivery must refuse");
+
+        assert!(error.contains("git rebase main"), "{error}");
+        assert_eq!(git(repo.path(), &["rev-parse", "HEAD"]), worker_tip);
+    }
+
+    #[test]
+    fn matching_target_base_is_left_untouched() {
+        let repo = repo();
+        git(repo.path(), &["checkout", "-b", "factory/test-worker"]);
+        let before = git(repo.path(), &["rev-parse", "HEAD"]);
+
+        let result = reconcile_reused_factory_branch(repo.path(), "factory/test-worker", "main")
+            .expect("matching base needs no reset");
+
+        assert_eq!(result, ReusedFactoryBranchStart::Unchanged);
+        assert_eq!(git(repo.path(), &["rev-parse", "HEAD"]), before);
+    }
+}
 
 pub(crate) fn validate_demo_statement_requirement(
     task_type: TaskType,
@@ -1173,15 +1328,17 @@ impl CasCore {
             )
         };
 
-        if let Some(target) = task.deliverables.work_target.as_ref() {
-            super::repo_context::resolve_repo_context(&self.cas_root, target).map_err(
-                |message| McpError {
-                    code: ErrorCode::INVALID_PARAMS,
-                    message: Cow::from(message),
-                    data: None,
-                },
-            )?;
-        }
+        let declared_repo_context = task
+            .deliverables
+            .work_target
+            .as_ref()
+            .map(|target| super::repo_context::resolve_repo_context(&self.cas_root, target))
+            .transpose()
+            .map_err(|message| McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from(message),
+                data: None,
+            })?;
 
         // cas-a844/cas-5054: a genuinely conflicted parked branch is unfinished
         // work, so its assigned worker may resume it. A clean AwaitingMerge
@@ -1254,6 +1411,54 @@ impl CasCore {
             .get(&agent_id)
             .map(|a| a.role == cas_types::AgentRole::Worker)
             .unwrap_or(false);
+
+        let reused_factory_branch_reset = if is_worker
+            && task.status == TaskStatus::Open
+            && task.deliverables.factory_branch_anchor.is_none()
+            && task
+                .deliverables
+                .historical_factory_branch_anchors
+                .is_empty()
+        {
+            if let Ok(worker) = agent_store.get(&agent_id) {
+                let target_repo_root = declared_repo_context
+                    .as_ref()
+                    .map(|context| context.repo_root.clone())
+                    .or_else(|| GitOperations::detect_repo_root(&self.cas_root).ok());
+                let target_branch = declared_repo_context
+                    .as_ref()
+                    .map(|context| context.target_branch.clone())
+                    .or_else(|| {
+                        target_repo_root.as_deref().map(|root| {
+                            GitOperations::new(root.to_path_buf()).detect_default_branch()
+                        })
+                    });
+                if let (Some(target_repo_root), Some(target_branch)) =
+                    (target_repo_root.as_deref(), target_branch)
+                {
+                    match reconcile_reused_factory_branch(
+                        target_repo_root,
+                        &crate::factory_isolation::expected_worker_branch(&worker.name),
+                        &target_branch,
+                    ) {
+                        Ok(ReusedFactoryBranchStart::Reset) => Some(format!(
+                            "\n\n🔄 REUSED FACTORY BRANCH RESET: {} was already merged into `{target_branch}` and was reset to that target before starting.",
+                            crate::factory_isolation::expected_worker_branch(&worker.name)
+                        )),
+                        Ok(ReusedFactoryBranchStart::Unchanged) => None,
+                        Err(message) => {
+                            return Err(Self::error(ErrorCode::INVALID_PARAMS, message));
+                        }
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
 
         // cas-3558: reject a worker starting a task explicitly assigned to
         // someone else. This is the code-level half of the self-dispatch
@@ -1675,6 +1880,14 @@ impl CasCore {
             }
         }
 
+        if let Some(reset_note) = reused_factory_branch_reset.as_deref() {
+            task.notes = if task.notes.is_empty() {
+                reset_note.trim().to_string()
+            } else {
+                format!("{}\n\n{}", task.notes, reset_note.trim())
+            };
+        }
+
         // Capture old status before mutation for lifecycle push (cas-062d).
         let old_status = task.status;
         // A worker has acted on the supervisor's recovery choice; remove the
@@ -1809,11 +2022,12 @@ impl CasCore {
                 )
             };
             let response = format!(
-                "Started task: {} - {}\nDelivery mode: {}{}{}{}{}{}{}{}",
+                "Started task: {} - {}\nDelivery mode: {}{}{}{}{}{}{}{}{}",
                 req.id,
                 crate::mcp::tools::truncate_str(&task.title, 509),
                 task.delivery_mode,
                 claim_info.unwrap_or_default(),
+                reused_factory_branch_reset.as_deref().unwrap_or_default(),
                 blocker_warning,
                 crate::mcp::tools::truncate_str(&unanchored_warning.unwrap_or_default(), 765,),
                 execution_state.unwrap_or_default(),
@@ -1829,11 +2043,12 @@ impl CasCore {
         }
 
         Ok(Self::success(format!(
-            "Started task: {} - {}\nDelivery mode: {}{}{}{}{}{}{}{}{}{}",
+            "Started task: {} - {}\nDelivery mode: {}{}{}{}{}{}{}{}{}{}{}",
             req.id,
             task.title,
             task.delivery_mode,
             claim_info.unwrap_or_default(),
+            reused_factory_branch_reset.as_deref().unwrap_or_default(),
             blocker_warning,
             // cas-156b: placed directly after the claim line so the nativity
             // warning cannot be pushed out of view by long sibling-note or

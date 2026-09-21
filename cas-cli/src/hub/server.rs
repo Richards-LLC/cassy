@@ -759,6 +759,7 @@ async fn proxy_socket(
                     ) {
                         continue;
                     }
+                    trace_conversation_history_relay(&session, &frame.bytes);
                     let receipt = operator_reply_receipt(&frame.bytes);
                     audit_refused_pane_resize(&auth, &session, &frame.bytes);
                     if sink.send(Message::Binary(frame.bytes.into())).await.is_err() {
@@ -893,6 +894,22 @@ async fn handle_client_message(
         // History is private to the authenticated paired device. Do not trust
         // a browser-supplied selector, even though this is a read operation.
         *device_id = context.device_id.clone();
+    }
+    if let ClientMessage::ConversationHistoryRequest {
+        request_id,
+        before,
+        limit,
+        device_id,
+    } = &message
+    {
+        tracing::info!(
+            session,
+            %request_id,
+            ?before,
+            limit,
+            device = %device_id,
+            "forwarding Commander conversation history request"
+        );
     }
     connector.send(session, message).await?;
     store.audit(
@@ -1249,6 +1266,40 @@ pub(crate) fn correlated_daemon_frame_allowed(
     true
 }
 
+/// Emit only bounded metadata for the private history response. The request
+/// id and row counts make a missing relay observable without logging prompts,
+/// replies, or credential material.
+pub(crate) fn conversation_history_summary(
+    bytes: &[u8],
+) -> Option<(String, usize, usize, bool)> {
+    let DaemonMessage::ConversationHistory {
+        request_id,
+        messages,
+        replies,
+        has_earlier,
+        ..
+    } = serde_json::from_slice::<DaemonMessage>(bytes).ok()?
+    else {
+        return None;
+    };
+    Some((request_id, messages.len(), replies.len(), has_earlier))
+}
+
+fn trace_conversation_history_relay(session: &str, bytes: &[u8]) {
+    let Some((request_id, messages, replies, has_earlier)) = conversation_history_summary(bytes)
+    else {
+        return;
+    };
+    tracing::info!(
+        session,
+        %request_id,
+        messages,
+        replies,
+        has_earlier,
+        "relayed Commander conversation history response"
+    );
+}
+
 fn operator_reply_receipt(bytes: &[u8]) -> Option<(i64, String)> {
     let DaemonMessage::OperatorReply {
         notification_id,
@@ -1363,6 +1414,7 @@ async fn proxy_machine_socket<R: SessionReadModel>(
                     ) {
                         continue;
                     }
+                    trace_conversation_history_relay(&session, &frame.bytes);
                     let receipt = operator_reply_receipt(&frame.bytes);
                     audit_refused_pane_resize(&auth, &session, &frame.bytes);
                     let result = match machine_binary_frame(&session, &frame) {

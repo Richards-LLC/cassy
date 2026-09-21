@@ -3,7 +3,7 @@ export function absoluteTimestamp(value: string | number): string {
 }
 
 export function relativeTimestamp(value: string | number | undefined, now = Date.now()): string {
-  if (value === undefined) return "waiting";
+  if (value === undefined) return "No activity yet";
   const timestamp = typeof value === "number" ? value : Date.parse(value);
   const elapsed = Math.max(0, now - timestamp);
   if (elapsed < 5_000) return "now";

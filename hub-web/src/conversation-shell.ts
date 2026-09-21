@@ -101,3 +101,66 @@ export function arrangeConversationShell(app: HTMLElement, model: ConversationSh
   }
   old.replaceWith(shell);
 }
+
+/* ---- Phone keyboard (cas-edc9) --------------------------------------------
+ * The viewport meta asks the browser to resize the layout viewport when the
+ * keyboard opens (interactive-widget=resizes-content), so 100dvh shrinks and
+ * the shell — header, thread, composer — fits above the keys. A browser that
+ * ignores the meta (iOS Safari, older Chrome) shrinks only the visual viewport
+ * and then scrolls the page to reveal the focused field, pushing the header
+ * and the thread tail above the top edge. The fallback below measures the
+ * visual viewport, publishes its height as --keyboard-viewport-height (the
+ * shell's height takes it over 100dvh), and scrolls the page back to the top
+ * so the header stays where it is. */
+export const KEYBOARD_VIEWPORT_PROPERTY = "--keyboard-viewport-height";
+
+export interface VisualViewportLike {
+  readonly height: number;
+  readonly offsetTop: number;
+  addEventListener(type: "resize" | "scroll", listener: () => void): void;
+  removeEventListener(type: "resize" | "scroll", listener: () => void): void;
+}
+
+export interface KeyboardViewportWindow {
+  readonly innerHeight: number;
+  readonly visualViewport?: VisualViewportLike | null;
+  readonly document: Document;
+  scrollTo(x: number, y: number): void;
+}
+
+/**
+ * The height the shell should take, or undefined when the layout viewport
+ * already matches the visual one (no keyboard, or the meta was honoured and
+ * 100dvh is right). A sub-pixel difference is not a keyboard.
+ */
+export function keyboardViewportHeight(innerHeight: number, visual: { height: number } | null | undefined): number | undefined {
+  if (!visual || !(visual.height > 0)) return undefined;
+  const height = Math.round(visual.height);
+  return height < Math.round(innerHeight) - 1 ? height : undefined;
+}
+
+/** Publish (or clear) the shell height on the document root. */
+export function applyKeyboardViewport(document: Document, height: number | undefined): void {
+  const root = document.documentElement;
+  if (height === undefined) root.style.removeProperty(KEYBOARD_VIEWPORT_PROPERTY);
+  else root.style.setProperty(KEYBOARD_VIEWPORT_PROPERTY, `${height}px`);
+}
+
+/**
+ * Keep the shell inside the visual viewport while the keyboard is up. Returns
+ * a disposer; a window without visualViewport is left alone (the meta is the
+ * only mechanism there).
+ */
+export function bindKeyboardViewport(window: KeyboardViewportWindow): () => void {
+  const visual = window.visualViewport;
+  if (!visual) return () => {};
+  const sync = () => {
+    applyKeyboardViewport(window.document, keyboardViewportHeight(window.innerHeight, visual));
+    // The browser scrolled the page to reveal the field; the shell now fits, so put the header back.
+    if (visual.offsetTop > 0) window.scrollTo(0, 0);
+  };
+  visual.addEventListener("resize", sync);
+  visual.addEventListener("scroll", sync);
+  sync();
+  return () => { visual.removeEventListener("resize", sync); visual.removeEventListener("scroll", sync); applyKeyboardViewport(window.document, undefined); };
+}

@@ -7,7 +7,7 @@ import { ConversationHistory } from "./conversation-history";
 import { ConversationView } from "./conversation-view";
 import { installAttentionObjects } from "./attention-objects";
 import { installAttachmentSheet } from "./attachment-sheet";
-import { arrangeConversationShell } from "./conversation-shell";
+import { arrangeConversationShell, bindKeyboardViewport } from "./conversation-shell";
 import { applyScheme, setScheme, type SchemePreference } from "./scheme";
 import { applyAttentionEnrichment, attentionCounts, attentionSummary, attentionUrl, createAttentionItem, dismissableInfoItems, machineEventAttention, mergeAttentionItem, type AttentionAction, type AttentionContent, type AttentionEnrichment } from "./attention";
 import { cycleAttentionGroup, renderAttentionPanel, renderAttentionSummary } from "./attention-view";
@@ -71,6 +71,7 @@ const pairingOperations = new PairingOperationCoordinator();
 // Which cancellation, if any, owns the "could not finish cancelling" step.
 const pairingCancellations = new PairingCancellationTracker();
 const app = document.querySelector<HTMLDivElement>("#app")!;
+bindKeyboardViewport(window);
 const machines = new Map<string, StoredMachine>();
 let machineCatalogLoaded = false;
 const sessions = new Map<string, HubSession[]>();
@@ -1785,6 +1786,9 @@ function bindSpeechComposer(): void {
     void submitSupervisorMessage();
   };
   keyboard.onclick = () => composer.focus();
+  // The keyboard is about to cover the bottom of the thread: pin the tail so
+  // the last turn and any pinned ask sit directly above the field (cas-edc9).
+  composer.onfocus = () => { if (selectedMachineId && selectedSession) conversationViews.get(sessionKey(selectedMachineId, selectedSession))?.followTail(); };
   mic.onclick = () => speechController?.toggle();
   syncSpeechComposer();
   if (speechDetectionStarted) return;

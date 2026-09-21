@@ -2,7 +2,7 @@ import { machineFooterMarkup, pairedMachinesDialogMarkup, renderPairedMachines }
 import { ConversationList, type ConversationRow } from '../src/conversation-list';
 import { ConversationHistory } from '../src/conversation-history';
 import { ConversationView } from '../src/conversation-view';
-import { conversationShellMarkup, dressComposer } from '../src/conversation-shell';
+import { applyKeyboardViewport, conversationShellMarkup, dressComposer, keyboardViewportHeight } from '../src/conversation-shell';
 import { installAttentionObjects, renderAskObject, renderBlockerObject } from '../src/attention-objects';
 import { installAttachmentSheet } from '../src/attachment-sheet';
 import type { ArtifactRef } from '../src/types';
@@ -98,7 +98,7 @@ export function renderConversationFixture(app: HTMLElement, state: string): void
     reply(49, 48, "No — unchanged since 3.25.3. The gate's only new failure is one lint warning.", 'answer', at(9, 57));
     reply(50, null, ASK_TEXT, 'ask', at(9, 58));
     working = true;
-  } else if (state === 'conversation-ask' || state === 'conversation-ask-answered') {
+  } else if (state === 'conversation-ask' || state === 'conversation-ask-answered' || state === 'conversation-keyboard') {
     // thread-a's tail: the blocker with its evidence window, then the ask.
     // Unanswered, the ask is pinned above the composer with its chips
     // (the payload carries options here); answered, the tray shows the sent reply.
@@ -157,6 +157,15 @@ export function renderConversationFixture(app: HTMLElement, state: string): void
   slot.innerHTML = '<div class="message"><h2><label for="message-text">Talk to supervisor</label></h2><textarea aria-describedby="message-status" id="message-text"></textarea><p class="control-disabled-reason" role="note" hidden></p><div class="composer-actions"><button id="message-keyboard" type="button">Keyboard</button><button id="message-send" class="primary" type="button">Send message</button></div><p id="message-status" class="message-status" role="status" hidden></p></div>';
   dressComposer(slot.querySelector<HTMLElement>('.message')!, supervisor);
   slot.querySelector<HTMLTextAreaElement>('#message-text')!.value = draft;
+  if (state === 'conversation-keyboard') {
+    // A phone keyboard on a browser that ignores interactive-widget: the visual
+    // viewport is 300px shorter than the layout one; the shell follows it and
+    // the field holds a draft while the pinned ask stays in view (cas-edc9).
+    // A landscape phone (short axis under 30rem) is left alone: Android hands
+    // a rotated phone a full-screen editor, so no page layout is visible.
+    applyKeyboardViewport(document, window.innerHeight >= 480 ? keyboardViewportHeight(window.innerHeight, { height: window.innerHeight - 300 }) : undefined);
+    slot.querySelector<HTMLTextAreaElement>('#message-text')!.value = 'Fix it in-train, then';
+  } else applyKeyboardViewport(document, undefined);
   slot.prepend(view.pinned);
   app.querySelector('#conversation-status-slot')!.innerHTML = '<p class="conversation-host">Supervisor conversations<br>In progress</p>';
   app.querySelector('#conversation-attention-slot')!.innerHTML = '<h2>Attention</h2><p class="conversation-host">One request needs your direction.</p>';

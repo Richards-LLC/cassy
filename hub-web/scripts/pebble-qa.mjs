@@ -22,7 +22,7 @@ const artifacts = resolve(process.argv[2] || join(repoRoot, '.cas', 'pebble-qa')
 await mkdir(artifacts, { recursive: true });
 const PHONE = { name: 'phone', width: 390, height: 844 };
 const DESKTOP = { name: 'desktop', width: 1280, height: 800 };
-const STATES = ['conversations-list', 'conversation', 'conversation-replied', 'conversation-error', 'conversation-thread', 'conversation-evidence', 'conversation-ask', 'conversation-ask-answered', 'conversation-blocker', 'conversation-pairs', 'conversation-attachment', 'conversation-empty', 'conversation-composer', 'paired-machines'];
+const STATES = ['conversations-list', 'conversation', 'conversation-replied', 'conversation-error', 'conversation-thread', 'conversation-evidence', 'conversation-ask', 'conversation-ask-answered', 'conversation-blocker', 'conversation-pairs', 'conversation-attachment', 'conversation-empty', 'conversation-composer', 'conversation-keyboard', 'paired-machines'];
 
 const receipts = [];
 const receipt = (name, ok, detail) => { receipts.push({ name, status: ok ? 'PASS' : 'FAIL', detail }); if (!ok) throw new Error(`${name}: ${detail}`); };
@@ -100,6 +100,45 @@ try {
     await shot('attachment');
     await open('conversation-empty'); await shot('empty');
     await open('conversation-composer'); await shot('composer');
+    // Phone keyboard (cas-edc9). Two paths: the browser honours
+    // interactive-widget=resizes-content and the viewport itself shrinks to
+    // 544 tall; or it ignores the meta and only the visual viewport shrinks,
+    // which the conversation-keyboard fixture reproduces through the
+    // visualViewport fallback. Either way the header, the pinned ask and the
+    // last turn stay inside the viewport with the composer at its bottom.
+    const keyboardReceipt = async (label, viewportHeight) => {
+      const composer = page.locator('.conversation-composer');
+      await composer.locator('textarea').focus();
+      await page.waitForTimeout(120);
+      const box = await page.evaluate(() => {
+        const rect = selector => document.querySelector(selector)?.getBoundingClientRect();
+        const header = rect('.conversation-heading'), composer = rect('.conversation-composer'), pinned = rect('.pinned-ask:not([hidden])');
+        const turns = document.querySelectorAll('.thread .msgs > .turn');
+        const last = turns[turns.length - 1]?.getBoundingClientRect();
+        const shell = rect('.conversation-shell');
+        const thread = document.querySelector('.conversation-reading.thread');
+        const tailGap = thread ? thread.scrollHeight - thread.scrollTop - thread.clientHeight : NaN;
+        return { scrollY: window.scrollY, tailGap, header: header && { top: header.top, bottom: header.bottom }, composer: composer && { top: composer.top, bottom: composer.bottom }, pinned: pinned && { top: pinned.top, bottom: pinned.bottom }, last: last && { top: last.top, bottom: last.bottom }, shell: shell && { height: shell.height } };
+      });
+      const inside = (r, limit) => r && r.top >= -0.5 && r.bottom <= limit + 0.5;
+      receipt(`keyboard ${label}: header at the top ${viewport.name} ${scheme}`, box.scrollY === 0 && inside(box.header, viewportHeight) && box.header.top < 1, JSON.stringify({ scrollY: box.scrollY, header: box.header, viewportHeight }));
+      receipt(`keyboard ${label}: composer above the keys ${viewport.name} ${scheme}`, inside(box.composer, viewportHeight) && box.composer.bottom > viewportHeight - 40, JSON.stringify({ composer: box.composer, viewportHeight }));
+      // The last turn here is the ask itself, taller than the room the keyboard
+      // leaves for the thread, so its tail — not its whole body — is what must
+      // show: the thread is scrolled to its end and the turn ends above the
+      // pinned copy, which is entirely in view.
+      receipt(`keyboard ${label}: pinned ask and thread tail visible ${viewport.name} ${scheme}`, inside(box.pinned, viewportHeight) && box.tailGap < 2 && box.last && box.last.bottom > box.header.bottom && box.last.bottom <= box.pinned.top + 0.5, JSON.stringify({ pinned: box.pinned, last: box.last, tailGap: box.tailGap, viewportHeight }));
+      receipt(`keyboard ${label}: shell fits the viewport ${viewport.name} ${scheme}`, Math.round(box.shell.height) === viewportHeight, JSON.stringify({ shell: box.shell, viewportHeight }));
+      await shot(`keyboard-${label}`);
+    };
+    if (viewport.name === 'phone') {
+      await open('conversation-ask');
+      await page.setViewportSize({ width: viewport.width, height: 544 });
+      await keyboardReceipt('resizes-content', 544);
+      await page.setViewportSize({ width: viewport.width, height: viewport.height });
+      await open('conversation-keyboard');
+      await keyboardReceipt('visual-viewport-fallback', 544);
+    }
     receipt(`no page errors ${viewport.name} ${scheme}`, errors.length === 0, errors.join('; '));
     await page.close();
   }
@@ -114,6 +153,7 @@ try {
     await list.getByRole('button', { name: /cas-src/ }).click();
     await page.getByRole('button', { name: `Send to ${SUPERVISOR}`, exact: true }).waitFor();
     await page.locator('.conversation-reading.thread').waitFor();
+    receipt(`bundle: viewport meta resizes content for the keyboard ${viewport.name}`, /interactive-widget=resizes-content/.test(await page.evaluate(() => document.querySelector('meta[name="viewport"]')?.getAttribute('content') ?? '')), await page.evaluate(() => document.querySelector('meta[name="viewport"]')?.getAttribute('content') ?? 'no viewport meta'));
     receipt(`bundle: default view has no pane article ${viewport.name}`, await page.locator('.conversation-pane, .conversation-pane-text').count() === 0 && !(await page.content()).includes('Live pane text') && !(await page.content()).includes('The supervisor conversation is ready for review.'), 'pane text from the Welcome scrollback is not mirrored into the thread');
     fixture.send(SUPERVISOR, { OperatorReply: { notification_id: 90, reply_to: null, message: 'Gate run 33512 failed on one warning. Fix it in-train or ship with it allowlisted?', summary: 'Ask', device_id: 'fixture-device', operator_label: 'Daniel', kind: 'ask', options: ['Fix in-train', 'Ship with allowlist'] } });
     const pinned = page.locator('.pinned-ask');

@@ -16,7 +16,7 @@ html {
 
 body {
   margin: 0;
-  min-height: 100dvh;
+  min-height: var(--keyboard-viewport-height, 100dvh);
   overscroll-behavior: none;
   background: var(--bg-root);
   color: var(--text-hi);
@@ -2771,7 +2771,7 @@ dialog form > *,
 .cloud-brand { display: inline-flex; align-items: center; gap: var(--space-2); color: var(--text-hi); white-space: nowrap; font: var(--weight-medium) var(--fs-lg)/1.2 var(--font-display); }
 .cloud-brand svg { width: var(--space-8); height: var(--space-8); color: var(--color-action); flex: none; }
 .project-badge { display: inline-block; max-width: 100%; width: fit-content; padding: var(--space-1) var(--space-2); background: var(--bg-active); color: var(--color-action); font: var(--weight-semibold) var(--fs-md)/var(--line-ui) var(--font-ui); border-radius: var(--radius-card); overflow-wrap: anywhere; }
-.conversation-shell { display: grid; grid-template-columns: var(--conversation-rail-width) minmax(0, 1fr) var(--worker-collapsed-width); height: 100dvh; overflow: hidden; color: var(--ink); background: var(--canvas); }
+.conversation-shell { display: grid; grid-template-columns: var(--conversation-rail-width) minmax(0, 1fr) var(--worker-collapsed-width); height: var(--keyboard-viewport-height, 100dvh); overflow: hidden; color: var(--ink); background: var(--canvas); }
 .conversation-shell button { min-height: var(--rail-item-min); }
 /* == Pebble rail (EPIC cas-cac1) ==
    The rail is a panel lifted off the canvas by --lift-edge, not a hairline.
@@ -2976,7 +2976,7 @@ button.chip:disabled { cursor: default; }
 .conversation-welcome p { color: var(--text-mid); line-height: 1.6; }
 .conversation-eyebrow { font-size: var(--fs-xs); letter-spacing: var(--tracking-label); color: var(--color-action); }
 @media (max-width: 53rem), (max-height: 30rem) and (pointer: coarse) {
-  .conversation-shell { display: block; height: 100dvh; }
+  .conversation-shell { display: block; height: var(--keyboard-viewport-height, 100dvh); }
   /* Phone: the list is the page — full width, no rail edge, and the compose
      FAB floats bottom right above the footer while the list is showing. */
   .conversation-sidebar { height: 100%; box-shadow: none; }

@@ -115,17 +115,23 @@ export async function detectSpeechInput(
 
 export interface SpeechDictationCallbacks {
   read(): string;
-  write(value: string, interim: boolean): void;
+  /** Return the insertion point captured when listening began. */
+  caret?(): number;
+  write(value: string, interim: boolean, caret?: number): void;
   state(next: SpeechInputState, detail?: string): void;
   permissionDenied(): void;
 }
 
-function joinedTranscript(base: string, speech: string): string {
-  const prefix = base.trimEnd();
-  const suffix = speech.trimStart();
-  if (!prefix) return suffix;
-  if (!suffix) return prefix;
-  return `${prefix} ${suffix}`;
+function transcriptAtCaret(base: string, speech: string, caret: number): { value: string; caret: number } {
+  const position = Math.max(0, Math.min(caret, base.length));
+  const prefix = base.slice(0, position);
+  const suffix = base.slice(position);
+  const words = speech.trim();
+  if (!words) return { value: base, caret: position };
+  const leadingSpace = prefix.length > 0 && !/\s$/.test(prefix) ? " " : "";
+  const trailingSpace = suffix.length > 0 && !/^\s/.test(suffix) ? " " : "";
+  const value = `${prefix}${leadingSpace}${words}${trailingSpace}${suffix}`;
+  return { value, caret: prefix.length + leadingSpace.length + words.length };
 }
 
 export class SpeechDictationController {
@@ -148,6 +154,7 @@ export class SpeechDictationController {
     if (this.active || !this.capability.create) return;
     const recognition = this.capability.create();
     const base = this.callbacks.read();
+    const caret = this.callbacks.caret?.() ?? base.length;
     recognition.continuous = false;
     recognition.interimResults = true;
     recognition.lang = this.capability.language;
@@ -161,7 +168,8 @@ export class SpeechDictationController {
         speech += result?.[0]?.transcript ?? "";
         hasInterim ||= result?.isFinal === false;
       }
-      this.callbacks.write(joinedTranscript(base, speech), hasInterim);
+      const transcript = transcriptAtCaret(base, speech, caret);
+      this.callbacks.write(transcript.value, hasInterim, transcript.caret);
     };
     recognition.onerror = (event) => {
       endedWithError = true;

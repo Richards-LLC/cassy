@@ -1,113 +1,230 @@
-import { transcriptLines, shouldFollowTail } from "./transcript";
-import type { TranscriptSource } from "./transcript-view";
-import type { ConversationEvent, ConversationHistory } from "./conversation-history";
+import { shouldFollowTail } from "./transcript";
+import type { ConversationEvent, ConversationHistory, ConversationSend } from "./conversation-history";
+import type { OperatorReply, OperatorTurnKind } from "./types";
+import {
+  cellTone,
+  coalesceText,
+  messageBlocks,
+  threadModel,
+  type ThreadCoalesce,
+  type ThreadGroup,
+  type ThreadItem,
+  type ThreadTurn,
+} from "./thread-model";
 
-/** The pane is one explicitly live document; channel events are actual turns.
- * Move that document when its text changes, without duplicating TUI redraws or
- * claiming that a live terminal snapshot supplies durable chat boundaries. */
+/**
+ * Pebble thread (cas-d167). The default conversation shows only operator
+ * turns and supervisor→operator turns; the live pane never appears here — the
+ * terminal stays the explicit alternate view.
+ */
+
+/** What a kind-specific renderer receives. Ask and blocker (Pebble 3) plug in here. */
+export interface TurnRenderContext {
+  readonly document: Document;
+  readonly turn: ThreadTurn;
+  readonly reply: OperatorReply;
+  readonly supervisor: string;
+  /** Renders the message body (prose + evidence tables) the way a plain bubble would. */
+  readonly body: () => HTMLElement[];
+}
+
+/**
+ * Render hook keyed on the supervisor turn kind. Return an element to own the
+ * turn's silhouette entirely; return `undefined` to fall back to a plain
+ * bubble carrying `data-kind`. The view still wraps whatever comes back in the
+ * group's `.turn` column, so alignment, timestamps and grouping stay its job.
+ */
+export type TurnRenderHook = (kind: OperatorTurnKind, context: TurnRenderContext) => HTMLElement | undefined;
+
+export interface ConversationViewOptions {
+  /** Supervisor codename; bold in the thread header and the accessible label. */
+  supervisor: string;
+  /** Machine label and project name for the mono line beneath the name. */
+  machine?: string;
+  project?: string;
+  /** Machine accent class (from machine-accent.ts) applied on the thread root. */
+  accentClass?: string;
+  /** True while the supervisor is executing: paints the working line. */
+  working?: () => boolean;
+  /** Refused sends offer to put their text back into the composer. */
+  editMessage?: (text: string) => void;
+  renderTurn?: TurnRenderHook;
+}
+
+const TICK = '<svg class="tick" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.6 8.6l3.3 3.3L13.4 4.4"/></svg>';
+
 export class ConversationView {
   readonly element: HTMLElement;
-  private readonly flow: HTMLElement;
-  private readonly pane: HTMLElement;
-  private readonly paneBody: HTMLElement;
+  private readonly head: HTMLElement;
+  private readonly msgs: HTMLElement;
   private readonly jump: HTMLButtonElement;
-  private paneText: string | undefined;
-  private eventNodes = new Map<string, HTMLElement>();
+  private readonly options: ConversationViewOptions;
+  private nodes = new Map<string, HTMLElement>();
   private following = true;
   private pinPending = false;
   private disposed = false;
   private resize?: ResizeObserver;
-  constructor(document: Document, private source: TranscriptSource, private history: ConversationHistory, private supervisor: string, private editMessage?: (text: string) => void) {
+
+  constructor(document: Document, private history: ConversationHistory, options: ConversationViewOptions | string, editMessage?: (text: string) => void) {
+    this.options = typeof options === "string" ? { supervisor: options, editMessage } : options;
+    const { supervisor } = this.options;
     this.element = document.createElement("div");
-    this.element.className = "conversation-reading";
+    this.element.className = "conversation-reading thread";
+    if (this.options.accentClass) this.element.classList.add(this.options.accentClass);
     this.element.tabIndex = 0;
     this.element.setAttribute("aria-label", `Conversation with ${supervisor}`);
-    this.flow = document.createElement("div"); this.flow.className = "conversation-flow";
-    this.pane = document.createElement("article"); this.pane.className = "conversation-pane";
-    const heading = document.createElement("header");
-    const name = document.createElement("strong"); name.textContent = supervisor;
-    const label = document.createElement("span"); label.textContent = "Live pane text";
-    heading.append(name, label);
-    this.paneBody = document.createElement("div"); this.paneBody.className = "conversation-pane-text";
-    this.pane.append(heading, this.paneBody);
+    this.head = document.createElement("header"); this.head.className = "thead";
+    const identity = document.createElement("div"); identity.className = "id";
+    const name = document.createElement("b"); name.textContent = supervisor;
+    const where = document.createElement("span");
+    where.textContent = [this.options.machine, this.options.project].filter(Boolean).join(" · ");
+    identity.append(name, where);
+    this.head.append(identity);
+    this.msgs = document.createElement("div"); this.msgs.className = "msgs";
+    this.msgs.setAttribute("role", "log");
     this.jump = document.createElement("button"); this.jump.type = "button";
     this.jump.className = "conversation-jump"; this.jump.textContent = "Jump to latest"; this.jump.hidden = true;
-    this.jump.onclick = () => { this.following = true; this.source.scrollToBottom(); this.update(); this.pin(); };
-    this.element.append(this.flow, this.jump);
+    this.jump.onclick = () => { this.following = true; this.update(); this.pin(); };
+    this.element.append(this.head, this.msgs, this.jump);
     this.element.addEventListener("scroll", () => {
       if (this.pinPending) return;
       this.following = shouldFollowTail(this.element);
       this.jump.hidden = this.following;
-      if (this.element.scrollTop === 0 && this.source.hasScrollbackAbove()) this.source.scrollRows(-5);
     }, { passive: true });
     if (typeof ResizeObserver !== "undefined") {
       this.resize = new ResizeObserver(() => { if (this.following) this.pin(); });
       this.resize.observe(this.element);
     }
-    // Selecting text never opens a keyboard or sends raw terminal input.
   }
+
+  /** Re-derive the thread from the history; nodes are keyed so grouping survives. */
   update(): void {
-    const lines = transcriptLines(this.source.rows(), this.source.theme());
-    const text = lines.map((line) => line.text).join("\n");
-    const changed = text !== this.paneText;
-    if (changed) {
-      this.paneText = text;
-      let fenced = false;
-      this.paneBody.replaceChildren(...lines.map((line) => {
-        const node = this.element.ownerDocument.createElement("p");
-        if (line.text.trimStart().startsWith("```")) fenced = !fenced;
-        const code = fenced || line.text.trimStart().startsWith("```") || /[\u2500-\u257f]/u.test(line.text) || /^\s{4}/.test(line.text);
-        node.className = code ? "conversation-code" : "conversation-line";
-        if (code) { node.tabIndex = 0; node.setAttribute("aria-label", "Code or diagram; scroll horizontally to read"); }
-        node.textContent = line.text || "\u00a0";
-        return node;
-      }));
+    if (this.disposed) return;
+    const working = this.options.working?.() === true;
+    const model = threadModel(this.history.events, { working });
+    const document = this.element.ownerDocument;
+    const next = new Map<string, HTMLElement>();
+    const children: HTMLElement[] = [];
+    for (const item of model) {
+      let node = this.nodes.get(item.key);
+      if (!node) node = document.createElement(item.type === "day" ? "p" : "div");
+      this.renderItem(node, item);
+      next.set(item.key, node);
+      children.push(node);
     }
-    if (!this.pane.isConnected && text.trim()) this.flow.append(this.pane);
-    for (const event of this.history.events) {
-      const id = event.kind === "send" ? `send:${event.value.id}` : `reply:${event.value.notification_id}`;
-      let node = this.eventNodes.get(id);
-      if (!node) { node = this.element.ownerDocument.createElement("article"); this.eventNodes.set(id, node); this.flow.append(node); }
-      this.renderEvent(node, event);
-    }
-    // Only an actual text change advances the live pane, never a heartbeat.
-    if (changed && text.trim() && this.flow.lastElementChild !== this.pane) this.flow.append(this.pane);
-    if (this.following && this.element.ownerDocument.getSelection()?.isCollapsed !== false) this.pin();
+    this.nodes = next;
+    // Only re-append when the sequence changed: an unchanged list keeps its
+    // scroll position and selection.
+    const same = this.msgs.children.length === children.length && children.every((node, index) => this.msgs.children[index] === node);
+    if (!same) this.msgs.replaceChildren(...children);
+    if (this.following && document.getSelection()?.isCollapsed !== false) this.pin();
   }
-  private renderEvent(node: HTMLElement, event: ConversationEvent): void {
-    const document = node.ownerDocument;
-    const signature = JSON.stringify(event);
+
+  /** Cheap liveness poll: repaints only when the working state actually flipped. */
+  refreshWorking(): void {
+    if (this.disposed) return;
+    const working = this.options.working?.() === true;
+    if (working !== this.nodes.has("working")) this.update();
+  }
+
+  private renderItem(node: HTMLElement, item: ThreadItem): void {
+    const signature = signatureOf(item);
     if (node.dataset.signature === signature) return;
     node.dataset.signature = signature;
-    node.className = `conversation-turn ${event.kind === "send" ? "from-you" : "from-supervisor"}`;
-    const header = document.createElement("header");
-    const sender = document.createElement("strong"); sender.textContent = event.kind === "send" ? "You" : this.supervisor;
-    const state = document.createElement("span");
-    state.className = "conversation-delivery"; state.setAttribute("role", "status");
-    if (event.kind === "send") {
-      const send = event.value;
-      node.dataset.state = send.state;
-      state.textContent = send.state === "sending" ? "Sending · awaiting receipt" : send.state === "error" ? `Not sent · ${send.error}` : send.state === "replied" ? "Replied" : send.stamped ? "Acknowledged · sent from you" : "Acknowledged";
-    } else {
-      node.dataset.replyTo = event.value.reply_to === null ? "" : String(event.value.reply_to);
-      node.dataset.kind = event.value.kind ?? "answer";
-      state.textContent = event.value.kind === "status" ? "Status" : event.value.kind === "receipt" ? "Receipt" : event.value.kind === "ask" ? "Ask" : event.value.kind === "blocker" ? "Blocker" : event.value.reply_to === null ? "Supervisor" : "Reply to you";
-    }
-    const body = document.createElement("p"); body.textContent = event.kind === "send" ? event.value.text : event.value.message;
-    header.append(sender, state); node.replaceChildren(header, body);
-    if (event.kind === "reply") {
-      for (const attachment of event.value.attachments ?? []) {
-        const row = document.createElement("div"); row.className = "conversation-attachment";
-        const link = document.createElement("a"); link.href = `#artifact:${encodeURIComponent(attachment.artifact_id)}`; link.dataset.artifactId = attachment.artifact_id; link.textContent = attachment.name; link.title = `${attachment.mime} · ${attachment.size_bytes} bytes`;
-        row.append(link); node.append(row);
-      }
-    }
-    if (event.kind === "send" && event.value.state === "error" && this.editMessage) {
-      const edit = document.createElement("button"); edit.type = "button"; edit.textContent = "Edit message";
-      edit.onclick = () => this.editMessage?.(event.value.text);
-      node.append(edit);
+    switch (item.type) {
+      case "day": node.className = "day"; node.textContent = item.label; return;
+      case "working": this.renderWorking(node); return;
+      case "coalesce": this.renderCoalesce(node, item); return;
+      case "group": this.renderGroup(node, item); return;
     }
   }
+
+  private renderWorking(node: HTMLElement): void {
+    const document = node.ownerDocument;
+    node.className = "turn working-turn";
+    const line = document.createElement("div"); line.className = "working"; line.setAttribute("role", "status");
+    const dots = document.createElement("span"); dots.className = "dots"; dots.setAttribute("aria-hidden", "true");
+    dots.append(document.createElement("i"), document.createElement("i"), document.createElement("i"));
+    line.append(dots, document.createTextNode("working"));
+    node.replaceChildren(line);
+  }
+
+  private renderCoalesce(node: HTMLElement, item: ThreadCoalesce): void {
+    const document = node.ownerDocument;
+    node.className = "turn coalesce-turn";
+    const line = document.createElement("div"); line.className = "coalesce";
+    line.dataset.count = String(item.count);
+    line.textContent = coalesceText(item);
+    line.title = item.replies.map((reply) => reply.message).join("\n");
+    node.replaceChildren(line);
+    if (item.time) { const time = document.createElement("time"); time.textContent = item.time; node.append(time); }
+  }
+
+  private renderGroup(node: HTMLElement, group: ThreadGroup): void {
+    const document = node.ownerDocument;
+    node.className = `turn ${group.side === "you" ? "you" : "sup"}`;
+    // Bubbles are keyed too: a later turn re-derives the earlier one's corner
+    // classes without replacing its node, so a selection or focus inside it
+    // survives the update.
+    const existing = new Map<string, HTMLElement>();
+    for (const child of node.querySelectorAll<HTMLElement>(":scope > [data-key]")) existing.set(child.dataset.key!, child);
+    const children: HTMLElement[] = [];
+    for (const turn of group.turns) {
+      const signature = JSON.stringify(turn.event);
+      let bubble = existing.get(turn.key);
+      if (!bubble || bubble.dataset.signature !== signature) {
+        bubble = turn.event.kind === "send" ? this.renderSend(document, turn, turn.event.value) : this.renderReply(document, turn, turn.event.value);
+        bubble.classList.add("conversation-turn");
+        bubble.dataset.key = turn.key;
+        bubble.dataset.signature = signature;
+      }
+      bubble.classList.toggle("group-first", turn.first);
+      bubble.classList.toggle("group-last", turn.last);
+      children.push(bubble);
+    }
+    if (group.time) { const time = document.createElement("time"); time.textContent = group.time; children.push(time as unknown as HTMLElement); }
+    node.replaceChildren(...children);
+  }
+
+  private renderSend(document: Document, turn: ThreadTurn, send: ConversationSend): HTMLElement {
+    const bubble = document.createElement("div");
+    bubble.className = "bub";
+    bubble.dataset.state = send.state;
+    bubble.append(...paragraphs(document, send.text));
+    if (send.state === "sending" || send.state === "error") {
+      const state = document.createElement("span");
+      state.className = "conversation-delivery"; state.setAttribute("role", "status");
+      state.textContent = send.state === "sending" ? "Sending…" : `Not sent · ${send.error ?? "refused"}`;
+      bubble.append(state);
+      if (send.state === "error" && this.options.editMessage) {
+        const edit = document.createElement("button"); edit.type = "button"; edit.className = "conversation-edit"; edit.textContent = "Edit message";
+        edit.onclick = () => this.options.editMessage?.(send.text);
+        bubble.append(edit);
+      }
+    }
+    return bubble;
+  }
+
+  private renderReply(document: Document, turn: ThreadTurn, reply: OperatorReply): HTMLElement {
+    const kind = reply.kind ?? "answer";
+    const body = (): HTMLElement[] => renderBody(document, reply);
+    const custom = this.options.renderTurn?.(kind, { document, turn, reply, supervisor: this.options.supervisor, body });
+    const bubble = custom ?? document.createElement("div");
+    if (!custom) {
+      bubble.className = kind === "receipt" ? "bub receipt" : "bub";
+      if (kind === "receipt") {
+        const tick = document.createElement("template"); tick.innerHTML = TICK;
+        const text = document.createElement("div"); text.className = "receipt-text"; text.append(...body());
+        bubble.append(tick.content.firstElementChild!, text);
+      } else {
+        bubble.append(...body());
+      }
+    }
+    bubble.dataset.kind = kind;
+    bubble.dataset.replyTo = reply.reply_to === null ? "" : String(reply.reply_to);
+    return bubble;
+  }
+
   private pin(): void {
     this.element.scrollTop = this.element.scrollHeight;
     this.jump.hidden = true;
@@ -119,5 +236,53 @@ export class ConversationView {
       requestAnimationFrame(() => { this.pinPending = false; });
     });
   }
+
   dispose(): void { this.disposed = true; this.resize?.disconnect(); this.element.remove(); }
 }
+
+function signatureOf(item: ThreadItem): string {
+  switch (item.type) {
+    case "day": return `day:${item.label}`;
+    case "working": return "working";
+    case "coalesce": return JSON.stringify([item.count, item.latest, item.time, item.replies.map((reply) => reply.notification_id)]);
+    case "group": return JSON.stringify([item.side, item.time, item.turns.map((turn) => [turn.key, turn.first, turn.last, turn.event])]);
+  }
+}
+
+function paragraphs(document: Document, text: string): HTMLElement[] {
+  return text.split(/\n{2,}/).map((chunk) => chunk.trim()).filter(Boolean).map((chunk) => {
+    const p = document.createElement("p"); p.textContent = chunk; return p;
+  });
+}
+
+/** Prose paragraphs plus evidence tables; attachments keep their link rows for Pebble 4. */
+export function renderBody(document: Document, reply: OperatorReply): HTMLElement[] {
+  const nodes: HTMLElement[] = [];
+  for (const block of messageBlocks(reply.message)) {
+    if (block.type === "text") { nodes.push(...paragraphs(document, block.text)); continue; }
+    const table = document.createElement("div"); table.className = "evi"; table.setAttribute("role", "table");
+    const columns = Math.max(block.table.header?.length ?? 0, ...block.table.rows.map((row) => row.length));
+    table.style.setProperty("--evi-columns", String(columns));
+    const row = (cells: string[], head: boolean): HTMLElement => {
+      const line = document.createElement("div"); line.className = head ? "evi-row evi-head" : "evi-row"; line.setAttribute("role", "row");
+      for (let index = 0; index < columns; index += 1) {
+        const cell = document.createElement("span"); cell.setAttribute("role", head ? "columnheader" : "cell");
+        const text = cells[index] ?? ""; cell.textContent = text;
+        const tone = head ? undefined : cellTone(text); if (tone) cell.classList.add(tone);
+        line.append(cell);
+      }
+      return line;
+    };
+    if (block.table.header) table.append(row(block.table.header, true));
+    for (const cells of block.table.rows) table.append(row(cells, false));
+    nodes.push(table);
+  }
+  for (const attachment of reply.attachments ?? []) {
+    const row = document.createElement("div"); row.className = "conversation-attachment";
+    const link = document.createElement("a"); link.href = `#artifact:${encodeURIComponent(attachment.artifact_id)}`; link.dataset.artifactId = attachment.artifact_id; link.textContent = attachment.name; link.title = `${attachment.mime} · ${attachment.size_bytes} bytes`;
+    row.append(link); nodes.push(row);
+  }
+  return nodes;
+}
+
+export type { ConversationEvent };

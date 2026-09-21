@@ -723,13 +723,13 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(css).toContain("font-family: var(--font-mono)");
     expect(css).not.toContain("border-right:");
     expect(css).not.toContain(".context { border-left:");
-    // Elevation is tokenized: the two overlay shadows plus the Pebble lifts
-    // (rail edge, selected row, compose FAB) — every declaration consumes a
-    // token and the phone rail reset is the only literal.
-    expect(css.match(/box-shadow:\s*var\(--shadow-overlay\)/g)).toHaveLength(2);
-    expect(css.match(/box-shadow:\s*var\(--lift(?:-edge|-strong)?\)/g)).toHaveLength(3);
-    expect(css.match(/box-shadow:/g)).toHaveLength(6);
-    expect(css.match(/box-shadow:\s*none/g)).toHaveLength(1);
+    // Elevation is tokenized: the two overlay shadows, the phone rail reset,
+    // and the Pebble --lift set (cas-cac1: elevation replaces hairlines on the
+    // rail, the rows, the compose FAB and the thread).
+    const shadows = [...css.matchAll(/box-shadow:\s*([^;]+);/g)].map((match) => match[1].trim());
+    expect(shadows.filter((value) => value === "var(--shadow-overlay)")).toHaveLength(2);
+    expect(shadows.filter((value) => value === "none")).toHaveLength(1);
+    for (const value of shadows) expect(value).toMatch(/^(?:none|var\(--(?:shadow-overlay|lift(?:-strong|-edge|-head)?)\))$/);
     expect(renderer).not.toContain('"700"');
     expect(surface).not.toContain('"normal 700"');
     expect(surface).not.toContain('"italic 700"');

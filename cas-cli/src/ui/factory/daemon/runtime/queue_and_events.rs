@@ -4284,10 +4284,15 @@ impl FactoryDaemon {
             // was queued at spawn but reaches the worker after a supervisor
             // reply must read as old spawn boilerplate, not a fresh reassignment.
             prompt_with_instructions = format!(
-                "{}\n\n{}",
+                "{}\n{}\n{}",
                 crate::mcp::tools::service::agent_search_system::message::queued_message_provenance(
                     &queued
                 ),
+                crate::mcp::tools::service::agent_search_system::message::commander_reply_command(
+                    &queued,
+                )
+                .map(|command| format!("Reply with: `{command}`"))
+                .unwrap_or_default(),
                 prompt_with_instructions,
             );
 

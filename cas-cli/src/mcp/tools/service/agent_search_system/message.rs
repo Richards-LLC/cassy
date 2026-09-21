@@ -137,6 +137,35 @@ pub(crate) fn queued_message_provenance(message: &cas_store::QueuedPrompt) -> St
     queued_message_provenance_at(message, chrono::Utc::now())
 }
 
+/// The only safe reply target for a verified Commander row is the operator
+/// lane. Keep this exact command beside the row so a supervisor never has to
+/// turn the human-readable `From:` label back into a routing target.
+pub(crate) fn commander_reply_command(message: &cas_store::QueuedPrompt) -> Option<String> {
+    matches!(operator_class(message), Some(OperatorClass::Verified { .. })).then(|| {
+        format!(
+            "coordination action=message target=operator in_reply_to={} message=…",
+            message.id
+        )
+    })
+}
+
+/// These values are CAS-generated queue-source labels, never agent names.
+/// Plain names intentionally stay on the queue-before-register path: a
+/// supervisor may send a worker assignment before its registration lands.
+pub(crate) fn target_is_reserved_source(target: &str) -> bool {
+    let target = target.trim().to_ascii_lowercase();
+    target.is_empty()
+        || target == "director-generated"
+        || target.starts_with("director-generated:")
+        || [
+            "lifecycle:",
+            "lifecycle-wake:",
+            "verification-dispatch:",
+        ]
+        .iter()
+        .any(|prefix| target.starts_with(prefix))
+}
+
 #[cfg(test)]
 mod viktor_provenance_tests {
     use super::queued_message_provenance_at;
@@ -525,6 +554,8 @@ impl CasService {
     ) -> Result<CallToolResult, McpError> {
         use crate::store::open_prompt_queue_store;
 
+        let mut req = req;
+
         let target = req.target.ok_or_else(|| {
             Self::error(
                 ErrorCode::INVALID_PARAMS,
@@ -552,6 +583,19 @@ impl CasService {
                  Example: summary=\"task blocked on verification\" (required alongside `message`).",
                 )
             })?;
+
+        let commander_target = target.starts_with(COMMANDER_SOURCE_PREFIX);
+        let commander_selector = target
+            .strip_prefix(COMMANDER_SOURCE_PREFIX)
+            .map(str::trim)
+            .filter(|selector| !selector.is_empty())
+            .map(str::to_owned);
+        if commander_target && commander_selector.is_none() {
+            return Err(Self::error(
+                ErrorCode::INVALID_PARAMS,
+                "target='commander:<label>' requires a non-empty Commander label or device",
+            ));
+        }
 
         let source = self
             .inner
@@ -641,7 +685,7 @@ impl CasService {
         };
 
         let addressed_logical_supervisor = target.eq_ignore_ascii_case("supervisor");
-        let addressed_operator = target.eq_ignore_ascii_case("operator");
+        let addressed_operator = target.eq_ignore_ascii_case("operator") || commander_target;
         if addressed_operator && role != "supervisor" {
             return Err(Self::error(
                 ErrorCode::INVALID_REQUEST,
@@ -649,7 +693,9 @@ impl CasService {
             ));
         }
         let mut peer_supervisor_copy = None;
-        let resolved_target = if role == "worker" {
+        let resolved_target = if addressed_operator {
+            "operator".to_string()
+        } else if role == "worker" {
             if target.eq_ignore_ascii_case("supervisor") {
                 resolve_supervisor_name().ok_or_else(|| {
                     Self::error(ErrorCode::INVALID_REQUEST,
@@ -900,6 +946,79 @@ impl CasService {
                 .unwrap_or_else(|| source.clone())
         };
 
+        // A commander:<label> target is a convenience alias for the verified
+        // operator lane. Resolve the newest matching Commander row while it
+        // is still available even if inbox polling already marked it seen.
+        // The reply then follows the row's paired device, never the client
+        // supplied label.
+        if let Some(selector) = commander_selector.as_deref() {
+            let session = factory_session
+                .as_deref()
+                .filter(|session| !session.trim().is_empty())
+                .ok_or_else(|| {
+                    Self::error(
+                        ErrorCode::INVALID_PARAMS,
+                        format!(
+                            "target='commander:{selector}' requires an active factory session; \
+                             once a verified Commander message exists, call `coordination \
+                             action=message target=operator in_reply_to=<notification_id> \
+                             summary=\"...\" message=\"...\"`"
+                        ),
+                    )
+                })?;
+            let mut supervisor_targets = vec!["supervisor", display_name.as_str()];
+            if let Some(name) = env_agent_name.as_deref()
+                && !supervisor_targets
+                    .iter()
+                    .any(|target| target.eq_ignore_ascii_case(name))
+            {
+                supervisor_targets.push(name);
+            }
+            if let Some(agent) = agent_from_store.as_ref()
+                && !supervisor_targets
+                    .iter()
+                    .any(|target| target.eq_ignore_ascii_case(&agent.name))
+            {
+                supervisor_targets.push(agent.name.as_str());
+            }
+            let prior = queue
+                .latest_verified_operator_message(session, selector, &supervisor_targets)
+                .map_err(|error| {
+                    Self::error(
+                        ErrorCode::INTERNAL_ERROR,
+                        format!(
+                            "Failed to resolve verified Commander message for \
+                             target='commander:{selector}': {error}"
+                        ),
+                    )
+                })?
+                .ok_or_else(|| {
+                    Self::error(
+                        ErrorCode::INVALID_PARAMS,
+                        format!(
+                            "No verified Commander message from '{selector}' is addressed to \
+                             this supervisor. Reply with `coordination action=message \
+                             target=operator in_reply_to=<notification_id> summary=\"...\" \
+                             message=\"...\"` after a verified Commander row arrives."
+                        ),
+                    )
+                })?;
+            if let Some(explicit) = req.in_reply_to
+                && explicit != prior.id
+            {
+                return Err(Self::error(
+                    ErrorCode::INVALID_PARAMS,
+                    format!(
+                        "target='commander:{selector}' resolves to notification_id={} \
+                         (not in_reply_to={explicit}); use `coordination action=message \
+                         target=operator in_reply_to={} summary=\"...\" message=\"...\"`",
+                        prior.id, prior.id
+                    ),
+                ));
+            }
+            req.in_reply_to = Some(prior.id);
+        }
+
         // Commander turns are a separate recipient lane. They remain
         // supervisor-only; answer turns must point at a live, hub-stamped
         // operator row, while status/receipt/ask/blocker turns may be sent
@@ -1146,10 +1265,57 @@ impl CasService {
                 })?;
             }
             return Ok(Self::success(format!(
-                "Commander {} queued\n\nID: {reply_id}\nIn reply to: {}\nDevice: {wire_device_id}\nStatus: queued for {wire_device_id}",
+                "Commander {} queued\n\nID: {reply_id}\nAnswered notification_id: {}\nDevice: {wire_device_id}\nStatus: queued for {wire_device_id}",
                 kind.as_str(),
                 req.in_reply_to.map_or_else(|| "none".to_string(), |id| id.to_string())
             )));
+        }
+
+        // Refuse CAS-generated row-source labels before any queue write. Plain
+        // names are deliberately allowed through: a supervisor may address a
+        // worker before registration, and the queue-before-register path
+        // reports that honestly until the worker appears.
+        let resolved_target_agent = {
+            use crate::store::open_agent_store;
+            open_agent_store(&self.inner.cas_root)
+                .ok()
+                .and_then(|store| store.list(None).ok())
+                .and_then(|agents| {
+                    agents
+                        .into_iter()
+                        .find(|agent| agent.name.eq_ignore_ascii_case(&resolved_target))
+                })
+        };
+        let target_is_registered = resolved_target.eq_ignore_ascii_case("all_workers")
+            || resolved_target.eq_ignore_ascii_case("supervisor")
+            || resolved_target.eq_ignore_ascii_case("director")
+            || resolved_target_agent.is_some();
+        if role != "worker" && target_is_reserved_source(&resolved_target) {
+            let mut valid_targets = vec![
+                "operator".to_string(),
+                "supervisor".to_string(),
+                "all_workers".to_string(),
+                "director".to_string(),
+            ];
+            if let Ok(store) = crate::store::open_agent_store(&self.inner.cas_root)
+                && let Ok(agents) = store.list(None)
+            {
+                valid_targets.extend(agents.into_iter().map(|agent| agent.name));
+            }
+            valid_targets.sort_unstable_by_key(|target| target.to_ascii_lowercase());
+            valid_targets.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
+            return Err(Self::error(
+                ErrorCode::INVALID_REQUEST,
+                format!(
+                    "Unknown message target '{resolved_target}'. Valid targets: {}. \
+                     Nothing was enqueued.",
+                    valid_targets
+                        .into_iter()
+                        .map(|target| format!("'{target}'"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            ));
         }
 
         // cas-4a27 (GH #334): reply inference intentionally requires a
@@ -1393,22 +1559,6 @@ impl CasService {
         // is not an agent_store registration. Treat it as always registered
         // so outbound replies after an inbound director message are not
         // reported as "not yet registered".
-        let resolved_target_agent = {
-            use crate::store::open_agent_store;
-            open_agent_store(&self.inner.cas_root)
-                .ok()
-                .and_then(|store| store.list(None).ok())
-                .and_then(|agents| {
-                    agents
-                        .into_iter()
-                        .find(|agent| agent.name.eq_ignore_ascii_case(&resolved_target))
-                })
-        };
-        let target_is_registered = resolved_target == "all_workers"
-            || resolved_target == "supervisor"
-            || resolved_target.eq_ignore_ascii_case("director")
-            || resolved_target_agent.is_some();
-
         let urgent = req.urgent.unwrap_or(false);
         // Urgent messages break the target's in-flight turn, so they must jump
         // the queue ahead of any backlog: force Critical priority when urgent
@@ -2331,7 +2481,7 @@ impl CasService {
                     redelivered += 1;
                     body.push_str(&format!(
                         "**[{}] From: {} — {INBOX_REDELIVERY_MARKER} (already delivered {})**\n\
-                        Summary: {}\n{}\nMessage: {}\n\n",
+                        Summary: {}\n{}\n{}Message: {}\n\n",
                         message.id,
                         message.source,
                         message
@@ -2340,16 +2490,22 @@ impl CasService {
                             .unwrap_or_else(|| "earlier".to_string()),
                         message.summary.as_deref().unwrap_or("(no summary)"),
                         queued_message_provenance(message),
+                        commander_reply_command(message)
+                            .map(|command| format!("Reply with: `{command}`\n"))
+                            .unwrap_or_default(),
                         message.prompt,
                     ));
                 }
                 InboxRedelivery::FirstDelivery => {
                     body.push_str(&format!(
-                        "**[{}] From: {}**\nSummary: {}\n{}\nMessage: {}\n\n",
+                        "**[{}] From: {}**\nSummary: {}\n{}\n{}Message: {}\n\n",
                         message.id,
                         message.source,
                         message.summary.as_deref().unwrap_or("(no summary)"),
                         queued_message_provenance(message),
+                        commander_reply_command(message)
+                            .map(|command| format!("Reply with: `{command}`\n"))
+                            .unwrap_or_default(),
                         message.prompt,
                     ));
                 }
@@ -3763,6 +3919,171 @@ mod cas_89e1_post_merge_message_type_tests {
             .poll_all(10)
             .expect("queued messages");
         assert!(rows.is_empty(), "rejected message must not be queued: {rows:?}");
+    }
+
+    #[test]
+    fn verified_commander_rows_print_the_exact_operator_reply_command() {
+        let mut row = cas_store::QueuedPrompt {
+            id: 3139,
+            source: "commander:Daniel@Soundwave".into(),
+            target: "supervisor".into(),
+            prompt: "What is status?".into(),
+            created_at: chrono::Utc::now(),
+            processed_at: None,
+            factory_session: Some("factory-1".into()),
+            summary: Some("status".into()),
+            priority: cas_store::NotificationPriority::Normal,
+            acked_at: None,
+            urgent: false,
+            origin: Some(cas_store::QueueOrigin::PairedDevice {
+                device_id: "device-1".into(),
+            }),
+            operator: None,
+            recipient_device_id: None,
+            kind: None,
+            attachments: Vec::new(),
+        };
+        assert_eq!(
+            commander_reply_command(&row).as_deref(),
+            Some("coordination action=message target=operator in_reply_to=3139 message=…")
+        );
+        row.origin = None;
+        assert_eq!(commander_reply_command(&row), None);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn commander_label_routes_to_latest_verified_operator_row() {
+        let _env = TestEnvGuard::with_optional_vars(&[
+            ("CAS_AGENT_ROLE", None),
+            ("CAS_AGENT_NAME", None),
+            ("CAS_FACTORY_SESSION", None),
+            ("CAS_SUPERVISOR_NAME", None),
+        ]);
+        let temp = tempfile::tempdir().expect("temporary Cassy root");
+        let cas_root = temp.path().join(".cas");
+        std::fs::create_dir_all(&cas_root).expect("Cassy root");
+        let agents = crate::store::open_agent_store(&cas_root).expect("agent store");
+        let mut supervisor = Agent::new("supervisor-id".to_string(), "supervisor".to_string());
+        supervisor.role = AgentRole::Supervisor;
+        supervisor.factory_session = Some("factory-commander-alias".to_string());
+        agents.register(&supervisor).expect("register supervisor");
+        let queue = crate::store::open_prompt_queue_store(&cas_root).expect("prompt queue");
+        let commander = queue
+            .enqueue_operator_message(
+                "commander:Daniel@Soundwave",
+                "supervisor",
+                "What is status?",
+                Some("factory-commander-alias"),
+                Some("status"),
+                Some(cas_store::NotificationPriority::Normal),
+                false,
+                None,
+                &cas_store::OperatorStamp {
+                    operator: "Daniel".into(),
+                    device_id: "device-1".into(),
+                    device_label: "Soundwave".into(),
+                    scopes: vec!["message:send".into()],
+                    verified: true,
+                },
+            )
+            .expect("queue Commander message")
+            .id();
+
+        let core = crate::mcp::server::CasCore::with_daemon(cas_root.clone(), None, None);
+        core.set_agent_id_for_testing(supervisor.id);
+        #[cfg(feature = "mcp-proxy")]
+        let service = CasService::new(core, None);
+        #[cfg(not(feature = "mcp-proxy"))]
+        let service = CasService::new(core);
+        let request: AgentRequest = serde_json::from_value(serde_json::json!({
+            "action": "message",
+            "target": "commander:Daniel@Soundwave",
+            "summary": "status response",
+            "message": "Three workers are running; nothing is awaiting merge.",
+        }))
+        .expect("commander alias request");
+        let response = response_text(
+            service
+                .message_send(request)
+                .await
+                .expect("commander alias queues successfully"),
+        );
+        assert!(response.contains(&format!("Answered notification_id: {commander}")), "{response}");
+        assert!(response.contains("Device: device-1"), "{response}");
+        let rows = queue
+            .peek_operator_replies("factory-commander-alias", 10)
+            .expect("read operator replies");
+        let reply = rows.first().expect("operator reply row");
+        assert_eq!(reply.recipient_device_id.as_deref(), Some("device-1"));
+        let payload: crate::ui::factory::OperatorReplyPayload =
+            serde_json::from_str(&reply.prompt).expect("operator reply payload");
+        assert_eq!(payload.reply_to, Some(commander));
+        assert_eq!(payload.kind, crate::ui::factory::OperatorTurnKind::Answer);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn unknown_supervisor_target_is_refused_before_queueing() {
+        let _env = TestEnvGuard::with_optional_vars(&[
+            ("CAS_AGENT_ROLE", None),
+            ("CAS_AGENT_NAME", None),
+            ("CAS_FACTORY_SESSION", None),
+            ("CAS_SUPERVISOR_NAME", None),
+        ]);
+        let temp = tempfile::tempdir().expect("temporary Cassy root");
+        let cas_root = temp.path().join(".cas");
+        std::fs::create_dir_all(&cas_root).expect("Cassy root");
+        let agents = crate::store::open_agent_store(&cas_root).expect("agent store");
+        let mut supervisor = Agent::new("supervisor-id".to_string(), "supervisor".to_string());
+        supervisor.role = AgentRole::Supervisor;
+        supervisor.factory_session = Some("factory-unknown-target".to_string());
+        agents.register(&supervisor).expect("register supervisor");
+        let core = crate::mcp::server::CasCore::with_daemon(cas_root.clone(), None, None);
+        core.set_agent_id_for_testing(supervisor.id);
+        #[cfg(feature = "mcp-proxy")]
+        let service = CasService::new(core, None);
+        #[cfg(not(feature = "mcp-proxy"))]
+        let service = CasService::new(core);
+        let request: AgentRequest = serde_json::from_value(serde_json::json!({
+            "action": "message",
+            "target": "lifecycle:manual",
+            "summary": "should fail",
+            "message": "This must never enter the queue.",
+        }))
+        .expect("unknown target request");
+        let error = service
+            .message_send(request)
+            .await
+            .expect_err("unknown target must be rejected");
+        assert!(error.message.contains("Unknown message target"), "{error:?}");
+        assert!(error.message.contains("'supervisor'"), "{error:?}");
+        assert!(error.message.contains("'all_workers'"), "{error:?}");
+        let rows = crate::store::open_prompt_queue_store(&cas_root)
+            .expect("prompt queue")
+            .peek_all(10)
+            .expect("peek queue");
+        assert!(rows.is_empty(), "unknown target must not enqueue: {rows:?}");
+    }
+
+    #[test]
+    fn plain_unregistered_names_remain_queue_before_register_targets() {
+        for target in [
+            "",
+            "  ",
+            "lifecycle:manual",
+            "lifecycle-wake:42",
+            "verification-dispatch:vd-1",
+            "director-generated",
+            "director-generated:task-1",
+        ] {
+            assert!(super::target_is_reserved_source(target), "{target:?}");
+        }
+        for target in [
+            "not-born-yet",
+            "lifecycle-worker",
+            "verification-dispatcher",
+        ] {
+            assert!(!super::target_is_reserved_source(target), "{target}");
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]

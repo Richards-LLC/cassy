@@ -1953,6 +1953,19 @@ pub trait PromptQueueStore: Send + Sync {
         limit: usize,
     ) -> Result<Vec<QueuedPrompt>>;
 
+    /// Read a bounded, device-scoped Commander conversation page without
+    /// consuming delivery state. The result is newest-first and may contain
+    /// one extra row so callers can determine whether an earlier page exists.
+    /// Only verified Commander sends for `device_id` and operator-lane replies
+    /// addressed to that device (or broadcast replies) are eligible.
+    fn conversation_history(
+        &self,
+        factory_session: &str,
+        device_id: &str,
+        before: Option<i64>,
+        limit: usize,
+    ) -> Result<Vec<QueuedPrompt>>;
+
     /// Most recent verified Commander device for a factory session. This is
     /// the recipient affinity for unprompted supervisor turns.
     fn latest_verified_operator_device(&self, factory_session: &str) -> Result<Option<String>>;
@@ -4496,6 +4509,58 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         Ok(prompts)
     }
 
+    fn conversation_history(
+        &self,
+        factory_session: &str,
+        device_id: &str,
+        before: Option<i64>,
+        limit: usize,
+    ) -> Result<Vec<QueuedPrompt>> {
+        if limit == 0 || device_id.trim().is_empty() {
+            return Ok(Vec::new());
+        }
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        let (before_clause, limit_parameter) = before
+            .map(|_| (" AND id < ?3 ", "?4"))
+            .unwrap_or(("", "?3"));
+        let sql = format!(
+            "SELECT id, source, target, prompt, created_at, processed_at,
+                    summary, priority, acked_at, urgent, factory_session,
+                    origin_agent_id, origin_kind, operator_label,
+                    operator_device_id, operator_device_label, operator_scopes,
+                    operator_verified, recipient_device_id, kind, attachments
+             FROM prompt_queue
+             WHERE factory_session = ?1
+               AND (
+                    (source LIKE 'commander:%'
+                     AND operator_verified = 1
+                     AND operator_device_id = ?2)
+                    OR
+                    (lower(target) = 'operator'
+                     AND (recipient_device_id = ?2
+                          OR recipient_device_id IS NULL
+                          OR recipient_device_id = ''
+                          OR recipient_device_id = '*'))
+               )
+               {before_clause}
+             ORDER BY id DESC
+               LIMIT {limit_parameter}"
+        );
+        let mut stmt = conn.prepare_cached(&sql)?;
+        let mut values: Vec<Box<dyn rusqlite::ToSql>> = vec![
+            Box::new(factory_session.to_owned()),
+            Box::new(device_id.to_owned()),
+        ];
+        if let Some(before) = before {
+            values.push(Box::new(before));
+        }
+        values.push(Box::new(limit as i64));
+        let params = values.iter().map(|value| value.as_ref());
+        stmt.query_map(rusqlite::params_from_iter(params), Self::prompt_from_row)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
     fn latest_verified_operator_device(&self, factory_session: &str) -> Result<Option<String>> {
         let conn = crate::shared_db::lock_connection(&self.conn)?;
         conn.query_row(
@@ -5559,6 +5624,86 @@ mod tests {
             store.latest_verified_operator_device("factory-7").unwrap(),
             Some("device-7".into())
         );
+    }
+
+    #[test]
+    fn conversation_history_is_session_and_verified_device_scoped() {
+        let (_temp, store) = create_test_store();
+        let daniel = OperatorStamp {
+            operator: "Daniel".into(),
+            device_id: "phone-7".into(),
+            device_label: "Soundwave".into(),
+            scopes: vec!["message:send".into()],
+            verified: true,
+        };
+        let other = OperatorStamp {
+            device_id: "phone-9".into(),
+            ..daniel.clone()
+        };
+        store
+            .enqueue_operator_message(
+                "commander:Daniel@Soundwave",
+                "supervisor",
+                "operator message",
+                Some("factory-7"),
+                None,
+                None,
+                false,
+                None,
+                &daniel,
+            )
+            .unwrap();
+        store
+            .enqueue_operator_message(
+                "commander:Daniel@Other",
+                "supervisor",
+                "other device message",
+                Some("factory-7"),
+                None,
+                None,
+                false,
+                None,
+                &other,
+            )
+            .unwrap();
+        store
+            .enqueue_urgent_with_outcome(
+                "supervisor",
+                "operator",
+                r#"{"schema_version":2,"reply_to":null,"message":"reply","summary":"","device_id":"phone-7","kind":"answer","attachments":[]}"#,
+                Some("factory-7"),
+                None,
+                None,
+                false,
+                Some(&QueueOrigin::Daemon),
+            )
+            .unwrap();
+        let reply_id = store
+            .peek_operator_replies("factory-7", 10)
+            .unwrap()
+            .first()
+            .unwrap()
+            .id;
+        store.stamp_recipient_device(reply_id, "phone-7").unwrap();
+
+        let history = store
+            .conversation_history("factory-7", "phone-7", None, 20)
+            .unwrap();
+        assert_eq!(history.len(), 2);
+        assert!(history.iter().any(|row| row.prompt == "operator message"));
+        assert!(history.iter().any(|row| row.target == "operator"));
+        assert!(
+            !history
+                .iter()
+                .any(|row| row.prompt == "other device message")
+        );
+
+        let newest = history.first().unwrap().id;
+        let earlier = store
+            .conversation_history("factory-7", "phone-7", Some(newest), 20)
+            .unwrap();
+        assert_eq!(earlier.len(), 1, "the cursor excludes only the newest row");
+        assert_eq!(earlier[0].prompt, "operator message");
     }
 
     /// A stamp survives the round trip through SQLite and comes back on the

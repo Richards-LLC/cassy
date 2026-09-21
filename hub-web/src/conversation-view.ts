@@ -100,6 +100,12 @@ export interface ConversationViewOptions {
    * in the history with the same replyTo, which is what marks the ask answered.
    */
   respond?: (ask: OperatorReply, text: string) => void;
+  /** Requests the next older durable page when history has more turns. */
+  loadEarlier?: () => void;
+  /** Whether the daemon reported an older page still available. */
+  hasEarlier?: () => boolean;
+  /** Keeps the paging control honest while a request is in flight. */
+  loadingEarlier?: () => boolean;
 }
 
 const TICK = '<svg class="tick" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.6 8.6l3.3 3.3L13.4 4.4"/></svg>';
@@ -113,6 +119,7 @@ export class ConversationView {
    */
   readonly pinned: HTMLElement;
   private readonly head: HTMLElement;
+  private readonly loadEarlier: HTMLButtonElement;
   private readonly msgs: HTMLElement;
   private readonly empty: HTMLElement;
   private readonly jump: HTMLButtonElement;
@@ -138,13 +145,19 @@ export class ConversationView {
     where.textContent = [this.options.machine, this.options.project].filter(Boolean).join(" · ");
     identity.append(name, where);
     this.head.append(identity);
+    this.loadEarlier = document.createElement("button");
+    this.loadEarlier.type = "button";
+    this.loadEarlier.className = "conversation-load-earlier";
+    this.loadEarlier.textContent = "Load earlier";
+    this.loadEarlier.hidden = true;
+    this.loadEarlier.onclick = () => this.options.loadEarlier?.();
     this.msgs = document.createElement("div"); this.msgs.className = "msgs";
     this.msgs.setAttribute("role", "log");
     this.empty = document.createElement("div"); this.empty.className = "empty"; this.empty.hidden = true;
     this.jump = document.createElement("button"); this.jump.type = "button";
     this.jump.className = "conversation-jump"; this.jump.textContent = "Jump to latest"; this.jump.hidden = true;
     this.jump.onclick = () => { this.following = true; this.update(); this.pin(); };
-    this.element.append(...(this.options.header === false ? [] : [this.head]), this.msgs, this.empty, this.jump);
+    this.element.append(...(this.options.header === false ? [] : [this.head]), this.loadEarlier, this.msgs, this.empty, this.jump);
     this.pinned = document.createElement("div"); this.pinned.className = "pinned-ask"; this.pinned.hidden = true;
     if (this.options.accentClass) this.pinned.classList.add(this.options.accentClass);
     this.pinned.setAttribute("role", "region"); this.pinned.setAttribute("aria-label", `Waiting on you: question from ${supervisor}`);
@@ -162,6 +175,11 @@ export class ConversationView {
   /** Re-derive the thread from the history; nodes are keyed so grouping survives. */
   update(): void {
     if (this.disposed) return;
+    const hasEarlier = this.options.hasEarlier?.() === true;
+    const loadingEarlier = this.options.loadingEarlier?.() === true;
+    this.loadEarlier.hidden = !hasEarlier;
+    this.loadEarlier.disabled = loadingEarlier;
+    this.loadEarlier.textContent = loadingEarlier ? "Loading earlier…" : "Load earlier";
     const working = this.options.working?.() === true;
     const model = threadModel(this.history.events, { working });
     const document = this.element.ownerDocument;

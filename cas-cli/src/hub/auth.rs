@@ -117,7 +117,8 @@ pub fn required_scope(message: &ClientMessage) -> Option<Scope> {
         // may follow an observer, while a leased pane follows its controller.
         ClientMessage::ResizePane { .. }
         | ClientMessage::RequestPaneKeyframe { .. }
-        | ClientMessage::ScrollbackRequest { .. } => Some(Scope::PaneRead),
+        | ClientMessage::ScrollbackRequest { .. }
+        | ClientMessage::ConversationHistoryRequest { .. } => Some(Scope::PaneRead),
         ClientMessage::SendMessage { .. } => Some(Scope::MessageSend),
         ClientMessage::InterruptPane { .. } => Some(Scope::PaneInterrupt),
         ClientMessage::SpawnWorkers { .. }

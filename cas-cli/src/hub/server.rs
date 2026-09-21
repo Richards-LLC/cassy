@@ -731,8 +731,9 @@ async fn proxy_socket(
     };
     let mut worker_gate = super::WorkerGate::new(reveal_workers);
     let (mut sink, mut source) = socket.split();
-    // MessageQueued has no device field: retain the authenticated submitter's
-    // client_ref so only that socket receives its durable acknowledgment.
+    // MessageQueued and ConversationHistory have no socket field: retain the
+    // authenticated submitter's correlation id so only that socket receives
+    // its private response.
     let mut pending_message_refs = HashSet::<(String, String)>::new();
     let mut revocations = auth
         .as_ref()
@@ -786,7 +787,7 @@ async fn proxy_socket(
                 Some(Ok(Message::Ping(_))) | Some(Ok(Message::Pong(_))) => {}
                 Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
                 Some(Ok(Message::Text(text))) => {
-                    let client_ref = client_message_ref(text.as_bytes());
+                    let client_ref = client_correlation_ref(text.as_bytes());
                     if let Some(client_ref) = client_ref.as_deref() {
                         pending_message_refs.insert((session.clone(), client_ref.to_owned()));
                     }
@@ -799,7 +800,7 @@ async fn proxy_socket(
                     }
                 }
                 Some(Ok(Message::Binary(bytes))) => {
-                    let client_ref = client_message_ref(&bytes);
+                    let client_ref = client_correlation_ref(&bytes);
                     if let Some(client_ref) = client_ref.as_deref() {
                         pending_message_refs.insert((session.clone(), client_ref.to_owned()));
                     }
@@ -888,6 +889,11 @@ async fn handle_client_message(
         // this message answers, cas-a8ea8) — is forwarded unchanged.
         *attribution = verified_attribution(context);
     }
+    if let ClientMessage::ConversationHistoryRequest { device_id, .. } = &mut message {
+        // History is private to the authenticated paired device. Do not trust
+        // a browser-supplied selector, even though this is a read operation.
+        *device_id = context.device_id.clone();
+    }
     connector.send(session, message).await?;
     store.audit(
         Some(context),
@@ -925,7 +931,9 @@ pub(crate) fn verified_attribution(context: &AuthContext) -> MessageAttribution 
 pub(crate) fn is_pane_read_message(message: &ClientMessage) -> bool {
     matches!(
         message,
-        ClientMessage::RequestPaneKeyframe { .. } | ClientMessage::ScrollbackRequest { .. }
+        ClientMessage::RequestPaneKeyframe { .. }
+            | ClientMessage::ScrollbackRequest { .. }
+            | ClientMessage::ConversationHistoryRequest { .. }
     )
 }
 
@@ -1177,6 +1185,19 @@ fn client_message_ref(bytes: &[u8]) -> Option<String> {
     client_ref
 }
 
+fn client_history_request_ref(bytes: &[u8]) -> Option<String> {
+    let ClientMessage::ConversationHistoryRequest { request_id, .. } =
+        serde_json::from_slice::<ClientMessage>(bytes).ok()?
+    else {
+        return None;
+    };
+    (!request_id.is_empty()).then_some(request_id)
+}
+
+fn client_correlation_ref(bytes: &[u8]) -> Option<String> {
+    client_message_ref(bytes).or_else(|| client_history_request_ref(bytes))
+}
+
 /// Preserve the submitted reference on a legacy attach refusal without
 /// changing the wire shape for clients that predate correlated sends.
 fn legacy_forbidden_error(client_ref: Option<&str>) -> serde_json::Value {
@@ -1202,7 +1223,7 @@ fn multiplex_forbidden_error(session: &str, client_ref: Option<&str>) -> serde_j
 
 /// MessageQueued and correlated Error frames share one daemon upstream, so
 /// the hub filters them by the authenticated socket that submitted the ref.
-fn correlated_daemon_frame_allowed(
+pub(crate) fn correlated_daemon_frame_allowed(
     pending: &mut HashSet<(String, String)>,
     session: &str,
     bytes: &[u8],
@@ -1219,6 +1240,11 @@ fn correlated_daemon_frame_allowed(
     }) = serde_json::from_slice::<DaemonMessage>(bytes)
     {
         return pending.remove(&(session.to_owned(), client_ref));
+    }
+    if let Ok(DaemonMessage::ConversationHistory { request_id, .. }) =
+        serde_json::from_slice::<DaemonMessage>(bytes)
+    {
+        return pending.remove(&(session.to_owned(), request_id));
     }
     true
 }
@@ -1461,7 +1487,7 @@ async fn proxy_machine_socket<R: SessionReadModel>(
                         Ok(bytes) => bytes,
                         Err(_) => continue,
                     };
-                    let client_ref = client_message_ref(&bytes);
+                    let client_ref = client_correlation_ref(&bytes);
                     if let Some(client_ref) = client_ref.as_deref() {
                         pending_message_refs.insert((session.clone(), client_ref.to_owned()));
                     }

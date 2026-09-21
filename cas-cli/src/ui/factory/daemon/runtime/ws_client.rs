@@ -328,6 +328,32 @@ impl FactoryDaemon {
                     );
                 }
             }
+            ClientMessage::ConversationHistoryRequest {
+                request_id,
+                before,
+                limit,
+                device_id,
+            } => {
+                match self.conversation_history_page(request_id.clone(), &device_id, before, limit)
+                {
+                    Ok(message) => {
+                        if let Some(frame) = ws_encode(&message)
+                            && let Some(client) = self.ws_clients.get_mut(&client_id)
+                        {
+                            let _ = client.sink.feed(frame).now_or_never();
+                        }
+                    }
+                    Err(error) => {
+                        if let Some(frame) = ws_encode(&DaemonMessage::Error {
+                            message: format!("conversation history failed: {error}"),
+                            client_ref: Some(request_id),
+                        }) && let Some(client) = self.ws_clients.get_mut(&client_id)
+                        {
+                            let _ = client.sink.feed(frame).now_or_never();
+                        }
+                    }
+                }
+            }
             ClientMessage::Attach { request_scrollback } => {
                 let state = self.build_session_state();
                 let pane_bootstrap = self.commander_pane_bootstrap(&state);

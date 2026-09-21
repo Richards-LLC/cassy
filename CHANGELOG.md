@@ -7,6 +7,18 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.27.2] - 2026-09-21
+
+### Added
+
+- The hub replays a conversation's history when it opens. Every message the
+  operator sends and every reply addressed to the operator is already durable
+  in the project's queue; the hub now asks the daemon for a bounded,
+  device-scoped page of those rows on open and on reconnect, hydrates the
+  thread before live turns arrive without duplicating them, and offers a
+  "load earlier" cursor. Pane text is never part of the page. Machines still
+  running an older daemon ignore the request and the thread behaves as before.
+
 ## [3.27.1] - 2026-09-21
 
 ### Fixed

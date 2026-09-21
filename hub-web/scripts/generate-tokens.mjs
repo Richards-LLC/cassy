@@ -85,6 +85,8 @@ try {
     "--rail-item-min": "44px",
     "--landscape-attention-rail-width": "80px",
     "--browser-notice-height": "32px",
+    // Layout viewport height; the visualViewport fallback overrides it inline while a phone keyboard is up (cas-edc9).
+    "--keyboard-viewport-height": "100dvh",
     "--attention-payload-max-height": "180px",
     "--attention-motion-duration": token("motion.reveal"),
     "--chrome-motion-duration": token("motion.chrome"),

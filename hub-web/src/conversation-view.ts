@@ -373,6 +373,17 @@ export class ConversationView {
     return { bubble, sheets };
   }
 
+  /**
+   * Scroll to the tail and follow it again: the composer took focus (the phone
+   * keyboard is coming up), so the latest turn and the pinned ask must be the
+   * thing above the field, whatever the operator had scrolled to before.
+   */
+  followTail(): void {
+    if (this.disposed) return;
+    this.following = true;
+    this.pin();
+  }
+
   private pin(): void {
     this.element.scrollTop = this.element.scrollHeight;
     this.jump.hidden = true;

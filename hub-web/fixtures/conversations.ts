@@ -83,7 +83,7 @@ export function renderConversationFixture(app: HTMLElement, state: string): void
       reply(42, 41, 'The project badge stays visible in the list and conversation header.', 'answer', at(9, 43));
     }
   }
-  const view = new ConversationView(document, history, { supervisor, machine: machine.label, project: machine.project, working: () => working, editMessage: () => {} });
+  const view = new ConversationView(document, history, { supervisor, machine: machine.label, project: machine.project, header: false, working: () => working, editMessage: () => {} });
   app.querySelector('#conversation-pane-slot')!.append(view.element); view.update();
   app.querySelector('#conversation-composer-slot')!.innerHTML = `<div class="message conversation-composer"><h2><label for="message-text">Your message</label></h2><textarea id="message-text" placeholder="Write to ${supervisor}…"></textarea><div class="composer-actions"><button id="message-send" class="primary" type="button">Send to ${supervisor}</button></div></div>`;
   app.querySelector('#conversation-status-slot')!.innerHTML = '<p class="conversation-host">Supervisor conversations<br>In progress</p>';

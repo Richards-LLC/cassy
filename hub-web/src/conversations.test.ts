@@ -83,6 +83,24 @@ describe('conversation evidence', () => {
     expect(shell).toContain('id="compose-fab" class="compose-fab"');
     expect(conversationShellMarkup({ selected: false, loaded: true, paired: false })).toContain('class="conversation-shell">');
   });
+  it('renders one Pebble header above the thread with the back link, Terminal view, avatar, badge and connection slot', () => {
+    const shell = document.createElement('div');
+    shell.innerHTML = conversationShellMarkup({ selected: true, supervisor: 'patient-pelican-9', projectDir: '/projects/cas-src', host: 'Atlas · Linux', machineId: 'atlas-linux', loaded: true, paired: true });
+    const main = shell.querySelector('.conversation-main')!;
+    expect(main.querySelectorAll('header')).toHaveLength(1);
+    const header = main.querySelector('header.conversation-heading.thead')!;
+    expect(header.querySelector('#conversation-back')?.textContent).toBe('‹ Conversations');
+    expect(header.querySelector('#conversation-terminal')?.textContent).toBe('Terminal view');
+    expect(header.querySelector('.conversation-avatar')?.textContent).toBe('A');
+    expect(header.querySelector('h1 b')?.textContent).toBe('patient-pelican-9');
+    expect(header.querySelector('h1 .project-badge')?.textContent).toBe('cas-src');
+    expect(header.querySelector('.conversation-host')?.textContent).toBe('Atlas · Linux');
+    expect(header.querySelector('#conversation-connection')).not.toBeNull();
+    expect(main.querySelector('.conversation-identity h1')).not.toBeNull(); expect(main.querySelectorAll('h1')).toHaveLength(1);
+    const view = new ConversationView(document, new ConversationHistory(), { supervisor: 'patient-pelican-9', machine: 'Atlas', project: 'cas-src', header: false });
+    shell.querySelector('#conversation-pane-slot')!.append(view.element);
+    expect(shell.querySelectorAll('.thead')).toHaveLength(1);
+  });
   it('shows only turns — never pane text — escapes replies, and never presents the operator as the supervisor', () => {
     const history = new ConversationHistory();
     const view = new ConversationView(document, history, { supervisor: 'real-supervisor', machine: 'Atlas', project: 'cas-src' }); document.body.replaceChildren(view.element); view.update();

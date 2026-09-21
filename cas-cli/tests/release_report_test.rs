@@ -411,13 +411,14 @@ release_train_receipts_posted_block
         "receipt template failed: {}",
         String::from_utf8_lossy(&receipt_block.stderr)
     );
+    let receipt_text = String::from_utf8(receipt_block.stdout).unwrap();
 
     let announce_path = project.path().join("generated-announce.md");
     fs::write(
         &announce_path,
         format!(
             "# Slack draft — fixture\n\n## User thread\n\n{}\n",
-            String::from_utf8(receipt_block.stdout).unwrap()
+            receipt_text
         ),
     )
     .unwrap();
@@ -430,6 +431,6 @@ release_train_receipts_posted_block
         report
             .contains("GitHub release: <https://github.com/example/project/releases/tag/v3.19.0>")
     );
-    assert!(receipt_block.contains("<https://example.test/user-1>"));
+    assert!(receipt_text.contains("<https://example.test/user-1>"));
     assert_markdownlint_clean(repo_root, &[&report_path, &announce_path]);
 }

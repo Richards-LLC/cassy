@@ -884,6 +884,8 @@ async fn handle_client_message(
         // cas-e8df: identity comes from the authenticated device session, never
         // from what the client put in the frame. Whatever labels arrived are
         // discarded here, and `operator_verified` is only ever set on this path.
+        // Everything else on the frame — `client_ref`, `in_reply_to` (the ask
+        // this message answers, cas-a8ea8) — is forwarded unchanged.
         *attribution = verified_attribution(context);
     }
     connector.send(session, message).await?;

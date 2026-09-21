@@ -32,6 +32,11 @@ The MCP upstream reachability check is one grouped row: it reports the number pr
 reachable upstreams, and includes the bounded credential-free cause for each unavailable one;
 the same message is carried in the existing `--json` check object.
 
+The host `hub service` row now reports `service installed but inactive, detached hub running`
+when an installed manager is inactive while a non-service hub owns the runtime lock. The same
+message is carried by the existing JSON check object; healthy service state retains the concise
+inspection hint.
+
 The `SessionStart budget` row reports supervisor guidance bytes and remaining headroom below
 the protected 8,192-byte ceiling. It warns at less than 512 bytes of headroom and directs the
 operator to move detail into `cas-supervisor/references/`; its status and message are carried
@@ -75,6 +80,10 @@ with no new failure or overflow.
 | Machine contract | 5 | The JSON run is one document and includes `name`, `status`, `message`, `phase`, and timing fields. |
 
 Scored by Codex on 2026-09-09; hierarchy, fit, and craft floors hold.
+
+Task capture: `terminal-qa: PASS cas-doctor-hub-service · 12 runs · 0 fail · 0 warn · 0 allowed`
+against the built binary with scrubbed HOME/XDG state and a stub `systemctl`; the inactive
+detached-service warning appeared in both human and JSON host reports.
 
 Task capture: `terminal-qa: PASS cas-doctor-866 · 12 runs · 0 fail · 0 warn · 0 allowed · /home/pippenz/.cas/artifacts/cas-35be/terminal-qa/cas-doctor/report.json`.
 The rebuilt healthy-baseline host report stayed within 80/120 columns across four palettes,

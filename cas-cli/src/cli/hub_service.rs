@@ -15,10 +15,12 @@ use anyhow::{Context, Result, ensure};
 use serde::Serialize;
 
 use super::{Cli, hub::HubServiceCommands};
-use crate::hub::{DEFAULT_HUB_PORT, HubRuntimePaths};
+use crate::hub::{DEFAULT_HUB_PORT, HubProcessRecord, HubRuntimePaths};
 
 const LAUNCHD_LABEL: &str = "dev.cas.commander-hub";
 const SYSTEMD_UNIT: &str = "cas-hub.service";
+pub(crate) const INACTIVE_DETACHED_HUB_WARNING: &str =
+    "service installed but inactive, detached hub running";
 const LAUNCHD_TAILSCALE_REFUSAL: &str = "`cas hub service install --tailscale-serve` is not supported for launchd: Tailscale Serve needs the interactive user's GUI namespace, while launchd starts in its bootstrap namespace. Install the loopback-only service with `cas hub service install`, or run `cas hub service uninstall && cas hub start --tailscale-serve` from an interactive shell when Commander pairing needs a public URL.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -167,9 +169,9 @@ fn install(
 /// restart, leaving normal stop/start lifecycle code for manually launched
 /// hubs.
 pub(super) fn restart_supervised(
-    _cli: &Cli,
+    cli: &Cli,
     tailscale_serve: bool,
-    _tailscale_port: u16,
+    tailscale_port: u16,
 ) -> Result<bool> {
     match native_platform() {
         ServicePlatform::Launchd => {
@@ -178,47 +180,148 @@ pub(super) fn restart_supervised(
                 return Ok(false);
             }
             let domain = launchd_domain()?;
-            if !command_succeeds(
+            let active = command_succeeds(
                 "launchctl",
                 ["print", &format!("{domain}/{LAUNCHD_LABEL}")],
-            ) {
-                return Ok(false);
-            }
+            );
             let service_tailscale = service_file_requests_tailscale(&path)?;
             if tailscale_serve && !service_tailscale {
                 anyhow::bail!(
-                    "cas hub restart --tailscale-serve cannot change launchd service arguments while KeepAlive supervision is active; run `cas hub service uninstall && cas hub start --tailscale-serve` from an interactive shell"
+                    "cas hub restart --tailscale-serve cannot change launchd service arguments while KeepAlive supervision is active; reinstall the loopback-only service or use an interactive shell for `cas hub start --tailscale-serve`"
                 );
             }
-            let previous_pid = HubRuntimePaths::default_for_user()?
-                .read_process_record()
-                .ok()
-                .map(|record| record.pid);
+            let paths = HubRuntimePaths::default_for_user()?;
+            stop_detached_hub_if_present(cli, &paths)?;
+            if !active {
+                run_manager_vec("launchctl", &launchd_bootstrap_args(&domain, &path))?;
+            }
+            let previous_pid = paths.read_process_record().ok().map(|record| record.pid);
             run_manager_vec("launchctl", &launchd_kickstart_args(&domain))?;
             wait_for_supervised_hub(previous_pid)?;
             Ok(true)
         }
         ServicePlatform::Systemd => {
             let path = systemd_path()?;
-            if !path.is_file() || !command_succeeds("systemctl", ["--user", "is-active", "--quiet", SYSTEMD_UNIT]) {
+            if !path.is_file() {
                 return Ok(false);
             }
             let service_tailscale = service_file_requests_tailscale(&path)?;
             if tailscale_serve && !service_tailscale {
-                anyhow::bail!(
-                    "cas hub restart --tailscale-serve cannot change systemd service arguments while supervision is active; run `cas hub service uninstall && cas hub start --tailscale-serve` from an interactive shell"
-                );
+                repair_systemd_publication_flags(&path, tailscale_port)?;
             }
-            let previous_pid = HubRuntimePaths::default_for_user()?
-                .read_process_record()
-                .ok()
-                .map(|record| record.pid);
+            let paths = HubRuntimePaths::default_for_user()?;
+            stop_detached_hub_if_present(cli, &paths)?;
+            let previous_pid = paths.read_process_record().ok().map(|record| record.pid);
             run_manager("systemctl", ["--user", "restart", SYSTEMD_UNIT], None)?;
             wait_for_supervised_hub(previous_pid)?;
             Ok(true)
         }
         ServicePlatform::ManualLinux | ServicePlatform::Unsupported => Ok(false),
     }
+}
+
+fn stop_detached_hub_if_present(cli: &Cli, paths: &HubRuntimePaths) -> Result<()> {
+    let detached_running = paths.read_process_record().ok().is_some_and(|record| {
+        record.launched_by.as_deref() != Some("service")
+            && super::hub::record_is_live(&record)
+            && paths
+                .read_lock_owner()
+                .is_some_and(|owner| owner.pid == record.pid && owner.phase == "running")
+    });
+    if detached_running {
+        super::hub::stop_for_service(cli)?;
+    }
+    Ok(())
+}
+
+fn repair_systemd_publication_flags(path: &Path, tailscale_port: u16) -> Result<()> {
+    let binary = systemd_service_binary(path)?;
+    write_service_file(path, &systemd_unit(&binary, true, tailscale_port))?;
+    run_manager("systemctl", ["--user", "daemon-reload"], None)
+}
+
+fn systemd_service_binary(path: &Path) -> Result<PathBuf> {
+    let command = fs::read_to_string(path)?
+        .lines()
+        .find_map(|line| line.strip_prefix("ExecStart="))
+        .and_then(|line| line.split_whitespace().next())
+        .filter(|binary| !binary.is_empty())
+        .map(PathBuf::from)
+        .context("installed cas hub service has no ExecStart binary")?;
+    ensure!(
+        command.is_absolute(),
+        "installed cas hub service ExecStart must use an absolute binary path"
+    );
+    Ok(command)
+}
+
+/// Return the operator-facing warning used by `cas hub status` and `cas doctor`
+/// when an installed service has been bypassed by a detached hub.
+pub(super) fn inactive_detached_warning(
+    paths: &HubRuntimePaths,
+    record: Option<&HubProcessRecord>,
+) -> Result<Option<&'static str>> {
+    let (installed, active) = match native_platform() {
+        ServicePlatform::Launchd => {
+            let path = launchd_path()?;
+            let domain = launchd_domain()?;
+            (
+                path.is_file(),
+                Some(command_succeeds(
+                    "launchctl",
+                    ["print", &format!("{domain}/{LAUNCHD_LABEL}")],
+                )),
+            )
+        }
+        ServicePlatform::Systemd => {
+            let path = systemd_path()?;
+            (
+                path.is_file(),
+                Some(command_succeeds(
+                    "systemctl",
+                    ["--user", "is-active", "--quiet", SYSTEMD_UNIT],
+                )),
+            )
+        }
+        ServicePlatform::ManualLinux | ServicePlatform::Unsupported => (false, None),
+    };
+    let hub_live = match record {
+        Some(record) => {
+            super::hub::record_is_live(record)
+                && paths
+                    .read_lock_owner()
+                    .is_some_and(|owner| owner.pid == record.pid && owner.phase == "running")
+        }
+        None => paths
+            .lock_holders()
+            .into_iter()
+            .any(|holder| holder.phase.as_deref() == Some("running")),
+    };
+    Ok(inactive_detached_warning_for(
+        installed,
+        active,
+        hub_live,
+        record.and_then(|record| record.launched_by.as_deref()),
+    ))
+}
+
+pub(crate) fn doctor_warning() -> Result<Option<String>> {
+    let paths = HubRuntimePaths::default_for_user()?;
+    let record = paths.read_process_record().ok();
+    Ok(inactive_detached_warning(&paths, record.as_ref())?.map(str::to_owned))
+}
+
+pub(crate) fn inactive_detached_warning_for(
+    installed: bool,
+    active: Option<bool>,
+    hub_live: bool,
+    launched_by: Option<&str>,
+) -> Option<&'static str> {
+    (installed
+        && active == Some(false)
+        && hub_live
+        && launched_by != Some("service"))
+    .then_some(INACTIVE_DETACHED_HUB_WARNING)
 }
 
 fn service_file_requests_tailscale(path: &Path) -> Result<bool> {
@@ -772,6 +875,22 @@ mod tests {
     }
 
     #[test]
+    fn systemd_service_binary_reads_the_absolute_exec_start_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let unit = temp.path().join("cas-hub.service");
+        fs::write(
+            &unit,
+            "[Service]\nExecStart=/opt/cas/bin/cas hub serve --bind 127.0.0.1\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            systemd_service_binary(&unit).unwrap(),
+            PathBuf::from("/opt/cas/bin/cas")
+        );
+    }
+
+    #[test]
     fn service_arguments_keep_tailscale_optional_and_loopback_fixed() {
         assert_eq!(
             service_args(Path::new("/opt/cas/bin/cas"), false, 443),
@@ -787,6 +906,25 @@ mod tests {
                 "service"
             ]
         );
+    }
+
+    #[test]
+    fn inactive_detached_warning_only_flags_a_bypassed_service() {
+        assert_eq!(
+            inactive_detached_warning_for(true, Some(false), true, Some("update")),
+            Some(INACTIVE_DETACHED_HUB_WARNING)
+        );
+        assert_eq!(
+            inactive_detached_warning_for(true, Some(false), true, Some("cli")),
+            Some(INACTIVE_DETACHED_HUB_WARNING)
+        );
+        assert_eq!(
+            inactive_detached_warning_for(true, Some(false), true, Some("service")),
+            None
+        );
+        assert_eq!(inactive_detached_warning_for(true, Some(true), true, Some("update")), None);
+        assert_eq!(inactive_detached_warning_for(false, Some(false), true, Some("update")), None);
+        assert_eq!(inactive_detached_warning_for(true, Some(false), false, Some("update")), None);
     }
 
     #[cfg(unix)]

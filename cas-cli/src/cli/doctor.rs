@@ -996,7 +996,7 @@ fn host_checks(current: Option<&Path>) -> Vec<Check> {
     let mut checks = vec![
         Check::new("user-level store", CheckStatus::Ok, format!("host root {}", root.display())),
         host_known_repos_check(),
-        Check::new("hub service", CheckStatus::Ok, "inspect with `cas hub service status`"),
+        host_hub_service_check(),
         host_hub_transport_check(),
     ];
     #[cfg(feature = "mcp-proxy")]
@@ -1016,6 +1016,22 @@ fn host_checks(current: Option<&Path>) -> Vec<Check> {
         checks.push(duplicates);
     }
     checks
+}
+
+fn host_hub_service_check() -> Check {
+    match crate::cli::hub_service::doctor_warning() {
+        Ok(Some(warning)) => Check::new("hub service", CheckStatus::Warning, warning),
+        Ok(None) => Check::new(
+            "hub service",
+            CheckStatus::Ok,
+            "inspect with `cas hub service status`",
+        ),
+        Err(error) => Check::new(
+            "hub service",
+            CheckStatus::Warning,
+            format!("cannot inspect hub service state: {error}"),
+        ),
+    }
 }
 
 fn host_known_repos_check() -> Check {

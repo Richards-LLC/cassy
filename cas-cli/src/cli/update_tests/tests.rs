@@ -392,6 +392,7 @@ fn refresh_receipt_names_each_skipped_project_and_why_it_was_not_refreshed() {
             reason: "its .cas has no [project] canonical_id pin and no git origin remote".to_string(),
         }],
         None,
+        None,
     );
 
     assert_eq!(receipt["skipped_unregistered"][0]["project"], "/tmp/container-copy");
@@ -706,7 +707,13 @@ fn post_swap_refresh_failure_without_a_receipt_is_not_reported_as_skipped() {
 
 #[test]
 fn refresh_receipt_names_the_binary_that_ran_it() {
-    let receipt = project_refresh_receipt_json(&[], &ProjectPhase::Ok(String::new()), &[], None);
+    let receipt = project_refresh_receipt_json(
+        &[],
+        &ProjectPhase::Ok(String::new()),
+        &[],
+        None,
+        None,
+    );
 
     assert_eq!(
         receipt["refresh_binary_version"],
@@ -735,6 +742,7 @@ fn refresh_receipt_records_partial_failure_before_refresh_returns_error() {
         &ProjectPhase::Ok("up to date".to_owned()),
         &[],
         None,
+        None,
     );
 
     assert_eq!(receipt["refresh_status"], "refresh_failed");
@@ -758,7 +766,7 @@ fn combined_receipt_merges_the_installed_binary_refresh_into_one_document() {
         "user_level_store": {"status": "ok"},
     });
 
-    let combined = combined_update_receipt("3.15.2", true, Some(&refresh), None);
+    let combined = combined_update_receipt("3.15.2", true, Some(&refresh), None, None);
     assert_eq!(combined["binary_updated"], true);
     assert_eq!(combined["version"], "3.15.2");
     assert_eq!(
@@ -768,9 +776,30 @@ fn combined_receipt_merges_the_installed_binary_refresh_into_one_document() {
     assert!(combined["user_level_store"].is_object(), "{combined}");
 
     // No swap: no refresh receipt to merge, and no stale version claimed.
-    let solo = combined_update_receipt("3.15.2", false, None, None);
+    let solo = combined_update_receipt("3.15.2", false, None, None, None);
     assert_eq!(solo["binary_updated"], false);
     assert!(solo.get("refresh_binary_version").is_none(), "{solo}");
+}
+
+#[test]
+fn update_receipt_proves_the_hub_version_transition_and_manager() {
+    let restart = HubRestartOutcome {
+        previous_version: Some("3.26.0".to_owned()),
+        current_version: Some("3.27.0".to_owned()),
+        service_managed: true,
+        ..Default::default()
+    };
+    let receipt = combined_update_receipt(
+        "3.27.0",
+        true,
+        None,
+        None,
+        Some(&restart),
+    );
+
+    assert_eq!(receipt["hub_restart"]["from_version"], "3.26.0");
+    assert_eq!(receipt["hub_restart"]["to_version"], "3.27.0");
+    assert_eq!(receipt["hub_restart"]["via"], "service");
 }
 
 #[test]
@@ -780,6 +809,7 @@ fn failed_serve_publication_still_refreshes_projects_and_reports_update_error() 
     let (refresh, reported_error) = refresh_after_hub_restart(
         HubRestartOutcome {
             transport_error: Some(transport_error.to_owned()),
+            ..Default::default()
         },
         |error| {
             assert_eq!(error, Some(transport_error));
@@ -795,6 +825,7 @@ fn failed_serve_publication_still_refreshes_projects_and_reports_update_error() 
         false,
         Some(&refresh),
         reported_error.as_deref(),
+        None,
     );
     assert_eq!(receipt["hub_transport"]["status"], "error");
     assert_eq!(receipt["hub_transport"]["message"], transport_error);
@@ -803,6 +834,7 @@ fn failed_serve_publication_still_refreshes_projects_and_reports_update_error() 
         &ProjectPhase::Ok("up to date".to_owned()),
         &[],
         reported_error.as_deref(),
+        None,
     );
     assert_eq!(refresh_receipt["hub_transport"]["status"], "error");
     assert_eq!(refresh_receipt["hub_transport"]["message"], transport_error);

@@ -376,6 +376,9 @@ fn update_transport_error_message_from(error: &anyhow::Error) -> Option<String> 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct HubRestartOutcome {
     pub(crate) transport_error: Option<String>,
+    pub(crate) previous_version: Option<String>,
+    pub(crate) current_version: Option<String>,
+    pub(crate) service_managed: bool,
 }
 
 fn default_hub_command() -> HubCommands {
@@ -1660,6 +1663,8 @@ fn status(cli: &Cli) -> Result<()> {
         Ok(record) => record,
         Err(error) => {
             let holder = paths.lock_holders().into_iter().next();
+            let service_warning =
+                super::hub_service::inactive_detached_warning(&paths, None)?;
             let transport = hub_transport_report(&paths, None);
             if cli.json {
                 println!(
@@ -1670,6 +1675,7 @@ fn status(cli: &Cli) -> Result<()> {
                         "binary": env!("CARGO_PKG_VERSION"),
                         "lock_holder": holder.as_ref().map(lock_holder_json),
                         "tailscale_serve": transport,
+                        "service_warning": service_warning,
                     })
                 );
             } else if let Some(holder) = &holder {
@@ -1678,6 +1684,9 @@ fn status(cli: &Cli) -> Result<()> {
                     holder.pid,
                     holder.age_label()
                 );
+                if let Some(warning) = service_warning {
+                    println!("WARNING: {warning}");
+                }
                 println!("{}", render_transport_status(&transport));
             } else {
                 println!("Cassy hub is not ready: no runtime record");
@@ -1697,6 +1706,7 @@ fn status(cli: &Cli) -> Result<()> {
         }
     };
     let live = record_is_ready(&paths, &record);
+    let service_warning = super::hub_service::inactive_detached_warning(&paths, Some(&record))?;
     let transport = hub_transport_report(&paths, Some(&record));
     if cli.json {
         println!(
@@ -1706,6 +1716,7 @@ fn status(cli: &Cli) -> Result<()> {
                 "record": record,
                 "binary": env!("CARGO_PKG_VERSION"),
                 "tailscale_serve": transport,
+                "service_warning": service_warning,
             })
         );
     } else {
@@ -1713,6 +1724,9 @@ fn status(cli: &Cli) -> Result<()> {
             "{}",
             render_status(&record, live, env!("CARGO_PKG_VERSION"))
         );
+        if let Some(warning) = service_warning {
+            println!("WARNING: {warning}");
+        }
         println!("{}", render_transport_status(&transport));
     }
     anyhow::ensure!(live, "cas hub is not running");
@@ -1783,6 +1797,12 @@ fn stop(cli: &Cli, force: bool) -> Result<()> {
     // No relaunch intent: a live hub can never mean success here, so this
     // keeps the pre-cas-bf90 behaviour exactly.
     stop_with_output(cli, true, None, force).map(|_| ())
+}
+
+/// Stop a live hub that is outside the installed service before the service
+/// manager is asked to start its own instance.
+pub(crate) fn stop_for_service(cli: &Cli) -> Result<()> {
+    stop_with_output(cli, false, None, false).map(|_| ())
 }
 
 fn stop_with_output(
@@ -1889,15 +1909,44 @@ fn stop_with_output(
     Ok(StopOutcome::Stopped)
 }
 
-/// Restart a live hub left behind by an older Cassy binary. This is called by
-/// `cas update` after the replacement version is known; a missing, dead, or
-/// already-current hub is intentionally a no-op.
+/// Refresh the live hub after `cas update` swaps in a replacement binary.
+/// Installed service managers are authoritative; without one, a missing,
+/// dead, or already-current hub remains a no-op.
 pub(crate) fn restart_stale_hub(
     binary_version: &str,
     cli: &Cli,
 ) -> Result<HubRestartOutcome> {
     let paths = HubRuntimePaths::default_for_user()?;
-    let Ok(record) = paths.read_process_record() else {
+    let record = paths.read_process_record().ok();
+    let (tailscale_serve, tailscale_port) = record
+        .as_ref()
+        .map(|record| {
+            (
+                tailscale_enabled(record),
+                record.tailscale_serve_port.unwrap_or(443),
+            )
+        })
+        .unwrap_or((false, 443));
+    let previous_version = record
+        .as_ref()
+        .filter(|record| record.version != binary_version)
+        .map(|record| record.version.clone());
+
+    // An installed service is authoritative even when it is currently
+    // inactive. Restarting it here starts the latest binary through the
+    // manager and prevents this update path from spawning a detached hub.
+    if super::hub_service::restart_supervised(cli, tailscale_serve, tailscale_port)? {
+        return Ok(HubRestartOutcome {
+            transport_error: None,
+            current_version: previous_version
+                .as_ref()
+                .map(|_| binary_version.to_owned()),
+            previous_version,
+            service_managed: true,
+        });
+    }
+
+    let Some(record) = record else {
         return Ok(HubRestartOutcome::default());
     };
     if !record_is_live(&record) {
@@ -1906,6 +1955,7 @@ pub(crate) fn restart_stale_hub(
     let Some(spec) = restart_spec_for_record(&record, binary_version)? else {
         return Ok(HubRestartOutcome::default());
     };
+    let previous_version = Some(record.version.clone());
 
     if !cli.json {
         println!(
@@ -1935,9 +1985,17 @@ pub(crate) fn restart_stale_hub(
         {
             return Ok(HubRestartOutcome {
                 transport_error: Some(update_transport_error_message(warning)),
+                previous_version,
+                current_version: Some(binary_version.to_owned()),
+                service_managed: false,
             });
         }
-        return Ok(HubRestartOutcome::default());
+        return Ok(HubRestartOutcome {
+            transport_error: None,
+            previous_version,
+            current_version: Some(binary_version.to_owned()),
+            service_managed: false,
+        });
     }
     match start_with_output_from(
         &args,
@@ -1947,11 +2005,19 @@ pub(crate) fn restart_stale_hub(
         !cli.json,
         HubLaunchOrigin::Update,
     ) {
-        Ok(()) => Ok(HubRestartOutcome::default()),
+        Ok(()) => Ok(HubRestartOutcome {
+            transport_error: None,
+            previous_version,
+            current_version: Some(binary_version.to_owned()),
+            service_managed: false,
+        }),
         Err(error) => {
             if let Some(message) = update_transport_error_message_from(&error) {
                 Ok(HubRestartOutcome {
                     transport_error: Some(message),
+                    previous_version,
+                    current_version: Some(binary_version.to_owned()),
+                    service_managed: false,
                 })
             } else {
                 Err(error)

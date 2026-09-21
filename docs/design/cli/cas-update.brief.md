@@ -20,6 +20,13 @@
 - The `Current version: / Latest version:` pairs, each in accent colour, are gone; versions
   are plain text in the row.
 
+### Service-managed hub refresh
+
+After a binary swap, the hub restart is represented in JSON as `hub_restart` with
+`from_version`, `to_version`, and `via` (`service` or `detached`). This receipt is included
+in both the combined update document and the post-swap project-refresh document, so the
+operator can verify that the installed service picked up the new binary.
+
 ## Critique
 
 Before (build `eda3dfd1`): `terminal-qa: FAIL cas-update-check · 12 runs · 33 fail · 0 warn` — 32 contrast, 1 unicode-without-fallback.
@@ -28,6 +35,11 @@ After: `terminal-qa: PASS cas-update-check · 12 runs · 0 fail · 0 warn · 0 a
 
 Post-swap failure review: `terminal-qa: PASS cas-update · 12 runs · 0 fail · 0 warn · 0 allowed · /home/pippenz/.cas/artifacts/cas-a461/terminal-qa/report.json`; the plain-mode
 failure test keeps the first line actionable by naming the failed project and the one rerun command.
+
+Service-refresh receipt review: `cas-cli` scoped update tests pass 41/41, including the
+old-to-new version transition and `via: service` contract; the real-build terminal capture
+for the adjacent doctor/service warning is recorded under
+`/home/pippenz/.cas/artifacts/cas-47f9/terminal-qa/`.
 
 | Dimension | Score | Evidence |
 | --- | --- | --- |

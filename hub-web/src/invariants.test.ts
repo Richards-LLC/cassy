@@ -723,7 +723,13 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(css).toContain("font-family: var(--font-mono)");
     expect(css).not.toContain("border-right:");
     expect(css).not.toContain(".context { border-left:");
-    expect(css.match(/box-shadow:/g)).toHaveLength(2);
+    // Elevation is tokenized: the two overlay shadows plus the Pebble lifts
+    // (rail edge, selected row, compose FAB) — every declaration consumes a
+    // token and the phone rail reset is the only literal.
+    expect(css.match(/box-shadow:\s*var\(--shadow-overlay\)/g)).toHaveLength(2);
+    expect(css.match(/box-shadow:\s*var\(--lift(?:-edge|-strong)?\)/g)).toHaveLength(3);
+    expect(css.match(/box-shadow:/g)).toHaveLength(6);
+    expect(css.match(/box-shadow:\s*none/g)).toHaveLength(1);
     expect(renderer).not.toContain('"700"');
     expect(surface).not.toContain('"normal 700"');
     expect(surface).not.toContain('"italic 700"');

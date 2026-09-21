@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { ConversationHistory } from "./conversation-history";
 import { ConversationList, type ConversationRow } from "./conversation-list";
 import { ConversationView } from "./conversation-view";
+import { conversationShellMarkup } from "./conversation-shell";
 import { projectName, projectBadge } from "./cloud-brand";
 import type { GhosttyRow } from "./terminal/ghostty/core";
 
@@ -46,6 +47,42 @@ describe('conversation evidence', () => {
     const node = container.firstElementChild as HTMLButtonElement; node.focus();
     list.render(container, [{ ...row, freshness: 'Catalog checked 1m ago' }, { ...row, key: 'b:same', machineId: 'b' }], vi.fn());
     expect(document.activeElement).toBe(node); expect(container.children).toHaveLength(2);
+  });
+  it('renders the Pebble row: machine accent on every row of a machine, waiting and unread as distinct affordances', () => {
+    const list = new ConversationList(); const container = document.createElement('nav'); document.body.replaceChildren(container);
+    const base = { session: 's', freshness: 'Catalog checked just now', connection: 'Live', attention: 0, unread: 0, selected: false };
+    list.render(container, [
+      { ...base, key: 'atlas-linux:a', machineId: 'atlas-linux', supervisor: 'patient-pelican-9', projectDir: '/projects/cas-src', host: 'Atlas · Linux', when: '09:58', preview: 'Fix <it>?', attention: 1, selected: true },
+      { ...base, key: 'studio-mac:b', machineId: 'studio-mac', supervisor: 'calm-otter-4', projectDir: '/projects/gabber-studio', host: 'Studio Mac · macOS', when: 'Tue', preview: 'Pass two is green.', unread: 2 },
+      { ...base, key: 'atlas-linux:c', machineId: 'atlas-linux', supervisor: 'steady-heron-2', projectDir: '/projects/petra-stella-cloud', host: 'Atlas · Linux', when: 'Tue' },
+    ], vi.fn());
+    const [waiting, unread, quiet] = [...container.children] as HTMLButtonElement[];
+    expect(waiting.className).toBe('conversation-row machine-accent-0');
+    expect(quiet.className).toBe('conversation-row machine-accent-0');
+    expect(unread.className).toBe('conversation-row machine-accent-1');
+    expect(waiting.querySelector('.conversation-avatar')?.textContent).toBe('A');
+    expect(waiting.querySelector('.conversation-supervisor')?.textContent).toBe('patient-pelican-9');
+    expect(waiting.querySelector('.project-badge')?.textContent).toBe('cas-src');
+    expect(waiting.querySelector('.conversation-preview')?.textContent).toBe('Fix <it>?');
+    expect(waiting.querySelector('script, it')).toBeNull();
+    expect(waiting.querySelector('.conversation-when')?.className).toBe('conversation-when hot');
+    expect(waiting.querySelector('.conversation-flag')?.getAttribute('aria-label')).toBe('Waiting for you');
+    expect(waiting.querySelector('.conversation-unread')).toBeNull();
+    expect(waiting.dataset.waiting).toBe('true');
+    expect(unread.querySelector('.conversation-unread')?.textContent).toBe('2');
+    expect(unread.querySelector('.conversation-when')).toBeNull();
+    expect(unread.querySelector('.conversation-flag')).toBeNull();
+    expect(unread.querySelector('.conversation-preview')?.className).toBe('conversation-preview bold');
+    expect(quiet.querySelector('.conversation-when')?.textContent).toBe('Tue');
+    expect(quiet.querySelector('.conversation-preview')?.textContent).toBe('Live');
+    expect(quiet.querySelector('.conversation-preview')?.className).toBe('conversation-preview');
+    expect(quiet.querySelector('.conversation-flag, .conversation-unread')).toBeNull();
+  });
+  it('puts the selected machine accent on the shell root and a compose FAB in the operator colour', () => {
+    const shell = conversationShellMarkup({ selected: true, supervisor: 'patient-pelican-9', projectDir: '/projects/cas-src', host: 'Atlas · Linux', machineId: 'atlas-linux', loaded: true, paired: true });
+    expect(shell).toContain('class="conversation-shell thread-open machine-accent-0"');
+    expect(shell).toContain('id="compose-fab" class="compose-fab"');
+    expect(conversationShellMarkup({ selected: false, loaded: true, paired: false })).toContain('class="conversation-shell">');
   });
   it('renders exact real rows, escapes replies, and never presents the operator as the supervisor', () => {
     const color = { r: 200, g: 200, b: 200 };

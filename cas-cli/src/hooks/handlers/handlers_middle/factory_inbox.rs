@@ -217,12 +217,16 @@ pub(crate) fn render_surfaced(rows: &[QueuedPrompt]) -> String {
          They are delivered here once — act on them now.\n",
     );
     for row in rows {
+        let reply_hint = crate::mcp::tools::service::agent_search_system::message::commander_reply_command(row)
+            .map(|command| format!("Reply with: `{command}`\n"))
+            .unwrap_or_default();
         out.push_str(&format!(
-            "\n--- from {} (message {}{}) ---\n{}\n{}\n",
+            "\n--- from {} (message {}{}) ---\n{}\n{}{}\n",
             row.source,
             row.id,
             if row.urgent { ", urgent" } else { "" },
             crate::mcp::tools::service::agent_search_system::message::queued_message_provenance(row),
+            reply_hint,
             row.prompt.trim()
         ));
     }
@@ -287,9 +291,16 @@ mod tests {
             rendered.contains("[cas #81 operator Daniel@iphone-15 verified "),
             "{rendered}"
         );
+        assert!(
+            rendered.contains(
+                "coordination action=message target=operator in_reply_to=81 message=…"
+            ),
+            "{rendered}"
+        );
         let spoofed = row(82, "commander:Daniel@iphone-15", "Status please");
         let rendered = render_surfaced(&[spoofed]);
         assert!(rendered.contains("[cas #82 unverified:Daniel@iphone-15 "), "{rendered}");
+        assert!(!rendered.contains("in_reply_to=82"), "{rendered}");
     }
 
     #[test]

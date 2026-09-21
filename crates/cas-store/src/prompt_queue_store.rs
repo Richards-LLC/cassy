@@ -1957,6 +1957,17 @@ pub trait PromptQueueStore: Send + Sync {
     /// the recipient affinity for unprompted supervisor turns.
     fn latest_verified_operator_device(&self, factory_session: &str) -> Result<Option<String>>;
 
+    /// Find the newest verified Commander message for a supervisor and an
+    /// operator selector.  Unlike pending-message peeks, this includes rows
+    /// already surfaced or acknowledged, because a supervisor may answer a
+    /// Commander after the original row left the pending queue.
+    fn latest_verified_operator_message(
+        &self,
+        factory_session: &str,
+        selector: &str,
+        supervisor_targets: &[&str],
+    ) -> Result<Option<QueuedPrompt>>;
+
     /// Record that the daemon selected/peeked this message for a delivery attempt.
     fn record_selected(&self, prompt_id: i64) -> Result<()>;
 
@@ -4502,6 +4513,52 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         )
         .optional()
         .map_err(Into::into)
+    }
+
+    fn latest_verified_operator_message(
+        &self,
+        factory_session: &str,
+        selector: &str,
+        supervisor_targets: &[&str],
+    ) -> Result<Option<QueuedPrompt>> {
+        if supervisor_targets.is_empty() {
+            return Ok(None);
+        }
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        let mut stmt = conn.prepare_cached(
+            "SELECT id, source, target, prompt, created_at, processed_at,
+                    summary, priority, acked_at, urgent, factory_session,
+                    origin_agent_id, origin_kind, operator_label,
+                    operator_device_id, operator_device_label, operator_scopes,
+                    operator_verified, recipient_device_id, kind, attachments
+             FROM prompt_queue
+             WHERE factory_session = ?
+               AND source LIKE 'commander:%'
+               AND origin_kind = 'paired_device'
+               AND operator_verified = 1
+             ORDER BY id DESC",
+        )?;
+        let rows = stmt.query_map(params![factory_session], Self::prompt_from_row)?;
+        for row in rows {
+            let row = row?;
+            let source_label = row
+                .source
+                .strip_prefix("commander:")
+                .unwrap_or_default();
+            let selector_matches = source_label.eq_ignore_ascii_case(selector)
+                || row.operator.as_ref().is_some_and(|operator| {
+                    operator.operator.eq_ignore_ascii_case(selector)
+                        || operator.device_id.eq_ignore_ascii_case(selector)
+                        || operator.device_label.eq_ignore_ascii_case(selector)
+                });
+            let target_matches = supervisor_targets
+                .iter()
+                .any(|target| row.target.eq_ignore_ascii_case(target));
+            if selector_matches && target_matches {
+                return Ok(Some(row));
+            }
+        }
+        Ok(None)
     }
 
     fn record_selected(&self, prompt_id: i64) -> Result<()> {

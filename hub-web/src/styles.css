@@ -2874,6 +2874,40 @@ dialog form > *,
 .thread .dots i:nth-child(3) { animation-delay: 0.4s; }
 @keyframes thread-working { 0%, 100% { opacity: 0.35; } 50% { opacity: 1; } }
 @media (prefers-reduced-motion: reduce) { .thread .dots i { animation: none; } }
+
+/* ---- attention objects: ask + blocker (cas-43f9) --------------------------
+ * Treatment A from round 3 (pebble.css .obj / .t-a / .blk / .chip / .window):
+ * one fused stepped object. The body steps down into a deeper tray under a
+ * single 28px outline with the spoken notch at the tray corner. Radius and
+ * shadow both live on .obj, so the shadow is cast from the rounded silhouette
+ * and never from a square box behind it. An ask's tray holds the quick-reply
+ * chips; a blocker's tray is an inset evidence window. The same object is
+ * pinned above the composer while an ask is unanswered. */
+.obj { max-width: min(100%, 560px); min-width: 0; border-radius: 28px 28px 28px 9px; box-shadow: var(--lift-strong); overflow: hidden; font: var(--weight-regular) 15px/1.5 var(--font-ui); text-align: left; }
+.obj-body { padding: 15px 23px 14px; border-radius: 28px 28px 0 0; }
+.obj-foot { border-radius: 0 0 28px 9px; }
+.obj.t-a .obj-body { background: var(--ask-bg); color: var(--ask-fg); }
+.obj.t-a .obj-foot { display: flex; flex-wrap: wrap; gap: 9px; padding: 11px 13px; background: var(--ask-deep); }
+.obj.t-a .obj-foot .chip { flex: 1; }
+.obj.t-a.blk .obj-body { background: var(--crit-bg); color: var(--crit-fg); }
+.obj.t-a.blk .obj-foot { display: block; padding: 0 9px 9px; background: var(--crit-bg); }
+.obj p { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.obj p + p { margin-top: 8px; }
+.obj .evi { background: var(--sheet-bg); color: var(--ink); border-radius: 17px; padding: 11px 15px; margin-top: 12px; }
+.obj .conversation-attachment { margin-top: 8px; }
+.obj .conversation-attachment a { color: inherit; }
+.chip { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-width: 0; margin: 0; padding: 8px 17px; border: 0; border-radius: var(--radius-pill); background: var(--panel); color: var(--ink); font: var(--weight-medium) 13px/1.2 var(--font-ui); text-align: center; overflow-wrap: anywhere; }
+button.chip { cursor: pointer; }
+button.chip:hover { box-shadow: var(--lift); }
+button.chip:focus-visible { outline: 2px solid var(--panel); outline-offset: 2px; }
+button.chip:disabled { cursor: default; }
+.chip.sent { color: var(--ink); }
+.chip .tick { width: 14px; height: 14px; margin: 0; color: var(--state-ok); flex: none; }
+.window { display: block; min-width: 0; background: var(--sheet-bg); color: var(--ink); border-radius: 20px; padding: 10px 16px; font: var(--weight-regular) 12.5px/1.45 var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+/* pinned copy: sits between the thread and the composer, on the canvas */
+.pinned-ask { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; padding: 10px 30px 12px; background: var(--canvas); color: var(--ink); }
+.pinned-ask[hidden] { display: none; }
+.pinned-label { padding: 0 6px; font: var(--weight-medium) 12px/1.3 var(--font-ui); color: var(--warn-text); letter-spacing: 0.02em; }
 .conversation-jump { position: sticky; bottom: var(--space-2); display: block; margin: var(--space-4) auto 0; background: var(--bg-panel); color: var(--color-action); }
 .conversation-jump[hidden] { display: none; }
 .conversation-composer { padding: var(--space-4) var(--space-6); padding-bottom: max(var(--space-4), env(safe-area-inset-bottom)); margin: 0; border-top: var(--line-width) solid var(--line-subtle); background: var(--bg-panel); color: var(--text-hi); }
@@ -2918,6 +2952,8 @@ dialog form > *,
   .thread .msgs { padding: 16px 16px 8px; gap: 14px; }
   .thread .turn { max-width: 88%; }
   .thread .evi-row { column-gap: 10px; font-size: 12px; }
+  .pinned-ask { padding: 8px 16px 10px; }
+  .obj-body { padding: 13px 19px 12px; }
 }
 @media (max-height: 30rem) {
   .conversation-heading { padding-top: var(--space-1); padding-bottom: var(--space-1); gap: var(--space-1); }

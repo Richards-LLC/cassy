@@ -23,6 +23,27 @@ describe('conversation evidence', () => {
     history.acknowledge({ client_ref: 'own', notification_id: 41, target: 'supervisor', stamped: true });
     expect(history.events[0]).toMatchObject({ value: { state: 'replied' } });
   });
+  it('tracks asks and blockers waiting on the operator and the send that answers an ask (cas-43f9)', () => {
+    const history = new ConversationHistory();
+    const turn = (notification_id: number, kind: 'ask' | 'blocker' | 'answer', message = `m${notification_id}`) => ({ notification_id, reply_to: null, message, summary: '', device_id: 'd', kind });
+    history.reply(turn(1, 'answer'));
+    history.reply(turn(2, 'blocker', 'Gate red.'));
+    history.reply(turn(3, 'ask', 'Fix or ship?'));
+    history.reply(turn(4, 'ask', 'Tag it too?'));
+    expect(history.waiting().map((item) => item.notification_id)).toEqual([2, 3, 4]);
+    expect(history.pinnedAsk()?.notification_id).toBe(4);
+    expect(history.answered(4)).toBeUndefined();
+    history.submit('q', 'supervisor', 'Yes, go ahead', Date.now(), 4);
+    expect(history.events.at(-1)).toMatchObject({ value: { replyTo: 4, state: 'sending' } });
+    expect(history.answered(4)).toMatchObject({ id: 'q', text: 'Yes, go ahead' });
+    // The send after the blocker acknowledges it; the other ask stays pinned until a send carries its id.
+    expect(history.waiting().map((item) => item.notification_id)).toEqual([3]);
+    expect(history.pinnedAsk()?.notification_id).toBe(3);
+    history.submit('free', 'supervisor', 'Ship it', Date.now(), 3);
+    expect(history.waiting()).toEqual([]); expect(history.pinnedAsk()).toBeUndefined();
+    history.submit('plain', 'supervisor', 'No reference');
+    expect(history.events.at(-1)).not.toHaveProperty('value.replyTo');
+  });
   it('correlates out-of-order replies and keeps rejection isolated', () => {
     const a = new ConversationHistory(), b = new ConversationHistory();
     a.submit('nonce', 'supervisor', 'A'); b.submit('nonce', 'supervisor', 'B');

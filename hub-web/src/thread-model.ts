@@ -218,3 +218,19 @@ export function cellTone(cell: string): "pass" | "flake" | "fail" | undefined {
   if (/\b(fail|failed|error|red)\b/.test(value)) return "fail";
   return undefined;
 }
+
+/* ---- blocker evidence ---------------------------------------------------- */
+
+const EVIDENCE_LINE = /^`?(?:[\w.@~-]+\/)*[\w.-]+\.\w+:\d+(?::\d+)?(?:\s*[·:—-]\s*.+)?`?$|^`[^`]+`$/;
+
+/**
+ * A blocker's evidence is its last line when that line reads as a file:line
+ * reference (optionally `· label`) or is wrapped in backticks. It leaves the
+ * prose and goes into the object's inset window.
+ */
+export function blockerEvidence(message: string): { text: string; evidence: string | undefined } {
+  const lines = message.trimEnd().split(/\r?\n/);
+  const last = lines.at(-1)?.trim() ?? "";
+  if (lines.length < 2 || !EVIDENCE_LINE.test(last)) return { text: message, evidence: undefined };
+  return { text: lines.slice(0, -1).join("\n").trimEnd(), evidence: last.replace(/^`|`$/g, "") };
+}

@@ -43,6 +43,13 @@ describe("Cassy Cloud supervisor composer targeting", () => {
       .toMatchObject({ SendMessage: { client_ref: "send-42" } });
   });
 
+  it("carries in_reply_to for a reply to a supervisor ask, and omits it otherwise (cas-43f9)", () => {
+    const frame = supervisorMessage("patient-lynx-59", "Yes, go ahead", "send-43", 52);
+    expect(frame).toMatchObject({ SendMessage: { client_ref: "send-43", target: "patient-lynx-59", text: "Yes, go ahead", in_reply_to: 52 } });
+    expect(JSON.parse(JSON.stringify(frame)).SendMessage.in_reply_to).toBe(52);
+    expect(supervisorMessage("patient-lynx-59", "Plain", "send-44").SendMessage).not.toHaveProperty("in_reply_to");
+  });
+
   it("does not invent a fallback target for a session without a supervisor", () => {
     expect(supervisorTarget(session("  "))).toBeUndefined();
   });

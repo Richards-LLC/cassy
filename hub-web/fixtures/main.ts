@@ -17,6 +17,7 @@ import type { GhosttyCell, GhosttyColor, GhosttyRow } from "../src/terminal/ghos
 export const FIXTURE_NAMES = [
   "paired-machines", "conversations-list", "conversation", "conversation-replied", "conversation-error",
   "conversation-thread", "conversation-evidence",
+  "conversation-ask", "conversation-ask-answered", "conversation-blocker", "conversation-pairs",
   "fleet-populated",
   "fleet-empty",
   "session-canvas",

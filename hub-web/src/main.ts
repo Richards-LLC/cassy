@@ -5,6 +5,7 @@ import "./styles.css";
 import { ConversationList, type ConversationRow } from "./conversation-list";
 import { ConversationHistory } from "./conversation-history";
 import { ConversationView } from "./conversation-view";
+import { installAttentionObjects } from "./attention-objects";
 import { arrangeConversationShell } from "./conversation-shell";
 import { applyScheme, setScheme, type SchemePreference } from "./scheme";
 import { applyAttentionEnrichment, attentionCounts, attentionSummary, attentionUrl, createAttentionItem, dismissableInfoItems, machineEventAttention, mergeAttentionItem, type AttentionAction, type AttentionContent, type AttentionEnrichment } from "./attention";
@@ -84,6 +85,8 @@ const statuses = new Map<string, Record<string, unknown>>();
 const leases = new Map<string, LeaseState>();
 const surfaces = new Map<string, TerminalSurface>();
 const transcripts = new Map<string, TranscriptView>();
+// Pebble 3: ask and blocker render as the fused-tray objects on the Pebble 2 seam.
+installAttentionObjects();
 const conversationViews = new Map<string, ConversationView>();
 const conversationHistories = new Map<string, ConversationHistory>();
 /** Supervisor turns per thread the operator had on screen the last time that thread was open. */
@@ -266,10 +269,16 @@ function applyPaneView(key: string, mount: HTMLElement, surface: TerminalSurface
           if (composer.value.trim()) { showComposerStatus("Your draft already has text. Clear it before editing the refused message.", "info"); composer.focus(); return; }
           composer.value = text; composer.dispatchEvent(new Event("input")); composer.focus();
         },
+        // A quick-reply chip answers the ask through the same leased path as
+        // the composer, with in_reply_to = the ask's notification id.
+        respond: (ask, text) => { void submitSupervisorMessage({ text, replyTo: ask.notification_id }); },
       });
       conversationViews.set(key, conversation);
     }
     if (conversation.element.parentElement !== mount) mount.append(conversation.element);
+    // The unanswered ask is pinned directly above the composer as well as in the flow.
+    const composerSlot = document.querySelector<HTMLElement>("#conversation-composer-slot");
+    if (composerSlot && conversation.pinned.parentElement !== composerSlot) composerSlot.prepend(conversation.pinned);
     conversation.update();
     return;
   }
@@ -1857,17 +1866,17 @@ async function takeControlForMessage(machine: StoredMachine, session: string): P
   return leases.get(sessionKey(machine.id, session))?.held_by_me === true;
 }
 
-function deliverSupervisorMessage(machine: StoredMachine, session: string, supervisor: string, text: string): void {
+function deliverSupervisorMessage(machine: StoredMachine, session: string, supervisor: string, text: string, replyTo?: number): void {
   const clientRef = crypto.randomUUID();
-  const sent = sendControl(machine.id, session, supervisorMessage(supervisor, text, clientRef));
+  const sent = sendControl(machine.id, session, supervisorMessage(supervisor, text, clientRef, replyTo));
   // Without an outcome the operator cannot tell a sent message from a lost
   // one, and the natural response is to send it a second time.
   if (!sent) {
     showComposerStatus("The hub connection is reconnecting, so this message was not delivered. Try again once the session is live.", "error");
     return;
   }
-  conversationHistory(sessionKey(machine.id, session)).submit(clientRef, supervisor, text);
-  updateConversationViews();
+  conversationHistory(sessionKey(machine.id, session)).submit(clientRef, supervisor, text, Date.now(), replyTo);
+  updateConversationViews(); renderConversationList();
   const storedDraft = conversationDrafts.get(sessionKey(machine.id, session));
   if (storedDraft?.text.trim() === text) conversationDrafts.delete(sessionKey(machine.id, session));
   if (selectedMachineId !== machine.id || selectedSession !== session) return;
@@ -1889,7 +1898,12 @@ function deliverSupervisorMessage(machine: StoredMachine, session: string, super
   composer?.focus();
 }
 
-async function submitSupervisorMessage(): Promise<void> {
+/**
+ * `quick` is a tapped quick-reply chip: its text goes out instead of the
+ * composer's, answering that ask. Free text from the composer answers the
+ * pinned ask, if one is waiting, so either way the send carries in_reply_to.
+ */
+async function submitSupervisorMessage(quick?: { text: string; replyTo: number }): Promise<void> {
   const composer = document.querySelector<HTMLTextAreaElement>("#message-text");
   if (!composer) return;
   const renderedThread = composer.dataset.threadKey;
@@ -1898,7 +1912,8 @@ async function submitSupervisorMessage(): Promise<void> {
     showComposerStatus("The selected conversation changed. Reopen the conversation before sending.", "error");
     return;
   }
-  const text = composer.value.trim();
+  const text = quick?.text ?? composer.value.trim();
+  const replyTo = quick?.replyTo ?? (selectedThread ? conversationHistory(selectedThread).pinnedAsk()?.notification_id : undefined);
   const plan = planSupervisorSend(supervisorSendContext(text));
   if (plan.kind === "blocked") {
     showComposerStatus(plan.reason, "error");
@@ -1920,7 +1935,7 @@ async function submitSupervisorMessage(): Promise<void> {
       return;
     }
   }
-  deliverSupervisorMessage(machine, session, supervisor, text);
+  deliverSupervisorMessage(machine, session, supervisor, text, replyTo);
   } finally {
     pendingSubmissions.delete(submissionKey);
   }
@@ -2313,7 +2328,6 @@ function renderConversationList(): void {
   const rows: ConversationRow[] = [...machines.values()].flatMap((machine) => visibleSessions(machine.id).filter((session) => supervisorTarget(session)).map((session) => {
     const key = sessionKey(machine.id, session.name);
     const updated = fleetCatalogUpdatedAt.get(machine.id);
-    const counts = attentionCounts(attention.filter((item) => item.machineId === machine.id && item.session === session.name));
     const selected = machine.id === selectedMachineId && session.name === selectedSession;
     // Preview is the last turn this page has seen; unread counts supervisor
     // turns that arrived while the thread was not open. Opening it reads them.
@@ -2321,7 +2335,9 @@ function renderConversationList(): void {
     const last = events.at(-1);
     const replies = events.filter((event) => event.kind === "reply").length;
     if (selected) readReplies.set(key, replies);
-    return { key, machineId: machine.id, session: session.name, supervisor: session.supervisor, projectDir: session.project_dir, host: machine.label, freshness: updated ? `Catalog checked ${relativeTimestamp(Date.parse(updated))}` : "Catalog not yet checked", when: updated ? relativeTimestamp(Date.parse(updated)) : undefined, preview: last ? (last.kind === "send" ? `You: ${last.value.text}` : last.value.message) : undefined, connection: session.unreachable ? "Unreachable · message pending" : session.dormant ? "Dormant" : session.liveness === "live" ? fleetConnectionLabel(connectionStates.get(machine.id)) : "Session unavailable", attention: counts.critical + counts.warning, unread: Math.max(0, replies - (readReplies.get(key) ?? 0)), selected };
+    // Waiting (ochre dot, hot time) is driven by asks and blockers the operator has not answered.
+    const waiting = conversationHistories.get(key)?.waiting().length ?? 0;
+    return { key, machineId: machine.id, session: session.name, supervisor: session.supervisor, projectDir: session.project_dir, host: machine.label, freshness: updated ? `Catalog checked ${relativeTimestamp(Date.parse(updated))}` : "Catalog not yet checked", when: updated ? relativeTimestamp(Date.parse(updated)) : undefined, preview: last ? (last.kind === "send" ? `You: ${last.value.text}` : last.value.message) : undefined, connection: session.unreachable ? "Unreachable · message pending" : session.dormant ? "Dormant" : session.liveness === "live" ? fleetConnectionLabel(connectionStates.get(machine.id)) : "Session unavailable", attention: waiting, unread: Math.max(0, replies - (readReplies.get(key) ?? 0)), selected };
   }));
   conversationRows = rows;
   conversationList.render(container, rows, (row) => { void openSession(row.machineId, row.session); });

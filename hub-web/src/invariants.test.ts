@@ -89,6 +89,20 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(source).not.toContain('disabled aria-describedby="control-disabled-reason"');
   });
 
+  it("answers a supervisor ask through the leased send path with in_reply_to and pins it above the composer (cas-43f9)", async () => {
+    const source = await readFile(new URL("main.ts", import.meta.url), "utf8");
+    expect(source).toContain("installAttentionObjects();");
+    expect(source).toContain("respond: (ask, text) => { void submitSupervisorMessage({ text, replyTo: ask.notification_id }); },");
+    expect(source).toContain("const replyTo = quick?.replyTo ?? (selectedThread ? conversationHistory(selectedThread).pinnedAsk()?.notification_id : undefined);");
+    expect(source).toContain("deliverSupervisorMessage(machine, session, supervisor, text, replyTo);");
+    expect(source).toContain("supervisorMessage(supervisor, text, clientRef, replyTo)");
+    expect(source).toContain(".submit(clientRef, supervisor, text, Date.now(), replyTo);");
+    expect(source).toContain("composerSlot.prepend(conversation.pinned);");
+    // The list's waiting affordance is driven by unanswered asks and blockers.
+    expect(source).toContain("const waiting = conversationHistories.get(key)?.waiting().length ?? 0;");
+    expect(source).toContain("attention: waiting,");
+  });
+
   it("keeps a half-typed supervisor message across background renders", async () => {
     const source = await readFile(new URL("main.ts", import.meta.url), "utf8");
     // render() replaces app.innerHTML on every heartbeat, which destroyed the
@@ -155,7 +169,7 @@ describe("binding Cassy Cloud browser invariants", () => {
     // duplicate message to the supervisor.
     expect(source).toContain("function sendControl(machineId: string, session: string, message: unknown): boolean {");
     expect(source).toContain("const clientRef = crypto.randomUUID();");
-    expect(source).toContain("const sent = sendControl(machine.id, session, supervisorMessage(supervisor, text, clientRef));");
+    expect(source).toContain("const sent = sendControl(machine.id, session, supervisorMessage(supervisor, text, clientRef, replyTo));");
     expect(source).toContain("messageDelivery = { session: sessionKey(machine.id, session), target: supervisor, clientRef };");
     expect(source).toContain("toast(`Sending to ${supervisor}`);");
   });
@@ -168,7 +182,7 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(source).toContain("if (!sendsOnEnter(event)) return;");
     expect(source).toContain("void submitSupervisorMessage();");
     expect(source).toContain('document.querySelector<HTMLButtonElement>("#message-send")!.onclick = () => { void submitSupervisorMessage(); };');
-    expect(source).toContain("async function submitSupervisorMessage(): Promise<void> {");
+    expect(source).toContain("async function submitSupervisorMessage(quick?: { text: string; replyTo: number }): Promise<void> {");
     expect(source).toContain("const plan = planSupervisorSend(supervisorSendContext(text));");
   });
 
@@ -723,7 +737,13 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(css).toContain("font-family: var(--font-mono)");
     expect(css).not.toContain("border-right:");
     expect(css).not.toContain(".context { border-left:");
-    expect(css.match(/box-shadow:/g)).toHaveLength(2);
+    // Elevation is tokenized: the two overlay shadows, the phone rail reset,
+    // and the Pebble --lift set (cas-cac1: elevation replaces hairlines on the
+    // rail, the rows, the compose FAB and the thread).
+    const shadows = [...css.matchAll(/box-shadow:\s*([^;]+);/g)].map((match) => match[1].trim());
+    expect(shadows.filter((value) => value === "var(--shadow-overlay)")).toHaveLength(2);
+    expect(shadows.filter((value) => value === "none")).toHaveLength(1);
+    for (const value of shadows) expect(value).toMatch(/^(?:none|var\(--(?:shadow-overlay|lift(?:-strong|-edge|-head)?)\))$/);
     expect(renderer).not.toContain('"700"');
     expect(surface).not.toContain('"normal 700"');
     expect(surface).not.toContain('"italic 700"');

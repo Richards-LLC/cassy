@@ -261,6 +261,13 @@ pub enum ClientMessage {
         /// Client-generated nonce used to correlate durable enqueue receipt.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         client_ref: Option<String>,
+        /// The supervisor Commander turn (its `notification_id`) this message
+        /// answers — an ask's quick reply or a composer reply to the pinned
+        /// ask (cas-a8ea8). The daemon binds the queued row to that turn and
+        /// confirms it, the same semantics as a worker reply's `in_reply_to`.
+        /// Older clients omit it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        in_reply_to: Option<i64>,
         attribution: MessageAttribution,
     },
 
@@ -823,9 +830,11 @@ mod tests {
             summary: Some("checkpoint request".to_string()),
             urgent: false,
             client_ref: Some("send-42".to_string()),
+            in_reply_to: Some(52),
             attribution: attributed_remote_operator(),
         };
         let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains(r#""in_reply_to":52"#), "{json}");
         let decoded: ClientMessage = serde_json::from_str(&json).unwrap();
         match decoded {
             ClientMessage::SendMessage {
@@ -834,6 +843,7 @@ mod tests {
                 summary,
                 urgent,
                 client_ref,
+                in_reply_to,
                 attribution,
             } => {
                 assert_eq!(target, "worker-1");
@@ -841,6 +851,7 @@ mod tests {
                 assert_eq!(summary.as_deref(), Some("checkpoint request"));
                 assert!(!urgent);
                 assert_eq!(client_ref.as_deref(), Some("send-42"));
+                assert_eq!(in_reply_to, Some(52));
                 assert_eq!(attribution.device_id.as_deref(), Some("device-123"));
                 assert_eq!(attribution.operator_label.as_deref(), Some("Pippenz"));
             }
@@ -860,9 +871,14 @@ mod tests {
             decoded,
             ClientMessage::SendMessage {
                 client_ref: None,
+                in_reply_to: None,
                 ..
             }
         ));
+        // A frame without a reply reference serializes without the key, so
+        // older daemons see the exact wire shape they already accept.
+        let plain = serde_json::to_string(&decoded).unwrap();
+        assert!(!plain.contains("in_reply_to"), "{plain}");
     }
 
     #[test]
@@ -1099,6 +1115,7 @@ mod tests {
                 summary: None,
                 urgent: false,
                 client_ref: None,
+                in_reply_to: None,
                 attribution: attributed_remote_operator(),
             })
             .unwrap(),

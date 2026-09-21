@@ -78,6 +78,9 @@ export interface OperatorReply {
   operator_label?: string;
   kind?: OperatorTurnKind;
   attachments?: ArtifactRef[];
+  /** Quick-reply choices for an `ask`. Not yet in OperatorReplyPayload
+   * (protocol.rs); consumed when a payload carries it, else the defaults. */
+  options?: string[];
 }
 
 /** Durable acknowledgment for a Commander SendMessage submission. */

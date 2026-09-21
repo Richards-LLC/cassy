@@ -107,7 +107,7 @@ one (brief: *Light and dark policy*).
 | 48 | `--line-width` 1px | `chart.hairline` | 1px | every hairline: inputs, ledger rules, connectors |
 | 49 | `--state-rule-width` 2px | **keep** | 2px | the critical left rule on attention events; the house's 3px is the verdict rule and must not be borrowed for danger |
 | 50 | `--focus-ring-width` 2px | **keep**; colour → `color.*.focus` | 2px | the sole outline |
-| 51 | `--shadow-overlay` 0 24px 80px var(--overlay-shadow-color) | `elevation.overlay` | 0 24px 80px rgba(18,20,26,.40) | dialog and `#toast` only; the invariant test counts two `box-shadow` declarations |
+| 51 | `--shadow-overlay` 0 24px 80px var(--overlay-shadow-color) | `elevation.overlay` | 0 24px 80px rgba(18,20,26,.40) | dialog and `#toast` only; the invariant test counts two `--shadow-overlay` declarations and allows the Pebble `--lift` set (cas-cac1) beside them |
 
 ## Geometry (app chrome, on the 4px grid)
 
@@ -182,7 +182,7 @@ tokens and their consumers, so this table can be checked for completeness:
 | `grep -o "var(--[a-z0-9-]*" hub-web/src/styles.css \| sort -u \| wc -l` | 78 | 78 of the 79 declared tokens are consumed in the stylesheet; no undeclared token is consumed |
 | `comm -23 <(declared) <(consumed)` | 1 | `--fs-terminal` — consumed only from TypeScript (`getPropertyValue` at terminal mount), not from any CSS rule |
 | `grep -rho "var(--[a-z0-9-]*" hub-web/src/*.ts hub-web/src/terminal/*.ts hub-web/index.html \| wc -l` | 28 | `var()` reads from TypeScript (`getComputedStyle` at mount: fonts, sizes, rail width, line-strong, state colours) |
-| `grep -n "box-shadow" hub-web/src/styles.css` | 2 | the two overlay shadows the invariant test counts |
+| `grep -c "var(--shadow-overlay)" hub-web/src/styles.css` | 2 | the two overlay shadows the invariant test counts; every other `box-shadow` is a Pebble `--lift` token |
 | `grep -n "prefers-color-scheme" hub-web/src/styles.css` | 0 | no light scheme exists at 3.17.3 |
 | `grep -n "@media print" hub-web/src/styles.css` | 0 | no print stylesheet exists at 3.17.3 |
 | `grep -n "prefers-reduced-motion" hub-web/src/styles.css` | 2 | reduced-motion blocks exist (lines 1509, 1639) |

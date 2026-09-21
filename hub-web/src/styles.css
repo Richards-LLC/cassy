@@ -2771,34 +2771,55 @@ dialog form > *,
 .cloud-brand { display: inline-flex; align-items: center; gap: var(--space-2); color: var(--text-hi); white-space: nowrap; font: var(--weight-medium) var(--fs-lg)/1.2 var(--font-display); }
 .cloud-brand svg { width: var(--space-8); height: var(--space-8); color: var(--color-action); flex: none; }
 .project-badge { display: inline-block; max-width: 100%; width: fit-content; padding: var(--space-1) var(--space-2); background: var(--bg-active); color: var(--color-action); font: var(--weight-semibold) var(--fs-md)/var(--line-ui) var(--font-ui); border-radius: var(--radius-card); overflow-wrap: anywhere; }
-.conversation-shell { display: grid; grid-template-columns: var(--context-panel-width) minmax(0, 1fr) var(--worker-collapsed-width); height: 100dvh; overflow: hidden; color: var(--text-hi); background: var(--bg-root); }
+.conversation-shell { display: grid; grid-template-columns: var(--conversation-rail-width) minmax(0, 1fr) var(--worker-collapsed-width); height: 100dvh; overflow: hidden; color: var(--ink); background: var(--canvas); }
 .conversation-shell button { min-height: var(--rail-item-min); }
-.conversation-sidebar { display: flex; flex-direction: column; min-width: 0; min-height: 0; border-inline-end: var(--line-width) solid var(--line-subtle); }
-.conversation-list-heading { padding: var(--space-6); padding-bottom: var(--space-4); }
-.conversation-list-title { display: flex; flex-direction: row; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-2); margin-top: var(--space-6); }
-.conversation-list-title h1 { font: var(--weight-medium) var(--fs-verdict)/1.1 var(--font-display); margin: 0; }
+/* == Pebble rail (EPIC cas-cac1) ==
+   The rail is a panel lifted off the canvas by --lift-edge, not a hairline.
+   Rows are 20px pebbles 4px apart with no separators; the selected row takes
+   the machine's --accent-soft and --lift. The machine accent is set by the
+   machine-accent-N class on each row (hub-web/src/machine-accent.ts). */
+.conversation-sidebar { display: flex; flex-direction: column; min-width: 0; min-height: 0; position: relative; z-index: 1; background: var(--panel); box-shadow: var(--lift-edge); }
+.conversation-list-heading { padding: 22px 18px 18px; }
+.conversation-list-title { display: flex; flex-direction: row; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-2); margin-top: var(--space-4); }
+.conversation-list-title h1 { font: var(--weight-semibold) 22px/1.2 var(--font-ui); letter-spacing: -0.015em; margin: 0 6px; }
 .conversation-list-title button { font-size: var(--fs-meta); }
-.conversation-list-heading p { color: var(--text-mid); margin: var(--space-3) 0 0; }
-#conversation-list { overflow-y: auto; min-height: 0; }
-.conversation-sidebar footer { padding: var(--space-4) var(--space-6); margin-top: auto; border-top: var(--line-width) solid var(--line-subtle); }
+.conversation-list-heading p { color: var(--ink-mid); margin: var(--space-3) 6px 0; }
+#conversation-list { overflow-y: auto; min-height: 0; display: flex; flex-direction: column; gap: var(--space-1); padding: 0 14px var(--space-4) 18px; }
+.conversation-sidebar footer { padding: var(--space-4) 18px; margin-top: auto; }
 .conversation-sidebar footer button { width: 100%; font-size: var(--fs-meta); }
-.conversation-row { display: flex; flex-direction: column; align-items: flex-start; text-align: left; width: 100%; padding: var(--space-6); gap: var(--space-2); border: 0; border-top: var(--line-width) solid var(--line-subtle); border-radius: 0; background: var(--bg-root); color: var(--text-hi); }
-.conversation-row:hover { background: var(--bg-hover); color: var(--text-hi); }
-.conversation-row[aria-current="true"] { background: var(--bg-panel); color: var(--text-hi); border-inline-start: var(--space-1) solid var(--color-action); padding-inline-start: calc(var(--space-6) - var(--space-1)); }
-.conversation-supervisor { font: var(--weight-medium) var(--fs-base)/var(--line-ui) var(--font-mono); overflow-wrap: anywhere; }
-.conversation-host, .conversation-freshness { color: var(--text-mid); font-size: var(--fs-meta); overflow-wrap: anywhere; }
-.conversation-row-state { display: flex; align-items: baseline; flex-wrap: wrap; gap: var(--space-3); width: 100%; font-size: var(--fs-meta); color: var(--text-mid); }
-.conversation-attention { color: var(--state-warn); font-weight: var(--weight-semibold); }
-.conversation-attention::before { content: "● "; }
-.conversation-empty { margin: var(--space-6); color: var(--text-mid); }
+.conversation-row { display: grid; grid-template-columns: 42px minmax(0, 1fr) auto; column-gap: 13px; row-gap: 3px; align-items: center; text-align: left; width: 100%; flex: none; padding: var(--space-3) 14px; border: 0; border-radius: 20px; background: var(--color-transparent); color: var(--ink); }
+.conversation-row:hover { background: var(--bg-hover); color: var(--ink); }
+.conversation-row[aria-current="true"] { background: var(--accent-soft); color: var(--ink); box-shadow: var(--lift); }
+.conversation-avatar { grid-row: span 2; display: flex; align-items: center; justify-content: center; width: 42px; height: 42px; border-radius: var(--radius-pill); background: var(--accent); color: var(--accent-fg); font: var(--weight-semibold) 17px/1 var(--font-ui); }
+.conversation-who { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; min-width: 0; }
+.conversation-supervisor { font: var(--weight-semibold) var(--fs-md)/1.35 var(--font-ui); overflow-wrap: anywhere; }
+.conversation-meta { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 7px; min-width: 0; max-width: 100%; }
+.conversation-project { display: inline-flex; align-items: center; gap: 7px; min-width: 0; max-width: 100%; }
+.conversation-sep { width: 3px; height: 3px; border-radius: var(--radius-pill); background: var(--ink-soft); flex: none; }
+.conversation-row .project-badge { padding: 0; border-radius: 0; background: var(--color-transparent); color: var(--ink-soft); font: var(--weight-medium) var(--fs-xs)/1.35 var(--font-mono); }
+.conversation-machine { display: inline-flex; align-items: center; gap: 7px; color: var(--ink-soft); font: var(--weight-medium) var(--fs-xs)/1.35 var(--font-mono); white-space: nowrap; }
+.conversation-when { justify-self: end; font-size: var(--fs-xs); color: var(--ink-soft); white-space: nowrap; }
+.conversation-when.hot { color: var(--warn-text); font-weight: var(--weight-semibold); }
+.conversation-preview { grid-column: 2; font-size: var(--fs-meta); line-height: 1.35; color: var(--ink-soft); overflow-wrap: anywhere; }
+.conversation-preview.bold { color: var(--ink); font-weight: var(--weight-medium); }
+.conversation-flag { grid-column: 3; justify-self: end; width: 10px; height: 10px; border-radius: var(--radius-pill); background: var(--ask-deep); }
+.conversation-unread { justify-self: end; min-width: 21px; padding: 2px 7px; border-radius: var(--radius-pill); text-align: center; background: var(--accent); color: var(--accent-fg); font: var(--weight-semibold) var(--fs-xs)/1.4 var(--font-ui); }
+.conversation-empty { margin: var(--space-6) 18px; color: var(--ink-mid); }
+.compose-fab { display: none; position: fixed; right: 18px; bottom: calc(18px + env(safe-area-inset-bottom)); z-index: 2; width: 56px; height: 56px; padding: 0; border: 0; border-radius: var(--radius-pill); background: var(--you-bg); color: var(--you-fg); box-shadow: var(--lift-strong); align-items: center; justify-content: center; }
+.compose-fab:hover { background: var(--you-bg); color: var(--you-fg); }
+.compose-fab svg { width: 24px; height: 24px; display: block; }
 .conversation-main { display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; }
-.conversation-heading { padding: var(--space-4) var(--space-6); border-bottom: var(--line-width) solid var(--line-subtle); }
-.conversation-topline { display: flex; justify-content: space-between; align-items: center; gap: var(--space-2); margin-bottom: var(--space-4); }
+/* The single header above the thread (cas-5b2d): Pebble thead shape, cas-11b01 controls on the row above. */
+.conversation-heading { display: flex; flex-direction: column; gap: var(--space-3); padding: var(--space-3) 30px 17px; background: var(--canvas); color: var(--ink); box-shadow: var(--lift-head); position: relative; z-index: 1; }
+.conversation-topline { display: flex; justify-content: space-between; align-items: center; gap: var(--space-2); }
 .conversation-topline .cloud-brand { display: none; }
 .conversation-topline button { font-size: var(--fs-meta); }
-.conversation-identity { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-3); }
-.conversation-identity h1 { margin: 0; font: var(--weight-medium) var(--fs-md)/var(--line-ui) var(--font-mono); overflow-wrap: anywhere; }
-.conversation-heading > p { margin: var(--space-2) 0 0; }
+.conversation-identity { display: flex; align-items: center; gap: 13px; min-width: 0; }
+.conversation-identity .conversation-avatar { flex: none; }
+.conversation-identity .id { min-width: 0; }
+.conversation-identity h1 { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); margin: 0; font: var(--weight-semibold) 16px/1.25 var(--font-ui); overflow-wrap: anywhere; }
+.conversation-identity h1 b { font-weight: inherit; }
+.conversation-identity .conversation-host { display: block; margin-top: 1px; font: var(--weight-regular) 13px/1.25 var(--font-mono); color: var(--ink-mid); overflow-wrap: anywhere; }
 .conversation-pane-slot { flex: 1; min-height: 0; min-width: 0; overflow: hidden; }
 .conversation-pane-slot .pane-grid { display: block; padding: 0; height: 100%; min-height: 0; background: var(--bg-root); color: var(--text-hi); }
 .conversation-pane-slot .primary-pane-slot { height: 100%; }
@@ -2806,29 +2827,143 @@ dialog form > *,
 .conversation-pane-slot .pane { display: block; height: 100%; border: 0; border-radius: 0; background: var(--bg-root); color: var(--text-hi); }
 .conversation-pane-slot .terminal-mount { height: 100%; padding: 0; background: var(--bg-root); color: var(--text-hi); overflow: hidden; }
 .conversation-active > :not(.conversation-reading) { visibility: hidden; position: absolute; pointer-events: none; }
-.conversation-reading { height: 100%; min-width: 0; overflow: auto; overscroll-behavior: contain; color: var(--text-hi); background: var(--bg-root); padding: var(--space-6); position: relative; }
-.conversation-flow { max-width: 70ch; margin: 0 auto; display: flex; flex-direction: column; gap: var(--space-6); }
-.conversation-flow article { min-width: 0; }
-.conversation-flow article > header { display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: var(--space-2); margin-bottom: var(--space-3); }
-.conversation-flow header strong { font: var(--weight-medium) var(--fs-meta)/var(--line-ui) var(--font-mono); overflow-wrap: anywhere; }
-.conversation-flow header span { font-size: var(--fs-xs); color: var(--text-mid); }
-.conversation-pane-text { font: var(--weight-regular) var(--fs-md)/1.65 var(--font-ui); }
-.conversation-line { white-space: pre-wrap; overflow-wrap: anywhere; margin: 0; }
-.conversation-code { font: var(--weight-regular) var(--fs-meta)/1.6 var(--font-mono); white-space: pre; overflow-x: auto; padding: var(--space-1) var(--space-2); margin: 0; background: var(--bg-raised); color: var(--text-hi); }
-.conversation-turn { padding: var(--space-4); border-left: var(--state-rule-width) solid var(--line-strong); }
-.conversation-turn.from-you { margin-left: var(--space-8); background: var(--bg-active); color: var(--text-hi); border-left-color: var(--color-action); border-radius: var(--radius-pane); }
-.conversation-turn > p { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: var(--fs-md); line-height: 1.6; }
-.conversation-turn[data-state="error"] .conversation-delivery { color: var(--state-crit); }
+
+/* ---- Pebble thread (cas-d167) --------------------------------------------
+ * Tokens are the epic contract (cas-cac1) ported by Pebble 1 into tokens.css:
+ * --canvas --ink --ink-mid --you-bg/--you-fg --sup-bg/--sup-fg --accent
+ * --sheet-bg --warn-text --crit-bg --lift --lift-head. Consumed, never
+ * redefined here. Shape system: 22px pebble, 8px spoken corner; grouped
+ * turns tighten their adjacent corners so a run reads as one voice. */
+.conversation-reading.thread { display: flex; flex-direction: column; height: 100%; min-width: 0; overflow: auto; overscroll-behavior: contain; padding: 0; position: relative; background: var(--canvas); color: var(--ink); font: var(--weight-regular) 15px/1.5 var(--font-ui); }
+.thread .thead { position: sticky; top: 0; z-index: 1; display: flex; align-items: center; gap: 13px; padding: 17px 30px; background: var(--canvas); box-shadow: var(--lift-head); }
+.thread .thead b { display: block; font: var(--weight-semibold) 16px/1.25 var(--font-ui); overflow-wrap: anywhere; }
+.thread .thead .id span { display: block; margin-top: 1px; font: var(--weight-regular) 13px/1.25 var(--font-mono); color: var(--ink-mid); overflow-wrap: anywhere; }
+.thread .thead .id span:empty { display: none; }
+.thread .msgs { flex: 1; padding: 22px 30px 10px; display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+.thread .day { align-self: center; margin: 0 0 2px; font-size: 12px; color: var(--ink-mid); }
+.thread .turn { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; max-width: 70%; min-width: 0; }
+.thread .turn.you { align-self: flex-end; align-items: flex-end; }
+.thread .turn > time { font-size: 12px; color: var(--ink-mid); padding: 2px 6px 0; }
+.thread .bub { max-width: 100%; min-width: 0; padding: 12px 19px; background: var(--sup-bg); color: var(--sup-fg); border-radius: 8px 22px 22px 8px; box-shadow: var(--lift); }
+.thread .bub.group-first { border-top-left-radius: 22px; }
+.thread .turn.you .bub { background: var(--you-bg); color: var(--you-fg); border-radius: 22px 8px 8px 22px; }
+.thread .turn.you .bub.group-first { border-top-right-radius: 22px; }
+.thread .bub p { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.thread .bub p + p { margin-top: 8px; }
+.thread .bub.receipt { display: flex; gap: 9px; }
+.thread .bub.receipt .receipt-text { min-width: 0; }
+.thread .tick { width: 15px; height: 15px; margin-top: 4px; color: var(--state-ok); flex: none; display: block; }
+.thread .conversation-delivery { display: block; margin-top: 6px; font-size: 12px; opacity: 0.85; }
+.thread .bub[data-state="error"] { background: var(--crit-bg); color: var(--crit-fg); }
+.thread .conversation-edit { margin-top: 8px; padding: 6px 14px; border-radius: 999px; border: 0; background: var(--crit-fg); color: var(--crit-bg); font: var(--weight-medium) 13px/1.2 var(--font-ui); }
+/* coalesced statuses — one quiet pebble, never a ledger */
+.thread .coalesce { align-self: flex-start; max-width: 100%; background: var(--sup-bg); color: var(--ink-mid); border-radius: 999px; padding: 8px 18px; font-size: 13px; overflow-wrap: anywhere; }
+/* evidence table inside a message: first column takes the slack, the rest hug their numbers */
+.thread .evi { background: var(--sheet-bg); color: var(--ink); border-radius: 17px; padding: 11px 15px; margin-top: 12px; max-width: 100%; }
+.thread .evi-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; column-gap: 14px; padding: 4px 0; font: var(--weight-regular) 12.5px/1.45 var(--font-mono); font-variant-numeric: tabular-nums; }
+.thread .evi-row span { min-width: 0; overflow-wrap: anywhere; }
+.thread .evi-row span:not(:first-child) { text-align: right; }
+.thread .evi-head { color: var(--ink-mid); font-size: 11.5px; }
+.thread .evi .pass { color: var(--state-ok); }
+.thread .evi .flake { color: var(--warn-text); }
+.thread .evi .fail { color: var(--crit-bg); }
+.thread .conversation-attachment { margin-top: 8px; }
+.thread .conversation-attachment a { color: inherit; }
+.thread .working { display: flex; align-items: center; gap: 9px; color: var(--ink-mid); font-size: 13px; }
+.thread .dots { display: flex; gap: 4px; }
+.thread .dots i { width: 6px; height: 6px; border-radius: 50%; background: var(--accent, var(--ink-mid)); animation: thread-working 1.2s ease-in-out infinite; }
+.thread .dots i:nth-child(2) { animation-delay: 0.2s; }
+.thread .dots i:nth-child(3) { animation-delay: 0.4s; }
+@keyframes thread-working { 0%, 100% { opacity: 0.35; } 50% { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .thread .dots i { animation: none; } }
+
+/* ---- attention objects: ask + blocker (cas-43f9) --------------------------
+ * Treatment A from round 3 (pebble.css .obj / .t-a / .blk / .chip / .window):
+ * one fused stepped object. The body steps down into a deeper tray under a
+ * single 28px outline with the spoken notch at the tray corner. Radius and
+ * shadow both live on .obj, so the shadow is cast from the rounded silhouette
+ * and never from a square box behind it. An ask's tray holds the quick-reply
+ * chips; a blocker's tray is an inset evidence window. The same object is
+ * pinned above the composer while an ask is unanswered. */
+.obj { max-width: min(100%, 560px); min-width: 0; border-radius: 28px 28px 28px 9px; box-shadow: var(--lift-strong); overflow: hidden; font: var(--weight-regular) 15px/1.5 var(--font-ui); text-align: left; }
+.obj-body { padding: 15px 23px 14px; border-radius: 28px 28px 0 0; }
+.obj-foot { border-radius: 0 0 28px 9px; }
+.obj.t-a .obj-body { background: var(--ask-bg); color: var(--ask-fg); }
+.obj.t-a .obj-foot { display: flex; flex-wrap: wrap; gap: 9px; padding: 11px 13px; background: var(--ask-deep); }
+.obj.t-a .obj-foot .chip { flex: 1; }
+.obj.t-a.blk .obj-body { background: var(--crit-bg); color: var(--crit-fg); }
+.obj.t-a.blk .obj-foot { display: block; padding: 0 9px 9px; background: var(--crit-bg); }
+.obj p { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.obj p + p { margin-top: 8px; }
+.obj .evi { background: var(--sheet-bg); color: var(--ink); border-radius: 17px; padding: 11px 15px; margin-top: 12px; }
+.obj .conversation-attachment { margin-top: 8px; }
+.obj .conversation-attachment a { color: inherit; }
+.chip { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-width: 0; margin: 0; padding: 8px 17px; border: 0; border-radius: var(--radius-pill); background: var(--panel); color: var(--ink); font: var(--weight-medium) 13px/1.2 var(--font-ui); text-align: center; overflow-wrap: anywhere; }
+button.chip { cursor: pointer; }
+button.chip:hover { box-shadow: var(--lift); }
+button.chip:focus-visible { outline: 2px solid var(--panel); outline-offset: 2px; }
+button.chip:disabled { cursor: default; }
+.chip.sent { color: var(--ink); }
+.chip .tick { width: 14px; height: 14px; margin: 0; color: var(--state-ok); flex: none; }
+.window { display: block; min-width: 0; background: var(--sheet-bg); color: var(--ink); border-radius: 20px; padding: 10px 16px; font: var(--weight-regular) 12.5px/1.45 var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+/* pinned copy: sits between the thread and the composer, on the canvas */
+.pinned-ask { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; padding: 10px 30px 12px; background: var(--canvas); color: var(--ink); }
+.pinned-ask[hidden] { display: none; }
+.pinned-label { padding: 0 6px; font: var(--weight-medium) 12px/1.3 var(--font-ui); color: var(--warn-text); letter-spacing: 0.02em; }
 .conversation-jump { position: sticky; bottom: var(--space-2); display: block; margin: var(--space-4) auto 0; background: var(--bg-panel); color: var(--color-action); }
 .conversation-jump[hidden] { display: none; }
-.conversation-composer { padding: var(--space-4) var(--space-6); padding-bottom: max(var(--space-4), env(safe-area-inset-bottom)); margin: 0; border-top: var(--line-width) solid var(--line-subtle); background: var(--bg-panel); color: var(--text-hi); }
-.conversation-composer h2 { margin: 0 0 var(--space-2); font-size: var(--fs-meta); }
-.conversation-composer textarea { width: 100%; min-height: var(--toolbar-height); height: var(--toolbar-height); max-height: 25dvh; resize: vertical; background: var(--bg-root); color: var(--text-hi); border-color: var(--line-subtle); font-size: var(--root-font-size); }
-.conversation-composer .composer-actions { display: flex; gap: var(--space-2); flex-wrap: wrap; }
+/* ---- Pebble 4 (cas-3800): sheet, composer, nothing waiting ---------------
+ * Attachment: treatment A from round-3/pebble.css — a sheet laid on the
+ * thread, no bubble around it, dog-eared at the top right. The ear is two
+ * complementary clip-path triangles painted over the corner (a canvas cut and
+ * a fold flap, 16px); nothing is overflow:hidden, so nothing inside the sheet
+ * can be clipped by it. In dark mode --fold sits close to --sheet-bg so the
+ * flap reads as a fold, not a protrusion. The whole sheet is the artifact link. */
+.thread .sheet { position: relative; display: flex; align-items: center; gap: 14px; max-width: 100%; min-width: 0; background: var(--sheet-bg); color: var(--ink); border-radius: 22px 0 22px 8px; padding: 12px 22px 12px 12px; box-shadow: var(--lift-strong); text-decoration: none; }
+.thread .sheet::before { content: ""; position: absolute; top: 0; right: 0; width: 16px; height: 16px; background: var(--fold); clip-path: polygon(0 0, 100% 100%, 0 100%); pointer-events: none; }
+.thread .sheet::after { content: ""; position: absolute; top: 0; right: 0; width: 16px; height: 16px; background: var(--canvas); clip-path: polygon(0 0, 100% 0, 100% 100%); pointer-events: none; }
+.thread .sheet:hover .fname, .thread .sheet:focus-visible .fname { text-decoration: underline; }
+.thread .sheet:focus-visible { outline: var(--focus-ring-width) solid var(--accent, var(--you-bg)); outline-offset: 2px; }
+.thread .plate { display: flex; align-items: flex-end; justify-content: center; flex: none; width: 38px; height: 46px; padding-bottom: 7px; border-radius: 7px; background: var(--crit-bg); color: var(--crit-fg); font: var(--weight-semibold) 9px/1 var(--font-ui); letter-spacing: 0.06em; }
+.thread .ftext { display: block; min-width: 0; }
+.thread .fname { display: block; font: var(--weight-semibold) 14.5px/1.35 var(--font-ui); color: var(--ink); overflow-wrap: anywhere; }
+.thread .fsub { display: flex; align-items: center; gap: 6px; margin-top: 3px; font: var(--weight-regular) 12.5px/1.3 var(--font-ui); color: var(--ink-mid); }
+.thread .fsub:empty { display: none; }
+/* An attachment-only turn is its sheet alone; the bubble would be a blank pebble. */
+.thread .bub.bub-empty { display: none; }
+
+/* Nothing waiting: the machine's monogram in its accent, the supervisor's
+   name, one quiet centred line, and the last message as a faint echo. */
+.thread .empty { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; min-width: 0; padding: 60px 40px; text-align: center; color: var(--ink); }
+.thread .empty[hidden], .thread .msgs[hidden] { display: none; }
+.thread .empty .mono { display: flex; align-items: center; justify-content: center; flex: none; width: 76px; height: 76px; border-radius: var(--radius-pill); background: var(--accent, var(--you-bg)); color: var(--accent-fg); font: var(--weight-semibold) 30px/1 var(--font-ui); box-shadow: var(--lift-strong); }
+.thread .empty b { font: var(--weight-semibold) 21px/1.2 var(--font-ui); letter-spacing: -0.015em; overflow-wrap: anywhere; }
+.thread .empty .proj2 { font: var(--weight-regular) 13px/1.3 var(--font-mono); color: var(--ink-mid); overflow-wrap: anywhere; }
+.thread .empty .proj2:empty { display: none; }
+.thread .empty .said { margin: 0; max-width: 34ch; color: var(--ink-mid); font-size: 15px; }
+.thread .empty .quiet { max-width: min(100%, 56ch); background: var(--sup-bg); color: var(--sup-fg); border-radius: 22px; padding: 12px 22px; box-shadow: var(--lift); overflow-wrap: anywhere; }
+
+/* Composer: the field is a pill on --panel with --lift; the send button takes
+   the machine accent from the shell root and names the supervisor; the attach
+   clip is present beside the field but disabled — there is no operator
+   attachment transport yet and its title says so. The ids inside are the
+   send handler's and the live-region updater's; only the dress changes. */
+.conversation-composer { position: relative; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; grid-template-areas: "clip field send" "status status status"; align-items: center; column-gap: 11px; row-gap: var(--space-2); padding: 14px 30px 22px; padding-bottom: max(22px, env(safe-area-inset-bottom)); margin: 0; border-top: 0; background: var(--canvas); color: var(--ink); }
+.conversation-composer h2 { margin: 0; } /* .sr-only from dressComposer: the label is for the reader */
+.conversation-composer .composer-clip { grid-area: clip; display: flex; align-items: center; justify-content: center; width: 44px; height: 44px; min-height: 44px; padding: 0; border: 0; border-radius: var(--radius-pill); background: var(--panel); color: var(--ink-mid); box-shadow: var(--lift); }
+.conversation-composer .composer-clip:disabled { opacity: 1; color: var(--ink-mid); }
+.conversation-composer .composer-clip svg { width: 19px; height: 19px; display: block; opacity: 0.55; }
+.conversation-composer textarea { grid-area: field; width: 100%; min-width: 0; min-height: 46px; height: auto; field-sizing: content; max-height: 25dvh; padding: 12px 22px; border: 0; border-radius: 23px; resize: none; background: var(--panel); color: var(--ink); box-shadow: var(--lift); font: var(--weight-regular) 14px/1.55 var(--font-ui); }
+.conversation-composer textarea::placeholder { color: var(--ink-mid); opacity: 1; }
+.conversation-composer .composer-actions { grid-area: send; display: flex; align-items: center; gap: var(--space-2); margin: 0; }
+.conversation-composer .composer-actions button { width: auto; }
 .conversation-composer #message-keyboard { display: none; }
-.conversation-composer #message-send { margin-left: auto; max-width: 100%; white-space: normal; overflow-wrap: anywhere; padding: var(--space-2) var(--space-4); }
+.conversation-composer #message-send.send { display: inline-flex; align-items: center; gap: 8px; margin: 0; min-height: 46px; padding: 0 20px 0 16px; border: 0; border-radius: var(--radius-pill); background: var(--accent, var(--you-bg)); color: var(--accent-fg); box-shadow: var(--lift-strong); font: var(--weight-semibold) 14px/1.2 var(--font-ui); white-space: nowrap; }
+.conversation-composer #message-send.send:hover:not([aria-disabled="true"]) { background: var(--accent, var(--you-bg)); color: var(--accent-fg); filter: brightness(1.08); }
+.conversation-composer .send-glyph { width: 19px; height: 19px; display: block; flex: none; }
 .conversation-composer .control-disabled-reason { display: none; }
-.conversation-composer .message-status, .conversation-composer .message-delivery { font-size: var(--fs-meta); margin-bottom: 0; }
+.conversation-composer .composer-status, .conversation-composer .message-status, .conversation-composer .message-delivery { grid-area: status; font-size: var(--fs-meta); margin: 0; }
+.conversation-composer .composer-status[hidden], .conversation-composer .message-status[hidden], .conversation-composer .message-delivery[hidden] { display: none; }
 .conversation-context { min-width: 0; overflow-y: auto; padding: var(--space-6); border-left: var(--line-width) solid var(--line-subtle); }
 .conversation-context .cloud-brand { font-size: var(--fs-base); }
 .conversation-context .cloud-brand svg { width: var(--space-6); height: var(--space-6); }
@@ -2842,7 +2977,13 @@ dialog form > *,
 .conversation-eyebrow { font-size: var(--fs-xs); letter-spacing: var(--tracking-label); color: var(--color-action); }
 @media (max-width: 53rem), (max-height: 30rem) and (pointer: coarse) {
   .conversation-shell { display: block; height: 100dvh; }
-  .conversation-sidebar { height: 100%; border-inline-end: 0; }
+  /* Phone: the list is the page — full width, no rail edge, and the compose
+     FAB floats bottom right above the footer while the list is showing. */
+  .conversation-sidebar { height: 100%; box-shadow: none; }
+  .conversation-list-heading { padding: 20px 12px 14px; }
+  #conversation-list { padding: 0 12px var(--space-4); }
+  .conversation-sidebar footer { padding: var(--space-3) 12px; padding-inline-end: calc(56px + 30px); }
+  .conversation-shell:not(.thread-open) .compose-fab { display: flex; }
   .conversation-main, .conversation-context { display: none; }
   .conversation-shell.thread-open .conversation-sidebar { display: none; }
   .conversation-shell.thread-open .conversation-main { display: flex; height: 100%; }
@@ -2850,33 +2991,36 @@ dialog form > *,
   .conversation-topline .cloud-brand svg { width: var(--space-6); height: var(--space-6); }
   .conversation-topline { flex-wrap: wrap; }
   .conversation-topline #conversation-terminal { margin-left: auto; }
-  .conversation-heading { padding: var(--space-3) var(--space-4); }
-  .conversation-topline { margin-bottom: var(--space-2); }
+  .conversation-heading { padding: var(--space-2) 16px 14px; gap: var(--space-2); }
   .conversation-topline button { padding: var(--space-1) var(--space-2); }
-  .conversation-reading { padding: var(--space-4); }
-  .conversation-composer { padding: var(--space-3) var(--space-4); padding-bottom: max(var(--space-3), env(safe-area-inset-bottom)); }
-  .conversation-turn.from-you { margin-left: var(--space-4); }
+  /* Phone composer: the send pill folds to its glyph; the label stays for the reader. */
+  .conversation-composer { column-gap: 9px; padding: 12px 16px 20px; padding-bottom: max(20px, env(safe-area-inset-bottom)); }
+  .conversation-composer textarea { padding: 12px 18px; }
+  .conversation-composer #message-send.send { width: 46px; padding: 0; justify-content: center; }
+  .conversation-composer .send-label { display: none; } /* the button's aria-label carries "Send to <supervisor>" */
+  .thread .thead { padding: 14px 16px; }
+  .thread .msgs { padding: 16px 16px 8px; gap: 14px; }
+  .thread .turn { max-width: 88%; }
+  .thread .sheet { padding: 11px 18px 11px 11px; gap: 12px; }
+  .thread .empty { padding: 40px 22px; }
+  .thread .evi-row { column-gap: 10px; font-size: 12px; }
+  .pinned-ask { padding: 8px 16px 10px; }
+  .obj-body { padding: 13px 19px 12px; }
 }
 @media (max-height: 30rem) {
-  .conversation-topline { margin: 0; }
-  .conversation-heading { padding-top: var(--space-1); padding-bottom: var(--space-1); }
-  .conversation-heading > .conversation-host { display: none; }
+  .conversation-heading { padding-top: var(--space-1); padding-bottom: var(--space-1); gap: var(--space-1); }
+  .conversation-identity .conversation-host { display: none; }
   .conversation-identity { gap: var(--space-2); }
-  .conversation-composer { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: var(--space-2); padding-top: var(--space-2); padding-bottom: var(--space-2); }
-  .conversation-composer h2 { display: none; }
-  .conversation-composer textarea { height: var(--rail-item-min); min-height: var(--rail-item-min); }
-  .conversation-composer .composer-actions { margin: 0; align-items: center; }
-  .conversation-composer #message-send { max-width: 32ch; }
-  .conversation-composer .message-status, .conversation-composer .message-delivery { grid-column: 1 / -1; margin: 0; }
+  .conversation-composer { padding-top: var(--space-2); padding-bottom: max(var(--space-2), env(safe-area-inset-bottom)); }
+  .conversation-composer textarea { height: var(--rail-item-min); min-height: var(--rail-item-min); padding-top: 10px; padding-bottom: 10px; }
+  .conversation-composer .composer-clip { width: var(--rail-item-min); height: var(--rail-item-min); }
+  .conversation-composer #message-send.send { min-height: var(--rail-item-min); }
 }
-
-.conversation-composer #message-send { background: var(--color-action); color: var(--bg-root); border-color: var(--color-action); }
 
 .conversation-row-state:empty { display: none; }
 .conversation-context .status-identifier { display: none; }
 
 #conversation-return { flex: none; white-space: nowrap; }
-.conversation-turn > button { margin-top: var(--space-3); }
 
 /* Machine evidence stays beneath the conversations, outside the phone composer. */
 .hub-footer-badges { display: grid; gap: var(--space-2); margin-bottom: var(--space-3); }
@@ -2888,7 +3032,9 @@ dialog form > *,
 .hub-footer-meta { display: flex; flex-wrap: wrap; justify-content: space-between; gap: var(--space-2); font-size: var(--fs-xs); color: var(--text-mid); }
 .machines-dialog-heading { display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); }
 .machines-dialog-heading button { min-width: var(--rail-item-min); min-height: var(--rail-item-min); }
-#paired-machines-dialog { padding: var(--space-6); overflow-y: auto; }
+/* Both axes scroll: dialog[open] hides x, and a hidden axis makes the strict
+   visual-qa probe read a third paired machine below the fold as clipped. */
+#paired-machines-dialog { padding: var(--space-6); overflow: auto; }
 #paired-machines-dialog h2 { margin-top: var(--space-3); margin-bottom: var(--space-2); font: var(--weight-medium) var(--fs-lg)/1.2 var(--font-display); }
 .machine-register-hint, .paired-machine p { color: var(--text-mid); font-size: var(--fs-meta); overflow-wrap: anywhere; }
 .paired-machine { border-top: var(--line-width) solid var(--line-subtle); padding: var(--space-4) 0; }

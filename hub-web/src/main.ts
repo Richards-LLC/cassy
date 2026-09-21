@@ -1,10 +1,12 @@
-import { cloudBrand } from "./cloud-brand";
+import { cloudBrand, projectName } from "./cloud-brand";
 import { machineFooterMarkup, pairedMachinesDialogMarkup, renderPairedMachines, type PairedMachineRow } from "./paired-machines";
 import { retainPendingSessions, visibleCatalog } from "./worker-visibility";
 import "./styles.css";
 import { ConversationList, type ConversationRow } from "./conversation-list";
 import { ConversationHistory } from "./conversation-history";
 import { ConversationView } from "./conversation-view";
+import { installAttentionObjects } from "./attention-objects";
+import { installAttachmentSheet } from "./attachment-sheet";
 import { arrangeConversationShell } from "./conversation-shell";
 import { applyScheme, setScheme, type SchemePreference } from "./scheme";
 import { applyAttentionEnrichment, attentionCounts, attentionSummary, attentionUrl, createAttentionItem, dismissableInfoItems, machineEventAttention, mergeAttentionItem, type AttentionAction, type AttentionContent, type AttentionEnrichment } from "./attention";
@@ -84,8 +86,16 @@ const statuses = new Map<string, Record<string, unknown>>();
 const leases = new Map<string, LeaseState>();
 const surfaces = new Map<string, TerminalSurface>();
 const transcripts = new Map<string, TranscriptView>();
+// Pebble 3: ask and blocker render as the fused-tray objects on the Pebble 2 seam.
+installAttentionObjects();
 const conversationViews = new Map<string, ConversationView>();
+// Pebble 4: a supervisor's artifact is a dog-eared sheet on the thread, not a link row.
+installAttachmentSheet();
 const conversationHistories = new Map<string, ConversationHistory>();
+/** Supervisor turns per thread the operator had on screen the last time that thread was open. */
+const readReplies = new Map<string, number>();
+/** Rows as last rendered, so the compose FAB can pick the thread that most wants the operator. */
+let conversationRows: ConversationRow[] = [];
 const conversationList = new ConversationList();
 let hubPresentation: "conversation" | "terminal" = "conversation";
 const pendingSubmissions = new Set<string>();
@@ -95,6 +105,13 @@ function conversationHistory(key: string): ConversationHistory {
   return history;
 }
 function updateConversationViews(): void { for (const view of conversationViews.values()) view.update(); }
+let workingRefresh: ReturnType<typeof setTimeout> | undefined;
+/** Pane output lights the working line now and schedules the check that puts it out. */
+function refreshWorkingLines(): void {
+  for (const view of conversationViews.values()) view.refreshWorking();
+  if (workingRefresh !== undefined) clearTimeout(workingRefresh);
+  workingRefresh = setTimeout(() => { workingRefresh = undefined; for (const view of conversationViews.values()) view.refreshWorking(); }, WORKING_WINDOW_MS + 250);
+}
 // The shell is rebuilt only when its own inputs changed. A hub heartbeat
 // carries none of them, so it can no longer replace the composer mid-sentence.
 let lastShellSignature: string | undefined;
@@ -112,6 +129,8 @@ const sessionStates = new Map<string, SessionState>();
 export const sessionSummaries = new Map<string, SessionCardSummary>();
 const paneBuffers = new Map<string, number[]>();
 const paneLastActivity = new Map<string, number>();
+/** Pane output this recent keeps the thread's working line lit. */
+const WORKING_WINDOW_MS = 30_000;
 const authoritativeSessions = new Set<string>();
 const paneKeyframesReady = new Set<string>();
 const selectedPanes = new Map<string, string>();
@@ -236,16 +255,33 @@ function applyPaneView(key: string, mount: HTMLElement, surface: TerminalSurface
     let conversation = conversationViews.get(key);
     if (!conversation) {
       const threadKey = sessionKey(selectedMachineId!, selectedSession!);
-      const target = supervisorTarget(sessions.get(selectedMachineId!)?.find((item) => item.name === selectedSession)) || "Supervisor";
-      conversation = new ConversationView(document, surface.transcript, conversationHistory(threadKey), target, (text) => {
-        const composer = document.querySelector<HTMLTextAreaElement>("#message-text");
-        if (!composer || composer.dataset.threadKey !== threadKey) return;
-        if (composer.value.trim()) { showComposerStatus("Your draft already has text. Clear it before editing the refused message.", "info"); composer.focus(); return; }
-        composer.value = text; composer.dispatchEvent(new Event("input")); composer.focus();
+      const hubSession = sessions.get(selectedMachineId!)?.find((item) => item.name === selectedSession);
+      const target = supervisorTarget(hubSession) || "Supervisor";
+      const history = conversationHistory(threadKey);
+      conversation = new ConversationView(document, history, {
+        supervisor: target,
+        machine: machines.get(selectedMachineId!)?.label,
+        project: projectName(hubSession?.project_dir),
+        header: false,
+        // The supervisor is executing while a send awaits its reply or the
+        // pane produced output in the last half minute.
+        working: () => history.hasPending() || [...paneLastActivity].some(([paneId, at]) => paneId.startsWith(`${threadKey}:`) && Date.now() - at < WORKING_WINDOW_MS),
+        editMessage: (text) => {
+          const composer = document.querySelector<HTMLTextAreaElement>("#message-text");
+          if (!composer || composer.dataset.threadKey !== threadKey) return;
+          if (composer.value.trim()) { showComposerStatus("Your draft already has text. Clear it before editing the refused message.", "info"); composer.focus(); return; }
+          composer.value = text; composer.dispatchEvent(new Event("input")); composer.focus();
+        },
+        // A quick-reply chip answers the ask through the same leased path as
+        // the composer, with in_reply_to = the ask's notification id.
+        respond: (ask, text) => { void submitSupervisorMessage({ text, replyTo: ask.notification_id }); },
       });
       conversationViews.set(key, conversation);
     }
     if (conversation.element.parentElement !== mount) mount.append(conversation.element);
+    // The unanswered ask is pinned directly above the composer as well as in the flow.
+    const composerSlot = document.querySelector<HTMLElement>("#conversation-composer-slot");
+    if (composerSlot && conversation.pinned.parentElement !== composerSlot) composerSlot.prepend(conversation.pinned);
     conversation.update();
     return;
   }
@@ -546,6 +582,7 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
     onOutput: (session, pane, data) => {
       const key = paneKey(machine.id, session, pane);
       paneLastActivity.set(key, Date.now());
+      refreshWorkingLines();
       if (authoritativeSessions.has(sessionKey(machine.id, session)) && !paneKeyframesReady.has(key)) return;
       const buffered = [...(paneBuffers.get(key) ?? []), ...data];
       paneBuffers.set(key, buffered.slice(-2_000_000));
@@ -1832,17 +1869,17 @@ async function takeControlForMessage(machine: StoredMachine, session: string): P
   return leases.get(sessionKey(machine.id, session))?.held_by_me === true;
 }
 
-function deliverSupervisorMessage(machine: StoredMachine, session: string, supervisor: string, text: string): void {
+function deliverSupervisorMessage(machine: StoredMachine, session: string, supervisor: string, text: string, replyTo?: number): void {
   const clientRef = crypto.randomUUID();
-  const sent = sendControl(machine.id, session, supervisorMessage(supervisor, text, clientRef));
+  const sent = sendControl(machine.id, session, supervisorMessage(supervisor, text, clientRef, replyTo));
   // Without an outcome the operator cannot tell a sent message from a lost
   // one, and the natural response is to send it a second time.
   if (!sent) {
     showComposerStatus("The hub connection is reconnecting, so this message was not delivered. Try again once the session is live.", "error");
     return;
   }
-  conversationHistory(sessionKey(machine.id, session)).submit(clientRef, supervisor, text);
-  updateConversationViews();
+  conversationHistory(sessionKey(machine.id, session)).submit(clientRef, supervisor, text, Date.now(), replyTo);
+  updateConversationViews(); renderConversationList();
   const storedDraft = conversationDrafts.get(sessionKey(machine.id, session));
   if (storedDraft?.text.trim() === text) conversationDrafts.delete(sessionKey(machine.id, session));
   if (selectedMachineId !== machine.id || selectedSession !== session) return;
@@ -1864,7 +1901,12 @@ function deliverSupervisorMessage(machine: StoredMachine, session: string, super
   composer?.focus();
 }
 
-async function submitSupervisorMessage(): Promise<void> {
+/**
+ * `quick` is a tapped quick-reply chip: its text goes out instead of the
+ * composer's, answering that ask. Free text from the composer answers the
+ * pinned ask, if one is waiting, so either way the send carries in_reply_to.
+ */
+async function submitSupervisorMessage(quick?: { text: string; replyTo: number }): Promise<void> {
   const composer = document.querySelector<HTMLTextAreaElement>("#message-text");
   if (!composer) return;
   const renderedThread = composer.dataset.threadKey;
@@ -1873,7 +1915,8 @@ async function submitSupervisorMessage(): Promise<void> {
     showComposerStatus("The selected conversation changed. Reopen the conversation before sending.", "error");
     return;
   }
-  const text = composer.value.trim();
+  const text = quick?.text ?? composer.value.trim();
+  const replyTo = quick?.replyTo ?? (selectedThread ? conversationHistory(selectedThread).pinnedAsk()?.notification_id : undefined);
   const plan = planSupervisorSend(supervisorSendContext(text));
   if (plan.kind === "blocked") {
     showComposerStatus(plan.reason, "error");
@@ -1895,7 +1938,7 @@ async function submitSupervisorMessage(): Promise<void> {
       return;
     }
   }
-  deliverSupervisorMessage(machine, session, supervisor, text);
+  deliverSupervisorMessage(machine, session, supervisor, text, replyTo);
   } finally {
     pendingSubmissions.delete(submissionKey);
   }
@@ -2159,7 +2202,7 @@ function render(captureDraft = true): void {
     machineDialog.close(); machineDialog.showModal();
   }
   if (hubPresentation === "conversation") {
-    arrangeConversationShell(app, { selected: Boolean(selectedSession), supervisor, projectDir: selectedHubSession?.project_dir, host: selected?.label, loaded: machineCatalogLoaded, paired: machines.size > 0 });
+    arrangeConversationShell(app, { selected: Boolean(selectedSession), supervisor, projectDir: selectedHubSession?.project_dir, host: selected?.label, machineId: selectedSession ? selected?.id : undefined, loaded: machineCatalogLoaded, paired: machines.size > 0 });
   } else {
     const returnControl = app.querySelector<HTMLButtonElement>("#talk-supervisor");
     if (returnControl) { returnControl.id = "conversation-return"; returnControl.textContent = "Conversations"; }
@@ -2286,10 +2329,20 @@ function renderConversationList(): void {
   const container = document.querySelector<HTMLElement>("#conversation-list");
   if (!container) return;
   const rows: ConversationRow[] = [...machines.values()].flatMap((machine) => visibleSessions(machine.id).filter((session) => supervisorTarget(session)).map((session) => {
+    const key = sessionKey(machine.id, session.name);
     const updated = fleetCatalogUpdatedAt.get(machine.id);
-    const counts = attentionCounts(attention.filter((item) => item.machineId === machine.id && item.session === session.name));
-    return { key: sessionKey(machine.id, session.name), machineId: machine.id, session: session.name, supervisor: session.supervisor, projectDir: session.project_dir, host: machine.label, freshness: updated ? `Catalog checked ${relativeTimestamp(Date.parse(updated))}` : "Catalog not yet checked", connection: session.unreachable ? "Unreachable · message pending" : session.dormant ? "Dormant" : session.liveness === "live" ? fleetConnectionLabel(connectionStates.get(machine.id)) : "Session unavailable", attention: counts.critical + counts.warning, selected: machine.id === selectedMachineId && session.name === selectedSession };
+    const selected = machine.id === selectedMachineId && session.name === selectedSession;
+    // Preview is the last turn this page has seen; unread counts supervisor
+    // turns that arrived while the thread was not open. Opening it reads them.
+    const events = conversationHistories.get(key)?.events ?? [];
+    const last = events.at(-1);
+    const replies = events.filter((event) => event.kind === "reply").length;
+    if (selected) readReplies.set(key, replies);
+    // Waiting (ochre dot, hot time) is driven by asks and blockers the operator has not answered.
+    const waiting = conversationHistories.get(key)?.waiting().length ?? 0;
+    return { key, machineId: machine.id, session: session.name, supervisor: session.supervisor, projectDir: session.project_dir, host: machine.label, freshness: updated ? `Catalog checked ${relativeTimestamp(Date.parse(updated))}` : "Catalog not yet checked", when: updated ? relativeTimestamp(Date.parse(updated)) : undefined, preview: last ? (last.kind === "send" ? `You: ${last.value.text}` : last.value.message) : undefined, connection: session.unreachable ? "Unreachable · message pending" : session.dormant ? "Dormant" : session.liveness === "live" ? fleetConnectionLabel(connectionStates.get(machine.id)) : "Session unavailable", attention: waiting, unread: Math.max(0, replies - (readReplies.get(key) ?? 0)), selected };
   }));
+  conversationRows = rows;
   conversationList.render(container, rows, (row) => { void openSession(row.machineId, row.session); });
   const empty = document.querySelector<HTMLElement>("#conversation-empty");
   if (empty) { empty.hidden = rows.length > 0; empty.textContent = !machineCatalogLoaded ? "Loading paired machines…" : machines.size === 0 ? "Pair a machine to start your first conversation." : "No live supervisors listed. Use Appearance & commands to show dormant sessions for recovery."; }
@@ -2656,6 +2709,14 @@ function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | und
   if (terminal) terminal.onclick = () => { hubPresentation = "terminal"; const storage = paneLayoutStorage(); if (storage && selectedMachineId && selectedSession) saveTranscriptView(storage, sessionKey(selectedMachineId, selectedSession), "terminal"); render(); };
   const returning = document.querySelector<HTMLButtonElement>("#conversation-return");
   if (returning) returning.onclick = () => { hubPresentation = "conversation"; render(); };
+  // Phone compose FAB: open the thread that is waiting on the operator, else
+  // the first one, and land in its composer; with nothing paired, pair.
+  const compose = document.querySelector<HTMLButtonElement>("#compose-fab");
+  if (compose) compose.onclick = () => {
+    const row = conversationRows.find((candidate) => candidate.attention > 0) ?? conversationRows[0];
+    if (!row) { openPairDialog(); return; }
+    void openSession(row.machineId, row.session).then(() => queueMicrotask(() => document.querySelector<HTMLTextAreaElement>("#message-text")?.focus()));
+  };
 
   const paletteToggle = document.querySelector<HTMLButtonElement>("#command-palette-toggle");
   if (paletteToggle) paletteToggle.onclick = openCommandPalette;

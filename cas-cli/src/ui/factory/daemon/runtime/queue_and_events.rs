@@ -9279,6 +9279,7 @@ mod tests {
             "Status please",
             None,
             false,
+            None,
             &unpaired,
         )
         .unwrap()
@@ -9292,6 +9293,7 @@ mod tests {
             "Status please, really",
             None,
             false,
+            None,
             &unpaired,
         )
         .unwrap()
@@ -9308,6 +9310,108 @@ mod tests {
                 "{header}"
             );
         }
+    }
+
+    /// cas-a8ea8: a Commander frame answering a supervisor ask
+    /// (`in_reply_to = N`) lands as a coordination row bound to that ask —
+    /// the same explicit reply reference a worker reply carries — and the ask
+    /// itself is confirmed, so the supervisor's inbox shows the answer bound
+    /// to its question instead of a fresh unrelated message.
+    #[test]
+    fn commander_reply_to_an_ask_binds_the_row_and_confirms_the_ask() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+        let attribution = crate::ui::factory::protocol::MessageAttribution {
+            device_id: Some("device-123".to_string()),
+            credential_id: Some("credential-456".to_string()),
+            device_label: Some("Pippenz phone".to_string()),
+            operator_label: Some("Pippenz".to_string()),
+            controller_origin: Some("https://commander.example".to_string()),
+            request_id: Some("request-789".to_string()),
+            scopes: vec!["message:send".to_string()],
+            operator_verified: true,
+        };
+        // The supervisor's ask, stored exactly as message.rs stores a
+        // target='operator' Commander turn.
+        let ask_payload = serde_json::to_string(&crate::ui::factory::OperatorReplyPayload {
+            schema_version: 2,
+            reply_to: None,
+            message: "Fix in-train or ship with allowlist?".to_string(),
+            summary: "ask".to_string(),
+            device_id: "device-123".to_string(),
+            operator_label: Some("Pippenz".to_string()),
+            kind: crate::ui::factory::OperatorTurnKind::Ask,
+            attachments: Vec::new(),
+        })
+        .unwrap();
+        let ask_id = queue
+            .enqueue_urgent_with_outcome(
+                "supervisor",
+                "operator",
+                &ask_payload,
+                Some("factory-1"),
+                Some("ask"),
+                Some(cas_store::NotificationPriority::Normal),
+                false,
+                Some(&cas_store::QueueOrigin::Daemon),
+            )
+            .unwrap()
+            .id();
+        queue.stamp_operator_reply(ask_id, "ask", &[]).unwrap();
+        let before = queue.message_delivery_report(ask_id).unwrap().unwrap();
+        assert_eq!(before.confirmation_source, cas_store::ConfirmationSource::Unconfirmed);
+
+        let reply_id = super::super::delivery::enqueue_commander_message(
+            &cas_dir,
+            "factory-1",
+            "patient-pelican-9",
+            "Fix in-train",
+            Some("Cassy Cloud message"),
+            false,
+            Some(ask_id),
+            &attribution,
+        )
+        .unwrap()
+        .id();
+
+        let queued = queue.peek_all(10).unwrap();
+        let row = queued.iter().find(|row| row.id == reply_id).unwrap();
+        assert_eq!(row.target, "patient-pelican-9");
+        assert_eq!(
+            row.prompt,
+            format!("[CAS reply: explicitly acknowledges notification_id={ask_id}]\nFix in-train")
+        );
+        assert_eq!(row.origin.as_ref().and_then(cas_store::QueueOrigin::verified_device_id), Some("device-123"));
+        let after = queue.message_delivery_report(ask_id).unwrap().unwrap();
+        assert_eq!(after.confirmation_source, cas_store::ConfirmationSource::ExplicitAck);
+        assert!(after.confirmed_at.is_some(), "the ask is confirmed by the operator's answer");
+
+        // A reference that is not a supervisor→operator turn is refused, and
+        // nothing is queued for it.
+        let worker_row = queue
+            .enqueue_urgent_with_outcome("supervisor", "worker-1", "work", Some("factory-1"), None, None, false, None)
+            .unwrap()
+            .id();
+        for (reference, expected) in [
+            (worker_row, "not a supervisor turn addressed to the operator"),
+            (ask_id + 1_000, "does not exist"),
+        ] {
+            let error = super::super::delivery::enqueue_commander_message(
+                &cas_dir,
+                "factory-1",
+                "patient-pelican-9",
+                "Hold",
+                None,
+                false,
+                Some(reference),
+                &attribution,
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(error.contains(expected), "{error}");
+        }
+        assert_eq!(queue.peek_all(10).unwrap().len(), 3, "refused replies queue nothing");
     }
 
     /// cas-f65d: a Commander semantic message and the equivalent MCP
@@ -9337,6 +9441,7 @@ mod tests {
             "Please checkpoint now",
             Some("checkpoint request"),
             false,
+            None,
             &attribution,
         )
         .unwrap()

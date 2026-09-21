@@ -5,10 +5,12 @@ export function supervisorTarget(session: HubSession | undefined): string | unde
   return target || undefined;
 }
 
-export function supervisorMessage(target: string, text: string, clientRef?: string): Record<string, unknown> {
+/** `inReplyTo` is the notification_id of the supervisor ask this message answers. */
+export function supervisorMessage(target: string, text: string, clientRef?: string, inReplyTo?: number): Record<string, unknown> {
   return {
     SendMessage: {
       ...(clientRef ? { client_ref: clientRef } : {}),
+      ...(inReplyTo === undefined ? {} : { in_reply_to: inReplyTo }),
       target,
       text,
       summary: "Cassy Cloud message",

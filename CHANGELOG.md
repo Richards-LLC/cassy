@@ -7,6 +7,46 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.27.0] - 2026-09-21
+
+### Changed
+
+- The hub's default conversation surface is now Pebble, the messaging design the
+  operator picked on 2026-09-18. The conversation list shows every supervisor
+  as a row with its machine's colour and monogram, the supervisor name, its
+  project and machine, a preview line, and two distinct affordances: a waiting
+  dot with a highlighted time when a supervisor needs an answer, and a filled
+  count pill for unread turns. The thread renders the operator's messages as
+  constant indigo pebbles on the right and the supervisor's in its machine
+  colour on the left, tightens the corners of consecutive turns into one group
+  with a single timestamp, folds runs of status updates into one quiet line,
+  marks receipts with a tick, shows a working indicator while the supervisor is
+  executing, and fits an evidence table inside a message at phone width without
+  a horizontal scroller.
+- A supervisor's ask and blocker are objects with their own silhouette: the body
+  steps down into a deeper tray holding quick-reply chips, and a blocker swaps
+  the tray for an inset evidence window. An unanswered ask is also pinned
+  directly above the composer and unpins when answered. Tapping a chip or
+  replying to the pinned ask sends the answer bound to that ask.
+- Report attachments render as raised dog-eared sheets laid on the thread
+  (type plate, name and size; the whole sheet opens the artifact) instead of a
+  link row inside a bubble. The composer is a pill field with the send button
+  in the machine colour naming the supervisor; a conversation with nothing
+  waiting shows a quiet empty state.
+- The live terminal pane no longer mirrors into the default conversation; the
+  terminal remains one tap away as the explicit alternate view. The thread has a
+  single header (monogram, supervisor with the project badge, machine and OS).
+
+### Fixed
+
+- The operator's reply reference now survives the hub. `SendMessage` frames
+  carry an optional `in_reply_to`; the hub forwards it unchanged and the daemon
+  binds the queued row to the supervisor's ask and confirms it, so a quick reply
+  reaches the supervisor bound to its question instead of as an unrelated
+  message. Older clients and frames without the field are unchanged.
+- Conversation list rows no longer leave a dangling separator when a long
+  project name wraps, and the rail footer counts the rows actually rendered.
+
 ## [3.26.0] - 2026-09-19
 
 ### Fixed

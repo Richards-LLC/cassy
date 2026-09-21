@@ -7,6 +7,29 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.27.1] - 2026-09-21
+
+### Fixed
+
+- A supervisor's answer to a Commander message now reaches the operator even
+  when the supervisor addresses it to the message's "From" label
+  (`commander:<label>`): that target is routed to the verified operator lane
+  with the reply reference inferred from the newest matching Commander row.
+  Message targets that can never be an agent (row-source labels such as
+  `lifecycle:` or `verification-dispatch:`, or empty names) are refused at call
+  time instead of being queued and silently abandoned, while a not-yet-registered
+  worker name still queues as before. The inbox, hook and daemon framing of a
+  verified Commander message now print the exact reply command.
+- On a phone, opening the keyboard no longer pushes the conversation header and
+  the latest messages out of view: the hub declares
+  `interactive-widget=resizes-content`, sizes the shell from the visual viewport
+  as a fallback, and follows the thread tail when the composer takes focus.
+- `cas update` restarts the hub through its installed systemd user service
+  instead of launching a detached hub beside it, records the old and new hub
+  versions in its outcome, keeps the unit's publication flags, and `cas hub
+  status` and `cas doctor` warn when the service is installed but inactive
+  while a detached hub holds the lock.
+
 ## [3.27.0] - 2026-09-21
 
 ### Changed

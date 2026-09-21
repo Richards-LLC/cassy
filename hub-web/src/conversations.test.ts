@@ -4,6 +4,7 @@ import { ConversationHistory } from "./conversation-history";
 import { ConversationList, type ConversationRow } from "./conversation-list";
 import { ConversationView } from "./conversation-view";
 import { conversationShellMarkup } from "./conversation-shell";
+import { renderConversationFixture } from "../fixtures/conversations";
 import { projectName, projectBadge } from "./cloud-brand";
 
 const reply = { notification_id: 42, reply_to: 41, message: 'Actual supervisor reply <safe>', summary: '', device_id: 'device', operator_label: 'Daniel' };
@@ -62,6 +63,9 @@ describe('conversation evidence', () => {
     expect(waiting.querySelector('.conversation-avatar')?.textContent).toBe('A');
     expect(waiting.querySelector('.conversation-supervisor')?.textContent).toBe('patient-pelican-9');
     expect(waiting.querySelector('.project-badge')?.textContent).toBe('cas-src');
+    // Separator and project travel together so a wrapped project never leaves the dot dangling.
+    expect(waiting.querySelector('.conversation-project')?.innerHTML).toBe('<span class="conversation-sep" aria-hidden="true"></span><span class="project-badge">cas-src</span>');
+    expect(waiting.querySelector('.conversation-who > .conversation-sep')).toBeNull();
     expect(waiting.querySelector('.conversation-preview')?.textContent).toBe('Fix <it>?');
     expect(waiting.querySelector('script, it')).toBeNull();
     expect(waiting.querySelector('.conversation-when')?.className).toBe('conversation-when hot');
@@ -76,6 +80,15 @@ describe('conversation evidence', () => {
     expect(quiet.querySelector('.conversation-preview')?.textContent).toBe('Live');
     expect(quiet.querySelector('.conversation-preview')?.className).toBe('conversation-preview');
     expect(quiet.querySelector('.conversation-flag, .conversation-unread')).toBeNull();
+  });
+  it('renders the fixture list with a footer count equal to the rows rendered', () => {
+    const app = document.createElement('div'); document.body.replaceChildren(app);
+    renderConversationFixture(app, 'conversations-list');
+    const rows = app.querySelectorAll('.conversation-row').length;
+    expect(rows).toBe(6);
+    expect(app.querySelector('.hub-footer-meta span')?.textContent).toBe(`${rows} conversations`);
+    expect(new Set([...app.querySelectorAll('.conversation-row')].map((row) => row.className)).size).toBe(3);
+    expect([...app.querySelectorAll('.project-badge')].map((badge) => badge.textContent)).toContain('petra-stella-cloud');
   });
   it('puts the selected machine accent on the shell root and a compose FAB in the operator colour', () => {
     const shell = conversationShellMarkup({ selected: true, supervisor: 'patient-pelican-9', projectDir: '/projects/cas-src', host: 'Atlas · Linux', machineId: 'atlas-linux', loaded: true, paired: true });

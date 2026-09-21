@@ -32,8 +32,10 @@ export function conversationRowMarkup(row: ConversationRow): string {
   const time = row.when ? `<span class="conversation-when${waiting ? " hot" : ""}" title="${escapeHtml(row.freshness)}">${escapeHtml(row.when)}</span>` : "";
   const headlineEnd = unread > 0 ? `<span class="conversation-unread" aria-label="${unread} unread">${unread}</span>` : time;
   const flag = waiting ? `<span class="conversation-flag" role="img" aria-label="${row.attention === 1 ? "Waiting for you" : `${row.attention} waiting for you`}"></span>` : "";
+  // The separator and project are one inline unit, so a long project name wraps
+  // as "· project" on the next line and never leaves the dot dangling.
   return `<span class="conversation-avatar" aria-hidden="true">${escapeHtml(machineMonogram(row.host))}</span>`
-    + `<span class="conversation-who"><strong class="conversation-supervisor">${escapeHtml(row.supervisor)}</strong><span class="conversation-sep" aria-hidden="true"></span>${projectBadge(row.projectDir)}</span>`
+    + `<span class="conversation-who"><strong class="conversation-supervisor">${escapeHtml(row.supervisor)}</strong><span class="conversation-project"><span class="conversation-sep" aria-hidden="true"></span>${projectBadge(row.projectDir)}</span></span>`
     + headlineEnd
     + `<span class="conversation-preview${waiting || unread > 0 ? " bold" : ""}">${escapeHtml(preview)}</span>`
     + flag;

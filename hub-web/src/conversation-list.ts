@@ -1,5 +1,6 @@
 import { escapeHtml, projectBadge } from "./cloud-brand";
 import { machineAccentClass, machineMonogram } from "./machine-accent";
+import { plainTextMarkdown } from "./markdown-renderer";
 
 export interface ConversationRow {
   key: string;
@@ -34,7 +35,7 @@ export function machineName(host: string): string {
 export function conversationRowMarkup(row: ConversationRow): string {
   const waiting = row.attention > 0;
   const unread = row.unread ?? 0;
-  const preview = row.preview || row.connection;
+  const preview = plainTextMarkdown(row.preview || row.connection);
   const time = row.when ? `<span class="conversation-when${waiting ? " hot" : ""}" title="${escapeHtml(row.freshness)}">${escapeHtml(row.when)}</span>` : "";
   const headlineEnd = unread > 0 ? `<span class="conversation-unread" aria-label="${unread} unread">${unread}</span>` : time;
   const flag = waiting ? `<span class="conversation-flag" role="img" aria-label="${row.attention === 1 ? "Waiting for you" : `${row.attention} waiting for you`}"></span>` : "";

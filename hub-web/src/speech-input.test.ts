@@ -86,6 +86,39 @@ describe("speech dictation", () => {
     expect(controller.listening).toBe(true);
   });
 
+  it("inserts the transcript at the captured caret and stops on the second tap", () => {
+    let recognition: SpeechRecognitionLike | undefined;
+    const states: string[] = [];
+    const writes: Array<[string, boolean, number | undefined]> = [];
+    const controller = new SpeechDictationController({
+      mode: "cloud",
+      language: "en-US",
+      create: () => {
+        recognition = new (recognitionConstructor())();
+        return recognition;
+      },
+    }, {
+      read: () => "Keep this draft",
+      caret: () => 4,
+      write: (value, interim, caret) => writes.push([value, interim, caret]),
+      state: (state) => states.push(state),
+      permissionDenied: vi.fn(),
+    });
+
+    controller.toggle();
+    const stop = vi.fn();
+    if (recognition) recognition.stop = stop;
+    recognition?.onresult?.({
+      results: [{ 0: { transcript: " spoken" }, isFinal: true }],
+    } as unknown as Event & { results: ArrayLike<{ readonly isFinal: boolean; readonly 0: { readonly transcript: string } }> });
+    controller.toggle();
+
+    expect(writes).toEqual([["Keep spoken this draft", false, 11]]);
+    expect(stop).toHaveBeenCalledOnce();
+    expect(states).toEqual(["listening", "idle"]);
+    expect(controller.listening).toBe(false);
+  });
+
   it("degrades permission denial without replacing it with a generic end state", () => {
     let recognition: SpeechRecognitionLike | undefined;
     const states: string[] = [];

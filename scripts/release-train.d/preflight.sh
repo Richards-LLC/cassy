@@ -10,8 +10,12 @@ cut_preflight_block() {
     return 1
 }
 
+cut_preflight_merge_queue_query() {
+    printf '%s\n' 'query { repository(owner: "Richards-LLC", name: "cassy") { mergeQueue(branch: "main") { entries(first: 100) { nodes { pullRequest { number title headRefName } } } } } }'
+}
+
 cut_preflight_check_competing_release() {
-    local gh="${CAS_RELEASE_TRAIN_GH:-gh}" prs queue
+    local gh="${CAS_RELEASE_TRAIN_GH:-gh}" prs queue query competing
     [[ "${CAS_RELEASE_TRAIN_PREFLIGHT_SKIP_COMPETING:-}" == 1 ]] && return 0
     if ! command -v "$gh" >/dev/null 2>&1; then
         cut_preflight_block competing-release "GitHub CLI $gh is not available"
@@ -29,14 +33,36 @@ cut_preflight_check_competing_release() {
         cut_preflight_block competing-release "an open release PR already targets $version"
         return $?
     fi
-    if ! queue="$("$gh" api graphql -f query='query { repository(owner: "Richards-LLC", name: "cassy") { mergeQueue(branch: "main") { entries(first: 100) { nodes { pullRequest { number title headRefName } } } } } }' 2>/dev/null)"; then
+    query="$(cut_preflight_merge_queue_query)"
+    if ! queue="$("$gh" api graphql -f query="$query" 2>/dev/null)"; then
         cut_preflight_block competing-release "could not inspect the merge queue with $gh"
         return $?
     fi
-    if printf '%s' "$queue" | grep -Eiq "release[ /_-]*${version}|v${version}"; then
+    if ! printf '%s' "$queue" | jq -e \
+        '.data.repository.mergeQueue.entries.nodes | type == "array"' >/dev/null 2>&1; then
+        cut_preflight_block competing-release "merge queue response did not contain repository.mergeQueue.entries.nodes"
+        return $?
+    fi
+    competing="$(printf '%s' "$queue" | jq -r \
+        '.data.repository.mergeQueue.entries.nodes[]?.pullRequest
+         | [(.title // ""), (.headRefName // "")] | join(" ")')"
+    if printf '%s' "$competing" | grep -Eiq "release[ /_-]*${version}|v${version}"; then
         cut_preflight_block competing-release "a release pull request is already in the merge queue"
         return $?
     fi
+}
+
+cut_preflight_env_value() {
+    local key="$1" env_file="${CAS_RELEASE_ENV_FILE:-$HOME/.cas/release.env}" line value
+    [[ -r "$env_file" ]] || return 1
+    line="$(grep -E "^(export )?${key}=" "$env_file" | head -n1 || true)"
+    [[ -n "$line" ]] || return 1
+    value="${line#*=}"
+    value="${value#\"}"
+    value="${value%\"}"
+    value="${value#\'}"
+    value="${value%\'}"
+    printf '%s\n' "$value"
 }
 
 cut_preflight_check_tag() {
@@ -60,8 +86,13 @@ cut_preflight_check_tag() {
 }
 
 cut_preflight_check_scratch() {
-    local scratch="${CAS_RELEASE_GATE_HOME_DIR:-/var/tmp/cas-release-gate}"
-    local probe="$scratch/.release-train-write.$$" archive required available previous
+    local scratch="${CAS_RELEASE_GATE_HOME_DIR:-}" configured
+    local probe archive required available previous scratch_parent checkout_device scratch_device
+    if [[ -z "$scratch" ]]; then
+        configured="$(cut_preflight_env_value CAS_RELEASE_GATE_HOME_DIR 2>/dev/null || true)"
+        scratch="${configured:-/var/tmp/cas-release-gate}"
+    fi
+    probe="$scratch/.release-train-write.$$"
     mkdir -p "$scratch" 2>/dev/null || {
         cut_preflight_block scratch-space "scratch base $scratch is not writable"
         return $?
@@ -71,6 +102,14 @@ cut_preflight_check_scratch() {
         return $?
     }
     rm -f "$probe"
+    scratch_parent="$(dirname "$scratch")"
+    checkout_device="${CAS_RELEASE_TRAIN_CHECKOUT_DEVICE:-$(stat -c %d "$worktree" 2>/dev/null || true)}"
+    scratch_device="${CAS_RELEASE_TRAIN_SCRATCH_DEVICE:-$(stat -c %d "$scratch_parent" 2>/dev/null || true)}"
+    if [[ -z "$checkout_device" || -z "$scratch_device" || "$checkout_device" != "$scratch_device" ]]; then
+        cut_preflight_block scratch-space \
+            "filesystem boundary: checkout device=${checkout_device:-unknown} scratch-parent device=${scratch_device:-unknown}"
+        return $?
+    fi
     archive="${CAS_RELEASE_TRAIN_LAST_ARCHIVE_SIZE:-}"
     if [[ -z "$archive" && -s "$scratch/archive-size-bytes" ]]; then
         archive="$(tr -d '[:space:]' <"$scratch/archive-size-bytes")"
@@ -86,7 +125,7 @@ cut_preflight_check_scratch() {
     fi
     [[ "$archive" =~ ^[0-9]+$ ]] || archive=0
     required=$((archive * 2))
-    available="$(df -Pk "$scratch" 2>/dev/null | awk 'NR == 2 { print $4 * 1024; exit }')"
+    available="$(df -Pk "$scratch_parent" 2>/dev/null | awk 'NR == 2 { print $4 * 1024; exit }')"
     if [[ "$required" -gt 0 && (! "$available" =~ ^[0-9]+$ || "$available" -lt "$required") ]]; then
         cut_preflight_block scratch-space \
             "scratch base $scratch has ${available:-unknown} bytes free; need at least $required"
@@ -95,32 +134,49 @@ cut_preflight_check_scratch() {
 }
 
 cut_preflight_check_env() {
-    local env_file="${CAS_RELEASE_ENV_FILE:-$HOME/.cas/release.env}" names
+    local env_file="${CAS_RELEASE_ENV_FILE:-$HOME/.cas/release.env}" names configured
     [[ -r "$env_file" ]] || {
         cut_preflight_block release-env "release env file $env_file is not readable"
         return $?
     }
     names="$(grep -oE '^(export )?[A-Z_]+=' "$env_file" | sed 's/=$//; s/^export //' | tr '\n' ' ')"
+    if [[ -z "${CAS_RELEASE_GATE_HOME_DIR:-}" ]]; then
+        configured="$(cut_preflight_env_value CAS_RELEASE_GATE_HOME_DIR 2>/dev/null || true)"
+        [[ -z "$configured" ]] || export CAS_RELEASE_GATE_HOME_DIR="$configured"
+    fi
     printf 'release env names: %s\n' "$names"
 }
 
 cut_preflight_check_zig() {
-    local zig="${ZIG:-}" main_checkout
+    local zig="${ZIG:-}" main_checkout zig_dir
     if [[ -n "$zig" && -x "$zig" ]]; then
         export ZIG="$zig"
         return 0
     fi
-    if [[ -x "$worktree/.context/zig/zig" ]]; then
+    if [[ -d "$worktree/.context/zig" && -x "$worktree/.context/zig/zig" ]]; then
         export ZIG="$worktree/.context/zig/zig"
         return 0
     fi
     main_checkout="$(git -C "$worktree" rev-parse --path-format=absolute --git-common-dir 2>/dev/null \
         | sed 's#/\.git$##')"
-    if [[ -x "$main_checkout/.context/zig/zig" ]]; then
+    zig_dir="$worktree/.context/zig"
+    if [[ -d "$main_checkout/.context/zig" && -x "$main_checkout/.context/zig/zig" ]]; then
         mkdir -p "$worktree/.context"
-        ln -s "$main_checkout/.context/zig/zig" "$worktree/.context/zig"
-        export ZIG="$worktree/.context/zig/zig"
-        return 0
+        if [[ -L "$zig_dir" ]]; then
+            rm -f "$zig_dir"
+        elif [[ -e "$zig_dir" && ! -d "$zig_dir" ]]; then
+            cut_preflight_block zig "$zig_dir exists but is not a Zig toolchain directory"
+            return $?
+        fi
+        if [[ ! -e "$zig_dir" ]]; then
+            ln -s "$main_checkout/.context/zig" "$zig_dir"
+        fi
+        if [[ -d "$zig_dir" && -x "$zig_dir/zig" ]]; then
+            export ZIG="$zig_dir/zig"
+            return 0
+        fi
+        cut_preflight_block zig "could not link the main checkout Zig toolchain directory into $zig_dir"
+        return $?
     fi
     if command -v zig >/dev/null 2>&1; then
         export ZIG="$(command -v zig)"
@@ -207,8 +263,8 @@ cut_stage_preflight() {
     }
     cut_preflight_check_competing_release || return 1
     cut_preflight_check_tag || return 1
-    cut_preflight_check_scratch || return 1
     cut_preflight_check_env || return 1
+    cut_preflight_check_scratch || return 1
     cut_preflight_check_zig || return 1
     cut_preflight_check_changelog || return 1
     cut_preflight_check_draft || return 1

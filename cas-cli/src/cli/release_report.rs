@@ -1268,9 +1268,14 @@ fn assemble_markdown(
         output.push_str("CHANGELOG source: unavailable.\n\n");
     }
     if let Some(release) = &sources.release {
+        let release_url = release
+            .url
+            .as_deref()
+            .map(|url| format!("<{url}>"))
+            .unwrap_or_else(|| "unavailable".to_string());
         output.push_str(&format!(
             "GitHub release: {} ({}).\n\n",
-            release.url.as_deref().unwrap_or("unavailable"),
+            release_url,
             if release.is_draft == Some(true) {
                 "draft"
             } else {
@@ -1310,6 +1315,7 @@ fn was_now_sections(sources: &AcquiredSources, user_facing: bool) -> String {
             let group = article
                 .group
                 .clone()
+                .map(|group| report_group_heading(&group, user_facing))
                 .unwrap_or_else(|| "Release changes".to_string());
             if let Some((_, articles)) = grouped.iter_mut().find(|(known, _)| known == &group) {
                 articles.push(article);
@@ -1401,6 +1407,15 @@ fn source_reference_line(sources: &AcquiredSources, tag: &str) -> String {
             refs.join(", "),
             sources.retrieved_at
         )
+    }
+}
+
+fn report_group_heading(group: &str, user_facing: bool) -> String {
+    let group = group.trim().trim_end_matches(':').trim();
+    if group.eq_ignore_ascii_case("Only reply") {
+        format!("{group} ({})", if user_facing { "user" } else { "dev" })
+    } else {
+        group.to_string()
     }
 }
 

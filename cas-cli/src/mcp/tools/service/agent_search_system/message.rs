@@ -149,6 +149,14 @@ pub(crate) fn commander_reply_command(message: &cas_store::QueuedPrompt) -> Opti
     })
 }
 
+pub(crate) const COMMANDER_REPLY_CONTRACT_POINTER: &str =
+    "Phone reply contract: see `cas-supervisor/references/operator-reply.md`.";
+
+fn commander_reply_framing(message: &cas_store::QueuedPrompt) -> Option<String> {
+    commander_reply_command(message)
+        .map(|command| format!("Reply with: `{command}`\n{COMMANDER_REPLY_CONTRACT_POINTER}\n"))
+}
+
 /// These values are CAS-generated queue-source labels, never agent names.
 /// Plain names intentionally stay on the queue-before-register path: a
 /// supervisor may send a worker assignment before its registration lands.
@@ -2490,9 +2498,7 @@ impl CasService {
                             .unwrap_or_else(|| "earlier".to_string()),
                         message.summary.as_deref().unwrap_or("(no summary)"),
                         queued_message_provenance(message),
-                        commander_reply_command(message)
-                            .map(|command| format!("Reply with: `{command}`\n"))
-                            .unwrap_or_default(),
+                        commander_reply_framing(message).unwrap_or_default(),
                         message.prompt,
                     ));
                 }
@@ -2503,9 +2509,7 @@ impl CasService {
                         message.source,
                         message.summary.as_deref().unwrap_or("(no summary)"),
                         queued_message_provenance(message),
-                        commander_reply_command(message)
-                            .map(|command| format!("Reply with: `{command}`\n"))
-                            .unwrap_or_default(),
+                        commander_reply_framing(message).unwrap_or_default(),
                         message.prompt,
                     ));
                 }
@@ -3947,8 +3951,15 @@ mod cas_89e1_post_merge_message_type_tests {
             commander_reply_command(&row).as_deref(),
             Some("coordination action=message target=operator in_reply_to=3139 message=…")
         );
+        assert_eq!(
+            super::commander_reply_framing(&row).as_deref(),
+            Some(
+                "Reply with: `coordination action=message target=operator in_reply_to=3139 message=…`\nPhone reply contract: see `cas-supervisor/references/operator-reply.md`.\n",
+            )
+        );
         row.origin = None;
         assert_eq!(commander_reply_command(&row), None);
+        assert_eq!(super::commander_reply_framing(&row), None);
     }
 
     #[tokio::test(flavor = "current_thread")]

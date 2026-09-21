@@ -136,6 +136,46 @@ def resolve_secret(name: str, explicit_env: str | None, credentials: dict[str, s
     return credentials.get(name, "")
 
 
+def registered_mecha_token_env() -> str | None:
+    """Return the token variable named by this machine's Claude registration."""
+
+    config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+    config_path = (Path(config_dir).expanduser() if config_dir else Path.home()) / ".claude.json"
+    try:
+        document = json.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(document, dict):
+        return None
+    servers = document.get("mcpServers")
+    if not isinstance(servers, dict):
+        return None
+    server = servers.get("mecha-cassy")
+    if not isinstance(server, dict):
+        return None
+    headers = server.get("headers")
+    if not isinstance(headers, dict):
+        return None
+    authorization = headers.get("Authorization")
+    if not isinstance(authorization, str):
+        return None
+    match = re.fullmatch(
+        r"\s*Bearer\s+\$\{(MECHA_SLACK_TOKEN_[A-Z0-9][A-Z0-9_]*)\}\s*",
+        authorization,
+    )
+    return match.group(1) if match else None
+
+
+def select_token_env(candidates: set[str], registered_env: str | None) -> str | None:
+    """Choose a token variable, preferring the machine's registration."""
+
+    if registered_env:
+        return registered_env
+    if len(candidates) == 1:
+        return next(iter(candidates))
+    return None
+
+
 def resolve_token(credentials: dict[str, str]) -> str:
     explicit = os.environ.get("CAS_RELEASE_TRAIN_MECHA_TOKEN_ENV") or os.environ.get(
         "MECHA_SLACK_TOKEN_ENV"
@@ -153,8 +193,14 @@ def resolve_token(credentials: dict[str, str]) -> str:
             and value
         }
     )
-    if len(candidates) == 1:
-        return resolve_secret(candidates[0], candidates[0], credentials)
+    registered_env = registered_mecha_token_env()
+    selected_env = select_token_env(set(candidates), registered_env)
+    if selected_env:
+        token = resolve_secret(selected_env, None, credentials)
+        if token:
+            return token
+        if selected_env == registered_env:
+            fail(f"registered MechaCassy token variable {selected_env} is unset or empty")
     if len(candidates) > 1:
         names = ", ".join(candidates)
         fail(f"multiple MechaCassy token variables found ({names}); set MECHA_SLACK_TOKEN_ENV")

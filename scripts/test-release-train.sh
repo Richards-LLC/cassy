@@ -43,6 +43,12 @@ if [[ "${TRAIN_FIXTURE_LEDGER_DIRTY:-}" == 1 ]]; then
 fi
 EOF
       chmod +x scripts/gen-builtin-reference-history.sh
+      cat > scripts/bump-release-version.sh <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ -z "${RELEASE_TRAIN_BUMP_LOG:-}" ]] || printf '%s\n' "$1" >>"$RELEASE_TRAIN_BUMP_LOG"
+EOF
+      chmod +x scripts/bump-release-version.sh
       git add seed.txt
       git add scripts cas-cli
       git -c commit.gpgsign=false commit -q -m seed ) >/dev/null
@@ -90,6 +96,97 @@ wait_for_file() {
 # ---------------------------------------------------------------------------
 wt_a="$(new_worktree epic-a-merge)"
 wt_b="$(new_worktree epic-b-merge)"
+
+# Gaps 1–2: pin the exact mergeQueue GraphQL shape and the shell quoting that
+# sends it to gh. The response is the recorded repository.mergeQueue shape.
+preflight_query_log="$tmp/preflight-query.log"
+preflight_query_gh="$tmp/preflight-query-gh.sh"
+cat >"$preflight_query_gh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+case "$1 $2" in
+  "pr list") printf '[]\n' ;;
+  "api graphql")
+    for argument in "$@"; do
+        case "$argument" in query=*) printf '%s\n' "${argument#query=}" >"$PREFLIGHT_QUERY_LOG" ;; esac
+    done
+    grep -q 'mergeQueue(branch: "main")' "$PREFLIGHT_QUERY_LOG"
+    ! grep -q 'mergeQueueEntries' "$PREFLIGHT_QUERY_LOG"
+    printf '%s\n' '{"data":{"repository":{"mergeQueue":{"entries":{"nodes":[]}}}}}'
+    ;;
+  *) exit 2 ;;
+esac
+EOF
+chmod +x "$preflight_query_gh"
+(
+    source "$repo_root/scripts/release-train.d/preflight.sh"
+    version=9.99.0
+    worktree="$wt_a"
+    run_dir="$tmp/preflight-query-run"
+    artifacts_root="$tmp/artifacts"
+    CAS_RELEASE_TRAIN_GH="$preflight_query_gh"
+    export PREFLIGHT_QUERY_LOG="$preflight_query_log"
+        cut_stage_file() { printf '%s/stage.%s.done\n' "$run_dir" "$1"; }
+    cut_preflight_check_competing_release
+)
+if grep -q 'mergeQueue(branch: "main")' "$preflight_query_log" \
+    && grep -q 'entries(first: 100)' "$preflight_query_log"; then
+    ok 'gap 1: preflight uses repository.mergeQueue(branch).entries response shape'
+else
+    bad "gap 1: merge queue query shape was not recorded: $(cat "$preflight_query_log" 2>/dev/null || true)"
+fi
+if ! grep -q '\\\\"' "$preflight_query_log"; then
+    ok 'gap 2: merge queue query reaches gh without literal backslash escapes'
+else
+    bad "gap 2: merge queue query still contains escaped quotes: $(cat "$preflight_query_log")"
+fi
+
+# Gap 4: preflight consumes the configured scratch base from the release env
+# file and applies the same filesystem-boundary rule as the gate.
+preflight_env="$tmp/preflight-release.env"
+preflight_scratch="$tmp/preflight-scratch"
+printf 'CAS_RELEASE_GATE_HOME_DIR=%s\n' "$preflight_scratch" >"$preflight_env"
+if (
+    source "$repo_root/scripts/release-train.d/preflight.sh"
+    version=9.99.0
+    worktree="$wt_a"
+    run_dir="$tmp/preflight-scratch-run"
+    artifacts_root="$tmp/artifacts"
+    CAS_RELEASE_ENV_FILE="$preflight_env"
+    CAS_RELEASE_TRAIN_CHECKOUT_DEVICE=41
+    CAS_RELEASE_TRAIN_SCRATCH_DEVICE=41
+        cut_stage_file() { printf '%s/stage.%s.done\n' "$run_dir" "$1"; }
+    unset CAS_RELEASE_GATE_HOME_DIR
+    cut_preflight_check_scratch
+) && [[ -d "$preflight_scratch" ]]; then
+    ok 'gap 4: preflight reads CAS_RELEASE_GATE_HOME_DIR and checks the scratch mount'
+else
+    bad 'gap 4: preflight did not honor the configured scratch base and mount check'
+fi
+
+# Gap 6: a linked worktree receives the Zig toolchain directory, never a
+# symlink whose target is the compiler binary itself.
+zig_main="$(new_worktree zig-main)"
+mkdir -p "$zig_main/.context/zig"
+printf '#!/usr/bin/env bash\nexit 0\n' >"$zig_main/.context/zig/zig"
+chmod +x "$zig_main/.context/zig/zig"
+zig_release="$tmp/zig-release"
+git -C "$zig_main" worktree add -q -b release/zig-test "$zig_release" HEAD
+if (
+    source "$repo_root/scripts/release-train.d/preflight.sh"
+    version=9.99.0
+    worktree="$zig_release"
+    run_dir="$tmp/zig-run"
+    ZIG=
+    cut_stage_file() { printf '%s/stage.%s.done\n' "$run_dir" "$1"; }
+    cut_preflight_check_zig
+) && [[ -L "$zig_release/.context/zig" ]] \
+    && [[ -d "$zig_release/.context/zig" ]] \
+    && [[ -x "$zig_release/.context/zig/zig" ]]; then
+    ok 'gap 6: preflight links the full Zig toolchain directory'
+else
+    bad 'gap 6: preflight did not create a directory-shaped Zig link'
+fi
 
 dir_a="$("$train" 9.99.0 "$wt_a" --print-run-dir)"
 dir_b="$("$train" 9.99.0 "$wt_b" --print-run-dir)"
@@ -609,13 +706,17 @@ PAGE_COUNT=$pdf_pages
 PDF_FILE_PERMALINK=https://petra-stella.slack.com/files/FIXTURE/report.pdf
 PDF_FILE_ID=F0FIXTUREPDF
 HTML_FILE_ID=F0FIXTUREHTML
-USER_THREAD_TS=fixture-user-thread
-DEV_THREAD_TS=fixture-dev-thread
+USER_THREAD_TS=${4:-missing-user-thread}
+DEV_THREAD_TS=${5:-missing-dev-thread}
 RECEIPT
 EOF
 chmod +x "$report_post"
 printf '# Fixture release report\n' >"$wt_a/docs/release-reports/v9.99.0.md"
 rm "$dir_a/release-report.receipt"
+cat >"$dir_a/announce.receipt" <<'EOF'
+USER_TOP_LEVEL_ID=announce-user-thread
+DEV_TOP_LEVEL_ID=announce-dev-thread
+EOF
 report_out="$(CAS_RELEASE_TRAIN_REPORT_POST_CMD="$report_post" \
     "$train" 9.99.0 "$wt_a" --report 2>&1)"
 if [[ "$report_out" == *'release report: verified PDF=docs/release-reports/v9.99.0.pdf'* ]] \
@@ -623,6 +724,12 @@ if [[ "$report_out" == *'release report: verified PDF=docs/release-reports/v9.99
     ok '--report requires and accepts the posting adapter receipt after publication'
 else
     bad "--report did not complete through the receipt adapter: $report_out"
+fi
+if grep -q '^USER_THREAD_TS=announce-user-thread$' "$dir_a/release-report.receipt" \
+    && grep -q '^DEV_THREAD_TS=announce-dev-thread$' "$dir_a/release-report.receipt"; then
+    ok 'gap 8: report reads User and Dev thread ids from announce.receipt'
+else
+    bad 'gap 8: report did not pass announce thread ids to its posting adapter'
 fi
 
 # ---------------------------------------------------------------------------
@@ -663,7 +770,9 @@ EOF
 } >"$stage_wt/docs/release-notes/$stage_date-v9.99.8-slack.md"
 git -C "$stage_wt" add docs/release-notes
 git -C "$stage_wt" -c commit.gpgsign=false commit -qm 'seed release stage draft'
-prep_stage_out="$(CAS_RELEASE_TRAIN_DATE="$stage_date" "$train" 9.99.8 "$stage_wt" --prep 2>&1 || true)"
+prep_bump_log="$tmp/prep-bump.log"
+prep_stage_out="$(CAS_RELEASE_TRAIN_DATE="$stage_date" RELEASE_TRAIN_BUMP_LOG="$prep_bump_log" \
+    "$train" 9.99.8 "$stage_wt" --prep 2>&1 || true)"
 if [[ "$prep_stage_out" == *'prep complete'* ]] \
     && git -C "$stage_wt" log -1 --format=%s | grep -q 'release: prepare v9.99.8' \
     && grep -q 'Prior release receipt carried forward\|v9.99.7 POSTED' \
@@ -671,6 +780,11 @@ if [[ "$prep_stage_out" == *'prep complete'* ]] \
     ok '--prep commits the current draft and carries the prior POSTED receipt'
 else
     bad "--prep did not carry the draft/receipt: $prep_stage_out"
+fi
+if grep -qx '9.99.8' "$prep_bump_log" 2>/dev/null; then
+    ok 'gap 3: prep runs the release version bump before staging metadata'
+else
+    bad "gap 3: prep did not run the version bump: $prep_stage_out"
 fi
 
 announce_stub="$tmp/announce-stub.sh"
@@ -775,25 +889,131 @@ receipts_gh="$tmp/receipts-gh.sh"
 cat >"$receipts_gh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
+[[ -z "${RECEIPTS_GH_CALLS:-}" ]] || printf '%s\n' "$*" >>"$RECEIPTS_GH_CALLS"
 case "$1 $2" in
+  "pr list")
+    if [[ "${RECEIPTS_EXISTING_PR:-}" == 1 ]]; then
+        if [[ "$*" == *'--jq'* ]]; then printf '998\n'; else printf '[{"number":998}]\n'; fi
+    else
+        printf '[]\n'
+    fi
+    ;;
   "pr create") printf 'https://example.test/Richards-LLC/cassy/pull/998\n' ;;
-  "pr view") printf '{"id":"PR_kwDOFIXTURE998"}\n' ;;
-  "api graphql") printf '{"data":{"enqueuePullRequest":{"mergeQueueEntry":{"state":"QUEUED"}}}}\n' ;;
+  "pr view")
+    if [[ "$*" == *'--json id'* ]]; then
+        printf '{"id":"PR_kwDOFIXTURE998","mergeable":"MERGEABLE","state":"OPEN"}\n'
+    else
+        printf '{"id":"PR_kwDOFIXTURE998","mergeable":"MERGEABLE","state":"OPEN"}\n'
+    fi
+    ;;
+  "api graphql")
+    if [[ -n "${RECEIPTS_QUEUE_STATE_FILE:-}" && ! -s "$RECEIPTS_QUEUE_STATE_FILE" ]]; then
+        printf 'UNPROCESSABLE Pull request mergeability check has not yet completed\n' >&2
+        printf 'attempted\n' >"$RECEIPTS_QUEUE_STATE_FILE"
+        exit 1
+    fi
+    printf '{"data":{"enqueuePullRequest":{"mergeQueueEntry":{"state":"QUEUED"}}}}\n'
+    ;;
   *) printf 'unexpected gh call: %s\n' "$*" >&2; exit 2 ;;
 esac
 EOF
 chmod +x "$receipts_gh"
+receipts_gh_calls="$tmp/receipts-gh.calls"
+receipts_queue_state="$tmp/receipts-queue.state"
 receipts_stage_out="$(CAS_RELEASE_TRAIN_DATE="$stage_date" \
-    CAS_RELEASE_TRAIN_GH="$receipts_gh" "$train" 9.99.8 "$stage_wt" --receipts 2>&1 || true)"
+    CAS_RELEASE_TRAIN_GH="$receipts_gh" RECEIPTS_GH_CALLS="$receipts_gh_calls" \
+    RECEIPTS_QUEUE_STATE_FILE="$receipts_queue_state" \
+    CAS_RELEASE_TRAIN_RECEIPTS_MERGEABLE_POLL_SECS=0 \
+    CAS_RELEASE_TRAIN_RECEIPTS_ENQUEUE_POLL_SECS=0 \
+    "$train" 9.99.8 "$stage_wt" --receipts 2>&1 || true)"
 receipt_branch="docs/release-receipts-v9.99.8"
 if [[ "$receipts_stage_out" == *'receipts PR #998 queued'* ]] \
     && grep -q '^PR_NUMBER=998$' "$stage_dir/receipts.pr" 2>/dev/null \
     && git --git-dir="$stage_origin" show "refs/heads/$receipt_branch:docs/release-reports/v9.99.8.md" >/dev/null 2>&1 \
     && git --git-dir="$stage_origin" show "refs/heads/$receipt_branch:docs/release-notes/$stage_date-v9.99.8-slack.md" \
         | grep -q '^## POSTED$'; then
-    ok '--receipts commits POSTED and report files in one queued docs PR'
+    ok 'gap 8: receipts appends the POSTED block and report in one queued docs PR'
 else
     bad "--receipts did not queue the docs PR: $receipts_stage_out"
+fi
+
+# Gap 9: a transient GitHub mergeability race is retried before the enqueue
+# mutation is considered a failure.
+if [[ "$(grep -c 'api graphql' "$receipts_gh_calls" 2>/dev/null || true)" == 2 ]]; then
+    ok 'gap 9: receipts retries enqueue after the mergeability race'
+else
+    bad "gap 9: receipts did not retry the mergeability race: $(cat "$receipts_gh_calls" 2>/dev/null || true)"
+fi
+
+# Gap 10: --resume reuses the existing worktree and PR rather than trying to
+# add the already-registered worktree or parsing an empty create response.
+rm -f "$stage_dir/receipts.pr"
+receipt_calls_before="$(wc -l <"$receipts_gh_calls" | tr -d '[:space:]')"
+receipts_resume_out="$(CAS_RELEASE_TRAIN_DATE="$stage_date" \
+    CAS_RELEASE_TRAIN_GH="$receipts_gh" RECEIPTS_GH_CALLS="$receipts_gh_calls" \
+    RECEIPTS_EXISTING_PR=1 CAS_RELEASE_TRAIN_RECEIPTS_MERGEABLE_POLL_SECS=0 \
+    CAS_RELEASE_TRAIN_RECEIPTS_ENQUEUE_POLL_SECS=0 \
+    "$train" 9.99.8 "$stage_wt" --receipts 2>&1 || true)"
+receipt_calls_after="$(wc -l <"$receipts_gh_calls" | tr -d '[:space:]')"
+if [[ "$receipts_resume_out" == *'receipts PR #998 queued'* ]] \
+    && [[ "$receipt_calls_after" -gt "$receipt_calls_before" ]] \
+    && ! tail -n +$((receipt_calls_before + 1)) "$receipts_gh_calls" | grep -q 'pr create' \
+    && grep -q '^PR_NUMBER=998$' "$stage_dir/receipts.pr"; then
+    ok 'gap 10: receipts --resume reuses the existing worktree and PR'
+else
+    bad "gap 10: receipts resume was not idempotent (before=$receipt_calls_before after=$receipt_calls_after): $receipts_resume_out calls=$(tail -n +$((receipt_calls_before + 1)) "$receipts_gh_calls" 2>/dev/null | tr '\n' '|') receipt=$(cat "$stage_dir/receipts.pr" 2>/dev/null || true)"
+fi
+
+# Gap 7: post-publication waits for the tag workflow, then runs both receipt
+# producers into the run directory before declaring the stage complete.
+post_publication_run="$tmp/post-publication-run"
+mkdir -p "$post_publication_run"
+post_publication_gh="$tmp/post-publication-gh.sh"
+cat >"$post_publication_gh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+case "$1 $2" in
+  "run list")
+    printf '%s\n' '[{"databaseId":4242,"status":"completed","conclusion":"success","headBranch":"v9.99.8","headSha":"'"$(cat "$POST_PUBLICATION_LANDED")"'","createdAt":"2099-01-02T00:00:00Z"}]'
+    ;;
+  *) exit 2 ;;
+esac
+EOF
+chmod +x "$post_publication_gh"
+post_publication_published="$tmp/post-publication-published.sh"
+cat >"$post_publication_published" <<'EOF'
+#!/usr/bin/env bash
+printf 'TAG=%s\nPUBLISHED_AT=2099-01-02T00:01:00Z\n' "$1"
+EOF
+chmod +x "$post_publication_published"
+post_publication_latency="$tmp/post-publication-latency.sh"
+cat >"$post_publication_latency" <<'EOF'
+#!/usr/bin/env bash
+printf 'TAG=%s\nPUBLISH_LATENCY_SECONDS=60\n' "$1"
+EOF
+chmod +x "$post_publication_latency"
+post_publication_landed="$(git -C "$stage_wt" rev-parse HEAD)"
+printf '%s\n' "$post_publication_landed" >"$post_publication_run/landed-main.sha"
+if (
+    source "$repo_root/scripts/release-train.d/post-publication.sh"
+    cut_has_external_stage() { return 1; }
+    version=9.99.8
+    worktree="$stage_wt"
+    run_dir="$post_publication_run"
+    script_dir="$repo_root/scripts"
+    export POST_PUBLICATION_LANDED="$post_publication_run/landed-main.sha"
+    CAS_RELEASE_TRAIN_GH="$post_publication_gh" \
+    CAS_RELEASE_TRAIN_POST_PUBLICATION_POLL_SECS=0 \
+    CAS_RELEASE_TRAIN_POST_PUBLICATION_TRIES=1 \
+    CAS_RELEASE_TRAIN_PUBLISHED_RECEIPT_CMD="$post_publication_published" \
+    CAS_RELEASE_TRAIN_LATENCY_RECEIPT_CMD="$post_publication_latency" \
+        release_train_post_publication
+) && [[ -s "$post_publication_run/release-workflow.json" ]] \
+    && [[ -s "$post_publication_run/release-published.receipt" ]] \
+    && [[ -s "$post_publication_run/release-latency.receipt" ]]; then
+    ok 'gap 7: post-publication waits for Release and records both receipts'
+else
+    bad 'gap 7: post-publication did not produce the workflow and receipt trio'
 fi
 
 # ---------------------------------------------------------------------------
@@ -1288,6 +1508,25 @@ else
     bad "publish did not use the recorded landed sha: $(cat "$run_default_dir/release.done" 2>/dev/null || echo absent)"
 fi
 
+# Gap 5: the release worktree may still point at the pre-merge branch tip when
+# the pipeline records the landed main SHA. Publish fast-forwards that ancestor
+# before creating the tag worktree.
+wt_ff="$(new_publish_fixture publish-fast-forward 9.99.9)"
+run_ff_dir="$(pipeline_run_dir "$wt_ff")"
+mkdir -p "$run_ff_dir"
+ff_current="$(git -C "$wt_ff" rev-parse HEAD)"
+ff_tree="$(git -C "$wt_ff" write-tree)"
+ff_landed="$(printf 'landed\n' | git -C "$wt_ff" commit-tree "$ff_tree" -p "$ff_current")"
+git -C "$wt_ff" push -q origin "$ff_landed:refs/heads/main"
+out="$(run_publish "$wt_ff" 9.99.9 "$ff_landed" "$tmp/publisher-ok.sh" "$pub_env" || true)"
+if [[ "$(git -C "$wt_ff" rev-parse HEAD)" == "$ff_landed" ]] \
+    && [[ "$(cat "$run_ff_dir/release.done" 2>/dev/null)" == 0 ]] \
+    && [[ "$out" == *'fast-forwarded'* ]]; then
+    ok 'gap 5: publish fast-forwards an ancestor release worktree before tagging'
+else
+    bad "gap 5: publish did not fast-forward before tagging: $out"
+fi
+
 # ===========================================================================
 # --cut — the preflight and stage-ledger contract.
 #
@@ -1312,10 +1551,16 @@ new_cut_fixture() {
       printf 'draft\n' > "docs-placeholder"
       mkdir -p "docs/release-notes"
       printf 'draft\n' > "docs/release-notes/$(date -u +%F)-v${version}-slack.md"
-      printf 'CAS_TEST_TOKEN=fixture-secret\n' > release.env
+      printf 'CAS_TEST_TOKEN=fixture-secret\nCAS_RELEASE_GATE_HOME_DIR=%s\n' "$tmp/$name-scratch" > release.env
       : > cas-cli/src/builtins/reference-history.json
       printf '#!/usr/bin/env bash\nexit 0\n' > .context/zig/zig
       chmod +x .context/zig/zig
+      cat > scripts/bump-release-version.sh <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ -z "${RELEASE_TRAIN_BUMP_LOG:-}" ]] || printf '%s\n' "$1" >>"$RELEASE_TRAIN_BUMP_LOG"
+EOF
+      chmod +x scripts/bump-release-version.sh
       git add -A
       git -c commit.gpgsign=false commit -q -m seed
       git remote add origin "$remote"
@@ -1351,6 +1596,12 @@ new_combined_cut_fixture() {
       printf 'CAS_TEST_TOKEN=fixture-secret\n' > release.env
       printf '#!/usr/bin/env bash\nexit 0\n' > .context/zig/zig
       chmod +x .context/zig/zig
+      cat > scripts/bump-release-version.sh <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ -z "${RELEASE_TRAIN_BUMP_LOG:-}" ]] || printf '%s\n' "$1" >>"$RELEASE_TRAIN_BUMP_LOG"
+EOF
+      chmod +x scripts/bump-release-version.sh
       : > cas-cli/src/builtins/reference-history.json
 cat > scripts/gen-builtin-reference-history.sh <<'EOF'
 #!/usr/bin/env bash
@@ -1550,8 +1801,9 @@ cat >"$combined_gh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 case "$1 $2" in
+  "pr list") printf '[]\n' ;;
   "pr create") printf 'https://example.test/Richards-LLC/cassy/pull/997\n' ;;
-  "pr view") printf '{"id":"PR_kwDOFIXTURE997"}\n' ;;
+  "pr view") printf '{"id":"PR_kwDOFIXTURE997","mergeable":"MERGEABLE","state":"OPEN"}\n' ;;
   "api graphql") printf '{"data":{"enqueuePullRequest":{"mergeQueueEntry":{"state":"QUEUED"}}}}\n' ;;
   *) printf 'unexpected gh call: %s\n' "$*" >&2; exit 2 ;;
 esac

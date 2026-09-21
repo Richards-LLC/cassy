@@ -3029,7 +3029,7 @@ button.chip:disabled { cursor: default; }
   .conversation-heading { padding: var(--space-2) 16px 14px; gap: var(--space-2); }
   .conversation-topline button { padding: var(--space-1) var(--space-2); }
   /* Phone composer: the send pill folds to its glyph; the label stays for the reader. */
-  .conversation-composer { column-gap: 6px; padding: 12px 6px 20px; padding-bottom: max(20px, env(safe-area-inset-bottom)); }
+  .conversation-composer { column-gap: 5px; padding: 12px 6px 20px; padding-bottom: max(20px, env(safe-area-inset-bottom)); }
   .conversation-composer textarea { padding: 12px 18px; }
   .conversation-composer .composer-actions { gap: 2px; }
   .conversation-composer .composer-clip,

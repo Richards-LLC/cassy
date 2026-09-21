@@ -1,4 +1,4 @@
-import { cloudBrand } from "./cloud-brand";
+import { cloudBrand, projectName } from "./cloud-brand";
 import { machineFooterMarkup, pairedMachinesDialogMarkup, renderPairedMachines, type PairedMachineRow } from "./paired-machines";
 import { retainPendingSessions, visibleCatalog } from "./worker-visibility";
 import "./styles.css";
@@ -99,6 +99,13 @@ function conversationHistory(key: string): ConversationHistory {
   return history;
 }
 function updateConversationViews(): void { for (const view of conversationViews.values()) view.update(); }
+let workingRefresh: ReturnType<typeof setTimeout> | undefined;
+/** Pane output lights the working line now and schedules the check that puts it out. */
+function refreshWorkingLines(): void {
+  for (const view of conversationViews.values()) view.refreshWorking();
+  if (workingRefresh !== undefined) clearTimeout(workingRefresh);
+  workingRefresh = setTimeout(() => { workingRefresh = undefined; for (const view of conversationViews.values()) view.refreshWorking(); }, WORKING_WINDOW_MS + 250);
+}
 // The shell is rebuilt only when its own inputs changed. A hub heartbeat
 // carries none of them, so it can no longer replace the composer mid-sentence.
 let lastShellSignature: string | undefined;
@@ -116,6 +123,8 @@ const sessionStates = new Map<string, SessionState>();
 export const sessionSummaries = new Map<string, SessionCardSummary>();
 const paneBuffers = new Map<string, number[]>();
 const paneLastActivity = new Map<string, number>();
+/** Pane output this recent keeps the thread's working line lit. */
+const WORKING_WINDOW_MS = 30_000;
 const authoritativeSessions = new Set<string>();
 const paneKeyframesReady = new Set<string>();
 const selectedPanes = new Map<string, string>();
@@ -240,12 +249,22 @@ function applyPaneView(key: string, mount: HTMLElement, surface: TerminalSurface
     let conversation = conversationViews.get(key);
     if (!conversation) {
       const threadKey = sessionKey(selectedMachineId!, selectedSession!);
-      const target = supervisorTarget(sessions.get(selectedMachineId!)?.find((item) => item.name === selectedSession)) || "Supervisor";
-      conversation = new ConversationView(document, surface.transcript, conversationHistory(threadKey), target, (text) => {
-        const composer = document.querySelector<HTMLTextAreaElement>("#message-text");
-        if (!composer || composer.dataset.threadKey !== threadKey) return;
-        if (composer.value.trim()) { showComposerStatus("Your draft already has text. Clear it before editing the refused message.", "info"); composer.focus(); return; }
-        composer.value = text; composer.dispatchEvent(new Event("input")); composer.focus();
+      const hubSession = sessions.get(selectedMachineId!)?.find((item) => item.name === selectedSession);
+      const target = supervisorTarget(hubSession) || "Supervisor";
+      const history = conversationHistory(threadKey);
+      conversation = new ConversationView(document, history, {
+        supervisor: target,
+        machine: machines.get(selectedMachineId!)?.label,
+        project: projectName(hubSession?.project_dir),
+        // The supervisor is executing while a send awaits its reply or the
+        // pane produced output in the last half minute.
+        working: () => history.hasPending() || [...paneLastActivity].some(([paneId, at]) => paneId.startsWith(`${threadKey}:`) && Date.now() - at < WORKING_WINDOW_MS),
+        editMessage: (text) => {
+          const composer = document.querySelector<HTMLTextAreaElement>("#message-text");
+          if (!composer || composer.dataset.threadKey !== threadKey) return;
+          if (composer.value.trim()) { showComposerStatus("Your draft already has text. Clear it before editing the refused message.", "info"); composer.focus(); return; }
+          composer.value = text; composer.dispatchEvent(new Event("input")); composer.focus();
+        },
       });
       conversationViews.set(key, conversation);
     }
@@ -550,6 +569,7 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
     onOutput: (session, pane, data) => {
       const key = paneKey(machine.id, session, pane);
       paneLastActivity.set(key, Date.now());
+      refreshWorkingLines();
       if (authoritativeSessions.has(sessionKey(machine.id, session)) && !paneKeyframesReady.has(key)) return;
       const buffered = [...(paneBuffers.get(key) ?? []), ...data];
       paneBuffers.set(key, buffered.slice(-2_000_000));

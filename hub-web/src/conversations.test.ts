@@ -5,7 +5,6 @@ import { ConversationList, type ConversationRow } from "./conversation-list";
 import { ConversationView } from "./conversation-view";
 import { conversationShellMarkup } from "./conversation-shell";
 import { projectName, projectBadge } from "./cloud-brand";
-import type { GhosttyRow } from "./terminal/ghostty/core";
 
 const reply = { notification_id: 42, reply_to: 41, message: 'Actual supervisor reply <safe>', summary: '', device_id: 'device', operator_label: 'Daniel' };
 describe('conversation evidence', () => {
@@ -84,28 +83,22 @@ describe('conversation evidence', () => {
     expect(shell).toContain('id="compose-fab" class="compose-fab"');
     expect(conversationShellMarkup({ selected: false, loaded: true, paired: false })).toContain('class="conversation-shell">');
   });
-  it('renders exact real rows, escapes replies, and never presents the operator as the supervisor', () => {
-    const color = { r: 200, g: 200, b: 200 };
-    const text = 'Actual pane <script>\t — keep this text';
-    const row = { cells: [...text].map(text => ({ text, wide: 0, foreground: color, background: color, bold: false, italic: false, invisible: false, strikethrough: false, overline: false, underline: false, selected: false })), text, isWrapContinuation: false, wrapsToNext: false } as GhosttyRow;
-    const focus = vi.fn();
-    const source = { rows: () => [row], theme: () => ({ foreground: color, background: color }), hasScrollbackAbove: () => false, scrollRows: vi.fn(), scrollToBottom: vi.fn(), focus };
+  it('shows only turns — never pane text — escapes replies, and never presents the operator as the supervisor', () => {
     const history = new ConversationHistory();
-    const view = new ConversationView(document, source, history, 'real-supervisor'); document.body.replaceChildren(view.element); view.update();
-    expect(view.element.querySelector('.conversation-line')?.textContent).toBe(text);
-    history.reply(reply); view.update();
-    expect(view.element.querySelector('.from-supervisor strong')?.textContent).toBe('real-supervisor');
-    expect(view.element.querySelector('.from-supervisor p')?.textContent).toBe(reply.message);
+    const view = new ConversationView(document, history, { supervisor: 'real-supervisor', machine: 'Atlas', project: 'cas-src' }); document.body.replaceChildren(view.element); view.update();
+    expect(view.element.querySelector('.thead b')?.textContent).toBe('real-supervisor');
+    expect(view.element.querySelector('.thead .id span')?.textContent).toBe('Atlas · cas-src');
+    expect(view.element.querySelector('.conversation-pane')).toBeNull();
+    expect(view.element.querySelector('.msgs')?.children).toHaveLength(0);
+    history.reply({ ...reply, message: 'Actual reply <script>alert(1)</script>' }); view.update();
+    expect(view.element.querySelector('.turn.sup .bub p')?.textContent).toBe('Actual reply <script>alert(1)</script>');
     expect(view.element.querySelector('script')).toBeNull();
-    view.element.click(); expect(focus).not.toHaveBeenCalled();
-    view.update(); expect(view.element.querySelectorAll('.conversation-pane')).toHaveLength(1);
+    expect(view.element.querySelector('.turn.you')).toBeNull();
+    expect(view.element.textContent).not.toContain('Live pane text');
   });
   it('keeps typed supervisor turns and renders artifact link rows', () => {
-    const color = { r: 200, g: 200, b: 200 };
-    const row = { cells: [], text: '', isWrapContinuation: false, wrapsToNext: false } as unknown as GhosttyRow;
-    const source = { rows: () => [row], theme: () => ({ foreground: color, background: color }), hasScrollbackAbove: () => false, scrollRows: vi.fn(), scrollToBottom: vi.fn(), focus: vi.fn() };
     const history = new ConversationHistory();
-    const view = new ConversationView(document, source, history, 'real-supervisor'); document.body.replaceChildren(view.element);
+    const view = new ConversationView(document, history, 'real-supervisor'); document.body.replaceChildren(view.element);
     history.reply({
       notification_id: 44,
       reply_to: null,
@@ -118,6 +111,8 @@ describe('conversation evidence', () => {
     view.update();
     const turn = view.element.querySelector<HTMLElement>('.conversation-turn');
     expect(turn?.dataset.kind).toBe('receipt');
+    expect(turn?.classList.contains('receipt')).toBe(true);
+    expect(turn?.querySelector('.tick')).not.toBeNull();
     expect(turn?.querySelector('a')?.getAttribute('href')).toBe('#artifact:report%2F1');
     expect(turn?.querySelector('a')?.textContent).toBe('report.pdf');
   });

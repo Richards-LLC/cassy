@@ -168,7 +168,8 @@ describe('conversation evidence', () => {
     expect(view.element.querySelector('.turn.you')).toBeNull();
     expect(view.element.textContent).not.toContain('Live pane text');
   });
-  it('keeps typed supervisor turns and renders artifact link rows', () => {
+  it('keeps typed supervisor turns and lays the artifact on the thread as a sheet beside the bubble', () => {
+    // The fixture module imported above installs the Pebble 4 sheet, as main.ts does.
     const history = new ConversationHistory();
     const view = new ConversationView(document, history, 'real-supervisor'); document.body.replaceChildren(view.element);
     history.reply({
@@ -185,8 +186,11 @@ describe('conversation evidence', () => {
     expect(turn?.dataset.kind).toBe('receipt');
     expect(turn?.classList.contains('receipt')).toBe(true);
     expect(turn?.querySelector('.tick')).not.toBeNull();
-    expect(turn?.querySelector('a')?.getAttribute('href')).toBe('#artifact:report%2F1');
-    expect(turn?.querySelector('a')?.textContent).toBe('report.pdf');
+    expect(turn?.querySelector('a')).toBeNull();
+    const sheet = turn?.nextElementSibling as HTMLAnchorElement | null;
+    expect(sheet?.classList.contains('sheet')).toBe(true);
+    expect(sheet?.getAttribute('href')).toBe('#artifact:report%2F1');
+    expect(sheet?.querySelector('.fname')?.textContent).toBe('report.pdf');
   });
 });
 

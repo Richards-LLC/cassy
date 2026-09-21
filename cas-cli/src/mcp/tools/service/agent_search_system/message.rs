@@ -149,6 +149,23 @@ pub(crate) fn commander_reply_command(message: &cas_store::QueuedPrompt) -> Opti
     })
 }
 
+/// These values are CAS-generated queue-source labels, never agent names.
+/// Plain names intentionally stay on the queue-before-register path: a
+/// supervisor may send a worker assignment before its registration lands.
+pub(crate) fn target_is_reserved_source(target: &str) -> bool {
+    let target = target.trim().to_ascii_lowercase();
+    target.is_empty()
+        || target == "director-generated"
+        || target.starts_with("director-generated:")
+        || [
+            "lifecycle:",
+            "lifecycle-wake:",
+            "verification-dispatch:",
+        ]
+        .iter()
+        .any(|prefix| target.starts_with(prefix))
+}
+
 #[cfg(test)]
 mod viktor_provenance_tests {
     use super::queued_message_provenance_at;
@@ -1254,9 +1271,10 @@ impl CasService {
             )));
         }
 
-        // Refuse unknown supervisor targets before any queue write. A queued
-        // row for a name that is not in the registry cannot be delivered and
-        // would otherwise sit until the poison sweep abandons it.
+        // Refuse CAS-generated row-source labels before any queue write. Plain
+        // names are deliberately allowed through: a supervisor may address a
+        // worker before registration, and the queue-before-register path
+        // reports that honestly until the worker appears.
         let resolved_target_agent = {
             use crate::store::open_agent_store;
             open_agent_store(&self.inner.cas_root)
@@ -1268,13 +1286,11 @@ impl CasService {
                         .find(|agent| agent.name.eq_ignore_ascii_case(&resolved_target))
                 })
         };
-        let target_is_external_inbox = resolved_target == "owner"
-            || resolved_target.starts_with("inbox:");
         let target_is_registered = resolved_target.eq_ignore_ascii_case("all_workers")
             || resolved_target.eq_ignore_ascii_case("supervisor")
             || resolved_target.eq_ignore_ascii_case("director")
             || resolved_target_agent.is_some();
-        if role != "worker" && !target_is_external_inbox && !target_is_registered {
+        if role != "worker" && target_is_reserved_source(&resolved_target) {
             let mut valid_targets = vec![
                 "operator".to_string(),
                 "supervisor".to_string(),
@@ -4029,7 +4045,7 @@ mod cas_89e1_post_merge_message_type_tests {
         let service = CasService::new(core);
         let request: AgentRequest = serde_json::from_value(serde_json::json!({
             "action": "message",
-            "target": "not-registered",
+            "target": "lifecycle:manual",
             "summary": "should fail",
             "message": "This must never enter the queue.",
         }))
@@ -4046,6 +4062,28 @@ mod cas_89e1_post_merge_message_type_tests {
             .peek_all(10)
             .expect("peek queue");
         assert!(rows.is_empty(), "unknown target must not enqueue: {rows:?}");
+    }
+
+    #[test]
+    fn plain_unregistered_names_remain_queue_before_register_targets() {
+        for target in [
+            "",
+            "  ",
+            "lifecycle:manual",
+            "lifecycle-wake:42",
+            "verification-dispatch:vd-1",
+            "director-generated",
+            "director-generated:task-1",
+        ] {
+            assert!(super::target_is_reserved_source(target), "{target:?}");
+        }
+        for target in [
+            "not-born-yet",
+            "lifecycle-worker",
+            "verification-dispatcher",
+        ] {
+            assert!(!super::target_is_reserved_source(target), "{target}");
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]

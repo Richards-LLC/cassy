@@ -23,6 +23,12 @@ export interface ConversationRow {
   selected: boolean;
 }
 
+/** The machine's own name: a host label such as "Atlas · Linux" reads "Atlas" on the row. */
+export function machineName(host: string): string {
+  const name = host.split(" · ")[0]?.trim();
+  return name || host.trim();
+}
+
 /** One Pebble row: `avatar · name · project · preview · time`, with two distinct
  * affordances — waiting (ochre dot, hot time) and unread (accent count pill). */
 export function conversationRowMarkup(row: ConversationRow): string {
@@ -32,10 +38,14 @@ export function conversationRowMarkup(row: ConversationRow): string {
   const time = row.when ? `<span class="conversation-when${waiting ? " hot" : ""}" title="${escapeHtml(row.freshness)}">${escapeHtml(row.when)}</span>` : "";
   const headlineEnd = unread > 0 ? `<span class="conversation-unread" aria-label="${unread} unread">${unread}</span>` : time;
   const flag = waiting ? `<span class="conversation-flag" role="img" aria-label="${row.attention === 1 ? "Waiting for you" : `${row.attention} waiting for you`}"></span>` : "";
-  // The separator and project are one inline unit, so a long project name wraps
-  // as "· project" on the next line and never leaves the dot dangling.
+  // Project and machine travel together as one meta unit: when the who-line
+  // is too narrow the whole "· project · machine" drops to the next line, and
+  // only an over-long project name splits the machine off after it. Each
+  // separator stays with its unit, so a dot never dangles at a line end.
+  // The machine is legible as text on every row (operator direction): the
+  // monogram and accent alone do not name it.
   return `<span class="conversation-avatar" aria-hidden="true">${escapeHtml(machineMonogram(row.host))}</span>`
-    + `<span class="conversation-who"><strong class="conversation-supervisor">${escapeHtml(row.supervisor)}</strong><span class="conversation-project"><span class="conversation-sep" aria-hidden="true"></span>${projectBadge(row.projectDir)}</span></span>`
+    + `<span class="conversation-who"><strong class="conversation-supervisor">${escapeHtml(row.supervisor)}</strong><span class="conversation-meta"><span class="conversation-project"><span class="conversation-sep" aria-hidden="true"></span>${projectBadge(row.projectDir)}</span><span class="conversation-machine"><span class="conversation-sep" aria-hidden="true"></span>${escapeHtml(machineName(row.host))}</span></span></span>`
     + headlineEnd
     + `<span class="conversation-preview${waiting || unread > 0 ? " bold" : ""}">${escapeHtml(preview)}</span>`
     + flag;

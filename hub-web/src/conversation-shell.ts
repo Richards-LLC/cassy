@@ -1,4 +1,4 @@
-import { cloudBrand, escapeHtml, projectBadge } from "./cloud-brand";
+import { cloudBrand, escapeHtml, projectBadge, projectName } from "./cloud-brand";
 import { machineAccentClass, machineMonogram } from "./machine-accent";
 
 export interface ConversationShellModel {
@@ -20,13 +20,13 @@ export const composeFabMarkup = '<button id="compose-fab" class="compose-fab" ty
 /**
  * The one header above the thread (cas-5b2d): the Pebble thead — machine
  * monogram in the accent, supervisor bold with the project badge beside it,
- * machine · connection in mono beneath — with the cas-11b01 back link and
+ * project · machine · connection in mono beneath (same order as a list row) — with the cas-11b01 back link and
  * Terminal view control on the row above it. Elevated with --lift-head; the
  * thread view itself renders no header inside this shell.
  */
 export function conversationHeaderMarkup(model: ConversationShellModel): string {
   const host = model.host || "";
-  return `<header class="conversation-heading thead"><div class="conversation-topline"><button id="conversation-back" type="button">‹ Conversations</button>${cloudBrand()}<button id="conversation-terminal" type="button">Terminal view</button></div><div class="conversation-identity"><span class="conversation-avatar" aria-hidden="true">${escapeHtml(machineMonogram(host || model.supervisor || "?"))}</span><div class="id"><h1><b>${escapeHtml(model.supervisor || "Supervisor unavailable")}</b>${projectBadge(model.projectDir)}</h1><span class="conversation-host">${escapeHtml(host)}<span id="conversation-connection" role="status"></span></span></div></div></header>`;
+  return `<header class="conversation-heading thead"><div class="conversation-topline"><button id="conversation-back" type="button">‹ Conversations</button>${cloudBrand()}<button id="conversation-terminal" type="button">Terminal view</button></div><div class="conversation-identity"><span class="conversation-avatar" aria-hidden="true">${escapeHtml(machineMonogram(host || model.supervisor || "?"))}</span><div class="id"><h1><b>${escapeHtml(model.supervisor || "Supervisor unavailable")}</b>${projectBadge(model.projectDir)}</h1><span class="conversation-host">${escapeHtml([projectName(model.projectDir), host].filter(Boolean).join(" · "))}<span id="conversation-connection" role="status"></span></span></div></div></header>`;
 }
 
 /** Attach is a real affordance beside the field but has no transport yet, so it is disabled and says so. */

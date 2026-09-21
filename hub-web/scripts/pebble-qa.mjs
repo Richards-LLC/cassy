@@ -8,15 +8,13 @@
 //     answer, the terminal alternate view, and the absence of the pane
 //     article in the default conversation.
 // Usage: node scripts/pebble-qa.mjs <artifact-dir>
-import { createServer } from 'node:http';
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
-import { extname, join, resolve } from 'node:path';
+import { mkdir, rm, writeFile } from 'node:fs/promises';
+import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
 import { launchBrowser } from '../../docs/design/hub-mobile/browser-tools.mjs';
 import { buildFixtureSite, closeServer, serveDirectory } from './visual-qa.mjs';
-import { installProtocolFixture, SUPERVISOR } from './conversations-qa.mjs';
+import { installProtocolFixture, serveDist, SUPERVISOR } from './conversations-qa.mjs';
 
 const here = fileURLToPath(new URL('.', import.meta.url));
 const repoRoot = resolve(here, '../..');
@@ -28,20 +26,6 @@ const STATES = ['conversations-list', 'conversation', 'conversation-replied', 'c
 
 const receipts = [];
 const receipt = (name, ok, detail) => { receipts.push({ name, status: ok ? 'PASS' : 'FAIL', detail }); if (!ok) throw new Error(`${name}: ${detail}`); };
-
-async function serveDist() {
-  const dist = join(repoRoot, 'hub-web', 'dist');
-  const types = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.wasm': 'application/wasm', '.woff2': 'font/woff2' };
-  const server = createServer(async (request, response) => {
-    const path = new URL(request.url ?? '/', 'http://127.0.0.1').pathname.replace(/^\/commander\/?/, '/');
-    const target = resolve(dist, `.${path === '/' ? '/index.html' : path}`);
-    if (!target.startsWith(dist) || !existsSync(target)) { response.writeHead(404); response.end(); return; }
-    response.writeHead(200, { 'content-type': types[extname(target)] ?? 'application/octet-stream', 'cache-control': 'no-store' });
-    response.end(await readFile(target));
-  });
-  await new Promise((ok, fail) => { server.once('error', fail); server.listen(0, '127.0.0.1', ok); });
-  return { server, origin: `http://127.0.0.1:${server.address().port}/commander/` };
-}
 
 const browser = await launchBrowser();
 const fixtureBuild = join(repoRoot, '.cas', 'pebble-qa-fixture-build');
@@ -69,6 +53,8 @@ try {
     const waiting = rows.filter({ has: page.locator('.conversation-flag') });
     const unread = rows.filter({ has: page.locator('.conversation-unread') });
     receipt(`list waiting-vs-unread ${viewport.name} ${scheme}`, await waiting.count() === 1 && await unread.count() === 1 && await waiting.locator('.conversation-when.hot').count() === 1 && await unread.locator('.conversation-unread').textContent() === '2' && await waiting.locator('.conversation-unread').count() === 0, 'exactly one waiting row (ochre dot + hot time, no pill) and one unread row (count pill)');
+    const machines = await rows.locator('.conversation-machine').allTextContents();
+    receipt(`list machine named as text ${viewport.name} ${scheme}`, machines.length === 6 && machines.every(Boolean) && new Set(machines).size === 3, machines.join(','));
     const footer = await page.locator('#paired-machines-toggle').textContent();
     receipt(`list footer count matches rows ${viewport.name} ${scheme}`, /6 conversations|3 paired machines/.test(footer ?? '') && !/3 conversations/.test(footer ?? ''), footer ?? '');
     await shot('list');
@@ -158,7 +144,7 @@ try {
 } finally {
   await browser.close();
   if (fixtureServer) await closeServer(fixtureServer.server);
-  if (distServer) await closeServer(distServer.server);
+  if (distServer) await distServer.close();
   await rm(fixtureBuild, { recursive: true, force: true });
   await writeFile(resolve(artifacts, 'pebble-qa.json'), JSON.stringify({ generatedAt: new Date().toISOString(), receipts }, null, 2));
   const failed = receipts.filter(r => r.status === 'FAIL');

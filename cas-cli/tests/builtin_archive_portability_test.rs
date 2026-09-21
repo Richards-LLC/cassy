@@ -516,6 +516,10 @@ const FIXTURE_SOURCES: &[(&str, &str)] = &[
         "pull_watermark_recovery_test.rs"
     ),
     source!(
+        "cas-cli/tests/release_report_test.rs",
+        "release_report_test.rs"
+    ),
+    source!(
         "cas-cli/tests/push_queue_scoping_test.rs",
         "push_queue_scoping_test.rs"
     ),

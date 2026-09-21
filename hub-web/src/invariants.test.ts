@@ -1179,7 +1179,7 @@ describe("binding Cassy Cloud browser invariants", () => {
     const callbacks = {
       onState: vi.fn(), onAttachState: vi.fn(), onSessions: vi.fn(), onMachineEvent: vi.fn(),
       onSessionState: vi.fn(), onOutput: vi.fn(), onPaneKeyframe: vi.fn(),
-      onFlowControlReset: vi.fn(), onSocketError: vi.fn(),
+      onFlowControlReset: vi.fn(), onSocketError: vi.fn(), onConversationHistory: vi.fn(),
     } satisfies HubCallbacks;
     const supervisor = new HubConnectionSupervisor(machine, callbacks);
     const internals = supervisor as unknown as { desired: boolean; machineMultiplex: boolean };
@@ -1214,6 +1214,18 @@ describe("binding Cassy Cloud browser invariants", () => {
         capabilities: ["authoritative_pane_keyframes"],
       } },
     }));
+    const historyRequest = socket.sent
+      .map((value) => JSON.parse(value) as Record<string, any>)
+      .find((value) => value.channel === "pty:factory-a" && value.message?.ConversationHistoryRequest);
+    expect(historyRequest?.message.ConversationHistoryRequest).toMatchObject({ limit: 50, device_id: "device" });
+    const historyPage = {
+      request_id: historyRequest?.message.ConversationHistoryRequest.request_id,
+      messages: [{ notification_id: 17, target: "supervisor", text: "Earlier question", state: "acknowledged", stamped: true, device_id: "device", at: "2026-09-21T12:00:00Z" }],
+      replies: [{ notification_id: 18, reply_to: 17, message: "Earlier answer", summary: "", device_id: "device", kind: "answer", attachments: [], at: "2026-09-21T12:01:00Z" }],
+      has_earlier: false,
+    };
+    socket.receive(JSON.stringify({ channel: "pty:factory-a", message: { ConversationHistory: historyPage } }));
+    expect(callbacks.onConversationHistory).toHaveBeenCalledWith("factory-a", historyPage);
     const session = new TextEncoder().encode("factory-a");
     const pane = new TextEncoder().encode("supervisor");
     const payload = new Uint8Array([0x1b, 0x5b, 0x48, 0x4f, 0x4b]);

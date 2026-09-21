@@ -970,7 +970,12 @@ export class HubConnectionSupervisor {
       const authoritative = Number(welcome.protocol_version ?? 1) >= 3
         && Array.isArray(welcome.capabilities)
         && welcome.capabilities.includes("authoritative_pane_keyframes");
-      if (Array.isArray(welcome.capabilities) && welcome.capabilities.includes("conversation_history")) {
+      // Protocol v3 daemons know the request even when a rolling hub relay
+      // drops the additive capability list. Keep the capability check for
+      // older v3 peers, but do not let that metadata omission make a durable
+      // conversation disappear on reopen.
+      const protocolVersion = Number(welcome.protocol_version ?? 1);
+      if (protocolVersion >= 3 || (Array.isArray(welcome.capabilities) && welcome.capabilities.includes("conversation_history"))) {
         this.requestConversationHistory(session);
       }
       for (const key of this.keyframeRequests) {

@@ -2099,6 +2099,33 @@ fn hub_history_response_is_consumed_by_only_the_requesting_socket() {
     ));
 }
 
+#[test]
+fn hub_history_response_summary_exposes_shape_without_turn_content() {
+    let frame = serde_json::to_vec(&DaemonMessage::ConversationHistory {
+        request_id: "history-2".into(),
+        messages: vec![crate::ui::factory::ConversationHistoryMessage {
+            notification_id: 41,
+            target: "supervisor".into(),
+            text: "private prompt".into(),
+            state: "acknowledged".into(),
+            stamped: true,
+            reply_to: None,
+            device_id: "phone-7".into(),
+            operator_label: Some("Daniel".into()),
+            at: "2026-09-21T14:52:41Z".into(),
+        }],
+        replies: Vec::new(),
+        has_earlier: true,
+        next_before: Some(40),
+    })
+    .unwrap();
+
+    assert_eq!(
+        super::server::conversation_history_summary(&frame),
+        Some(("history-2".into(), 1, 0, true))
+    );
+}
+
 /// cas-e8df: the attribution a Commander send carries into the daemon is
 /// rebuilt from the authenticated device session. A frame that arrives with
 /// spoofed labels (and even `operator_verified: true`) keeps none of them.

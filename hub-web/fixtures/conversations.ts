@@ -2,15 +2,25 @@ import { machineFooterMarkup, pairedMachinesDialogMarkup, renderPairedMachines }
 import { ConversationList, type ConversationRow } from '../src/conversation-list';
 import { ConversationHistory } from '../src/conversation-history';
 import { ConversationView } from '../src/conversation-view';
-import { conversationShellMarkup } from '../src/conversation-shell';
+import { conversationShellMarkup, dressComposer } from '../src/conversation-shell';
 import { installAttentionObjects, renderAskObject, renderBlockerObject } from '../src/attention-objects';
+import { installAttachmentSheet } from '../src/attachment-sheet';
+import type { ArtifactRef } from '../src/types';
 import './pairs.css';
 
 // Pebble 3: ask and blocker paint as the fused-tray objects in every fixture.
 installAttentionObjects();
+// Pebble 4: artifacts are dog-eared sheets in every fixture, as in the app.
+installAttachmentSheet();
 
 const ASK_TEXT = 'Gate run 33512 failed on that one warning. Fix it in-train — one worker, about ten minutes — or ship 3.26.0 with it allowlisted?';
 const BLOCKER_TEXT = 'The release gate went red. The train is held; nothing was tagged or pushed to main.\nattention.rs:212 · needless_borrow';
+
+/** The report-card case (cassy#910): one supervisor turn, two artifacts. */
+export const REPORT_CARD_ATTACHMENTS: ArtifactRef[] = [
+  { artifact_id: 'report/3.26.0/brief.pdf', name: '3.26.0 release brief.pdf', mime: 'application/pdf', size_bytes: 1_468_006, sha256: '9f2c6b1e4d7a3c5f8e0b2d4a6c8e1f3a5b7d9f0c2e4a6b8d0f1a3c5e7b9d1f2a' },
+  { artifact_id: 'report/3.26.0/card.html', name: 'Release report card.html', mime: 'text/html', size_bytes: 88_064, sha256: '1a3c5e7b9d1f2a4c6e8b0d2f4a6c8e0b1d3f5a7c9e1b3d5f7a9c1e3b5d7f9a2c' },
+];
 
 // The Pebble list from docs/design/hub-messaging/round-3/list.html: three
 // machines across six projects, Atlas and Studio Mac each on two projects, the
@@ -40,10 +50,14 @@ export function fixtureConversationRows(selected: boolean): ConversationRow[] {
 export function renderConversationFixture(app: HTMLElement, state: string): void {
   const supervisor = FIXTURE_SUPERVISOR;
   const selected = !['conversations-list', 'paired-machines'].includes(state);
-  // The evidence state opens the Studio Mac thread so the supervisor pebbles take the second accent.
+  // The evidence state opens the Studio Mac thread so the supervisor pebbles
+  // take the second accent; the empty state opens Bench (third accent) as in
+  // empty.html.
   const machine = state === 'conversation-evidence'
     ? { id: 'studio-mac', label: 'Studio Mac', host: 'Studio Mac · macOS', projectDir: '/projects/gabber-studio', project: 'gabber-studio' }
-    : { id: 'atlas-linux', label: 'Atlas', host: 'Atlas · Linux', projectDir: '/projects/cas-src', project: 'cas-src' };
+    : state === 'conversation-empty'
+      ? { id: 'bench-1', label: 'Bench', host: 'Bench · Linux', projectDir: '/projects/cas-hub-static', project: 'cas-hub-static' }
+      : { id: 'atlas-linux', label: 'Atlas', host: 'Atlas · Linux', projectDir: '/projects/cas-src', project: 'cas-src' };
   app.innerHTML = conversationShellMarkup({ selected, supervisor, projectDir: machine.projectDir, host: machine.host, machineId: machine.id, loaded: true, paired: true });
   const listRows = fixtureConversationRows(selected);
   new ConversationList().render(app.querySelector('#conversation-list')!, listRows, () => {});
@@ -62,9 +76,11 @@ export function renderConversationFixture(app: HTMLElement, state: string): void
   // Fixture clock: 09:41 today, so day and group timestamps are deterministic.
   const today = new Date(); today.setHours(9, 41, 0, 0);
   const at = (hh: number, mm: number) => new Date(today.getFullYear(), today.getMonth(), today.getDate(), hh, mm).getTime();
-  const reply = (notification_id: number, reply_to: number | null, message: string, kind: 'answer' | 'status' | 'receipt' | 'ask' | 'blocker', when: number) =>
-    history.reply({ notification_id, reply_to, message, summary: '', device_id: 'fixture', operator_label: 'Daniel', kind }, when);
+  const reply = (notification_id: number, reply_to: number | null, message: string, kind: 'answer' | 'status' | 'receipt' | 'ask' | 'blocker', when: number, attachments?: ArtifactRef[]) =>
+    history.reply({ notification_id, reply_to, message, summary: '', device_id: 'fixture', operator_label: 'Daniel', kind, ...(attachments ? { attachments } : {}) }, when);
   let working = false;
+  let echo: string | undefined;
+  let draft = '';
   if (state === 'conversation-thread') {
     // thread-a: directive, answer, receipt, coalesced statuses, question, answer, ask (Pebble 3 fallback), working.
     history.submit('directive', supervisor, 'Merge the two green lanes, then cut 3.26.0 once the gate is green.', at(9, 41));
@@ -75,6 +91,8 @@ export function renderConversationFixture(app: HTMLElement, state: string): void
     reply(45, null, 'Gate 4 of 14 targets green', 'status', at(9, 51));
     reply(46, null, 'Gate 8 of 14 targets green', 'status', at(9, 53));
     reply(47, null, 'gate 11 of 14 targets green', 'status', at(9, 55));
+    // thread-a's sheet at 09:52: an attachment-only turn is its sheet alone.
+    reply(51, null, '', 'answer', at(9, 52), [REPORT_CARD_ATTACHMENTS[0]!]);
     history.submit('question', supervisor, 'Did the tokens drift test move?', at(9, 56));
     history.acknowledge({ client_ref: 'question', notification_id: 48, target: supervisor, stamped: true });
     reply(49, 48, "No — unchanged since 3.25.3. The gate's only new failure is one lint warning.", 'answer', at(9, 57));
@@ -111,6 +129,18 @@ export function renderConversationFixture(app: HTMLElement, state: string): void
     reply(62, 61, ['Yes — pass two is green. Every pack:', '', '| pack | cases | result |', '| --- | --- | --- |', '| core | 412 | pass |', '| ui | 388 | pass |', '| net | 211 | pass |', '| store | 174 | pass |', '| hooks | 96 | pass |', '| mcp | 143 | pass |', '| hub | 260 | pass |', '| cli | 318 | 1 flake |'].join('\n'), 'answer', at(9, 30));
     reply(63, 61, 'Tagged gabber-studio v2.4.1 and pushed.', 'receipt', at(9, 31));
     working = true;
+  } else if (state === 'conversation-attachment') {
+    // The report-card case: a receipt with prose, then its two artifacts laid on the thread as sheets.
+    history.submit('report', supervisor, 'Send me the release report when the gate is green.', at(9, 40));
+    history.acknowledge({ client_ref: 'report', notification_id: 70, target: supervisor, stamped: true });
+    reply(71, 70, 'Gate green on all 14 targets. 3.26.0 is tagged and the brief is attached; the report card has the per-target timings.', 'receipt', at(9, 52), REPORT_CARD_ATTACHMENTS);
+  } else if (state === 'conversation-empty') {
+    // empty.html: nothing in the thread, the last thing said as a faint echo.
+    echo = 'Promoted the hub to production on Monday.';
+  } else if (state === 'conversation-composer') {
+    // A phone composer mid-draft: the field holds text, the send pill is in the accent.
+    reply(80, null, 'Rebased and pushed; nothing waiting.', 'answer', at(9, 30));
+    draft = 'Cut 3.26.0 once the gate is green, then post the release notes.';
   } else if (state !== 'conversation') {
     history.submit('fixture', supervisor, 'Please keep the project badge prominent.', at(9, 41));
     if (state === 'conversation-error') history.reject('fixture', 'The session no longer grants this device control.');
@@ -120,10 +150,14 @@ export function renderConversationFixture(app: HTMLElement, state: string): void
     }
   }
   // Fixture respond: record the chip as an operator send answering the ask, exactly as main.ts does after the hub accepts it.
-  const view = new ConversationView(document, history, { supervisor, machine: machine.label, project: machine.project, header: false, working: () => working, editMessage: () => {}, respond: (ask, text) => { history.submit(`quick-${ask.notification_id}`, supervisor, text, Date.now(), ask.notification_id); view.update(); } });
+  const view = new ConversationView(document, history, { supervisor, machine: machine.label, project: machine.project, header: false, working: () => working, echo: () => echo, editMessage: () => {}, respond: (ask, text) => { history.submit(`quick-${ask.notification_id}`, supervisor, text, Date.now(), ask.notification_id); view.update(); } });
   app.querySelector('#conversation-pane-slot')!.append(view.element); view.update();
-  app.querySelector('#conversation-composer-slot')!.innerHTML = `<div class="message conversation-composer"><h2><label for="message-text">Your message</label></h2><textarea id="message-text" placeholder="Write to ${supervisor}…"></textarea><div class="composer-actions"><button id="message-send" class="primary" type="button">Send to ${supervisor}</button></div></div>`;
-  app.querySelector('#conversation-composer-slot')!.prepend(view.pinned);
+  // The app's own composer region, dressed the way arrangeConversationShell dresses it; the pinned ask mounts above it.
+  const slot = app.querySelector<HTMLElement>('#conversation-composer-slot')!;
+  slot.innerHTML = '<div class="message"><h2><label for="message-text">Talk to supervisor</label></h2><textarea aria-describedby="message-status" id="message-text"></textarea><p class="control-disabled-reason" role="note" hidden></p><div class="composer-actions"><button id="message-keyboard" type="button">Keyboard</button><button id="message-send" class="primary" type="button">Send message</button></div><p id="message-status" class="message-status" role="status" hidden></p></div>';
+  dressComposer(slot.querySelector<HTMLElement>('.message')!, supervisor);
+  slot.querySelector<HTMLTextAreaElement>('#message-text')!.value = draft;
+  slot.prepend(view.pinned);
   app.querySelector('#conversation-status-slot')!.innerHTML = '<p class="conversation-host">Supervisor conversations<br>In progress</p>';
   app.querySelector('#conversation-attention-slot')!.innerHTML = '<h2>Attention</h2><p class="conversation-host">One request needs your direction.</p>';
 }

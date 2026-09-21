@@ -87,6 +87,12 @@ describe('conversation evidence', () => {
     // Separator and project travel together so a wrapped project never leaves the dot dangling.
     expect(waiting.querySelector('.conversation-project')?.innerHTML).toBe('<span class="conversation-sep" aria-hidden="true"></span><span class="project-badge">cas-src</span>');
     expect(waiting.querySelector('.conversation-who > .conversation-sep')).toBeNull();
+    // The machine is named as text on every row, after the project, with its own wrapping separator.
+    expect(waiting.querySelector('.conversation-machine')?.textContent).toBe('Atlas');
+    expect(waiting.querySelector('.conversation-machine')?.innerHTML).toBe('<span class="conversation-sep" aria-hidden="true"></span>Atlas');
+    expect(unread.querySelector('.conversation-machine')?.textContent).toBe('Studio Mac');
+    expect(waiting.querySelector('.conversation-who')?.textContent).toBe('patient-pelican-9cas-srcAtlas');
+    expect(waiting.querySelector('.conversation-who > .conversation-meta > .conversation-project + .conversation-machine')).not.toBeNull();
     expect(waiting.querySelector('.conversation-preview')?.textContent).toBe('Fix <it>?');
     expect(waiting.querySelector('script, it')).toBeNull();
     expect(waiting.querySelector('.conversation-when')?.className).toBe('conversation-when hot');
@@ -128,7 +134,7 @@ describe('conversation evidence', () => {
     expect(header.querySelector('.conversation-avatar')?.textContent).toBe('A');
     expect(header.querySelector('h1 b')?.textContent).toBe('patient-pelican-9');
     expect(header.querySelector('h1 .project-badge')?.textContent).toBe('cas-src');
-    expect(header.querySelector('.conversation-host')?.textContent).toBe('Atlas · Linux');
+    expect(header.querySelector('.conversation-host')?.textContent).toBe('cas-src · Atlas · Linux');
     expect(header.querySelector('#conversation-connection')).not.toBeNull();
     expect(main.querySelector('.conversation-identity h1')).not.toBeNull(); expect(main.querySelectorAll('h1')).toHaveLength(1);
     const view = new ConversationView(document, new ConversationHistory(), { supervisor: 'patient-pelican-9', machine: 'Atlas', project: 'cas-src', header: false });

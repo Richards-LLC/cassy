@@ -14,7 +14,7 @@ import {
   type ConnectionStage,
   type AttachSnapshot,
 } from "./connection-state";
-import type { HubSession, LeaseState, MessageQueued, OperatorReply, PaneInfo, SessionCardSummary, SessionState, StoredMachine } from "./types";
+import type { ConversationHistoryPage, HubSession, LeaseState, MessageQueued, OperatorReply, PaneInfo, SessionCardSummary, SessionState, StoredMachine } from "./types";
 
 import { sessionsPath, workersRevealed } from "./worker-visibility";
 import { dormantRevealed } from "./dormant-visibility";
@@ -59,6 +59,7 @@ export interface HubCallbacks {
   onMessageQueued?(session: string, queued: MessageQueued): void;
   onMessageRejected?(session: string, clientRef: string, detail: string): void;
   onOperatorReply?(session: string, reply: OperatorReply): void;
+  onConversationHistory?(session: string, page: ConversationHistoryPage): void;
   onSessionSummary?(session: string, summary: SessionCardSummary): void;
   onPaneKeyframe(session: string, paneId: string, data: Uint8Array): void;
   onPaneSize?(session: string, paneId: string, cols: number, rows: number, authority: string): void;
@@ -856,6 +857,20 @@ export class HubConnectionSupervisor {
     });
   }
 
+  /** Request a private, device-scoped page of durable Commander turns. */
+  requestConversationHistory(session: string, before?: number, limit = 50): boolean {
+    return this.send(session, {
+      ConversationHistoryRequest: {
+        request_id: crypto.randomUUID(),
+        ...(before === undefined ? {} : { before }),
+        limit: Math.min(50, Math.max(1, limit)),
+        // The hub overwrites this from the authenticated credential. Including
+        // it here keeps direct daemon fixtures and the wire shape explicit.
+        device_id: this.machine.deviceId,
+      },
+    });
+  }
+
   private async handleMachineMessage(input: string | ArrayBuffer | Blob): Promise<void> {
     if (typeof input !== "string") {
       const bytes = new Uint8Array(input instanceof Blob ? await input.arrayBuffer() : input);
@@ -955,6 +970,9 @@ export class HubConnectionSupervisor {
       const authoritative = Number(welcome.protocol_version ?? 1) >= 3
         && Array.isArray(welcome.capabilities)
         && welcome.capabilities.includes("authoritative_pane_keyframes");
+      if (Array.isArray(welcome.capabilities) && welcome.capabilities.includes("conversation_history")) {
+        this.requestConversationHistory(session);
+      }
       for (const key of this.keyframeRequests) {
         if (key.startsWith(`${session}:`)) this.keyframeRequests.delete(key);
       }
@@ -986,6 +1004,8 @@ export class HubConnectionSupervisor {
       if (queued) this.callbacks.onMessageQueued?.(session, queued);
     } else if (message.OperatorReply) {
       this.callbacks.onOperatorReply?.(session, message.OperatorReply as OperatorReply);
+    } else if (message.ConversationHistory) {
+      this.callbacks.onConversationHistory?.(session, message.ConversationHistory as ConversationHistoryPage);
     } else if (message.SessionSummary) {
       this.callbacks.onSessionSummary?.(session, message.SessionSummary.summary);
     } else if (message.PaneAdded || message.PaneRemoved || message.PaneExited) {

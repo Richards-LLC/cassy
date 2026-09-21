@@ -83,6 +83,32 @@ export interface OperatorReply {
   options?: string[];
 }
 
+/** Durable operator message projected by the daemon's history page. */
+export interface ConversationHistoryMessage {
+  notification_id: number;
+  target: string;
+  text: string;
+  state: "sending" | "acknowledged";
+  stamped: boolean;
+  reply_to?: number;
+  device_id: string;
+  operator_label?: string;
+  at: string;
+}
+
+/** Durable supervisor reply with its queue timestamp for ordered hydration. */
+export interface ConversationHistoryReply extends OperatorReply {
+  at: string;
+}
+
+export interface ConversationHistoryPage {
+  request_id: string;
+  messages: ConversationHistoryMessage[];
+  replies: ConversationHistoryReply[];
+  has_earlier: boolean;
+  next_before?: number;
+}
+
 /** Durable acknowledgment for a Commander SendMessage submission. */
 export interface MessageQueued {
   client_ref: string | null;

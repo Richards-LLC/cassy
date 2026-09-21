@@ -45,7 +45,7 @@ import { FleetBoardRenderer } from "./fleet-board";
 import { FirstConnectionAnnouncer, installPairedMachine } from "./first-connection";
 import { isEditableElement, renderDecision, shellSignature } from "./render-model";
 import { operatorThreadMarkup } from "./operator-thread";
-import type { AttentionItem, HubSession, LeaseState, OperatorReply, PaneInfo, Scope, SessionCardSummary, SessionState, StoredMachine } from "./types";
+import type { AttentionItem, ConversationHistoryPage, HubSession, LeaseState, OperatorReply, PaneInfo, Scope, SessionCardSummary, SessionState, StoredMachine } from "./types";
 
 applyScheme();
 
@@ -104,6 +104,15 @@ function conversationHistory(key: string): ConversationHistory {
   let history = conversationHistories.get(key);
   if (!history) { history = new ConversationHistory(); conversationHistories.set(key, history); }
   return history;
+}
+const conversationHistoryPages = new Map<string, { hasEarlier: boolean; nextBefore?: number; loading: boolean }>();
+function conversationHistoryPage(key: string): { hasEarlier: boolean; nextBefore?: number; loading: boolean } {
+  let page = conversationHistoryPages.get(key);
+  if (!page) {
+    page = { hasEarlier: false, loading: false };
+    conversationHistoryPages.set(key, page);
+  }
+  return page;
 }
 function updateConversationViews(): void { for (const view of conversationViews.values()) view.update(); }
 let workingRefresh: ReturnType<typeof setTimeout> | undefined;
@@ -276,6 +285,19 @@ function applyPaneView(key: string, mount: HTMLElement, surface: TerminalSurface
         // A quick-reply chip answers the ask through the same leased path as
         // the composer, with in_reply_to = the ask's notification id.
         respond: (ask, text) => { void submitSupervisorMessage({ text, replyTo: ask.notification_id }); },
+        hasEarlier: () => conversationHistoryPage(threadKey).hasEarlier,
+        loadingEarlier: () => conversationHistoryPage(threadKey).loading,
+        loadEarlier: () => {
+          const page = conversationHistoryPage(threadKey);
+          if (page.loading || page.nextBefore === undefined) return;
+          page.loading = true;
+          updateConversationViews();
+          const sent = connections.get(selectedMachineId!)?.requestConversationHistory(selectedSession!, page.nextBefore);
+          if (!sent) {
+            page.loading = false;
+            updateConversationViews();
+          }
+        },
       });
       conversationViews.set(key, conversation);
     }
@@ -617,6 +639,25 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
         replies.push(reply);
         operatorReplies.set(key, replies.slice(-20));
       }
+      if (selectedMachineId === machine.id && selectedSession === session) render();
+    },
+    onConversationHistory: (session, page: ConversationHistoryPage) => {
+      const key = sessionKey(machine.id, session);
+      const cursor = conversationHistoryPage(key);
+      cursor.loading = false;
+      cursor.hasEarlier = page.has_earlier;
+      cursor.nextBefore = page.next_before;
+      const history = conversationHistory(key);
+      for (const message of page.messages) history.hydrateSend(message);
+      const replies = operatorReplies.get(key) ?? [];
+      for (const reply of page.replies) {
+        history.hydrateReply(reply);
+        if (!replies.some((item) => item.notification_id === reply.notification_id)) replies.push(reply);
+      }
+      replies.sort((a, b) => a.notification_id - b.notification_id);
+      operatorReplies.set(key, replies.slice(-100));
+      updateConversationViews();
+      renderConversationList();
       if (selectedMachineId === machine.id && selectedSession === session) render();
     },
     onSessionSummary: (session, summary) => {

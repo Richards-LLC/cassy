@@ -23,6 +23,16 @@ describe('conversation evidence', () => {
     history.acknowledge({ client_ref: 'own', notification_id: 41, target: 'supervisor', stamped: true });
     expect(history.events[0]).toMatchObject({ value: { state: 'replied' } });
   });
+  it('hydrates durable sends and replies in order, then dedupes live receipts and replies', () => {
+    const history = new ConversationHistory();
+    history.hydrateReply({ notification_id: 12, reply_to: null, message: 'Later', summary: '', device_id: 'phone', at: '2026-09-21T14:02:00Z' });
+    history.hydrateSend({ notification_id: 11, target: 'supervisor', text: 'Earlier', state: 'acknowledged', stamped: true, device_id: 'phone', operator_label: 'Daniel', at: '2026-09-21T14:01:00Z' });
+    expect(history.events.map((event) => event.kind === 'send' ? event.value.text : event.value.message)).toEqual(['Earlier', 'Later']);
+    history.acknowledge({ client_ref: null, notification_id: 11, target: 'supervisor', stamped: true });
+    history.reply({ notification_id: 12, reply_to: null, message: 'Later', summary: '', device_id: 'phone' });
+    expect(history.events).toHaveLength(2);
+    expect(history.events[0]).toMatchObject({ value: { notificationId: 11, state: 'acknowledged' } });
+  });
   it('tracks asks and blockers waiting on the operator and the send that answers an ask (cas-43f9)', () => {
     const history = new ConversationHistory();
     const turn = (notification_id: number, kind: 'ask' | 'blocker' | 'answer', message = `m${notification_id}`) => ({ notification_id, reply_to: null, message, summary: '', device_id: 'd', kind });

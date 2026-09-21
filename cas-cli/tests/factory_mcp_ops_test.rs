@@ -6988,6 +6988,41 @@ async fn test_coordination_message_to_unregistered_target_reports_queued_pending
     assert_eq!(prompts[0].target, "not-born-yet");
 }
 
+/// CAS-generated queue-source labels are not routable agent names. They must
+/// be rejected before enqueue, while the plain-name case above remains the
+/// queue-before-register path.
+#[tokio::test]
+async fn test_coordination_message_to_reserved_source_target_is_refused() {
+    let _guard = EnvGuard::set(&[
+        ("CAS_AGENT_ROLE", "supervisor"),
+        ("CAS_AGENT_NAME", "supervisor"),
+    ]);
+    let env = FactoryTestEnv::new();
+
+    let req = coord_msg(
+        "message",
+        "lifecycle:manual",
+        "this source label is not an agent",
+        None,
+    );
+    let error = env
+        .service
+        .coordination(Parameters(req))
+        .await
+        .expect_err("reserved source target must be rejected");
+    assert!(
+        error.message.contains("Unknown message target"),
+        "unexpected error: {}",
+        error.message
+    );
+
+    let prompts = env.prompt_queue().peek_all(10).expect("peek");
+    assert!(
+        prompts.is_empty(),
+        "reserved source target must not enqueue: {prompts:?}"
+    );
+}
+
 /// cas-6ad2: "queue-before-register -> register consumes it exactly once".
 /// A message queued to a worker name before that worker exists in the
 /// agent store must be delivered into the worker's OWN prompt loop at

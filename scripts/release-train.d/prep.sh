@@ -3,6 +3,11 @@
 # Release-train prep owns the draft that enters the release commit. The
 # --cut dispatcher sources this file, so its public seam is release_train_prep.
 
+if ! declare -F release_train_receipts_carry_pending >/dev/null 2>&1; then
+    # shellcheck disable=SC1091
+    source "$script_dir/release-train.d/receipts-common.sh"
+fi
+
 release_train_draft_path() {
     local date_part="${CAS_RELEASE_TRAIN_DATE:-$(date -u +%F)}"
     printf '%s\n' "${CAS_RELEASE_TRAIN_DRAFT:-$worktree/docs/release-notes/${date_part}-v${version}-slack.md}"
@@ -54,6 +59,7 @@ release_train_prep() {
         printf 'ERROR prep version: version bump failed for %s\n' "$version" >&2
         return 1
     fi
+    release_train_receipts_carry_pending || return 1
     release_train_carry_previous_posted "$draft"
     git -C "$worktree" add -- "$draft"
     for prep_input in CHANGELOG.md Cargo.lock Cargo.toml cas-cli/Cargo.toml \

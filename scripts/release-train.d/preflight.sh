@@ -2,6 +2,11 @@
 # Cheap, side-effect-bounded checks for --cut. No build or detached process
 # starts until every check in this file has passed.
 
+if ! declare -F release_train_receipts_unmerged_records >/dev/null 2>&1; then
+    # shellcheck disable=SC1091
+    source "$script_dir/release-train.d/receipts-common.sh"
+fi
+
 cut_preflight_block() {
     local name="$1" detail="$2"
     printf 'BLOCKER %s: %s\n' "$name" "$detail" >&2
@@ -249,6 +254,15 @@ cut_preflight_check_integration() {
     fi
 }
 
+cut_preflight_check_receipts() {
+    local record commit branch
+    while IFS=$'\t' read -r record commit branch; do
+        [[ -n "$record" ]] || continue
+        printf 'preflight warning: unmerged prior receipts commit %s from %s; --prep will carry it forward\n' \
+            "$commit" "${branch:-recorded receipt}"
+    done < <(release_train_receipts_unmerged_records)
+}
+
 cut_stage_preflight() {
     local branch
     branch="$(git -C "$worktree" branch --show-current)"
@@ -269,5 +283,6 @@ cut_stage_preflight() {
     cut_preflight_check_changelog || return 1
     cut_preflight_check_draft || return 1
     cut_preflight_check_integration || return 1
+    cut_preflight_check_receipts
     printf 'preflight passed version=%s worktree=%s\n' "$version" "$worktree"
 }

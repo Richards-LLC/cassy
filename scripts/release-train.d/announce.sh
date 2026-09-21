@@ -5,6 +5,46 @@ release_train_announce_draft_path() {
     printf '%s\n' "${CAS_RELEASE_TRAIN_DRAFT:-$worktree/docs/release-notes/${date_part}-v${version}-slack.md}"
 }
 
+release_train_announce_receipt_field() {
+    local key="$1"
+    sed -n "s/^${key}=//p" "$run_dir/announce.receipt" | head -n1
+}
+
+release_train_announce_posted_block() {
+    local posted_at channel channel_id channel_display tick
+    posted_at="$(release_train_announce_receipt_field POSTED_AT)"
+    channel="$(release_train_announce_receipt_field CHANNEL)"
+    channel_id="$(release_train_announce_receipt_field CHANNEL_ID)"
+    channel_display="#${channel}"
+    [[ -n "$channel_id" ]] && channel_display="$channel_display ($channel_id)"
+    tick="$(printf '\x60')"
+    cat <<EOF
+## POSTED
+
+- **Posted at (UTC):** ${tick}${posted_at}${tick}
+- **Channel:** ${tick}${channel_display}${tick}
+- **User top-level:** ${tick}message_id=$(release_train_announce_receipt_field USER_TOP_LEVEL_ID)${tick} · $(release_train_announce_receipt_field USER_TOP_LEVEL_PERMALINK)
+- **User reply:** ${tick}message_id=$(release_train_announce_receipt_field USER_REPLY_ID)${tick} · $(release_train_announce_receipt_field USER_REPLY_PERMALINK)
+- **Dev top-level:** ${tick}message_id=$(release_train_announce_receipt_field DEV_TOP_LEVEL_ID)${tick} · $(release_train_announce_receipt_field DEV_TOP_LEVEL_PERMALINK)
+- **Dev reply:** ${tick}message_id=$(release_train_announce_receipt_field DEV_REPLY_ID)${tick} · $(release_train_announce_receipt_field DEV_REPLY_PERMALINK)
+EOF
+}
+
+release_train_announce_append_posted() {
+    local draft="$1" temp
+    grep -q '^## POSTED$' "$draft" && return 0
+    temp="$(mktemp "$worktree/.release-draft-posted.XXXXXX")"
+    if ! {
+        cat "$draft"
+        printf '\n'
+        release_train_announce_posted_block
+    } >"$temp"; then
+        rm -f "$temp"
+        return 1
+    fi
+    mv "$temp" "$draft"
+}
+
 release_train_announce() {
     local draft body_dir post_cmd receipt proxy_toml
     draft="$(release_train_announce_draft_path)"
@@ -25,6 +65,10 @@ release_train_announce() {
                 return 1
             fi
         done
+        if ! release_train_announce_append_posted "$draft"; then
+            printf 'ERROR announce receipt: could not append POSTED block to %s\n' "$draft" >&2
+            return 1
+        fi
         printf 'announce complete · receipt=%s\n' "$receipt"
         return 0
     fi
@@ -65,6 +109,10 @@ release_train_announce() {
             return 1
         fi
     done
+    if ! release_train_announce_append_posted "$draft"; then
+        printf 'ERROR announce receipt: could not append POSTED block to %s\n' "$draft" >&2
+        return 1
+    fi
     printf 'announce complete · receipt=%s\n' "$receipt"
 }
 

@@ -63,8 +63,8 @@ fn assert_markdownlint_clean_with_npx(repo_root: &Path, files: &[&Path], npx: &s
 #[cfg(unix)]
 #[test]
 fn generated_docs_lint_skips_when_npx_is_missing() {
-    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
-    assert_markdownlint_clean_with_npx(repo_root, &[], "cas-test-missing-npx");
+    let repo_root = cas::test_paths::workspace_root();
+    assert_markdownlint_clean_with_npx(&repo_root, &[], "cas-test-missing-npx");
 }
 
 #[cfg(unix)]
@@ -396,8 +396,17 @@ Dev reply
         .assert()
         .success();
 
-    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
-    let receipt_script = repo_root.join("scripts/release-train.d/receipts.sh");
+    let repo_root = cas::test_paths::workspace_root();
+    let receipt_dir = repo_root.join("scripts/release-train.d");
+    let receipt_script = receipt_dir.join("receipts.sh");
+    if !receipt_dir.is_dir() || !receipt_script.is_file() {
+        println!(
+            "SKIP generated_release_report_and_receipts_draft_pass_docs_lint: source checkout \
+             is absent; looked for {}",
+            receipt_script.display()
+        );
+        return;
+    }
     let receipt_block = ProcessCommand::new("bash")
         .args([
             "-c",
@@ -451,5 +460,5 @@ release_train_receipts_posted_block
             .contains("GitHub release: <https://github.com/example/project/releases/tag/v3.19.0>")
     );
     assert!(receipt_text.contains("<https://example.test/user-1>"));
-    assert_markdownlint_clean(repo_root, &[&report_path, &announce_path]);
+    assert_markdownlint_clean(&repo_root, &[&report_path, &announce_path]);
 }

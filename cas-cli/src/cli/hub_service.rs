@@ -19,6 +19,7 @@ use crate::hub::{DEFAULT_HUB_PORT, HubLockOwner, HubProcessRecord, HubRuntimePat
 
 const LAUNCHD_LABEL: &str = "dev.cas.commander-hub";
 const SYSTEMD_UNIT: &str = "cas-hub.service";
+const SYSTEMCTL_PATH_ENV: &str = "CAS_HUB_SYSTEMCTL";
 pub(crate) const INACTIVE_DETACHED_HUB_WARNING: &str =
     "service installed but inactive, detached hub running";
 const LAUNCHD_TAILSCALE_REFUSAL: &str = "`cas hub service install --tailscale-serve` is not supported for launchd: Tailscale Serve needs the interactive user's GUI namespace, while launchd starts in its bootstrap namespace. Install the loopback-only service with `cas hub service install`, or run `cas hub service uninstall && cas hub start --tailscale-serve` from an interactive shell when Commander pairing needs a public URL.";
@@ -414,7 +415,7 @@ fn uninstall(platform: ServicePlatform, cli: &Cli) -> Result<()> {
         ServicePlatform::Systemd => {
             let path = systemd_path()?;
             if path.exists() {
-                let _ = Command::new("systemctl")
+                let _ = manager_command("systemctl")
                     .args(["--user", "disable", "--now", SYSTEMD_UNIT])
                     .stdout(Stdio::null())
                     .stderr(Stdio::null())
@@ -598,7 +599,7 @@ fn run_manager<const N: usize>(
     args: [&str; N],
     trailing_path: Option<&Path>,
 ) -> Result<()> {
-    let mut child = Command::new(command);
+    let mut child = manager_command(command);
     child.args(args);
     child.stdout(Stdio::null()).stderr(Stdio::null());
     if let Some(path) = trailing_path {
@@ -613,7 +614,7 @@ fn run_manager<const N: usize>(
 }
 
 fn run_manager_vec(command: &str, args: &[String]) -> Result<()> {
-    let status = Command::new(command)
+    let status = manager_command(command)
         .args(args)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -627,12 +628,19 @@ fn run_manager_vec(command: &str, args: &[String]) -> Result<()> {
 }
 
 fn command_succeeds<const N: usize>(command: &str, args: [&str; N]) -> bool {
-    Command::new(command)
+    manager_command(command)
         .args(args)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
         .is_ok_and(|status| status.success())
+}
+
+fn manager_command(command: &str) -> Command {
+    match (command, std::env::var_os(SYSTEMCTL_PATH_ENV)) {
+        ("systemctl", Some(path)) => Command::new(path),
+        _ => Command::new(command),
+    }
 }
 
 fn launchd_bootout_args(domain: &str, path: &Path) -> Vec<String> {
@@ -947,7 +955,6 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn installed_systemd_unit_owns_restart_and_receives_the_new_record() {
-        use std::ffi::OsString;
         use std::io::{Read, Write};
         use std::net::TcpListener;
         use std::os::unix::fs::PermissionsExt;
@@ -975,11 +982,7 @@ exit 1
         )
         .unwrap();
         fs::set_permissions(&systemctl, fs::Permissions::from_mode(0o700)).unwrap();
-        let inherited_path = std::env::var_os("PATH").unwrap_or_default();
-        let mut path = OsString::from(&bin);
-        path.push(":");
-        path.push(inherited_path);
-        env.set("PATH", path);
+        env.set(SYSTEMCTL_PATH_ENV, &systemctl);
 
         let log = fixture.path().join("systemctl.log");
         env.set("CAS_SYSTEMCTL_LOG", &log);

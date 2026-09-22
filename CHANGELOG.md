@@ -7,6 +7,30 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.27.5] - 2026-09-22
+
+### Added
+
+- Hub conversation history is scoped to the project instead of one factory
+  session: opening a conversation on a paired phone replays every message the
+  operator sent and every reply addressed to that device across all of the
+  project's sessions, oldest to newest with paging, a light divider at each
+  session boundary, and a "No earlier history" marker after the oldest page.
+  Device scoping and pane-text exclusion are unchanged. A machine's running
+  session must be restarted on this version for the wider replay to apply.
+- Plain-text replies from sessions started before the reply contract render
+  readably: a leading "Status HH:MMZ." or "LABEL:" fragment becomes a bold
+  lead line and "(1) … (2) …" sequences become a numbered list; bodies that
+  already contain Markdown are untouched.
+
+### Fixed
+
+- The hub conversations list clamps each preview to two lines (and 160
+  characters), so one long reply no longer fills the phone screen.
+- The release train records the factory session at cut start and passes only
+  it to the assembly self-heal, runs the version bump inside the release
+  worktree, and names the offending line when the announcement lint fails.
+
 ## [3.27.4] - 2026-09-22
 
 ### Added

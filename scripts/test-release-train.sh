@@ -741,6 +741,41 @@ stage_wt="$(new_worktree release-stages)"
 stage_date='2099-01-02'
 fence="$(printf '\x60\x60\x60')"
 mkdir -p "$stage_wt/docs/release-notes" "$stage_wt/docs/release-reports"
+
+# A standalone caller must be able to source receipts.sh without inheriting
+# release-train.sh's script_dir variable, and use the posted-block helper.
+standalone_receipts_dir="$tmp/standalone-receipts"
+mkdir -p "$standalone_receipts_dir"
+cat >"$standalone_receipts_dir/announce.receipt" <<'EOF'
+POSTED_AT=2099-01-02T00:00:00Z
+CHANNEL=cas-internal
+CHANNEL_ID=C01234567
+USER_TOP_LEVEL_ID=user-1
+USER_TOP_LEVEL_PERMALINK=https://example.test/user-1
+USER_REPLY_ID=user-2
+USER_REPLY_PERMALINK=https://example.test/user-2
+DEV_TOP_LEVEL_ID=dev-1
+DEV_TOP_LEVEL_PERMALINK=https://example.test/dev-1
+DEV_REPLY_ID=dev-2
+DEV_REPLY_PERMALINK=https://example.test/dev-2
+EOF
+standalone_receipts_output="$tmp/standalone-receipts.out"
+standalone_receipts_error="$tmp/standalone-receipts.err"
+if (
+    unset script_dir
+    run_dir="$standalone_receipts_dir"
+    worktree="$stage_wt"
+    source "$repo_root/scripts/release-train.d/receipts.sh"
+    release_train_announce_posted_block
+) >"$standalone_receipts_output" 2>"$standalone_receipts_error" \
+    && grep -q '^## POSTED$' "$standalone_receipts_output" \
+    && grep -q 'message_id=user-1' "$standalone_receipts_output" \
+    && grep -q '<https://example.test/user-1>' "$standalone_receipts_output"; then
+    ok 'standalone receipts source resolves sibling stages and renders POSTED'
+else
+    bad "standalone receipts source failed: $(cat "$standalone_receipts_error" 2>/dev/null || true)"
+fi
+
 cat >"$stage_wt/docs/release-notes/2098-12-31-v9.99.7-slack.md" <<'EOF'
 # Slack draft — prior
 
@@ -819,6 +854,11 @@ if [[ "$announce_stage_out" == *'announce complete'* ]] \
 else
     bad "--announce did not record the adapter receipt: $announce_stage_out"
 fi
+if grep -q '^## POSTED$' "$stage_wt/docs/release-notes/$stage_date-v9.99.8-slack.md"; then
+    ok 'gap 8: --announce appends the POSTED block to the draft after posting'
+else
+    bad 'gap 8: --announce left the POSTED block only in the run receipt'
+fi
 
 bad_draft="$tmp/bad-slack.md"
 cp "$stage_wt/docs/release-notes/$stage_date-v9.99.8-slack.md" "$bad_draft"
@@ -880,7 +920,9 @@ fi
 stage_origin="$tmp/stage-origin.git"
 git init -q --bare "$stage_origin"
 git -C "$stage_wt" remote add origin "$stage_origin"
+git -C "$stage_wt" branch -m release/9.99.8
 git -C "$stage_wt" push -q origin HEAD:main
+git -C "$stage_wt" push -q origin HEAD:release/9.99.8
 printf 'report\n' >"$stage_wt/docs/release-reports/v9.99.8.md"
 printf '<html>report</html>\n' >"$stage_wt/docs/release-reports/v9.99.8.html"
 cp "$repo_root/docs/release-reports/v3.19.0.pdf" "$stage_wt/docs/release-reports/v9.99.8.pdf"
@@ -926,43 +968,93 @@ receipts_stage_out="$(CAS_RELEASE_TRAIN_DATE="$stage_date" \
     CAS_RELEASE_TRAIN_RECEIPTS_MERGEABLE_POLL_SECS=0 \
     CAS_RELEASE_TRAIN_RECEIPTS_ENQUEUE_POLL_SECS=0 \
     "$train" 9.99.8 "$stage_wt" --receipts 2>&1 || true)"
-receipt_branch="docs/release-receipts-v9.99.8"
-if [[ "$receipts_stage_out" == *'receipts PR #998 queued'* ]] \
-    && grep -q '^PR_NUMBER=998$' "$stage_dir/receipts.pr" 2>/dev/null \
+receipt_branch="release/9.99.8"
+receipt_commit="$(sed -n 's/^COMMIT_SHA=//p' "$stage_dir/receipts.commit" 2>/dev/null | head -n1 || true)"
+if [[ "$receipts_stage_out" == *'receipts commit'* ]] \
+    && [[ "$receipt_commit" =~ ^[0-9a-f]{40}$ ]] \
     && git --git-dir="$stage_origin" show "refs/heads/$receipt_branch:docs/release-reports/v9.99.8.md" >/dev/null 2>&1 \
     && git --git-dir="$stage_origin" show "refs/heads/$receipt_branch:docs/release-notes/$stage_date-v9.99.8-slack.md" \
         | grep -q '^## POSTED$'; then
-    ok 'gap 8: receipts appends the POSTED block and report in one queued docs PR'
+    ok 'gap 9: receipts commits the POSTED block and report on the release branch'
 else
-    bad "--receipts did not queue the docs PR: $receipts_stage_out"
+    bad "--receipts did not commit release evidence: $receipts_stage_out"
 fi
 
-# Gap 9: a transient GitHub mergeability race is retried before the enqueue
-# mutation is considered a failure.
-if [[ "$(grep -c 'api graphql' "$receipts_gh_calls" 2>/dev/null || true)" == 2 ]]; then
-    ok 'gap 9: receipts retries enqueue after the mergeability race'
+# The receipt path must never create or queue a docs-only PR after a release.
+if [[ ! -e "$stage_dir/receipts.pr" ]] \
+    && [[ ! -s "$receipts_gh_calls" ]]; then
+    ok 'gap 10: receipts does not create or queue a docs-only PR'
 else
-    bad "gap 9: receipts did not retry the mergeability race: $(cat "$receipts_gh_calls" 2>/dev/null || true)"
+    bad "gap 10: receipts still used the docs PR path: $(cat "$receipts_gh_calls" 2>/dev/null || true)"
 fi
 
-# Gap 10: --resume reuses the existing worktree and PR rather than trying to
-# add the already-registered worktree or parsing an empty create response.
-rm -f "$stage_dir/receipts.pr"
-receipt_calls_before="$(wc -l <"$receipts_gh_calls" | tr -d '[:space:]')"
+# The receipt stage is idempotent on --resume: the recorded commit is reused.
+receipt_head_before="$(git -C "$stage_wt" rev-parse HEAD)"
+if [[ -e "$receipts_gh_calls" ]]; then
+    receipt_calls_before="$(wc -l <"$receipts_gh_calls" | tr -d '[:space:]')"
+else
+    receipt_calls_before=0
+fi
 receipts_resume_out="$(CAS_RELEASE_TRAIN_DATE="$stage_date" \
     CAS_RELEASE_TRAIN_GH="$receipts_gh" RECEIPTS_GH_CALLS="$receipts_gh_calls" \
-    RECEIPTS_EXISTING_PR=1 CAS_RELEASE_TRAIN_RECEIPTS_MERGEABLE_POLL_SECS=0 \
-    CAS_RELEASE_TRAIN_RECEIPTS_ENQUEUE_POLL_SECS=0 \
     "$train" 9.99.8 "$stage_wt" --receipts 2>&1 || true)"
-receipt_calls_after="$(wc -l <"$receipts_gh_calls" | tr -d '[:space:]')"
-if [[ "$receipts_resume_out" == *'receipts PR #998 queued'* ]] \
-    && [[ "$receipt_calls_after" -gt "$receipt_calls_before" ]] \
-    && ! tail -n +$((receipt_calls_before + 1)) "$receipts_gh_calls" | grep -q 'pr create' \
-    && grep -q '^PR_NUMBER=998$' "$stage_dir/receipts.pr"; then
-    ok 'gap 10: receipts --resume reuses the existing worktree and PR'
+if [[ -e "$receipts_gh_calls" ]]; then
+    receipt_calls_after="$(wc -l <"$receipts_gh_calls" | tr -d '[:space:]')"
 else
-    bad "gap 10: receipts resume was not idempotent (before=$receipt_calls_before after=$receipt_calls_after): $receipts_resume_out calls=$(tail -n +$((receipt_calls_before + 1)) "$receipts_gh_calls" 2>/dev/null | tr '\n' '|') receipt=$(cat "$stage_dir/receipts.pr" 2>/dev/null || true)"
+    receipt_calls_after=0
 fi
+if [[ "$receipts_resume_out" == *'receipts complete'* ]] \
+    && [[ "$(git -C "$stage_wt" rev-parse HEAD)" == "$receipt_head_before" ]] \
+    && [[ "$receipt_calls_after" == "$receipt_calls_before" ]] \
+    && grep -q "^COMMIT_SHA=$receipt_commit$" "$stage_dir/receipts.commit"; then
+    ok 'gap 11: receipts --resume reuses the existing release commit'
+else
+    bad "gap 11: receipts resume was not idempotent (before=$receipt_calls_before after=$receipt_calls_after): $receipts_resume_out"
+fi
+
+# Preflight warns when a prior release's receipts commit is not present in the
+# current release branch; --prep owns carrying that commit forward.
+carry_wt="$tmp/next-release"
+git init -q -b main "$carry_wt"
+git -C "$carry_wt" config user.email test@test.invalid
+git -C "$carry_wt" config user.name 'Release Train Test'
+git -C "$carry_wt" remote add origin "$stage_origin"
+git -C "$carry_wt" fetch -q origin main
+git -C "$carry_wt" checkout -q -b release/9.99.9 origin/main
+mkdir -p "$carry_wt/docs/release-notes" "$carry_wt/scripts"
+printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail' \
+    '[[ -z "${RELEASE_TRAIN_BUMP_LOG:-}" ]] || printf "%s\\n" "$1" >>"$RELEASE_TRAIN_BUMP_LOG"' \
+    >"$carry_wt/scripts/bump-release-version.sh"
+chmod +x "$carry_wt/scripts/bump-release-version.sh"
+printf '%s\n' '# Next release draft' >"$carry_wt/docs/release-notes/2099-01-03-v9.99.9-slack.md"
+preflight_receipts_warning="$tmp/preflight-receipts-warning.log"
+(
+    source "$repo_root/scripts/release-train.d/preflight.sh"
+    version=9.99.9
+    worktree="$carry_wt"
+    run_dir="$tmp/preflight-receipts-warning-run"
+    artifacts_root="$tmp/artifacts"
+    cut_preflight_check_receipts
+) >"$preflight_receipts_warning" 2>&1
+if grep -q 'unmerged prior receipts commit' "$preflight_receipts_warning"; then
+    ok 'gap 12: preflight warns about an unmerged prior receipts commit'
+else
+    bad "gap 12: preflight did not warn about pending receipts: $(cat "$preflight_receipts_warning")"
+fi
+prep_carry_out="$(CAS_RELEASE_TRAIN_DATE=2099-01-03 \
+    RELEASE_TRAIN_BUMP_LOG="$tmp/next-prep-bump.log" \
+    "$train" 9.99.9 "$carry_wt" --prep 2>&1 || true)"
+carry_head="$(git -C "$carry_wt" rev-parse HEAD)"
+if [[ "$prep_carry_out" == *'carried receipts commit'* ]] \
+    && git -C "$carry_wt" merge-base --is-ancestor "$receipt_commit" "$carry_head" \
+    && git -C "$carry_wt" log -1 --format=%s | grep -q 'release: prepare v9.99.9'; then
+    ok 'gap 13: prep merges the recorded receipts commit before the next release'
+else
+    bad "gap 13: prep did not carry the recorded receipts commit: $prep_carry_out"
+fi
+# The remaining cut fixtures use isolated remotes; keep the prior-release
+# receipt record scoped to the carry-forward fixture above.
+rm -f "$stage_dir/receipts.commit"
 
 # Gap 7: post-publication waits for the tag workflow, then runs both receipt
 # producers into the run directory before declaring the stage complete.
@@ -1844,9 +1936,9 @@ combined_expected='preflight assemble prep ledger gate pr-body pipeline publish 
 combined_actual="$(printf '%s\n' "$combined_clean_out" | sed -n 's/^stage \([^:]*\): start$/\1/p' | paste -sd' ' -)"
 if [[ "$combined_clean_out" == *'cut complete'* ]] \
     && [[ "$combined_actual" == "$combined_expected" ]] \
-    && [[ -s "$combined_clean_dir/receipts.pr" ]] \
-    && grep -q '^PR_NUMBER=997$' "$combined_clean_dir/receipts.pr"; then
-    ok '--cut runs the assembled stage bodies in canonical order and records receipts PR'
+    && [[ -s "$combined_clean_dir/receipts.commit" ]] \
+    && grep -q '^COMMIT_SHA=[0-9a-f]\{40\}$' "$combined_clean_dir/receipts.commit"; then
+    ok '--cut runs the assembled stage bodies in canonical order and records the receipts commit'
 else
     bad "combined clean cut did not complete in order: stages=$combined_actual output=$combined_clean_out"
 fi
@@ -1878,6 +1970,9 @@ if [[ "$manual_status" == *'INTERVENTIONS=1'* ]]; then
 else
     bad "manual --gate --only did not update intervention count: $manual_status"
 fi
+# The resume fixture has a separate remote, so do not let the clean fixture's
+# synthetic receipt commit look portable across its isolated repositories.
+rm -f "$combined_clean_dir/receipts.commit"
 
 combined_resume_version=9.99.13
 combined_resume_wt="$(new_combined_cut_fixture combined-resume "$combined_resume_version")"

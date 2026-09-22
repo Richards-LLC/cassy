@@ -36,7 +36,13 @@ version and worktree, never a version-keyed path.
    order. The ledger is the last prep step. `assemble` invokes stale-base heal
    when required. The gate is a detached process group; inspect its recorded PID
    with `kill -0`, never by process-name search. Every stage writes a SHA
-   receipt, and the train preserves pipeline/publisher hand-off epochs.
+   receipt, and the train preserves pipeline/publisher hand-off epochs. After
+   the four announcement writes succeed, `announce` appends the `## POSTED`
+   block to the draft. `receipts` commits that draft and the release report
+   artifacts on the `release/` branch, writes the commit and branch to the
+   run-dir `receipts.commit` receipt, and never opens a docs-only PR. Before
+   the next release, `preflight` warns about an unmerged prior receipt commit
+   and `prep` carries it forward with a merge before preparing the new draft.
 5. If the command stops, answer only the named blocker, then rerun the exact
    printed `--cut --resume` command. Use `scripts/release-train.sh <version>
    <release-worktree> --status` for bounded, read-only state. A targeted

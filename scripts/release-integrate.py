@@ -39,14 +39,14 @@ def resolve(root, branch):
     return tips[0]
 
 
-def receipts_pr_for_base(root, base):
+def receipts_commit_for_base(root, base):
     run_dir = os.environ.get("CAS_RELEASE_RECEIPTS_RUN_DIR")
     candidates = []
     if run_dir:
-        candidates.append(Path(run_dir) / "receipts.pr")
+        candidates.append(Path(run_dir) / "receipts.commit")
     common = Path(git(root, "rev-parse", "--path-format=absolute", "--git-common-dir")).resolve()
     artifacts = Path(os.environ.get("CAS_RELEASE_ARTIFACTS_ROOT", common.parent / ".cas" / "artifacts" / "release"))
-    candidates.extend(sorted(artifacts.glob("v*-*/receipts.pr")))
+    candidates.extend(sorted(artifacts.glob("v*-*/receipts.commit")))
     for path in candidates:
         try:
             fields = dict(
@@ -57,7 +57,7 @@ def receipts_pr_for_base(root, base):
         except OSError:
             continue
         if fields.get("BASE_SHA") == base:
-            return fields.get("PR_NUMBER", "unknown")
+            return fields.get("COMMIT_SHA", "unknown")
     return None
 
 
@@ -73,10 +73,10 @@ def warn_receipts_ahead(root, base, main_tip):
     changed = git(root, "diff", "--name-only", base, main_tip).splitlines()
     if not changed or not all(path.startswith("docs/") for path in changed):
         return
-    pr_number = receipts_pr_for_base(root, base) or "unknown"
+    commit_sha = receipts_commit_for_base(root, base) or "unknown"
     print(
         "WARN assemble receipt docs: origin/main is ahead of the integration base "
-        f"only under docs/; receipts PR #{pr_number} is the cause. "
+        f"only under docs/; receipts commit {commit_sha} is the cause. "
         "Run the stale-base heal before assembling.",
         file=sys.stderr,
     )

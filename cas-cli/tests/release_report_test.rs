@@ -407,30 +407,34 @@ Dev reply
         );
         return;
     }
+    let receipt_run_dir = project.path().join("receipt-run");
+    fs::create_dir_all(&receipt_run_dir).unwrap();
+    fs::write(
+        receipt_run_dir.join("announce.receipt"),
+        "POSTED_AT=2099-01-02T00:00:00Z\n\
+         CHANNEL=cas-internal\n\
+         CHANNEL_ID=C01234567\n\
+         USER_TOP_LEVEL_ID=user-1\n\
+         USER_TOP_LEVEL_PERMALINK=https://example.test/user-1\n\
+         USER_REPLY_ID=user-2\n\
+         USER_REPLY_PERMALINK=https://example.test/user-2\n\
+         DEV_TOP_LEVEL_ID=dev-1\n\
+         DEV_TOP_LEVEL_PERMALINK=https://example.test/dev-1\n\
+         DEV_REPLY_ID=dev-2\n\
+         DEV_REPLY_PERMALINK=https://example.test/dev-2\n",
+    )
+    .unwrap();
     let receipt_block = ProcessCommand::new("bash")
         .args([
             "-c",
             r#"
 source "$1"
-release_train_receipts_field() {
-    case "$1" in
-        POSTED_AT) printf '%s' '2099-01-02T00:00:00Z' ;;
-        CHANNEL) printf '%s' 'cas-internal' ;;
-        CHANNEL_ID) printf '%s' 'C01234567' ;;
-        USER_TOP_LEVEL_ID) printf '%s' 'user-1' ;;
-        USER_TOP_LEVEL_PERMALINK) printf '%s' 'https://example.test/user-1' ;;
-        USER_REPLY_ID) printf '%s' 'user-2' ;;
-        USER_REPLY_PERMALINK) printf '%s' 'https://example.test/user-2' ;;
-        DEV_TOP_LEVEL_ID) printf '%s' 'dev-1' ;;
-        DEV_TOP_LEVEL_PERMALINK) printf '%s' 'https://example.test/dev-1' ;;
-        DEV_REPLY_ID) printf '%s' 'dev-2' ;;
-        DEV_REPLY_PERMALINK) printf '%s' 'https://example.test/dev-2' ;;
-    esac
-}
-release_train_receipts_posted_block
+run_dir="$2"
+release_train_announce_posted_block
 "#,
             "receipt-block",
             receipt_script.to_str().unwrap(),
+            receipt_run_dir.to_str().unwrap(),
         ])
         .output()
         .unwrap();

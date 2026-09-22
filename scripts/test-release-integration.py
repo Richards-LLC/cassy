@@ -124,7 +124,7 @@ PY
         self.assertEqual(self.git("rev-parse", "HEAD"), self.tip)
         self.assertTrue((self.root / ".cas/healed").exists())
 
-    def test_docs_only_receipts_base_names_the_receipts_pr(self):
+    def test_docs_only_receipts_base_names_the_receipts_commit(self):
         self.git("checkout", "main")
         docs = self.root / "docs"
         docs.mkdir()
@@ -137,8 +137,8 @@ PY
         artifacts = Path(self.temp.name) / "artifacts"
         run_dir = artifacts / "v0.0.0-release-test"
         run_dir.mkdir(parents=True)
-        (run_dir / "receipts.pr").write_text(
-            f"PR_NUMBER=123\nBASE_SHA={self.base}\n"
+        (run_dir / "receipts.commit").write_text(
+            f"COMMIT_SHA={docs_tip}\nBRANCH=release/test\nBASE_SHA={self.base}\n"
         )
         result = subprocess.run(
             [str(TRAIN), "0.0.0", str(self.root), "--assemble"],
@@ -148,7 +148,7 @@ PY
         )
         self.assertEqual(result.returncode, 1)
         self.assertIn("only under docs/", result.stderr)
-        self.assertIn("receipts PR #123", result.stderr)
+        self.assertIn(f"receipts commit {docs_tip}", result.stderr)
         self.assertEqual(self.git("rev-parse", "HEAD"), self.base)
 
     def test_changed_integration_refuses_wrong_receipt(self):

@@ -124,8 +124,11 @@ fn reconcile_reused_factory_branch(
         format!("Cannot inspect reused factory branch {expected_branch}: {error}")
     })?;
 
+    // Factory repos commonly carry untracked CAS metadata (for example the
+    // test harness's `.cas/config.toml`). It survives a hard reset, so only
+    // tracked changes make this reconciliation unsafe.
     let status = std::process::Command::new("git")
-        .args(["status", "--porcelain"])
+        .args(["status", "--porcelain", "--untracked-files=no"])
         .current_dir(worktree_path)
         .output()
         .map_err(|error| {
@@ -246,6 +249,24 @@ mod reused_factory_branch_tests {
 
         assert_eq!(result, ReusedFactoryBranchStart::Unchanged);
         assert_eq!(git(repo.path(), &["rev-parse", "HEAD"]), before);
+    }
+
+    #[test]
+    fn tracked_changes_on_reused_branch_are_refused() {
+        let repo = repo();
+        git(repo.path(), &["checkout", "-b", "factory/test-worker"]);
+        std::fs::write(repo.path().join("prior"), "prior\n").expect("prior file");
+        git(repo.path(), &["add", "prior"]);
+        git(repo.path(), &["commit", "-m", "prior delivery"]);
+        git(repo.path(), &["checkout", "main"]);
+        git(repo.path(), &["merge", "--no-ff", "factory/test-worker", "-m", "merge prior delivery"]);
+        git(repo.path(), &["checkout", "factory/test-worker"]);
+        std::fs::write(repo.path().join("base"), "modified\n").expect("tracked change");
+
+        let error = reconcile_reused_factory_branch(repo.path(), "factory/test-worker", "main")
+            .expect_err("tracked changes must block reset");
+
+        assert!(error.contains("uncommitted changes"), "{error}");
     }
 }
 
@@ -1421,21 +1442,13 @@ impl CasCore {
                 .is_empty()
         {
             if let Ok(worker) = agent_store.get(&agent_id) {
-                let target_repo_root = declared_repo_context
-                    .as_ref()
-                    .map(|context| context.repo_root.clone())
-                    .or_else(|| GitOperations::detect_repo_root(&self.cas_root).ok());
-                let target_branch = declared_repo_context
-                    .as_ref()
-                    .map(|context| context.target_branch.clone())
-                    .or_else(|| {
-                        target_repo_root.as_deref().map(|root| {
-                            GitOperations::new(root.to_path_buf()).detect_default_branch()
-                        })
-                    });
-                if let (Some(target_repo_root), Some(target_branch)) =
-                    (target_repo_root.as_deref(), target_branch)
-                {
+                // A declared WorkTarget is the only authoritative target. Do
+                // not guess from the worker's incidental checkout when legacy
+                // test/local tasks have no repository binding; that can make
+                // an unrelated existing branch look like a foreign delivery.
+                if let Some(context) = declared_repo_context.as_ref() {
+                    let target_repo_root = &context.repo_root;
+                    let target_branch = &context.target_branch;
                     match reconcile_reused_factory_branch(
                         target_repo_root,
                         &crate::factory_isolation::expected_worker_branch(&worker.name),

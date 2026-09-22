@@ -369,6 +369,157 @@ pub(super) fn enqueue_pr_lane_failure_relay(
     )
 }
 
+/// Wake the delivering worker after GitHub confirms that its main-targeted PR
+/// merged. The source and dedupe key contain the immutable PR/merge receipt so
+/// repeated polls and daemon restarts cannot duplicate the lifecycle wake.
+fn enqueue_delivery_pr_merged_wake(
+    cas_dir: &std::path::Path,
+    task_id: &str,
+    worker: &str,
+    pr_number: u64,
+    merge_commit: &str,
+) -> Result<(), String> {
+    use crate::mcp::tools::core::task::lifecycle::supervisor_push::LIFECYCLE_WAKE_SOURCE_PREFIX;
+    use cas_store::NotificationPriority;
+
+    let queue = crate::store::open_prompt_queue_store(cas_dir)
+        .map_err(|error| format!("could not open prompt queue: {error}"))?;
+    let factory_session = std::env::var("CAS_FACTORY_SESSION").ok();
+    let key = format!("delivery-pr-merged:{task_id}:{pr_number}:{merge_commit}");
+    let source = format!("{LIFECYCLE_WAKE_SOURCE_PREFIX}{key}");
+    let prompt = crate::prompt_revalidation::delivery_pr_merged_envelope(
+        task_id,
+        worker,
+        pr_number,
+        merge_commit,
+    );
+    queue
+        .enqueue_idempotent(
+            &source,
+            worker,
+            &prompt,
+            factory_session.as_deref(),
+            Some(&format!("PR #{pr_number} merged: close {task_id}")),
+            Some(NotificationPriority::High),
+            &key,
+            Some(&cas_store::QueueOrigin::Daemon),
+        )
+        .map_err(|error| format!("could not enqueue delivery merge wake: {error}"))?;
+    super::delivery::wake_daemon_after_enqueue(cas_dir);
+    Ok(())
+}
+
+/// Persist the PR identity as soon as it is discovered, then persist the merge
+/// receipt only after the worker wake is durable. A failed prompt write leaves
+/// the merge unrecorded so the next GitHub poll retries the complete handoff.
+fn apply_delivery_pr_observation(
+    cas_dir: &std::path::Path,
+    observation: &super::ci_watch::DeliveryPrObservation,
+) -> Result<(), String> {
+    let store = crate::store::open_task_store(cas_dir)
+        .map_err(|error| format!("could not open task store: {error}"))?;
+    let mut task = store
+        .get(&observation.task_id)
+        .map_err(|error| format!("could not read task: {error}"))?;
+    let mut changed = false;
+    if task.deliverables.delivery_pr_number != Some(observation.pr_number) {
+        task.deliverables.delivery_pr_number = Some(observation.pr_number);
+        changed = true;
+    }
+    let Some(merge_commit) = observation.merge_commit.as_deref() else {
+        if changed {
+            store
+                .update(&task)
+                .map_err(|error| format!("could not record delivery PR: {error}"))?;
+        }
+        return Ok(());
+    };
+    let already_recorded = task.deliverables.delivery_pr_merge_commit.as_deref()
+        == Some(merge_commit)
+        && task.deliverables.delivery_pr_merged_at.is_some();
+    if !already_recorded {
+        if !task.is_terminal() {
+            enqueue_delivery_pr_merged_wake(
+                cas_dir,
+                &observation.task_id,
+                &observation.worker,
+                observation.pr_number,
+                merge_commit,
+            )?;
+        }
+        task.deliverables.delivery_pr_merge_commit = Some(merge_commit.to_string());
+        task.deliverables.delivery_pr_merged_at = Some(chrono::Utc::now());
+        changed = true;
+    }
+    if changed {
+        store
+            .update(&task)
+            .map_err(|error| format!("could not record delivery PR merge: {error}"))?;
+    }
+    Ok(())
+}
+
+/// Give the worker a bounded chance to close after the typed merge wake. If it
+/// remains open, the existing durable supervisor attention lane tells the
+/// supervisor exactly which PR/receipt needs recovery. Its stable key makes
+/// this a single escalation for the merge episode.
+fn relay_delivery_pr_merge_timeouts(cas_dir: &std::path::Path) {
+    let Ok(store) = crate::store::open_task_store(cas_dir) else {
+        return;
+    };
+    let Ok(tasks) = store.list(None) else {
+        return;
+    };
+    let now = chrono::Utc::now();
+    for task in tasks {
+        let (Some(pr_number), Some(merge_commit), Some(merged_at), Some(worker)) = (
+            task.deliverables.delivery_pr_number,
+            task.deliverables.delivery_pr_merge_commit.as_deref(),
+            task.deliverables.delivery_pr_merged_at,
+            task.assignee.as_deref(),
+        ) else {
+            continue;
+        };
+        let Ok(age) = (now - merged_at).to_std() else {
+            continue;
+        };
+        if task.is_terminal() || age < super::ci_watch::DELIVERY_MERGE_CLOSE_GRACE {
+            continue;
+        }
+        let detail = format!(
+            "Delivery PR #{pr_number} for {} merged at {merge_commit}, but task remains {} after {}m. The worker was already told to close; inspect or recover the task.",
+            task.id,
+            task.status,
+            age.as_secs() / 60,
+        );
+        let occurrence = format!("delivery-pr-merged:{}:{pr_number}:{merge_commit}", task.id);
+        match enqueue_worker_attention_relay_detail_with_key(
+            cas_dir,
+            "delivery_pr_merge_timeout",
+            worker,
+            Some(&task.id),
+            Some(age.as_secs()),
+            |_| detail.clone(),
+            &occurrence,
+            Some(&occurrence),
+        ) {
+            WorkerAttentionRelayOutcome::Persisted { notification_id } => tracing::warn!(
+                task_id = %task.id,
+                pr_number,
+                merge_commit,
+                notification_id,
+                "delivery PR remained open after merge wake grace"
+            ),
+            WorkerAttentionRelayOutcome::Pending => tracing::warn!(
+                task_id = %task.id,
+                pr_number,
+                "delivery PR merge timeout relay remains pending"
+            ),
+            WorkerAttentionRelayOutcome::NotApplicable => {}
+        }
+    }
+}
+
 /// The fail-safe for supervisor traffic that is NOT wake-eligible (cas-d9a8).
 ///
 /// A worker's blocker, verification handoff or plan carries no CAS-emitted
@@ -1177,6 +1328,61 @@ mod worker_attention_tests {
         assert!(rows[0].prompt.contains("33436155392"));
         assert_recovery_wake_requires_daemon(&rows[0]);
     }
+
+    #[test]
+    fn merged_delivery_records_receipt_wakes_worker_and_escalates_once() {
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[(
+            "CAS_FACTORY_SESSION",
+            "delivery-pr-merged-test",
+        )]);
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        register_supervisor(&cas_dir, "delivery-pr-merged-test");
+        let task_store = crate::store::open_task_store(&cas_dir).unwrap();
+        let mut task = cas_types::Task::new("cas-7ea6".to_string(), "delivery".to_string());
+        task.status = cas_types::TaskStatus::AwaitingMerge;
+        task.assignee = Some("calm-octopus-51".to_string());
+        task_store.add(&task).unwrap();
+        let observation = crate::ui::factory::daemon::runtime::ci_watch::DeliveryPrObservation {
+            task_id: "cas-7ea6".to_string(),
+            worker: "calm-octopus-51".to_string(),
+            branch: "factory/calm-octopus-51".to_string(),
+            pr_number: 932,
+            head_sha: "worker-tip".to_string(),
+            merge_commit: Some("merge-tip".to_string()),
+        };
+
+        apply_delivery_pr_observation(&cas_dir, &observation).unwrap();
+        apply_delivery_pr_observation(&cas_dir, &observation).unwrap();
+        let persisted = task_store.get("cas-7ea6").unwrap();
+        assert_eq!(persisted.deliverables.delivery_pr_number, Some(932));
+        assert_eq!(
+            persisted.deliverables.delivery_pr_merge_commit.as_deref(),
+            Some("merge-tip")
+        );
+        let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+        let rows = queue.peek_all(10).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].target, "calm-octopus-51");
+        assert!(rows[0].prompt.contains("PR #932 merged at merge-tip"));
+        assert!(rows[0].prompt.contains("close cas-7ea6 with commit_receipt=merge-tip"));
+        assert_eq!(rows[0].origin, Some(cas_store::QueueOrigin::Daemon));
+
+        let mut aged = persisted;
+        aged.deliverables.delivery_pr_merged_at =
+            Some(chrono::Utc::now() - chrono::Duration::minutes(10));
+        task_store.update(&aged).unwrap();
+        relay_delivery_pr_merge_timeouts(&cas_dir);
+        relay_delivery_pr_merge_timeouts(&cas_dir);
+        let rows = queue.peek_all(10).unwrap();
+        assert_eq!(rows.len(), 2);
+        let supervisor_row = rows.iter().find(|row| row.target == "supervisor").unwrap();
+        assert!(supervisor_row.prompt.contains("kind=\"delivery_pr_merge_timeout\""));
+        assert!(supervisor_row.prompt.contains("PR #932"));
+        assert!(crate::prompt_revalidation::is_supervisor_wake_envelope(
+            &supervisor_row.prompt
+        ));
+    }
 }
 
 impl FactoryDaemon {
@@ -1481,6 +1687,7 @@ impl FactoryDaemon {
                     (
                         Vec<super::ci_watch::CiFailure>,
                         super::ci_watch::MergeQueuePoll,
+                        Vec<super::ci_watch::DeliveryPrObservation>,
                     ),
                     super::ci_watch::CiWatchError,
                 >,
@@ -1633,6 +1840,10 @@ impl FactoryDaemon {
                         .into_iter()
                         .filter_map(|task| {
                             let worker = task.assignee?;
+                            let work_target = task.deliverables.work_target.as_ref()?;
+                            if work_target.target_branch != "main" {
+                                return None;
+                            }
                             let branch = task
                                 .deliverables
                                 .parked_branch
@@ -1642,6 +1853,8 @@ impl FactoryDaemon {
                                 task_id: task.id,
                                 worker,
                                 branch,
+                                branch_tip: task.deliverables.factory_branch_anchor,
+                                pr_number: task.deliverables.delivery_pr_number,
                             })
                         })
                         .collect::<Vec<_>>();
@@ -1677,7 +1890,12 @@ impl FactoryDaemon {
                             &previously_queued,
                             &previously_armed,
                         )?;
-                        Ok((failures, queue_poll))
+                        let delivery_pr_observations =
+                            super::ci_watch::collect_delivery_pr_observations(
+                                &transport,
+                                &deliveries,
+                            )?;
+                        Ok((failures, queue_poll, delivery_pr_observations))
                     }));
                     last_ci_watch = std::time::Instant::now();
                 }
@@ -1685,10 +1903,30 @@ impl FactoryDaemon {
                 if ci_watch_task.as_ref().is_some_and(JoinHandle::is_finished) {
                     let task = ci_watch_task.take().expect("checked above");
                     match task.await {
-                        Ok(Ok((failures, queue_poll))) => {
+                        Ok(Ok((failures, queue_poll, delivery_pr_observations))) => {
                             ci_watch_unavailable_reported = false;
                             last_merge_queue_membership = queue_poll.queued_prs;
                             last_auto_merge_membership = queue_poll.auto_merge_prs;
+                            for observation in delivery_pr_observations {
+                                match apply_delivery_pr_observation(
+                                    self.app.cas_dir(),
+                                    &observation,
+                                ) {
+                                    Ok(()) => tracing::info!(
+                                        task_id = %observation.task_id,
+                                        pr_number = observation.pr_number,
+                                        merge_commit = ?observation.merge_commit,
+                                        "recorded delivery PR observation"
+                                    ),
+                                    Err(error) => tracing::warn!(
+                                        task_id = %observation.task_id,
+                                        pr_number = observation.pr_number,
+                                        %error,
+                                        "could not persist delivery PR observation"
+                                    ),
+                                }
+                            }
+                            relay_delivery_pr_merge_timeouts(self.app.cas_dir());
                             for ejection in queue_poll.ejections {
                                 match enqueue_merge_queue_ejection_relay(
                                     self.app.cas_dir(),

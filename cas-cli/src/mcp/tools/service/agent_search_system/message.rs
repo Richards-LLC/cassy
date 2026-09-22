@@ -12,6 +12,26 @@ fn resolve_inbox_recipient(
         .filter(|name| !name.trim().is_empty())
 }
 
+fn extract_pull_request_number(text: &str) -> Option<u64> {
+    for marker in ["pull/", "PR #", "pr #", "Pull Request #"] {
+        let mut offset = 0;
+        while let Some(relative) = text[offset..].find(marker) {
+            let start = offset + relative + marker.len();
+            let digits = text[start..]
+                .chars()
+                .take_while(char::is_ascii_digit)
+                .collect::<String>();
+            if !digits.is_empty()
+                && let Ok(number) = digits.parse()
+            {
+                return Some(number);
+            }
+            offset = start;
+        }
+    }
+    None
+}
+
 /// Marker prefixed to any inbox row this poll is handing over for a second
 /// time (cas-99d2, GH #127).
 ///
@@ -1405,6 +1425,9 @@ impl CasService {
             };
             use crate::store::open_task_store_local;
 
+            let requested_pr_number = extract_pull_request_number(&message)
+                .or_else(|| extract_pull_request_number(&summary));
+
             let merge_task = open_task_store_local(&self.inner.cas_root)
                 .ok()
                 .and_then(|store| {
@@ -1520,6 +1543,22 @@ impl CasService {
                                     &branch_tip,
                                     &repo.target_branch,
                                 );
+                            if let Some(pr_number) = requested_pr_number {
+                                let mut task_with_pr = task.clone();
+                                if task_with_pr.deliverables.delivery_pr_number != Some(pr_number) {
+                                    task_with_pr.deliverables.delivery_pr_number = Some(pr_number);
+                                    if let Ok(store) = open_task_store_local(&self.inner.cas_root) {
+                                        if let Err(error) = store.update(&task_with_pr) {
+                                            tracing::warn!(
+                                                task_id = %task.id,
+                                                pr_number,
+                                                %error,
+                                                "could not record merge-request PR number"
+                                            );
+                                        }
+                                    }
+                                }
+                            }
                             message = attach_merge_request_envelope(
                                 &message,
                                 &MergeRequestEnvelope {
@@ -1532,6 +1571,7 @@ impl CasService {
                                     target_branch: repo.target_branch,
                                     target_branch_tip: target_tip,
                                     commits_not_on_target_base,
+                                    pr_number: requested_pr_number,
                                 },
                             );
                         }
@@ -3222,7 +3262,7 @@ mod inbox_poll_identity_tests {
     use super::{
         enrich_report_from_harness_artifact, interrupt_unconfirmed_message,
         lifecycle_relay_is_stale_at_inbox_pop, recipient_transport_warning,
-        resolve_inbox_recipient,
+        extract_pull_request_number, resolve_inbox_recipient,
     };
     use cas_store::DeliveryStage;
 
@@ -3349,6 +3389,16 @@ mod inbox_poll_identity_tests {
             Some("env-worker".to_string())
         );
         assert_eq!(resolve_inbox_recipient(None, Some("  ".to_string())), None);
+    }
+
+    #[test]
+    fn merge_request_pr_number_extraction_accepts_urls_and_labels() {
+        assert_eq!(
+            extract_pull_request_number("queued https://github.test/org/repo/pull/932"),
+            Some(932)
+        );
+        assert_eq!(extract_pull_request_number("PR #933 merged"), Some(933));
+        assert_eq!(extract_pull_request_number("no pull request here"), None);
     }
 
     #[test]

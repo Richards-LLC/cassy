@@ -12,7 +12,8 @@ pub(super) use ratatui::Terminal;
 pub(super) use tokio::task::JoinHandle;
 
 pub(super) use crate::store::{
-    AgentStore, SpawnAction, open_agent_store, open_prompt_queue_store, open_spawn_queue_store,
+    AgentStore, SpawnAction, TaskStore, open_agent_store, open_prompt_queue_store,
+    open_spawn_queue_store,
 };
 pub(super) use crate::ui::factory::app::{
     EpicStateChange, FactoryApp, FactoryConfig, ScrollAction, WorkerSpawnResult,

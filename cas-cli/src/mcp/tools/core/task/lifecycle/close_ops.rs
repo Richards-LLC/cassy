@@ -1029,10 +1029,10 @@ fn add_scoped_proof_target(targets: &mut std::collections::BTreeSet<String>, tar
     }
 }
 
-/// Resolve the integration binaries that exercise an attributed delivery
-/// diff. This mirrors `check-scoped-test-surface.sh` at the close boundary so
-/// a worker cannot close after running only a changed module's unit filter.
-fn required_scoped_proof_targets(
+/// Legacy in-process target resolver for repository fixtures that do not carry
+/// the committed surface checker. Real closes use the checker-backed wrapper
+/// below so the suggested command cannot drift from the proof guard.
+fn legacy_required_scoped_proof_targets(
     repo: &std::path::Path,
     changed_paths: &[String],
 ) -> Vec<String> {
@@ -1124,6 +1124,135 @@ fn required_scoped_proof_targets(
         .into_iter()
         .filter(|target| scoped_proof_cargo_test_target_exists(repo, target))
         .collect()
+}
+
+/// Ask the committed surface checker for the same integration-target mapping
+/// used by `scripts/run-scoped-tests.sh`. The close gate used to carry a
+/// second Rust implementation of that mapping; it drifted from the checker
+/// and suggested an eight-target command for a diff the checker required to
+/// run with eleven targets. Keep the small in-process resolver as a fixture
+/// fallback for unit tests that intentionally build a repository without the
+/// project scripts, but all real repository closes use the checker as the
+/// authority.
+#[derive(Debug, Default)]
+struct ScopedProofTargetCache {
+    entries: std::collections::HashMap<ScopedProofTargetCacheKey, Vec<String>>,
+}
+
+#[derive(Debug, Hash, PartialEq, Eq)]
+struct ScopedProofTargetCacheKey {
+    proof_repo: std::path::PathBuf,
+    target_repo: std::path::PathBuf,
+    changed_paths: Vec<String>,
+}
+
+fn scoped_proof_changed_path_set(changed_paths: &[String]) -> Vec<String> {
+    let mut paths = changed_paths
+        .iter()
+        .map(|path| path.replace('\\', "/"))
+        .collect::<Vec<_>>();
+    paths.sort();
+    paths.dedup();
+    paths
+}
+
+fn proof_repo_is_git_worktree(repo: &std::path::Path) -> bool {
+    std::process::Command::new("git")
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .current_dir(repo)
+        .output()
+        .is_ok_and(|output| output.status.success() && output.stdout == b"true\n")
+}
+
+fn required_scoped_proof_targets(
+    proof_repo: &std::path::Path,
+    target_repo: &std::path::Path,
+    changed_paths: &[String],
+    cache: &mut ScopedProofTargetCache,
+) -> Vec<String> {
+    let normalized_paths = scoped_proof_changed_path_set(changed_paths);
+    let key = ScopedProofTargetCacheKey {
+        proof_repo: proof_repo.to_path_buf(),
+        target_repo: target_repo.to_path_buf(),
+        changed_paths: normalized_paths.clone(),
+    };
+    if let Some(targets) = cache.entries.get(&key) {
+        return targets.clone();
+    }
+
+    let targets = resolve_scoped_proof_targets_without_cache(
+        proof_repo,
+        target_repo,
+        &normalized_paths,
+    );
+    cache.entries.insert(key, targets.clone());
+    targets
+}
+
+fn resolve_scoped_proof_targets_without_cache(
+    proof_repo: &std::path::Path,
+    target_repo: &std::path::Path,
+    changed_paths: &[String],
+) -> Vec<String> {
+    // The worker checkout owns the delivery diff, while the task's target
+    // repository is the durable location for project tooling. Keep the
+    // checker path tied to the declared target so an installed Cassy binary
+    // does not reach back into its build checkout; run it from the worker
+    // checkout so its relative source/test lookups describe that diff.
+    let checker = target_repo.join("scripts/check-scoped-test-surface.sh");
+    // The checker is an inspection helper, not a substitute for repository
+    // resolution. In-process fallback is the safe path for lightweight
+    // stores, installed binaries without a checkout, and any checker failure.
+    if proof_repo_is_git_worktree(proof_repo) && checker.is_file() {
+        let mut command = std::process::Command::new("bash");
+        command
+            .arg(&checker)
+            .args([
+                "--resolve-targets",
+                "--base",
+                "HEAD",
+                "--paths-from-stdin",
+                "--",
+            ])
+            .current_dir(proof_repo)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        if let Ok(mut child) = command.spawn() {
+            let paths = if changed_paths.is_empty() {
+                String::new()
+            } else {
+                format!("{}\n", changed_paths.join("\n"))
+            };
+            let stdin_ok = child
+                .stdin
+                .take()
+                .map(|mut stdin| {
+                    use std::io::Write;
+                    stdin.write_all(paths.as_bytes()).is_ok()
+                })
+                .unwrap_or(false);
+            let output = child.wait_with_output();
+            if stdin_ok
+                && let Ok(output) = output
+                && output.status.success()
+                && let Some(line) = String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .find(|line| line.starts_with("SCOPED_PROOF_TARGET_ARGS:"))
+            {
+                let mut targets = Vec::new();
+                let mut tokens = line.split_whitespace().skip(1);
+                while let Some(token) = tokens.next() {
+                    if token == "--test" && let Some(target) = tokens.next() {
+                        targets.push(target.to_string());
+                    }
+                }
+                return targets;
+            }
+        }
+    }
+
+    legacy_required_scoped_proof_targets(proof_repo, changed_paths)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1260,7 +1389,15 @@ fn validate_risk_close_proofs(
     changed_paths: &[String],
     proof_repo: &std::path::Path,
 ) -> Result<(), String> {
-    validate_risk_close_proofs_with_base(task, changed_paths, proof_repo, None)
+    let mut scoped_proof_cache = ScopedProofTargetCache::default();
+    validate_risk_close_proofs_with_base_and_target_and_cache(
+        task,
+        changed_paths,
+        proof_repo,
+        proof_repo,
+        None,
+        &mut scoped_proof_cache,
+    )
 }
 
 fn validate_risk_close_proofs_with_base(
@@ -1268,6 +1405,25 @@ fn validate_risk_close_proofs_with_base(
     changed_paths: &[String],
     proof_repo: &std::path::Path,
     expected_base: Option<&str>,
+) -> Result<(), String> {
+    let mut scoped_proof_cache = ScopedProofTargetCache::default();
+    validate_risk_close_proofs_with_base_and_target_and_cache(
+        task,
+        changed_paths,
+        proof_repo,
+        proof_repo,
+        expected_base,
+        &mut scoped_proof_cache,
+    )
+}
+
+fn validate_risk_close_proofs_with_base_and_target_and_cache(
+    task: &Task,
+    changed_paths: &[String],
+    proof_repo: &std::path::Path,
+    target_repo: &std::path::Path,
+    expected_base: Option<&str>,
+    scoped_proof_cache: &mut ScopedProofTargetCache,
 ) -> Result<(), String> {
     if task.risk.contains(&TaskRisk::Platform) && !has_platform_proof_note(&task.notes) {
         let missing = platform_proof_missing_evidence(&task.notes).join(", ");
@@ -1294,7 +1450,12 @@ fn validate_risk_close_proofs_with_base(
             ));
         }
     }
-    let required_targets = required_scoped_proof_targets(proof_repo, changed_paths);
+    let required_targets = required_scoped_proof_targets(
+        proof_repo,
+        target_repo,
+        changed_paths,
+        scoped_proof_cache,
+    );
     if !required_targets.is_empty() {
         if let Some(expected_base) = expected_base {
             let actual_base = scoped_proof_note_base(&task.notes);
@@ -1496,6 +1657,234 @@ mod risk_proof_tests {
         dir
     }
 
+    fn install_scoped_proof_checker(dir: &std::path::Path) -> bool {
+        let checker = crate::test_paths::workspace_root()
+            .join("scripts/check-scoped-test-surface.sh");
+        if !checker.is_file() {
+            eprintln!(
+                "SKIP: scoped proof gate regression needs checker at {}",
+                checker.display()
+            );
+            return false;
+        }
+        let destination = dir.join("scripts/check-scoped-test-surface.sh");
+        std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
+        std::fs::copy(checker, destination).unwrap();
+        true
+    }
+
+    fn initialize_scoped_proof_git_fixture(dir: &std::path::Path) {
+        let status = std::process::Command::new("git")
+            .args(["init", "-q", "-b", "main"])
+            .current_dir(dir)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let status = std::process::Command::new("git")
+            .args(["add", "."])
+            .current_dir(dir)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let status = std::process::Command::new("git")
+            .args([
+                "-c",
+                "user.name=scoped-proof-test",
+                "-c",
+                "user.email=scoped-proof-test@example.invalid",
+                "commit",
+                "-qm",
+                "fixture",
+            ])
+            .current_dir(dir)
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+
+    #[test]
+    fn scoped_proof_gate_and_surface_checker_agree_on_multi_area_diff() {
+        let dir = tempfile::tempdir().unwrap();
+        if !install_scoped_proof_checker(dir.path()) {
+            return;
+        }
+        let target_repo = tempfile::tempdir().unwrap();
+        let target_checker = target_repo
+            .path()
+            .join("scripts/check-scoped-test-surface.sh");
+        std::fs::create_dir_all(target_checker.parent().unwrap()).unwrap();
+        std::fs::copy(
+            dir.path().join("scripts/check-scoped-test-surface.sh"),
+            &target_checker,
+        )
+        .unwrap();
+
+        let files = [
+            "cas-cli/src/builtins/skills/demo/SKILL.md",
+            "cas-cli/src/hub.rs",
+            "cas-cli/tests/builtin_archive_portability_test.rs",
+            "cas-cli/tests/builtin_demo_test.rs",
+            "cas-cli/tests/builtin_flavor_drift_test.rs",
+            "cas-cli/tests/agent_definition_contract_test.rs",
+            "cas-cli/tests/factory_codex_skill_guardrails.rs",
+            "cas-cli/tests/hub_contract_test.rs",
+            "cas-cli/tests/mcp_tools_test.rs",
+            "cas-cli/tests/mcp_tools_test/task_tools/operations.rs",
+        ];
+        for file in files {
+            let path = dir.path().join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let body = if file.ends_with("hub.rs") {
+                "pub fn supervisor_sessions() {}\n"
+            } else if file.ends_with("hub_contract_test.rs") {
+                "fn covers_hub() { cas::hub::supervisor_sessions(); }\n"
+            } else if file.ends_with("builtin_demo_test.rs") {
+                "const SOURCE: &str = \"cas-cli/src/builtins/skills/demo/SKILL.md\";\nconst CATALOG: &str = \"skills/demo/SKILL.md\";\n"
+            } else {
+                "fn fixture() {}\n"
+            };
+            std::fs::write(path, body).unwrap();
+        }
+        initialize_scoped_proof_git_fixture(dir.path());
+        let status = std::process::Command::new("git")
+            .args(["checkout", "-qb", "changed"])
+            .current_dir(dir.path())
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        let changed = [
+            "cas-cli/src/builtins/skills/demo/SKILL.md",
+            "cas-cli/src/hub.rs",
+            "cas-cli/tests/mcp_tools_test/task_tools/operations.rs",
+        ];
+        for file in changed {
+            use std::io::Write;
+            let path = dir.path().join(file);
+            let mut handle = std::fs::OpenOptions::new()
+                .append(true)
+                .open(path)
+                .unwrap();
+            writeln!(handle, "// multi-area diff").unwrap();
+        }
+        let status = std::process::Command::new("git")
+            .args(["add", "."])
+            .current_dir(dir.path())
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let status = std::process::Command::new("git")
+            .args([
+                "-c",
+                "user.name=scoped-proof-test",
+                "-c",
+                "user.email=scoped-proof-test@example.invalid",
+                "commit",
+                "-qm",
+                "multi-area change",
+            ])
+            .current_dir(dir.path())
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        let changed = changed
+            .iter()
+            .map(|file| (*file).to_string())
+            .collect::<Vec<_>>();
+        let mut cache = ScopedProofTargetCache::default();
+        let targets = required_scoped_proof_targets(
+            dir.path(),
+            target_repo.path(),
+            &changed,
+            &mut cache,
+        );
+        let reordered = changed.iter().rev().cloned().collect::<Vec<_>>();
+        assert_eq!(
+            required_scoped_proof_targets(
+                dir.path(),
+                target_repo.path(),
+                &reordered,
+                &mut cache,
+            ),
+            targets,
+            "the same changed-path set must reuse the close-local cache"
+        );
+        assert_eq!(cache.entries.len(), 1);
+        assert_eq!(
+            targets,
+            [
+                "hub_contract_test".to_string(),
+                "mcp_tools_test".to_string(),
+                "builtin_archive_portability_test".to_string(),
+                "builtin_flavor_drift_test".to_string(),
+                "agent_definition_contract_test".to_string(),
+                "factory_codex_skill_guardrails".to_string(),
+                "builtin_demo_test".to_string(),
+            ]
+        );
+
+        let checker = dir.path().join("scripts/check-scoped-test-surface.sh");
+        let actual_diff = std::process::Command::new("bash")
+            .arg(&checker)
+            .args(["--resolve-targets", "--base", "main", "--"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        assert!(
+            actual_diff.status.success(),
+            "surface checker could not resolve the committed multi-area diff: {}",
+            String::from_utf8_lossy(&actual_diff.stderr)
+        );
+        let actual_diff_args = String::from_utf8_lossy(&actual_diff.stdout);
+        for target in &targets {
+            assert!(
+                actual_diff_args.contains(&format!("--test {target}")),
+                "committed diff omitted gate target {target}: {actual_diff_args}"
+            );
+        }
+        let status = std::process::Command::new("git")
+            .args(["status", "--porcelain"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        assert!(
+            status.status.success() && status.stdout.is_empty(),
+            "surface checker must not write inside the inspected repo: {}",
+            String::from_utf8_lossy(&status.stdout)
+        );
+
+        let mut command = std::process::Command::new("bash");
+        command
+            .arg(checker)
+            .args(["--base", "HEAD", "--paths-from-stdin", "--", "-p", "cas", "--lib"]);
+        for target in &targets {
+            command.args(["--test", target]);
+        }
+        command
+            .current_dir(dir.path())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        let mut child = command.spawn().unwrap();
+        {
+            use std::io::Write;
+            let mut stdin = child.stdin.take().unwrap();
+            writeln!(stdin, "{}", changed.join("\n")).unwrap();
+        }
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "surface checker rejected the gate command: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("covered committed diff"),
+            "surface checker did not emit a passing receipt: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+    }
+
     #[test]
     fn scoped_proof_drops_nested_module_without_cargo_target() {
         let dir = tempfile::tempdir().unwrap();
@@ -1552,9 +1941,12 @@ mod risk_proof_tests {
         std::fs::write(source, "pub(super) fn supervisor_sessions() {}\n").unwrap();
         std::fs::write(test, "#[test] fn test_supervisor_sessions() {}\n").unwrap();
 
+        let mut cache = ScopedProofTargetCache::default();
         assert!(required_scoped_proof_targets(
             dir.path(),
-            &["cas-cli/src/hub.rs".to_string()]
+            dir.path(),
+            &["cas-cli/src/hub.rs".to_string()],
+            &mut cache,
         )
         .is_empty());
     }
@@ -1573,10 +1965,13 @@ mod risk_proof_tests {
         )
         .unwrap();
 
+        let mut cache = ScopedProofTargetCache::default();
         assert_eq!(
             required_scoped_proof_targets(
                 dir.path(),
-                &["cas-cli/src/hub.rs".to_string()]
+                dir.path(),
+                &["cas-cli/src/hub.rs".to_string()],
+                &mut cache,
             ),
             ["hub_contract_test".to_string()]
         );
@@ -5832,11 +6227,18 @@ impl CasCore {
                         )
                     })
             });
-            if let Err(message) = validate_risk_close_proofs_with_base(
+            let target_repo = declared_repo_context
+                .as_ref()
+                .map(|context| context.repo_root.as_path())
+                .unwrap_or(close_project_root.as_path());
+            let mut scoped_proof_cache = ScopedProofTargetCache::default();
+            if let Err(message) = validate_risk_close_proofs_with_base_and_target_and_cache(
                 &task,
                 &changed_paths,
                 proof_repo,
+                target_repo,
                 scoped_proof_base.as_deref(),
+                &mut scoped_proof_cache,
             ) {
                 return Ok(Self::tool_error(message));
             }

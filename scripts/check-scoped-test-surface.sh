@@ -14,12 +14,13 @@ set -euo pipefail
 target_branch="${SCOPED_PROOF_TARGET_BRANCH:-}"
 
 usage() {
-    echo "usage: $0 [--base <git-ref>] [--resolve-targets] -- [cargo/nextest arguments]" >&2
+    echo "usage: $0 [--base <git-ref>] [--resolve-targets] [--paths-from-stdin] -- [cargo/nextest arguments]" >&2
     exit 2
 }
 
 base_ref=""
 resolve_targets=false
+paths_from_stdin=false
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --base)
@@ -29,6 +30,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --resolve-targets)
             resolve_targets=true
+            shift
+            ;;
+        --paths-from-stdin)
+            paths_from_stdin=true
             shift
             ;;
         --)
@@ -116,6 +121,15 @@ if [[ "$resolve_targets" == true ]]; then
     echo "SCOPED_PROOF SURFACE: base=${base_ref} merge-base=${merge_base}" >&2
 else
     echo "SCOPED_PROOF SURFACE: base=${base_ref} merge-base=${merge_base}"
+fi
+
+changed_paths=()
+if [[ "$paths_from_stdin" == true ]]; then
+    while IFS= read -r path; do
+        [[ -n "$path" ]] && changed_paths+=("$path")
+    done
+else
+    mapfile -t changed_paths < <(git diff --name-only "$merge_base" HEAD)
 fi
 
 lib_requested=false
@@ -489,7 +503,7 @@ while IFS= read -r path; do
             add_required_test_target "$(basename "${path%.rs}")"
             ;;
     esac
-done < <(git diff --name-only "$merge_base" HEAD)
+done < <(printf '%s\n' "${changed_paths[@]}")
 
 # These guardrails are file-class contracts, not optional path discoveries:
 # an integration-test source must remain readable in nextest archives, and a
@@ -503,7 +517,7 @@ while IFS= read -r path; do
             add_required_test_target hook_schema
             ;;
     esac
-done < <(git diff --name-only "$merge_base" HEAD)
+done < <(printf '%s\n' "${changed_paths[@]}")
 
 # Builtin skills and agents are embedded into all harness flavors, so their
 # source paths can be covered by tests that are not themselves changed. Always
@@ -533,7 +547,7 @@ while IFS= read -r path; do
     discover_builtin_test_targets "$path"
     [[ -n "$catalog_path" ]] || continue
     discover_builtin_test_targets "$catalog_path"
-done < <(git diff --name-only "$merge_base" HEAD)
+done < <(printf '%s\n' "${changed_paths[@]}")
 
 missing=()
 if [[ "$resolve_targets" == true ]]; then

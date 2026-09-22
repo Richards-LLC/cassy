@@ -103,9 +103,13 @@ for header, terminal, pairing and favicon. The monochrome mark inherits
 `--font-display`, medium weight, `--fs-lg` (21px), with `--space-2` separation.
 No downloaded font or raster is required.
 
-Place the complete brand at the top of the thread list on phone and desktop.
-The phone conversation header retains the complete lockup above its project
-badge; the desktop context rail repeats a quiet 14px wordmark with a 24px mark.
+Place the complete brand at the top of the thread list on phone and desktop;
+the list screen is the only place the phone shows the lockup. The phone
+conversation header omits it so the header stays one row (about 56px): a 40px
+"‹" back target, a 36px avatar, the supervisor codename (ellipsised) beside a
+13px project badge, the host line beneath, and a text-only "Terminal". The
+buttons keep their full accessible names ("‹ Conversations", "Terminal view").
+The desktop context rail repeats a quiet 14px wordmark with a 24px mark.
 The main wordmark is 21px with a 32px mark; compact minimums are 14px / 24px.
 Reserve 8px around the mark. The vector is decorative beside readable text,
 never an unlabeled navigation control. A project badge names the work, not the

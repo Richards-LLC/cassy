@@ -4470,6 +4470,8 @@ This is the body content."#;
                 "cas-2327",
                 "reverse states",
                 "release-notes impact",
+                "Reused worker:",
+                "git rebase <target>",
             ] {
                 assert!(content.contains(required), "{label} surface checklist missing {required:?}");
             }

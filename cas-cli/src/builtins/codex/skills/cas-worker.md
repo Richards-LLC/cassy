@@ -16,12 +16,10 @@ errors and the return contract only.
 
 1. Run `mcp__cs__task action=mine`. If empty, message the supervisor once that
    you are ready, then wait; do not poll or self-dispatch.
-2. Choose exactly one assigned task. Run `mcp__cs__task action=show id=<task-id>`,
+2. Choose exactly one task. Run `mcp__cs__task action=show id=<task-id>`,
    then `mcp__cs__task action=start id=<task-id>` before editing.
-   Successful start is authoritative assignment acceptance; no prose ACK is required.
-   When reusing a worker for a different target, confirm `factory/<worker>` is based
-   on that target; reset it when the prior delivery is merged, or refuse with the
-   exact `git rebase <target>` command.
+   authoritative assignment acceptance; no prose ACK is required.
+   Reused worker: check target; reset merged or `git rebase <target>`.
 3. Read the task's depth and acceptance criteria and the project `CLAUDE.md`.
    For non-empty `demo_statement`, run `cas-qa-craft` before close.
 4. Implement only the assigned scope. Commit logical units with the task ID.

@@ -76,6 +76,24 @@ export function conversationEmptyText(catalogLoaded: boolean, machineCount: numb
   return !catalogLoaded ? "Loading paired machines…" : machineCount === 0 ? "Pair a machine to start your first conversation." : "No live supervisors listed. Use Appearance & commands to show dormant sessions for recovery.";
 }
 
+/**
+ * The desktop context rail (P10). It holds only what the thread header does
+ * not: open asks and blockers, task progress, the thread's attachments and
+ * its attention events — each section starts hidden and syncContextRail
+ * (context-rail.ts) reveals the ones with data. With none, the rail folds to
+ * the 48px context track. No lockup, badge, supervisor or host: those live in
+ * the header beside it.
+ */
+function contextRailMarkup(selected: boolean): string {
+  const sections = selected
+    ? '<section class="context-section" data-section="waiting" aria-labelledby="context-waiting-heading" hidden><h2 id="context-waiting-heading">Waiting on you</h2><ul class="context-list context-waiting"></ul></section>'
+      + '<section class="context-section" data-section="progress" aria-labelledby="context-progress-heading" hidden><h2 id="context-progress-heading">Tasks &amp; progress</h2><p class="status-stale" role="status" hidden></p><div id="conversation-status-slot"></div></section>'
+      + '<section class="context-section" data-section="attachments" aria-labelledby="context-attachments-heading" hidden><h2 id="context-attachments-heading">Attachments</h2><ul class="context-list context-attachments"></ul></section>'
+      + '<section class="context-section" data-section="attention" hidden><div id="conversation-attention-slot"></div></section>'
+    : "";
+  return `<aside class="conversation-context" aria-label="Conversation context" data-open="false" aria-hidden="true">${sections}</aside>`;
+}
+
 export function conversationShellMarkup(model: ConversationShellModel): string {
   // First run: the welcome carries the one primary "Pair a machine". The list
   // header's chip is hidden beside it on wide screens (styles.css
@@ -93,7 +111,7 @@ export function conversationShellMarkup(model: ConversationShellModel): string {
     <main class="conversation-main">
       ${model.selected ? `${conversationHeaderMarkup(model)}<section id="conversation-pane-slot" class="conversation-pane-slot"></section><div id="conversation-composer-slot"></div>` : `<div class="conversation-welcome"><span class="conversation-eyebrow">SUPERVISOR CONVERSATIONS</span><h2>Stay close to the work.</h2><p>${!model.loaded ? "Loading your paired machines…" : !model.paired ? "Pair a machine to read your supervisors’ words and talk to them here." : "Choose a project to read its supervisor’s words and send an instruction."}</p>${!model.paired && model.loaded ? '<button id="empty-pair" class="primary" type="button">Pair a machine</button>' : ""}</div>`}
     </main>
-    <aside class="conversation-context" aria-label="Conversation context">${cloudBrand()}<h2>In this conversation</h2>${model.selected ? `${projectBadge(model.projectDir)}<p class="conversation-context-name">${escapeHtml(model.supervisor || "Supervisor unavailable")}</p><p class="conversation-host">${escapeHtml(model.host || "")}</p><h2>Tasks &amp; progress</h2><p class="status-stale" role="status" hidden></p><div id="conversation-status-slot"></div><div id="conversation-attention-slot"></div>` : '<p class="conversation-host">Project context appears here when you open a conversation.</p>'}</aside>
+    ${contextRailMarkup(model.selected)}
   </div>`;
 }
 

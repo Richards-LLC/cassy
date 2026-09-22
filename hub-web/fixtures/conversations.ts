@@ -4,6 +4,7 @@ import { ConversationHistory } from '../src/conversation-history';
 import { ConversationView } from '../src/conversation-view';
 import { applyKeyboardViewport, conversationEmptyText, conversationShellMarkup, dressComposer, keyboardViewportHeight } from '../src/conversation-shell';
 import { applyMicState, composerMarkup, type MicState } from '../src/composer-markup';
+import { syncContextRail } from '../src/context-rail';
 import { installAttentionObjects, renderAskObject, renderBlockerObject } from '../src/attention-objects';
 import { installAttachmentSheet } from '../src/attachment-sheet';
 import type { ArtifactRef } from '../src/types';
@@ -173,7 +174,7 @@ export function renderConversationFixture(app: HTMLElement, state: string): void
     }
   }
   // Fixture respond: record the chip as an operator send answering the ask, exactly as main.ts does after the hub accepts it.
-  const view = new ConversationView(document, history, { supervisor, machine: machine.label, project: machine.project, header: false, working: () => working, echo: () => echo, hasEarlier: () => loadingEarlier, loadingEarlier: () => loadingEarlier, editMessage: () => {}, retryMessage: (send) => { history.discardRefused(send.id); history.submit(`retry-${send.id}`, supervisor, send.text, Date.now(), send.replyTo); view.update(); }, respond: (ask, text) => { history.submit(`quick-${ask.notification_id}`, supervisor, text, Date.now(), ask.notification_id); view.update(); } });
+  const view = new ConversationView(document, history, { supervisor, machine: machine.label, project: machine.project, header: false, working: () => working, echo: () => echo, hasEarlier: () => loadingEarlier, loadingEarlier: () => loadingEarlier, editMessage: () => {}, retryMessage: (send) => { history.discardRefused(send.id); history.submit(`retry-${send.id}`, supervisor, send.text, Date.now(), send.replyTo); view.update(); }, respond: (ask, text) => { history.submit(`quick-${ask.notification_id}`, supervisor, text, Date.now(), ask.notification_id); view.update(); syncContextRail(app, { history, progress: false, attention: 0 }); } });
   app.querySelector('#conversation-pane-slot')!.append(view.element); view.update();
   // The app's own composer region, dressed the way arrangeConversationShell dresses it; the pinned ask mounts above it.
   const slot = app.querySelector<HTMLElement>('#conversation-composer-slot')!;
@@ -194,8 +195,11 @@ export function renderConversationFixture(app: HTMLElement, state: string): void
     slot.querySelector<HTMLTextAreaElement>('#message-text')!.value = 'Fix it in-train, then';
   } else applyKeyboardViewport(document, undefined);
   slot.prepend(view.pinned);
-  app.querySelector('#conversation-status-slot')!.innerHTML = '<p class="conversation-host">Supervisor conversations<br>In progress</p>';
-  app.querySelector('#conversation-attention-slot')!.innerHTML = '<h2>Attention</h2><p class="conversation-host">One request needs your direction.</p>';
+  // The desktop context rail (P10) shows only what this thread's own data
+  // supports: open asks/blockers and attachments. The fixtures report no
+  // status and no attention events, so those sections stay absent, and a
+  // thread with neither folds the rail to its 48px track.
+  syncContextRail(app, { history, progress: false, attention: 0 });
 }
 
 /**

@@ -28,7 +28,9 @@ version and worktree, never a version-keyed path.
    only); resolvable Zig; a dated CHANGELOG heading and draft; and a passing
    integration receipt. Pin the cut date in `run.env` from `started_at` and
    use that date for every draft path, including after midnight. Run the same
-   announcement lint during preflight that `announce` will run. Real-project fixtures use
+   announcement lint during preflight that `announce` will run. User thread
+   wording must avoid `agent`, `worker`, `supervisor`, `daemon`, and `factory`
+   terms. Real-project fixtures use
    `cas::test_paths::runtime_fixture_parent()`, and fixture versions use
    `9.99.x`. An intentional doctor row change is a reviewed snapshot update.
 4. Run one command:

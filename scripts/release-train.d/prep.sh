@@ -74,7 +74,7 @@ release_train_prep() {
         printf '  → restore scripts/bump-release-version.sh, then rerun --prep\n' >&2
         return 1
     fi
-    if ! "$bump_cmd" "$version"; then
+    if ! (cd "$worktree" && "$bump_cmd" "$version"); then
         printf 'ERROR prep version: version bump failed for %s\n' "$version" >&2
         return 1
     fi

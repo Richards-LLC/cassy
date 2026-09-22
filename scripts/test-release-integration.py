@@ -58,6 +58,7 @@ set -eu
 test \"$1\" = factory
 test \"$2\" = integration-recover
 test \"$3\" = --base-only
+printf '%s\\n' \"${CAS_FACTORY_SESSION:-missing}\" > .cas/recovery-session
 base=$(git rev-parse refs/remotes/origin/main)
 git update-ref refs/heads/integration/project \"$base\"
 python3 - \"$base\" <<'PY'
@@ -111,8 +112,15 @@ PY
     def test_changed_main_heals_stale_union_once(self):
         self.git("update-ref", "refs/remotes/origin/main", self.tip)
         self.install_recovery_stub()
+        run_dir = self.root / ".cas/release-run"
+        run_dir.mkdir(parents=True)
+        (run_dir / "run.env").write_text("factory_session=fixture-session\n")
         old_env = os.environ.get("CAS_RELEASE_TRAIN_CAS")
+        old_run_dir = os.environ.get("CAS_RELEASE_TRAIN_RUN_DIR")
+        old_factory_session = os.environ.get("CAS_FACTORY_SESSION")
         os.environ["CAS_RELEASE_TRAIN_CAS"] = str(self.root / ".cas/fake-cas")
+        os.environ["CAS_RELEASE_TRAIN_RUN_DIR"] = str(run_dir)
+        os.environ.pop("CAS_FACTORY_SESSION", None)
         try:
             result = self.assemble()
         finally:
@@ -120,9 +128,18 @@ PY
                 os.environ.pop("CAS_RELEASE_TRAIN_CAS", None)
             else:
                 os.environ["CAS_RELEASE_TRAIN_CAS"] = old_env
+            if old_run_dir is None:
+                os.environ.pop("CAS_RELEASE_TRAIN_RUN_DIR", None)
+            else:
+                os.environ["CAS_RELEASE_TRAIN_RUN_DIR"] = old_run_dir
+            if old_factory_session is None:
+                os.environ.pop("CAS_FACTORY_SESSION", None)
+            else:
+                os.environ["CAS_FACTORY_SESSION"] = old_factory_session
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(self.git("rev-parse", "HEAD"), self.tip)
         self.assertTrue((self.root / ".cas/healed").exists())
+        self.assertEqual((self.root / ".cas/recovery-session").read_text().strip(), "fixture-session")
 
     def test_docs_only_receipts_base_names_the_receipts_commit(self):
         self.git("checkout", "main")

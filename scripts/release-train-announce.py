@@ -33,6 +33,7 @@ USER_FORBIDDEN = (
     "factory",
     "worker",
     "supervisor",
+    "daemon",
     "epic",
     "lane",
 )
@@ -61,6 +62,14 @@ def lint_body(index: int, body: str) -> None:
             fail(f"body {BODY_NAMES[index]} line {line_number} starts with #")
         if re.match(r"^-\s", line):
             fail(f"body {BODY_NAMES[index]} line {line_number} uses a hyphen bullet")
+        if index == 0:
+            lowered = line.lower()
+            for forbidden in USER_FORBIDDEN:
+                if forbidden in lowered:
+                    fail(
+                        f"body {BODY_NAMES[index]} line {line_number} contains forbidden "
+                        f"user wording: {forbidden}: {line}"
+                    )
     bullets = [number for number, line in enumerate(lines) if line.startswith("• ")]
     if index in (0, 2):
         if len(lines) != 2 or not TOP_LEVEL_LABEL.fullmatch(lines[0]):
@@ -69,11 +78,6 @@ def lint_body(index: int, body: str) -> None:
             fail(f"body {BODY_NAMES[index]} top-level must use Was → Now")
         if len(re.findall(r"[A-Za-z0-9][A-Za-z0-9’'-]*", lines[1])) > 25:
             fail(f"body {BODY_NAMES[index]} top-level punch exceeds 25 words")
-        if index == 0:
-            lowered = body.lower()
-            for forbidden in USER_FORBIDDEN:
-                if forbidden in lowered:
-                    fail(f"body {BODY_NAMES[index]} contains forbidden user wording: {forbidden}")
         return
     if not bullets:
         fail(f"body {BODY_NAMES[index]} has no bullet")

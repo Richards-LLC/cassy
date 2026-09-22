@@ -245,6 +245,7 @@ cut_preflight_check_draft() {
     mkdir -p "$lint_dir"
     if ! lint_output="$(python3 "$script_dir/release-train-announce.py" --validate "$draft" "$lint_dir" 2>&1)"; then
         printf '%s\n' "$lint_output" >"$run_dir/preflight-announce.log"
+        printf '%s\n' "$lint_output" >&2
         cut_preflight_block release-draft \
             "announce lint failed for $draft; inspect $run_dir/preflight-announce.log"
         return $?

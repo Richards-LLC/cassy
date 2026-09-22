@@ -2807,7 +2807,10 @@ dialog form > *,
 .cloud-brand { display: inline-flex; align-items: center; gap: var(--space-2); color: var(--text-hi); white-space: nowrap; font: var(--weight-medium) var(--fs-lg)/1.2 var(--font-display); }
 .cloud-brand svg { width: var(--space-8); height: var(--space-8); color: var(--color-action); flex: none; }
 .project-badge { display: inline-block; max-width: 100%; width: fit-content; padding: var(--space-1) var(--space-2); background: var(--bg-active); color: var(--color-action); font: var(--weight-semibold) var(--fs-md)/var(--line-ui) var(--font-ui); border-radius: var(--radius-card); overflow-wrap: anywhere; }
-.conversation-shell { display: grid; grid-template-columns: var(--conversation-rail-width) minmax(0, 1fr) var(--worker-collapsed-width); height: var(--keyboard-viewport-height, 100dvh); overflow: hidden; color: var(--ink); background: var(--canvas); }
+/* The context rail (P10) folds to the 48px context track until it has
+ * something the header does not; .context-open gives it its 240px back. */
+.conversation-shell { display: grid; grid-template-columns: var(--conversation-rail-width) minmax(0, 1fr) var(--machine-rail-width); height: var(--keyboard-viewport-height, 100dvh); overflow: hidden; color: var(--ink); background: var(--canvas); }
+.conversation-shell.context-open { grid-template-columns: var(--conversation-rail-width) minmax(0, 1fr) var(--worker-collapsed-width); }
 .conversation-shell button { min-height: var(--rail-item-min); }
 /* == Pebble rail (EPIC cas-cac1) ==
    The rail is a panel lifted off the canvas by --lift-edge, not a hairline.
@@ -3064,11 +3067,23 @@ button.chip:disabled { cursor: default; }
 .conversation-composer .control-disabled-reason { display: none; }
 .conversation-composer .composer-status, .conversation-composer .message-status, .conversation-composer .message-delivery { grid-area: status; font-size: var(--fs-meta); margin: 0; }
 .conversation-composer .composer-status[hidden], .conversation-composer .message-status[hidden], .conversation-composer .message-delivery[hidden] { display: none; }
-.conversation-context { min-width: 0; overflow-y: auto; padding: var(--space-6); border-left: var(--line-width) solid var(--line-subtle); }
-.conversation-context .cloud-brand { font-size: var(--fs-base); }
-.conversation-context .cloud-brand svg { width: var(--space-6); height: var(--space-6); }
-.conversation-context h2 { margin: var(--space-8) 0 var(--space-3); font: var(--weight-medium) var(--fs-base)/var(--line-ui) var(--font-ui); }
-.conversation-context-name { font-family: var(--font-mono); font-size: var(--fs-meta); overflow-wrap: anywhere; }
+.conversation-context { min-width: 0; overflow-y: auto; padding: var(--space-6) var(--space-4); border-left: var(--line-width) solid var(--line-subtle); }
+.conversation-context[data-open="false"] { padding: 0; overflow: hidden; }
+.conversation-context .context-section[hidden] { display: none; }
+.conversation-context .context-section + .context-section { margin-top: var(--space-6); }
+.conversation-context h2 { margin: 0 0 var(--space-3); font: var(--weight-medium) var(--fs-base)/var(--line-ui) var(--font-ui); }
+.conversation-context .context-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--space-1); }
+.conversation-context .context-jump, .conversation-context .context-attachment { display: grid; width: 100%; min-height: var(--rail-item-min); padding: var(--space-2); border-radius: 12px; background: var(--color-transparent); color: var(--ink); text-align: left; text-decoration: none; font: var(--weight-regular) var(--fs-meta)/1.35 var(--font-ui); }
+.conversation-context .context-jump { grid-template-columns: minmax(0, 1fr); row-gap: 2px; }
+.conversation-context .context-jump:hover, .conversation-context .context-attachment:hover { background: var(--bg-hover); }
+.conversation-context .context-kind { font-weight: var(--weight-semibold); color: var(--ink); }
+.conversation-context .context-jump[data-kind="blocker"] .context-kind { color: var(--warn-text); }
+.conversation-context .context-jump .context-text { color: var(--ink-mid); overflow-wrap: anywhere; }
+.conversation-context .context-attachment { grid-template-columns: auto minmax(0, 1fr); grid-template-areas: "plate name" "plate meta"; column-gap: var(--space-2); align-items: center; }
+.conversation-context .context-plate { grid-area: plate; display: flex; align-items: center; justify-content: center; min-width: 34px; height: 34px; padding: 0 4px; border-radius: 7px; background: var(--crit-bg); color: var(--crit-fg); font: var(--weight-semibold) 9px/1 var(--font-ui); letter-spacing: 0.06em; }
+.conversation-context .context-attachment .context-text { grid-area: name; min-width: 0; overflow-wrap: anywhere; }
+.conversation-context .context-meta { grid-area: meta; color: var(--ink-mid); font-size: 12px; }
+.conversation-context .context-meta:empty { display: none; }
 .conversation-context .context-tab { padding: 0; }
 .conversation-context .workers { display: none; }
 .conversation-welcome { margin: auto; padding: var(--space-8); max-width: 60ch; }

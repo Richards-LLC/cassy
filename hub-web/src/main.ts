@@ -8,8 +8,9 @@ import { ConversationView } from "./conversation-view";
 import { installAttentionObjects } from "./attention-objects";
 import { installAttachmentSheet } from "./attachment-sheet";
 import { arrangeConversationShell, bindKeyboardViewport, conversationEmptyText } from "./conversation-shell";
+import { syncContextRail } from "./context-rail";
 import { applyScheme, setScheme, type SchemePreference } from "./scheme";
-import { applyAttentionEnrichment, attentionCounts, attentionSummary, attentionUrl, createAttentionItem, dismissableInfoItems, machineEventAttention, mergeAttentionItem, type AttentionAction, type AttentionContent, type AttentionEnrichment } from "./attention";
+import { applyAttentionEnrichment, attentionCounts, attentionSummary, attentionUrl, createAttentionItem, dismissableInfoItems, groupAttention, machineEventAttention, mergeAttentionItem, type AttentionAction, type AttentionContent, type AttentionEnrichment } from "./attention";
 import { cycleAttentionGroup, renderAttentionPanel, renderAttentionSummary } from "./attention-view";
 import { HubConnectionSupervisor, type ConnectionState, type HubMachineInfo } from "./connection";
 import { attachElapsedSeconds, elapsedSeconds, type AttachSnapshot } from "./connection-state";
@@ -116,7 +117,17 @@ function conversationHistoryPage(key: string): { hasEarlier: boolean; nextBefore
   }
   return page;
 }
-function updateConversationViews(): void { for (const view of conversationViews.values()) view.update(); }
+function updateConversationViews(): void { for (const view of conversationViews.values()) view.update(); syncConversationContext(); }
+// What the desktop context rail can show beyond the header (P10): the last
+// status and attention renders record whether they had anything for the open
+// thread; asks, blockers and attachments are read from its history.
+let contextProgress = false;
+let contextAttention = 0;
+function syncConversationContext(): void {
+  if (hubPresentation !== "conversation") return;
+  const history = selectedMachineId && selectedSession ? conversationHistories.get(sessionKey(selectedMachineId, selectedSession)) : undefined;
+  syncContextRail(document, { history, progress: contextProgress, attention: contextAttention });
+}
 let workingRefresh: ReturnType<typeof setTimeout> | undefined;
 /** Pane output lights the working line now and schedules the check that puts it out. */
 function refreshWorkingLines(): void {
@@ -2278,6 +2289,7 @@ function renderRegions(context: RegionContext): void {
   }
   renderAttention();
   renderStatus(context.status);
+  syncConversationContext();
   applyLiveRegions(app, context.liveRegions);
   if (context.selected && context.session && context.connectionSnapshot) {
     renderConnectionSurface(context.selected.id, context.session, context.connectionSnapshot);
@@ -2550,6 +2562,7 @@ function renderAttention(): void {
   const container = document.querySelector<HTMLElement>("#attention-panel");
   if (!container) return;
   const visibleAttention = hubPresentation === "conversation" ? attention.filter((item) => item.machineId === selectedMachineId && (!item.session || item.session === selectedSession)) : attention;
+  contextAttention = groupAttention(visibleAttention).length;
   renderAttentionPanel(container, visibleAttention, {
     dismiss: acknowledgeAttentionGroup,
     act: performAttentionAction,
@@ -2586,6 +2599,7 @@ function renderStatus(status?: Record<string, unknown>): void {
   // Region updates run against a container the shell rebuild is no longer
   // clearing for them, so this owns its own emptying.
   container.replaceChildren();
+  contextProgress = false;
   if (!status) { container.textContent = selectedSession ? "Waiting for project status…" : "Open a session for project status."; return; }
   const summary = selectedMachineId && selectedSession ? sessionSummaries.get(sessionKey(selectedMachineId, selectedSession)) : undefined;
   if (summary) {
@@ -2645,7 +2659,8 @@ function renderStatus(status?: Record<string, unknown>): void {
     row.append(line, title);
     container.append(row);
   }
-  if (agents.length === 0 && tasks.length === 0 && !summary) {
+  contextProgress = Boolean(summary) || agents.length > 0 || tasks.length > 0;
+  if (!contextProgress) {
     const empty = document.createElement("p");
     empty.className = "status-empty";
     empty.textContent = "No agents or tasks reported for this session yet.";

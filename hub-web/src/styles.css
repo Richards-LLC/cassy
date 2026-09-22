@@ -204,6 +204,20 @@ pre { font-family: var(--font-mono); }
   background: var(--bg-active);
 }
 
+/* The active fill alone is 1.3:1 against the rail (WCAG 1.4.11), so the
+   selected machine also carries an accent edge bar that is >= 3:1 in both
+   schemes. A bar, not an outline: the outline is the focus ring. */
+.machine-icon.active::before {
+  content: "";
+  position: absolute;
+  top: var(--space-2);
+  bottom: var(--space-2);
+  left: 2px;
+  width: 3px;
+  border-radius: var(--radius-pill);
+  background: var(--accent);
+}
+
 .rail-control:hover:not(:disabled) { background: var(--bg-raised); }
 
 .machine-state,
@@ -2847,9 +2861,12 @@ dialog form > *,
 #conversation-list { overflow-y: auto; min-height: 0; display: flex; flex-direction: column; gap: var(--space-1); padding: 0 14px var(--space-4) 18px; }
 .conversation-sidebar footer { padding: var(--space-4) 18px; margin-top: auto; }
 .conversation-sidebar footer button { width: 100%; font-size: var(--fs-meta); }
-.conversation-row { display: grid; grid-template-columns: 42px minmax(0, 1fr) auto; column-gap: 13px; row-gap: 3px; align-items: center; text-align: left; width: 100%; flex: none; padding: var(--space-3) 14px; border: 0; border-radius: 20px; background: var(--color-transparent); color: var(--ink); }
+.conversation-row { position: relative; display: grid; grid-template-columns: 42px minmax(0, 1fr) auto; column-gap: 13px; row-gap: 3px; align-items: center; text-align: left; width: 100%; flex: none; padding: var(--space-3) 14px; border: 0; border-radius: 20px; background: var(--color-transparent); color: var(--ink); }
 .conversation-row:hover { background: var(--bg-hover); color: var(--ink); }
 .conversation-row[aria-current="true"] { background: var(--accent-soft); color: var(--ink); box-shadow: var(--lift); }
+/* --accent-soft is 1.3:1 light / 1.16:1 dark against the sidebar, so the
+   selected row also carries a >= 3:1 accent edge bar (WCAG 1.4.11). */
+.conversation-row[aria-current="true"]::before { content: ""; position: absolute; top: var(--space-4); bottom: var(--space-4); left: 5px; width: 3px; border-radius: var(--radius-pill); background: var(--accent); }
 .conversation-avatar { grid-row: span 2; display: flex; align-items: center; justify-content: center; width: 42px; height: 42px; border-radius: var(--radius-pill); background: var(--accent); color: var(--accent-fg); font: var(--weight-semibold) 17px/1 var(--font-ui); }
 .conversation-who { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; min-width: 0; }
 .conversation-supervisor { font: var(--weight-semibold) var(--fs-md)/1.35 var(--font-ui); }

@@ -199,6 +199,42 @@ describe("ConversationView (Pebble thread)", () => {
     expect(refused.querySelector(".conversation-delivery")?.textContent).toBe("Not sent · no access");
     refused.querySelector("button")!.click(); expect(edit).toHaveBeenCalledWith("Ship it");
   });
+  it("marks a refused send as not sent: warning glyph, a Not sent lead, the reason, then Edit and Retry (P8, cas-b1ee)", () => {
+    const history = new ConversationHistory();
+    const edit = vi.fn(); const retry = vi.fn();
+    const view = new ConversationView(document, history, { supervisor: "sup", editMessage: edit, retryMessage: retry }); document.body.replaceChildren(view.element);
+    history.submit("x", "sup", "Ship it", at(9, 0), 52); history.reject("x", "no access"); view.update();
+    const refused = view.element.querySelector<HTMLElement>('.turn.you .bub[data-state="error"]')!;
+    const label = refused.querySelector<HTMLElement>(".conversation-refused")!;
+    expect(label.getAttribute("role")).toBe("status");
+    expect(label.querySelector("svg.warn")?.getAttribute("aria-hidden")).toBe("true");
+    expect(label.querySelector("b")?.textContent).toBe("Not sent");
+    expect(label.querySelector(".conversation-refused-reason")?.textContent).toBe("no access");
+    expect(label.textContent).toBe("Not sent · no access");
+    const buttons = [...refused.querySelectorAll<HTMLButtonElement>(".conversation-actions button")];
+    expect(buttons.map((button) => [button.className, button.textContent, button.getAttribute("aria-label")])).toEqual([
+      ["conversation-edit", "Edit", "Edit message"], ["conversation-retry", "Retry", "Retry sending"],
+    ]);
+    buttons[0]!.click(); expect(edit).toHaveBeenCalledWith("Ship it");
+    buttons[1]!.click(); expect(retry).toHaveBeenCalledWith(expect.objectContaining({ id: "x", text: "Ship it", replyTo: 52, state: "error" }));
+    // Without the callbacks a refused send still says Not sent, with no dead buttons.
+    const bare = new ConversationView(document, history, "sup"); bare.update();
+    expect(bare.element.querySelector(".conversation-refused b")?.textContent).toBe("Not sent");
+    expect(bare.element.querySelector(".conversation-actions")).toBeNull();
+    // The sending state keeps its quiet line and never offers the actions.
+    history.submit("y", "sup", "Again", at(9, 1)); view.update();
+    const sending = view.element.querySelector<HTMLElement>('.bub[data-state="sending"]')!;
+    expect(sending.querySelector(".conversation-delivery")?.textContent).toBe("Sending…");
+    expect(sending.querySelector(".conversation-refused, .conversation-actions")).toBeNull();
+  });
+  it("discards only a refused send when a retry replaces it", () => {
+    const history = new ConversationHistory();
+    history.submit("ok", "sup", "Fine", at(9, 0)); history.submit("bad", "sup", "Ship it", at(9, 1)); history.reject("bad", "no access");
+    expect(history.discardRefused("ok")).toBe(false);
+    expect(history.discardRefused("bad")).toBe(true);
+    expect(history.events.map((event) => event.kind === "send" && event.value.id)).toEqual(["ok"]);
+    expect(history.discardRefused("bad")).toBe(false);
+  });
   it("renders nothing-waiting beside the log with the monogram, the quiet line and the echo, and clears it when a turn arrives", () => {
     const history = new ConversationHistory();
     let echo: string | undefined = "Promoted the hub to production on Monday.";

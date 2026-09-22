@@ -14,6 +14,9 @@ interface ListMarker {
 const FENCE = /^\s{0,3}`{3,}(?:[^`]*)$/;
 const HEADING = /^\s{0,3}#{1,6}(?:\s+|$)(.*)$/;
 const LIST = /^(\s*)([-+*]|\d+[.)])\s+(.*)$/;
+const LEGACY_NUMBER = /(?:\(\d+\)|\d+\))(?=[ \t]+)/g;
+const LEAD = /^(?:Status\s+\d{1,2}:\d{2}Z\.(?:[ \t]+[A-Z][A-Z0-9]*(?:[ \t]+[A-Z][A-Z0-9]*)*:)?|[A-Z][A-Z0-9]*(?:[ \t]+[A-Z][A-Z0-9]*)*:)/;
+const INLINE_MARKDOWN = /`[^`\n]+`|\*\*[^*\n]+\*\*|\*[^*\n]+\*|\[[^\]\n]+\]\([^\n)]+\)/;
 
 function listMarker(line: string): ListMarker | undefined {
   const match = LIST.exec(line);
@@ -27,6 +30,67 @@ function isFence(line: string): boolean {
 
 function isBlockStart(line: string): boolean {
   return isFence(line) || HEADING.test(line) || listMarker(line) !== undefined;
+}
+
+function leadingPlainText(source: string): string | undefined {
+  const match = LEAD.exec(source);
+  return match && match[0] ? match[0] : undefined;
+}
+
+function hasMarkdownMarkers(source: string): boolean {
+  if (INLINE_MARKDOWN.test(source)) return true;
+  return source.split("\n").some((line) => {
+    if (isFence(line) || HEADING.test(line)) return true;
+    const marker = listMarker(line);
+    // A closing parenthesis is the legacy prose form handled below. A dot or
+    // a bullet at line start remains the Markdown contract.
+    return marker !== undefined && !/^\s*\d+\)\s+/.test(line);
+  });
+}
+
+interface LegacyEnumeration {
+  prefix: string;
+  items: string[];
+}
+
+function legacyEnumeration(source: string): LegacyEnumeration | undefined {
+  const markers: Array<{ index: number; end: number; number: number }> = [];
+  for (const match of source.matchAll(LEGACY_NUMBER)) {
+    const index = match.index ?? -1;
+    if (index < 0 || (index > 0 && !/\s/.test(source[index - 1]!))) continue;
+    markers.push({ index, end: index + match[0].length, number: Number.parseInt(match[0].replace(/[()]/g, ""), 10) });
+  }
+  if (markers.length < 2 || markers[0]!.number !== 1) return undefined;
+
+  const prefix = source.slice(0, markers[0]!.index).trim();
+  if (prefix && leadingPlainText(prefix) !== prefix) return undefined;
+  for (let index = 1; index < markers.length; index += 1) {
+    if (markers[index]!.number !== markers[index - 1]!.number + 1) return undefined;
+  }
+
+  const items = markers.map((marker, index) => source.slice(marker.end, markers[index + 1]?.index ?? source.length).trim());
+  if (items.some((item) => !item)) return undefined;
+  return { prefix, items };
+}
+
+/**
+ * Older supervisors sometimes put numbered prose in one line instead of
+ * emitting Markdown. Recognize only a clearly ordered, lead-prefixed sequence
+ * (or one that starts at the beginning); ordinary parentheses stay literal.
+ */
+function normalizePlainText(source: string): string {
+  if (hasMarkdownMarkers(source)) return source;
+  const enumeration = legacyEnumeration(source);
+  if (enumeration) {
+    const parts: string[] = [];
+    if (enumeration.prefix) parts.push(`# ${enumeration.prefix}`);
+    parts.push(enumeration.items.map((item, index) => `${index + 1}. ${item}`).join("\n"));
+    return parts.join("\n\n");
+  }
+
+  const lead = leadingPlainText(source);
+  if (!lead) return source;
+  return `# ${lead}${source.slice(lead.length)}`;
 }
 
 function appendInline(document: Document, parent: HTMLElement, source: string): void {
@@ -187,7 +251,7 @@ function renderList(document: Document, lines: string[], start: number, baseInde
 
 /** Render the supported reply subset as safe DOM nodes. */
 export function renderMarkdown(document: Document, source: string): HTMLElement[] {
-  const lines = source.replace(/\r\n?/g, "\n").split("\n");
+  const lines = normalizePlainText(source).replace(/\r\n?/g, "\n").split("\n");
   const nodes: HTMLElement[] = [];
   let index = 0;
   while (index < lines.length) {
@@ -228,7 +292,7 @@ export function renderMarkdown(document: Document, source: string): HTMLElement[
 
 /** Strip supported formatting for compact conversation-list previews. */
 export function plainTextMarkdown(source: string): string {
-  const lines = source.replace(/\r\n?/g, "\n").split("\n");
+  const lines = normalizePlainText(source).replace(/\r\n?/g, "\n").split("\n");
   const output: string[] = [];
   let index = 0;
   while (index < lines.length) {

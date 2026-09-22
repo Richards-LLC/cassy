@@ -211,7 +211,9 @@ try {
     + "/* Pebble machine accents (hub-web/src/machine-accent.ts): append a set, never reorder. */\n"
     + accentBlocks + "\n"
     + "/* Dark wells: color.dark.* + color.series-neutral.dark; derived surfaces use those roles. */\n"
-    + ".terminal-mount:not(.conversation-active), .transcript, .terminal-search input, .attention-payload pre,\n.connection-log pre, dialog:not(.command-palette) input {\n  color-scheme: dark;\n"
+    // Dialog inputs are not wells: the pairing fields are --panel fields with a
+    // --line-strong edge in both schemes (styles.css dialog input).
+    + ".terminal-mount:not(.conversation-active), .transcript, .terminal-search input, .attention-payload pre,\n.connection-log pre {\n  color-scheme: dark;\n"
     + declarations({ ...derived, ...colors("dark") }) + "\n}\n";
   if (values.check) {
     if (readFileSync(values.output, "utf8") !== output) throw new Error("Generated tokens.css has drifted; run npm run tokens and commit the result.");

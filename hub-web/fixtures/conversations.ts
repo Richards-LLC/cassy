@@ -52,9 +52,11 @@ export function fixtureConversationRows(selected: boolean): ConversationRow[] {
 
 export function renderConversationFixture(app: HTMLElement, state: string): void {
   const supervisor = FIXTURE_SUPERVISOR;
-  const selected = !['conversations-list', 'conversations-loading', 'paired-machines'].includes(state);
+  const selected = !['conversations-list', 'conversations-loading', 'conversations-unpaired', 'paired-machines'].includes(state);
   // Catalog loading: nothing is known yet, so no machine, no row, no pairing offer.
   const loading = state === 'conversations-loading';
+  // First run: the catalog is loaded and empty, so the welcome offers pairing.
+  const unpaired = state === 'conversations-unpaired';
   // The evidence state opens the Studio Mac thread so the supervisor pebbles
   // take the second accent; the empty state opens Bench (third accent) as in
   // empty.html.
@@ -63,10 +65,10 @@ export function renderConversationFixture(app: HTMLElement, state: string): void
     : state === 'conversation-empty'
       ? { id: 'bench-1', label: 'Bench', host: 'Bench · Linux', projectDir: '/projects/cas-hub-static', project: 'cas-hub-static' }
       : { id: 'atlas-linux', label: 'Atlas', host: 'Atlas · Linux', projectDir: '/projects/cas-src', project: 'cas-src' };
-  app.innerHTML = conversationShellMarkup({ selected, supervisor, projectDir: machine.projectDir, host: machine.host, machineId: machine.id, loaded: !loading, paired: !loading });
-  const listRows = loading ? [] : fixtureConversationRows(selected);
+  app.innerHTML = conversationShellMarkup({ selected, supervisor, projectDir: machine.projectDir, host: machine.host, machineId: machine.id, loaded: !loading, paired: !loading && !unpaired });
+  const listRows = loading || unpaired ? [] : fixtureConversationRows(selected);
   new ConversationList().render(app.querySelector('#conversation-list')!, listRows, () => {});
-  const machines = loading ? [] : FIXTURE_MACHINES;
+  const machines = loading || unpaired ? [] : FIXTURE_MACHINES;
   // The list's empty line, exactly as main.ts renderConversationList sets it.
   const empty = app.querySelector<HTMLElement>('#conversation-empty')!;
   empty.hidden = listRows.length > 0;

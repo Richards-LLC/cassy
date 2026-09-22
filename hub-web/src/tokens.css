@@ -611,7 +611,7 @@ html[data-scheme="dark"] .machine-accent-2 {
 
 /* Dark wells: color.dark.* + color.series-neutral.dark; derived surfaces use those roles. */
 .terminal-mount:not(.conversation-active), .transcript, .terminal-search input, .attention-payload pre,
-.connection-log pre, dialog:not(.command-palette) input {
+.connection-log pre {
   color-scheme: dark;
   --bg-raised: color-mix(in srgb, var(--bg-root) 92%, var(--text-hi));
   --bg-hover: color-mix(in srgb, var(--bg-root) 88%, var(--text-hi));

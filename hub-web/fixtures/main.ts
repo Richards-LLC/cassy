@@ -40,6 +40,7 @@ export const FIXTURE_NAMES = [
   "conversation-mic-listening",
   "conversation-mic-unavailable",
   "conversations-loading",
+  "conversations-unpaired",
 ] as const;
 
 export type FixtureName = (typeof FIXTURE_NAMES)[number];

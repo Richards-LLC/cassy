@@ -77,9 +77,14 @@ export function conversationEmptyText(catalogLoaded: boolean, machineCount: numb
 }
 
 export function conversationShellMarkup(model: ConversationShellModel): string {
-  return `<div class="conversation-shell${model.selected ? " thread-open" : ""}${model.machineId ? ` ${machineAccentClass(model.machineId)}` : ""}">
+  // First run: the welcome carries the one primary "Pair a machine". The list
+  // header's chip is hidden beside it on wide screens (styles.css
+  // .welcome-pairs) and, on a phone where the welcome is not shown, it is the
+  // primary action itself.
+  const welcomePairs = !model.selected && model.loaded && !model.paired;
+  return `<div class="conversation-shell${model.selected ? " thread-open" : ""}${welcomePairs ? " welcome-pairs" : ""}${model.machineId ? ` ${machineAccentClass(model.machineId)}` : ""}">
     <aside class="conversation-sidebar" aria-label="Supervisor conversations">
-      <header class="conversation-list-heading">${cloudBrand()}<div class="conversation-list-title"><h1>Conversations</h1><button id="pair-toggle" type="button">Pair a machine</button></div><p>Your projects. Your supervisors.</p></header>
+      <header class="conversation-list-heading">${cloudBrand()}<div class="conversation-list-title"><h1>Conversations</h1><button id="pair-toggle"${welcomePairs ? ' class="primary"' : ""} type="button">Pair a machine</button></div><p>Your projects. Your supervisors.</p></header>
       <nav id="conversation-list" aria-label="Choose a supervisor"></nav>
       <div id="conversation-empty" class="conversation-empty" hidden></div>
       <footer><div id="hub-footer-badges" class="hub-footer-badges" aria-label="Hub status"></div><button id="command-palette-toggle" type="button">Appearance &amp; commands</button></footer>

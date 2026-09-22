@@ -33,6 +33,7 @@ export const FIXTURE_NAMES = [
   "conversation-mic-listening",
   "conversation-mic-unavailable",
   "conversations-loading",
+  "conversations-unpaired",
 ];
 
 export const REQUIRED_SCHEMES = ["light", "dark"];

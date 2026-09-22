@@ -28,6 +28,10 @@ button,
 input,
 textarea { font: inherit; }
 
+/* Every placeholder in the ink-mid role: the browser default grey is 4.19:1. */
+input::placeholder,
+textarea::placeholder { color: var(--ink-mid); opacity: 1; }
+
 button {
   min-height: var(--button-height);
   padding: 0 var(--space-3);
@@ -365,12 +369,14 @@ pre { font-family: var(--font-mono); }
 /* == End Unit 3: machine rail and drawer == */
 .primary {
   width: 100%;
-  color: var(--text-hi);
-  background: var(--bg-active);
-  font-weight: var(--weight-medium);
+  color: var(--you-fg);
+  background: var(--you-bg);
+  font-weight: var(--weight-semibold);
 }
 
-.primary:hover:not(:disabled) { background: var(--bg-hover); }
+/* The main action keeps its fill under the pointer and brightens; the generic
+   button hover (--bg-hover) would make it the weakest control on screen. */
+.primary:hover:not(:disabled):not([aria-disabled="true"]) { background: var(--you-bg); filter: brightness(1.08); }
 
 .nav-item {
   display: grid;
@@ -510,7 +516,7 @@ pre { font-family: var(--font-mono); }
 .attention-ticket,
 .status-identifier,
 .pair-code,
-.pair-details dd {
+.pair-details dd.pair-identifier {
   font-family: var(--font-mono);
 }
 
@@ -1470,7 +1476,7 @@ main {
 .attention-detail {
   margin: 0;
   color: var(--text-mid);
-  font-family: var(--font-mono);
+  font-family: var(--font-ui);
   font-size: var(--fs-meta);
   overflow-wrap: anywhere;
 }
@@ -2021,11 +2027,14 @@ dialog label {
   font-size: var(--fs-meta);
 }
 
+/* A panel field on the dialog surface. The edge is --ink-mid, not
+   --line-strong: on the warm --bg-raised dialog (P15) --line-strong measures
+   2.89:1 in light, under the 3:1 a field boundary needs. */
 dialog input {
   padding: var(--space-3);
-  color: var(--text-hi);
-  background: var(--bg-terminal);
-  border: 0;
+  color: var(--ink);
+  background: var(--panel);
+  border: var(--line-width) solid var(--ink-mid);
   border-radius: var(--radius-card);
 }
 
@@ -2164,7 +2173,7 @@ fieldset {
   letter-spacing: var(--tracking-label);
   text-transform: uppercase;
 }
-.pair-details dd { margin: 0; overflow-wrap: anywhere; }
+.pair-details dd { margin: 0; overflow-wrap: anywhere; font-family: var(--font-ui); }
 
 .field-hint {
   color: var(--text-mid);
@@ -2820,6 +2829,10 @@ dialog form > *,
 .conversation-list-title h1 { font: var(--weight-semibold) 22px/1.2 var(--font-ui); letter-spacing: -0.015em; margin: 0 6px; }
 /* Header controls are text buttons (P15, cas-9616): no chip on the paper, the hover step on hover. */
 .conversation-list-title button { font-size: var(--fs-meta); color: var(--ink); background: var(--color-transparent); }
+/* ...except the first-run Pair a machine on a phone, which is the primary action (P3). */
+.conversation-list-title .primary { width: auto; color: var(--you-fg); background: var(--you-bg); }
+/* First run on a wide screen: the welcome's Pair a machine is the one primary action. */
+.welcome-pairs #pair-toggle { display: none; }
 .conversation-list-heading p { color: var(--ink-mid); margin: var(--space-3) 6px 0; }
 #conversation-list { overflow-y: auto; min-height: 0; display: flex; flex-direction: column; gap: var(--space-1); padding: 0 14px var(--space-4) 18px; }
 .conversation-sidebar footer { padding: var(--space-4) 18px; margin-top: auto; }
@@ -3049,7 +3062,7 @@ button.chip:disabled { cursor: default; }
 .conversation-composer .composer-clip { grid-area: clip; display: flex; align-items: center; justify-content: center; width: 44px; height: 44px; min-height: 44px; padding: 0; border: 0; border-radius: var(--radius-pill); background: var(--panel); color: var(--ink-mid); box-shadow: var(--lift); }
 .conversation-composer .composer-clip:disabled { opacity: 1; color: var(--ink-mid); }
 .conversation-composer .composer-clip svg { width: 19px; height: 19px; display: block; opacity: 0.55; }
-.conversation-composer textarea { grid-area: field; width: 100%; min-width: 0; min-height: 46px; height: auto; field-sizing: content; max-height: 25dvh; padding: 12px 22px; border: 0; border-radius: 23px; resize: none; background: var(--panel); color: var(--ink); box-shadow: var(--lift); font: var(--weight-regular) 14px/1.55 var(--font-ui); }
+.conversation-composer textarea { grid-area: field; width: 100%; min-width: 0; min-height: 46px; height: auto; field-sizing: content; max-height: 25dvh; padding: 12px 22px; border: var(--line-width) solid var(--line-strong); border-radius: 23px; resize: none; background: var(--panel); color: var(--ink); box-shadow: var(--lift); font: var(--weight-regular) 14px/1.55 var(--font-ui); }
 .conversation-composer textarea::placeholder { color: var(--ink-mid); opacity: 1; }
 .conversation-composer .composer-actions { grid-area: send; display: flex; align-items: center; gap: var(--space-2); margin: 0; }
 .conversation-composer .composer-actions button { width: auto; }
@@ -3084,6 +3097,11 @@ button.chip:disabled { cursor: default; }
   #conversation-list { padding: 0 12px var(--space-4); }
   .conversation-sidebar footer { padding: var(--space-3) 12px; padding-inline-end: calc(56px + 30px); }
   .conversation-shell:not(.thread-open) .compose-fab { display: flex; }
+  /* The welcome is hidden on a phone, so the header chip is the first-run
+     action; the compose FAB (which would only open pairing, under the label
+     "Write to a supervisor") steps aside so there is one Pair a machine. */
+  .welcome-pairs #pair-toggle { display: revert; }
+  .conversation-shell.welcome-pairs .compose-fab { display: none; }
   .conversation-main, .conversation-context { display: none; }
   .conversation-shell.thread-open .conversation-sidebar { display: none; }
   .conversation-shell.thread-open .conversation-main { display: flex; height: 100%; }

@@ -146,7 +146,20 @@ describe('conversation evidence', () => {
     const shell = conversationShellMarkup({ selected: true, supervisor: 'patient-pelican-9', projectDir: '/projects/cas-src', host: 'Atlas · Linux', machineId: 'atlas-linux', loaded: true, paired: true });
     expect(shell).toContain('class="conversation-shell thread-open machine-accent-0"');
     expect(shell).toContain('id="compose-fab" class="compose-fab"');
-    expect(conversationShellMarkup({ selected: false, loaded: true, paired: false })).toContain('class="conversation-shell">');
+    expect(conversationShellMarkup({ selected: false, loaded: true, paired: true })).toContain('class="conversation-shell">');
+  });
+  it('offers one primary Pair a machine on first run: the welcome, with the header chip primary only where the welcome is hidden (D3)', () => {
+    const shell = document.createElement('div');
+    shell.innerHTML = conversationShellMarkup({ selected: false, loaded: true, paired: false });
+    expect(shell.querySelector('.conversation-shell')?.classList.contains('welcome-pairs')).toBe(true);
+    expect(shell.querySelector('#empty-pair')?.classList.contains('primary')).toBe(true);
+    expect(shell.querySelector('#pair-toggle')?.classList.contains('primary')).toBe(true);
+    for (const model of [{ loaded: false, paired: false }, { loaded: true, paired: true }]) {
+      shell.innerHTML = conversationShellMarkup({ selected: false, ...model });
+      expect(shell.querySelector('.welcome-pairs')).toBeNull();
+      expect(shell.querySelector('#empty-pair')).toBeNull();
+      expect(shell.querySelector('#pair-toggle')?.classList.contains('primary')).toBe(false);
+    }
   });
   it('renders one Pebble header above the thread with the back link, Terminal view, avatar, badge and connection slot', () => {
     const shell = document.createElement('div');

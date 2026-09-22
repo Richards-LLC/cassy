@@ -5204,14 +5204,9 @@ This is the body content."#;
         // at compile time (cas-1f6e): a runtime read of the producer path passed
         // on every build host and failed on the merge-queue shard runner, where
         // only the compiled test binary exists — the fixture-paths class.
-        const DESIGN_LANGUAGE_DOC: &str = include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../docs/design/petrastella-design-language.md"
-        ));
-        const DESIGN_TOKENS_DOC: &str = include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../docs/design/design-tokens.json"
-        ));
+        const DESIGN_LANGUAGE_DOC: &str =
+            include_str!("../../docs/design/petrastella-design-language.md");
+        const DESIGN_TOKENS_DOC: &str = include_str!("../../docs/design/design-tokens.json");
         for (builtin, doc, on_disk) in [
             (
                 FILES[8],

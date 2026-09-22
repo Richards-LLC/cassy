@@ -9,6 +9,15 @@ import type { StoredMachine } from "./types";
 
 Object.defineProperty(globalThis, "crypto", { value: webcrypto, configurable: true });
 
+// The app's markup lives in main.ts and in the builders it shares with the
+// visual-QA fixtures (composer, pairing dialog, conversation shell), so
+// "main.ts" reads them all.
+const APP_SOURCES = ["main.ts", "composer-markup.ts", "pair-dialog-markup.ts", "conversation-shell.ts"];
+async function readSource(path: string): Promise<string> {
+  if (path !== "main.ts") return readFile(new URL(path, import.meta.url), "utf8");
+  return (await Promise.all(APP_SOURCES.map((source) => readFile(new URL(source, import.meta.url), "utf8")))).join("\n");
+}
+
 afterEach(() => {
   vi.useRealTimers();
   vi.unstubAllGlobals();
@@ -26,14 +35,14 @@ describe("binding Cassy Cloud browser invariants", () => {
   });
 
   it("offers exactly one primary action without an invitation and never a Pair control (cas-8051 F7)", async () => {
-    const source = await readFile(new URL("main.ts", import.meta.url), "utf8");
+    const source = await readSource("main.ts");
     const html = await readFile(new URL("../index.html", import.meta.url), "utf8");
     // The entry step used to render a disabled Pair beside Create pairing code
     // and explain the disabled button in prose. The stronger property: with no
     // invitation there is no Pair/submit control in the dialog at all, the
     // link path is named as the alternative, and Pair exists only on the
     // confirmation form an invitation opens directly.
-    const entry = source.slice(source.indexOf("// One state, one next action."), source.indexOf("// A phone sentence takes longer to type"));
+    const entry = source.slice(source.indexOf("// One state, one next action."), source.indexOf("* Render the six scopes against the invitation's ceiling."));
     expect(entry).toContain("<h2>Pair a machine</h2>");
     expect(entry).not.toContain(">Pair</button>");
     expect(entry).not.toContain('type="submit"');
@@ -59,7 +68,7 @@ describe("binding Cassy Cloud browser invariants", () => {
   });
 
   it("asks for the machine's hub address instead of seeding the page origin (cas-8051 F5)", async () => {
-    const [main, draft] = await Promise.all(["main.ts", "pairing-draft.ts"].map((path) => readFile(new URL(path, import.meta.url), "utf8")));
+    const [main, draft] = await Promise.all(["main.ts", "pairing-draft.ts"].map((path) => readSource(path)));
     expect(draft).toContain('hubUrl: "",');
     expect(draft).toContain("pageOrigin: controllerOrigin,");
     expect(main).toContain("<label>Machine's hub address<input name=\"url\" type=\"url\" required autofocus placeholder=");
@@ -73,7 +82,7 @@ describe("binding Cassy Cloud browser invariants", () => {
   });
 
   it("names the remedy when an observer-only credential disables control", async () => {
-    const source = await readFile(new URL("main.ts", import.meta.url), "utf8");
+    const source = await readSource("main.ts");
     expect(source).toContain("Relay pairing granted read-only scopes for ${location.origin}");
     expect(source).toContain("cas hub pair --origin ${location.origin}");
     expect(source).toContain("Pairings are specific to each Cassy Cloud origin.");
@@ -90,7 +99,7 @@ describe("binding Cassy Cloud browser invariants", () => {
   });
 
   it("answers a supervisor ask through the leased send path with in_reply_to and pins it above the composer (cas-43f9)", async () => {
-    const source = await readFile(new URL("main.ts", import.meta.url), "utf8");
+    const source = await readSource("main.ts");
     expect(source).toContain("installAttentionObjects();");
     expect(source).toContain("respond: (ask, text) => { void submitSupervisorMessage({ text, replyTo: ask.notification_id }); },");
     expect(source).toContain("const replyTo = quick?.replyTo ?? (selectedThread ? conversationHistory(selectedThread).pinnedAsk()?.notification_id : undefined);");
@@ -104,7 +113,7 @@ describe("binding Cassy Cloud browser invariants", () => {
   });
 
   it("keeps a half-typed supervisor message across background renders", async () => {
-    const source = await readFile(new URL("main.ts", import.meta.url), "utf8");
+    const source = await readSource("main.ts");
     // render() replaces app.innerHTML on every heartbeat, which destroyed the
     // composer's contents mid-sentence — fatal on a phone, where typing is slow.
     expect(source).toContain("function captureMessageDraft(): void {");
@@ -121,7 +130,7 @@ describe("binding Cassy Cloud browser invariants", () => {
   });
 
   it("detects a phone from one definition, in both orientations", async () => {
-    const [main, css, design] = await Promise.all(["main.ts", "styles.css", "../DESIGN.md"].map((path) => readFile(new URL(path, import.meta.url), "utf8")));
+    const [main, css, design] = await Promise.all(["main.ts", "styles.css", "../DESIGN.md"].map((path) => readSource(path)));
     // A rotated Pixel 7 is 915px wide, so a width-only breakpoint handed a
     // 412px-tall screen the three-column desktop console (report defect D5).
     // CSS and JS must ask the identical question, or rotation puts the layout
@@ -164,7 +173,7 @@ describe("binding Cassy Cloud browser invariants", () => {
   });
 
   it("reports the outcome of sending a supervisor message", async () => {
-    const source = await readFile(new URL("main.ts", import.meta.url), "utf8");
+    const source = await readSource("main.ts");
     // A send with no outcome is indistinguishable from a lost one, and invites a
     // duplicate message to the supervisor.
     expect(source).toContain("function sendControl(machineId: string, session: string, message: unknown): boolean {");
@@ -175,7 +184,7 @@ describe("binding Cassy Cloud browser invariants", () => {
   });
 
   it("sends the supervisor message from Enter and from the button, through one path", async () => {
-    const source = await readFile(new URL("main.ts", import.meta.url), "utf8");
+    const source = await readSource("main.ts");
     // Enter was never wired: it inserted a newline and sent nothing, in observe
     // mode and in control mode alike (measured against the live hub, cas-0d61).
     expect(source).toContain("composer.onkeydown = (event) => {");
@@ -187,7 +196,7 @@ describe("binding Cassy Cloud browser invariants", () => {
   });
 
   it("keeps a hub heartbeat off the shell rebuild path", async () => {
-    const [main, regions] = await Promise.all(["main.ts", "live-regions.ts"].map((path) => readFile(new URL(path, import.meta.url), "utf8")));
+    const [main, regions] = await Promise.all(["main.ts", "live-regions.ts"].map((path) => readSource(path)));
     // A five-second status frame used to replace every live control in the
     // page: the composer was re-created six times and blurred six times inside
     // ten seconds of typing, and on a phone each blur closes the keyboard.
@@ -227,7 +236,7 @@ describe("binding Cassy Cloud browser invariants", () => {
   });
 
   it("keeps pairing failures inside the open dialog and cancellation cleanup visible (cas-7d55 F1/F2/F3/F6)", async () => {
-    const [main, model] = await Promise.all(["main.ts", "render-model.ts"].map((path) => readFile(new URL(path, import.meta.url), "utf8")));
+    const [main, model] = await Promise.all(["main.ts", "render-model.ts"].map((path) => readSource(path)));
     // F1: the status sentence and busy flags are live regions, not shell
     // signature; a failed exchange must re-enable Pair under a focused field.
     expect(main).toContain("pairingCleanupFailed ? `cleanup-failed:${pairingCleanupContext.cause}");
@@ -237,7 +246,7 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(main).toContain('focusInPairingDialog: composing && document.querySelector("#pair-dialog")?.contains(active) === true,');
     expect(model).toContain("return input.pairingStepChanged && input.focusInPairingDialog ? \"shell\" : \"defer\";");
     // The status node is always in the markup so a region can fill it.
-    expect(main).toContain("function pairStatusMarkup(): string {");
+    expect(main).toContain("function pairStatusMarkup(pairingStatus: string): string {");
     expect(main).not.toContain("${pairingStatus ? `<p class=\"pair-status\"");
     // F2: cancel closes only once cleanup is durable; otherwise a retry step.
     expect(main).toContain("const outcome = cancellationOutcome(cleared, verifiesCleanup);");
@@ -267,7 +276,7 @@ describe("binding Cassy Cloud browser invariants", () => {
 
   it("keeps the live-region selectors and the shell markup on the same nodes", async () => {
     const [main, regions, fixture] = await Promise.all(
-      ["main.ts", "live-regions.ts", "live-regions.test.ts"].map((path) => readFile(new URL(path, import.meta.url), "utf8")),
+      ["main.ts", "live-regions.ts", "live-regions.test.ts"].map((path) => readSource(path)),
     );
     // The updater writes by selector into markup rendered somewhere else. A
     // rename on either side would silently stop updating a region rather than
@@ -296,7 +305,7 @@ describe("binding Cassy Cloud browser invariants", () => {
   });
 
   it("never leaves the supervisor send button silently disabled", async () => {
-    const [main, css] = await Promise.all(["main.ts", "styles.css"].map((path) => readFile(new URL(path, import.meta.url), "utf8")));
+    const [main, css] = await Promise.all(["main.ts", "styles.css"].map((path) => readSource(path)));
     // A real `disabled` attribute swallows the tap: no event, no frame, no
     // reason. Observing operators concluded the feature was broken.
     expect(main).not.toContain('<button id="message-send" class="primary" ${!selected || !selectedSession || !supervisor || !canControl(selected.id, selectedSession, "message-send") ? "disabled" : ""}>');
@@ -315,7 +324,7 @@ describe("binding Cassy Cloud browser invariants", () => {
   });
 
   it("takes control to deliver an observed message instead of dropping it", async () => {
-    const source = await readFile(new URL("main.ts", import.meta.url), "utf8");
+    const source = await readSource("main.ts");
     // The hub refuses SendMessage without this device's session lease
     // (hub/server.rs handle_client_message), so observe-mode sends need the
     // lease the operator would otherwise have to take by hand.
@@ -327,7 +336,7 @@ describe("binding Cassy Cloud browser invariants", () => {
   });
 
   it("collapses one outage into one attention card per machine and session", async () => {
-    const source = await readFile(new URL("main.ts", import.meta.url), "utf8");
+    const source = await readSource("main.ts");
     // Without a stable fingerprint each retry coalesces to its own card, so a
     // single unreachable hub buries the feed under near-identical criticals.
     expect(source).toContain("fingerprint: `${machine.id}:auth_loss`");
@@ -336,7 +345,7 @@ describe("binding Cassy Cloud browser invariants", () => {
   });
 
   it("marks operations data as stale while the hub connection is not live", async () => {
-    const [main, css] = await Promise.all(["main.ts", "styles.css"].map((path) => readFile(new URL(path, import.meta.url), "utf8")));
+    const [main, css] = await Promise.all(["main.ts", "styles.css"].map((path) => readSource(path)));
     expect(main).toContain("const statusIsStale = Boolean(selected) && machineConnectionSnapshot !== undefined");
     expect(main).toContain('class="status-stale" role="status"');
     expect(main).toContain("Not live — reconnecting.");
@@ -349,7 +358,7 @@ describe("binding Cassy Cloud browser invariants", () => {
 
   it("derives the header mode and terminal cursor from the real session lease", async () => {
     const [main, terminal] = await Promise.all([
-      readFile(new URL("main.ts", import.meta.url), "utf8"),
+      readSource("main.ts"),
       readFile(new URL("terminal/ghostty/surface.ts", import.meta.url), "utf8"),
     ]);
     expect(main).toContain('const mode = lease?.held_by_me ? "CONTROL" : "OBSERVER"');
@@ -359,7 +368,7 @@ describe("binding Cassy Cloud browser invariants", () => {
   });
 
   it("keeps palette codenames primary while indexing optional session summaries", async () => {
-    const source = await readFile(new URL("main.ts", import.meta.url), "utf8");
+    const source = await readSource("main.ts");
     expect(source).toContain("<span>Jump to ${escapeHtml(session.name)}</span>");
     expect(source).toContain("summary ? `${summary.title} ${summary.description} ${summary.phase}` : \"\"");
     expect(source).toContain('data-search-text="${escapeAttr(searchMetadata)}"');
@@ -369,7 +378,7 @@ describe("binding Cassy Cloud browser invariants", () => {
 
   it("renders instructional empty pane and all-clear feed states", async () => {
     const [main, attentionView] = await Promise.all([
-      readFile(new URL("main.ts", import.meta.url), "utf8"),
+      readSource("main.ts"),
       readFile(new URL("attention-view.ts", import.meta.url), "utf8"),
     ]);
     expect(main).toContain('<p class="empty-title">No session open</p>');
@@ -384,7 +393,7 @@ describe("binding Cassy Cloud browser invariants", () => {
   });
 
   it("distinguishes a loading catalog from an unpaired Cassy Cloud drawer", async () => {
-    const source = await readFile(new URL("main.ts", import.meta.url), "utf8");
+    const source = await readSource("main.ts");
     expect(source).toContain("let machineCatalogLoaded = false;");
     expect(source).toContain("machineCatalogLoaded = true;");
     expect(source).toContain('"Loading paired machines…"');
@@ -399,7 +408,7 @@ describe("binding Cassy Cloud browser invariants", () => {
   });
 
   it("gives an unpaired phone one pairing path and no empty-state debris", async () => {
-    const [main, css] = await Promise.all(["main.ts", "styles.css"].map((path) => readFile(new URL(path, import.meta.url), "utf8")));
+    const [main, css] = await Promise.all(["main.ts", "styles.css"].map((path) => readSource(path)));
     expect(main).toContain("const fleetEmpty = machineCatalogLoaded && machines.size === 0 && attention.length === 0;");
     expect(main).toContain('fleetEmpty ? " fleet-empty" : ""');
     expect(main).toContain("const showSessionControls = selected !== undefined && selectedSession !== undefined;");
@@ -425,7 +434,7 @@ describe("binding Cassy Cloud browser invariants", () => {
   });
 
   it("makes the pairing code reachable without retyping it from a phone screen", async () => {
-    const source = await readFile(new URL("main.ts", import.meta.url), "utf8");
+    const source = await readSource("main.ts");
     expect(source).toContain('data-pair-command="cas hub authorize ${escapeAttr(pendingPairing.userCode)}"');
     expect(source).toContain("navigator.clipboard.writeText(pairCopy.dataset.pairCommand");
     expect(source).toContain('toast("Command copied")');
@@ -454,7 +463,7 @@ describe("binding Cassy Cloud browser invariants", () => {
   });
 
   it("binds the browser fetch receiver at every pairing handoff", async () => {
-    const source = await readFile(new URL("main.ts", import.meta.url), "utf8");
+    const source = await readSource("main.ts");
     expect(source).not.toMatch(/fetcher:\s*(?:window\.|globalThis\.)?fetch\s*[,}]/);
     expect(source).not.toMatch(/(?:acknowledgePairing|createPairingRequest|pollPairingRequest)\(\s*(?:window\.|globalThis\.)?fetch\s*,/);
   });
@@ -488,7 +497,7 @@ describe("binding Cassy Cloud browser invariants", () => {
   });
 
   it("keeps long-lived credentials out of ambient browser storage and URL channels", async () => {
-    const source = await Promise.all(["storage.ts", "dpop.ts"].map((path) => readFile(new URL(path, import.meta.url), "utf8")));
+    const source = await Promise.all(["storage.ts", "dpop.ts"].map((path) => readSource(path)));
     const joined = source.join("\n");
     for (const forbidden of ["local" + "Storage", "document.cookie", "serviceWorker.register", "caches.open"]) {
       expect(joined).not.toContain(forbidden);
@@ -504,7 +513,7 @@ describe("binding Cassy Cloud browser invariants", () => {
   });
 
   it("feature-detects hub versions and keeps controls disabled on skew", async () => {
-    const source = await Promise.all(["main.ts", "connection.ts"].map((path) => readFile(new URL(path, import.meta.url), "utf8")));
+    const source = await Promise.all(["main.ts", "connection.ts"].map((path) => readSource(path)));
     const joined = source.join("\n");
     expect(joined).toContain('"/v1/machine"');
     expect(joined).toContain("Compatibility check unavailable");
@@ -513,21 +522,21 @@ describe("binding Cassy Cloud browser invariants", () => {
   });
 
   it("targets interrupt at the explicitly selected pane rather than render order", async () => {
-    const source = await readFile(new URL("main.ts", import.meta.url), "utf8");
+    const source = await readSource("main.ts");
     expect(source).toContain("selectedPanes.get(sessionKey(selected.id, selectedSession))");
     expect(source).toContain("{ InterruptPane: { pane_id: pane } }");
     expect(source).not.toContain("[...surfaces.keys()].find");
   });
 
   it("never caches an asynchronously-created terminal against a detached render", async () => {
-    const source = await readFile(new URL("main.ts", import.meta.url), "utf8");
+    const source = await readSource("main.ts");
     expect(source).toContain("existingSurface.element !== mount || !existingSurface.element.isConnected");
     expect(source).toContain("!mount.isConnected || currentMount !== mount");
     expect(source).toContain("surface.dispose();");
   });
 
   it("preserves the active pane grid across lease and status renders", async () => {
-    const source = await readFile(new URL("main.ts", import.meta.url), "utf8");
+    const source = await readSource("main.ts");
     expect(source).toContain("currentGrid?.dataset.sessionKey === terminalSessionKey");
     expect(source).toContain("replaceWith(preservedGrid)");
     expect(source).toContain('document.activeElement?.matches(".t3-ghostty-input")');
@@ -536,7 +545,7 @@ describe("binding Cassy Cloud browser invariants", () => {
   });
 
   it("keeps the phone ATTENTION hierarchy human-readable and group-actionable", async () => {
-    const [main, attentionView, css] = await Promise.all(["main.ts", "attention-view.ts", "styles.css"].map((path) => readFile(new URL(path, import.meta.url), "utf8")));
+    const [main, attentionView, css] = await Promise.all(["main.ts", "attention-view.ts", "styles.css"].map((path) => readSource(path)));
     expect(main).toContain('machineEventAttention(kind, payload, pending)');
     expect(main).toContain('applyAttentionEnrichment(provisional, enriched');
     expect(main).toContain('renderAttentionPanel(container, visibleAttention');
@@ -557,7 +566,7 @@ describe("binding Cassy Cloud browser invariants", () => {
   });
 
   it("opens the pairing dialog for an invitation instead of leaving the user on the empty state", async () => {
-    const [main, css] = await Promise.all(["main.ts", "styles.css"].map((path) => readFile(new URL(path, import.meta.url), "utf8")));
+    const [main, css] = await Promise.all(["main.ts", "styles.css"].map((path) => readSource(path)));
 
     // A consumed fragment used to render the same "No machine paired yet"
     // screen, so the only signal that the invitation arrived was that nothing
@@ -591,7 +600,7 @@ describe("binding Cassy Cloud browser invariants", () => {
   it("D7 gives every control in the phone rail one container treatment", async () => {
     const [main, css, view, design] = await Promise.all(
       ["main.ts", "styles.css", "attention-view.ts", "../DESIGN.md"]
-        .map((path) => readFile(new URL(path, import.meta.url), "utf8")),
+        .map((path) => readSource(path)),
     );
 
     // One rule, one surface, one radius, one minimum target for Machines, each
@@ -640,7 +649,7 @@ describe("binding Cassy Cloud browser invariants", () => {
   });
 
   it("keeps supervisor messaging reachable from the collapsed phone rail", async () => {
-    const [main, css] = await Promise.all(["main.ts", "styles.css"].map((path) => readFile(new URL(path, import.meta.url), "utf8")));
+    const [main, css] = await Promise.all(["main.ts", "styles.css"].map((path) => readSource(path)));
     expect(main).toContain('id="mobile-message-toggle"');
     expect(main).toContain("function openSupervisorComposer(): void {");
     expect(main).toContain('activeContextTab = "status";');
@@ -659,7 +668,7 @@ describe("binding Cassy Cloud browser invariants", () => {
   });
 
   it("keeps a dedicated one-handed supervisor action and voice-first phone composer", async () => {
-    const [main, css] = await Promise.all(["main.ts", "styles.css"].map((path) => readFile(new URL(path, import.meta.url), "utf8")));
+    const [main, css] = await Promise.all(["main.ts", "styles.css"].map((path) => readSource(path)));
     expect(main).toContain('id="talk-supervisor"');
     expect(main).toContain("Talk to supervisor");
     expect(main).toContain('id="message-mic"');
@@ -681,7 +690,7 @@ describe("binding Cassy Cloud browser invariants", () => {
   });
 
   it("keeps a focused terminal focused across steady-state renders", async () => {
-    const source = await readFile(new URL("main.ts", import.meta.url), "utf8");
+    const source = await readSource("main.ts");
     // Re-inserting a pane card blurs its hidden textarea, which closes a phone
     // keyboard on every five-second heartbeat render. Panes move only when their
     // slot or position genuinely changed.
@@ -692,7 +701,7 @@ describe("binding Cassy Cloud browser invariants", () => {
   });
 
   it("colours connection dots from the phases the supervisor actually emits", async () => {
-    const [main, css] = await Promise.all(["main.ts", "styles.css"].map((path) => readFile(new URL(path, import.meta.url), "utf8")));
+    const [main, css] = await Promise.all(["main.ts", "styles.css"].map((path) => readSource(path)));
     // connectionClass emits lifecycle phases, so styling legacy names such as
     // "connected" or "offline" leaves every dot stuck on idle grey.
     expect(main).toContain('function connectionClass(state: ConnectionState | undefined): string { return state?.degraded ? "degraded" : state?.phase ?? "idle"; }');
@@ -705,7 +714,7 @@ describe("binding Cassy Cloud browser invariants", () => {
   });
 
   it("renders phone secondary panes as tappable rows instead of empty terminal wells", async () => {
-    const [main, css] = await Promise.all(["main.ts", "styles.css"].map((path) => readFile(new URL(path, import.meta.url), "utf8")));
+    const [main, css] = await Promise.all(["main.ts", "styles.css"].map((path) => readSource(path)));
     // Only the primary pane mounts a surface on a phone, so every other pane has
     // to read as a compact row and open on tap rather than reserve empty space.
     expect(main).toContain("const secondaryOnPhone = phone && pane.id !== layout.primaryPaneId;");
@@ -725,7 +734,7 @@ describe("binding Cassy Cloud browser invariants", () => {
       "../index.html",
       "terminal/ghostty/renderer.ts",
       "terminal/ghostty/surface.ts",
-    ].map((path) => readFile(new URL(path, import.meta.url), "utf8")));
+    ].map((path) => readSource(path)));
     expect(css).toContain('@import "./tokens.css";');
     expect(css).not.toContain(":root {");
     expect(css).not.toMatch(/#[0-9a-f]{3,8}\b/i);
@@ -753,7 +762,7 @@ describe("binding Cassy Cloud browser invariants", () => {
   });
 
   it("encodes the supervisor-first Cassy Cloud shell at desktop and phone widths", async () => {
-    const [main, css, connection] = await Promise.all(["main.ts", "styles.css", "connection.ts"].map((path) => readFile(new URL(path, import.meta.url), "utf8")));
+    const [main, css, connection] = await Promise.all(["main.ts", "styles.css", "connection.ts"].map((path) => readSource(path)));
     expect(main).toContain('class="machine-navigation${machineDrawerOpen ? " drawer-open" : ""}"');
     expect(main).toContain('id="pair-toggle" class="rail-control pair-machine"');
     expect(main).toContain('class="session-header"');
@@ -782,7 +791,7 @@ describe("binding Cassy Cloud browser invariants", () => {
   });
 
   it("puts a session picker and a back control in the primary chrome on both layouts", async () => {
-    const [main, css] = await Promise.all(["main.ts", "styles.css"].map((path) => readFile(new URL(path, import.meta.url), "utf8")));
+    const [main, css] = await Promise.all(["main.ts", "styles.css"].map((path) => readSource(path)));
     // The session name in the header is the switch. It is the only chrome that
     // is always visible on a phone, where the ⌘K palette is display:none.
     expect(main).toContain('id="session-picker-toggle" class="session-picker-toggle" type="button" aria-haspopup="dialog"');
@@ -807,7 +816,7 @@ describe("binding Cassy Cloud browser invariants", () => {
   });
 
   it("routes every navigation through one recorded selection and restores the last session on reopen", async () => {
-    const main = await readFile(new URL("main.ts", import.meta.url), "utf8");
+    const main = await readSource("main.ts");
     // One trail: a machine pick, a session open, an attention jump, and a
     // pairing all record the same way, so back and restore never disagree.
     expect(main).toContain("function commitSelection(next: SessionSelection): void {");
@@ -832,7 +841,7 @@ describe("binding Cassy Cloud browser invariants", () => {
   });
 
   it("captures both legacy and relay pairing drafts before a background render replaces markup", async () => {
-    const source = await readFile(new URL("main.ts", import.meta.url), "utf8");
+    const source = await readSource("main.ts");
     expect(source.indexOf("if (captureDraft) capturePairingDraft();")).toBeLessThan(source.indexOf("app.innerHTML ="));
     expect(source).toContain("updatePairingDraft(pairingDraft, new FormData(form).entries()");
     for (const field of ["hubUrl", "machineLabel", "deviceLabel", "operatorLabel", "scopes"]) {
@@ -841,7 +850,7 @@ describe("binding Cassy Cloud browser invariants", () => {
   });
 
   it("lets unleased observers size panes but preserves controller-owned geometry", async () => {
-    const source = await readFile(new URL("main.ts", import.meta.url), "utf8");
+    const source = await readSource("main.ts");
     expect(source).toContain('machines.get(machineId)?.scopes.includes("pane-read")');
     expect(source).toContain("return !lease?.controller_label || lease.held_by_me");
     expect(source).toContain("if (becameGeometryOwner) resizeViewablePanes(machineId, session)");
@@ -851,7 +860,7 @@ describe("binding Cassy Cloud browser invariants", () => {
 
   // cas-37f8: a phone-sized viewer must never shrink the operator's console.
   it("stops asking for a pane size once the local dashboard claims that pane", async () => {
-    const source = await readFile(new URL("main.ts", import.meta.url), "utf8");
+    const source = await readSource("main.ts");
     expect(source).toContain('const local = authority === "LocalDashboard";');
     expect(source).toContain("if (!ownsPaneGeometry(machineId, session, paneId)) return;");
     expect(source).toContain(
@@ -912,7 +921,7 @@ describe("binding Cassy Cloud browser invariants", () => {
       "/v1/health", "/v1/machine", "/v1/sessions",
     ]);
     const [main, connectionView] = await Promise.all([
-      readFile(new URL("main.ts", import.meta.url), "utf8"),
+      readSource("main.ts"),
       readFile(new URL("connection-state-view.ts", import.meta.url), "utf8"),
     ]);
     expect(main).toContain('state.authFailure === "needs-pairing" ? "Machine needs pairing"');
@@ -943,7 +952,7 @@ describe("binding Cassy Cloud browser invariants", () => {
   });
 
   it("degrades an unusable engine honestly instead of spinning at 0s", async () => {
-    const [connection, main, connectionView, css] = await Promise.all(["connection.ts", "main.ts", "connection-state-view.ts", "styles.css"].map((path) => readFile(new URL(path, import.meta.url), "utf8")));
+    const [connection, main, connectionView, css] = await Promise.all(["connection.ts", "main.ts", "connection-state-view.ts", "styles.css"].map((path) => readSource(path)));
     // The version floor that broke every attach on Chrome 113 is gone: the
     // combined signal is built through a helper with a fallback.
     expect(connection).toContain("signal: anySignal([this.eventAbort.signal, signal]),");
@@ -1101,7 +1110,7 @@ describe("binding Cassy Cloud browser invariants", () => {
 
   it("turns connection failures into timed actions while retaining prior terminal frames", async () => {
     const [source, connectionView] = await Promise.all([
-      readFile(new URL("main.ts", import.meta.url), "utf8"),
+      readSource("main.ts"),
       readFile(new URL("connection-state-view.ts", import.meta.url), "utf8"),
     ]);
     const styles = await readFile(new URL("styles.css", import.meta.url), "utf8");
@@ -1118,7 +1127,7 @@ describe("binding Cassy Cloud browser invariants", () => {
   });
 
   it("drives pane recovery from the selected session attach lifecycle", async () => {
-    const source = await readFile(new URL("main.ts", import.meta.url), "utf8");
+    const source = await readSource("main.ts");
     expect(source).toContain("onAttachState: (session, state) =>");
     expect(source).toContain("attachStates.set(sessionKey(machine.id, session), state)");
     expect(source).toContain("connection.attachSnapshot(selectedSession) ?? connection.snapshot()");
@@ -1128,12 +1137,12 @@ describe("binding Cassy Cloud browser invariants", () => {
   });
 
   it("removes the connecting instruction when the terminal state arrives", async () => {
-    const source = await readFile(new URL("main.ts", import.meta.url), "utf8");
+    const source = await readSource("main.ts");
     expect(source).toContain('grid.querySelector(".empty")?.remove();');
   });
 
   it("requests an authoritative supervisor keyframe before lazily mounted workers", async () => {
-    const [connection, main] = await Promise.all(["connection.ts", "main.ts"].map((path) => readFile(new URL(path, import.meta.url), "utf8")));
+    const [connection, main] = await Promise.all(["connection.ts", "main.ts"].map((path) => readSource(path)));
     expect(connection.indexOf("this.requestPaneKeyframe(session, supervisor.id)")).toBeLessThan(
       connection.indexOf("this.callbacks.onSessionState(session, welcome.state, undefined, true)"),
     );

@@ -7,7 +7,7 @@ import { ConversationHistory } from "./conversation-history";
 import { ConversationView } from "./conversation-view";
 import { installAttentionObjects } from "./attention-objects";
 import { installAttachmentSheet } from "./attachment-sheet";
-import { arrangeConversationShell, bindKeyboardViewport } from "./conversation-shell";
+import { arrangeConversationShell, bindKeyboardViewport, conversationEmptyText } from "./conversation-shell";
 import { applyScheme, setScheme, type SchemePreference } from "./scheme";
 import { applyAttentionEnrichment, attentionCounts, attentionSummary, attentionUrl, createAttentionItem, dismissableInfoItems, machineEventAttention, mergeAttentionItem, type AttentionAction, type AttentionContent, type AttentionEnrichment } from "./attention";
 import { cycleAttentionGroup, renderAttentionPanel, renderAttentionSummary } from "./attention-view";
@@ -19,11 +19,11 @@ import { createDeviceKey } from "./dpop";
 import { readPairingFragment, watchPairingFragment } from "./fragment";
 import { createPairingDraft, updatePairingDraft } from "./pairing-draft";
 import { bindPairingDialogCancel } from "./pairing-dialog";
-import { EXPIRED_PAIRING_INVITATION_MESSAGE, INVALID_PAIRING_LINK_MESSAGE, cancellationOutcome, cleanupStepCopy, pairingCleanupFailureUpdate, pairingStorageClearFailureMessage, type CleanupStepContext } from "./pairing-cleanup";
+import { EXPIRED_PAIRING_INVITATION_MESSAGE, INVALID_PAIRING_LINK_MESSAGE, cancellationOutcome, pairingCleanupFailureUpdate, pairingStorageClearFailureMessage, type CleanupStepContext } from "./pairing-cleanup";
 import { exchangePendingPairing, PairingCleanupError, PairingExchangeError, PairingStorageError } from "./pairing-exchange";
 import { PairingOperationCoordinator, commitPairingResult } from "./pairing-operation";
 import { LATE_ROLLBACK_FAILURE_MESSAGE, PairingCancellationTracker, cleanupRetryOutcome } from "./pairing-cancellation";
-import { PAIRING_SCOPES, pairCommand, preselectedScopes, scopeChoices, scopeLabel, scopeSummary, ungrantedScopes } from "./pairing-scopes";
+import { preselectedScopes } from "./pairing-scopes";
 import { pendingPairingStoreFor, type PendingPairing, type PendingRelayRequest } from "./pending-pairing";
 import { DEFAULT_PAIRING_SCOPES, PairingRelayError, acknowledgePairing, createPairingRequest, pairingRelayOrigin, pollPairingRequest } from "./pairing-relay";
 import { browserSupport, unsupportedBrowserNotice } from "./browser-support";
@@ -45,6 +45,8 @@ import { FleetBoardRenderer } from "./fleet-board";
 import { FirstConnectionAnnouncer, installPairedMachine } from "./first-connection";
 import { isEditableElement, renderDecision, shellSignature } from "./render-model";
 import { operatorThreadMarkup } from "./operator-thread";
+import { applyMicState, composerMarkup } from "./composer-markup";
+import { pairDialogMarkup as renderPairDialogMarkup } from "./pair-dialog-markup";
 import type { AttentionItem, ConversationHistoryPage, HubSession, LeaseState, OperatorReply, PaneInfo, Scope, SessionCardSummary, SessionState, StoredMachine } from "./types";
 
 applyScheme();
@@ -1699,43 +1701,18 @@ function connectionLabel(state: ConnectionState | AttachSnapshot | undefined): s
 
 function connectionClass(state: ConnectionState | undefined): string { return state?.degraded ? "degraded" : state?.phase ?? "idle"; }
 
-function scopeSummaryMarkup(scopes: readonly Scope[]): string {
-  return `<div><dt>This browser will be able to</dt><dd class="pair-summary">${scopeSummary(scopes).map(escapeHtml).join(" · ")}</dd></div>`;
-}
-
-function pairingDetails(origin: string, scopes: readonly Scope[]): string {
-  return `<dl class="pair-details">${scopeSummaryMarkup(scopes)}<div><dt>Cassy Cloud origin</dt><dd>${escapeHtml(origin)}</dd></div><div><dt>Exact scopes</dt><dd>${scopes.map(scopeLabel).map(escapeHtml).join(", ")}</dd></div></dl>`;
-}
-
-function pairStatusMarkup(): string {
-  return `<p class="pair-status" role="status"${pairingStatus ? "" : " hidden"}>${escapeHtml(pairingStatus)}</p>`;
-}
-
 function pairDialogMarkup(): string {
-  if (pairingCleanupFailed) {
-    // Cancel already discarded the invitation; this step exists because the
-    // page cannot yet prove a reload will not see it again. There is no way
-    // back to the invitation from here, only forward through the cleanup.
-    const copy = cleanupStepCopy(pairingCleanupContext);
-    return `<dialog id="pair-dialog">${cloudBrand()}<section class="pair-flow pair-cleanup" tabindex="-1" autofocus aria-labelledby="pair-cleanup-title"><h2 id="pair-cleanup-title">${escapeHtml(copy.title)}</h2><p>${escapeHtml(copy.discarded)} ${escapeHtml(copy.outstanding)}</p><p>${escapeHtml(copy.next)}</p>${pairStatusMarkup()}<div class="dialog-actions"><button id="pair-close" type="button" data-role="cleanup">Close</button><button id="pair-cleanup-retry" type="button" class="primary">Retry cleanup</button></div></section></dialog>`;
-  }
-  if (pendingPairing?.kind === "relay-request") {
-    return `<dialog id="pair-dialog">${cloudBrand()}<section class="pair-flow"><h2>Pair a machine</h2><p>On the machine you want to pair, run this command, then approve the request it prints:</p><p><code>cas hub authorize ${escapeHtml(pendingPairing.userCode)}</code></p><div class="pair-code" aria-label="Pairing code">${escapeHtml(pendingPairing.userCode)}</div><div class="pair-code-actions"><button id="pair-copy" type="button" data-pair-command="cas hub authorize ${escapeAttr(pendingPairing.userCode)}">Copy command</button></div><p>Expires in <strong id="pair-countdown">10:00</strong></p>${pairingDetails(pendingPairing.controllerOrigin, pendingPairing.requestedScopes)}${pairStatusMarkup()}<div class="dialog-actions"><button id="pair-cancel" type="button">Cancel</button></div></section></dialog>`;
-  }
-  if (pendingPairing?.kind === "invitation") {
-    const relay = Boolean(pendingPairing.relay);
-    const hubUrl = pendingPairing.hubUrl;
-    const origin = pendingPairing.controllerOrigin;
-    const invitationScopes = pendingPairing.scopes;
-    return `<dialog id="pair-dialog">${cloudBrand()}<form id="pair-form"><h2>${relay ? "Machine authorized" : "Pair a machine"}</h2><p>${relay ? "Verify the machine details, then create this browser's device credential." : "One-time invitation ready. Confirm the target hub."}</p>${relay && hubUrl && origin && invitationScopes ? `<dl class="pair-details"><div><dt>Machine</dt><dd>${escapeHtml(pendingPairing.machineLabel ?? pendingPairing.hubId)}</dd></div><div><dt>Machine's hub address</dt><dd>${escapeHtml(hubUrl)}</dd></div>${scopeSummaryMarkup(invitationScopes)}<div><dt>Cassy Cloud origin</dt><dd>${escapeHtml(origin)}</dd></div><div><dt>Granted scopes</dt><dd>${invitationScopes.map(scopeLabel).map(escapeHtml).join(", ")}</dd></div></dl><p>Invitation expires in <strong id="pair-countdown">10:00</strong></p>` : `<label>Machine's hub address<input name="url" type="url" required autofocus placeholder="https://studio.tailnet.ts.net" value="${escapeAttr(pairingDraft.hubUrl)}"><small class="field-hint">The address of the machine you are pairing, as printed by <code>cas hub pair</code> (usually its Tailscale name). It is not this page's address unless this page is served by that machine.</small></label><div class="pair-code-actions pair-address-actions"><button id="pair-use-page-origin" type="button" data-page-origin="${escapeAttr(pairingDraft.pageOrigin)}">Use this page's address (${escapeHtml(pairingDraft.pageOrigin)})</button></div><label>Machine label<input name="label" required placeholder="Studio Mac" value="${escapeAttr(pairingDraft.machineLabel)}"><small class="field-hint">How this machine is listed in Cassy Cloud.</small></label><fieldset><legend>Scopes requested</legend>${scopeChecks(pairingDraft.scopes, invitationScopes)}</fieldset>${scopeCeilingHint(invitationScopes)}`}<label>Device label<input name="device" required autofocus value="${escapeAttr(pairingDraft.deviceLabel)}"><small class="field-hint">How this browser is listed on the machine.</small></label><label>Operator label<input name="operator" required placeholder="Your name" value="${escapeAttr(pairingDraft.operatorLabel)}"><small class="field-hint">Who is pairing this browser; the machine records it.</small></label>${pairStatusMarkup()}<div class="dialog-actions"><button id="pair-cancel" type="button">Cancel</button><button type="submit" class="primary" ${pairingExchangeInFlight ? "disabled" : ""}>${pairingExchangeInFlight ? "Pairing…" : "Pair"}</button></div></form></dialog>`;
-  }
-  const relayAction = relayOrigin
-    ? `<button id="pair-create" type="button" class="primary" ${pairingCreateInFlight ? "disabled" : ""}>${pairingCreateInFlight ? "Creating…" : "Create pairing code"}</button>`
-    : '<p class="pairing-disabled-reason">Page-initiated pairing is unavailable because this Cassy Cloud build has no reviewed relay origin.</p>';
-  // One state, one next action. Without an invitation there is nothing to
-  // Pair, so no Pair control exists here at all; a link printed by the machine
-  // opens the confirmation form directly and never passes through this step.
-  return `<dialog id="pair-dialog">${cloudBrand()}<section class="pair-flow" tabindex="-1" autofocus><h2>Pair a machine</h2><p>Create a ten-minute code, approve it on the machine you want to pair, then confirm the exact Cassy Cloud origin and scopes here.</p>${pairingDetails(location.origin, DEFAULT_PAIRING_SCOPES)}<label>Email code (optional)<input id="pair-email" type="email" autocomplete="email" placeholder="operator@example.com" value="${escapeAttr(pairingDraft.email)}"></label>${pairStatusMarkup()}<p class="pair-alternative">Already have a link? Open the pairing URL that <code>cas hub pair</code> printed on the machine; it continues straight to confirmation.</p><div class="dialog-actions"><button id="pair-close" type="button">${pairingCreateInFlight ? "Cancel" : "Close"}</button>${relayAction}</div></section></dialog>`;
+  return renderPairDialogMarkup({
+    cleanupFailed: pairingCleanupFailed,
+    cleanupContext: pairingCleanupContext,
+    pendingPairing,
+    draft: pairingDraft,
+    status: pairingStatus,
+    createInFlight: pairingCreateInFlight,
+    exchangeInFlight: pairingExchangeInFlight,
+    relayOrigin,
+    pageOrigin: location.origin,
+  });
 }
 
 // A phone sentence takes longer to type than the heartbeat render interval, so
@@ -1765,18 +1742,7 @@ function restoreMessageDraft(): void {
 function syncSpeechComposer(): void {
   const mic = document.querySelector<HTMLButtonElement>("#message-mic");
   if (!mic) return;
-  const unavailable = speechCapability === undefined || speechCapability.mode === "typing";
-  const reason = speechCapability === undefined
-    ? "Checking voice input support…"
-    : speechInputDetail || "Voice input is not supported in this browser. Type your message instead.";
-  mic.disabled = unavailable;
-  mic.classList.toggle("listening", speechInputState === "listening");
-  mic.setAttribute("aria-pressed", String(speechInputState === "listening"));
-  const label = unavailable ? "Voice input unavailable" : speechInputState === "listening" ? "Stop listening" : "Start listening";
-  mic.setAttribute("aria-label", label);
-  mic.title = unavailable ? reason : speechInputState === "listening" ? "Stop listening" : speechInputDetail || "Start listening";
-  if (unavailable || speechInputDetail) mic.setAttribute("aria-description", reason);
-  else mic.removeAttribute("aria-description");
+  applyMicState(mic, { mode: speechCapability === undefined ? "checking" : speechCapability.mode === "typing" ? "typing" : "speech", listening: speechInputState === "listening", detail: speechInputDetail });
 }
 
 function createSpeechController(capability: SpeechInputCapability): SpeechDictationController {
@@ -2216,7 +2182,7 @@ function render(captureDraft = true): void {
             <button id="context-panel-close" class="context-panel-close" type="button" aria-label="Close panel">×</button>
           </div>
           <section id="attention-panel" class="context-tab" data-context-content="attention" ${activeContextTab === "attention" ? "" : "hidden"}></section>
-          <section class="context-tab status-context" data-context-content="status" ${activeContextTab === "status" ? "" : "hidden"}><p class="status-stale" role="status" hidden></p><div id="status-view"></div><div class="message"><h2><label for="message-text">Talk to ${escapeHtml(supervisor ?? "supervisor")}</label></h2>${operatorThreadMarkup(thread)}<textarea aria-describedby="message-status" id="message-text" placeholder="Speak or type a message, then review it before sending"></textarea><p class="control-disabled-reason" role="note" hidden></p><div class="composer-actions"><button id="message-mic" type="button" disabled aria-label="Voice input unavailable" aria-description="Checking voice input support…" title="Checking voice input support…" aria-pressed="false"><svg class="mic-glyph" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="8" y="3" width="8" height="12" rx="4"></rect><path d="M5 11a7 7 0 0 0 14 0M12 18v3M9 21h6"></path></svg></button><button id="message-keyboard" type="button">Keyboard</button><button id="message-send" class="primary">Send message</button></div><p id="message-status" class="message-status" role="status" hidden></p><p id="message-delivery" class="message-delivery" role="status" hidden></p></div></section>
+          <section class="context-tab status-context" data-context-content="status" ${activeContextTab === "status" ? "" : "hidden"}><p class="status-stale" role="status" hidden></p><div id="status-view"></div>${composerMarkup(supervisor, operatorThreadMarkup(thread))}</section>
         </div>
       </aside>
     </div>
@@ -2393,7 +2359,7 @@ function renderConversationList(): void {
   conversationRows = rows;
   conversationList.render(container, rows, (row) => { void openSession(row.machineId, row.session); });
   const empty = document.querySelector<HTMLElement>("#conversation-empty");
-  if (empty) { empty.hidden = rows.length > 0; empty.textContent = !machineCatalogLoaded ? "Loading paired machines…" : machines.size === 0 ? "Pair a machine to start your first conversation." : "No live supervisors listed. Use Appearance & commands to show dormant sessions for recovery."; }
+  if (empty) { empty.hidden = rows.length > 0; empty.textContent = conversationEmptyText(machineCatalogLoaded, machines.size); }
   const state = document.querySelector<HTMLElement>("#conversation-connection");
   if (state && selectedMachineId) state.textContent = ` · ${visibleSessions(selectedMachineId).find(session => session.name === selectedSession)?.unreachable ? "Unreachable · message pending" : fleetConnectionLabel(connectionStates.get(selectedMachineId))}`;
 }
@@ -2957,23 +2923,6 @@ function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | und
   };
   bindSpeechComposer();
   if (document.querySelector<HTMLButtonElement>("#message-send")) document.querySelector<HTMLButtonElement>("#message-send")!.onclick = () => { void submitSupervisorMessage(); };
-}
-
-/**
- * Render the six scopes against the invitation's ceiling. A scope the machine
- * did not grant is shown, disabled, and explained — requesting it is what made
- * a default `cas hub pair` link fail its first exchange with a bare 401.
- */
-function scopeChecks(selectedScopes: readonly Scope[], grantedScopes: readonly Scope[] | undefined): string {
-  return scopeChoices(grantedScopes, selectedScopes).map((choice) => `<label class="scope${choice.granted ? "" : " scope-denied"}"><input type="checkbox" name="scope" value="${choice.scope}" ${choice.checked ? "checked" : ""} ${choice.granted ? "" : "disabled"}>${choice.label}${choice.granted ? "" : '<span class="scope-note">not granted by this invitation</span>'}</label>`).join("");
-}
-
-/** Name the missing scopes and the exact command that mints them. */
-function scopeCeilingHint(grantedScopes: readonly Scope[] | undefined): string {
-  const missing = ungrantedScopes(grantedScopes);
-  if (!missing.length) return "";
-  const command = pairCommand(location.origin, PAIRING_SCOPES);
-  return `<p class="scope-hint">To also get ${missing.map((scope) => escapeHtml(scopeLabel(scope))).join(", ")}, run this on the machine and open the new link:</p><div class="pair-code-actions"><code>${escapeHtml(command)}</code><button id="pair-copy" type="button" data-pair-command="${escapeAttr(command)}">Copy command</button></div>`;
 }
 
 function escapeHtml(value: string): string { const span = document.createElement("span"); span.textContent = value; return span.innerHTML; }

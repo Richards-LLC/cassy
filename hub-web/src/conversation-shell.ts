@@ -64,6 +64,11 @@ export function dressComposer(composer: HTMLElement, supervisor?: string): void 
   }
 }
 
+/** The list's empty line: loading, unpaired, or paired with nothing live. */
+export function conversationEmptyText(catalogLoaded: boolean, machineCount: number): string {
+  return !catalogLoaded ? "Loading paired machines…" : machineCount === 0 ? "Pair a machine to start your first conversation." : "No live supervisors listed. Use Appearance & commands to show dormant sessions for recovery.";
+}
+
 export function conversationShellMarkup(model: ConversationShellModel): string {
   return `<div class="conversation-shell${model.selected ? " thread-open" : ""}${model.machineId ? ` ${machineAccentClass(model.machineId)}` : ""}">
     <aside class="conversation-sidebar" aria-label="Supervisor conversations">

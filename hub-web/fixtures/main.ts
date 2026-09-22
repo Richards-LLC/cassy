@@ -6,8 +6,10 @@ import { renderConnectionSurfaceInto } from "../src/connection-state-view";
 import { DeferredRenderScheduler } from "../src/deferred-render";
 import { renderFleetBoardInto, type FleetBoardModel } from "../src/fleet-board";
 import { pairingDialogCancellationActive } from "../src/pairing-dialog";
-import { cleanupStepCopy } from "../src/pairing-cleanup";
 import { pairingExchangeFailure } from "../src/pairing-messages";
+import { pairDialogMarkup } from "../src/pair-dialog-markup";
+import { createPairingDraft } from "../src/pairing-draft";
+import { DEFAULT_PAIRING_SCOPES } from "../src/pairing-relay";
 import { renderDecision, shellSignature } from "../src/render-model";
 import { operatorThreadMarkup } from "../src/operator-thread";
 import { TranscriptView, type TranscriptSource } from "../src/transcript-view";
@@ -29,7 +31,15 @@ export const FIXTURE_NAMES = [
   "operator-thread",
   "connection-failed-retry",
   "pairing-step-1",
+  "pairing-email",
+  "pairing-code",
   "pairing-cleanup",
+  "conversation-long-status",
+  "conversation-loading-earlier",
+  "conversation-mic-idle",
+  "conversation-mic-listening",
+  "conversation-mic-unavailable",
+  "conversations-loading",
 ] as const;
 
 export type FixtureName = (typeof FIXTURE_NAMES)[number];
@@ -292,52 +302,53 @@ function renderConnection(): HTMLElement {
   return grid;
 }
 
-function renderPairing(cleanup: boolean): HTMLDialogElement {
-  const dialog = document.createElement("dialog");
-  dialog.id = "pair-dialog";
-  const flow = element("section", `pair-flow${cleanup ? " pair-cleanup" : ""}`);
-  if (cleanup) {
-    const copy = cleanupStepCopy({ cause: "failure", storeOpen: true, rollbackPending: true });
-    flow.append(element("h2", undefined, copy.title), element("p", undefined, `${copy.discarded} ${copy.outstanding}`), element("p", undefined, copy.next));
-    const status = element("p", "pair-status", "Pairing failed; cleanup is still being verified.");
-    status.setAttribute("role", "status");
-    flow.append(status);
-    const actions = element("div", "dialog-actions");
-    actions.append(button("Close"), button("Retry cleanup", "primary"));
-    flow.append(actions);
-  } else {
-    flow.append(element("h2", undefined, "Pair a machine"), element("p", undefined, "Create a one-time pairing code and approve it on the machine you want to monitor."));
-    const code = element("code", "pair-code", "K7MW-4H2Q");
-    flow.append(code);
-    const details = element("dl", "pair-details");
-    const capability = element("div");
-    capability.append(element("dt", undefined, "This browser will be able to"), element("dd", "pair-summary", "Read machine, session, and pane state"));
-    const origin = element("div");
-    origin.append(element("dt", undefined, "Cassy Cloud origin"), element("dd", undefined, window.location.origin));
-    details.append(capability, origin);
-    flow.append(details);
-    const status = element("p", "pair-status", "Waiting for approval on the machine.");
-    status.setAttribute("role", "status");
-    flow.append(status);
-    const actions = element("div", "dialog-actions");
-    actions.append(button("Cancel"), button("Create pairing code", "primary"));
-    flow.append(actions);
-  }
+type PairingFixture = "pairing-step-1" | "pairing-email" | "pairing-code" | "pairing-cleanup";
+
+/**
+ * The production pairing dialog (the same pairDialogMarkup main.ts renders)
+ * for one fixture state: the entry step with its email field, the email field
+ * live under focus, the relay code, and the cleanup step.
+ */
+function renderPairing(view: PairingFixture): HTMLDialogElement {
+  const origin = window.location.origin;
+  const cleanup = view === "pairing-cleanup";
+  const code = view === "pairing-code";
+  const template = document.createElement("template");
+  template.innerHTML = pairDialogMarkup({
+    cleanupFailed: cleanup,
+    cleanupContext: { cause: "failure", storeOpen: true, rollbackPending: true },
+    pendingPairing: code
+      ? { kind: "relay-request", pairingRequestId: "fixture", userCode: "K7MW-4H2Q", pollSecret: "fixture", controllerOrigin: origin, requestedScopes: DEFAULT_PAIRING_SCOPES, expiresAt: new Date(Date.now() + 600_000).toISOString(), interval: 5 }
+      : null,
+    draft: createPairingDraft(origin),
+    status: cleanup ? "Pairing failed; cleanup is still being verified." : code ? "Waiting for a machine to claim the code…" : "",
+    createInFlight: false,
+    exchangeInFlight: false,
+    relayOrigin: "https://petra-stella-cloud.vercel.app",
+    pageOrigin: origin,
+  });
+  const dialog = template.content.querySelector<HTMLDialogElement>("#pair-dialog");
+  if (!dialog) throw new Error("pairDialogMarkup rendered no #pair-dialog");
   // Exercise the production cancellation policy at the fixture seam. The
   // result is intentionally not shown; it prevents a fixture from drifting
   // into a flow that the real dialog would not allow.
-  dialog.dataset.cancellationActive = String(pairingDialogCancellationActive({ createInFlight: !cleanup, exchangeInFlight: false, hasPendingPairing: cleanup }));
-  const failure = pairingExchangeFailure({ status: 502, body: "", controllerOrigin: window.location.origin });
+  dialog.dataset.cancellationActive = String(pairingDialogCancellationActive({ createInFlight: false, exchangeInFlight: false, hasPendingPairing: code || cleanup }));
+  const failure = pairingExchangeFailure({ status: 502, body: "", controllerOrigin: origin });
   dialog.dataset.failureCopy = failure.message;
-  dialog.append(flow);
   return dialog;
 }
 
-function appendOpenPairingDialog(cleanup: boolean): void {
-  const dialog = renderPairing(cleanup);
+function appendOpenPairingDialog(view: PairingFixture): void {
+  const dialog = renderPairing(view);
   app.append(dialog);
   dialog.showModal();
   if (!dialog.open) throw new Error("Pairing fixture dialog did not open");
+  if (view === "pairing-email") {
+    // The live field: focused and empty, so its placeholder and edge are what is measured (D4).
+    const email = dialog.querySelector<HTMLInputElement>("#pair-email");
+    if (!email) throw new Error("Production pairing dialog has no #pair-email field");
+    email.focus();
+  }
 }
 
 function renderShell(): void {
@@ -424,8 +435,7 @@ function renderShell(): void {
   if (["attention-0", "attention-12", "operator-thread"].includes(fixtureName)) shell.append(renderContext(fixtureName === "attention-12" ? 12 : 0));
   app.replaceChildren(shell);
   renderRestingToast();
-  if (fixtureName === "pairing-step-1") appendOpenPairingDialog(false);
-  if (fixtureName === "pairing-cleanup") appendOpenPairingDialog(true);
+  if (fixtureName.startsWith("pairing")) appendOpenPairingDialog(fixtureName as PairingFixture);
   if (fixtureName === "fleet-populated" && new URLSearchParams(window.location.search).has("broken")) {
     const style = document.createElement("style");
     style.textContent = ".fixture-broken-contrast { color: var(--bg-panel); background: var(--bg-panel); }";

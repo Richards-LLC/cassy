@@ -27,7 +27,7 @@
     "playwright": {
       "args": [
         "-y",
-        "@playwright/mcp@0.0.70",
+        "@playwright/mcp@latest",
         "--user-data-dir",
         "${HOME}/.playwright-mcp-profile",
         "--browser",

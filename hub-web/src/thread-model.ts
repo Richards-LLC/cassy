@@ -3,8 +3,9 @@
  *
  * Turns the flat `ConversationHistory` event list into what the thread paints:
  * day separators, runs of turns from one side grouped so their adjacent
- * corners tighten, consecutive supervisor status turns folded into one quiet
- * line, and one timestamp per group. Pure, so grouping survives incremental
+ * corners tighten, consecutive short supervisor status turns folded into one
+ * quiet line, and one timestamp per group. A long status, or one that asks
+ * the operator for something, is not folded: it reads as a supervisor bubble. Pure, so grouping survives incremental
  * DOM updates — the view re-derives the classes from this model instead of
  * leaning on `:first-of-type`, which forgets a group once a status line or a
  * later turn lands inside it.
@@ -92,6 +93,29 @@ function turnOf(event: ConversationEvent): ThreadTurn {
   return { key: eventKey(event), side: "supervisor", kind: event.value.kind ?? "answer", event, first: false, last: false };
 }
 
+/**
+ * A status longer than this reads as a message, not a progress tick: folding it
+ * into the quiet line would clamp most of it away (P2 of the 2026-09-22 design
+ * review; the real case is a 1,079-character "WAITING ON YOU" update).
+ */
+export const STATUS_FOLD_LIMIT = 140;
+
+/**
+ * Whether a status puts something in front of the operator: a waiting-on-you
+ * marker, a request for their decision or input, or a direct question. Such a
+ * status must never be set in the quietest style in the thread.
+ */
+const STATUS_ASK = /\bwaiting on (?:you|your)\b|\b(?:need|needs|needed) (?:you|your)\b|\byour (?:call|decision|answer|approval|input|go-ahead|sign-off)\b|\bover to you\b|\?(?:\s|$)/i;
+
+export function statusAsks(message: string): boolean {
+  return STATUS_ASK.test(message);
+}
+
+/** Only a short status with no ask folds into the quiet coalesced line. */
+export function foldsAsStatus(message: string): boolean {
+  return message.trim().length <= STATUS_FOLD_LIMIT && !statusAsks(message);
+}
+
 /** Derive the painted thread from the history's events. */
 export function threadModel(events: readonly ConversationEvent[], options: ThreadModelOptions = {}): ThreadItem[] {
   const now = options.now ?? Date.now();
@@ -135,7 +159,7 @@ export function threadModel(events: readonly ConversationEvent[], options: Threa
       });
     }
 
-    if (event.kind === "reply" && (event.value.kind ?? "answer") === "status") {
+    if (event.kind === "reply" && (event.value.kind ?? "answer") === "status" && foldsAsStatus(event.value.message)) {
       closeGroup();
       if (!coalesce) {
         coalesce = { type: "coalesce", key: `coalesce:${event.value.notification_id}`, count: 0, latest: "", replies: [], time: undefined };

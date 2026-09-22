@@ -97,6 +97,38 @@ wait_for_file() {
 wt_a="$(new_worktree epic-a-merge)"
 wt_b="$(new_worktree epic-b-merge)"
 
+# The cut captures a factory session before the detached gate strips identity;
+# when the launching shell has no session variable, discover the sole running
+# session bound to the repository.
+discovery_wt="$(new_worktree factory-session-discovery)"
+discovery_cas="$tmp/factory-session-discovery-cas.sh"
+cat >"$discovery_cas" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "$1" == --json && "$2" == list && "$3" == --project-dir \
+    && "$4" == "$DISCOVERY_PROJECT" && "$5" == --running-only ]]
+printf '{"schema_version":1,"sessions":[{"name":"discovered-session","project_dir":"%s","is_running":true}]}\n' \
+    "$DISCOVERY_PROJECT"
+EOF
+chmod +x "$discovery_cas"
+discovery_gate="$tmp/factory-session-discovery-gate.sh"
+new_gate_stub "$discovery_gate" 0
+discovery_run="$("$train" 9.99.1 "$discovery_wt" --print-run-dir)"
+env -u CAS_FACTORY_SESSION \
+    CAS_RELEASE_TRAIN_CAS="$discovery_cas" DISCOVERY_PROJECT="$discovery_wt" \
+    CAS_RELEASE_TRAIN_GATE_CMD="$discovery_gate" \
+    "$train" 9.99.1 "$discovery_wt" --gate --only scratch-base >/dev/null 2>&1 || true
+if wait_for_file "$discovery_run/diagnostics/*/run.env"; then
+    discovery_env="$(find "$discovery_run/diagnostics" -type f -name run.env -print -quit)"
+    if grep -q '^factory_session=discovered-session$' "$discovery_env"; then
+        ok 'gap 1: cut records the discovered factory session before stripping gate identity'
+    else
+        bad "gap 1: cut did not record the discovered factory session: $(cat "$discovery_env" 2>/dev/null || true)"
+    fi
+else
+    bad 'gap 1: cut did not create a diagnostic run environment for session discovery'
+fi
+
 # Gaps 1–2: pin the exact mergeQueue GraphQL shape and the shell quoting that
 # sends it to gh. The response is the recorded repository.mergeQueue shape.
 preflight_query_log="$tmp/preflight-query.log"

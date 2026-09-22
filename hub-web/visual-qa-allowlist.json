@@ -36,6 +36,16 @@
       "reason": "Unit 6 accepts the collapsed worker bar: it truncates the unmounted terminal placeholder of a pane the operator collapsed; the bar keeps the codename and role."
     },
     {
+      "type": "clipped-content",
+      "selector": ".conversation-preview",
+      "reason": "Conversation previews intentionally clip replies to two visible lines on the phone; the rendered text is bounded to 160 characters and the line clamp supplies the visible ellipsis."
+    },
+    {
+      "type": "content-overflow",
+      "selector": ".conversation-preview",
+      "reason": "Conversation previews intentionally clip replies to two visible lines on the phone; the rendered text is bounded to 160 characters and the line clamp supplies the visible ellipsis."
+    },
+    {
       "type": "javascript-disabled-loss",
       "selector": "body",
       "reason": "Unit 6 accepts that Commander is a JavaScript application: index.html has an empty #app and module script, so without JavaScript there is no pairing, terminal, or screen content; Unit 3 adds the noscript explanation."

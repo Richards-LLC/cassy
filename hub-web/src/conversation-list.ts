@@ -24,6 +24,15 @@ export interface ConversationRow {
   selected: boolean;
 }
 
+export const CONVERSATION_PREVIEW_MAX_CHARS = 160;
+
+/** Keep a long reply useful to screen readers and the two-line rail preview. */
+export function truncateConversationPreview(text: string): string {
+  const characters = Array.from(text);
+  if (characters.length <= CONVERSATION_PREVIEW_MAX_CHARS) return text;
+  return `${characters.slice(0, CONVERSATION_PREVIEW_MAX_CHARS - 1).join("").trimEnd()}…`;
+}
+
 /** The machine's own name: a host label such as "Atlas · Linux" reads "Atlas" on the row. */
 export function machineName(host: string): string {
   const name = host.split(" · ")[0]?.trim();
@@ -35,7 +44,7 @@ export function machineName(host: string): string {
 export function conversationRowMarkup(row: ConversationRow): string {
   const waiting = row.attention > 0;
   const unread = row.unread ?? 0;
-  const preview = plainTextMarkdown(row.preview || row.connection);
+  const preview = truncateConversationPreview(plainTextMarkdown(row.preview || row.connection));
   const time = row.when ? `<span class="conversation-when${waiting ? " hot" : ""}" title="${escapeHtml(row.freshness)}">${escapeHtml(row.when)}</span>` : "";
   const headlineEnd = unread > 0 ? `<span class="conversation-unread" aria-label="${unread} unread">${unread}</span>` : time;
   const flag = waiting ? `<span class="conversation-flag" role="img" aria-label="${row.attention === 1 ? "Waiting for you" : `${row.attention} waiting for you`}"></span>` : "";

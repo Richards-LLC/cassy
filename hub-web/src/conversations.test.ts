@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from "vitest";
 import { ConversationHistory } from "./conversation-history";
-import { ConversationList, type ConversationRow } from "./conversation-list";
+import { ConversationList, conversationRowMarkup, truncateConversationPreview, type ConversationRow } from "./conversation-list";
 import { ConversationView } from "./conversation-view";
 import { ATTACH_DISABLED_REASON, arrangeConversationShell, conversationShellMarkup, dressComposer } from "./conversation-shell";
 import { renderConversationFixture } from "../fixtures/conversations";
@@ -125,6 +125,13 @@ describe('conversation evidence', () => {
     expect(preview?.textContent).toBe('Ready cargo check');
     expect(preview?.textContent).not.toContain('**');
     expect(preview?.querySelector('code')).toBeNull();
+  });
+  it('truncates long conversation previews to 160 characters with an ellipsis', () => {
+    const longReply = 'A supervisor reply that keeps going. '.repeat(40);
+    const preview = truncateConversationPreview(longReply);
+    expect(preview).toHaveLength(160);
+    expect(preview.endsWith('…')).toBe(true);
+    expect(conversationRowMarkup({ key: 'a:s', machineId: 'a', session: 's', supervisor: 'sup', host: 'Atlas', freshness: 'now', connection: 'Live', attention: 0, preview: longReply, selected: false })).toContain(`>${preview}</span>`);
   });
   it('renders the fixture list with a footer count equal to the rows rendered', () => {
     const app = document.createElement('div'); document.body.replaceChildren(app);

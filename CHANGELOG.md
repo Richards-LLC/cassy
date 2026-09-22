@@ -7,6 +7,44 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.27.4] - 2026-09-22
+
+### Added
+
+- A worker whose delivery pull request merges is woken by the daemon with the
+  exact close command, and the supervisor is relayed if the task is still open
+  five minutes later. Delivery PR numbers and merge commits are recorded on
+  the task.
+- Starting a task on a reused worker branch reconciles the branch first: a
+  tip whose prior delivery is already merged is reset to the new target base,
+  an unrelated tip is refused with the exact rebase command, and the
+  merge-request envelope reports how many commits are not on the target base.
+
+### Fixed
+
+- The release train's receipts stage commits the POSTED block and the report
+  on the release branch and pushes it, instead of opening a docs-only pull
+  request to main; the next prep carries it forward.
+- The release train no longer needs the five hand steps recorded on the
+  3.27.3 cut: prep refreshes Cargo.lock offline after the version bump,
+  assemble rebases docs-only release commits onto the integration tip, the
+  run date is pinned when the cut starts so a cut crossing midnight keeps its
+  draft, preflight runs the announcement lint before the gate, and the
+  receipts enqueue waits for required checks to be reported.
+- The rolling union sweep skips epic branches whose tip is already contained
+  in main and names main, not a prior epic, when the conflicting content came
+  from main.
+- The close gate derives its required scoped-proof targets from the same
+  surface checker that validates them, cached once per close, so the command
+  it suggests is the command that passes.
+- The worker commit guard allows `git rebase --continue` and
+  `git cherry-pick --continue` by resolving the branch from the rebase
+  metadata; a detached HEAD outside a rebase is still refused.
+- The checkout-dependency guard derives and scans every test-bearing Rust
+  source, including library `#[cfg(test)]` modules, so a compile-time
+  checkout read in a unit test cannot reach the merge-queue shard. Two such
+  reads it found were fixed.
+
 ## [3.27.3] - 2026-09-21
 
 ### Added

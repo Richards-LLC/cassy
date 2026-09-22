@@ -43,6 +43,19 @@ describe("ConversationView (Pebble thread)", () => {
     expect(first.classList.contains("group-first")).toBe(true); expect(first.classList.contains("group-last")).toBe(false);
     expect(view.element.querySelectorAll(".msgs > .turn")).toHaveLength(1);
   });
+  it("shows session dividers and the no-earlier-history marker", () => {
+    const history = new ConversationHistory();
+    const view = new ConversationView(document, history, {
+      supervisor: "sup",
+      historyEnd: () => true,
+    });
+    document.body.replaceChildren(view.element);
+    history.submit("a", "sup", "Older", at(9, 0), undefined, "factory-old");
+    history.reply(reply(1, "answer", "Reply"), at(9, 1), "factory-old");
+    view.update();
+    expect(view.element.querySelector(".history-end")?.textContent).toBe("No earlier history");
+    expect(view.element.querySelector(".session-divider")?.textContent).toBe("session factory-old started 09:00");
+  });
   it("coalesces status runs into one quiet line and shows the working indicator while executing", () => {
     const history = new ConversationHistory();
     let working = false;

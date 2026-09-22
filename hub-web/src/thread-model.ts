@@ -46,15 +46,19 @@ export interface ThreadCoalesce {
 }
 
 export interface ThreadDay { type: "day"; key: string; label: string }
+export interface ThreadSession { type: "session"; key: string; label: string }
+export interface ThreadHistoryEnd { type: "history-end"; key: string; label: string }
 export interface ThreadWorking { type: "working"; key: string }
 
-export type ThreadItem = ThreadDay | ThreadGroup | ThreadCoalesce | ThreadWorking;
+export type ThreadItem = ThreadDay | ThreadSession | ThreadGroup | ThreadCoalesce | ThreadHistoryEnd | ThreadWorking;
 
 export interface ThreadModelOptions {
   /** Whether the supervisor is executing: appends the working line. */
   working?: boolean;
   /** Clock used for day labels; injectable for tests. */
   now?: number;
+  /** The oldest loaded page is complete; paint its explicit end marker. */
+  historyEnd?: boolean;
 }
 
 export function eventKey(event: ConversationEvent): string {
@@ -93,6 +97,7 @@ export function threadModel(events: readonly ConversationEvent[], options: Threa
   const now = options.now ?? Date.now();
   const items: ThreadItem[] = [];
   let lastDay: string | undefined;
+  let lastSession: string | undefined;
   let group: ThreadGroup | undefined;
   let coalesce: ThreadCoalesce | undefined;
 
@@ -119,6 +124,17 @@ export function threadModel(events: readonly ConversationEvent[], options: Threa
       items.push({ type: "day", key: `day:${lastDay}`, label: "Today" });
     }
 
+    const session = event.session;
+    if (session && session !== lastSession) {
+      closeGroup(); coalesce = undefined;
+      lastSession = session;
+      items.push({
+        type: "session",
+        key: `session:${session}:${eventKey(event)}`,
+        label: `session ${session} started ${clockLabel(at) ?? "earlier"}`,
+      });
+    }
+
     if (event.kind === "reply" && (event.value.kind ?? "answer") === "status") {
       closeGroup();
       if (!coalesce) {
@@ -143,6 +159,7 @@ export function threadModel(events: readonly ConversationEvent[], options: Threa
     group.time = clockLabel(at) ?? group.time;
   }
   closeGroup();
+  if (options.historyEnd) items.unshift({ type: "history-end", key: "history-end", label: "No earlier history" });
   if (options.working) items.push({ type: "working", key: "working" });
   return items;
 }

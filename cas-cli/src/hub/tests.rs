@@ -2112,6 +2112,7 @@ fn hub_history_response_summary_exposes_shape_without_turn_content() {
             reply_to: None,
             device_id: "phone-7".into(),
             operator_label: Some("Daniel".into()),
+            session: "factory-1".into(),
             at: "2026-09-21T14:52:41Z".into(),
         }],
         replies: Vec::new(),
@@ -2119,6 +2120,9 @@ fn hub_history_response_summary_exposes_shape_without_turn_content() {
         next_before: Some(40),
     })
     .unwrap();
+
+    let wire: serde_json::Value = serde_json::from_slice(&frame).unwrap();
+    assert_eq!(wire["ConversationHistory"]["messages"][0]["session"], "factory-1");
 
     assert_eq!(
         super::server::conversation_history_summary(&frame),

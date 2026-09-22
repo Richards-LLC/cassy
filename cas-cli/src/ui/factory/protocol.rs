@@ -136,6 +136,10 @@ pub struct ConversationHistoryMessage {
     pub device_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operator_label: Option<String>,
+    /// Factory session that produced this turn. History is project-scoped, so
+    /// the Commander can mark boundaries when several sessions are hydrated.
+    #[serde(default)]
+    pub session: String,
     pub at: String,
 }
 
@@ -155,6 +159,9 @@ pub struct ConversationHistoryReply {
     pub kind: OperatorTurnKind,
     #[serde(default)]
     pub attachments: Vec<ArtifactRef>,
+    /// Factory session that produced this turn.
+    #[serde(default)]
+    pub session: String,
     pub at: String,
 }
 
@@ -1115,6 +1122,7 @@ mod tests {
                 reply_to: None,
                 device_id: "phone-7".into(),
                 operator_label: Some("Daniel".into()),
+                session: "factory-1".into(),
                 at: "2026-09-21T14:52:41Z".into(),
             }],
             replies: Vec::new(),

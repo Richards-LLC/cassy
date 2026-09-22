@@ -3665,6 +3665,10 @@ impl FactoryDaemon {
                     operator_label: payload.operator_label,
                     kind: payload.kind,
                     attachments: payload.attachments,
+                    session: row
+                        .factory_session
+                        .clone()
+                        .unwrap_or_else(|| self.session_name.clone()),
                     at: row.created_at.to_rfc3339(),
                 });
                 continue;
@@ -3690,6 +3694,10 @@ impl FactoryDaemon {
                 reply_to,
                 device_id: operator.device_id.clone(),
                 operator_label: Some(operator.operator.clone()),
+                session: row
+                    .factory_session
+                    .clone()
+                    .unwrap_or_else(|| self.session_name.clone()),
                 at: row.created_at.to_rfc3339(),
             });
         }

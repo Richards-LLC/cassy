@@ -96,7 +96,7 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(source).toContain("const replyTo = quick?.replyTo ?? (selectedThread ? conversationHistory(selectedThread).pinnedAsk()?.notification_id : undefined);");
     expect(source).toContain("deliverSupervisorMessage(machine, session, supervisor, text, replyTo);");
     expect(source).toContain("supervisorMessage(supervisor, text, clientRef, replyTo)");
-    expect(source).toContain(".submit(clientRef, supervisor, text, Date.now(), replyTo);");
+    expect(source).toContain(".submit(clientRef, supervisor, text, Date.now(), replyTo, session);");
     expect(source).toContain("composerSlot.prepend(conversation.pinned);");
     // The list's waiting affordance is driven by unanswered asks and blockers.
     expect(source).toContain("const waiting = conversationHistories.get(key)?.waiting().length ?? 0;");

@@ -741,6 +741,41 @@ stage_wt="$(new_worktree release-stages)"
 stage_date='2099-01-02'
 fence="$(printf '\x60\x60\x60')"
 mkdir -p "$stage_wt/docs/release-notes" "$stage_wt/docs/release-reports"
+
+# A standalone caller must be able to source receipts.sh without inheriting
+# release-train.sh's script_dir variable, and use the posted-block helper.
+standalone_receipts_dir="$tmp/standalone-receipts"
+mkdir -p "$standalone_receipts_dir"
+cat >"$standalone_receipts_dir/announce.receipt" <<'EOF'
+POSTED_AT=2099-01-02T00:00:00Z
+CHANNEL=cas-internal
+CHANNEL_ID=C01234567
+USER_TOP_LEVEL_ID=user-1
+USER_TOP_LEVEL_PERMALINK=https://example.test/user-1
+USER_REPLY_ID=user-2
+USER_REPLY_PERMALINK=https://example.test/user-2
+DEV_TOP_LEVEL_ID=dev-1
+DEV_TOP_LEVEL_PERMALINK=https://example.test/dev-1
+DEV_REPLY_ID=dev-2
+DEV_REPLY_PERMALINK=https://example.test/dev-2
+EOF
+standalone_receipts_output="$tmp/standalone-receipts.out"
+standalone_receipts_error="$tmp/standalone-receipts.err"
+if (
+    unset script_dir
+    run_dir="$standalone_receipts_dir"
+    worktree="$stage_wt"
+    source "$repo_root/scripts/release-train.d/receipts.sh"
+    release_train_announce_posted_block
+) >"$standalone_receipts_output" 2>"$standalone_receipts_error" \
+    && grep -q '^## POSTED$' "$standalone_receipts_output" \
+    && grep -q 'message_id=user-1' "$standalone_receipts_output" \
+    && grep -q '<https://example.test/user-1>' "$standalone_receipts_output"; then
+    ok 'standalone receipts source resolves sibling stages and renders POSTED'
+else
+    bad "standalone receipts source failed: $(cat "$standalone_receipts_error" 2>/dev/null || true)"
+fi
+
 cat >"$stage_wt/docs/release-notes/2098-12-31-v9.99.7-slack.md" <<'EOF'
 # Slack draft — prior
 

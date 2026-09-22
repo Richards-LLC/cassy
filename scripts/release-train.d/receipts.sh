@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
 
+if [[ -z "${script_dir:-}" ]]; then
+    script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+fi
+
 if ! declare -F release_train_announce_draft_path >/dev/null 2>&1; then
     # --receipts is a standalone stage as well as a --cut stage.
     # shellcheck disable=SC1091

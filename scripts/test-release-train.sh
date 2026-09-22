@@ -115,6 +115,8 @@ discovery_gate="$tmp/factory-session-discovery-gate.sh"
 new_gate_stub "$discovery_gate" 0
 discovery_run="$("$train" 9.99.1 "$discovery_wt" --print-run-dir)"
 env -u CAS_FACTORY_SESSION \
+    CAS_AGENT_ID=discovered-agent-id CAS_SESSION_ID=discovered-session-id \
+    CAS_AGENT_NAME=discovered-supervisor CAS_AGENT_ROLE=supervisor \
     CAS_RELEASE_TRAIN_CAS="$discovery_cas" DISCOVERY_PROJECT="$discovery_wt" \
     CAS_RELEASE_TRAIN_GATE_CMD="$discovery_gate" \
     "$train" 9.99.1 "$discovery_wt" --gate --only scratch-base >/dev/null 2>&1 || true
@@ -124,6 +126,14 @@ if wait_for_file "$discovery_run/diagnostics/*/run.env"; then
         ok 'gap 1: cut records the discovered factory session before stripping gate identity'
     else
         bad "gap 1: cut did not record the discovered factory session: $(cat "$discovery_env" 2>/dev/null || true)"
+    fi
+    if grep -q '^agent_id=discovered-agent-id$' "$discovery_env" \
+        && grep -q '^session_id=discovered-session-id$' "$discovery_env" \
+        && grep -q '^agent_name=discovered-supervisor$' "$discovery_env" \
+        && grep -q '^agent_role=supervisor$' "$discovery_env"; then
+        ok 'gap 1b: cut records the launching supervisor identity before stripping gate identity'
+    else
+        bad "gap 1b: cut did not record the launching supervisor identity: $(cat "$discovery_env" 2>/dev/null || true)"
     fi
 else
     bad 'gap 1: cut did not create a diagnostic run environment for session discovery'
@@ -1236,6 +1246,7 @@ EOF
 chmod +x "$post_publication_latency"
 post_publication_landed="$(git -C "$stage_wt" rev-parse HEAD)"
 printf '%s\n' "$post_publication_landed" >"$post_publication_run/landed-main.sha"
+post_publication_stderr="$tmp/post-publication.stderr"
 if (
     source "$repo_root/scripts/release-train.d/post-publication.sh"
     cut_has_external_stage() { return 1; }
@@ -1250,12 +1261,13 @@ if (
     CAS_RELEASE_TRAIN_PUBLISHED_RECEIPT_CMD="$post_publication_published" \
     CAS_RELEASE_TRAIN_LATENCY_RECEIPT_CMD="$post_publication_latency" \
         release_train_post_publication
-) && [[ -s "$post_publication_run/release-workflow.json" ]] \
+) 2>"$post_publication_stderr" && [[ -s "$post_publication_run/release-workflow.json" ]] \
     && [[ -s "$post_publication_run/release-published.receipt" ]] \
-    && [[ -s "$post_publication_run/release-latency.receipt" ]]; then
-    ok 'gap 7: post-publication waits for Release and records both receipts'
+    && [[ -s "$post_publication_run/release-latency.receipt" ]] \
+    && ! grep -q 'command not found' "$post_publication_stderr"; then
+    ok 'gap 7: post-publication waits for Release, records both receipts, and has no missing helper'
 else
-    bad 'gap 7: post-publication did not produce the workflow and receipt trio'
+    bad "gap 7: post-publication did not produce clean workflow/receipt output: $(cat "$post_publication_stderr" 2>/dev/null || true)"
 fi
 
 # ---------------------------------------------------------------------------
@@ -2227,7 +2239,7 @@ else
 fi
 
 if python3 "$script_dir/test-release-integration.py"; then
-    ok 'gap 1: rolling assembly self-heal passes the recorded factory session; clean, red, dirty and locked fixtures'
+    ok 'gap 1: rolling assembly self-heal passes the recorded factory session and supervisor identity; clean, red, dirty and locked fixtures'
 else
     bad 'rolling integration assembly fixture suite'
 fi

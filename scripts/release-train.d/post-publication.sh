@@ -1,5 +1,15 @@
 #!/usr/bin/env bash
 
+if [[ -z "${script_dir:-}" ]]; then
+    script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+fi
+
+if ! declare -F release_train_date_stamp >/dev/null 2>&1; then
+    # post-publication is also a standalone stage and may not follow announce.
+    # shellcheck disable=SC1091
+    source "$script_dir/release-train.d/announce.sh"
+fi
+
 release_train_post_publication_workflow() {
     local landed tag repo gh tries poll i workflows row status conclusion
     landed="$(tr -d '[:space:]' <"$run_dir/landed-main.sha" 2>/dev/null || true)"

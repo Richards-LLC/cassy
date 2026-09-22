@@ -59,6 +59,7 @@ test \"$1\" = factory
 test \"$2\" = integration-recover
 test \"$3\" = --base-only
 printf '%s\\n' \"${CAS_FACTORY_SESSION:-missing}\" > .cas/recovery-session
+printf '%s\\n' \"${CAS_AGENT_ID:-missing}|${CAS_SESSION_ID:-missing}|${CAS_AGENT_NAME:-missing}|${CAS_AGENT_ROLE:-missing}\" > .cas/recovery-identity
 base=$(git rev-parse refs/remotes/origin/main)
 git update-ref refs/heads/integration/project \"$base\"
 python3 - \"$base\" <<'PY'
@@ -114,32 +115,38 @@ PY
         self.install_recovery_stub()
         run_dir = self.root / ".cas/release-run"
         run_dir.mkdir(parents=True)
-        (run_dir / "run.env").write_text("factory_session=fixture-session\n")
-        old_env = os.environ.get("CAS_RELEASE_TRAIN_CAS")
-        old_run_dir = os.environ.get("CAS_RELEASE_TRAIN_RUN_DIR")
-        old_factory_session = os.environ.get("CAS_FACTORY_SESSION")
+        (run_dir / "run.env").write_text(
+            "factory_session=fixture-session\n"
+            "agent_id=fixture-agent-id\n"
+            "session_id=fixture-supervisor-session\n"
+            "agent_name=fixture-supervisor\n"
+            "agent_role=supervisor\n"
+        )
+        env_names = [
+            "CAS_RELEASE_TRAIN_CAS", "CAS_RELEASE_TRAIN_RUN_DIR", "CAS_FACTORY_SESSION",
+            "CAS_AGENT_ID", "CAS_SESSION_ID", "CAS_AGENT_NAME", "CAS_AGENT_ROLE",
+        ]
+        old_env = {name: os.environ.get(name) for name in env_names}
         os.environ["CAS_RELEASE_TRAIN_CAS"] = str(self.root / ".cas/fake-cas")
         os.environ["CAS_RELEASE_TRAIN_RUN_DIR"] = str(run_dir)
-        os.environ.pop("CAS_FACTORY_SESSION", None)
+        for name in env_names[2:]:
+            os.environ.pop(name, None)
         try:
             result = self.assemble()
         finally:
-            if old_env is None:
-                os.environ.pop("CAS_RELEASE_TRAIN_CAS", None)
-            else:
-                os.environ["CAS_RELEASE_TRAIN_CAS"] = old_env
-            if old_run_dir is None:
-                os.environ.pop("CAS_RELEASE_TRAIN_RUN_DIR", None)
-            else:
-                os.environ["CAS_RELEASE_TRAIN_RUN_DIR"] = old_run_dir
-            if old_factory_session is None:
-                os.environ.pop("CAS_FACTORY_SESSION", None)
-            else:
-                os.environ["CAS_FACTORY_SESSION"] = old_factory_session
+            for name, value in old_env.items():
+                if value is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = value
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(self.git("rev-parse", "HEAD"), self.tip)
         self.assertTrue((self.root / ".cas/healed").exists())
         self.assertEqual((self.root / ".cas/recovery-session").read_text().strip(), "fixture-session")
+        self.assertEqual(
+            (self.root / ".cas/recovery-identity").read_text().strip(),
+            "fixture-agent-id|fixture-supervisor-session|fixture-supervisor|supervisor",
+        )
 
     def test_docs_only_receipts_base_names_the_receipts_commit(self):
         self.git("checkout", "main")

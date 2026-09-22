@@ -839,6 +839,7 @@ EOF
 cat >"$prep_lock_wt/scripts/bump-release-version.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
+[[ "$PWD" == "${PREP_EXPECTED_WORKTREE:?}" ]]
 sed -i 's/version = "0.0.0"/version = "9.99.13"/' Cargo.toml
 EOF
 chmod +x "$prep_lock_wt/scripts/bump-release-version.sh"
@@ -854,14 +855,16 @@ set -euo pipefail
 printf 'version = 3\n# refreshed for 9.99.13\n' > Cargo.lock
 EOF
 chmod +x "$prep_lock_cargo"
-prep_lock_out="$(CAS_RELEASE_TRAIN_DATE="$prep_lock_date" CAS_RELEASE_TRAIN_CARGO="$prep_lock_cargo" \
+prep_lock_out="$(cd "$tmp" && CAS_RELEASE_TRAIN_DATE="$prep_lock_date" \
+    CAS_RELEASE_TRAIN_CARGO="$prep_lock_cargo" PREP_EXPECTED_WORKTREE="$prep_lock_wt" \
     "$train" 9.99.13 "$prep_lock_wt" --prep 2>&1 || true)"
 if [[ "$prep_lock_out" == *'prep complete'* ]] \
     && [[ -z "$(git -C "$prep_lock_wt" status --porcelain)" ]] \
+    && git -C "$prep_lock_wt" show HEAD:Cargo.toml | grep -q 'version = "9.99.13"' \
     && git -C "$prep_lock_wt" show HEAD:Cargo.lock | grep -q 'refreshed for 9.99.13'; then
-    ok 'gap 1: prep refreshes Cargo.lock and leaves the bumped tree clean'
+    ok 'gap 3: prep runs bump and Cargo.lock refresh from the release worktree'
 else
-    bad "gap 1: prep left a stale or dirty lockfile: $prep_lock_out"
+    bad "gap 3: prep did not use the release worktree for bump/lockfile: $prep_lock_out"
 fi
 
 announce_stub="$tmp/announce-stub.sh"
@@ -967,6 +970,33 @@ else
     else
         bad "gap 4: preflight did not name the announce lint failure: $(cat "$preflight_lint_err")"
     fi
+fi
+
+# Gap 2: preflight must print the exact user-facing line that violates the
+# announcement wording rule, not only point at a saved lint log.
+wording_draft="$tmp/wording-draft.md"
+cp "$stage_wt/docs/release-notes/$stage_date-v9.99.8-slack.md" "$wording_draft"
+sed -i '0,/the release handoff/s//the agent handoff/' "$wording_draft"
+wording_wt="$(new_worktree preflight-wording)"
+mkdir -p "$wording_wt/docs/release-notes"
+cp "$wording_draft" "$wording_wt/docs/release-notes/$stage_date-v9.99.8-slack.md"
+wording_run="$tmp/preflight-wording-run"
+mkdir -p "$wording_run"
+if (
+    source "$repo_root/scripts/release-train.d/preflight.sh"
+    version=9.99.8
+    worktree="$wording_wt"
+    run_dir="$wording_run"
+    CAS_RELEASE_TRAIN_DATE="$stage_date"
+    cut_stage_file() { printf '%s/stage.%s.done\n' "$run_dir" "$1"; }
+    cut_preflight_check_draft
+) >"$tmp/preflight-wording.out" 2>"$tmp/preflight-wording.err"; then
+    bad 'gap 2: preflight accepted forbidden user wording'
+elif grep -q 'line 2' "$tmp/preflight-wording.err" \
+    && grep -q 'the agent handoff' "$tmp/preflight-wording.err"; then
+    ok 'gap 2: preflight prints the offending user-wording line'
+else
+    bad "gap 2: preflight omitted the offending line: $(cat "$tmp/preflight-wording.err")"
 fi
 
 # The validator accepts every rubric deploy target for both audiences, with an
@@ -1238,7 +1268,8 @@ for flavour in skills codex/skills grok/skills; do
         'four Slack POSTED' 'refresh_binary_version' 'stranded_branch_override' \
         'release.tag-complete.epoch' 'release-published.receipt' \
         'Pin the cut date' 'Cargo.lock' 'docs-only release commits' \
-        'status-check rollup' 'announcement lint'; do
+        'status-check rollup' 'announcement lint' 'wording must avoid' \
+        'agent`, `worker`, `supervisor`, `daemon`, and `factory'; do
         if grep -qF "$marker" "$skill" 2>/dev/null; then
             ok "cas-cut-release ($flavour) carries marker: $marker"
         else
@@ -2164,7 +2195,7 @@ else
 fi
 
 if python3 "$script_dir/test-release-integration.py"; then
-    ok 'rolling integration assembly: clean, stale-base heal, red, dirty and locked fixtures'
+    ok 'gap 1: rolling assembly self-heal passes the recorded factory session; clean, red, dirty and locked fixtures'
 else
     bad 'rolling integration assembly fixture suite'
 fi

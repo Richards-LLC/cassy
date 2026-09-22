@@ -148,14 +148,44 @@ live_gate_pid() {
     printf '%s\n' "$pid"
 }
 
+release_train_factory_session() {
+    local session="${CAS_FACTORY_SESSION:-}" cas_cmd project_root sessions
+    [[ -n "$session" ]] && {
+        printf '%s\n' "$session"
+        return 0
+    }
+    project_root="$(git -C "$worktree" rev-parse --path-format=absolute --git-common-dir 2>/dev/null \
+        | sed 's#/\.git$##' || true)"
+    [[ -n "$project_root" && -d "$project_root" ]] || project_root="$worktree"
+    cas_cmd="${CAS_RELEASE_TRAIN_CAS:-cas}"
+    if [[ "$cas_cmd" == */* ]]; then
+        [[ -x "$cas_cmd" ]] || return 1
+    else
+        command -v "$cas_cmd" >/dev/null 2>&1 || return 1
+    fi
+    sessions="$(cd "$project_root" && "$cas_cmd" --json list \
+        --project-dir "$project_root" --running-only 2>/dev/null || true)"
+    [[ -n "$sessions" ]] || return 1
+    printf '%s' "$sessions" | jq -r --arg project "$project_root" '
+        [.sessions[]? | select(.is_running == true and .project_dir == $project
+            and (.name // "") != "") | .name]
+        | unique
+        | if length == 1 then .[0] else empty end
+    ' 2>/dev/null
+}
+
 write_run_env() {
     local env_file="${1:-$run_dir/run.env}" tip tip_sha started_at run_date
+    local factory_session existing_factory_session
     tip="$(git -C "$worktree" rev-parse --short HEAD 2>/dev/null || echo unknown)"
     tip_sha="$(git -C "$worktree" rev-parse HEAD 2>/dev/null || echo unknown)"
     started_at="$(sed -n 's/^started_at=//p' "$env_file" 2>/dev/null | head -n1 || true)"
     [[ "$started_at" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] \
         || started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     run_date="${started_at%%T*}"
+    existing_factory_session="$(sed -n 's/^factory_session=//p' "$env_file" 2>/dev/null | head -n1 || true)"
+    factory_session="${existing_factory_session:-${CAS_FACTORY_SESSION:-}}"
+    [[ -n "$factory_session" ]] || factory_session="$(release_train_factory_session || true)"
     cat >"$env_file" <<EOF
 version=$version
 worktree=$worktree
@@ -165,6 +195,7 @@ tip=$tip
 tip_sha=$tip_sha
 started_at=$started_at
 run_date=$run_date
+factory_session=$factory_session
 started_by_pid=$$
 EOF
 }
@@ -1027,7 +1058,8 @@ case "$action" in
         exit $?
         ;;
     --assemble)
-        CAS_RELEASE_RECEIPTS_RUN_DIR="$run_dir" \
+        CAS_RELEASE_RECEIPTS_RUN_DIR="${CAS_RELEASE_RECEIPTS_RUN_DIR:-$run_dir}" \
+        CAS_RELEASE_TRAIN_RUN_DIR="${CAS_RELEASE_TRAIN_RUN_DIR:-$run_dir}" \
             python3 "$script_dir/release-integrate.py" "$worktree"
         exit $?
         ;;

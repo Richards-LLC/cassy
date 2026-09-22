@@ -125,11 +125,35 @@ def recovery_timeout_secs():
     return value
 
 
+def recorded_factory_session():
+    run_dir = os.environ.get("CAS_RELEASE_TRAIN_RUN_DIR")
+    if run_dir:
+        try:
+            fields = dict(
+                line.split("=", 1)
+                for line in (Path(run_dir) / "run.env").read_text(encoding="utf-8").splitlines()
+                if "=" in line
+            )
+        except OSError:
+            fields = {}
+        session = fields.get("factory_session", "").strip()
+        if session:
+            return session
+    return os.environ.get("CAS_FACTORY_SESSION", "").strip()
+
+
 def heal_stale_assembly(root):
     """Re-sweep the current base/open-epic union once before assembly retry."""
     command = os.environ.get("CAS_RELEASE_TRAIN_CAS", "cas")
-    env = os.environ.copy()
+    env = {
+        key: os.environ[key]
+        for key in ("HOME", "PATH")
+        if os.environ.get(key)
+    }
     env["CAS_ROOT"] = str(root / ".cas")
+    factory_session = recorded_factory_session()
+    if factory_session:
+        env["CAS_FACTORY_SESSION"] = factory_session
     try:
         result = subprocess.run(
             [command, "factory", "integration-recover", "--base-only"],

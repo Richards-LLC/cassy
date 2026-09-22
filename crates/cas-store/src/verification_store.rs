@@ -1998,6 +1998,11 @@ pub fn request_changes_for_parked_delivery(
     deliverables.parked_branch = None;
     deliverables.merge_conflicted = false;
     deliverables.review_envelope = None;
+    // A corrective close cycle must not keep watching the prior delivery PR;
+    // the next parked tip may use the same factory branch with a new PR.
+    deliverables.delivery_pr_number = None;
+    deliverables.delivery_pr_merge_commit = None;
+    deliverables.delivery_pr_merged_at = None;
 
     let now = Utc::now();
     let branch_handling = if boundary == RequestChangesBoundary::Merged {

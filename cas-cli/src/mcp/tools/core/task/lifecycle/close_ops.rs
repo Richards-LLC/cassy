@@ -7449,6 +7449,11 @@ impl CasCore {
             // would be a no-op at best, dead code at worst.
             task.closed_at = None;
             task.terminal_outcome = None;
+            // A reopened task starts a fresh delivery cycle. Do not let the
+            // daemon attribute a reused factory branch to the prior landed PR.
+            task.deliverables.delivery_pr_number = None;
+            task.deliverables.delivery_pr_merge_commit = None;
+            task.deliverables.delivery_pr_merged_at = None;
             // cas-cf64 (P2, anchor freshness — Scenario B): a stale
             // `factory_branch_anchor` from a PRIOR close/park cycle must not
             // survive a reopen as active authority. Preserve it as historical

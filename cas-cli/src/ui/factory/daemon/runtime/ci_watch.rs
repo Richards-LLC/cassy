@@ -27,6 +27,7 @@ pub(crate) const EXTERNAL_TAG_EXISTS_EVENT: &str = "tag_exists";
 const EXTERNAL_GIT_TIMEOUT: Duration = Duration::from_secs(2);
 const GH_CALL_TIMEOUT: Duration = Duration::from_secs(8);
 pub(crate) const REQUIRED_PR_LANE_CHECK: &str = "Scoped Validation (factory/PR)";
+pub(crate) const DELIVERY_MERGE_CLOSE_GRACE: Duration = Duration::from_secs(5 * 60);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CiFailure {
@@ -93,6 +94,10 @@ pub(crate) trait CiTransport {
     fn failing_job(&self, run_id: u64) -> Result<String, CiWatchError>;
     fn failed_log(&self, run_id: u64) -> Result<Option<String>, CiWatchError>;
     fn merge_queue_pull_requests(&self) -> Result<Vec<MergeQueuePullRequest>, CiWatchError>;
+    fn delivery_pull_requests(
+        &self,
+        branch: &str,
+    ) -> Result<Vec<DeliveryPullRequest>, CiWatchError>;
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -112,6 +117,37 @@ pub(crate) struct AwaitingMergeDelivery {
     pub task_id: String,
     pub worker: String,
     pub branch: String,
+    pub branch_tip: Option<String>,
+    pub pr_number: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub(crate) struct DeliveryPullRequest {
+    pub number: u64,
+    #[serde(rename = "headRefName")]
+    pub head_branch: String,
+    #[serde(rename = "headRefOid")]
+    pub head_sha: String,
+    pub state: String,
+    #[serde(rename = "mergedAt")]
+    pub merged_at: Option<String>,
+    #[serde(rename = "mergeCommit")]
+    pub merge_commit: Option<DeliveryMergeCommit>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub(crate) struct DeliveryMergeCommit {
+    pub oid: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DeliveryPrObservation {
+    pub task_id: String,
+    pub worker: String,
+    pub branch: String,
+    pub pr_number: u64,
+    pub head_sha: String,
+    pub merge_commit: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -483,6 +519,7 @@ struct MergeQueuePullRequests {
 pub(crate) struct GhCiTransport {
     repo: String,
     cwd: PathBuf,
+    gh_binary: PathBuf,
 }
 
 impl GhCiTransport {
@@ -508,11 +545,12 @@ impl GhCiTransport {
         Ok(Self {
             repo,
             cwd: project.to_path_buf(),
+            gh_binary: PathBuf::from("gh"),
         })
     }
 
     fn gh_json<T: for<'de> Deserialize<'de>>(&self, args: &[String]) -> Result<T, CiWatchError> {
-        let mut command = Command::new("gh");
+        let mut command = Command::new(&self.gh_binary);
         command.args(args).current_dir(&self.cwd);
         let output = run_command(
             &mut command,
@@ -542,7 +580,7 @@ impl GhCiTransport {
     }
 
     fn gh_text(&self, args: &[String]) -> Result<String, CiWatchError> {
-        let mut command = Command::new("gh");
+        let mut command = Command::new(&self.gh_binary);
         command.args(args).current_dir(&self.cwd);
         let output = run_command(
             &mut command,
@@ -619,11 +657,75 @@ impl CiTransport for GhCiTransport {
         ])?;
         Ok(response.data.repository.pull_requests.nodes)
     }
+
+    fn delivery_pull_requests(
+        &self,
+        branch: &str,
+    ) -> Result<Vec<DeliveryPullRequest>, CiWatchError> {
+        self.gh_json(&[
+            "pr".to_string(),
+            "list".to_string(),
+            "--repo".to_string(),
+            self.repo.clone(),
+            "--state".to_string(),
+            "all".to_string(),
+            "--head".to_string(),
+            branch.to_string(),
+            "--limit".to_string(),
+            "20".to_string(),
+            "--json".to_string(),
+            "number,headRefName,headRefOid,state,mergedAt,mergeCommit".to_string(),
+        ])
+    }
 }
 
 fn merge_group_pr_number(branch: &str) -> Option<u64> {
     let (_, suffix) = branch.rsplit_once("/pr-")?;
     suffix.split_once('-')?.0.parse().ok()
+}
+
+/// Match each parked delivery to its PR and retain the merge commit when the
+/// PR has landed. The task's recorded PR number wins after discovery; before
+/// discovery, the branch tip anchor prevents an older PR on a reused factory
+/// branch from being attributed to the current task.
+pub(crate) fn collect_delivery_pr_observations(
+    transport: &dyn CiTransport,
+    deliveries: &[AwaitingMergeDelivery],
+) -> Result<Vec<DeliveryPrObservation>, CiWatchError> {
+    let mut observations = Vec::new();
+    for delivery in deliveries {
+        let pulls = transport.delivery_pull_requests(&delivery.branch)?;
+        let candidate = pulls
+            .into_iter()
+            .filter(|pull| pull.head_branch == delivery.branch)
+            .filter(|pull| {
+                if let Some(number) = delivery.pr_number {
+                    number == pull.number
+                } else {
+                    delivery
+                        .branch_tip
+                        .as_deref()
+                        .is_none_or(|tip| tip == pull.head_sha)
+                }
+            })
+            .max_by_key(|pull| pull.number);
+        let Some(pull) = candidate else {
+            continue;
+        };
+        let merged = pull.merged_at.is_some() || pull.state.eq_ignore_ascii_case("MERGED");
+        observations.push(DeliveryPrObservation {
+            task_id: delivery.task_id.clone(),
+            worker: delivery.worker.clone(),
+            branch: delivery.branch.clone(),
+            pr_number: pull.number,
+            head_sha: pull.head_sha,
+            merge_commit: merged
+                .then(|| pull.merge_commit)
+                .flatten()
+                .map(|commit| commit.oid),
+        });
+    }
+    Ok(observations)
 }
 
 /// The queue snapshot is intentionally small: one GraphQL open-PR listing and
@@ -912,10 +1014,12 @@ mod tests {
     use super::*;
     use cas_store::SqlitePromptQueueStore;
     use std::cell::Cell;
+    use std::os::unix::fs::PermissionsExt;
 
     struct FakeTransport {
         runs: Vec<CiRun>,
         pulls: Vec<MergeQueuePullRequest>,
+        delivery_pulls: Vec<DeliveryPullRequest>,
         job: String,
         log: Option<String>,
         calls: Cell<u8>,
@@ -934,6 +1038,12 @@ mod tests {
         }
         fn merge_queue_pull_requests(&self) -> Result<Vec<MergeQueuePullRequest>, CiWatchError> {
             Ok(self.pulls.clone())
+        }
+        fn delivery_pull_requests(
+            &self,
+            _: &str,
+        ) -> Result<Vec<DeliveryPullRequest>, CiWatchError> {
+            Ok(self.delivery_pulls.clone())
         }
     }
 
@@ -985,11 +1095,120 @@ mod tests {
         }
     }
 
+    fn delivery_pull(
+        number: u64,
+        branch: &str,
+        head_sha: &str,
+        merged_at: Option<&str>,
+        merge_commit: Option<&str>,
+    ) -> DeliveryPullRequest {
+        DeliveryPullRequest {
+            number,
+            head_branch: branch.to_string(),
+            head_sha: head_sha.to_string(),
+            state: if merged_at.is_some() {
+                "MERGED".to_string()
+            } else {
+                "OPEN".to_string()
+            },
+            merged_at: merged_at.map(str::to_string),
+            merge_commit: merge_commit.map(|oid| DeliveryMergeCommit {
+                oid: oid.to_string(),
+            }),
+        }
+    }
+
+    #[test]
+    fn merged_delivery_pr_observation_carries_pr_and_merge_commit() {
+        let delivery = AwaitingMergeDelivery {
+            task_id: "cas-7ea6".to_string(),
+            worker: "calm-octopus-51".to_string(),
+            branch: "factory/calm-octopus-51".to_string(),
+            branch_tip: Some("worker-tip".to_string()),
+            pr_number: None,
+        };
+        let transport = FakeTransport {
+            runs: Vec::new(),
+            pulls: Vec::new(),
+            delivery_pulls: vec![delivery_pull(
+                932,
+                &delivery.branch,
+                "worker-tip",
+                Some("2026-09-21T12:00:00Z"),
+                Some("merge-tip"),
+            )],
+            job: String::new(),
+            log: None,
+            calls: Cell::new(0),
+        };
+
+        let observations =
+            collect_delivery_pr_observations(&transport, std::slice::from_ref(&delivery)).unwrap();
+        assert_eq!(observations.len(), 1);
+        assert_eq!(observations[0].pr_number, 932);
+        assert_eq!(observations[0].merge_commit.as_deref(), Some("merge-tip"));
+    }
+
+    #[test]
+    fn gh_delivery_pull_request_query_parses_stubbed_gh_output() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let gh = temp.path().join("gh");
+        std::fs::write(
+            &gh,
+            "#!/bin/sh\nprintf '%s' '[{\"number\":932,\"headRefName\":\"factory/calm-octopus-51\",\"headRefOid\":\"worker-tip\",\"state\":\"MERGED\",\"mergedAt\":\"2026-09-21T12:00:00Z\",\"mergeCommit\":{\"oid\":\"merge-tip\"}}]'\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let transport = GhCiTransport {
+            repo: "org/repo".to_string(),
+            cwd: temp.path().to_path_buf(),
+            gh_binary: gh,
+        };
+
+        let pulls = transport
+            .delivery_pull_requests("factory/calm-octopus-51")
+            .unwrap();
+        assert_eq!(pulls.len(), 1);
+        assert_eq!(pulls[0].number, 932);
+        assert_eq!(pulls[0].merge_commit.as_ref().unwrap().oid, "merge-tip");
+    }
+
+    #[test]
+    fn delivery_pr_observation_ignores_stale_head_from_a_reused_branch() {
+        let delivery = AwaitingMergeDelivery {
+            task_id: "cas-7ea6".to_string(),
+            worker: "calm-octopus-51".to_string(),
+            branch: "factory/calm-octopus-51".to_string(),
+            branch_tip: Some("current-tip".to_string()),
+            pr_number: None,
+        };
+        let transport = FakeTransport {
+            runs: Vec::new(),
+            pulls: Vec::new(),
+            delivery_pulls: vec![delivery_pull(
+                931,
+                &delivery.branch,
+                "old-tip",
+                Some("2026-09-21T11:00:00Z"),
+                Some("old-merge"),
+            )],
+            job: String::new(),
+            log: None,
+            calls: Cell::new(0),
+        };
+        assert!(
+            collect_delivery_pr_observations(&transport, std::slice::from_ref(&delivery))
+                .unwrap()
+                .is_empty()
+        );
+    }
+
     #[test]
     fn failed_completed_live_lane_emits_a_relay_with_job_and_test() {
         let transport = FakeTransport {
             runs: vec![run("factory/bright-otter", Some("failure"))],
             pulls: Vec::new(),
+            delivery_pulls: Vec::new(),
             job: "Fast Validation".to_string(),
             log: Some("test contract_conflict_regression ... FAILED".to_string()),
             calls: Cell::new(0),
@@ -1013,6 +1232,7 @@ mod tests {
                 run_with("main", "current-green", 42, Some("success")),
             ],
             pulls: Vec::new(),
+            delivery_pulls: Vec::new(),
             job: "should not run".to_string(),
             log: None,
             calls: Cell::new(0),
@@ -1034,6 +1254,7 @@ mod tests {
                 run_with("main", "current-red", 42, Some("failure")),
             ],
             pulls: Vec::new(),
+            delivery_pulls: Vec::new(),
             job: "Fast Validation".to_string(),
             log: None,
             calls: Cell::new(0),
@@ -1117,6 +1338,7 @@ mod tests {
         let transport = FakeTransport {
             runs: vec![run("main", Some("success"))],
             pulls: Vec::new(),
+            delivery_pulls: Vec::new(),
             job: "should not run".to_string(),
             log: None,
             calls: Cell::new(0),
@@ -1132,6 +1354,8 @@ mod tests {
             task_id: "cas-fc35".to_string(),
             worker: "fast-jaguar-59".to_string(),
             branch: "factory/fast-jaguar-59".to_string(),
+            branch_tip: None,
+            pr_number: None,
         };
         let mut failed = run_with(
             "gh-readonly-queue/main/pr-556-base",
@@ -1143,6 +1367,7 @@ mod tests {
         let ejected = FakeTransport {
             runs: vec![failed.clone()],
             pulls: vec![pull(556, &delivery.branch, false, "2026-08-20T15:32:03Z")],
+            delivery_pulls: Vec::new(),
             job: String::new(),
             log: None,
             calls: Cell::new(0),
@@ -1160,6 +1385,7 @@ mod tests {
         let requeued = FakeTransport {
             runs: vec![failed],
             pulls: vec![pull(556, &delivery.branch, true, "2026-08-20T15:40:00Z")],
+            delivery_pulls: Vec::new(),
             job: String::new(),
             log: None,
             calls: Cell::new(0),
@@ -1183,6 +1409,7 @@ mod tests {
         let re_ejected = FakeTransport {
             runs: vec![second_failed],
             pulls: vec![pull(556, &delivery.branch, false, "2026-08-20T15:42:00Z")],
+            delivery_pulls: Vec::new(),
             job: String::new(),
             log: None,
             calls: Cell::new(0),
@@ -1199,6 +1426,7 @@ mod tests {
         let normal_merge = FakeTransport {
             runs: Vec::new(),
             pulls: Vec::new(),
+            delivery_pulls: Vec::new(),
             job: String::new(),
             log: None,
             calls: Cell::new(0),
@@ -1207,6 +1435,8 @@ mod tests {
             task_id: "cas-fc35".to_string(),
             worker: "fast-jaguar-59".to_string(),
             branch: "factory/fast-jaguar-59".to_string(),
+            branch_tip: None,
+            pr_number: None,
         };
         assert!(
             collect_merge_queue_ejections(
@@ -1227,6 +1457,8 @@ mod tests {
             task_id: "cas-pr-lane".to_string(),
             worker: "bright-otter".to_string(),
             branch: "factory/bright-otter".to_string(),
+            branch_tip: None,
+            pr_number: None,
         };
         let transport = FakeTransport {
             runs: vec![run_with(
@@ -1242,6 +1474,7 @@ mod tests {
                 true,
                 "2026-08-31T20:31:00Z",
             )],
+            delivery_pulls: Vec::new(),
             job: REQUIRED_PR_LANE_CHECK.to_string(),
             log: None,
             calls: Cell::new(0),
@@ -1271,6 +1504,8 @@ mod tests {
             task_id: "cas-pr-lane".to_string(),
             worker: "bright-otter".to_string(),
             branch: "factory/bright-otter".to_string(),
+            branch_tip: None,
+            pr_number: None,
         };
         let transport = FakeTransport {
             runs: vec![
@@ -1294,6 +1529,7 @@ mod tests {
                 true,
                 "2026-08-31T20:31:00Z",
             )],
+            delivery_pulls: Vec::new(),
             job: "macOS Check".to_string(),
             log: None,
             calls: Cell::new(0),
@@ -1315,6 +1551,8 @@ mod tests {
             task_id: "cas-pr-arm".to_string(),
             worker: "bright-otter".to_string(),
             branch: "factory/bright-otter".to_string(),
+            branch_tip: None,
+            pr_number: None,
         };
         let armed = FakeTransport {
             runs: Vec::new(),
@@ -1325,6 +1563,7 @@ mod tests {
                 false,
                 "2026-08-31T20:00:00Z",
             )],
+            delivery_pulls: Vec::new(),
             job: String::new(),
             log: None,
             calls: Cell::new(0),
@@ -1346,6 +1585,7 @@ mod tests {
         let disarmed = FakeTransport {
             runs: Vec::new(),
             pulls: vec![disarmed_pull],
+            delivery_pulls: Vec::new(),
             job: String::new(),
             log: None,
             calls: Cell::new(0),
@@ -1413,6 +1653,12 @@ mod tests {
             fn merge_queue_pull_requests(
                 &self,
             ) -> Result<Vec<MergeQueuePullRequest>, CiWatchError> {
+                unreachable!()
+            }
+            fn delivery_pull_requests(
+                &self,
+                _: &str,
+            ) -> Result<Vec<DeliveryPullRequest>, CiWatchError> {
                 unreachable!()
             }
         }

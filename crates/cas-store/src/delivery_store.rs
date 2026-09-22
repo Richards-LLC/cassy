@@ -735,6 +735,9 @@ mod tests {
         task.assignee = Some("worker".into());
         task.deliverables.factory_branch_anchor = Some("a".repeat(40));
         task.deliverables.parked_branch = Some("factory/worker".into());
+        task.deliverables.delivery_pr_number = Some(932);
+        task.deliverables.delivery_pr_merge_commit = Some("merge-tip".into());
+        task.deliverables.delivery_pr_merged_at = Some(Utc::now());
         task.pending_worktree_merge = true;
         task_store.add(&task).unwrap();
 
@@ -781,6 +784,9 @@ mod tests {
             vec!["a".repeat(40)]
         );
         assert!(reopened.deliverables.parked_branch.is_none());
+        assert!(reopened.deliverables.delivery_pr_number.is_none());
+        assert!(reopened.deliverables.delivery_pr_merge_commit.is_none());
+        assert!(reopened.deliverables.delivery_pr_merged_at.is_none());
         assert!(!reopened.pending_worktree_merge);
         assert!(reopened.notes.contains("Decision: changes requested"));
         assert!(reopened.notes.contains("prior commits remain on factory/worker"));

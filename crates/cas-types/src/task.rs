@@ -432,6 +432,15 @@ pub struct TaskDeliverables {
     /// Merge commit hash for associated worktree (if any)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merge_commit: Option<String>,
+    /// Pull request number discovered for a parked factory delivery.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_pr_number: Option<u64>,
+    /// Merge commit reported by GitHub for the parked delivery pull request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_pr_merge_commit: Option<String>,
+    /// Time the daemon first observed the delivery pull request as merged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_pr_merged_at: Option<DateTime<Utc>>,
     /// Persisted review envelope captured on verification-jail close so a later
     /// supervisor close can forward the prior code-review outcome without
     /// re-running the gate. Serialized as a JSON string.
@@ -512,6 +521,12 @@ struct TaskDeliverablesObject {
     #[serde(default)]
     merge_commit: Option<String>,
     #[serde(default)]
+    delivery_pr_number: Option<u64>,
+    #[serde(default)]
+    delivery_pr_merge_commit: Option<String>,
+    #[serde(default)]
+    delivery_pr_merged_at: Option<DateTime<Utc>>,
+    #[serde(default)]
     review_envelope: Option<String>,
     #[serde(default)]
     factory_branch_anchor: Option<String>,
@@ -532,6 +547,9 @@ impl From<TaskDeliverablesObject> for TaskDeliverables {
             files_changed: value.files_changed,
             commit_hash: value.commit_hash,
             merge_commit: value.merge_commit,
+            delivery_pr_number: value.delivery_pr_number,
+            delivery_pr_merge_commit: value.delivery_pr_merge_commit,
+            delivery_pr_merged_at: value.delivery_pr_merged_at,
             review_envelope: value.review_envelope,
             factory_branch_anchor: value.factory_branch_anchor,
             historical_factory_branch_anchors: value.historical_factory_branch_anchors,
@@ -750,6 +768,9 @@ impl TaskDeliverables {
             && self.files_changed.is_empty()
             && self.commit_hash.is_none()
             && self.merge_commit.is_none()
+            && self.delivery_pr_number.is_none()
+            && self.delivery_pr_merge_commit.is_none()
+            && self.delivery_pr_merged_at.is_none()
             && self.review_envelope.is_none()
             && self.factory_branch_anchor.is_none()
             && self.historical_factory_branch_anchors.is_empty()

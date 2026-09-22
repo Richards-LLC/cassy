@@ -6,6 +6,8 @@ use std::str::FromStr;
 
 const MERGE_ENVELOPE_OPEN: &str = "<cas-merge-request>";
 const MERGE_ENVELOPE_CLOSE: &str = "</cas-merge-request>";
+const DELIVERY_PR_MERGED_ENVELOPE_OPEN: &str = "<delivery-pr-merged ";
+const DELIVERY_PR_MERGED_ENVELOPE_CLOSE: &str = "</delivery-pr-merged>";
 
 /// cas-8725: the two CAS-emitted envelopes that join `<cas-merge-request>` as
 /// things a registered worker may wake an idle supervisor with.
@@ -172,6 +174,56 @@ pub(crate) struct MergeRequestEnvelope {
     /// target base at compose time.
     #[serde(default)]
     pub commits_not_on_target_base: u32,
+    /// Pull request number when the worker or daemon already knows it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_number: Option<u64>,
+}
+
+/// Daemon-authored lifecycle wake for a worker whose parked delivery PR has
+/// merged. The body deliberately names the exact close receipt so an idle
+/// worker can resume the terminal action without guessing which commit landed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DeliveryPrMergedEnvelope {
+    pub task_id: String,
+    pub worker: String,
+    pub pr_number: u64,
+    pub merge_commit: String,
+}
+
+pub(crate) fn delivery_pr_merged_envelope(
+    task_id: &str,
+    worker: &str,
+    pr_number: u64,
+    merge_commit: &str,
+) -> String {
+    let task_id = xml_attribute_value(task_id);
+    let worker = xml_attribute_value(worker);
+    let merge_commit = xml_attribute_value(merge_commit);
+    format!(
+        "<delivery-pr-merged task_id=\"{task_id}\" worker=\"{worker}\" pr_number=\"{pr_number}\" merge_commit=\"{merge_commit}\">\nPR #{pr_number} merged at {merge_commit}: close {task_id} with commit_receipt={merge_commit}\n{DELIVERY_PR_MERGED_ENVELOPE_CLOSE}"
+    )
+}
+
+pub(crate) fn parse_delivery_pr_merged_envelope(prompt: &str) -> Option<DeliveryPrMergedEnvelope> {
+    if !prompt.starts_with(DELIVERY_PR_MERGED_ENVELOPE_OPEN)
+        || !prompt.trim_end().ends_with(DELIVERY_PR_MERGED_ENVELOPE_CLOSE)
+    {
+        return None;
+    }
+    let tag_end = prompt.find('>')?;
+    let tag = &prompt[..tag_end];
+    Some(DeliveryPrMergedEnvelope {
+        task_id: xml_attribute(tag, "task_id")
+            .filter(|value| !value.is_empty())?
+            .to_string(),
+        worker: xml_attribute(tag, "worker")
+            .filter(|value| !value.is_empty())?
+            .to_string(),
+        pr_number: xml_attribute(tag, "pr_number")?.parse().ok()?,
+        merge_commit: xml_attribute(tag, "merge_commit")
+            .filter(|value| !value.is_empty())?
+            .to_string(),
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -627,6 +679,7 @@ pub(crate) fn parse_worker_attention_envelope(prompt: &str) -> bool {
                     | "supervisor_stalled"
                     | "merged_close_blocked"
                     | "pr_lane_failed"
+                    | "delivery_pr_merge_timeout"
                     // cas-d9a8: CAS's own unread-backlog summary for the
                     // supervisor. Same envelope, same producer (the daemon
                     // relay), so it inherits the wake terms rather than
@@ -1805,8 +1858,9 @@ mod tests {
             branch_tip: worker_tip,
             target_branch: "main".to_string(),
             target_branch_tip: target_tip,
-        anchor_tip: None,
-        commits_not_on_target_base: 0,
+            anchor_tip: None,
+            commits_not_on_target_base: 0,
+            pr_number: None,
         };
         assert_eq!(
             parse_merge_request_envelope(&attach_merge_request_envelope("please merge", &envelope)),
@@ -1933,8 +1987,9 @@ mod tests {
                 branch_tip: worker_tip.clone(),
                 target_branch: "main".to_string(),
                 target_branch_tip: enqueue_target_tip.clone(),
-            anchor_tip: None,
-            commits_not_on_target_base: 0,
+                anchor_tip: None,
+                commits_not_on_target_base: 0,
+                pr_number: None,
             },
         );
 
@@ -1963,8 +2018,9 @@ mod tests {
                 branch_tip: worker_tip,
                 target_branch: "main".to_string(),
                 target_branch_tip: delivery_target_tip,
-            anchor_tip: None,
-            commits_not_on_target_base: 0,
+                anchor_tip: None,
+                commits_not_on_target_base: 0,
+                pr_number: None,
             })
         );
     }
@@ -2020,8 +2076,9 @@ mod tests {
             branch_tip: "worker-tip".to_string(),
             target_branch: "main".to_string(),
             target_branch_tip: "base-tip".to_string(),
-        anchor_tip: None,
-        commits_not_on_target_base: 0,
+            anchor_tip: None,
+            commits_not_on_target_base: 0,
+            pr_number: None,
         }
     }
 
@@ -2177,6 +2234,7 @@ mod tests {
             target_branch_tip: "base-tip".to_string(),
             anchor_tip: Some("anchor-tip".to_string()),
             commits_not_on_target_base: 0,
+            pr_number: None,
         };
 
         assert_eq!(
@@ -2233,6 +2291,23 @@ mod tests {
             },
             "a later AwaitingMerge cycle must not revive the declined request"
         );
+    }
+
+    #[test]
+    fn delivery_pr_merge_wake_round_trips_and_names_the_close_receipt() {
+        let body = delivery_pr_merged_envelope(
+            "cas-7ea6",
+            "calm-octopus-51",
+            932,
+            "deadbeef",
+        );
+        let parsed = parse_delivery_pr_merged_envelope(&body).expect("daemon envelope parses");
+        assert_eq!(parsed.task_id, "cas-7ea6");
+        assert_eq!(parsed.worker, "calm-octopus-51");
+        assert_eq!(parsed.pr_number, 932);
+        assert_eq!(parsed.merge_commit, "deadbeef");
+        assert!(body.contains("close cas-7ea6 with commit_receipt=deadbeef"));
+        assert!(parse_delivery_pr_merged_envelope("quoted text").is_none());
     }
 
     #[test]
@@ -2325,6 +2400,9 @@ mod cas_3dcb_worker_died_relay_tests {
         // reports.
         assert!(is_supervisor_wake_envelope(
             "<worker-attention kind=\"supervisor_unread\" worker=\"calm-owl\" notification_id=\"42\">\nbody</worker-attention>"
+        ));
+        assert!(is_supervisor_wake_envelope(
+            "<worker-attention kind=\"delivery_pr_merge_timeout\" worker=\"calm-owl\" notification_id=\"42\">\nbody</worker-attention>"
         ));
         // An invented kind is still refused: the allowance is a fixed list,
         // not "anything shaped like a worker-attention tag".

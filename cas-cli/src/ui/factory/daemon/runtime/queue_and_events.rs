@@ -8321,6 +8321,7 @@ mod tests {
             target_branch_tip: "b".repeat(40),
             anchor_tip: None,
             commits_not_on_target_base: 0,
+            pr_number: None,
         };
         let body = crate::prompt_revalidation::attach_merge_request_envelope(
             "MERGE REQUIRED for cas-d9a8",

@@ -149,9 +149,13 @@ live_gate_pid() {
 }
 
 write_run_env() {
-    local env_file="${1:-$run_dir/run.env}" tip tip_sha
+    local env_file="${1:-$run_dir/run.env}" tip tip_sha started_at run_date
     tip="$(git -C "$worktree" rev-parse --short HEAD 2>/dev/null || echo unknown)"
     tip_sha="$(git -C "$worktree" rev-parse HEAD 2>/dev/null || echo unknown)"
+    started_at="$(sed -n 's/^started_at=//p' "$env_file" 2>/dev/null | head -n1 || true)"
+    [[ "$started_at" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] \
+        || started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    run_date="${started_at%%T*}"
     cat >"$env_file" <<EOF
 version=$version
 worktree=$worktree
@@ -159,9 +163,21 @@ worktree_name=$worktree_name
 repository=$(git -C "$worktree" rev-parse --show-toplevel 2>/dev/null || echo unknown)
 tip=$tip
 tip_sha=$tip_sha
-started_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+started_at=$started_at
+run_date=$run_date
 started_by_pid=$$
 EOF
+}
+
+release_train_date_stamp() {
+    local date_stamp="${CAS_RELEASE_TRAIN_DATE:-}" started_at
+    if [[ -z "$date_stamp" && -s "${run_dir:-}/run.env" ]]; then
+        started_at="$(sed -n 's/^started_at=//p' "$run_dir/run.env" | head -n1 || true)"
+        date_stamp="${started_at%%T*}"
+    fi
+    [[ "$date_stamp" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] \
+        || date_stamp="$(date -u +%F)"
+    printf '%s\n' "$date_stamp"
 }
 
 # --------------------------------------------------------------------------
@@ -349,6 +365,21 @@ required_checks_pass() {
     ' >/dev/null 2>&1
 }
 
+mergeability_and_checks_ready() {
+    local number="$1" repository="$2" payload
+    payload="$(gh_cmd pr view "$number" -R "$repository" \
+        --json mergeable,statusCheckRollup 2>/dev/null || true)"
+    printf '%s' "$payload" | jq -e '
+        .mergeable == "MERGEABLE"
+        and (
+            [.statusCheckRollup[]? | (.name // .context // "")]
+            | map(select(. == "Fast Validation" or . == "macOS Check"))
+            | unique
+            | length
+        ) >= 2
+    ' >/dev/null 2>&1
+}
+
 run_pipeline() {
     local gate_status gate_sha current_sha
     gate_status="$(cat "$run_dir/gate.done" 2>/dev/null || true)"
@@ -378,6 +409,8 @@ run_pipeline() {
     local repo_slug="${CAS_RELEASE_TRAIN_REPO:-Richards-LLC/cassy}"
     local poll="${CAS_RELEASE_TRAIN_POLL_SECS:-45}"
     local check_tries="${CAS_RELEASE_TRAIN_CHECK_TRIES:-40}"
+    local mergeability_tries="${CAS_RELEASE_TRAIN_MERGEABILITY_TRIES:-60}"
+    local mergeability_poll="${CAS_RELEASE_TRAIN_MERGEABILITY_POLL_SECS:-5}"
     local watch_tries="${CAS_RELEASE_TRAIN_WATCH_TRIES:-60}"
 
     date -u +%s >"$run_dir/pipeline.start.epoch"
@@ -419,6 +452,20 @@ run_pipeline() {
     if ! required_checks_pass; then
         pipeline_log "CHECKS_NEVER_PASSED — not enqueuing; an enqueue before the pull_request run exists is dropped silently"
         pipeline_finish CHECKS_FAILED
+        return 1
+    fi
+
+    for ((i = 1; i <= mergeability_tries; i++)); do
+        if mergeability_and_checks_ready "$pr_number" "$repo_slug"; then
+            pipeline_log "mergeability/status checks ready"
+            break
+        fi
+        pipeline_log "mergeability/status checks not ready (attempt $i/$mergeability_tries)"
+        sleep "$mergeability_poll"
+    done
+    if ! mergeability_and_checks_ready "$pr_number" "$repo_slug"; then
+        pipeline_log "MERGEABILITY_NEVER_READY — not enqueuing"
+        pipeline_finish MERGEABILITY_FAILED
         return 1
     fi
 

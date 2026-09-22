@@ -2,6 +2,18 @@
 # Cheap, side-effect-bounded checks for --cut. No build or detached process
 # starts until every check in this file has passed.
 
+if ! declare -F release_train_date_stamp >/dev/null 2>&1; then
+    release_train_date_stamp() {
+        local date_stamp="${CAS_RELEASE_TRAIN_DATE:-}" started_at
+        if [[ -z "$date_stamp" && -s "${run_dir:-}/run.env" ]]; then
+            started_at="$(sed -n 's/^started_at=//p' "$run_dir/run.env" | head -n1 || true)"
+            date_stamp="${started_at%%T*}"
+        fi
+        [[ "$date_stamp" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || date_stamp="$(date -u +%F)"
+        printf '%s\n' "$date_stamp"
+    }
+fi
+
 if ! declare -F release_train_receipts_unmerged_records >/dev/null 2>&1; then
     # shellcheck disable=SC1091
     source "$script_dir/release-train.d/receipts-common.sh"
@@ -192,7 +204,8 @@ cut_preflight_check_zig() {
 }
 
 cut_preflight_check_changelog() {
-    local changelog="$worktree/CHANGELOG.md" date_stamp="${CAS_RELEASE_TRAIN_DATE:-$(date -u +%F)}"
+    local changelog="$worktree/CHANGELOG.md" date_stamp
+    date_stamp="$(release_train_date_stamp)"
     if grep -Eq "^## \[$version\]( - [0-9]{4}-[0-9]{2}-[0-9]{2})?$" "$changelog"; then
         return 0
     fi
@@ -221,12 +234,21 @@ cut_preflight_check_changelog() {
 }
 
 cut_preflight_check_draft() {
-    local date_stamp="${CAS_RELEASE_TRAIN_DATE:-$(date -u +%F)}"
-    local draft="$worktree/docs/release-notes/${date_stamp}-v${version}-slack.md"
+    local date_stamp draft lint_dir lint_output
+    date_stamp="$(release_train_date_stamp)"
+    draft="$worktree/docs/release-notes/${date_stamp}-v${version}-slack.md"
     [[ -r "$draft" ]] || {
         cut_preflight_block release-draft "missing readable draft $draft"
         return $?
     }
+    lint_dir="$run_dir/preflight-announce-bodies"
+    mkdir -p "$lint_dir"
+    if ! lint_output="$(python3 "$script_dir/release-train-announce.py" --validate "$draft" "$lint_dir" 2>&1)"; then
+        printf '%s\n' "$lint_output" >"$run_dir/preflight-announce.log"
+        cut_preflight_block release-draft \
+            "announce lint failed for $draft; inspect $run_dir/preflight-announce.log"
+        return $?
+    fi
 }
 
 cut_preflight_check_integration() {

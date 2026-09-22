@@ -913,6 +913,7 @@ mkdir -p "$midnight_dir"
 printf 'started_at=2099-01-01T23:59:59Z\n' >"$midnight_dir/run.env"
 midnight_out="$(env -u CAS_RELEASE_TRAIN_DATE \
     CAS_RELEASE_TRAIN_ANNOUNCE_POST_CMD="$announce_stub" \
+    CAS_RELEASE_TRAIN_ANNOUNCE_STUB_LOG="$tmp/midnight-announce.log" \
     "$train" 9.99.8 "$midnight_wt" --announce 2>&1 || true)"
 if [[ "$midnight_out" == *'announce complete'* ]] \
     && grep -q '^## POSTED$' "$midnight_wt/docs/release-notes/2099-01-01-v9.99.8-slack.md"; then
@@ -1235,7 +1236,9 @@ for flavour in skills codex/skills grok/skills; do
         '9.99.x' 'cause class' 'workers never poll CI' 'competing release' \
         'merge-queue GraphQL query' 'CAS_RELEASE_ENV_FILE' 'annotated tag peels' \
         'four Slack POSTED' 'refresh_binary_version' 'stranded_branch_override' \
-        'release.tag-complete.epoch' 'release-published.receipt'; do
+        'release.tag-complete.epoch' 'release-published.receipt' \
+        'Pin the cut date' 'Cargo.lock' 'docs-only release commits' \
+        'status-check rollup' 'announcement lint'; do
         if grep -qF "$marker" "$skill" 2>/dev/null; then
             ok "cas-cut-release ($flavour) carries marker: $marker"
         else
@@ -1761,7 +1764,16 @@ new_cut_fixture() {
       fi
       printf 'draft\n' > "docs-placeholder"
       mkdir -p "docs/release-notes"
-      printf 'draft\n' > "docs/release-notes/$(date -u +%F)-v${version}-slack.md"
+      {
+          printf '*Live on production — User — Cassy v%s*\n\n' "$version"
+          printf 'Was: release fixture\n\nNow: release fixture\n\n'
+          printf '\x60\x60\x60\n*Live on production — User — Cassy v%s*\nWas: release fixture → Now: release fixture\n\x60\x60\x60\n\n' "$version"
+          printf '\x60\x60\x60\n• *Context* — fixture\n\x60\x60\x60\n\n'
+          printf '*Live on production — Dev — Cassy v%s*\n\n' "$version"
+          printf 'Was: release fixture\n\nNow: release fixture\n\n'
+          printf '\x60\x60\x60\n*Live on production — Dev — Cassy v%s*\nWas: release fixture → Now: release fixture\n\x60\x60\x60\n\n' "$version"
+          printf '\x60\x60\x60\n• *Context* — fixture\n\x60\x60\x60\n'
+      } > "docs/release-notes/$(date -u +%F)-v${version}-slack.md"
       printf 'CAS_TEST_TOKEN=fixture-secret\nCAS_RELEASE_GATE_HOME_DIR=%s\n' "$tmp/$name-scratch" > release.env
       : > cas-cli/src/builtins/reference-history.json
       printf '#!/usr/bin/env bash\nexit 0\n' > .context/zig/zig

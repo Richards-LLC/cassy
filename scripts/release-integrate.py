@@ -82,6 +82,36 @@ def warn_receipts_ahead(root, base, main_tip):
     )
 
 
+def is_ancestor(root, older, newer):
+    result = subprocess.run(
+        ["git", "-C", str(root), "merge-base", "--is-ancestor", older, newer],
+        capture_output=True,
+    )
+    return result.returncode == 0
+
+
+def rebase_docs_only_release(root, main_tip, integration_tip):
+    """Move release metadata commits from main onto the tested union tip."""
+    current = git(root, "rev-parse", "HEAD")
+    if is_ancestor(root, current, integration_tip):
+        return
+    branch = git(root, "branch", "--show-current")
+    if not branch.startswith("release/") or not is_ancestor(root, main_tip, current):
+        return
+    changed = git(root, "diff", "--name-only", f"{main_tip}..{current}").splitlines()
+    allowed = lambda path: path == "CHANGELOG.md" or path.startswith("docs/release-notes/")
+    if not changed or not all(allowed(path) for path in changed):
+        return
+    result = subprocess.run(
+        ["git", "-C", str(root), "rebase", "--onto", integration_tip, main_tip],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode:
+        raise RuntimeError("Could not rebase docs-only release commits onto the integration tip")
+    print("Rebased docs-only release commits onto integration tip", file=sys.stderr)
+
+
 def recovery_timeout_secs():
     raw = os.environ.get("CAS_RELEASE_TRAIN_RECOVERY_TIMEOUT_SECS", "")
     if not raw:
@@ -154,6 +184,7 @@ def _assemble_locked(root, lock, allow_heal=True):
     current = git(root, "branch", "--show-current")
     if current and not current.startswith("release/"):
         raise RuntimeError("Use a detached checkout or a release/ branch for assembly")
+    rebase_docs_only_release(root, main_tip, tip)
     git(root, "-c", "core.hooksPath=/dev/null", "merge", "--ff-only", tip)
     return tip
 

@@ -32,7 +32,7 @@ release_train_receipts() {
     fi
 
     draft="$(release_train_announce_draft_path 2>/dev/null || printf '%s/docs/release-notes/%s-v%s-slack.md' \
-        "$worktree" "${CAS_RELEASE_TRAIN_DATE:-$(date -u +%F)}" "$version")"
+        "$worktree" "$(release_train_date_stamp)" "$version")"
     receipt="$run_dir/announce.receipt"
     if [[ ! -s "$receipt" ]]; then
         printf 'ERROR receipts announcement: missing %s\n' "$receipt" >&2

@@ -1029,10 +1029,10 @@ fn add_scoped_proof_target(targets: &mut std::collections::BTreeSet<String>, tar
     }
 }
 
-/// Resolve the integration binaries that exercise an attributed delivery
-/// diff. This mirrors `check-scoped-test-surface.sh` at the close boundary so
-/// a worker cannot close after running only a changed module's unit filter.
-fn required_scoped_proof_targets(
+/// Legacy in-process target resolver for repository fixtures that do not carry
+/// the committed surface checker. Real closes use the checker-backed wrapper
+/// below so the suggested command cannot drift from the proof guard.
+fn legacy_required_scoped_proof_targets(
     repo: &std::path::Path,
     changed_paths: &[String],
 ) -> Vec<String> {
@@ -1124,6 +1124,71 @@ fn required_scoped_proof_targets(
         .into_iter()
         .filter(|target| scoped_proof_cargo_test_target_exists(repo, target))
         .collect()
+}
+
+/// Ask the committed surface checker for the same integration-target mapping
+/// used by `scripts/run-scoped-tests.sh`. The close gate used to carry a
+/// second Rust implementation of that mapping; it drifted from the checker
+/// and suggested an eight-target command for a diff the checker required to
+/// run with eleven targets. Keep the small in-process resolver as a fixture
+/// fallback for unit tests that intentionally build a repository without the
+/// project scripts, but all real repository closes use the checker as the
+/// authority.
+fn required_scoped_proof_targets(
+    repo: &std::path::Path,
+    changed_paths: &[String],
+) -> Vec<String> {
+    let checker = repo.join("scripts/check-scoped-test-surface.sh");
+    if checker.is_file() {
+        let mut command = std::process::Command::new("bash");
+        command
+            .arg(&checker)
+            .args([
+                "--resolve-targets",
+                "--base",
+                "HEAD",
+                "--paths-from-stdin",
+                "--",
+            ])
+            .current_dir(repo)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        if let Ok(mut child) = command.spawn() {
+            let paths = if changed_paths.is_empty() {
+                String::new()
+            } else {
+                format!("{}\n", changed_paths.join("\n"))
+            };
+            let stdin_ok = child
+                .stdin
+                .take()
+                .map(|mut stdin| {
+                    use std::io::Write;
+                    stdin.write_all(paths.as_bytes()).is_ok()
+                })
+                .unwrap_or(false);
+            let output = child.wait_with_output();
+            if stdin_ok
+                && let Ok(output) = output
+                && output.status.success()
+                && let Some(line) = String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .find(|line| line.starts_with("SCOPED_PROOF_TARGET_ARGS:"))
+            {
+                let mut targets = Vec::new();
+                let mut tokens = line.split_whitespace().skip(1);
+                while let Some(token) = tokens.next() {
+                    if token == "--test" && let Some(target) = tokens.next() {
+                        targets.push(target.to_string());
+                    }
+                }
+                return targets;
+            }
+        }
+    }
+
+    legacy_required_scoped_proof_targets(repo, changed_paths)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1494,6 +1559,186 @@ mod risk_proof_tests {
         )
         .unwrap();
         dir
+    }
+
+    fn install_scoped_proof_checker(dir: &std::path::Path) {
+        let checker = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../scripts/check-scoped-test-surface.sh");
+        let destination = dir.join("scripts/check-scoped-test-surface.sh");
+        std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
+        std::fs::copy(checker, destination).unwrap();
+    }
+
+    fn initialize_scoped_proof_git_fixture(dir: &std::path::Path) {
+        let status = std::process::Command::new("git")
+            .args(["init", "-q", "-b", "main"])
+            .current_dir(dir)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let status = std::process::Command::new("git")
+            .args(["add", "."])
+            .current_dir(dir)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let status = std::process::Command::new("git")
+            .args([
+                "-c",
+                "user.name=scoped-proof-test",
+                "-c",
+                "user.email=scoped-proof-test@example.invalid",
+                "commit",
+                "-qm",
+                "fixture",
+            ])
+            .current_dir(dir)
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+
+    #[test]
+    fn scoped_proof_gate_and_surface_checker_agree_on_multi_area_diff() {
+        let dir = tempfile::tempdir().unwrap();
+        install_scoped_proof_checker(dir.path());
+
+        let files = [
+            "cas-cli/src/builtins/skills/demo/SKILL.md",
+            "cas-cli/src/hub.rs",
+            "cas-cli/tests/builtin_archive_portability_test.rs",
+            "cas-cli/tests/builtin_demo_test.rs",
+            "cas-cli/tests/builtin_flavor_drift_test.rs",
+            "cas-cli/tests/agent_definition_contract_test.rs",
+            "cas-cli/tests/factory_codex_skill_guardrails.rs",
+            "cas-cli/tests/hub_contract_test.rs",
+            "cas-cli/tests/mcp_tools_test.rs",
+            "cas-cli/tests/mcp_tools_test/task_tools/operations.rs",
+        ];
+        for file in files {
+            let path = dir.path().join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let body = if file.ends_with("hub.rs") {
+                "pub fn supervisor_sessions() {}\n"
+            } else if file.ends_with("hub_contract_test.rs") {
+                "fn covers_hub() { cas::hub::supervisor_sessions(); }\n"
+            } else if file.ends_with("builtin_demo_test.rs") {
+                "const SOURCE: &str = \"cas-cli/src/builtins/skills/demo/SKILL.md\";\nconst CATALOG: &str = \"skills/demo/SKILL.md\";\n"
+            } else {
+                "fn fixture() {}\n"
+            };
+            std::fs::write(path, body).unwrap();
+        }
+        initialize_scoped_proof_git_fixture(dir.path());
+        let status = std::process::Command::new("git")
+            .args(["checkout", "-qb", "changed"])
+            .current_dir(dir.path())
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        let changed = [
+            "cas-cli/src/builtins/skills/demo/SKILL.md",
+            "cas-cli/src/hub.rs",
+            "cas-cli/tests/mcp_tools_test/task_tools/operations.rs",
+        ];
+        for file in changed {
+            use std::io::Write;
+            let path = dir.path().join(file);
+            let mut handle = std::fs::OpenOptions::new()
+                .append(true)
+                .open(path)
+                .unwrap();
+            writeln!(handle, "// multi-area diff").unwrap();
+        }
+        let status = std::process::Command::new("git")
+            .args(["add", "."])
+            .current_dir(dir.path())
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let status = std::process::Command::new("git")
+            .args([
+                "-c",
+                "user.name=scoped-proof-test",
+                "-c",
+                "user.email=scoped-proof-test@example.invalid",
+                "commit",
+                "-qm",
+                "multi-area change",
+            ])
+            .current_dir(dir.path())
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        let changed = changed
+            .iter()
+            .map(|file| (*file).to_string())
+            .collect::<Vec<_>>();
+        let targets = required_scoped_proof_targets(dir.path(), &changed);
+        assert_eq!(
+            targets,
+            [
+                "hub_contract_test".to_string(),
+                "mcp_tools_test".to_string(),
+                "builtin_archive_portability_test".to_string(),
+                "builtin_flavor_drift_test".to_string(),
+                "agent_definition_contract_test".to_string(),
+                "factory_codex_skill_guardrails".to_string(),
+                "builtin_demo_test".to_string(),
+            ]
+        );
+
+        let checker = dir.path().join("scripts/check-scoped-test-surface.sh");
+        let actual_diff = std::process::Command::new("bash")
+            .arg(&checker)
+            .args(["--resolve-targets", "--base", "main", "--"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        assert!(
+            actual_diff.status.success(),
+            "surface checker could not resolve the committed multi-area diff: {}",
+            String::from_utf8_lossy(&actual_diff.stderr)
+        );
+        let actual_diff_args = String::from_utf8_lossy(&actual_diff.stdout);
+        for target in &targets {
+            assert!(
+                actual_diff_args.contains(&format!("--test {target}")),
+                "committed diff omitted gate target {target}: {actual_diff_args}"
+            );
+        }
+
+        let mut command = std::process::Command::new("bash");
+        command
+            .arg(checker)
+            .args(["--base", "HEAD", "--paths-from-stdin", "--", "-p", "cas", "--lib"]);
+        for target in &targets {
+            command.args(["--test", target]);
+        }
+        command
+            .current_dir(dir.path())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        let mut child = command.spawn().unwrap();
+        {
+            use std::io::Write;
+            let mut stdin = child.stdin.take().unwrap();
+            writeln!(stdin, "{}", changed.join("\n")).unwrap();
+        }
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "surface checker rejected the gate command: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("covered committed diff"),
+            "surface checker did not emit a passing receipt: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
     }
 
     #[test]

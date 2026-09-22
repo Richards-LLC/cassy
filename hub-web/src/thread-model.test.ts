@@ -47,6 +47,19 @@ describe("threadModel", () => {
     // A status run splits the supervisor turns around it into separate groups.
     const after = items[3] as ThreadGroup; expect(after.turns[0]).toMatchObject({ first: true, last: true });
   });
+  it("orders by time, not arrival: a turn stamped inside a status run splits it, one stamped after does not (cas-7294)", () => {
+    const run = (sheetAt: number) => {
+      const history = new ConversationHistory();
+      history.reply(reply(1, "status", "Gate started"), at(9, 49));
+      history.reply(reply(2, "status", "Gate 4 of 14"), at(9, 51));
+      history.reply(reply(3, "status", "Gate 8 of 14"), at(9, 53));
+      history.reply(reply(4, "status", "gate 11 of 14 targets green"), at(9, 55));
+      history.reply(reply(5, "answer", ""), sheetAt); // arrives last
+      return threadModel(history.events, { now: NOW }).filter((item) => item.type === "coalesce").map((item) => item.type === "coalesce" ? item.count : 0);
+    };
+    expect(run(at(9, 52))).toEqual([2, 2]);
+    expect(run(at(9, 55))).toEqual([4]);
+  });
   it("renders a lone status as its own quiet text without a count", () => {
     const history = new ConversationHistory();
     history.reply(reply(1, "status", "Rebasing"), at(9, 49));

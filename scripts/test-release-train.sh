@@ -115,6 +115,8 @@ discovery_gate="$tmp/factory-session-discovery-gate.sh"
 new_gate_stub "$discovery_gate" 0
 discovery_run="$("$train" 9.99.1 "$discovery_wt" --print-run-dir)"
 env -u CAS_FACTORY_SESSION \
+    CAS_AGENT_ID=discovered-agent-id CAS_SESSION_ID=discovered-session-id \
+    CAS_AGENT_NAME=discovered-supervisor CAS_AGENT_ROLE=supervisor \
     CAS_RELEASE_TRAIN_CAS="$discovery_cas" DISCOVERY_PROJECT="$discovery_wt" \
     CAS_RELEASE_TRAIN_GATE_CMD="$discovery_gate" \
     "$train" 9.99.1 "$discovery_wt" --gate --only scratch-base >/dev/null 2>&1 || true
@@ -124,6 +126,14 @@ if wait_for_file "$discovery_run/diagnostics/*/run.env"; then
         ok 'gap 1: cut records the discovered factory session before stripping gate identity'
     else
         bad "gap 1: cut did not record the discovered factory session: $(cat "$discovery_env" 2>/dev/null || true)"
+    fi
+    if grep -q '^agent_id=discovered-agent-id$' "$discovery_env" \
+        && grep -q '^session_id=discovered-session-id$' "$discovery_env" \
+        && grep -q '^agent_name=discovered-supervisor$' "$discovery_env" \
+        && grep -q '^agent_role=supervisor$' "$discovery_env"; then
+        ok 'gap 1b: cut records the launching supervisor identity before stripping gate identity'
+    else
+        bad "gap 1b: cut did not record the launching supervisor identity: $(cat "$discovery_env" 2>/dev/null || true)"
     fi
 else
     bad 'gap 1: cut did not create a diagnostic run environment for session discovery'
@@ -2227,7 +2237,7 @@ else
 fi
 
 if python3 "$script_dir/test-release-integration.py"; then
-    ok 'gap 1: rolling assembly self-heal passes the recorded factory session; clean, red, dirty and locked fixtures'
+    ok 'gap 1: rolling assembly self-heal passes the recorded factory session and supervisor identity; clean, red, dirty and locked fixtures'
 else
     bad 'rolling integration assembly fixture suite'
 fi

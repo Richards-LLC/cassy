@@ -156,10 +156,19 @@ describe('conversation evidence', () => {
     const header = main.querySelector('header.conversation-heading.thead')!;
     expect(header.querySelector('#conversation-back')?.textContent).toBe('‹ Conversations');
     expect(header.querySelector('#conversation-terminal')?.textContent).toBe('Terminal view');
+    // Phone folds to "‹" and "Terminal" (cas-1776); the aria-labels keep the full names at every width.
+    expect(header.querySelector('#conversation-back')?.getAttribute('aria-label')).toBe('‹ Conversations');
+    expect(header.querySelector('#conversation-terminal')?.getAttribute('aria-label')).toBe('Terminal view');
+    expect(header.querySelector('#conversation-back .back-glyph')?.textContent).toBe('‹');
+    expect(header.querySelector('#conversation-back .back-label')?.textContent).toBe(' Conversations');
+    expect(header.querySelector('#conversation-terminal .terminal-suffix')?.textContent).toBe(' view');
     expect(header.querySelector('.conversation-avatar')?.textContent).toBe('A');
     expect(header.querySelector('h1 b')?.textContent).toBe('patient-pelican-9');
     expect(header.querySelector('h1 .project-badge')?.textContent).toBe('cas-src');
     expect(header.querySelector('.conversation-host')?.textContent).toBe('cas-src · Atlas · Linux');
+    expect(header.querySelector('.conversation-host > .host-where')?.textContent).toBe('cas-src · Atlas · Linux');
+    expect(header.querySelector('.conversation-host > .host-where + #conversation-connection')).not.toBeNull();
+    expect(header.querySelector('h1 b')?.getAttribute('title')).toBe('patient-pelican-9');
     expect(header.querySelector('#conversation-connection')).not.toBeNull();
     expect(main.querySelector('.conversation-identity h1')).not.toBeNull(); expect(main.querySelectorAll('h1')).toHaveLength(1);
     const view = new ConversationView(document, new ConversationHistory(), { supervisor: 'patient-pelican-9', machine: 'Atlas', project: 'cas-src', header: false });

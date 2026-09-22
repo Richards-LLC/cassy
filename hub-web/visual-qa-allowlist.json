@@ -49,6 +49,26 @@
       "type": "javascript-disabled-loss",
       "selector": "body",
       "reason": "Unit 6 accepts that Commander is a JavaScript application: index.html has an empty #app and module script, so without JavaScript there is no pairing, terminal, or screen content; Unit 3 adds the noscript explanation."
+    },
+    {
+      "type": "clipped-content",
+      "selector": ".conversation-identity h1 > b",
+      "reason": "cas-1776 accepts the phone thread header's single-line supervisor codename ellipsis; the element's title carries the codename whole and the list row shows it wrapped."
+    },
+    {
+      "type": "content-overflow",
+      "selector": ".conversation-identity h1 > b",
+      "reason": "cas-1776 accepts the phone thread header's single-line supervisor codename ellipsis; the element's title carries the codename whole and the list row shows it wrapped."
+    },
+    {
+      "type": "clipped-content",
+      "selector": ".conversation-identity .conversation-host > .host-where",
+      "reason": "cas-1776 accepts the phone thread header's single-line project · machine ellipsis; the connection state after it stays visible and the project badge names the project."
+    },
+    {
+      "type": "content-overflow",
+      "selector": ".conversation-identity .conversation-host > .host-where",
+      "reason": "cas-1776 accepts the phone thread header's single-line project · machine ellipsis; the connection state after it stays visible and the project badge names the project."
     }
   ]
 }

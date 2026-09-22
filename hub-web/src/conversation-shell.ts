@@ -23,10 +23,17 @@ export const composeFabMarkup = '<button id="compose-fab" class="compose-fab" ty
  * project · machine · connection in mono beneath (same order as a list row) — with the cas-11b01 back link and
  * Terminal view control on the row above it. Elevated with --lift-head; the
  * thread view itself renders no header inside this shell.
+ *
+ * On phone the two rows fold into one (cas-1776): the back link shows only its
+ * "‹" glyph and the Terminal control only "Terminal"; each button's aria-label
+ * keeps its accessible name ("‹ Conversations", "Terminal view") the same at
+ * every width. The codename ellipsises (its title carries it whole) and the
+ * host line ellipsises its project · machine part while the connection state
+ * after it stays visible.
  */
 export function conversationHeaderMarkup(model: ConversationShellModel): string {
   const host = model.host || "";
-  return `<header class="conversation-heading thead"><div class="conversation-topline"><button id="conversation-back" type="button">‹ Conversations</button>${cloudBrand()}<button id="conversation-terminal" type="button">Terminal view</button></div><div class="conversation-identity"><span class="conversation-avatar" aria-hidden="true">${escapeHtml(machineMonogram(host || model.supervisor || "?"))}</span><div class="id"><h1><b>${escapeHtml(model.supervisor || "Supervisor unavailable")}</b>${projectBadge(model.projectDir)}</h1><span class="conversation-host">${escapeHtml([projectName(model.projectDir), host].filter(Boolean).join(" · "))}<span id="conversation-connection" role="status"></span></span></div></div></header>`;
+  return `<header class="conversation-heading thead"><div class="conversation-topline"><button id="conversation-back" type="button" aria-label="‹ Conversations"><span class="back-glyph">‹</span><span class="back-label"> Conversations</span></button>${cloudBrand()}<button id="conversation-terminal" type="button" aria-label="Terminal view">Terminal<span class="terminal-suffix"> view</span></button></div><div class="conversation-identity"><span class="conversation-avatar" aria-hidden="true">${escapeHtml(machineMonogram(host || model.supervisor || "?"))}</span><div class="id"><h1><b title="${escapeHtml(model.supervisor || "Supervisor unavailable")}">${escapeHtml(model.supervisor || "Supervisor unavailable")}</b>${projectBadge(model.projectDir)}</h1><span class="conversation-host"><span class="host-where">${escapeHtml([projectName(model.projectDir), host].filter(Boolean).join(" · "))}</span><span id="conversation-connection" role="status"></span></span></div></div></header>`;
 }
 
 /** Attach is a real affordance beside the field but has no transport yet, so it is disabled and says so. */

@@ -3051,12 +3051,27 @@ button.chip:disabled { cursor: default; }
   .conversation-main, .conversation-context { display: none; }
   .conversation-shell.thread-open .conversation-sidebar { display: none; }
   .conversation-shell.thread-open .conversation-main { display: flex; height: 100%; }
-  .conversation-topline .cloud-brand { display: inline-flex; font-size: var(--fs-base); }
-  .conversation-topline .cloud-brand svg { width: var(--space-6); height: var(--space-6); }
-  .conversation-topline { flex-wrap: wrap; }
-  .conversation-topline #conversation-terminal { margin-left: auto; }
-  .conversation-heading { padding: var(--space-2) 16px 14px; gap: var(--space-2); }
-  .conversation-topline button { padding: var(--space-1) var(--space-2); }
+  /* One-row phone thread header (cas-1776): a 40px "‹" back target, the
+     identity (36px avatar, codename ellipsised beside its badge, host line
+     beneath) and a text-only "Terminal". The lockup stays on the list screen
+     only (DESIGN.md §Brand). The topline dissolves into the heading grid so
+     its two buttons flank the identity on the same row. */
+  .conversation-heading { display: grid; grid-template-columns: 40px minmax(0, 1fr) auto; align-items: center; column-gap: var(--space-1); padding: 6px var(--space-2) 6px var(--space-1); }
+  .conversation-topline { display: contents; }
+  .conversation-topline .cloud-brand { display: none; }
+  #conversation-back { grid-column: 1; grid-row: 1; width: 40px; min-width: 40px; min-height: 44px; padding: 0; display: flex; align-items: center; justify-content: center; background: var(--color-transparent); color: var(--ink); }
+  #conversation-back .back-glyph { font: var(--weight-regular) 30px/1 var(--font-ui); }
+  #conversation-back .back-label, #conversation-terminal .terminal-suffix { display: none; } /* aria-label keeps the full name */
+  .conversation-identity { grid-column: 2; grid-row: 1; gap: 10px; }
+  .conversation-identity .conversation-avatar { width: 36px; height: 36px; font-size: 15px; }
+  #conversation-terminal { grid-column: 3; grid-row: 1; min-height: 44px; padding: 0 var(--space-2); background: var(--color-transparent); color: var(--ink-mid); font-size: var(--fs-xs); }
+  #conversation-back:hover:not(:disabled), #conversation-terminal:hover:not(:disabled) { background: var(--bg-hover); }
+  .conversation-identity h1 { flex-wrap: nowrap; }
+  .conversation-identity h1 b { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 22px; }
+  .conversation-identity .project-badge { flex: none; font-size: 13px; padding: 2px 6px; }
+  .conversation-identity .conversation-host { display: flex; font-size: 12px; white-space: nowrap; }
+  .conversation-identity .host-where { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  #conversation-connection { flex: none; white-space: pre; }
   /* Phone composer: the send pill folds to its glyph; the label stays for the reader. */
   .conversation-composer { column-gap: 5px; padding: 12px 6px 20px; padding-bottom: max(20px, env(safe-area-inset-bottom)); }
   .conversation-composer textarea { padding: 12px 18px; }

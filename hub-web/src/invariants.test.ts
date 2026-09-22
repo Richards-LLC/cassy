@@ -1314,3 +1314,31 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(socketOpened).not.toHaveBeenCalled();
   });
 });
+
+describe("design polish P3/P4/P12/P16 (D3/D4/D12/D17)", () => {
+  it("paints the primary action in the operator colour, keeps it on hover, and gives fields and placeholders their contrast", async () => {
+    const [css, tokens, markup] = await Promise.all(["styles.css", "tokens.css", "pair-dialog-markup.ts"].map((path) => readSource(path)));
+    const rule = (selector: string) => css.slice(css.indexOf(`${selector} {`), css.indexOf("}", css.indexOf(`${selector} {`)) + 1);
+    // P3: you-bg fill, you-fg label, semibold; hover brightens instead of falling to --bg-hover.
+    expect(rule("\n.primary")).toContain("color: var(--you-fg);");
+    expect(rule("\n.primary")).toContain("background: var(--you-bg);");
+    expect(rule("\n.primary")).toContain("font-weight: var(--weight-semibold);");
+    expect(css).toContain('.primary:hover:not(:disabled):not([aria-disabled="true"]) { background: var(--you-bg); filter: brightness(1.08); }');
+    expect(css).not.toContain(".primary:hover:not(:disabled) { background: var(--bg-hover); }");
+    expect(css).toContain(".welcome-pairs #pair-toggle { display: none; }");
+    expect(css).toContain(".conversation-shell.welcome-pairs .compose-fab { display: none; }");
+    // P4: every placeholder in ink-mid at full opacity; dialog inputs are panel fields with a strong edge, not wells.
+    expect(css).toContain("input::placeholder,\ntextarea::placeholder { color: var(--ink-mid); opacity: 1; }");
+    expect(rule("\ndialog input")).toContain("background: var(--panel);");
+    expect(rule("\ndialog input")).toContain("border: var(--line-width) solid var(--line-strong);");
+    expect(tokens).not.toContain("dialog:not(.command-palette) input");
+    // P12: the composer draft pill has an edge and keeps its lift.
+    expect(css).toContain("border: var(--line-width) solid var(--line-strong); border-radius: 23px; resize: none; background: var(--panel); color: var(--ink); box-shadow: var(--lift);");
+    // P16: pairing and attention prose in the UI face; mono only on identifiers.
+    expect(css).toContain(".pair-details dd { margin: 0; overflow-wrap: anywhere; font-family: var(--font-ui); }");
+    expect(css).toContain(".pair-details dd.pair-identifier {\n  font-family: var(--font-mono);");
+    expect(rule("\n.attention-detail")).toContain("font-family: var(--font-ui);");
+    expect(markup).toContain('<dd class="pair-summary">');
+    expect(markup).toContain('<dt>Exact scopes</dt><dd class="pair-identifier">');
+  });
+});

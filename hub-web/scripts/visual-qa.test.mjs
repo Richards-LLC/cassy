@@ -84,7 +84,7 @@ describe("hub-web fixture visual QA", () => {
     for (const name of [
       "conversation-long-status", "conversation-loading-earlier",
       "conversation-mic-idle", "conversation-mic-listening", "conversation-mic-unavailable",
-      "pairing-email", "conversations-loading",
+      "pairing-email", "conversations-loading", "conversations-unpaired",
     ]) expect(FIXTURE_NAMES).toContain(name);
     // The long status is the real operator row, not a paraphrase.
     expect(Buffer.byteLength(row)).toBe(1079); // byte-identical to ~/.cas/artifacts/hub-row-20812.txt

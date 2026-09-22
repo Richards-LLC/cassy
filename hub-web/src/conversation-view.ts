@@ -107,6 +107,8 @@ export interface ConversationViewOptions {
   hasEarlier?: () => boolean;
   /** Keeps the paging control honest while a request is in flight. */
   loadingEarlier?: () => boolean;
+  /** The loaded page reaches the beginning of the project history. */
+  historyEnd?: () => boolean;
 }
 
 const TICK = '<svg class="tick" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.6 8.6l3.3 3.3L13.4 4.4"/></svg>';
@@ -182,7 +184,7 @@ export class ConversationView {
     this.loadEarlier.disabled = loadingEarlier;
     this.loadEarlier.textContent = loadingEarlier ? "Loading earlier…" : "Load earlier";
     const working = this.options.working?.() === true;
-    const model = threadModel(this.history.events, { working });
+    const model = threadModel(this.history.events, { working, historyEnd: this.options.historyEnd?.() === true });
     const document = this.element.ownerDocument;
     const next = new Map<string, HTMLElement>();
     const children: HTMLElement[] = [];
@@ -282,6 +284,8 @@ export class ConversationView {
     node.dataset.signature = signature;
     switch (item.type) {
       case "day": node.className = "day"; node.textContent = item.label; return;
+      case "session": node.className = "session-divider"; node.textContent = item.label; return;
+      case "history-end": node.className = "history-end"; node.textContent = item.label; return;
       case "working": this.renderWorking(node); return;
       case "coalesce": this.renderCoalesce(node, item); return;
       case "group": this.renderGroup(node, item); return;
@@ -421,6 +425,8 @@ export class ConversationView {
 function signatureOf(item: ThreadItem, turnSignature: (turn: ThreadTurn) => string): string {
   switch (item.type) {
     case "day": return `day:${item.label}`;
+    case "session": return `session:${item.label}`;
+    case "history-end": return "history-end";
     case "working": return "working";
     case "coalesce": return JSON.stringify([item.count, item.latest, item.time, item.replies.map((reply) => reply.notification_id)]);
     case "group": return JSON.stringify([item.side, item.time, item.turns.map((turn) => [turn.key, turn.first, turn.last, turnSignature(turn)])]);

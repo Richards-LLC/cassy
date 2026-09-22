@@ -105,11 +105,11 @@ function conversationHistory(key: string): ConversationHistory {
   if (!history) { history = new ConversationHistory(); conversationHistories.set(key, history); }
   return history;
 }
-const conversationHistoryPages = new Map<string, { hasEarlier: boolean; nextBefore?: number; loading: boolean }>();
-function conversationHistoryPage(key: string): { hasEarlier: boolean; nextBefore?: number; loading: boolean } {
+const conversationHistoryPages = new Map<string, { hasEarlier: boolean; nextBefore?: number; loading: boolean; loaded: boolean }>();
+function conversationHistoryPage(key: string): { hasEarlier: boolean; nextBefore?: number; loading: boolean; loaded: boolean } {
   let page = conversationHistoryPages.get(key);
   if (!page) {
-    page = { hasEarlier: false, loading: false };
+    page = { hasEarlier: false, loading: false, loaded: false };
     conversationHistoryPages.set(key, page);
   }
   return page;
@@ -287,6 +287,10 @@ function applyPaneView(key: string, mount: HTMLElement, surface: TerminalSurface
         respond: (ask, text) => { void submitSupervisorMessage({ text, replyTo: ask.notification_id }); },
         hasEarlier: () => conversationHistoryPage(threadKey).hasEarlier,
         loadingEarlier: () => conversationHistoryPage(threadKey).loading,
+        historyEnd: () => {
+          const page = conversationHistoryPage(threadKey);
+          return page.loaded && !page.hasEarlier;
+        },
         loadEarlier: () => {
           const page = conversationHistoryPage(threadKey);
           if (page.loading || page.nextBefore === undefined) return;
@@ -631,7 +635,7 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       updateConversationViews(); renderConversationList();
     },
     onOperatorReply: (session, reply) => {
-      conversationHistory(sessionKey(machine.id, session)).reply(reply);
+      conversationHistory(sessionKey(machine.id, session)).reply(reply, Date.now(), session);
       updateConversationViews(); renderConversationList();
       const key = sessionKey(machine.id, session);
       const replies = operatorReplies.get(key) ?? [];
@@ -645,6 +649,7 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       const key = sessionKey(machine.id, session);
       const cursor = conversationHistoryPage(key);
       cursor.loading = false;
+      cursor.loaded = true;
       cursor.hasEarlier = page.has_earlier;
       cursor.nextBefore = page.next_before;
       const history = conversationHistory(key);
@@ -1921,7 +1926,7 @@ function deliverSupervisorMessage(machine: StoredMachine, session: string, super
     showComposerStatus("The hub connection is reconnecting, so this message was not delivered. Try again once the session is live.", "error");
     return;
   }
-  conversationHistory(sessionKey(machine.id, session)).submit(clientRef, supervisor, text, Date.now(), replyTo);
+  conversationHistory(sessionKey(machine.id, session)).submit(clientRef, supervisor, text, Date.now(), replyTo, session);
   updateConversationViews(); renderConversationList();
   const storedDraft = conversationDrafts.get(sessionKey(machine.id, session));
   if (storedDraft?.text.trim() === text) conversationDrafts.delete(sessionKey(machine.id, session));

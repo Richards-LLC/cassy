@@ -93,11 +93,13 @@ export interface ConversationHistoryMessage {
   reply_to?: number;
   device_id: string;
   operator_label?: string;
+  session?: string;
   at: string;
 }
 
 /** Durable supervisor reply with its queue timestamp for ordered hydration. */
 export interface ConversationHistoryReply extends OperatorReply {
+  session?: string;
   at: string;
 }
 

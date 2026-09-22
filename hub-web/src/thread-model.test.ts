@@ -65,6 +65,18 @@ describe("threadModel", () => {
     expect(threadModel(undated.events, { now: NOW })[0]).toMatchObject({ type: "day", label: "Today" });
     expect(dayLabel(at(9, 0, -9), NOW)).not.toMatch(/Today|Yesterday/);
   });
+  it("marks project history session boundaries and its explicit beginning", () => {
+    const history = new ConversationHistory();
+    history.submit("older", "sup", "Older question", at(9, 0, -1), undefined, "factory-older");
+    history.reply(reply(1, "answer", "Older answer"), at(9, 2, -1), "factory-older");
+    history.submit("newer", "sup", "Newer question", at(9, 0), undefined, "factory-newer");
+    const items = threadModel(history.events, { now: NOW, historyEnd: true });
+    expect(items.map((item) => item.type)).toEqual(["history-end", "day", "session", "group", "group", "day", "session", "group"]);
+    expect(items.filter((item) => item.type === "session").map((item) => item.label)).toEqual([
+      "session factory-older started 09:00",
+      "session factory-newer started 09:00",
+    ]);
+  });
   it("keeps ask and blocker as turns with their kind for the render hook", () => {
     const history = new ConversationHistory();
     history.reply(reply(1, "ask"), at(9, 58)); history.reply(reply(2, "blocker"), at(9, 59));

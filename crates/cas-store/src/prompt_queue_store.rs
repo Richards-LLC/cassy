@@ -1953,14 +1953,16 @@ pub trait PromptQueueStore: Send + Sync {
         limit: usize,
     ) -> Result<Vec<QueuedPrompt>>;
 
-    /// Read a bounded, device-scoped Commander conversation page without
+    /// Read a bounded, project-scoped Commander conversation page without
     /// consuming delivery state. The result is newest-first and may contain
     /// one extra row so callers can determine whether an earlier page exists.
     /// Only verified Commander sends for `device_id` and operator-lane replies
-    /// addressed to that device (or broadcast replies) are eligible.
+    /// addressed to that device (or broadcast replies) are eligible. The
+    /// factory-session argument remains at the trait boundary for compatibility
+    /// with daemon callers, but the store is already project-scoped.
     fn conversation_history(
         &self,
-        factory_session: &str,
+        _factory_session: &str,
         device_id: &str,
         before: Option<i64>,
         limit: usize,
@@ -4511,7 +4513,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
 
     fn conversation_history(
         &self,
-        factory_session: &str,
+        _factory_session: &str,
         device_id: &str,
         before: Option<i64>,
         limit: usize,
@@ -4521,8 +4523,8 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         }
         let conn = crate::shared_db::lock_connection(&self.conn)?;
         let (before_clause, limit_parameter) = before
-            .map(|_| (" AND id < ?3 ", "?4"))
-            .unwrap_or(("", "?3"));
+            .map(|_| (" AND id < ?2 ", "?3"))
+            .unwrap_or(("", "?2"));
         let sql = format!(
             "SELECT id, source, target, prompt, created_at, processed_at,
                     summary, priority, acked_at, urgent, factory_session,
@@ -4530,27 +4532,23 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                     operator_device_id, operator_device_label, operator_scopes,
                     operator_verified, recipient_device_id, kind, attachments
              FROM prompt_queue
-             WHERE factory_session = ?1
-               AND (
+             WHERE (
                     (source LIKE 'commander:%'
                      AND operator_verified = 1
-                     AND operator_device_id = ?2)
+                     AND operator_device_id = ?1)
                     OR
                     (lower(target) = 'operator'
-                     AND (recipient_device_id = ?2
+                     AND (recipient_device_id = ?1
                           OR recipient_device_id IS NULL
                           OR recipient_device_id = ''
                           OR recipient_device_id = '*'))
                )
                {before_clause}
-             ORDER BY id DESC
+               ORDER BY created_at DESC, id DESC
                LIMIT {limit_parameter}"
         );
         let mut stmt = conn.prepare_cached(&sql)?;
-        let mut values: Vec<Box<dyn rusqlite::ToSql>> = vec![
-            Box::new(factory_session.to_owned()),
-            Box::new(device_id.to_owned()),
-        ];
+        let mut values: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(device_id.to_owned())];
         if let Some(before) = before {
             values.push(Box::new(before));
         }
@@ -5627,7 +5625,7 @@ mod tests {
     }
 
     #[test]
-    fn conversation_history_is_session_and_verified_device_scoped() {
+    fn conversation_history_is_project_and_verified_device_scoped() {
         let (_temp, store) = create_test_store();
         let daniel = OperatorStamp {
             operator: "Daniel".into(),
@@ -5667,11 +5665,36 @@ mod tests {
             )
             .unwrap();
         store
+            .enqueue_operator_message(
+                "commander:Daniel@Soundwave",
+                "supervisor",
+                "older project session message",
+                Some("factory-6"),
+                None,
+                None,
+                false,
+                None,
+                &daniel,
+            )
+            .unwrap();
+        store
             .enqueue_urgent_with_outcome(
                 "supervisor",
                 "operator",
                 r#"{"schema_version":2,"reply_to":null,"message":"reply","summary":"","device_id":"phone-7","kind":"answer","attachments":[]}"#,
                 Some("factory-7"),
+                None,
+                None,
+                false,
+                Some(&QueueOrigin::Daemon),
+            )
+            .unwrap();
+        store
+            .enqueue_urgent_with_outcome(
+                "supervisor",
+                "operator",
+                r#"{"schema_version":2,"reply_to":null,"message":"older project session reply","summary":"","device_id":"phone-7","kind":"answer","attachments":[]}"#,
+                Some("factory-6"),
                 None,
                 None,
                 false,
@@ -5689,8 +5712,11 @@ mod tests {
         let history = store
             .conversation_history("factory-7", "phone-7", None, 20)
             .unwrap();
-        assert_eq!(history.len(), 2);
+        assert_eq!(history.len(), 4);
         assert!(history.iter().any(|row| row.prompt == "operator message"));
+        assert!(history
+            .iter()
+            .any(|row| row.prompt == "older project session message"));
         assert!(history.iter().any(|row| row.target == "operator"));
         assert!(
             !history
@@ -5702,8 +5728,8 @@ mod tests {
         let earlier = store
             .conversation_history("factory-7", "phone-7", Some(newest), 20)
             .unwrap();
-        assert_eq!(earlier.len(), 1, "the cursor excludes only the newest row");
-        assert_eq!(earlier[0].prompt, "operator message");
+        assert_eq!(earlier.len(), 3, "the cursor excludes only the newest row");
+        assert!(!earlier.iter().any(|row| row.id == newest));
     }
 
     /// A stamp survives the round trip through SQLite and comes back on the

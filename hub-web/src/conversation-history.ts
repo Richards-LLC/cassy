@@ -13,7 +13,7 @@ export interface ConversationSend {
 }
 /** `at` is when this client saw the event (ms epoch); it stamps the thread's
  * day separators and group timestamps and is never a delivery receipt. */
-export type ConversationEvent = { kind: "send"; value: ConversationSend; at?: number } | { kind: "reply"; value: OperatorReply; at?: number };
+export type ConversationEvent = { kind: "send"; value: ConversationSend; at?: number; session?: string } | { kind: "reply"; value: OperatorReply; at?: number; session?: string };
 
 /** In-memory per-thread evidence. A submitted socket frame is never a receipt. */
 export class ConversationHistory {
@@ -34,8 +34,8 @@ export class ConversationHistory {
   hasPending(): boolean {
     return this.events.some(event => event.kind === "send" && (event.value.state === "sending" || event.value.state === "acknowledged"));
   }
-  submit(id: string, target: string, text: string, at: number = Date.now(), replyTo?: number): void {
-    this.insert({ kind: "send", value: { id, target, text, state: "sending", ...(replyTo === undefined ? {} : { replyTo }) }, at });
+  submit(id: string, target: string, text: string, at: number = Date.now(), replyTo?: number, session?: string): void {
+    this.insert({ kind: "send", value: { id, target, text, state: "sending", ...(replyTo === undefined ? {} : { replyTo }) }, at, session });
   }
 
   /** Merge one durable operator message without duplicating a live ack. */
@@ -47,6 +47,7 @@ export class ConversationHistory {
       existing.value.state = message.state;
       existing.value.stamped = message.stamped;
       existing.value.replyTo = message.reply_to;
+      existing.session = message.session;
       return;
     }
     this.insert({
@@ -61,6 +62,7 @@ export class ConversationHistory {
         ...(message.reply_to === undefined ? {} : { replyTo: message.reply_to }),
       },
       at: ConversationHistory.timestamp(message.at),
+      session: message.session,
     });
   }
   /** The operator send that answered this ask, if any. */
@@ -104,7 +106,7 @@ export class ConversationHistory {
     send.value.error = message;
     return true;
   }
-  reply(reply: OperatorReply, at: number | undefined = Date.now()): void {
+  reply(reply: OperatorReply, at: number | undefined = Date.now(), session?: string): void {
     if (this.events.some((event) => event.kind === "reply" && event.value.notification_id === reply.notification_id)) return;
     const normalized: OperatorReply = {
       ...reply,
@@ -112,7 +114,7 @@ export class ConversationHistory {
       kind: reply.kind ?? "answer",
       attachments: reply.attachments ?? [],
     };
-    this.insert({ kind: "reply", value: normalized, at });
+    this.insert({ kind: "reply", value: normalized, at, session });
     for (const event of this.events) {
       if (event.kind === "send" && normalized.reply_to !== null && event.value.notificationId === normalized.reply_to) event.value.state = "replied";
     }
@@ -121,6 +123,6 @@ export class ConversationHistory {
   /** Merge a durable supervisor turn using its original queue timestamp. */
   hydrateReply(reply: ConversationHistoryReply): void {
     const { at, ...live } = reply;
-    this.reply(live, ConversationHistory.timestamp(at));
+    this.reply(live, ConversationHistory.timestamp(at), reply.session);
   }
 }

@@ -1823,22 +1823,37 @@ main {
 
 #message-mic .mic-glyph { width: 20px; height: 20px; display: block; }
 
+/* P6 (cas-0c80): listening is the critical fill with a 4px 28% halo, never
+ * the Send accent. The halo is static, so reduced motion keeps it; motion only
+ * breathes its strength. Checking and unavailable are quiet: a neutral glyph on
+ * a dashed ring, never the warning amber. */
 #message-mic.listening {
-  border-color: var(--color-action);
-  color: var(--accent-fg);
-  background: var(--color-action);
+  border-color: var(--crit-bg);
+  color: var(--crit-fg);
+  background: var(--crit-bg);
+  outline: 4px solid color-mix(in srgb, var(--crit-bg) 28%, transparent);
+  outline-offset: 0;
   animation: composer-mic-pulse 1.8s ease-in-out infinite;
+}
+
+/* A keyboard focus ring outranks the halo; the critical fill still says listening. */
+#message-mic.listening:focus-visible {
+  outline: var(--focus-ring-width) solid var(--color-focus);
+  outline-offset: var(--focus-ring-width);
+  animation: none;
 }
 
 #message-mic:disabled {
   opacity: 1;
-  color: var(--state-warn);
-  border-color: var(--state-warn);
+  color: var(--text-mid);
+  border-style: dashed;
+  border-color: var(--line-strong);
+  background: var(--color-transparent);
 }
 
 @keyframes composer-mic-pulse {
-  0%, 100% { outline: 0 solid transparent; outline-offset: 0; }
-  50% { outline: 4px solid color-mix(in srgb, var(--color-action) 22%, transparent); outline-offset: 2px; }
+  0%, 100% { outline-color: color-mix(in srgb, var(--crit-bg) 28%, transparent); }
+  50% { outline-color: color-mix(in srgb, var(--crit-bg) 14%, transparent); }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -3038,9 +3053,10 @@ button.chip:disabled { cursor: default; }
 .conversation-composer textarea::placeholder { color: var(--ink-mid); opacity: 1; }
 .conversation-composer .composer-actions { grid-area: send; display: flex; align-items: center; gap: var(--space-2); margin: 0; }
 .conversation-composer .composer-actions button { width: auto; }
-.conversation-composer #message-mic { width: 44px; min-width: 44px; height: 44px; min-height: 44px; color: var(--ink-mid); border-color: var(--line-strong); background: var(--panel); box-shadow: var(--lift); }
-.conversation-composer #message-mic.listening { color: var(--accent-fg); border-color: var(--accent, var(--you-bg)); background: var(--accent, var(--you-bg)); box-shadow: var(--lift-strong); }
-.conversation-composer #message-mic:disabled { color: var(--warn-text); border-color: var(--warn-text); background: var(--panel); box-shadow: var(--lift); }
+.conversation-composer #message-mic { width: 44px; min-width: 44px; height: 44px; min-height: 44px; color: var(--ink-mid); border-color: var(--line-strong); background: var(--panel); }
+.conversation-composer #message-mic:not(:disabled) { box-shadow: var(--lift); }
+.conversation-composer #message-mic.listening { color: var(--crit-fg); border-color: var(--crit-bg); background: var(--crit-bg); box-shadow: var(--lift-strong); }
+.conversation-composer #message-mic:disabled { color: var(--ink-mid); border-style: dashed; border-color: var(--line-strong); background: var(--color-transparent); }
 .conversation-composer #message-keyboard { display: none; }
 .conversation-composer #message-send.send { display: inline-flex; align-items: center; gap: 8px; margin: 0; min-height: 46px; padding: 0 20px 0 16px; border: 0; border-radius: var(--radius-pill); background: var(--accent, var(--you-bg)); color: var(--accent-fg); box-shadow: var(--lift-strong); font: var(--weight-semibold) 14px/1.2 var(--font-ui); white-space: nowrap; }
 .conversation-composer #message-send.send:hover:not([aria-disabled="true"]) { background: var(--accent, var(--you-bg)); color: var(--accent-fg); filter: brightness(1.08); }

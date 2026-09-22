@@ -7,6 +7,36 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.27.7] - 2026-09-22
+
+### Changed
+
+- Commander design polish, from a full light/dark, phone/desktop design
+  review: an unanswered question appears once (pinned above the composer) with
+  a short pointer in the thread; long or question-bearing status updates read
+  as normal replies and short ones clamp at three lines with "Show full
+  update"; primary buttons use the operator colour and are the strongest
+  control on every screen; the phone thread header is one row (121 to 56 px);
+  dark mode tints questions and blockers instead of flooding them, keeping
+  Send the brightest element; the desktop context rail shows only what the
+  header does not and folds away when empty; the conversation list keeps times
+  on unread rows, never breaks codenames, and moves Appearance & commands to a
+  header button.
+- Mic states: unavailable is a quiet dashed ring; listening is a red fill with
+  a halo and a "Listening" placeholder.
+
+### Fixed
+
+- A message that failed to send looks failed ("Not sent", Edit, Retry), and a
+  failed reply no longer unpins its question or clears a blocker.
+- Readability: every placeholder, the pairing email field, "Loading earlier",
+  and the composer edge meet contrast minimums in both schemes (no text below
+  4.5:1 across 166 measured renders).
+- An unreachable session with a pending message shows that state on its list
+  row instead of the last message.
+- Visual QA renders the production composer and pairing markup, and picks the
+  newest stable Playwright rather than an arbitrary cached copy.
+
 ## [3.27.6] - 2026-09-22
 
 ### Fixed

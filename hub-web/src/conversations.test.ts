@@ -54,6 +54,39 @@ describe('conversation evidence', () => {
     history.acknowledge({ client_ref: 'r', notification_id: 9, target: 'supervisor', stamped: true });
     expect(history.answered(4)).toMatchObject({ id: 'r', state: 'acknowledged' });
   });
+  it('never counts a refused send as acknowledging a blocker (cas-6874)', () => {
+    const history = new ConversationHistory();
+    history.reply({ notification_id: 7, reply_to: null, message: 'Gate red.', summary: '', device_id: 'd', kind: 'blocker' });
+    expect(history.waiting().map((item) => item.notification_id)).toEqual([7]);
+    // Sending acknowledges optimistically.
+    history.submit('s', 'supervisor', 'Looking now', Date.now());
+    expect(history.waiting()).toEqual([]);
+    // Refused: the supervisor received nothing, so the blocker is waiting on the operator again.
+    history.reject('s', 'offline');
+    expect(history.waiting().map((item) => item.notification_id)).toEqual([7]);
+    // The list row (attention = waiting().length, as renderConversationList feeds it) still flags it waiting on the operator.
+    const container = document.createElement('nav');
+    new ConversationList().render(container, [{ key: 'a:s', machineId: 'a', session: 's', supervisor: 'sup', host: 'Atlas', freshness: 'now', connection: 'Live', when: '10:00', attention: history.waiting().length, selected: false }], vi.fn());
+    expect((container.firstElementChild as HTMLElement).dataset.waiting).toBe('true');
+    expect(container.querySelector('.conversation-flag')?.getAttribute('aria-label')).toBe('Waiting for you');
+    // A retry replaces the refused send and acknowledges the blocker.
+    expect(history.discardRefused('s')).toBe(true);
+    history.submit('r', 'supervisor', 'Looking now', Date.now());
+    expect(history.waiting()).toEqual([]);
+    history.acknowledge({ client_ref: 'r', notification_id: 12, target: 'supervisor', stamped: true });
+    expect(history.waiting()).toEqual([]);
+    // A later refused send beside the delivered one never un-acknowledges it.
+    history.submit('late', 'supervisor', 'Also', Date.now()); history.reject('late', 'offline');
+    expect(history.waiting()).toEqual([]);
+  });
+  it('keeps a blocker waiting when only a refused send follows it, even without a retry (cas-6874)', () => {
+    const history = new ConversationHistory();
+    history.submit('before', 'supervisor', 'Earlier', 1);
+    history.reply({ notification_id: 8, reply_to: null, message: 'Need a key.', summary: '', device_id: 'd', kind: 'blocker' }, 2);
+    history.submit('x', 'supervisor', 'Here', 3); history.reject('x', 'no access');
+    // The send before the blocker never acknowledges it, and the refused one after it does not either.
+    expect(history.waiting().map((item) => item.notification_id)).toEqual([8]);
+  });
   it('tracks asks and blockers waiting on the operator and the send that answers an ask (cas-43f9)', () => {
     const history = new ConversationHistory();
     const turn = (notification_id: number, kind: 'ask' | 'blocker' | 'answer', message = `m${notification_id}`) => ({ notification_id, reply_to: null, message, summary: '', device_id: 'd', kind });

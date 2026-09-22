@@ -65,9 +65,15 @@ export class ConversationHistory {
       session: message.session,
     });
   }
-  /** The operator send that answered this ask, if any. */
+  /**
+   * The operator send that answered this ask, if any. A refused send never
+   * reached the supervisor, so it answers nothing: the ask stays waiting (and
+   * pinned, with its chips) beside the refused bubble until a send that is
+   * sending, acknowledged or replied carries its id. A sending reply answers
+   * optimistically and gives the ask back if the hub refuses it.
+   */
   answered(notificationId: number): ConversationSend | undefined {
-    for (const event of this.events) if (event.kind === "send" && event.value.replyTo === notificationId) return event.value;
+    for (const event of this.events) if (event.kind === "send" && event.value.replyTo === notificationId && event.value.state !== "error") return event.value;
     return undefined;
   }
   /**

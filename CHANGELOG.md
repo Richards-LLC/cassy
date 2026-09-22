@@ -7,6 +7,22 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.27.6] - 2026-09-22
+
+### Fixed
+
+- The hub lists every session whose supervisor is live, even before it has
+  spawned workers or after its workers have all been retired. Only sessions
+  with neither a live supervisor nor workers stay hidden by default; the
+  worker-only and dormant reveal switches are unchanged.
+- Older plain-text status replies that begin "Status 13:2xZ." now get the bold
+  lead line and list layout (the lead pattern accepted only two-digit minutes),
+  and an empty conversation shows the empty state instead of the
+  "No earlier history" marker.
+- The release train keeps the recorded supervisor identity for the assemble
+  self-heal's integration recovery and sources its date helper in
+  post-publication.
+
 ## [3.27.5] - 2026-09-22
 
 ### Added

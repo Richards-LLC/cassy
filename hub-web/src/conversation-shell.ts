@@ -94,6 +94,9 @@ function contextRailMarkup(selected: boolean): string {
   return `<aside class="conversation-context" aria-label="Conversation context" data-open="false" aria-hidden="true">${sections}</aside>`;
 }
 
+/** Appearance & commands as a header icon button (P13): out of the phone thumb zone, named for assistive tech. */
+export const appearanceButtonMarkup = '<button id="command-palette-toggle" class="icon-button" type="button" aria-label="Appearance &amp; commands" title="Appearance &amp; commands"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" aria-hidden="true" focusable="false"><path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="17" r="2"/></svg></button>';
+
 export function conversationShellMarkup(model: ConversationShellModel): string {
   // First run: the welcome carries the one primary "Pair a machine". The list
   // header's chip is hidden beside it on wide screens (styles.css
@@ -102,11 +105,11 @@ export function conversationShellMarkup(model: ConversationShellModel): string {
   const welcomePairs = !model.selected && model.loaded && !model.paired;
   return `<div class="conversation-shell${model.selected ? " thread-open" : ""}${welcomePairs ? " welcome-pairs" : ""}${model.machineId ? ` ${machineAccentClass(model.machineId)}` : ""}">
     <aside class="conversation-sidebar" aria-label="Supervisor conversations">
-      <header class="conversation-list-heading">${cloudBrand()}<div class="conversation-list-title"><h1>Conversations</h1><button id="pair-toggle"${welcomePairs ? ' class="primary"' : ""} type="button">Pair a machine</button></div><p>Your projects. Your supervisors.</p></header>
+      <header class="conversation-list-heading"><div class="conversation-list-top">${cloudBrand()}${appearanceButtonMarkup}</div><div class="conversation-list-title"><h1>Conversations</h1><button id="pair-toggle"${welcomePairs ? ' class="primary"' : ""} type="button">Pair a machine</button></div><p>Your projects. Your supervisors.</p></header>
       <nav id="conversation-list" aria-label="Choose a supervisor"></nav>
       <div id="conversation-empty" class="conversation-empty" hidden></div>
-      <footer><div id="hub-footer-badges" class="hub-footer-badges" aria-label="Hub status"></div><button id="command-palette-toggle" type="button">Appearance &amp; commands</button></footer>
-      ${composeFabMarkup}
+      <footer><div id="hub-footer-badges" class="hub-footer-badges" aria-label="Hub status"></div></footer>
+      ${model.paired ? composeFabMarkup : ""}
     </aside>
     <main class="conversation-main">
       ${model.selected ? `${conversationHeaderMarkup(model)}<section id="conversation-pane-slot" class="conversation-pane-slot"></section><div id="conversation-composer-slot"></div>` : `<div class="conversation-welcome"><span class="conversation-eyebrow">SUPERVISOR CONVERSATIONS</span><h2>Stay close to the work.</h2><p>${!model.loaded ? "Loading your paired machines…" : !model.paired ? "Pair a machine to read your supervisors’ words and talk to them here." : "Choose a project to read its supervisor’s words and send an instruction."}</p>${!model.paired && model.loaded ? '<button id="empty-pair" class="primary" type="button">Pair a machine</button>' : ""}</div>`}

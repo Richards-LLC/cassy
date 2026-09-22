@@ -245,8 +245,12 @@ describe("ConversationView (Pebble thread)", () => {
     expect(view.element.querySelector(".msgs")?.children).toHaveLength(0);
     expect(empty.querySelector(".mono")?.textContent).toBe("B");
     expect(empty.querySelector("b")?.textContent).toBe("calm-heron-5");
-    expect(empty.querySelector(".proj2")?.textContent).toBe("Bench · cas-hub-static");
+    // P14: project · machine, as in the header and the list.
+    expect(empty.querySelector(".proj2")?.textContent).toBe("cas-hub-static · Bench");
     expect(empty.querySelector(".said")?.textContent).toBe("Nothing waiting on you. calm-heron-5 will write here when it needs a decision.");
+    // The codename in the sentence is an identifier span that never breaks at its hyphen.
+    expect(empty.querySelector(".said .codename")?.textContent).toBe("calm-heron-5");
+    expect(empty.querySelector("b")?.classList.contains("codename")).toBe(true);
     expect(empty.querySelector(".quiet")?.textContent).toBe("Promoted the hub to production on Monday.");
     echo = undefined; view.update();
     expect(empty.querySelector(".quiet")).toBeNull();

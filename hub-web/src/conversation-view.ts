@@ -149,9 +149,9 @@ export class ConversationView {
     this.element.setAttribute("aria-label", `Conversation with ${supervisor}`);
     this.head = document.createElement("header"); this.head.className = "thead";
     const identity = document.createElement("div"); identity.className = "id";
-    const name = document.createElement("b"); name.textContent = supervisor;
+    const name = document.createElement("b"); name.className = "codename"; name.textContent = supervisor;
     const where = document.createElement("span");
-    where.textContent = [this.options.machine, this.options.project].filter(Boolean).join(" · ");
+    where.textContent = [this.options.project, this.options.machine].filter(Boolean).join(" · ");
     identity.append(name, where);
     this.head.append(identity);
     this.loadEarlier = document.createElement("button");
@@ -290,11 +290,14 @@ export class ConversationView {
     const document = this.element.ownerDocument;
     const mono = document.createElement("span"); mono.className = "mono"; mono.setAttribute("aria-hidden", "true");
     mono.textContent = machineMonogram(machine || supervisor);
-    const name = document.createElement("b"); name.textContent = supervisor;
+    const name = document.createElement("b"); name.className = "codename"; name.textContent = supervisor;
+    // project · machine, the order of the header and every list row (P14).
     const where = document.createElement("span"); where.className = "proj2";
-    where.textContent = [machine, project].filter(Boolean).join(" · ");
+    where.textContent = [project, machine].filter(Boolean).join(" · ");
     const said = document.createElement("p"); said.className = "said"; said.setAttribute("role", "status");
-    said.textContent = `Nothing waiting on you. ${supervisor} will write here when it needs a decision.`;
+    // The codename is an identifier: mono and never broken at its hyphen, even inside prose.
+    const codename = document.createElement("span"); codename.className = "codename"; codename.textContent = supervisor;
+    said.append("Nothing waiting on you. ", codename, " will write here when it needs a decision.");
     const children: HTMLElement[] = [mono, name, where, said];
     if (echo) { const quiet = document.createElement("div"); quiet.className = "quiet"; quiet.textContent = echo; children.push(quiet); }
     this.empty.replaceChildren(...children);

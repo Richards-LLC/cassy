@@ -148,9 +148,13 @@ describe('conversation evidence', () => {
     expect(waiting.querySelector('.conversation-avatar')?.textContent).toBe('A');
     expect(waiting.querySelector('.conversation-supervisor')?.textContent).toBe('patient-pelican-9');
     expect(waiting.querySelector('.project-badge')?.textContent).toBe('cas-src');
-    // Separator and project travel together so a wrapped project never leaves the dot dangling.
-    expect(waiting.querySelector('.conversation-project')?.innerHTML).toBe('<span class="conversation-sep" aria-hidden="true"></span><span class="project-badge">cas-src</span>');
+    // P13: the meta leads with the project, never a stray dot; the only separator rides with the machine.
+    expect(waiting.querySelector('.conversation-project')?.innerHTML).toBe('<span class="project-badge">cas-src</span>');
     expect(waiting.querySelector('.conversation-who > .conversation-sep')).toBeNull();
+    expect(waiting.querySelectorAll('.conversation-sep')).toHaveLength(1);
+    expect(waiting.querySelector('.conversation-meta')?.firstElementChild?.firstElementChild?.className).toBe('project-badge');
+    // P14: the codename is one unbreakable word.
+    expect(waiting.querySelector('.conversation-supervisor')?.classList.contains('codename')).toBe(true);
     // The machine is named as text on every row, after the project, with its own wrapping separator.
     expect(waiting.querySelector('.conversation-machine')?.textContent).toBe('Atlas');
     expect(waiting.querySelector('.conversation-machine')?.innerHTML).toBe('<span class="conversation-sep" aria-hidden="true"></span>Atlas');
@@ -161,16 +165,45 @@ describe('conversation evidence', () => {
     expect(waiting.querySelector('script, it')).toBeNull();
     expect(waiting.querySelector('.conversation-when')?.className).toBe('conversation-when hot');
     expect(waiting.querySelector('.conversation-flag')?.getAttribute('aria-label')).toBe('Waiting for you');
+    expect(waiting.querySelector('.conversation-marks > .conversation-flag')).not.toBeNull();
     expect(waiting.querySelector('.conversation-unread')).toBeNull();
     expect(waiting.dataset.waiting).toBe('true');
     expect(unread.querySelector('.conversation-unread')?.textContent).toBe('2');
-    expect(unread.querySelector('.conversation-when')).toBeNull();
+    // P13: an unread row keeps its time at the headline end; the count sits beneath it.
+    expect(unread.querySelector('.conversation-when')?.textContent).toBe('Tue');
+    expect([...unread.children].map((child) => child.className)).toEqual(['conversation-avatar', 'conversation-who', 'conversation-when', 'conversation-preview bold', 'conversation-marks']);
+    expect(unread.querySelector('.conversation-marks > .conversation-unread')).not.toBeNull();
     expect(unread.querySelector('.conversation-flag')).toBeNull();
     expect(unread.querySelector('.conversation-preview')?.className).toBe('conversation-preview bold');
     expect(quiet.querySelector('.conversation-when')?.textContent).toBe('Tue');
     expect(quiet.querySelector('.conversation-preview')?.textContent).toBe('Live');
     expect(quiet.querySelector('.conversation-preview')?.className).toBe('conversation-preview');
-    expect(quiet.querySelector('.conversation-flag, .conversation-unread')).toBeNull();
+    expect(quiet.querySelector('.conversation-flag, .conversation-unread, .conversation-marks')).toBeNull();
+  });
+  it('keeps the time and stacks both marks when a row is waiting and unread (P13)', () => {
+    const list = new ConversationList(); const container = document.createElement('nav');
+    list.render(container, [{ key: 'a:s', machineId: 'a', session: 's', supervisor: 'patient-pelican-9', projectDir: '/p/cas-src', host: 'Atlas', freshness: 'now', connection: 'Live', when: '09:58', attention: 2, unread: 3, selected: false }], vi.fn());
+    const row = container.firstElementChild!;
+    expect(row.querySelector('.conversation-when.hot')?.textContent).toBe('09:58');
+    expect([...row.querySelector('.conversation-marks')!.children].map((child) => child.className)).toEqual(['conversation-unread', 'conversation-flag']);
+    expect(row.querySelector('.conversation-flag')?.getAttribute('aria-label')).toBe('2 waiting for you');
+  });
+  it('gates the compose FAB on a paired machine and puts Appearance & commands in the header as a named icon button (P13)', () => {
+    const unpaired = document.createElement('div');
+    unpaired.innerHTML = conversationShellMarkup({ selected: false, loaded: true, paired: false });
+    expect(unpaired.querySelector('#compose-fab')).toBeNull();
+    const loading = document.createElement('div');
+    loading.innerHTML = conversationShellMarkup({ selected: false, loaded: false, paired: false });
+    expect(loading.querySelector('#compose-fab')).toBeNull();
+    const paired = document.createElement('div');
+    paired.innerHTML = conversationShellMarkup({ selected: false, loaded: true, paired: true });
+    expect(paired.querySelector('#compose-fab')?.getAttribute('aria-label')).toBe('Write to a supervisor');
+    const toggle = paired.querySelector<HTMLButtonElement>('#command-palette-toggle')!;
+    expect(toggle.closest('.conversation-list-heading > .conversation-list-top')).not.toBeNull();
+    expect(toggle.getAttribute('aria-label')).toBe('Appearance & commands');
+    expect(toggle.textContent).toBe('');
+    expect(toggle.querySelector('svg')?.getAttribute('aria-hidden')).toBe('true');
+    expect(paired.querySelector('.conversation-sidebar footer #command-palette-toggle')).toBeNull();
   });
   it('strips supervisor markdown from conversation-list previews', () => {
     const list = new ConversationList(); const container = document.createElement('nav');
@@ -270,7 +303,8 @@ describe('conversation evidence', () => {
     const history = new ConversationHistory();
     const view = new ConversationView(document, history, { supervisor: 'real-supervisor', machine: 'Atlas', project: 'cas-src' }); document.body.replaceChildren(view.element); view.update();
     expect(view.element.querySelector('.thead b')?.textContent).toBe('real-supervisor');
-    expect(view.element.querySelector('.thead .id span')?.textContent).toBe('Atlas · cas-src');
+    // P14: project · machine, the order of the shell header and every list row.
+    expect(view.element.querySelector('.thead .id span')?.textContent).toBe('cas-src · Atlas');
     expect(view.element.querySelector('.conversation-pane')).toBeNull();
     expect(view.element.querySelector('.msgs')?.children).toHaveLength(0);
     history.reply({ ...reply, message: 'Actual reply <script>alert(1)</script>' }); view.update();

@@ -2012,11 +2012,14 @@ dialog label {
   font-size: var(--fs-meta);
 }
 
+/* A panel field on the dialog surface. The edge is --ink-mid, not
+   --line-strong: on the warm --bg-raised dialog (P15) --line-strong measures
+   2.89:1 in light, under the 3:1 a field boundary needs. */
 dialog input {
   padding: var(--space-3);
   color: var(--ink);
   background: var(--panel);
-  border: var(--line-width) solid var(--line-strong);
+  border: var(--line-width) solid var(--ink-mid);
   border-radius: var(--radius-card);
 }
 

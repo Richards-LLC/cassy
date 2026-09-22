@@ -1330,7 +1330,7 @@ describe("design polish P3/P4/P12/P16 (D3/D4/D12/D17)", () => {
     // P4: every placeholder in ink-mid at full opacity; dialog inputs are panel fields with a strong edge, not wells.
     expect(css).toContain("input::placeholder,\ntextarea::placeholder { color: var(--ink-mid); opacity: 1; }");
     expect(rule("\ndialog input")).toContain("background: var(--panel);");
-    expect(rule("\ndialog input")).toContain("border: var(--line-width) solid var(--line-strong);");
+    expect(rule("\ndialog input")).toContain("border: var(--line-width) solid var(--ink-mid);");
     expect(tokens).not.toContain("dialog:not(.command-palette) input");
     // P12: the composer draft pill has an edge and keeps its lift.
     expect(css).toContain("border: var(--line-width) solid var(--line-strong); border-radius: 23px; resize: none; background: var(--panel); color: var(--ink); box-shadow: var(--lift);");

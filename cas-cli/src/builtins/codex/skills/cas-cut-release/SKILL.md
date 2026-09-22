@@ -26,7 +26,9 @@ version and worktree, never a version-keyed path.
    merge-queue GraphQL query, and remote tags); a writable `scratch-base` with
    space for twice the last archive; readable `CAS_RELEASE_ENV_FILE` (names
    only); resolvable Zig; a dated CHANGELOG heading and draft; and a passing
-   integration receipt. Real-project fixtures use
+   integration receipt. Pin the cut date in `run.env` from `started_at` and
+   use that date for every draft path, including after midnight. Run the same
+   announcement lint during preflight that `announce` will run. Real-project fixtures use
    `cas::test_paths::runtime_fixture_parent()`, and fixture versions use
    `9.99.x`. An intentional doctor row change is a reviewed snapshot update.
 4. Run one command:
@@ -43,6 +45,10 @@ version and worktree, never a version-keyed path.
    run-dir `receipts.commit` receipt, and never opens a docs-only PR. Before
    the next release, `preflight` warns about an unmerged prior receipt commit
    and `prep` carries it forward with a merge before preparing the new draft.
+   `prep` refreshes `Cargo.lock` with `cargo update --workspace --offline`.
+   `assemble` rebases docs-only release commits from `main` onto the tested
+   integration tip. The pipeline waits for `MERGEABLE` plus the required
+   status-check rollup before enqueueing, defaulting to 60 attempts at 5 seconds.
 5. If the command stops, answer only the named blocker, then rerun the exact
    printed `--cut --resume` command. Use `scripts/release-train.sh <version>
    <release-worktree> --status` for bounded, read-only state. A targeted

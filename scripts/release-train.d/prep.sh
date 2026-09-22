@@ -9,8 +9,27 @@ if ! declare -F release_train_receipts_carry_pending >/dev/null 2>&1; then
 fi
 
 release_train_draft_path() {
-    local date_part="${CAS_RELEASE_TRAIN_DATE:-$(date -u +%F)}"
+    local date_part
+    date_part="$(release_train_date_stamp)"
     printf '%s\n' "${CAS_RELEASE_TRAIN_DRAFT:-$worktree/docs/release-notes/${date_part}-v${version}-slack.md}"
+}
+
+release_train_refresh_lockfile() {
+    [[ -f "$worktree/Cargo.toml" && -f "$worktree/Cargo.lock" ]] || return 0
+    local cargo_cmd="${CAS_RELEASE_TRAIN_CARGO:-cargo}"
+    if [[ "$cargo_cmd" == */* ]]; then
+        [[ -x "$cargo_cmd" ]] || {
+            printf 'ERROR prep lockfile: cargo command is not executable: %s\n' "$cargo_cmd" >&2
+            return 1
+        }
+    elif ! command -v "$cargo_cmd" >/dev/null 2>&1; then
+        printf 'ERROR prep lockfile: cargo command is not available: %s\n' "$cargo_cmd" >&2
+        return 1
+    fi
+    if ! (cd "$worktree" && "$cargo_cmd" update --workspace --offline); then
+        printf 'ERROR prep lockfile: cargo update --workspace --offline failed\n' >&2
+        return 1
+    fi
 }
 
 release_train_previous_draft() {
@@ -59,6 +78,7 @@ release_train_prep() {
         printf 'ERROR prep version: version bump failed for %s\n' "$version" >&2
         return 1
     fi
+    release_train_refresh_lockfile || return 1
     release_train_receipts_carry_pending || return 1
     release_train_carry_previous_posted "$draft"
     git -C "$worktree" add -- "$draft"

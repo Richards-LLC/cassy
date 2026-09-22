@@ -69,7 +69,7 @@ release_train_post_publication() {
     if declare -F release_train_announce_draft_path >/dev/null 2>&1; then
         draft="$(release_train_announce_draft_path)"
     else
-        draft="$worktree/docs/release-notes/${CAS_RELEASE_TRAIN_DATE:-$(date -u +%F)}-v${version}-slack.md"
+        draft="$worktree/docs/release-notes/$(release_train_date_stamp)-v${version}-slack.md"
     fi
     draft_args=("$tag")
     if [[ -f "$draft" ]] && grep -qE '\{\{(LINUX|MACOS)_SHA256\}\}' "$draft"; then

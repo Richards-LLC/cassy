@@ -151,6 +151,23 @@ PY
         self.assertIn(f"receipts commit {docs_tip}", result.stderr)
         self.assertEqual(self.git("rev-parse", "HEAD"), self.base)
 
+    def test_docs_only_release_commit_rebases_onto_integration_tip(self):
+        self.git("checkout", "release/test")
+        (self.root / "CHANGELOG.md").write_text("# Changelog\n\n## [0.0.0]\n")
+        release_notes = self.root / "docs/release-notes"
+        release_notes.mkdir(parents=True)
+        (release_notes / "2099-01-01-v0.0.0-slack.md").write_text("draft\n")
+        self.git("add", "CHANGELOG.md", "docs/release-notes")
+        self.git("commit", "-m", "release docs")
+        docs_tip = self.git("rev-parse", "HEAD")
+
+        result = self.assemble()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        assembled_tip = self.git("rev-parse", "HEAD")
+        self.assertNotEqual(assembled_tip, docs_tip)
+        self.assertEqual(self.git("rev-parse", "HEAD^"), self.tip)
+        self.assertEqual(self.git("show", "--format=%s", "--no-patch", "HEAD"), "release docs")
+
     def test_changed_integration_refuses_wrong_receipt(self):
         self.git("update-ref", "refs/heads/integration/project", self.base)
         self.refused("tip changed")

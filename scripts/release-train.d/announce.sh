@@ -1,7 +1,20 @@
 #!/usr/bin/env bash
 
+if ! declare -F release_train_date_stamp >/dev/null 2>&1; then
+    release_train_date_stamp() {
+        local date_stamp="${CAS_RELEASE_TRAIN_DATE:-}" started_at
+        if [[ -z "$date_stamp" && -s "${run_dir:-}/run.env" ]]; then
+            started_at="$(sed -n 's/^started_at=//p' "$run_dir/run.env" | head -n1 || true)"
+            date_stamp="${started_at%%T*}"
+        fi
+        [[ "$date_stamp" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || date_stamp="$(date -u +%F)"
+        printf '%s\n' "$date_stamp"
+    }
+fi
+
 release_train_announce_draft_path() {
-    local date_part="${CAS_RELEASE_TRAIN_DATE:-$(date -u +%F)}"
+    local date_part
+    date_part="$(release_train_date_stamp)"
     printf '%s\n' "${CAS_RELEASE_TRAIN_DRAFT:-$worktree/docs/release-notes/${date_part}-v${version}-slack.md}"
 }
 

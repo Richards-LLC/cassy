@@ -5,7 +5,7 @@ theme: dual
 colors:
   bg: "--bg-root #F7F4EE / #12141A"
   surface: "--bg-panel #FFFFFF / #191C24"
-  surface-raised: "--bg-raised color-mix(in srgb, var(--bg-panel) 96%, var(--text-hi)) / color-mix(in srgb, var(--bg-panel) 96%, var(--text-hi))"
+  surface-raised: "--bg-raised color-mix(in srgb, var(--bg-root) 92%, var(--text-hi)) / color-mix(in srgb, var(--bg-root) 92%, var(--text-hi))"
   border: "--line-subtle #DAD3C7 / #2B3040"
   border-strong: "--line-strong #8F8371 / #6B7390"
   text: "--text-hi #1B1D24 / #E9E6E0"
@@ -39,6 +39,22 @@ pebble:
   warn-text: "--warn-text #7F5504 / #E2B14D"
   crit: "--crit-bg #B3261E / #EF7B72"
   crit-text: "--crit-fg #FFFFFF / #12141A"
+  you-bubble: "--you-bubble-bg #2E3A9F / #3A46B0"
+  you-bubble-text: "--you-bubble-fg #FFFFFF / #FFFFFF"
+  ask-tint: "--ask-tint #E2B14D / #3A3020"
+  ask-tint-text: "--ask-tint-fg #1B1D24 / #E9E6E0"
+  ask-tint-tray: "--ask-tint-deep #7F5504 / #2B2418"
+  ask-edge: "--ask-edge transparent / #E2B14D"
+  tray-chip: "--tray-chip-bg #FFFFFF / transparent"
+  tray-chip-text: "--tray-chip-fg #1B1D24 / #E9E6E0"
+  tray-chip-line: "--tray-chip-line transparent / #E2B14D"
+  pin-chip: "--pin-chip-bg #FFFFFF / #E2B14D"
+  pin-chip-text: "--pin-chip-fg #1B1D24 / #12141A"
+  pin-chip-hover: "--pin-chip-hover var(--bg-hover) / #EDC169"
+  tray-focus: "--tray-focus #FFFFFF / #E2B14D"
+  crit-tint: "--crit-tint #B3261E / #3A1F1E"
+  crit-tint-text: "--crit-tint-fg #FFFFFF / #E9E6E0"
+  crit-edge: "--crit-edge transparent / #EF7B72"
   lift: "--lift 0 1px 2px rgba(18,20,26,0.05), 0 6px 18px rgba(18,20,26,0.06) / 0 1px 2px rgba(0,0,0,0.32), 0 6px 18px rgba(0,0,0,0.34)"
   lift-strong: "--lift-strong 0 2px 4px rgba(18,20,26,0.08), 0 14px 34px rgba(18,20,26,0.10) / 0 2px 4px rgba(0,0,0,0.40), 0 14px 34px rgba(0,0,0,0.46)"
   lift-edge: "--lift-edge 10px 0 30px -18px rgba(18,20,26,0.22) / 10px 0 30px -18px rgba(0,0,0,0.60)"
@@ -103,9 +119,13 @@ for header, terminal, pairing and favicon. The monochrome mark inherits
 `--font-display`, medium weight, `--fs-lg` (21px), with `--space-2` separation.
 No downloaded font or raster is required.
 
-Place the complete brand at the top of the thread list on phone and desktop.
-The phone conversation header retains the complete lockup above its project
-badge; the desktop context rail repeats a quiet 14px wordmark with a 24px mark.
+Place the complete brand at the top of the thread list on phone and desktop;
+the list screen is the only place the phone shows the lockup. The phone
+conversation header omits it so the header stays one row (about 56px): a 40px
+"‹" back target, a 36px avatar, the supervisor codename (ellipsised) beside a
+13px project badge, the host line beneath, and a text-only "Terminal". The
+buttons keep their full accessible names ("‹ Conversations", "Terminal view").
+The desktop context rail repeats a quiet 14px wordmark with a 24px mark.
 The main wordmark is 21px with a 32px mark; compact minimums are 14px / 24px.
 Reserve 8px around the mark. The vector is decorative beside readable text,
 never an unlabeled navigation control. A project badge names the work, not the
@@ -124,7 +144,7 @@ inherits the chosen page scheme; code scrolls locally without clipping prose.
 ## Colors
 
 - `--bg-root` inherits house `bg` (warm paper / warm graphite); `--bg-panel` inherits `surface` for the rail, header, drawer and context panel.
-- `--bg-raised` mixes 96% `surface` with `ink`; `--bg-hover` mixes 92%. These are the console's two derived overrides; selection uses house `verdict-soft` through `--bg-active`.
+- `--bg-raised` mixes 92% `bg` (the page, same value as `--canvas`) with `ink`; `--bg-hover` mixes 88%. Deriving from the page rather than `surface` keeps chips warm on paper instead of a cool #F6F6F6 seam (P15). Header controls (‹ Conversations, Terminal view, Pair a machine in the list header) are text buttons: transparent, `--ink`, `--bg-hover` on hover. These are the console's two derived overrides; selection uses house `verdict-soft` through `--bg-active`.
 - `--text-hi` inherits `ink`; `--text-mid` inherits `ink-muted`. There is no tertiary text token; timestamps and pane roles use the readable muted value.
 - `--color-action` is for controls and links; `--color-verdict` is for the decisive figure mark. Both inherit the house accent; neither is a running-status colour.
 - `--color-focus` supplies the sole focus outline. `--state-ok`, `--state-warn` and `--state-crit` inherit `good`, `warning` and `danger`; info text is muted evidence.
@@ -158,6 +178,7 @@ inherits the chosen page scheme; code scrolls locally without clipping prose.
 - Root, panel and raised surfaces separate regions by colour and the 8px shell gutter. The `dialog` and `#toast` declarations in `hub-web/src/styles.css` consume house `elevation.overlay` through `--shadow-overlay`, identical in both schemes. Phone drawer and attention sheets stay shadowless.
 - The Pebble conversation surface (EPIC cas-cac1, `docs/design/hub-messaging/round-3/`) uses elevation instead of hairlines: the rail edge is `--lift-edge`, the selected row and calm bubbles are `--lift`, attention objects and the compose FAB are `--lift-strong`, the thread header is `--lift-head`. All four are generated per scheme (ink-cast in light, black-cast in dark); `invariants.test.ts` pins every `box-shadow` to a token.
 - Pebble tokens live under `pebble:` above and are the contract every Pebble child consumes: `--canvas`/`--panel`/`--sheet-bg` surfaces, the `--ink` ramp, the constant operator pair `--you-bg`/`--you-fg`, the ask and blocker pairs, and the per-machine set `--accent`, `--accent-soft`, `--accent-fg`, `--sup-bg`, `--sup-fg`. The machine set is generated as `.machine-accent-N` (indigo, green, violet) and assigned by `hub-web/src/machine-accent.ts` from the machine id — FNV-1a into a jump consistent hash, so a fourth accent appended to `generate-tokens.mjs` recolours no existing machine. `machine-accent.test.ts` measures every rendered pair at ≥ 4.5:1 in both schemes.
+- Dark tints, never floods (P9): in dark an in-thread ask is `--ask-tint` #3A3020 in ink with a 4px `--ask-edge` gold edge and outlined tray chips; a blocker is `--crit-tint` #3A1F1E in ink with a 4px salmon `--crit-edge`; the operator's bubble is `--you-bubble-bg` #3A46B0 with white text. Only the pinned ask keeps the full `--ask-bg` gold (its chips gold on the `--ask-deep` tray), and Send keeps the bright accent, so the next action is the brightest thing on screen. `--you-bg` stays the operator's action colour (FAB, focus fallbacks); the bubble has its own pair. In light every tint token resolves to the flood it replaced, and the edges are transparent, so paper is unchanged. `machine-accent.test.ts` pins the pairs (text ≥ 4.5:1, edges and chip outlines ≥ 3:1).
 - Pane selection changes the reserved transparent border to `--line-strong`; it does not change geometry or add a glow.
 
 ## Shapes

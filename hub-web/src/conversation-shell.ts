@@ -23,10 +23,17 @@ export const composeFabMarkup = '<button id="compose-fab" class="compose-fab" ty
  * project · machine · connection in mono beneath (same order as a list row) — with the cas-11b01 back link and
  * Terminal view control on the row above it. Elevated with --lift-head; the
  * thread view itself renders no header inside this shell.
+ *
+ * On phone the two rows fold into one (cas-1776): the back link shows only its
+ * "‹" glyph and the Terminal control only "Terminal"; each button's aria-label
+ * keeps its accessible name ("‹ Conversations", "Terminal view") the same at
+ * every width. The codename ellipsises (its title carries it whole) and the
+ * host line ellipsises its project · machine part while the connection state
+ * after it stays visible.
  */
 export function conversationHeaderMarkup(model: ConversationShellModel): string {
   const host = model.host || "";
-  return `<header class="conversation-heading thead"><div class="conversation-topline"><button id="conversation-back" type="button">‹ Conversations</button>${cloudBrand()}<button id="conversation-terminal" type="button">Terminal view</button></div><div class="conversation-identity"><span class="conversation-avatar" aria-hidden="true">${escapeHtml(machineMonogram(host || model.supervisor || "?"))}</span><div class="id"><h1><b>${escapeHtml(model.supervisor || "Supervisor unavailable")}</b>${projectBadge(model.projectDir)}</h1><span class="conversation-host">${escapeHtml([projectName(model.projectDir), host].filter(Boolean).join(" · "))}<span id="conversation-connection" role="status"></span></span></div></div></header>`;
+  return `<header class="conversation-heading thead"><div class="conversation-topline"><button id="conversation-back" type="button" aria-label="‹ Conversations"><span class="back-glyph">‹</span><span class="back-label"> Conversations</span></button>${cloudBrand()}<button id="conversation-terminal" type="button" aria-label="Terminal view">Terminal<span class="terminal-suffix"> view</span></button></div><div class="conversation-identity"><span class="conversation-avatar" aria-hidden="true">${escapeHtml(machineMonogram(host || model.supervisor || "?"))}</span><div class="id"><h1><b title="${escapeHtml(model.supervisor || "Supervisor unavailable")}">${escapeHtml(model.supervisor || "Supervisor unavailable")}</b>${projectBadge(model.projectDir)}</h1><span class="conversation-host"><span class="host-where">${escapeHtml([projectName(model.projectDir), host].filter(Boolean).join(" · "))}</span><span id="conversation-connection" role="status"></span></span></div></div></header>`;
 }
 
 /** Attach is a real affordance beside the field but has no transport yet, so it is disabled and says so. */
@@ -64,19 +71,50 @@ export function dressComposer(composer: HTMLElement, supervisor?: string): void 
   }
 }
 
+/** The list's empty line: loading, unpaired, or paired with nothing live. */
+export function conversationEmptyText(catalogLoaded: boolean, machineCount: number): string {
+  return !catalogLoaded ? "Loading paired machines…" : machineCount === 0 ? "Pair a machine to start your first conversation." : "No live supervisors listed. Use Appearance & commands to show dormant sessions for recovery.";
+}
+
+/**
+ * The desktop context rail (P10). It holds only what the thread header does
+ * not: open asks and blockers, task progress, the thread's attachments and
+ * its attention events — each section starts hidden and syncContextRail
+ * (context-rail.ts) reveals the ones with data. With none, the rail folds to
+ * the 48px context track. No lockup, badge, supervisor or host: those live in
+ * the header beside it.
+ */
+function contextRailMarkup(selected: boolean): string {
+  const sections = selected
+    ? '<section class="context-section" data-section="waiting" aria-labelledby="context-waiting-heading" hidden><h2 id="context-waiting-heading">Waiting on you</h2><ul class="context-list context-waiting"></ul></section>'
+      + '<section class="context-section" data-section="progress" aria-labelledby="context-progress-heading" hidden><h2 id="context-progress-heading">Tasks &amp; progress</h2><p class="status-stale" role="status" hidden></p><div id="conversation-status-slot"></div></section>'
+      + '<section class="context-section" data-section="attachments" aria-labelledby="context-attachments-heading" hidden><h2 id="context-attachments-heading">Attachments</h2><ul class="context-list context-attachments"></ul></section>'
+      + '<section class="context-section" data-section="attention" hidden><div id="conversation-attention-slot"></div></section>'
+    : "";
+  return `<aside class="conversation-context" aria-label="Conversation context" data-open="false" aria-hidden="true">${sections}</aside>`;
+}
+
+/** Appearance & commands as a header icon button (P13): out of the phone thumb zone, named for assistive tech. */
+export const appearanceButtonMarkup = '<button id="command-palette-toggle" class="icon-button" type="button" aria-label="Appearance &amp; commands" title="Appearance &amp; commands"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" aria-hidden="true" focusable="false"><path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="17" r="2"/></svg></button>';
+
 export function conversationShellMarkup(model: ConversationShellModel): string {
-  return `<div class="conversation-shell${model.selected ? " thread-open" : ""}${model.machineId ? ` ${machineAccentClass(model.machineId)}` : ""}">
+  // First run: the welcome carries the one primary "Pair a machine". The list
+  // header's chip is hidden beside it on wide screens (styles.css
+  // .welcome-pairs) and, on a phone where the welcome is not shown, it is the
+  // primary action itself.
+  const welcomePairs = !model.selected && model.loaded && !model.paired;
+  return `<div class="conversation-shell${model.selected ? " thread-open" : ""}${welcomePairs ? " welcome-pairs" : ""}${model.machineId ? ` ${machineAccentClass(model.machineId)}` : ""}">
     <aside class="conversation-sidebar" aria-label="Supervisor conversations">
-      <header class="conversation-list-heading">${cloudBrand()}<div class="conversation-list-title"><h1>Conversations</h1><button id="pair-toggle" type="button">Pair a machine</button></div><p>Your projects. Your supervisors.</p></header>
+      <header class="conversation-list-heading"><div class="conversation-list-top">${cloudBrand()}${appearanceButtonMarkup}</div><div class="conversation-list-title"><h1>Conversations</h1><button id="pair-toggle"${welcomePairs ? ' class="primary"' : ""} type="button">Pair a machine</button></div><p>Your projects. Your supervisors.</p></header>
       <nav id="conversation-list" aria-label="Choose a supervisor"></nav>
       <div id="conversation-empty" class="conversation-empty" hidden></div>
-      <footer><div id="hub-footer-badges" class="hub-footer-badges" aria-label="Hub status"></div><button id="command-palette-toggle" type="button">Appearance &amp; commands</button></footer>
-      ${composeFabMarkup}
+      <footer><div id="hub-footer-badges" class="hub-footer-badges" aria-label="Hub status"></div></footer>
+      ${model.paired ? composeFabMarkup : ""}
     </aside>
     <main class="conversation-main">
       ${model.selected ? `${conversationHeaderMarkup(model)}<section id="conversation-pane-slot" class="conversation-pane-slot"></section><div id="conversation-composer-slot"></div>` : `<div class="conversation-welcome"><span class="conversation-eyebrow">SUPERVISOR CONVERSATIONS</span><h2>Stay close to the work.</h2><p>${!model.loaded ? "Loading your paired machines…" : !model.paired ? "Pair a machine to read your supervisors’ words and talk to them here." : "Choose a project to read its supervisor’s words and send an instruction."}</p>${!model.paired && model.loaded ? '<button id="empty-pair" class="primary" type="button">Pair a machine</button>' : ""}</div>`}
     </main>
-    <aside class="conversation-context" aria-label="Conversation context">${cloudBrand()}<h2>In this conversation</h2>${model.selected ? `${projectBadge(model.projectDir)}<p class="conversation-context-name">${escapeHtml(model.supervisor || "Supervisor unavailable")}</p><p class="conversation-host">${escapeHtml(model.host || "")}</p><h2>Tasks &amp; progress</h2><p class="status-stale" role="status" hidden></p><div id="conversation-status-slot"></div><div id="conversation-attention-slot"></div>` : '<p class="conversation-host">Project context appears here when you open a conversation.</p>'}</aside>
+    ${contextRailMarkup(model.selected)}
   </div>`;
 }
 

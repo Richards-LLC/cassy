@@ -95,6 +95,8 @@ export interface ConversationViewOptions {
   echo?: () => string | undefined;
   /** Refused sends offer to put their text back into the composer. */
   editMessage?: (text: string) => void;
+  /** Refused sends offer to go out again unchanged (same text, same in_reply_to). */
+  retryMessage?: (send: ConversationSend) => void;
   /**
    * Quick replies and composer replies to an ask go through this; the caller
    * sends with in_reply_to = the ask's notification_id and records the send
@@ -112,6 +114,8 @@ export interface ConversationViewOptions {
 }
 
 const TICK = '<svg class="tick" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.6 8.6l3.3 3.3L13.4 4.4"/></svg>';
+/** Warning triangle for a refused send; decorative — the "Not sent" text carries the meaning. */
+const WARN = '<svg class="warn" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 1.9 14.6 13.6H1.4Z"/><path d="M8 6.2v3.4"/><path d="M8 11.7v.1"/></svg>';
 
 export class ConversationView {
   readonly element: HTMLElement;
@@ -128,6 +132,8 @@ export class ConversationView {
   private readonly jump: HTMLButtonElement;
   private readonly options: ConversationViewOptions;
   private nodes = new Map<string, HTMLElement>();
+  /** Coalesced status lines the operator opened with "Show full update"; survives repaints. */
+  private expanded = new Set<string>();
   private following = true;
   private pinPending = false;
   private disposed = false;
@@ -143,9 +149,9 @@ export class ConversationView {
     this.element.setAttribute("aria-label", `Conversation with ${supervisor}`);
     this.head = document.createElement("header"); this.head.className = "thead";
     const identity = document.createElement("div"); identity.className = "id";
-    const name = document.createElement("b"); name.textContent = supervisor;
+    const name = document.createElement("b"); name.className = "codename"; name.textContent = supervisor;
     const where = document.createElement("span");
-    where.textContent = [this.options.machine, this.options.project].filter(Boolean).join(" · ");
+    where.textContent = [this.options.project, this.options.machine].filter(Boolean).join(" · ");
     identity.append(name, where);
     this.head.append(identity);
     this.loadEarlier = document.createElement("button");
@@ -170,7 +176,10 @@ export class ConversationView {
       this.jump.hidden = this.following;
     }, { passive: true });
     if (typeof ResizeObserver !== "undefined") {
-      this.resize = new ResizeObserver(() => { if (this.following) this.pin(); });
+      this.resize = new ResizeObserver(() => {
+        for (const node of this.msgs.querySelectorAll<HTMLElement>(".coalesce-turn")) syncClampPill(node);
+        if (this.following) this.pin();
+      });
       this.resize.observe(this.element);
     }
   }
@@ -181,8 +190,7 @@ export class ConversationView {
     const hasEarlier = this.options.hasEarlier?.() === true;
     const loadingEarlier = this.options.loadingEarlier?.() === true;
     this.loadEarlier.hidden = !hasEarlier;
-    this.loadEarlier.disabled = loadingEarlier;
-    this.loadEarlier.textContent = loadingEarlier ? "Loading earlier…" : "Load earlier";
+    this.renderLoadEarlier(loadingEarlier);
     const working = this.options.working?.() === true;
     const model = threadModel(this.history.events, { working, historyEnd: this.options.historyEnd?.() === true });
     const document = this.element.ownerDocument;
@@ -196,6 +204,7 @@ export class ConversationView {
       children.push(node);
     }
     this.nodes = next;
+    for (const key of this.expanded) if (!next.has(key)) this.expanded.delete(key);
     // Only re-append when the sequence changed: an unchanged list keeps its
     // scroll position and selection.
     const same = this.msgs.children.length === children.length && children.every((node, index) => this.msgs.children[index] === node);
@@ -203,6 +212,24 @@ export class ConversationView {
     this.renderPinned(document);
     this.renderEmpty(model.length === 0);
     if (this.following && document.getSelection()?.isCollapsed !== false) this.pin();
+  }
+
+  /**
+   * While an older page loads the button stays readable (it is the only
+   * loading signal): ink-mid at full opacity, the thread's three-dot working
+   * mark beside the label, and aria-busy on the thread for assistive tech.
+   */
+  private renderLoadEarlier(loading: boolean): void {
+    if (loading) this.element.setAttribute("aria-busy", "true");
+    else this.element.removeAttribute("aria-busy");
+    if (this.loadEarlier.disabled === loading && this.loadEarlier.dataset.loading === String(loading)) return;
+    this.loadEarlier.disabled = loading;
+    this.loadEarlier.dataset.loading = String(loading);
+    const document = this.element.ownerDocument;
+    if (!loading) { this.loadEarlier.textContent = "Load earlier"; return; }
+    const dots = document.createElement("span"); dots.className = "dots"; dots.setAttribute("aria-hidden", "true");
+    dots.append(document.createElement("i"), document.createElement("i"), document.createElement("i"));
+    this.loadEarlier.replaceChildren(dots, document.createTextNode("Loading earlier…"));
   }
 
   /** The most recent unanswered ask, pinned above the composer; answering unpins it. */
@@ -241,7 +268,9 @@ export class ConversationView {
     const reply = turn.event.kind === "reply" ? turn.event.value : undefined;
     const answered = reply?.kind === "ask" ? this.history.answered(reply.notification_id) : undefined;
     const waiting = reply?.kind === "blocker" ? this.history.waiting().some((item) => item.notification_id === reply.notification_id) : undefined;
-    return JSON.stringify([turn.event, answered && [answered.id, answered.state, answered.text], waiting]);
+    // The pinned ask's flow copy is collapsed; it expands again when a newer ask takes the pin.
+    const pinned = reply?.kind === "ask" ? this.history.pinnedAsk()?.notification_id === reply.notification_id : undefined;
+    return JSON.stringify([turn.event, answered && [answered.id, answered.state, answered.text], waiting, pinned]);
   }
 
   /**
@@ -261,11 +290,14 @@ export class ConversationView {
     const document = this.element.ownerDocument;
     const mono = document.createElement("span"); mono.className = "mono"; mono.setAttribute("aria-hidden", "true");
     mono.textContent = machineMonogram(machine || supervisor);
-    const name = document.createElement("b"); name.textContent = supervisor;
+    const name = document.createElement("b"); name.className = "codename"; name.textContent = supervisor;
+    // project · machine, the order of the header and every list row (P14).
     const where = document.createElement("span"); where.className = "proj2";
-    where.textContent = [machine, project].filter(Boolean).join(" · ");
+    where.textContent = [project, machine].filter(Boolean).join(" · ");
     const said = document.createElement("p"); said.className = "said"; said.setAttribute("role", "status");
-    said.textContent = `Nothing waiting on you. ${supervisor} will write here when it needs a decision.`;
+    // The codename is an identifier: mono and never broken at its hyphen, even inside prose.
+    const codename = document.createElement("span"); codename.className = "codename"; codename.textContent = supervisor;
+    said.append("Nothing waiting on you. ", codename, " will write here when it needs a decision.");
     const children: HTMLElement[] = [mono, name, where, said];
     if (echo) { const quiet = document.createElement("div"); quiet.className = "quiet"; quiet.textContent = echo; children.push(quiet); }
     this.empty.replaceChildren(...children);
@@ -302,15 +334,41 @@ export class ConversationView {
     node.replaceChildren(line);
   }
 
+  /**
+   * Folded statuses: a rounded box clamped at three lines. "Show full update"
+   * opens the whole run — every folded update in order, latest last — and is
+   * offered whenever the run hides something: earlier updates, or a latest
+   * update that overflows the clamp.
+   */
   private renderCoalesce(node: HTMLElement, item: ThreadCoalesce): void {
     const document = node.ownerDocument;
+    const expanded = this.expanded.has(item.key);
     node.className = "turn coalesce-turn";
     const line = document.createElement("div"); line.className = "coalesce";
+    line.id = `coalesce-${item.key.replace(/[^\w-]/g, "-")}`;
     line.dataset.count = String(item.count);
-    line.textContent = coalesceText(item);
-    line.title = item.replies.map((reply) => reply.message).join("\n");
-    node.replaceChildren(line);
+    line.dataset.expanded = String(expanded);
+    if (expanded) {
+      line.append(...item.replies.map((reply) => { const p = document.createElement("p"); p.textContent = reply.message; return p; }));
+    } else {
+      line.textContent = coalesceText(item);
+      line.title = item.replies.map((reply) => reply.message).join("\n");
+    }
+    const more = document.createElement("button"); more.type = "button"; more.className = "coalesce-expand";
+    more.textContent = expanded ? "Show less" : "Show full update";
+    more.setAttribute("aria-expanded", String(expanded));
+    more.setAttribute("aria-controls", line.id);
+    more.hidden = !expanded && item.count < 2;
+    more.onclick = () => {
+      if (this.expanded.has(item.key)) this.expanded.delete(item.key); else this.expanded.add(item.key);
+      this.renderCoalesce(node, item);
+      node.querySelector<HTMLButtonElement>(".coalesce-expand")?.focus();
+    };
+    node.replaceChildren(line, more);
     if (item.time) { const time = document.createElement("time"); time.textContent = item.time; node.append(time); }
+    // A single status can still overflow three lines at a narrow width; offer
+    // the way in once layout says the clamp hid something.
+    if (more.hidden && typeof requestAnimationFrame !== "undefined") requestAnimationFrame(() => syncClampPill(node));
   }
 
   private renderGroup(node: HTMLElement, group: ThreadGroup): void {
@@ -349,16 +407,38 @@ export class ConversationView {
     bubble.className = "bub";
     bubble.dataset.state = send.state;
     bubble.append(...paragraphs(document, send.text));
-    if (send.state === "sending" || send.state === "error") {
+    if (send.state === "sending") {
       const state = document.createElement("span");
       state.className = "conversation-delivery"; state.setAttribute("role", "status");
-      state.textContent = send.state === "sending" ? "Sending…" : `Not sent · ${send.error ?? "refused"}`;
+      state.textContent = "Sending…";
       bubble.append(state);
-      if (send.state === "error" && this.options.editMessage) {
-        const edit = document.createElement("button"); edit.type = "button"; edit.className = "conversation-edit"; edit.textContent = "Edit message";
+    } else if (send.state === "error") {
+      // P8 (cas-b1ee): a refused send must not read as delivered. The bubble
+      // drops its fill for a dashed critical outline; the label leads with a
+      // warning glyph and "Not sent", the refusal reason follows quietly.
+      const state = document.createElement("span");
+      state.className = "conversation-delivery conversation-refused"; state.setAttribute("role", "status");
+      const glyph = document.createElement("template"); glyph.innerHTML = WARN;
+      const label = document.createElement("b"); label.textContent = "Not sent";
+      // The separator is for the reader; on screen the reason takes its own line.
+      const separator = document.createElement("span"); separator.className = "sr-only"; separator.textContent = " · ";
+      const reason = document.createElement("span"); reason.className = "conversation-refused-reason"; reason.textContent = send.error ?? "refused";
+      state.append(glyph.content.firstElementChild!, label, separator, reason);
+      bubble.append(state);
+      const actions = document.createElement("div"); actions.className = "conversation-actions";
+      if (this.options.editMessage) {
+        const edit = document.createElement("button"); edit.type = "button"; edit.className = "conversation-edit"; edit.textContent = "Edit";
+        edit.setAttribute("aria-label", "Edit message");
         edit.onclick = () => this.options.editMessage?.(send.text);
-        bubble.append(edit);
+        actions.append(edit);
       }
+      if (this.options.retryMessage) {
+        const retry = document.createElement("button"); retry.type = "button"; retry.className = "conversation-retry"; retry.textContent = "Retry";
+        retry.setAttribute("aria-label", "Retry sending");
+        retry.onclick = () => this.options.retryMessage?.(send);
+        actions.append(retry);
+      }
+      if (actions.childElementCount) bubble.append(actions);
     }
     return bubble;
   }
@@ -420,6 +500,14 @@ export class ConversationView {
   }
 
   dispose(): void { this.disposed = true; this.resize?.disconnect(); this.element.remove(); this.pinned.remove(); }
+}
+
+/** Show the expand pill on a lone folded status only while the three-line clamp is hiding text. */
+function syncClampPill(node: HTMLElement): void {
+  const line = node.querySelector<HTMLElement>(":scope > .coalesce");
+  const more = node.querySelector<HTMLButtonElement>(":scope > .coalesce-expand");
+  if (!line || !more || !line.isConnected || line.dataset.expanded === "true" || Number(line.dataset.count) > 1) return;
+  more.hidden = !(line.scrollHeight > line.clientHeight + 1);
 }
 
 function signatureOf(item: ThreadItem, turnSignature: (turn: ThreadTurn) => string): string {

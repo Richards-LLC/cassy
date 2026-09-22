@@ -65,15 +65,25 @@ export class ConversationHistory {
       session: message.session,
     });
   }
-  /** The operator send that answered this ask, if any. */
+  /**
+   * The operator send that answered this ask, if any. A refused send never
+   * reached the supervisor, so it answers nothing: the ask stays waiting (and
+   * pinned, with its chips) beside the refused bubble until a send that is
+   * sending, acknowledged or replied carries its id. A sending reply answers
+   * optimistically and gives the ask back if the hub refuses it.
+   */
   answered(notificationId: number): ConversationSend | undefined {
-    for (const event of this.events) if (event.kind === "send" && event.value.replyTo === notificationId) return event.value;
+    for (const event of this.events) if (event.kind === "send" && event.value.replyTo === notificationId && event.value.state !== "error") return event.value;
     return undefined;
   }
   /**
    * Asks and blockers still waiting on the operator, oldest first. An ask is
    * answered by a send carrying its id; a blocker is acknowledged by any
-   * operator send after it. Drives the list's waiting affordance and the pin.
+   * operator send after it that was not refused. A refused send never reached
+   * the supervisor, so the blocker keeps waiting beside it; a sending send
+   * acknowledges optimistically and gives the blocker back if refused, and a
+   * successful retry acknowledges it. Drives the list's waiting affordance and
+   * the pin.
    */
   waiting(): OperatorReply[] {
     const out: OperatorReply[] = [];
@@ -81,7 +91,7 @@ export class ConversationHistory {
       if (event.kind !== "reply") return;
       const reply = event.value;
       if (reply.kind === "ask" && !this.answered(reply.notification_id)) out.push(reply);
-      else if (reply.kind === "blocker" && !this.events.slice(index + 1).some((later) => later.kind === "send")) out.push(reply);
+      else if (reply.kind === "blocker" && !this.events.slice(index + 1).some((later) => later.kind === "send" && later.value.state !== "error")) out.push(reply);
     });
     return out;
   }
@@ -104,6 +114,13 @@ export class ConversationHistory {
     if (!send || send.kind !== "send" || send.value.notificationId !== undefined) return false;
     send.value.state = "error";
     send.value.error = message;
+    return true;
+  }
+  /** Drop a refused send that a retry replaced. Only a refused send can be discarded. */
+  discardRefused(id: string): boolean {
+    const index = this.events.findIndex((event) => event.kind === "send" && event.value.id === id && event.value.state === "error");
+    if (index < 0) return false;
+    this.events.splice(index, 1);
     return true;
   }
   reply(reply: OperatorReply, at: number | undefined = Date.now(), session?: string): void {

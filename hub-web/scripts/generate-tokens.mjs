@@ -25,9 +25,12 @@ try {
   if (!overlayColor) throw new Error("Missing colour component in required token path: elevation.overlay.$value");
 
   // Hub-only values explicitly retained by the map; house values come from JSON.
+  // --bg-raised/--bg-hover step from the page (--bg-root, the same house `bg` as
+  // --canvas; the dark wells below redeclare it) rather than the white/charcoal
+  // panel, so chips stay warm on paper instead of cool grey (P15, cas-9616).
   const derived = {
-    "--bg-raised": "color-mix(in srgb, var(--bg-panel) 96%, var(--text-hi))",
-    "--bg-hover": "color-mix(in srgb, var(--bg-panel) 92%, var(--text-hi))",
+    "--bg-raised": "color-mix(in srgb, var(--bg-root) 92%, var(--text-hi))",
+    "--bg-hover": "color-mix(in srgb, var(--bg-root) 88%, var(--text-hi))",
     "--overlay-backdrop": "color-mix(in srgb, var(--bg-root) 72%, transparent)",
   };
   const common = {
@@ -112,10 +115,30 @@ try {
   // shared contract every Pebble child consumes and never redefines. House roles
   // are read from design-tokens.json; the rest are hub-only literals ported from
   // docs/design/hub-messaging/round-3/pebble.css (light) and its dark block.
+  //
+  // Attention objects and the operator bubble (P9, cas-9616): in dark the thread
+  // tints instead of flooding. An in-thread ask/blocker is a dark tint in ink with
+  // a 4px coloured edge; only the pinned ask keeps the full gold fill, and Send
+  // keeps the bright accent, so the next action stays the brightest thing. Light
+  // resolves every one of these to the value it rendered before.
+  //   --ask-tint/-fg/-deep  in-thread ask body, its ink, its tray
+  //   --ask-edge            the 4px edge on an in-thread ask (transparent in light)
+  //   --tray-chip-*         quick-reply chips on an in-thread tray
+  //   --pin-chip-*          quick-reply chips on the pinned (full gold) tray, and their hover
+  //   --tray-focus          focus ring on either tray's chips
+  //   --crit-tint/-fg/-edge in-thread blocker body, ink and edge
+  //   --you-bubble-bg/-fg   the operator's own bubble; --you-bg stays the action colour
+  const lightInk = token("color.light.ink"), darkInk = token("color.dark.ink");
+  const gold = token("color.dark.warning");
   const pebbleLiterals = {
     light: {
       "--sheet-bg": "#FFFFFF", "--fold": "#EAE5DB", "--ink-soft": "#494E5C",
       "--you-fg": "#FFFFFF", "--ask-fg": "#1B1D24", "--ask-deep": "#7F5504", "--crit-fg": "#FFFFFF", "--accent-fg": "#FFFFFF",
+      "--ask-tint": gold, "--ask-tint-fg": lightInk, "--ask-tint-deep": "#7F5504", "--ask-edge": "transparent",
+      "--tray-chip-bg": "#FFFFFF", "--tray-chip-fg": lightInk, "--tray-chip-line": "transparent",
+      "--pin-chip-bg": "#FFFFFF", "--pin-chip-fg": lightInk, "--pin-chip-hover": "var(--bg-hover)", "--tray-focus": "#FFFFFF",
+      "--crit-tint": token("color.light.danger"), "--crit-tint-fg": "#FFFFFF", "--crit-edge": "transparent",
+      "--you-bubble-bg": token("color.light.action"), "--you-bubble-fg": "#FFFFFF",
       "--lift": "0 1px 2px rgba(18,20,26,0.05), 0 6px 18px rgba(18,20,26,0.06)",
       "--lift-strong": "0 2px 4px rgba(18,20,26,0.08), 0 14px 34px rgba(18,20,26,0.10)",
       "--lift-edge": "10px 0 30px -18px rgba(18,20,26,0.22)",
@@ -124,6 +147,11 @@ try {
     dark: {
       "--sheet-bg": "#1F232D", "--fold": "#262B35", "--ink-soft": "#B4B8C4",
       "--you-fg": "#12141A", "--ask-fg": "#12141A", "--ask-deep": "#6E551C", "--crit-fg": "#12141A", "--accent-fg": "#12141A",
+      "--ask-tint": "#3A3020", "--ask-tint-fg": darkInk, "--ask-tint-deep": "#2B2418", "--ask-edge": gold,
+      "--tray-chip-bg": "transparent", "--tray-chip-fg": darkInk, "--tray-chip-line": gold,
+      "--pin-chip-bg": gold, "--pin-chip-fg": "#12141A", "--pin-chip-hover": "#EDC169", "--tray-focus": gold,
+      "--crit-tint": "#3A1F1E", "--crit-tint-fg": darkInk, "--crit-edge": token("color.dark.danger"),
+      "--you-bubble-bg": "#3A46B0", "--you-bubble-fg": "#FFFFFF",
       "--lift": "0 1px 2px rgba(0,0,0,0.32), 0 6px 18px rgba(0,0,0,0.34)",
       "--lift-strong": "0 2px 4px rgba(0,0,0,0.40), 0 14px 34px rgba(0,0,0,0.46)",
       "--lift-edge": "10px 0 30px -18px rgba(0,0,0,0.60)",
@@ -183,7 +211,9 @@ try {
     + "/* Pebble machine accents (hub-web/src/machine-accent.ts): append a set, never reorder. */\n"
     + accentBlocks + "\n"
     + "/* Dark wells: color.dark.* + color.series-neutral.dark; derived surfaces use those roles. */\n"
-    + ".terminal-mount:not(.conversation-active), .transcript, .terminal-search input, .attention-payload pre,\n.connection-log pre, dialog:not(.command-palette) input {\n  color-scheme: dark;\n"
+    // Dialog inputs are not wells: the pairing fields are --panel fields with a
+    // --line-strong edge in both schemes (styles.css dialog input).
+    + ".terminal-mount:not(.conversation-active), .transcript, .terminal-search input, .attention-payload pre,\n.connection-log pre {\n  color-scheme: dark;\n"
     + declarations({ ...derived, ...colors("dark") }) + "\n}\n";
   if (values.check) {
     if (readFileSync(values.output, "utf8") !== output) throw new Error("Generated tokens.css has drifted; run npm run tokens and commit the result.");

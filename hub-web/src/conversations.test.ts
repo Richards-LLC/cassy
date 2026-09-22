@@ -33,6 +33,60 @@ describe('conversation evidence', () => {
     expect(history.events).toHaveLength(2);
     expect(history.events[0]).toMatchObject({ value: { notificationId: 11, state: 'acknowledged' } });
   });
+  it('never counts a refused send as the answer to an ask (cas-b438)', () => {
+    const history = new ConversationHistory();
+    history.reply({ notification_id: 4, reply_to: null, message: 'Tag it?', summary: '', device_id: 'd', kind: 'ask' });
+    // Sending answers optimistically.
+    history.submit('q', 'supervisor', 'Yes, go ahead', Date.now(), 4);
+    expect(history.answered(4)?.id).toBe('q'); expect(history.pinnedAsk()).toBeUndefined();
+    // Refused: nothing reached the supervisor, so the ask is waiting and pinned again.
+    history.reject('q', 'no access');
+    expect(history.answered(4)).toBeUndefined();
+    expect(history.pinnedAsk()?.notification_id).toBe(4);
+    expect(history.waiting().map((item) => item.notification_id)).toEqual([4]);
+    // A retry replaces the refused send and answers the ask.
+    expect(history.discardRefused('q')).toBe(true);
+    history.submit('r', 'supervisor', 'Yes, go ahead', Date.now(), 4);
+    expect(history.answered(4)?.id).toBe('r'); expect(history.pinnedAsk()).toBeUndefined();
+    // A refused send beside a live one never shadows it, whatever the order.
+    history.submit('late', 'supervisor', 'Hold', Date.now(), 4); history.reject('late', 'no access');
+    expect(history.answered(4)?.id).toBe('r');
+    history.acknowledge({ client_ref: 'r', notification_id: 9, target: 'supervisor', stamped: true });
+    expect(history.answered(4)).toMatchObject({ id: 'r', state: 'acknowledged' });
+  });
+  it('never counts a refused send as acknowledging a blocker (cas-6874)', () => {
+    const history = new ConversationHistory();
+    history.reply({ notification_id: 7, reply_to: null, message: 'Gate red.', summary: '', device_id: 'd', kind: 'blocker' });
+    expect(history.waiting().map((item) => item.notification_id)).toEqual([7]);
+    // Sending acknowledges optimistically.
+    history.submit('s', 'supervisor', 'Looking now', Date.now());
+    expect(history.waiting()).toEqual([]);
+    // Refused: the supervisor received nothing, so the blocker is waiting on the operator again.
+    history.reject('s', 'offline');
+    expect(history.waiting().map((item) => item.notification_id)).toEqual([7]);
+    // The list row (attention = waiting().length, as renderConversationList feeds it) still flags it waiting on the operator.
+    const container = document.createElement('nav');
+    new ConversationList().render(container, [{ key: 'a:s', machineId: 'a', session: 's', supervisor: 'sup', host: 'Atlas', freshness: 'now', connection: 'Live', when: '10:00', attention: history.waiting().length, selected: false }], vi.fn());
+    expect((container.firstElementChild as HTMLElement).dataset.waiting).toBe('true');
+    expect(container.querySelector('.conversation-flag')?.getAttribute('aria-label')).toBe('Waiting for you');
+    // A retry replaces the refused send and acknowledges the blocker.
+    expect(history.discardRefused('s')).toBe(true);
+    history.submit('r', 'supervisor', 'Looking now', Date.now());
+    expect(history.waiting()).toEqual([]);
+    history.acknowledge({ client_ref: 'r', notification_id: 12, target: 'supervisor', stamped: true });
+    expect(history.waiting()).toEqual([]);
+    // A later refused send beside the delivered one never un-acknowledges it.
+    history.submit('late', 'supervisor', 'Also', Date.now()); history.reject('late', 'offline');
+    expect(history.waiting()).toEqual([]);
+  });
+  it('keeps a blocker waiting when only a refused send follows it, even without a retry (cas-6874)', () => {
+    const history = new ConversationHistory();
+    history.submit('before', 'supervisor', 'Earlier', 1);
+    history.reply({ notification_id: 8, reply_to: null, message: 'Need a key.', summary: '', device_id: 'd', kind: 'blocker' }, 2);
+    history.submit('x', 'supervisor', 'Here', 3); history.reject('x', 'no access');
+    // The send before the blocker never acknowledges it, and the refused one after it does not either.
+    expect(history.waiting().map((item) => item.notification_id)).toEqual([8]);
+  });
   it('tracks asks and blockers waiting on the operator and the send that answers an ask (cas-43f9)', () => {
     const history = new ConversationHistory();
     const turn = (notification_id: number, kind: 'ask' | 'blocker' | 'answer', message = `m${notification_id}`) => ({ notification_id, reply_to: null, message, summary: '', device_id: 'd', kind });
@@ -94,9 +148,13 @@ describe('conversation evidence', () => {
     expect(waiting.querySelector('.conversation-avatar')?.textContent).toBe('A');
     expect(waiting.querySelector('.conversation-supervisor')?.textContent).toBe('patient-pelican-9');
     expect(waiting.querySelector('.project-badge')?.textContent).toBe('cas-src');
-    // Separator and project travel together so a wrapped project never leaves the dot dangling.
-    expect(waiting.querySelector('.conversation-project')?.innerHTML).toBe('<span class="conversation-sep" aria-hidden="true"></span><span class="project-badge">cas-src</span>');
+    // P13: the meta leads with the project, never a stray dot; the only separator rides with the machine.
+    expect(waiting.querySelector('.conversation-project')?.innerHTML).toBe('<span class="project-badge">cas-src</span>');
     expect(waiting.querySelector('.conversation-who > .conversation-sep')).toBeNull();
+    expect(waiting.querySelectorAll('.conversation-sep')).toHaveLength(1);
+    expect(waiting.querySelector('.conversation-meta')?.firstElementChild?.firstElementChild?.className).toBe('project-badge');
+    // P14: the codename is one unbreakable word.
+    expect(waiting.querySelector('.conversation-supervisor')?.classList.contains('codename')).toBe(true);
     // The machine is named as text on every row, after the project, with its own wrapping separator.
     expect(waiting.querySelector('.conversation-machine')?.textContent).toBe('Atlas');
     expect(waiting.querySelector('.conversation-machine')?.innerHTML).toBe('<span class="conversation-sep" aria-hidden="true"></span>Atlas');
@@ -107,16 +165,45 @@ describe('conversation evidence', () => {
     expect(waiting.querySelector('script, it')).toBeNull();
     expect(waiting.querySelector('.conversation-when')?.className).toBe('conversation-when hot');
     expect(waiting.querySelector('.conversation-flag')?.getAttribute('aria-label')).toBe('Waiting for you');
+    expect(waiting.querySelector('.conversation-marks > .conversation-flag')).not.toBeNull();
     expect(waiting.querySelector('.conversation-unread')).toBeNull();
     expect(waiting.dataset.waiting).toBe('true');
     expect(unread.querySelector('.conversation-unread')?.textContent).toBe('2');
-    expect(unread.querySelector('.conversation-when')).toBeNull();
+    // P13: an unread row keeps its time at the headline end; the count sits beneath it.
+    expect(unread.querySelector('.conversation-when')?.textContent).toBe('Tue');
+    expect([...unread.children].map((child) => child.className)).toEqual(['conversation-avatar', 'conversation-who', 'conversation-when', 'conversation-preview bold', 'conversation-marks']);
+    expect(unread.querySelector('.conversation-marks > .conversation-unread')).not.toBeNull();
     expect(unread.querySelector('.conversation-flag')).toBeNull();
     expect(unread.querySelector('.conversation-preview')?.className).toBe('conversation-preview bold');
     expect(quiet.querySelector('.conversation-when')?.textContent).toBe('Tue');
     expect(quiet.querySelector('.conversation-preview')?.textContent).toBe('Live');
     expect(quiet.querySelector('.conversation-preview')?.className).toBe('conversation-preview');
-    expect(quiet.querySelector('.conversation-flag, .conversation-unread')).toBeNull();
+    expect(quiet.querySelector('.conversation-flag, .conversation-unread, .conversation-marks')).toBeNull();
+  });
+  it('keeps the time and stacks both marks when a row is waiting and unread (P13)', () => {
+    const list = new ConversationList(); const container = document.createElement('nav');
+    list.render(container, [{ key: 'a:s', machineId: 'a', session: 's', supervisor: 'patient-pelican-9', projectDir: '/p/cas-src', host: 'Atlas', freshness: 'now', connection: 'Live', when: '09:58', attention: 2, unread: 3, selected: false }], vi.fn());
+    const row = container.firstElementChild!;
+    expect(row.querySelector('.conversation-when.hot')?.textContent).toBe('09:58');
+    expect([...row.querySelector('.conversation-marks')!.children].map((child) => child.className)).toEqual(['conversation-unread', 'conversation-flag']);
+    expect(row.querySelector('.conversation-flag')?.getAttribute('aria-label')).toBe('2 waiting for you');
+  });
+  it('gates the compose FAB on a paired machine and puts Appearance & commands in the header as a named icon button (P13)', () => {
+    const unpaired = document.createElement('div');
+    unpaired.innerHTML = conversationShellMarkup({ selected: false, loaded: true, paired: false });
+    expect(unpaired.querySelector('#compose-fab')).toBeNull();
+    const loading = document.createElement('div');
+    loading.innerHTML = conversationShellMarkup({ selected: false, loaded: false, paired: false });
+    expect(loading.querySelector('#compose-fab')).toBeNull();
+    const paired = document.createElement('div');
+    paired.innerHTML = conversationShellMarkup({ selected: false, loaded: true, paired: true });
+    expect(paired.querySelector('#compose-fab')?.getAttribute('aria-label')).toBe('Write to a supervisor');
+    const toggle = paired.querySelector<HTMLButtonElement>('#command-palette-toggle')!;
+    expect(toggle.closest('.conversation-list-heading > .conversation-list-top')).not.toBeNull();
+    expect(toggle.getAttribute('aria-label')).toBe('Appearance & commands');
+    expect(toggle.textContent).toBe('');
+    expect(toggle.querySelector('svg')?.getAttribute('aria-hidden')).toBe('true');
+    expect(paired.querySelector('.conversation-sidebar footer #command-palette-toggle')).toBeNull();
   });
   it('strips supervisor markdown from conversation-list previews', () => {
     const list = new ConversationList(); const container = document.createElement('nav');
@@ -133,6 +220,11 @@ describe('conversation evidence', () => {
     expect(preview.endsWith('…')).toBe(true);
     expect(conversationRowMarkup({ key: 'a:s', machineId: 'a', session: 's', supervisor: 'sup', host: 'Atlas', freshness: 'now', connection: 'Live', attention: 0, preview: longReply, selected: false })).toContain(`>${preview}</span>`);
   });
+  it('names an unreachable session with a pending instruction on its row, over the last turn (cas-7294)', () => {
+    const row: ConversationRow = { key: 'a:s', machineId: 'a', session: 's', supervisor: 'sup', host: 'Atlas', freshness: 'now', connection: 'Unreachable · message pending', attention: 0, preview: 'You: Keep this instruction visible.', selected: false };
+    expect(conversationRowMarkup({ ...row, unreachable: true })).toContain('<span class="conversation-preview unreachable">Unreachable · message pending</span>');
+    expect(conversationRowMarkup({ ...row, connection: 'Live' })).toContain('<span class="conversation-preview">You: Keep this instruction visible.</span>');
+  });
   it('renders the fixture list with a footer count equal to the rows rendered', () => {
     const app = document.createElement('div'); document.body.replaceChildren(app);
     renderConversationFixture(app, 'conversations-list');
@@ -146,7 +238,20 @@ describe('conversation evidence', () => {
     const shell = conversationShellMarkup({ selected: true, supervisor: 'patient-pelican-9', projectDir: '/projects/cas-src', host: 'Atlas · Linux', machineId: 'atlas-linux', loaded: true, paired: true });
     expect(shell).toContain('class="conversation-shell thread-open machine-accent-0"');
     expect(shell).toContain('id="compose-fab" class="compose-fab"');
-    expect(conversationShellMarkup({ selected: false, loaded: true, paired: false })).toContain('class="conversation-shell">');
+    expect(conversationShellMarkup({ selected: false, loaded: true, paired: true })).toContain('class="conversation-shell">');
+  });
+  it('offers one primary Pair a machine on first run: the welcome, with the header chip primary only where the welcome is hidden (D3)', () => {
+    const shell = document.createElement('div');
+    shell.innerHTML = conversationShellMarkup({ selected: false, loaded: true, paired: false });
+    expect(shell.querySelector('.conversation-shell')?.classList.contains('welcome-pairs')).toBe(true);
+    expect(shell.querySelector('#empty-pair')?.classList.contains('primary')).toBe(true);
+    expect(shell.querySelector('#pair-toggle')?.classList.contains('primary')).toBe(true);
+    for (const model of [{ loaded: false, paired: false }, { loaded: true, paired: true }]) {
+      shell.innerHTML = conversationShellMarkup({ selected: false, ...model });
+      expect(shell.querySelector('.welcome-pairs')).toBeNull();
+      expect(shell.querySelector('#empty-pair')).toBeNull();
+      expect(shell.querySelector('#pair-toggle')?.classList.contains('primary')).toBe(false);
+    }
   });
   it('renders one Pebble header above the thread with the back link, Terminal view, avatar, badge and connection slot', () => {
     const shell = document.createElement('div');
@@ -156,10 +261,19 @@ describe('conversation evidence', () => {
     const header = main.querySelector('header.conversation-heading.thead')!;
     expect(header.querySelector('#conversation-back')?.textContent).toBe('‹ Conversations');
     expect(header.querySelector('#conversation-terminal')?.textContent).toBe('Terminal view');
+    // Phone folds to "‹" and "Terminal" (cas-1776); the aria-labels keep the full names at every width.
+    expect(header.querySelector('#conversation-back')?.getAttribute('aria-label')).toBe('‹ Conversations');
+    expect(header.querySelector('#conversation-terminal')?.getAttribute('aria-label')).toBe('Terminal view');
+    expect(header.querySelector('#conversation-back .back-glyph')?.textContent).toBe('‹');
+    expect(header.querySelector('#conversation-back .back-label')?.textContent).toBe(' Conversations');
+    expect(header.querySelector('#conversation-terminal .terminal-suffix')?.textContent).toBe(' view');
     expect(header.querySelector('.conversation-avatar')?.textContent).toBe('A');
     expect(header.querySelector('h1 b')?.textContent).toBe('patient-pelican-9');
     expect(header.querySelector('h1 .project-badge')?.textContent).toBe('cas-src');
     expect(header.querySelector('.conversation-host')?.textContent).toBe('cas-src · Atlas · Linux');
+    expect(header.querySelector('.conversation-host > .host-where')?.textContent).toBe('cas-src · Atlas · Linux');
+    expect(header.querySelector('.conversation-host > .host-where + #conversation-connection')).not.toBeNull();
+    expect(header.querySelector('h1 b')?.getAttribute('title')).toBe('patient-pelican-9');
     expect(header.querySelector('#conversation-connection')).not.toBeNull();
     expect(main.querySelector('.conversation-identity h1')).not.toBeNull(); expect(main.querySelectorAll('h1')).toHaveLength(1);
     const view = new ConversationView(document, new ConversationHistory(), { supervisor: 'patient-pelican-9', machine: 'Atlas', project: 'cas-src', header: false });
@@ -194,7 +308,8 @@ describe('conversation evidence', () => {
     const history = new ConversationHistory();
     const view = new ConversationView(document, history, { supervisor: 'real-supervisor', machine: 'Atlas', project: 'cas-src' }); document.body.replaceChildren(view.element); view.update();
     expect(view.element.querySelector('.thead b')?.textContent).toBe('real-supervisor');
-    expect(view.element.querySelector('.thead .id span')?.textContent).toBe('Atlas · cas-src');
+    // P14: project · machine, the order of the shell header and every list row.
+    expect(view.element.querySelector('.thead .id span')?.textContent).toBe('cas-src · Atlas');
     expect(view.element.querySelector('.conversation-pane')).toBeNull();
     expect(view.element.querySelector('.msgs')?.children).toHaveLength(0);
     history.reply({ ...reply, message: 'Actual reply <script>alert(1)</script>' }); view.update();

@@ -5,6 +5,7 @@ import { readFile, mkdir, writeFile } from 'node:fs/promises';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { homedir } from 'node:os';
+import { createRequire } from 'node:module';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { inflateSync } from 'node:zlib';
 
@@ -306,9 +307,72 @@ const PAGE_INSPECTION = ({ colorScheme, contrastLimit, largeTextLimit, boxTolera
     return { findings, infos, invalidAllowlistSelectors, textNodes: textNodes.map(({ node: _node, element: _element, ...item }) => item), viewport };
 };
 
-async function resolvePlaywright() {
+const STABLE_SEMVER = /^(\d+)\.(\d+)\.(\d+)$/;
+
+function stableVersion(version) {
+  const match = typeof version === 'string' ? version.match(STABLE_SEMVER) : null;
+  return match ? match.slice(1).map(Number) : null;
+}
+
+function compareVersions(left, right) {
+  for (let index = 0; index < 3; index += 1) if (left[index] !== right[index]) return left[index] - right[index];
+  return 0;
+}
+
+function readPackageVersion(packageDir) {
   try {
-    return await import('playwright');
+    return JSON.parse(readFileSync(join(packageDir, 'package.json'), 'utf8')).version;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Choose a Playwright package from the npx cache by version, never by
+ * directory order: the highest stable release wins and prereleases (alphas,
+ * betas, next builds) are never chosen. Returns null when no stable release is
+ * cached, so the caller refuses rather than running on whatever sorts last.
+ * @param {string} npxRoot the `_npx` cache directory
+ * @returns {{packageDir: string, version: string} | null}
+ */
+export function selectCachedPlaywright(npxRoot = join(homedir(), '.npm', '_npx')) {
+  if (!existsSync(npxRoot)) return null;
+  let best = null;
+  for (const entry of readdirSync(npxRoot, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const packageDir = join(npxRoot, entry.name, 'node_modules', 'playwright');
+    const version = readPackageVersion(packageDir);
+    const parsed = stableVersion(version);
+    if (!parsed) continue;
+    if (!best || compareVersions(parsed, best.parsed) > 0) best = { packageDir, version, parsed };
+  }
+  return best ? { packageDir: best.packageDir, version: best.version } : null;
+}
+
+async function importPlaywrightPackage(packageDir) {
+  const packageJson = JSON.parse(readFileSync(join(packageDir, 'package.json'), 'utf8'));
+  const entry = packageJson.exports?.['.']?.import || packageJson.module || packageJson.main || 'index.js';
+  const entryPath = join(packageDir, typeof entry === 'string' ? entry : 'index.js');
+  return await import(pathToFileURL(entryPath).href);
+}
+
+/**
+ * Resolve Playwright and say which one: `npm exec --package=playwright` (the
+ * supported entry, which installs the current release) puts its bin on PATH;
+ * PLAYWRIGHT_MODULE names an explicit package; the npx cache is only consulted
+ * by version (see selectCachedPlaywright).
+ * @returns {Promise<{playwright: any, version: string, source: string}>}
+ */
+export async function resolvePlaywright() {
+  try {
+    const playwright = await import('playwright');
+    let version = 'unknown';
+    try {
+      version = createRequire(import.meta.url)('playwright/package.json').version ?? version;
+    } catch {
+      // The module loaded; its manifest is only for the version line.
+    }
+    return { playwright, version, source: 'node_modules' };
   } catch {
     const explicit = process.env.PLAYWRIGHT_MODULE;
     const binary = explicit || (() => {
@@ -321,21 +385,14 @@ async function resolvePlaywright() {
     let packageDir = explicit && !explicit.endsWith('/.bin/playwright')
       ? explicit
       : binary ? join(dirname(binary), '..', 'playwright') : '';
+    let source = explicit ? 'PLAYWRIGHT_MODULE' : 'PATH';
     if (!packageDir || !existsSync(join(packageDir, 'package.json'))) {
-      const npxRoot = join(homedir(), '.npm', '_npx');
-      const candidates = existsSync(npxRoot)
-        ? readdirSync(npxRoot, { withFileTypes: true })
-            .filter((entry) => entry.isDirectory())
-            .map((entry) => join(npxRoot, entry.name, 'node_modules', 'playwright'))
-            .filter((candidate) => existsSync(join(candidate, 'package.json')))
-        : [];
-      packageDir = candidates.at(-1) || '';
+      const cached = selectCachedPlaywright();
+      packageDir = cached?.packageDir || '';
+      source = 'npx cache (highest stable)';
     }
     if (!packageDir) throw new Error('Playwright is required. Run with `npm exec --yes --package=playwright -- node scripts/visual-qa.mjs ...` or set PLAYWRIGHT_MODULE.');
-    const packageJson = JSON.parse(readFileSync(join(packageDir, 'package.json'), 'utf8'));
-    const entry = packageJson.exports?.['.']?.import || packageJson.module || packageJson.main || 'index.js';
-    const entryPath = join(packageDir, typeof entry === 'string' ? entry : 'index.js');
-    return await import(pathToFileURL(entryPath).href);
+    return { playwright: await importPlaywrightPackage(packageDir), version: readPackageVersion(packageDir) ?? 'unknown', source: `${source}: ${packageDir}` };
   }
 }
 
@@ -470,6 +527,7 @@ function markdownReport(result) {
     '',
     `**Summary:** ${result.status} · ${result.findings.length} finding(s) · ${result.infoFindings.length} informational · ${result.suppressed.length} allowlisted · ${result.screenshots.length} screenshot(s)`,
     '',
+    `Playwright: ${result.playwrightVersion}  `,
     `Schemes: ${result.schemes.join(', ')}  `,
     `Viewports: ${result.viewports.map((viewport) => `${viewport.name} (${viewport.width}×${viewport.height})`).join(', ')}`,
     '',
@@ -508,7 +566,8 @@ export async function runVisualQa(options) {
   const viewports = (options.viewports || DEFAULT_VIEWPORTS).map(normalizeViewport);
   const allowlist = await loadAllowlist(options.allowlistPath);
   await mkdir(artifactDir, { recursive: true });
-  const playwright = await resolvePlaywright();
+  const { playwright, version: playwrightVersion, source: playwrightSource } = await resolvePlaywright();
+  console.log(`Playwright ${playwrightVersion} (${playwrightSource})`);
   const browser = await playwright.chromium.launch({ headless: true, executablePath: systemChromium() });
   const findings = [];
   const infoFindings = [];
@@ -583,6 +642,7 @@ export async function runVisualQa(options) {
     status: findings.length ? 'FAIL' : 'PASS',
     exitCode: findings.length && options.strict ? 1 : 0,
     generatedAt: new Date().toISOString(),
+    playwrightVersion,
     schemes,
     viewports,
     urls: inputUrls,

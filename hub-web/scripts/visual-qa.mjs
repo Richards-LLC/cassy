@@ -24,7 +24,16 @@ export const FIXTURE_NAMES = [
   "operator-thread",
   "connection-failed-retry",
   "pairing-step-1",
+  "pairing-email",
+  "pairing-code",
   "pairing-cleanup",
+  "conversation-long-status",
+  "conversation-loading-earlier",
+  "conversation-mic-idle",
+  "conversation-mic-listening",
+  "conversation-mic-unavailable",
+  "conversations-loading",
+  "conversations-unpaired",
 ];
 
 export const REQUIRED_SCHEMES = ["light", "dark"];

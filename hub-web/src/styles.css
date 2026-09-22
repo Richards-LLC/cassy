@@ -28,6 +28,10 @@ button,
 input,
 textarea { font: inherit; }
 
+/* Every placeholder in the ink-mid role: the browser default grey is 4.19:1. */
+input::placeholder,
+textarea::placeholder { color: var(--ink-mid); opacity: 1; }
+
 button {
   min-height: var(--button-height);
   padding: 0 var(--space-3);
@@ -365,12 +369,14 @@ pre { font-family: var(--font-mono); }
 /* == End Unit 3: machine rail and drawer == */
 .primary {
   width: 100%;
-  color: var(--text-hi);
-  background: var(--bg-active);
-  font-weight: var(--weight-medium);
+  color: var(--you-fg);
+  background: var(--you-bg);
+  font-weight: var(--weight-semibold);
 }
 
-.primary:hover:not(:disabled) { background: var(--bg-hover); }
+/* The main action keeps its fill under the pointer and brightens; the generic
+   button hover (--bg-hover) would make it the weakest control on screen. */
+.primary:hover:not(:disabled):not([aria-disabled="true"]) { background: var(--you-bg); filter: brightness(1.08); }
 
 .nav-item {
   display: grid;
@@ -510,7 +516,7 @@ pre { font-family: var(--font-mono); }
 .attention-ticket,
 .status-identifier,
 .pair-code,
-.pair-details dd {
+.pair-details dd.pair-identifier {
   font-family: var(--font-mono);
 }
 
@@ -1470,7 +1476,7 @@ main {
 .attention-detail {
   margin: 0;
   color: var(--text-mid);
-  font-family: var(--font-mono);
+  font-family: var(--font-ui);
   font-size: var(--fs-meta);
   overflow-wrap: anywhere;
 }
@@ -1823,22 +1829,37 @@ main {
 
 #message-mic .mic-glyph { width: 20px; height: 20px; display: block; }
 
+/* P6 (cas-0c80): listening is the critical fill with a 4px 28% halo, never
+ * the Send accent. The halo is static, so reduced motion keeps it; motion only
+ * breathes its strength. Checking and unavailable are quiet: a neutral glyph on
+ * a dashed ring, never the warning amber. */
 #message-mic.listening {
-  border-color: var(--color-action);
-  color: var(--accent-fg);
-  background: var(--color-action);
+  border-color: var(--crit-bg);
+  color: var(--crit-fg);
+  background: var(--crit-bg);
+  outline: 4px solid color-mix(in srgb, var(--crit-bg) 28%, transparent);
+  outline-offset: 0;
   animation: composer-mic-pulse 1.8s ease-in-out infinite;
+}
+
+/* A keyboard focus ring outranks the halo; the critical fill still says listening. */
+#message-mic.listening:focus-visible {
+  outline: var(--focus-ring-width) solid var(--color-focus);
+  outline-offset: var(--focus-ring-width);
+  animation: none;
 }
 
 #message-mic:disabled {
   opacity: 1;
-  color: var(--state-warn);
-  border-color: var(--state-warn);
+  color: var(--text-mid);
+  border-style: dashed;
+  border-color: var(--line-strong);
+  background: var(--color-transparent);
 }
 
 @keyframes composer-mic-pulse {
-  0%, 100% { outline: 0 solid transparent; outline-offset: 0; }
-  50% { outline: 4px solid color-mix(in srgb, var(--color-action) 22%, transparent); outline-offset: 2px; }
+  0%, 100% { outline-color: color-mix(in srgb, var(--crit-bg) 28%, transparent); }
+  50% { outline-color: color-mix(in srgb, var(--crit-bg) 14%, transparent); }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -2006,11 +2027,14 @@ dialog label {
   font-size: var(--fs-meta);
 }
 
+/* A panel field on the dialog surface. The edge is --ink-mid, not
+   --line-strong: on the warm --bg-raised dialog (P15) --line-strong measures
+   2.89:1 in light, under the 3:1 a field boundary needs. */
 dialog input {
   padding: var(--space-3);
-  color: var(--text-hi);
-  background: var(--bg-terminal);
-  border: 0;
+  color: var(--ink);
+  background: var(--panel);
+  border: var(--line-width) solid var(--ink-mid);
   border-radius: var(--radius-card);
 }
 
@@ -2149,7 +2173,7 @@ fieldset {
   letter-spacing: var(--tracking-label);
   text-transform: uppercase;
 }
-.pair-details dd { margin: 0; overflow-wrap: anywhere; }
+.pair-details dd { margin: 0; overflow-wrap: anywhere; font-family: var(--font-ui); }
 
 .field-hint {
   color: var(--text-mid);
@@ -2792,7 +2816,10 @@ dialog form > *,
 .cloud-brand { display: inline-flex; align-items: center; gap: var(--space-2); color: var(--text-hi); white-space: nowrap; font: var(--weight-medium) var(--fs-lg)/1.2 var(--font-display); }
 .cloud-brand svg { width: var(--space-8); height: var(--space-8); color: var(--color-action); flex: none; }
 .project-badge { display: inline-block; max-width: 100%; width: fit-content; padding: var(--space-1) var(--space-2); background: var(--bg-active); color: var(--color-action); font: var(--weight-semibold) var(--fs-md)/var(--line-ui) var(--font-ui); border-radius: var(--radius-card); overflow-wrap: anywhere; }
-.conversation-shell { display: grid; grid-template-columns: var(--conversation-rail-width) minmax(0, 1fr) var(--worker-collapsed-width); height: var(--keyboard-viewport-height, 100dvh); overflow: hidden; color: var(--ink); background: var(--canvas); }
+/* The context rail (P10) folds to the 48px context track until it has
+ * something the header does not; .context-open gives it its 240px back. */
+.conversation-shell { display: grid; grid-template-columns: var(--conversation-rail-width) minmax(0, 1fr) var(--machine-rail-width); height: var(--keyboard-viewport-height, 100dvh); overflow: hidden; color: var(--ink); background: var(--canvas); }
+.conversation-shell.context-open { grid-template-columns: var(--conversation-rail-width) minmax(0, 1fr) var(--worker-collapsed-width); }
 .conversation-shell button { min-height: var(--rail-item-min); }
 /* == Pebble rail (EPIC cas-cac1) ==
    The rail is a panel lifted off the canvas by --lift-edge, not a hairline.
@@ -2801,9 +2828,21 @@ dialog form > *,
    machine-accent-N class on each row (hub-web/src/machine-accent.ts). */
 .conversation-sidebar { display: flex; flex-direction: column; min-width: 0; min-height: 0; position: relative; z-index: 1; background: var(--panel); box-shadow: var(--lift-edge); }
 .conversation-list-heading { padding: 22px 18px 18px; }
+/* P13: the lockup and the Appearance & commands icon button share the top row. */
+.conversation-list-top { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); }
+.icon-button { display: inline-flex; align-items: center; justify-content: center; flex: none; width: var(--rail-item-min); min-width: var(--rail-item-min); min-height: var(--rail-item-min); padding: 0; border-radius: var(--radius-pill); color: var(--ink); background: var(--color-transparent); }
+.icon-button svg { width: 22px; height: 22px; display: block; }
+/* P14: a codename is one word and never breaks at its hyphen; a list row may ellipsise it. */
+.codename { white-space: nowrap; }
+.conversation-supervisor.codename { min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
 .conversation-list-title { display: flex; flex-direction: row; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-2); margin-top: var(--space-4); }
 .conversation-list-title h1 { font: var(--weight-semibold) 22px/1.2 var(--font-ui); letter-spacing: -0.015em; margin: 0 6px; }
-.conversation-list-title button { font-size: var(--fs-meta); }
+/* Header controls are text buttons (P15, cas-9616): no chip on the paper, the hover step on hover. */
+.conversation-list-title button { font-size: var(--fs-meta); color: var(--ink); background: var(--color-transparent); }
+/* ...except the first-run Pair a machine on a phone, which is the primary action (P3). */
+.conversation-list-title .primary { width: auto; color: var(--you-fg); background: var(--you-bg); }
+/* First run on a wide screen: the welcome's Pair a machine is the one primary action. */
+.welcome-pairs #pair-toggle { display: none; }
 .conversation-list-heading p { color: var(--ink-mid); margin: var(--space-3) 6px 0; }
 #conversation-list { overflow-y: auto; min-height: 0; display: flex; flex-direction: column; gap: var(--space-1); padding: 0 14px var(--space-4) 18px; }
 .conversation-sidebar footer { padding: var(--space-4) 18px; margin-top: auto; }
@@ -2813,8 +2852,9 @@ dialog form > *,
 .conversation-row[aria-current="true"] { background: var(--accent-soft); color: var(--ink); box-shadow: var(--lift); }
 .conversation-avatar { grid-row: span 2; display: flex; align-items: center; justify-content: center; width: 42px; height: 42px; border-radius: var(--radius-pill); background: var(--accent); color: var(--accent-fg); font: var(--weight-semibold) 17px/1 var(--font-ui); }
 .conversation-who { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; min-width: 0; }
-.conversation-supervisor { font: var(--weight-semibold) var(--fs-md)/1.35 var(--font-ui); overflow-wrap: anywhere; }
-.conversation-meta { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 7px; min-width: 0; max-width: 100%; }
+.conversation-supervisor { font: var(--weight-semibold) var(--fs-md)/1.35 var(--font-ui); }
+/* The meta is always its own line under the codename (P13), so no row needs a leading dot. */
+.conversation-meta { display: inline-flex; flex-wrap: wrap; flex-basis: 100%; align-items: center; gap: 7px; min-width: 0; max-width: 100%; }
 .conversation-project { display: inline-flex; align-items: center; gap: 7px; min-width: 0; max-width: 100%; }
 .conversation-sep { width: 3px; height: 3px; border-radius: var(--radius-pill); background: var(--ink-soft); flex: none; }
 .conversation-row .project-badge { padding: 0; border-radius: 0; background: var(--color-transparent); color: var(--ink-soft); font: var(--weight-medium) var(--fs-xs)/1.35 var(--font-mono); }
@@ -2823,8 +2863,12 @@ dialog form > *,
 .conversation-when.hot { color: var(--warn-text); font-weight: var(--weight-semibold); }
 .conversation-preview { grid-column: 2; min-width: 0; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; max-height: calc(2 * 1.35em); overflow: hidden; text-overflow: ellipsis; font-size: var(--fs-meta); line-height: 1.35; color: var(--ink-soft); overflow-wrap: anywhere; }
 .conversation-preview.bold { color: var(--ink); font-weight: var(--weight-medium); }
-.conversation-flag { grid-column: 3; justify-self: end; width: 10px; height: 10px; border-radius: var(--radius-pill); background: var(--ask-deep); }
-.conversation-unread { justify-self: end; min-width: 21px; padding: 2px 7px; border-radius: var(--radius-pill); text-align: center; background: var(--accent); color: var(--accent-fg); font: var(--weight-semibold) var(--fs-xs)/1.4 var(--font-ui); }
+.conversation-preview.unreachable { color: var(--warn-text); font-weight: var(--weight-medium); }
+/* P13: the time keeps the headline end; the unread count and waiting dot sit beneath it. */
+.conversation-marks { grid-column: 3; justify-self: end; display: inline-flex; align-items: center; gap: 6px; }
+/* --warn-text, the hot time's colour: the same brown on paper as before, gold in dark (the old --ask-deep dot was 2.4:1 there). */
+.conversation-flag { width: 10px; height: 10px; border-radius: var(--radius-pill); background: var(--warn-text); }
+.conversation-unread { min-width: 21px; padding: 2px 7px; border-radius: var(--radius-pill); text-align: center; background: var(--accent); color: var(--accent-fg); font: var(--weight-semibold) var(--fs-xs)/1.4 var(--font-ui); }
 .conversation-empty { margin: var(--space-6) 18px; color: var(--ink-mid); }
 .compose-fab { display: none; position: fixed; right: 18px; bottom: calc(18px + env(safe-area-inset-bottom)); z-index: 2; width: 56px; height: 56px; padding: 0; border: 0; border-radius: var(--radius-pill); background: var(--you-bg); color: var(--you-fg); box-shadow: var(--lift-strong); align-items: center; justify-content: center; }
 .compose-fab:hover { background: var(--you-bg); color: var(--you-fg); }
@@ -2834,7 +2878,7 @@ dialog form > *,
 .conversation-heading { display: flex; flex-direction: column; gap: var(--space-3); padding: var(--space-3) 30px 17px; background: var(--canvas); color: var(--ink); box-shadow: var(--lift-head); position: relative; z-index: 1; }
 .conversation-topline { display: flex; justify-content: space-between; align-items: center; gap: var(--space-2); }
 .conversation-topline .cloud-brand { display: none; }
-.conversation-topline button { font-size: var(--fs-meta); }
+.conversation-topline button { font-size: var(--fs-meta); color: var(--ink); background: var(--color-transparent); }
 .conversation-identity { display: flex; align-items: center; gap: 13px; min-width: 0; }
 .conversation-identity .conversation-avatar { flex: none; }
 .conversation-identity .id { min-width: 0; }
@@ -2862,6 +2906,12 @@ dialog form > *,
 .thread .thead .id span:empty { display: none; }
 .thread .conversation-load-earlier { align-self: center; margin: 10px auto 0; padding: 7px 14px; border: var(--line-width) solid var(--line-subtle); border-radius: 999px; background: var(--bg-panel); color: var(--ink-mid); font: var(--weight-medium) 12px/1.2 var(--font-ui); }
 .thread .conversation-load-earlier[hidden] { display: none; }
+/* Loading an older page: the label is the loading signal, so it stays legible
+ * (ink-mid at full opacity, not the global disabled .42) and carries the
+ * thread's three-dot working mark. */
+.thread .conversation-load-earlier[data-loading="true"] { display: inline-flex; align-items: center; gap: 8px; }
+.thread .conversation-load-earlier:disabled { opacity: 1; color: var(--ink-mid); cursor: progress; }
+.thread .conversation-load-earlier .dots i { width: 5px; height: 5px; }
 .thread .msgs { flex: 1; padding: 22px 30px 10px; display: flex; flex-direction: column; gap: 16px; min-width: 0; }
 .thread .day { align-self: center; margin: 0 0 2px; font-size: 12px; color: var(--ink-mid); }
 .thread .session-divider, .thread .history-end { align-self: center; margin: 0; color: var(--ink-mid); font: var(--weight-medium) 11px/1.3 var(--font-mono); letter-spacing: 0.02em; text-align: center; }
@@ -2872,7 +2922,7 @@ dialog form > *,
 .thread .turn > time { font-size: 12px; color: var(--ink-mid); padding: 2px 6px 0; }
 .thread .bub { max-width: 100%; min-width: 0; padding: 12px 19px; background: var(--sup-bg); color: var(--sup-fg); border-radius: 8px 22px 22px 8px; box-shadow: var(--lift); }
 .thread .bub.group-first { border-top-left-radius: 22px; }
-.thread .turn.you .bub { background: var(--you-bg); color: var(--you-fg); border-radius: 22px 8px 8px 22px; }
+.thread .turn.you .bub { background: var(--you-bubble-bg); color: var(--you-bubble-fg); border-radius: 22px 8px 8px 22px; }
 .thread .turn.you .bub.group-first { border-top-right-radius: 22px; }
 .thread .bub p { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 .thread .bub p + p { margin-top: 8px; }
@@ -2889,10 +2939,31 @@ dialog form > *,
 .thread .bub.receipt .receipt-text { min-width: 0; }
 .thread .tick { width: 15px; height: 15px; margin-top: 4px; color: var(--state-ok); flex: none; display: block; }
 .thread .conversation-delivery { display: block; margin-top: 6px; font-size: 12px; opacity: 0.85; }
-.thread .bub[data-state="error"] { background: var(--crit-bg); color: var(--crit-fg); }
-.thread .conversation-edit { margin-top: 8px; padding: 6px 14px; border-radius: 999px; border: 0; background: var(--crit-fg); color: var(--crit-bg); font: var(--weight-medium) 13px/1.2 var(--font-ui); }
-/* coalesced statuses — one quiet pebble, never a ledger */
-.thread .coalesce { align-self: flex-start; max-width: 100%; background: var(--sup-bg); color: var(--ink-mid); border-radius: 999px; padding: 8px 18px; font-size: 13px; overflow-wrap: anywhere; }
+/* P8 (cas-b1ee): a refused send looks refused, not delivered. No fill, a
+ * dashed critical outline (--crit-bg on --canvas ≥5.9:1 both schemes), body
+ * in --ink, a 13px semibold "Not sent" lead with a warning glyph, and Edit /
+ * Retry below as outline pills. The review asked for 1.5px; Chrome 153
+ * computes a 1.5px border as 1px at DPR 1 and 2 (measured), so it is 2px. */
+.thread .turn.you .bub[data-state="error"] { background: transparent; color: var(--ink); border: 2px dashed var(--crit-bg); box-shadow: none; padding: 10px 17px; }
+.thread .conversation-refused { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; margin-top: 8px; opacity: 1; color: var(--ink); font: var(--weight-regular) 12px/1.35 var(--font-ui); }
+.thread .conversation-refused b { color: var(--crit-bg); font: var(--weight-semibold) 13px/1.3 var(--font-ui); }
+.thread .conversation-refused .warn { width: 15px; height: 15px; flex: none; color: var(--crit-bg); }
+.thread .conversation-refused-reason { flex-basis: 100%; min-width: 0; color: var(--ink-mid); overflow-wrap: anywhere; }
+.thread .conversation-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 10px; }
+.thread .conversation-edit, .thread .conversation-retry { min-height: 32px; padding: 0 14px; border-radius: 999px; border: 1.5px solid var(--line-strong); background: transparent; color: var(--ink); font: var(--weight-medium) 13px/1.2 var(--font-ui); cursor: pointer; }
+.thread .conversation-edit:hover, .thread .conversation-retry:hover { border-color: var(--ink); }
+.thread .conversation-edit:focus-visible, .thread .conversation-retry:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+/* coalesced statuses — one quiet box, never a ledger. Long or ask-bearing
+ * statuses never land here (thread-model foldsAsStatus); what does is clamped
+ * at three lines. The transparent bottom border is the bottom padding: the
+ * fill paints under it but overflow clips at the padding edge, so a clamped
+ * fourth line never peeks through. */
+.thread .coalesce { align-self: flex-start; max-width: 100%; background: var(--sup-bg); color: var(--ink-mid); border-radius: 16px; padding: 10px 16px 0; border-bottom: 10px solid transparent; font-size: 13px; overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; line-clamp: 3; overflow: hidden; }
+.thread .coalesce[data-expanded="true"] { display: block; -webkit-line-clamp: none; line-clamp: none; overflow: visible; }
+.thread .coalesce p { margin: 0; white-space: pre-wrap; }
+.thread .coalesce p + p { margin-top: 6px; }
+.thread .coalesce-expand { min-height: 32px; padding: 0 14px; border: var(--line-width) solid var(--line-strong); border-radius: 999px; background: transparent; color: var(--ink); font: var(--weight-medium) 13px/1.2 var(--font-ui); }
+.thread .coalesce-expand[hidden] { display: none; }
 /* evidence table inside a message: first column takes the slack, the rest hug their numbers */
 .thread .evi { background: var(--sheet-bg); color: var(--ink); border-radius: 17px; padding: 11px 15px; margin-top: 12px; max-width: 100%; }
 .thread .evi-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; column-gap: 14px; padding: 4px 0; font: var(--weight-regular) 12.5px/1.45 var(--font-mono); font-variant-numeric: tabular-nums; }
@@ -2923,16 +2994,34 @@ dialog form > *,
 .obj { max-width: min(100%, 560px); min-width: 0; border-radius: 28px 28px 28px 9px; box-shadow: var(--lift-strong); overflow: hidden; font: var(--weight-regular) 15px/1.5 var(--font-ui); text-align: left; }
 .obj-body { padding: 15px 23px 14px; border-radius: 28px 28px 0 0; }
 .obj-foot { border-radius: 0 0 28px 9px; }
-.obj.t-a .obj-body { background: var(--ask-bg); color: var(--ask-fg); }
-.obj.t-a .obj-foot { display: flex; flex-wrap: wrap; gap: 9px; padding: 11px 13px; background: var(--ask-deep); }
-.obj.t-a .obj-foot .chip { flex: 1; }
-.obj.t-a.blk .obj-body { background: var(--crit-bg); color: var(--crit-fg); }
-.obj.t-a.blk .obj-foot { display: block; padding: 0 9px 9px; background: var(--crit-bg); }
+/* In-thread objects take the tint set (P9, cas-9616): a dark tint in ink with a
+ * 4px coloured edge in dark, the unchanged gold/red floods in light (the edge is
+ * transparent there and the fill paints under it, so geometry is unchanged).
+ * Only the pinned copy keeps the full gold fill. */
+.obj.t-a .obj-body { padding-left: 19px; border-left: 4px solid var(--ask-edge); background: var(--ask-tint); color: var(--ask-tint-fg); }
+.obj.t-a .obj-foot { display: flex; flex-wrap: wrap; gap: 9px; padding: 11px 13px 11px 9px; border-left: 4px solid var(--ask-edge); background: var(--ask-tint-deep); }
+.obj.t-a .obj-foot .chip { flex: 1; padding: 7px 16px; border: 1px solid var(--tray-chip-line); background: var(--tray-chip-bg); color: var(--tray-chip-fg); }
+.obj.t-a .obj-foot button.chip:hover:not(:disabled) { background: var(--bg-hover); }
+.obj.t-a .obj-foot button.chip:focus-visible { outline-color: var(--tray-focus); }
+.obj.t-a.blk .obj-body { border-left-color: var(--crit-edge); background: var(--crit-tint); color: var(--crit-tint-fg); }
+.obj.t-a.blk .obj-foot { display: block; padding: 0 9px 9px 5px; border-left-color: var(--crit-edge); background: var(--crit-tint); }
+.pinned-ask .obj.t-a .obj-body { border-left-color: var(--color-transparent); background: var(--ask-bg); color: var(--ask-fg); }
+.pinned-ask .obj.t-a .obj-foot { border-left-color: var(--color-transparent); background: var(--ask-deep); }
+.pinned-ask .obj.t-a .obj-foot .chip { border-color: var(--color-transparent); background: var(--pin-chip-bg); color: var(--pin-chip-fg); }
+.pinned-ask .obj.t-a .obj-foot button.chip:hover:not(:disabled) { background: var(--pin-chip-hover); }
 .obj p { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 .obj p + p { margin-top: 8px; }
 .obj .evi { background: var(--sheet-bg); color: var(--ink); border-radius: 17px; padding: 11px 15px; margin-top: 12px; }
 .obj .conversation-attachment { margin-top: 8px; }
 .obj .conversation-attachment a { color: inherit; }
+/* P1 (cas-b1ee): while an ask is pinned, its copy in the flow is a supervisor
+ * pebble with a 4px waiting edge and a pointer to the tray; the chips live
+ * only in the tray. The edge is --warn-text, not --ask-bg: light --ask-bg on
+ * --sup-bg is 1.65:1, below the 3:1 mark floor; --warn-text is 5.4:1 light and
+ * equals --ask-bg in dark. */
+.obj.t-a.ask-collapsed { border-radius: 18px 18px 18px 6px; box-shadow: var(--lift); }
+.obj.t-a.ask-collapsed .obj-body { padding: 12px 19px; border-left: 4px solid var(--warn-text); border-radius: 18px 18px 18px 6px; background: var(--sup-bg); color: var(--sup-fg); }
+.obj.t-a.ask-collapsed .ask-waiting { margin-top: 6px; font: var(--weight-semibold) 12px/1.3 var(--font-ui); color: var(--warn-text); }
 .chip { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-width: 0; margin: 0; padding: 8px 17px; border: 0; border-radius: var(--radius-pill); background: var(--panel); color: var(--ink); font: var(--weight-medium) 13px/1.2 var(--font-ui); text-align: center; overflow-wrap: anywhere; }
 button.chip { cursor: pointer; }
 button.chip:hover { box-shadow: var(--lift); }
@@ -2972,10 +3061,11 @@ button.chip:disabled { cursor: default; }
 .thread .empty { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; min-width: 0; padding: 60px 40px; text-align: center; color: var(--ink); }
 .thread .empty[hidden], .thread .msgs[hidden] { display: none; }
 .thread .empty .mono { display: flex; align-items: center; justify-content: center; flex: none; width: 76px; height: 76px; border-radius: var(--radius-pill); background: var(--accent, var(--you-bg)); color: var(--accent-fg); font: var(--weight-semibold) 30px/1 var(--font-ui); box-shadow: var(--lift-strong); }
-.thread .empty b { font: var(--weight-semibold) 21px/1.2 var(--font-ui); letter-spacing: -0.015em; overflow-wrap: anywhere; }
+.thread .empty b { max-width: 100%; font: var(--weight-semibold) 21px/1.2 var(--font-ui); letter-spacing: -0.015em; }
 .thread .empty .proj2 { font: var(--weight-regular) 13px/1.3 var(--font-mono); color: var(--ink-mid); overflow-wrap: anywhere; }
 .thread .empty .proj2:empty { display: none; }
 .thread .empty .said { margin: 0; max-width: 34ch; color: var(--ink-mid); font-size: 15px; }
+.thread .empty .said .codename { font: var(--weight-medium) 0.93em/1 var(--font-mono); color: var(--ink); }
 .thread .empty .quiet { max-width: min(100%, 56ch); background: var(--sup-bg); color: var(--sup-fg); border-radius: 22px; padding: 12px 22px; box-shadow: var(--lift); overflow-wrap: anywhere; }
 
 /* Composer: the field is a pill on --panel with --lift; the send button takes
@@ -2988,13 +3078,14 @@ button.chip:disabled { cursor: default; }
 .conversation-composer .composer-clip { grid-area: clip; display: flex; align-items: center; justify-content: center; width: 44px; height: 44px; min-height: 44px; padding: 0; border: 0; border-radius: var(--radius-pill); background: var(--panel); color: var(--ink-mid); box-shadow: var(--lift); }
 .conversation-composer .composer-clip:disabled { opacity: 1; color: var(--ink-mid); }
 .conversation-composer .composer-clip svg { width: 19px; height: 19px; display: block; opacity: 0.55; }
-.conversation-composer textarea { grid-area: field; width: 100%; min-width: 0; min-height: 46px; height: auto; field-sizing: content; max-height: 25dvh; padding: 12px 22px; border: 0; border-radius: 23px; resize: none; background: var(--panel); color: var(--ink); box-shadow: var(--lift); font: var(--weight-regular) 14px/1.55 var(--font-ui); }
+.conversation-composer textarea { grid-area: field; width: 100%; min-width: 0; min-height: 46px; height: auto; field-sizing: content; max-height: 25dvh; padding: 12px 22px; border: var(--line-width) solid var(--line-strong); border-radius: 23px; resize: none; background: var(--panel); color: var(--ink); box-shadow: var(--lift); font: var(--weight-regular) 14px/1.55 var(--font-ui); }
 .conversation-composer textarea::placeholder { color: var(--ink-mid); opacity: 1; }
 .conversation-composer .composer-actions { grid-area: send; display: flex; align-items: center; gap: var(--space-2); margin: 0; }
 .conversation-composer .composer-actions button { width: auto; }
-.conversation-composer #message-mic { width: 44px; min-width: 44px; height: 44px; min-height: 44px; color: var(--ink-mid); border-color: var(--line-strong); background: var(--panel); box-shadow: var(--lift); }
-.conversation-composer #message-mic.listening { color: var(--accent-fg); border-color: var(--accent, var(--you-bg)); background: var(--accent, var(--you-bg)); box-shadow: var(--lift-strong); }
-.conversation-composer #message-mic:disabled { color: var(--warn-text); border-color: var(--warn-text); background: var(--panel); box-shadow: var(--lift); }
+.conversation-composer #message-mic { width: 44px; min-width: 44px; height: 44px; min-height: 44px; color: var(--ink-mid); border-color: var(--line-strong); background: var(--panel); }
+.conversation-composer #message-mic:not(:disabled) { box-shadow: var(--lift); }
+.conversation-composer #message-mic.listening { color: var(--crit-fg); border-color: var(--crit-bg); background: var(--crit-bg); box-shadow: var(--lift-strong); }
+.conversation-composer #message-mic:disabled { color: var(--ink-mid); border-style: dashed; border-color: var(--line-strong); background: var(--color-transparent); }
 .conversation-composer #message-keyboard { display: none; }
 .conversation-composer #message-send.send { display: inline-flex; align-items: center; gap: 8px; margin: 0; min-height: 46px; padding: 0 20px 0 16px; border: 0; border-radius: var(--radius-pill); background: var(--accent, var(--you-bg)); color: var(--accent-fg); box-shadow: var(--lift-strong); font: var(--weight-semibold) 14px/1.2 var(--font-ui); white-space: nowrap; }
 .conversation-composer #message-send.send:hover:not([aria-disabled="true"]) { background: var(--accent, var(--you-bg)); color: var(--accent-fg); filter: brightness(1.08); }
@@ -3002,11 +3093,23 @@ button.chip:disabled { cursor: default; }
 .conversation-composer .control-disabled-reason { display: none; }
 .conversation-composer .composer-status, .conversation-composer .message-status, .conversation-composer .message-delivery { grid-area: status; font-size: var(--fs-meta); margin: 0; }
 .conversation-composer .composer-status[hidden], .conversation-composer .message-status[hidden], .conversation-composer .message-delivery[hidden] { display: none; }
-.conversation-context { min-width: 0; overflow-y: auto; padding: var(--space-6); border-left: var(--line-width) solid var(--line-subtle); }
-.conversation-context .cloud-brand { font-size: var(--fs-base); }
-.conversation-context .cloud-brand svg { width: var(--space-6); height: var(--space-6); }
-.conversation-context h2 { margin: var(--space-8) 0 var(--space-3); font: var(--weight-medium) var(--fs-base)/var(--line-ui) var(--font-ui); }
-.conversation-context-name { font-family: var(--font-mono); font-size: var(--fs-meta); overflow-wrap: anywhere; }
+.conversation-context { min-width: 0; overflow-y: auto; padding: var(--space-6) var(--space-4); border-left: var(--line-width) solid var(--line-subtle); }
+.conversation-context[data-open="false"] { padding: 0; overflow: hidden; }
+.conversation-context .context-section[hidden] { display: none; }
+.conversation-context .context-section + .context-section { margin-top: var(--space-6); }
+.conversation-context h2 { margin: 0 0 var(--space-3); font: var(--weight-medium) var(--fs-base)/var(--line-ui) var(--font-ui); }
+.conversation-context .context-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--space-1); }
+.conversation-context .context-jump, .conversation-context .context-attachment { display: grid; width: 100%; min-height: var(--rail-item-min); padding: var(--space-2); border-radius: 12px; background: var(--color-transparent); color: var(--ink); text-align: left; text-decoration: none; font: var(--weight-regular) var(--fs-meta)/1.35 var(--font-ui); }
+.conversation-context .context-jump { grid-template-columns: minmax(0, 1fr); row-gap: 2px; }
+.conversation-context .context-jump:hover, .conversation-context .context-attachment:hover { background: var(--bg-hover); }
+.conversation-context .context-kind { font-weight: var(--weight-semibold); color: var(--ink); }
+.conversation-context .context-jump[data-kind="blocker"] .context-kind { color: var(--warn-text); }
+.conversation-context .context-jump .context-text { color: var(--ink-mid); overflow-wrap: anywhere; }
+.conversation-context .context-attachment { grid-template-columns: auto minmax(0, 1fr); grid-template-areas: "plate name" "plate meta"; column-gap: var(--space-2); align-items: center; }
+.conversation-context .context-plate { grid-area: plate; display: flex; align-items: center; justify-content: center; min-width: 34px; height: 34px; padding: 0 4px; border-radius: 7px; background: var(--crit-bg); color: var(--crit-fg); font: var(--weight-semibold) 9px/1 var(--font-ui); letter-spacing: 0.06em; }
+.conversation-context .context-attachment .context-text { grid-area: name; min-width: 0; overflow-wrap: anywhere; }
+.conversation-context .context-meta { grid-area: meta; color: var(--ink-mid); font-size: 12px; }
+.conversation-context .context-meta:empty { display: none; }
 .conversation-context .context-tab { padding: 0; }
 .conversation-context .workers { display: none; }
 .conversation-welcome { margin: auto; padding: var(--space-8); max-width: 60ch; }
@@ -3021,16 +3124,46 @@ button.chip:disabled { cursor: default; }
   .conversation-list-heading { padding: 20px 12px 14px; }
   #conversation-list { padding: 0 12px var(--space-4); }
   .conversation-sidebar footer { padding: var(--space-3) 12px; padding-inline-end: calc(56px + 30px); }
+  /* P13: the phone footer folds to one 32px line — the paired-machines toggle
+     and its state. The conversation count and hub build stay on desktop (the
+     list is the count here). The toggle's hit area still reaches 40px. */
+  .conversation-shell .conversation-sidebar > footer { padding-top: var(--space-1); padding-bottom: max(var(--space-1), env(safe-area-inset-bottom)); }
+  .conversation-sidebar .hub-footer-badges { display: flex; flex-wrap: nowrap; align-items: center; gap: var(--space-3); min-height: 32px; margin: 0; }
+  .conversation-sidebar #paired-machines-toggle { position: relative; flex-wrap: nowrap; min-width: 0; min-height: 32px; padding: 0 var(--space-2); background: var(--color-transparent); }
+  .conversation-sidebar #paired-machines-toggle:hover:not(:disabled) { background: var(--bg-hover); }
+  .conversation-sidebar #paired-machines-toggle::before { content: ""; position: absolute; inset: -4px 0; }
+  .conversation-sidebar #paired-machines-toggle > span:nth-child(2) { overflow-wrap: normal; white-space: nowrap; }
+  .conversation-sidebar .hub-footer-meta { display: none; }
   .conversation-shell:not(.thread-open) .compose-fab { display: flex; }
+  /* The welcome is hidden on a phone, so the header chip is the first-run
+     action; the compose FAB (which would only open pairing, under the label
+     "Write to a supervisor") steps aside so there is one Pair a machine. */
+  .welcome-pairs #pair-toggle { display: revert; }
+  .conversation-shell.welcome-pairs .compose-fab { display: none; }
   .conversation-main, .conversation-context { display: none; }
   .conversation-shell.thread-open .conversation-sidebar { display: none; }
   .conversation-shell.thread-open .conversation-main { display: flex; height: 100%; }
-  .conversation-topline .cloud-brand { display: inline-flex; font-size: var(--fs-base); }
-  .conversation-topline .cloud-brand svg { width: var(--space-6); height: var(--space-6); }
-  .conversation-topline { flex-wrap: wrap; }
-  .conversation-topline #conversation-terminal { margin-left: auto; }
-  .conversation-heading { padding: var(--space-2) 16px 14px; gap: var(--space-2); }
-  .conversation-topline button { padding: var(--space-1) var(--space-2); }
+  /* One-row phone thread header (cas-1776): a 40px "‹" back target, the
+     identity (36px avatar, codename ellipsised beside its badge, host line
+     beneath) and a text-only "Terminal". The lockup stays on the list screen
+     only (DESIGN.md §Brand). The topline dissolves into the heading grid so
+     its two buttons flank the identity on the same row. */
+  .conversation-heading { display: grid; grid-template-columns: 40px minmax(0, 1fr) auto; align-items: center; column-gap: var(--space-1); padding: 6px var(--space-2) 6px var(--space-1); }
+  .conversation-topline { display: contents; }
+  .conversation-topline .cloud-brand { display: none; }
+  #conversation-back { grid-column: 1; grid-row: 1; width: 40px; min-width: 40px; min-height: 44px; padding: 0; display: flex; align-items: center; justify-content: center; background: var(--color-transparent); color: var(--ink); }
+  #conversation-back .back-glyph { font: var(--weight-regular) 30px/1 var(--font-ui); }
+  #conversation-back .back-label, #conversation-terminal .terminal-suffix { display: none; } /* aria-label keeps the full name */
+  .conversation-identity { grid-column: 2; grid-row: 1; gap: 10px; }
+  .conversation-identity .conversation-avatar { width: 36px; height: 36px; font-size: 15px; }
+  #conversation-terminal { grid-column: 3; grid-row: 1; min-height: 44px; padding: 0 var(--space-2); background: var(--color-transparent); color: var(--ink-mid); font-size: var(--fs-xs); }
+  #conversation-back:hover:not(:disabled), #conversation-terminal:hover:not(:disabled) { background: var(--bg-hover); }
+  .conversation-identity h1 { flex-wrap: nowrap; }
+  .conversation-identity h1 b { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 22px; }
+  .conversation-identity .project-badge { flex: none; font-size: 13px; padding: 2px 6px; }
+  .conversation-identity .conversation-host { display: flex; font-size: 12px; white-space: nowrap; }
+  .conversation-identity .host-where { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  #conversation-connection { flex: none; white-space: pre; }
   /* Phone composer: the send pill folds to its glyph; the label stays for the reader. */
   .conversation-composer { column-gap: 5px; padding: 12px 6px 20px; padding-bottom: max(20px, env(safe-area-inset-bottom)); }
   .conversation-composer textarea { padding: 12px 18px; }
@@ -3048,6 +3181,8 @@ button.chip:disabled { cursor: default; }
   .thread .evi-row { column-gap: 10px; font-size: 12px; }
   .pinned-ask { padding: 8px 16px 10px; }
   .obj-body { padding: 13px 19px 12px; }
+  /* 4px of the 19px inset is the tint edge (P9). */
+  .obj.t-a .obj-body { padding-left: 15px; }
 }
 @media (max-height: 30rem) {
   .conversation-heading { padding-top: var(--space-1); padding-bottom: var(--space-1); gap: var(--space-1); }

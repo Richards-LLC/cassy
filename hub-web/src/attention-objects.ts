@@ -22,6 +22,14 @@ export function askOptions(reply: OperatorReply): string[] {
   return options.length > 0 ? options : [...DEFAULT_ASK_OPTIONS];
 }
 
+/** The collapsed in-flow copy's pointer to the pinned tray. */
+export const WAITING_LINE = "Waiting on you — answer below";
+
+/** True when `reply` is the ask the view pins above the composer (the most recent unanswered one). */
+export function isPinnedAsk(reply: OperatorReply, context: Pick<TurnRenderContext, "history">): boolean {
+  return context.history?.pinnedAsk()?.notification_id === reply.notification_id;
+}
+
 function tick(document: Document): Element {
   const template = document.createElement("template"); template.innerHTML = TICK;
   return template.content.firstElementChild!;
@@ -37,6 +45,19 @@ export function renderAskObject(reply: OperatorReply, context: TurnRenderContext
   const body = document.createElement("div"); body.className = "obj-body"; body.append(...context.body());
   const foot = document.createElement("div"); foot.className = "obj-foot";
   const answer = context.history?.answered(reply.notification_id);
+  // P1 (cas-b1ee): while this ask is the one pinned above the composer, its
+  // copy in the flow collapses to a supervisor pebble with a waiting line; the
+  // chips live only in the pinned tray, so the operator never sees two live
+  // copies of the same question. Older unanswered asks keep their chips.
+  if (!answer && !context.pinned && isPinnedAsk(reply, context)) {
+    object.className = "obj t-a ask-collapsed";
+    object.dataset.answered = "false";
+    object.dataset.collapsed = "true";
+    const wait = document.createElement("p"); wait.className = "ask-waiting"; wait.textContent = WAITING_LINE;
+    body.append(wait);
+    object.append(body);
+    return object;
+  }
   if (answer) {
     // The chosen reply stays in the tray as sent; the other choices leave.
     object.dataset.answered = "true";

@@ -4,8 +4,8 @@
 
 :root {
   color-scheme: light dark;
-  --bg-raised: color-mix(in srgb, var(--bg-panel) 96%, var(--text-hi));
-  --bg-hover: color-mix(in srgb, var(--bg-panel) 92%, var(--text-hi));
+  --bg-raised: color-mix(in srgb, var(--bg-root) 92%, var(--text-hi));
+  --bg-hover: color-mix(in srgb, var(--bg-root) 88%, var(--text-hi));
   --overlay-backdrop: color-mix(in srgb, var(--bg-root) 72%, transparent);
   --bg-terminal: #0C0E13;
   --overlay-shadow-color: rgba(18,20,26,0.40);
@@ -106,6 +106,22 @@
   --ask-deep: #7F5504;
   --crit-fg: #FFFFFF;
   --accent-fg: #FFFFFF;
+  --ask-tint: #E2B14D;
+  --ask-tint-fg: #1B1D24;
+  --ask-tint-deep: #7F5504;
+  --ask-edge: transparent;
+  --tray-chip-bg: #FFFFFF;
+  --tray-chip-fg: #1B1D24;
+  --tray-chip-line: transparent;
+  --pin-chip-bg: #FFFFFF;
+  --pin-chip-fg: #1B1D24;
+  --pin-chip-hover: var(--bg-hover);
+  --tray-focus: #FFFFFF;
+  --crit-tint: #B3261E;
+  --crit-tint-fg: #FFFFFF;
+  --crit-edge: transparent;
+  --you-bubble-bg: #2E3A9F;
+  --you-bubble-fg: #FFFFFF;
   --lift: 0 1px 2px rgba(18,20,26,0.05), 0 6px 18px rgba(18,20,26,0.06);
   --lift-strong: 0 2px 4px rgba(18,20,26,0.08), 0 14px 34px rgba(18,20,26,0.10);
   --lift-edge: 10px 0 30px -18px rgba(18,20,26,0.22);
@@ -119,8 +135,8 @@
 @media (prefers-color-scheme: dark) {
   :root {
     color-scheme: light dark;
-    --bg-raised: color-mix(in srgb, var(--bg-panel) 96%, var(--text-hi));
-    --bg-hover: color-mix(in srgb, var(--bg-panel) 92%, var(--text-hi));
+    --bg-raised: color-mix(in srgb, var(--bg-root) 92%, var(--text-hi));
+    --bg-hover: color-mix(in srgb, var(--bg-root) 88%, var(--text-hi));
     --overlay-backdrop: color-mix(in srgb, var(--bg-root) 72%, transparent);
     --bg-terminal: #0C0E13;
     --overlay-shadow-color: rgba(18,20,26,0.40);
@@ -221,6 +237,22 @@
     --ask-deep: #6E551C;
     --crit-fg: #12141A;
     --accent-fg: #12141A;
+    --ask-tint: #3A3020;
+    --ask-tint-fg: #E9E6E0;
+    --ask-tint-deep: #2B2418;
+    --ask-edge: #E2B14D;
+    --tray-chip-bg: transparent;
+    --tray-chip-fg: #E9E6E0;
+    --tray-chip-line: #E2B14D;
+    --pin-chip-bg: #E2B14D;
+    --pin-chip-fg: #12141A;
+    --pin-chip-hover: #EDC169;
+    --tray-focus: #E2B14D;
+    --crit-tint: #3A1F1E;
+    --crit-tint-fg: #E9E6E0;
+    --crit-edge: #EF7B72;
+    --you-bubble-bg: #3A46B0;
+    --you-bubble-fg: #FFFFFF;
     --lift: 0 1px 2px rgba(0,0,0,0.32), 0 6px 18px rgba(0,0,0,0.34);
     --lift-strong: 0 2px 4px rgba(0,0,0,0.40), 0 14px 34px rgba(0,0,0,0.46);
     --lift-edge: 10px 0 30px -18px rgba(0,0,0,0.60);
@@ -234,8 +266,8 @@
 
 html[data-scheme="light"] {
   color-scheme: light;
-  --bg-raised: color-mix(in srgb, var(--bg-panel) 96%, var(--text-hi));
-  --bg-hover: color-mix(in srgb, var(--bg-panel) 92%, var(--text-hi));
+  --bg-raised: color-mix(in srgb, var(--bg-root) 92%, var(--text-hi));
+  --bg-hover: color-mix(in srgb, var(--bg-root) 88%, var(--text-hi));
   --overlay-backdrop: color-mix(in srgb, var(--bg-root) 72%, transparent);
   --bg-terminal: #0C0E13;
   --overlay-shadow-color: rgba(18,20,26,0.40);
@@ -336,6 +368,22 @@ html[data-scheme="light"] {
   --ask-deep: #7F5504;
   --crit-fg: #FFFFFF;
   --accent-fg: #FFFFFF;
+  --ask-tint: #E2B14D;
+  --ask-tint-fg: #1B1D24;
+  --ask-tint-deep: #7F5504;
+  --ask-edge: transparent;
+  --tray-chip-bg: #FFFFFF;
+  --tray-chip-fg: #1B1D24;
+  --tray-chip-line: transparent;
+  --pin-chip-bg: #FFFFFF;
+  --pin-chip-fg: #1B1D24;
+  --pin-chip-hover: var(--bg-hover);
+  --tray-focus: #FFFFFF;
+  --crit-tint: #B3261E;
+  --crit-tint-fg: #FFFFFF;
+  --crit-edge: transparent;
+  --you-bubble-bg: #2E3A9F;
+  --you-bubble-fg: #FFFFFF;
   --lift: 0 1px 2px rgba(18,20,26,0.05), 0 6px 18px rgba(18,20,26,0.06);
   --lift-strong: 0 2px 4px rgba(18,20,26,0.08), 0 14px 34px rgba(18,20,26,0.10);
   --lift-edge: 10px 0 30px -18px rgba(18,20,26,0.22);
@@ -348,8 +396,8 @@ html[data-scheme="light"] {
 
 html[data-scheme="dark"] {
   color-scheme: dark;
-  --bg-raised: color-mix(in srgb, var(--bg-panel) 96%, var(--text-hi));
-  --bg-hover: color-mix(in srgb, var(--bg-panel) 92%, var(--text-hi));
+  --bg-raised: color-mix(in srgb, var(--bg-root) 92%, var(--text-hi));
+  --bg-hover: color-mix(in srgb, var(--bg-root) 88%, var(--text-hi));
   --overlay-backdrop: color-mix(in srgb, var(--bg-root) 72%, transparent);
   --bg-terminal: #0C0E13;
   --overlay-shadow-color: rgba(18,20,26,0.40);
@@ -450,6 +498,22 @@ html[data-scheme="dark"] {
   --ask-deep: #6E551C;
   --crit-fg: #12141A;
   --accent-fg: #12141A;
+  --ask-tint: #3A3020;
+  --ask-tint-fg: #E9E6E0;
+  --ask-tint-deep: #2B2418;
+  --ask-edge: #E2B14D;
+  --tray-chip-bg: transparent;
+  --tray-chip-fg: #E9E6E0;
+  --tray-chip-line: #E2B14D;
+  --pin-chip-bg: #E2B14D;
+  --pin-chip-fg: #12141A;
+  --pin-chip-hover: #EDC169;
+  --tray-focus: #E2B14D;
+  --crit-tint: #3A1F1E;
+  --crit-tint-fg: #E9E6E0;
+  --crit-edge: #EF7B72;
+  --you-bubble-bg: #3A46B0;
+  --you-bubble-fg: #FFFFFF;
   --lift: 0 1px 2px rgba(0,0,0,0.32), 0 6px 18px rgba(0,0,0,0.34);
   --lift-strong: 0 2px 4px rgba(0,0,0,0.40), 0 14px 34px rgba(0,0,0,0.46);
   --lift-edge: 10px 0 30px -18px rgba(0,0,0,0.60);
@@ -547,10 +611,10 @@ html[data-scheme="dark"] .machine-accent-2 {
 
 /* Dark wells: color.dark.* + color.series-neutral.dark; derived surfaces use those roles. */
 .terminal-mount:not(.conversation-active), .transcript, .terminal-search input, .attention-payload pre,
-.connection-log pre, dialog:not(.command-palette) input {
+.connection-log pre {
   color-scheme: dark;
-  --bg-raised: color-mix(in srgb, var(--bg-panel) 96%, var(--text-hi));
-  --bg-hover: color-mix(in srgb, var(--bg-panel) 92%, var(--text-hi));
+  --bg-raised: color-mix(in srgb, var(--bg-root) 92%, var(--text-hi));
+  --bg-hover: color-mix(in srgb, var(--bg-root) 88%, var(--text-hi));
   --overlay-backdrop: color-mix(in srgb, var(--bg-root) 72%, transparent);
   --bg-root: #12141A;
   --bg-panel: #191C24;

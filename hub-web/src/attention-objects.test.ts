@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { DEFAULT_ASK_OPTIONS, askOptions, installAttentionObjects, renderAskObject, renderBlockerObject } from "./attention-objects";
+import { DEFAULT_ASK_OPTIONS, WAITING_LINE, askOptions, installAttentionObjects, renderAskObject, renderBlockerObject } from "./attention-objects";
 import { ConversationHistory } from "./conversation-history";
 import { ConversationView, type TurnRenderContext } from "./conversation-view";
 import type { ThreadTurn } from "./thread-model";
@@ -10,9 +10,9 @@ const at = (hh: number, mm: number) => new Date(2026, 8, 21, hh, mm).getTime();
 function reply(id: number, kind: "ask" | "blocker", message: string, extra: Partial<OperatorReply> = {}): OperatorReply {
   return { notification_id: id, reply_to: null, message, summary: "", device_id: "d", kind, ...extra };
 }
-function context(reply: OperatorReply, history: ConversationHistory, respond?: TurnRenderContext["respond"]): TurnRenderContext {
+function context(reply: OperatorReply, history: ConversationHistory, respond?: TurnRenderContext["respond"], pinned?: boolean): TurnRenderContext {
   const turn: ThreadTurn = { key: `reply:${reply.notification_id}`, side: "supervisor", kind: reply.kind ?? "answer", event: { kind: "reply", value: reply }, first: true, last: true };
-  const ctx: TurnRenderContext = { document, turn, reply, supervisor: "atlas-sup", body: () => { const p = document.createElement("p"); p.textContent = reply.message; return [p]; }, history, respond };
+  const ctx: TurnRenderContext = { document, turn, reply, supervisor: "atlas-sup", body: () => { const p = document.createElement("p"); p.textContent = reply.message; return [p]; }, history, respond, pinned };
   return ctx;
 }
 
@@ -64,6 +64,46 @@ describe("ask object (Pebble 3, treatment A)", () => {
   });
 });
 
+describe("ask shown once (P1, cas-b1ee)", () => {
+  it("collapses the pinned ask's flow copy to a waiting pebble with no chips, while the pinned copy keeps them", () => {
+    const history = new ConversationHistory();
+    const ask = reply(50, "ask", "Fix or ship?", { options: ["Fix in-train", "Ship with allowlist"] });
+    history.reply(ask, at(9, 58));
+    const flow = renderAskObject(ask, context(ask, history, () => {}));
+    expect(flow.className).toBe("obj t-a ask-collapsed");
+    expect(flow.dataset.collapsed).toBe("true"); expect(flow.dataset.answered).toBe("false");
+    expect(flow.getAttribute("aria-label")).toBe("Question from atlas-sup");
+    expect(flow.querySelector(".obj-body p")?.textContent).toBe("Fix or ship?");
+    expect(flow.querySelector(".obj-body .ask-waiting")?.textContent).toBe(WAITING_LINE);
+    expect(WAITING_LINE).toBe("Waiting on you — answer below");
+    expect(flow.querySelector(".obj-foot")).toBeNull(); expect(flow.querySelectorAll(".chip")).toHaveLength(0);
+    const pinned = renderAskObject(ask, context(ask, history, () => {}, true));
+    expect(pinned.className).toBe("obj t-a"); expect(pinned.dataset.collapsed).toBeUndefined();
+    expect(pinned.querySelector(".ask-waiting")).toBeNull();
+    expect([...pinned.querySelectorAll("button.chip")].map((chip) => chip.textContent)).toEqual(["Fix in-train", "Ship with allowlist"]);
+  });
+  it("keeps the chips on an unpinned ask: an older unanswered ask, or one rendered without a history", () => {
+    const history = new ConversationHistory();
+    const older = reply(50, "ask", "Older?"); const newer = reply(52, "ask", "Newer?");
+    history.reply(older, at(9, 50)); history.reply(newer, at(9, 58));
+    const node = renderAskObject(older, context(older, history, () => {}));
+    expect(node.dataset.collapsed).toBeUndefined(); expect(node.querySelector(".ask-waiting")).toBeNull();
+    expect(node.querySelectorAll("button.chip")).toHaveLength(2);
+    expect(renderAskObject(newer, context(newer, history, () => {})).dataset.collapsed).toBe("true");
+    const bare = { ...context(older, history, () => {}), history: undefined };
+    expect(renderAskObject(older, bare).querySelectorAll("button.chip")).toHaveLength(2);
+  });
+  it("shows the sent-answer chip, not the waiting line, once the ask is answered", () => {
+    const history = new ConversationHistory();
+    const ask = reply(50, "ask", "Fix or ship?");
+    history.reply(ask, at(9, 58)); history.submit("q", "atlas-sup", "Hold", at(10, 0), 50);
+    const node = renderAskObject(ask, context(ask, history, () => {}));
+    expect(node.className).toBe("obj t-a"); expect(node.dataset.answered).toBe("true");
+    expect(node.querySelector(".ask-waiting")).toBeNull();
+    expect(node.querySelector(".chip.sent")?.textContent).toBe("Hold");
+  });
+});
+
 describe("blocker object", () => {
   it("carries the inset evidence window when the message ends in a file:line evidence line", () => {
     const blocker = reply(51, "blocker", "The release gate went red. The train is held.\nattention.rs:212 · needless_borrow");
@@ -99,6 +139,12 @@ describe("installed on the Pebble 2 seam", () => {
     expect(view.element.querySelector('[data-kind="blocker"] .window')?.textContent).toBe("attention.rs:212 · needless_borrow");
     const inFlow = view.element.querySelector<HTMLElement>('[data-kind="ask"]')!;
     expect(inFlow.classList.contains("obj")).toBe(true); expect(inFlow.dataset.answered).toBe("false");
+    // Shown once: the flow copy is the collapsed pebble pointing at the tray;
+    // the only chips on screen are the pinned ones.
+    expect(inFlow.dataset.collapsed).toBe("true");
+    expect(inFlow.querySelector(".ask-waiting")?.textContent).toBe("Waiting on you — answer below");
+    expect(view.element.querySelectorAll(".chip")).toHaveLength(0);
+    expect(document.querySelectorAll("button.chip")).toHaveLength(2);
     expect(view.pinned.hidden).toBe(false);
     expect(view.pinned.querySelector(".pinned-label")?.textContent).toBe("Waiting on you");
     const pinned = view.pinned.querySelector<HTMLElement>('.obj[data-pinned="true"]')!;
@@ -111,10 +157,61 @@ describe("installed on the Pebble 2 seam", () => {
     expect(history.events.at(-1)).toMatchObject({ kind: "send", value: { text: "Yes, go ahead", replyTo: 52 } });
     expect(view.pinned.hidden).toBe(true); expect(view.pinned.children).toHaveLength(0);
     const answered = view.element.querySelector<HTMLElement>('[data-kind="ask"]')!;
-    expect(answered.dataset.answered).toBe("true");
+    expect(answered.dataset.answered).toBe("true"); expect(answered.dataset.collapsed).toBeUndefined();
+    expect(answered.querySelector(".ask-waiting")).toBeNull();
     expect(answered.querySelector(".chip.sent")?.textContent).toBe("Yes, go ahead");
     // The operator's send after the blocker acknowledges it too.
     expect(history.waiting()).toEqual([]);
+  });
+  it("keeps a refused chip reply's ask pinned with live chips beside Not sent, and unpins it on a successful retry (cas-b438)", () => {
+    uninstall = installAttentionObjects();
+    const history = new ConversationHistory();
+    const sent: string[] = [];
+    const view = new ConversationView(document, history, {
+      supervisor: "atlas-sup",
+      respond: (ask, text) => { sent.push(text); history.submit(`quick-${sent.length}`, "atlas-sup", text, at(10, sent.length), ask.notification_id); view.update(); },
+      retryMessage: (send) => { history.discardRefused(send.id); history.submit(`retry-${send.id}`, "atlas-sup", send.text, at(10, 30), send.replyTo); view.update(); },
+    });
+    document.body.replaceChildren(view.element, view.pinned);
+    history.reply(reply(52, "ask", "Fix or ship?"), at(9, 58)); view.update();
+    const flowAsk = () => view.element.querySelector<HTMLElement>('[data-kind="ask"]')!;
+    const pinnedChips = () => [...view.pinned.querySelectorAll<HTMLButtonElement>("button.chip")];
+    // Tap a pinned chip: sending answers optimistically, so the pin is released.
+    pinnedChips()[0]!.click();
+    expect(sent).toEqual(["Yes, go ahead"]);
+    expect(view.pinned.hidden).toBe(true); expect(flowAsk().dataset.answered).toBe("true");
+    // The hub refuses it: the ask is pinned again with usable chips, the flow copy collapses back, and the refused bubble offers Retry.
+    history.reject("quick-1", "no access"); view.update();
+    expect(view.pinned.hidden).toBe(false);
+    expect(view.pinned.querySelector<HTMLElement>(".obj")?.dataset.notificationId).toBe("52");
+    expect(pinnedChips()).toHaveLength(2); expect(pinnedChips().every((chip) => !chip.disabled)).toBe(true);
+    expect(flowAsk().dataset.answered).toBe("false"); expect(flowAsk().dataset.collapsed).toBe("true");
+    expect(flowAsk().querySelector(".chip.sent")).toBeNull();
+    const refused = view.element.querySelector<HTMLElement>('.bub[data-state="error"]')!;
+    expect(refused.querySelector(".conversation-refused b")?.textContent).toBe("Not sent");
+    // Answering again from the still-pinned tray works.
+    pinnedChips()[1]!.click();
+    expect(sent).toEqual(["Yes, go ahead", "Hold"]); expect(view.pinned.hidden).toBe(true);
+    history.reject("quick-2", "no access"); view.update();
+    expect(view.pinned.hidden).toBe(false);
+    // Retry of a refused reply: the new send answers the ask and the pin is released.
+    view.element.querySelector<HTMLButtonElement>('.bub[data-state="error"] .conversation-retry')!.click();
+    expect(view.pinned.hidden).toBe(true); expect(view.pinned.children).toHaveLength(0);
+    expect(flowAsk().dataset.answered).toBe("true"); expect(flowAsk().querySelector(".chip.sent")?.textContent).toBe("Yes, go ahead");
+    expect(history.answered(52)?.id).toBe("retry-quick-1");
+  });
+  it("expands the older ask's flow copy again when a newer ask takes the pin", () => {
+    uninstall = installAttentionObjects();
+    const history = new ConversationHistory();
+    const view = new ConversationView(document, history, { supervisor: "atlas-sup", respond: () => {} });
+    document.body.replaceChildren(view.element, view.pinned);
+    history.reply(reply(50, "ask", "First?"), at(9, 50)); view.update();
+    const first = () => view.element.querySelector<HTMLElement>('[data-kind="ask"][data-notification-id="50"]')!;
+    expect(first().dataset.collapsed).toBe("true");
+    history.reply(reply(52, "ask", "Second?"), at(9, 58)); view.update();
+    expect(first().dataset.collapsed).toBeUndefined(); expect(first().querySelectorAll("button.chip")).toHaveLength(2);
+    expect(view.element.querySelector<HTMLElement>('[data-notification-id="52"]')?.dataset.collapsed).toBe("true");
+    expect(view.pinned.querySelector<HTMLElement>(".obj")?.dataset.notificationId).toBe("52");
   });
   it("unregisters cleanly so the fallback bubbles return", () => {
     installAttentionObjects()();

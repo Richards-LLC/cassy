@@ -2,11 +2,15 @@ import { machineFooterMarkup, pairedMachinesDialogMarkup, renderPairedMachines }
 import { ConversationList, type ConversationRow } from '../src/conversation-list';
 import { ConversationHistory } from '../src/conversation-history';
 import { ConversationView } from '../src/conversation-view';
-import { applyKeyboardViewport, conversationShellMarkup, dressComposer, keyboardViewportHeight } from '../src/conversation-shell';
+import { applyKeyboardViewport, conversationEmptyText, conversationShellMarkup, dressComposer, keyboardViewportHeight } from '../src/conversation-shell';
+import { applyMicState, composerMarkup, type MicState } from '../src/composer-markup';
+import { syncContextRail } from '../src/context-rail';
 import { installAttentionObjects, renderAskObject, renderBlockerObject } from '../src/attention-objects';
 import { installAttachmentSheet } from '../src/attachment-sheet';
 import type { ArtifactRef } from '../src/types';
 import './pairs.css';
+// Real operator row 20812 (1,079 characters): the long status D2 measured.
+import LONG_STATUS from './hub-row-20812.txt?raw';
 
 // Pebble 3: ask and blocker paint as the fused-tray objects in every fixture.
 installAttentionObjects();
@@ -39,7 +43,7 @@ export function fixtureConversationRows(selected: boolean): ConversationRow[] {
   const base = { freshness: 'Catalog checked just now', connection: 'Live', attention: 0, unread: 0, selected: false };
   return [
     { ...base, key: 'atlas-linux:one', machineId: 'atlas-linux', session: 'one', supervisor: FIXTURE_SUPERVISOR, projectDir: '/projects/cas-src', host: 'Atlas · Linux', when: '09:58', preview: 'Fix the warning in-train, or ship allowlisted?', attention: 1, selected },
-    { ...base, key: 'studio-mac:two', machineId: 'studio-mac', session: 'two', supervisor: 'calm-otter-4', projectDir: '/projects/gabber-studio', host: 'Studio Mac · macOS', preview: 'Pass two is green — every pack in one place.', unread: 2 },
+    { ...base, key: 'studio-mac:two', machineId: 'studio-mac', session: 'two', supervisor: 'calm-otter-4', projectDir: '/projects/gabber-studio', host: 'Studio Mac · macOS', when: '09:41', preview: 'Pass two is green — every pack in one place.', unread: 2 },
     { ...base, key: 'atlas-linux:three', machineId: 'atlas-linux', session: 'three', supervisor: 'steady-heron-2', projectDir: '/projects/petra-stella-cloud', host: 'Atlas · Linux', when: 'Tue', freshness: 'Catalog checked 1m ago', preview: 'Preview is up for the alias merge.' },
     { ...base, key: 'studio-mac:four', machineId: 'studio-mac', session: 'four', supervisor: 'quiet-marten-7', projectDir: '/projects/openclaw', host: 'Studio Mac · macOS', when: 'Tue', preview: 'Rebased and pushed; nothing waiting.' },
     { ...base, key: 'bench-1:five', machineId: 'bench-1', session: 'five', supervisor: 'bright-otter-3', projectDir: '/projects/mecha-cassy', host: 'Bench · Linux', when: 'Mon', freshness: 'Catalog checked 2h ago', preview: 'Posted both threads to the channel.' },
@@ -49,7 +53,11 @@ export function fixtureConversationRows(selected: boolean): ConversationRow[] {
 
 export function renderConversationFixture(app: HTMLElement, state: string): void {
   const supervisor = FIXTURE_SUPERVISOR;
-  const selected = !['conversations-list', 'paired-machines'].includes(state);
+  const selected = !['conversations-list', 'conversations-loading', 'conversations-unpaired', 'paired-machines'].includes(state);
+  // Catalog loading: nothing is known yet, so no machine, no row, no pairing offer.
+  const loading = state === 'conversations-loading';
+  // First run: the catalog is loaded and empty, so the welcome offers pairing.
+  const unpaired = state === 'conversations-unpaired';
   // The evidence state opens the Studio Mac thread so the supervisor pebbles
   // take the second accent; the empty state opens Bench (third accent) as in
   // empty.html.
@@ -58,10 +66,14 @@ export function renderConversationFixture(app: HTMLElement, state: string): void
     : state === 'conversation-empty'
       ? { id: 'bench-1', label: 'Bench', host: 'Bench · Linux', projectDir: '/projects/cas-hub-static', project: 'cas-hub-static' }
       : { id: 'atlas-linux', label: 'Atlas', host: 'Atlas · Linux', projectDir: '/projects/cas-src', project: 'cas-src' };
-  app.innerHTML = conversationShellMarkup({ selected, supervisor, projectDir: machine.projectDir, host: machine.host, machineId: machine.id, loaded: true, paired: true });
-  const listRows = fixtureConversationRows(selected);
+  app.innerHTML = conversationShellMarkup({ selected, supervisor, projectDir: machine.projectDir, host: machine.host, machineId: machine.id, loaded: !loading, paired: !loading && !unpaired });
+  const listRows = loading || unpaired ? [] : fixtureConversationRows(selected);
   new ConversationList().render(app.querySelector('#conversation-list')!, listRows, () => {});
-  const machines = FIXTURE_MACHINES;
+  const machines = loading || unpaired ? [] : FIXTURE_MACHINES;
+  // The list's empty line, exactly as main.ts renderConversationList sets it.
+  const empty = app.querySelector<HTMLElement>('#conversation-empty')!;
+  empty.hidden = listRows.length > 0;
+  empty.textContent = conversationEmptyText(!loading, machines.length);
   // The footer counts conversations, not machines: it must equal the rows rendered above.
   app.querySelector('#hub-footer-badges')!.innerHTML = machineFooterMarkup(machines, listRows.length, 'fixture');
   app.insertAdjacentHTML('beforeend', pairedMachinesDialogMarkup());
@@ -81,7 +93,19 @@ export function renderConversationFixture(app: HTMLElement, state: string): void
   let working = false;
   let echo: string | undefined;
   let draft = '';
-  if (state === 'conversation-thread') {
+  let loadingEarlier = false;
+  if (state === 'conversation-long-status') {
+    // D2: a real waiting-on-you update arriving as a status after an earlier one.
+    history.submit('directive', supervisor, 'Where are we on the user-eye pilot?', at(13, 20));
+    history.acknowledge({ client_ref: 'directive', notification_id: 20810, target: supervisor, stamped: true });
+    reply(20811, null, 'Status 13:1xZ. Pilot run 2 of 3 in flight.', 'status', at(13, 22));
+    reply(20812, null, LONG_STATUS.trim(), 'status', at(13, 25));
+  } else if (state === 'conversation-loading-earlier') {
+    // The thread's only loading signal: an earlier page is on its way (D5).
+    loadingEarlier = true;
+    reply(42, null, 'On it. Both lanes are green on their own CI — the gate starts after the second merge lands.', 'answer', at(9, 44));
+    reply(43, null, 'Both lanes are on the epic branch. The release gate is running.', 'receipt', at(9, 47));
+  } else if (state === 'conversation-thread') {
     // thread-a: directive, answer, receipt, coalesced statuses, question, answer, ask (Pebble 3 fallback), working.
     history.submit('directive', supervisor, 'Merge the two green lanes, then cut 3.26.0 once the gate is green.', at(9, 41));
     history.acknowledge({ client_ref: 'directive', notification_id: 41, target: supervisor, stamped: true });
@@ -91,8 +115,11 @@ export function renderConversationFixture(app: HTMLElement, state: string): void
     reply(45, null, 'Gate 4 of 14 targets green', 'status', at(9, 51));
     reply(46, null, 'Gate 8 of 14 targets green', 'status', at(9, 53));
     reply(47, null, 'gate 11 of 14 targets green', 'status', at(9, 55));
-    // thread-a's sheet at 09:52: an attachment-only turn is its sheet alone.
-    reply(51, null, '', 'answer', at(9, 52), [REPORT_CARD_ATTACHMENTS[0]!]);
+    // thread-a's sheet at 09:55, after the last status: an attachment-only
+    // turn is its sheet alone. History is ordered by time (durable replay), so
+    // a sheet stamped inside the 09:49–09:55 run would split the coalesced
+    // statuses in two (cas-7294).
+    reply(51, null, '', 'answer', at(9, 55), [REPORT_CARD_ATTACHMENTS[0]!]);
     history.submit('question', supervisor, 'Did the tokens drift test move?', at(9, 56));
     history.acknowledge({ client_ref: 'question', notification_id: 48, target: supervisor, stamped: true });
     reply(49, 48, "No — unchanged since 3.25.3. The gate's only new failure is one lint warning.", 'answer', at(9, 57));
@@ -150,12 +177,16 @@ export function renderConversationFixture(app: HTMLElement, state: string): void
     }
   }
   // Fixture respond: record the chip as an operator send answering the ask, exactly as main.ts does after the hub accepts it.
-  const view = new ConversationView(document, history, { supervisor, machine: machine.label, project: machine.project, header: false, working: () => working, echo: () => echo, editMessage: () => {}, respond: (ask, text) => { history.submit(`quick-${ask.notification_id}`, supervisor, text, Date.now(), ask.notification_id); view.update(); } });
+  const view = new ConversationView(document, history, { supervisor, machine: machine.label, project: machine.project, header: false, working: () => working, echo: () => echo, hasEarlier: () => loadingEarlier, loadingEarlier: () => loadingEarlier, editMessage: () => {}, retryMessage: (send) => { history.discardRefused(send.id); history.submit(`retry-${send.id}`, supervisor, send.text, Date.now(), send.replyTo); view.update(); }, respond: (ask, text) => { history.submit(`quick-${ask.notification_id}`, supervisor, text, Date.now(), ask.notification_id); view.update(); syncContextRail(app, { history, progress: false, attention: 0 }); } });
   app.querySelector('#conversation-pane-slot')!.append(view.element); view.update();
   // The app's own composer region, dressed the way arrangeConversationShell dresses it; the pinned ask mounts above it.
   const slot = app.querySelector<HTMLElement>('#conversation-composer-slot')!;
-  slot.innerHTML = '<div class="message"><h2><label for="message-text">Talk to supervisor</label></h2><textarea aria-describedby="message-status" id="message-text"></textarea><p class="control-disabled-reason" role="note" hidden></p><div class="composer-actions"><button id="message-keyboard" type="button">Keyboard</button><button id="message-send" class="primary" type="button">Send message</button></div><p id="message-status" class="message-status" role="status" hidden></p></div>';
+  // Dictation writes interim words into the field while the mic listens.
+  if (state === 'conversation-mic-listening') draft = 'Cut 3.26.0 once the gate is';
+  // The production composer markup (main.ts renders the same builder), mic included.
+  slot.innerHTML = composerMarkup(supervisor);
   dressComposer(slot.querySelector<HTMLElement>('.message')!, supervisor);
+  applyMicState(slot.querySelector<HTMLButtonElement>('#message-mic')!, fixtureMicState(state));
   slot.querySelector<HTMLTextAreaElement>('#message-text')!.value = draft;
   if (state === 'conversation-keyboard') {
     // A phone keyboard on a browser that ignores interactive-widget: the visual
@@ -167,8 +198,22 @@ export function renderConversationFixture(app: HTMLElement, state: string): void
     slot.querySelector<HTMLTextAreaElement>('#message-text')!.value = 'Fix it in-train, then';
   } else applyKeyboardViewport(document, undefined);
   slot.prepend(view.pinned);
-  app.querySelector('#conversation-status-slot')!.innerHTML = '<p class="conversation-host">Supervisor conversations<br>In progress</p>';
-  app.querySelector('#conversation-attention-slot')!.innerHTML = '<h2>Attention</h2><p class="conversation-host">One request needs your direction.</p>';
+  // The desktop context rail (P10) shows only what this thread's own data
+  // supports: open asks/blockers and attachments. The fixtures report no
+  // status and no attention events, so those sections stay absent, and a
+  // thread with neither folds the rail to its 48px track.
+  syncContextRail(app, { history, progress: false, attention: 0 });
+}
+
+/**
+ * The mic as main.ts syncSpeechComposer leaves it: dictation available and
+ * idle once detection settles; listening; or typing-only when the browser has
+ * no speech recognition (the unavailable reason is the production sentence).
+ */
+function fixtureMicState(state: string): MicState {
+  if (state === 'conversation-mic-listening') return { mode: 'speech', listening: true, detail: '' };
+  if (state === 'conversation-mic-unavailable') return { mode: 'typing', listening: false, detail: '' };
+  return { mode: 'speech', listening: false, detail: '' };
 }
 
 /** pairs.html: each attention object beside a calm pebble for scale. */

@@ -163,6 +163,43 @@ describe("installed on the Pebble 2 seam", () => {
     // The operator's send after the blocker acknowledges it too.
     expect(history.waiting()).toEqual([]);
   });
+  it("keeps a refused chip reply's ask pinned with live chips beside Not sent, and unpins it on a successful retry (cas-b438)", () => {
+    uninstall = installAttentionObjects();
+    const history = new ConversationHistory();
+    const sent: string[] = [];
+    const view = new ConversationView(document, history, {
+      supervisor: "atlas-sup",
+      respond: (ask, text) => { sent.push(text); history.submit(`quick-${sent.length}`, "atlas-sup", text, at(10, sent.length), ask.notification_id); view.update(); },
+      retryMessage: (send) => { history.discardRefused(send.id); history.submit(`retry-${send.id}`, "atlas-sup", send.text, at(10, 30), send.replyTo); view.update(); },
+    });
+    document.body.replaceChildren(view.element, view.pinned);
+    history.reply(reply(52, "ask", "Fix or ship?"), at(9, 58)); view.update();
+    const flowAsk = () => view.element.querySelector<HTMLElement>('[data-kind="ask"]')!;
+    const pinnedChips = () => [...view.pinned.querySelectorAll<HTMLButtonElement>("button.chip")];
+    // Tap a pinned chip: sending answers optimistically, so the pin is released.
+    pinnedChips()[0]!.click();
+    expect(sent).toEqual(["Yes, go ahead"]);
+    expect(view.pinned.hidden).toBe(true); expect(flowAsk().dataset.answered).toBe("true");
+    // The hub refuses it: the ask is pinned again with usable chips, the flow copy collapses back, and the refused bubble offers Retry.
+    history.reject("quick-1", "no access"); view.update();
+    expect(view.pinned.hidden).toBe(false);
+    expect(view.pinned.querySelector<HTMLElement>(".obj")?.dataset.notificationId).toBe("52");
+    expect(pinnedChips()).toHaveLength(2); expect(pinnedChips().every((chip) => !chip.disabled)).toBe(true);
+    expect(flowAsk().dataset.answered).toBe("false"); expect(flowAsk().dataset.collapsed).toBe("true");
+    expect(flowAsk().querySelector(".chip.sent")).toBeNull();
+    const refused = view.element.querySelector<HTMLElement>('.bub[data-state="error"]')!;
+    expect(refused.querySelector(".conversation-refused b")?.textContent).toBe("Not sent");
+    // Answering again from the still-pinned tray works.
+    pinnedChips()[1]!.click();
+    expect(sent).toEqual(["Yes, go ahead", "Hold"]); expect(view.pinned.hidden).toBe(true);
+    history.reject("quick-2", "no access"); view.update();
+    expect(view.pinned.hidden).toBe(false);
+    // Retry of a refused reply: the new send answers the ask and the pin is released.
+    view.element.querySelector<HTMLButtonElement>('.bub[data-state="error"] .conversation-retry')!.click();
+    expect(view.pinned.hidden).toBe(true); expect(view.pinned.children).toHaveLength(0);
+    expect(flowAsk().dataset.answered).toBe("true"); expect(flowAsk().querySelector(".chip.sent")?.textContent).toBe("Yes, go ahead");
+    expect(history.answered(52)?.id).toBe("retry-quick-1");
+  });
   it("expands the older ask's flow copy again when a newer ask takes the pin", () => {
     uninstall = installAttentionObjects();
     const history = new ConversationHistory();

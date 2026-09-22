@@ -33,6 +33,27 @@ describe('conversation evidence', () => {
     expect(history.events).toHaveLength(2);
     expect(history.events[0]).toMatchObject({ value: { notificationId: 11, state: 'acknowledged' } });
   });
+  it('never counts a refused send as the answer to an ask (cas-b438)', () => {
+    const history = new ConversationHistory();
+    history.reply({ notification_id: 4, reply_to: null, message: 'Tag it?', summary: '', device_id: 'd', kind: 'ask' });
+    // Sending answers optimistically.
+    history.submit('q', 'supervisor', 'Yes, go ahead', Date.now(), 4);
+    expect(history.answered(4)?.id).toBe('q'); expect(history.pinnedAsk()).toBeUndefined();
+    // Refused: nothing reached the supervisor, so the ask is waiting and pinned again.
+    history.reject('q', 'no access');
+    expect(history.answered(4)).toBeUndefined();
+    expect(history.pinnedAsk()?.notification_id).toBe(4);
+    expect(history.waiting().map((item) => item.notification_id)).toEqual([4]);
+    // A retry replaces the refused send and answers the ask.
+    expect(history.discardRefused('q')).toBe(true);
+    history.submit('r', 'supervisor', 'Yes, go ahead', Date.now(), 4);
+    expect(history.answered(4)?.id).toBe('r'); expect(history.pinnedAsk()).toBeUndefined();
+    // A refused send beside a live one never shadows it, whatever the order.
+    history.submit('late', 'supervisor', 'Hold', Date.now(), 4); history.reject('late', 'no access');
+    expect(history.answered(4)?.id).toBe('r');
+    history.acknowledge({ client_ref: 'r', notification_id: 9, target: 'supervisor', stamped: true });
+    expect(history.answered(4)).toMatchObject({ id: 'r', state: 'acknowledged' });
+  });
   it('tracks asks and blockers waiting on the operator and the send that answers an ask (cas-43f9)', () => {
     const history = new ConversationHistory();
     const turn = (notification_id: number, kind: 'ask' | 'blocker' | 'answer', message = `m${notification_id}`) => ({ notification_id, reply_to: null, message, summary: '', device_id: 'd', kind });

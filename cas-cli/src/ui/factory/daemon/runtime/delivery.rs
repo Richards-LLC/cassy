@@ -1485,6 +1485,7 @@ mod tests {
             git_loaded: true,
             reminders: vec![],
             epic_closed_counts: std::collections::HashMap::new(),
+            start_gated_task_ids: Default::default(),
         }
     }
 

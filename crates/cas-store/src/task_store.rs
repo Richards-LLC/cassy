@@ -3,6 +3,7 @@
 use chrono::{DateTime, TimeZone, Utc};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::Value;
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -683,6 +684,19 @@ impl SqliteTaskStore {
     /// Prevents read skew where a task exists but its epic link is invisible (or vice
     /// versa) due to a concurrent write between two separate queries.
     pub fn list_with_parent_deps(&self) -> Result<(Vec<Task>, Vec<Dependency>)> {
+        let (tasks, deps, _) = self.list_with_parent_deps_and_start_gates()?;
+        Ok((tasks, deps))
+    }
+
+    /// [`Self::list_with_parent_deps`] plus the ids of tasks whose explicit
+    /// `requires-start` prerequisites are not yet terminal, all read under one
+    /// lock hold.
+    ///
+    /// The prerequisite predicate matches `list_ready` and the `start` gate:
+    /// a prerequisite resolves only once it is `closed` or `cancelled`.
+    pub fn list_with_parent_deps_and_start_gates(
+        &self,
+    ) -> Result<(Vec<Task>, Vec<Dependency>, HashSet<String>)> {
         let conn = crate::shared_db::lock_connection(&self.conn)?;
 
         // Both queries run under the same mutex hold, guaranteeing a consistent snapshot
@@ -708,7 +722,19 @@ impl SqliteTaskStore {
                 .collect::<std::result::Result<Vec<_>, _>>()?
         };
 
-        Ok((tasks, deps))
+        let start_gated = {
+            let mut stmt = conn.prepare_cached(
+                "SELECT DISTINCT d.from_id
+                 FROM dependencies d
+                 JOIN tasks prerequisite ON d.to_id = prerequisite.id
+                 WHERE d.dep_type = 'requires-start'
+                 AND prerequisite.status NOT IN ('closed', 'cancelled')",
+            )?;
+            stmt.query_map([], |row| row.get::<_, String>(0))?
+                .collect::<std::result::Result<HashSet<_>, _>>()?
+        };
+
+        Ok((tasks, deps, start_gated))
     }
 }
 

@@ -604,6 +604,7 @@ impl FactoryApp {
             git_loaded: false,
             reminders: Vec::new(),
             epic_closed_counts: HashMap::new(),
+            start_gated_task_ids: Default::default(),
         };
         event_detector.initialize(&director_data);
         let notifier = Notifier::new(cas_factory::NotifyConfig::default());

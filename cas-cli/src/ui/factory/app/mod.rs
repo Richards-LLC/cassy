@@ -2500,6 +2500,7 @@ fn unfiltered_snapshot_from(data: &DirectorData) -> DirectorData {
         git_loaded: false,
         reminders: Vec::new(),
         epic_closed_counts: HashMap::new(),
+        start_gated_task_ids: Default::default(),
     }
 }
 
@@ -3486,6 +3487,7 @@ mod tests {
             git_loaded,
             reminders: Vec::new(),
             epic_closed_counts: HashMap::new(),
+            start_gated_task_ids: Default::default(),
         }
     }
 
@@ -3501,6 +3503,7 @@ mod tests {
             git_loaded: false,
             reminders: Vec::new(),
             epic_closed_counts: HashMap::new(),
+            start_gated_task_ids: Default::default(),
         }
     }
 
@@ -3577,6 +3580,7 @@ mod tests {
             git_loaded: true,
             reminders: vec![],
             epic_closed_counts: HashMap::new(),
+            start_gated_task_ids: Default::default(),
         };
 
         let ids = non_closed_task_ids(&data);
@@ -3790,6 +3794,7 @@ mod tests {
             git_loaded: false,
             reminders: Vec::new(),
             epic_closed_counts: HashMap::new(),
+            start_gated_task_ids: Default::default(),
         };
 
         // Start with stale epic_state pointing to old epic
@@ -3813,6 +3818,7 @@ mod tests {
             git_loaded: false,
             reminders: Vec::new(),
             epic_closed_counts: HashMap::new(),
+            start_gated_task_ids: Default::default(),
         });
 
         let events = detector.detect_changes(&data, None);
@@ -3908,6 +3914,7 @@ mod tests {
             git_loaded: true,
             reminders: Vec::new(),
             epic_closed_counts: HashMap::new(),
+            start_gated_task_ids: Default::default(),
         };
 
         // Simulate `filter_director_agents_to_current_session` scoping the
@@ -3988,6 +3995,7 @@ mod tests {
             git_loaded: true,
             reminders: Vec::new(),
             epic_closed_counts: HashMap::new(),
+            start_gated_task_ids: Default::default(),
         };
 
         let mut app = super::FactoryApp::for_test();
@@ -4077,6 +4085,7 @@ mod tests {
             git_loaded: false,
             reminders: Vec::new(),
             epic_closed_counts: HashMap::new(),
+            start_gated_task_ids: Default::default(),
         };
         // "epic-no-branch" has no task referencing it either, so it must be
         // reachable only via the current_epic_id path to prove the
@@ -4148,6 +4157,7 @@ mod tests {
             git_loaded: false,
             reminders: Vec::new(),
             epic_closed_counts: HashMap::new(),
+            start_gated_task_ids: Default::default(),
         };
 
         let visible = app.branch_visible_epics_for_ahead_behind();
@@ -4690,6 +4700,7 @@ mod tests {
             git_loaded: false,
             reminders: Vec::new(),
             epic_closed_counts: HashMap::new(),
+            start_gated_task_ids: Default::default(),
         };
 
         let state = super::detect_epic_state(&data, None);
@@ -4759,6 +4770,7 @@ mod tests {
             git_loaded: false,
             reminders: Vec::new(),
             epic_closed_counts: HashMap::new(),
+            start_gated_task_ids: Default::default(),
         };
 
         let state = super::detect_epic_state(&data, None);
@@ -4817,6 +4829,7 @@ mod tests {
             git_loaded: false,
             reminders: Vec::new(),
             epic_closed_counts: HashMap::new(),
+            start_gated_task_ids: Default::default(),
         };
 
         // Preferred epic should win even though another epic is explicitly InProgress.
@@ -4865,6 +4878,7 @@ mod tests {
             git_loaded: false,
             reminders: Vec::new(),
             epic_closed_counts: HashMap::new(),
+            start_gated_task_ids: Default::default(),
         };
 
         let state = super::detect_epic_state(&data, Some(preferred_id));
@@ -5023,6 +5037,7 @@ mod tests {
             git_loaded: false,
             reminders: Vec::new(),
             epic_closed_counts: HashMap::new(),
+            start_gated_task_ids: Default::default(),
         };
 
         let pinned = super::resolve_epic_state_for_focus(
@@ -5058,6 +5073,7 @@ mod tests {
             git_loaded: false,
             reminders: Vec::new(),
             epic_closed_counts: HashMap::new(),
+            start_gated_task_ids: Default::default(),
         };
         assert_eq!(
             super::resolve_epic_state_for_focus(&zero_only, &super::SessionEpicFocus::default())
@@ -5089,6 +5105,7 @@ mod tests {
             git_loaded: false,
             reminders: Vec::new(),
             epic_closed_counts: HashMap::new(),
+            start_gated_task_ids: Default::default(),
         };
 
         assert!(
@@ -5524,6 +5541,7 @@ mod tests {
             git_loaded: false,
             reminders: Vec::new(),
             epic_closed_counts: HashMap::new(),
+            start_gated_task_ids: Default::default(),
         };
         app.apply_session_metadata_focus();
 
@@ -5562,6 +5580,7 @@ mod tests {
             git_loaded: false,
             reminders: Vec::new(),
             epic_closed_counts: HashMap::new(),
+            start_gated_task_ids: Default::default(),
         };
 
         let changes = app.handle_epic_events(&[DirectorEvent::EpicStarted {
@@ -5602,6 +5621,7 @@ mod tests {
             git_loaded: false,
             reminders: Vec::new(),
             epic_closed_counts: HashMap::new(),
+            start_gated_task_ids: Default::default(),
         };
 
         let events = vec![DirectorEvent::EpicStarted {
@@ -5719,6 +5739,7 @@ mod tests {
             git_loaded: false,
             reminders: Vec::new(),
             epic_closed_counts: HashMap::new(),
+            start_gated_task_ids: Default::default(),
         };
 
         // Init path: detect_epic_state must prefer the active (lex-earlier,
@@ -5751,6 +5772,7 @@ mod tests {
             git_loaded: false,
             reminders: Vec::new(),
             epic_closed_counts: HashMap::new(),
+            start_gated_task_ids: Default::default(),
         });
 
         let events = detector.detect_changes(&data, state.epic_id());
@@ -5827,6 +5849,7 @@ mod tests {
             git_loaded: false,
             reminders: Vec::new(),
             epic_closed_counts: HashMap::new(),
+            start_gated_task_ids: Default::default(),
         };
 
         let mut detector =
@@ -5842,6 +5865,7 @@ mod tests {
             git_loaded: false,
             reminders: Vec::new(),
             epic_closed_counts: HashMap::new(),
+            start_gated_task_ids: Default::default(),
         });
 
         // current_epic_id points at a ghost epic not in data.epic_tasks.
@@ -5920,6 +5944,7 @@ mod tests {
             git_loaded: false,
             reminders: Vec::new(),
             epic_closed_counts: HashMap::new(),
+            start_gated_task_ids: Default::default(),
         };
 
         let mut detector =
@@ -5935,6 +5960,7 @@ mod tests {
             git_loaded: false,
             reminders: Vec::new(),
             epic_closed_counts: HashMap::new(),
+            start_gated_task_ids: Default::default(),
         });
 
         let events = detector.detect_changes(&data, None);

@@ -795,6 +795,7 @@ mod worker_attention_tests {
             git_loaded: true,
             reminders: vec![],
             epic_closed_counts: HashMap::new(),
+            start_gated_task_ids: Default::default(),
         };
         let pane = PaneWakeState {
             composer_dirty: false,

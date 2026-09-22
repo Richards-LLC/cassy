@@ -66,18 +66,42 @@ describe("supervisor markdown subset", () => {
     ]);
   });
 
-  it("keeps Markdown and ordinary parenthetical prose untouched", () => {
+  it("renders the verbatim status row with a malformed minute as a bold lead and three items", () => {
+    const source = "Status 13:2xZ. WAITING ON YOU: (1) mockup shape — final 5 posts / 10 issues at ~/.cas/artifacts/cas-7771/slack-by-flow/index.html, Blocked paths first, every item proven by real login / measurement / real click; (2) \"post\"; (3) \"run it\" — the real 80-cell one-command run (~$53, <2 h), and whether Luna or Opus explores. LUNA vs OPUS (20 same cells, same verify+vet): Opus 66 raw → 35 vetted, 27 false positives, $12.42; Luna 19 raw → 14 vetted, 6 false positives, cost receipt missing from Codex CLI; both recovered 4 of 9 known defects — a floor, the comparison's verifier ran 1 attempt on an older build and dropped 2 items that reproduce 3/3; being re-verified. flow-opus.png / flow-luna.png in ~/.cas/artifacts/cas-db69/. MERGED TODAY (tests green, honest typecheck): action-replay verifier + real form login; code-vet step; cross-route dedupe; one cell per route + 120 s + 429 cap; capture fix; one-command qa-run with scorecard. Retrospective: docs/qa/2026-09-21-user-eye-pilot-retrospective.md. IN FLIGHT: recall re-check, dev-pages cleanup PR. Nothing posted.";
+    const root = document.createElement("div");
+    root.append(...renderMarkdown(document, source));
+
+    expect(root.querySelector(".markdown-heading strong")?.textContent).toBe("Status 13:2xZ. WAITING ON YOU:");
+    expect([...root.querySelectorAll("ol > li")].map((item) => item.textContent)).toEqual([
+      expect.stringContaining("mockup shape"),
+      '"post";',
+      expect.stringContaining('"run it"'),
+    ]);
+    expect(root.querySelectorAll("ol > li")).toHaveLength(3);
+  });
+
+  it("recognizes a short sentence followed by an all-caps lead label", () => {
+    const root = document.createElement("div");
+    root.append(...renderMarkdown(document, "The release gate is green. WAITING ON YOU: (1) review the receipt (2) close the task"));
+
+    expect(root.querySelector(".markdown-heading strong")?.textContent).toBe("The release gate is green. WAITING ON YOU:");
+    expect(root.querySelectorAll("ol > li")).toHaveLength(2);
+  });
+
+  it("keeps the plain prefix when an enumeration has no recognizable lead", () => {
+    const root = document.createElement("div");
+    root.append(...renderMarkdown(document, "A note with (1) a parenthetical and (2) another colon: stays structured."));
+
+    expect(root.querySelector(".markdown-heading")).toBeNull();
+    expect(root.querySelector("p")?.textContent).toBe("A note with");
+    expect([...root.querySelectorAll("ol > li")].map((item) => item.textContent)).toEqual(["a parenthetical and", "another colon: stays structured."]);
+  });
+
+  it("keeps Markdown bodies untouched", () => {
     const markdown = document.createElement("div");
     markdown.append(...renderMarkdown(document, "**Already formatted**\n\n(1) leave this literal (2) too"));
     expect(markdown.querySelector("strong")?.textContent).toBe("Already formatted");
     expect(markdown.querySelector("ol")).toBeNull();
     expect(markdown.textContent).toContain("(1) leave this literal (2) too");
-
-    const prose = "A note with (1) a parenthetical and (2) another colon: stays literal.";
-    const ordinary = document.createElement("div");
-    ordinary.append(...renderMarkdown(document, prose));
-    expect(ordinary.querySelector("ol")).toBeNull();
-    expect(ordinary.querySelector("strong")).toBeNull();
-    expect(ordinary.textContent).toBe(prose);
   });
 });

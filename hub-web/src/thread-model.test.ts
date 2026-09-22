@@ -77,6 +77,9 @@ describe("threadModel", () => {
       "session factory-newer started 09:00",
     ]);
   });
+  it("keeps an empty thread in the empty state when the loaded page ends history", () => {
+    expect(threadModel([], { historyEnd: true, working: true })).toEqual([]);
+  });
   it("keeps ask and blocker as turns with their kind for the render hook", () => {
     const history = new ConversationHistory();
     history.reply(reply(1, "ask"), at(9, 58)); history.reply(reply(2, "blocker"), at(9, 59));

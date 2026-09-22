@@ -159,8 +159,12 @@ export function threadModel(events: readonly ConversationEvent[], options: Threa
     group.time = clockLabel(at) ?? group.time;
   }
   closeGroup();
-  if (options.historyEnd) items.unshift({ type: "history-end", key: "history-end", label: "No earlier history" });
-  if (options.working) items.push({ type: "working", key: "working" });
+  // An empty durable page owns the empty state. Do not let pagination or a
+  // transient working signal turn it into a fake history marker/thread.
+  if (events.length > 0) {
+    if (options.historyEnd) items.unshift({ type: "history-end", key: "history-end", label: "No earlier history" });
+    if (options.working) items.push({ type: "working", key: "working" });
+  }
   return items;
 }
 

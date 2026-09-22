@@ -15,7 +15,8 @@ const FENCE = /^\s{0,3}`{3,}(?:[^`]*)$/;
 const HEADING = /^\s{0,3}#{1,6}(?:\s+|$)(.*)$/;
 const LIST = /^(\s*)([-+*]|\d+[.)])\s+(.*)$/;
 const LEGACY_NUMBER = /(?:\(\d+\)|\d+\))(?=[ \t]+)/g;
-const LEAD = /^(?:Status\s+\d{1,2}:\d{2}Z\.(?:[ \t]+[A-Z][A-Z0-9]*(?:[ \t]+[A-Z][A-Z0-9]*)*:)?|[A-Z][A-Z0-9]*(?:[ \t]+[A-Z][A-Z0-9]*)*:)/;
+const ALL_CAPS_LABEL = "[A-Z][A-Z0-9]*(?:[ \\t]+[A-Z][A-Z0-9]*)*";
+const LEAD = new RegExp(`^(?:Status\\s+\\d{1,2}:[\\dx]{2}Z\\.(?:[ \\t]+${ALL_CAPS_LABEL}:)?|[^.\\n]{1,120}\\.[ \\t]+${ALL_CAPS_LABEL}:)`);
 const INLINE_MARKDOWN = /`[^`\n]+`|\*\*[^*\n]+\*\*|\*[^*\n]+\*|\[[^\]\n]+\]\([^\n)]+\)/;
 
 function listMarker(line: string): ListMarker | undefined {
@@ -63,7 +64,6 @@ function legacyEnumeration(source: string): LegacyEnumeration | undefined {
   if (markers.length < 2 || markers[0]!.number !== 1) return undefined;
 
   const prefix = source.slice(0, markers[0]!.index).trim();
-  if (prefix && leadingPlainText(prefix) !== prefix) return undefined;
   for (let index = 1; index < markers.length; index += 1) {
     if (markers[index]!.number !== markers[index - 1]!.number + 1) return undefined;
   }
@@ -75,15 +75,17 @@ function legacyEnumeration(source: string): LegacyEnumeration | undefined {
 
 /**
  * Older supervisors sometimes put numbered prose in one line instead of
- * emitting Markdown. Recognize only a clearly ordered, lead-prefixed sequence
- * (or one that starts at the beginning); ordinary parentheses stay literal.
+ * emitting Markdown. A recognized lead becomes a bold first paragraph; when
+ * the lead is not recognizable, keep it as a plain paragraph before the list.
  */
 function normalizePlainText(source: string): string {
   if (hasMarkdownMarkers(source)) return source;
   const enumeration = legacyEnumeration(source);
   if (enumeration) {
     const parts: string[] = [];
-    if (enumeration.prefix) parts.push(`# ${enumeration.prefix}`);
+    if (enumeration.prefix) {
+      parts.push(leadingPlainText(enumeration.prefix) === enumeration.prefix ? `# ${enumeration.prefix}` : enumeration.prefix);
+    }
     parts.push(enumeration.items.map((item, index) => `${index + 1}. ${item}`).join("\n"));
     return parts.join("\n\n");
   }

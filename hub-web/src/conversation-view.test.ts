@@ -56,6 +56,17 @@ describe("ConversationView (Pebble thread)", () => {
     expect(view.element.querySelector(".history-end")?.textContent).toBe("No earlier history");
     expect(view.element.querySelector(".session-divider")?.textContent).toBe("session factory-old started 09:00");
   });
+  it("shows the empty state instead of the history marker for an empty loaded page", () => {
+    const history = new ConversationHistory();
+    const view = new ConversationView(document, history, { supervisor: "sup", historyEnd: () => true, working: () => true });
+    document.body.replaceChildren(view.element);
+    view.update();
+
+    expect(view.element.querySelector<HTMLElement>(".empty")?.hidden).toBe(false);
+    expect(view.element.querySelector(".said")?.textContent).toBe("Nothing waiting on you. sup will write here when it needs a decision.");
+    expect(view.element.querySelector(".history-end")).toBeNull();
+    expect(view.element.querySelector(".working")).toBeNull();
+  });
   it("coalesces status runs into one quiet line and shows the working indicator while executing", () => {
     const history = new ConversationHistory();
     let working = false;

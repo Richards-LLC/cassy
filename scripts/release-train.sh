@@ -29,6 +29,7 @@
 #   scripts/release-train.sh <version> <epic-worktree> --announce
 #   scripts/release-train.sh <version> <epic-worktree> --report
 #   scripts/release-train.sh <version> <epic-worktree> --receipts
+#   scripts/release-train.sh <version> <epic-worktree> --host-update
 #   scripts/release-train.sh <version> <epic-worktree> --status
 #   scripts/release-train.sh <version> <epic-worktree> --stop
 #   scripts/release-train.sh <version> <epic-worktree> --print-run-dir
@@ -50,10 +51,11 @@
 #   CAS_RELEASE_TRAIN_REPORT_POST_CMD default <checkout>/scripts/release-report-post.py
 #   CAS_RELEASE_TRAIN_REPORT_USER_THREAD_TS and _DEV_THREAD_TS supplied to the adapter
 #   CAS_RELEASE_ENV_FILE          default ~/.cas/release.env
+#   CAS_RELEASE_TRAIN_CAS         default cas (assemble heal and --host-update)
 set -euo pipefail
 
 usage() {
-    printf 'Usage: %s <version> <epic-worktree> [--cut [--resume]|--assemble|--prep|--announce|--check-lane <branch>|--gate [--reuse | --only <row,row>]|--pipeline|--publish [sha]|--report|--receipts|--status|--stop|--print-run-dir]\n' "$0"
+    printf 'Usage: %s <version> <epic-worktree> [--cut [--resume]|--assemble|--prep|--announce|--check-lane <branch>|--gate [--reuse | --only <row,row>]|--pipeline|--publish [sha]|--report|--receipts|--host-update|--status|--stop|--print-run-dir]\n' "$0"
 }
 
 version="${1:-}"
@@ -1113,6 +1115,10 @@ case "$action" in
         # shellcheck disable=SC1091
         source "$script_dir/release-train.d/receipts.sh"
         release_train_receipts
+        exit $?
+        ;;
+    --host-update)
+        release_train_host_update
         exit $?
         ;;
     --stop)

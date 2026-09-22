@@ -51,14 +51,29 @@ class IntegrationAssembly(unittest.TestCase):
         return subprocess.run([str(TRAIN), "0.0.0", str(self.root), "--assemble"],
                               capture_output=True, text=True)
 
-    def install_recovery_stub(self):
+    def delivery_lock_path(self):
+        common = (self.root / ".git").resolve()
+        key = hashlib.sha256(b"cas-0a21/delivery-target-lock/v1\0" + os.fsencode(common)
+                             + b"\0integration/project").hexdigest()
+        return self.root / ".cas/locks/delivery-target" / (key + ".lock")
+
+    def install_recovery_stub(self, needs_lock=False):
         stub = self.root / ".cas/fake-cas"
+        # The real integration-recover takes the same delivery-target lock the
+        # assembler uses; a stub that needs it fails fast instead of waiting.
+        lock_probe = "" if not needs_lock else f"""exec 9>>'{self.delivery_lock_path()}'
+if ! python3 -c 'import fcntl; fcntl.flock(9, fcntl.LOCK_EX | fcntl.LOCK_NB)' 2>/dev/null; then
+    echo 'delivery-target lock held during recovery' >&2
+    exit 75
+fi
+printf 'acquired\\n' > .cas/recovery-lock
+"""
         stub.write_text("""#!/bin/sh
 set -eu
 test \"$1\" = factory
 test \"$2\" = integration-recover
 test \"$3\" = --base-only
-printf '%s\\n' \"${CAS_FACTORY_SESSION:-missing}\" > .cas/recovery-session
+""" + lock_probe + """printf '%s\\n' \"${CAS_FACTORY_SESSION:-missing}\" > .cas/recovery-session
 printf '%s\\n' \"${CAS_AGENT_ID:-missing}|${CAS_SESSION_ID:-missing}|${CAS_AGENT_NAME:-missing}|${CAS_AGENT_ROLE:-missing}\" > .cas/recovery-identity
 base=$(git rev-parse refs/remotes/origin/main)
 git update-ref refs/heads/integration/project \"$base\"
@@ -148,6 +163,24 @@ PY
             "fixture-agent-id|fixture-supervisor-session|fixture-supervisor|supervisor",
         )
 
+    def test_heal_runs_without_holding_the_delivery_target_lock(self):
+        # 3.27.6: assemble held the lock while integration-recover waited on it.
+        self.git("update-ref", "refs/remotes/origin/main", self.tip)
+        self.install_recovery_stub(needs_lock=True)
+        result = subprocess.run(
+            [str(TRAIN), "0.0.0", str(self.root), "--assemble"],
+            capture_output=True,
+            text=True,
+            env={**os.environ, "CAS_RELEASE_TRAIN_CAS": str(self.root / ".cas/fake-cas"),
+                 "CAS_RELEASE_TRAIN_RECOVERY_TIMEOUT_SECS": "30"},
+            timeout=60,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("lock held during recovery", result.stderr)
+        self.assertTrue((self.root / ".cas/recovery-lock").exists())
+        self.assertTrue((self.root / ".cas/healed").exists())
+        self.assertEqual(self.git("rev-parse", "HEAD"), self.tip)
+
     def test_docs_only_receipts_base_names_the_receipts_commit(self):
         self.git("checkout", "main")
         docs = self.root / "docs"
@@ -202,10 +235,7 @@ PY
         self.assertEqual((self.root / "uncommitted").read_text(), "keep me")
 
     def test_live_daemon_lock_is_nonblocking(self):
-        common = (self.root / ".git").resolve()
-        key = hashlib.sha256(b"cas-0a21/delivery-target-lock/v1\0" + os.fsencode(common)
-                             + b"\0integration/project").hexdigest()
-        path = self.root / ".cas/locks/delivery-target" / (key + ".lock")
+        path = self.delivery_lock_path()
         path.parent.mkdir(parents=True)
         with path.open("a") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)

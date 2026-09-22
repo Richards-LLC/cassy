@@ -2238,6 +2238,95 @@ else
     bad "announce lint refusal was not fail-closed: $(cat "$tmp/combined-lint.out")"
 fi
 
+# host-update must run `cas update` and prove cas, hub and refresh all report
+# the release (3.27.6 wrote a done receipt reading "proof deferred" while the
+# host stayed on the previous version). The stub cas takes its answers from
+# HOST_STUB_* so each case states exactly what the host reported.
+host_stub="$tmp/host-cas"
+cat >"$host_stub" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >>"${HOST_STUB_LOG:?}"
+case "$1" in
+  update)
+    [[ "$*" == "update --yes --json --version ${HOST_STUB_EXPECT_VERSION:?}" ]] || { echo "bad update args: $*" >&2; exit 64; }
+    [[ "${HOST_STUB_UPDATE:-}" == noop ]] && exit 0
+    printf '{"binary_updated":true,"version":"%s"}\n' "$HOST_STUB_BINARY"
+    printf '{"refresh_binary_version":"%s","refresh_status":"%s","projects":[%s],"user_level_store":{"status":"ok: fixture"}}\n' \
+        "$HOST_STUB_REFRESH" "${HOST_STUB_REFRESH_STATUS:-complete}" "${HOST_STUB_PROJECTS:-}"
+    exit "${HOST_STUB_UPDATE_EXIT:-0}"
+    ;;
+  --version) printf 'cas %s (fixture 2099-01-01)\n' "$HOST_STUB_BINARY" ;;
+  hub) printf '{"binary":"%s","record":{"version":"%s"},"running":true}\n' "$HOST_STUB_BINARY" "$HOST_STUB_HUB" ;;
+  *) echo "unexpected: $*" >&2; exit 65 ;;
+esac
+EOF
+chmod +x "$host_stub"
+host_version=9.99.20
+host_wt="$tmp/host-update-wt"
+mkdir -p "$host_wt"
+git -C "$host_wt" init -q
+host_run_dir="$("$train" "$host_version" "$host_wt" --print-run-dir)"
+run_host_update() {
+    rm -f "$host_run_dir/host-update.json"
+    env CAS_RELEASE_TRAIN_CAS="$host_stub" HOST_STUB_LOG="$tmp/host-stub.log" \
+        HOST_STUB_EXPECT_VERSION="$host_version" HOST_STUB_BINARY="$host_version" \
+        HOST_STUB_HUB="$host_version" HOST_STUB_REFRESH="$host_version" "$@" \
+        "$train" "$host_version" "$host_wt" --host-update
+}
+host_status() {
+    python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["status"])' \
+        "$host_run_dir/host-update.json" 2>/dev/null || printf 'missing\n'
+}
+if out="$(run_host_update HOST_STUB_UPDATE=noop 2>&1)"; then
+    bad "host-update accepted a no-op update: $out"
+elif [[ "$out" == *'BLOCKER host-update: cas update printed no refresh receipt'* && "$(host_status)" == FAIL ]]; then
+    ok 'host-update: a deferred/no-op update is a named blocker with a FAIL receipt'
+else
+    bad "host-update no-op failure was not named: $out"
+fi
+if out="$(run_host_update HOST_STUB_BINARY=9.99.19 HOST_STUB_HUB=9.99.19 2>&1)"; then
+    bad "host-update accepted a stale binary and hub: $out"
+elif [[ "$out" == *'BLOCKER host-update: cas_version=9.99.19 does not equal the released 9.99.20'* \
+    && "$out" == *'BLOCKER host-update: hub_version=9.99.19'* && "$(host_status)" == FAIL ]]; then
+    ok 'host-update: cas/hub version mismatch fails naming each stale component'
+else
+    bad "host-update mismatch was not named: $out"
+fi
+if out="$(run_host_update HOST_STUB_REFRESH=9.99.19 2>&1)"; then
+    bad "host-update accepted a refresh from the old image: $out"
+elif [[ "$out" == *'BLOCKER host-update: refresh_binary_version=9.99.19 does not equal'* ]]; then
+    ok 'host-update: a refresh_binary_version mismatch fails'
+else
+    bad "host-update refresh mismatch was not named: $out"
+fi
+if out="$(run_host_update 2>&1)" && [[ "$(host_status)" == PASS ]] \
+    && grep -q '"refresh_binary_version": "9.99.20"' "$host_run_dir/host-update.json" \
+    && grep -q '"hub_version": "9.99.20"' "$host_run_dir/host-update.json" \
+    && grep -q '"cas_version": "9.99.20"' "$host_run_dir/host-update.json"; then
+    ok 'host-update: matching cas, hub and refresh versions pass with host-update.json evidence'
+else
+    bad "host-update did not pass on a converged host: $out"
+fi
+cloud_project='{"project":"/srv/unrelated","migration":"ok: m","search_index":"ok: s","skills":"ok: k","membership":"ok: b","cloud_sync":"FAILED: push rejected"}'
+if out="$(run_host_update HOST_STUB_UPDATE_EXIT=1 HOST_STUB_REFRESH_STATUS=refresh_failed \
+        HOST_STUB_PROJECTS="$cloud_project" 2>&1)" && [[ "$(host_status)" == PASS ]] \
+    && [[ "$out" == *'WARN host-update: cloud_sync failed for /srv/unrelated'* ]] \
+    && grep -q 'push rejected' "$host_run_dir/host-update.json"; then
+    ok 'host-update: a cloud_sync refresh failure on an unrelated project is recorded, not blocking'
+else
+    bad "host-update cloud_sync tolerance failed: $out"
+fi
+migration_project='{"project":"/srv/broken","migration":"FAILED: locked","search_index":"ok: s","skills":"ok: k","membership":"ok: b","cloud_sync":"ok: c"}'
+if out="$(run_host_update HOST_STUB_UPDATE_EXIT=1 HOST_STUB_REFRESH_STATUS=refresh_failed \
+        HOST_STUB_PROJECTS="$migration_project" 2>&1)"; then
+    bad "host-update accepted a failed migration: $out"
+elif [[ "$out" == *'BLOCKER host-update: cas update refresh failed: /srv/broken migration FAILED: locked'* ]]; then
+    ok 'host-update: any non-cloud_sync refresh failure blocks'
+else
+    bad "host-update migration failure was not named: $out"
+fi
+
 if python3 "$script_dir/test-release-integration.py"; then
     ok 'gap 1: rolling assembly self-heal passes the recorded factory session and supervisor identity; clean, red, dirty and locked fixtures'
 else

@@ -54,4 +54,30 @@ describe("supervisor markdown subset", () => {
       .toBe("Ready one cargo check receipt");
     expect(plainTextMarkdown("[unsafe](javascript:alert(1))")).toBe("[unsafe](javascript:alert(1))");
   });
+
+  it("turns an older status enumeration into a bold lead and an ordered list", () => {
+    const root = document.createElement("div");
+    root.append(...renderMarkdown(document, "Status 13:28Z. WAITING ON YOU: (1) merge the branch — it is ready (2) close the task after the receipt"));
+
+    expect(root.querySelector(".markdown-heading strong")?.textContent).toBe("Status 13:28Z. WAITING ON YOU:");
+    expect([...root.querySelectorAll("ol > li")].map((item) => item.textContent)).toEqual([
+      "merge the branch — it is ready",
+      "close the task after the receipt",
+    ]);
+  });
+
+  it("keeps Markdown and ordinary parenthetical prose untouched", () => {
+    const markdown = document.createElement("div");
+    markdown.append(...renderMarkdown(document, "**Already formatted**\n\n(1) leave this literal (2) too"));
+    expect(markdown.querySelector("strong")?.textContent).toBe("Already formatted");
+    expect(markdown.querySelector("ol")).toBeNull();
+    expect(markdown.textContent).toContain("(1) leave this literal (2) too");
+
+    const prose = "A note with (1) a parenthetical and (2) another colon: stays literal.";
+    const ordinary = document.createElement("div");
+    ordinary.append(...renderMarkdown(document, prose));
+    expect(ordinary.querySelector("ol")).toBeNull();
+    expect(ordinary.querySelector("strong")).toBeNull();
+    expect(ordinary.textContent).toBe(prose);
+  });
 });

@@ -106,6 +106,13 @@ export class ConversationHistory {
     send.value.error = message;
     return true;
   }
+  /** Drop a refused send that a retry replaced. Only a refused send can be discarded. */
+  discardRefused(id: string): boolean {
+    const index = this.events.findIndex((event) => event.kind === "send" && event.value.id === id && event.value.state === "error");
+    if (index < 0) return false;
+    this.events.splice(index, 1);
+    return true;
+  }
   reply(reply: OperatorReply, at: number | undefined = Date.now(), session?: string): void {
     if (this.events.some((event) => event.kind === "reply" && event.value.notification_id === reply.notification_id)) return;
     const normalized: OperatorReply = {

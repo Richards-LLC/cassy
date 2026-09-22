@@ -95,6 +95,8 @@ export interface ConversationViewOptions {
   echo?: () => string | undefined;
   /** Refused sends offer to put their text back into the composer. */
   editMessage?: (text: string) => void;
+  /** Refused sends offer to go out again unchanged (same text, same in_reply_to). */
+  retryMessage?: (send: ConversationSend) => void;
   /**
    * Quick replies and composer replies to an ask go through this; the caller
    * sends with in_reply_to = the ask's notification_id and records the send
@@ -112,6 +114,8 @@ export interface ConversationViewOptions {
 }
 
 const TICK = '<svg class="tick" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.6 8.6l3.3 3.3L13.4 4.4"/></svg>';
+/** Warning triangle for a refused send; decorative — the "Not sent" text carries the meaning. */
+const WARN = '<svg class="warn" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 1.9 14.6 13.6H1.4Z"/><path d="M8 6.2v3.4"/><path d="M8 11.7v.1"/></svg>';
 
 export class ConversationView {
   readonly element: HTMLElement;
@@ -264,7 +268,9 @@ export class ConversationView {
     const reply = turn.event.kind === "reply" ? turn.event.value : undefined;
     const answered = reply?.kind === "ask" ? this.history.answered(reply.notification_id) : undefined;
     const waiting = reply?.kind === "blocker" ? this.history.waiting().some((item) => item.notification_id === reply.notification_id) : undefined;
-    return JSON.stringify([turn.event, answered && [answered.id, answered.state, answered.text], waiting]);
+    // The pinned ask's flow copy is collapsed; it expands again when a newer ask takes the pin.
+    const pinned = reply?.kind === "ask" ? this.history.pinnedAsk()?.notification_id === reply.notification_id : undefined;
+    return JSON.stringify([turn.event, answered && [answered.id, answered.state, answered.text], waiting, pinned]);
   }
 
   /**
@@ -398,16 +404,38 @@ export class ConversationView {
     bubble.className = "bub";
     bubble.dataset.state = send.state;
     bubble.append(...paragraphs(document, send.text));
-    if (send.state === "sending" || send.state === "error") {
+    if (send.state === "sending") {
       const state = document.createElement("span");
       state.className = "conversation-delivery"; state.setAttribute("role", "status");
-      state.textContent = send.state === "sending" ? "Sending…" : `Not sent · ${send.error ?? "refused"}`;
+      state.textContent = "Sending…";
       bubble.append(state);
-      if (send.state === "error" && this.options.editMessage) {
-        const edit = document.createElement("button"); edit.type = "button"; edit.className = "conversation-edit"; edit.textContent = "Edit message";
+    } else if (send.state === "error") {
+      // P8 (cas-b1ee): a refused send must not read as delivered. The bubble
+      // drops its fill for a dashed critical outline; the label leads with a
+      // warning glyph and "Not sent", the refusal reason follows quietly.
+      const state = document.createElement("span");
+      state.className = "conversation-delivery conversation-refused"; state.setAttribute("role", "status");
+      const glyph = document.createElement("template"); glyph.innerHTML = WARN;
+      const label = document.createElement("b"); label.textContent = "Not sent";
+      // The separator is for the reader; on screen the reason takes its own line.
+      const separator = document.createElement("span"); separator.className = "sr-only"; separator.textContent = " · ";
+      const reason = document.createElement("span"); reason.className = "conversation-refused-reason"; reason.textContent = send.error ?? "refused";
+      state.append(glyph.content.firstElementChild!, label, separator, reason);
+      bubble.append(state);
+      const actions = document.createElement("div"); actions.className = "conversation-actions";
+      if (this.options.editMessage) {
+        const edit = document.createElement("button"); edit.type = "button"; edit.className = "conversation-edit"; edit.textContent = "Edit";
+        edit.setAttribute("aria-label", "Edit message");
         edit.onclick = () => this.options.editMessage?.(send.text);
-        bubble.append(edit);
+        actions.append(edit);
       }
+      if (this.options.retryMessage) {
+        const retry = document.createElement("button"); retry.type = "button"; retry.className = "conversation-retry"; retry.textContent = "Retry";
+        retry.setAttribute("aria-label", "Retry sending");
+        retry.onclick = () => this.options.retryMessage?.(send);
+        actions.append(retry);
+      }
+      if (actions.childElementCount) bubble.append(actions);
     }
     return bubble;
   }

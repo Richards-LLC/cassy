@@ -287,6 +287,10 @@ function applyPaneView(key: string, mount: HTMLElement, surface: TerminalSurface
         // A quick-reply chip answers the ask through the same leased path as
         // the composer, with in_reply_to = the ask's notification id.
         respond: (ask, text) => { void submitSupervisorMessage({ text, replyTo: ask.notification_id }); },
+        // Retry sends the refused text again through the same leased path,
+        // keeping its original in_reply_to; the refused bubble leaves the
+        // thread only once the new send is actually on the wire.
+        retryMessage: (send) => { void submitSupervisorMessage({ text: send.text, replyTo: send.replyTo, retryOf: send.id }); },
         hasEarlier: () => conversationHistoryPage(threadKey).hasEarlier,
         loadingEarlier: () => conversationHistoryPage(threadKey).loading,
         historyEnd: () => {
@@ -1883,7 +1887,7 @@ async function takeControlForMessage(machine: StoredMachine, session: string): P
   return leases.get(sessionKey(machine.id, session))?.held_by_me === true;
 }
 
-function deliverSupervisorMessage(machine: StoredMachine, session: string, supervisor: string, text: string, replyTo?: number): void {
+function deliverSupervisorMessage(machine: StoredMachine, session: string, supervisor: string, text: string, replyTo?: number, retryOf?: string): void {
   const clientRef = crypto.randomUUID();
   const sent = sendControl(machine.id, session, supervisorMessage(supervisor, text, clientRef, replyTo));
   // Without an outcome the operator cannot tell a sent message from a lost
@@ -1892,7 +1896,9 @@ function deliverSupervisorMessage(machine: StoredMachine, session: string, super
     showComposerStatus("The hub connection is reconnecting, so this message was not delivered. Try again once the session is live.", "error");
     return;
   }
-  conversationHistory(sessionKey(machine.id, session)).submit(clientRef, supervisor, text, Date.now(), replyTo, session);
+  const history = conversationHistory(sessionKey(machine.id, session));
+  if (retryOf) history.discardRefused(retryOf);
+  history.submit(clientRef, supervisor, text, Date.now(), replyTo, session);
   updateConversationViews(); renderConversationList();
   const storedDraft = conversationDrafts.get(sessionKey(machine.id, session));
   if (storedDraft?.text.trim() === text) conversationDrafts.delete(sessionKey(machine.id, session));
@@ -1919,8 +1925,10 @@ function deliverSupervisorMessage(machine: StoredMachine, session: string, super
  * `quick` is a tapped quick-reply chip: its text goes out instead of the
  * composer's, answering that ask. Free text from the composer answers the
  * pinned ask, if one is waiting, so either way the send carries in_reply_to.
+ * A retry of a refused send is also `quick`: it carries the refused send's own
+ * in_reply_to (possibly none) and `retryOf`, the refused send it replaces.
  */
-async function submitSupervisorMessage(quick?: { text: string; replyTo: number }): Promise<void> {
+async function submitSupervisorMessage(quick?: { text: string; replyTo?: number; retryOf?: string }): Promise<void> {
   const composer = document.querySelector<HTMLTextAreaElement>("#message-text");
   if (!composer) return;
   const renderedThread = composer.dataset.threadKey;
@@ -1930,7 +1938,7 @@ async function submitSupervisorMessage(quick?: { text: string; replyTo: number }
     return;
   }
   const text = quick?.text ?? composer.value.trim();
-  const replyTo = quick?.replyTo ?? (selectedThread ? conversationHistory(selectedThread).pinnedAsk()?.notification_id : undefined);
+  const replyTo = quick ? quick.replyTo : (selectedThread ? conversationHistory(selectedThread).pinnedAsk()?.notification_id : undefined);
   const plan = planSupervisorSend(supervisorSendContext(text));
   if (plan.kind === "blocked") {
     showComposerStatus(plan.reason, "error");
@@ -1952,7 +1960,7 @@ async function submitSupervisorMessage(quick?: { text: string; replyTo: number }
       return;
     }
   }
-  deliverSupervisorMessage(machine, session, supervisor, text, replyTo);
+  deliverSupervisorMessage(machine, session, supervisor, text, replyTo, quick?.retryOf);
   } finally {
     pendingSubmissions.delete(submissionKey);
   }

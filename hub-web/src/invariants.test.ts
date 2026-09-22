@@ -102,10 +102,13 @@ describe("binding Cassy Cloud browser invariants", () => {
     const source = await readSource("main.ts");
     expect(source).toContain("installAttentionObjects();");
     expect(source).toContain("respond: (ask, text) => { void submitSupervisorMessage({ text, replyTo: ask.notification_id }); },");
-    expect(source).toContain("const replyTo = quick?.replyTo ?? (selectedThread ? conversationHistory(selectedThread).pinnedAsk()?.notification_id : undefined);");
-    expect(source).toContain("deliverSupervisorMessage(machine, session, supervisor, text, replyTo);");
+    expect(source).toContain("const replyTo = quick ? quick.replyTo : (selectedThread ? conversationHistory(selectedThread).pinnedAsk()?.notification_id : undefined);");
+    expect(source).toContain("deliverSupervisorMessage(machine, session, supervisor, text, replyTo, quick?.retryOf);");
+    // Retry of a refused send (cas-b1ee): same leased path, the refused send's own in_reply_to.
+    expect(source).toContain("retryMessage: (send) => { void submitSupervisorMessage({ text: send.text, replyTo: send.replyTo, retryOf: send.id }); },");
+    expect(source).toContain("if (retryOf) history.discardRefused(retryOf);");
     expect(source).toContain("supervisorMessage(supervisor, text, clientRef, replyTo)");
-    expect(source).toContain(".submit(clientRef, supervisor, text, Date.now(), replyTo, session);");
+    expect(source).toContain("history.submit(clientRef, supervisor, text, Date.now(), replyTo, session);");
     expect(source).toContain("composerSlot.prepend(conversation.pinned);");
     // The list's waiting affordance is driven by unanswered asks and blockers.
     expect(source).toContain("const waiting = conversationHistories.get(key)?.waiting().length ?? 0;");
@@ -191,7 +194,7 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(source).toContain("if (!sendsOnEnter(event)) return;");
     expect(source).toContain("void submitSupervisorMessage();");
     expect(source).toContain('document.querySelector<HTMLButtonElement>("#message-send")!.onclick = () => { void submitSupervisorMessage(); };');
-    expect(source).toContain("async function submitSupervisorMessage(quick?: { text: string; replyTo: number }): Promise<void> {");
+    expect(source).toContain("async function submitSupervisorMessage(quick?: { text: string; replyTo?: number; retryOf?: string }): Promise<void> {");
     expect(source).toContain("const plan = planSupervisorSend(supervisorSendContext(text));");
   });
 
@@ -750,11 +753,12 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(css).not.toContain("border-right:");
     expect(css).not.toContain(".context { border-left:");
     // Elevation is tokenized: the two overlay shadows, the phone rail reset,
-    // and the Pebble --lift set (cas-cac1: elevation replaces hairlines on the
-    // rail, the rows, the compose FAB and the thread).
+    // the unfilled refused send (cas-b1ee), and the Pebble --lift set
+    // (cas-cac1: elevation replaces hairlines on the rail, the rows, the
+    // compose FAB and the thread).
     const shadows = [...css.matchAll(/box-shadow:\s*([^;]+);/g)].map((match) => match[1].trim());
     expect(shadows.filter((value) => value === "var(--shadow-overlay)")).toHaveLength(2);
-    expect(shadows.filter((value) => value === "none")).toHaveLength(1);
+    expect(shadows.filter((value) => value === "none")).toHaveLength(2);
     for (const value of shadows) expect(value).toMatch(/^(?:none|var\(--(?:shadow-overlay|lift(?:-strong|-edge|-head)?)\))$/);
     expect(renderer).not.toContain('"700"');
     expect(surface).not.toContain('"normal 700"');

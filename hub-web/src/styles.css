@@ -2896,8 +2896,20 @@ dialog form > *,
 .thread .bub.receipt .receipt-text { min-width: 0; }
 .thread .tick { width: 15px; height: 15px; margin-top: 4px; color: var(--state-ok); flex: none; display: block; }
 .thread .conversation-delivery { display: block; margin-top: 6px; font-size: 12px; opacity: 0.85; }
-.thread .bub[data-state="error"] { background: var(--crit-bg); color: var(--crit-fg); }
-.thread .conversation-edit { margin-top: 8px; padding: 6px 14px; border-radius: 999px; border: 0; background: var(--crit-fg); color: var(--crit-bg); font: var(--weight-medium) 13px/1.2 var(--font-ui); }
+/* P8 (cas-b1ee): a refused send looks refused, not delivered. No fill, a
+ * dashed critical outline (--crit-bg on --canvas ≥5.9:1 both schemes), body
+ * in --ink, a 13px semibold "Not sent" lead with a warning glyph, and Edit /
+ * Retry below as outline pills. The review asked for 1.5px; Chrome 153
+ * computes a 1.5px border as 1px at DPR 1 and 2 (measured), so it is 2px. */
+.thread .turn.you .bub[data-state="error"] { background: transparent; color: var(--ink); border: 2px dashed var(--crit-bg); box-shadow: none; padding: 10px 17px; }
+.thread .conversation-refused { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; margin-top: 8px; opacity: 1; color: var(--ink); font: var(--weight-regular) 12px/1.35 var(--font-ui); }
+.thread .conversation-refused b { color: var(--crit-bg); font: var(--weight-semibold) 13px/1.3 var(--font-ui); }
+.thread .conversation-refused .warn { width: 15px; height: 15px; flex: none; color: var(--crit-bg); }
+.thread .conversation-refused-reason { flex-basis: 100%; min-width: 0; color: var(--ink-mid); overflow-wrap: anywhere; }
+.thread .conversation-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 10px; }
+.thread .conversation-edit, .thread .conversation-retry { min-height: 32px; padding: 0 14px; border-radius: 999px; border: 1.5px solid var(--line-strong); background: transparent; color: var(--ink); font: var(--weight-medium) 13px/1.2 var(--font-ui); cursor: pointer; }
+.thread .conversation-edit:hover, .thread .conversation-retry:hover { border-color: var(--ink); }
+.thread .conversation-edit:focus-visible, .thread .conversation-retry:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
 /* coalesced statuses — one quiet box, never a ledger. Long or ask-bearing
  * statuses never land here (thread-model foldsAsStatus); what does is clamped
  * at three lines. The transparent bottom border is the bottom padding: the
@@ -2959,6 +2971,14 @@ dialog form > *,
 .obj .evi { background: var(--sheet-bg); color: var(--ink); border-radius: 17px; padding: 11px 15px; margin-top: 12px; }
 .obj .conversation-attachment { margin-top: 8px; }
 .obj .conversation-attachment a { color: inherit; }
+/* P1 (cas-b1ee): while an ask is pinned, its copy in the flow is a supervisor
+ * pebble with a 4px waiting edge and a pointer to the tray; the chips live
+ * only in the tray. The edge is --warn-text, not --ask-bg: light --ask-bg on
+ * --sup-bg is 1.65:1, below the 3:1 mark floor; --warn-text is 5.4:1 light and
+ * equals --ask-bg in dark. */
+.obj.t-a.ask-collapsed { border-radius: 18px 18px 18px 6px; box-shadow: var(--lift); }
+.obj.t-a.ask-collapsed .obj-body { padding: 12px 19px; border-left: 4px solid var(--warn-text); border-radius: 18px 18px 18px 6px; background: var(--sup-bg); color: var(--sup-fg); }
+.obj.t-a.ask-collapsed .ask-waiting { margin-top: 6px; font: var(--weight-semibold) 12px/1.3 var(--font-ui); color: var(--warn-text); }
 .chip { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-width: 0; margin: 0; padding: 8px 17px; border: 0; border-radius: var(--radius-pill); background: var(--panel); color: var(--ink); font: var(--weight-medium) 13px/1.2 var(--font-ui); text-align: center; overflow-wrap: anywhere; }
 button.chip { cursor: pointer; }
 button.chip:hover { box-shadow: var(--lift); }

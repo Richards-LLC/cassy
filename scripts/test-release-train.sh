@@ -1246,6 +1246,7 @@ EOF
 chmod +x "$post_publication_latency"
 post_publication_landed="$(git -C "$stage_wt" rev-parse HEAD)"
 printf '%s\n' "$post_publication_landed" >"$post_publication_run/landed-main.sha"
+post_publication_stderr="$tmp/post-publication.stderr"
 if (
     source "$repo_root/scripts/release-train.d/post-publication.sh"
     cut_has_external_stage() { return 1; }
@@ -1260,12 +1261,13 @@ if (
     CAS_RELEASE_TRAIN_PUBLISHED_RECEIPT_CMD="$post_publication_published" \
     CAS_RELEASE_TRAIN_LATENCY_RECEIPT_CMD="$post_publication_latency" \
         release_train_post_publication
-) && [[ -s "$post_publication_run/release-workflow.json" ]] \
+) 2>"$post_publication_stderr" && [[ -s "$post_publication_run/release-workflow.json" ]] \
     && [[ -s "$post_publication_run/release-published.receipt" ]] \
-    && [[ -s "$post_publication_run/release-latency.receipt" ]]; then
-    ok 'gap 7: post-publication waits for Release and records both receipts'
+    && [[ -s "$post_publication_run/release-latency.receipt" ]] \
+    && ! grep -q 'command not found' "$post_publication_stderr"; then
+    ok 'gap 7: post-publication waits for Release, records both receipts, and has no missing helper'
 else
-    bad 'gap 7: post-publication did not produce the workflow and receipt trio'
+    bad "gap 7: post-publication did not produce clean workflow/receipt output: $(cat "$post_publication_stderr" 2>/dev/null || true)"
 fi
 
 # ---------------------------------------------------------------------------

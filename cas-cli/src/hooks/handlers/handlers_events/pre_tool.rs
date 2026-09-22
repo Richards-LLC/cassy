@@ -1178,13 +1178,13 @@ fn git_history_write_operation(git_words: &[String]) -> Option<usize> {
     let operation_index = git_words.iter().position(|word| {
         matches!(
             word.as_str(),
-            "commit" | "merge" | "push" | "rebase" | "reset" | "checkout" | "add"
+            "commit" | "merge" | "push" | "rebase" | "cherry-pick" | "reset" | "checkout" | "add"
         )
     })?;
     let operation = git_words.get(operation_index)?.as_str();
     let args = &git_words[operation_index + 1..];
     let is_write = match operation {
-        "commit" | "merge" | "push" | "rebase" => true,
+        "commit" | "merge" | "push" | "rebase" | "cherry-pick" => true,
         "reset" => args.iter().any(|arg| arg == "--hard" || arg == "-H"),
         "checkout" => args.iter().any(|arg| !arg.starts_with('-')),
         "add" => args.iter().any(|arg| arg == "-A" || arg == "--all"),
@@ -1294,7 +1294,7 @@ fn git_write_targets(cwd: &str, command: &str) -> Vec<GitCommandTarget> {
     }
 }
 
-fn get_branch_at_git_target(target: &GitCommandTarget) -> Option<String> {
+fn git_command_at_target(target: &GitCommandTarget) -> std::process::Command {
     let mut command = std::process::Command::new("git");
     if let Some(git_dir) = &target.git_dir {
         command.args(["--git-dir"]).arg(git_dir);
@@ -1304,6 +1304,11 @@ fn get_branch_at_git_target(target: &GitCommandTarget) -> Option<String> {
     if let Some(work_tree) = &target.work_tree {
         command.args(["--work-tree"]).arg(work_tree);
     }
+    command
+}
+
+fn get_branch_at_git_target(target: &GitCommandTarget) -> Option<String> {
+    let mut command = git_command_at_target(target);
     let output = command
         .args(["symbolic-ref", "--short", "HEAD"])
         .output()
@@ -1313,6 +1318,44 @@ fn get_branch_at_git_target(target: &GitCommandTarget) -> Option<String> {
     } else {
         None
     }
+}
+
+/// During a rebase Git detaches HEAD, but records the branch being rebased in
+/// one of these metadata files. Continuation commands must be checked against
+/// that branch just like any other history-changing operation; a detached HEAD
+/// without either file remains a hard refusal.
+fn get_branch_at_rebase_git_target(target: &GitCommandTarget) -> Option<String> {
+    for metadata_path in ["rebase-merge/head-name", "rebase-apply/head-name"] {
+        let Ok(output) = git_command_at_target(target)
+            .args(["rev-parse", "--git-path", metadata_path])
+            .output()
+        else {
+            continue;
+        };
+        if !output.status.success() {
+            continue;
+        }
+
+        let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if path.is_empty() {
+            continue;
+        }
+        let path = std::path::PathBuf::from(&path);
+        let path = if path.is_absolute() {
+            path
+        } else {
+            target.path_for_scope().join(path)
+        };
+        let Ok(branch) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        let branch = branch.trim();
+        let branch = branch.strip_prefix("refs/heads/").unwrap_or(branch).trim();
+        if !branch.is_empty() {
+            return Some(branch.to_string());
+        }
+    }
+    None
 }
 
 fn check_worker_git_commit_scope_for_command(cwd: &str, command: &str) -> Option<String> {
@@ -1403,14 +1446,18 @@ fn check_worker_git_commit_scope_at_target(
         }
     }
 
-    // Resolve HEAD once. Protected branches and detached HEAD retain the
-    // established WORKER COMMIT GUARD contract before identity-specific
-    // checks run. Besides keeping the message stable, this preserves the
-    // shared-checkout remedy (worktree first, restore trunk on fallback).
+    // Resolve HEAD once. Protected branches retain the established WORKER
+    // COMMIT GUARD contract before identity-specific checks run. A rebase is
+    // the one valid detached-HEAD case: Git records the original branch in
+    // rebase-merge/head-name or rebase-apply/head-name, so continuation
+    // commands can still be checked against the worker branch. A detached
+    // HEAD without rebase metadata remains refused.
     let worker_name =
         std::env::var("CAS_AGENT_NAME").unwrap_or_else(|_| "<worker-name>".to_string());
 
-    let branch = match get_branch_at_git_target(target) {
+    let branch = match get_branch_at_git_target(target)
+        .or_else(|| get_branch_at_rebase_git_target(target))
+    {
         None => {
             return Some(format!(
                 "🚫 WORKER COMMIT GUARD: HEAD is detached — cannot determine branch.\n\n\
@@ -3828,6 +3875,7 @@ mod worker_commit_guard_tests {
             "git commit -m work",
             "git merge main",
             "git rebase main",
+            "git cherry-pick --continue",
             "git reset --hard HEAD~1",
             "git checkout main",
             "git add -A",
@@ -4279,6 +4327,82 @@ mod worker_commit_guard_tests {
         let msg = result.unwrap();
         assert!(msg.contains("WORKER COMMIT GUARD"));
         assert!(msg.contains("detached"));
+    }
+
+    #[test]
+    fn paused_rebase_resolves_original_worker_branch_for_continuations() {
+        let tmp = make_git_repo();
+        let p = tmp.path();
+        let branch = "factory/rebase-worker";
+
+        let switch = std::process::Command::new("git")
+            .args(["switch", "-c", branch])
+            .current_dir(p)
+            .output()
+            .unwrap();
+        assert!(switch.status.success());
+        std::fs::write(p.join("f.txt"), "worker change").unwrap();
+        for args in [vec!["add", "f.txt"], vec!["commit", "-m", "worker"]] {
+            let output = std::process::Command::new("git")
+                .args(&args)
+                .current_dir(p)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "git {args:?}: {output:?}");
+        }
+
+        let switch = std::process::Command::new("git")
+            .args(["switch", "main"])
+            .current_dir(p)
+            .output()
+            .unwrap();
+        assert!(switch.status.success());
+        std::fs::write(p.join("f.txt"), "main change").unwrap();
+        for args in [vec!["add", "f.txt"], vec!["commit", "-m", "main"]] {
+            let output = std::process::Command::new("git")
+                .args(&args)
+                .current_dir(p)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "git {args:?}: {output:?}");
+        }
+
+        let switch = std::process::Command::new("git")
+            .args(["switch", branch])
+            .current_dir(p)
+            .output()
+            .unwrap();
+        assert!(switch.status.success());
+        let rebase = std::process::Command::new("git")
+            .args(["rebase", "main"])
+            .current_dir(p)
+            .output()
+            .unwrap();
+        assert!(
+            !rebase.status.success(),
+            "fixture rebase must pause on a conflict: {rebase:?}"
+        );
+
+        let detached = get_branch_at_git_target(&GitCommandTarget::from_cwd(&p.to_string_lossy()));
+        assert!(
+            detached.is_none(),
+            "rebase should detach HEAD: {detached:?}"
+        );
+        let rebase_branch =
+            get_branch_at_rebase_git_target(&GitCommandTarget::from_cwd(&p.to_string_lossy()));
+        assert_eq!(rebase_branch.as_deref(), Some(branch));
+
+        let ps = p.to_string_lossy().to_string();
+        let _env = TestEnvGuard::with_optional_vars(&[
+            ("CAS_CLONE_PATH", Some(&ps)),
+            ("CAS_AGENT_NAME", Some("rebase-worker")),
+        ]);
+        for command in ["git rebase --continue", "git cherry-pick --continue"] {
+            assert!(
+                check_worker_git_commit_scope_for_command(&ps, command).is_none(),
+                "continuation should use the branch recorded by rebase metadata: {command}"
+            );
+        }
     }
 
     #[test]

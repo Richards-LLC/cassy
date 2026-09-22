@@ -195,7 +195,14 @@ def heal_stale_assembly(root):
         )
 
 
-def _assemble_locked(root, lock, allow_heal=True):
+class StaleBaseError(RuntimeError):
+    """origin/main moved past the integration receipt base."""
+
+    def __init__(self):
+        super().__init__(STALE_BASE_ERROR)
+
+
+def _assemble_locked(root):
     """Validate and consume an integration receipt while holding its lock."""
     common = Path(git(root, "rev-parse", "--path-format=absolute", "--git-common-dir")).resolve()
     project = "".join(c if c.isascii() and (c.isalnum() or c == "-") else "-"
@@ -208,16 +215,10 @@ def _assemble_locked(root, lock, allow_heal=True):
     tip = git(root, "rev-parse", "--verify", f"refs/heads/{branch}^{{commit}}")
     if tip != receipt.get("tip"):
         raise RuntimeError("Integration tip changed since its sweep; rerun the merge sweep")
-    try:
-        main_tip = git(root, "rev-parse", "refs/remotes/origin/main")
-        if main_tip != receipt.get("base"):
-            warn_receipts_ahead(root, receipt.get("base", ""), main_tip)
-            raise RuntimeError(STALE_BASE_ERROR)
-    except RuntimeError as exc:
-        if not allow_heal or str(exc) != STALE_BASE_ERROR:
-            raise
-        heal_stale_assembly(root)
-        return _assemble_locked(root, lock, allow_heal=False)
+    main_tip = git(root, "rev-parse", "refs/remotes/origin/main")
+    if main_tip != receipt.get("base"):
+        warn_receipts_ahead(root, receipt.get("base", ""), main_tip)
+        raise StaleBaseError()
     for epic in receipt["epics"]:
         if resolve(root, epic["branch"]) != epic["tip"]:
             raise RuntimeError("An epic changed since integration; rerun the merge sweep")
@@ -231,7 +232,13 @@ def _assemble_locked(root, lock, allow_heal=True):
     return tip
 
 
-def assemble(root):
+def _under_delivery_lock(root, action):
+    """Run action(root) holding the integration branch's delivery-target lock.
+
+    The lock is released when this returns or raises, so nothing started
+    after it (notably integration-recover, which takes the same lock) can
+    wait on this process.
+    """
     common = Path(git(root, "rev-parse", "--path-format=absolute", "--git-common-dir")).resolve()
     project = "".join(c if c.isascii() and (c.isalnum() or c == "-") else "-"
                       for c in common.parent.name)
@@ -247,7 +254,23 @@ def assemble(root):
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
             raise RuntimeError("Integration sweep is running; retry assembly after it finishes") from exc
-        return _assemble_locked(root, lock)
+        try:
+            return action(root)
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+
+
+def assemble(root):
+    try:
+        return _under_delivery_lock(root, _assemble_locked)
+    except StaleBaseError:
+        pass
+    # integration-recover takes the same delivery-target lock, so the heal must
+    # run with it released (3.27.6 deadlocked here). The retry re-acquires the
+    # lock and revalidates the receipt the recovery rewrote; a second stale
+    # base is a hard failure rather than another heal.
+    heal_stale_assembly(root)
+    return _under_delivery_lock(root, _assemble_locked)
 
 
 def main():

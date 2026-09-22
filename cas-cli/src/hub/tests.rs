@@ -2782,18 +2782,29 @@ fn ordinary_relay_traffic_is_never_parsed_as_a_resize_refusal() {
     assert_eq!(super::server::refused_pane_resize(b"not json"), None);
 }
 
-/// cas-6261: the catalog lists supervisor-led sessions only unless the viewer
-/// asks for workers explicitly.
+/// cas-7103: the catalog lists every live supervisor-led session, even before
+/// it has spawned workers; worker-only rows still require an explicit switch.
 #[tokio::test]
-async fn sessions_catalog_hides_worker_only_rows_by_default() {
+async fn sessions_catalog_lists_live_supervisors_with_empty_rosters() {
+    let mut empty_supervisor = fixture_session("empty-supervisor");
+    empty_supervisor.workers.clear();
     let mut bare = fixture_session("bare-shell");
     bare.supervisor = String::new();
     bare.workers = vec!["worker-9".into()];
+    let mut hung_empty = fixture_session("hung-empty");
+    hung_empty.supervisor = String::new();
+    hung_empty.workers.clear();
+    hung_empty.liveness = DaemonLiveness::MissingEndpoint;
     let mut dormant = fixture_session("orphaned-supervisor");
     dormant.dormant = true;
     dormant.workers.clear();
-    let source =
-        RecordingReadModel::with_sessions(vec![fixture_session("factory-a"), bare, dormant]);
+    let source = RecordingReadModel::with_sessions(vec![
+        fixture_session("factory-a"),
+        empty_supervisor,
+        bare,
+        hung_empty,
+        dormant,
+    ]);
     let events = MachineEventBus::new(16);
     let state = HubState::new(
         SessionCatalog::new(source),
@@ -2838,22 +2849,31 @@ async fn sessions_catalog_hides_worker_only_rows_by_default() {
         default_catalog["freshness_threshold_secs"],
         crate::mcp::tools::service::agent_liveness::WORKER_STALE_SECS
     );
-    assert_eq!(names(default_catalog), vec!["factory-a"]);
+    assert_eq!(
+        names(default_catalog),
+        vec!["factory-a", "empty-supervisor"]
+    );
     assert_eq!(
         names(fetch("/v1/sessions?workers=0").await),
-        vec!["factory-a"]
+        vec!["factory-a", "empty-supervisor"]
     );
     assert_eq!(
         names(fetch("/v1/sessions?workers=1").await),
-        vec!["factory-a", "bare-shell"]
+        vec!["factory-a", "empty-supervisor", "bare-shell"]
     );
     assert_eq!(
         names(fetch("/v1/sessions?dormant=1").await),
-        vec!["factory-a", "orphaned-supervisor"]
+        vec!["factory-a", "empty-supervisor", "orphaned-supervisor"]
     );
     assert_eq!(
         names(fetch("/v1/sessions?workers=1&dormant=1").await),
-        vec!["factory-a", "bare-shell", "orphaned-supervisor"]
+        vec![
+            "factory-a",
+            "empty-supervisor",
+            "bare-shell",
+            "hung-empty",
+            "orphaned-supervisor"
+        ]
     );
 }
 

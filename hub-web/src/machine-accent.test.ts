@@ -130,3 +130,75 @@ describe("Pebble accent contrast", () => {
     expect(contrast("#777777", "#FFFFFF")).toBeLessThan(FLOOR);
   });
 });
+
+/** A token that resolves to `transparent` shows the surface it sits on. */
+const over = (value: string, surface: string) => (value === "transparent" ? surface : value);
+
+describe("dark tints instead of floods (P9, cas-9616)", () => {
+  it("keeps every tint, bubble and tray chip pair at or above 4.5:1 text and 3:1 marks in both schemes", () => {
+    for (const scheme of ["light", "dark"]) {
+      const s = scope(`html[data-scheme="${scheme}"]`);
+      const trayChip = over(s["--tray-chip-bg"], s["--ask-tint-deep"]);
+      const text: Array<[string, string, string]> = [
+        ["in-thread ask ink on its tint", s["--ask-tint-fg"], s["--ask-tint"]],
+        ["in-thread tray chip text", s["--tray-chip-fg"], trayChip],
+        ["sent tick on an in-thread tray chip", s["--state-ok"], trayChip],
+        ["pinned ask ink on full gold", s["--ask-fg"], s["--ask-bg"]],
+        ["pinned tray chip text", s["--pin-chip-fg"], s["--pin-chip-bg"]],
+        ["in-thread blocker ink on its tint", s["--crit-tint-fg"], s["--crit-tint"]],
+        ["operator bubble text", s["--you-bubble-fg"], s["--you-bubble-bg"]],
+      ];
+      for (const [name, fg, bg] of text) {
+        const ratio = contrast(fg, bg);
+        expect(ratio, `${scheme} · ${name}: ${fg} on ${bg} = ${ratio.toFixed(2)}:1`).toBeGreaterThanOrEqual(FLOOR);
+      }
+      const marks: Array<[string, string, string]> = [
+        ["pinned tray chip against the pinned tray", s["--pin-chip-bg"], s["--ask-deep"]],
+        ["chip focus ring on the pinned tray", s["--tray-focus"], s["--ask-deep"]],
+        ["chip focus ring on an in-thread tray", s["--tray-focus"], s["--ask-tint-deep"]],
+      ];
+      if (scheme === "dark") marks.push(
+        ["ask edge against its tint", s["--ask-edge"], s["--ask-tint"]],
+        ["ask edge against the canvas", s["--ask-edge"], s["--canvas"]],
+        ["tray chip outline against the tray", s["--tray-chip-line"], s["--ask-tint-deep"]],
+        ["blocker edge against its tint", s["--crit-edge"], s["--crit-tint"]],
+        ["blocker edge against the canvas", s["--crit-edge"], s["--canvas"]],
+        ["collapsed-ask edge (design polish 1) on the supervisor pebble", s["--ask-bg"], s["--sup-bg"]],
+      );
+      for (const [name, fg, bg] of marks) {
+        const ratio = contrast(fg, bg);
+        expect(ratio, `${scheme} · ${name}: ${fg} on ${bg} = ${ratio.toFixed(2)}:1`).toBeGreaterThanOrEqual(3);
+      }
+    }
+  });
+
+  it("tints the dark in-thread objects and keeps light exactly as it was", () => {
+    const light = scope('html[data-scheme="light"]');
+    const dark = scope('html[data-scheme="dark"]');
+    // Light: the in-thread object is the pinned object, so nothing on paper moves.
+    expect([light["--ask-tint"], light["--ask-tint-fg"], light["--ask-tint-deep"]]).toEqual([light["--ask-bg"], light["--ask-fg"], light["--ask-deep"]]);
+    expect([light["--crit-tint"], light["--crit-tint-fg"]]).toEqual([light["--crit-bg"], light["--crit-fg"]]);
+    expect([light["--you-bubble-bg"], light["--you-bubble-fg"]]).toEqual([light["--you-bg"], light["--you-fg"]]);
+    expect([light["--ask-edge"], light["--crit-edge"], light["--tray-chip-line"]]).toEqual(["transparent", "transparent", "transparent"]);
+    // Dark: tints darker than the flood they replace; the pinned ask keeps the gold.
+    expect(dark["--ask-tint"]).toBe("#3A3020");
+    expect(dark["--crit-tint"]).toBe("#3A1F1E");
+    expect(dark["--ask-edge"]).toBe(dark["--ask-bg"]);
+    expect(dark["--crit-edge"]).toBe(dark["--crit-bg"]);
+    // The operator's bubble is quieter than Send: Send keeps the bright accent.
+    expect(dark["--you-bubble-bg"]).toBe("#3A46B0");
+    expect(dark["--you-bg"]).toBe(dark["--accent"]);
+    for (const [name, fill] of [["ask", dark["--ask-tint"]], ["blocker", dark["--crit-tint"]], ["operator bubble", dark["--you-bubble-bg"]]]) {
+      expect(contrast(fill, dark["--canvas"]), `${name} fill must sit far below Send against the canvas`).toBeLessThan(contrast(dark["--accent"], dark["--canvas"]) / 3);
+    }
+  });
+
+  it("derives the raised and hover steps from the page, not the panel", () => {
+    for (const scheme of ["light", "dark"]) {
+      const s = scope(`html[data-scheme="${scheme}"]`);
+      expect(s["--bg-raised"]).toBe("color-mix(in srgb, var(--bg-root) 92%, var(--text-hi))");
+      expect(s["--bg-hover"]).toBe("color-mix(in srgb, var(--bg-root) 88%, var(--text-hi))");
+      expect(s["--bg-root"]).toBe(s["--canvas"]);
+    }
+  });
+});

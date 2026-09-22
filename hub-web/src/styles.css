@@ -2803,7 +2803,8 @@ dialog form > *,
 .conversation-list-heading { padding: 22px 18px 18px; }
 .conversation-list-title { display: flex; flex-direction: row; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-2); margin-top: var(--space-4); }
 .conversation-list-title h1 { font: var(--weight-semibold) 22px/1.2 var(--font-ui); letter-spacing: -0.015em; margin: 0 6px; }
-.conversation-list-title button { font-size: var(--fs-meta); }
+/* Header controls are text buttons (P15, cas-9616): no chip on the paper, the hover step on hover. */
+.conversation-list-title button { font-size: var(--fs-meta); color: var(--ink); background: var(--color-transparent); }
 .conversation-list-heading p { color: var(--ink-mid); margin: var(--space-3) 6px 0; }
 #conversation-list { overflow-y: auto; min-height: 0; display: flex; flex-direction: column; gap: var(--space-1); padding: 0 14px var(--space-4) 18px; }
 .conversation-sidebar footer { padding: var(--space-4) 18px; margin-top: auto; }
@@ -2834,7 +2835,7 @@ dialog form > *,
 .conversation-heading { display: flex; flex-direction: column; gap: var(--space-3); padding: var(--space-3) 30px 17px; background: var(--canvas); color: var(--ink); box-shadow: var(--lift-head); position: relative; z-index: 1; }
 .conversation-topline { display: flex; justify-content: space-between; align-items: center; gap: var(--space-2); }
 .conversation-topline .cloud-brand { display: none; }
-.conversation-topline button { font-size: var(--fs-meta); }
+.conversation-topline button { font-size: var(--fs-meta); color: var(--ink); background: var(--color-transparent); }
 .conversation-identity { display: flex; align-items: center; gap: 13px; min-width: 0; }
 .conversation-identity .conversation-avatar { flex: none; }
 .conversation-identity .id { min-width: 0; }
@@ -2872,7 +2873,7 @@ dialog form > *,
 .thread .turn > time { font-size: 12px; color: var(--ink-mid); padding: 2px 6px 0; }
 .thread .bub { max-width: 100%; min-width: 0; padding: 12px 19px; background: var(--sup-bg); color: var(--sup-fg); border-radius: 8px 22px 22px 8px; box-shadow: var(--lift); }
 .thread .bub.group-first { border-top-left-radius: 22px; }
-.thread .turn.you .bub { background: var(--you-bg); color: var(--you-fg); border-radius: 22px 8px 8px 22px; }
+.thread .turn.you .bub { background: var(--you-bubble-bg); color: var(--you-bubble-fg); border-radius: 22px 8px 8px 22px; }
 .thread .turn.you .bub.group-first { border-top-right-radius: 22px; }
 .thread .bub p { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 .thread .bub p + p { margin-top: 8px; }
@@ -2923,11 +2924,21 @@ dialog form > *,
 .obj { max-width: min(100%, 560px); min-width: 0; border-radius: 28px 28px 28px 9px; box-shadow: var(--lift-strong); overflow: hidden; font: var(--weight-regular) 15px/1.5 var(--font-ui); text-align: left; }
 .obj-body { padding: 15px 23px 14px; border-radius: 28px 28px 0 0; }
 .obj-foot { border-radius: 0 0 28px 9px; }
-.obj.t-a .obj-body { background: var(--ask-bg); color: var(--ask-fg); }
-.obj.t-a .obj-foot { display: flex; flex-wrap: wrap; gap: 9px; padding: 11px 13px; background: var(--ask-deep); }
-.obj.t-a .obj-foot .chip { flex: 1; }
-.obj.t-a.blk .obj-body { background: var(--crit-bg); color: var(--crit-fg); }
-.obj.t-a.blk .obj-foot { display: block; padding: 0 9px 9px; background: var(--crit-bg); }
+/* In-thread objects take the tint set (P9, cas-9616): a dark tint in ink with a
+ * 4px coloured edge in dark, the unchanged gold/red floods in light (the edge is
+ * transparent there and the fill paints under it, so geometry is unchanged).
+ * Only the pinned copy keeps the full gold fill. */
+.obj.t-a .obj-body { padding-left: 19px; border-left: 4px solid var(--ask-edge); background: var(--ask-tint); color: var(--ask-tint-fg); }
+.obj.t-a .obj-foot { display: flex; flex-wrap: wrap; gap: 9px; padding: 11px 13px 11px 9px; border-left: 4px solid var(--ask-edge); background: var(--ask-tint-deep); }
+.obj.t-a .obj-foot .chip { flex: 1; padding: 7px 16px; border: 1px solid var(--tray-chip-line); background: var(--tray-chip-bg); color: var(--tray-chip-fg); }
+.obj.t-a .obj-foot button.chip:hover:not(:disabled) { background: var(--bg-hover); }
+.obj.t-a .obj-foot button.chip:focus-visible { outline-color: var(--tray-focus); }
+.obj.t-a.blk .obj-body { border-left-color: var(--crit-edge); background: var(--crit-tint); color: var(--crit-tint-fg); }
+.obj.t-a.blk .obj-foot { display: block; padding: 0 9px 9px 5px; border-left-color: var(--crit-edge); background: var(--crit-tint); }
+.pinned-ask .obj.t-a .obj-body { border-left-color: var(--color-transparent); background: var(--ask-bg); color: var(--ask-fg); }
+.pinned-ask .obj.t-a .obj-foot { border-left-color: var(--color-transparent); background: var(--ask-deep); }
+.pinned-ask .obj.t-a .obj-foot .chip { border-color: var(--color-transparent); background: var(--pin-chip-bg); color: var(--pin-chip-fg); }
+.pinned-ask .obj.t-a .obj-foot button.chip:hover:not(:disabled) { background: var(--pin-chip-hover); }
 .obj p { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 .obj p + p { margin-top: 8px; }
 .obj .evi { background: var(--sheet-bg); color: var(--ink); border-radius: 17px; padding: 11px 15px; margin-top: 12px; }
@@ -3048,6 +3059,8 @@ button.chip:disabled { cursor: default; }
   .thread .evi-row { column-gap: 10px; font-size: 12px; }
   .pinned-ask { padding: 8px 16px 10px; }
   .obj-body { padding: 13px 19px 12px; }
+  /* 4px of the 19px inset is the tint edge (P9). */
+  .obj.t-a .obj-body { padding-left: 15px; }
 }
 @media (max-height: 30rem) {
   .conversation-heading { padding-top: var(--space-1); padding-bottom: var(--space-1); gap: var(--space-1); }

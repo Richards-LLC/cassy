@@ -179,7 +179,15 @@ function renderContext(count: number): HTMLElement {
   const body = element("div", "context-body");
   const tabs = element("div", "context-tabs");
   tabs.setAttribute("role", "tablist");
-  tabs.append(button("Attention", "active"), button("Workers & Tasks"));
+  // Production markup (src/main.ts context-tabs): the selected tab is aria-selected, not a class.
+  const tab = (label: string, key: string, selected: boolean) => {
+    const node = button(label);
+    node.setAttribute("role", "tab");
+    node.dataset.contextTab = key;
+    node.setAttribute("aria-selected", String(selected));
+    return node;
+  };
+  tabs.append(tab("Attention", "attention", true), tab("Workers & Tasks", "status", false));
   body.append(tabs, fixtureName === "operator-thread" ? renderOperatorComposer() : renderAttention(count));
   panel.append(body);
   return panel;

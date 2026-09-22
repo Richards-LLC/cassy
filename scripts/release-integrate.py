@@ -125,21 +125,38 @@ def recovery_timeout_secs():
     return value
 
 
-def recorded_factory_session():
+def recorded_run_fields():
     run_dir = os.environ.get("CAS_RELEASE_TRAIN_RUN_DIR")
     if run_dir:
         try:
-            fields = dict(
+            return dict(
                 line.split("=", 1)
                 for line in (Path(run_dir) / "run.env").read_text(encoding="utf-8").splitlines()
                 if "=" in line
             )
         except OSError:
-            fields = {}
-        session = fields.get("factory_session", "").strip()
-        if session:
-            return session
-    return os.environ.get("CAS_FACTORY_SESSION", "").strip()
+            pass
+    return {}
+
+
+def recorded_factory_session():
+    session = recorded_run_fields().get("factory_session", "").strip()
+    return session or os.environ.get("CAS_FACTORY_SESSION", "").strip()
+
+
+def recorded_identity():
+    fields = recorded_run_fields()
+    identity = {}
+    for field, variable in (
+        ("agent_id", "CAS_AGENT_ID"),
+        ("session_id", "CAS_SESSION_ID"),
+        ("agent_name", "CAS_AGENT_NAME"),
+        ("agent_role", "CAS_AGENT_ROLE"),
+    ):
+        value = fields.get(field, "").strip() or os.environ.get(variable, "").strip()
+        if value:
+            identity[variable] = value
+    return identity
 
 
 def heal_stale_assembly(root):
@@ -154,6 +171,7 @@ def heal_stale_assembly(root):
     factory_session = recorded_factory_session()
     if factory_session:
         env["CAS_FACTORY_SESSION"] = factory_session
+    env.update(recorded_identity())
     try:
         result = subprocess.run(
             [command, "factory", "integration-recover", "--base-only"],

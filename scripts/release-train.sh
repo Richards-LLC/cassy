@@ -177,6 +177,8 @@ release_train_factory_session() {
 write_run_env() {
     local env_file="${1:-$run_dir/run.env}" tip tip_sha started_at run_date
     local factory_session existing_factory_session
+    local agent_id existing_agent_id session_id existing_session_id
+    local agent_name existing_agent_name agent_role existing_agent_role
     tip="$(git -C "$worktree" rev-parse --short HEAD 2>/dev/null || echo unknown)"
     tip_sha="$(git -C "$worktree" rev-parse HEAD 2>/dev/null || echo unknown)"
     started_at="$(sed -n 's/^started_at=//p' "$env_file" 2>/dev/null | head -n1 || true)"
@@ -186,6 +188,14 @@ write_run_env() {
     existing_factory_session="$(sed -n 's/^factory_session=//p' "$env_file" 2>/dev/null | head -n1 || true)"
     factory_session="${existing_factory_session:-${CAS_FACTORY_SESSION:-}}"
     [[ -n "$factory_session" ]] || factory_session="$(release_train_factory_session || true)"
+    existing_agent_id="$(sed -n 's/^agent_id=//p' "$env_file" 2>/dev/null | head -n1 || true)"
+    existing_session_id="$(sed -n 's/^session_id=//p' "$env_file" 2>/dev/null | head -n1 || true)"
+    existing_agent_name="$(sed -n 's/^agent_name=//p' "$env_file" 2>/dev/null | head -n1 || true)"
+    existing_agent_role="$(sed -n 's/^agent_role=//p' "$env_file" 2>/dev/null | head -n1 || true)"
+    agent_id="${existing_agent_id:-${CAS_AGENT_ID:-${CAS_SESSION_ID:-}}}"
+    session_id="${existing_session_id:-${CAS_SESSION_ID:-}}"
+    agent_name="${existing_agent_name:-${CAS_AGENT_NAME:-}}"
+    agent_role="${existing_agent_role:-${CAS_AGENT_ROLE:-}}"
     cat >"$env_file" <<EOF
 version=$version
 worktree=$worktree
@@ -196,6 +206,10 @@ tip_sha=$tip_sha
 started_at=$started_at
 run_date=$run_date
 factory_session=$factory_session
+agent_id=$agent_id
+session_id=$session_id
+agent_name=$agent_name
+agent_role=$agent_role
 started_by_pid=$$
 EOF
 }

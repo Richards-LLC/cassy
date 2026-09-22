@@ -17,6 +17,9 @@ export interface ConversationRow {
   when?: string;
   /** Last turn in the thread, or the connection state when there is none. */
   preview?: string;
+  /** The session left the catalog with an instruction still pending: the
+   * preview line names that state instead of the last turn (cas-7294). */
+  unreachable?: boolean;
   /** Asks and blockers waiting on the operator: ochre dot + hot timestamp. */
   attention: number;
   /** Supervisor turns the operator has not opened: filled count pill in the machine accent. */
@@ -44,7 +47,7 @@ export function machineName(host: string): string {
 export function conversationRowMarkup(row: ConversationRow): string {
   const waiting = row.attention > 0;
   const unread = row.unread ?? 0;
-  const preview = truncateConversationPreview(plainTextMarkdown(row.preview || row.connection));
+  const preview = truncateConversationPreview(plainTextMarkdown(row.unreachable ? row.connection : row.preview || row.connection));
   // The time always holds the headline end; an unread count sits beneath it
   // with the waiting dot, so the most active row never loses its time (P13).
   const time = row.when ? `<span class="conversation-when${waiting ? " hot" : ""}" title="${escapeHtml(row.freshness)}">${escapeHtml(row.when)}</span>` : "";
@@ -61,7 +64,7 @@ export function conversationRowMarkup(row: ConversationRow): string {
   return `<span class="conversation-avatar" aria-hidden="true">${escapeHtml(machineMonogram(row.host))}</span>`
     + `<span class="conversation-who"><strong class="conversation-supervisor codename">${escapeHtml(row.supervisor)}</strong><span class="conversation-meta"><span class="conversation-project">${projectBadge(row.projectDir)}</span><span class="conversation-machine"><span class="conversation-sep" aria-hidden="true"></span>${escapeHtml(machineName(row.host))}</span></span></span>`
     + time
-    + `<span class="conversation-preview${waiting || unread > 0 ? " bold" : ""}">${escapeHtml(preview)}</span>`
+    + `<span class="conversation-preview${row.unreachable ? " unreachable" : waiting || unread > 0 ? " bold" : ""}">${escapeHtml(preview)}</span>`
     + marks;
 }
 

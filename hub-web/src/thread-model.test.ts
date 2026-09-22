@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { ConversationHistory } from "./conversation-history";
-import { blockerEvidence, cellTone, coalesceText, dayLabel, messageBlocks, threadModel, type ThreadGroup } from "./thread-model";
+import { blockerEvidence, cellTone, coalesceText, dayLabel, foldsAsStatus, messageBlocks, STATUS_FOLD_LIMIT, statusAsks, threadModel, type ThreadGroup } from "./thread-model";
+import ROW_20812 from "./fixtures/hub-row-20812.txt?raw";
 import type { OperatorReply, OperatorTurnKind } from "./types";
 
 const NOW = new Date(2026, 8, 21, 10, 0).getTime();
@@ -52,6 +53,45 @@ describe("threadModel", () => {
     const [, line] = threadModel(history.events, { now: NOW });
     if (line?.type !== "coalesce") throw new Error("expected coalesce");
     expect(coalesceText(line)).toBe("Rebasing");
+  });
+  it("does not fold the operator's real row 20812: a long waiting-on-you status reads as a supervisor turn", () => {
+    const history = new ConversationHistory();
+    history.submit("d", "sup", "Where are we on the QA pilot? What do you need from me?", at(13, 18));
+    history.reply(reply(20811, "status", "Gate 11 of 14 targets green"), at(13, 20));
+    history.reply(reply(20812, "status", ROW_20812.trim()), at(13, 24));
+    const items = threadModel(history.events, { now: NOW });
+    expect(items.map((item) => item.type)).toEqual(["day", "group", "coalesce", "group"]);
+    const line = items[2]; if (line?.type !== "coalesce") throw new Error("expected coalesce");
+    // The short status keeps its quiet line on its own; the long one no longer hides it behind "1 more update ·".
+    expect(line.count).toBe(1); expect(coalesceText(line)).toBe("Gate 11 of 14 targets green");
+    const turn = (items[3] as ThreadGroup).turns[0]!;
+    expect((items[3] as ThreadGroup).side).toBe("supervisor");
+    expect(turn.kind).toBe("status");
+    expect(turn.event.kind === "reply" && turn.event.value.message).toBe(ROW_20812.trim());
+    expect(ROW_20812.trim().length).toBeGreaterThan(STATUS_FOLD_LIMIT);
+    expect(statusAsks(ROW_20812)).toBe(true);
+  });
+  it("routes by length at the fold limit and by ask regardless of length", () => {
+    expect(foldsAsStatus("x".repeat(STATUS_FOLD_LIMIT))).toBe(true);
+    expect(foldsAsStatus("x".repeat(STATUS_FOLD_LIMIT + 1))).toBe(false);
+    // Surrounding whitespace does not count toward the limit.
+    expect(foldsAsStatus(`  ${"x".repeat(STATUS_FOLD_LIMIT)}\n`)).toBe(true);
+    for (const ask of ["WAITING ON YOU: say post", "Need your call on the lane split", "Ship it or hold?", "Gate green — over to you", "Needs your approval to merge"]) {
+      expect(foldsAsStatus(ask), ask).toBe(false);
+    }
+    for (const tick of ["Gate 11 of 14 targets green", "Rebasing", "fetching https://example.test/run?id=4 · 3 of 5"]) {
+      expect(foldsAsStatus(tick), tick).toBe(true);
+    }
+  });
+  it("an ask-bearing status splits a status run and joins the supervisor turns beside it", () => {
+    const history = new ConversationHistory();
+    history.reply(reply(1, "status", "Gate started"), at(9, 49));
+    history.reply(reply(2, "status", "Gate red on macOS — rerun or skip?"), at(9, 50));
+    history.reply(reply(3, "answer", "Details in the log."), at(9, 51));
+    history.reply(reply(4, "status", "Rerunning"), at(9, 52));
+    const items = threadModel(history.events, { now: NOW });
+    expect(items.map((item) => item.type)).toEqual(["day", "coalesce", "group", "coalesce"]);
+    expect((items[2] as ThreadGroup).turns.map((turn) => turn.kind)).toEqual(["status", "answer"]);
   });
   it("adds day separators, an undated Today, and the working line only when executing", () => {
     const history = new ConversationHistory();

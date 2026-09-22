@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { ConversationHistory } from "./conversation-history";
 import { ConversationView, registerTurnRenderer } from "./conversation-view";
 import type { OperatorReply, OperatorTurnKind } from "./types";
+import ROW_20812 from "./fixtures/hub-row-20812.txt?raw";
 
 const at = (hh: number, mm: number) => new Date(2026, 8, 21, hh, mm).getTime();
 function reply(id: number, kind: OperatorTurnKind, message = `m${id}`, reply_to: number | null = null): OperatorReply {
@@ -80,6 +81,78 @@ describe("ConversationView (Pebble thread)", () => {
     expect(view.element.querySelector(".msgs > :last-child .working")?.textContent).toContain("working");
     working = false; view.refreshWorking();
     expect(view.element.querySelector(".working")).toBeNull();
+  });
+  it("renders the operator's real row 20812 as a full supervisor bubble, not the quiet status line", () => {
+    const history = new ConversationHistory();
+    const view = new ConversationView(document, history, "sup"); document.body.replaceChildren(view.element);
+    history.reply(reply(20811, "status", "Gate 11 of 14 targets green"), at(13, 20));
+    history.reply(reply(20812, "status", ROW_20812.trim()), at(13, 24)); view.update();
+    const bubble = view.element.querySelector<HTMLElement>('.bub[data-kind="status"]');
+    expect(bubble).not.toBeNull();
+    expect(bubble!.closest(".turn")?.className).toBe("turn sup");
+    // The operator's asks keep their shape: the lead-in is the bubble's heading and (1)–(3) are a real list.
+    expect(bubble!.querySelector(".markdown-heading")?.textContent).toBe("Status 13:2xZ. WAITING ON YOU:");
+    expect([...bubble!.querySelectorAll("ol.markdown-list > li")].map((li) => li.textContent?.slice(0, 13))).toEqual(["mockup shape ", '"post";', '"run it" — th']);
+    expect(bubble!.textContent).toContain("IN FLIGHT: recall re-check, dev-pages cleanup PR. Nothing posted.");
+    expect(bubble!.closest(".coalesce")).toBeNull();
+    const quiet = view.element.querySelectorAll<HTMLElement>(".coalesce");
+    expect(quiet).toHaveLength(1);
+    expect(quiet[0]!.textContent).toBe("Gate 11 of 14 targets green");
+    expect(quiet[0]!.textContent).not.toContain("WAITING ON YOU");
+  });
+  it("offers Show full update on a folded run, opens every update, keeps it open across repaints, and closes again", () => {
+    const history = new ConversationHistory();
+    const view = new ConversationView(document, history, "sup"); document.body.replaceChildren(view.element);
+    history.reply(reply(1, "status", "Gate started"), at(9, 49)); history.reply(reply(2, "status", "gate 11 of 14"), at(9, 55)); view.update();
+    const line = view.element.querySelector<HTMLElement>(".coalesce")!;
+    const more = view.element.querySelector<HTMLButtonElement>(".coalesce-expand")!;
+    expect(more.hidden).toBe(false);
+    expect(more.textContent).toBe("Show full update");
+    expect(more.getAttribute("aria-expanded")).toBe("false");
+    expect(more.getAttribute("aria-controls")).toBe(line.id);
+    expect(line.dataset.expanded).toBe("false");
+    more.click();
+    const open = view.element.querySelector<HTMLElement>(".coalesce")!;
+    expect(open.dataset.expanded).toBe("true");
+    expect([...open.querySelectorAll("p")].map((p) => p.textContent)).toEqual(["Gate started", "gate 11 of 14"]);
+    const less = view.element.querySelector<HTMLButtonElement>(".coalesce-expand")!;
+    expect(less.textContent).toBe("Show less"); expect(less.getAttribute("aria-expanded")).toBe("true");
+    expect(document.activeElement).toBe(less);
+    // A later status joins the open run and it stays open.
+    history.reply(reply(3, "status", "gate 12 of 14"), at(9, 57)); view.update();
+    expect([...view.element.querySelectorAll(".coalesce p")].map((p) => p.textContent)).toEqual(["Gate started", "gate 11 of 14", "gate 12 of 14"]);
+    view.element.querySelector<HTMLButtonElement>(".coalesce-expand")!.click();
+    const closed = view.element.querySelector<HTMLElement>(".coalesce")!;
+    expect(closed.dataset.expanded).toBe("false");
+    expect(closed.textContent).toBe("2 more updates · gate 12 of 14");
+  });
+  it("hides Show full update on a lone short status that nothing clamps", () => {
+    const history = new ConversationHistory();
+    const view = new ConversationView(document, history, "sup"); document.body.replaceChildren(view.element);
+    history.reply(reply(1, "status", "Rebasing"), at(9, 49)); view.update();
+    expect(view.element.querySelector<HTMLButtonElement>(".coalesce-expand")?.hidden).toBe(true);
+  });
+  it("keeps Loading earlier readable: aria-busy on the thread and the working mark while a page loads", () => {
+    const history = new ConversationHistory();
+    let loading = false;
+    const loadEarlier = vi.fn();
+    const view = new ConversationView(document, history, { supervisor: "sup", hasEarlier: () => true, loadingEarlier: () => loading, loadEarlier });
+    document.body.replaceChildren(view.element);
+    history.reply(reply(20812, "status", ROW_20812.trim()), at(13, 24)); view.update();
+    const button = view.element.querySelector<HTMLButtonElement>(".conversation-load-earlier")!;
+    expect(button.hidden).toBe(false); expect(button.disabled).toBe(false);
+    expect(button.textContent).toBe("Load earlier"); expect(button.querySelector(".dots")).toBeNull();
+    expect(view.element.hasAttribute("aria-busy")).toBe(false);
+    button.click(); expect(loadEarlier).toHaveBeenCalledTimes(1);
+    loading = true; view.update();
+    expect(view.element.getAttribute("aria-busy")).toBe("true");
+    expect(button.disabled).toBe(true); expect(button.dataset.loading).toBe("true");
+    expect(button.textContent).toBe("Loading earlier…");
+    const dots = button.querySelector<HTMLElement>(".dots");
+    expect(dots?.getAttribute("aria-hidden")).toBe("true"); expect(dots?.querySelectorAll("i")).toHaveLength(3);
+    loading = false; view.update();
+    expect(view.element.hasAttribute("aria-busy")).toBe(false);
+    expect(button.disabled).toBe(false); expect(button.textContent).toBe("Load earlier"); expect(button.querySelector(".dots")).toBeNull();
   });
   it("falls back to data-kind bubbles for ask and blocker when nothing is registered", () => {
     const history = new ConversationHistory();

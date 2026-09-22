@@ -128,6 +128,8 @@ export class ConversationView {
   private readonly jump: HTMLButtonElement;
   private readonly options: ConversationViewOptions;
   private nodes = new Map<string, HTMLElement>();
+  /** Coalesced status lines the operator opened with "Show full update"; survives repaints. */
+  private expanded = new Set<string>();
   private following = true;
   private pinPending = false;
   private disposed = false;
@@ -170,7 +172,10 @@ export class ConversationView {
       this.jump.hidden = this.following;
     }, { passive: true });
     if (typeof ResizeObserver !== "undefined") {
-      this.resize = new ResizeObserver(() => { if (this.following) this.pin(); });
+      this.resize = new ResizeObserver(() => {
+        for (const node of this.msgs.querySelectorAll<HTMLElement>(".coalesce-turn")) syncClampPill(node);
+        if (this.following) this.pin();
+      });
       this.resize.observe(this.element);
     }
   }
@@ -181,8 +186,7 @@ export class ConversationView {
     const hasEarlier = this.options.hasEarlier?.() === true;
     const loadingEarlier = this.options.loadingEarlier?.() === true;
     this.loadEarlier.hidden = !hasEarlier;
-    this.loadEarlier.disabled = loadingEarlier;
-    this.loadEarlier.textContent = loadingEarlier ? "Loading earlier…" : "Load earlier";
+    this.renderLoadEarlier(loadingEarlier);
     const working = this.options.working?.() === true;
     const model = threadModel(this.history.events, { working, historyEnd: this.options.historyEnd?.() === true });
     const document = this.element.ownerDocument;
@@ -196,6 +200,7 @@ export class ConversationView {
       children.push(node);
     }
     this.nodes = next;
+    for (const key of this.expanded) if (!next.has(key)) this.expanded.delete(key);
     // Only re-append when the sequence changed: an unchanged list keeps its
     // scroll position and selection.
     const same = this.msgs.children.length === children.length && children.every((node, index) => this.msgs.children[index] === node);
@@ -203,6 +208,24 @@ export class ConversationView {
     this.renderPinned(document);
     this.renderEmpty(model.length === 0);
     if (this.following && document.getSelection()?.isCollapsed !== false) this.pin();
+  }
+
+  /**
+   * While an older page loads the button stays readable (it is the only
+   * loading signal): ink-mid at full opacity, the thread's three-dot working
+   * mark beside the label, and aria-busy on the thread for assistive tech.
+   */
+  private renderLoadEarlier(loading: boolean): void {
+    if (loading) this.element.setAttribute("aria-busy", "true");
+    else this.element.removeAttribute("aria-busy");
+    if (this.loadEarlier.disabled === loading && this.loadEarlier.dataset.loading === String(loading)) return;
+    this.loadEarlier.disabled = loading;
+    this.loadEarlier.dataset.loading = String(loading);
+    const document = this.element.ownerDocument;
+    if (!loading) { this.loadEarlier.textContent = "Load earlier"; return; }
+    const dots = document.createElement("span"); dots.className = "dots"; dots.setAttribute("aria-hidden", "true");
+    dots.append(document.createElement("i"), document.createElement("i"), document.createElement("i"));
+    this.loadEarlier.replaceChildren(dots, document.createTextNode("Loading earlier…"));
   }
 
   /** The most recent unanswered ask, pinned above the composer; answering unpins it. */
@@ -302,15 +325,41 @@ export class ConversationView {
     node.replaceChildren(line);
   }
 
+  /**
+   * Folded statuses: a rounded box clamped at three lines. "Show full update"
+   * opens the whole run — every folded update in order, latest last — and is
+   * offered whenever the run hides something: earlier updates, or a latest
+   * update that overflows the clamp.
+   */
   private renderCoalesce(node: HTMLElement, item: ThreadCoalesce): void {
     const document = node.ownerDocument;
+    const expanded = this.expanded.has(item.key);
     node.className = "turn coalesce-turn";
     const line = document.createElement("div"); line.className = "coalesce";
+    line.id = `coalesce-${item.key.replace(/[^\w-]/g, "-")}`;
     line.dataset.count = String(item.count);
-    line.textContent = coalesceText(item);
-    line.title = item.replies.map((reply) => reply.message).join("\n");
-    node.replaceChildren(line);
+    line.dataset.expanded = String(expanded);
+    if (expanded) {
+      line.append(...item.replies.map((reply) => { const p = document.createElement("p"); p.textContent = reply.message; return p; }));
+    } else {
+      line.textContent = coalesceText(item);
+      line.title = item.replies.map((reply) => reply.message).join("\n");
+    }
+    const more = document.createElement("button"); more.type = "button"; more.className = "coalesce-expand";
+    more.textContent = expanded ? "Show less" : "Show full update";
+    more.setAttribute("aria-expanded", String(expanded));
+    more.setAttribute("aria-controls", line.id);
+    more.hidden = !expanded && item.count < 2;
+    more.onclick = () => {
+      if (this.expanded.has(item.key)) this.expanded.delete(item.key); else this.expanded.add(item.key);
+      this.renderCoalesce(node, item);
+      node.querySelector<HTMLButtonElement>(".coalesce-expand")?.focus();
+    };
+    node.replaceChildren(line, more);
     if (item.time) { const time = document.createElement("time"); time.textContent = item.time; node.append(time); }
+    // A single status can still overflow three lines at a narrow width; offer
+    // the way in once layout says the clamp hid something.
+    if (more.hidden && typeof requestAnimationFrame !== "undefined") requestAnimationFrame(() => syncClampPill(node));
   }
 
   private renderGroup(node: HTMLElement, group: ThreadGroup): void {
@@ -420,6 +469,14 @@ export class ConversationView {
   }
 
   dispose(): void { this.disposed = true; this.resize?.disconnect(); this.element.remove(); this.pinned.remove(); }
+}
+
+/** Show the expand pill on a lone folded status only while the three-line clamp is hiding text. */
+function syncClampPill(node: HTMLElement): void {
+  const line = node.querySelector<HTMLElement>(":scope > .coalesce");
+  const more = node.querySelector<HTMLButtonElement>(":scope > .coalesce-expand");
+  if (!line || !more || !line.isConnected || line.dataset.expanded === "true" || Number(line.dataset.count) > 1) return;
+  more.hidden = !(line.scrollHeight > line.clientHeight + 1);
 }
 
 function signatureOf(item: ThreadItem, turnSignature: (turn: ThreadTurn) => string): string {

@@ -2862,6 +2862,12 @@ dialog form > *,
 .thread .thead .id span:empty { display: none; }
 .thread .conversation-load-earlier { align-self: center; margin: 10px auto 0; padding: 7px 14px; border: var(--line-width) solid var(--line-subtle); border-radius: 999px; background: var(--bg-panel); color: var(--ink-mid); font: var(--weight-medium) 12px/1.2 var(--font-ui); }
 .thread .conversation-load-earlier[hidden] { display: none; }
+/* Loading an older page: the label is the loading signal, so it stays legible
+ * (ink-mid at full opacity, not the global disabled .42) and carries the
+ * thread's three-dot working mark. */
+.thread .conversation-load-earlier[data-loading="true"] { display: inline-flex; align-items: center; gap: 8px; }
+.thread .conversation-load-earlier:disabled { opacity: 1; color: var(--ink-mid); cursor: progress; }
+.thread .conversation-load-earlier .dots i { width: 5px; height: 5px; }
 .thread .msgs { flex: 1; padding: 22px 30px 10px; display: flex; flex-direction: column; gap: 16px; min-width: 0; }
 .thread .day { align-self: center; margin: 0 0 2px; font-size: 12px; color: var(--ink-mid); }
 .thread .session-divider, .thread .history-end { align-self: center; margin: 0; color: var(--ink-mid); font: var(--weight-medium) 11px/1.3 var(--font-mono); letter-spacing: 0.02em; text-align: center; }
@@ -2891,8 +2897,17 @@ dialog form > *,
 .thread .conversation-delivery { display: block; margin-top: 6px; font-size: 12px; opacity: 0.85; }
 .thread .bub[data-state="error"] { background: var(--crit-bg); color: var(--crit-fg); }
 .thread .conversation-edit { margin-top: 8px; padding: 6px 14px; border-radius: 999px; border: 0; background: var(--crit-fg); color: var(--crit-bg); font: var(--weight-medium) 13px/1.2 var(--font-ui); }
-/* coalesced statuses — one quiet pebble, never a ledger */
-.thread .coalesce { align-self: flex-start; max-width: 100%; background: var(--sup-bg); color: var(--ink-mid); border-radius: 999px; padding: 8px 18px; font-size: 13px; overflow-wrap: anywhere; }
+/* coalesced statuses — one quiet box, never a ledger. Long or ask-bearing
+ * statuses never land here (thread-model foldsAsStatus); what does is clamped
+ * at three lines. The transparent bottom border is the bottom padding: the
+ * fill paints under it but overflow clips at the padding edge, so a clamped
+ * fourth line never peeks through. */
+.thread .coalesce { align-self: flex-start; max-width: 100%; background: var(--sup-bg); color: var(--ink-mid); border-radius: 16px; padding: 10px 16px 0; border-bottom: 10px solid transparent; font-size: 13px; overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; line-clamp: 3; overflow: hidden; }
+.thread .coalesce[data-expanded="true"] { display: block; -webkit-line-clamp: none; line-clamp: none; overflow: visible; }
+.thread .coalesce p { margin: 0; white-space: pre-wrap; }
+.thread .coalesce p + p { margin-top: 6px; }
+.thread .coalesce-expand { min-height: 32px; padding: 0 14px; border: var(--line-width) solid var(--line-strong); border-radius: 999px; background: transparent; color: var(--ink); font: var(--weight-medium) 13px/1.2 var(--font-ui); }
+.thread .coalesce-expand[hidden] { display: none; }
 /* evidence table inside a message: first column takes the slack, the rest hug their numbers */
 .thread .evi { background: var(--sheet-bg); color: var(--ink); border-radius: 17px; padding: 11px 15px; margin-top: 12px; max-width: 100%; }
 .thread .evi-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; column-gap: 14px; padding: 4px 0; font: var(--weight-regular) 12.5px/1.45 var(--font-mono); font-variant-numeric: tabular-nums; }

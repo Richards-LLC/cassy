@@ -115,8 +115,11 @@ export function renderConversationFixture(app: HTMLElement, state: string): void
     reply(45, null, 'Gate 4 of 14 targets green', 'status', at(9, 51));
     reply(46, null, 'Gate 8 of 14 targets green', 'status', at(9, 53));
     reply(47, null, 'gate 11 of 14 targets green', 'status', at(9, 55));
-    // thread-a's sheet at 09:52: an attachment-only turn is its sheet alone.
-    reply(51, null, '', 'answer', at(9, 52), [REPORT_CARD_ATTACHMENTS[0]!]);
+    // thread-a's sheet at 09:55, after the last status: an attachment-only
+    // turn is its sheet alone. History is ordered by time (durable replay), so
+    // a sheet stamped inside the 09:49–09:55 run would split the coalesced
+    // statuses in two (cas-7294).
+    reply(51, null, '', 'answer', at(9, 55), [REPORT_CARD_ATTACHMENTS[0]!]);
     history.submit('question', supervisor, 'Did the tokens drift test move?', at(9, 56));
     history.acknowledge({ client_ref: 'question', notification_id: 48, target: supervisor, stamped: true });
     reply(49, 48, "No — unchanged since 3.25.3. The gate's only new failure is one lint warning.", 'answer', at(9, 57));

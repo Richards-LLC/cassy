@@ -7,6 +7,19 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.27.8] - 2026-09-22
+
+### Fixed
+
+- The selected conversation row and the active machine icon carry a visible
+  accent edge (7:1 or better in light and dark); they were marked only by a
+  faint fill.
+- The factory's stalled-supervisor nudge no longer tells the supervisor to
+  assign a task whose start dependency is still in progress.
+- The release train no longer deadlocks when it heals a stale assembly base,
+  and its host-update stage installs the release and proves the binary, the
+  running hub and the project refresh all report the new version.
+
 ## [3.27.7] - 2026-09-22
 
 ### Changed

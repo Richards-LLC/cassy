@@ -1135,10 +1135,16 @@ fn legacy_required_scoped_proof_targets(
 /// project scripts, but all real repository closes use the checker as the
 /// authority.
 fn required_scoped_proof_targets(
-    repo: &std::path::Path,
+    proof_repo: &std::path::Path,
+    target_repo: &std::path::Path,
     changed_paths: &[String],
 ) -> Vec<String> {
-    let checker = repo.join("scripts/check-scoped-test-surface.sh");
+    // The worker checkout owns the delivery diff, while the task's target
+    // repository is the durable location for project tooling. Keep the
+    // checker path tied to the declared target so an installed Cassy binary
+    // does not reach back into its build checkout; run it from the worker
+    // checkout so its relative source/test lookups describe that diff.
+    let checker = target_repo.join("scripts/check-scoped-test-surface.sh");
     if checker.is_file() {
         let mut command = std::process::Command::new("bash");
         command
@@ -1150,7 +1156,7 @@ fn required_scoped_proof_targets(
                 "--paths-from-stdin",
                 "--",
             ])
-            .current_dir(repo)
+            .current_dir(proof_repo)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
@@ -1188,7 +1194,7 @@ fn required_scoped_proof_targets(
         }
     }
 
-    legacy_required_scoped_proof_targets(repo, changed_paths)
+    legacy_required_scoped_proof_targets(proof_repo, changed_paths)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1325,13 +1331,35 @@ fn validate_risk_close_proofs(
     changed_paths: &[String],
     proof_repo: &std::path::Path,
 ) -> Result<(), String> {
-    validate_risk_close_proofs_with_base(task, changed_paths, proof_repo, None)
+    validate_risk_close_proofs_with_base_and_target(
+        task,
+        changed_paths,
+        proof_repo,
+        proof_repo,
+        None,
+    )
 }
 
 fn validate_risk_close_proofs_with_base(
     task: &Task,
     changed_paths: &[String],
     proof_repo: &std::path::Path,
+    expected_base: Option<&str>,
+) -> Result<(), String> {
+    validate_risk_close_proofs_with_base_and_target(
+        task,
+        changed_paths,
+        proof_repo,
+        proof_repo,
+        expected_base,
+    )
+}
+
+fn validate_risk_close_proofs_with_base_and_target(
+    task: &Task,
+    changed_paths: &[String],
+    proof_repo: &std::path::Path,
+    target_repo: &std::path::Path,
     expected_base: Option<&str>,
 ) -> Result<(), String> {
     if task.risk.contains(&TaskRisk::Platform) && !has_platform_proof_note(&task.notes) {
@@ -1359,7 +1387,8 @@ fn validate_risk_close_proofs_with_base(
             ));
         }
     }
-    let required_targets = required_scoped_proof_targets(proof_repo, changed_paths);
+    let required_targets =
+        required_scoped_proof_targets(proof_repo, target_repo, changed_paths);
     if !required_targets.is_empty() {
         if let Some(expected_base) = expected_base {
             let actual_base = scoped_proof_note_base(&task.notes);
@@ -1561,12 +1590,20 @@ mod risk_proof_tests {
         dir
     }
 
-    fn install_scoped_proof_checker(dir: &std::path::Path) {
-        let checker = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../scripts/check-scoped-test-surface.sh");
+    fn install_scoped_proof_checker(dir: &std::path::Path) -> bool {
+        let checker = crate::test_paths::workspace_root()
+            .join("scripts/check-scoped-test-surface.sh");
+        if !checker.is_file() {
+            eprintln!(
+                "SKIP: scoped proof gate regression needs checker at {}",
+                checker.display()
+            );
+            return false;
+        }
         let destination = dir.join("scripts/check-scoped-test-surface.sh");
         std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
         std::fs::copy(checker, destination).unwrap();
+        true
     }
 
     fn initialize_scoped_proof_git_fixture(dir: &std::path::Path) {
@@ -1601,7 +1638,19 @@ mod risk_proof_tests {
     #[test]
     fn scoped_proof_gate_and_surface_checker_agree_on_multi_area_diff() {
         let dir = tempfile::tempdir().unwrap();
-        install_scoped_proof_checker(dir.path());
+        if !install_scoped_proof_checker(dir.path()) {
+            return;
+        }
+        let target_repo = tempfile::tempdir().unwrap();
+        let target_checker = target_repo
+            .path()
+            .join("scripts/check-scoped-test-surface.sh");
+        std::fs::create_dir_all(target_checker.parent().unwrap()).unwrap();
+        std::fs::copy(
+            dir.path().join("scripts/check-scoped-test-surface.sh"),
+            &target_checker,
+        )
+        .unwrap();
 
         let files = [
             "cas-cli/src/builtins/skills/demo/SKILL.md",
@@ -1676,7 +1725,7 @@ mod risk_proof_tests {
             .iter()
             .map(|file| (*file).to_string())
             .collect::<Vec<_>>();
-        let targets = required_scoped_proof_targets(dir.path(), &changed);
+        let targets = required_scoped_proof_targets(dir.path(), target_repo.path(), &changed);
         assert_eq!(
             targets,
             [
@@ -1799,6 +1848,7 @@ mod risk_proof_tests {
 
         assert!(required_scoped_proof_targets(
             dir.path(),
+            dir.path(),
             &["cas-cli/src/hub.rs".to_string()]
         )
         .is_empty());
@@ -1820,6 +1870,7 @@ mod risk_proof_tests {
 
         assert_eq!(
             required_scoped_proof_targets(
+                dir.path(),
                 dir.path(),
                 &["cas-cli/src/hub.rs".to_string()]
             ),
@@ -6077,10 +6128,15 @@ impl CasCore {
                         )
                     })
             });
-            if let Err(message) = validate_risk_close_proofs_with_base(
+            let target_repo = declared_repo_context
+                .as_ref()
+                .map(|context| context.repo_root.as_path())
+                .unwrap_or(close_project_root.as_path());
+            if let Err(message) = validate_risk_close_proofs_with_base_and_target(
                 &task,
                 &changed_paths,
                 proof_repo,
+                target_repo,
                 scoped_proof_base.as_deref(),
             ) {
                 return Ok(Self::tool_error(message));

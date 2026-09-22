@@ -909,10 +909,9 @@ mod tests {
 
     #[test]
     fn section_four_claim_fixture_is_byte_faithful() {
-        let expected: serde_json::Value = serde_json::from_str(include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../hub-web/src/fixtures/hub-reverse-pairing/claim-request.json"
-        )))
+        let expected: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../hub-web/src/fixtures/hub-reverse-pairing/claim-request.json"
+        ))
         .unwrap();
         let request = serde_json::to_value(ClaimRequest {
             wire_version: 1,
@@ -929,10 +928,9 @@ mod tests {
 
     #[test]
     fn section_four_completion_fixture_pins_relay_accepted_canonical_origin() {
-        let expected: serde_json::Value = serde_json::from_str(include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../hub-web/src/fixtures/hub-reverse-pairing/complete-request.json"
-        )))
+        let expected: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../hub-web/src/fixtures/hub-reverse-pairing/complete-request.json"
+        ))
         .unwrap();
         let scopes = Scope::default_read_only();
         let request = serde_json::to_value(CompleteRequest {

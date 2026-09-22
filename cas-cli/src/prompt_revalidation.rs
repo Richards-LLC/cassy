@@ -168,6 +168,10 @@ pub(crate) struct MergeRequestEnvelope {
     /// default so envelopes written by an older client still parse.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub anchor_tip: Option<String>,
+    /// Number of commits in `branch_tip` that are not reachable from the
+    /// target base at compose time.
+    #[serde(default)]
+    pub commits_not_on_target_base: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1802,6 +1806,7 @@ mod tests {
             target_branch: "main".to_string(),
             target_branch_tip: target_tip,
         anchor_tip: None,
+        commits_not_on_target_base: 0,
         };
         assert_eq!(
             parse_merge_request_envelope(&attach_merge_request_envelope("please merge", &envelope)),
@@ -1929,6 +1934,7 @@ mod tests {
                 target_branch: "main".to_string(),
                 target_branch_tip: enqueue_target_tip.clone(),
             anchor_tip: None,
+            commits_not_on_target_base: 0,
             },
         );
 
@@ -1958,6 +1964,7 @@ mod tests {
                 target_branch: "main".to_string(),
                 target_branch_tip: delivery_target_tip,
             anchor_tip: None,
+            commits_not_on_target_base: 0,
             })
         );
     }
@@ -2014,7 +2021,22 @@ mod tests {
             target_branch: "main".to_string(),
             target_branch_tip: "base-tip".to_string(),
         anchor_tip: None,
+        commits_not_on_target_base: 0,
         }
+    }
+
+    #[test]
+    fn merge_envelope_round_trips_commits_not_on_target_base() {
+        let mut envelope = merge_envelope();
+        envelope.commits_not_on_target_base = 3;
+        let encoded = attach_merge_request_envelope("please merge", &envelope);
+
+        assert_eq!(
+            parse_merge_request_envelope(&encoded)
+                .expect("structured merge request envelope")
+                .commits_not_on_target_base,
+            3
+        );
     }
 
     fn merge_task(status: TaskStatus, anchor: Option<&str>) -> Task {
@@ -2154,6 +2176,7 @@ mod tests {
             target_branch: "main".to_string(),
             target_branch_tip: "base-tip".to_string(),
             anchor_tip: Some("anchor-tip".to_string()),
+            commits_not_on_target_base: 0,
         };
 
         assert_eq!(

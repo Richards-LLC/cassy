@@ -624,7 +624,8 @@ struct SessionsQuery {
     dormant: bool,
 }
 
-/// The default catalog lists fresh supervisor-led sessions with live workers only. The two
+/// The default catalog lists every fresh supervisor-led session, including
+/// sessions whose live supervisor has not spawned workers yet. The two
 /// visibility controls are independent: `workers=1` includes live worker-only
 /// rows, while `dormant=1` includes sessions whose supervisor is not live.
 pub(crate) fn supervisor_sessions(
@@ -638,10 +639,7 @@ pub(crate) fn supervisor_sessions(
     sessions
         .into_iter()
         .filter(|session| {
-            reveal_dormant
-                || (!session.dormant
-                    && session.liveness == super::DaemonLiveness::Live
-                    && !session.workers.is_empty())
+            reveal_dormant || (!session.dormant && session.liveness == super::DaemonLiveness::Live)
         })
         .filter(|session| reveal_workers || !session.supervisor.trim().is_empty())
         .collect()
@@ -1959,7 +1957,7 @@ mod catalog_visibility_tests {
     use super::*;
 
     #[test]
-    fn normal_catalog_requires_fresh_staffed_reachable_supervisor() {
+    fn normal_catalog_requires_fresh_reachable_supervisor() {
         let live = super::super::fixture_session("live");
         let mut dead = live.clone();
         dead.name = "dead".into();
@@ -1974,7 +1972,7 @@ mod catalog_visibility_tests {
         let visible = supervisor_sessions(all.clone(), false, false);
         assert_eq!(
             visible.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
-            vec!["live"]
+            vec!["live", "empty"]
         );
         assert_eq!(supervisor_sessions(all, false, true).len(), 4);
     }

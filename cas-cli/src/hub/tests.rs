@@ -2871,6 +2871,7 @@ async fn sessions_catalog_lists_live_supervisors_with_empty_rosters() {
             "factory-a",
             "empty-supervisor",
             "bare-shell",
+            "hung-empty",
             "orphaned-supervisor"
         ]
     );

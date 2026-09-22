@@ -9222,6 +9222,7 @@ fn director_data_for(agents: &[Agent], session: &str) -> cas_factory::DirectorDa
         git_loaded: true,
         reminders: vec![],
         epic_closed_counts: HashMap::new(),
+        start_gated_task_ids: Default::default(),
     }
 }
 

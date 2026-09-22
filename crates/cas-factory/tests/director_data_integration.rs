@@ -552,6 +552,86 @@ fn test_tasks_by_epic_with_parent_child_dependency() {
     assert!(standalone.is_empty(), "All tasks belong to epic");
 }
 
+/// cas-6577: the director snapshot must name tasks whose explicit
+/// `requires_start` prerequisite is still open, with the same terminal
+/// predicate `task action=start` applies. A `blocks` edge is not a start gate.
+#[test]
+fn test_director_data_reports_open_requires_start_gates() {
+    let temp_dir = setup_test_cas_dir();
+    let cas_dir = temp_dir.path();
+
+    let task_store = init_task_store(cas_dir);
+    init_agent_store(cas_dir);
+    init_event_store(cas_dir);
+
+    let mut prerequisite = create_test_task(
+        "cas-7294",
+        "Prerequisite",
+        TaskStatus::InProgress,
+        TaskType::Task,
+        Priority::HIGH,
+        Some("watchful-swan-31"),
+    );
+    for task in [
+        prerequisite.clone(),
+        create_test_task(
+            "cas-1cd0",
+            "Gate",
+            TaskStatus::Open,
+            TaskType::Task,
+            Priority::HIGH,
+            None,
+        ),
+        create_test_task(
+            "cas-soft",
+            "Soft-blocked",
+            TaskStatus::Open,
+            TaskType::Task,
+            Priority::HIGH,
+            None,
+        ),
+    ] {
+        task_store.add(&task).expect("Failed to add task");
+    }
+    for (from, dep_type) in [
+        ("cas-1cd0", DependencyType::RequiresStart),
+        ("cas-soft", DependencyType::Blocks),
+    ] {
+        task_store
+            .add_dependency(&Dependency {
+                from_id: from.to_string(),
+                to_id: "cas-7294".to_string(),
+                dep_type,
+                created_at: chrono::Utc::now(),
+                created_by: None,
+            })
+            .expect("Failed to add dependency");
+    }
+
+    let data = DirectorData::load_fast(cas_dir).expect("Failed to load DirectorData");
+    assert_eq!(
+        data.start_gated_task_ids,
+        ["cas-1cd0".to_string()].into_iter().collect(),
+        "only the requires_start edge on an open prerequisite gates start"
+    );
+    assert!(
+        data.ready_tasks.iter().any(|task| task.id == "cas-1cd0"),
+        "a gated task stays visible in the snapshot"
+    );
+
+    for terminal in [TaskStatus::Cancelled, TaskStatus::Closed] {
+        prerequisite.status = terminal;
+        task_store
+            .update(&prerequisite)
+            .expect("Failed to update prerequisite");
+        let data = DirectorData::load_fast(cas_dir).expect("Failed to load DirectorData");
+        assert!(
+            data.start_gated_task_ids.is_empty(),
+            "a {terminal:?} prerequisite releases the gate"
+        );
+    }
+}
+
 // =============================================================================
 // Recency ordering tests (cas-2fb6)
 // =============================================================================
@@ -611,6 +691,7 @@ fn data_from_tasks(tasks: Vec<TaskSummary>) -> DirectorData {
         git_loaded: false,
         reminders: Vec::new(),
         epic_closed_counts: std::collections::HashMap::new(),
+        start_gated_task_ids: Default::default(),
     }
 }
 

@@ -424,6 +424,9 @@ pub(crate) fn supervisor_actionable_state_with_merge_classifier(
         });
     }
 
+    // cas-6577: only name work `task action=start` would accept. A task
+    // behind an open `requires_start` prerequisite is refused at start, so
+    // recommending it produces a false wake and a wrong instruction.
     let mut task_ids = data
         .ready_tasks
         .iter()
@@ -431,6 +434,7 @@ pub(crate) fn supervisor_actionable_state_with_merge_classifier(
             task.epic.as_deref() == Some(epic_id)
                 && task.status == TaskStatus::Open
                 && task.assignee.is_none()
+                && !data.start_gated_task_ids.contains(&task.id)
         })
         .map(|task| task.id.clone())
         .collect::<Vec<_>>();

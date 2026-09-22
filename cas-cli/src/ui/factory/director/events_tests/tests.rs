@@ -86,6 +86,7 @@ fn test_detect_task_assigned() {
         git_loaded: true,
         reminders: vec![],
         epic_closed_counts: HashMap::new(),
+        start_gated_task_ids: Default::default(),
     };
     detector.initialize(&data1);
 
@@ -108,6 +109,7 @@ fn test_detect_task_assigned() {
         git_loaded: true,
         reminders: vec![],
         epic_closed_counts: HashMap::new(),
+        start_gated_task_ids: Default::default(),
     };
 
     let events = detector.detect_changes(&data2, None);
@@ -143,6 +145,7 @@ fn test_detect_task_completed() {
         git_loaded: true,
         reminders: vec![],
         epic_closed_counts: HashMap::new(),
+        start_gated_task_ids: Default::default(),
     };
     detector.initialize(&data1);
 
@@ -160,6 +163,7 @@ fn test_detect_task_completed() {
         git_loaded: true,
         reminders: vec![],
         epic_closed_counts: HashMap::new(),
+        start_gated_task_ids: Default::default(),
     };
 
     let events = detector.detect_changes(&data2, None);
@@ -186,6 +190,7 @@ fn idle_data_for(agent_id: &str, agent_name: &str) -> DirectorData {
         git_loaded: true,
         reminders: vec![],
         epic_closed_counts: HashMap::new(),
+        start_gated_task_ids: Default::default(),
     }
 }
 
@@ -214,6 +219,7 @@ fn working_data_for(
         git_loaded: true,
         reminders: vec![],
         epic_closed_counts: HashMap::new(),
+        start_gated_task_ids: Default::default(),
     }
 }
 
@@ -367,6 +373,7 @@ fn test_worker_idle_payload_includes_close_rejected_task_state() {
         git_loaded: true,
         reminders: vec![],
         epic_closed_counts: HashMap::new(),
+        start_gated_task_ids: Default::default(),
     };
     detector.initialize(&data);
 
@@ -428,6 +435,7 @@ fn test_worker_idle_awaiting_merge_close_rejected_debounces_after_first_fire() {
         git_loaded: true,
         reminders: vec![],
         epic_closed_counts: HashMap::new(),
+        start_gated_task_ids: Default::default(),
     };
     detector.initialize(&data);
 
@@ -541,6 +549,7 @@ fn test_ignore_non_factory_agents() {
         git_loaded: true,
         reminders: vec![],
         epic_closed_counts: HashMap::new(),
+        start_gated_task_ids: Default::default(),
     };
     detector.initialize(&data1);
 
@@ -561,6 +570,7 @@ fn test_ignore_non_factory_agents() {
         git_loaded: true,
         reminders: vec![],
         epic_closed_counts: HashMap::new(),
+        start_gated_task_ids: Default::default(),
     };
 
     let events = detector.detect_changes(&data2, None);
@@ -592,6 +602,7 @@ fn test_debouncing() {
         git_loaded: true,
         reminders: vec![],
         epic_closed_counts: HashMap::new(),
+        start_gated_task_ids: Default::default(),
     };
     detector.initialize(&data1);
 
@@ -614,6 +625,7 @@ fn test_debouncing() {
         git_loaded: true,
         reminders: vec![],
         epic_closed_counts: HashMap::new(),
+        start_gated_task_ids: Default::default(),
     };
 
     let events1 = detector.detect_changes(&data2, None);
@@ -684,6 +696,7 @@ fn test_detect_epic_started() {
         git_loaded: true,
         reminders: vec![],
         epic_closed_counts: HashMap::new(),
+        start_gated_task_ids: Default::default(),
     };
     detector.initialize(&data1);
 
@@ -699,6 +712,7 @@ fn test_detect_epic_started() {
         git_loaded: true,
         reminders: vec![],
         epic_closed_counts: HashMap::new(),
+        start_gated_task_ids: Default::default(),
     };
 
     let events = detector.detect_changes(&data2, None);
@@ -727,6 +741,7 @@ fn test_detect_epic_completed() {
         git_loaded: true,
         reminders: vec![],
         epic_closed_counts: HashMap::new(),
+        start_gated_task_ids: Default::default(),
     };
     detector.initialize(&data1);
 
@@ -742,6 +757,7 @@ fn test_detect_epic_completed() {
         git_loaded: true,
         reminders: vec![],
         epic_closed_counts: HashMap::new(),
+        start_gated_task_ids: Default::default(),
     };
 
     let events = detector.detect_changes(&data2, None);
@@ -769,6 +785,7 @@ fn test_no_epic_event_when_unchanged() {
         git_loaded: true,
         reminders: vec![],
         epic_closed_counts: HashMap::new(),
+        start_gated_task_ids: Default::default(),
     };
     detector.initialize(&data1);
 
@@ -784,6 +801,7 @@ fn test_no_epic_event_when_unchanged() {
         git_loaded: true,
         reminders: vec![],
         epic_closed_counts: HashMap::new(),
+        start_gated_task_ids: Default::default(),
     };
 
     let events = detector.detect_changes(&data2, None);
@@ -825,6 +843,7 @@ fn test_idle_events_suppressed_for_removed_workers() {
         git_loaded: true,
         reminders: vec![],
         epic_closed_counts: HashMap::new(),
+        start_gated_task_ids: Default::default(),
     };
     detector.initialize(&data1);
 
@@ -856,6 +875,7 @@ fn test_idle_events_suppressed_for_removed_workers() {
         git_loaded: true,
         reminders: vec![],
         epic_closed_counts: HashMap::new(),
+        start_gated_task_ids: Default::default(),
     };
 
     // Two idle ticks are required to cross the consecutive-tick debounce.
@@ -907,6 +927,7 @@ fn test_idle_rate_limit_longer_than_general_debounce() {
         git_loaded: true,
         reminders: vec![],
         epic_closed_counts: HashMap::new(),
+        start_gated_task_ids: Default::default(),
     };
     detector.initialize(&data1);
 
@@ -924,6 +945,7 @@ fn test_idle_rate_limit_longer_than_general_debounce() {
         git_loaded: true,
         reminders: vec![],
         epic_closed_counts: HashMap::new(),
+        start_gated_task_ids: Default::default(),
     };
 
     // Two idle ticks are required to cross the consecutive-tick debounce.
@@ -976,6 +998,7 @@ fn test_detect_epic_started_open_with_branch() {
         git_loaded: true,
         reminders: vec![],
         epic_closed_counts: HashMap::new(),
+        start_gated_task_ids: Default::default(),
     };
     detector.initialize(&data1);
 
@@ -996,6 +1019,7 @@ fn test_detect_epic_started_open_with_branch() {
         git_loaded: true,
         reminders: vec![],
         epic_closed_counts: HashMap::new(),
+        start_gated_task_ids: Default::default(),
     };
 
     let events = detector.detect_changes(&data2, None);
@@ -1032,6 +1056,7 @@ fn test_no_duplicate_epic_started_for_existing_open_with_branch() {
         git_loaded: true,
         reminders: vec![],
         epic_closed_counts: HashMap::new(),
+        start_gated_task_ids: Default::default(),
     };
     detector.initialize(&data1);
 
@@ -1052,6 +1077,7 @@ fn test_no_duplicate_epic_started_for_existing_open_with_branch() {
         git_loaded: true,
         reminders: vec![],
         epic_closed_counts: HashMap::new(),
+        start_gated_task_ids: Default::default(),
     };
 
     let events = detector.detect_changes(&data2, None);
@@ -1081,6 +1107,7 @@ fn test_in_progress_epic_takes_priority_over_open_with_branch() {
         git_loaded: true,
         reminders: vec![],
         epic_closed_counts: HashMap::new(),
+        start_gated_task_ids: Default::default(),
     };
     detector.initialize(&data1);
 
@@ -1099,6 +1126,7 @@ fn test_in_progress_epic_takes_priority_over_open_with_branch() {
         git_loaded: true,
         reminders: vec![],
         epic_closed_counts: HashMap::new(),
+        start_gated_task_ids: Default::default(),
     };
 
     let events = detector.detect_changes(&data2, None);
@@ -1145,6 +1173,7 @@ fn test_closed_task_not_redispatched_to_idle_worker() {
         git_loaded: true,
         reminders: vec![],
         epic_closed_counts: HashMap::new(),
+        start_gated_task_ids: Default::default(),
     };
     detector.initialize(&data1);
 
@@ -1162,6 +1191,7 @@ fn test_closed_task_not_redispatched_to_idle_worker() {
         git_loaded: true,
         reminders: vec![],
         epic_closed_counts: HashMap::new(),
+        start_gated_task_ids: Default::default(),
     };
 
     let events = detector.detect_changes(&data2, None);
@@ -1207,6 +1237,7 @@ fn test_closed_task_leaked_into_ready_tasks_not_dispatched() {
         git_loaded: true,
         reminders: vec![],
         epic_closed_counts: HashMap::new(),
+        start_gated_task_ids: Default::default(),
     };
     detector.initialize(&data1);
 
@@ -1231,6 +1262,7 @@ fn test_closed_task_leaked_into_ready_tasks_not_dispatched() {
         git_loaded: true,
         reminders: vec![],
         epic_closed_counts: HashMap::new(),
+        start_gated_task_ids: Default::default(),
     };
 
     let events = detector.detect_changes(&data2, None);
@@ -1266,6 +1298,7 @@ fn test_blocked_task_not_dispatched() {
         git_loaded: true,
         reminders: vec![],
         epic_closed_counts: HashMap::new(),
+        start_gated_task_ids: Default::default(),
     };
     detector.initialize(&data1);
 
@@ -1290,6 +1323,7 @@ fn test_blocked_task_not_dispatched() {
         git_loaded: true,
         reminders: vec![],
         epic_closed_counts: HashMap::new(),
+        start_gated_task_ids: Default::default(),
     };
 
     let events = detector.detect_changes(&data2, None);
@@ -1344,6 +1378,7 @@ fn test_no_worker_idle_while_pending_messages_in_queue() {
         git_loaded: true,
         reminders: vec![],
         epic_closed_counts: HashMap::new(),
+        start_gated_task_ids: Default::default(),
     };
     detector.initialize(&data_with_pending);
 
@@ -1630,6 +1665,7 @@ fn test_closed_task_with_stale_assignee_not_redispatched() {
         git_loaded: true,
         reminders: vec![],
         epic_closed_counts: HashMap::new(),
+        start_gated_task_ids: Default::default(),
     };
     detector.initialize(&data1);
 
@@ -1657,6 +1693,7 @@ fn test_closed_task_with_stale_assignee_not_redispatched() {
         git_loaded: true,
         reminders: vec![],
         epic_closed_counts: HashMap::new(),
+        start_gated_task_ids: Default::default(),
     };
 
     let events = detector.detect_changes(&data2, None);
@@ -1804,6 +1841,7 @@ fn test_task_assigned_no_refire_on_oscillation() {
         git_loaded: true,
         reminders: vec![],
         epic_closed_counts: HashMap::new(),
+        start_gated_task_ids: Default::default(),
     };
     detector.initialize(&unassigned);
 
@@ -1881,6 +1919,7 @@ fn active_agent_data(agent: AgentSummary) -> DirectorData {
         git_loaded: true,
         reminders: vec![],
         epic_closed_counts: HashMap::new(),
+        start_gated_task_ids: Default::default(),
     }
 }
 
@@ -1948,6 +1987,7 @@ fn test_supervisor_never_emits_worker_idle() {
         git_loaded: true,
         reminders: vec![],
         epic_closed_counts: HashMap::new(),
+        start_gated_task_ids: Default::default(),
     };
     detector.initialize(&data_both_idle);
 
@@ -2142,6 +2182,7 @@ fn stalled_data_for(agent: AgentSummary) -> DirectorData {
         git_loaded: true,
         reminders: vec![],
         epic_closed_counts: HashMap::new(),
+        start_gated_task_ids: Default::default(),
     }
 }
 
@@ -2172,6 +2213,7 @@ fn assigned_unstarted_data(
         git_loaded: true,
         reminders: vec![],
         epic_closed_counts: HashMap::new(),
+        start_gated_task_ids: Default::default(),
     }
 }
 
@@ -2466,6 +2508,7 @@ fn test_728b_worker_stalled_suppressed_within_grace_window_then_fires_once_elaps
         git_loaded: true,
         reminders: vec![],
         epic_closed_counts: HashMap::new(),
+        start_gated_task_ids: Default::default(),
     };
     detector.initialize(&open_data);
 

@@ -1973,6 +1973,7 @@ mod tests {
             git_loaded: true,
             reminders: vec![],
             epic_closed_counts: HashMap::new(),
+            start_gated_task_ids: Default::default(),
         }
     }
 
@@ -2788,6 +2789,7 @@ mod tests {
             git_loaded: true,
             reminders: vec![],
             epic_closed_counts: HashMap::new(),
+            start_gated_task_ids: Default::default(),
         };
         let config = default_config();
 
@@ -2850,6 +2852,7 @@ mod tests {
             git_loaded: true,
             reminders: vec![],
             epic_closed_counts: HashMap::new(),
+            start_gated_task_ids: Default::default(),
         };
         let config = default_config();
 
@@ -3963,6 +3966,7 @@ mod tests {
             git_loaded: true,
             reminders: vec![],
             epic_closed_counts: HashMap::new(),
+            start_gated_task_ids: Default::default(),
         }
     }
 
@@ -4267,6 +4271,7 @@ mod tests {
             git_loaded: true,
             reminders: vec![],
             epic_closed_counts: HashMap::new(),
+            start_gated_task_ids: Default::default(),
         };
         let config = default_config();
 
@@ -4363,6 +4368,7 @@ mod tests {
             git_loaded: true,
             reminders: vec![],
             epic_closed_counts: HashMap::new(),
+            start_gated_task_ids: Default::default(),
         };
 
         let event = DirectorEvent::WorkerIdle {
@@ -4417,6 +4423,7 @@ mod tests {
             git_loaded: true,
             reminders: vec![],
             epic_closed_counts: HashMap::new(),
+            start_gated_task_ids: Default::default(),
         };
         // The reverse-lookup maps session ID → display name.
         data.agent_id_to_name
@@ -4475,6 +4482,7 @@ mod tests {
             git_loaded: true,
             reminders: vec![],
             epic_closed_counts: HashMap::new(),
+            start_gated_task_ids: Default::default(),
         };
 
         let event = DirectorEvent::AgentRegistered {

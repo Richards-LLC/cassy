@@ -3,7 +3,7 @@
 //! This module provides DirectorData aggregation from CAS stores,
 //! without any TUI/rendering dependencies.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -180,6 +180,10 @@ pub struct DirectorData {
     pub reminders: Vec<Reminder>,
     /// Count of closed subtasks per epic (epic_id -> closed_count)
     pub epic_closed_counts: HashMap<String, usize>,
+    /// Ids of tasks whose explicit `requires_start` prerequisites are still
+    /// open. `task action=start` refuses these, so nothing that recommends an
+    /// assignment may name them (cas-6577).
+    pub start_gated_task_ids: HashSet<String>,
 }
 
 impl DirectorData {
@@ -254,7 +258,8 @@ impl DirectorData {
         };
         // Atomically load tasks + parent-child deps in a single lock hold to prevent
         // read skew where a task exists but its epic link is invisible (causes panel flicker)
-        let (tasks, parent_child_deps) = task_store.list_with_parent_deps()?;
+        let (tasks, parent_child_deps, start_gated_task_ids) =
+            task_store.list_with_parent_deps_and_start_gates()?;
 
         // Build assignee to task map for looking up current tasks
         let mut assignee_tasks: HashMap<String, String> = HashMap::new();
@@ -618,6 +623,7 @@ impl DirectorData {
             git_loaded,
             reminders,
             epic_closed_counts,
+            start_gated_task_ids,
         })
     }
 
@@ -786,7 +792,6 @@ fn load_all_git_changes(
     worktree_store: Option<&SqliteWorktreeStore>,
 ) -> anyhow::Result<Vec<SourceChangesInfo>> {
     use rayon::prelude::*;
-    use std::collections::HashSet;
 
     let repo_root = cas_dir.parent().unwrap_or(cas_dir);
 
@@ -1205,6 +1210,7 @@ mod tests {
             git_loaded: false,
             reminders: Vec::new(),
             epic_closed_counts: HashMap::new(),
+            start_gated_task_ids: Default::default(),
         };
 
         let live_groups = data.live_epic_groups();

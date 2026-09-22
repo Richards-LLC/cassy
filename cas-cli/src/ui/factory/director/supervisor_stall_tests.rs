@@ -71,6 +71,7 @@ fn data() -> DirectorData {
         git_loaded: false,
         reminders: Vec::new(),
         epic_closed_counts: HashMap::new(),
+        start_gated_task_ids: Default::default(),
     }
 }
 
@@ -396,5 +397,81 @@ fn merged_close_blocked_stall_wakes_for_changed_delivery_without_refiring_same_s
             )
             .wake
             .is_some()
+    );
+}
+
+/// cas-6577: a gate task whose `requires_start` prerequisite is still in
+/// progress is refused by `task action=start`, so the stall detector must not
+/// tell the supervisor to assign it to an idle worker.
+#[test]
+fn start_gated_task_is_never_named_for_assignment() {
+    let now = Utc.with_ymd_and_hms(2026, 9, 22, 22, 18, 0).unwrap();
+    let mut snapshot = data();
+    snapshot.in_progress_tasks.push(task(
+        "cas-7294",
+        TaskStatus::InProgress,
+        Some("id-watchful-swan-31"),
+        Some("cas-epic"),
+    ));
+    snapshot
+        .ready_tasks
+        .push(task("cas-1cd0", TaskStatus::Open, None, Some("cas-epic")));
+    snapshot.start_gated_task_ids.insert("cas-1cd0".into());
+    let mut busy = worker("watchful-swan-31", now - Duration::seconds(3600));
+    busy.current_task = Some("cas-7294".into());
+    snapshot.agents.push(busy);
+    snapshot
+        .agents
+        .push(worker("lively-hawk-36", now - Duration::seconds(3600)));
+
+    let state = supervisor_actionable_state(
+        &snapshot,
+        Some("cas-epic"),
+        "supervisor",
+        &HashSet::new(),
+        now,
+        600,
+        |_| None,
+    );
+    assert_eq!(state, None, "only start-gated work is open: no nudge");
+
+    // An ungated sibling is still named; the gate never is.
+    snapshot
+        .ready_tasks
+        .push(task("cas-free", TaskStatus::Open, None, Some("cas-epic")));
+    let state = supervisor_actionable_state(
+        &snapshot,
+        Some("cas-epic"),
+        "supervisor",
+        &HashSet::new(),
+        now,
+        600,
+        |_| None,
+    );
+    assert_eq!(
+        state,
+        Some(SupervisorActionableState::AssignReadyWork {
+            task_ids: vec!["cas-free".into()],
+            idle_workers: vec!["lively-hawk-36".into()],
+        })
+    );
+
+    // Once the prerequisite is terminal the snapshot no longer gates it.
+    snapshot.start_gated_task_ids.clear();
+    let state = supervisor_actionable_state(
+        &snapshot,
+        Some("cas-epic"),
+        "supervisor",
+        &HashSet::new(),
+        now,
+        600,
+        |_| None,
+    );
+    assert_eq!(
+        state,
+        Some(SupervisorActionableState::AssignReadyWork {
+            task_ids: vec!["cas-1cd0".into(), "cas-free".into()],
+            idle_workers: vec!["lively-hawk-36".into()],
+        })
     );
 }

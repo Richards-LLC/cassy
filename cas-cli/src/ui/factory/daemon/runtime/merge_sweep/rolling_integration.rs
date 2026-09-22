@@ -25,6 +25,8 @@ pub(super) struct BaseFailure {
 struct IntegrationReceipt {
     base: String,
     epics: Vec<EpicTip>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    already_integrated: Vec<EpicTip>,
     tip: Option<String>,
     status: String,
     detail: String,
@@ -54,7 +56,12 @@ enum Assembly {
 
 /// Build the union in creation order. Conflict probes use Git's merge engine,
 /// rather than assuming every epic that touched a conflicted file conflicts.
-fn assemble(worktree: &Path, base: &str, epics: &[EpicTip]) -> Result<Assembly, String> {
+fn assemble(
+    worktree: &Path,
+    base: &str,
+    base_label: &str,
+    epics: &[EpicTip],
+) -> Result<Assembly, String> {
     git_output(worktree, &["reset", "--hard", base])?;
     let mut prefixes = vec![base.to_owned()];
     for (index, epic) in epics.iter().enumerate() {
@@ -84,39 +91,34 @@ fn assemble(worktree: &Path, base: &str, epics: &[EpicTip]) -> Result<Assembly, 
                 ));
             }
             let mut pairs = Vec::new();
-            // Probe base+previous epic against the incoming epic without
-            // touching the assembly checkout or manufacturing a commit.
-            for prior in &epics[..index] {
-                let output = Command::new("git")
-                    .current_dir(worktree)
-                    .args(["merge-tree", "--write-tree", &prior.tip, &epic.tip])
-                    .output()
-                    .map_err(|error| error.to_string())?;
-                if output.status.code() == Some(1) {
-                    pairs.push(prior.id.clone());
-                } else if !output.status.success() {
-                    return Err(format!(
-                        "conflict attribution probe {}: {}",
-                        prior.id,
-                        first_output_line(&output.stderr)
-                    ));
+            // Probe the actual base first. If it conflicts, the content came
+            // from main rather than any prior epic in this rolling union.
+            let base_conflict = merge_tree_conflicts(worktree, base, &epic.tip)?;
+            if !base_conflict {
+                // Probe each prior epic against the incoming epic without
+                // touching the assembly checkout or manufacturing a commit.
+                for prior in &epics[..index] {
+                    if merge_tree_conflicts(worktree, &prior.tip, &epic.tip)? {
+                        pairs.push(prior.id.clone());
+                    }
                 }
             }
-            if pairs.is_empty() {
+            if pairs.is_empty() && !base_conflict {
                 // Main or a higher-order interaction; name it honestly instead
                 // of inventing a pair unsupported by a merge probe.
                 pairs.extend(epics[..index].iter().map(|prior| prior.id.clone()));
             }
+            let against = if base_conflict || index == 0 {
+                base_label.to_owned()
+            } else {
+                pairs.join(", ")
+            };
             pairs.push(epic.id.clone());
             return Ok(Assembly::Conflict {
                 detail: format!(
                     "Conflict adding {} against {}. Files: {}",
                     epic.id,
-                    if index == 0 {
-                        "origin/main".to_owned()
-                    } else {
-                        pairs[..pairs.len() - 1].join(", ")
-                    },
+                    against,
                     files.lines().collect::<Vec<_>>().join(", ")
                 ),
                 affected: pairs,
@@ -167,31 +169,59 @@ fn ref_tip(root: &Path, reference: &str) -> Option<String> {
     .ok()
 }
 
+fn merge_tree_conflicts(root: &Path, left: &str, right: &str) -> Result<bool, String> {
+    let output = Command::new("git")
+        .current_dir(root)
+        .args(["merge-tree", "--write-tree", left, right])
+        .output()
+        .map_err(|error| error.to_string())?;
+    match output.status.code() {
+        Some(0) => Ok(false),
+        Some(1) => Ok(true),
+        _ => Err(format!(
+            "conflict attribution probe {left} vs {right}: {}",
+            first_output_line(&output.stderr)
+        )),
+    }
+}
+
 /// Build the set from all open task rows, independent of ownership. Rows with
 /// no live local or origin ref are ignored; a divergent local/origin pair is
 /// still an actionable integration error and is preserved for the caller.
-fn live_open_epics(root: &Path, tasks: Vec<Task>) -> Result<Vec<EpicTip>, String> {
-    open_epics(tasks)
-        .into_iter()
-        .filter_map(|task| {
-            let branch = epic_branch(&task)?.to_owned();
-            let local = ref_tip(root, &format!("refs/heads/{branch}"));
-            let remote = ref_tip(root, &format!("refs/remotes/origin/{branch}"));
-            if local.is_none() && remote.is_none() {
-                return None;
-            }
-            let tip = match resolve_epic_tip(root, &branch) {
-                Ok(tip) => tip,
-                Err(error) => return Some(Err(error)),
-            };
-            Some(Ok(EpicTip {
-                id: task.id,
-                branch,
-                tip,
-                owner: task.epic_verification_owner.or(task.assignee),
-            }))
-        })
-        .collect()
+/// Tips already contained in `base` are returned separately for the receipt.
+fn live_open_epics(
+    root: &Path,
+    base: &str,
+    tasks: Vec<Task>,
+) -> Result<(Vec<EpicTip>, Vec<EpicTip>), String> {
+    let mut epics = Vec::new();
+    let mut already_integrated = Vec::new();
+    for task in open_epics(tasks) {
+        let Some(branch) = epic_branch(&task).map(str::to_owned) else {
+            continue;
+        };
+        let local = ref_tip(root, &format!("refs/heads/{branch}"));
+        let remote = ref_tip(root, &format!("refs/remotes/origin/{branch}"));
+        if local.is_none() && remote.is_none() {
+            continue;
+        }
+        let tip = match resolve_epic_tip(root, &branch) {
+            Ok(tip) => tip,
+            Err(error) => return Err(error),
+        };
+        let epic = EpicTip {
+            id: task.id,
+            branch,
+            tip,
+            owner: task.epic_verification_owner.or(task.assignee),
+        };
+        if git_output(root, &["merge-base", "--is-ancestor", &epic.tip, base]).is_ok() {
+            already_integrated.push(epic);
+        } else {
+            epics.push(epic);
+        }
+    }
+    Ok((epics, already_integrated))
 }
 
 fn focused_epic_id_for_project(root: &Path) -> Option<String> {
@@ -305,6 +335,7 @@ fn integrate(
     let mut receipt = IntegrationReceipt {
         base: String::new(),
         epics: Vec::new(),
+        already_integrated: Vec::new(),
         tip: None,
         status: "RUNNING".to_owned(),
         detail: format!(
@@ -352,7 +383,9 @@ fn integrate(
             }
         }
     }
-    receipt.epics = live_open_epics(project_root, tasks)?;
+    let (epics, already_integrated) = live_open_epics(project_root, &base, tasks)?;
+    receipt.epics = epics;
+    receipt.already_integrated = already_integrated;
     let synthetic = SweepRequest {
         epic_id: format!("integration-{}", sanitize_component(project)),
         target_branch: branch.clone(),
@@ -368,7 +401,7 @@ fn integrate(
         ],
     )
     .ok();
-    let (tip, prefixes) = match assemble(&worktree, &base, &receipt.epics)? {
+    let (tip, prefixes) = match assemble(&worktree, &base, "origin/main", &receipt.epics)? {
         Assembly::Conflict { detail, affected } => {
             receipt.status = "CONFLICT".to_owned();
             receipt.detail = detail.clone();
@@ -1205,7 +1238,13 @@ mod tests {
         let first = epic(repo.path(), "a", "shared", "first\n");
         let second = epic(repo.path(), "b", "shared", "second\n");
         git(repo.path(), &["checkout", "--detach", "main"]);
-        let result = assemble(repo.path(), "main", &[first.clone(), second.clone()]).unwrap();
+        let result = assemble(
+            repo.path(),
+            "main",
+            "main",
+            &[first.clone(), second.clone()],
+        )
+        .unwrap();
         let Assembly::Conflict { detail, affected } = result else {
             panic!("expected conflict");
         };
@@ -1221,9 +1260,13 @@ mod tests {
         let first = epic(repo.path(), "a", "a", "first\n");
         let second = epic(repo.path(), "b", "b", "second\n");
         git(repo.path(), &["checkout", "--detach", "main"]);
-        let Assembly::Clean { tip, prefixes } =
-            assemble(repo.path(), "main", &[first.clone(), second.clone()]).unwrap()
-        else {
+        let Assembly::Clean { tip, prefixes } = assemble(
+            repo.path(),
+            "main",
+            "main",
+            &[first.clone(), second.clone()],
+        )
+        .unwrap() else {
             panic!("expected clean union");
         };
         assert_eq!(prefixes.len(), 3);
@@ -1246,7 +1289,7 @@ mod tests {
         let second = epic(repo.path(), "b", "b", "second\n");
         git(repo.path(), &["checkout", "--detach", "main"]);
         let Assembly::Clean { prefixes, .. } =
-            assemble(repo.path(), "main", &[first, second]).unwrap()
+            assemble(repo.path(), "main", "main", &[first, second]).unwrap()
         else {
             panic!("expected clean Git merge");
         };
@@ -1372,10 +1415,73 @@ mod tests {
         closed.status = TaskStatus::Closed;
         closed.branch = Some(closed_branch.branch);
 
-        let epics = live_open_epics(repo.path(), vec![closed, open]).unwrap();
+        let (epics, already_integrated) =
+            live_open_epics(repo.path(), "main", vec![closed, open]).unwrap();
         assert_eq!(epics.len(), 1);
         assert_eq!(epics[0].id, "origin-open");
         assert_eq!(epics[0].owner, None);
+        assert!(already_integrated.is_empty());
+    }
+
+    #[test]
+    fn stale_merged_epic_is_reported_integrated_and_base_conflict_names_main() {
+        let repo = fixture();
+        let stale = epic(repo.path(), "cas-stale", "stale", "stale\n");
+        let initial = git(repo.path(), &["rev-parse", "main"]);
+        git(repo.path(), &["checkout", "main"]);
+        git(repo.path(), &["merge", "--ff-only", &stale.branch]);
+
+        git(repo.path(), &["checkout", "-b", "epic/cas-live", &initial]);
+        fs::write(repo.path().join("shared"), "live\n").unwrap();
+        git(repo.path(), &["add", "shared"]);
+        git(repo.path(), &["commit", "-m", "cas-live"]);
+        let live = EpicTip {
+            id: "cas-live".to_owned(),
+            branch: "epic/cas-live".to_owned(),
+            tip: git(repo.path(), &["rev-parse", "HEAD"]),
+            owner: None,
+        };
+
+        git(repo.path(), &["checkout", "main"]);
+        fs::write(repo.path().join("shared"), "main\n").unwrap();
+        git(repo.path(), &["add", "shared"]);
+        git(repo.path(), &["commit", "-m", "main-rewrite"]);
+
+        let mut stale_task = Task::new("cas-stale".to_owned(), "stale".to_owned());
+        stale_task.task_type = TaskType::Epic;
+        stale_task.branch = Some(stale.branch.clone());
+        let mut live_task = Task::new("cas-live".to_owned(), "live".to_owned());
+        live_task.task_type = TaskType::Epic;
+        live_task.branch = Some(live.branch.clone());
+        let (epics, already_integrated) =
+            live_open_epics(repo.path(), "main", vec![stale_task, live_task]).unwrap();
+        assert_eq!(
+            epics
+                .iter()
+                .map(|epic| epic.id.as_str())
+                .collect::<Vec<_>>(),
+            ["cas-live"]
+        );
+        assert_eq!(
+            already_integrated
+                .iter()
+                .map(|epic| epic.id.as_str())
+                .collect::<Vec<_>>(),
+            ["cas-stale"]
+        );
+
+        git(repo.path(), &["checkout", "--detach", "main"]);
+        let Assembly::Conflict { detail, affected } =
+            assemble(repo.path(), "main", "origin/main", &epics).unwrap()
+        else {
+            panic!("expected the live epic to conflict with main");
+        };
+        assert!(
+            detail.contains("Conflict adding cas-live against origin/main"),
+            "{detail}"
+        );
+        assert!(!detail.contains("cas-stale"), "{detail}");
+        assert_eq!(affected, ["cas-live"]);
     }
 
     #[test]

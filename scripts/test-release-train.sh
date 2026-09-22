@@ -822,6 +822,48 @@ else
     bad "gap 3: prep did not run the version bump: $prep_stage_out"
 fi
 
+# Gap 1: a version bump must refresh the lockfile before the prep commit, so
+# the first gate cargo invocation sees a clean tree.
+prep_lock_wt="$(new_worktree prep-lock)"
+prep_lock_date='2099-01-04'
+cat >"$prep_lock_wt/Cargo.toml" <<'EOF'
+[package]
+name = "release-lock-fixture"
+version = "0.0.0"
+edition = "2024"
+EOF
+cat >"$prep_lock_wt/Cargo.lock" <<'EOF'
+version = 3
+# stale lock metadata
+EOF
+cat >"$prep_lock_wt/scripts/bump-release-version.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+sed -i 's/version = "0.0.0"/version = "9.99.13"/' Cargo.toml
+EOF
+chmod +x "$prep_lock_wt/scripts/bump-release-version.sh"
+mkdir -p "$prep_lock_wt/docs/release-notes"
+printf '# Fixture draft\n' >"$prep_lock_wt/docs/release-notes/$prep_lock_date-v9.99.13-slack.md"
+git -C "$prep_lock_wt" add Cargo.toml Cargo.lock scripts/bump-release-version.sh docs/release-notes
+git -C "$prep_lock_wt" -c commit.gpgsign=false commit -qm 'seed stale lock fixture'
+prep_lock_cargo="$tmp/prep-lock-cargo.sh"
+cat >"$prep_lock_cargo" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "$*" == 'update --workspace --offline' ]]
+printf 'version = 3\n# refreshed for 9.99.13\n' > Cargo.lock
+EOF
+chmod +x "$prep_lock_cargo"
+prep_lock_out="$(CAS_RELEASE_TRAIN_DATE="$prep_lock_date" CAS_RELEASE_TRAIN_CARGO="$prep_lock_cargo" \
+    "$train" 9.99.13 "$prep_lock_wt" --prep 2>&1 || true)"
+if [[ "$prep_lock_out" == *'prep complete'* ]] \
+    && [[ -z "$(git -C "$prep_lock_wt" status --porcelain)" ]] \
+    && git -C "$prep_lock_wt" show HEAD:Cargo.lock | grep -q 'refreshed for 9.99.13'; then
+    ok 'gap 1: prep refreshes Cargo.lock and leaves the bumped tree clean'
+else
+    bad "gap 1: prep left a stale or dirty lockfile: $prep_lock_out"
+fi
+
 announce_stub="$tmp/announce-stub.sh"
 cat >"$announce_stub" <<'EOF'
 #!/usr/bin/env bash
@@ -860,6 +902,25 @@ else
     bad 'gap 8: --announce left the POSTED block only in the run receipt'
 fi
 
+# Gap 3: announce must use the run's pinned start date when the stage crosses
+# midnight, rather than recomputing the date at stage time.
+midnight_wt="$(new_worktree midnight-announce)"
+mkdir -p "$midnight_wt/docs/release-notes"
+cp "$stage_wt/docs/release-notes/$stage_date-v9.99.8-slack.md" \
+    "$midnight_wt/docs/release-notes/2099-01-01-v9.99.8-slack.md"
+midnight_dir="$("$train" 9.99.8 "$midnight_wt" --print-run-dir)"
+mkdir -p "$midnight_dir"
+printf 'started_at=2099-01-01T23:59:59Z\n' >"$midnight_dir/run.env"
+midnight_out="$(env -u CAS_RELEASE_TRAIN_DATE \
+    CAS_RELEASE_TRAIN_ANNOUNCE_POST_CMD="$announce_stub" \
+    "$train" 9.99.8 "$midnight_wt" --announce 2>&1 || true)"
+if [[ "$midnight_out" == *'announce complete'* ]] \
+    && grep -q '^## POSTED$' "$midnight_wt/docs/release-notes/2099-01-01-v9.99.8-slack.md"; then
+    ok 'gap 3: announce uses the cut start date across midnight'
+else
+    bad "gap 3: announce used the stage date instead of the pinned run date: $midnight_out"
+fi
+
 bad_draft="$tmp/bad-slack.md"
 cp "$stage_wt/docs/release-notes/$stage_date-v9.99.8-slack.md" "$bad_draft"
 sed -i '0,/\\*Release handoff\\*/s//**bad**/' "$bad_draft"
@@ -879,6 +940,32 @@ if [[ "$bad_out" == *'lint failed'* ]] && [[ ! -e "$bad_announce_log" ]]; then
     ok '--announce rejects invalid mrkdwn before any adapter write'
 else
     bad "--announce posted or accepted invalid mrkdwn: $bad_out"
+fi
+
+# Gap 4: preflight must run the same four-body announce lint before any gate
+# or publication stage can start.
+preflight_lint_wt="$(new_worktree preflight-lint)"
+mkdir -p "$preflight_lint_wt/docs/release-notes"
+cp "$bad_draft" "$preflight_lint_wt/docs/release-notes/$stage_date-v9.99.9-slack.md"
+preflight_lint_run="$tmp/preflight-lint-run"
+mkdir -p "$preflight_lint_run"
+preflight_lint_err="$tmp/preflight-lint.err"
+if (
+    source "$repo_root/scripts/release-train.d/preflight.sh"
+    version=9.99.9
+    worktree="$preflight_lint_wt"
+    run_dir="$preflight_lint_run"
+    CAS_RELEASE_TRAIN_DATE="$stage_date"
+    cut_stage_file() { printf '%s/stage.%s.done\n' "$run_dir" "$1"; }
+    cut_preflight_check_draft
+) >"$tmp/preflight-lint.out" 2>"$preflight_lint_err"; then
+    bad 'gap 4: preflight accepted a draft that announce rejects'
+else
+    if grep -q 'announce lint' "$preflight_lint_err"; then
+        ok 'gap 4: preflight runs announce lint before publication'
+    else
+        bad "gap 4: preflight did not name the announce lint failure: $(cat "$preflight_lint_err")"
+    fi
 fi
 
 # The validator accepts every rubric deploy target for both audiences, with an
@@ -1256,6 +1343,8 @@ run_pipeline() {
     CAS_RELEASE_TRAIN_GH="$tmp/gh-stub.sh" \
     CAS_RELEASE_TRAIN_POLL_SECS=0 \
     CAS_RELEASE_TRAIN_CHECK_TRIES=4 \
+    CAS_RELEASE_TRAIN_MERGEABILITY_TRIES=4 \
+    CAS_RELEASE_TRAIN_MERGEABILITY_POLL_SECS=0 \
     CAS_RELEASE_TRAIN_WATCH_TRIES=6 \
         "$train" 9.99.9 "$worktree" --pipeline 2>&1
 }
@@ -1319,7 +1408,7 @@ printf '4242\n' > "$state/pr-number.txt"
 cat > "$state/checks-default.json" <<'JSON'
 [{"name":"Fast Validation","bucket":"skipped"},{"name":"macOS Check","bucket":"skipped"}]
 JSON
-printf '{"state":"OPEN","mergeCommit":null,"id":"PR_id"}\n' > "$state/prview-default.json"
+printf '{"state":"OPEN","mergeCommit":null,"id":"PR_id","mergeable":"MERGEABLE","statusCheckRollup":[{"name":"Fast Validation","state":"SUCCESS"},{"name":"macOS Check","state":"SUCCESS"}]}\n' > "$state/prview-default.json"
 out="$(run_pipeline "$wt_skip" "$state" || true)"
 if [[ "$out" == *"CHECKS_NEVER_PASSED"* || "$(cat "$run_skip_dir/pipeline.done" 2>/dev/null)" == "CHECKS_FAILED" ]]; then
     ok 'SKIPPED rows from a push-triggered run do not satisfy the required checks'
@@ -1342,7 +1431,7 @@ printf '4242\n' > "$state/pr-number.txt"
 cat > "$state/checks-default.json" <<'JSON'
 [{"name":"Fast Validation","bucket":"pass"},{"name":"macOS Check","bucket":"pass"}]
 JSON
-printf '{"state":"MERGED","mergeCommit":{"oid":"deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"},"id":"PR_id"}\n' > "$state/prview-default.json"
+printf '{"state":"MERGED","mergeCommit":{"oid":"deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"},"id":"PR_id","mergeable":"MERGEABLE","statusCheckRollup":[{"name":"Fast Validation","state":"SUCCESS"},{"name":"macOS Check","state":"SUCCESS"}]}\n' > "$state/prview-default.json"
 out="$(run_pipeline "$wt_ok" "$state" || true)"
 if [[ "$(cat "$run_ok_dir/pipeline.done" 2>/dev/null)" == "MERGED" ]]; then
     ok 'a merged PR ends the pipeline with MERGED'
@@ -1365,6 +1454,36 @@ else
     bad 'no gate receipt comment was posted'
 fi
 
+# Gap 5: enqueue waits for GitHub to resolve mergeability and report the
+# required check contexts; pending checks are sufficient once they are present.
+wt_queue_wait="$(new_pipeline_fixture queue-readiness-wait)"
+run_queue_wait_dir="$(pipeline_run_dir "$wt_queue_wait")"
+seed_gate_receipt "$run_queue_wait_dir" "$wt_queue_wait"
+state="$tmp/state-queue-wait"; mkdir -p "$state"
+printf '' > "$state/pr-list.json"
+printf '4242\n' > "$state/pr-number.txt"
+cat > "$state/checks-default.json" <<'JSON'
+[{"name":"Fast Validation","bucket":"pass"},{"name":"macOS Check","bucket":"pass"}]
+JSON
+cat > "$state/prview-8.json" <<'JSON'
+{"state":"OPEN","mergeCommit":null,"id":"PR_id","mergeable":"UNKNOWN","statusCheckRollup":[]}
+JSON
+cat > "$state/prview-9.json" <<'JSON'
+{"state":"OPEN","mergeCommit":null,"id":"PR_id","mergeable":"MERGEABLE","statusCheckRollup":[{"name":"Fast Validation","state":"PENDING"},{"name":"macOS Check","state":"PENDING"}]}
+JSON
+printf '{"state":"MERGED","mergeCommit":{"oid":"feedfacefeedfacefeedfacefeedfacefeedface"},"id":"PR_id","mergeable":"MERGEABLE","statusCheckRollup":[{"name":"Fast Validation","state":"SUCCESS"},{"name":"macOS Check","state":"SUCCESS"}]}\n' > "$state/prview-default.json"
+out="$(run_pipeline "$wt_queue_wait" "$state" || true)"
+queue_enqueue_line="$(grep -n 'enqueuePullRequest' "$state/calls.log" | head -n1 | cut -d: -f1 || true)"
+queue_ready_line="$(grep -n -- '--json mergeable,statusCheckRollup' "$state/calls.log" | tail -n1 | cut -d: -f1 || true)"
+if [[ "$(cat "$run_queue_wait_dir/pipeline.done" 2>/dev/null)" == "MERGED" ]] \
+    && [[ "$queue_ready_line" =~ ^[0-9]+$ && "$queue_enqueue_line" =~ ^[0-9]+$ ]] \
+    && (( queue_ready_line < queue_enqueue_line )) \
+    && [[ "$out" == *'mergeability/status checks ready'* ]]; then
+    ok 'gap 5: pipeline waits for mergeability and reported status checks before enqueue'
+else
+    bad "gap 5: pipeline enqueued before readiness: $out"
+fi
+
 # --- an existing PR is reused, never duplicated ----------------------------
 wt_reuse="$(new_pipeline_fixture reuse-pr)"
 run_reuse_dir="$(pipeline_run_dir "$wt_reuse")"
@@ -1374,7 +1493,7 @@ printf '[{"number":777}]\n' > "$state/pr-list.json"
 cat > "$state/checks-default.json" <<'JSON'
 [{"name":"Fast Validation","bucket":"pass"},{"name":"macOS Check","bucket":"pass"}]
 JSON
-printf '{"state":"MERGED","mergeCommit":{"oid":"cafebabecafebabecafebabecafebabecafebabe"},"id":"PR_id"}\n' > "$state/prview-default.json"
+printf '{"state":"MERGED","mergeCommit":{"oid":"cafebabecafebabecafebabecafebabecafebabe"},"id":"PR_id","mergeable":"MERGEABLE","statusCheckRollup":[{"name":"Fast Validation","state":"SUCCESS"},{"name":"macOS Check","state":"SUCCESS"}]}\n' > "$state/prview-default.json"
 run_pipeline "$wt_reuse" "$state" >/dev/null 2>&1 || true
 if [[ "$(cat "$run_reuse_dir/pr-number.txt" 2>/dev/null)" == "777" ]] && ! grep -q '^pr create' "$state/calls.log"; then
     ok 'an existing PR for the head branch is reused, not recreated'
@@ -1392,7 +1511,7 @@ printf '4242\n' > "$state/pr-number.txt"
 cat > "$state/checks-default.json" <<'JSON'
 [{"name":"Fast Validation","bucket":"pass"},{"name":"macOS Check","bucket":"pass"}]
 JSON
-printf '{"state":"OPEN","mergeCommit":null,"id":"PR_id"}\n' > "$state/prview-default.json"
+printf '{"state":"OPEN","mergeCommit":null,"id":"PR_id","mergeable":"MERGEABLE","statusCheckRollup":[{"name":"Fast Validation","state":"PENDING"},{"name":"macOS Check","state":"PENDING"}]}\n' > "$state/prview-default.json"
 printf 'no-entry\n' > "$state/entry-default.txt"
 printf '[]\n' > "$state/runlist-default.json"
 out="$(run_pipeline "$wt_drop" "$state" || true)"
@@ -1418,7 +1537,7 @@ printf '4242\n' > "$state/pr-number.txt"
 cat > "$state/checks-default.json" <<'JSON'
 [{"name":"Fast Validation","bucket":"pass"},{"name":"macOS Check","bucket":"pass"}]
 JSON
-printf '{"state":"OPEN","mergeCommit":null,"id":"PR_id"}\n' > "$state/prview-default.json"
+printf '{"state":"OPEN","mergeCommit":null,"id":"PR_id","mergeable":"MERGEABLE","statusCheckRollup":[{"name":"Fast Validation","state":"PENDING"},{"name":"macOS Check","state":"PENDING"}]}\n' > "$state/prview-default.json"
 printf 'QUEUED\n' > "$state/entry-default.txt"
 cat > "$state/runlist-default.json" <<'JSON'
 [{"databaseId":99,"status":"completed","conclusion":"failure","createdAt":"2099-01-01T00:00:00Z"}]
@@ -1444,7 +1563,7 @@ printf '4242\n' > "$state/pr-number.txt"
 cat > "$state/checks-default.json" <<'JSON'
 [{"name":"Fast Validation","bucket":"pass"},{"name":"macOS Check","bucket":"pass"}]
 JSON
-printf '{"state":"MERGED","mergeCommit":{"oid":"f00dcafef00dcafef00dcafef00dcafef00dcafe"},"id":"PR_id"}\n' > "$state/prview-default.json"
+printf '{"state":"MERGED","mergeCommit":{"oid":"f00dcafef00dcafef00dcafef00dcafef00dcafe"},"id":"PR_id","mergeable":"MERGEABLE","statusCheckRollup":[{"name":"Fast Validation","state":"SUCCESS"},{"name":"macOS Check","state":"SUCCESS"}]}\n' > "$state/prview-default.json"
 cat > "$state/runlist-default.json" <<'JSON'
 [{"databaseId":7,"status":"completed","conclusion":"failure","createdAt":"2020-01-01T00:00:00Z"}]
 JSON

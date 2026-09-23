@@ -42,9 +42,13 @@ impl CasService {
                 format!("qa_record rejected: no self-review: {reviewer_id} implemented {task_id}"),
             ));
         }
-        cas_store::claim_qa_pass(&cas_root, task_id, &reviewer, now).map_err(|error| {
+        let claimed = cas_store::claim_qa_pass(&cas_root, task_id, &reviewer, now).map_err(|error| {
             Self::error(ErrorCode::INVALID_PARAMS, format!("qa_record rejected: {error}"))
         })?;
+        // The verdict must be backed by the round's evidence bundle, built
+        // against exactly the tip under review (cas-c3b8 contract v1).
+        let bundle = crate::qa_pass::validate_round_bundle(std::path::Path::new(ledger_path), &claimed)
+            .map_err(|reason| Self::error(ErrorCode::INVALID_PARAMS, format!("qa_record rejected: {reason}")))?;
         let pass = cas_store::resolve_qa_pass(
             &cas_root,
             task_id,
@@ -57,6 +61,20 @@ impl CasService {
         )
         .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, format!("qa_record rejected: {error}")))?;
 
+        // Cite the round's bundle on the delivery the same way an
+        // implementer cites its own (`note_type=platform_proof`).
+        if let Ok(store) = self.inner.open_task_store() {
+            let note = format!(
+                "[{}] 🧪 PLATFORM_PROOF qa-bundle: {} (independent QA round {}, {})",
+                now.format("%Y-%m-%d %H:%M"),
+                bundle.display(),
+                pass.round,
+                pass.state,
+            );
+            if let Err(error) = store.append_note(task_id, &note) {
+                tracing::warn!(task_id = %task_id, error = %error, "cas-619f: bundle citation not recorded");
+            }
+        }
         let qa_task_note = self.close_qa_task(&pass, verdict, summary);
         let routing = match verdict {
             QaVerdict::Approved => self.announce_qa_pass(&pass),

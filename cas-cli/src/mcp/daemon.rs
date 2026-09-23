@@ -293,7 +293,7 @@ impl EmbeddedDaemonConfigExt for EmbeddedDaemonConfig {
             apply_decay: self.apply_decay,
             curated_importance_floor: self.curated_importance_floor,
             promote_on_access: self.promote_on_access,
-            model: "haiku".to_string(),
+            model: crate::light_lane::default_model(),
             update_entity_summaries: false, // Disable for MCP embedded daemon
             // Code indexing - pass through from config
             index_code: self.index_code,

@@ -375,7 +375,7 @@ impl WizardConfig {
                 generate_summaries: false,
                 token_budget: 4000,
                 ai_context: false,
-                ai_model: "claude-haiku-4-5".to_string(),
+                ai_model: "claude-opus-5-5".to_string(),
                 plan_mode: Default::default(),
                 minimal_start: false,
                 ..Default::default()

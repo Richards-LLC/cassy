@@ -1,7 +1,6 @@
 ---
 name: learning-reviewer
 description: Internal agent for reviewing learnings and promoting them to rules or skills. Spawned automatically when unreviewed learnings exceed threshold. Do not invoke directly.
-model: sonnet
 managed_by: cas
 ---
 

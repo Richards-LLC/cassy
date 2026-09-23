@@ -1,10 +1,5 @@
-//! cas-f3e3: `stop_hook_active` — the harness's Stop loop-prevention brake.
-//!
-//! Claude Code sets `stop_hook_active: true` on a `Stop` payload when the
-//! session is ALREADY continuing because a previous Stop hook returned
-//! `decision: "block"`. Cassy blocks Stop in five places and, until cas-f3e3,
-//! declared and read the key nowhere — so a blocker the model cannot clear by
-//! continuing had no brake at all.
+//! `stop_hook_active` remains the brake for exit and loop blockers. Maintenance
+//! work is now queued independently and never blocks the parent session.
 //!
 //! Confirmed on the wire, not from docs: the payloads below are shaped from a
 //! live capture of Claude Code 2.1.224 (see
@@ -71,24 +66,21 @@ fn decision_of(out: &cas_core::hooks::types::HookOutput) -> Option<&str> {
 #[test]
 fn stop_hook_active_stops_cas_from_re_blocking_a_continuation() {
     let _g = super::env_lock();
-    // Not a factory worker — the four maintenance blockers are skipped for
-    // workers regardless, so that path would also pass vacuously.
+    // Exercise the same path for factory and non-factory sessions.
     unsafe { std::env::remove_var("CAS_AGENT_ROLE") };
 
     let dir = tempfile::tempdir().unwrap();
     let cas_root = cas_root_that_always_blocks_stop(dir.path());
 
-    // GUARD: a first, non-re-entrant Stop really is blocked.
+    // A first Stop must not block for maintenance.
     let first = handle_stop(&stop_payload(Some(false)), Some(&cas_root)).expect("handler ok");
     assert_eq!(
         decision_of(&first),
-        Some("block"),
-        "precondition failed: the blocker must fire on a first Stop, \
-         otherwise the assertion below is vacuous"
+        None,
+        "maintenance must not block the parent session"
     );
 
-    // FIX: the same Stop, but the harness says we are already continuing
-    // because a stop hook blocked us. Blocking again is what loops.
+    // Reentrant Stop also stays unblocked.
     let reentrant = handle_stop(&stop_payload(Some(true)), Some(&cas_root)).expect("handler ok");
     assert_eq!(
         decision_of(&reentrant),
@@ -98,8 +90,7 @@ fn stop_hook_active_stops_cas_from_re_blocking_a_continuation() {
     );
 }
 
-/// A harness that does not send the key at all must behave exactly as before
-/// this change — absent means "not re-entrant", so Cassy still blocks.
+/// An absent key still reaches the non-blocking maintenance check.
 #[test]
 fn an_absent_stop_hook_active_key_leaves_blocking_behaviour_unchanged() {
     let _g = super::env_lock();
@@ -111,7 +102,7 @@ fn an_absent_stop_hook_active_key_leaves_blocking_behaviour_unchanged() {
     let out = handle_stop(&stop_payload(None), Some(&cas_root)).expect("handler ok");
     assert_eq!(
         decision_of(&out),
-        Some("block"),
-        "omitting the key must not silently disable Cassy's Stop blockers"
+        None,
+        "maintenance must not block when the key is absent"
     );
 }

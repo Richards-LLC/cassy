@@ -1107,20 +1107,17 @@ pub fn handle_session_end(
         .collect();
 
     let session_count = session_observations.len();
-    let supervisor_actionable_idle_minutes = if std::env::var("CAS_AGENT_ROLE")
-        .ok()
-        .as_deref()
-        == Some("supervisor")
-    {
-        std::env::var("CAS_FACTORY_SESSION")
-            .ok()
-            .and_then(|session| {
-                crate::ui::factory::supervisor_progress_from_session_metadata_named(&session)
-            })
-            .map(|(_, tracker)| tracker.actionable_idle_minutes_at(chrono::Utc::now()))
-    } else {
-        None
-    };
+    let supervisor_actionable_idle_minutes =
+        if std::env::var("CAS_AGENT_ROLE").ok().as_deref() == Some("supervisor") {
+            std::env::var("CAS_FACTORY_SESSION")
+                .ok()
+                .and_then(|session| {
+                    crate::ui::factory::supervisor_progress_from_session_metadata_named(&session)
+                })
+                .map(|(_, tracker)| tracker.actionable_idle_minutes_at(chrono::Utc::now()))
+        } else {
+            None
+        };
     if let Some(minutes) = supervisor_actionable_idle_minutes {
         eprintln!("cas: Supervisor actionable-idle minutes: {minutes}");
     }
@@ -1430,7 +1427,11 @@ Respond with JSON only, no markdown:
 
     let result = traced_prompt(
         &prompt_text,
-        QueryOptions::new().model("claude-haiku-4-5").max_turns(1),
+        QueryOptions::new()
+            .model("claude-opus-5-5")
+            .max_turns(1)
+            .extra_arg("--effort")
+            .extra_arg("low"),
         "session_summary",
     )
     .await
@@ -1510,7 +1511,11 @@ Respond with ONLY the title, no quotes or punctuation at the end."#
 
     let result = traced_prompt(
         &prompt_text,
-        QueryOptions::new().model("claude-haiku-4-5").max_turns(1),
+        QueryOptions::new()
+            .model("claude-opus-5-5")
+            .max_turns(1)
+            .extra_arg("--effort")
+            .extra_arg("low"),
         "session_title",
     )
     .await
@@ -1636,7 +1641,11 @@ If no clear learnings found, respond with: []"#
 
     let result = traced_prompt(
         &prompt_text,
-        QueryOptions::new().model("claude-haiku-4-5").max_turns(1),
+        QueryOptions::new()
+            .model("claude-opus-5-5")
+            .max_turns(1)
+            .extra_arg("--effort")
+            .extra_arg("low"),
         "learning_extraction",
     )
     .await
@@ -1748,7 +1757,11 @@ async fn session_learn_async(
 
     let result = traced_prompt(
         &prompt_text,
-        QueryOptions::new().model("claude-haiku-4-5").max_turns(1),
+        QueryOptions::new()
+            .model("claude-opus-5-5")
+            .max_turns(1)
+            .extra_arg("--effort")
+            .extra_arg("low"),
         "session_learn",
     )
     .await

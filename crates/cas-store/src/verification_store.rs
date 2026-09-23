@@ -1758,20 +1758,40 @@ fn correct_parked_delivery_proof_scope_inner(
         })
         .transpose()?;
 
-    if require_merged_delivery
-        && !delivery
+    let observed_work_target_merge = if require_merged_delivery && delivery.is_none() {
+        let target_branch = corrected_task
+            .deliverables
+            .work_target
             .as_ref()
-            .is_some_and(|(_, state)| *state == WorkerDeliveryState::Merged)
+            .map(|target| target.target_branch.as_str());
+        match target_branch {
+            Some(branch) => tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM observed_delivery_merges
+                 WHERE task_id = ?1 AND target_branch = ?2)",
+                params![corrected_task.id, branch],
+                |row| row.get::<_, bool>(0),
+            )?,
+            None => false,
+        }
+    } else {
+        false
+    };
+
+    if require_merged_delivery
+        && !delivery.as_ref().is_some_and(|(_, state)| {
+            matches!(*state, WorkerDeliveryState::Merged | WorkerDeliveryState::CloseReady)
+        })
+        && !observed_work_target_merge
     {
         return Err(StoreError::Parse(
-            "proof-target correction requires an already-merged delivery transaction".to_string(),
+            "proof correction requires a merged or close-ready delivery transaction or an authenticated worktree_merge observation on the task's WorkTarget".to_string(),
         ));
     }
 
     if !allow_merged_delivery
-        && delivery
-            .as_ref()
-            .is_some_and(|(_, state)| *state == WorkerDeliveryState::Merged)
+        && delivery.as_ref().is_some_and(|(_, state)| {
+            matches!(*state, WorkerDeliveryState::Merged | WorkerDeliveryState::CloseReady)
+        })
     {
         return Err(StoreError::Parse(
             "proof-scope correction cannot rewrite a merged delivery transaction; the merge is an immutable delivery fact"
@@ -1809,7 +1829,8 @@ fn correct_parked_delivery_proof_scope_inner(
             ));
         }
         if *state != WorkerDeliveryState::Stale
-            && !(*state == WorkerDeliveryState::Merged && allow_merged_delivery)
+            && !(matches!(*state, WorkerDeliveryState::Merged | WorkerDeliveryState::CloseReady)
+                && allow_merged_delivery)
         {
             let changed = tx.execute(
                 "UPDATE worker_delivery_transactions
@@ -1847,8 +1868,8 @@ fn correct_parked_delivery_proof_scope_inner(
 
     let changed = tx.execute(
         "UPDATE tasks SET status = 'open', notes = ?2, deliverables = ?3,
-         proof_targets = ?4, pending_verification = 0, pending_worktree_merge = 0, updated_at = ?5
-         WHERE id = ?1 AND status = 'awaiting_merge' AND updated_at = ?6",
+         proof_targets = ?4, risk = ?5, pending_verification = 0, pending_worktree_merge = 0, updated_at = ?6
+         WHERE id = ?1 AND status IN ('awaiting_merge', 'in_progress') AND updated_at = ?7",
         params![
             corrected_task.id,
             corrected_task.notes,
@@ -1862,13 +1883,25 @@ fn correct_parked_delivery_proof_scope_inner(
             } else {
                 Some(corrected_task.proof_targets.join(","))
             },
+            if corrected_task.risk.is_empty() {
+                None
+            } else {
+                Some(
+                    corrected_task
+                        .risk
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join(","),
+                )
+            },
             now.to_rfc3339(),
             expected_updated_at.to_rfc3339(),
         ],
     )?;
     if changed != 1 {
         return Err(StoreError::Parse(
-            "proof-scope correction requires the unchanged AwaitingMerge task".to_string(),
+            "proof-scope correction requires the unchanged AwaitingMerge or InProgress task".to_string(),
         ));
     }
     let event = Event::new(

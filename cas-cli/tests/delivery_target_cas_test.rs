@@ -426,6 +426,76 @@ fn assert_no_delivery_projection(fixture: &DeliveryFixture, state: WorkerDeliver
     );
 }
 
+#[tokio::test]
+async fn cas8d38_worktree_merge_records_observed_work_target_delivery() {
+    let repo = GitRepo::new();
+    run_git(&["branch", "integration"], &repo.root);
+    run_git(
+        &["remote", "add", "origin", "git@github.com:org/cas8d38-observed.git"],
+        &repo.root,
+    );
+    let cas_root = init_cas_dir(&repo.root).expect("init CAS");
+    std::fs::write(cas_root.join("config.toml"), "[worktrees]\nenabled = false\n")
+        .expect("write config");
+    let supervisor_id = "cas8d38-supervisor-session";
+    register_delivery_agent(
+        &cas_root,
+        supervisor_id,
+        "cas8d38-supervisor",
+        AgentRole::Supervisor,
+        "cas8d38-factory",
+    );
+    register_delivery_agent(
+        &cas_root,
+        "cas8d38-worker-session",
+        "cas8d38-worker",
+        AgentRole::Worker,
+        "cas8d38-factory",
+    );
+    let worker_path = cas_root.join("worktrees").join("cas8d38-worker");
+    repo.add_worktree(&worker_path, "factory/cas8d38-worker");
+    std::fs::write(worker_path.join("delivered.txt"), "observed merge\n").unwrap();
+    run_git(&["add", "delivered.txt"], &worker_path);
+    run_git(&["commit", "-m", "observed delivery"], &worker_path);
+
+    let task_store = open_task_store(&cas_root).unwrap();
+    let mut task = Task::new("cas-cas8d38-observed".to_string(), "Observed merge correction".to_string());
+    task.task_type = TaskType::Task;
+    task.status = TaskStatus::InProgress;
+    task.depth = TaskDepth::Light;
+    task.assignee = Some("cas8d38-worker".to_string());
+    task.risk = vec![cas::types::TaskRisk::Platform];
+    task.deliverables.work_target = Some(WorkTarget {
+        repo_selector: "remote:github.com/org/cas8d38-observed".to_string(),
+        target_branch: "integration".to_string(),
+    });
+    task_store.add(&task).unwrap();
+
+    let service = delivery_service(&cas_root, supervisor_id);
+    let mut merge = coord_req("worktree_merge");
+    merge.id = Some("factory/cas8d38-worker".to_string());
+    merge.task_id = Some(task.id.clone());
+    merge.cleanup = Some(false);
+    let merged = service.coordination(Parameters(merge)).await.expect("merge call");
+    assert!(get_text(&merged).contains("Merged"), "{}", get_text(&merged));
+    assert!(cas_store::get_latest_worker_delivery(&cas_root, &task.id)
+        .unwrap()
+        .is_none(), "observation must not fabricate a worker receipt");
+
+    let corrected = service
+        .task(Parameters(task_req(serde_json::json!({
+            "action": "update",
+            "id": task.id,
+            "risk": "none",
+            "proof_scope_fix": true,
+            "reason": "Platform risk was declared in error after the observed integration merge."
+        }))))
+        .await
+        .expect("supervisor correction");
+    assert!(get_text(&corrected).contains("Corrected proof scope"));
+    assert_eq!(task_store.get(&task.id).unwrap().risk, [cas::types::TaskRisk::None]);
+}
+
 // =============================================================================
 // Regressions
 // =============================================================================

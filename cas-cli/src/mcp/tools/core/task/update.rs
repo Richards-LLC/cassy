@@ -482,21 +482,25 @@ impl CasCore {
                 });
             }
             let proof_targets_fix = req.proof_targets.is_some();
-            if target_repo.is_none() && target_branch.is_none() && !proof_targets_fix {
+            let risk_fix = req.risk.is_some();
+            if target_repo.is_none() && target_branch.is_none() && !proof_targets_fix && !risk_fix {
                 return Err(McpError {
                     code: ErrorCode::INVALID_PARAMS,
                     message: Cow::from(
-                        "PROOF-SCOPE FIX REJECTED: supply target_repo/target_branch or widened proof_targets to correct the stale delivery scope."
+                        "PROOF-SCOPE FIX REJECTED: supply target_repo/target_branch, widened proof_targets, or corrected risk to repair the delivery scope."
                             .to_string(),
                     ),
                     data: None,
                 });
             }
-            if proof_targets_fix && (target_repo.is_some() || target_branch.is_some()) {
+            let correction_kinds = proof_targets_fix as u8
+                + risk_fix as u8
+                + (target_repo.is_some() || target_branch.is_some()) as u8;
+            if correction_kinds > 1 {
                 return Err(McpError {
                     code: ErrorCode::INVALID_PARAMS,
                     message: Cow::from(
-                        "PROOF-SCOPE FIX REJECTED: proof_targets widening cannot be combined with target_repo/target_branch correction in one call."
+                        "PROOF-SCOPE FIX REJECTED: change only one of proof_targets, risk, or the work target in one correction."
                             .to_string(),
                     ),
                     data: None,
@@ -519,6 +523,13 @@ impl CasCore {
                     });
                 }
             }
+            if risk_fix && effective_risk == task.risk {
+                return Err(McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from("PROOF-SCOPE FIX REJECTED: corrected risk is unchanged."),
+                    data: None,
+                });
+            }
             let unrelated = [
                 ("title", req.title.is_some()),
                 ("notes", req.notes.is_some()),
@@ -530,7 +541,6 @@ impl CasCore {
                 ("acceptance_criteria", req.acceptance_criteria.is_some()),
                 ("demo_statement", req.demo_statement.is_some()),
                 ("execution_note", req.execution_note.is_some()),
-                ("risk", req.risk.is_some()),
                 (
                     "proof_targets",
                     req.proof_targets.is_some() && !proof_targets_fix,
@@ -554,17 +564,17 @@ impl CasCore {
                 return Err(McpError {
                     code: ErrorCode::INVALID_PARAMS,
                     message: Cow::from(format!(
-                        "PROOF-SCOPE FIX REJECTED: this administrative path may change only target_repo/target_branch; unrelated field(s) supplied: {}.",
+                        "PROOF-SCOPE FIX REJECTED: this administrative path may change only the work target, proof_targets, or risk; unrelated field(s) supplied: {}.",
                         unrelated.join(", ")
                     )),
                     data: None,
                 });
             }
-            if task.status != TaskStatus::AwaitingMerge {
+            if !matches!(task.status, TaskStatus::AwaitingMerge | TaskStatus::InProgress) {
                 return Err(McpError {
                     code: ErrorCode::INVALID_PARAMS,
                     message: Cow::from(format!(
-                        "PROOF-SCOPE FIX REJECTED: task {} is {} rather than awaiting_merge; the ordinary update path remains available outside a parked proof cycle.",
+                        "PROOF-SCOPE FIX REJECTED: task {} is {} rather than awaiting_merge or in_progress; this path repairs only an active delivery proof cycle.",
                         task.id, task.status
                     )),
                     data: None,
@@ -579,7 +589,7 @@ impl CasCore {
                 data: None,
             })?;
 
-            let corrected_target = if proof_targets_fix {
+            let corrected_target = if proof_targets_fix || risk_fix {
                 task.deliverables.work_target.clone()
             } else if target_repo.is_some_and(|repo| repo.trim().is_empty()) {
                 if task.execution_note.as_deref() != Some("no-code") {
@@ -653,7 +663,7 @@ impl CasCore {
                     target_branch: branch,
                 })
             };
-            if !proof_targets_fix
+            if !proof_targets_fix && !risk_fix
                 && task.deliverables.work_target.as_ref() == corrected_target.as_ref()
             {
                 return Err(McpError {
@@ -670,13 +680,21 @@ impl CasCore {
             if proof_targets_fix {
                 task.proof_targets = effective_proof_targets.clone();
             }
+            if risk_fix {
+                task.risk = effective_risk.clone();
+            }
             task.deliverables.review_envelope = None;
             task.deliverables.pre_close_hook = None;
             task.status = TaskStatus::Open;
             task.pending_verification = false;
             task.pending_worktree_merge = false;
             task.updated_at = chrono::Utc::now();
-            let target_description = if proof_targets_fix {
+            let target_description = if risk_fix {
+                format!(
+                    "Risk corrected to {}.",
+                    task.risk.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ")
+                )
+            } else if proof_targets_fix {
                 format!(
                     "Proof targets widened to {}.",
                     task.proof_targets.join(", ")
@@ -705,7 +723,7 @@ impl CasCore {
             } else {
                 format!("{}\n\n{}", task.notes, note)
             };
-            let correction = if proof_targets_fix {
+            let correction = if proof_targets_fix || risk_fix {
                 cas_store::correct_parked_delivery_proof_targets(
                     &self.cas_root,
                     &task,
@@ -727,7 +745,12 @@ impl CasCore {
                 message: Cow::from(format!("PROOF-SCOPE FIX REJECTED: {error}")),
                 data: None,
             })?;
-            let result_target = if proof_targets_fix {
+            let result_target = if risk_fix {
+                format!(
+                    "Risk corrected to {}.",
+                    task.risk.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ")
+                )
+            } else if proof_targets_fix {
                 format!(
                     "Proof targets widened to {}.",
                     task.proof_targets.join(", ")

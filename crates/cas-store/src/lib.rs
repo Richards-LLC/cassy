@@ -123,6 +123,7 @@ pub use delivery_store::{
     DELIVERY_SCHEMA, build_worker_completion_receipt, create_worker_delivery,
     create_worker_delivery_with_dispatch, create_worker_delivery_with_dispatch_for_lease,
     get_latest_worker_delivery, get_worker_delivery_by_receipt, list_worker_delivery_events,
+    record_observed_delivery_merge,
     transition_worker_delivery, transition_worker_delivery_verification_with_conn,
     worker_delivery_transaction_id,
 };

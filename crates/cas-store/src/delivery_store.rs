@@ -72,7 +72,74 @@ BEGIN SELECT RAISE(ABORT, 'worker delivery events are append-only'); END;
 CREATE TRIGGER IF NOT EXISTS worker_delivery_events_append_only_delete
 BEFORE DELETE ON worker_delivery_events
 BEGIN SELECT RAISE(ABORT, 'worker delivery events are append-only'); END;
+
+-- A supervisor may merge a task before its worker submits a completion
+-- receipt. Keep that Git fact distinct from worker-supplied proof: no synthetic
+-- worker receipt or verifier verdict is manufactured by worktree_merge.
+CREATE TABLE IF NOT EXISTS observed_delivery_merges (
+    task_id TEXT NOT NULL,
+    source_branch TEXT NOT NULL,
+    target_branch TEXT NOT NULL,
+    source_commit_sha TEXT NOT NULL,
+    merge_commit_sha TEXT NOT NULL,
+    actor_agent_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY(task_id, target_branch, source_commit_sha, merge_commit_sha)
+);
+CREATE INDEX IF NOT EXISTS idx_observed_delivery_merges_task
+    ON observed_delivery_merges(task_id, created_at DESC);
+CREATE TRIGGER IF NOT EXISTS observed_delivery_merges_immutable_update
+BEFORE UPDATE ON observed_delivery_merges
+BEGIN SELECT RAISE(ABORT, 'observed delivery merges are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS observed_delivery_merges_immutable_delete
+BEFORE DELETE ON observed_delivery_merges
+BEGIN SELECT RAISE(ABORT, 'observed delivery merges are immutable'); END;
 "#;
+
+/// Persist an authenticated worktree_merge observation after Git has advanced
+/// the task's declared target. This is a delivery fact, not worker proof.
+pub fn record_observed_delivery_merge(
+    root: &Path,
+    task_id: &str,
+    source_branch: &str,
+    target_branch: &str,
+    source_commit_sha: &str,
+    merge_commit_sha: &str,
+    actor_agent_id: &str,
+) -> Result<()> {
+    if [
+        task_id,
+        source_branch,
+        target_branch,
+        source_commit_sha,
+        merge_commit_sha,
+        actor_agent_id,
+    ]
+        .iter()
+        .any(|value| value.trim().is_empty())
+    {
+        return Err(StoreError::Parse(
+            "observed merge requires complete task, branch, commit, and actor identity"
+                .to_string(),
+        ));
+    }
+    let conn = open(root)?;
+    conn.execute(
+        "INSERT OR IGNORE INTO observed_delivery_merges
+         (task_id, source_branch, target_branch, source_commit_sha, merge_commit_sha, actor_agent_id, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            task_id,
+            source_branch,
+            target_branch,
+            source_commit_sha,
+            merge_commit_sha,
+            actor_agent_id,
+            Utc::now().to_rfc3339()
+        ],
+    )?;
+    Ok(())
+}
 
 fn open(root: &Path) -> Result<Connection> {
     let conn = Connection::open(root.join("cas.db"))?;

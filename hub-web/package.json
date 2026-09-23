@@ -6,11 +6,13 @@
   "scripts": {
     "build": "npm run tokens && vite build",
     "test": "node scripts/generate-tokens.mjs --check && npm run tokens && vitest run",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p e2e",
     "tokens": "node scripts/generate-tokens.mjs",
-    "visual-qa": "npm exec --yes --package=playwright -- node scripts/visual-qa.mjs"
+    "visual-qa": "npm exec --yes --package=playwright -- node scripts/visual-qa.mjs",
+    "journeys": "playwright test --project=journeys"
   },
   "devDependencies": {
+    "@playwright/test": "1.63.0",
     "@types/node": "^24.2.1",
     "jsdom": "^26.1.0",
     "typescript": "^5.9.2",

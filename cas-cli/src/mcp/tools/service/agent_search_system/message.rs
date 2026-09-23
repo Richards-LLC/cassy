@@ -1428,13 +1428,33 @@ impl CasService {
             let requested_pr_number = extract_pull_request_number(&message)
                 .or_else(|| extract_pull_request_number(&summary));
 
-            let merge_task = open_task_store_local(&self.inner.cas_root)
+            let merge_context = open_task_store_local(&self.inner.cas_root)
                 .ok()
                 .and_then(|store| {
                     let tasks = store.list(None).ok()?;
-                    select_merge_request_task(&tasks, &display_name, req.task_id.as_deref())
-                        .cloned()
+                    let active_task = tasks
+                        .iter()
+                        .find(|task| {
+                            task.status == cas_types::TaskStatus::InProgress
+                                && task.assignee.as_deref().is_some_and(|name| {
+                                    name.eq_ignore_ascii_case(&display_name)
+                                })
+                        })
+                        .map(|task| task.id.clone());
+                    Some((
+                        select_merge_request_task(&tasks, &display_name, req.task_id.as_deref())
+                            .cloned(),
+                        active_task,
+                    ))
                 });
+            let (merge_task, active_task) = merge_context.unwrap_or((None, None));
+            if req.task_id.is_none()
+                && let Some(active_task) = active_task.as_deref()
+            {
+                return Ok(Self::success(format!(
+                    "Task {active_task} is in progress. Close it before requesting its merge, or supply task_id for an earlier parked delivery. No merge request was queued."
+                )));
+            }
 
             if let Some(task) = merge_task
                 && let Some(work_target) = task.deliverables.work_target.as_ref()
@@ -1483,19 +1503,46 @@ impl CasService {
                 }
             {
                 let branch = crate::prompt_revalidation::merge_request_branch(Some(&task));
-                // cas-b17c (GH #703): revalidate against the LIVE branch tip.
-                // This used to prefer `factory_branch_anchor`, which records
-                // the previous merge — so a commit pushed after that merge was
-                // judged as the already-merged sha and the request was
-                // suppressed with "Merge already landed". The anchor is kept
-                // only as a reported datum so the drift is visible downstream.
+                // GH #703: use the live branch tip for a continued unmerged
+                // delivery. A parked task's anchor is immutable once its
+                // delivery lands or the worker starts another task on this
+                // mutable branch; revalidating the live tip then would claim
+                // the other task's commits for this one.
                 let recorded_anchor = task.deliverables.factory_branch_anchor.clone();
-                if let Some(branch) = branch
-                    && let Some(branch_tip) = crate::prompt_revalidation::resolve_live_branch_tip(
-                        &repo.repo_root,
-                        &branch,
-                        recorded_anchor.as_deref(),
+                let other_task_active = active_task
+                    .as_deref()
+                    .is_some_and(|active_id| active_id != task.id);
+                if task.status == cas_types::TaskStatus::AwaitingMerge
+                    && other_task_active
+                    && recorded_anchor.is_none()
+                {
+                    return Ok(Self::success(format!(
+                        "Task {} is parked without an immutable delivery anchor while another task is in progress. No merge request was queued; ask the supervisor to reconcile its delivery.",
+                        task.id
+                    )));
+                }
+                let anchor_integrated = recorded_anchor.as_deref().is_some_and(|anchor| {
+                    matches!(
+                        revalidate_merge_request(
+                            &repo.repo_root,
+                            anchor,
+                            &repo.target_branch,
+                        ),
+                        MergeRequestDecision::AlreadyIntegrated { .. }
                     )
+                });
+                let frozen_anchor = (task.status == cas_types::TaskStatus::AwaitingMerge
+                    && (other_task_active || anchor_integrated))
+                    .then(|| recorded_anchor.clone())
+                    .flatten();
+                if let Some(branch) = branch
+                    && let Some(branch_tip) = frozen_anchor.or_else(|| {
+                        crate::prompt_revalidation::resolve_live_branch_tip(
+                            &repo.repo_root,
+                            &branch,
+                            recorded_anchor.as_deref(),
+                        )
+                    })
                 {
                     if task.status != cas_types::TaskStatus::AwaitingMerge
                         && task
@@ -3754,10 +3801,22 @@ mod cas_89e1_post_merge_message_type_tests {
         std::fs::write(repo.join("base.txt"), "base\n").expect("base file");
         git(repo, &["add", "."]);
         git(repo, &["commit", "-qm", "base"]);
+        git(repo, &["branch", "fresh-base", "main"]);
         git(repo, &["checkout", "-qb", "factory/worker-a"]);
         std::fs::write(repo.join("delivery.txt"), "delivery\n").expect("delivery file");
         git(repo, &["add", "delivery.txt"]);
         git(repo, &["commit", "-qm", "delivery"]);
+        let parked_anchor = String::from_utf8(
+            Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(repo)
+                .output()
+                .expect("parked anchor")
+                .stdout,
+        )
+        .expect("anchor sha")
+        .trim()
+        .to_string();
         git(repo, &["checkout", "-q", "main"]);
         git(
             repo,
@@ -3787,6 +3846,7 @@ mod cas_89e1_post_merge_message_type_tests {
             target_branch: "main".to_string(),
         });
         task.deliverables.parked_branch = Some("factory/worker-a".to_string());
+        task.deliverables.factory_branch_anchor = Some(parked_anchor.clone());
         tasks.add(&task).expect("add parked task");
 
         // The fixture starts hermetic even when the test binary was launched
@@ -3832,6 +3892,45 @@ mod cas_89e1_post_merge_message_type_tests {
         assert!(
             stale_merge.contains("Merge already landed"),
             "an explicitly typed stale merge request must still be suppressed: {stale_merge}"
+        );
+
+        // The worker starts task B on the reused factory branch, now based on
+        // unrelated main work. A's immutable delivery is still the old SHA.
+        let mut task_b = Task::new("cas-task-b".to_string(), "next task".to_string());
+        task_b.status = TaskStatus::InProgress;
+        task_b.assignee = Some(worker.name.clone());
+        tasks.add(&task_b).expect("add active task B");
+        git(repo, &["checkout", "-q", "factory/worker-a"]);
+        git(repo, &["reset", "--hard", "fresh-base"]);
+        std::fs::write(repo.join("task-b.txt"), "unrelated task B\n").unwrap();
+        git(repo, &["add", "task-b.txt"]);
+        git(repo, &["commit", "-qm", "task B"]);
+
+        let parked_request = response_text(
+            service
+                .message_send(message_request(true))
+                .await
+                .expect("parked A request is checked against A's anchor"),
+        );
+        assert!(
+            parked_request.contains("Merge already landed"),
+            "task B's tip must not become A's merge request: {parked_request}"
+        );
+        assert_eq!(
+            tasks.get(&task.id).unwrap().deliverables.factory_branch_anchor,
+            Some(parked_anchor)
+        );
+        let mut implicit_request = message_request(true);
+        implicit_request.task_id = None;
+        let implicit_response = response_text(
+            service
+                .message_send(implicit_request)
+                .await
+                .expect("implicit request with active B receives guidance"),
+        );
+        assert!(
+            implicit_response.contains("No merge request was queued"),
+            "implicit request must not target parked A: {implicit_response}"
         );
     }
 

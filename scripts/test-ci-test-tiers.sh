@@ -954,7 +954,8 @@ require_absent "$suite_shards" 'Restore self-hosted producer paths' 'shards do n
 require_absent "$suite_shards" '/var/lib/cassy-actions/' 'shards do not depend on self-hosted producer filesystem paths'
 require_text "$suite_shards" '--workspace-remap "$GITHUB_WORKSPACE"' 'shards remap the self-hosted archive workspace to their hosted checkout'
 require_text "$suite_shards" 'INSTA_WORKSPACE_ROOT: ${{ github.workspace }}' 'shards pin insta snapshot lookup to their hosted checkout'
-require_text "$suite_shards" 'scripts/run-verified-tests.sh nextest run --archive-file fast-validation-suite.tar.zst --workspace-remap "$GITHUB_WORKSPACE" --no-fail-fast --partition count:${{ matrix.shard }}/3' 'shards execute every archived workspace nextest binary exactly once'
+require_text "$suite_shards" 'scripts/run-verified-tests.sh nextest run --archive-file fast-validation-suite.tar.zst --workspace-remap "$GITHUB_WORKSPACE" --no-fail-fast --partition "count:$SHARD/3"' 'shards execute every archived workspace nextest binary exactly once'
+require_text "$suite_shards" 'SHARD: ${{ matrix.shard }}' 'shard number enters the shell as environment data'
 require_text "$suite" 'needs: [ci-diff, fast-validation-suite-shards, fast-validation-main-push-dedupe]' 'required full-suite context fans in every shard after diff routing and the main-push tree gate'
 require_text "$suite" 'test "$SHARDS" = success' 'required full-suite context rejects failed shards'
 require_text "$(<"$makefile")" '../scripts/run-verified-tests.sh nextest run --workspace --no-fail-fast' 'local make test verifies CI workspace nextest scope'
@@ -1328,6 +1329,10 @@ require_text "$install_path_proof_text" 'workflow_dispatch:' 'install-path proof
 require_text "$scoped_validation" './scripts/test-cas-install.sh' 'Scoped Validation runs portable installer fixtures'
 require_text "$fast_preflight" './scripts/test-cas-install.sh' 'Fast Validation preflight runs portable installer fixtures'
 require_absent "$(<"$release")" 'gh release delete' 'release never replaces published assets after a receipt'
+require_text "$(<"$release")" 'git log --pretty=format:' 'release notes come directly from git log'
+require_text "$(<"$release")" '> "$RUNNER_TEMP/notes.md"' 'release notes are written as data to a file'
+require_text "$(<"$release")" '--notes-file "$RUNNER_TEMP/notes.md"' 'release creation reads notes from the file'
+require_absent "$(<"$release")" 'steps.notes.outputs.notes' 'release never interpolates notes into shell source'
 require_text "$(<"$release")" 'refusing to replace its assets' 'release rerun with an existing release fails loudly'
 require_text "$(<"$release")" 'RELEASE_SLACK_RUBRIC.md#recovering-a-failed-or-partial-release' 'release rerun names its recovery procedure'
 require_text "$(<"$repo_root/docs/RELEASE_SLACK_RUBRIC.md")" '### Recovering a failed or partial release' 'release rubric documents partial-release recovery'
@@ -1345,6 +1350,13 @@ release_create_body="$(awk '
 retry_tmp="$(mktemp -d)"
 trap 'rm -rf "$retry_tmp"' EXIT
 mkdir -p "$retry_tmp/bin"
+git -C "$repo_root" log --pretty=format:'- %s' 42219dce^..42219dce > "$retry_tmp/notes.md"
+if grep -qFx -- '- Revert "docs(cas-a073): sweep Grok changelog through 1.0.40"' "$retry_tmp/notes.md"; then
+    echo 'ok   quoted v3.28.0 commit subject remains literal release-note data'
+else
+    echo 'FAIL quoted v3.28.0 commit subject changed during note generation'
+    fail=$((fail + 1))
+fi
 cat >"$retry_tmp/bin/gh" <<'EOF'
 #!/usr/bin/env bash
 case "$1 $2" in
@@ -1356,7 +1368,7 @@ EOF
 chmod +x "$retry_tmp/bin/gh"
 
 set +e
-existing_output="$(GITHUB_REF=refs/tags/v9.9.9 FAKE_RELEASE_EXISTS=0 FAKE_GH_LOG="$retry_tmp/creates" PATH="$retry_tmp/bin:$PATH" bash -c "$release_create_body" 2>&1)"
+existing_output="$(GITHUB_REF=refs/tags/v9.9.9 RUNNER_TEMP="$retry_tmp" FAKE_RELEASE_EXISTS=0 FAKE_GH_LOG="$retry_tmp/creates" PATH="$retry_tmp/bin:$PATH" bash -c "$release_create_body" 2>&1)"
 existing_status=$?
 set -e
 test "$existing_status" -eq 1
@@ -1364,8 +1376,9 @@ grep -qF 'Release v9.9.9 already exists; refusing to replace its assets' <<<"$ex
 test ! -e "$retry_tmp/creates"
 echo 'ok   partial-release retry refuses loudly and does not upload replacement bytes'
 
-GITHUB_REF=refs/tags/v9.9.9 FAKE_RELEASE_EXISTS=1 FAKE_GH_LOG="$retry_tmp/creates" PATH="$retry_tmp/bin:$PATH" bash -c "$release_create_body"
+GITHUB_REF=refs/tags/v9.9.9 RUNNER_TEMP="$retry_tmp" FAKE_RELEASE_EXISTS=1 FAKE_GH_LOG="$retry_tmp/creates" PATH="$retry_tmp/bin:$PATH" bash -c "$release_create_body"
 grep -qF 'release create v9.9.9' "$retry_tmp/creates"
+grep -qF -- "--notes-file $retry_tmp/notes.md" "$retry_tmp/creates"
 echo 'ok   first release run creates the release when no object exists'
 
 # ---------------------------------------------------------------------------
@@ -1511,7 +1524,8 @@ require_count "$all_actions" 'mozilla-actions/sccache-action@v0.0.11' '5' 'every
 require_count "$all_actions" 'continue-on-error: true' '8' 'every sccache setup action and the self-hosted probes fail open'
 require_count "$all_actions" 'sccache --start-server' '5' 'every sccache setup probes backend availability'
 require_count "$all_actions" 'sccache backend unavailable — building uncached' '5' 'every sccache outage logs its uncached fallback'
-require_count "$all_actions" 'SCCACHE_PATH=$GITHUB_WORKSPACE/scripts/sccache-unavailable.sh' '5' 'every sccache fallback makes the action post hook harmless'
+require_count "$all_actions" 'SCCACHE_PATH=%s/scripts/sccache-unavailable.sh' '4' 'workflow sccache fallbacks make the action post hook harmless'
+require_count "$all_actions" 'SCCACHE_PATH=$GITHUB_WORKSPACE/scripts/sccache-unavailable.sh' '1' 'reusable setup action preserves its sccache fallback'
 if [[ -x "$fallback" ]] \
     && "$fallback" --show-stats | grep -qF 'sccache unavailable; build ran uncached' \
     && "$fallback" --show-stats --stats-format=json | jq -e '.stats.compile_requests == 0 and .stats.cache_hits.counts == {}' >/dev/null; then

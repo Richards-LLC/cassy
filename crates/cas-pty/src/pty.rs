@@ -4611,8 +4611,8 @@ mod tests {
         );
         // The CAS MCP server injection (cas-bbc2) always emits `-c` flags, so we
         // can no longer assert the total absence of `-c`. Instead assert that the
-        // only `-c` overrides present are the MCP server and direct namespace
-        // projection ones — none configure reasoning effort.
+        // only `-c` overrides present are the MCP server, direct namespace
+        // projection, and worker input-prompt guard — none configure effort.
         let c_values: Vec<&String> = config
             .args
             .windows(2)
@@ -4623,8 +4623,15 @@ mod tests {
             c_values.iter().all(|v| {
                 v.starts_with("mcp_servers.cs.")
                     || *v == "features.code_mode.direct_only_tool_namespaces=[\"mcp__cs\"]"
+                    || *v == "features.default_mode_request_user_input=false"
             }),
-            "with effort=None the only -c overrides should be the cas MCP server injection and direct namespace projection; got: {c_values:?}"
+            "with effort=None the only -c overrides should be the cas MCP server injection, direct namespace projection, and worker input-prompt guard; got: {c_values:?}"
+        );
+        assert!(
+            c_values
+                .iter()
+                .any(|v| *v == "features.default_mode_request_user_input=false"),
+            "worker must disable Default-mode input prompts; got: {c_values:?}"
         );
     }
 

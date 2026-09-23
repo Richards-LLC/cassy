@@ -3028,6 +3028,11 @@ app.addEventListener("focusout", () => {
     // every editable control releases the rebuild.
     const active = document.activeElement;
     if (isEditableElement(active) && app.contains(active)) return;
+    // Arrowing from the palette filter onto its rows is still one palette
+    // interaction: a rebuild here would replace the dialog, wipe the filter
+    // and leave Enter to run whatever row now leads (cas-9648). The owed
+    // rebuild runs when focus leaves the palette.
+    if (active instanceof HTMLElement && active.closest("#command-palette[open]")) return;
     deferredRender.focusLeft();
   });
 });

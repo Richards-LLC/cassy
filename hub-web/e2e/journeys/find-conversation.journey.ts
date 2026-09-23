@@ -60,9 +60,15 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     await expect(composer).toHaveValue("");
     await page.keyboard.type("On it");
     await expect(composer).toHaveValue("On it");
+    // From the focused composer, arrowing onto the row must keep the filter:
+    // opening the palette mid-draft owes a rebuild that must not land here.
     await page.keyboard.press("ControlOrMeta+k");
     await page.getByRole("searchbox", { name: "Filter commands" }).fill(OTTER);
-    await page.getByRole("searchbox", { name: "Filter commands" }).press("Enter");
+    await page.getByRole("searchbox", { name: "Filter commands" }).press("ArrowDown");
+    await expect(page.getByRole("button", { name: new RegExp(`Jump to ${OTTER}`) })).toBeFocused();
+    await expect(page.getByRole("searchbox", { name: "Filter commands" })).toHaveValue(OTTER);
+    await page.keyboard.press("Enter");
+    await expect(page.locator("#command-palette")).toBeHidden();
     await expect(page.getByRole("button", { name: `Send to ${OTTER}`, exact: true })).toBeVisible();
     await expect(composer).toBeFocused();
     await expect(composer).toHaveValue("Half a thought");

@@ -362,6 +362,55 @@ async fn rejection_returns_the_delivery_and_approval_unlocks_merge_and_close() {
 }
 
 #[tokio::test]
+async fn pending_round_refuses_both_merge_paths_in_progress_and_awaiting_merge() {
+    let (temp, core, repo, task_id) = fixture();
+    let _env = env_test_lock();
+    let cas_dir = repo.join(".cas");
+    let _keep = &temp;
+    let parked = close_text(&core, &task_id).await;
+    assert!(parked.contains("INDEPENDENT QA DISPATCHED"), "{parked}");
+    let qa_task = qa_task_id(&cas_dir, &task_id);
+    let tasks = open_task_store(&cas_dir).unwrap();
+
+    for status in [TaskStatus::AwaitingMerge, TaskStatus::InProgress] {
+        let mut task = tasks.get(&task_id).unwrap();
+        task.status = status;
+        tasks.update(&task).unwrap();
+
+        let raw = cas::qa_pass::supervisor_merge_refusal(
+            &cas_dir,
+            &repo,
+            "git merge --no-ff --no-commit factory/test-agent",
+        )
+        .unwrap_or_else(|| panic!("raw merge was allowed for {status:?}"));
+        assert!(raw.contains(&task_id) && raw.contains(&qa_task), "{raw}");
+
+        let managed = core
+            .worktree_merge("test-agent", false, Some(&task_id), false, None)
+            .await
+            .expect_err("worktree_merge must wait for the independent QA verdict");
+        assert!(
+            managed.message.contains(&task_id) && managed.message.contains(&qa_task),
+            "{managed:?}"
+        );
+    }
+
+    // The round still binds its branch if the task is reassigned before QA.
+    let mut task = tasks.get(&task_id).unwrap();
+    task.status = TaskStatus::InProgress;
+    task.assignee = Some("replacement-agent".to_string());
+    task.deliverables.parked_branch = None;
+    tasks.update(&task).unwrap();
+    let refusal = cas::qa_pass::supervisor_merge_refusal(
+        &cas_dir,
+        &repo,
+        "git merge factory/test-agent",
+    )
+    .expect("the recorded round must keep its branch guarded after reassignment");
+    assert!(refusal.contains(&qa_task), "{refusal}");
+}
+
+#[tokio::test]
 async fn merged_without_a_verdict_is_refused_at_close_and_dispatched() {
     let (temp, core, repo, task_id) = fixture();
     let _env = env_test_lock();
@@ -380,8 +429,15 @@ async fn merged_without_a_verdict_is_refused_at_close_and_dispatched() {
     let refused = close_text(&core, &task_id).await;
     assert!(refused.contains("INDEPENDENT QA REQUIRED"), "{refused}");
     assert!(refused.contains("INDEPENDENT QA DISPATCHED"), "{refused}");
-    assert_ne!(tasks.get(&task_id).unwrap().status, TaskStatus::Closed);
+    assert_eq!(tasks.get(&task_id).unwrap().status, TaskStatus::InProgress);
     assert_eq!(cas_store::list_qa_passes(&cas_dir, &task_id).unwrap().len(), 1);
+    let guard = cas::qa_pass::supervisor_merge_refusal(
+        &cas_dir,
+        &repo,
+        "git merge --no-ff --no-commit factory/test-agent",
+    )
+    .expect("the backstop's InProgress round must block a raw merge");
+    assert!(guard.contains(&qa_task_id(&cas_dir, &task_id)), "{guard}");
 }
 
 #[tokio::test]

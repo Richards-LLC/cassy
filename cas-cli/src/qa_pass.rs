@@ -257,7 +257,7 @@ pub fn factory_branches_merged_by(command: &str) -> Vec<String> {
 }
 
 /// Supervisor pre-tool guard: the refusal when a `git merge` would integrate
-/// a parked user-facing delivery whose current tip has no passed or waived
+/// a user-facing delivery with a recorded round whose current tip has no passed or waived
 /// independent QA round. Fails open (None) when Cassy state is unreadable —
 /// the close backstop still refuses such a task later.
 pub fn supervisor_merge_refusal(cas_root: &Path, cwd: &Path, command: &str) -> Option<String> {
@@ -271,15 +271,24 @@ pub fn supervisor_merge_refusal(cas_root: &Path, cwd: &Path, command: &str) -> O
         return None;
     }
     let task_store = crate::store::open_task_store(cas_root).ok()?;
-    let parked = task_store.list(Some(cas_types::TaskStatus::AwaitingMerge)).ok()?;
+    // A close can dispatch a round from the post-merge backstop while the
+    // delivery remains InProgress. The recorded round, not the park status,
+    // determines whether this merge needs an independent verdict.
+    let deliveries = task_store.list(None).ok()?;
     for branch in branches {
         let worker = branch.trim_start_matches("factory/");
-        for task in parked.iter().filter(|task| {
-            task.deliverables.parked_branch.as_deref() == Some(branch.as_str())
-                || task.assignee.as_deref() == Some(worker)
-        }) {
+        for task in deliveries
+            .iter()
+            .filter(|task| task.status != cas_types::TaskStatus::Closed)
+        {
             let passes = cas_store::list_qa_passes(cas_root, &task.id).unwrap_or_default();
             if !gate_applies(task, &qa, &passes) {
+                continue;
+            }
+            if task.deliverables.parked_branch.as_deref() != Some(branch.as_str())
+                && task.assignee.as_deref() != Some(worker)
+                && !passes.iter().any(|pass| pass.branch == branch)
+            {
                 continue;
             }
             let head = Command::new("git")

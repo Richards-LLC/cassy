@@ -1,5 +1,8 @@
 #![cfg(unix)]
 
+#[path = "support/hub_fixture.rs"]
+mod hub_fixture;
+
 use std::path::Path;
 
 use assert_cmd::Command;
@@ -17,8 +20,8 @@ fn cas_command(home: &Path, path: &Path) -> Command {
 
 #[test]
 fn detached_hub_launcher_starts_with_an_empty_path() {
-    let home = cas::test_paths::private_hub_tempdir();
-    let empty_path = cas::test_paths::private_hub_tempdir();
+    let home = hub_fixture::private_hub_tempdir();
+    let empty_path = hub_fixture::private_hub_tempdir();
 
     let start = cas_command(home.path(), empty_path.path())
         .args(["--json", "hub", "start", "--port", "0"])

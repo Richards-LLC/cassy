@@ -20,6 +20,10 @@ use cas_mux::{Pane, SupervisorCli};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Barrier};
 
+#[cfg(unix)]
+#[path = "support/warm_stub.rs"]
+mod warm_stub;
+
 /// Self-cleaning scratch dir — these tests would otherwise leave a handful of
 /// `/tmp` directories behind on every run.
 struct Scratch(PathBuf);
@@ -220,21 +224,16 @@ async fn claude_worker_pane_does_not_touch_codex_config() {
 /// failure would reintroduce the permanent interactive-prompt park.
 #[cfg(unix)]
 async fn codex_does_not_launch_when_trust_read_back_cannot_verify() {
-    use std::os::unix::fs::PermissionsExt;
-
     let (_home, bin, config) = isolate_codex_env("unverified");
     let workdir = Scratch::new("unverified-cwd");
     std::fs::write(&config, "this is [not valid TOML\n").unwrap();
     let codex = bin.join("codex");
-    std::fs::write(
+    warm_stub::warm_stub(
         &codex,
         "#!/bin/sh\n: > \"$PWD/.mock-codex-should-not-launch\"\nexit 0\n",
-    )
-    .unwrap();
-    std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o755)).unwrap();
+    );
     let cas = bin.join("cas");
-    std::fs::write(&cas, "#!/bin/sh\nexit 0\n").unwrap();
-    std::fs::set_permissions(&cas, std::fs::Permissions::from_mode(0o755)).unwrap();
+    warm_stub::warm_stub(&cas, "#!/bin/sh\nexit 0\n");
 
     let result = Pane::worker(
         "unverified",
@@ -267,8 +266,6 @@ async fn codex_does_not_launch_when_trust_read_back_cannot_verify() {
 /// `Pane::worker` happens-before boundary rather than only the write helper.
 #[cfg(unix)]
 async fn concurrent_codex_workers_launch_only_after_every_trust_entry_is_read_back() {
-    use std::os::unix::fs::PermissionsExt;
-
     const WORKERS: usize = 8;
     let (_home, bin, config) = isolate_codex_env("concurrent");
     let workdirs: Vec<Scratch> = (0..WORKERS)
@@ -279,7 +276,7 @@ async fn concurrent_codex_workers_launch_only_after_every_trust_entry_is_read_ba
     // the mock Codex never invokes it. The Codex mock itself verifies the
     // project table before emitting its launch receipt.
     let codex = bin.join("codex");
-    std::fs::write(
+    warm_stub::warm_stub(
         &codex,
         r#"#!/bin/sh
 expected="[projects.\"$(pwd)\"]"
@@ -295,19 +292,14 @@ done < "$CODEX_HOME/config.toml"
 : > "$PWD/.mock-codex-launched-before-trust"
 exit 23
 "#,
-    )
-    .unwrap();
-    std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o755)).unwrap();
+    );
     let cas = bin.join("cas");
-    std::fs::write(&cas, "#!/bin/sh\nexit 0\n").unwrap();
-    std::fs::set_permissions(&cas, std::fs::Permissions::from_mode(0o755)).unwrap();
+    warm_stub::warm_stub(&cas, "#!/bin/sh\nexit 0\n");
     let nice = bin.join("nice");
-    std::fs::write(
+    warm_stub::warm_stub(
         &nice,
         "#!/bin/sh\nwhile [ \"$1\" != \"codex\" ]; do shift; done\nexec \"$@\"\n",
-    )
-    .unwrap();
-    std::fs::set_permissions(&nice, std::fs::Permissions::from_mode(0o755)).unwrap();
+    );
 
     let start = Arc::new(Barrier::new(WORKERS));
     std::thread::scope(|scope| {

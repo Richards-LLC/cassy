@@ -65,6 +65,10 @@ fn grok_0105_binary() -> Option<PathBuf> {
     grok_binary("1.0.5", "grok-1.0.5-")
 }
 
+fn grok_0140_binary() -> Option<PathBuf> {
+    grok_binary("1.0.40", "grok-1.0.40-")
+}
+
 fn run(mut command: Command, purpose: &str) -> std::process::Output {
     let output = command.output().unwrap_or_else(|error| {
         panic!("{purpose}: failed to execute command: {error}");
@@ -340,6 +344,13 @@ fn event_exists(body: &str, predicate: impl Fn(&Value) -> bool) -> bool {
         .any(|event| predicate(&event))
 }
 
+fn completed_turn_count(body: &str) -> usize {
+    body.lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|event| event["type"] == "turn_ended" && event["outcome"] == "completed")
+        .count()
+}
+
 #[test]
 #[ignore = "requires real Grok Build 0.2.114, authentication, and model traffic"]
 fn grok_02114_factory_launch_contract_passes_live_matrix() {
@@ -358,6 +369,16 @@ fn grok_0105_factory_launch_contract_passes_live_matrix() {
         .expect("this receipt is valid only when an exact Grok Build 1.0.5 binary is installed");
 
     run_grok_factory_contract(grok_binary, "1.0.5");
+}
+
+#[test]
+#[ignore = "requires real Grok Build 1.0.40, authentication, and model traffic"]
+fn grok_0140_factory_launch_contract_passes_live_matrix() {
+    let _serial = real_pty_serial::lock();
+    let grok_binary = grok_0140_binary()
+        .expect("this receipt is valid only when an exact Grok Build 1.0.40 binary is installed");
+
+    run_grok_factory_contract(grok_binary, "1.0.40");
 }
 
 fn run_grok_factory_contract(grok_binary: PathBuf, version: &str) {
@@ -607,11 +628,6 @@ fn run_grok_factory_contract(grok_binary: PathBuf, version: &str) {
         prompt_context["working_directory"],
         scratch.to_string_lossy().as_ref()
     );
-    let system_prompt = std::fs::read_to_string(session_dir.join("system_prompt.txt"))
-        .expect("read Grok system prompt");
-    assert!(system_prompt.contains("Cassy Factory Worker"));
-    assert!(system_prompt.contains("cas__task") && system_prompt.contains("cas__coordination"));
-
     let chat = std::fs::read_to_string(session_dir.join("chat_history.jsonl"))
         .expect("read Grok chat history");
     for action in ["whoami", "mine", "show", "start", "notes"] {
@@ -623,6 +639,10 @@ fn run_grok_factory_contract(grok_binary: PathBuf, version: &str) {
     assert!(chat.contains("\\\"tool_name\\\":\\\"cas__coordination\\\""));
     assert!(chat.contains("\\\"tool_name\\\":\\\"cas__task\\\""));
     assert!(chat.contains(PROBE_MARKER));
+    let system_prompt = std::fs::read_to_string(session_dir.join("system_prompt.txt"))
+        .expect("read Grok system prompt");
+    assert!(system_prompt.contains("Cassy Factory Worker"));
+    assert!(system_prompt.contains("cas__task") && system_prompt.contains("cas__coordination"));
     assert!(
         chat.lines()
             .filter_map(|line| serde_json::from_str::<Value>(line).ok())
@@ -650,6 +670,81 @@ fn run_grok_factory_contract(grok_binary: PathBuf, version: &str) {
         !scratch.join("CLAUDE_COMPAT_HOOK_RAN").exists(),
         "disabled Claude-compatible SessionStart hook must never execute"
     );
+
+    if version == "1.0.40" {
+        // Grok 1.0.24 changed the interactive Esc behavior. Cassy's urgent
+        // redirect reaches the production turn-break path, which sends
+        // Ctrl+C, so prove that the redirect lands and completes rather than
+        // leaving the worker in-flight.
+        let completed_before_interrupt = completed_turn_count(&events);
+        runtime
+            .block_on(mux.inject(
+                PANE,
+                "Run `sleep 20` in the shell now and wait for it to finish; do not answer before it returns. This is an interrupt probe.",
+            ))
+            .expect("start Grok urgent-interrupt probe");
+        let in_flight_deadline = Instant::now() + Duration::from_secs(20);
+        while Instant::now() < in_flight_deadline {
+            let _ = mux.poll_batch();
+            if mux.get(PANE).expect("probe pane").is_turn_in_flight() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert!(
+            mux.get(PANE).expect("probe pane").is_turn_in_flight(),
+            "Grok urgent-interrupt probe must catch a live turn"
+        );
+
+        runtime
+            .block_on(mux.interrupt_and_inject(
+                PANE,
+                "Message from supervisor: stop the current probe and reply CAS-GROK-1.0.40-INTERRUPTED-OK.",
+                Duration::from_millis(1200),
+            ))
+            .expect("Grok urgent interrupt-and-inject must succeed");
+
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let mut redirected_events = String::new();
+        let mut redirected_chat = String::new();
+        while Instant::now() < deadline {
+            let _ = mux.poll_batch();
+            redirected_events =
+                std::fs::read_to_string(&session_dir.join("events.jsonl")).unwrap_or_default();
+            redirected_chat = std::fs::read_to_string(&session_dir.join("chat_history.jsonl"))
+                .unwrap_or_default();
+            if completed_turn_count(&redirected_events) > completed_before_interrupt
+                && redirected_chat.contains("CAS-GROK-1.0.40-INTERRUPTED-OK")
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(300));
+        }
+        assert!(
+            completed_turn_count(&redirected_events) > completed_before_interrupt,
+            "Grok must finish a redirected turn after urgent Esc; events tail:\n{}",
+            redirected_events
+                .lines()
+                .rev()
+                .take(30)
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+        assert!(
+            redirected_chat.contains("CAS-GROK-1.0.40-INTERRUPTED-OK"),
+            "Grok must answer the urgent redirect after Esc; chat tail:\n{}",
+            redirected_chat
+                .lines()
+                .rev()
+                .take(30)
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+        assert!(
+            !mux.get(PANE).expect("probe pane").is_turn_in_flight(),
+            "Grok pane must be idle after the urgent redirect completes"
+        );
+    }
 
     let mut observer = McpClient::spawn(
         &scratch,

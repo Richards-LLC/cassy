@@ -1,0 +1,144 @@
+{
+  "schema_version": 1,
+  "receipt_id": "grok-build-1.0.40-2026-09-23",
+  "harness": "grok-build",
+  "harness_version": "1.0.40",
+  "observed_default_harness_version": "1.0.41",
+  "validated_at": "2026-09-23",
+  "result": "pass",
+  "checklist": [
+    {
+      "id": "cli_version",
+      "required": true,
+      "status": "pass",
+      "evidence_refs": ["live-production-run"],
+      "detail": "The exact retained binary reported grok 1.0.40 (eb1a2256660d) [stable] before the run. The host default had advanced to 1.0.41 (4220f3b224a6), so this receipt names the exact 1.0.40 executable validated."
+    },
+    {
+      "id": "noninteractive_permission_bypass",
+      "required": true,
+      "status": "pass",
+      "evidence_refs": ["live-production-run"],
+      "detail": "The production launch emitted --permission-mode bypassPermissions and the transcript recorded yolo_mode=true."
+    },
+    {
+      "id": "session_uuid",
+      "required": true,
+      "status": "pass",
+      "evidence_refs": ["live-production-run"],
+      "detail": "PtyConfig emitted a fresh bare UUID through both --session-id and CAS_SESSION_ID; the same ID named the live transcript."
+    },
+    {
+      "id": "model_and_reasoning_effort",
+      "required": true,
+      "status": "pass",
+      "evidence_refs": ["live-production-run"],
+      "detail": "The production launch emitted grok-4.5 with medium reasoning effort and the assistant transcript recorded both."
+    },
+    {
+      "id": "cwd",
+      "required": true,
+      "status": "pass",
+      "evidence_refs": ["live-production-run"],
+      "detail": "Both the process cwd and --cwd targeted the disposable repository; prompt_context.json recorded the same working directory."
+    },
+    {
+      "id": "worker_role_rules",
+      "required": true,
+      "status": "pass",
+      "evidence_refs": ["live-production-run"],
+      "detail": "The production --rules payload contained the Cassy Factory Worker role and cas__ namespace, and the exact text appeared in system_prompt.txt."
+    },
+    {
+      "id": "persistent_mcp_discovery_and_namespace",
+      "required": true,
+      "status": "pass",
+      "evidence_refs": ["live-production-run"],
+      "detail": "Persistent config discovered cas serve, connected 15 tools, and the worker invoked cas__coordination and cas__task rather than Claude/Codex aliases."
+    },
+    {
+      "id": "factory_identity_environment",
+      "required": true,
+      "status": "pass",
+      "evidence_refs": ["live-production-run"],
+      "detail": "Inherited CAS agent, role, factory, session, root, worker CLI, model, and effort environment bound cas serve to the disposable store and registered the expected Grok worker."
+    },
+    {
+      "id": "transcript_and_liveness",
+      "required": true,
+      "status": "pass",
+      "evidence_refs": ["live-production-run"],
+      "detail": "The session was written under ~/.grok/sessions/*/<session-id>; its post-submit turn_ended event cleared Pane in-flight state through the production liveness resolver."
+    },
+    {
+      "id": "worker_task_edit_commit_lifecycle",
+      "required": true,
+      "status": "pass",
+      "evidence_refs": ["live-production-run"],
+      "detail": "The worker called whoami, mine, show, start, and notes; wrote the exact probe marker; committed it with the versioned lifecycle subject; and left the disposable repository clean."
+    },
+    {
+      "id": "compatible_hooks_disabled",
+      "required": true,
+      "status": "pass",
+      "evidence_refs": ["live-production-run"],
+      "detail": "Grok inspect reported every discovered Claude/Cursor-compatible hook disabled, and the SessionStart hook canary did not execute."
+    },
+    {
+      "id": "worktree_containment",
+      "required": true,
+      "status": "pass",
+      "evidence_refs": ["live-production-run"],
+      "detail": "The worker wrote and committed only the named probe in the disposable repository; git status was clean afterward and the production --cwd/prompt context remained inside that repository."
+    },
+    {
+      "id": "urgent_interrupt_redirect",
+      "required": true,
+      "status": "pass",
+      "evidence_refs": ["live-production-run"],
+      "detail": "A mid-turn sleep probe was interrupted through Mux::interrupt_and_inject; Cassy's Grok turn-break path sent Ctrl+C and the redirected turn completed with CAS-GROK-1.0.40-INTERRUPTED-OK. This confirms the 1.0.24 Esc decision note without treating Esc itself as the turn-break byte."
+    },
+    {
+      "id": "1.0.17_mid_call_mcp_input",
+      "required": false,
+      "status": "not_covered",
+      "evidence_refs": ["scoped-test-proof"],
+      "detail": "Not covered: this bounded non-interactive matrix used the persistent stdio Cassy server, which did not request additional input; it did not provision a synthetic MCP tool that pauses for a form answer and resumes."
+    },
+    {
+      "id": "1.0.8_mcp_consent_popup",
+      "required": false,
+      "status": "not_covered",
+      "evidence_refs": ["scoped-test-proof"],
+      "detail": "Not covered: no MCP server in the isolated configuration requested URL consent or question-form input, so the interactive consent popup path was not exercised."
+    },
+    {
+      "id": "1.0.34_memory_ga",
+      "required": false,
+      "status": "not_covered",
+      "evidence_refs": ["scoped-test-proof"],
+      "detail": "Not covered: the run did not enable or configure Grok model-context memory; it validated the standard --rules and cas__ discovery path only."
+    },
+    {
+      "id": "0.2.105_compaction_survival",
+      "required": false,
+      "status": "not_covered",
+      "evidence_refs": ["scoped-test-proof"],
+      "detail": "Not covered: the bounded worker lifecycle and urgent-interrupt turns completed below compaction pressure; no forced long-session compaction was attempted."
+    }
+  ],
+  "evidence": [
+    {
+      "id": "live-production-run",
+      "kind": "live_test",
+      "reference": "task:cas-ef93#2026-09-23-production-run",
+      "summary": "Fresh real Grok Build 1.0.40 PtyConfig::grok run with target/debug/cas first on PATH, a disposable repository/CAS_ROOT, compatible hooks disabled, persistent cas__ MCP discovery, worker lifecycle, and urgent interrupt redirect; all required assertions passed. Session evidence: 6e2b0561-9889-434f-bbc9-905195a32571 under /home/pippenz/.grok/sessions/%2Ftmp%2Fcas-9bd9-grok-contract-3455669/."
+    },
+    {
+      "id": "scoped-test-proof",
+      "kind": "test",
+      "reference": "scripts/run-scoped-tests.sh -p cas-mux --test grok_factory_contract_runtime --run-ignored all -E test(grok_0140_factory_launch_contract_passes_live_matrix) --no-capture",
+      "summary": "Guarded nextest run a530d3d7-7250-43bc-9d53-0c670ec49460 reported 1 test passed, 0 failed, 2 skipped in 27.147 seconds; the scoped-test guard exited 0 and reported PASS across 2 harness summary lines."
+    }
+  ]
+}

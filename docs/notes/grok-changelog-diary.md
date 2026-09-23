@@ -34,15 +34,18 @@ dependency, verify on upgrade) · 🔧 fix shipped · 🏗 EPIC · ⏭ n/a
 
 ## Version status
 
-- **Cassy validated against:** Grok Build **1.0.5**
-  (`grok 1.0.5 (5115b46bc9) [stable]`), verified live 2026-08-25 through the
-  complete isolated `PtyConfig::grok` worker matrix and recorded in the typed
-  `grok-build-1.0.5-2026-08-25` conformance receipt. The prior
-  `grok-build-0.2.114-2026-07-30` receipt remains historical evidence.
-- **Locally installed and latest stable:** **1.0.40** (`grok 1.0.40
-  (eb1a2256660d) [stable]`, checked 2026-09-23). The former 1.0.5 install has
-  been superseded. Wingetly independently lists 1.0.40 as the latest package
-  version: [Grok Build versions](https://wingetly.io/apps/x-ai/grok-build).
+- **Cassy validated against:** Grok Build **1.0.40**
+  (`grok 1.0.40 (eb1a2256660d) [stable]`), verified live 2026-09-23 through
+  the complete isolated `PtyConfig::grok` worker matrix, including the urgent
+  interrupt redirect, and recorded in the typed
+  `grok-build-1.0.40-2026-09-23` conformance receipt. The prior
+  `grok-build-1.0.5-2026-08-25` and `grok-build-0.2.114-2026-07-30` receipts
+  remain historical evidence.
+- **Locally installed and latest stable:** **1.0.41** (`grok 1.0.41
+  (4220f3b224a6) [stable]`, checked 2026-09-23). The exact 1.0.40 binary
+  remains retained and is the binary named by the validation receipt. Wingetly
+  independently lists the 1.0.40 package among shipped versions:
+  [Grok Build versions](https://wingetly.io/apps/x-ai/grok-build).
 - **Latest release-note evidence:** the local `~/.grok/CHANGELOG.md` snapshot
   provides versioned sections for **1.0.6–1.0.13**. Its companion
   `~/.grok/CHANGELOG.json` is a flat item list with no version/date attribution.
@@ -53,17 +56,14 @@ dependency, verify on upgrade) · 🔧 fix shipped · 🏗 EPIC · ⏭ n/a
   release-note page; direct curl is Cloudflare-protected (HTTP 403 on
   2026-09-23), so that page remains the 0.2.117 source rather than evidence for
   newer 1.0.x releases.
-- **Gap:** the validated pin remains **1.0.5** because the complete live
-  `PtyConfig::grok` matrix has not been rerun against 1.0.40. Local notes cover
-  1.0.6–1.0.13 and Releasebot covers 1.0.17–1.0.25 plus 1.0.30–1.0.34;
-  1.0.14–1.0.16, 1.0.26–1.0.29, and 1.0.35–1.0.40 are consolidated below as
-  a per-version source gap. The required validation is tracked separately in
-  **cas-ef93**, including the urgent-interrupt path, and must not be inferred
-  from this diary update. The interrupt touchpoint is `Pane::break_turn` in
-  `crates/cas-pty/src/pty.rs:5421-5426` (cas-c931): Grok 1.0.24 changed Esc
-  semantics, so the matrix must verify that an urgent worker redirect still
-  breaks a Grok turn. The earlier 0.2.102–0.2.103 and 0.2.107–0.2.111 gaps
-  remain documented below.
+- **Validated-version source gap:** local notes cover 1.0.6–1.0.13 and
+  Releasebot covers 1.0.17–1.0.25 plus 1.0.30–1.0.34;
+  1.0.14–1.0.16, 1.0.26–1.0.29, and 1.0.35–1.0.41 are consolidated below as
+  a per-version source gap. The 1.0.40 receipt explicitly records the
+  delegated 1.0.17 MCP-input, 1.0.8 consent-popup, 1.0.34 memory, and
+  0.2.105 compaction checks as not covered by this bounded non-interactive
+  matrix. The earlier 0.2.102–0.2.103 and 0.2.107–0.2.111 gaps remain
+  documented below.
 
 ## Cassy ↔ Grok touchpoints (what a release can break)
 
@@ -135,7 +135,7 @@ At minimum, `PtyConfig::grok` sets:
 
 | Grok version | Headline | Cassy verdict | Pointer |
 |--------------|----------|-------------|---------|
-| 1.0.14–1.0.16, 1.0.26–1.0.29, 1.0.35–1.0.40 | No per-version notes in checked feeds | — (source gap) | this doc |
+| 1.0.14–1.0.16, 1.0.26–1.0.29, 1.0.35–1.0.41 | No per-version notes in checked feeds | — (source gap) | this doc |
 | 1.0.34 | Memory generally available · Markdown heading colors | 👀 / ⏭ | this doc |
 | 1.0.33 | Structured MCP results · cancellation/session/subagent recovery · clone/skill fixes | 👀 / 🟢 | this doc |
 | 1.0.32 | Pre-session config listing · first-session crash/TLS fixes | 👀 / ⏭ | this doc |
@@ -190,7 +190,7 @@ At minimum, `PtyConfig::grok` sets:
 
 ## Entries
 
-### 1.0.14–1.0.16, 1.0.26–1.0.29, 1.0.35–1.0.40 — consolidated release-note source gap
+### 1.0.14–1.0.16, 1.0.26–1.0.29, 1.0.35–1.0.41 — consolidated release-note source gap
 
 Reviewed 2026-09-23. The checked sources are the local versioned
 `~/.grok/CHANGELOG.md` (through 1.0.13), its flat/unversioned
@@ -201,8 +201,9 @@ changelog](https://x.ai/build/changelog) (currently showing 0.2.117), and
 lists 1.0.40 and 1.0.34 among shipped versions). No per-version release notes
 were attributable to these ranges. Direct curl to x.ai returned HTTP 403 from
 Cloudflare on this review date. → — **source gap; no release behavior or Cassy
-verdict is inferred.** The installed 1.0.40 binary still requires the separate
-**cas-ef93** `PtyConfig::grok` validation task.
+verdict is inferred.** The exact 1.0.40 binary is validated by the separate
+`grok-build-1.0.40-2026-09-23` receipt; 1.0.41 is installed but has no
+corresponding release-note evidence or validation receipt.
 
 ### 1.0.34 — memory generally available · Markdown heading colors
 

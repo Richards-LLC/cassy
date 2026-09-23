@@ -1331,6 +1331,187 @@ fn scoped_proof_command(required_targets: &[String], base: Option<&str>) -> Stri
     )
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct FailedScopedRun {
+    failures: std::collections::BTreeSet<String>,
+    tests_run: usize,
+    platform: String,
+}
+
+fn compare_failed_scoped_runs(
+    base: &FailedScopedRun,
+    delivery: &FailedScopedRun,
+) -> Result<(), String> {
+    if base.platform != delivery.platform {
+        return Err(format!(
+            "base and delivery ran on different platforms: {} vs {}",
+            base.platform, delivery.platform
+        ));
+    }
+    let new_failures: Vec<_> = delivery
+        .failures
+        .difference(&base.failures)
+        .cloned()
+        .collect();
+    if !new_failures.is_empty() {
+        return Err(format!(
+            "delivery-only failing tests block close: {}",
+            new_failures.join(", ")
+        ));
+    }
+    Ok(())
+}
+
+fn parse_failed_scoped_run(
+    log: &str,
+    expected_head: &str,
+    expected_base: &str,
+    expected_command: &str,
+) -> Result<FailedScopedRun, String> {
+    // The runner preserves nextest's raw log for diagnosis. Match against the
+    // same ANSI-free view that its own success/failure guard uses.
+    let ansi = regex::Regex::new(r"\x1b\[[0-9;]*[A-Za-z]")
+        .map_err(|error| format!("cannot parse scoped log colors: {error}"))?;
+    let clean_log = ansi.replace_all(log, "");
+    let log = clean_log.as_ref();
+    let header = log
+        .lines()
+        .find(|line| line.starts_with("SCOPED_RUN: "))
+        .ok_or("missing SCOPED_RUN header")?;
+    for (field, expected) in [
+        ("version=", "1"),
+        ("head=", expected_head),
+        ("base=", expected_base),
+        ("runner=", "nextest_run"),
+    ] {
+        if scoped_proof_receipt_field(header, field).as_deref() != Some(expected) {
+            return Err(format!("SCOPED_RUN {field} does not match the delivery"));
+        }
+    }
+    if header.split_once(" command=").map(|(_, command)| command) != Some(expected_command) {
+        return Err("SCOPED_RUN command differs from the required scoped command".into());
+    }
+    let platform = scoped_proof_receipt_field(header, "platform=")
+        .filter(|platform| platform.contains('/') && platform.split_whitespace().count() == 1)
+        .ok_or("SCOPED_RUN platform is missing")?;
+    let exit = log
+        .lines()
+        .find_map(|line| line.strip_prefix("SCOPED_RUN_RESULT: cargo_exit="))
+        .and_then(|exit| exit.parse::<i32>().ok())
+        .ok_or("missing scoped cargo exit status")?;
+    if exit == 0 {
+        return Err("base-red comparison requires a failed test run".into());
+    }
+    let summary = log
+        .lines()
+        .filter(|line| line.trim_start().starts_with("Summary ["))
+        .last()
+        .ok_or("missing nextest summary; a build failure is not a base-red test result")?;
+    let summary = summary.trim();
+    let run = summary
+        .split_once(" run: ")
+        .ok_or("malformed nextest summary")?;
+    let tests_run = run
+        .0
+        .split_whitespace()
+        .rev()
+        .nth(1)
+        .and_then(|count| count.parse::<usize>().ok())
+        .ok_or("malformed nextest test count")?;
+    let reported_failed = run
+        .1
+        .split(',')
+        .find_map(|part| {
+            let mut words = part.split_whitespace();
+            let count = words.next()?.parse::<usize>().ok()?;
+            (words.next() == Some("failed")).then_some(count)
+        })
+        .ok_or("nextest summary does not report failed tests")?;
+    let failures: std::collections::BTreeSet<String> = log
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim_start();
+            line.starts_with("FAIL [")
+                .then(|| line.split_once(") ").map(|(_, name)| name.trim().to_string()))
+                .flatten()
+        })
+        .collect();
+    if tests_run == 0 || reported_failed == 0 || failures.len() != reported_failed {
+        return Err(format!(
+            "nextest failure list is incomplete: {tests_run} tests run, {reported_failed} reported failed, {} identified",
+            failures.len()
+        ));
+    }
+    Ok(FailedScopedRun {
+        failures,
+        tests_run,
+        platform,
+    })
+}
+
+fn read_task_scoped_log(
+    cas_root: &std::path::Path,
+    task_id: &str,
+    path: &str,
+) -> Result<String, String> {
+    validate_completion_artifact_path(cas_root, task_id, path)
+        .map_err(|error| format!("scoped log path rejected: {error}"))?;
+    let path = std::path::Path::new(path);
+    let metadata =
+        std::fs::metadata(path).map_err(|error| format!("scoped log unreadable: {error}"))?;
+    if !metadata.is_file() || metadata.len() > 32 * 1024 * 1024 {
+        return Err("scoped log must be a file no larger than 32 MiB".into());
+    }
+    std::fs::read_to_string(path).map_err(|error| format!("scoped log unreadable: {error}"))
+}
+
+fn validate_inherited_scoped_failures(
+    task: &Task,
+    cas_root: &std::path::Path,
+    proof_repo: &std::path::Path,
+    expected_base: Option<&str>,
+    required_targets: &[String],
+) -> Result<String, String> {
+    let expected_base = expected_base.ok_or("delivery has no attributable scoped proof base")?;
+    let note = task
+        .notes
+        .lines()
+        .filter(|line| line.contains("SCOPED_BASE_RED:"))
+        .last()
+        .ok_or("add a progress note with SCOPED_BASE_RED: base_log=<durable path> delivery_log=<durable path> after running the same scoped command at the base and delivery; a registered supervisor must close with supervisor_override=true")?;
+    let base_path = scoped_proof_receipt_field(note, "base_log=").ok_or("missing base_log")?;
+    let delivery_path =
+        scoped_proof_receipt_field(note, "delivery_log=").ok_or("missing delivery_log")?;
+    if base_path == delivery_path {
+        return Err("base and delivery logs must be distinct".into());
+    }
+    let head = std::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(proof_repo)
+        .output()
+        .map_err(|error| format!("cannot resolve delivery HEAD: {error}"))?;
+    if !head.status.success() {
+        return Err("cannot resolve delivery HEAD".into());
+    }
+    let head = String::from_utf8_lossy(&head.stdout).trim().to_string();
+    let command = scoped_proof_command(required_targets, None);
+    let base_log = read_task_scoped_log(cas_root, &task.id, &base_path)?;
+    let delivery_log = read_task_scoped_log(cas_root, &task.id, &delivery_path)?;
+    use sha2::Digest;
+    let base_digest = hex::encode(sha2::Sha256::digest(base_log.as_bytes()));
+    let delivery_digest = hex::encode(sha2::Sha256::digest(delivery_log.as_bytes()));
+    let base = parse_failed_scoped_run(&base_log, expected_base, expected_base, &command)?;
+    let delivery = parse_failed_scoped_run(&delivery_log, &head, expected_base, &command)?;
+    compare_failed_scoped_runs(&base, &delivery)?;
+    Ok(format!(
+        "SCOPED_BASE_RED accepted for base={expected_base}, head={head}, command={command}; base: {} failed / {} run ({base_path}, sha256={base_digest}); delivery: {} failed / {} run ({delivery_path}, sha256={delivery_digest}); every delivery failure was present at base",
+        base.failures.len(),
+        base.tests_run,
+        delivery.failures.len(),
+        delivery.tests_run,
+    ))
+}
+
 /// Convert changed Rust source paths into the module names that the scoped
 /// proof-surface resolver exposes. Non-source files do not require a library
 /// proof target; integration targets are represented by their path stem.
@@ -1511,6 +1692,168 @@ fn validate_risk_close_proofs_with_base_and_target_and_cache(
 #[cfg(test)]
 mod risk_proof_tests {
     use super::*;
+
+    fn failed_run_log(head: &str, base: &str, command: &str, failed: &[&str]) -> String {
+        let mut log = format!(
+            "SCOPED_RUN: version=1 head={head} base={base} runner=nextest_run platform=Darwin/arm64 command={command}\n"
+        );
+        for (index, name) in failed.iter().enumerate() {
+            log.push_str(&format!(
+                "        FAIL [   0.010s] ({}/{}) cas::lib {name}\n",
+                index + 1,
+                failed.len()
+            ));
+        }
+        log.push_str(&format!(
+            "     Summary [   0.010s] {} tests run: 0 passed, {} failed, 0 skipped\nSCOPED_RUN_RESULT: cargo_exit=100\n",
+            failed.len(),
+            failed.len()
+        ));
+        log
+    }
+
+    #[test]
+    fn inherited_scoped_failures_accept_only_failures_seen_at_base() {
+        let command = "scripts/run-scoped-tests.sh --proof -p cas --lib --test lifecycle";
+        let base_log = failed_run_log("base", "base", command, &["test_a", "test_b"]);
+        let delivery_log = failed_run_log("head", "base", command, &["test_a"]);
+        let base = parse_failed_scoped_run(&base_log, "base", "base", command).unwrap();
+        let delivery = parse_failed_scoped_run(&delivery_log, "head", "base", command).unwrap();
+        compare_failed_scoped_runs(&base, &delivery).unwrap();
+
+        let regression_log = failed_run_log("head", "base", command, &["test_a", "test_c"]);
+        let regression = parse_failed_scoped_run(&regression_log, "head", "base", command).unwrap();
+        let error = compare_failed_scoped_runs(&base, &regression).unwrap_err();
+        assert!(error.contains("test_c"), "{error}");
+        assert!(!error.contains("test_a"), "{error}");
+
+        let other_platform = parse_failed_scoped_run(
+            &delivery_log.replace("platform=Darwin/arm64", "platform=Linux/x86_64"),
+            "head",
+            "base",
+            command,
+        )
+        .unwrap();
+        assert!(compare_failed_scoped_runs(&base, &other_platform)
+            .unwrap_err()
+            .contains("different platforms"));
+    }
+
+    #[test]
+    fn inherited_scoped_failure_logs_must_match_command_revision_and_complete_summary() {
+        let command = "scripts/run-scoped-tests.sh --proof -p cas --lib --test lifecycle";
+        let log = failed_run_log("head", "base", command, &["test_a"]);
+        assert!(parse_failed_scoped_run(&log, "other-head", "base", command).is_err());
+        assert!(parse_failed_scoped_run(&log, "head", "other-base", command).is_err());
+        assert!(parse_failed_scoped_run(&log, "head", "base", "other command").is_err());
+        assert!(parse_failed_scoped_run(
+            &log.replace("1 failed", "2 failed"),
+            "head",
+            "base",
+            command
+        )
+        .is_err());
+        assert!(parse_failed_scoped_run(
+            &log.replace("SCOPED_RUN_RESULT: cargo_exit=100", "SCOPED_RUN_RESULT: cargo_exit=0"),
+            "head",
+            "base",
+            command
+        )
+        .is_err());
+        assert!(parse_failed_scoped_run(
+            &log.replace("Summary [", "Build ["),
+            "head",
+            "base",
+            command
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn inherited_scoped_failure_close_audit_reads_task_owned_base_and_delivery_logs() {
+        let repo = tempfile::tempdir().unwrap();
+        std::fs::write(repo.path().join("fixture.txt"), "base\n").unwrap();
+        initialize_scoped_proof_git_fixture(repo.path());
+        let rev = |dir: &std::path::Path| {
+            String::from_utf8(
+                std::process::Command::new("git")
+                    .args(["rev-parse", "HEAD"])
+                    .current_dir(dir)
+                    .output()
+                    .unwrap()
+                    .stdout,
+            )
+            .unwrap()
+            .trim()
+            .to_string()
+        };
+        let base = rev(repo.path());
+        std::fs::write(repo.path().join("fixture.txt"), "delivery\n").unwrap();
+        assert!(std::process::Command::new("git")
+            .args(["add", "."])
+            .current_dir(repo.path())
+            .status()
+            .unwrap()
+            .success());
+        assert!(std::process::Command::new("git")
+            .args([
+                "-c",
+                "user.name=scoped-proof-test",
+                "-c",
+                "user.email=scoped-proof-test@example.invalid",
+                "commit",
+                "-qm",
+                "delivery",
+            ])
+            .current_dir(repo.path())
+            .status()
+            .unwrap()
+            .success());
+        let head = rev(repo.path());
+        let cas_root = tempfile::tempdir().unwrap();
+        let artifacts = cas_root.path().join("artifacts/cas-base-red");
+        std::fs::create_dir_all(&artifacts).unwrap();
+        std::fs::write(
+            cas_root.path().join("config.toml"),
+            format!("[factory]\nartifacts_root = {:?}\n", artifacts.parent().unwrap().display().to_string()),
+        )
+        .unwrap();
+        let command = "scripts/run-scoped-tests.sh --proof -p cas --lib --test lifecycle";
+        let base_path = artifacts.join("base.log");
+        let delivery_path = artifacts.join("delivery.log");
+        std::fs::write(&base_path, failed_run_log(&base, &base, command, &["test_a", "test_b"]))
+            .unwrap();
+        std::fs::write(&delivery_path, failed_run_log(&head, &base, command, &["test_a"]))
+            .unwrap();
+        let mut task = Task::new("cas-base-red".into(), "base red audit".into());
+        task.notes = format!(
+            "SCOPED_BASE_RED: base_log={} delivery_log={}",
+            base_path.display(),
+            delivery_path.display()
+        );
+        let targets = vec!["lifecycle".to_string()];
+        let decision = validate_inherited_scoped_failures(
+            &task,
+            cas_root.path(),
+            repo.path(),
+            Some(&base),
+            &targets,
+        )
+        .expect("inherited-only failures should permit audited supervisor close");
+        assert!(decision.contains("every delivery failure was present at base"));
+
+        std::fs::write(&delivery_path, failed_run_log(&head, &base, command, &["test_c"]))
+            .unwrap();
+        let error = validate_inherited_scoped_failures(
+            &task,
+            cas_root.path(),
+            repo.path(),
+            Some(&base),
+            &targets,
+        )
+        .unwrap_err();
+        assert!(error.contains("test_c"), "{error}");
+    }
 
     #[test]
     fn supervisor_override_measurement_names_every_declared_risk_gap() {
@@ -6294,6 +6637,7 @@ impl CasCore {
             };
 
         let mut waived_risk_gate = None;
+        let mut accepted_inherited_scoped_failures = None;
         if close_disposition.requires_delivery_gates() {
             let proof_repo = worker_worktree_path
                 .as_deref()
@@ -6351,7 +6695,7 @@ impl CasCore {
                 &mut scoped_proof_cache,
             ) {
                 let measured_gaps = declared_risk_close_gaps(&task, &changed_paths);
-                if !supervisor_override || measured_gaps.is_empty() {
+                if !supervisor_override {
                     return Ok(Self::tool_error(message));
                 }
                 // Supervisor authority and a non-empty reason were checked at
@@ -6367,9 +6711,33 @@ impl CasCore {
                     scoped_proof_base.as_deref(),
                     &mut scoped_proof_cache,
                 ) {
-                    return Ok(Self::tool_error(scoped_error));
+                    let required_targets = required_scoped_proof_targets(
+                        proof_repo,
+                        target_repo,
+                        &changed_paths,
+                        &mut scoped_proof_cache,
+                    );
+                    if required_targets.is_empty() {
+                        return Ok(Self::tool_error(scoped_error));
+                    }
+                    match validate_inherited_scoped_failures(
+                        &task,
+                        &self.cas_root,
+                        proof_repo,
+                        scoped_proof_base.as_deref(),
+                        &required_targets,
+                    ) {
+                        Ok(measurement) => accepted_inherited_scoped_failures = Some(measurement),
+                        Err(audit_error) => {
+                            return Ok(Self::tool_error(format!(
+                                "{scoped_error} Inherited base-red audit rejected: {audit_error}"
+                            )));
+                        }
+                    }
                 }
-                waived_risk_gate = Some(measured_gaps.join("; "));
+                if !measured_gaps.is_empty() {
+                    waived_risk_gate = Some(measured_gaps.join("; "));
+                }
             }
         }
 
@@ -6618,6 +6986,11 @@ impl CasCore {
             if let Some(measurement) = waived_risk_gate.as_deref() {
                 task.notes.push_str(&format!(
                     "\n\n[{timestamp}] DECISION: supervisor waived declared-risk close gate after measuring: {measurement}"
+                ));
+            }
+            if let Some(measurement) = accepted_inherited_scoped_failures.as_deref() {
+                task.notes.push_str(&format!(
+                    "\n\n[{timestamp}] DECISION: supervisor accepted inherited scoped failures after comparing durable base and delivery logs: {measurement}"
                 ));
             }
         }

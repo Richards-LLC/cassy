@@ -662,6 +662,27 @@ expect pass "SCOPED_PROOF: command=scripts/run-scoped-tests.sh --proof" \
     env CARGO="${runner_stub}" SCOPED_PROOF_BASE=main \
     "${mapping_repo}/scripts/run-scoped-tests.sh" --proof -p cas --lib factory_ops --test factory_mcp_ops_test
 
+# A red base still needs a durable machine-readable run header for the
+# supervisor's inherited-failure comparison, even though no PASS is emitted.
+red_stub="$(make_stub scoped-red 100 <<'EOF'
+        FAIL [   0.001s] (1/1) cas::lib inherited::test_case
+     Summary [   0.001s] 1 tests run: 0 passed, 1 failed, 0 skipped
+EOF
+)"
+red_log="${tmpdir}/scoped-red.log"
+expect fail "the test run exited 100" \
+    "proof runner: a red test run records its command, revision, base, and exit" \
+    env CARGO="${red_stub}" SCOPED_PROOF_BASE=main SCOPED_TEST_LOG="${red_log}" \
+    "${mapping_repo}/scripts/run-scoped-tests.sh" --proof -p cas --lib factory_ops --test factory_mcp_ops_test
+if grep -q "^SCOPED_RUN: version=1 head=$(git -C "${mapping_repo}" rev-parse HEAD) base=main runner=nextest_run platform=$(uname -s)/$(uname -m) command=scripts/run-scoped-tests.sh --proof -p cas --lib factory_ops --test factory_mcp_ops_test$" "${red_log}" \
+    && grep -q '^SCOPED_RUN_RESULT: cargo_exit=100$' "${red_log}"; then
+    pass_count=$((pass_count + 1))
+    echo "ok   red scoped log binds command, revision, base, and exit"
+else
+    fail_count=$((fail_count + 1))
+    echo "FAIL red scoped log lacks audit metadata"
+fi
+
 proof_receipt="${mapping_repo}/supervisor-proof.receipt"
 expect pass "SCOPED_PROOF_RECEIPT: id=sp-" \
     "proof runner: --proof can persist a durable supervisor receipt" \

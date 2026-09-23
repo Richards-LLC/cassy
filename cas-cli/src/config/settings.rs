@@ -277,6 +277,12 @@ pub struct QaConfig {
     #[serde(default = "default_independent_pass")]
     pub independent_pass: bool,
 
+    /// cas-0cd5: refuse the implementer's close of a user-facing delivery
+    /// until its cas-qa-craft evidence bundle (or, for demo-only non-web
+    /// deliveries, its evidence ledger) is valid for the delivered head.
+    #[serde(default = "default_evidence_gate")]
+    pub evidence_gate: bool,
+
     /// cas-619f: repo-relative globs whose change makes a delivery
     /// user-facing even without a label or demo_statement.
     #[serde(default = "default_user_facing_paths")]
@@ -294,6 +300,10 @@ pub struct QaConfig {
 }
 
 pub fn default_independent_pass() -> bool {
+    true
+}
+
+pub fn default_evidence_gate() -> bool {
     true
 }
 
@@ -333,6 +343,7 @@ impl Default for QaConfig {
             user_facing_labels: default_user_facing_labels(),
             telemetry_sweep: None,
             independent_pass: default_independent_pass(),
+            evidence_gate: default_evidence_gate(),
             user_facing_paths: default_user_facing_paths(),
             pass_timeout_mins: default_pass_timeout_mins(),
             max_rounds: default_max_rounds(),

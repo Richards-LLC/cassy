@@ -145,6 +145,10 @@ impl Config {
                 qa.independent_pass.to_string(),
             ),
             (
+                "qa.evidence_gate".to_string(),
+                qa.evidence_gate.to_string(),
+            ),
+            (
                 "qa.user_facing_paths".to_string(),
                 qa.user_facing_paths.join(","),
             ),

@@ -4749,6 +4749,50 @@ impl CasCore {
             return Ok(Self::tool_error(message));
         }
 
+        // cas-0cd5: the implementer's QA evidence must be valid for the
+        // delivered head before the delivery may park for merge (and before
+        // its post-merge re-close can finish). Runs ahead of the merge gate
+        // so an unevidenced user-facing delivery never parks and never gets an
+        // independent reviewer spawned (cas-619f). A live supervisor's
+        // override (already validated above) waives it with a logged reason.
+        if close_disposition.requires_delivery_gates()
+            && task.task_type != TaskType::Epic
+            && task.assignee.is_some()
+            && (close_repo_verified || worker_worktree_path.is_some())
+        {
+            let evidence_repo = if close_repo_verified {
+                close_project_root.clone()
+            } else {
+                worker_worktree_path
+                    .clone()
+                    .unwrap_or_else(|| close_project_root.clone())
+            };
+            match super::qa_evidence_gate::qa_evidence_close_gate(
+                &self.cas_root,
+                &task,
+                &evidence_repo,
+                &resolved_parent_branch,
+                req.commit_receipt.as_deref(),
+            ) {
+                Ok(notes) => {
+                    for note in notes {
+                        append_close_decision_note(task_store.as_ref(), &mut task, &note);
+                    }
+                }
+                Err(message) if supervisor_override => {
+                    append_close_decision_note(
+                        task_store.as_ref(),
+                        &mut task,
+                        &format!(
+                            "✅ DECISION QA evidence gate waived by supervisor override: {}. Waived refusal: {message}",
+                            req.reason.as_deref().unwrap_or("").trim()
+                        ),
+                    );
+                }
+                Err(message) => return Ok(Self::tool_error(message)),
+            }
+        }
+
         if close_disposition.requires_delivery_gates()
             && task.task_type != TaskType::Epic
             && task.assignee.is_some()

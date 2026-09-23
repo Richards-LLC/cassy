@@ -302,6 +302,13 @@ impl Config {
                     .parse()
                     .map_err(|_| MemError::Parse(format!("Invalid boolean value: {value}")))?;
             }
+            "qa.evidence_gate" => {
+                let qa = self.qa.get_or_insert_with(QaConfig::default);
+                qa.evidence_gate = value
+                    .trim()
+                    .parse()
+                    .map_err(|_| MemError::Parse(format!("Invalid boolean value: {value}")))?;
+            }
             "qa.user_facing_paths" => {
                 let qa = self.qa.get_or_insert_with(QaConfig::default);
                 qa.user_facing_paths = value

@@ -52,6 +52,7 @@ pub(crate) mod close_ops;
 mod gate_error_tests;
 pub(crate) mod proof_scope;
 mod qa_dispatch;
+pub(crate) mod qa_evidence_gate;
 pub(crate) mod repository_proof;
 pub(crate) mod stale_close_guard;
 pub(crate) mod supervisor_push;

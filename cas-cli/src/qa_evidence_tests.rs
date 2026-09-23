@@ -350,7 +350,10 @@ fn citations_outside_the_task_or_from_an_independent_round_are_rejected() {
     let refusal = fx
         .validate(&format!("qa-bundle: {}/bundle.json", round.display()))
         .unwrap_err();
-    assert!(refusal.problem.contains("independent QA round"), "{refusal:?}");
+    assert!(
+        refusal.problem.contains("not cited"),
+        "a reviewer's round is never read as the implementer's bundle: {refusal:?}"
+    );
 }
 
 #[test]
@@ -363,8 +366,13 @@ fn listed_files_may_not_escape_the_bundle() {
 
 #[test]
 fn newest_citation_wins() {
-    let notes = "qa-bundle: /a/old/bundle.json\n[later] qa-bundle: `/a/new/bundle.json`.";
-    assert_eq!(cited_bundle_path(notes).as_deref(), Some("/a/new/bundle.json"));
+    let notes = "qa-bundle: /a/old/bundle.json\n[later] qa-bundle: `/a/new/bundle.json`.\n\
+                 [reviewer] qa-bundle: /a/independent-qa/round-1/bundle.json";
+    assert_eq!(
+        cited_bundle_path(notes).as_deref(),
+        Some("/a/new/bundle.json"),
+        "a later independent round citation must not shadow the implementer's bundle"
+    );
     assert_eq!(cited_bundle_path("nothing"), None);
 }
 

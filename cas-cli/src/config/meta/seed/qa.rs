@@ -54,6 +54,23 @@ pub(super) fn register_qa(registry: &mut ConfigRegistry) {
     });
 
     registry.register(ConfigMeta {
+        key: "qa.evidence_gate",
+        section: "qa",
+        name: "QA Evidence Close Gate",
+        description: "Refuse the implementer's close of a user-facing delivery until its cas-qa-craft evidence bundle is valid for the delivered commit (trace with a passing assertion, screencast receipt, final aria snapshot, polish renders, visual QA PASS, critique floor). Demo-only deliveries with no web surface need the evidence ledger instead. Also refuses deliveries that add test.fixme/skip/only markers without a cas-allow-skip reason.",
+        value_type: ConfigType::Bool,
+        default: "true",
+        constraint: Constraint::None,
+        advanced: false,
+        requires_feature: None,
+        keywords: &["qa", "evidence", "bundle", "close", "gate", "playwright", "trace", "fixme", "skip"],
+        use_cases: &[
+            "Keep enabled so user-facing deliveries cannot close without proof they were run",
+            "Disable for a project with no user-facing surface",
+        ],
+    });
+
+    registry.register(ConfigMeta {
         key: "qa.user_facing_paths",
         section: "qa",
         name: "User-Facing Paths",

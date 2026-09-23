@@ -103,7 +103,11 @@ struct ManifestFiles {
     critique: Option<String>,
 }
 
-/// Newest `qa-bundle: <path>` citation in the notes.
+/// Newest `qa-bundle: <path>` citation in the notes that is the
+/// implementer's own. cas-619f cites each independent round's bundle on the
+/// same delivery task (`<task>/independent-qa/round-<n>/bundle.json`); those
+/// are the reviewer's evidence and never stand in for, or shadow, the
+/// implementer's bundle.
 pub fn cited_bundle_path(notes: &str) -> Option<String> {
     notes
         .match_indices(BUNDLE_CITATION)
@@ -118,7 +122,7 @@ pub fn cited_bundle_path(notes: &str) -> Option<String> {
                         .trim_end_matches(|ch: char| "(),[]{}<>\"'`;*.".contains(ch))
                         .to_string()
                 })
-                .filter(|path| !path.is_empty())
+                .filter(|path| !path.is_empty() && !path.contains("/independent-qa/"))
         })
         .last()
 }

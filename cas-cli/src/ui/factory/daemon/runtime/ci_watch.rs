@@ -1014,7 +1014,6 @@ mod tests {
     use super::*;
     use cas_store::SqlitePromptQueueStore;
     use std::cell::Cell;
-    use std::os::unix::fs::PermissionsExt;
 
     struct FakeTransport {
         runs: Vec<CiRun>,
@@ -1153,12 +1152,10 @@ mod tests {
     fn gh_delivery_pull_request_query_parses_stubbed_gh_output() {
         let temp = tempfile::TempDir::new().unwrap();
         let gh = temp.path().join("gh");
-        std::fs::write(
+        crate::test_paths::warm_stub(
             &gh,
             "#!/bin/sh\nprintf '%s' '[{\"number\":932,\"headRefName\":\"factory/calm-octopus-51\",\"headRefOid\":\"worker-tip\",\"state\":\"MERGED\",\"mergedAt\":\"2026-09-21T12:00:00Z\",\"mergeCommit\":{\"oid\":\"merge-tip\"}}]'\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         let transport = GhCiTransport {
             repo: "org/repo".to_string(),
             cwd: temp.path().to_path_buf(),

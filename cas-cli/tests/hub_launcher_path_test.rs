@@ -4,7 +4,6 @@ use std::path::Path;
 
 use assert_cmd::Command;
 use serde_json::Value;
-use tempfile::TempDir;
 
 fn cas_command(home: &Path, path: &Path) -> Command {
     let mut command = Command::new(cas::test_paths::cas_binary());
@@ -18,8 +17,8 @@ fn cas_command(home: &Path, path: &Path) -> Command {
 
 #[test]
 fn detached_hub_launcher_starts_with_an_empty_path() {
-    let home = TempDir::new().unwrap();
-    let empty_path = TempDir::new().unwrap();
+    let home = cas::test_paths::private_hub_tempdir();
+    let empty_path = cas::test_paths::private_hub_tempdir();
 
     let start = cas_command(home.path(), empty_path.path())
         .args(["--json", "hub", "start", "--port", "0"])

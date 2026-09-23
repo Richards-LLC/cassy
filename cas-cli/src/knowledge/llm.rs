@@ -399,11 +399,9 @@ mod tests {
     /// the flags the runner passes, so the test controls exit status and output.
     #[cfg(unix)]
     fn stub(script: &str) -> (tempfile::TempDir, String) {
-        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("provider");
-        std::fs::write(&path, format!("#!/bin/sh\n{script}\n")).expect("write stub");
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        crate::test_paths::warm_stub(&path, &format!("#!/bin/sh\n{script}\n"));
         let name = path.to_string_lossy().to_string();
         (dir, name)
     }

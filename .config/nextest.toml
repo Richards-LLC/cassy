@@ -27,3 +27,14 @@ failure-output = "immediate-final"
 fail-fast = false
 status-level = "fail"
 final-status-level = "slow"
+
+[test-groups]
+# Each hub integration test launches several large debug binaries and its own
+# detached service. Bound macOS process-start contention while still running
+# independent homes in parallel.
+hub-process = { max-threads = 4 }
+
+[[profile.default.overrides]]
+filter = 'binary(hub_clean_home_test)'
+platform = 'cfg(target_os = "macos")'
+test-group = 'hub-process'

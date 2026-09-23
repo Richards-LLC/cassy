@@ -290,21 +290,16 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn export_uses_mapped_directory_and_account_root() {
-        use std::os::unix::fs::PermissionsExt;
         let root = TempDir::new().unwrap();
         let directory = TempDir::new().unwrap();
         let account = TempDir::new().unwrap();
         let cas_id = "opencode-isolated";
         let state = state(&root, cas_id, directory.path());
         let script = root.path().join("fake-opencode");
-        std::fs::write(
+        crate::test_paths::warm_stub(
             &script,
             "#!/bin/sh\nprintf '%s|%s|%s' \"$PWD\" \"$CAS_OPENCODE_ACCOUNT_DIR\" \"$2\"\n",
-        )
-        .unwrap();
-        let mut permissions = std::fs::metadata(&script).unwrap().permissions();
-        permissions.set_mode(0o700);
-        std::fs::set_permissions(&script, permissions).unwrap();
+        );
 
         let rendered = export_session_with_deadline(
             &script,

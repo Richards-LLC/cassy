@@ -965,7 +965,7 @@ mod tests {
         let bin = fixture.path().join("bin");
         fs::create_dir(&bin).unwrap();
         let systemctl = bin.join("systemctl");
-        fs::write(
+        crate::test_paths::warm_stub(
             &systemctl,
             r#"#!/bin/sh
 printf '%s\n' "$*" >> "$CAS_SYSTEMCTL_LOG"
@@ -979,9 +979,7 @@ if [ "$1" = "--user" ] && [ "$2" = "restart" ] && [ "$3" = "cas-hub.service" ]; 
 fi
 exit 1
 "#,
-        )
-        .unwrap();
-        fs::set_permissions(&systemctl, fs::Permissions::from_mode(0o700)).unwrap();
+        );
         env.set(SYSTEMCTL_PATH_ENV, &systemctl);
 
         let log = fixture.path().join("systemctl.log");

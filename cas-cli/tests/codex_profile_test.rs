@@ -8,8 +8,9 @@
 
 use assert_cmd::Command;
 use predicates::prelude::*;
+#[cfg(target_os = "linux")]
 use std::io::Write;
-use std::os::unix::fs::PermissionsExt;
+#[cfg(target_os = "linux")]
 use std::process::{Command as StdCommand, Stdio};
 use tempfile::TempDir;
 
@@ -50,7 +51,7 @@ fn home_with_profiles() -> TempDir {
     let bin = home.path().join("bin");
     std::fs::create_dir_all(&bin).unwrap();
     let codex = bin.join("codex");
-    std::fs::write(
+    cas::test_paths::warm_stub(
         &codex,
         r#"#!/bin/sh
 if [ "$1" = "login" ] && [ "$2" = "status" ]; then
@@ -68,11 +69,7 @@ fi
 printf 'BARE_CODEX_HOME=%s\n' "${CODEX_HOME:-<main>}"
 exit 0
 "#,
-    )
-    .unwrap();
-    let mut permissions = std::fs::metadata(&codex).unwrap().permissions();
-    permissions.set_mode(0o755);
-    std::fs::set_permissions(&codex, permissions).unwrap();
+    );
     home
 }
 

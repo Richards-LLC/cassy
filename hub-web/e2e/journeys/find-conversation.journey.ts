@@ -23,6 +23,10 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
   await journey.stage("Jump to a supervisor by name", async () => {
     await page.getByRole("button", { name: "Appearance & commands" }).click();
     await page.getByRole("searchbox", { name: "Filter commands" }).fill(OTTER);
+    const commands = page.locator("#command-palette .palette-command");
+    await expect(commands.visible()).toHaveCount(1);
+    await expect(commands.visible().first()).toContainText(`Jump to ${OTTER}`);
+    await expect(page.getByRole("button", { name: /Appearance · Dark/ })).toBeHidden();
     await page.getByRole("button", { name: new RegExp(`Jump to ${OTTER}`) }).click();
     await expect(page.getByRole("button", { name: `Send to ${OTTER}`, exact: true })).toBeVisible();
     await expect(page.locator(".conversation-host")).toContainText("gabber-studio · Studio Mac");

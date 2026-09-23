@@ -140,6 +140,27 @@ impl Config {
                 "qa.telemetry_sweep".to_string(),
                 qa.telemetry_sweep.unwrap_or_default(),
             ),
+            (
+                "qa.independent_pass".to_string(),
+                qa.independent_pass.to_string(),
+            ),
+            (
+                "qa.evidence_gate".to_string(),
+                qa.evidence_gate.to_string(),
+            ),
+            (
+                "qa.terminal_render_paths".to_string(),
+                qa.terminal_render_paths.join(","),
+            ),
+            (
+                "qa.user_facing_paths".to_string(),
+                qa.user_facing_paths.join(","),
+            ),
+            (
+                "qa.pass_timeout_mins".to_string(),
+                qa.pass_timeout_mins.to_string(),
+            ),
+            ("qa.max_rounds".to_string(), qa.max_rounds.to_string()),
             // Dev section
             ("dev.dev_mode".to_string(), dev.dev_mode.to_string()),
             (

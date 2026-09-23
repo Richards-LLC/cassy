@@ -354,7 +354,9 @@ pub struct SystemRequest {
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct VerificationRequest {
     /// Action to perform
-    #[schemars(description = "Action: 'add', 'show', 'list', 'latest', 'external_verify'")]
+    #[schemars(
+        description = "Action: 'add', 'show', 'list', 'latest', 'external_verify', 'qa_record', 'qa_waive', 'qa_status'"
+    )]
     pub action: String,
 
     /// Verification ID (for show)
@@ -434,6 +436,11 @@ pub struct VerificationRequest {
     #[schemars(description = "external_verify: JSON array of {name, expected} check objects")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub required_checks: Option<String>,
+
+    /// cas-619f: absolute path of the independent QA round's LEDGER.md.
+    #[schemars(description = "qa_record: absolute path of this round's LEDGER.md")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ledger_path: Option<String>,
 }
 
 /// Unified published-artifact operations request (cassy#910).

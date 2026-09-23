@@ -6086,8 +6086,15 @@ impl CasService {
                 }
             }
         }
-        let report =
+        let mut report =
             render_epic_status_collection(epic_id, parent_branch, &collection, &stacked_on);
+        // cas-619f: independent QA state per child, including supervisor
+        // waivers and their reasons. Omitted entirely when no child has a
+        // round, so epics without user-facing work render as before.
+        report.push_str(&crate::qa_pass::render_epic_qa_section(
+            &self.inner.cas_root,
+            &subtasks,
+        ));
 
         Ok(Self::success(report))
     }

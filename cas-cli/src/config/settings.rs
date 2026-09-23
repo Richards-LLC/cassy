@@ -271,6 +271,76 @@ pub struct QaConfig {
     /// the `cas-qa-craft` skill before it exercises a task's demo statement.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub telemetry_sweep: Option<String>,
+
+    /// cas-619f: dispatch an independent QA + polish pass (a different agent
+    /// than the implementer) before a user-facing factory delivery merges.
+    #[serde(default = "default_independent_pass")]
+    pub independent_pass: bool,
+
+    /// cas-0cd5: refuse the implementer's close of a user-facing delivery
+    /// until its cas-qa-craft evidence bundle (or, for demo-only non-web
+    /// deliveries, its evidence ledger) is valid for the delivered head.
+    #[serde(default = "default_evidence_gate")]
+    pub evidence_gate: bool,
+
+    /// cas-0cd5: repo-relative globs whose change means a delivery alters
+    /// terminal rendering. A demo-only (non-web) delivery touching one needs a
+    /// cas-cli-craft terminal-qa PASS receipt as well as its evidence ledger.
+    #[serde(default = "default_terminal_render_paths")]
+    pub terminal_render_paths: Vec<String>,
+
+    /// cas-619f: repo-relative globs whose change makes a delivery
+    /// user-facing even without a label or demo_statement.
+    #[serde(default = "default_user_facing_paths")]
+    pub user_facing_paths: Vec<String>,
+
+    /// cas-619f: minutes one independent QA round may take before it times
+    /// out and the supervisor must redispatch or waive.
+    #[serde(default = "default_pass_timeout_mins")]
+    pub pass_timeout_mins: u32,
+
+    /// cas-619f: rejected QA rounds before Cassy escalates to the supervisor
+    /// instead of opening another round.
+    #[serde(default = "default_max_rounds")]
+    pub max_rounds: u32,
+}
+
+pub fn default_independent_pass() -> bool {
+    true
+}
+
+pub fn default_evidence_gate() -> bool {
+    true
+}
+
+pub fn default_terminal_render_paths() -> Vec<String> {
+    ["**/ui/**", "**/tui/**", "**/*render*", "**/*output*", "**/*theme*", "**/*progress*"]
+        .into_iter()
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+pub fn default_user_facing_paths() -> Vec<String> {
+    [
+        "**/*.html",
+        "**/*.css",
+        "**/*.scss",
+        "**/*.vue",
+        "**/*.svelte",
+        "**/*.tsx",
+        "**/*.jsx",
+    ]
+    .into_iter()
+    .map(ToOwned::to_owned)
+    .collect()
+}
+
+pub fn default_pass_timeout_mins() -> u32 {
+    45
+}
+
+pub fn default_max_rounds() -> u32 {
+    3
 }
 
 pub fn default_user_facing_labels() -> Vec<String> {
@@ -285,6 +355,12 @@ impl Default for QaConfig {
         Self {
             user_facing_labels: default_user_facing_labels(),
             telemetry_sweep: None,
+            independent_pass: default_independent_pass(),
+            evidence_gate: default_evidence_gate(),
+            terminal_render_paths: default_terminal_render_paths(),
+            user_facing_paths: default_user_facing_paths(),
+            pass_timeout_mins: default_pass_timeout_mins(),
+            max_rounds: default_max_rounds(),
         }
     }
 }

@@ -142,7 +142,7 @@ At minimum, `PtyConfig::grok` sets:
 | 1.0.31 | MCP prefix retention · worktree path/scrollback/dashboard fixes | 👀 / 🟢 | this doc |
 | 1.0.30 | Session timing · workflow status · tmux lag | 👀 / ⏭ | this doc |
 | 1.0.25 | Hook silence · headless timeout · MCP/session/workflow fixes | 👀 / 🟢 | this doc |
-| 1.0.24 | Esc no longer cancels a running turn | 👀 | this doc |
+| 1.0.24 | Esc no longer cancels a running turn | 🟢 already covered | this doc |
 | 1.0.23 | Wrapped URL/email links | ⏭ | this doc |
 | 1.0.22 | MCP precedence · permission diffs · session/subagent/workflow reliability | 👀 / 🟢 | this doc |
 | 1.0.21 | Permission mode/session welcome-screen fixes | 👀 / ⏭ | this doc |
@@ -296,11 +296,13 @@ Reviewed 2026-09-23. Source: [Releasebot's per-version Grok Build feed](https://
 which attributes the **1.0.24 — 2026-09-07** note to xAI.
 
 - **Esc no longer cancels a running turn and instead reminds users to use
-  Ctrl+C.** → 👀 **watch — urgent interrupt and liveness.** Cassy's urgent
-  interrupt-and-redirect sends Esc through `Pane::break_turn`
-  (`crates/cas-pty/src/pty.rs:5421-5426`, cas-c931). On Grok ≥1.0.24 this
-  behavior may leave a worker turn running, so **cas-ef93** must test the
-  urgent-interrupt path against 1.0.40 before the validated pin advances.
+  Ctrl+C.** → 🟢 **already covered.** Cassy's urgent interrupt-and-redirect
+  calls `Pane::break_turn` (`crates/cas-mux/src/pane/mod.rs:1462`), which
+  writes the harness's own cancel bytes; the Grok backend returns Ctrl+C
+  (`0x03`), not Esc (`crates/cas-mux/src/backend/grok.rs:70-72`, pinned by
+  `crates/cas-mux/src/harness.rs:293-296`, since cas-7f6f). Live confirmation
+  against 1.0.40 passed in **cas-ef93** and is recorded in the typed
+  `grok-build-1.0.40-2026-09-23` receipt.
 
 ### 1.0.23 — wrapped URL/email links
 

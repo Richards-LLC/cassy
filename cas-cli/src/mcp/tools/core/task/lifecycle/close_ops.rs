@@ -1378,10 +1378,36 @@ fn proof_targets_scope_fix_command(task: &Task, uncovered: &[String]) -> String 
         }
     }
     format!(
-        "Ask a live registered supervisor to run `task action=update id={} proof_targets=\"{}\" proof_scope_fix=true reason=\"widen proof scope for delivered modules\"`, then record scoped proof for every module and retry close.",
+        "Ask a live registered supervisor to run `task action=update id={} proof_targets=\"{}\" proof_scope_fix=true reason=\"widen proof scope for delivered modules\"`, then record scoped proof and retry close. If no delivery transaction exists, a live registered supervisor may instead close with `supervisor_override=true reason=\"reviewed uncovered source modules and accepted the measured scope mismatch\"`; the waived modules are recorded on the task.",
         task.id,
         targets.join(",")
     )
+}
+
+fn declared_risk_close_gaps(task: &Task, changed_paths: &[String]) -> Vec<String> {
+    let mut gaps = Vec::new();
+    if task.risk.contains(&TaskRisk::Platform) && !has_platform_proof_note(&task.notes) {
+        gaps.push(format!(
+            "platform_proof missing evidence: {}",
+            platform_proof_missing_evidence(&task.notes).join(", ")
+        ));
+    }
+    if task.risk.contains(&TaskRisk::Concurrency) && !has_loaded_proof_note(&task.notes) {
+        gaps.push(format!(
+            "loaded_proof missing evidence: {}",
+            loaded_proof_missing_evidence(&task.notes).join(", ")
+        ));
+    }
+    if task.risk.contains(&TaskRisk::BlastRadius) {
+        let uncovered = uncovered_blast_radius_modules(changed_paths, &task.proof_targets);
+        if !uncovered.is_empty() {
+            gaps.push(format!(
+                "blast-radius uncovered source modules: {}",
+                uncovered.join(", ")
+            ));
+        }
+    }
+    gaps
 }
 
 fn validate_risk_close_proofs(
@@ -1428,7 +1454,8 @@ fn validate_risk_close_proofs_with_base_and_target_and_cache(
     if task.risk.contains(&TaskRisk::Platform) && !has_platform_proof_note(&task.notes) {
         let missing = platform_proof_missing_evidence(&task.notes).join(", ");
         return Err(format!(
-            "TASK CLOSE REJECTED: task {} declares risk=platform but its platform_proof receipt is incomplete (missing evidence: {missing}). Add one with action=notes note_type=platform_proof containing macOS, a platform command, and a passing result, then retry close.",
+            "TASK CLOSE REJECTED: task {} declares risk=platform but its platform_proof receipt is incomplete (missing evidence: {missing}). Add one with action=notes note_type=platform_proof containing macOS, a platform command, and a passing result, then retry close. If platform risk was declared in error, a live registered supervisor may run `task action=update id={} risk=none proof_scope_fix=true reason=\"correct erroneous platform risk\"` on a merged delivery, or close with `supervisor_override=true reason=\"reviewed the platform-risk mismatch\"`; the missing evidence is recorded on the task.",
+            task.id,
             task.id,
         ));
     }
@@ -1484,6 +1511,20 @@ fn validate_risk_close_proofs_with_base_and_target_and_cache(
 #[cfg(test)]
 mod risk_proof_tests {
     use super::*;
+
+    #[test]
+    fn supervisor_override_measurement_names_every_declared_risk_gap() {
+        let mut task = Task::new("cas-8d38-risk".into(), "risk measurement".into());
+        task.risk = vec![TaskRisk::Platform, TaskRisk::BlastRadius];
+        task.proof_targets = vec!["lifecycle".into()];
+        let gaps = declared_risk_close_gaps(
+            &task,
+            &["cas-cli/src/mcp/tools/service/core.rs".into()],
+        );
+        assert_eq!(gaps.len(), 2);
+        assert!(gaps[0].contains("platform_proof missing evidence"));
+        assert!(gaps[1].contains("uncovered source modules: core"));
+    }
 
     #[test]
     fn blast_radius_names_modules_missing_from_proof_scope() {
@@ -6184,6 +6225,7 @@ impl CasCore {
                 })
             };
 
+        let mut waived_risk_gate = None;
         if close_disposition.requires_delivery_gates() {
             let proof_repo = worker_worktree_path
                 .as_deref()
@@ -6240,7 +6282,26 @@ impl CasCore {
                 scoped_proof_base.as_deref(),
                 &mut scoped_proof_cache,
             ) {
-                return Ok(Self::tool_error(message));
+                let measured_gaps = declared_risk_close_gaps(&task, &changed_paths);
+                if !supervisor_override || measured_gaps.is_empty() {
+                    return Ok(Self::tool_error(message));
+                }
+                // Supervisor authority and a non-empty reason were checked at
+                // entry. Waive only the declared-risk mismatch; the mandatory
+                // scoped proof derived from the actual diff still runs.
+                let mut without_declared_risk = task.clone();
+                without_declared_risk.risk = vec![TaskRisk::None];
+                if let Err(scoped_error) = validate_risk_close_proofs_with_base_and_target_and_cache(
+                    &without_declared_risk,
+                    &changed_paths,
+                    proof_repo,
+                    target_repo,
+                    scoped_proof_base.as_deref(),
+                    &mut scoped_proof_cache,
+                ) {
+                    return Ok(Self::tool_error(scoped_error));
+                }
+                waived_risk_gate = Some(measured_gaps.join("; "));
             }
         }
 
@@ -6485,6 +6546,11 @@ impl CasCore {
                 task.notes = decision_note;
             } else {
                 task.notes = format!("{}\n\n{}", task.notes, decision_note);
+            }
+            if let Some(measurement) = waived_risk_gate.as_deref() {
+                task.notes.push_str(&format!(
+                    "\n\n[{timestamp}] DECISION: supervisor waived declared-risk close gate after measuring: {measurement}"
+                ));
             }
         }
 

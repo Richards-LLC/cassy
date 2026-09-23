@@ -514,6 +514,72 @@ async fn cas525c_supervisor_proof_scope_fix_reopens_with_decision_not_review_fai
             .notes
             .contains("changes requested by supervisor")
     );
+
+    // A worktree_merge can land before any worker completion receipt exists.
+    // Its observed WorkTarget merge is sufficient for an audited correction;
+    // no worker proof or delivery transaction is fabricated.
+    let observed_created = unified_task(
+        &service,
+        serde_json::json!({
+            "action": "create",
+            "risk": "platform",
+            "title": "Correct risk on observed merge",
+            "target_repo": temp.path().to_str().unwrap(),
+            "target_branch": "main"
+        }),
+    )
+    .await;
+    let observed_id = extract_task_id(&observed_created).unwrap().to_string();
+    let mut observed_task = store.get(&observed_id).unwrap();
+    observed_task.status = TaskStatus::InProgress;
+    store.update(&observed_task).unwrap();
+    cas_store::record_observed_delivery_merge(
+        &cas_dir,
+        &observed_id,
+        "factory/worker",
+        "release",
+        &"a".repeat(40),
+        &"b".repeat(40),
+        "supervisor-session",
+    )
+    .unwrap();
+    let wrong_target: cas_mcp::TaskRequest = serde_json::from_value(serde_json::json!({
+        "action": "update",
+        "id": observed_id,
+        "risk": "none",
+        "proof_scope_fix": true,
+        "reason": "A merge on another branch cannot correct this WorkTarget."
+    }))
+    .unwrap();
+    let rejected = service.task(Parameters(wrong_target)).await.unwrap_err();
+    assert!(rejected.message.contains("WorkTarget"), "{}", rejected.message);
+    assert_eq!(store.get(&observed_id).unwrap().risk, [cas::types::TaskRisk::Platform]);
+    cas_store::record_observed_delivery_merge(
+        &cas_dir,
+        &observed_id,
+        "factory/worker",
+        "main",
+        &"a".repeat(40),
+        &"b".repeat(40),
+        "supervisor-session",
+    )
+    .unwrap();
+    let corrected_observed = unified_task(
+        &service,
+        serde_json::json!({
+            "action": "update",
+            "id": observed_id,
+            "risk": "none",
+            "proof_scope_fix": true,
+            "reason": "WorkTarget merge was observed, and platform risk was declared in error."
+        }),
+    )
+    .await;
+    assert!(corrected_observed.contains("Corrected proof scope"), "{corrected_observed}");
+    assert_eq!(store.get(&observed_id).unwrap().risk, [cas::types::TaskRisk::None]);
+    assert!(cas_store::get_latest_worker_delivery(&cas_dir, &observed_id)
+        .unwrap()
+        .is_none());
 }
 
 #[tokio::test]
@@ -577,6 +643,18 @@ async fn casd86d_supervisor_widens_targets_on_merged_delivery_without_review_fai
         None,
     )
     .unwrap();
+    cas_store::transition_worker_delivery(
+        &cas_dir,
+        &delivery.id,
+        &[WorkerDeliveryState::Merged],
+        WorkerDeliveryState::CloseReady,
+        "supervisor-session",
+        Some("supervisor-session"),
+        None,
+        Some(&"d".repeat(40)),
+        None,
+    )
+    .unwrap();
 
     set_test_agent_role(&cas_dir, AgentRole::Supervisor);
     let fixed = unified_task(
@@ -603,7 +681,7 @@ async fn casd86d_supervisor_widens_targets_on_merged_delivery_without_review_fai
             .unwrap()
             .1
             .state,
-        WorkerDeliveryState::Merged,
+        WorkerDeliveryState::CloseReady,
         "scope correction must preserve the immutable merged delivery fact"
     );
 
@@ -622,6 +700,151 @@ async fn casd86d_supervisor_widens_targets_on_merged_delivery_without_review_fai
     .await;
     assert!(reclosed.contains("Closed task"), "{reclosed}");
     assert_eq!(store.get(&task_id).unwrap().status, TaskStatus::Closed);
+}
+
+#[tokio::test]
+async fn cas8d38_supervisor_corrects_platform_risk_after_close_ready_merge() {
+    let (temp, core) = setup_cas();
+    let _env_lock = env_test_lock();
+    let cas_dir = temp.path().join(".cas");
+    let service = CasService::new(core, None);
+
+    let created = unified_task(
+        &service,
+        serde_json::json!({
+            "action": "create",
+            "risk": "platform",
+            "title": "Correct mistaken platform risk"
+        }),
+    )
+    .await;
+    let task_id = extract_task_id(&created).unwrap().to_string();
+    let store = open_task_store(&cas_dir).unwrap();
+    let mut task = store.get(&task_id).unwrap();
+    task.status = TaskStatus::InProgress;
+    store.update(&task).unwrap();
+
+    let receipt = cas_store::build_worker_completion_receipt(
+        &WorkerCompletionReceiptInput {
+            task_id: task_id.clone(),
+            worker_agent_id: "worker-session".into(),
+            repo_selector: "remote:github.com/example/cas8d38".into(),
+            source_branch: "factory/worker".into(),
+            commit_sha: "a".repeat(40),
+            merge_base_sha: "b".repeat(40),
+            target_branch: "main".into(),
+            target_sha: "c".repeat(40),
+            proof_reference: "scoped proof".into(),
+            scope_summary: "platform risk correction".into(),
+            artifact_path: None,
+        },
+        "worker",
+        chrono::Utc::now(),
+    );
+    let delivery = cas_store::create_worker_delivery(
+        &cas_dir,
+        &receipt,
+        WorkerDeliveryState::AwaitingMerge,
+        "worker-session",
+    )
+    .unwrap();
+    cas_store::transition_worker_delivery(
+        &cas_dir,
+        &delivery.id,
+        &[WorkerDeliveryState::AwaitingMerge],
+        WorkerDeliveryState::Merged,
+        "supervisor-session",
+        Some("supervisor-session"),
+        None,
+        Some(&"d".repeat(40)),
+        None,
+    )
+    .unwrap();
+    cas_store::transition_worker_delivery(
+        &cas_dir,
+        &delivery.id,
+        &[WorkerDeliveryState::Merged],
+        WorkerDeliveryState::CloseReady,
+        "supervisor-session",
+        Some("supervisor-session"),
+        None,
+        Some(&"d".repeat(40)),
+        None,
+    )
+    .unwrap();
+
+    set_test_agent_role(&cas_dir, AgentRole::Supervisor);
+    let fixed = unified_task(
+        &service,
+        serde_json::json!({
+            "action": "update",
+            "id": task_id,
+            "risk": "none",
+            "proof_scope_fix": true,
+            "reason": "Platform risk was assigned to this Linux-only change by mistake."
+        }),
+    )
+    .await;
+    assert!(fixed.contains("Corrected proof scope"), "{fixed}");
+    let corrected = store.get(&task_id).unwrap();
+    assert_eq!(corrected.status, TaskStatus::Open);
+    assert_eq!(corrected.risk, [cas::types::TaskRisk::None]);
+    assert!(corrected.notes.contains("Risk corrected to none"));
+    assert_eq!(
+        cas_store::get_latest_worker_delivery(&cas_dir, &task_id)
+            .unwrap()
+            .unwrap()
+            .1
+            .state,
+        WorkerDeliveryState::CloseReady
+    );
+}
+
+#[tokio::test]
+async fn cas8d38_supervisor_override_closes_platform_mismatch_with_measurement() {
+    let (temp, core) = setup_cas();
+    let _env_lock = env_test_lock();
+    let cas_dir = temp.path().join(".cas");
+    let service = CasService::new(core, None);
+    let created = unified_task(
+        &service,
+        serde_json::json!({
+            "action": "create",
+            "risk": "platform",
+            "depth": "light",
+            "title": "Close mistaken platform risk"
+        }),
+    )
+    .await;
+    let task_id = extract_task_id(&created).unwrap().to_string();
+
+    let ordinary = unified_task(
+        &service,
+        serde_json::json!({
+            "action": "close",
+            "id": task_id,
+            "reason": "Linux-only change has no macOS evidence."
+        }),
+    )
+    .await;
+    assert!(ordinary.contains("platform_proof receipt is incomplete"), "{ordinary}");
+
+    set_test_agent_role(&cas_dir, AgentRole::Supervisor);
+    let overridden = unified_task(
+        &service,
+        serde_json::json!({
+            "action": "close",
+            "id": task_id,
+            "supervisor_override": true,
+            "reason": "Reviewed the Linux-only scope and accepted the mistaken platform declaration."
+        }),
+    )
+    .await;
+    assert!(overridden.contains("Closed task"), "{overridden}");
+    let closed = open_task_store(&cas_dir).unwrap().get(&task_id).unwrap();
+    assert_eq!(closed.status, TaskStatus::Closed);
+    assert!(closed.notes.contains("supervisor waived declared-risk close gate"));
+    assert!(closed.notes.contains("platform_proof missing evidence: typed note_type=platform_proof"));
 }
 
 #[tokio::test]

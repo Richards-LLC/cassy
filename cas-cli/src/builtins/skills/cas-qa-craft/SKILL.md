@@ -13,6 +13,9 @@ and not a substitute for unit or integration tests. Time-box the whole pass to
 For an epic with child demos, use the supervisor's
 [epic flow walk](../cas-supervisor/references/epic-flow-walk.md):
 one combined matrix with a **60-minute** box overrides the task defaults below.
+If you started a `qa-pass` task, you are the independent reviewer of someone
+else's delivery: follow [references/independent-pass.md](references/independent-pass.md)
+instead of the procedure below.
 
 ## Procedure
 
@@ -71,3 +74,9 @@ then add every valid finding as a `telemetry sweep` row labeled
 `eyewitness/telemetry` using [references/telemetry-sweep.md](references/telemetry-sweep.md).
 If it is unset, write the exact header line `sweep: not configured` and
 continue the ordinary matrix.
+
+## User journeys
+
+Walk the user journeys a change touches, from the real entry point to the
+user's goal, and score the experience, not just pass/fail. User-facing epics
+keep `docs/qa/journeys.md` current. See [references/journeys.md](references/journeys.md).

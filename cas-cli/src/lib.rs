@@ -66,6 +66,7 @@ pub mod otel;
 pub mod qa_evidence;
 pub mod opencode_preflight;
 pub(crate) mod prompt_revalidation;
+pub mod qa_pass;
 pub mod retrieval_eval;
 pub mod retrieval_parity;
 pub mod sentry;

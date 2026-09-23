@@ -295,6 +295,46 @@ impl Config {
                     Some(value.trim().to_string())
                 };
             }
+            "qa.independent_pass" => {
+                let qa = self.qa.get_or_insert_with(QaConfig::default);
+                qa.independent_pass = value
+                    .trim()
+                    .parse()
+                    .map_err(|_| MemError::Parse(format!("Invalid boolean value: {value}")))?;
+            }
+            "qa.user_facing_paths" => {
+                let qa = self.qa.get_or_insert_with(QaConfig::default);
+                qa.user_facing_paths = value
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|glob| !glob.is_empty())
+                    .map(ToOwned::to_owned)
+                    .collect();
+            }
+            "qa.pass_timeout_mins" => {
+                let qa = self.qa.get_or_insert_with(QaConfig::default);
+                let minutes: u32 = value
+                    .trim()
+                    .parse()
+                    .map_err(|_| MemError::Parse(format!("Invalid minutes value: {value}")))?;
+                if minutes == 0 {
+                    return Err(MemError::Parse(
+                        "qa.pass_timeout_mins must be at least 1".to_string(),
+                    ));
+                }
+                qa.pass_timeout_mins = minutes;
+            }
+            "qa.max_rounds" => {
+                let qa = self.qa.get_or_insert_with(QaConfig::default);
+                let rounds: u32 = value
+                    .trim()
+                    .parse()
+                    .map_err(|_| MemError::Parse(format!("Invalid round count: {value}")))?;
+                if rounds == 0 {
+                    return Err(MemError::Parse("qa.max_rounds must be at least 1".to_string()));
+                }
+                qa.max_rounds = rounds;
+            }
             // Dev section
             "dev.dev_mode" => {
                 let dev = self.dev.get_or_insert_with(DevConfig::default);

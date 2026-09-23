@@ -5,6 +5,7 @@
 
 use std::io::Write as _;
 
+use cas_factory::routing::{CapabilitySnapshot, resolve_lane};
 use cas_factory::{
     ConfigSources, resolve_specs, resolve_supervisor_spec, worker_slot_cli_configured,
     worker_slot_effort_configured,
@@ -670,6 +671,9 @@ fn all_effort_variants_roundtrip_through_toml() {
 
 #[test]
 fn supervisor_spec_defaults_to_supervisor_lane() {
+    let lane = resolve_lane("supervisor", &CapabilitySnapshot::default())
+        .unwrap()
+        .spec;
     let spec = resolve_supervisor_spec(ConfigSources {
         user_config: Some(nonexistent_path()),
         project_config: None,
@@ -677,9 +681,9 @@ fn supervisor_spec_defaults_to_supervisor_lane() {
     })
     .unwrap();
 
-    assert_eq!(spec.cli, SupervisorCli::Claude);
-    assert_eq!(spec.model.as_deref(), Some("claude-fable-5-1"));
-    assert_eq!(spec.effort, Some(Effort::Medium));
+    assert_eq!(spec.cli, lane.cli);
+    assert_eq!(spec.model, lane.model);
+    assert_eq!(spec.effort, lane.effort);
 }
 
 #[test]
@@ -811,6 +815,9 @@ fn supervisor_spec_invalid_json_returns_error() {
 
 #[test]
 fn supervisor_spec_factory_workers_toml_does_not_affect_supervisor() {
+    let lane = resolve_lane("supervisor", &CapabilitySnapshot::default())
+        .unwrap()
+        .spec;
     // [[factory.workers]] must not bleed into the supervisor spec.
     let project = toml_file(
         r#"
@@ -829,14 +836,12 @@ effort = "minimal"
 
     // Supervisor should see the supervisor lane default, NOT the worker TOML.
     assert_eq!(
-        spec.cli,
-        SupervisorCli::Claude,
+        spec.cli, lane.cli,
         "[[factory.workers]] must not affect supervisor"
     );
     assert_eq!(
-        spec.effort,
-        Some(Effort::Medium),
+        spec.effort, lane.effort,
         "[[factory.workers]] must not affect supervisor"
     );
-    assert_eq!(spec.model.as_deref(), Some("claude-fable-5-1"));
+    assert_eq!(spec.model, lane.model);
 }

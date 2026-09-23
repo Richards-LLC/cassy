@@ -11,7 +11,7 @@ use crate::types::{Entry, EntryType, MemoryTier};
 fn test_daemon_config_default() {
     let config = DaemonConfig::default();
     assert_eq!(config.interval_minutes, 30);
-    assert_eq!(config.model, "haiku");
+    assert_eq!(config.model, "gpt-6-luna");
     assert!(config.auto_prune);
 }
 

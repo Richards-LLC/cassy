@@ -41,8 +41,8 @@ verify on upgrade) · 🔧 fix shipped · 🏗 EPIC · ⏭ n/a
   initialized disposable `CAS_ROOT`, worktree discovery fixtures, code-mode coexistence, and
   interrupt/resume recovery. The typed receipt records the live run and the scoped factory parity
   gate. The non-gating 0.149.1 probe also found `-c model_reasoning_effort=max` accepted by Codex
-  0.149.1; Cassy still maps only its existing `Effort::XHigh` → `xhigh` vocabulary because no
-  Effort implementation change is part of that validation. The older entries below remain a
+  0.149.1; Cassy supports both `Effort::XHigh` → `xhigh` and `Effort::Max` → `max`
+  (cas-556a); the probe did not change either mapping. The older entries below remain a
   *triage pass* against release-note items, while the current 0.156.0 receipt validates the
   load-bearing touchpoints. (Contrast the Claude Code diary's .166/.162 entries, which were
   deep-verified for specific user questions.) The
@@ -59,7 +59,7 @@ The load-bearing surface, all in `crates/cas-pty/src/pty.rs::PtyConfig::codex` u
   `--dangerously-skip-permissions`). If renamed/removed/semantically narrowed, workers can't act.
   Watch any "sandbox / approval / deny-rule enforcement" changelog line.
 - **`-c model_reasoning_effort=<e>`** — effort is set via a **TOML `-c` override, not a flag**
-  (vocabulary: none/minimal/low/medium/high/xhigh). Mapped from `Effort::as_codex_config()`
+  (vocabulary: none/minimal/low/medium/high/xhigh/max). Mapped from `Effort::as_codex_config()`
   (`crates/cas-mux/src/spec.rs:45`). Any "reasoning effort" changelog line is a 👀.
 - **`--config developer_instructions="..."`** — supervisor/worker role instructions are injected
   via this config key. A rename breaks role priming.
@@ -73,13 +73,13 @@ The load-bearing surface, all in `crates/cas-pty/src/pty.rs::PtyConfig::codex` u
 - **`AGENTS.md`** — Codex's workspace-instruction file (its CLAUDE.md analogue). Workers run in
   worktrees, so "AGENTS.md loading / symlinked workspace" changes are 👀.
 - **`CAS_AGENT_ROLE` / `CAS_FACTORY_MODE` env** — drive the same hook-local auto-approve + jail
-  exemptions as Claude workers (note: Codex has no Claude-style hook system; Cassy relies on `--yolo`
-  and env, not PreToolUse, on the Codex path).
+  exemptions as Claude workers. Cassy provisions trusted Codex `hooks.json` with
+  PreToolUse and PostToolUse hooks (cas-ba048, cas-5ae8), alongside `--yolo`.
 
 ## Index
 
 | Codex version | Headline | Cassy verdict | Pointer |
-|---------------|----------|-------------|---------|
+| --- | --- | --- | --- |
 | 0.156.0 | **Fullscreen TUI/voice/usage · worktrees default · MCP credential recovery · sandbox hardening** | 🟢 validated | [release](https://github.com/openai/codex/releases/tag/rust-v0.156.0) · receipt |
 | 0.155.0 | **Voice · daemon recovery/update · MCP Touch ID/OAuth status · sandbox hardening** | 🟢 validated | [release](https://github.com/openai/codex/releases/tag/rust-v0.155.0) · receipt |
 | 0.154.0 | **Worktrees · inline questions · plugin/skill refresh · MCP OAuth coordination · trust-gated startup** | 🟢 validated | [release](https://github.com/openai/codex/releases/tag/rust-v0.154.0) · receipt |
@@ -243,7 +243,7 @@ Reviewed 2026-08-25. Triage pass vs touchpoints. Source: official
 - **SDKs now accept exact CLI config overrides and `max`/`ultra` reasoning effort; the release also
   restores permission profiles across resumed and forked threads.** → 🟢 **validated touchpoints: `-c
   model_reasoning_effort=<e>`, `--config developer_instructions="..."`, and `--yolo`.** Cassy
-  currently maps `Effort::XHigh` to `xhigh` and launches workers with `--yolo`; these notes do not
+  mapped `Effort::XHigh` to `xhigh` at review time and launches workers with `--yolo`; these notes do not
   document a CLI rename or changed `developer_instructions` key. The 0.149.1 matrix confirmed
   `xhigh` remains accepted and the resumed factory session keeps non-interactive bypass rather than
   restoring an interactive profile.
@@ -370,6 +370,8 @@ Reviewed 2026-07-30. Triage pass vs touchpoints. Source: official `rust-v0.146.0
   #34678, #35023, #35056, #35239).** → 👀 **touchpoints: MCP (`cs`) and sandbox/network behavior.**
   The local stdio `cs` server needs no proxy or OAuth, but host proxy policy must not prevent its
   startup or alter factory network access under `--yolo`.
+
+- **2026-09-23 resolution:** Won't-do: local stdio cs needs no proxy, and the validated Linux host has no proxy policy.
 - **Named/pinned/side-conversation sessions, paginated and ephemeral forks, remote Code Mode hosts,
   standalone web search for custom providers, terminal rendering, installers, macOS signing,
   enterprise update controls, and app-server performance work.** → ⏭ n/a to the documented Cassy PTY
@@ -395,6 +397,8 @@ Reviewed 2026-07-22 (diary-codex / cas-c7f9). Triage pass vs touchpoints. Source
   not a replacement for `cas integrate`: after any import, verify the local stdio `cs` registration,
   Cassy-synced skills/agents, and workspace instructions were preserved rather than shadowed by imported
   configuration.
+
+- **2026-09-23 resolution:** Won't-do: import is optional; rerun cas integrate afterward to restore Cassy wiring.
 - **MCP startup/auth fixes add startup timeouts, avoid blocking OAuth discovery, serialize credential
   refresh, and safely reuse tool catalogs (#32229, #32781, #32825, #33184, #33297).** → 👀
   **touchpoint: MCP (`cs`).** The local stdio server has no OAuth, and catalog reuse should improve
@@ -410,6 +414,8 @@ Reviewed 2026-07-22 (diary-codex / cas-c7f9). Triage pass vs touchpoints. Source
   **touchpoint: `--yolo` + `CAS_AGENT_ROLE` / `CAS_FACTORY_MODE`.** Safety improvements are welcome,
   but confirm a factory launch still receives non-interactive full access and does not regain approval
   prompts; Windows workers should also verify proxy enforcement does not narrow expected network access.
+
+- **2026-09-23 resolution:** Won't-do for Windows: current factory hosts and receipts are Linux, so a Windows matrix would not validate this deployment.
 - **Bundled GPT-5.4 selections migrated to GPT-5.6 Terra/Luna variants (#33173), with GPT-5.6 Sol the
   Bedrock default (#32288).** → ✅ **touchpoint: `--model`.** Cassy passes the selected model through and
   does not pin these bundled defaults, so no mapping change follows from this release. The new Bedrock
@@ -445,6 +451,8 @@ rust-v0.144.0 --repo openai/codex`.
   it. Our `cs` server is local stdio with no OAuth, so expected impact is none — but **smoke
   `mcp__cs__*` load** after the bump in case the elicitation path changes MCP client startup ordering
   or hangs when a *second* MCP server in the same config needs auth.
+
+- **2026-09-23 resolution:** Won't-do for a second server: cs has no OAuth; other servers' authentication is outside the Cassy launch contract.
 - **"Reduced plugin skill-loading time on remote executors by resolving namespaces once per root"
   (#31348) + skill catalog/compaction parity tests.** → 👀 **touchpoint: `.codex/skills/`.** Perf/correctness
   on plugin skill discovery. Local `.codex/skills/` mirror (from `cas integrate`) should be unaffected;
@@ -456,10 +464,14 @@ rust-v0.144.0 --repo openai/codex`.
 - **"Windows sandbox sessions can delete files in writable roots and access the managed primary
   runtime" (#31138, #31574).** → 👀 minor **sandbox** (Windows host only). Factory `--yolo` path should
   still bypass; note for Windows workers if any.
+- **2026-09-23 resolution:** Won't-do: current factory hosts and receipts are Linux, so a Windows
+  matrix would not validate this deployment.
 - **MCP tool snapshot reuse within a sampling request (#31292); increase tool schema compaction
   threshold (#31497); round MCP timeout durations in error messages (#31612).** → 👀 **MCP (`cs`)**
   fidelity/perf. Schema compaction threshold up is usually helpful for large `cs` tool surfaces;
   smoke a few multi-arg tools on upgrade.
+
+- **2026-09-23 resolution:** Owned by cas-27e1: exercise complex multi-argument cs schemas.
 - **Usage-limit reset-credit picker, app-server hosted auth redirects, global pnpm install detection,
   Bedrock display names, TUI paste sanitization, code-mode host defaults.** → ⏭ n/a (orthogonal to the
   Cassy launch surface).
@@ -471,8 +483,8 @@ rust-v0.143.0 --repo openai/codex`. This is the first stable after the diary's p
 
 - **"…first-class support for `max` reasoning effort" (#30467, #29899; Bedrock GPT-5.6 family
   #30285).** → 👀 **touchpoint: `-c model_reasoning_effort`.** Codex now treats `max` as a first-class
-  effort level. Cassy still maps `Effort::XHigh` → `xhigh` (`Effort::as_codex_config` in
-  `crates/cas-mux/src/spec.rs`) and documents vocabulary `none/minimal/low/medium/high/xhigh`. **Verify
+  effort level. At this review Cassy mapped `Effort::XHigh` → `xhigh`; cas-556a later added
+  `Effort::Max` → `max`. **Verify
   on upgrade** that `xhigh` still accepts/works; if Codex deprecates `xhigh` in favor of `max` (or
   models only advertise `max`), Cassy needs a mapping update. No evidence of rename in this release —
   additive `max` support is the safer reading.
@@ -508,6 +520,8 @@ rust-v0.143.0 --repo openai/codex`. This is the first stable after the diary's p
   the Cassy PTY launch surface). Cancelled-review MCP-busy fix (#31189) is a minor reliability win if a
   human runs `/review` in a shared Codex, not a factory concern.
 
+- **2026-09-23 resolution:** Won't-do: the validated Linux host has no proxy policy to exercise.
+
 ### 0.142.5 — trace-log payload redaction backport
 
 Reviewed 2026-07-07 (patient-condor-18 / supervisor). Locally installed at review time.
@@ -529,6 +543,8 @@ band **currently installed locally** (`codex-cli 0.142.4`).
   (so the default applies, which should be unbounded/off), but **verify on the 0.142 bump** that factory
   workers don't pick up a low default budget that kills long turns mid-task. If Codex ever defaults this
   on, Cassy needs to either raise it via `-c` or surface "turn aborted: budget" distinctly from a stall.
+
+- **2026-09-23 resolution:** Owned by cas-2c2d: distinguish budget aborts from stalls.
 - **"Command approvals scoped by execution environment" (#28738) + "network approvals scoped by
   environment" (#28899) + "Report remote sandbox denials semantically" (#29424).** → 👀 **touchpoint:
   `--yolo`/approval.** Approvals are now keyed to the exec environment. Cassy workers bypass via `--yolo`;
@@ -542,9 +558,11 @@ band **currently installed locally** (`codex-cli 0.142.4`).
   safer for our generated `.codex/skills/*.md`, but **verify the synced mirror still loads** post-bump.
 - **"App-server clients can configure multi-agent delegation as disabled / explicit-request-only /
   proactive" (#28685, #28792, #29324) + "Parent agents receive terminal subagent errors instead of
-  empty success" (#28375).** → 👀 strategic (multi-agent v2; same posture as 0.137/0.138 — feed it,
-  don't compete). The terminal-error propagation is a genuine reliability win if Cassy ever consumes
+  empty success" (#28375).** → 👀 strategic (multi-agent v2; the Cassy stance remains an operator
+  decision). The terminal-error propagation is a genuine reliability win if Cassy ever consumes
   Codex-native subagents.
+
+- **2026-09-23: operator decision — ignore; Cassy keeps factory ownership and does not adopt or compete with Codex-native orchestration.**
 - **Indexed web-search mode, scheduled UTC time reminders + current-time tool, `/usage` reset-credit
   redemption, plugin catalog sections.** → ⏭ n/a (orthogonal to the Cassy launch surface).
 
@@ -554,10 +572,8 @@ Reviewed 2026-06-30. Triage pass.
 
 - **"Hook trust bypass now persists through `codex exec` thread start and resume, while blocking
   `PostToolUse` hooks correctly reject code-mode tool calls" (#26434, #28365).** → 👀 **note: Codex
-  hooks.** Codex now has its own hooks.json + PostToolUse path. Cassy's Codex worker model relies on
-  `--yolo` + env (no Codex hook system in the loop, per the touchpoints list), so this is mostly
-  informational — but if Cassy ever adopts Codex hooks for parity with the Claude path, the trust-bypass
-  and code-mode-rejection semantics are the relevant surface.
+  hooks.** Codex now has its own hooks.json + PostToolUse path. Cassy subsequently provisioned trusted Codex hooks (cas-ba048) and wired
+  PostToolUse (cas-5ae8); trust-bypass and code-mode rejection now affect that path.
 - **"Selected executor plugins can activate their stdio MCP servers per thread" (#27870, #27884,
   #27893…).** → 👀 **touchpoint: MCP (`cs`).** How stdio MCP servers (our `cs`) get activated is moving
   to per-thread/plugin-scoped activation. **Verify `mcp__cs__*` still loads** from `.codex/config.toml`
@@ -567,6 +583,7 @@ Reviewed 2026-06-30. Triage pass.
 - **"TUI input prompts can auto-resolve after inactivity" (#28235) + "let steer interrupt wait_agent"
   (#28341).** → 👀 minor: a `request_user_input` auto-resolution timer could auto-answer a worker's
   prompt — but `--yolo` workers shouldn't be prompting. Note in case a worker hangs on an input dialog.
+- **2026-09-23 resolution:** Owned by cas-2c2d: prove idle prompts cannot auto-answer workers.
 - Noise relay E2E remote transport, P-521 TLS, bounded image cache. → ⏭ n/a (remote-exec/TUI).
 
 ### 0.140.0 — `/import` from Claude Code · corrupted-SQLite auto-recover · encrypted MCP-OAuth secrets
@@ -578,12 +595,16 @@ Reviewed 2026-06-30. Triage pass.
   Code setup. Interesting for the cross-harness story (Cassy supports both) and for onboarding a user who
   already has a CC config — but it imports *Codex-side* setup, not Cassy's MCP/skill wiring, so it's not a
   substitute for `cas integrate`. Flag for the onboarding-doc pass; no code action.
+
+- **2026-09-23 resolution:** Won't-do: cross-harness import is optional onboarding, not a substitute for cas integrate.
 - **"Corrupted SQLite state databases are now backed up and rebuilt automatically… including malformed
   database-directory cases" (#26859, #27719); 0.131 added fail-closed when state can't open.** → 👀
   minor. Codex's *own* state SQLite, separate from Cassy's project-local `cas.db`
   (memory `reference_cas_project_local_dbs`). Echoes the Cassy finding that a SQLite restore breaks a live
   MCP connection (memory `feedback_sqlite_restore_breaks_mcp_connection`) — different DB, same hazard
   class; no overlap expected.
+
+- **2026-09-23 resolution:** Won't-do: Codex state is separate from Cassy's project database and has no shared restore path.
 - **"Managed Amazon Bedrock API-key auth and encrypted local storage for CLI and MCP OAuth credentials"
   (#27443, #27689, #27504, #27535, #27539, #27541).** → 👀 **touchpoint: MCP (`cs`).** Encrypted secret
   namespaces for MCP OAuth. Our `cs` server is local stdio with no OAuth, so N/A in practice — but
@@ -600,13 +621,19 @@ Reviewed 2026-06-30. Triage pass.
   networking more consistently" (#24981, #27035).** → 👀 **touchpoint: `--yolo`/sandbox.** Directly on
   the bypass path — verify `--yolo` workers keep full read/exec on the worktree + Cassy root and that
   proxy-only networking (if a host sets it) doesn't block worker network access.
+
+- **2026-09-23 resolution:** Won't-do for proxy-only hosts: no such policy exists on the validated host to test.
 - **"Tool and connector input schemas now preserve `oneOf` and `allOf`, and large schemas keep more
   shallow structure when compacted" (#24118, #27084).** → 👀 **touchpoint: MCP (`cs`).** Our
   `mcp__cs__*` tool schemas pass through Codex's schema handling; richer `oneOf`/`allOf` preservation is
   a fidelity win for the Cassy tool surface. Smoke `cs` tool calls on upgrade.
+
+- **2026-09-23 resolution:** Won't-do: the 15 current `cs` input schemas contain no `oneOf` or
+  `allOf`; cas-27e1 covers multi-argument task create/show fidelity.
 - **`cli: add -P sandbox permissions profile alias` (#27054); multi-agent v2 `close_agent`→
   `interrupt_agent` rename (#26994).** → ✅ no action (profile is an alias; Cassy uses `--yolo`, not
   profiles) / 👀 strategic (multi-agent v2 naming churn — informational).
+- **2026-09-23: operator decision — ignore; Cassy keeps factory ownership and does not adopt or compete with Codex-native orchestration.**
 - **"Exclude external tool output from memories" (#26821).** → ✅ no action; Codex's own "memories"
   concept, orthogonal to Cassy memory exposed via `cs`.
 
@@ -624,8 +651,7 @@ an upgrade actually lands on one of these.
   reject it with a migration error. Verify no legacy profile config ships in the Cassy-managed `.codex`.
 - **Subagent identity now included in hook inputs + richer extension/hook context (0.134, #23963,
   #22882); subagent start/stop lifecycle events for extensions (0.133, #22782…).** → 👀 note (Codex
-  hooks/extensions; same informational status as 0.140/0.141 — Cassy Codex path doesn't use Codex hooks
-  yet).
+  hooks/extensions); Cassy later adopted trusted Codex hooks (cas-ba048, cas-5ae8).
 - **AGENTS instruction loading hardened: local global reads + warnings for invalid UTF-8 instead of
   silent drops (0.133, #23343, #23232).** → 👀 **touchpoint: AGENTS.md.** Strictly better — a malformed
   AGENTS.md now warns instead of silently dropping worker priming. The lineage of the 0.138 symlink fix
@@ -636,6 +662,9 @@ an upgrade actually lands on one of these.
   👀 **touchpoint: MCP (`cs`).** Schema-fidelity + concurrency improvements that the `oneOf`/`allOf`
   work (0.139) builds on; all strictly helpful to the Cassy tool surface. The "extra skills roots
   removed" (0.130) is the early signal of the skills-subsystem consolidation that runs through 0.142.
+
+- **2026-09-23 resolution:** Won't-do: the 15 current `cs` input schemas contain no `$ref` or
+  `$defs`; cas-27e1 covers multi-argument task create/show fidelity.
 - **State/SQLite safety: fail-closed when local state can't open + preserve SQLite data (0.131,
   #21831…); memory runtime state moved to a dedicated SQLite DB (0.135, #24591); memory summaries
   versioned/rebuilt when stale (0.132, #23148).** → ✅ no action; Codex's own state/memory DBs, separate
@@ -644,6 +673,8 @@ an upgrade actually lands on one of these.
   commands" (0.131, #21969, #22843).** → 👀 minor touchpoint: factory workers run in worktrees; this
   makes Codex's internal git helpers ignore repo-level hook/fsmonitor config, which is *safer* for the
   Cassy factory-commit guard (memory `factory_commit_guard_blocks_main`) — no conflict expected.
+
+- **2026-09-23 resolution:** Won't-do: Codex git helpers do not own Cassy's commit guard, and no conflict is known.
 - **`CODEX_NON_INTERACTIVE=1` install mode (0.135, #21567); bundled patched zsh helper (0.135).** → ✅
   no action; useful for scripted/CI Codex installs in an onboarding context. TUI/markdown/vim/Windows
   polish across all six → ⏭ n/a.
@@ -658,6 +689,8 @@ Reviewed 2026-06-09 (calm-crane-32 / supervisor). Triage pass vs touchpoints.
   flag. On the 0.128→0.138 upgrade, verify (a) the `model_reasoning_effort` TOML key still exists and
   (b) our fixed vocabulary (none…xhigh) still validates against model-advertised levels. If 0.138
   added a first-class `--effort` flag, consider switching to it.
+
+- **2026-09-23 resolution:** Won't-do for flag migration: Codex 0.156.0 has no effort flag; the config key passed validation.
 - **"Bridge host-loaded skills into the skills extension" (#26172).** → 👀 **touchpoint: `.codex/skills/`.**
   Codex is moving skills into an extension subsystem. Verify our synced `.codex/skills/*.md` still load
   on upgrade.
@@ -665,9 +698,10 @@ Reviewed 2026-06-09 (calm-crane-32 / supervisor). Triage pass vs touchpoints.
   `AGENTS.md` files are picked up" (#26205, #26465).** → 👀 **touchpoint: AGENTS.md.** Factory workers
   run in worktrees; this likely *helps* (more reliable pickup) but verify worker priming still lands.
 - **"catalog multi-agent v2 config" (#26254) + multi-agent v2 work.** → 👀 **strategic.** Codex is
-  building its own multi-agent orchestration — the same "cede the mechanism, own knowledge + quality"
-  fork tracked for Claude Code (Workflow / Agent Teams). Same posture applies: Cassy should feed Codex
-  multi-agent, not compete with it. No action; flagged for the next strategy pass.
+  building its own multi-agent orchestration, which overlaps Cassy's factory lifecycle. The operator
+  has not decided Cassy's long-term stance; this remains flagged for a strategy pass.
+
+- **2026-09-23: operator decision — ignore; Cassy keeps factory ownership and does not adopt or compete with Codex-native orchestration.**
 - **Startup resilience: `/usr/bin/bash` support (#26538), OAuth-backed MCP pre-refresh (#26482).** →
   ✅ no action (strictly helpful; the bash one echoes our shell-form vs exec-form lineage).
 - **`/app` desktop handoff, local-image paths to model, plugin `--json`, Bazel worktree settings,
@@ -689,6 +723,7 @@ Reviewed 2026-06-09. Triage pass.
   env-identity carrying doesn't reintroduce a prompt on the bypass path.
 - **"Multi-agent v2 keeps runtime choice with each thread… cleaner follow-up and metadata defaults
   for spawned agents" (#25266, #25636, …).** → 👀 strategic (see 0.138 note).
+- **2026-09-23: operator decision — ignore; Cassy keeps factory ownership and does not adopt or compete with Codex-native orchestration.**
 - **"Moved repo review rules and contributor conventions into `AGENTS.md`" (#25682).** → ✅ no action
   (Codex repo's own convention; informs that AGENTS.md is the live instruction surface).
 - **F13–F24 keybindings, enterprise credit limits, remote-control pairing, ChatGPT-auth, SQLite
@@ -710,6 +745,7 @@ Reviewed 2026-06-09. Triage pass.
   no action (security hardening; doesn't touch our launch surface).
 - **"Move memories root setup out of core config" (#24758).** → 👀 minor — Codex has its own
   "memories" concept; confirm no collision with how Cassy presents memory via MCP. Likely orthogonal.
+- **2026-09-23 resolution:** Won't-do: Codex memories and Cassy MCP memory have separate stores and tool names.
 - **`/archive` + `codex archive`, OSC 8 TUI links, Windows sandbox elevated setup, Bedrock region
   fallback, image-gen extension.** → ⏭ n/a.
 
@@ -719,11 +755,15 @@ Reviewed 2026-06-09. Triage pass.
 
 - **Effort flag migration:** if a stable Codex ships a first-class `--effort`, replace the
   `-c model_reasoning_effort=` TOML override (cleaner, version-stable). See 0.138 entry.
+
+- **2026-09-23 resolution:** Won't-do: Codex 0.156.0 has no effort flag; keep the validated TOML override.
 - **Multi-agent v2 strategic posture:** decide Cassy's stance toward Codex's native multi-agent
   orchestration (mirror of the Claude Code Workflow/Agent-Teams fork). See 0.137/0.138 entries.
+
+- **2026-09-23: operator decision — ignore; Cassy keeps factory ownership and does not adopt or compete with Codex-native orchestration.**
 - **Future upgrade validation:** rerun the typed 0.146 matrix (effort key, skills/agents and
   AGENTS.md discovery, `--yolo`, direct `cs` MCP calls alongside code mode, interruption, and
   rollout-budget continuity) before advancing the validated pin.
-- **Codex hooks adoption (optional):** Codex now has hooks.json + PostToolUse with trust-bypass
-  semantics (0.140/0.141). If Cassy ever wants Claude-path parity (PreToolUse auto-approve, jail
-  exemptions) on the Codex side instead of relying solely on `--yolo` + env, that's the surface.
+- **Codex hooks adoption:** Codex has hooks.json + PostToolUse with trust-bypass
+  semantics (0.140/0.141); Cassy adopted trusted PreToolUse and PostToolUse hooks
+  in cas-ba048 and cas-5ae8.

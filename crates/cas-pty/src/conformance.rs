@@ -119,6 +119,8 @@ impl HarnessConformanceReceipt {
     }
 }
 
+const CLAUDE_21280_RECEIPT: &str =
+    include_str!("../conformance/claude-code-2.1.280-2026-09-23.json");
 const CODEX_0149_RECEIPT: &str = include_str!("../conformance/codex-cli-0.149.1-2026-08-25.json");
 const CODEX_0156_RECEIPT: &str = include_str!("../conformance/codex-cli-0.156.0-2026-09-23.json");
 const GROK_02114_RECEIPT: &str = include_str!("../conformance/grok-build-0.2.114-2026-07-30.json");
@@ -129,6 +131,10 @@ const OPENCODE_11823_TOKEN_PLAN_RECEIPT: &str =
 
 pub fn codex_0149_conformance_receipt() -> Result<HarnessConformanceReceipt, serde_json::Error> {
     serde_json::from_str(CODEX_0149_RECEIPT)
+}
+
+pub fn claude_21280_conformance_receipt() -> Result<HarnessConformanceReceipt, serde_json::Error> {
+    serde_json::from_str(CLAUDE_21280_RECEIPT)
 }
 
 pub fn codex_0156_conformance_receipt() -> Result<HarnessConformanceReceipt, serde_json::Error> {
@@ -156,6 +162,7 @@ pub fn opencode_11823_token_plan_conformance_receipt()
 /// Later preflight work can consume this without parsing comments or Markdown.
 pub fn harness_conformance_receipts() -> Result<Vec<HarnessConformanceReceipt>, serde_json::Error> {
     Ok(vec![
+        claude_21280_conformance_receipt()?,
         codex_0156_conformance_receipt()?,
         grok_0140_conformance_receipt()?,
         opencode_11823_token_plan_conformance_receipt()?,
@@ -166,6 +173,50 @@ pub fn harness_conformance_receipts() -> Result<Vec<HarnessConformanceReceipt>, 
 mod tests {
     use super::*;
     use std::collections::HashSet;
+
+    #[test]
+    fn claude_21280_receipt_is_typed_complete_and_passes_required_checks() {
+        let receipt = claude_21280_conformance_receipt().expect("embedded receipt must parse");
+        assert_eq!(receipt.schema_version, 1);
+        assert_eq!(receipt.harness, Harness::ClaudeCode);
+        assert_eq!(receipt.harness_version, "2.1.280");
+        assert_eq!(receipt.observed_default_matches_validated(), Some(true));
+        assert_eq!(receipt.validated_at, "2026-09-23");
+        assert!(receipt.validates_pin());
+
+        let evidence_ids: HashSet<&str> = receipt
+            .evidence
+            .iter()
+            .map(|item| item.id.as_str())
+            .collect();
+        assert!(receipt.checklist.iter().all(|check| {
+            !check.evidence_refs.is_empty()
+                && check
+                    .evidence_refs
+                    .iter()
+                    .all(|id| evidence_ids.contains(id.as_str()))
+        }));
+        assert!(
+            receipt
+                .checklist
+                .iter()
+                .filter(|check| check.required)
+                .all(|check| check.status == ConformanceStatus::Pass)
+        );
+        for id in [
+            "cassy_skill_precedence_over_user_cloud",
+            "mcp_auto_background_after_two_minutes",
+        ] {
+            let check = receipt
+                .checklist
+                .iter()
+                .find(|check| check.id == id)
+                .unwrap();
+            assert!(!check.required);
+            assert_eq!(check.status, ConformanceStatus::NotCovered);
+            assert!(!check.detail.is_empty());
+        }
+    }
 
     #[test]
     fn codex_0149_receipt_is_typed_complete_and_passes_every_required_check() {
@@ -218,6 +269,11 @@ mod tests {
         assert_eq!(receipt.validated_at, "2026-09-23");
         assert_eq!(receipt.result, ConformanceStatus::Pass);
         assert!(receipt.validates_pin());
+        assert!(receipt.checklist.iter().any(|check| {
+            check.id == "complex_schema_task_create_show"
+                && check.required
+                && check.status == ConformanceStatus::Pass
+        }));
 
         let evidence_ids: HashSet<&str> = receipt
             .evidence

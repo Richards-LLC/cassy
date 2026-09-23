@@ -87,7 +87,7 @@ Before generating ideas, gather codebase context. Ideas detached from the actual
 
 Run two grounding steps in parallel (in the **foreground** — results are needed before Phase 2):
 
-**1. Quick context scan** — dispatch a general-purpose sub-agent (cheap model is fine, e.g. Haiku) with this prompt:
+**1. Quick context scan** — dispatch a general-purpose sub-agent (light lane is appropriate, e.g. GPT-6 Luna/xhigh) with this prompt:
 
 > Read the project's `CLAUDE.md` and `README.md` (or `AGENTS.md` if present), then discover the top-level directory layout using Glob with pattern `*` or `*/*`. Return a concise summary (under 30 lines) covering:
 > - Project shape (language, framework, top-level directory layout)

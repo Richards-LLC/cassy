@@ -863,16 +863,19 @@ fn parse_ai_selection(response: &str) -> Vec<String> {
 fn call_claude_for_selection(prompt: &str, model: &str) -> Result<String, MemError> {
     let mut command = Command::new("claude");
     crate::internal_llm::isolate_command(&mut command);
+    command.args([
+        "-p",
+        prompt,
+        "--model",
+        model,
+        "--no-input",
+        "--output-format",
+        "text",
+    ]);
+    if model == "claude-opus-5-5" {
+        command.args(["--effort", "low"]);
+    }
     let output = command
-        .args([
-            "-p",
-            prompt,
-            "--model",
-            model,
-            "--no-input",
-            "--output-format",
-            "text",
-        ])
         .output()
         .map_err(|e| MemError::Other(format!("Failed to run claude CLI: {e}")))?;
 

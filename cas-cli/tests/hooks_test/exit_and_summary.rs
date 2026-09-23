@@ -100,11 +100,12 @@ fn test_exit_blocked_with_epic_subtasks() {
 // Part G: Session Summary Tests
 // =============================================================================
 
-/// Test that Stop blocks when generate_summary is enabled and no summary exists
+/// Session summary queues without blocking when enabled and no summary exists.
 #[test]
-fn test_stop_blocks_for_session_summary() {
+fn test_stop_queues_session_summary_without_blocking() {
     let temp = TempDir::new().unwrap();
     init_cas(&temp);
+    install_fake_maintenance_runner(&temp);
 
     // Enable generate_summary in the existing hooks.stop table.
     set_config_value(&temp, "hooks.stop.generate_summary", "true");
@@ -118,13 +119,18 @@ fn test_stop_blocks_for_session_summary() {
         &write_tool_input(session_id, "/src/main.rs"),
     );
 
-    // Try to stop - should be blocked for session summary
-    let stop_output = send_hook(&temp, "Stop", &stop_input(session_id));
-
-    assert_stop_blocked(
+    let stop_output = send_hook(&temp, "Stop", &maintenance_stop_input(&temp, session_id));
+    assert_maintenance_queued(
+        &temp,
+        session_id,
+        "session-summarizer",
         &stop_output,
-        &["session-summarizer", "summary", "Session summary"],
-        Some(&["session-summary required", "session-summarizer"]),
+        &[
+            "session-summarizer job",
+            "Summarize Cassy session",
+            session_id,
+            "transcript.jsonl",
+        ],
     );
 }
 

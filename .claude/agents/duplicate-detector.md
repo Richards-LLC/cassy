@@ -1,7 +1,6 @@
 ---
 name: duplicate-detector
 description: Internal agent for finding and consolidating duplicate or near-duplicate memories, rules, and learnings. Spawned periodically for cleanup.
-model: haiku
 managed_by: cas
 ---
 

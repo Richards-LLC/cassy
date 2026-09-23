@@ -24,7 +24,7 @@ impl cas_core::hooks::HooksConfig for Config {
         self.hooks
             .as_ref()
             .map(|h| h.ai_model.clone())
-            .unwrap_or_else(|| "claude-haiku-4-5".to_string())
+            .unwrap_or_else(|| "claude-opus-5-5".to_string())
     }
 
     fn ai_fallback(&self) -> bool {

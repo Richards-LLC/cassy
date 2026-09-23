@@ -72,6 +72,52 @@ fn codex_all_states_and_terminal_aliases() {
         );
     }
 }
+
+#[test]
+fn codex_budget_abort_is_distinct_from_stall_and_idle() {
+    let start = "{\"timestamp\":\"2026-09-10T19:00:00Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"}}\n";
+    let budget = "{\"timestamp\":\"2026-09-10T19:00:01Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"turn_aborted\",\"reason\":\"budget_limited\"}}\n";
+    let got = run(SupervisorCli::Codex, &format!("{start}{budget}"), true);
+    assert_eq!(got.state, Liveness::BudgetAborted);
+    assert_eq!(got.summary("worker"), "liveness: budget_aborted | worker");
+    assert!(got.detail().contains("turn_aborted"));
+
+    let interrupted = budget.replace("budget_limited", "interrupted");
+    assert_eq!(
+        run(SupervisorCli::Codex, &format!("{start}{interrupted}"), true).state,
+        Liveness::WaitingForInput
+    );
+    let late_tool = "{\"timestamp\":\"2026-09-10T19:00:02Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"function_call_output\"}}\n";
+    assert_eq!(
+        run(
+            SupervisorCli::Codex,
+            &format!("{start}{budget}{late_tool}"),
+            true
+        )
+        .state,
+        Liveness::BudgetAborted
+    );
+    let budget_error = "{\"timestamp\":\"2026-09-10T19:00:01Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"error\",\"error\":{\"message\":\"shared rollout token budget exhausted\",\"codexErrorInfo\":\"rolloutBudgetExceeded\"}}}\n";
+    assert_eq!(
+        run(
+            SupervisorCli::Codex,
+            &format!("{start}{budget_error}"),
+            true
+        )
+        .state,
+        Liveness::BudgetAborted
+    );
+    let restarted = start.replace("19:00:00", "19:00:03");
+    assert_eq!(
+        run(
+            SupervisorCli::Codex,
+            &format!("{start}{budget}{restarted}"),
+            true
+        )
+        .state,
+        Liveness::Executing
+    );
+}
 #[test]
 fn claude_all_states() {
     for (reason, time, alive, expected) in [

@@ -42,6 +42,7 @@ struct DoctorRow {
 #[serde(rename_all = "snake_case")]
 enum DoctorState {
     Ok,
+    Warn,
     Missing,
     Stale,
 }
@@ -53,9 +54,9 @@ struct FactoryDoctorReport {
 
 impl FactoryDoctorReport {
     fn has_required_failure(&self) -> bool {
-        self.rows
-            .iter()
-            .any(|row| row.required && row.state != DoctorState::Ok)
+        self.rows.iter().any(|row| {
+            row.required && matches!(row.state, DoctorState::Missing | DoctorState::Stale)
+        })
     }
 }
 
@@ -273,6 +274,39 @@ fn harness_row(
                     .to_string(),
             );
         }
+    }
+    if harness == SupervisorCli::Claude
+        && let CliProbe::Ok { version, .. } = probe
+        && let Some(receipt) = harness_conformance_receipts().ok().and_then(|receipts| {
+            receipts
+                .into_iter()
+                .find(|item| item.harness == Harness::ClaudeCode)
+        })
+        && receipt.validates_pin()
+        && crate::factory_preflight::compare_claude_version_to_pin(
+            version,
+            &receipt.harness_version,
+        ) == Some(std::cmp::Ordering::Less)
+    {
+        let was_ok = row.state == DoctorState::Ok;
+        if was_ok {
+            row.state = DoctorState::Warn;
+        }
+        let installed = version.split_whitespace().next().unwrap_or(version);
+        let version_detail = format!(
+            "installed Claude Code {installed}; validated {}",
+            receipt.harness_version
+        );
+        row.detail = if was_ok {
+            version_detail
+        } else {
+            format!("{}; {version_detail}", row.detail)
+        };
+        let upgrade = "Run `claude update`.";
+        row.remediation = Some(row.remediation.map_or_else(
+            || upgrade.to_string(),
+            |existing| format!("{existing} {upgrade}"),
+        ));
     }
     row
 }
@@ -541,9 +575,22 @@ fn print_human(report: &FactoryDoctorReport) {
     for row in &report.rows {
         let status = match row.state {
             DoctorState::Ok => "ok",
+            DoctorState::Warn => "warn",
             DoctorState::Missing => "missing",
             DoctorState::Stale => "stale",
         };
+        if row.state == DoctorState::Warn {
+            println!(
+                "{:<9} {:<7} {}",
+                format!("{}:", row.name),
+                status,
+                row.detail
+            );
+            if let Some(remediation) = &row.remediation {
+                println!("           hint: {remediation}");
+            }
+            continue;
+        }
         println!(
             "{:<9} {:<7} capability={:?}{} {}",
             format!("{}:", row.name),
@@ -565,7 +612,12 @@ mod tests {
     fn ready(path: &str) -> CliProbe {
         CliProbe::Ok {
             path: PathBuf::from(path),
-            version: "v1.2.3".to_string(),
+            version: if path.ends_with("claude") {
+                "2.1.280 (Claude Code)"
+            } else {
+                "v1.2.3"
+            }
+            .to_string(),
         }
     }
 
@@ -591,7 +643,7 @@ mod tests {
                 "opus",
                 CapabilityAvailability::Available,
             ),
-            (Harness::CodexCli, "gpt-5.6-luna", codex),
+            (Harness::CodexCli, "gpt-6-sol", codex),
             (
                 Harness::GrokBuild,
                 "grok-4.5",
@@ -631,6 +683,98 @@ mod tests {
                 .unwrap()
                 .state,
             DoctorState::Ok
+        );
+    }
+
+    fn doctor_for_claude_version(version: &str) -> FactoryDoctorReport {
+        collect_report(
+            Path::new("/project"),
+            &[SupervisorCli::Claude],
+            &probes(
+                CliProbe::Ok {
+                    path: PathBuf::from("/bin/claude"),
+                    version: format!("{version} (Claude Code)"),
+                },
+                CliProbe::Missing,
+                CliProbe::Missing,
+            ),
+            &capabilities(CapabilityAvailability::Available),
+            false,
+        )
+    }
+
+    #[test]
+    fn doctor_warns_below_claude_pin_without_failing_and_names_upgrade() {
+        let report = doctor_for_claude_version("2.1.279");
+        let row = report.rows.iter().find(|row| row.name == "Claude").unwrap();
+        assert_eq!(row.state, DoctorState::Warn);
+        assert!(!report.has_required_failure());
+        assert!(row.detail.contains("2.1.279"));
+        assert!(row.detail.contains("2.1.280"));
+        assert!(
+            row.remediation
+                .as_deref()
+                .unwrap()
+                .contains("`claude update`")
+        );
+        assert!(
+            serde_json::to_string(&report)
+                .unwrap()
+                .contains("\"state\":\"warn\"")
+        );
+    }
+
+    #[test]
+    fn doctor_accepts_claude_at_and_above_validated_floor() {
+        for version in ["2.1.280", "2.1.281"] {
+            let report = doctor_for_claude_version(version);
+            let row = report.rows.iter().find(|row| row.name == "Claude").unwrap();
+            assert_eq!(row.state, DoctorState::Ok, "{version}");
+            assert!(!report.has_required_failure());
+        }
+    }
+
+    #[test]
+    fn doctor_keeps_unavailable_capability_visible_below_claude_floor() {
+        let mut capability = capabilities(CapabilityAvailability::Available);
+        let account_profile =
+            account_dir_for_harness(Harness::ClaudeCode).unwrap_or_else(|| "default".to_string());
+        capability.record(
+            crate::capability::harness_route_identity(
+                Harness::ClaudeCode,
+                "opus",
+                &account_profile,
+            ),
+            cas_factory::CapabilityEvidence::new(
+                CapabilityAvailability::Unavailable,
+                CapabilitySnapshot::now_ms(),
+            ),
+        );
+        let report = collect_report(
+            Path::new("/project"),
+            &[SupervisorCli::Claude],
+            &probes(
+                CliProbe::Ok {
+                    path: PathBuf::from("/bin/claude"),
+                    version: "2.1.279 (Claude Code)".to_string(),
+                },
+                CliProbe::Missing,
+                CliProbe::Missing,
+            ),
+            &capability,
+            false,
+        );
+        let row = report.rows.iter().find(|row| row.name == "Claude").unwrap();
+        assert_eq!(row.state, DoctorState::Missing);
+        assert!(report.has_required_failure());
+        assert!(row.detail.contains("capability"));
+        assert!(row.detail.contains("installed Claude Code 2.1.279"));
+        assert!(row.remediation.as_deref().unwrap().contains("claude login"));
+        assert!(
+            row.remediation
+                .as_deref()
+                .unwrap()
+                .contains("claude update")
         );
     }
 
@@ -766,12 +910,12 @@ effort = "high"
     }
 
     #[test]
-    fn doctor_accepts_fable_taste_spec_and_requires_claude() {
+    fn doctor_accepts_opus_taste_spec_and_requires_claude() {
         let _home = crate::test_support::TestEnvGuard::temp_home();
         let directory = tempfile::tempdir().unwrap();
         let mut decision =
             cas_factory::resolve_lane("taste", &CapabilitySnapshot::default()).unwrap();
-        for effort in [cas_mux::Effort::Medium, cas_mux::Effort::High] {
+        for effort in [cas_mux::Effort::Low, cas_mux::Effort::High] {
             decision.spec.effort = Some(effort);
             let args = FactoryArgs {
                 workers: 1,

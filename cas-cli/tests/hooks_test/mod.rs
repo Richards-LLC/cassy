@@ -32,10 +32,9 @@ pub(crate) fn cas_cmd(dir: &TempDir) -> Command {
     cmd.current_dir(dir.path());
     // Clear CAS_ROOT to prevent env pollution from parent shell
     cmd.env_remove("CAS_ROOT");
-    // Hook integration fixtures exercise end-user Stop semantics, not the
-    // factory-worker exemptions. Keep ambient factory identity out of every
-    // subprocess so maintenance blockers and attribution use the payload's
-    // session ID deterministically.
+    // Hook integration fixtures exercise end-user Stop semantics. Keep ambient
+    // factory identity out of every subprocess so maintenance queueing and
+    // attribution use the payload's session ID deterministically.
     for variable in [
         "CAS_AGENT_ROLE",
         "CAS_FACTORY_MODE",
@@ -46,7 +45,63 @@ pub(crate) fn cas_cmd(dir: &TempDir) -> Command {
         cmd.env_remove(variable);
     }
     cmd.env("CAS_SKIP_FACTORY_TOOLING", "1");
+    let test_bin = dir.path().join(".test-bin");
+    if test_bin.join("codex").exists() {
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        cmd.env(
+            "PATH",
+            std::env::join_paths(std::iter::once(test_bin).chain(std::env::split_paths(&path)))
+                .unwrap(),
+        );
+    }
     cmd
+}
+
+/// Replace the detached light-lane process with a local prompt recorder.
+pub(crate) fn install_fake_maintenance_runner(dir: &TempDir) {
+    use std::os::unix::fs::PermissionsExt;
+    let bin = dir.path().join(".test-bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let executable = bin.join("codex");
+    std::fs::write(&executable, "#!/bin/sh\nprintf '%s\\n' \"$@\"\n").unwrap();
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+/// Check both the immediate Stop response and the detached job's recorded prompt.
+pub(crate) fn assert_maintenance_queued(
+    dir: &TempDir,
+    session_id: &str,
+    name: &str,
+    output: &str,
+    prompt_fragments: &[&str],
+) {
+    assert_stop_allowed(output, None);
+    let job_dir = dir.path().join(".cas/maintenance").join(session_id);
+    assert!(
+        job_dir.join(format!("{name}.queued")).exists(),
+        "{name} queue marker missing"
+    );
+    let log = job_dir.join(format!("{name}.log"));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    let prompt = loop {
+        if let Ok(content) = std::fs::read_to_string(&log) {
+            if !content.is_empty() {
+                break content;
+            }
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{name} prompt was not recorded at {}",
+            log.display()
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
+    for fragment in prompt_fragments {
+        assert!(
+            prompt.contains(fragment),
+            "{name} queued prompt lacks {fragment:?}: {prompt}"
+        );
+    }
 }
 
 /// Initialize CAS in temp directory
@@ -184,6 +239,13 @@ pub(crate) fn stop_input(session_id: &str) -> serde_json::Value {
         "cwd": "/test",
         "hook_event_name": "Stop"
     })
+}
+
+pub(crate) fn maintenance_stop_input(dir: &TempDir, session_id: &str) -> serde_json::Value {
+    let mut input = stop_input(session_id);
+    input["cwd"] = serde_json::json!(dir.path());
+    input["transcript_path"] = serde_json::json!(dir.path().join("transcript.jsonl"));
+    input
 }
 
 /// List entries in CAS through the local store fixture.

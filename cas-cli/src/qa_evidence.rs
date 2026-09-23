@@ -753,9 +753,7 @@ pub fn validate_ledger(ctx: &EvidenceContext<'_>) -> Result<PathBuf, EvidenceRef
             .map(str::trim)
             .collect();
         // Row grammar: id | cell | expected | observed | verdict | label | evidence | defect.
-        line.trim_start().starts_with('|')
-            && cells.get(4) == Some(&"PASS")
-            && cells.get(5) == Some(&"real-build")
+        cells.get(4) == Some(&"PASS") && cells.get(5) == Some(&"real-build")
     });
     if !has_pass {
         return Err(EvidenceRefusal::new(

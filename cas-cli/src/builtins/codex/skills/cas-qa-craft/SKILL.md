@@ -71,3 +71,33 @@ then add every valid finding as a `telemetry sweep` row labeled
 `eyewitness/telemetry` using [references/telemetry-sweep.md](references/telemetry-sweep.md).
 If it is unset, write the exact header line `sweep: not configured` and
 continue the ordinary matrix.
+
+## User journeys
+
+A journey is one end-to-end user flow, from a real entry point to the user's
+goal, across feature boundaries. Walk journeys, not only the changed piece.
+The contract is `docs/qa/journey-evaluation.md` in projects that have one.
+
+- **Every epic that changes a user-facing surface adds or updates the journeys
+  it touches** in `docs/qa/journeys.md`, in the same epic: steps, expected
+  experience and edge paths, plus the spec that walks it. If the project has
+  no catalog yet, create one with its critical journeys first.
+- **Find the touched journeys** with
+  `scripts/journeys-for-diff.py <base> [<head>]` where the project ships it.
+  Otherwise, match the diff against each journey's **Touches** globs by hand.
+  Add any journey the `demo_statement` names. Put each one in the matrix as a
+  row that starts at its **Entry** and ends at its **Goal**.
+- **Run them** through the project's journey suite, for example
+  `scripts/journey-eval.sh <artifact-dir> --grep <ID>`. Each journey's
+  receipts are a trace, a screencast with one chapter per stage, stage
+  screenshots, a final aria snapshot and the stage timings. Cite them in the
+  ledger.
+- **Score the experience**, not only pass/fail. Rate each journey 0–3 for dead
+  end, confusing copy, extra steps, lost context and waits, and route by the
+  severity table in the contract. A journey that cannot reach its goal is a
+  defect task, never a note.
+- **Keep the catalog honest.** Edit a journey's Steps and its `test.step`
+  titles together; `scripts/journeys-for-diff.py --check` fails when they
+  drift.
+- Before a release that ships a changed bundle, the release evaluation walks
+  every journey. That procedure is in the contract, not here.

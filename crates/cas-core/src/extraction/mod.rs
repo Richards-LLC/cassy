@@ -12,7 +12,7 @@
 //! # Implementations
 //!
 //! - `DeferredExtractor` - Marks observations for later processing (default)
-//! - `AIExtractor` - Uses Claude SDK for AI-powered extraction (requires `ai` feature)
+//! - `AIExtractor` - Builds and parses AI-powered extraction prompts
 //! - `EntityExtractor` - Extracts entities and relationships for knowledge graph
 //! - `PatternEntityExtractor` - Simple pattern-based entity extraction (no AI)
 //!
@@ -158,7 +158,7 @@ pub struct AIExtractorConfig {
 impl Default for AIExtractorConfig {
     fn default() -> Self {
         Self {
-            model: "claude-haiku-4-5".to_string(),
+            model: "gpt-6-luna".to_string(),
             max_thinking_tokens: 2000,
             extract_learnings: true,
             extract_preferences: true,
@@ -167,11 +167,10 @@ impl Default for AIExtractorConfig {
     }
 }
 
-/// AI-powered extractor using Claude SDK
+/// AI-powered extractor prompt and response parser
 ///
-/// Uses Claude to analyze observations and extract structured information.
-/// This struct provides the configuration and prompt building logic.
-/// Actual AI calls must be performed by the application layer.
+/// This struct provides configuration and prompt building logic. The
+/// application layer routes model calls through the selected light lane.
 ///
 /// # Example
 ///

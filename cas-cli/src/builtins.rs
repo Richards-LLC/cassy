@@ -3822,11 +3822,9 @@ This is the body content."#;
             "model-selection.md",
             // cas-a7d1: registry lane summary in the small body.
             "Registry lanes",
-            "Claude/Haiku 4.5/low",
-            "Codex/GPT-5.6 Luna/xhigh",
-            "Claude/Fable 5.1/medium",
-            "Codex/GPT-6 Astra/high",
-            "Opus 5/high fallback",
+            "Codex/GPT-6 Luna/xhigh",
+            "Codex/GPT-6 Sol/medium",
+            "Claude/Opus 5.5/high",
             "standing suspension",
             "generated route table and recipes",
         ] {
@@ -3875,11 +3873,11 @@ This is the body content."#;
         );
 
         // The shared body must retain explicit complete-call controls and the
-        // registry's Astra heavy route on every twin without duplicating workflow.
+        // registry's Opus heavy route on every twin without duplicating workflow.
         for (label, body) in [("claude", claude), ("codex", codex), ("grok", grok)] {
             assert!(
-                body.contains("Codex/GPT-6 Astra/high"),
-                "{label} cas-supervisor.md must retain the Astra heavy registry route"
+                body.contains("**heavy** Claude/Opus 5.5/high"),
+                "{label} cas-supervisor.md must retain the Opus heavy registry route"
             );
             assert!(
                 body.contains("pass complete `cli=`, `model=`, and `effort=` controls"),
@@ -6152,7 +6150,11 @@ This is the body content."#;
                 .iter()
                 .find(|builtin| builtin.path == "agents/learning-reviewer.md")
                 .unwrap_or_else(|| panic!("{label}: learning-reviewer agent is not registered"));
-            for marker in ["model: sonnet", "complete list of unreviewed learning IDs"] {
+            assert!(
+                !reviewer.content.contains("model:"),
+                "{label} learning-reviewer must use the light lane"
+            );
+            for marker in ["complete list of unreviewed learning IDs"] {
                 assert!(
                     reviewer.content.contains(marker),
                     "{label} learning-reviewer missing marker {marker:?}"
@@ -6745,7 +6747,7 @@ This is the body content."#;
                     "Opus is a normal taste",
                     "Opus/high is the taste",
                     "Opus taste to high",
-                    "# taste — recipe claude_opus",
+                    "# taste — recipe claude_fable",
                 ] {
                     assert!(
                         !builtin.content.contains(stale),
@@ -6761,7 +6763,7 @@ This is the body content."#;
                         builtin.path
                     );
                     assert!(recipes.contains(&format!(
-                        "# taste — recipe claude_fable (fallback: claude_opus)\n{prefix}coordination action=spawn_workers count=1 isolate=true cli=claude model=claude-fable-5-1 effort=medium"
+                        "# taste — recipe claude_opus_5_5 (fallback: claude_opus)\n{prefix}coordination action=spawn_workers count=1 isolate=true cli=claude model=claude-opus-5-5 effort=high"
                     )));
                 }
             }
@@ -6881,8 +6883,9 @@ This is the body content."#;
                 "registry recipe for {lane_name:?} missing from the supervisor guidance"
             );
         }
-        assert!(claude.content.contains("Claude Fable 5.1 at medium"));
-        assert!(claude.content.contains("Claude Haiku 4.5"));
+        assert!(claude.content.contains("Claude Opus 5.5 at high"));
+        assert!(claude.content.contains("Codex GPT-6 Luna"));
+        assert!(!claude.content.contains("claude_haiku"));
         assert!(!claude.content.contains("operator decision pending"));
         assert!(!claude.content.contains("exceptional-only"));
         // cas-b342 edge case: the exact frontier slug is `gpt-5.6-sol`; a bare
@@ -7746,10 +7749,9 @@ This is the body content."#;
             "heavy",
             // cas-a7d1: registry lane summary in the small body.
             "Registry lanes",
-            "Claude/Haiku 4.5/low",
-            "Codex/GPT-5.6 Luna/xhigh",
-            "Claude/Fable 5.1/medium",
-            "Codex/GPT-6 Astra/high",
+            "Codex/GPT-6 Luna/xhigh",
+            "Codex/GPT-6 Sol/medium",
+            "Claude/Opus 5.5/high",
             "standing suspension",
             "generated route table and recipes",
         ] {

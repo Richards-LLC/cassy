@@ -829,7 +829,6 @@ fn cli_for_model_slug(model: &str) -> Option<cas_mux::SupervisorCli> {
     if model.starts_with("claude")
         || model.starts_with("opus")
         || model.starts_with("sonnet")
-        || model.starts_with("haiku")
         || model.starts_with("fable")
     {
         return Some(cas_mux::SupervisorCli::Claude);
@@ -11681,7 +11680,7 @@ mod tests {
                 ));
             }
         }
-        for lane in ["standard", "heavy"] {
+        for lane in ["standard"] {
             let (specs, _, _) = build_lane_spawn_specs(
                 1,
                 lane,
@@ -11734,6 +11733,24 @@ mod tests {
             );
             assert_eq!(agent.metadata["worker_cli"], launched_cli, "{label}");
         }
+    }
+
+    #[test]
+    fn heavy_lane_spawn_specs_use_claude_opus_primary() {
+        let (specs, recipe, warnings) = build_lane_spawn_specs(
+            1,
+            "heavy",
+            None,
+            None,
+            &cas_factory::CapabilitySnapshot::default(),
+        )
+        .unwrap();
+        assert_eq!(recipe, "claude_opus_5_5");
+        assert!(warnings.is_empty());
+        assert_eq!(specs[0].cli, cas_mux::SupervisorCli::Claude);
+        assert_eq!(specs[0].model.as_deref(), Some("claude-opus-5-5"));
+        assert_eq!(specs[0].effort, Some(cas_mux::Effort::High));
+        assert!(spawn_specs_summary(&specs, &[]).contains(": claude model=claude-opus-5-5"));
     }
 
     #[test]
@@ -11803,20 +11820,20 @@ mod tests {
         .expect("lane should resolve");
 
         assert_eq!(specs.0.len(), 2);
-        assert_eq!(specs.1, "claude_haiku");
+        assert_eq!(specs.1, "codex_luna_6");
         assert_eq!(specs.0[0].name.as_deref(), Some("research"));
         assert_eq!(specs.0[1].name.as_deref(), Some("review"));
         assert_eq!(specs.0[0].config_dir.as_deref(), Some("~/.claude-alt"));
         assert_eq!(
             specs.0[0].model.as_deref(),
-            Some("claude-haiku-4-5-20251001")
+            Some("gpt-6-luna")
         );
-        assert_eq!(specs.0[0].effort, Some(cas_mux::Effort::Low));
+        assert_eq!(specs.0[0].effort, Some(cas_mux::Effort::XHigh));
         assert!(specs.2.is_empty(), "static primary should not warn");
     }
 
     #[test]
-    fn taste_lane_spawn_specs_and_explicit_fable_route_agree() {
+    fn taste_lane_spawn_specs_use_opus_and_explicit_fable_remains_valid() {
         let _home = TestEnvGuard::temp_home();
         let (specs, recipe, warnings) = build_lane_spawn_specs(
             2,
@@ -11826,15 +11843,15 @@ mod tests {
             &cas_factory::CapabilitySnapshot::default(),
         )
         .unwrap();
-        assert_eq!(recipe, "claude_fable");
+        assert_eq!(recipe, "claude_opus_5_5");
         assert!(warnings.is_empty());
         assert_eq!(specs.len(), 2);
         assert_eq!(specs[0].name.as_deref(), Some("taste-a"));
         assert_eq!(specs[1].name.as_deref(), Some("taste-b"));
         for spec in specs {
             assert_eq!(spec.cli, cas_mux::SupervisorCli::Claude);
-            assert_eq!(spec.model.as_deref(), Some("claude-fable-5-1"));
-            assert_eq!(spec.effort, Some(cas_mux::Effort::Medium));
+            assert_eq!(spec.model.as_deref(), Some("claude-opus-5-5"));
+            assert_eq!(spec.effort, Some(cas_mux::Effort::High));
             assert_eq!(spec.config_dir.as_deref(), Some("~/.claude-alt"));
         }
         assert_eq!(
@@ -11873,14 +11890,14 @@ mod tests {
         let mut snapshot = cas_factory::CapabilitySnapshot::default();
         snapshot.record(
             cas_factory::recipe_route_identity(
-                &registry.recipes["claude_fable"],
+                &registry.recipes["claude_opus_5_5"],
                 "default",
             ),
             cas_factory::CapabilityEvidence::new(
                 cas_factory::CapabilityAvailability::Unavailable,
                 now,
             )
-            .with_reason("Claude Fable account unavailable"),
+            .with_reason("Claude Opus account unavailable"),
         );
         snapshot.record(
             cas_factory::recipe_route_identity(
@@ -11906,7 +11923,7 @@ mod tests {
         assert_eq!(specs[0].effort, Some(cas_mux::Effort::High));
         assert_eq!(
             warnings,
-            ["fallback: claude_opus (primary claude_fable unavailable: Claude Fable account unavailable)"],
+            ["fallback: claude_opus (primary claude_opus_5_5 unavailable: Claude Opus account unavailable)"],
         );
     }
 
@@ -11964,6 +11981,19 @@ mod tests {
 
         assert!(err.contains("gpt-5.6-luna"), "{err}");
         assert!(err.contains("cli=codex"), "{err}");
+    }
+
+    #[test]
+    fn spawn_spec_rejects_haiku_and_points_to_light_lane() {
+        let _home = TestEnvGuard::temp_home();
+        for cli in [None, Some("claude")] {
+            for model in ["haiku", "claude-haiku-4-5-20251001"] {
+                let err = build_spawn_spec_json(cli, Some(model), Some("low"))
+                    .expect_err("Haiku may not reach the spawn queue");
+                assert!(err.contains("light lane"), "{err}");
+                assert!(err.contains("gpt-6-luna"), "{err}");
+            }
+        }
     }
 
     #[test]
@@ -12245,7 +12275,7 @@ model = "local/qwen3.8"
         for (cli, model) in [
             ("claude", "claude-opus-5"),
             ("claude", "opus"),
-            ("codex", "gpt-5.6-luna"),
+            ("codex", "gpt-6-sol"),
             ("grok", "grok-4.5"),
             ("codex", "some-unreleased-slug"),
         ] {
@@ -12343,7 +12373,7 @@ model = "local/qwen3.8"
         let warning = spawn_spec_warning(false, false, &json);
 
         assert!(
-            warning.contains("policy default codex/gpt-5.6-luna/xhigh"),
+            warning.contains("policy default codex/gpt-6-sol/medium"),
             "{warning}"
         );
         assert!(
@@ -12363,7 +12393,7 @@ model = "local/qwen3.8"
         let warning = spawn_specs_warning(false, false, &specs);
 
         assert!(
-            warning.contains("policy default codex/gpt-5.6-luna/xhigh"),
+            warning.contains("policy default codex/gpt-6-sol/medium"),
             "{warning}"
         );
         assert!(

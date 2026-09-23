@@ -150,7 +150,13 @@ pub(crate) fn run_consolidation(
 
     let entries = store.list()?;
     let consolidation_config = ConsolidationConfig {
-        model: config.model.clone(),
+        // Consolidation still uses claude_rs; the daemon extraction route is
+        // independent and can use the Codex light lane.
+        model: if config.model.starts_with("claude-") {
+            config.model.clone()
+        } else {
+            "claude-opus-5-5".to_string()
+        },
         batch_size: config.batch_size,
         ..Default::default()
     };

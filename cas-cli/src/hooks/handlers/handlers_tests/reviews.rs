@@ -140,6 +140,7 @@ fn test_build_rule_review_context_at_threshold() {
     let context = result.unwrap();
     assert!(context.contains("rule-review required=\"true\""));
     assert!(context.contains("rule-reviewer"));
+    assert!(!context.contains("Task tool"));
 }
 
 #[test]
@@ -324,6 +325,7 @@ fn test_build_duplicate_detection_context_at_threshold() {
     let context = result.unwrap();
     assert!(context.contains("duplicate-detection required=\"true\""));
     assert!(context.contains("duplicate-detector"));
+    assert!(!context.contains("Task tool"));
 }
 
 #[test]

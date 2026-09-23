@@ -114,7 +114,7 @@ impl Default for DaemonConfig {
             apply_decay: true,
             curated_importance_floor: 0.9,
             promote_on_access: true,
-            model: "haiku".to_string(),
+            model: crate::light_lane::default_model(),
             cas_root: PathBuf::new(),
             update_entity_summaries: true,
             index_code: true,

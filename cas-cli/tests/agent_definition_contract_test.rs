@@ -19,6 +19,9 @@ fn load(relative: &str) -> &'static str {
         "cas-cli/src/hooks/handlers/handlers_middle/session_stop/mod.rs" => {
             include_str!("../src/hooks/handlers/handlers_middle/session_stop/mod.rs")
         }
+        "cas-cli/src/hooks/handlers/handlers_middle/session_stop/stop_flow.rs" => {
+            include_str!("../src/hooks/handlers/handlers_middle/session_stop/stop_flow.rs")
+        }
         "cas-cli/src/builtins.rs" => include_str!("../src/builtins.rs"),
         _ => builtin_catalog::find_source_path(relative),
     }
@@ -250,15 +253,23 @@ fn learning_reviewer_receives_and_consumes_explicit_ids() {
         "Stop prompt builder must construct the complete unreviewed ID list"
     );
     assert!(
-        stop_handler.contains("Review these unreviewed learning IDs"),
-        "Stop prompt must pass IDs to learning-reviewer"
+        stop_handler.contains("Review exactly these unreviewed learning IDs: {unreviewed_ids}"),
+        "Stop context must pass explicit IDs to learning-reviewer"
+    );
+    let stop_flow = load("cas-cli/src/hooks/handlers/handlers_middle/session_stop/stop_flow.rs");
+    assert!(stop_flow.contains("build_learning_review_context(store.as_ref(), &config)"));
+    assert!(stop_flow.contains("\"learning-reviewer\",\n                context,"));
+    assert!(stop_flow.contains("{body}\\n\\nRun this maintenance job"));
+    assert!(
+        stop_flow.contains("{context}"),
+        "queued prompt must carry explicit-ID context"
     );
 
     for path in REVIEWER_PATHS {
         let body = load(path);
         assert!(
-            body.contains("learning ID from the parent prompt"),
-            "{path} must consume IDs supplied by the parent prompt"
+            body.contains("learning ID from the queued prompt"),
+            "{path} must consume IDs supplied by the queued prompt"
         );
     }
 }

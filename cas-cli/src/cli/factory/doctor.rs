@@ -591,7 +591,7 @@ mod tests {
                 "opus",
                 CapabilityAvailability::Available,
             ),
-            (Harness::CodexCli, "gpt-5.6-luna", codex),
+            (Harness::CodexCli, "gpt-6-sol", codex),
             (
                 Harness::GrokBuild,
                 "grok-4.5",
@@ -766,12 +766,12 @@ effort = "high"
     }
 
     #[test]
-    fn doctor_accepts_fable_taste_spec_and_requires_claude() {
+    fn doctor_accepts_opus_taste_spec_and_requires_claude() {
         let _home = crate::test_support::TestEnvGuard::temp_home();
         let directory = tempfile::tempdir().unwrap();
         let mut decision =
             cas_factory::resolve_lane("taste", &CapabilitySnapshot::default()).unwrap();
-        for effort in [cas_mux::Effort::Medium, cas_mux::Effort::High] {
+        for effort in [cas_mux::Effort::Low, cas_mux::Effort::High] {
             decision.spec.effort = Some(effort);
             let args = FactoryArgs {
                 workers: 1,

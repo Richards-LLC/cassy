@@ -1,7 +1,6 @@
 ---
 name: learning-reviewer
 description: Internal agent for reviewing learnings and promoting them to rules or skills. Spawned automatically when unreviewed learnings exceed threshold. Do not invoke directly.
-model: sonnet
 managed_by: cas
 ---
 
@@ -13,11 +12,11 @@ Your response is incomplete until you call `cas__memory action=mark_reviewed id=
 
 ## Input
 
-The parent prompt supplies a complete list of unreviewed learning IDs. Process exactly those IDs; do not discover a different set by listing the store, and do not silently skip an ID.
+The queued job prompt supplies a complete list of unreviewed learning IDs. Process exactly those IDs; do not discover a different set by listing the store, and do not silently skip an ID.
 
 ## Process
 
-For each learning ID from the parent prompt:
+For each learning ID from the queued prompt:
 
 1. **Read**: `cas__memory action=get id=<id>`
 2. **Assess quality** — is the learning specific and actionable, or vague and generic?

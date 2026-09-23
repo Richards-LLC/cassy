@@ -688,6 +688,60 @@ esac
 
 #[cfg(unix)]
 #[test]
+fn slow_tailscale_serve_start_waits_for_bounded_publication() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let home = private_home();
+    let bin = home.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    let tailscale = bin.join("tailscale");
+    fs::write(
+        &tailscale,
+        r#"#!/bin/sh
+if [ -f "$HOME/slow-start" ]; then /bin/sleep 2; fi
+case "$*" in
+  'status --json') printf '%s' '{"Self":{"DNSName":"slow.tail.example."}}' ;;
+  'serve status --json')
+    if [ -f "$HOME/mock-serve" ]; then
+      target=$(/bin/cat "$HOME/mock-serve")
+      printf '{"Web":{"slow.tail.example:443":{"Handlers":{"/":{"Proxy":"%s"}}}}}' "$target"
+    else printf '%s' '{}'; fi ;;
+  'serve --bg --yes --https=443 '*) printf '%s' "$5" > "$HOME/mock-serve" ;;
+  'serve --https=443 off') /bin/rm -f "$HOME/mock-serve" ;;
+  *) exit 9 ;;
+esac
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&tailscale, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::write(home.path().join("slow-start"), b"").unwrap();
+
+    let started = Instant::now();
+    let record = start_hub(home.path(), bin.as_os_str(), true);
+    let elapsed = started.elapsed();
+    fs::remove_file(home.path().join("slow-start")).unwrap();
+    let startup_log = fs::read_to_string(home.path().join(".cas/hub/hub.log")).unwrap();
+
+    let stop = assert_health_status_and_stop(home.path(), bin.as_os_str(), &record);
+    assert!(
+        elapsed >= Duration::from_secs(8),
+        "{elapsed:?}; {startup_log}"
+    );
+    assert_eq!(
+        record["public_url"], "https://slow.tail.example/",
+        "{record}; {startup_log}"
+    );
+    assert_eq!(
+        record["transport_warning"],
+        Value::Null,
+        "{record}; {startup_log}"
+    );
+    assert_eq!(stop["tailscale_serve_removed"], true);
+    assert!(!home.path().join("mock-serve").exists());
+}
+
+#[cfg(unix)]
+#[test]
 fn process_start_rejects_state_collisions_with_sanitized_diagnostics() {
     use std::os::unix::fs::{PermissionsExt, symlink};
 

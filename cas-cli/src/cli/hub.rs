@@ -25,6 +25,14 @@ const HUB_LIFECYCLE_TIMEOUT: Duration = Duration::from_secs(10);
 const HUB_CONNECTION_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 const HUB_LAUNCH_TIMEOUT: Duration = Duration::from_secs(5);
 
+fn hub_launch_timeout(tailscale_serve: bool) -> Duration {
+    if tailscale_serve {
+        HUB_LAUNCH_TIMEOUT + TailscaleServeManager::successful_ensure_budget()
+    } else {
+        HUB_LAUNCH_TIMEOUT
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HubLaunchOrigin {
     Cli,
@@ -292,7 +300,7 @@ impl HubTransportReport {
         } else {
             "cas hub restart --force"
         };
-        let state = lock_holder_display_state(holder);
+        let state = lock_holder_display_state_with_timeout(holder, hub_launch_timeout(tailscale));
         let remedy = match state {
             HubDisplayState::Starting { wedged: false, .. } | HubDisplayState::Stopping { .. } => {
                 "Run `cas hub status` again after this phase completes.".to_owned()
@@ -724,6 +732,20 @@ fn wait_for_lock_or_satisfying_hub(
             return Ok(LaunchWait::AlreadySatisfied(Box::new(record)));
         }
         if Instant::now() >= deadline {
+            if tailscale_serve
+                && let Some(holder) = paths.lock_holders().into_iter().find(|holder| {
+                    holder.phase.as_deref() == Some("starting")
+                        && holder.age.is_some_and(|age| age < hub_launch_timeout(true))
+                })
+            {
+                anyhow::bail!(
+                    "cas hub launch waiter: {}; run `cas hub status` after startup completes",
+                    hub_state_label(
+                        lock_holder_display_state_with_timeout(&holder, hub_launch_timeout(true)),
+                        holder.pid
+                    )
+                );
+            }
             // Distinct from the runtime's generic lock-wait message on purpose:
             // three separate sites could previously emit identical text, so an
             // operator (or a test) could not tell which wait actually expired.
@@ -797,7 +819,7 @@ pub(super) fn hub_display_state(
     if holder.as_ref().and_then(|holder| holder.phase.as_deref()) == Some("starting") {
         return HubDisplayState::Starting {
             age_secs,
-            wedged: age_secs >= HUB_LAUNCH_TIMEOUT.as_secs(),
+            wedged: age_secs >= hub_launch_timeout(record.tailscale_cli.is_some()).as_secs(),
         };
     }
     if holder.as_ref().and_then(|holder| holder.phase.as_deref()) == Some("stopping") {
@@ -846,11 +868,18 @@ pub(super) fn hub_state_label(state: HubDisplayState, pid: u32) -> String {
 }
 
 fn lock_holder_display_state(holder: &HubLockHolder) -> HubDisplayState {
+    lock_holder_display_state_with_timeout(holder, HUB_LAUNCH_TIMEOUT)
+}
+
+fn lock_holder_display_state_with_timeout(
+    holder: &HubLockHolder,
+    launch_timeout: Duration,
+) -> HubDisplayState {
     let age_secs = holder.age.map(|age| age.as_secs()).unwrap_or(0);
     if holder.phase.as_deref() == Some("starting") {
         HubDisplayState::Starting {
             age_secs,
-            wedged: age_secs >= HUB_LAUNCH_TIMEOUT.as_secs(),
+            wedged: age_secs >= launch_timeout.as_secs(),
         }
     } else if holder.phase.as_deref() == Some("stopping") {
         HubDisplayState::Stopping { age_secs }
@@ -1282,7 +1311,7 @@ fn start_with_output_resolved(
         return Err(error.into());
     }
 
-    let deadline = Instant::now() + HUB_LAUNCH_TIMEOUT;
+    let deadline = Instant::now() + hub_launch_timeout(tailscale_serve);
     while Instant::now() < deadline {
         if let Ok(record) = paths.read_process_record() {
             if record_is_ready(&paths, &record) {
@@ -1460,9 +1489,17 @@ fn serve_foreground(args: &HubServeArgs, tailscale_serve: bool, tailscale_port: 
             let proxy_listener =
                 tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
             let proxy_port = proxy_listener.local_addr()?.port();
-            match tailscale_manager.ensure_with_prior_target(
+            let ensure_started = Instant::now();
+            let ensure_result = tailscale_manager.ensure_with_prior_target(
                 proxy_port, tailscale_port, prior_serve_target,
-            ) {
+            );
+            let _ = writeln!(
+                startup_log,
+                "Tailscale Serve ensure {} in {}ms",
+                if ensure_result.is_ok() { "succeeded" } else { "refused" },
+                ensure_started.elapsed().as_millis(),
+            );
+            match ensure_result {
                 Ok(receipt) => (Some(proxy_listener), Some(receipt), None),
                 Err(error) => {
                     let warning = error.to_string();
@@ -2574,6 +2611,25 @@ mod tests {
             render_transport_status(&report),
             "Tailscale Serve: FAIL - pid 804 is wedged in startup after 91s\n  remedy: Run `cas hub restart --force --tailscale-serve` to recover the hub."
         );
+    }
+
+    #[test]
+    fn slow_tailscale_start_is_still_starting_within_ensure_budget() {
+        let holder = HubLockHolder {
+            pid: 804,
+            age: Some(Duration::from_secs(10)),
+            phase: Some("starting".to_owned()),
+            command: Some("cas hub serve --tailscale-serve".to_owned()),
+        };
+        let report = HubTransportReport::wedged_lock(&holder, true);
+        assert!(report.message.contains("is starting for 10s"), "{}", report.message);
+        assert!(
+            report.remedy.as_deref().unwrap().contains("status` again"),
+            "{:?}",
+            report.remedy
+        );
+        assert_eq!(hub_launch_timeout(false), HUB_LAUNCH_TIMEOUT);
+        assert!(hub_launch_timeout(true) > Duration::from_secs(10));
     }
 
     #[test]

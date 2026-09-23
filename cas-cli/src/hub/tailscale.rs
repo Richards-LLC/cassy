@@ -28,6 +28,10 @@ fn private_tempdir() -> tempfile::TempDir {
 }
 
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
+// A successful ensure uses four CLI commands for a free port, or six when it
+// first removes an owned stale route. The launcher must allow that complete
+// bounded sequence before declaring a still-starting hub dead.
+const MAX_SUCCESSFUL_ENSURE_COMMANDS: u32 = 6;
 const RECEIPT_FILE: &str = "tailscale-serve.json";
 const TEARDOWN_RECEIPT_FILE: &str = "tailscale-serve-teardown.json";
 
@@ -65,6 +69,10 @@ pub struct TailscaleServeManager {
 }
 
 impl TailscaleServeManager {
+    pub(crate) fn successful_ensure_budget() -> Duration {
+        COMMAND_TIMEOUT * MAX_SUCCESSFUL_ENSURE_COMMANDS
+    }
+
     pub fn new(state_dir: impl AsRef<Path>) -> Self {
         Self::with_executable(state_dir, tailscale_executable())
     }

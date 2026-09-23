@@ -2713,6 +2713,10 @@ impl CasCore {
         // explicit diagnostic verdict below, never as a refusal to merge.
         let branch_ci_state = lookup_branch_ci(&worktree.branch, &cwd);
         let ci_prefix = describe_branch_ci_state(&worktree.branch, &branch_ci_state);
+        let observed_source_tip = transactional_delivery
+            .is_none()
+            .then(|| manager.git().resolve_commit(&worktree.branch))
+            .flatten();
 
         // Carries the target-sync line from inside the merge branch out to the
         // receipt; empty when nothing needed reconciling.
@@ -3192,6 +3196,41 @@ impl CasCore {
         } else {
             String::new()
         };
+
+        // A supervisor can merge a task before its worker submitted a
+        // completion receipt. Record the verified Git merge separately from
+        // worker proof, so a later scope correction has an immutable delivery
+        // fact without inventing a worker receipt or verifier verdict.
+        if transactional_delivery.is_none()
+            && let (Some(task_id), Some(context), Some(source_tip), Some(target_tip), Ok(actor)) = (
+                task_id,
+                declared_repo_context.as_ref(),
+                observed_source_tip.as_deref(),
+                merge_commit.as_deref(),
+                self.get_agent_id(),
+            )
+            && worktree.parent_branch == context.target_branch
+            && crate::mcp::tools::core::task::lifecycle::close_ops::git_commit_is_ancestor(
+                &cwd, source_tip, target_tip,
+            )
+        {
+            cas_store::record_observed_delivery_merge(
+                &cas_root,
+                task_id,
+                &worktree.branch,
+                &context.target_branch,
+                source_tip,
+                target_tip,
+                &actor,
+            )
+            .map_err(|error| McpError {
+                code: ErrorCode::INTERNAL_ERROR,
+                message: Cow::from(format!(
+                    "WorkTarget merge completed, but its delivery observation could not be recorded: {error}"
+                )),
+                data: None,
+            })?;
+        }
 
         if !reconciled_delivery {
             let epic_id = worktree.epic_id.clone().or_else(|| {

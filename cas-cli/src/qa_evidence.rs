@@ -244,6 +244,22 @@ pub fn validate_bundle(ctx: &EvidenceContext<'_>) -> Result<BundleReceipt, Evide
             cite_command(ctx),
         ));
     }
+    // The contract lets a `journey` bundle skip polish because the release
+    // journey evaluation scores it. That exception does not reach the
+    // implementer's close: a delivery still needs its own polish proof.
+    if manifest.producer == "journey" && manifest.visual_qa_status != "pass" {
+        return Err(EvidenceRefusal::new(
+            format!(
+                "a journey bundle without polish proof (visual_qa_status {:?}); the journey polish exception covers the release evaluation, not a delivery close",
+                manifest.visual_qa_status
+            ),
+            format!(
+                "add the polish keys to {} or cite a cas-qa-craft bundle: {}",
+                manifest_path.display(),
+                producing_command("visual_qa_stdout", &bundle_dir)
+            ),
+        ));
+    }
 
     // 2. Required files.
     let files = &manifest.files;

@@ -718,3 +718,33 @@ fn delivery_range_before_and_after_merge() {
         vec!["ui.tsx".to_string()]
     );
 }
+
+#[test]
+fn journey_polish_exception_does_not_reach_the_delivery_close() {
+    let fx = Fixture::new();
+    fx.write_bundle(|manifest| {
+        manifest["producer"] = serde_json::json!("journey");
+        manifest["visual_qa_status"] = serde_json::json!("unavailable");
+        for key in [
+            "polish_screenshots",
+            "visual_qa",
+            "visual_qa_json",
+            "visual_qa_stdout",
+            "critique",
+        ] {
+            manifest["files"].as_object_mut().unwrap().remove(key);
+        }
+    });
+    let refusal = fx.validate(&fx.notes()).unwrap_err();
+    assert!(
+        refusal
+            .problem
+            .contains("journey bundle without polish proof"),
+        "{refusal:?}"
+    );
+
+    let fx = Fixture::new();
+    fx.write_bundle(|manifest| manifest["producer"] = serde_json::json!("journey"));
+    fx.validate(&fx.notes())
+        .expect("a journey bundle with polish proof is accepted");
+}

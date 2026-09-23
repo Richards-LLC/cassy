@@ -58,8 +58,12 @@ dependency, verify on upgrade) · 🔧 fix shipped · 🏗 EPIC · ⏭ n/a
   1.0.6–1.0.13 and Releasebot covers 1.0.17–1.0.25 plus 1.0.30–1.0.34;
   1.0.14–1.0.16, 1.0.26–1.0.29, and 1.0.35–1.0.40 are consolidated below as
   a per-version source gap. The required validation is tracked separately in
-  **cas-ef93** and must not be inferred from this diary update. The earlier
-  0.2.102–0.2.103 and 0.2.107–0.2.111 gaps remain documented below.
+  **cas-ef93**, including the urgent-interrupt path, and must not be inferred
+  from this diary update. The interrupt touchpoint is `Pane::break_turn` in
+  `crates/cas-pty/src/pty.rs:5421-5426` (cas-c931): Grok 1.0.24 changed Esc
+  semantics, so the matrix must verify that an urgent worker redirect still
+  breaks a Grok turn. The earlier 0.2.102–0.2.103 and 0.2.107–0.2.111 gaps
+  remain documented below.
 
 ## Cassy ↔ Grok touchpoints (what a release can break)
 
@@ -138,7 +142,7 @@ At minimum, `PtyConfig::grok` sets:
 | 1.0.31 | MCP prefix retention · worktree path/scrollback/dashboard fixes | 👀 / 🟢 | this doc |
 | 1.0.30 | Session timing · workflow status · tmux lag | 👀 / ⏭ | this doc |
 | 1.0.25 | Hook silence · headless timeout · MCP/session/workflow fixes | 👀 / 🟢 | this doc |
-| 1.0.24 | Esc no longer cancels a running turn | ⏭ | this doc |
+| 1.0.24 | Esc no longer cancels a running turn | 👀 | this doc |
 | 1.0.23 | Wrapped URL/email links | ⏭ | this doc |
 | 1.0.22 | MCP precedence · permission diffs · session/subagent/workflow reliability | 👀 / 🟢 | this doc |
 | 1.0.21 | Permission mode/session welcome-screen fixes | 👀 / ⏭ | this doc |
@@ -288,8 +292,14 @@ which attributes the **1.0.25 — 2026-09-09** notes to xAI.
 ### 1.0.24 — Esc no longer cancels a running turn
 
 Reviewed 2026-09-23. Source: [Releasebot's per-version Grok Build feed](https://releasebot.io/updates/xai/grok-build),
-which attributes the **1.0.24 — 2026-09-07** note to xAI. → ⏭ **n/a**
-(interactive key behavior; Cassy cancellation and worker leases remain separate).
+which attributes the **1.0.24 — 2026-09-07** note to xAI.
+
+- **Esc no longer cancels a running turn and instead reminds users to use
+  Ctrl+C.** → 👀 **watch — urgent interrupt and liveness.** Cassy's urgent
+  interrupt-and-redirect sends Esc through `Pane::break_turn`
+  (`crates/cas-pty/src/pty.rs:5421-5426`, cas-c931). On Grok ≥1.0.24 this
+  behavior may leave a worker turn running, so **cas-ef93** must test the
+  urgent-interrupt path against 1.0.40 before the validated pin advances.
 
 ### 1.0.23 — wrapped URL/email links
 

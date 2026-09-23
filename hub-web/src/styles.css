@@ -2023,7 +2023,13 @@ dialog::backdrop { background: var(--overlay-backdrop); }
   dialog { border: 1px solid CanvasText; }
   .palette-command { border: 1px solid ButtonBorder; }
   .palette-command:disabled { border-color: GrayText; }
-  .session-picker-entry[aria-current="true"] { border: 2px solid Highlight; }
+  /* The focus ring is Highlight, so the open session cannot also be a
+     Highlight frame: it is filled instead, and its own ring flips to
+     HighlightText so focus still shows on the fill. */
+  .palette-commands .palette-command:focus-visible { outline-color: Highlight; }
+  .session-picker-entry[aria-current="true"] { forced-color-adjust: none; color: HighlightText; background: Highlight; border-color: Highlight; }
+  .session-picker-entry[aria-current="true"] * { color: HighlightText; background: transparent; border-color: HighlightText; }
+  .palette-commands .session-picker-entry[aria-current="true"]:focus-visible { outline-color: HighlightText; }
 }
 /* == End Unit 3: command palette == */
 

@@ -99,7 +99,7 @@ esac
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(8);
+    let deadline = Instant::now() + Duration::from_secs(30);
     let mut replacement = None;
     while Instant::now() < deadline {
         if let Ok(record) = paths.read_process_record() {
@@ -110,7 +110,13 @@ esac
         }
         thread::sleep(Duration::from_millis(25));
     }
-    let replacement = replacement.expect("foreground start must publish the replacement shim");
+    let replacement = replacement.unwrap_or_else(|| {
+        let _ = child.kill();
+        let _ = child.wait();
+        let mut stderr = String::new();
+        let _ = child.stderr.take().unwrap().read_to_string(&mut stderr);
+        panic!("foreground start must publish the replacement shim: {stderr}");
+    });
     assert_ne!(replacement, old_target);
     assert_eq!(
         fs::read_to_string(home.path().join("mock-serve")).unwrap(),

@@ -855,6 +855,12 @@ fn update_receipt_proves_the_hub_version_transition_and_manager() {
         previous_version: Some("3.26.0".to_owned()),
         current_version: Some("3.27.0".to_owned()),
         service_managed: true,
+        prior_state: "unresponsive".to_owned(),
+        action: "restarted".to_owned(),
+        verified: true,
+        loopback_verified: true,
+        transport_verified: Some(true),
+        public_url: Some("https://hub.tail.ts.net/".to_owned()),
         ..Default::default()
     };
     let receipt = combined_update_receipt(
@@ -868,6 +874,11 @@ fn update_receipt_proves_the_hub_version_transition_and_manager() {
     assert_eq!(receipt["hub_restart"]["from_version"], "3.26.0");
     assert_eq!(receipt["hub_restart"]["to_version"], "3.27.0");
     assert_eq!(receipt["hub_restart"]["via"], "service");
+    assert_eq!(receipt["hub_restart"]["prior_state"], "unresponsive");
+    assert_eq!(receipt["hub_restart"]["action"], "restarted");
+    assert_eq!(receipt["hub_restart"]["verified"], true);
+    assert_eq!(receipt["hub_restart"]["transport_verified"], true);
+    assert_eq!(receipt["hub_restart"]["public_url"], "https://hub.tail.ts.net/");
 }
 
 #[test]

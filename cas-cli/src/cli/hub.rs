@@ -397,6 +397,23 @@ pub(crate) struct HubRestartOutcome {
     pub(crate) previous_version: Option<String>,
     pub(crate) current_version: Option<String>,
     pub(crate) service_managed: bool,
+    pub(crate) prior_state: String,
+    pub(crate) action: String,
+    pub(crate) verified: bool,
+    pub(crate) loopback_verified: bool,
+    pub(crate) transport_verified: Option<bool>,
+    pub(crate) transport_warning: Option<String>,
+    pub(crate) recovery_attempted: bool,
+    pub(crate) public_url: Option<String>,
+    pub(crate) failure: Option<String>,
+    pub(crate) remedy: Option<String>,
+}
+
+struct HubUpdateVerification {
+    public_url: Option<String>,
+    transport_verified: Option<bool>,
+    transport_warning: Option<String>,
+    remedy: Option<String>,
 }
 
 fn default_hub_command() -> HubCommands {
@@ -575,8 +592,12 @@ fn wait_for_stop_or_satisfying_hub(
             continue;
         }
         let lock = paths.try_acquire_instance_lock()?;
+        // A forced recovery owns the machine lock, which is authoritative for
+        // hub lifetime. Older detached launchers can leave a reaped-late PID
+        // after their listener and lock are already gone; waiting on kill(0)
+        // alone then reports a false stop timeout.
         let quiescent = lock.is_some()
-            && settle_pid.is_none_or(|pid| !process_is_running(pid));
+            && (force || settle_pid.is_none_or(|pid| !process_is_running(pid)));
         drop(lock);
         if quiescent {
             return Ok(None);
@@ -2132,121 +2153,297 @@ fn stop_with_output(
     Ok(StopOutcome::Stopped)
 }
 
-/// Refresh the live hub after `cas update` swaps in a replacement binary.
-/// Installed service managers are authoritative; without one, a missing,
-/// dead, or already-current hub remains a no-op.
+fn update_prior_state(
+    paths: &HubRuntimePaths,
+    record: Option<&HubProcessRecord>,
+    holder: Option<&HubLockHolder>,
+    has_receipt: bool,
+) -> &'static str {
+    let state = record.map(|record| hub_display_state(paths, record)).or_else(|| {
+        holder.map(lock_holder_display_state)
+    });
+    match state {
+        Some(HubDisplayState::Exited) => "exited",
+        Some(HubDisplayState::Starting { wedged: false, .. }) => "starting",
+        Some(HubDisplayState::Starting { wedged: true, .. }) => "startup_wedged",
+        Some(HubDisplayState::Stopping { .. }) => "stopping",
+        Some(HubDisplayState::Unresponsive { .. }) => "unresponsive",
+        Some(HubDisplayState::Running) => "running",
+        None if has_receipt => "exited",
+        None => "none",
+    }
+}
+
+fn update_restart_spec(
+    record: Option<&HubProcessRecord>,
+    receipt: Option<&TailscaleServeReceipt>,
+) -> Result<HubRestartSpec> {
+    let bind = record
+        .map(|record| record.bind.parse())
+        .transpose()
+        .context("invalid bind address in hub process record")?
+        .unwrap_or(IpAddr::from([127, 0, 0, 1]));
+    Ok(HubRestartSpec {
+        bind,
+        // A recordless legacy route does not preserve the old bind port. Let
+        // the kernel choose a free port rather than colliding with another
+        // hub's well-known port on the same machine.
+        port: record.map_or(0, |record| record.port),
+        tailscale_serve: record.is_some_and(tailscale_enabled) || receipt.is_some(),
+        tailscale_port: receipt
+            .map(|receipt| receipt.https_port)
+            .or_else(|| record.and_then(|record| record.tailscale_serve_port))
+            .unwrap_or(443),
+    })
+}
+
+fn verify_updated_hub(
+    paths: &HubRuntimePaths,
+    binary_version: &str,
+    spec: &HubRestartSpec,
+) -> Result<HubUpdateVerification> {
+    let record = paths.read_process_record().context("new hub has no process record")?;
+    anyhow::ensure!(record.version == binary_version, "hub still runs version {}", record.version);
+    anyhow::ensure!(record.bind == spec.bind.to_string() && (spec.port == 0 || record.port == spec.port),
+        "hub restarted with different bind or port");
+    let holder = paths.read_lock_owner().context("new hub does not hold its machine lock")?;
+    anyhow::ensure!(holder.pid == record.pid && holder.phase == "running",
+        "new hub lock is not in running phase");
+    anyhow::ensure!(record_is_live(&record), "new hub loopback /v1/health is not ready");
+    if !spec.tailscale_serve {
+        return Ok(HubUpdateVerification {
+            public_url: None,
+            transport_verified: None,
+            transport_warning: None,
+            remedy: None,
+        });
+    }
+    let manager = TailscaleServeManager::new(paths.root());
+    let receipt = manager.owned_receipt()?.context("Tailscale Serve ownership receipt is missing")?;
+    anyhow::ensure!(receipt.https_port == spec.tailscale_port,
+        "Tailscale Serve published the wrong HTTPS port");
+    anyhow::ensure!(record.tailscale_serve_target.as_deref() == Some(receipt.local_target.as_str()),
+        "Tailscale Serve receipt does not name the new hub shim");
+    let handlers = manager.serve_handlers(spec.tailscale_port)?;
+    anyhow::ensure!(handlers == vec![("/".to_owned(), receipt.local_target.clone())],
+        "Tailscale Serve status does not route to the new hub shim");
+    let public_url = record.public_url.as_deref().context("new hub has no Tailscale public URL")?;
+    let health_url = format!("{}/v1/health", public_url.trim_end_matches('/'));
+    let public_health: Result<serde_json::Value> = ureq::get(&health_url)
+        .timeout(Duration::from_secs(5))
+        .call()
+        .with_context(|| format!("public Tailscale /v1/health unavailable at {health_url}"))
+        .and_then(|response| {
+            response
+                .into_json()
+                .context("public Tailscale /v1/health returned invalid JSON")
+        });
+    let public_failure = match public_health {
+        Ok(health) if health["schema_version"] == 1 && health["ready"] == true => None,
+        Ok(_) => Some("public Tailscale /v1/health did not report ready".to_owned()),
+        Err(error) => Some(format!("{error:#}")),
+    };
+    let remedy = public_failure.as_ref().map(|_| {
+        "Check MagicDNS and `tailscale status`, then retry the public URL; the hub and Serve route are healthy.".to_owned()
+    });
+    Ok(HubUpdateVerification {
+        public_url: Some(public_url.to_owned()),
+        transport_verified: Some(public_failure.is_none()),
+        transport_warning: public_failure.map(|failure| format!("{health_url}: {failure}")),
+        remedy,
+    })
+}
+
+fn finish_update_hub_verification(
+    outcome: &mut HubRestartOutcome,
+    verification: HubUpdateVerification,
+    binary_version: &str,
+    cli: &Cli,
+) {
+    outcome.verified = true;
+    outcome.loopback_verified = true;
+    outcome.transport_verified = verification.transport_verified;
+    outcome.transport_warning = verification.transport_warning;
+    outcome.current_version = Some(binary_version.to_owned());
+    outcome.public_url = verification.public_url;
+    outcome.failure = None;
+    outcome.remedy = verification.remedy;
+    if !cli.json {
+        let transport = if outcome.transport_verified == Some(false) {
+            "loopback (public Tailscale URL needs attention)"
+        } else {
+            outcome.public_url.as_deref().unwrap_or("loopback")
+        };
+        let restart = if outcome.action == "restarted" {
+            if outcome.recovery_attempted {
+                " → restarted after one recovery"
+            } else {
+                " → restarted"
+            }
+        } else {
+            ""
+        };
+        println!(
+            "cas update: hub was {}{restart} → verified at {transport}",
+            outcome.prior_state,
+        );
+        if let Some(warning) = outcome.transport_warning.as_deref() {
+            eprintln!("cas update: public transport warning: {warning}");
+            if let Some(remedy) = outcome.remedy.as_deref() {
+                eprintln!("cas update: {remedy}");
+            }
+        }
+    }
+}
+
+fn capture_update_hub_evidence(paths: &HubRuntimePaths, reason: &str) {
+    use std::io::{Read, Seek, SeekFrom};
+    let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%SZ");
+    let evidence = paths.root().join(format!("update-recovery-{stamp}.txt"));
+    let mut tail = Vec::new();
+    if let Ok(mut log) = std::fs::File::open(paths.log_path()) {
+        if let Ok(len) = log.metadata().map(|metadata| metadata.len()) {
+            let _ = log.seek(SeekFrom::Start(len.saturating_sub(8192)));
+            let _ = log.read_to_end(&mut tail);
+        }
+    }
+    let _ = std::fs::write(&evidence, format!(
+        "verification failure: {reason}\nprocess record: {:?}\nlock: {:?}\nhub.log tail:\n{}",
+        paths.read_process_record().ok(),
+        paths.read_lock_owner(),
+        String::from_utf8_lossy(&tail),
+    ));
+    #[cfg(target_os = "macos")]
+    if let Some(pid) = paths.read_process_record().ok().map(|record| record.pid) {
+        let _ = Command::new("sample")
+            .args([pid.to_string(), "2".to_owned(), "-file".to_owned(),
+                paths.root().join(format!("update-recovery-{stamp}.sample.txt")).display().to_string()])
+            .status();
+    }
+    #[cfg(target_os = "linux")]
+    if let Some(pid) = paths.read_process_record().ok().map(|record| record.pid) {
+        if let Ok(stack) = std::fs::read(format!("/proc/{pid}/stack")) {
+            let _ = std::fs::write(paths.root().join(format!("update-recovery-{stamp}.stack.txt")), stack);
+        }
+    }
+}
+
+/// After a binary swap, converge every previously present hub to the new
+/// binary and verify both loopback and the requested transport.
 pub(crate) fn restart_stale_hub(
     binary_version: &str,
     cli: &Cli,
 ) -> Result<HubRestartOutcome> {
     let paths = HubRuntimePaths::default_for_user()?;
     let record = paths.read_process_record().ok();
-    let (tailscale_serve, tailscale_port) = record
-        .as_ref()
-        .map(|record| {
-            (
-                tailscale_enabled(record),
-                record.tailscale_serve_port.unwrap_or(443),
-            )
-        })
-        .unwrap_or((false, 443));
-    let previous_version = record
-        .as_ref()
-        .filter(|record| record.version != binary_version)
-        .map(|record| record.version.clone());
-
-    // An installed service is authoritative even when it is currently
-    // inactive. Restarting it here starts the latest binary through the
-    // manager and prevents this update path from spawning a detached hub.
-    if super::hub_service::restart_supervised(cli, tailscale_serve, tailscale_port)? {
-        return Ok(HubRestartOutcome {
-            transport_error: None,
-            current_version: previous_version
-                .as_ref()
-                .map(|_| binary_version.to_owned()),
-            previous_version,
-            service_managed: true,
-        });
-    }
-
-    let Some(record) = record else {
-        return Ok(HubRestartOutcome::default());
+    let holder = paths.lock_holders().into_iter().next();
+    let receipt = TailscaleServeManager::new(paths.root()).owned_receipt().ok().flatten();
+    let prior_state = update_prior_state(&paths, record.as_ref(), holder.as_ref(), receipt.is_some());
+    let spec = update_restart_spec(record.as_ref(), receipt.as_ref())?;
+    let mut outcome = HubRestartOutcome {
+        prior_state: prior_state.to_owned(),
+        action: "skipped".to_owned(),
+        previous_version: record.as_ref().map(|record| record.version.clone()),
+        ..Default::default()
     };
-    if !record_is_live(&record) {
-        return Ok(HubRestartOutcome::default());
+    if prior_state == "none" {
+        return Ok(outcome);
     }
-    let Some(spec) = restart_spec_for_record(&record, binary_version)? else {
-        return Ok(HubRestartOutcome::default());
-    };
-    let previous_version = Some(record.version.clone());
-
-    if !cli.json {
-        println!(
-            "cas update: restarting stale hub (pid {}, version {} -> {})",
-            record.pid, record.version, binary_version
-        );
+    if prior_state == "running"
+        && record.as_ref().is_some_and(|record| record.version == binary_version)
+        && let Ok(verification) = verify_updated_hub(&paths, binary_version, &spec)
+    {
+        outcome.action = "verified".to_owned();
+        outcome.service_managed = record
+            .as_ref()
+            .is_some_and(|record| record.launched_by.as_deref() == Some("service"));
+        finish_update_hub_verification(&mut outcome, verification, binary_version, cli);
+        return Ok(outcome);
     }
     let args = HubServeArgs {
         bind: spec.bind,
         port: spec.port,
         ..HubServeArgs::default()
     };
-    // A stale-version restart is a relaunch: if a concurrent command already
-    // produced a hub on the new binary, that is the outcome this wanted.
-    if let StopOutcome::AlreadySatisfied(record) = stop_with_output(
-        cli,
-        !cli.json,
-        Some(RelaunchIntent {
-            args: &args,
-            tailscale_serve: spec.tailscale_serve,
-            tailscale_port: spec.tailscale_port,
-        }),
-        false,
-    )? {
-        if spec.tailscale_serve
-            && let Some(warning) = record.transport_warning.as_deref()
-        {
-            return Ok(HubRestartOutcome {
-                transport_error: Some(update_transport_error_message(warning)),
-                previous_version,
-                current_version: Some(binary_version.to_owned()),
-                service_managed: false,
-            });
+    let attempt = || -> Result<bool> {
+        // The service manager owns its own stop/start sequence; a detached hub
+        // must be stopped through the same force path as `cas hub restart`.
+        if super::hub_service::restart_supervised(cli, spec.tailscale_serve, spec.tailscale_port)? {
+            return Ok(true);
         }
-        return Ok(HubRestartOutcome {
-            transport_error: None,
-            previous_version,
-            current_version: Some(binary_version.to_owned()),
-            service_managed: false,
+        let stopped = stop_with_output(
+            cli,
+            false,
+            Some(RelaunchIntent {
+                args: &args,
+                tailscale_serve: spec.tailscale_serve,
+                tailscale_port: spec.tailscale_port,
+            }),
+            true,
+        )?;
+        if !matches!(stopped, StopOutcome::AlreadySatisfied(_)) {
+            start_with_output_from(
+                &args,
+                cli,
+                spec.tailscale_serve,
+                spec.tailscale_port,
+                false,
+                HubLaunchOrigin::Update,
+            )?;
+        }
+        Ok(false)
+    };
+    outcome.action = "restarted".to_owned();
+    for number in 0..2 {
+        if number == 1 {
+            outcome.recovery_attempted = true;
+        }
+        let result = attempt().and_then(|service_managed| {
+            outcome.service_managed = service_managed;
+            verify_updated_hub(&paths, binary_version, &spec)
         });
-    }
-    match start_with_output_from(
-        &args,
-        cli,
-        spec.tailscale_serve,
-        spec.tailscale_port,
-        !cli.json,
-        HubLaunchOrigin::Update,
-    ) {
-        Ok(()) => Ok(HubRestartOutcome {
-            transport_error: None,
-            previous_version,
-            current_version: Some(binary_version.to_owned()),
-            service_managed: false,
-        }),
-        Err(error) => {
-            if let Some(message) = update_transport_error_message_from(&error) {
-                Ok(HubRestartOutcome {
-                    transport_error: Some(message),
-                    previous_version,
-                    current_version: Some(binary_version.to_owned()),
-                    service_managed: false,
-                })
-            } else {
-                Err(error)
+        match result {
+            Ok(verification) => {
+                finish_update_hub_verification(&mut outcome, verification, binary_version, cli);
+                return Ok(outcome);
+            }
+            Err(error) => {
+                let message = format!("{error:#}");
+                if number == 0 {
+                    capture_update_hub_evidence(&paths, &message);
+                }
+                outcome.failure = Some(message);
             }
         }
     }
+    outcome.action = "failed".to_owned();
+    if let Ok(record) = paths.read_process_record()
+        && record.version == binary_version
+    {
+        outcome.current_version = Some(binary_version.to_owned());
+        outcome.loopback_verified = record_is_ready(&paths, &record);
+        outcome.public_url = record.public_url;
+    }
+    outcome.transport_verified = spec.tailscale_serve.then_some(false);
+    let remedy = if spec.tailscale_serve {
+        "Inspect ~/.cas/hub/update-recovery-*.txt, then run `cas hub restart --force --tailscale-serve`."
+    } else {
+        "Inspect ~/.cas/hub/update-recovery-*.txt, then run `cas hub restart --force`."
+    };
+    outcome.remedy = Some(remedy.to_owned());
+    if spec.tailscale_serve {
+        outcome.transport_error = outcome.failure.as_ref().map(|failure| {
+            format!("cas update: Tailscale Serve verification failed: {failure}; {remedy}")
+        });
+    }
+    if !cli.json {
+        eprintln!(
+            "cas update: hub was {} → restart verification failed after one recovery: {}; {remedy}",
+            outcome.prior_state,
+            outcome.failure.as_deref().unwrap_or("unknown failure"),
+        );
+    }
+    Ok(outcome)
 }
 
 fn process_is_running(pid: u32) -> bool {
@@ -2329,7 +2526,11 @@ fn record_is_ready(paths: &HubRuntimePaths, record: &HubProcessRecord) -> bool {
         return false;
     }
     match paths.read_lock_owner() {
-        Some(owner) => owner.pid == record.pid && owner.phase == "running",
+        Some(owner) => {
+            owner.pid == record.pid
+                && (owner.phase == "running"
+                    || (owner.phase.is_empty() && record.version != env!("CARGO_PKG_VERSION")))
+        }
         None => record.version != env!("CARGO_PKG_VERSION"),
     }
 }

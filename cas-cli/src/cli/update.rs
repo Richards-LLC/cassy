@@ -332,6 +332,14 @@ pub fn execute(args: &UpdateArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
         print_update_banner_with_formatter(&mut fmt, &report, hub_transport_error.as_deref())?;
     }
 
+    if hub_proof.action == "failed" {
+        anyhow::bail!(
+            "hub recovery failed after one retry: {}; {}",
+            hub_proof.failure.as_deref().unwrap_or("unknown verification error"),
+            hub_proof.remedy.as_deref().unwrap_or("Run `cas hub restart --force`."),
+        );
+    }
+
     Ok(())
 }
 
@@ -364,19 +372,28 @@ fn combined_update_receipt(
             "message": error,
         });
     }
-    if let Some(hub_restart) = hub_restart
-        && let (Some(previous), Some(current)) = (
-            hub_restart.previous_version.as_deref(),
-            hub_restart.current_version.as_deref(),
-        )
-    {
-        receipt["hub_restart"] = serde_json::json!({
-            "from_version": previous,
-            "to_version": current,
-            "via": if hub_restart.service_managed { "service" } else { "detached" },
-        });
+    if let Some(hub_restart) = hub_restart {
+        receipt["hub_restart"] = hub_restart_receipt(hub_restart);
     }
     receipt
+}
+
+fn hub_restart_receipt(outcome: &super::hub::HubRestartOutcome) -> serde_json::Value {
+    serde_json::json!({
+        "from_version": outcome.previous_version,
+        "to_version": outcome.current_version,
+        "via": if outcome.service_managed { "service" } else { "detached" },
+        "prior_state": outcome.prior_state,
+        "action": outcome.action,
+        "verified": outcome.verified,
+        "loopback_verified": outcome.loopback_verified,
+        "transport_verified": outcome.transport_verified,
+        "transport_warning": outcome.transport_warning,
+        "recovery_attempted": outcome.recovery_attempted,
+        "public_url": outcome.public_url,
+        "failure": outcome.failure,
+        "remedy": outcome.remedy,
+    })
 }
 
 fn refresh_after_hub_restart<T>(
@@ -1420,7 +1437,8 @@ fn project_refresh_receipt_json(
         // receipt from the pre-update image is what made an operator's first
         // `cas update` look converged when it was not.
         "refresh_binary_version": env!("CARGO_PKG_VERSION"),
-        "refresh_status": if receipts.iter().any(|receipt| receipt.failed())
+        "refresh_status": if hub_restart.is_some_and(|hub| hub.action == "failed")
+            || receipts.iter().any(|receipt| receipt.failed())
             || user_level.failed()
         {
             "refresh_failed"
@@ -1449,17 +1467,8 @@ fn project_refresh_receipt_json(
             "message": error,
         });
     }
-    if let Some(hub_restart) = hub_restart
-        && let (Some(previous), Some(current)) = (
-            hub_restart.previous_version.as_deref(),
-            hub_restart.current_version.as_deref(),
-        )
-    {
-        receipt["hub_restart"] = serde_json::json!({
-            "from_version": previous,
-            "to_version": current,
-            "via": if hub_restart.service_managed { "service" } else { "detached" },
-        });
+    if let Some(hub_restart) = hub_restart {
+        receipt["hub_restart"] = hub_restart_receipt(hub_restart);
     }
     receipt
 }
@@ -3061,6 +3070,13 @@ fn execute_post_swap(args: &UpdateArgs, cli: &Cli, current_version: &str) -> any
         let mut out = io::stdout();
         let mut fmt = Formatter::stdout(&mut out, ActiveTheme::default());
         print_update_banner_with_formatter(&mut fmt, &report, hub_transport_error.as_deref())?;
+    }
+    if hub_proof.action == "failed" {
+        anyhow::bail!(
+            "hub recovery failed after one retry: {}; {}",
+            hub_proof.failure.as_deref().unwrap_or("unknown verification error"),
+            hub_proof.remedy.as_deref().unwrap_or("Run `cas hub restart --force`."),
+        );
     }
     Ok(())
 }

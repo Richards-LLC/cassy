@@ -2,9 +2,10 @@ use crate::hooks_test::*;
 use tempfile::TempDir;
 
 #[test]
-fn test_stop_blocks_for_learning_review() {
+fn test_stop_queues_learning_review_without_blocking() {
     let temp = TempDir::new().unwrap();
     init_cas(&temp);
+    install_fake_maintenance_runner(&temp);
 
     // Enable learning_review in the existing hooks.stop table.
     set_config_value(&temp, "hooks.stop.learning_review_enabled", "true");
@@ -24,17 +25,21 @@ fn test_stop_blocks_for_learning_review() {
         &write_tool_input(session_id, "/src/main.rs"),
     );
 
-    // Try to stop - should be blocked for learning review
-    let stop_output = send_hook(&temp, "Stop", &stop_input(session_id));
-
-    assert_stop_blocked(
+    let learning_ids: Vec<_> = open_entries(&temp)
+        .into_iter()
+        .map(|entry| entry.id)
+        .collect();
+    let stop_output = send_hook(&temp, "Stop", &maintenance_stop_input(&temp, session_id));
+    let mut fragments = vec!["learning-reviewer job", "Unreviewed Learnings", session_id];
+    for id in &learning_ids {
+        fragments.push(id);
+    }
+    assert_maintenance_queued(
+        &temp,
+        session_id,
+        "learning-reviewer",
         &stop_output,
-        &["learning-reviewer", "learning", "Learning review"],
-        Some(&[
-            "learning-review required",
-            "learning-reviewer",
-            "Unreviewed Learnings",
-        ]),
+        &fragments,
     );
 }
 
@@ -85,11 +90,12 @@ fn test_stop_not_blocked_without_learning_review_config() {
 // Part I: Rule Review Tests
 // =============================================================================
 
-/// Test that Stop blocks when rule_review is enabled and threshold is exceeded
+/// Rule review queues without blocking when the threshold is exceeded.
 #[test]
-fn test_stop_blocks_for_rule_review() {
+fn test_stop_queues_rule_review_without_blocking() {
     let temp = TempDir::new().unwrap();
     init_cas(&temp);
+    install_fake_maintenance_runner(&temp);
 
     // Enable rule_review in the existing hooks.stop table.
     set_config_value(&temp, "hooks.stop.rule_review_enabled", "true");
@@ -109,13 +115,18 @@ fn test_stop_blocks_for_rule_review() {
         &write_tool_input(session_id, "/src/main.rs"),
     );
 
-    // Try to stop - should be blocked for rule review
-    let stop_output = send_hook(&temp, "Stop", &stop_input(session_id));
-
-    assert_stop_blocked(
+    let stop_output = send_hook(&temp, "Stop", &maintenance_stop_input(&temp, session_id));
+    assert_maintenance_queued(
+        &temp,
+        session_id,
+        "rule-reviewer",
         &stop_output,
-        &["rule-reviewer", "rule", "Rule review"],
-        Some(&["rule-review required", "rule-reviewer", "Draft Rules"]),
+        &[
+            "rule-reviewer job",
+            "Draft Rules",
+            "Test draft rule number",
+            session_id,
+        ],
     );
 }
 
@@ -168,11 +179,12 @@ fn test_stop_not_blocked_with_rule_review_disabled() {
 // Part J: Duplicate Detection Tests
 // =============================================================================
 
-/// Test that Stop blocks when duplicate_detection is enabled and threshold is exceeded
+/// Duplicate detection queues without blocking when the threshold is exceeded.
 #[test]
-fn test_stop_blocks_for_duplicate_detection() {
+fn test_stop_queues_duplicate_detection_without_blocking() {
     let temp = TempDir::new().unwrap();
     init_cas(&temp);
+    install_fake_maintenance_runner(&temp);
 
     // Enable duplicate_detection in the existing hooks.stop table.
     set_config_value(&temp, "hooks.stop.duplicate_detection_enabled", "true");
@@ -192,17 +204,18 @@ fn test_stop_blocks_for_duplicate_detection() {
         &write_tool_input(session_id, "/src/main.rs"),
     );
 
-    // Try to stop - should be blocked for duplicate detection
-    let stop_output = send_hook(&temp, "Stop", &stop_input(session_id));
-
-    assert_stop_blocked(
+    let stop_output = send_hook(&temp, "Stop", &maintenance_stop_input(&temp, session_id));
+    assert_maintenance_queued(
+        &temp,
+        session_id,
+        "duplicate-detector",
         &stop_output,
-        &["duplicate-detector", "duplicate", "Duplicate detection"],
-        Some(&[
-            "duplicate-detection required",
-            "duplicate-detector",
+        &[
+            "duplicate-detector job",
             "Memory Cleanup",
-        ]),
+            "Test entry number",
+            session_id,
+        ],
     );
 }
 

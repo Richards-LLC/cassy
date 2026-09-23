@@ -88,8 +88,9 @@ of exactly the UI it ships.
    `<artifact-dir>/journeys/<id>/`. It also writes `SUMMARY.md`, with the
    `hub-web/dist` tree hash, the pass/fail result and the stage timings.
 2. **Evaluate.** A different agent from any implementer of the epic, on the
-   `taste` lane, watches every journey's screencast, reads its stage
-   screenshots and timings, and scores each journey on the rubric. It then
+   `taste` lane, gets [journey-evaluator-brief.md](journey-evaluator-brief.md).
+   It watches every journey's screencast, reads its stage screenshots and
+   timings, and scores each journey on the rubric. It then
    writes `docs/qa/journey-evaluations/<date>-hub-web-<tree8>.md` from
    `docs/qa/journey-evaluations/TEMPLATE.md`.
 3. **Route findings** by severity (below). Blocking findings stop the cut.

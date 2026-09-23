@@ -191,9 +191,11 @@ The QA worker never edits the delivery. Fixes belong to the implementer.
 
 ## 5. Finding format
 
-Everything goes in `~/.cas/artifacts/<delivery-task>/independent-qa/round-<n>/`, in the
-cas-c3b8 evidence bundle layout (shape pending from happy-gazelle-77; this
-section adopts it verbatim once received). `LEDGER.md` has these sections:
+Everything goes in `~/.cas/artifacts/<delivery-task>/independent-qa/round-<n>/`, , as a
+cas-c3b8 evidence bundle (contract v1). Its `bundle.json` must have
+`producer: "independent-qa"` and a `head_sha` equal to the reviewed tip, and
+`qa_record` refuses a verdict without it. Findings are `F01.png`…, each with
+one `showChapter` in `receipt.webm`. `LEDGER.md` has these sections:
 
 - **Header:** pass id, reviewer, implementer, branch, `bound_head`, build
   command, served URL, and the Playwright version.

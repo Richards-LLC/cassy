@@ -65,11 +65,24 @@ pub fn delivery_eligibility(
     changed_paths: Option<&[String]>,
     journeys: &[String],
 ) -> QaEligibility {
+    if !qa.independent_pass {
+        return QaEligibility::default();
+    }
+    user_facing_reasons(task, qa, changed_paths, journeys)
+}
+
+/// The shared user-facing predicate (independent of any gate's on/off flag),
+/// so every QA gate agrees on which deliveries are user-facing (cas-619f,
+/// cas-0cd5). Epics, QA work items and docs/test/CI-only diffs are never
+/// user-facing.
+pub fn user_facing_reasons(
+    task: &Task,
+    qa: &QaConfig,
+    changed_paths: Option<&[String]>,
+    journeys: &[String],
+) -> QaEligibility {
     let mut reasons = Vec::new();
-    if !qa.independent_pass
-        || task.task_type == TaskType::Epic
-        || task.labels.iter().any(|label| label == QA_PASS_LABEL)
-    {
+    if task.task_type == TaskType::Epic || task.labels.iter().any(|label| label == QA_PASS_LABEL) {
         return QaEligibility { reasons };
     }
     let surface_paths: Vec<String> = changed_paths
@@ -418,6 +431,50 @@ pub fn render_epic_qa_section(cas_root: &Path, children: &[Task]) -> String {
     format!("\n\nIndependent QA:\n{}\n", lines.join("\n"))
 }
 
+/// Check the independent round's evidence bundle (cas-c3b8 contract v1)
+/// beside its ledger: `bundle.json` with `producer: "independent-qa"`, the
+/// delivery's task id, and `head_sha` equal to the reviewed tip. Returns the
+/// bundle path, or why it cannot back a verdict.
+pub fn validate_round_bundle(ledger_path: &Path, pass: &QaPass) -> Result<std::path::PathBuf, String> {
+    let dir = ledger_path
+        .parent()
+        .ok_or_else(|| "ledger_path has no parent directory".to_string())?;
+    let bundle = dir.join("bundle.json");
+    let raw = std::fs::read_to_string(&bundle).map_err(|_| {
+        format!(
+            "no evidence bundle at {} — write the cas-qa-craft bundle (producer \"independent-qa\") beside LEDGER.md",
+            bundle.display()
+        )
+    })?;
+    let value: serde_json::Value = serde_json::from_str(&raw)
+        .map_err(|error| format!("{} is not valid JSON: {error}", bundle.display()))?;
+    let field = |name: &str| value.get(name).and_then(|v| v.as_str()).unwrap_or("");
+    if field("producer") != "independent-qa" {
+        return Err(format!(
+            "{}: producer must be \"independent-qa\" (found {:?})",
+            bundle.display(),
+            field("producer")
+        ));
+    }
+    if field("task_id") != pass.task_id {
+        return Err(format!(
+            "{}: task_id must be {} (found {:?})",
+            bundle.display(),
+            pass.task_id,
+            field("task_id")
+        ));
+    }
+    if field("head_sha") != pass.bound_head {
+        return Err(format!(
+            "{}: head_sha must be the reviewed tip {} (found {:?})",
+            bundle.display(),
+            pass.bound_head,
+            field("head_sha")
+        ));
+    }
+    Ok(bundle)
+}
+
 /// Title of the QA work item for one round.
 pub fn qa_task_title(delivery: &Task, pass: &QaPass) -> String {
     let mut title = delivery.title.trim().to_string();
@@ -578,6 +635,8 @@ mod tests {
 
         qa.independent_pass = false;
         assert!(!delivery_eligibility(&task(), &qa, Some(&css), &[]).is_eligible());
+        // The shared predicate ignores the gate flag.
+        assert!(user_facing_reasons(&task(), &qa, Some(&css), &[]).is_eligible());
     }
 
     fn pass(head: &str, state: cas_types::QaPassState) -> QaPass {
@@ -668,6 +727,29 @@ mod tests {
         assert!(factory_branches_merged_by("git merge epic/x").is_empty());
         assert!(factory_branches_merged_by("git log factory/a-1").is_empty());
         assert!(factory_branches_merged_by("echo factory/a-1 merge").is_empty());
+    }
+
+    #[test]
+    fn round_bundle_must_name_the_reviewed_tip_and_producer() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let ledger = dir.path().join("LEDGER.md");
+        std::fs::write(&ledger, "# ledger").unwrap();
+        let round = pass("aaaa1111", cas_types::QaPassState::Claimed);
+        assert!(validate_round_bundle(&ledger, &round).unwrap_err().contains("no evidence bundle"));
+        let write = |producer: &str, head: &str| {
+            std::fs::write(
+                dir.path().join("bundle.json"),
+                serde_json::json!({"schema":1,"task_id":"cas-ui1","producer":producer,"head_sha":head})
+                    .to_string(),
+            )
+            .unwrap();
+        };
+        write("cas-qa-craft", "aaaa1111");
+        assert!(validate_round_bundle(&ledger, &round).unwrap_err().contains("producer"));
+        write("independent-qa", "bbbb2222");
+        assert!(validate_round_bundle(&ledger, &round).unwrap_err().contains("head_sha"));
+        write("independent-qa", "aaaa1111");
+        assert!(validate_round_bundle(&ledger, &round).is_ok());
     }
 
     #[test]

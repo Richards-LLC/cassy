@@ -9,6 +9,33 @@ impl CasCore {
         &self,
         Parameters(req): Parameters<VerificationAddRequest>,
     ) -> Result<CallToolResult, McpError> {
+        // cas-619f: an unknown verification_type used to fall through to a
+        // task verdict silently. Only task and epic verdicts live here; the
+        // independent QA verdict has its own action and record.
+        if let Some(vtype) = req.verification_type.as_deref() {
+            match vtype.trim().to_ascii_lowercase().as_str() {
+                "" | "task" | "epic" => {}
+                "qa" => {
+                    return Err(McpError {
+                        code: ErrorCode::INVALID_PARAMS,
+                        message: Cow::from(
+                            "verification_type=qa is not recorded with action=add. The independent QA reviewer uses action=qa_record (task_id, status, summary, ledger_path); a supervisor waiver uses action=qa_waive.",
+                        ),
+                        data: None,
+                    });
+                }
+                other => {
+                    return Err(McpError {
+                        code: ErrorCode::INVALID_PARAMS,
+                        message: Cow::from(format!(
+                            "Unknown verification_type {other:?}: expected 'task' or 'epic'."
+                        )),
+                        data: None,
+                    });
+                }
+            }
+        }
+
         // Validate and sanitize caller-authored content before opening stores,
         // inspecting one-time authority, or applying expiry transitions.
         // This makes malformed issues failure-atomic even when the named
@@ -507,7 +534,7 @@ impl CasCore {
 
         // Set verification type if specified (default is Task)
         if let Some(vtype) = &req.verification_type {
-            if vtype == "epic" {
+            if vtype.trim().eq_ignore_ascii_case("epic") {
                 verification.verification_type = VerificationType::Epic;
             }
         }

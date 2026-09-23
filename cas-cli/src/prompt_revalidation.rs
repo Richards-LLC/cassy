@@ -1084,6 +1084,75 @@ pub(crate) fn parse_verification_dispatch_envelope(
     })
 }
 
+const QA_DISPATCH_ENVELOPE_OPEN: &str = "<cas-qa-dispatch ";
+const QA_DISPATCH_ENVELOPE_CLOSE: &str = "</cas-qa-dispatch>";
+
+/// Parsed `<cas-qa-dispatch …>` handoff (cas-619f).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct QaDispatchEnvelope {
+    pub pass_id: String,
+    pub task_id: String,
+    pub qa_task_id: String,
+    pub bound_head: String,
+    pub deadline: String,
+}
+
+/// Build the independent-QA handoff CAS enqueues for the supervisor when a
+/// user-facing delivery parks for merge (cas-619f). Whole-prompt shaped like
+/// the verification-dispatch envelope, so free text cannot impersonate it.
+pub(crate) fn qa_dispatch_envelope(
+    pass_id: &str,
+    task_id: &str,
+    qa_task_id: &str,
+    round: u32,
+    bound_head: &str,
+    deadline: &str,
+    implementer: &str,
+    reasons: &str,
+) -> String {
+    format!(
+        "{QA_DISPATCH_ENVELOPE_OPEN}pass_id=\"{pass}\" task_id=\"{task}\" qa_task_id=\"{qa}\" \
+         round=\"{round}\" bound_head=\"{head}\" deadline=\"{deadline}\">\n\
+         {task} (delivered by {implementer}) is user-facing ({reasons}) and parked for merge. \
+         It needs an independent QA and polish pass before it merges.\n\
+         Spawn a reviewer who is not {implementer}: \
+         mcp__cas__coordination action=spawn_workers lane=taste task_id={qa}\n\
+         Do not merge {task} until the pass records a verdict for {head}; \
+         to skip it, waive with a reason: mcp__cas__verification action=qa_waive task_id={task} summary=\"...\"\n\
+         {QA_DISPATCH_ENVELOPE_CLOSE}",
+        pass = xml_attribute_value(pass_id),
+        task = xml_attribute_value(task_id),
+        qa = xml_attribute_value(qa_task_id),
+        head = xml_attribute_value(bound_head),
+        deadline = xml_attribute_value(deadline),
+        implementer = xml_attribute_value(implementer),
+        reasons = xml_attribute_value(reasons),
+    )
+}
+
+/// Parse an independent-QA handoff, if this prompt is one.
+pub(crate) fn parse_qa_dispatch_envelope(prompt: &str) -> Option<QaDispatchEnvelope> {
+    if !prompt.starts_with(QA_DISPATCH_ENVELOPE_OPEN)
+        || !prompt.trim_end().ends_with(QA_DISPATCH_ENVELOPE_CLOSE)
+    {
+        return None;
+    }
+    let tag_end = prompt.find('>')?;
+    let tag = &prompt[..tag_end];
+    let required = |name: &str| {
+        xml_attribute(tag, name)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    };
+    Some(QaDispatchEnvelope {
+        pass_id: required("pass_id")?,
+        task_id: required("task_id")?,
+        qa_task_id: required("qa_task_id")?,
+        bound_head: required("bound_head")?,
+        deadline: required("deadline")?,
+    })
+}
+
 fn xml_attribute<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
     let needle = format!(" {name}=\"");
     let start = tag.find(&needle)? + needle.len();
@@ -2529,6 +2598,32 @@ mod cas_3dcb_worker_died_relay_tests {
             "a lookalike missing required attributes must not parse"
         );
         assert!(parse_verification_dispatch_envelope("dispatch vd-8725 is pending").is_none());
+    }
+
+    #[test]
+    fn qa_dispatch_envelope_round_trips_and_rejects_lookalikes() {
+        let body = qa_dispatch_envelope(
+            "qapass-1",
+            "cas-619f",
+            "cas-qa01",
+            2,
+            "aaaa1111bbbb2222",
+            "2026-09-23T18:00:00+00:00",
+            "swift-fox",
+            "label:ui",
+        );
+        let parsed = parse_qa_dispatch_envelope(&body).expect("CAS's own handoff must parse");
+        assert_eq!(parsed.pass_id, "qapass-1");
+        assert_eq!(parsed.task_id, "cas-619f");
+        assert_eq!(parsed.qa_task_id, "cas-qa01");
+        assert_eq!(parsed.bound_head, "aaaa1111bbbb2222");
+        assert!(body.contains("spawn_workers lane=taste task_id=cas-qa01"), "{body}");
+        assert!(body.contains("not swift-fox"), "{body}");
+        assert!(parse_qa_dispatch_envelope(&format!("hey\n{body}")).is_none());
+        assert!(
+            parse_qa_dispatch_envelope("<cas-qa-dispatch pass_id=\"x\">no task</cas-qa-dispatch>")
+                .is_none()
+        );
     }
 
     #[test]

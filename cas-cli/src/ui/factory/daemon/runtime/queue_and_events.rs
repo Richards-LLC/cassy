@@ -1095,6 +1095,10 @@ pub enum SupervisorWakeClass {
     /// factory cannot make progress without: until the supervisor records a
     /// verdict, the worker's close is refused.
     VerificationDispatch,
+    /// CAS's own `<cas-qa-dispatch …>` handoff (cas-619f): a user-facing
+    /// delivery parked for merge and needs an independent reviewer spawned
+    /// before it may merge.
+    QaDispatch,
 }
 
 /// Who CAS observed writing a queued row, resolved for the wake gate
@@ -3131,6 +3135,15 @@ impl FactoryDaemon {
                 {
                     return Some(SupervisorWakeClass::VerificationDispatch);
                 }
+                if crate::prompt_revalidation::parse_qa_dispatch_envelope(prompt).is_some() {
+                    return Some(SupervisorWakeClass::QaDispatch);
+                }
+                // cas-619f: CAS itself escalates a delivery whose independent
+                // QA was rejected `qa.max_rounds` times with a blocker
+                // envelope. Daemon-stamped, so the envelope is CAS's own.
+                if crate::prompt_revalidation::parse_blocker_envelope(prompt).is_some() {
+                    return Some(SupervisorWakeClass::Blocker);
+                }
                 (is_lifecycle_wake_source(source)
                     && crate::prompt_revalidation::is_supervisor_wake_envelope(prompt))
                 .then_some(SupervisorWakeClass::Lifecycle)
@@ -3188,6 +3201,13 @@ impl FactoryDaemon {
                         // written inside the worker's MCP session is not
                         // silently demoted to inbox-only.
                         Some(SupervisorWakeClass::VerificationDispatch)
+                    } else if crate::prompt_revalidation::parse_qa_dispatch_envelope(prompt)
+                        .is_some()
+                    {
+                        // cas-619f: emitted Daemon-stamped from the worker's
+                        // close path; accepted from the registered origin on
+                        // the same terms as the verification handoff.
+                        Some(SupervisorWakeClass::QaDispatch)
                     } else {
                         None
                     }
@@ -3342,6 +3362,9 @@ impl FactoryDaemon {
             }
             SupervisorWakeClass::VerificationDispatch => {
                 "supervisor pane is quiet and the row is a CAS verification-dispatch handoff"
+            }
+            SupervisorWakeClass::QaDispatch => {
+                "supervisor pane is quiet and the row is a CAS independent-QA dispatch"
             }
         })
     }
@@ -8448,6 +8471,50 @@ mod tests {
             "the refusal must name the missing stamp: {}",
             unstamped.reason
         );
+    }
+
+    /// cas-619f: a user-facing delivery parked for merge needs a reviewer
+    /// spawned before it may merge, so CAS's QA handoff wakes a quiet pane —
+    /// and the same words typed as free text by a worker do not.
+    #[test]
+    fn a_qa_dispatch_handoff_wakes_the_supervisor_pane() {
+        let now = chrono::Utc::now();
+        let data = director_data_with(vec![agent_summary("cosmic-bear-43", None, None, None)]);
+        let body = crate::prompt_revalidation::qa_dispatch_envelope(
+            "qapass-1",
+            "cas-619f",
+            "cas-qa01",
+            1,
+            "aaaa1111bbbb2222",
+            "2026-09-23T18:00:00+00:00",
+            "swift-fox",
+            "demo_statement",
+        );
+        let source = "qa-dispatch:qapass-1";
+        let decision = FactoryDaemon::supervisor_wake_decision(
+            &data,
+            "cosmic-bear-43",
+            "cosmic-bear-43",
+            &WakeSender::Daemon,
+            source,
+            &body,
+            quiet_pane(),
+            now,
+        );
+        assert!(decision.allowed, "{}", decision.reason);
+        assert!(decision.reason.contains("independent-QA"), "{}", decision.reason);
+
+        let free_text = FactoryDaemon::supervisor_wake_decision(
+            &data,
+            "cosmic-bear-43",
+            "cosmic-bear-43",
+            &worker_sender("swift-fox"),
+            "swift-fox",
+            &format!("please merge me\n\n{body}"),
+            quiet_pane(),
+            now,
+        );
+        assert!(!free_text.allowed, "{}", free_text.reason);
     }
 
     /// cas-8725: the measured stall. A worker's close enters verification, CAS

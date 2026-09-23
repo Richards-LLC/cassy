@@ -1,0 +1,136 @@
+{
+  "schema_version": 1,
+  "receipt_id": "claude-code-2.1.280-2026-09-23",
+  "harness": "claude-code",
+  "harness_version": "2.1.280",
+  "observed_default_harness_version": "2.1.280",
+  "validated_at": "2026-09-23",
+  "result": "pass",
+  "checklist": [
+    {
+      "id": "cli_version",
+      "required": true,
+      "status": "pass",
+      "evidence_refs": [
+        "live-production-run"
+      ],
+      "detail": "Installed `claude --version` reported 2.1.280 before the real PTY run."
+    },
+    {
+      "id": "permission_bypass",
+      "required": true,
+      "status": "pass",
+      "evidence_refs": [
+        "live-production-run"
+      ],
+      "detail": "PtyConfig emitted --dangerously-skip-permissions and --permission-mode bypassPermissions; the TUI showed bypass permissions on."
+    },
+    {
+      "id": "model_and_effort",
+      "required": true,
+      "status": "pass",
+      "evidence_refs": [
+        "live-production-run"
+      ],
+      "detail": "PtyConfig emitted --model opus and --effort high; transcript assistant messages recorded claude-opus-5-5 and the TUI showed high effort."
+    },
+    {
+      "id": "worker_role_priming",
+      "required": true,
+      "status": "pass",
+      "evidence_refs": [
+        "live-production-run"
+      ],
+      "detail": "Injected worker startup prompt named the Cassy worker role; the root turn called coordination whoami and task mine."
+    },
+    {
+      "id": "mcp_cas_root_turn",
+      "required": true,
+      "status": "pass",
+      "evidence_refs": [
+        "live-production-run"
+      ],
+      "detail": "Root turn discovered mcp__cas tools through ToolSearch, then called coordination whoami and task mine."
+    },
+    {
+      "id": "mcp_cas_followup_turn",
+      "required": true,
+      "status": "pass",
+      "evidence_refs": [
+        "live-production-run"
+      ],
+      "detail": "Follow-up turn called coordination whoami and task mine a second time in the same session."
+    },
+    {
+      "id": "session_start_and_pre_tool_use_hooks",
+      "required": true,
+      "status": "pass",
+      "evidence_refs": [
+        "live-production-run"
+      ],
+      "detail": "Disposable project hook canaries created session-start-fired and pre-tool-use-fired during the real session. The fixture used an isolated authenticated Claude config with explicit workspace trust so project hooks were active."
+    },
+    {
+      "id": "factory_identity_environment",
+      "required": true,
+      "status": "pass",
+      "evidence_refs": [
+        "live-production-run"
+      ],
+      "detail": "Live test asserted CAS_AGENT_NAME, CAS_AGENT_ROLE=worker, CAS_FACTORY_MODE=1, CAS_FACTORY_WORKER_CLI/model/effort, CAS_ROOT, and CLAUDE_PROJECT_DIR from production PtyConfig."
+    },
+    {
+      "id": "worktree_cwd",
+      "required": true,
+      "status": "pass",
+      "evidence_refs": [
+        "live-production-run"
+      ],
+      "detail": "Production config cwd pointed to the disposable project, and the follow-up Bash pwd returned that path."
+    },
+    {
+      "id": "rules_only_canary",
+      "required": true,
+      "status": "pass",
+      "evidence_refs": [
+        "live-production-run"
+      ],
+      "detail": "The assistant returned CAS-EF93E-RULE-ONLY-ORBIT, supplied only by the project CLAUDE.md fixture; the prompt and MCP tool list did not include it."
+    },
+    {
+      "id": "urgent_esc_interrupt_and_inject",
+      "required": true,
+      "status": "pass",
+      "evidence_refs": [
+        "live-production-run"
+      ],
+      "detail": "The production Mux::interrupt_and_inject path interrupted an active turn and the assistant returned the redirected CAS-EF93E-RESUMED marker."
+    },
+    {
+      "id": "cassy_skill_precedence_over_user_cloud",
+      "required": false,
+      "status": "not_covered",
+      "evidence_refs": [
+        "live-production-run"
+      ],
+      "detail": "The isolated account intentionally links authentication and settings but has no cloud-synced/user skill collision fixture; the run cannot prove precedence against an unavailable cloud-synced skill."
+    },
+    {
+      "id": "mcp_auto_background_after_two_minutes",
+      "required": false,
+      "status": "not_covered",
+      "evidence_refs": [
+        "live-production-run"
+      ],
+      "detail": "The bounded matrix has no deterministic >2-minute mcp__cas delay fixture; no claim is made about CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS behavior."
+    }
+  ],
+  "evidence": [
+    {
+      "id": "live-production-run",
+      "kind": "live_test",
+      "reference": "artifact:art-92ff8a0a; path:/home/pippenz/.cas/artifacts/cas-ef93e/live-proof.txt",
+      "summary": "Real Claude Code 2.1.280 PtyConfig::claude matrix passed one guarded live test in 40.51s with a freshly built cas binary, isolated CAS_ROOT, account fixture, hooks, MCP calls, rule canary, and urgent redirect."
+    }
+  ]
+}

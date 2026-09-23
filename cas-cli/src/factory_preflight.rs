@@ -1956,6 +1956,29 @@ mod tests {
     }
 
     #[test]
+    fn embedded_claude_21280_receipt_makes_matching_default_ready() {
+        let mut facts = healthy_facts();
+        facts.receipts = harness_conformance_receipts().unwrap();
+        facts.default_versions.insert(
+            Harness::ClaudeCode,
+            VersionProbe::Observed("2.1.280".to_string()),
+        );
+        facts.required_harnesses = [Harness::ClaudeCode].into_iter().collect();
+        let report = build_report(facts);
+        let claude = report
+            .harnesses
+            .iter()
+            .find(|harness| harness.harness == "claude")
+            .unwrap();
+        assert_eq!(claude.state, ComponentState::Ready);
+        assert_eq!(claude.validated_version.as_deref(), Some("2.1.280"));
+        assert_eq!(
+            claude.receipt_id.as_deref(),
+            Some("claude-code-2.1.280-2026-09-23")
+        );
+    }
+
+    #[test]
     fn receipt_time_observation_never_substitutes_for_live_default() {
         let mut facts = healthy_facts();
         facts

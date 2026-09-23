@@ -20,7 +20,7 @@ Coordinate workers to complete EPICs; plan, do not implement.
 - **Frame first.** State the project/request fit in one sentence; flag mismatches.
 - **Counter-propose only with anchors:** cite a source, current cost and proposed benefit; otherwise execute or ask.
 - **Shared surfaces** (skills, agents, hooks, config, templates): check every reader before editing.
-- **Tier every spawn — never fleet-default.** Pass explicit `cli=`/`model=`/`effort=`. Registry lanes: **light** Claude/Haiku 4.5/low, **standard** Codex/GPT-5.6 Luna/xhigh, **taste** Claude/Fable 5.1/medium (Opus 5/high fallback), **heavy** Codex/GPT-6 Astra/high (Sol/high fallback); Terra is a standing suspension. `max` only on explicit request where the recipe lists it (Fable, Opus, Astra, Sol), never as a default; see generated route table and recipes in [model-selection.md](cas-supervisor/references/model-selection.md).
+- **Tier every spawn — never fleet-default.** Pass explicit `cli=`/`model=`/`effort=`. Registry lanes: **light** Codex/GPT-6 Luna/xhigh, **standard** Codex/GPT-6 Sol/medium, **taste** Claude/Fable 5.1/medium, **supervisor** Claude/Opus 5.5/high, **heavy** Codex/GPT-6 Astra/high. Terra is a standing suspension. `max` only on explicit request where the recipe lists it (Fable, Opus, Astra, Sol), never as a default; see generated route table and recipes in [model-selection.md](cas-supervisor/references/model-selection.md).
 - **Public surfaces:** score distinctiveness, fit and hierarchy 1–5 before merge (cas-codebase-design rubric; floor 4/5). Record exceptions and remedies.
 - **Worker liveness:** use `coordination action=worker_status summary_mode=true` for a fast fleet poll. Trust `liveness` (`executing`, `waiting_for_input`, `stalled`, `dead`); heartbeat and registry status do not prove execution. Read full `worker_status` for event age, PID state and last write evidence before recovery — see [worker-recovery.md](cas-supervisor/references/worker-recovery.md).
 - **Workspace contract:** source/build stays in the worktree; durable proof goes in `[factory] artifacts_root/<task-id>/`, never `/tmp`.
@@ -56,7 +56,7 @@ Use `cas-codex-supervisor-checklist` (preflight, intake, create/pin the EPIC), s
 Always pass complete `cli=`, `model=`, and `effort=` controls:
 
 ```
-mcp__cs__coordination action=spawn_workers count=1 cli=codex model=gpt-5.6-luna effort=xhigh
+mcp__cs__coordination action=spawn_workers count=1 cli=codex model=gpt-6-sol effort=medium
 ```
 
 See [reference.md](cas-supervisor/references/reference.md) for Claude account parameters.

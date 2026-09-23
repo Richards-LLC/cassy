@@ -10,7 +10,7 @@ Borrowed from `third-brain-v5-skills/skills/session-learn` (MIT, reference_third
 
 ## When to use
 
-- **Auto-trigger** (default OFF): the `Stop` hook runs this classifier when `[memory] session_learn_auto = true` is set in `.cas/config.toml`. The flag defaults to `false` for v1 because each invocation pays one Haiku call (~1–3 s, ~$0.001) and the user should opt in.
+- **Auto-trigger** (default OFF): the `Stop` hook runs this classifier when `[memory] session_learn_auto = true` is set in `.cas/config.toml`. The flag defaults to `false` for v1 because each invocation pays one model call (cost and latency depend on the configured route) and the user should opt in.
 - **Manual** ("extract this session", "save what we learned", "extract knowledge"): the user invokes the skill at any point. Honors the same `<5 tool calls` skip rule unless the user explicitly says "extract even though it's short".
 - **Chained from other skills** (third-brain pattern: cognitive-compile, wiki-ingest, deep-research). Cassy does not yet have those skills, but the contract is the same — call this skill with the session's transcript path.
 
@@ -40,7 +40,7 @@ Exactly one batched output: a JSON array of memory drafts, each with the 7-signa
 
 ## Quality rules
 
-- **Skip floor.** If the session has < 5 tool calls, return `[]`. Trivial sessions produce noisy memories. (The Rust hook handler enforces this same floor before invoking the classifier so we never spend a Haiku call on noise.)
+- **Skip floor.** If the session has < 5 tool calls, return `[]`. Trivial sessions produce noisy memories. (The Rust hook handler enforces this same floor before invoking the classifier so we never spend a model call on noise.)
 - **Dedupe at the source.** Before drafting, scan the existing memory store via `mcp__cas__search` for each candidate finding. If a near-duplicate exists, do not draft a new one — instead include the existing memory's ID in your output's `dedup_hits` field so the caller can record the corroboration without creating a duplicate. The overlap-detection gate downstream is a second backstop, not the first one.
 - **Confidence honesty.** Each draft must carry `confidence ∈ [0.0, 1.0]`. The Rust handler suppresses drafts with `confidence < 0.6` unless they're tagged `correction` (corrections fire at `≥ 0.5` because user pushbacks are high-signal even when terse).
 - **One signal per draft.** A finding that arguably fits two signal types is two drafts, not one merged "mixed" draft — the downstream entry_type routing depends on the signal being unambiguous.
@@ -75,7 +75,7 @@ If no drafts, return `[]`. Do not return prose; do not wrap in markdown.
 
 ## Decision: in-process vs subprocess
 
-**v1 recommendation: in-process.** The Rust SessionStop hook handler embeds this skill's prompt body via `include_str!` and runs Haiku via `traced_prompt` directly. Cost: one Haiku call, ~1–3 s, ~$0.001 per session. The skill markdown serves as both the runtime prompt template and human-readable documentation.
+**v1 recommendation: in-process.** The Rust SessionStop hook handler embeds this skill's prompt body via `include_str!` and runs the configured model via `traced_prompt` directly. Cost and latency depend on that route. The skill markdown serves as both the runtime prompt template and human-readable documentation.
 
 **Escape hatch (v2 if needed): subprocess.** Spawn `claude --resume <session-id> --skill session-learn` so the classifier runs in the *same* harness session whose transcript it is reading. More expensive (full Claude Code boot + tool budget) but produces richer drafts because the model still has working context the transcript may have truncated. Not implemented in v1; revisit if v1 false-negative rate is high.
 

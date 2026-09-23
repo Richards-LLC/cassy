@@ -5,8 +5,8 @@ model = "opus"
 effort = "high"
 
 [defaults.codex]
-model = "gpt-5.6-luna"
-effort = "xhigh"
+model = "gpt-6-sol"
+effort = "medium"
 
 [defaults.grok]
 model = "grok-4.5"
@@ -16,12 +16,39 @@ effort = "high"
 model = "qwencloud/qwen3.8-max"
 effort = "medium"
 
-[recipes.claude_haiku]
+[recipes.codex_sol_6]
+harness = "codex"
+provider = "openai"
+model = "gpt-6-sol"
+default_effort = "medium"
+allowed_efforts = ["low", "medium", "high", "xhigh", "max"]
+status = "active"
+required_capability = "codex-account"
+
+[recipes.codex_luna_6]
+harness = "codex"
+provider = "openai"
+model = "gpt-6-luna"
+default_effort = "xhigh"
+allowed_efforts = ["low", "medium", "high", "xhigh", "max"]
+status = "active"
+required_capability = "codex-account"
+
+[recipes.claude_opus_5_5]
 harness = "claude"
 provider = "anthropic"
-model = "claude-haiku-4-5-20251001"
+model = "claude-opus-5-5"
+default_effort = "high"
+allowed_efforts = ["low", "high"]
+status = "active"
+required_capability = "claude-account"
+
+[recipes.claude_opus_5_5_low]
+harness = "claude"
+provider = "anthropic"
+model = "claude-opus-5-5"
 default_effort = "low"
-allowed_efforts = ["low", "medium"]
+allowed_efforts = ["low", "high"]
 status = "active"
 required_capability = "claude-account"
 
@@ -50,6 +77,15 @@ provider = "anthropic"
 model = "claude-fable-5-1"
 default_effort = "medium"
 # `max` per the Claude effort doc (cas-556a); explicit request only.
+allowed_efforts = ["medium", "high", "max"]
+status = "active"
+required_capability = "claude-account"
+
+[recipes.claude_fable_high]
+harness = "claude"
+provider = "anthropic"
+model = "claude-fable-5-1"
+default_effort = "high"
 allowed_efforts = ["medium", "high", "max"]
 status = "active"
 required_capability = "claude-account"
@@ -107,10 +143,12 @@ reason = "Receipt-gated by opencode-1.18.23-hosted-token-plan-2026-08-27; explic
 required_capability = "qwencloud-token-plan-key"
 
 [lanes.light]
-candidates = ["claude_haiku", "codex_luna"]
+candidates = ["codex_luna_6"]
+fallbacks = ["claude_opus_5_5_low"]
 
 [lanes.standard]
-candidates = ["codex_luna", "claude_opus"]
+candidates = ["codex_sol_6"]
+fallbacks = ["codex_luna_6"]
 
 [lanes.taste]
 candidates = ["claude_fable"]
@@ -120,10 +158,8 @@ fallbacks = ["claude_opus"]
 no_fallback = false
 
 [lanes.supervisor]
-candidates = ["claude_fable"]
-# Claude Fable is the supervisor default; an unavailable Claude account must
-# fall back loudly to Claude Opus 5/high rather than silently failing closed.
-fallbacks = ["claude_opus"]
+candidates = ["claude_opus_5_5"]
+fallbacks = ["claude_fable_high"]
 no_fallback = false
 
 [lanes.heavy]

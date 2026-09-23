@@ -743,7 +743,7 @@ fn apply_codex_fallback_with(
 /// unnecessary fallback to `default_model`, not a broken spawn.
 fn model_is_claude_compatible(model: &str) -> bool {
     let m = model.to_ascii_lowercase();
-    ["claude", "sonnet", "opus", "haiku", "fable", "mythos"]
+    ["claude", "sonnet", "opus", "fable", "mythos"]
         .iter()
         .any(|needle| m.contains(needle))
 }
@@ -1280,7 +1280,7 @@ mod codex_fallback_tests {
 
     #[test]
     fn model_is_claude_compatible_matches_known_families() {
-        for m in ["sonnet", "claude-opus-4-5", "Fable-5", "MYTHOS-5", "haiku"] {
+        for m in ["sonnet", "claude-opus-4-5", "Fable-5", "MYTHOS-5"] {
             assert!(model_is_claude_compatible(m), "{m} should match");
         }
         for m in ["gpt-5.6-terra", "o3", "grok-4.5"] {

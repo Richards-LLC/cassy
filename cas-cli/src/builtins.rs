@@ -3822,11 +3822,11 @@ This is the body content."#;
             "model-selection.md",
             // cas-a7d1: registry lane summary in the small body.
             "Registry lanes",
-            "Claude/Haiku 4.5/low",
-            "Codex/GPT-5.6 Luna/xhigh",
+            "Codex/GPT-6 Luna/xhigh",
+            "Codex/GPT-6 Sol/medium",
             "Claude/Fable 5.1/medium",
+            "Claude/Opus 5.5/high",
             "Codex/GPT-6 Astra/high",
-            "Opus 5/high fallback",
             "standing suspension",
             "generated route table and recipes",
         ] {
@@ -6882,7 +6882,8 @@ This is the body content."#;
             );
         }
         assert!(claude.content.contains("Claude Fable 5.1 at medium"));
-        assert!(claude.content.contains("Claude Haiku 4.5"));
+        assert!(claude.content.contains("Codex GPT-6 Luna"));
+        assert!(!claude.content.contains("claude_haiku"));
         assert!(!claude.content.contains("operator decision pending"));
         assert!(!claude.content.contains("exceptional-only"));
         // cas-b342 edge case: the exact frontier slug is `gpt-5.6-sol`; a bare
@@ -7746,9 +7747,10 @@ This is the body content."#;
             "heavy",
             // cas-a7d1: registry lane summary in the small body.
             "Registry lanes",
-            "Claude/Haiku 4.5/low",
-            "Codex/GPT-5.6 Luna/xhigh",
+            "Codex/GPT-6 Luna/xhigh",
+            "Codex/GPT-6 Sol/medium",
             "Claude/Fable 5.1/medium",
+            "Claude/Opus 5.5/high",
             "Codex/GPT-6 Astra/high",
             "standing suspension",
             "generated route table and recipes",

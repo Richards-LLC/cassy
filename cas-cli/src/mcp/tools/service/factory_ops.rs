@@ -829,7 +829,6 @@ fn cli_for_model_slug(model: &str) -> Option<cas_mux::SupervisorCli> {
     if model.starts_with("claude")
         || model.starts_with("opus")
         || model.starts_with("sonnet")
-        || model.starts_with("haiku")
         || model.starts_with("fable")
     {
         return Some(cas_mux::SupervisorCli::Claude);
@@ -11803,15 +11802,15 @@ mod tests {
         .expect("lane should resolve");
 
         assert_eq!(specs.0.len(), 2);
-        assert_eq!(specs.1, "claude_haiku");
+        assert_eq!(specs.1, "codex_luna_6");
         assert_eq!(specs.0[0].name.as_deref(), Some("research"));
         assert_eq!(specs.0[1].name.as_deref(), Some("review"));
         assert_eq!(specs.0[0].config_dir.as_deref(), Some("~/.claude-alt"));
         assert_eq!(
             specs.0[0].model.as_deref(),
-            Some("claude-haiku-4-5-20251001")
+            Some("gpt-6-luna")
         );
-        assert_eq!(specs.0[0].effort, Some(cas_mux::Effort::Low));
+        assert_eq!(specs.0[0].effort, Some(cas_mux::Effort::XHigh));
         assert!(specs.2.is_empty(), "static primary should not warn");
     }
 
@@ -11964,6 +11963,19 @@ mod tests {
 
         assert!(err.contains("gpt-5.6-luna"), "{err}");
         assert!(err.contains("cli=codex"), "{err}");
+    }
+
+    #[test]
+    fn spawn_spec_rejects_haiku_and_points_to_light_lane() {
+        let _home = TestEnvGuard::temp_home();
+        for cli in [None, Some("claude")] {
+            for model in ["haiku", "claude-haiku-4-5-20251001"] {
+                let err = build_spawn_spec_json(cli, Some(model), Some("low"))
+                    .expect_err("Haiku may not reach the spawn queue");
+                assert!(err.contains("light lane"), "{err}");
+                assert!(err.contains("gpt-6-luna"), "{err}");
+            }
+        }
     }
 
     #[test]
@@ -12245,7 +12257,7 @@ model = "local/qwen3.8"
         for (cli, model) in [
             ("claude", "claude-opus-5"),
             ("claude", "opus"),
-            ("codex", "gpt-5.6-luna"),
+            ("codex", "gpt-6-sol"),
             ("grok", "grok-4.5"),
             ("codex", "some-unreleased-slug"),
         ] {
@@ -12343,7 +12355,7 @@ model = "local/qwen3.8"
         let warning = spawn_spec_warning(false, false, &json);
 
         assert!(
-            warning.contains("policy default codex/gpt-5.6-luna/xhigh"),
+            warning.contains("policy default codex/gpt-6-sol/medium"),
             "{warning}"
         );
         assert!(
@@ -12363,7 +12375,7 @@ model = "local/qwen3.8"
         let warning = spawn_specs_warning(false, false, &specs);
 
         assert!(
-            warning.contains("policy default codex/gpt-5.6-luna/xhigh"),
+            warning.contains("policy default codex/gpt-6-sol/medium"),
             "{warning}"
         );
         assert!(

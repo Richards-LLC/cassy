@@ -2418,24 +2418,24 @@ mod tests {
     }
 
     #[test]
-    fn supervisor_lane_cli_launch_summary_names_opus_fallback() {
+    fn supervisor_lane_cli_launch_summary_names_fable_fallback() {
         let registry = cas_factory::embedded_registry().unwrap();
         let now = cas_factory::CapabilitySnapshot::now_ms();
         let mut snapshot = CapabilitySnapshot::default();
         snapshot.record(
             cas_factory::recipe_route_identity(
-                &registry.recipes["claude_fable"],
+                &registry.recipes["claude_opus_5_5"],
                 "default",
             ),
             cas_factory::CapabilityEvidence::new(
                 cas_factory::CapabilityAvailability::Unavailable,
                 now,
             )
-            .with_reason("Claude Fable account unavailable"),
+            .with_reason("Claude Opus account unavailable"),
         );
         snapshot.record(
             cas_factory::recipe_route_identity(
-                &registry.recipes["claude_opus"],
+                &registry.recipes["claude_fable_high"],
                 "default",
             ),
             cas_factory::CapabilityEvidence::new(
@@ -2453,11 +2453,11 @@ mod tests {
             &snapshot,
         )
         .expect("supervisor fallback should resolve");
-        assert_eq!(specs[0].model.as_deref(), Some("claude-opus-5"));
+        assert_eq!(specs[0].model.as_deref(), Some("claude-fable-5-1"));
         assert_eq!(specs[0].effort, Some(cas_mux::Effort::High));
         assert!(
             notice.contains(
-                "fallback: claude_opus (primary claude_fable unavailable: Claude Fable account unavailable)"
+                "fallback: claude_fable_high (primary claude_opus_5_5 unavailable: Claude Opus account unavailable)"
             ),
             "{notice}"
         );
@@ -2581,8 +2581,8 @@ mod tests {
         normalize_supervisor_spec(&mut spec, &sources).unwrap();
 
         assert_eq!(spec.cli, cas_mux::SupervisorCli::Codex);
-        assert_eq!(spec.model.as_deref(), Some("gpt-5.6-luna"));
-        assert_eq!(spec.effort, Some(cas_mux::Effort::XHigh));
+        assert_eq!(spec.model.as_deref(), Some("gpt-6-sol"));
+        assert_eq!(spec.effort, Some(cas_mux::Effort::Medium));
 
         let (supervisor_cli, supervisor_model, supervisor_effort) =
             launch_fields_from_spec(&spec);
@@ -2607,13 +2607,13 @@ mod tests {
             .expect("Codex supervisor must receive a model argument");
         assert_eq!(
             supervisor.args.get(model_idx + 1).map(String::as_str),
-            Some("gpt-5.6-luna")
+            Some("gpt-6-sol")
         );
         assert!(
             supervisor
                 .args
                 .iter()
-                .any(|arg| arg == "model_reasoning_effort=xhigh"),
+                .any(|arg| arg == "model_reasoning_effort=medium"),
             "Codex supervisor must receive the resolved Codex effort"
         );
     }
@@ -2659,8 +2659,8 @@ mod tests {
         normalize_supervisor_spec(&mut spec, &sources).unwrap();
 
         assert_eq!(spec.cli, cas_mux::SupervisorCli::Claude);
-        assert_eq!(spec.model.as_deref(), Some("claude-fable-5-1"));
-        assert_eq!(spec.effort, Some(cas_mux::Effort::Medium));
+        assert_eq!(spec.model.as_deref(), Some("claude-opus-5-5"));
+        assert_eq!(spec.effort, Some(cas_mux::Effort::High));
     }
 
     #[test]

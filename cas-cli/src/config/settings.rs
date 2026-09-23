@@ -1090,17 +1090,14 @@ pub struct TelemetryConfig {
 /// who want a different worker model add an explicit `[llm.worker] model
 /// = "..."` to their `.cas/config.toml`.
 ///
-/// The standard worker tier is Luna/xhigh; Sol/high is reserved for explicit
-/// heavy and frontier routing. Terra is suspended as a routing target pending
-/// an explicit operator re-enable. See cas-05e3, cas-fbac, cas-e352.
-pub const STOCK_WORKER_MODEL: &str = "gpt-5.6-luna";
+/// The standard worker tier is GPT-6 Sol/medium. Terra remains suspended.
+pub const STOCK_WORKER_MODEL: &str = "gpt-6-sol";
 
 /// Stock worker reasoning effort used as the final fallback for
 /// `[llm.worker.reasoning_effort]`. Same chain rules as
 /// [`STOCK_WORKER_MODEL`]: applied only when both the role override and
-/// the top-level `[llm] reasoning_effort` are unset. Luna is only used at its
-/// current maximum Cassy effort, xhigh. See cas-05e3, cas-fbac, cas-e352.
-pub const STOCK_WORKER_REASONING_EFFORT: &str = "xhigh";
+/// the top-level `[llm] reasoning_effort` are unset.
+pub const STOCK_WORKER_REASONING_EFFORT: &str = "medium";
 
 /// Stock worker harness used as the final fallback for `[llm.worker.harness]`.
 /// Same chain rules as [`STOCK_WORKER_MODEL`]: applied only when both the
@@ -2001,8 +1998,8 @@ harness = "codex"
         );
         // Sanity-check the constant values match the shipped routing policy.
         assert_eq!(STOCK_WORKER_HARNESS, "codex");
-        assert_eq!(STOCK_WORKER_MODEL, "gpt-5.6-luna");
-        assert_eq!(STOCK_WORKER_REASONING_EFFORT, "xhigh");
+        assert_eq!(STOCK_WORKER_MODEL, "gpt-6-sol");
+        assert_eq!(STOCK_WORKER_REASONING_EFFORT, "medium");
     }
 
     /// Existing-user preservation: a top-level `[llm] model = "X"` (no

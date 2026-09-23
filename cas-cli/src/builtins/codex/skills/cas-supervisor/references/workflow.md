@@ -46,7 +46,7 @@ spawn straight onto it:
 
 ```
 mcp__cs__task action=create title="..." description="..."
-mcp__cs__coordination action=spawn_workers count=1 isolate=true cli=codex model=gpt-5.6-luna effort=xhigh task_id=<task-id>
+mcp__cs__coordination action=spawn_workers count=1 isolate=true cli=codex model=gpt-6-sol effort=medium task_id=<task-id>
 ```
 
 A concrete open, unassigned `task_id` authorizes the spawn on its own. It authorizes exactly
@@ -59,12 +59,12 @@ and the "all subtasks closed -> verify and close the epic" flow, so this is the 
 
 1. Spawn workers:
    ```
-   mcp__cs__coordination action=spawn_workers count=N isolate=true cli=codex model=gpt-5.6-luna effort=xhigh
+   mcp__cs__coordination action=spawn_workers count=N isolate=true cli=codex model=gpt-6-sol effort=medium
    ```
    Omit `isolate` for shared mode.
 
    **Hard rule:** every `spawn_workers` call MUST include explicit `cli=`,
-   `model=`, and `effort=`. The active registry matrix is Claude Haiku 4.5/low for light, Codex GPT-5.6 Luna/xhigh for standard, Claude Fable 5.1/medium for taste (Claude Opus 5/high fallback), and Codex GPT-6 Astra/high for heavy (Codex GPT-5.6 Sol/high fallback). Use taste for judgment and public decisions and heavy for implementation risk; Terra is a standing suspension.
+   `model=`, and `effort=`. The active registry matrix is Codex GPT-6 Luna/xhigh for light (Claude Opus 5.5/low fallback), Codex GPT-6 Sol/medium for standard (GPT-6 Luna/xhigh fallback), Claude Fable 5.1/medium for taste (Claude Opus 5/high fallback), Claude Opus 5.5/high for supervisor (Claude Fable 5.1/high fallback), and Codex GPT-6 Astra/high for heavy (Codex GPT-5.6 Sol/high fallback). Use taste for judgment and public decisions and heavy for implementation risk; Terra is a standing suspension.
    Omitted fields fall back through the factory config cascade and stock floor;
    the spawn acknowledgement nags because supervisors should make worker tier
    selection intentional and visible.
@@ -75,11 +75,11 @@ and the "all subtasks closed -> verify and close the epic" flow, so this is the 
 Copy-paste commands generated from the registry; every recipe pins `cli`, `model`, and `effort`:
 
 ```text
-# light — recipe claude_haiku
-mcp__cs__coordination action=spawn_workers count=1 isolate=true cli=claude model=claude-haiku-4-5-20251001 effort=low
+# light — recipe codex_luna_6 (fallback: claude_opus_5_5_low)
+mcp__cs__coordination action=spawn_workers count=1 isolate=true cli=codex model=gpt-6-luna effort=xhigh
 
-# standard — recipe codex_luna
-mcp__cs__coordination action=spawn_workers count=1 isolate=true cli=codex model=gpt-5.6-luna effort=xhigh
+# standard — recipe codex_sol_6 (fallback: codex_luna_6)
+mcp__cs__coordination action=spawn_workers count=1 isolate=true cli=codex model=gpt-6-sol effort=medium
 
 # taste — recipe claude_fable (fallback: claude_opus)
 mcp__cs__coordination action=spawn_workers count=1 isolate=true cli=claude model=claude-fable-5-1 effort=medium
@@ -87,8 +87,8 @@ mcp__cs__coordination action=spawn_workers count=1 isolate=true cli=claude model
 # heavy — recipe codex_astra_high (fallback: codex_sol)
 mcp__cs__coordination action=spawn_workers count=1 isolate=true cli=codex model=gpt-6-astra effort=high
 
-# supervisor — recipe claude_fable (fallback: claude_opus)
-mcp__cs__coordination action=spawn_workers count=1 isolate=true cli=claude model=claude-fable-5-1 effort=medium
+# supervisor — recipe claude_opus_5_5 (fallback: claude_fable_high)
+mcp__cs__coordination action=spawn_workers count=1 isolate=true cli=claude model=claude-opus-5-5 effort=high
 
 ```
 <!-- END GENERATED SPAWN RECIPES -->

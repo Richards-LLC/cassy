@@ -10,8 +10,9 @@ Pay for reasoning only where reasoning is the bottleneck. Every worker slot has 
 
 Routing is two stages. **Stage 1 — tier the task** by complexity; the tier is a stable property of the work. **Stage 2 — pick the registry lane** that fills that tier:
 
-- **Light** is Claude Haiku 4.5 at the registry's default low effort: bounded chores, docs, and mechanical work still carry an explicit effort.
-- **Standard** is Codex GPT-5.6 Luna at xhigh: the stock engineering floor for normal feature and bug work.
+- **Light** is Codex GPT-6 Luna at xhigh, with Claude Opus 5.5/low as fallback: bounded chores, docs, and mechanical work still carry an explicit effort.
+- **Standard** is Codex GPT-6 Sol at medium, with Codex GPT-6 Luna/xhigh as fallback: the stock engineering floor for normal feature and bug work.
+- **Supervisor** is Claude Opus 5.5 at high, with Claude Fable 5.1/high as fallback.
 - **Taste** is Claude Fable 5.1 at medium: public surfaces, prompts, docs, naming, release notes, and general judgment are normal taste work, with Claude Opus 5/high as its loud fallback when Fable is unavailable.
 - **Heavy** is Codex GPT-6 Astra at high: cross-cutting refactors, concurrency/lifecycle code, migrations, and critical-path work, with Codex GPT-5.6 Sol/high as its loud fallback.
 - **OpenCode is route-specific** — its local and hosted Qwen lanes each require their
@@ -19,7 +20,7 @@ Routing is two stages. **Stage 1 — tier the task** by complexity; the tier is 
   support from the selector alone. The operator's default hosted lane is the explicit
   QwenCloud Token Plan route.
 
-Luna remains xhigh-only by Cassy policy: the Codex models manifest lists `max` for Luna too, but the standard lane keeps its cost ceiling. `max` is a Cassy effort value (cas-556a) accepted only on explicit request by recipes that list it — Claude Fable 5.1, Claude Opus 5, Codex GPT-6 Astra, Codex GPT-5.6 Sol; `ultra` is not a Cassy effort value. The canonical policy is `crates/cas-factory/policy/lane-registry.toml`; the generated table below reflects its lane status.
+The light lane defaults to GPT-6 Luna/xhigh. The older GPT-5.6 Luna recipe remains xhigh-only for explicit requests. `max` is a Cassy effort value (cas-556a) accepted only on explicit request by recipes that list it — Claude Fable 5.1, Claude Opus 5, Codex GPT-6 Astra, Sol, and Luna, Codex GPT-5.6 Sol; `ultra` is not a Cassy effort value. The canonical policy is `crates/cas-factory/policy/lane-registry.toml`; the generated table below reflects its lane status.
 
 ## Registry route table
 
@@ -28,12 +29,13 @@ The route table below is generated from the embedded `cas-factory` registry. Kee
 <!-- BEGIN GENERATED ROUTE TABLE: cas-factory lane registry -->
 | Lane | Recipe | Provider | CLI | Model | Effort | Status | Fallback | Notes |
 |---|---|---|---|---|---|---|---|---|
-| `light` | `claude_haiku` | `anthropic` | `claude` | `claude-haiku-4-5-20251001` | `low` | `active` | `ordered candidates` |  |
-| `standard` | `codex_luna` | `openai` | `codex` | `gpt-5.6-luna` | `xhigh` | `active` | `ordered candidates` |  |
+| `light` | `codex_luna_6` | `openai` | `codex` | `gpt-6-luna` | `xhigh` | `active` | `fallback: claude_opus_5_5_low` |  |
+| `standard` | `codex_sol_6` | `openai` | `codex` | `gpt-6-sol` | `medium` | `active` | `fallback: codex_luna_6` |  |
 | `taste` | `claude_fable` | `anthropic` | `claude` | `claude-fable-5-1` | `medium` | `active` | `fallback: claude_opus` |  |
 | `heavy` | `codex_astra_high` | `openai` | `codex` | `gpt-6-astra` | `high` | `active` | `fallback: codex_sol` |  |
-| `supervisor` | `claude_fable` | `anthropic` | `claude` | `claude-fable-5-1` | `medium` | `active` | `fallback: claude_opus` |  |
+| `supervisor` | `claude_opus_5_5` | `anthropic` | `claude` | `claude-opus-5-5` | `high` | `active` | `fallback: claude_fable_high` |  |
 | `— (explicit only)` | `codex_astra` | `openai` | `codex` | `gpt-6-astra` | `medium` | `active` | `not lane-routed` | Heavy route; excluded from supervisor and taste after the observed 2026-09-05 stall holding finished workers and stopping epic drive. |
+| `— (explicit only)` | `codex_luna` | `openai` | `codex` | `gpt-5.6-luna` | `xhigh` | `active` | `not lane-routed` |  |
 | `— (explicit only)` | `codex_terra` | `openai` | `codex` | `gpt-5.6-terra` | `xhigh` | `suspended` | `not lane-routed` | Standing operator suspension (2026-08-27) |
 | `— (explicit only)` | `qwencloud_qwen` | `qwencloud` | `opencode` | `qwen3.8-max` | `medium` | `active` | `not lane-routed` | Receipt-gated by opencode-1.18.23-hosted-token-plan-2026-08-27; explicit recipe/model only |
 
@@ -44,7 +46,7 @@ Token-heavy read-only investigation belongs in a `cas-codex-exec` shell-out, not
 
 ### Taste lane
 
-Use Claude Fable 5.1 at medium for architecture judgment, public decisions, rescue assessment, and independent challenge. Route safety-critical implementation through heavy. Taste falls back to Claude Opus 5/high when Fable is unavailable, and the spawn receipt names the fallback and primary-unavailable reason. Claude Opus remains supported for explicit Claude requests and as the taste/supervisor lane fallback. Claude Sonnet is not a normal worker lane and must not appear in copyable supervisor recipes.
+Use Claude Fable 5.1 at medium for architecture judgment, public decisions, rescue assessment, and independent challenge. Route safety-critical implementation through heavy. Taste falls back to Claude Opus 5/high when Fable is unavailable, and the spawn receipt names the fallback and primary-unavailable reason. Claude Opus 5 remains the taste fallback; Claude Opus 5.5/high is the supervisor primary. Claude Sonnet is not a normal worker lane and must not appear in copyable supervisor recipes.
 
 ### Capacity overlays
 
@@ -99,8 +101,8 @@ carry the operator-declared tier as metadata when supplied.
 
 | `cli=` | Accepted `model=` slugs | Notes |
 |---|---|---|
-| `codex` | `gpt-6-astra`, `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna` | Plain slugs only — `-codex`-suffixed slugs are rejected by the API, and bare `gpt-5.6` is invalid. Astra/high is the heavy route; Sol/high is its fallback; the medium Astra recipe remains explicit-only; Luna/xhigh is the standard route; Luna is the gpt-5.4-mini successor. |
-| `claude` | any canonical `claude-*` id (e.g. `claude-fable-5-1`, `claude-opus-5`, `claude-haiku-4-5-20251001`, `claude-sonnet-5`) or the `opus`/`sonnet`/`haiku` aliases | Canonical IDs accept future numeric family/version releases and the CLI's optional `[1m]` context suffix; Haiku/low is the light lane; Fable/medium is the taste lane; Opus and Sonnet remain available for explicit Claude work; Opus is also the standard lane fallback. |
+| `codex` | `gpt-6-astra`, `gpt-6-sol`, `gpt-6-luna`, `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna` | Plain slugs only — `-codex`-suffixed slugs are rejected by the API, and bare `gpt-5.6` is invalid. Astra/high is the heavy route; Sol/high is its fallback; the medium Astra recipe remains explicit-only; GPT-6 Sol/medium is the standard route; GPT-6 Luna/xhigh is the light route; Luna is the gpt-5.4-mini successor. |
+| `claude` | any canonical `claude-*` id (e.g. `claude-fable-5-1`, `claude-opus-5-5`, `claude-opus-5`, `claude-sonnet-5`) or the `opus`/`sonnet` aliases | Canonical IDs accept future numeric family/version releases and the CLI's optional `[1m]` context suffix; Haiku requests are rejected. Fable/medium is the taste lane; Opus 5.5/high is the supervisor lane and its low effort variant is the light fallback. |
 | `grok` | `grok-4.5`, `grok-4.6` | Provider capacity is not an active registry lane in this matrix; never invent `cli=cursor` or a fallback recipe. |
 | `opencode` | `local/<model>`, `qwencloud/qwen3.8-max`, `alibaba/qwen3.8-max`, `alibaba-cn/qwen3.8-max` | Explicit local, Token Plan, or DashScope pay-as-you-go lane; per-lane conformance receipt required. Hosted auth/model availability are operator preflight inputs. |
 
@@ -112,7 +114,7 @@ alias as its stock model; this is a fallback route, not a registry lane.
 
 ```text
 # Claude stock fallback
-mcp__cs__coordination action=spawn_workers count=1 isolate=true cli=codex model=gpt-5.6-luna effort=xhigh
+mcp__cs__coordination action=spawn_workers count=1 isolate=true cli=codex model=gpt-6-sol effort=medium
 mcp__cs__coordination action=spawn_workers count=1 isolate=true cli=claude model=opus effort=high
 ```
 
@@ -129,7 +131,7 @@ How each backend receives them:
 | Grok | `--reasoning-effort <level>` |
 | OpenCode | generated primary-agent `variant` (local: endpoint-specific; Token Plan/pay-as-you-go qwen3.8-max: `low`, `medium`, `xhigh`; Token Plan also pins `enable_thinking`) |
 
-For non-Luna multi-step workers, `effort=high` is the ceiling by default. Luna is the exception: its only permitted Cassy effort is `xhigh`. The registry sets Haiku light to low, Fable taste to medium, and Astra heavy to high; `max` is never a lane default and `ultra` is not a Cassy effort value.
+For multi-step workers, choose the lane default. GPT-6 Luna defaults to `xhigh` in the light lane; legacy GPT-5.6 Luna only permits `xhigh`. The registry sets GPT-6 Luna light to xhigh, GPT-6 Sol standard to medium, Opus 5.5 supervisor to high, Fable taste to medium, and Astra heavy to high; `max` is never a lane default and `ultra` is not a Cassy effort value.
 
 ### `max` effort (explicit request only)
 
@@ -138,9 +140,9 @@ For non-Luna multi-step workers, `effort=high` is the ceiling by default. Luna i
 | Recipe | `max` | Source |
 |---|---|---|
 | `claude_fable` (Claude Fable 5.1), `claude_opus` (Claude Opus 5) | accepted | Claude effort doc (https://platform.claude.com/docs/en/build-with-claude/effort): `max` is available on Claude Fable 5.1/5, Mythos 5.1/5, Opus 5/4.8/4.7/4.6, Sonnet 5/4.6; `xhigh` on Fable 5.1/5, Mythos 5.1/5, Opus 5/4.8/4.7, Sonnet 5. Set a large `max_tokens` (≥64k) at xhigh/max. |
-| `codex_astra`, `codex_astra_high` (GPT-6 Astra), `codex_sol` (GPT-5.6 Sol) | accepted | codex-rs `codex-rs/protocol/src/openai_models.rs` defines `ReasoningEffort::Max` (wire value `max`); the per-model sets come from the Codex models manifest (codex 0.153.4): Astra/Sol/Terra list `low`–`xhigh`, `max`, `ultra`; Luna lists `low`–`xhigh`, `max`. |
-| `codex_luna` (GPT-5.6 Luna) | rejected — `xhigh` only | Cassy policy (standard-lane cost ceiling), not a provider limit. |
-| `claude_haiku`, OpenCode Qwen lanes | rejected | Not listed by the provider tables above. |
+| `codex_astra`, `codex_astra_high` (GPT-6 Astra), `codex_sol_6` (GPT-6 Sol), `codex_luna_6` (GPT-6 Luna), `codex_sol` (GPT-5.6 Sol) | accepted | codex-rs `codex-rs/protocol/src/openai_models.rs` defines `ReasoningEffort::Max` (wire value `max`); the per-model sets come from the Codex models manifest (codex 0.156.0): GPT-6 Sol lists `low`–`ultra`, GPT-6 Luna lists `low`–`max`; Cassy accepts through `max`. |
+| `codex_luna` (GPT-5.6 Luna) | rejected — `xhigh` only | Cassy policy (legacy explicit route), not a provider limit. |
+| OpenCode Qwen lanes | rejected | Not listed by the provider tables above. |
 
 Cost caveat: an independent measurement (dev.to, synthorai) put Astra `max` at ≈2.3× the cost of `low` with no accuracy gain on its 11 tasks. Reach for `max` when a task has already failed at `high`/`xhigh` and the operator asked for it, not as a routine escalation. Codex receives `--config model_reasoning_effort=max`; Claude receives `--effort max`.
 

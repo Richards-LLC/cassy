@@ -2,7 +2,7 @@
 //!
 //! The assertions that matter here are the ones a unit test cannot make:
 //!
-//! * the recorded digest and size agree with `sha256sum` and `stat`, not just
+//! * the recorded digest and size agree with `sha256sum` and `wc`, not just
 //!   with our own second opinion;
 //! * an oversized file is refused *before* any network call, proven by a mock
 //!   server that receives nothing;
@@ -120,15 +120,17 @@ fn system_sha256(path: &Path) -> String {
 }
 
 fn system_size(path: &Path) -> u64 {
-    let output = Command::new("stat")
-        .args(["-c", "%s"])
+    let output = Command::new("wc")
+        .arg("-c")
         .arg(path)
         .output()
-        .expect("stat must be available");
-    assert!(output.status.success(), "stat failed");
+        .expect("wc must be available");
+    assert!(output.status.success(), "wc failed");
     String::from_utf8(output.stdout)
         .unwrap()
-        .trim()
+        .split_whitespace()
+        .next()
+        .unwrap()
         .parse()
         .unwrap()
 }

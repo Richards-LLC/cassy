@@ -1,5 +1,6 @@
 //! Bounded one-shot work routed through the factory light lane.
 
+use std::fs::OpenOptions;
 use std::io;
 use std::io::Read;
 use std::path::Path;
@@ -7,6 +8,12 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use cas_mux::SupervisorCli;
+use fs2::FileExt;
+
+pub const DETACHED_WORKER_ARG: &str = "--internal-light-lane-worker";
+const LOCK_WAIT: Duration = Duration::from_secs(900);
+const JOB_TIMEOUT: Duration = Duration::from_secs(300);
+const KILL_GRACE: Duration = Duration::from_secs(10);
 
 pub(crate) fn default_model() -> String {
     cas_factory::resolve_lane("light", &cas_factory::CapabilitySnapshot::default())
@@ -86,18 +93,19 @@ fn command(prompt: &str, cwd: &Path) -> io::Result<Command> {
 }
 
 pub(crate) fn spawn(prompt: &str, cwd: &Path, log: &Path) -> io::Result<Child> {
+    let _ = command(prompt, cwd)?;
     let output = std::fs::File::create(log)?;
     let errors = output.try_clone()?;
-    let inner = command(prompt, cwd)?;
     let lock = log
         .parent()
         .ok_or_else(|| io::Error::other("maintenance log has no directory"))?
         .join("lane.lock");
-    let mut bounded = Command::new("flock");
-    bounded.args(["-w", "900"]);
-    bounded.arg(lock);
-    bounded.args(["timeout", "-k", "10s", "300s"]);
-    bounded.arg(inner.get_program()).args(inner.get_args());
+    let mut bounded = Command::new(std::env::current_exe()?);
+    bounded
+        .arg(DETACHED_WORKER_ARG)
+        .arg(lock)
+        .arg(cwd)
+        .arg(prompt);
     bounded.current_dir(cwd);
     for key in [
         "CAS_AGENT_ROLE",
@@ -136,6 +144,87 @@ pub(crate) fn spawn(prompt: &str, cwd: &Path, log: &Path) -> io::Result<Child> {
         .stdout(Stdio::from(output))
         .stderr(Stdio::from(errors))
         .spawn()
+}
+
+/// Run the detached maintenance process without relying on GNU `flock` or
+/// `timeout`, neither of which ships with macOS. The lock belongs to this
+/// process and remains held until the harness exits or its deadline expires.
+pub fn run_detached_worker(lock: &Path, cwd: &Path, prompt: &str) -> io::Result<()> {
+    let lock_file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(lock)?;
+    let lock_deadline = Instant::now() + LOCK_WAIT;
+    loop {
+        match lock_file.try_lock_exclusive() {
+            Ok(()) => break,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                if Instant::now() >= lock_deadline {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "light-lane lock timed out",
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+
+    let mut harness = command(prompt, cwd)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        unsafe {
+            harness.pre_exec(|| {
+                if libc::setpgid(0, 0) < 0 {
+                    Err(io::Error::last_os_error())
+                } else {
+                    Ok(())
+                }
+            });
+        }
+    }
+    let mut child = harness.spawn()?;
+    let deadline = Instant::now() + JOB_TIMEOUT;
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return if status.success() {
+                Ok(())
+            } else {
+                Err(io::Error::other(format!(
+                    "light-lane harness exited with {status}"
+                )))
+            };
+        }
+        if Instant::now() >= deadline {
+            #[cfg(unix)]
+            unsafe {
+                libc::killpg(child.id() as i32, libc::SIGTERM);
+            }
+            #[cfg(not(unix))]
+            let _ = child.kill();
+            let grace_deadline = Instant::now() + KILL_GRACE;
+            while Instant::now() < grace_deadline {
+                if child.try_wait()?.is_some() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            #[cfg(unix)]
+            unsafe {
+                libc::killpg(child.id() as i32, libc::SIGKILL);
+            }
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "light-lane harness timed out",
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
 }
 
 pub(crate) fn run(prompt: &str, cwd: &Path, timeout: Duration) -> io::Result<String> {

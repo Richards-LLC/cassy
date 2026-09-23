@@ -486,6 +486,8 @@ Reviewed 2026-08-25. Source:
   coordination has its own durable queue and acknowledgment semantics. Continue checking mirror
   generation on upgrades; no task is warranted from this release.
 
+- **2026-09-23 resolution:** Won't-do: generated mirrors are UTF-8 Markdown without BOM; a separate BOM check is unnecessary.
+
 ### 2.1.238 — MCP initialization/trust · runner lifecycle · delivery correctness
 
 Reviewed 2026-08-25. Source:
@@ -517,6 +519,8 @@ Reviewed 2026-08-25. Source:
   Cassy's daemon and PTY paths already record the worktree/session root and `CAS_CLONE_PATH`; its
   skill sync owns the generated mirror. The host fixes reduce stale-session and stale-skill symptoms,
   but do not change Cassy's persistence or sync contract.
+
+- **2026-09-23 resolution:** Won't-do: deleted-directory recovery and skill reload are host fixes; Cassy records worktree roots and syncs mirrors.
 - **Auto mode no longer treats `Monitor` rules as trusted, and git status is not fooled by
   `status.showUntrackedFiles=no`.** → 🟢 **already covered.** Cassy's PreToolUse policy and factory
   commit/path guards remain separate defense-in-depth checks; the host classifier does not replace
@@ -587,6 +591,8 @@ Reviewed 2026-08-25. Source:
   and `claude plugin validate` checks bare `.claude/skills`.** → 👀 / 🟢 **watch / already covered.**
   Cassy syncs built-in skill and agent mirrors and retains explicit worker guidance; verify mirror
   precedence on upgrades, but the release exposes no required Cassy edit.
+
+- **2026-09-23 resolution:** Owned by cas-ef93e: the live matrix checks skill-mirror precedence in a worktree.
 - **Todo/task-tracking tools are disabled on newer models unless explicitly re-enabled.** → ✅ **no
   action.** Cassy task state is durable through `mcp__cas__task`; its worker guidance already forbids
   ephemeral `TodoWrite`, so the host change does not remove a Cassy dependency.
@@ -623,6 +629,8 @@ section.
   OAuth, but the new behavior remains relevant when a workspace also configures remote MCP servers.
   Cassy's SessionStart/PreToolUse contracts remain configuration-owned; do not treat runner-provided
   hooks as a substitute for them.
+
+- **2026-09-23 resolution:** Won't-do: Cassy MCP is local stdio without OAuth; remote authentication belongs to the host.
 - **2.1.229 fixes CPU-limited dynamic-workflow fan-out; 2.1.225–2.1.224 improve headless and
   cross-session message delivery; 2.1.221 makes background sessions commit/push and gives forked
   sessions their own worktree.** → 🟢 **lifecycle and isolation wins.** Cassy keeps task ownership,
@@ -632,6 +640,8 @@ section.
   deferred-tool duplication; 2.1.229 refreshes command-source plugins per session.** → 👀 **watch
   skill precedence.** On a Claude upgrade, verify the Cassy-synced skill/agent mirror still wins
   predictably in a worktree and that required worker instructions are not silently displaced.
+
+- **2026-09-23 resolution:** Owned by cas-ef93e: the live matrix checks skill precedence against user/cloud skills.
 - **2.1.224–2.1.221 close destructive-git/worktree, permission-check, background-hook, print-mode
   MCP-startup, and MCP-error-visibility gaps.** → 🟢 **direct safety and evidence wins.** Cassy's
   own clone-path, hook, and verifier boundaries remain defense in depth; no runtime change follows.
@@ -661,10 +671,9 @@ changelog](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md#2121
   model.
 - **Dynamic workflows now default to a medium size guideline (fewer than 15 agents), while nested
   subagents may spawn to depth 3 by default.** → 🟢 **Cassy remains explicitly bounded.** The
-  `cas-code-review` Workflow selects a finite persona set and enforces
-  `CODEX_MAX_CONCURRENCY = 4` in `.claude/workflows/cas-code-review.js`; its reviewer agents do not
-  depend on recursive delegation. The broader host default does not replace those workflow-owned
-  bounds, so no Cassy change is required.
+  former `cas-code-review` Workflow selected a finite persona set and enforced
+  `CODEX_MAX_CONCURRENCY = 4`; cas-7216 later removed that Workflow. Its reviewer agents did not
+  depend on recursive delegation, so the broader host default required no Cassy change.
 - **Headless init can report invalid `--mcp-config` entries, and `claude mcp list`/`/mcp` now expose
   connection status and error text.** → ✅ **diagnostics win.** Cassy factory startup requires a
   committed `.mcp.json` so isolated sessions receive Cassy tools (`cas-cli/src/cli/factory/mod.rs`), and
@@ -678,8 +687,8 @@ Reviewed 2026-07-30. Source: [Anthropic's official
 changelog](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md#21218).
 
 - **The built-in `/code-review` now runs as a background subagent.** → ✅ **no action — separate
-  authority path.** Cassy uses its own `cas-code-review` Workflow and keeps review ownership with the
-  supervisor (`cas-cli/src/builtins/skills/cas-code-review/SKILL.md`). Backgrounding Claude's bundled
+  authority path.** Cassy formerly used its own `cas-code-review` Workflow (removed by cas-7216)
+  and keeps review ownership with the supervisor. Backgrounding Claude's bundled
   command neither invokes nor bypasses Cassy's close and review gates.
 - **Tool-executor errors are no longer silently dropped, aborted responses no longer leave an
   unpaired `tool_use` block, and headless/SDK forks retain lineage after compaction.** → 🟢 **evidence
@@ -693,9 +702,9 @@ changelog](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md#2121
 Reviewed 2026-07-22 (diary-claude / cas-9642). Host on **2.1.217**.
 
 - **Concurrent subagents are capped at 20 by default, nested spawning is off by default, and
-  `--max-budget-usd` now halts background subagents.** → 🟢 **direct safety win.** Cassy verification and
-  `cas-code-review` use bounded subagent dispatch (`.claude/agents/task-verifier.md` and the
-  `cas-code-review` skill); ordinary fan-out remains well below 20. The host now also bounds accidental
+  `--max-budget-usd` now halts background subagents.** → 🟢 **direct safety win.** Cassy verification
+  uses bounded subagent dispatch (`.claude/agents/task-verifier.md`); the former `cas-code-review`
+  Workflow was removed by cas-7216. Ordinary fan-out remains well below 20. The host also bounds accidental
   recursive or runaway delegation. No Cassy change; `CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS` and
   `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH` are escape hatches if an intentional workflow grows.
 - **Transcript-write failures and inherited session-saving disablement now warn instead of silently
@@ -736,8 +745,8 @@ Reviewed 2026-07-22. **Single-item release.**
 
 - **Claude no longer invokes `/verify` or `/code-review` on its own.** → ✅ **no action — authority
   boundary clarified.** Cassy's close gate explicitly dispatches the `task-verifier` agent and the
-  supervisor owns `cas-code-review`; neither depends on Claude opportunistically choosing a similarly
-  named built-in skill (`docs/verifier-dispatch-trace.md`). Explicit Cassy lifecycle calls remain intact.
+  supervisor owns review and close. The former `cas-code-review` Workflow was removed by cas-7216;
+  neither lifecycle path depends on Claude choosing a similarly named built-in skill.
 
 ### 2.1.214 — hook blocking restored · tool heartbeat · permission hardening
 
@@ -781,6 +790,8 @@ Reviewed 2026-07-22.
   staying usable is beneficial, but if a caller assumes a foreground result, first inspect
   `CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS` when diagnosing an apparently detached Cassy call. No concrete
   defect observed, so no task filed.
+
+- **2026-09-23 resolution:** Owned by cas-ef93e: the live matrix tests auto-background behavior or records a coverage gap.
 - **A `continue:false` hook halt is no longer lost when a tool fails/completes mid-stream, and hook
   infrastructure errors are no longer reported as user rejection.** → 🟢 **direct hook-authority
   win.** Cassy PreToolUse guards rely on harness halts being final; this removes a race and preserves the
@@ -810,6 +821,8 @@ Reviewed 2026-07-22.
 - **`--forward-subagent-text` can include subagent text/thinking in stream-json.** → 👀 opportunity,
   not required. It could improve headless verifier diagnostics, but Cassy does not need to expose hidden
   reasoning and no concrete evidence gap warrants changing spawn flags.
+
+- **2026-09-23 resolution:** Won't-do: verifier results have durable receipts; forwarding hidden subagent text is unnecessary.
 
 ### 2.1.210 — isolated git mutation · hook-timeout semantics · dead-worker cleanup
 
@@ -859,7 +872,7 @@ Reviewed 2026-07-14.
   large MCP tool surface (`cas__*`, plus host MCPs). Pure perf.
 - **"Fixed the Agent tool launching with no tools when a subagent's `tools` list resolves to nothing —
   it now returns a clear error naming the unrecognized entries."** → ✅ no action; clearer failure for
-  `cas-code-review` Workflow persona dispatch / named Agent spawns with bad tool allowlists.
+  former `cas-code-review` Workflow's persona dispatch (removed by cas-7216) / named Agent spawns with bad tool allowlists.
 - **"Fixed multi-second per-turn slowdowns in sessions with many permission deny/ask rules — rule
   matchers are now compiled once and cached."** → ✅ no action; host-side if anyone runs dense deny
   rules outside DSP.
@@ -906,6 +919,8 @@ Reviewed 2026-07-14.
   risk: an agent that *calls* `EnterWorktree` into a Cassy worktree path may now get a human confirm
   prompt — same unattended-pane hang class as the 2.1.200 `AskUserQuestion` note. No Cassy change unless
   that shape shows up in the wild.
+
+- **2026-09-23 resolution:** Won't-do: factory workers enter Cassy worktrees through coordination, not the host EnterWorktree tool.
 - Background-agent auto-upgrade after CC update, `/code-review` opus quality, agents-view Ctrl+X →
   ⏭ / adjacent (built-in `/code-review`, not `cas-code-review`).
 
@@ -920,8 +935,8 @@ Reviewed 2026-07-14.
   look like a human yes. No Cassy change.
 - **"Fixed `--json-schema` silently producing unstructured output when the schema was invalid, and
   schemas using the `format` keyword being rejected."** → ✅ no action / residual of 2.1.187
-  structured-output hardening. Helps Workflow `agent({schema})` paths used by `cas-code-review`
-  (Phase C) fail loudly on bad schemas instead of returning free-form prose.
+  structured-output hardening. This helped the former `cas-code-review` Workflow's
+  `agent({schema})` path fail loudly; cas-7216 later removed that Workflow.
 - **"Fixed project verify skills being rewritten on every session instead of only when a documented
   command changed."** → ✅ no action; skill hot-reload thrash reduction (pairs with 2.1.174
   re-announce-only-changed). Cassy skill sync already prefers stable skill bodies.
@@ -957,8 +972,8 @@ Reviewed 2026-07-14.
   subagents depend on cwd staying inside the assigned tree; parent-checkout leakage is a silent
   cross-worker corruption risk. Rides free.
 - **"Improved subagent behavior: agents are now less likely to re-delegate their entire task to another
-  subagent."** → ✅ no action; quality win for task-verifier / `cas-code-review` persona fan-out (less
-  nested Agent thrash).
+  subagent."** → ✅ no action; quality win for task-verifier and the former `cas-code-review` persona
+  dispatch (removed by cas-7216), reducing nested Agent thrash.
 - **"Fixed `TaskStop` and `TaskOutput` failing to find background agents spawned by another agent —
   errors now list running agents by id and description."** → ✅ no action; clearer nested-agent
   control surface.
@@ -976,7 +991,7 @@ Reviewed 2026-07-07 (patient-condor-18 / supervisor). Sweep of 2.1.197–2.1.202
 
 - **"Fixed re-invoking an already-loaded skill appending a duplicate copy of its instructions to
   context."** → ✅ **no action — direct win.** Long supervisor sessions re-invoke Cassy skills
-  (`cas-supervisor`, `verify-before-claim`, `cas-code-review`) repeatedly; each re-invoke was silently
+  (`cas-supervisor`, `verify-before-claim`) repeatedly; each re-invoke was silently
   duplicating the skill body in context. This fix is pure context-bloat relief for exactly our usage
   pattern. Rides free on the bump.
 - **"Fixed resuming a session by name, or opening the resume picker, taking minutes and using a large
@@ -985,13 +1000,13 @@ Reviewed 2026-07-07 (patient-condor-18 / supervisor). Sweep of 2.1.197–2.1.202
   change in Cassy.
 - **"Fixed workflow scripts with unicode quote escapes in strings being corrupted before parsing;
   workflow parse errors now show the offending line."** + `workflow.run_id`/`workflow.name` OTel
-  attributes. → ✅ no action; de-flakes + improves debuggability of the `cas-code-review` Workflow
-  scripts (Phase C, cas-b667). No Cassy change.
+  attributes. → ✅ no action; this improved the former `cas-code-review` Workflow's debuggability
+  before cas-7216 removed it.
 - **"Changed `/review <pr>` back to a fast single-pass review; use `/code-review <level> <pr#>` for
   multi-agent."** → ✅ no action — CC's *built-in* review surfaces, distinct from `cas-code-review`
   (same disambiguation as the 2.1.196 token-cut note). Logged so nobody mistakes it for a Cassy change.
-- "Dynamic workflow size" `/config` setting (advisory agent-count guideline) → ✅ no action; could be
-  a host-side knob if `cas-code-review` fan-out ever feels over/under-sized, but it's advisory only.
+- "Dynamic workflow size" `/config` setting (advisory agent-count guideline) → ✅ no action; the
+  former `cas-code-review` Workflow was removed by cas-7216.
 
 ### 2.1.201 — Sonnet 5 drops mid-conversation system role for harness reminders
 
@@ -1046,8 +1061,9 @@ Reviewed 2026-07-07.
   `feedback_reassign_collision_near_limit_worker`), so the mismatch detection is a genuine safety net
   there. No Cassy change.
 - **"Subagents cut off by a rate limit or server error now return partial work / report the error to
-  the parent instead of claiming success."** → ✅ no action — de-flakes `cas-code-review` Workflow
-  persona dispatch (an API-errored persona previously looked like an empty-but-successful review).
+  the parent instead of claiming success."** → ✅ no action — this helped the former
+  `cas-code-review` Workflow's persona dispatch before cas-7216 removed it (an API-errored persona
+  previously looked like an empty-but-successful review).
   Same family as the 2.1.187 structured-output hardening.
 - **Retry hardening: transient 429s auto-retry with backoff for subscribers;
   `CLAUDE_CODE_RETRY_WATCHDOG` raises retry ceilings.** → ✅ no action; strictly helpful for long
@@ -1116,8 +1132,11 @@ Reviewed 2026-06-30 (eager-leopard-33 / supervisor). Sweep of 2.1.171–2.1.196.
   A factory-worker turn that legitimately stalls >5 min inside a single long tool with no streamed
   output would now abort + retry. Low risk (Cassy turns stream tool calls regularly), but if a worker
   starts thrashing on a long build/test step, the disable env is the lever.
+
+- **2026-09-23 resolution:** Won't-do: this is a host retry setting, and no Cassy-specific failure has been observed.
 - **`/code-review` merged five cleanup finders into one (~−25% tokens).** → ✅ no action. That's CC's
-  *built-in* `/code-review`; Cassy ships its own `cas-code-review` Workflow + skill (Phase C, cas-b667) —
+  *built-in* `/code-review`; Cassy formerly shipped the `cas-code-review` Workflow
+  (removed by cas-7216) —
   a separate surface, no shared code. Logged so the token-cut isn't mistaken for a Cassy change.
 
 ### 2.1.195 — hook matchers: hyphenated identifiers now exact-match
@@ -1158,9 +1177,10 @@ Reviewed 2026-06-30. Two adjacent releases with the same Cassy angle.
 - **`--json-schema` / Workflow `agent({schema})` structured output hardened: the model can no longer
   re-call `StructuredOutput` indefinitely after a success, follow-up turns reliably return structured
   output (2.1.187), and schema-validation-failure loops now abort after 5 attempts (2.1.186).** → 👀
-  **watch — benefits Cassy.** The `cas-code-review` Workflow and its Steps 3-4 persona dispatch use
-  schema-validated `agent({schema})`; these fixes directly de-flake that path. No Cassy change; pick up
-  the reliability win on the bump.
+  **historical watch.** The former `cas-code-review` Workflow used schema-validated
+  `agent({schema})`; cas-7216 later removed that dispatch path.
+
+- **2026-09-23 resolution:** Won't-do: cas-7216 removed the cas-code-review Workflow and its schema dispatch.
 - **`claude mcp login <name>` / `logout <name>` CLI (2.1.186).** → ✅ no action; convenience for
   authenticating an MCP server from the CLI (Cassy's `mcp__cas__*` is local stdio, no OAuth, so N/A in
   practice but harmless).
@@ -1178,6 +1198,8 @@ Reviewed 2026-06-30. **Touches the factory spawn path.**
   init + spawn-time keystroke leak is precisely the flake class we've hit. This host fix should *help*
   Cassy spawn reliability; **verify on upgrade** that worker panes come up clean and supervisor
   keystrokes typed during a spawn don't leak into the new worker pane.
+
+- **2026-09-23 resolution:** Won't-do: the keystroke leak is fixed in the host; Cassy has no host-pane behavior to patch.
 - **Auto mode now blocks destructive git (`reset --hard`, `checkout -- .`, `clean -fd`, `stash drop`),
   amend of non-agent commits, and `terraform/pulumi/cdk destroy`.** → ✅ no action — same shape as the
   .160 sensitive-file note: factory workers run `--dangerously-skip-permissions` (bypassPermissions),
@@ -1223,7 +1245,8 @@ Reviewed 2026-06-30.
   `project_skill_hot_sync_no_daemon_restart`); with this fix, editing one Cassy skill no longer re-floods
   the model with the full listing. Strictly better for that workflow.
 - Workflow `agent()` subagents now carry per-agent attribution headers. → ✅ no action; improves
-  `cas-code-review` Workflow dispatch readability. (2.1.175's `enforceAvailableModels` and 2.1.176's
+  the former `cas-code-review` Workflow's dispatch readability before cas-7216 removed it.
+  (2.1.175's `enforceAvailableModels` and 2.1.176's
   hook `if`-condition path matching are host-config niceties → ✅ no action.)
 
 ### 2.1.170 — Claude Fable 5 (Mythos-class model) GA · VS Code transcript-save fix
@@ -1278,11 +1301,15 @@ worth knowing about.
   cleanly isolates "is it Cassy or the harness" in one flag — no manual settings surgery. Worth
   folding into a Cassy troubleshooting/onboarding doc as the first triage step. Note: it disables
   the whole Cassy surface, so factory mode won't run under it — it's a diagnosis tool, not a run mode.
+
+- **2026-09-23 resolution:** Won't-do: safe mode disables the MCP, hooks, and skills required by factory workers; use it only for ad hoc diagnosis.
 - **`disableBundledSkills` setting + `CLAUDE_CODE_DISABLE_BUNDLED_SKILLS`** — hides Claude Code's
   *bundled* skills/workflows/built-in slash commands from the model. → ✅ no action, **👀 namespace
   hygiene option.** Cassy ships its own skill set; a user drowning in bundled + Cassy skills could set
   this to reduce menu clutter and slash-command collisions. Does NOT affect Cassy skills (those are
   project/user skills, not bundled). Optional ops choice, not a code change.
+
+- **2026-09-23 resolution:** Won't-do: disabling bundled skills is an optional user preference, not a Cassy requirement.
 - **`claude agents --json` gains `--all`, `id`, `state`; now includes blocked + just-dispatched
   sessions.** → ✅ no action. Re-confirms the standing finding (memory `project_claude_agents_json_session_scoped`,
   `project_cc_2_1_145_150_compat_results`): `agents --json` tracks *background sessions*, not the
@@ -1331,9 +1358,13 @@ Reviewed 2026-06-08.
   `additionalContext` instead of the current Stop-hook output path. Not urgent — current
   path works — but flagged so we evaluate before the next hook-surface EPIC. No task filed
   yet.
+
+- **2026-09-23 resolution:** Won't-do: the existing Stop-hook guidance path works; no failure justifies a new output contract.
 - **`requiredMinimumVersion` / `requiredMaximumVersion` managed settings.** → ✅ no action.
   Could be useful to pin factory hosts to a known-good CC range, but that's an ops choice,
   not a code change. Note for onboarding docs if we ever standardize a CC floor.
+
+- **2026-09-23 resolution:** Owned by cas-25eb: set the Claude factory version floor from the validated receipt.
 - **`/plugin list`, skill `\$` escape, `CLAUDE_CODE_SESSION_ID` to stdio MCP on resume.**
   → ✅ no action.
 
@@ -1398,5 +1429,9 @@ remaining .160 changelog lines with a Cassy angle.)
   `STOCK_WORKER_MODEL` comparison. See 2.1.197 entry.
 - **session-learn / guidance via Stop-hook `additionalContext`** (from 2.1.163) — evaluate
   before next hook-surface EPIC. See 2.1.163 entry.
+
+- **2026-09-23 resolution:** Won't-do: the existing Stop-hook guidance path works.
 - **Factory CC version floor** via `requiredMinimumVersion` (from 2.1.163) — ops/onboarding
   decision, not code.
+
+- **2026-09-23 resolution:** Owned by cas-25eb: set the minimum version from the validated receipt.

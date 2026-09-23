@@ -218,6 +218,11 @@ mod tests {
         assert_eq!(receipt.validated_at, "2026-09-23");
         assert_eq!(receipt.result, ConformanceStatus::Pass);
         assert!(receipt.validates_pin());
+        assert!(receipt.checklist.iter().any(|check| {
+            check.id == "complex_schema_task_create_show"
+                && check.required
+                && check.status == ConformanceStatus::Pass
+        }));
 
         let evidence_ids: HashSet<&str> = receipt
             .evidence

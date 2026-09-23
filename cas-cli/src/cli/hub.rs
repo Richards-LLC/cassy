@@ -2834,12 +2834,7 @@ mod tests {
 
     #[test]
     fn live_process_classification_uses_lock_phase_without_changing_readiness() {
-        #[cfg(unix)]
-        use std::os::unix::fs::PermissionsExt;
-
-        let temp = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
-        #[cfg(unix)]
-        std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let temp = crate::test_support::private_hub_tempdir();
         let paths = HubRuntimePaths::new(temp.path());
         let mut lock = paths.acquire_instance_lock().unwrap();
         let mut record = record(env!("CARGO_PKG_VERSION"), 0, None);

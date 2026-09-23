@@ -119,7 +119,7 @@ pub struct VerificationConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
 
-    /// Model to use for verification (Haiku recommended for speed)
+    /// Model to use for verification (light lane by default)
     #[serde(default = "default_verification_model")]
     pub model: String,
 
@@ -161,7 +161,7 @@ pub struct VerificationPatterns {
 }
 
 fn default_verification_model() -> String {
-    "claude-haiku-4-5".to_string()
+    crate::light_lane::default_model()
 }
 
 fn default_verification_timeout() -> u64 {

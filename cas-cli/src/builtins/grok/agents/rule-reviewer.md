@@ -1,7 +1,6 @@
 ---
 name: rule-reviewer
 description: Internal agent for reviewing draft rules. Promotes good rules to proven, merges similar rules, and retires stale ones without losing history. Spawned when draft rules exceed threshold.
-model: haiku
 managed_by: cas
 ---
 

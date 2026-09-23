@@ -119,7 +119,7 @@ pub struct EntityExtractorConfig {
 impl Default for EntityExtractorConfig {
     fn default() -> Self {
         Self {
-            model: "claude-haiku-4-5".to_string(),
+            model: "claude-opus-5-5".to_string(),
             min_confidence: 0.6,
             max_entities: 10,
             max_relationships: 20,

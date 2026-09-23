@@ -393,10 +393,7 @@ pub fn handle_stop(input: &HookInput, cas_root: Option<&Path>) -> Result<HookOut
         // Gated on [memory] session_learn_auto = true in .cas/config.toml.
         // The obs_count >= 5 guard mirrors the SKILL.md "< 5 tool calls = skip"
         // floor so we never pay a Haiku call on a trivial session.
-        let session_learn_auto = config
-            .memory
-            .as_ref()
-            .is_some_and(|m| m.session_learn_auto);
+        let session_learn_auto = config.memory.as_ref().is_some_and(|m| m.session_learn_auto);
 
         if session_learn_auto && obs_count >= 5 {
             if let Some(ref transcript_path) = input.transcript_path {
@@ -428,9 +425,10 @@ pub fn handle_stop(input: &HookInput, cas_root: Option<&Path>) -> Result<HookOut
                         };
 
                         let mut stored = 0usize;
-                        for draft in drafts.iter().filter(|d| {
-                            confidence_floor(d) && d.dedup_hits.is_empty()
-                        }) {
+                        for draft in drafts
+                            .iter()
+                            .filter(|d| confidence_floor(d) && d.dedup_hits.is_empty())
+                        {
                             // BM25 overlap-detection gate
                             if find_similar_entry(cas_root, &draft.content) {
                                 eprintln!(
@@ -613,65 +611,97 @@ pub fn handle_stop(input: &HookInput, cas_root: Option<&Path>) -> Result<HookOut
         }
     }
 
-    // Check for factory worker role - workers skip maintenance agents
-    // Maintenance tasks (learning-reviewer, rule-reviewer, duplicate-detector) should run
-    // on supervisor only. Workers should focus on their assigned tasks.
+    // Factory role still controls the final git-state event below.
     let is_factory_worker = std::env::var("CAS_AGENT_ROLE")
         .map(|role| role.to_lowercase() == "worker")
         .unwrap_or(false);
 
-    // Only trigger maintenance agents for non-worker agents.
-    //
-    // cas-f3e3: also skipped when `stop_hook_active` is true. All four blockers
-    // below ask the agent to spawn a maintenance subagent; if it declines, the
-    // condition still holds at the next Stop and the block repeats. These are
-    // exactly the non-self-clearing blockers the harness's loop-prevention
-    // signal exists for.
-    if !is_factory_worker && !stop_is_reentrant {
-        // Check for unreviewed learnings that need review before stop
-        if let Some(review_context) = build_learning_review_context(store.as_ref(), &config) {
-            eprintln!("cas: Blocking stop - unreviewed learnings need review");
-            return Ok(HookOutput::block_stop_with_context(
-                "You have unreviewed learnings that should be analyzed. Please spawn a learning-reviewer subagent to process them before stopping.".to_string(),
-                review_context,
+    if !stop_is_reentrant && std::env::var_os("CAS_MAINTENANCE_JOB").is_none() {
+        let mut jobs = Vec::new();
+        if let Some(context) = build_learning_review_context(store.as_ref(), &config) {
+            jobs.push((
+                "learning-reviewer",
+                context,
+                include_str!("../../../../builtins/codex/agents/learning-reviewer.md"),
             ));
         }
-
-        // Check for draft rules that need review before stop
         if let Ok(rule_store) = open_rule_store(cas_root) {
-            if let Some(review_context) = build_rule_review_context(rule_store.as_ref(), &config) {
-                eprintln!("cas: Blocking stop - draft rules need review");
-                return Ok(HookOutput::block_stop_with_context(
-                    "You have draft rules that should be reviewed. Please spawn a rule-reviewer subagent to process them before stopping.".to_string(),
-                    review_context,
+            if let Some(context) = build_rule_review_context(rule_store.as_ref(), &config) {
+                jobs.push((
+                    "rule-reviewer",
+                    context,
+                    include_str!("../../../../builtins/codex/agents/rule-reviewer.md"),
                 ));
             }
         }
-
-        // Check for potential duplicates that need cleanup before stop
-        if let Some(cleanup_context) = build_duplicate_detection_context(store.as_ref(), &config) {
-            eprintln!("cas: Blocking stop - duplicate detection recommended");
-            return Ok(HookOutput::block_stop_with_context(
-                "You have accumulated many entries that may contain duplicates. Please spawn a duplicate-detector subagent to consolidate them before stopping.".to_string(),
-                cleanup_context,
+        if let Some(context) = build_duplicate_detection_context(store.as_ref(), &config) {
+            jobs.push((
+                "duplicate-detector",
+                context,
+                include_str!("../../../../builtins/codex/agents/duplicate-detector.md"),
             ));
         }
-
-        // Check if session summary generation is enabled
-        if let Some(summary_context) =
+        if let Some(context) =
             build_session_summary_context(store.as_ref(), &config, &input.session_id)
         {
-            eprintln!("cas: Blocking stop - session summary required");
-            return Ok(HookOutput::block_stop_with_context(
-                "Session summary generation is enabled. Please spawn a session-summarizer subagent to create a summary before stopping.".to_string(),
-                summary_context,
+            jobs.push((
+                "session-summarizer",
+                context,
+                include_str!("../../../../builtins/codex/agents/session-summarizer.md"),
             ));
+        }
+        for (name, context, body) in jobs {
+            if context.contains("-error>") {
+                eprintln!("cas: {name} could not be queued: {context}");
+                continue;
+            }
+            let safe_session: String = input
+                .session_id
+                .chars()
+                .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+                .take(80)
+                .collect();
+            let job_dir = cas_root.join("maintenance").join(safe_session);
+            if let Err(error) = std::fs::create_dir_all(&job_dir) {
+                eprintln!("cas: {name} job directory failed: {error}");
+                continue;
+            }
+            let marker = job_dir.join(format!("{name}.queued"));
+            if std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&marker)
+                .is_err()
+            {
+                continue;
+            }
+            let prompt = format!(
+                "{body}\n\nRun this maintenance job for Cassy session {}. Transcript: {}. The following context supplies the exact work items. Execute this job directly and do not spawn another agent.\n\n{context}",
+                input.session_id,
+                input.transcript_path.as_deref().unwrap_or("unavailable")
+            );
+            let cwd = if input.cwd.is_empty() {
+                std::path::Path::new(".")
+            } else {
+                std::path::Path::new(&input.cwd)
+            };
+            let log = job_dir.join(format!("{name}.log"));
+            match crate::light_lane::spawn(&prompt, cwd, &log) {
+                Ok(child) => eprintln!(
+                    "cas: queued {name} light-lane job pid={} log={}",
+                    child.id(),
+                    log.display()
+                ),
+                Err(error) => {
+                    let _ = std::fs::remove_file(&marker);
+                    eprintln!("cas: {name} light-lane launch failed: {error}");
+                }
+            }
         }
     }
 
     // Best-effort codemap reminder
-    let codemap_reminder =
-        crate::hooks::handlers::handlers_events::codemap_stop_reminder(cas_root);
+    let codemap_reminder = crate::hooks::handlers::handlers_events::codemap_stop_reminder(cas_root);
     if let Some(ref reminder) = codemap_reminder {
         eprintln!("cas: {reminder}");
     }

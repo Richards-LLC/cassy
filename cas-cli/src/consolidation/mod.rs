@@ -254,7 +254,10 @@ pub mod ai {
 
         let prompt_text = build_consolidation_prompt(entries);
 
-        let options = QueryOptions::default().model(&config.model);
+        let mut options = QueryOptions::default().model(&config.model);
+        if config.model == "claude-opus-5-5" {
+            options = options.extra_arg("--effort").extra_arg("low");
+        }
 
         let result = traced_prompt(&prompt_text, options, "consolidation")
             .await

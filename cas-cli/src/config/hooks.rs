@@ -607,7 +607,7 @@ impl Default for PlanModeConfig {
 }
 
 fn default_ai_model() -> String {
-    "claude-haiku-4-5".to_string()
+    "claude-opus-5-5".to_string()
 }
 
 fn default_ai_fallback() -> bool {

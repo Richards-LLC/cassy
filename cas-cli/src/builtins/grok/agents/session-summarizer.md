@@ -1,7 +1,6 @@
 ---
 name: session-summarizer
 description: Internal agent for generating session summaries at stop. Creates a concise summary of work done, decisions made, and learnings captured. Spawned by Stop hook.
-model: haiku
 managed_by: cas
 ---
 

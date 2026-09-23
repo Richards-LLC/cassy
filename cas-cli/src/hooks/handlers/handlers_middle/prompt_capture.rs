@@ -578,7 +578,11 @@ If this is NOT a preference to remember, respond with: null"#
 
     let result = traced_prompt(
         &prompt_text,
-        QueryOptions::new().model("claude-haiku-4-5").max_turns(1),
+        QueryOptions::new()
+            .model("claude-opus-5-5")
+            .max_turns(1)
+            .extra_arg("--effort")
+            .extra_arg("low"),
         "preference_extraction",
     )
     .await

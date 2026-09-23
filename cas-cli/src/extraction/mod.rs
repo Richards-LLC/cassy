@@ -1,7 +1,7 @@
 //! Observation and entity extraction pipeline
 //!
 //! This module re-exports extraction types from `cas-core` and extends them
-//! with async AI-powered extraction methods using the `claude_rs` SDK.
+//! with async AI-powered extraction methods routed through the light lane.
 //!
 //! # Architecture
 //!
@@ -55,7 +55,10 @@ pub mod entities {
 
             let prompt_text = self.build_prompt(entry);
 
-            let options = QueryOptions::new().model(self.model()).max_turns(1);
+            let mut options = QueryOptions::new().model(self.model()).max_turns(1);
+            if self.model() == "claude-opus-5-5" {
+                options = options.extra_arg("--effort").extra_arg("low");
+            }
 
             let result = traced_prompt(&prompt_text, options, "entity_extraction")
                 .await
@@ -79,10 +82,40 @@ pub mod tasks {
 use crate::error::MemError;
 use cas_types::Entry;
 
+async fn extraction_response(
+    prompt: String,
+    model: &str,
+    max_thinking_tokens: u32,
+    label: &'static str,
+) -> Result<String, MemError> {
+    if model.starts_with("gpt-") {
+        return tokio::task::spawn_blocking(move || {
+            let cwd = std::env::current_dir().map_err(|e| MemError::Other(e.to_string()))?;
+            crate::light_lane::run(&prompt, &cwd, std::time::Duration::from_secs(180))
+                .map_err(|e| MemError::Other(format!("light lane extraction failed: {e}")))
+        })
+        .await
+        .map_err(|e| MemError::Other(format!("light lane extraction task failed: {e}")))?;
+    }
+    use crate::tracing::claude_wrapper::traced_prompt;
+    use claude_rs::QueryOptions;
+    let mut options = QueryOptions::new().model(model).max_turns(1);
+    if model == "claude-opus-5-5" {
+        options = options.extra_arg("--effort").extra_arg("low");
+    }
+    if !model.contains("haiku") {
+        options = options.max_thinking_tokens(max_thinking_tokens);
+    }
+    let result = traced_prompt(&prompt, options, label)
+        .await
+        .map_err(|e| MemError::Other(format!("Claude extraction failed: {e}")))?;
+    Ok(result.text().to_string())
+}
+
 /// Extension trait for async AI extraction
 #[allow(async_fn_in_trait)]
 pub trait AIExtractorAsync {
-    /// Async extraction using claude_rs SDK (single observation)
+    /// Async extraction of one observation
     async fn extract_async(&self, observation: &Entry) -> Result<ExtractionResult, MemError>;
 
     /// Async batched extraction (multiple observations with shared context)
@@ -94,26 +127,17 @@ pub trait AIExtractorAsync {
 
 impl AIExtractorAsync for AIExtractor {
     async fn extract_async(&self, observation: &Entry) -> Result<ExtractionResult, MemError> {
-        use crate::tracing::claude_wrapper::traced_prompt;
-        use claude_rs::QueryOptions;
-
         let start_time = std::time::Instant::now();
         let prompt_text = self.build_prompt(observation);
-
-        let mut options = QueryOptions::new().model(self.model()).max_turns(1);
-
-        // Only add thinking tokens for models that support it (not Haiku)
-        if !self.model().contains("haiku") {
-            options = options.max_thinking_tokens(self.max_thinking_tokens());
-        }
-
-        let result = traced_prompt(&prompt_text, options, "extraction")
-            .await
-            .map_err(|e| MemError::Other(format!("Claude extraction failed: {e}")))?;
-
-        let response_text = result.text();
+        let response_text = extraction_response(
+            prompt_text,
+            self.model(),
+            self.max_thinking_tokens(),
+            "extraction",
+        )
+        .await?;
         let extraction_result = self
-            .parse_response(response_text, &observation.id)
+            .parse_response(&response_text, &observation.id)
             .map_err(|e| MemError::Other(e.to_string()))?;
 
         // Trace the extraction
@@ -146,9 +170,6 @@ impl AIExtractorAsync for AIExtractor {
         &self,
         observations: &[Entry],
     ) -> Result<ExtractionResult, MemError> {
-        use crate::tracing::claude_wrapper::traced_prompt;
-        use claude_rs::QueryOptions;
-
         if observations.is_empty() {
             return Ok(ExtractionResult::default());
         }
@@ -156,24 +177,19 @@ impl AIExtractorAsync for AIExtractor {
         let start_time = std::time::Instant::now();
         let prompt_text = self.build_batch_prompt(observations);
 
-        let mut options = QueryOptions::new().model(self.model()).max_turns(1);
-
-        // Only add thinking tokens for models that support it (not Haiku)
-        if !self.model().contains("haiku") {
-            options = options.max_thinking_tokens(self.max_thinking_tokens());
-        }
-
-        let result = traced_prompt(&prompt_text, options, "extraction_batch")
-            .await
-            .map_err(|e| MemError::Other(format!("Claude batch extraction failed: {e}")))?;
-
-        let response_text = result.text();
+        let response_text = extraction_response(
+            prompt_text,
+            self.model(),
+            self.max_thinking_tokens(),
+            "extraction_batch",
+        )
+        .await?;
 
         // Use the first observation ID as source, but include all
         let source_ids: Vec<_> = observations.iter().map(|o| o.id.as_str()).collect();
         let combined_source = source_ids.join(",");
         let extraction_result = self
-            .parse_response(response_text, &combined_source)
+            .parse_response(&response_text, &combined_source)
             .map_err(|e| MemError::Other(e.to_string()))?;
 
         // Trace the extraction with quality info
@@ -244,6 +260,24 @@ mod tests {
         assert!(config.extract_preferences);
         assert!(config.suggest_rules);
         assert_eq!(config.max_thinking_tokens, 2000);
+    }
+
+    /// Manual provider receipt for the daemon's default extraction route.
+    #[tokio::test]
+    #[ignore = "requires a live Codex login and incurs model usage"]
+    async fn live_light_lane_extraction() {
+        let extractor = AIExtractor::new(AIExtractorConfig::default());
+        let observation = Entry {
+            id: "light-lane-live-observation".to_string(),
+            entry_type: EntryType::Observation,
+            content: "In cas-cli/src/store/syncing_task.rs, concurrent task writers failed with SQLITE_BUSY because a new SQLite connection omitted busy_timeout=5000. Setting the timeout on every newly opened connection allowed the competing writer to finish before the next write; retrying only the transaction did not fix it.".to_string(),
+            ..Default::default()
+        };
+        let result = extractor.extract_async(&observation).await.unwrap();
+        assert!(
+            !result.learnings.is_empty(),
+            "live extraction returned no learning"
+        );
     }
 
     #[test]

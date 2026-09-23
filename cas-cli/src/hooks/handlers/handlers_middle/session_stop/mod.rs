@@ -138,7 +138,7 @@ const LEARNING_REVIEW_LIMIT: usize = 20;
 /// Build context for learning review if there are unreviewed learnings above threshold
 ///
 /// Returns Some(context) if learning review should be triggered, None otherwise.
-/// The context instructs the agent to spawn a learning-reviewer subagent.
+/// The context supplies work items to the independent learning-reviewer job.
 /// Returns error context if store operations fail (fail explicitly, no silent skip).
 pub fn build_learning_review_context(store: &dyn Store, config: &Config) -> Option<String> {
     // Check if learning review is enabled via hooks.stop.learning_review_enabled
@@ -228,18 +228,9 @@ pub fn build_learning_review_context(store: &dyn Store, config: &Config) -> Opti
         .collect::<Vec<_>>()
         .join(", ");
 
-    context.push_str("\n**Instructions:**\n");
-    context.push_str(
-        "1. Use the Task tool to spawn a `learning-reviewer` subagent with this prompt:\n",
-    );
     context.push_str(&format!(
-        "   \"Review these unreviewed learning IDs: {unreviewed_ids}. For each:\n"
+        "\n**learning-reviewer job:** Review exactly these unreviewed learning IDs: {unreviewed_ids}. Mark each reviewed after processing.\n"
     ));
-    context.push_str("   - If it describes a pattern/convention → create a draft rule\n");
-    context.push_str("   - If it describes a workflow/procedure → create a draft skill\n");
-    context.push_str("   - If it's project-specific context → leave as learning\n");
-    context.push_str("   Mark each learning as reviewed after processing.\"\n");
-    context.push_str("2. After the subagent completes, you may stop.\n");
     context.push_str("</learning-review>\n");
 
     Some(context)
@@ -248,7 +239,7 @@ pub fn build_learning_review_context(store: &dyn Store, config: &Config) -> Opti
 /// Build context for rule review when draft rules exceed threshold
 ///
 /// Returns Some(context) if rule review should be triggered, None otherwise.
-/// The context instructs the agent to spawn a rule-reviewer subagent.
+/// The context supplies work items to the independent rule-reviewer job.
 /// Returns error context if store operations fail (fail explicitly, no silent skip).
 pub fn build_rule_review_context(rule_store: &dyn RuleStore, config: &Config) -> Option<String> {
     // Check if rule review is enabled
@@ -336,14 +327,7 @@ pub fn build_rule_review_context(rule_store: &dyn RuleStore, config: &Config) ->
         ));
     }
 
-    context.push_str("\n**Instructions:**\n");
-    context
-        .push_str("1. Use the Task tool to spawn a `rule-reviewer` subagent with this prompt:\n");
-    context.push_str("   \"Review the draft rules in Cassy. For each:\n");
-    context.push_str("   - If clear and validated → promote to proven\n");
-    context.push_str("   - If similar to another → merge them\n");
-    context.push_str("   - If vague or outdated → archive it\"\n");
-    context.push_str("2. After the subagent completes, you may stop.\n");
+    context.push_str("\n**rule-reviewer job:** Review the draft rules shown above. Promote, merge, or retire each according to the job instructions.\n");
     context.push_str("</rule-review>\n");
 
     Some(context)
@@ -352,7 +336,7 @@ pub fn build_rule_review_context(rule_store: &dyn RuleStore, config: &Config) ->
 /// Build context for duplicate detection when entries exceed threshold
 ///
 /// Returns Some(context) if duplicate detection should be triggered, None otherwise.
-/// The context instructs the agent to spawn a duplicate-detector subagent.
+/// The context supplies work items to the independent duplicate-detector job.
 /// Returns error context if store operations fail (fail explicitly, no silent skip).
 pub fn build_duplicate_detection_context(store: &dyn Store, config: &Config) -> Option<String> {
     // Check if duplicate detection is enabled
@@ -430,15 +414,7 @@ pub fn build_duplicate_detection_context(store: &dyn Store, config: &Config) -> 
         ));
     }
 
-    context.push_str("\n**Instructions:**\n");
-    context.push_str(
-        "1. Use the Task tool to spawn a `duplicate-detector` subagent with this prompt:\n",
-    );
-    context.push_str("   \"Scan Cassy memories for duplicates. For each duplicate pair:\n");
-    context.push_str("   - Merge content into the more complete entry\n");
-    context.push_str("   - Archive the redundant entry\n");
-    context.push_str("   - Report statistics on space saved\"\n");
-    context.push_str("2. After the subagent completes, you may stop.\n");
+    context.push_str("\n**duplicate-detector job:** Scan these entries for duplicates and consolidate confirmed pairs according to the job instructions.\n");
     context.push_str("</duplicate-detection>\n");
 
     Some(context)
@@ -447,7 +423,7 @@ pub fn build_duplicate_detection_context(store: &dyn Store, config: &Config) -> 
 /// Build context for session summary generation
 ///
 /// Returns Some(context) if generate_summary is enabled and no summary exists yet.
-/// The context instructs the agent to spawn a session-summarizer subagent.
+/// The context supplies work items to the independent session-summarizer job.
 /// Returns an error context if store operations fail (fail explicitly, no silent skip).
 pub fn build_session_summary_context(
     store: &dyn Store,
@@ -503,29 +479,7 @@ pub fn build_session_summary_context(
     context.push_str(
         "Before ending this session, generate a summary of the work done, decisions made, and learnings captured.\n\n",
     );
-    context.push_str("**Instructions:**\n");
-    context.push_str(
-        "1. Use the Task tool to spawn a `session-summarizer` subagent with this prompt:\n",
-    );
-    // EPIC cas-8888 (cas-fd9f): own_tool_prefix() — the summarizer subagent
-    // inherits the same process's MCP registration as its parent, so it
-    // needs the parent's own tool prefix here.
-    let prefix = crate::harness_policy::own_tool_prefix();
-    context.push_str("   \"Generate a session summary. Steps:\n");
-    context.push_str(&format!(
-        "   - Get session context using {prefix}search action=context\n"
-    ));
-    context.push_str(&format!(
-        "   - List tasks worked on using {prefix}task action=mine\n"
-    ));
-    context.push_str(&format!(
-        "   - Get recent memories using {prefix}memory action=recent limit=20\n"
-    ));
-    context.push_str("   - Create a structured summary covering: completed work, decisions, files changed, learnings, blockers, next steps\n");
-    context.push_str(&format!(
-        "   - Store the summary using {prefix}memory action=remember with tags session,summary\"\n"
-    ));
-    context.push_str("2. After the subagent completes, you may stop.\n");
+    context.push_str(&format!("**session-summarizer job:** Summarize Cassy session {session_id} using its session context, tasks, recent memories, and transcript. Store the summary with session and summary tags.\n"));
     context.push_str("</session-summary>\n");
 
     Some(context)
@@ -644,19 +598,43 @@ mod tests_b3 {
     use tempfile::TempDir;
 
     fn setup_git_repo_with_factory_branch(tmp: &std::path::Path) {
-        Command::new("git").args(["init", "-b", "main"]).current_dir(tmp).output().unwrap();
-        Command::new("git").args(["config", "user.email", "test@cas"]).current_dir(tmp).output().unwrap();
-        Command::new("git").args(["config", "user.name", "Cassy Test"]).current_dir(tmp).output().unwrap();
+        Command::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(tmp)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.email", "test@cas"])
+            .current_dir(tmp)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", "Cassy Test"])
+            .current_dir(tmp)
+            .output()
+            .unwrap();
         std::fs::write(tmp.join("README"), "init").unwrap();
-        Command::new("git").args(["add", "README"]).current_dir(tmp).output().unwrap();
-        Command::new("git").args(["commit", "-m", "init"]).current_dir(tmp).output().unwrap();
+        Command::new("git")
+            .args(["add", "README"])
+            .current_dir(tmp)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(tmp)
+            .output()
+            .unwrap();
         Command::new("git")
             .args(["checkout", "-b", "factory/stop-worker"])
             .current_dir(tmp)
             .output()
             .unwrap();
         std::fs::write(tmp.join("work.rs"), "// task").unwrap();
-        Command::new("git").args(["add", "work.rs"]).current_dir(tmp).output().unwrap();
+        Command::new("git")
+            .args(["add", "work.rs"])
+            .current_dir(tmp)
+            .output()
+            .unwrap();
         Command::new("git")
             .args(["commit", "-m", "feat: worker task done"])
             .current_dir(tmp)
@@ -683,8 +661,7 @@ mod tests_b3 {
             "ses-b3-test-001",
         );
 
-        let store = SqliteEventStore::open(cas_dir.path())
-            .expect("event store must open");
+        let store = SqliteEventStore::open(cas_dir.path()).expect("event store must open");
         let events = store.list_recent(10).expect("list_recent must succeed");
 
         assert!(

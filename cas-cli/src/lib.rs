@@ -38,6 +38,7 @@ pub mod daemon;
 pub mod duplicate_check;
 pub mod error;
 pub mod extraction;
+mod light_lane;
 pub mod factory_auth_health;
 pub(crate) mod factory_build_guard;
 pub mod factory_context_reset;

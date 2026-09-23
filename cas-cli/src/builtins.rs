@@ -6152,7 +6152,11 @@ This is the body content."#;
                 .iter()
                 .find(|builtin| builtin.path == "agents/learning-reviewer.md")
                 .unwrap_or_else(|| panic!("{label}: learning-reviewer agent is not registered"));
-            for marker in ["model: sonnet", "complete list of unreviewed learning IDs"] {
+            assert!(
+                !reviewer.content.contains("model:"),
+                "{label} learning-reviewer must use the light lane"
+            );
+            for marker in ["complete list of unreviewed learning IDs"] {
                 assert!(
                     reviewer.content.contains(marker),
                     "{label} learning-reviewer missing marker {marker:?}"

@@ -41,7 +41,9 @@ export const test = base.extend<{ journey: Journey }>({
     const errors: string[] = [];
     page.on("pageerror", (error) => errors.push(error.message));
     const viewport = page.viewportSize() ?? { width: 1280, height: 800 };
-    await page.screencast.start({ path: join(dir, "journey.webm"), size: viewport });
+    // No explicit size: frames arrive capped at 800 px wide, and a larger canvas
+    // leaves them in one corner of a grey frame.
+    await page.screencast.start({ path: join(dir, "journey.webm") });
     await page.screencast.showActions({ position: "top-right", duration: 300 });
     let double: HubDouble | undefined;
 

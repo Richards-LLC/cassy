@@ -26,5 +26,6 @@ test("HUB-J10 switch to dark and keep reading", async ({ page, journey }) => {
     await page.reload();
     await expect(page.locator("html")).toHaveAttribute("data-scheme", "dark");
     await expect(page.getByRole("button", { name: `Send to ${PELICAN}`, exact: true })).toBeVisible();
+    await expect(page.getByRole("log").getByText("Status: the Linux lane is green; the Mac lane is still running.")).toBeVisible();
   });
 });

@@ -58,6 +58,8 @@ export class HubDouble {
   private polls = 0;
   private requestedScopes: string[] = [];
   private nextId = 1000;
+  /** Turns pushed live, replayed in history like a real hub after a reload. */
+  private readonly live = new Map<string, { messages: Array<Record<string, unknown>>; replies: Array<Record<string, unknown>> }>();
 
   constructor(private readonly page: Page, private readonly options: DoubleOptions) {}
 
@@ -130,6 +132,9 @@ export class HubDouble {
     const reply = this.nextId++;
     this.send(session, { MessageQueued: { client_ref: sent.client_ref, notification_id: queued, target: sent.target, stamped: true } });
     this.send(session, { OperatorReply: { notification_id: reply, reply_to: queued, message, summary: "", device_id: "journey-device", ...extra } });
+    const now = new Date().toISOString();
+    this.remember(session).messages.push({ notification_id: queued, target: sent.target, text: sent.text, state: "acknowledged", stamped: true, device_id: "journey-device", at: now });
+    this.remember(session).replies.push({ notification_id: reply, reply_to: queued, message, summary: "", device_id: "journey-device", attachments: [], at: now, ...extra });
     return { queued, reply };
   }
 
@@ -137,7 +142,14 @@ export class HubDouble {
   supervisorSays(session: string, message: string, extra: Record<string, unknown> = {}): number {
     const id = this.nextId++;
     this.send(session, { OperatorReply: { notification_id: id, reply_to: null, message, summary: "", device_id: "journey-device", ...extra } });
+    this.remember(session).replies.push({ notification_id: id, reply_to: null, message, summary: "", device_id: "journey-device", attachments: [], at: new Date().toISOString(), ...extra });
     return id;
+  }
+
+  private remember(session: string) {
+    let turns = this.live.get(session);
+    if (!turns) this.live.set(session, (turns = { messages: [], replies: [] }));
+    return turns;
   }
 
   /** Drop a session's socket as a network failure would. */
@@ -249,7 +261,11 @@ export class HubDouble {
         const request = message.ConversationHistoryRequest;
         this.historyRequests.push({ session, ...request });
         const page = request.before === undefined ? pages[0] : pages.find((p, i) => i > 0 && pages[i - 1].next_before === request.before);
-        const reply = page ?? { messages: [], replies: [], has_earlier: false };
+        let reply: HistoryPage = page ?? { messages: [], replies: [], has_earlier: false };
+        const live = this.live.get(session);
+        if (request.before === undefined && live) {
+          reply = { ...reply, messages: [...reply.messages, ...live.messages], replies: [...reply.replies, ...live.replies] };
+        }
         ws.send(JSON.stringify({ ConversationHistory: { request_id: request.request_id, ...reply } }));
       }
     });

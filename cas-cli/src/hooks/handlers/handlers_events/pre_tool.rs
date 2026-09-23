@@ -214,6 +214,29 @@ pub fn handle_pre_tool_use(
     }
 
     // ========================================================================
+    // INDEPENDENT QA MERGE GUARD (cas-619f)
+    //
+    // Raw `git merge factory/<worker>` is the documented supervisor merge
+    // path, so the "a user-facing delivery cannot merge without an
+    // independent QA pass" rule has to hold here, not only in
+    // `worktree_merge`. Denies only when a parked, QA-bound delivery's
+    // current tip lacks a passed or waived round; everything else is
+    // untouched, and unreadable state fails open to the close backstop.
+    // ========================================================================
+    if tool_name == "Bash"
+        && crate::harness_policy::is_supervisor(input)
+        && let Some(root) = cas_root
+        && let Some(cmd) = input
+            .tool_input
+            .as_ref()
+            .and_then(|ti| ti.get("command").and_then(|v| v.as_str()))
+        && let Some(refusal) =
+            crate::qa_pass::supervisor_merge_refusal(root, std::path::Path::new(&input.cwd), cmd)
+    {
+        return Ok(HookOutput::with_pre_tool_permission("deny", &refusal));
+    }
+
+    // ========================================================================
     // FACTORY WORKSPACE CONTRACT — ROOT-INDEPENDENT FALLBACK
     //
     // Filesystem auto-approval must remain available when Cassy cannot resolve

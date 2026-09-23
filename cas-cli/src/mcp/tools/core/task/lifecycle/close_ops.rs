@@ -4842,7 +4842,7 @@ impl CasCore {
                             &task,
                             "MERGE REQUIRED",
                             &msg,
-                            anchor,
+                            anchor.clone(),
                             merge_conflicted,
                         );
                     } else {
@@ -4865,8 +4865,32 @@ impl CasCore {
                         }
                     }
 
+                    // cas-619f: a user-facing delivery needs an independent
+                    // QA pass before it may merge. Open (or re-find) the
+                    // round for this exact tip and tell the worker where it
+                    // stands. Idempotent per tip, so close retries are cheap.
+                    let msg = match self.dispatch_independent_qa(
+                        &task,
+                        &close_project_root,
+                        &resolved_parent_branch,
+                        anchor.as_deref(),
+                    ) {
+                        Some(qa_status) => format!("{msg}{qa_status}"),
+                        None => msg,
+                    };
+
                     return Ok(Self::tool_error(msg));
                 }
+            }
+
+            // cas-619f backstop: the delivery is integrated. A user-facing
+            // task closes only when an independently reviewed tip (passed
+            // or waived) is contained in the target. Catches merges made
+            // outside the guarded paths (raw git in another harness/shell).
+            if let Some(refusal) =
+                self.independent_qa_close_refusal(&task, &close_project_root, &resolved_parent_branch)
+            {
+                return Ok(Self::tool_error(refusal));
             }
         }
 

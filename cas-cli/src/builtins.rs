@@ -509,6 +509,11 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
         path: "skills/cas-qa-craft/references/evidence-bundle.md",
         content: include_str!("builtins/skills/cas-qa-craft/references/evidence-bundle.md"),
     },
+    // cas-619f: the independent reviewer's procedure for a qa-pass task.
+    BuiltinFile {
+        path: "skills/cas-qa-craft/references/independent-pass.md",
+        content: include_str!("builtins/skills/cas-qa-craft/references/independent-pass.md"),
+    },
     // release-notes skill (GH #65): drafts/posts the user + dev Slack threads
     // for every staging/main merge and installs the canonical rubric template
     // at docs/release-notes/RUBRIC.md when a project has none.
@@ -1082,6 +1087,11 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-qa-craft/references/evidence-bundle.md",
         content: include_str!("builtins/codex/skills/cas-qa-craft/references/evidence-bundle.md"),
+    },
+    // cas-619f: the independent reviewer's procedure for a qa-pass task.
+    BuiltinFile {
+        path: "skills/cas-qa-craft/references/independent-pass.md",
+        content: include_str!("builtins/codex/skills/cas-qa-craft/references/independent-pass.md"),
     },
     // release-notes skill (GH #65) — codex mirror.
     BuiltinFile {
@@ -1666,6 +1676,11 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-qa-craft/references/evidence-bundle.md",
         content: include_str!("builtins/grok/skills/cas-qa-craft/references/evidence-bundle.md"),
+    },
+    // cas-619f: the independent reviewer's procedure for a qa-pass task.
+    BuiltinFile {
+        path: "skills/cas-qa-craft/references/independent-pass.md",
+        content: include_str!("builtins/grok/skills/cas-qa-craft/references/independent-pass.md"),
     },
     // release-notes skill (GH #65) — grok twin.
     BuiltinFile {

@@ -6,6 +6,22 @@
 
 use std::path::{Path, PathBuf};
 
+/// Create a private hub fixture beneath a canonical temporary directory.
+/// macOS commonly spells TMPDIR through /var, a symlink rejected by hub state.
+pub fn private_hub_tempdir() -> tempfile::TempDir {
+    let parent = std::env::temp_dir()
+        .canonicalize()
+        .expect("temporary directory must be canonicalizable");
+    let temp = tempfile::tempdir_in(parent).expect("canonical temporary fixture directory");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700))
+            .expect("private temporary fixture directory");
+    }
+    temp
+}
+
 /// Finds the checkout containing the archived test at runtime.
 pub fn workspace_root() -> PathBuf {
     for key in ["CAS_TEST_WORKSPACE_ROOT", "NEXTEST_WORKSPACE_ROOT"] {

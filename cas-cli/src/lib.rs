@@ -90,6 +90,7 @@ mod test_env_guard;
 #[cfg(test)]
 pub(crate) mod test_support {
     pub(crate) use crate::test_env_guard::TestEnvGuard;
+    pub(crate) use crate::test_paths::private_hub_tempdir;
     use std::path::Path;
     use std::sync::{Mutex, MutexGuard, OnceLock};
 

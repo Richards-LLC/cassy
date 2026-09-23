@@ -3824,9 +3824,7 @@ This is the body content."#;
             "Registry lanes",
             "Codex/GPT-6 Luna/xhigh",
             "Codex/GPT-6 Sol/medium",
-            "Claude/Fable 5.1/medium",
             "Claude/Opus 5.5/high",
-            "Codex/GPT-6 Astra/high",
             "standing suspension",
             "generated route table and recipes",
         ] {
@@ -3875,11 +3873,11 @@ This is the body content."#;
         );
 
         // The shared body must retain explicit complete-call controls and the
-        // registry's Astra heavy route on every twin without duplicating workflow.
+        // registry's Opus heavy route on every twin without duplicating workflow.
         for (label, body) in [("claude", claude), ("codex", codex), ("grok", grok)] {
             assert!(
-                body.contains("Codex/GPT-6 Astra/high"),
-                "{label} cas-supervisor.md must retain the Astra heavy registry route"
+                body.contains("**heavy** Claude/Opus 5.5/high"),
+                "{label} cas-supervisor.md must retain the Opus heavy registry route"
             );
             assert!(
                 body.contains("pass complete `cli=`, `model=`, and `effort=` controls"),
@@ -6745,7 +6743,7 @@ This is the body content."#;
                     "Opus is a normal taste",
                     "Opus/high is the taste",
                     "Opus taste to high",
-                    "# taste — recipe claude_opus",
+                    "# taste — recipe claude_fable",
                 ] {
                     assert!(
                         !builtin.content.contains(stale),
@@ -6761,7 +6759,7 @@ This is the body content."#;
                         builtin.path
                     );
                     assert!(recipes.contains(&format!(
-                        "# taste — recipe claude_fable (fallback: claude_opus)\n{prefix}coordination action=spawn_workers count=1 isolate=true cli=claude model=claude-fable-5-1 effort=medium"
+                        "# taste — recipe claude_opus_5_5 (fallback: claude_opus)\n{prefix}coordination action=spawn_workers count=1 isolate=true cli=claude model=claude-opus-5-5 effort=high"
                     )));
                 }
             }
@@ -6881,7 +6879,7 @@ This is the body content."#;
                 "registry recipe for {lane_name:?} missing from the supervisor guidance"
             );
         }
-        assert!(claude.content.contains("Claude Fable 5.1 at medium"));
+        assert!(claude.content.contains("Claude Opus 5.5 at high"));
         assert!(claude.content.contains("Codex GPT-6 Luna"));
         assert!(!claude.content.contains("claude_haiku"));
         assert!(!claude.content.contains("operator decision pending"));
@@ -7749,9 +7747,7 @@ This is the body content."#;
             "Registry lanes",
             "Codex/GPT-6 Luna/xhigh",
             "Codex/GPT-6 Sol/medium",
-            "Claude/Fable 5.1/medium",
             "Claude/Opus 5.5/high",
-            "Codex/GPT-6 Astra/high",
             "standing suspension",
             "generated route table and recipes",
         ] {

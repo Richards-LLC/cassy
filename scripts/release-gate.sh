@@ -20,7 +20,7 @@ failure_log_grok_rel='cas-cli/src/builtins/grok/skills/cas-cut-release/reference
 readonly -a gate_check_ids=(
     scratch-base epic-worktree-fresh epic-worktree-zig failure-log ancestor-proxy-config assemble-stale-base
     version-literals fixture-paths workspace-tests macos-check hub-web-dist-drift hub-web-visual-qa nextest doctests archive-mode
-    snapshot-portability builtin-projections changelog-and-versions release-script
+    snapshot-portability builtin-projections changelog-and-versions release-script release-notes-shell-injection
     procedure-guardrails working-tree
 )
 
@@ -1072,6 +1072,10 @@ check_release_script() {
     grep -qF 'audit-only and remote-safe' scripts/release.sh
 }
 
+check_release_notes_shell_injection() {
+    python3 scripts/check-workflow-run-interpolation.py
+}
+
 check_procedure_guardrails() {
     local skill="cas-cli/src/builtins/skills/cas-cut-release/SKILL.md"
     [[ -f "$skill" ]] || {
@@ -1190,6 +1194,9 @@ run_check changelog-and-versions \
 run_check release-script \
     'release.sh stale duplicate cleanup and audit-only pre-warm contract' \
     check_release_script
+run_check release-notes-shell-injection \
+    'all workflow run blocks reject GitHub expression interpolation' \
+    check_release_notes_shell_injection
 run_check procedure-guardrails \
     'cas-cut-release reconciliation, queue, PID, receipt, and host guardrails' \
     check_procedure_guardrails

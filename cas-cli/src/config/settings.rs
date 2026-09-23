@@ -216,8 +216,8 @@ pub struct SyncConfig {
 /// even when stack detection does not find their usual language/framework.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SkillsConfig {
-    /// Optional builtin skill ids, such as `fallow` or
-    /// `cas-nuxt-playwright`.
+    /// Optional builtin skill ids, such as `fallow`, `cas-nuxt-playwright`, or
+    /// `cas-playwright-debug`.
     #[serde(default)]
     pub optional: Vec<String>,
 }

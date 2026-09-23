@@ -537,9 +537,9 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
         content: include_str!("builtins/skills/cas-github-issues/SKILL.md"),
     },
     // cas-nuxt-playwright skill: unified Nuxt 3 + Playwright E2E testing
-    // guide. Replaces the legacy user-level cas-playwright-debug skill with
-    // a single builtin that covers both writing and debugging tests. Modeled
-    // after the gabber-studio production test suite; Firebase-focused.
+    // guide covering writing and Nuxt-specific debugging. Modeled after the
+    // gabber-studio production test suite; Firebase-focused. Stack-neutral
+    // failure triage lives in the cas-playwright-debug builtin (cas-5e54).
     BuiltinFile {
         path: "skills/cas-nuxt-playwright/SKILL.md",
         content: include_str!("builtins/skills/cas-nuxt-playwright/SKILL.md"),
@@ -549,6 +549,13 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
         content: include_str!(
             "builtins/skills/cas-nuxt-playwright/references/auth-fixture-template.md"
         ),
+    },
+    // cas-playwright-debug skill (cas-5e54): stack-neutral Playwright 1.59+
+    // failure triage — trace CLI, `--debug=cli` stepping, flake control.
+    // Optional project skill, detected from a Playwright dependency/config.
+    BuiltinFile {
+        path: "skills/cas-playwright-debug/SKILL.md",
+        content: include_str!("builtins/skills/cas-playwright-debug/SKILL.md"),
     },
     // cas-frontend-engineering skill: project-agnostic implementation craft
     // for component boundaries, state, accessibility, performance, tokens,
@@ -1095,6 +1102,11 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
         content: include_str!(
             "builtins/codex/skills/cas-nuxt-playwright/references/auth-fixture-template.md"
         ),
+    },
+    // cas-playwright-debug skill (cas-5e54) — codex mirror, byte-identical.
+    BuiltinFile {
+        path: "skills/cas-playwright-debug/SKILL.md",
+        content: include_str!("builtins/codex/skills/cas-playwright-debug/SKILL.md"),
     },
     // cas-frontend-engineering skill — codex mirror.
     BuiltinFile {
@@ -1681,6 +1693,11 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
             "builtins/grok/skills/cas-nuxt-playwright/references/auth-fixture-template.md"
         ),
     },
+    // cas-playwright-debug skill (cas-5e54) — grok mirror, byte-identical.
+    BuiltinFile {
+        path: "skills/cas-playwright-debug/SKILL.md",
+        content: include_str!("builtins/grok/skills/cas-playwright-debug/SKILL.md"),
+    },
     // cas-frontend-engineering skill — grok mirror.
     BuiltinFile {
         path: "skills/cas-frontend-engineering/SKILL.md",
@@ -2053,6 +2070,15 @@ pub const GENERAL_PARITY_CAPABILITIES: &[RequiredCapability] = &[
         claude: Some("skills/cas-nuxt-playwright"),
         codex: Some("skills/cas-nuxt-playwright"),
         grok: Some("skills/cas-nuxt-playwright"),
+        note: "",
+    },
+    RequiredCapability {
+        // cas-5e54: failure triage is tool-neutral shell work, so every
+        // harness ships the same byte-identical procedure.
+        id: "cas-playwright-debug",
+        claude: Some("skills/cas-playwright-debug"),
+        codex: Some("skills/cas-playwright-debug"),
+        grok: Some("skills/cas-playwright-debug"),
         note: "",
     },
     RequiredCapability {
@@ -2714,15 +2740,16 @@ pub fn sync_all_builtins_for_harness(
     }
 }
 
-const OPTIONAL_PROJECT_SKILLS: &[&str] = &["fallow", "cas-nuxt-playwright"];
+const OPTIONAL_PROJECT_SKILLS: &[&str] = &["fallow", "cas-nuxt-playwright", "cas-playwright-debug"];
 
 /// Sync project builtins while keeping stack-specific skills opt-in.
 ///
 /// The user-level sync functions intentionally retain the complete catalog.
 /// Project sync is different: `fallow` belongs in JavaScript/TypeScript
-/// projects and `cas-nuxt-playwright` belongs in Nuxt projects. A project can
-/// explicitly enable either id in `[skills].optional` when detection cannot
-/// see an indirect or generated dependency.
+/// projects, `cas-nuxt-playwright` belongs in Nuxt projects, and
+/// `cas-playwright-debug` belongs in projects that run Playwright Test. A
+/// project can explicitly enable any of these ids in `[skills].optional` when
+/// detection cannot see an indirect or generated dependency.
 pub fn sync_all_builtins_for_project(
     harness: SupervisorCli,
     project_root: &Path,
@@ -2807,6 +2834,11 @@ fn enabled_optional_project_skills(project_root: &Path) -> HashSet<&'static str>
     }) {
         enabled.insert("cas-nuxt-playwright");
     }
+    if explicit.iter().any(|id| {
+        id == "cas-playwright-debug" || id == "playwright-debug" || id == "playwright"
+    }) {
+        enabled.insert("cas-playwright-debug");
+    }
 
     let package_path = project_root.join("package.json");
     let package = std::fs::read_to_string(&package_path)
@@ -2817,6 +2849,22 @@ fn enabled_optional_project_skills(project_root: &Path) -> HashSet<&'static str>
     }
     if package.as_ref().is_some_and(package_declares_nuxt) {
         enabled.insert("cas-nuxt-playwright");
+    }
+    if package.as_ref().is_some_and(package_declares_playwright) {
+        enabled.insert("cas-playwright-debug");
+    }
+    if [
+        "playwright.config.ts",
+        "playwright.config.js",
+        "playwright.config.mts",
+        "playwright.config.mjs",
+        "playwright.config.cts",
+        "playwright.config.cjs",
+    ]
+    .iter()
+    .any(|name| project_root.join(name).is_file())
+    {
+        enabled.insert("cas-playwright-debug");
     }
     if ["nuxt.config.ts", "nuxt.config.js", "nuxt.config.mjs"]
         .iter()
@@ -2850,6 +2898,14 @@ fn project_contains_js_ts(project_root: &Path) -> bool {
 }
 
 fn package_declares_nuxt(package: &serde_json::Value) -> bool {
+    package_declares_any(package, &["nuxt"])
+}
+
+fn package_declares_playwright(package: &serde_json::Value) -> bool {
+    package_declares_any(package, &["@playwright/test", "playwright"])
+}
+
+fn package_declares_any(package: &serde_json::Value, names: &[&str]) -> bool {
     [
         "dependencies",
         "devDependencies",
@@ -2861,7 +2917,7 @@ fn package_declares_nuxt(package: &serde_json::Value) -> bool {
         package
             .get(section)
             .and_then(serde_json::Value::as_object)
-            .is_some_and(|dependencies| dependencies.contains_key("nuxt"))
+            .is_some_and(|dependencies| names.iter().any(|name| dependencies.contains_key(*name)))
     })
 }
 
@@ -7447,8 +7503,8 @@ This is the body content."#;
         );
         // 2. Unmanaged cas-* user skill — PRESERVED by the marker guard.
         let unmanaged = write_skill(
-            "cas-playwright-debug",
-            "---\nname: cas-playwright-debug\nuser-invocable: true\n---\n# user\n",
+            "cas-local-user-skill",
+            "---\nname: cas-local-user-skill\nuser-invocable: true\n---\n# user\n",
         );
         // 3. Current builtin, even without a marker — PRESERVED by `keep`.
         let kept_by_name = write_skill("cas-codemap", "---\nname: cas-codemap\n---\n# no marker\n");
@@ -7524,10 +7580,15 @@ This is the body content."#;
             names.contains("cas-nuxt-playwright"),
             "builtin skill dir set should contain cas-nuxt-playwright"
         );
-        // The legacy orphan is NOT a builtin, so it is never in the keep set.
+        // cas-5e54: the formerly orphaned cas-playwright-debug is a managed
+        // builtin again, so the prune keep set must protect it.
         assert!(
-            !names.contains("cas-playwright-debug"),
-            "cas-playwright-debug is not a builtin and must not be in the keep set"
+            names.contains("cas-playwright-debug"),
+            "builtin skill dir set should contain cas-playwright-debug"
+        );
+        assert!(
+            !names.contains("cas-local-user-skill"),
+            "an unmarked local cas-* skill is not a builtin"
         );
     }
 

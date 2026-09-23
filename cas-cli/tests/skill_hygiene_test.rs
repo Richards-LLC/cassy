@@ -219,3 +219,106 @@ fn optional_stack_skills_follow_detection_and_explicit_enable() {
         );
     }
 }
+
+/// cas-5e54: the Playwright debugging skill teaches the 1.59+ agent tooling
+/// (trace CLI, `--debug=cli` + session-scoped `playwright cli`) with command
+/// shapes verified against @playwright/test 1.63, and never recommends the
+/// idioms Playwright discourages inside a runnable example.
+#[test]
+fn playwright_debug_teaches_trace_cli_and_agent_debugger() {
+    let skill = source("", "skills/cas-playwright-debug/SKILL.md");
+    for flavor in ["codex", "grok"] {
+        assert_eq!(
+            source(flavor, "skills/cas-playwright-debug/SKILL.md"),
+            skill,
+            "{flavor} mirror must be byte-identical"
+        );
+    }
+
+    for required in [
+        "npx playwright trace open ",
+        "npx playwright trace actions --errors-only",
+        "npx playwright trace action <id>",
+        "npx playwright trace snapshot <id> --phase before",
+        "npx playwright trace requests --failed",
+        "--debug=cli",
+        "npx playwright cli attach tw-",
+        "-s=tw-XXXXXX step-over",
+        "pause-at",
+        "retryStrategy: 'isolated'",
+        "failOnFlakyTests",
+        "{ lock: '",
+        "snapshots: { dom: true, aria: true, screen: true }",
+        ".visible()",
+        "page.frameLocator()",
+    ] {
+        assert!(skill.contains(required), "skill must teach {required:?}");
+    }
+    // 1.63's snapshot phase flag is --phase; --name does not exist.
+    assert!(!skill.contains("--name before"));
+
+    // Discouraged idioms may appear only as the left column of the
+    // "Instead of" table or in prose that forbids them — never in a code block.
+    let mut in_code = false;
+    for line in skill.lines() {
+        if line.trim_start().starts_with("```") {
+            in_code = !in_code;
+            continue;
+        }
+        if in_code {
+            for banned in ["networkidle", "waitForTimeout", ":visible"] {
+                assert!(
+                    !line.contains(banned),
+                    "code example recommends {banned}: {line}"
+                );
+            }
+        }
+    }
+    assert!(skill.contains("| Instead of | Write |"));
+}
+
+/// cas-5e54: cas-playwright-debug is an optional stack skill selected by a
+/// Playwright Test dependency, a playwright config file, or explicit opt-in.
+#[test]
+fn playwright_debug_is_selected_by_playwright_detection() {
+    let installed = |root: &std::path::Path| {
+        sync_all_builtins_for_project(SupervisorCli::Claude, root).unwrap();
+        root.join(".claude/skills/cas-playwright-debug/SKILL.md")
+            .is_file()
+    };
+
+    let plain = TempDir::new().unwrap();
+    fs::create_dir_all(plain.path().join(".cas")).unwrap();
+    fs::write(
+        plain.path().join("package.json"),
+        r#"{"dependencies":{"vite":"^5.0.0"}}"#,
+    )
+    .unwrap();
+    assert!(!installed(plain.path()), "no Playwright, no skill");
+
+    let dependency = TempDir::new().unwrap();
+    fs::create_dir_all(dependency.path().join(".cas")).unwrap();
+    fs::write(
+        dependency.path().join("package.json"),
+        r#"{"devDependencies":{"@playwright/test":"^1.63.0"}}"#,
+    )
+    .unwrap();
+    assert!(installed(dependency.path()), "@playwright/test selects it");
+
+    let config_only = TempDir::new().unwrap();
+    fs::create_dir_all(config_only.path().join(".cas")).unwrap();
+    fs::write(config_only.path().join("playwright.config.ts"), "").unwrap();
+    assert!(
+        installed(config_only.path()),
+        "playwright.config.ts selects it"
+    );
+
+    let explicit = TempDir::new().unwrap();
+    fs::create_dir_all(explicit.path().join(".cas")).unwrap();
+    fs::write(
+        explicit.path().join(".cas/config.toml"),
+        "[skills]\noptional = [\"playwright-debug\"]\n",
+    )
+    .unwrap();
+    assert!(installed(explicit.path()), "explicit opt-in selects it");
+}

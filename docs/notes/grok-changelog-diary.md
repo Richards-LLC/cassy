@@ -41,6 +41,7 @@ dependency, verify on upgrade) · 🔧 fix shipped · 🏗 EPIC · ⏭ n/a
   `grok-build-1.0.40-2026-09-23` conformance receipt. The prior
   `grok-build-1.0.5-2026-08-25` and `grok-build-0.2.114-2026-07-30` receipts
   remain historical evidence.
+- **2026-09-23 operator decision:** Defer the audit gaps for MCP discovery health, busy-worker message delivery, compaction survival, consent popups, background liveness, and memory; these are not tracked.
 - **Locally installed and latest stable:** **1.0.41** (`grok 1.0.41
   (4220f3b224a6) [stable]`, checked 2026-09-23). The exact 1.0.40 binary
   remains retained and is the binary named by the validation receipt. Wingetly
@@ -134,7 +135,7 @@ At minimum, `PtyConfig::grok` sets:
 ## Index
 
 | Grok version | Headline | Cassy verdict | Pointer |
-|--------------|----------|-------------|---------|
+| --- | --- | --- | --- |
 | 1.0.14–1.0.16, 1.0.26–1.0.29, 1.0.35–1.0.41 | No per-version notes in checked feeds | — (source gap) | this doc |
 | 1.0.34 | Memory generally available · Markdown heading colors | 👀 / ⏭ | this doc |
 | 1.0.33 | Structured MCP results · cancellation/session/subagent recovery · clone/skill fixes | 👀 / 🟢 | this doc |

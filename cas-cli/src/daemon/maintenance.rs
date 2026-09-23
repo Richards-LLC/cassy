@@ -12,13 +12,31 @@ use crate::error::CasError;
 /// lifecycle hooks, so a worker may remain busy while its heartbeat path is
 /// unavailable; a process that identifies itself by argv or `CAS_AGENT_NAME`
 /// is independent liveness evidence and wins over the stale timestamp.
+/// macOS cannot perform the /proc identity scan. A tracked PID that still
+/// exists has unknown identity and must be kept; ESRCH proves that PID exited.
 ///
 /// Non-worker agents retain the historical heartbeat-only cleanup policy.
 pub(crate) fn heartbeat_stale_agent_should_be_reaped(
     agent: &crate::types::Agent,
     find_live_worker_pid: impl FnOnce(&str) -> Option<u32>,
 ) -> bool {
-    agent.role != crate::types::AgentRole::Worker || find_live_worker_pid(&agent.name).is_none()
+    if agent.role != crate::types::AgentRole::Worker {
+        return true;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        find_live_worker_pid(&agent.name).is_none()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        // RealProcessTable has no identity scan without /proc. A missing
+        // match is unknown while the tracked PID exists; ESRCH is evidence
+        // that it exited. EPERM counts as existing in pid_alive.
+        let _ = find_live_worker_pid;
+        agent
+            .pid
+            .is_some_and(|pid| !crate::mcp::daemon::pid_alive(pid))
+    }
 }
 
 /// Resolve duplicate registry rows to the newest row for one logical agent.
@@ -42,7 +60,7 @@ pub(crate) fn newest_agent_for_identity(
         .max_by_key(|candidate| (candidate.last_heartbeat, candidate.registered_at))
 }
 
-fn heartbeat_stale_agent_has_live_process(agent: &crate::types::Agent) -> bool {
+fn heartbeat_stale_agent_should_be_kept(agent: &crate::types::Agent) -> bool {
     !heartbeat_stale_agent_should_be_reaped(agent, |worker_name| {
         crate::cli::factory::wedged::find_worker_pid(
             &crate::cli::factory::wedged::RealProcessTable,
@@ -152,11 +170,11 @@ pub fn run_maintenance(config: &DaemonConfig) -> Result<DaemonRunResult, CasErro
                 {
                     continue;
                 }
-                if heartbeat_stale_agent_has_live_process(agent) {
+                if heartbeat_stale_agent_should_be_kept(agent) {
                     tracing::warn!(
                         worker = %agent.name,
                         agent_id = %agent.id,
-                        "heartbeat stale but live factory worker process found; skipping reap"
+                        "heartbeat stale but worker death is unverified; skipping reap"
                     );
                     continue;
                 }
@@ -201,11 +219,11 @@ pub fn run_maintenance(config: &DaemonConfig) -> Result<DaemonRunResult, CasErro
                     );
                     continue;
                 }
-                if heartbeat_stale_agent_has_live_process(agent) {
+                if heartbeat_stale_agent_should_be_kept(agent) {
                     tracing::warn!(
                         worker = %agent.name,
                         agent_id = %agent.id,
-                        "heartbeat stale but live factory worker process found; skipping reap"
+                        "heartbeat stale but worker death is unverified; skipping reap"
                     );
                     continue;
                 }
@@ -475,9 +493,40 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn stale_worker_without_live_process_is_reaped() {
         let mut worker = crate::types::Agent::new("dead-worker".to_string(), "dead-owl".to_string());
         worker.role = crate::types::AgentRole::Worker;
+        assert!(heartbeat_stale_agent_should_be_reaped(&worker, |_| None));
+    }
+
+    #[test]
+    #[cfg(not(target_os = "linux"))]
+    fn stale_worker_without_process_table_identity_is_kept() {
+        let mut worker = crate::types::Agent::new(
+            "unknown-worker".to_string(),
+            "unknown-owl".to_string(),
+        );
+        worker.role = crate::types::AgentRole::Worker;
+        assert!(!heartbeat_stale_agent_should_be_reaped(&worker, |_| None));
+        worker.pid = Some(std::process::id());
+        assert!(!heartbeat_stale_agent_should_be_reaped(&worker, |_| None));
+        worker.role = crate::types::AgentRole::Supervisor;
+        assert!(heartbeat_stale_agent_should_be_reaped(&worker, |_| None));
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn stale_worker_with_exited_tracked_pid_is_reaped() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("0")
+            .spawn()
+            .expect("spawn short-lived process");
+        let pid = child.id();
+        child.wait().expect("reap short-lived process");
+        let mut worker = crate::types::Agent::new("dead-worker".into(), "dead-owl".into());
+        worker.role = crate::types::AgentRole::Worker;
+        worker.pid = Some(pid);
         assert!(heartbeat_stale_agent_should_be_reaped(&worker, |_| None));
     }
 
@@ -506,6 +555,7 @@ mod tests {
             worker_name.clone(),
         );
         worker.role = crate::types::AgentRole::Worker;
+        worker.pid = Some(child.id());
         worker.last_heartbeat = Utc::now() - chrono::Duration::seconds(601);
         worker.metadata.insert("worker_cli".to_string(), "codex".to_string());
         worker.metadata.insert(
@@ -514,7 +564,7 @@ mod tests {
         );
         store.register(&worker).expect("register stale worker");
 
-        let result = run_maintenance(&DaemonConfig {
+        let config = DaemonConfig {
             cas_root: cas_root.clone(),
             process_observations: false,
             consolidate_memories: false,
@@ -525,16 +575,23 @@ mod tests {
             index_bm25: false,
             agent_purge_age_hours: 0,
             ..DaemonConfig::default()
-        })
-        .expect("maintenance succeeds");
+        };
+        let result = run_maintenance(&config).expect("maintenance succeeds");
 
-        let _ = child.kill();
-        let _ = child.wait();
         assert_eq!(result.agents_cleaned, 0);
         assert_eq!(
             store.get(&worker.id).expect("read worker after maintenance").status,
             crate::types::AgentStatus::Active,
             "a live env-identified Codex worker must not be reaped solely for heartbeat age"
+        );
+        child.kill().expect("stop fixture worker");
+        child.wait().expect("reap fixture worker");
+        let dead_result = run_maintenance(&config).expect("maintenance handles dead worker");
+        assert_eq!(dead_result.agents_cleaned, 1);
+        assert_eq!(
+            store.get(&worker.id).expect("read worker after cleanup").status,
+            crate::types::AgentStatus::Stale,
+            "ESRCH on a tracked PID must allow cleanup"
         );
     }
 }

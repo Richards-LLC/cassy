@@ -491,6 +491,8 @@ mod tests {
         );
     }
 
+    // The fixture assumes Linux's /tmp tmpfs mount and /proc/mounts lookup.
+    #[cfg(target_os = "linux")]
     #[test]
     fn full_root_on_tmpfs_is_refused_and_names_the_mount() {
         let verdict = inspect_isolated_root(
@@ -509,6 +511,8 @@ mod tests {
         );
     }
 
+    // The warning branch describes a Linux tmpfs-backed /tmp scratch root.
+    #[cfg(target_os = "linux")]
     #[test]
     fn small_root_on_tmpfs_warns_instead_of_refusing() {
         let verdict = inspect_isolated_root(

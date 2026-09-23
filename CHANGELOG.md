@@ -7,7 +7,36 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.28.1] - 2026-09-23
+
+3.28.0 was tagged but never published. 3.28.1 ships every 3.28.0 change listed
+below, plus this fix.
+
+### Added
+
+- `cas-playwright-debug`: a built-in skill for Playwright projects that works
+  from the saved trace (`npx playwright trace`), reproduces with
+  `--debug=cli`, and controls flakes with test locks and isolated retries.
+
+### Changed
+
+- `cas-nuxt-playwright` is rewritten for Playwright 1.63: web-first waits
+  instead of `networkidle`, `.visible()`, accessibility snapshots, test locks,
+  isolated retries, the clock and storage APIs, passkeys, drag-and-drop uploads
+  and the new component-testing model.
+- `cas-frontend-engineering` turns each design promise into a concrete
+  Playwright check, including reduced-motion, forced-colours and high-contrast
+  runs and loading, error and empty states.
+
+### Fixed
+
+- Publishing a release no longer breaks when a commit message contains quotes
+  or other shell characters: release notes are passed as a file, and no
+  workflow step pastes GitHub values into shell code.
+
 ## [3.28.0] - 2026-09-23
+
+Tagged but not published; these changes ship in 3.28.1.
 
 ### Changed
 

@@ -91,7 +91,8 @@ fn test_list_decayable_excludes_in_context_and_archive_tiers() {
     }
 
     let decayable = store.list_decayable().unwrap();
-    let ids: Vec<_> = decayable.iter().map(|entry| entry.id.as_str()).collect();
+    let mut ids: Vec<_> = decayable.iter().map(|entry| entry.id.as_str()).collect();
+    ids.sort_unstable();
     assert_eq!(ids, vec!["cold", "working"]);
 }
 

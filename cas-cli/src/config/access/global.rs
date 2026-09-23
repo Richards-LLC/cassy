@@ -92,7 +92,9 @@ mod tests {
         let mut env = TestEnvGuard::temp_home();
         let config_home = env.home().join(".config");
         env.set("XDG_CONFIG_HOME", &config_home);
-        let global_dir = config_home.join("cas");
+        // dirs::config_dir follows the platform convention (Library/Application
+        // Support on macOS), so write the fixture where the API actually reads.
+        let global_dir = global_cas_dir().expect("global config directory");
         std::fs::create_dir_all(&global_dir).unwrap();
         let config_path = global_dir.join("config.toml");
         let original = "[project]\naliases = []\nlse\n";

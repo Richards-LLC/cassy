@@ -166,6 +166,15 @@ impl ClaudeCliRunner {
         prompt: &str,
         enclosing_deadline: Option<Instant>,
     ) -> Result<String, LlmError> {
+        self.complete_inner_with_spawn_hook(prompt, enclosing_deadline, |_| false)
+    }
+
+    fn complete_inner_with_spawn_hook(
+        &self,
+        prompt: &str,
+        enclosing_deadline: Option<Instant>,
+        after_spawn: impl FnOnce(&mut std::process::Child) -> bool,
+    ) -> Result<String, LlmError> {
         // Both captures are owned by `NamedTempFile`, so every early return —
         // including the `?` on the second create — unlinks what was created.
         let stdout_capture = Self::capture_file("out")?;
@@ -205,6 +214,13 @@ impl ClaudeCliRunner {
         let mut child = spawn_with_retry(&mut command)
             .map_err(|error| LlmError::Unavailable(format!("{}: {error}", self.binary)))?;
         self.calls.fetch_add(1, Ordering::Relaxed);
+        // The descendant-cleanup test needs its child to exist before it
+        // starts a short timeout. Production keeps the original call budget.
+        let call_deadline = if after_spawn(&mut child) {
+            Instant::now() + self.timeout
+        } else {
+            call_deadline
+        };
 
         // Feed stdin from a worker thread. A blocking `write_all` here would sit
         // outside the deadline loop: a prompt larger than the pipe buffer
@@ -433,16 +449,32 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_timed_out_provider_group_leaves_no_stalled_descendant() {
-        let stub_dir = tempfile::tempdir().expect("stub dir");
-        let child_pid_file = stub_dir.path().join("child.pid");
-        let script = format!(
-            "(sleep 30) & child_pid=$!; echo $child_pid > '{}'; wait",
-            child_pid_file.display()
-        );
-        let (_provider_dir, binary) = stub(&script);
+        use std::os::unix::process::{CommandExt, ExitStatusExt};
+
+        let (_provider_dir, binary) = stub("sleep 30");
         let runner = runner_for(&binary, Duration::from_millis(300));
+        let mut group_member = None;
         let started = Instant::now();
-        let result = runner.complete("hi");
+        let result = runner.complete_inner_with_spawn_hook("hi", None, |provider| {
+            // Join a second process to the provider's group before starting
+            // the timeout. This exercises descendant cleanup without racing
+            // shell startup or a PID marker written by that shell.
+            let group_id = provider.id() as i32;
+            let mut command = Command::new("sleep");
+            command.arg("30");
+            // SAFETY: setpgid is async-signal-safe before exec.
+            unsafe {
+                command.pre_exec(move || {
+                    if libc::setpgid(0, group_id) == 0 {
+                        Ok(())
+                    } else {
+                        Err(std::io::Error::last_os_error())
+                    }
+                });
+            }
+            group_member = Some(command.spawn().expect("spawn provider group member"));
+            true
+        });
         assert!(matches!(result, Err(LlmError::Failed(message)) if message.contains("timed out")));
         assert!(
             started.elapsed() < Duration::from_secs(10),
@@ -450,19 +482,20 @@ mod tests {
             started.elapsed()
         );
 
-        let child_pid = std::fs::read_to_string(&child_pid_file)
-            .expect("provider must start its descendant before the deadline")
-            .trim()
-            .parse::<u32>()
-            .expect("child pid");
-        // Give the kernel a short opportunity to reap the group member, then
-        // make one liveness probe. The codemap workflow itself never polls.
-        std::thread::sleep(Duration::from_millis(100));
-        let alive = unsafe { libc::kill(child_pid as i32, 0) == 0 };
-        assert!(
-            !alive,
-            "timed-out provider descendant {child_pid} is still alive"
-        );
+        let mut member = group_member.expect("group member spawned before deadline");
+        let status_deadline = Instant::now() + Duration::from_secs(5);
+        let status = loop {
+            if let Some(status) = member.try_wait().expect("poll group member") {
+                break status;
+            }
+            if Instant::now() >= status_deadline {
+                let _ = member.kill();
+                let _ = member.wait();
+                panic!("timed-out provider group member remained alive");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert_eq!(status.signal(), Some(libc::SIGKILL));
     }
 
     #[cfg(unix)]

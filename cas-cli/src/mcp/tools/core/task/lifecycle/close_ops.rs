@@ -23667,7 +23667,10 @@ mod epic_status_gate_tests {
             .map(|index| {
                 (
                     Box::leak(format!("close-worker-{index}").into_boxed_str()) as &str,
-                    50,
+                    // The gate scales with child branches. One stranded
+                    // commit per branch covers that path without 2,500 Git
+                    // commits in the setup fixture.
+                    1,
                 )
             })
             .collect();

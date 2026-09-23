@@ -7,6 +7,30 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.28.0] - 2026-09-23
+
+### Changed
+
+- New default model lanes: everyday coding runs on GPT-6 Sol (medium) with
+  GPT-6 Luna (extra-high) as fallback; the supervisor, design and hard-problem
+  lanes run on Claude Opus 5.5 (high), falling back to Fable 5.1, Opus 5 and
+  GPT-6 Astra respectively; small chores run on GPT-6 Luna (extra-high) with
+  Opus 5.5 (low) as fallback.
+- Claude Haiku is no longer used anywhere. Requests for it are refused with a
+  pointer to the light lane.
+- Session summaries, learning and rule reviews and duplicate detection run as
+  background jobs on the light lane after a session ends, instead of pausing
+  the end of the session.
+
+### Added
+
+- Claude Code 2.1.280 is a validated version. `cas factory doctor` and factory
+  preflight warn, without blocking, when the installed Claude Code is older and
+  suggest `claude update`.
+- The Codex check now follows the standard lane, verifies complex tool
+  arguments end to end, reports token-budget stops as `budget_aborted` instead
+  of a stall, and keeps unattended Codex workers from pausing for input.
+
 ## [3.27.8] - 2026-09-22
 
 ### Fixed

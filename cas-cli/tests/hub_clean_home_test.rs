@@ -1,3 +1,6 @@
+#[path = "support/hub_fixture.rs"]
+mod hub_fixture;
+
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::{Read, Write};
@@ -14,7 +17,6 @@ use std::time::Instant;
 
 use assert_cmd::Command;
 use serde_json::Value;
-use tempfile::TempDir;
 
 #[cfg(unix)]
 fn install_tailscale_mock(_home: &Path, path: &Path, script: &str) {
@@ -45,15 +47,8 @@ fn system_path() -> OsString {
     std::env::var_os("PATH").unwrap_or_default()
 }
 
-fn private_home() -> TempDir {
-    let parent = std::env::temp_dir().canonicalize().unwrap();
-    let home = tempfile::tempdir_in(parent).unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(home.path(), fs::Permissions::from_mode(0o700)).unwrap();
-    }
-    home
+fn private_home() -> hub_fixture::PrivateHubTempDir {
+    hub_fixture::private_hub_tempdir()
 }
 
 #[cfg(unix)]
@@ -585,6 +580,139 @@ fn start_hub(home: &Path, path: &OsStr, tailscale: bool) -> Value {
         String::from_utf8_lossy(&output.stderr)
     );
     serde_json::from_slice(&output.stdout).expect("start output is JSON")
+}
+
+#[cfg(unix)]
+fn hub_serve_command_is_live(pid: u32) -> bool {
+    std::process::Command::new("ps")
+        .args(["-o", "command=", "-p", &pid.to_string()])
+        .output()
+        .is_ok_and(|output| String::from_utf8_lossy(&output.stdout).contains(" hub serve"))
+}
+
+#[cfg(unix)]
+#[test]
+fn panic_mid_fixture_reaps_detached_hub_and_group() {
+    let mut pid = 0;
+    let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let home = private_home();
+        let record = start_hub(home.path(), &system_path(), false);
+        pid = record["pid"].as_u64().expect("detached hub PID") as u32;
+        assert!(hub_serve_command_is_live(pid));
+        panic!("forced panic after detached hub startup");
+    }));
+    assert!(panic.is_err());
+    for _ in 0..50 {
+        if !hub_serve_command_is_live(pid) {
+            return;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    // The PID came from this fixture's successful start; prevent this
+    // regression test itself from leaving a leaked hub on assertion failure.
+    unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+    panic!("detached fixture hub PID {pid} survived panic cleanup");
+}
+
+#[cfg(unix)]
+#[test]
+fn cleanup_refuses_hub_home_outside_test_temp_root() {
+    struct OwnedChild(std::process::Child);
+    impl Drop for OwnedChild {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    let outside = tempfile::tempdir_in(cas::test_paths::workspace_root()).unwrap();
+    let test_root = std::env::temp_dir().canonicalize().unwrap();
+    assert!(
+        !outside
+            .path()
+            .canonicalize()
+            .unwrap()
+            .starts_with(&test_root)
+    );
+    fs::write(
+        outside.path().join(".cas-test-hub-home"),
+        std::process::id().to_string(),
+    )
+    .unwrap();
+    let mut hub = OwnedChild(
+        cas_process_command(outside.path(), &system_path())
+            .args(["hub", "serve", "--port", "0"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let paths = cas::hub::HubRuntimePaths::new(outside.path().join(".cas/hub"));
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let mut ready = false;
+    while Instant::now() < deadline {
+        if paths
+            .read_process_record()
+            .is_ok_and(|record| record.pid == hub.0.id())
+        {
+            ready = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert!(ready, "outside hub never wrote its process record");
+    assert!(hub_serve_command_is_live(hub.0.id()));
+    hub_fixture::cleanup_detached_hub_test_home(outside.path());
+    assert!(
+        hub.0.try_wait().unwrap().is_none(),
+        "outside hub was killed"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn atexit_backstop_reaps_forgotten_fixture_home() {
+    let receipt_dir = tempfile::tempdir().unwrap();
+    let receipt_path = receipt_dir.path().join("forgotten-hub.json");
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "atexit_backstop_helper", "--ignored"])
+        .env("CAS_HUB_ATEXIT_RECEIPT", &receipt_path)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "atexit child failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let receipt: Value = serde_json::from_slice(&fs::read(&receipt_path).unwrap()).unwrap();
+    let pid = receipt["pid"].as_u64().unwrap() as u32;
+    for _ in 0..50 {
+        if !hub_serve_command_is_live(pid) {
+            let home = receipt["home"].as_str().unwrap();
+            fs::remove_dir_all(home).unwrap();
+            return;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+    panic!("atexit backstop left detached hub PID {pid} alive");
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "subprocess helper for atexit fixture backstop"]
+fn atexit_backstop_helper() {
+    let receipt_path = std::env::var_os("CAS_HUB_ATEXIT_RECEIPT")
+        .expect("atexit helper must run through its parent test");
+    let home = private_home();
+    let record = start_hub(home.path(), &system_path(), false);
+    fs::write(
+        receipt_path,
+        serde_json::json!({"home":home.path(), "pid":record["pid"]}).to_string(),
+    )
+    .unwrap();
+    std::mem::forget(home);
+    std::process::exit(0);
 }
 
 fn assert_health_status_and_stop(home: &Path, path: &OsStr, record: &Value) -> Value {

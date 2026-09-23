@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 # Release gate: a release that changes hub-web must carry a journey evaluation
-# of exactly the hub-web tree it ships (docs/qa/journey-evaluation.md).
+# of exactly the bundle it ships (docs/qa/journey-evaluation.md). The key is
+# the git tree of hub-web/dist: the bytes cas embeds, rebuilt by CI whenever
+# the hub-web source changes.
 #
 # Usage: check-journey-evaluation.sh <worktree>
 #
-# Passes when hub-web is absent, when hub-web is unchanged since the last
+# Passes when hub-web/dist is absent, when it is unchanged since the last
 # release tag (CAS_JOURNEY_BASE_REF overrides the tag), or when a committed
-# docs/qa/journey-evaluations/*.md report names the current hub-web tree, has
+# docs/qa/journey-evaluations/*.md report names the current dist tree, has
 # `blocking_findings: 0`, and records every catalog journey as PASS.
 # Otherwise prints `BLOCKER journey-evaluation: ...` and exits 1.
 set -euo pipefail
@@ -21,8 +23,8 @@ block() {
     exit 1
 }
 
-git -C "$worktree" rev-parse --verify -q 'HEAD:hub-web' >/dev/null || {
-    printf 'journey-evaluation: no hub-web in HEAD; not applicable\n'
+git -C "$worktree" rev-parse --verify -q 'HEAD:hub-web/dist' >/dev/null || {
+    printf 'journey-evaluation: no hub-web/dist in HEAD; not applicable\n'
     exit 0
 }
 
@@ -30,15 +32,15 @@ base="${CAS_JOURNEY_BASE_REF:-}"
 if [[ -z "$base" ]]; then
     base="$(git -C "$worktree" describe --tags --abbrev=0 --match 'v[0-9]*' HEAD 2>/dev/null || true)"
 fi
-if [[ -n "$base" ]] && git -C "$worktree" diff --quiet "$base" HEAD -- hub-web; then
-    printf 'journey-evaluation: hub-web unchanged since %s; not required\n' "$base"
+if [[ -n "$base" ]] && git -C "$worktree" diff --quiet "$base" HEAD -- hub-web/dist; then
+    printf 'journey-evaluation: hub-web/dist unchanged since %s; not required\n' "$base"
     exit 0
 fi
 
-tree="$(git -C "$worktree" rev-parse 'HEAD:hub-web')"
-mapfile -t reports < <(git -C "$worktree" grep -l -E "^[-* ]*hub_web_tree: *$tree\b" HEAD -- "$reports_dir" 2>/dev/null \
+tree="$(git -C "$worktree" rev-parse 'HEAD:hub-web/dist')"
+mapfile -t reports < <(git -C "$worktree" grep -l -E "^[-* ]*hub_web_dist: *$tree\b" HEAD -- "$reports_dir" 2>/dev/null \
     | sed 's#^HEAD:##' | grep -v '/TEMPLATE\.md$' || true)
-[[ ${#reports[@]} -gt 0 ]] || block "hub-web changed since ${base:-<no release tag>} and no committed report in $reports_dir names hub_web_tree $tree"
+[[ ${#reports[@]} -gt 0 ]] || block "hub-web/dist changed since ${base:-<no release tag>} and no committed report in $reports_dir names hub_web_dist $tree"
 
 ids_json="$(CAS_JOURNEYS_ROOT="$worktree" python3 "$script_dir/journeys-for-diff.py" --all)" \
     || block "cannot read the journey catalog in $worktree"
@@ -54,9 +56,9 @@ for report in "${reports[@]}"; do
         grep -Eq "^\| *$id *\| *PASS *\|" <<<"$body" || problems+=("$id has no PASS row")
     done
     if [[ ${#problems[@]} -eq 0 ]]; then
-        printf 'journey-evaluation: %s covers hub-web tree %s (%d journeys)\n' "$report" "${tree:0:8}" "${#ids[@]}"
+        printf 'journey-evaluation: %s covers hub-web/dist tree %s (%d journeys)\n' "$report" "${tree:0:8}" "${#ids[@]}"
         exit 0
     fi
     failures+=("$report: $(IFS=';'; printf '%s' "${problems[*]}")")
 done
-block "no passing report for hub-web tree ${tree:0:8}: ${failures[*]}"
+block "no passing report for hub-web/dist tree ${tree:0:8}: ${failures[*]}"

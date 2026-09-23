@@ -68,6 +68,12 @@ For the Commander hub, the suite is `hub-web/e2e/journeys/`. It runs as the
   full matrix; `cas-619f`'s per-delivery pass owns the matrix.
 - **Waits are measured, not hidden.** Each stage records its wall time. The
   evaluator sees a slow stage in `result.json` even when the test passed.
+  Timings include the screencast's action annotations, roughly 0.3 s per
+  action. Compare stages with each other and across runs, not against a
+  stopwatch.
+- **Browser.** The journeys project runs the full Chromium build
+  (`channel: "chromium"`). In 1.63, `chromium-headless-shell` crashes the
+  renderer when a conversation mounts its terminal surface.
 
 ## 3. Release-time journey evaluation
 
@@ -75,11 +81,12 @@ A release that changes a user-facing surface must carry a journey evaluation
 of exactly the UI it ships.
 
 1. **Run.** Before the cut, the supervisor runs
-   `scripts/journey-eval.sh <artifact-dir>` on the release candidate: the
-   assembled epic tip. It builds the hub bundle, runs the `journeys`
-   project, and copies each journey's receipts to
+   `scripts/journey-eval.sh <artifact-dir>` on the release candidate, which is
+   the assembled epic tip, with `npm ci` done in `hub-web/`. It runs the
+   `journeys` project against the committed `hub-web/dist` and copies each
+   journey's receipts, including its trace, to
    `<artifact-dir>/journeys/<id>/`. It also writes `SUMMARY.md`, with the
-   hub-web tree hash, the pass/fail result and the stage timings.
+   `hub-web/dist` tree hash, the pass/fail result and the stage timings.
 2. **Evaluate.** A different agent from any implementer of the epic, on the
    `taste` lane, watches every journey's screencast, reads its stage
    screenshots and timings, and scores each journey on the rubric. It then
@@ -91,15 +98,18 @@ of exactly the UI it ships.
 4. **Gate.** `scripts/check-journey-evaluation.sh <worktree>` runs at the
    start of the release train's `prep` stage, after `assemble`. It passes when
    either of these is true:
-   - `hub-web/` is unchanged since the last release tag.
-   - A committed report names the assembled `hub-web` tree hash, records
-     every catalog journey as run, and states `blocking findings: 0`.
+   - `hub-web/dist` is unchanged since the last release tag.
+   - A committed report's `hub_web_dist:` line names the assembled
+     `hub-web/dist` tree, it has a PASS row for every catalog journey, and it
+     states `blocking_findings: 0`.
 
    Otherwise the train stops with the named blocker `journey-evaluation`.
 
-The report is keyed by the tree hash, not the version. It stays valid for
-that exact UI whatever version number ships it, and any change to `hub-web/`
-invalidates it.
+The report is keyed by the git tree of `hub-web/dist`, not by the version.
+`dist/` is the bundle `cas` embeds, and CI rebuilds it whenever the source
+changes. The report stays valid for that exact UI whatever version number
+ships it. A change to the shipped UI invalidates it; a change to a spec or a
+doc does not.
 
 ### Friction rubric
 

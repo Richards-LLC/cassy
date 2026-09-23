@@ -6,7 +6,7 @@
 #
 # Output:
 #   <artifact-dir>/journeys/<ID>/{trace.zip,journey.webm,NN-<stage>.png,final.aria.yml,result.json}
-#   <artifact-dir>/SUMMARY.md   tree hash, commit, per-journey result and stage timings
+#   <artifact-dir>/SUMMARY.md   hub-web/dist tree hash, commit, per-journey result and stage timings
 #   <artifact-dir>/playwright/  raw Playwright output and HTML report
 # Exit status is the suite's. See docs/qa/journey-evaluation.md.
 set -euo pipefail
@@ -27,7 +27,7 @@ if ! git -C "$repo" diff --quiet -- hub-web/dist; then
     exit 2
 fi
 
-tree="$(git -C "$repo" rev-parse HEAD:hub-web)"
+tree="$(git -C "$repo" rev-parse HEAD:hub-web/dist)"
 commit="$(git -C "$repo" rev-parse HEAD)"
 rm -rf "$artifacts/journeys" "$artifacts/playwright"
 mkdir -p "$artifacts/journeys"
@@ -37,19 +37,22 @@ status=0
     npx playwright test --project=journeys "$@") || status=$?
 
 python3 - "$artifacts" "$tree" "$commit" "$status" <<'EOF'
-import json, sys
+import json, shutil, sys
 from pathlib import Path
 artifacts, tree, commit, status = Path(sys.argv[1]), sys.argv[2], sys.argv[3], int(sys.argv[4])
 rows = []
-for result in sorted((artifacts / "journeys").glob("*/result.json")):
+for result in sorted((artifacts / "journeys").glob("*/result.json"), key=lambda p: (p.parent.name.rsplit("J", 1)[0], int(p.parent.name.rsplit("J", 1)[1]))):
     data = json.loads(result.read_text())
+    trace = Path(data.get("output_dir", "")) / "trace.zip"
+    if trace.is_file():
+        shutil.copyfile(trace, result.parent / "trace.zip")
     stages = data.get("stages", [])
     total = sum(s.get("ms", 0) for s in stages)
     slow = max(stages, key=lambda s: s.get("ms", 0)) if stages else {"title": "-", "ms": 0}
     rows.append((data["id"], data["title"], data["status"], total, slow))
 lines = [
-    f"# Journey suite run — hub-web {tree[:8]}", "",
-    f"- hub_web_tree: {tree}",
+    f"# Journey suite run — hub-web/dist {tree[:8]}", "",
+    f"- hub_web_dist: {tree}",
     f"- evaluated_commit: {commit}",
     f"- suite_exit: {status}",
     f"- journeys: {len(rows)}, PASS {sum(1 for r in rows if r[2] == 'PASS')}",

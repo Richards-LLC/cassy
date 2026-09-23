@@ -154,6 +154,9 @@ def select(paths: list[str], surfaces: dict[str, list[str]], journeys: list[dict
         for journey in journeys:
             if journey["id"] in chosen:
                 continue
+            if path == suite_path(journey):
+                chosen[journey["id"]] = row(journey, "suite")
+                continue
             for pattern in globs(journey["fields"].get("Touches", "")):
                 if fnmatch.fnmatchcase(path, pattern):
                     chosen[journey["id"]] = row(journey, pattern)

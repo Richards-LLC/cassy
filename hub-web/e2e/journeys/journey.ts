@@ -42,7 +42,7 @@ export const test = base.extend<{ journey: Journey }>({
     page.on("pageerror", (error) => errors.push(error.message));
     const viewport = page.viewportSize() ?? { width: 1280, height: 800 };
     await page.screencast.start({ path: join(dir, "journey.webm"), size: viewport });
-    await page.screencast.showActions({ position: "top-right" });
+    await page.screencast.showActions({ position: "top-right", duration: 300 });
     let double: HubDouble | undefined;
 
     const journey: Journey = {

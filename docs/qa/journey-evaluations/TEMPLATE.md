@@ -1,11 +1,11 @@
-# Journey evaluation — hub-web <tree8>
+# Journey evaluation — hub-web/dist <tree8>
 
 <!-- Copy to <date>-hub-web-<tree8>.md. The receipt lines are machine-read by
 scripts/check-journey-evaluation.sh: keep their `key: value` shape. -->
 
 ## Receipt
 
-- hub_web_tree: <40-hex output of `git rev-parse HEAD:hub-web`>
+- hub_web_dist: <40-hex output of `git rev-parse HEAD:hub-web/dist`>
 - evaluated_commit: <release-candidate commit SHA>
 - suite_run: <scripts/journey-eval.sh artifact dir> — <N> journeys, <N> PASS
 - evaluator: <agent name> (taste lane; not an implementer of the release epic)

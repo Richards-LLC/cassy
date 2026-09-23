@@ -550,6 +550,7 @@ Tagged but not published; these changes ship in 3.28.1.
 ## [3.25.3] - 2026-09-11
 
 ### Fixed
+
 - The `Scoped Validation (fast)` CI tier no longer requires ripgrep on the
   runner: the proof-surface script falls back to `git grep` (#836).
 - The director's stalled-supervisor relay distinguishes a merged delivery whose
@@ -559,6 +560,7 @@ Tagged but not published; these changes ship in 3.28.1.
 ## [3.25.2] - 2026-09-11
 
 ### Fixed
+
 - `cas codex` / `cas claude` launch the supervisor on a model and effort that
   belong to the chosen harness: an inherited incompatible model is repaired to
   the harness recipe and an explicit incompatible model is refused at
@@ -571,6 +573,7 @@ Tagged but not published; these changes ship in 3.28.1.
 ## [3.25.1] - 2026-09-10
 
 ### Added
+
 - Rolling integration branch: every epic merge re-merges main plus all open
   epics into `integration/<project>`, sweeps it, and reports conflicts or
   failures to the owning supervisors at merge time.
@@ -584,12 +587,14 @@ Tagged but not published; these changes ship in 3.28.1.
   sweep, so a clean assembly needs one short gate.
 
 ### Fixed
+
 - `version-literals` gate row scans tracked files only, so gitignored build
   caches cannot fail a release.
 
 ## [3.25.0] - 2026-09-10
 
 ### Added
+
 - Commander conversations: the Hub opens on a Cassy Cloud-branded list of
   supervisor conversations with a prominent project badge, shows each
   supervisor's real pane text, and sends addressed messages with distinct
@@ -610,6 +615,7 @@ Tagged but not published; these changes ship in 3.28.1.
   consumed-code pairing messages, and a doctor row (#817).
 
 ### Changed
+
 - Supervisor skill guidance moved detail behind references to stay within the
   SessionStart budget; `max` is a valid effort level for Fable, Opus, Astra,
   and Sol.
@@ -617,6 +623,7 @@ Tagged but not published; these changes ship in 3.28.1.
   directory to the supervisor launch exactly like an explicit profile (#820).
 
 ### Fixed
+
 - Isolated workers can no longer edit, commit, reset, or push inside the
   primary checkout or any path outside their registered worktree (#816).
 - Task close verifies delivery content from the task's content commits when
@@ -628,6 +635,7 @@ Tagged but not published; these changes ship in 3.28.1.
 ## [3.24.0] - 2026-09-10
 
 ### Added
+
 - MCP proxy configuration now expands `${VAR}` and `${VAR:-default}` values,
   reporting required unset values as `missing_credential_env` (#803).
 - Hub startup is a lock, bind, and process-record transaction; `--force`
@@ -637,6 +645,7 @@ Tagged but not published; these changes ship in 3.28.1.
   verifies its nested process tree (#796).
 
 ### Changed
+
 - Task start, claim, and close accept assignees by UUID or name (#799).
 - Factory supervisors route coordination through the CAS message path instead
   of the host `SendMessage` transport (#793).
@@ -654,6 +663,7 @@ Tagged but not published; these changes ship in 3.28.1.
   arbitrary source-path test data (#778).
 
 ### Fixed
+
 - Oversized embedding units are truncated with an explicit receipt and retried
   instead of being quarantined permanently (#805).
 - Image generation sends the API key through a mode-600 header file rather
@@ -662,6 +672,7 @@ Tagged but not published; these changes ship in 3.28.1.
 ## [3.23.0] - 2026-09-10
 
 ### Added
+
 - Factory coordination traffic is now configurable and bounded: ordinary
   messages allow 1,200 characters, escalations allow 2,500, and task notes
   allow 1,500; over-cap messages are rejected before queueing with an artifact
@@ -672,6 +683,7 @@ Tagged but not published; these changes ship in 3.28.1.
   task notes and artifacts and one decision per worker message.
 
 ### Changed
+
 - Startup context is delivered once per session; tool-result fallback no
   longer replays transport-delivered mail, task details show the newest five
   notes, claim files are pruned, and queue provenance is a one-line
@@ -682,12 +694,14 @@ Tagged but not published; these changes ship in 3.28.1.
   parent during base refresh.
 
 ### Fixed
+
 - Release reports no longer mistake GitHub pull-request references for issue
   references.
 
 ## [3.22.1] - 2026-09-09
 
 ### Fixed
+
 - `cas release report` assembles a usable report on its first run from any
   checkout: project settings resolve through the shared store detection (a git
   worktree finds `issues.repo` and the project is named from its config),
@@ -712,6 +726,7 @@ Tagged but not published; these changes ship in 3.28.1.
   refused address.
 
 ### Changed
+
 - The supervisor skill's reporting-style, release-train ownership, and
   cross-team routing guidance is parked verbatim in
   `cas-supervisor/references/reporting-and-routing.md`, linked from the skill
@@ -720,6 +735,7 @@ Tagged but not published; these changes ship in 3.28.1.
 ## [3.22.0] - 2026-09-09
 
 ### Added
+
 - `cas release report <version> [--out <dir>] [--pdf] [--json]` assembles the
   release-report Markdown source for any project from its Keep-a-Changelog
   section, release-notes draft, GitHub release and closed issues (via `gh` and
@@ -743,6 +759,7 @@ Tagged but not published; these changes ship in 3.28.1.
   guidance size against the protected ceiling and fails under 512 B of headroom.
 
 ### Changed
+
 - SessionStart payload compaction orders sections by value: static listings
   compact first, ambient recall and the factory inbox last, and a compacted
   section leaves a one-line marker in the payload. Built-in supervisor guidance
@@ -761,6 +778,7 @@ Tagged but not published; these changes ship in 3.28.1.
 ## [3.21.0] - 2026-09-09
 
 ### Added
+
 - Epic-level flow walk: when any child of an epic carries a demo statement, the
   supervisor runs one combined user-flow evidence pass on the assembled epic
   tip, concurrently with the release gate, with a 60-minute box and the
@@ -778,6 +796,7 @@ Tagged but not published; these changes ship in 3.28.1.
   counts observed misses.
 
 ### Changed
+
 - Turn context (ambient recall, supervisor reminders, factory inbox) is
   delivered once per prompt through PostToolUse or any Cassy tool response when
   the UserPromptSubmit hook is not invoked, which Claude Code 2.1.263 and later
@@ -793,6 +812,7 @@ Tagged but not published; these changes ship in 3.28.1.
 ## [3.20.0] - 2026-09-08
 
 ### Added
+
 - User-facing task labels now require a non-empty demo statement at creation
   time. The configurable `qa.user_facing_labels` setting defaults to `ui`,
   `hub`, `cli-ux`, `commander`, and `frontend`; epics, unlabeled tasks, and
@@ -812,11 +832,13 @@ Tagged but not published; these changes ship in 3.28.1.
   forward.
 
 ### Changed
+
 - Release preparation now links the report source and both rendered report
   formats from the announcement draft, preserving source fidelity and
   continuous A4/Letter pagination evidence for review.
 
 ### Fixed
+
 - Ambient recall now runs its semantic channel within budget (connect and request
   deadlines are both bounded), ranks recent memories with deep term overlap ahead
   of old rules that match one common word, stops padding prompts with unrelated
@@ -827,6 +849,7 @@ Tagged but not published; these changes ship in 3.28.1.
 ## [3.19.0] - 2026-09-08
 
 ### Added
+
 - `cas doctor` now includes separate `known repos` and `MCP upstream
   reachability` checks. Missing roots are distinguished from live roots that
   lack a Cassy store, and each result names the appropriate `cas doctor --fix`,
@@ -843,6 +866,7 @@ Tagged but not published; these changes ship in 3.28.1.
   and `summary` for bounded paging and fast ancestry-only reports.
 
 ### Changed
+
 - `cas hub status` now reports a healthy CAS-created Tailscale Serve route
   with its live hub target, while retaining distinct loopback-only and
   unavailable states.
@@ -873,6 +897,7 @@ Tagged but not published; these changes ship in 3.28.1.
   install-path proof passes the token on both validation lanes.
 
 ### Fixed
+
 - Codex workers now derive `HOME` and the Playwright MCP profile from the
   host home instead of using a fixed path, so MCP startup works on macOS and
   other hosts with different home directories.
@@ -884,35 +909,41 @@ Tagged but not published; these changes ship in 3.28.1.
 ## [3.18.1] - 2026-09-08
 
 ### Added
+
 - `cas doctor --host` now includes a `hub transport` row so the health report
   shows whether the hub's public route is available and points to the live hub.
 - Commander connection and pairing fixtures now use the same connection
   surfaces as the product, keeping their failure and recovery states honest.
 
 ### Changed
+
 - `cas hub status` now exits non-zero when the CAS-created Tailscale Serve
   route no longer targets the live hub shim.
 - CAS-created Tailscale Serve routes now remain part of the hub's durable
   lifecycle across relaunches.
 
 ### Fixed
+
 - Pairing diagnostics now distinguish an HTTP 502 route with a missing hub
   backend and explain how to restore the route or use a reachable hub URL.
 
 ## [3.18.0] - 2026-09-07
 
 ### Added
+
 - A light and dark Commander that follows the Petrastella design language,
   with an Appearance choice in the command palette.
 - A fleet view drawn as a verdict and dot plot, a readable attention timeline,
   a ledger-style transcript, and clearer pairing and connection surfaces.
 
 ### Changed
+
 - Generated design tokens now have a drift test, the hub-web visual-QA gate
   runs in CI and the release gate, and shared CSS allowlist semantics keep
   intentional visual exceptions explicit.
 
 ### Fixed
+
 - A flaky `hub::attention` test, workspace-guard handling of heredoc bodies,
   fail-closed `report_cas_bug` staging for unfiled reports, and pre-close
   recovery of rebased anchors with a named commit receipt.
@@ -920,6 +951,7 @@ Tagged but not published; these changes ship in 3.28.1.
 ## [3.17.3] - 2026-09-06
 
 ### Added
+
 - A vendored design system for every project: the `cas-ui-craft` skill with a
   required concept brief, a form vocabulary beyond tables and cards, a critique
   rubric with a floor score, and four annotated exemplars; the Petrastella
@@ -945,6 +977,7 @@ Tagged but not published; these changes ship in 3.28.1.
   model lane rubric review rewritten under the new design system.
 
 ### Changed
+
 - `cas-html-reports` and `cas-dataviz` now require a concept brief before any
   render, default to the Petrastella design language with a `DESIGN.md`
   override, and ship ambitious annotated examples with before/after pairs.
@@ -959,6 +992,7 @@ Tagged but not published; these changes ship in 3.28.1.
   fallback; `taste` and `supervisor` fall back to Claude Opus 5 at high.
 
 ### Fixed
+
 - Claude factory workers no longer hang on “Waiting for team lead approval”
   for shell commands that remove or rewrite files inside their worktree; the
   launcher sets bypass permission mode, the workspace guard understands
@@ -972,6 +1006,7 @@ Tagged but not published; these changes ship in 3.28.1.
 ## [3.17.2] - 2026-09-05
 
 ### Added
+
 - The director now wakes a silent supervisor when the fleet is idle, tasks are
   awaiting merge, or all children are terminal, subject to configurable
   `[factory] stall_after_secs`. The supervisor skill now requires a “Drive to
@@ -979,6 +1014,7 @@ Tagged but not published; these changes ship in 3.28.1.
   summaries expose actionable-idle minutes.
 
 ### Changed
+
 - Factory supervisors now launch through an explicit `supervisor` registry lane
   routed to Claude Fable 5.1 at medium effort (previously the built-in Claude
   Opus/high default); the lane fails closed when the Claude account is
@@ -989,6 +1025,7 @@ Tagged but not published; these changes ship in 3.28.1.
   `release.published`.
 
 ### Fixed
+
 - Post-merge task re-close now names a stale parked delivery anchor and its
   remediation, and accepts a receipt matching the current assignee's branch tip
   as task identity.
@@ -1000,12 +1037,14 @@ Tagged but not published; these changes ship in 3.28.1.
   guidance.
 
 ### Tests
+
 - Parallel test fixtures now use isolated paths and disk-index writers, removing
   cross-test collisions without changing production behavior.
 
 ## [3.17.1] - 2026-09-05
 
 ### Changed
+
 - The factory `taste` lane now routes to Claude Fable 5.1 at medium effort
   instead of Codex GPT-6 Astra. Explicit Astra and Opus requests still work,
   and `taste` fails closed when the Claude account is unavailable. The registry
@@ -1020,6 +1059,7 @@ Tagged but not published; these changes ship in 3.28.1.
   mirrors. Operational bugs are directed to their matching repository first.
 
 ### Fixed
+
 - The installer now requires the selected GitHub release asset's published
   SHA-256 before extraction or executable replacement. A missing, malformed,
   or mismatched receipt leaves the existing installation untouched. This is
@@ -1077,6 +1117,7 @@ Tagged but not published; these changes ship in 3.28.1.
 ## [3.17.0] - 2026-09-05
 
 ### Added
+
 - Commander pairing tells you where you stand at each step: one primary action
   per step, machine-address guidance, a capability summary naming exactly the
   scopes granted, and a saved-versus-connected distinction so a saved machine
@@ -1097,6 +1138,7 @@ Tagged but not published; these changes ship in 3.28.1.
   is no longer reported as a published release.
 
 ### Fixed
+
 - Generated skill and spec frontmatter is emitted by one proven YAML
   serializer. Three hand-rolled escapers had drifted apart, so a description
   containing a Windows path and a colon — `Use C:\project: inspect` — produced
@@ -1137,18 +1179,21 @@ Tagged but not published; these changes ship in 3.28.1.
   retrieval measurement explains itself and requires explicit use attribution.
 
 ### Removed
+
 - The dormant Slack upload staging helper and its tests. The helper was
   referenced only by its own tests and overwrote a symlink target before
   rejecting the write; deleting it removes the defect rather than shipping a
   repaired feature nothing calls.
 
 ### Documentation
+
 - A correctness and architecture audit of this repository, and a review of the
   Commander pairing journeys and their recovery paths.
 
 ## [3.16.0] - 2026-09-04
 
 ### Added
+
 - `cas integrate mecha-cassy` onboards a machine in one command. The label is
   derived from the hostname (`MECHA_SLACK_TOKEN_<HOSTNAME>`), the bearer is
   minted through the hub with your existing Cassy Cloud login, the bypass is
@@ -1168,6 +1213,7 @@ Tagged but not published; these changes ship in 3.28.1.
   removes the stale registration; `cas known-repos forget <path>` does it.
 
 ### Fixed
+
 - `cas update` no longer refreshes test-fixture database copies, probe stores,
   temp directories, or unpinned folder containers as if they were projects, and
   cloud push refuses any store whose identity would be a bare folder name. The
@@ -1195,6 +1241,7 @@ Tagged but not published; these changes ship in 3.28.1.
 ## [3.15.8] - 2026-09-04
 
 ### Fixed
+
 - `cas update` refreshed every local project in one process but resolved the
   cloud identity once, from the directory the command was launched in, so all
   projects pushed to and pulled from that one project's cloud scope. Each
@@ -1213,6 +1260,7 @@ Tagged but not published; these changes ship in 3.28.1.
   team-pull watermark so the next pull re-evaluates from a full snapshot.
 
 ### Added
+
 - `cas doctor` reports a new `cloud identity metadata` check that names any
   team-pull watermark, team registration, or knowledge-push identity that
   belongs to another project, with the exact command to repair it. Retained
@@ -1226,6 +1274,7 @@ Tagged but not published; these changes ship in 3.28.1.
 ## [3.15.7] - 2026-09-04
 
 ### Added
+
 - A worker's blocker now reaches an idle supervisor's screen. Sending a message
   with `blocker=true` wraps it in a marker that Cassy itself attaches, and the
   supervisor's screen wakes for it the same way it does for a merge request.
@@ -1241,6 +1290,7 @@ Tagged but not published; these changes ship in 3.28.1.
 ## [3.15.6] - 2026-09-04
 
 ### Fixed
+
 - Updating no longer ends with a false alarm. After the new version installed
   and its post-install work ran correctly, the update still failed with a
   message saying the wrong version had done the work and telling you to run it
@@ -1251,6 +1301,7 @@ Tagged but not published; these changes ship in 3.28.1.
 ## [3.15.5] - 2026-09-04
 
 ### Added
+
 - The release train now publishes from the repository's own script as well:
   after the release pull request lands, one command tags the exact landed
   commit from a clean detached worktree and starts the publisher, refusing up
@@ -1271,6 +1322,7 @@ Tagged but not published; these changes ship in 3.28.1.
   and again only when a different message becomes the oldest one waiting.
 
 ### Changed
+
 - Whether a message may interrupt a supervisor now depends on who actually sent
   it, as recorded when the message was written, rather than on the sender label
   attached to it. Labels can be set by whoever sends the message; the record
@@ -1281,6 +1333,7 @@ Tagged but not published; these changes ship in 3.28.1.
   request looked identical to routine traffic working as intended.
 
 ### Fixed
+
 - A message could interrupt a supervisor's screen simply by carrying another
   supervisor's name. The name was checked against the roster, but anyone sending
   a message can choose the name it carries, so spelling a real supervisor's name
@@ -1296,6 +1349,7 @@ Tagged but not published; these changes ship in 3.28.1.
 ## [3.15.4] - 2026-09-04
 
 ### Added
+
 - `worker_status` now names the epic each live supervisor is running, including
   supervisors in other factory sessions that share the same checkout. Knowing
   another supervisor is live was only half of what an operator needs before a
@@ -1305,6 +1359,7 @@ Tagged but not published; these changes ship in 3.28.1.
   "no epic".
 
 ### Fixed
+
 - A message from one supervisor to another now reaches the recipient's pane
   instead of waiting in an inbox for a poll. Supervisor-sent messages were
   labelled with the generic sender "supervisor", which the recipient's delivery
@@ -1345,6 +1400,7 @@ Tagged but not published; these changes ship in 3.28.1.
   drops the entry, and records the landed main sha.
 
 ### Changed
+
 - **Behaviour change for automation:** if the newly installed binary cannot be
   run for the post-install phases, `cas update` now exits **non-zero** with
   "binary updated to X; refresh did not run — run `cas update` again", and its
@@ -1357,6 +1413,7 @@ Tagged but not published; these changes ship in 3.28.1.
 ## [3.15.3] - 2026-09-04
 
 ### Fixed
+
 - `cas doctor` no longer counts a dependency whose endpoint is a quarantined
   task as an "orphaned dependency". Quarantining foreign rows (which doctor
   itself prescribes) hid those tasks from the board but not from the dependency
@@ -1409,6 +1466,7 @@ Tagged but not published; these changes ship in 3.28.1.
 ## [3.15.2] - 2026-09-04
 
 ### Fixed
+
 - `cas update` no longer reports a project as refreshed while its schema stays
   behind. A migration whose name had already been recorded under another id
   (a store migrated by a pre-release build that numbered it differently) made
@@ -1447,6 +1505,7 @@ Tagged but not published; these changes ship in 3.28.1.
 ## [3.15.1] - 2026-09-04
 
 ### Fixed
+
 - Closing a task no longer wedges when the worker's branch moves after the
   verifier dispatch was minted. The proof now binds the delivered commits: new
   commits, merges or fast-forwards on top keep the dispatch valid as long as
@@ -1476,6 +1535,7 @@ Tagged but not published; these changes ship in 3.28.1.
 ## [3.15.0] - 2026-09-03
 
 ### Added
+
 - `cas integrate mecha-cassy` sets up MechaCassy on a machine in one command:
   a machine-level proxy registration every project inherits, Claude Code and
   Codex entries by environment-variable name, and an authenticated tool list as
@@ -1511,6 +1571,7 @@ Tagged but not published; these changes ship in 3.28.1.
   (GH #704).
 
 ### Fixed
+
 - Tasks whose owner project was never recorded can be started and claimed
   again instead of being refused as an "unassigned legacy row" (GH #690).
 - Client project-identity canonicalization matches the cloud's rule exactly,
@@ -1551,6 +1612,7 @@ Tagged but not published; these changes ship in 3.28.1.
 ## [3.14.0] - 2026-09-03
 
 ### Added
+
 - Commander gets a session picker in the header and a back control: every
   session on every paired machine is one tap away, and reopening the app
   restores the last session instead of "No session open".
@@ -1564,6 +1626,7 @@ Tagged but not published; these changes ship in 3.28.1.
   Deck, Voice) and an Android field report are published under docs/reports.
 
 ### Fixed
+
 - Remote Commander viewers can no longer shrink the operator's local console:
   while the local dashboard is attached it owns each pane's PTY size, refused
   viewer resizes are audited, and the viewer renders the authoritative size.
@@ -1591,6 +1654,7 @@ Tagged but not published; these changes ship in 3.28.1.
 ## [3.13.1] - 2026-09-03
 
 ### Changed
+
 - The built-in `cas-cut-release` skill (Claude, Codex, and Grok mirrors) now
   gives one exact publish procedure: release credentials come from a
   configurable user-level `release.env` and are proven by name only, release
@@ -1606,11 +1670,13 @@ Tagged but not published; these changes ship in 3.28.1.
 ## [3.13.0] - 2026-09-03
 
 ### Added
+
 - The MechaCassy Slack transport gives every harness a shared, fail-closed way
   to publish release notes with channel checks, paced threads, receipts, and
   environment-only credentials.
 
 ### Changed
+
 - Supervisor identity now survives restarts cleanly: live workers remain
   reachable, old same-name sessions retire safely, and task-free worker deaths
   no longer create misleading supervisor warnings (GH #677, GH #678).
@@ -1629,6 +1695,7 @@ Tagged but not published; these changes ship in 3.28.1.
 ## [3.12.1] - 2026-09-02
 
 ### Added
+
 - `cas-cut-release`, the supervisor's single release procedure: a ten-step
   fail-closed train with a "what went wrong before" appendix and a
   self-learning `references/failure-log.md` that any agent must extend
@@ -1641,6 +1708,7 @@ Tagged but not published; these changes ship in 3.28.1.
   tree; every failure-log entry must map to a gate check.
 
 ### Fixed
+
 - `scripts/release.sh` removes stale BLAKE3 build outputs before its
   portable-ISA audit, so a prior build in the tag worktree no longer fails
   the "exactly one BLAKE3 build output" check.
@@ -1649,6 +1717,7 @@ Tagged but not published; these changes ship in 3.28.1.
 ## [3.12.0] - 2026-09-02
 
 ### Fixed
+
 - The task verifier's verdict templates now record `files_reviewed` (the
   field was silently dropped before) and its test-first check uses a valid
   ripgrep flag instead of erroring on every run; the learning reviewer now
@@ -1671,6 +1740,7 @@ Tagged but not published; these changes ship in 3.28.1.
   cas-search are generated from the dispatch table and pinned by a test.
 
 ### Changed
+
 - Worker session guidance fits the SessionStart budget (about 6 KB instead
   of 9.9 KB), so ready tasks and memories are populated on every spawn;
   harness-enforced rules are no longer restated as prose.
@@ -1694,6 +1764,7 @@ Tagged but not published; these changes ship in 3.28.1.
 ## [3.11.0] - 2026-09-02
 
 ### Changed
+
 - `cas doctor` renders a grouped report: a header with project and version,
   one line per section (Store, Indexes, Cloud, Config, Integrations) when
   every check passes, non-OK checks on their own row with a short message and
@@ -1717,6 +1788,7 @@ Tagged but not published; these changes ship in 3.28.1.
 ## [3.10.1] - 2026-09-02
 
 ### Fixed
+
 - Project-scope cloud pull reconciles entries that exist locally as archived
   rows through the same last-writer-wins path as team pull, instead of
   failing every one of them with "entry already exists" (347 per pull on
@@ -1738,6 +1810,7 @@ Tagged but not published; these changes ship in 3.28.1.
 ## [3.10.0] - 2026-09-01
 
 ### Removed
+
 - The multi-persona code-review pipeline: the `cas-code-review` skill and
   workflow, its persona references, the deprecated code-reviewer agents, the
   worker review-dispatch gate, and the `[code_review]` config section.
@@ -1746,6 +1819,7 @@ Tagged but not published; these changes ship in 3.28.1.
   cloud rows map to `awaiting_merge`).
 
 ### Changed
+
 - Task review is now the supervisor's merge-time diff review: the worker's
   branch diff is read against the task spec with scoped test receipts, and the
   supervisor records a verification row as the review receipt; the supervisor
@@ -1758,6 +1832,7 @@ Tagged but not published; these changes ship in 3.28.1.
 ## [3.9.1] - 2026-09-01
 
 ### Fixed
+
 - Moving a task to another project now queues exactly one delete for the old
   project key and one destination-keyed upsert, sent in that order in a single
   push, so the old project no longer keeps a re-created copy; deleting a task
@@ -1771,6 +1846,7 @@ Tagged but not published; these changes ship in 3.28.1.
   killing every process in it.
 
 ### Added
+
 - `delivery_mode = local_merge` on epics/sessions: the close gate tells workers
   to wait for the supervisor's local merge instead of pushing, the worker skill
   documents both modes, and the worker guard refuses `git push` to origin in
@@ -1779,6 +1855,7 @@ Tagged but not published; these changes ship in 3.28.1.
 ## [3.9.0] - 2026-09-01
 
 ### Added
+
 - Task dependency edges (epic→child, blocks, related, duplicate) sync to the
   team cloud as a `task_dependencies` entity: enqueued on add/remove/epic
   create, pushed in both envelopes, applied and deleted on pull, with dangling
@@ -1796,6 +1873,7 @@ Tagged but not published; these changes ship in 3.28.1.
   boundary.
 
 ### Changed
+
 - One canonical project identity: git-remote and case variants of a project
   slug resolve to the pinned slug for registration, push stamping, pull
   ownership, dependency ownership and `purge-foreign`; `cas doctor` reports
@@ -1824,6 +1902,7 @@ Tagged but not published; these changes ship in 3.28.1.
 ## [3.8.0] - 2026-09-01
 
 ### Added
+
 - `mcp__cas__task` list/ready/blocked/available accept `include_foreign`; the
   board is scoped to the current project by default and prints how many
   foreign-origin rows were hidden. `show` on a foreign task names its owner.
@@ -1837,6 +1916,7 @@ Tagged but not published; these changes ship in 3.28.1.
   requested/granted scopes once.
 
 ### Changed
+
 - Team push no longer overwrites an explicit `origin_project` with the pushing
   project; only rows with a missing or blank origin inherit it, and Global
   tasks stay unstamped.
@@ -1857,6 +1937,7 @@ Tagged but not published; these changes ship in 3.28.1.
 ## [3.7.7] - 2026-09-01
 
 ### Changed
+
 - Factory delivery monitoring now flags a failed required check while
   auto-merge is armed, or an auto-merge arm that disappears after green checks,
   with duplicate notifications suppressed per pull request and head commit
@@ -1868,28 +1949,33 @@ Tagged but not published; these changes ship in 3.28.1.
 ## [3.7.6] - 2026-08-31
 
 ### Changed
+
 - Claude worker launches preserve the requester's config and secure-storage
   selectors independently, auth checks stop waiting after a bounded timeout,
   and failed checks no longer silently choose the main account.
 
 ### Fixed
+
 - Custom Claude profile directories now keep truthful names in account badges
   instead of being mislabeled as the main profile.
 
 ## [3.7.5] - 2026-08-31
 
 ### Added
+
 - `cas setup` guides a newly installed machine through PATH, cloud login and
   team selection, device pairing, hub service, optional Viktor credentials, and
   first-project initialization with safe reruns and dry-run status reporting.
 
 ### Changed
+
 - `cas cloud push` drains the complete personal backlog by default, stops when
   no progress is possible, and reports remaining team-scoped rows explicitly.
 
 ## [3.7.4] - 2026-08-31
 
 ### Changed
+
 - Curated memories with importance at least 0.9 or positive helpful feedback
   stay in the working tier during decay, and reading a cold or archived memory
   brings it back to working; `[memory.decay]` settings and doctor counters make
@@ -1902,6 +1988,7 @@ Tagged but not published; these changes ship in 3.28.1.
 ## [3.7.3] - 2026-08-31
 
 ### Fixed
+
 - `cas update` now turns over stale `cas serve` processes before refreshing
   each project and repairs legacy Tantivy search-index roots; busy locks warn
   without failing the update.
@@ -1911,6 +1998,7 @@ Tagged but not published; these changes ship in 3.28.1.
 ## [3.7.2] - 2026-08-31
 
 ### Added
+
 - SessionStart memory injection is now telemetered with honest retrieval
   outcomes: unresolved cards stay distinct from ignored cards, and reading an
   injected memory counts as use. Ambient rule and skill surfaces are recorded
@@ -1923,6 +2011,7 @@ Tagged but not published; these changes ship in 3.28.1.
   resumable repair.
 
 ### Changed
+
 - Helpful Memories now read from the live, curated, tier-aware corpus while
   excluding raw context blobs, and `cas stats` reports the live corpus count.
 - `retrieval_metrics` supports session filtering and rejects unsupported
@@ -1936,6 +2025,7 @@ Tagged but not published; these changes ship in 3.28.1.
   git so generated files no longer become repository noise.
 
 ### Fixed
+
 - Background and legacy search indexing now share one repair path, making
   daemon-written memories visible to search and giving busy legacy processes a
   bounded doctor warning with a retry remedy.
@@ -1943,6 +2033,7 @@ Tagged but not published; these changes ship in 3.28.1.
 ## [3.7.1] - 2026-08-30
 
 ### Added
+
 - Refreshed the generated `.claude/CODEMAP.md` navigation map and added a
   bounded codemap-latency receipt that proves no content change, freshness,
   local commit/push readiness, and the required protected-PR compute budget.
@@ -1954,6 +2045,7 @@ Tagged but not published; these changes ship in 3.28.1.
   tests for the timeout, receipt, freshness, and no-write contracts.
 
 ### Changed
+
 - Protected pull requests now run only the required Fast Validation and macOS
   Check paths; heavy compile lanes remain on main, scheduled, or explicitly
   dispatched runs. First branch pushes use the protected default branch as a
@@ -1963,6 +2055,7 @@ Tagged but not published; these changes ship in 3.28.1.
   codemap status proof when knowledge distillation is unavailable or times out.
 
 ### Fixed
+
 - Codemap latency validation now labels detached GitHub Actions readiness
   separately from ordinary local readiness and rejects stale or missing
   freshness proofs without touching `CODEMAP.md`.
@@ -1972,6 +2065,7 @@ Tagged but not published; these changes ship in 3.28.1.
 ## [3.7.0] - 2026-08-30
 
 ### Added
+
 - `cas cloud unlink [--purge-remote]`: sever a project's cloud link locally
   and, with the flag, remove that project's remote records (entries, tasks,
   knowledge pages) — scoped discovery through the single `CloudSyncer` pull
@@ -1996,6 +2090,7 @@ Tagged but not published; these changes ship in 3.28.1.
   imperative reference mirrored to all three harness flavors.
 
 ### Fixed
+
 - Team-sync deserialization: `TaskDeliverables` tolerates the legacy
   JSON-string encoding on pull and canonicalizes on serialization, and the
   cross-DB relocation writers normalize payloads before push — ends the
@@ -2017,6 +2112,7 @@ Tagged but not published; these changes ship in 3.28.1.
 ## [3.6.0] - 2026-08-29
 
 ### Added
+
 - `cas-image-generate` builtin skill: style-aware asset generation for apps,
   websites, and reports. Harvests a project's design context (palette, motifs,
   typography feel) into style tokens, routes each asset type to Google's Nano
@@ -2035,6 +2131,7 @@ Tagged but not published; these changes ship in 3.28.1.
   capability documentation.
 
 ### Fixed
+
 - Image-generate helper: reference payloads are assembled via files instead of
   argv (`--reference` no longer fails on ARG_MAX for real image sizes), and
   output naming honors the API's returned MIME type instead of writing
@@ -2050,6 +2147,7 @@ Tagged but not published; these changes ship in 3.28.1.
 ## [3.5.0] - 2026-08-29
 
 ### Fixed
+
 - Team sync deletes now send the project-scoped identity (`project_id`), unparking
   deletions that older servers' project-aware DELETE contract had permanently
   rejected; parked rejections requeue and flush after upgrade.
@@ -2058,6 +2156,7 @@ Tagged but not published; these changes ship in 3.28.1.
   and the rejection message names the supervisor merge-receipt recovery path (GH #597).
 
 ### Added
+
 - Skill persistence gated on `validation_script` execution at create/update.
 - Measured rule promotion: Draft→Proven driven by outcome evidence instead of a
   single call; real rule impact tracking increments `surface_count` at injection.
@@ -2072,6 +2171,7 @@ Tagged but not published; these changes ship in 3.28.1.
 ## [3.4.2] - 2026-08-27
 
 ### Added
+
 - **Cassy can run workers on a fourth AI backend: OpenCode driving Qwen.** `cli=opencode` spawns workers on Qwen 3.8 Max through a QwenCloud Token Plan subscription (`sk-sp-` key), validated end-to-end by a live conformance receipt — a Qwen-driven worker completed a real Cassy task lifecycle (create, code, commit, push, verified close), survived cancellation, retained permission denials, and kept two account roots isolated. Model selectors carry an explicit route (`qwencloud/…`, `alibaba/…`, `local/…`) with no silent cross-route fallback; routes without a receipt are refused before queue insertion.
 - **Model routing is now a checked rulebook, not folklore.** A typed, embedded lane registry defines the worker lanes — light: Haiku 4.5, standard: GPT-5.6 Luna at xhigh, taste: Claude Opus 5 at high, heavy: GPT-5.6 Sol at high, with Terra under standing suspension — and every spawn path (MCP, direct CLI, daemon respawn, doctor) enforces it with rejections that name the violated rule and the available alternatives. Work can be requested by `lane=`; a missing primary backend produces a warned, never-silent substitute, and asking for an exact model is never rewritten. Doctor and preflight report per-backend availability as available / unavailable (with the enable command) / unknown. The docs' routing tables are generated from the same registry the code enforces.
 - **The Commander hub installs as a managed service.** `cas hub service install|uninstall|status` (with `--dry-run`) writes and enables a systemd user unit on Linux (linger handled) or a launchd agent on macOS: restart-on-failure, discoverable logs, no secrets in unit files, idempotent re-runs, wired into the installer's next steps.
@@ -2080,6 +2180,7 @@ Tagged but not published; these changes ship in 3.28.1.
 - **A brand-new machine gets one friendly line.** Typing `cas` before anything is configured now names the next command instead of printing a factory preflight's list of everything missing.
 
 ### Fixed
+
 - **Factory messages arrive when sent, not when someone happens to wake.** Enqueuing a message now nudges the daemon immediately, delivered messages carry their age and a staleness marker, and a spawn assignment for a task the worker has already finished is withdrawn instead of replayed as if new.
 - **A task can no longer be waved into supervisor review while its branch is unmerged.** Every close-path transition re-fetches and re-validates the live branch tip's ancestry at decision time, closing the race where a straggler commit slid past a partial merge.
 - **The workspace-contract hook stops rejecting writes inside a worker's own worktree.** Containment now uses the registered worktree binding with canonicalized, fail-closed path comparison instead of guessing from the current directory, fixing the case where one subtree was allowed and its sibling was blocked.
@@ -2091,14 +2192,17 @@ Tagged but not published; these changes ship in 3.28.1.
 ## [3.4.1] - 2026-08-20
 
 ### Changed
+
 - **A tagged release now publishes in about two minutes instead of fifteen.** The release tree is final the moment the version-bump PR lands, so both platform archives are built then, and tagging adopts those prebuilt artifacts instead of starting a cold cross-platform build on the tag's critical path. The Linux lane builds on the self-hosted runner. A tag with no usable prebuild still builds at tag time, so the slow path remains a working fallback rather than a failure.
 
 ### Fixed
+
 - **The 3.4.0 notes below now describe what actually shipped.** Two entries overstated the release: the macOS install entry claimed shell-rc PATH wiring that is not in the installer, and the skills entry read as twelve new skills when eight new skill directories landed. Both are corrected in place below rather than left to mislead anyone reading the release history.
 
 ## [3.4.0] - 2026-08-20
 
 ### Added
+
 - **Eight new built-in skills ship with every harness.** The Matt Pocock skill collection is imported for Claude, Codex, and Grok with harness-correct tool aliases and MIT provenance recorded: eight arrive as new `cas-` prefixed skill directories (writing-for-agents, diagnosing-bugs, domain-modeling, codebase-design, tdd, wizard, resolving-merge-conflicts, to-questionnaire) and four more are folded into existing builtins as reference material. (Corrected in 3.4.1; this entry originally said twelve new skills.)
 - **`cas viktor key` completes Viktor setup with one pasted operator key.** The key is validated and stored machine-only with 0600 permissions — never in project state or environment files.
 - **One `cas update` now brings every project fully current.** `cas update --all-projects` discovers every local project and runs the whole chain per project — schema migration, skill sync, cloud team-membership refresh, and cloud sync — with per-project receipts, continuable failures, and dry-run support. The contrib `cas-update` helper delegates to it.
@@ -2107,10 +2211,12 @@ Tagged but not published; these changes ship in 3.28.1.
 - **Dropped work announces itself.** Merge-queue ejections and worker delivery stalls push durable, episode-keyed relays to the supervisor and worker instead of leaving tasks waiting silently.
 
 ### Changed
+
 - **A code change reaches main in under five minutes.** PR admission checks collapsed to seconds, merge-queue validation runs the full suite once on fast self-hosted hardware with runtime-path-portable test archives, and stale queue runs are cancelled by behavior-tested watchdogs.
 - **Release binaries are code-signed after stripping**, with a verification gate before packaging and a dispatch-only job for inspecting published artifacts' signatures.
 
 ### Fixed
+
 - **Closed work stays closed.** Cloud pull can no longer silently resurrect terminal tasks: terminal status changes require an attributed reopen, and unattributed remote reopens park in the conflict journal exactly once.
 - **Epic close is fast and unambiguous.** Closing a large epic commits first and responds with a compact receipt in about a second; timeout messages state whether the write landed.
 - **Concurrent `cas-update` runs no longer corrupt a shared build.** The helper takes an atomic, holder-visible lock.
@@ -2119,6 +2225,7 @@ Tagged but not published; these changes ship in 3.28.1.
 ## [3.3.0] - 2026-08-19
 
 ### Fixed
+
 - **Cloud sync no longer deadlocks on projects whose team bucket predates the git-remote identity contract.** Team registration now adopts the server-resolved canonical project id from the registration response, verifies it, and pins it so the same sync run pushes and pulls against the real bucket. Previously every sync aborted with a misleading "server-side defect" error (gabber-studio was down for two days; any legacy-slug project on a fresh checkout was affected).
 - **`cas cloud project set` is authoritative again.** An explicit `[project] canonical_id` pin is no longer silently rewritten to the remote-derived form, and the later team-push adoption path never overrides an existing pin.
 - **Registration failure messages now name the server-resolved canonical id** instead of wrongly blaming the server when identity resolution diverges.
@@ -2126,14 +2233,17 @@ Tagged but not published; these changes ship in 3.28.1.
 ## [3.2.0] - 2026-08-19
 
 ### Added
+
 - **Factory workers now surface Viktor-originated questions to a live supervisor.** Incoming conversations are persisted and deduplicated, and remain visible for the next supervisor when no live session is available.
 - **Cassy can use an alternate worker account without losing its isolated project context.** Each worker now resolves its own project history and hooks instead of inheriting another checkout's state.
 
 ### Changed
+
 - **Merge-queue validation now uses the trusted self-hosted route where appropriate, while the required validation set stays intentionally small and explicit.**
 - **Worker guidance is more concise and scannable, with evidence-first progress updates and clearer handoff expectations.**
 
 ### Fixed
+
 - **Factory spawning and delivery are more reliable.** Workers retain refreshed local epic bases when publication is unavailable, reject unsafe branch-reference state, and handle Codex account, liveness, and terminal-limit conditions more accurately.
 - **Task completion and test evidence are stricter and clearer.** Cassy prevents misleading green test receipts, preserves merge and review gates, and repairs the urgent-stop review path.
 - **Viktor restart and archive handling now fail visibly and recover safely, reducing silent loss of pending replies and queued work.**
@@ -2141,6 +2251,7 @@ Tagged but not published; these changes ship in 3.28.1.
 ## [3.1.0] - 2026-08-18
 
 ### Added
+
 - **Viktor conversations now work through a managed, two-way Cassy gateway.** When a project has no `.cas/proxy.toml`, `cas serve` refreshes a credential-reference-only Viktor upstream with an exact, fail-closed allowlist of nine conversation tools; an explicit project proxy configuration opts out. Run-starting calls are registered for daemon-owned follow-up, so Cassy delivers completed replies as inbound `origin=viktor` notifications instead of agents polling. `cas init` and `cas update --sync` install the `cas-viktor` skill for Claude, Codex, and Grok, and `cas viktor` reports credential-safe provisioning status.
 - **Factory spawns can now select each worker's harness and account independently.** `spawn_workers` resolves per-worker `name`, CLI, model, effort, and `config_dir` overrides, validates the matching Claude or Codex account directory, and carries the resolved account into the spawned worker rather than flattening a mixed fleet to one supervisor profile.
 - **Ben's Apple Silicon Mac setup guide is now part of the repository.** The guide covers the supported release-binary install, machine-wide Cloud login, project initialization, Commander service, source-checkout maintenance, recovery, and the current macOS process-restart limitation.
@@ -2148,10 +2259,12 @@ Tagged but not published; these changes ship in 3.28.1.
 ## [3.0.0] - 2026-08-18
 
 ### Added
+
 - **`cas init` stops scaffolding your home directory by accident.** Run in `$HOME` (or at the filesystem root) it now names what it would create and asks before writing anything; non-interactive runs refuse outright and point at `--allow-non-project` for automation that means it. Project directories, including non-git ones, are unaffected.
 - **The Codex account picker remains useful when there is only one account.** An interactive bare `cas codex` launch now offers that account and a `+ Log in a new account…` row, so adding a named account does not require a hidden command.
 
 ### Changed
+
 - **CAS now presents itself as Cassy wherever people see it.** Commander, pairing email, installation and documentation copy, CLI help and banners, and Factory startup now use Cassy; commands, paths, environment variables, and code-level CAS names remain unchanged.
 - **Factory runs keep the selected Codex account attached to the decision.** Availability checks and explicit `config_dir` preflight inspect that account's `CODEX_HOME`, and launch or attach output names the account home in use.
 - **Factory worker guidance now asks for a concise, shaped response to the user.** The runtime prompt carries the response contract instead of leaving worker handoff prose implicit.
@@ -2159,6 +2272,7 @@ Tagged but not published; these changes ship in 3.28.1.
 - **Your team is picked up automatically — no setup command to discover.** When you are logged in and CAS can tell which team you are on, `cas cloud sync` scopes the project to that team and registers it, instead of syncing in personal scope until you happen to run a team command. It says which team it adopted and how to undo it; `cas cloud team auto off` keeps a project personal for good, `cas cloud team set` still pins a specific team, and if you belong to several teams with no default CAS asks you to pick rather than guessing.
 
 ### Fixed
+
 - **An unavailable explicit Codex profile offers the next login step.** On an interactive terminal, `cas codex --profile <name>` now offers `cas codex login <name>` instead of leaving the account unusable without recovery guidance.
 - **`cas claude --workers 0` no longer errors.** The zero-worker path now shares the normal account-selection flow.
 - **A successful cloud sync now means your project really is connected to your team.** `cas cloud sync` confirms the project is registered with the active team before reporting success, registers it when it is missing, and stops with the actual reason — including the exact server exchange that failed — instead of printing green checkmarks over a project the team never received. Previously a machine with nothing queued to send registered nothing, so `cas cloud team-memories` answered "this project hasn't been synced to the team yet" right after a clean sync. That message now names the project, team, and endpoint involved instead of repeating the command that just ran.
@@ -2169,9 +2283,11 @@ Tagged but not published; these changes ship in 3.28.1.
 ## [2.72.0] - 2026-08-17
 
 ### Added
+
 - **External expertise now crosses one enforced, receipted gateway.** `cas serve` replaces the proxy's compatibility default with an exact configured `(server, tool)` allowlist at boot and reload, denies every external call when that list is empty, and refuses paid verification routes outside the registered-supervisor gateway. The first production flow reserves a durable budget receipt before `ask_viktor`, resumes timed-out runs by their stored run ID, and returns only the fail-closed external-production-verification verdict; configuration and route/budget defaults are documented in `crates/cas-mcp-proxy/README.md`.
 
 ### Changed
+
 - **Cloud synchronization retains an auditable outcome.** Terminal task updates are guarded before they can regress, pull provenance and sync receipts surface the applied result, permanent push rejections are parked with concise errors, and canonical task identifiers remain normalized through the full sync path.
 - **Repository and release references now point at `Richards-LLC/cassy`.** Install, update, Homebrew, release, and API links follow the canonical repository home.
 - **Commander and CLI guidance better match live behavior.** Hosted Commander health checks admit the supported origin, reachable hubs clearly guide users through re-pairing, and command help exposes cloud operations while keeping internal maintenance tools out of the public surface.
@@ -2179,38 +2295,45 @@ Tagged but not published; these changes ship in 3.28.1.
 - **README documentation now explains the knowledge system.**
 
 ### Fixed
+
 - **Factory workers see stale output instructions before acting on them.** Spawn briefs name each task's resolved durable artifact directory and warn when task prose prescribes an absolute or home-relative path outside the worktree or sanctioned artifact root.
 - **Release and test operations recover more predictably.** The repository includes an Actions-outage release fallback runbook, and PTY tests tolerate loaded runners without flaking.
 
 ## [2.71.0] - 2026-08-16
 
 ### Added
+
 - **Groundwork: the complete contract for governing external expertise.** This release lands the Viktor delegation gateway as library surface with its enforcement seams in place — a registered-caller policy hook in the MCP proxy, exact parsed (server, tool) allowlist policy, a delegation receipt store with duplicate-call protection, budget reservations, and timed-out-run resumption (migration 236), and a fail-closed verdict contract under which a verifier that could not answer — timeout, malformed output, insufficient scope, transport failure, or any other enumerated non-answer — records a durable non-pass and never reads as approval. **None of it is enforced yet:** no production path installs the policy or writes receipts in this release (the proxy's default policy remains allow-all), so the supervisor-only provider key remains the operative control until the production wiring ships.
 
 ### Changed
+
 - **Message status tells the truth.** Activity that merely suggests a recipient saw a message shows as its own weaker state instead of "confirmed", a message repeatedly blocked by a busy recipient is flagged undelivered instead of silently waiting, and only an explicit acknowledgment of the exact message discharges an urgent halt.
 - **One authority decides which branch work belongs on.** Worker spawn bases, merge destinations, and newly created or newly linked epic children all resolve through the same declared-work-target precedence chain; an epic branch that has cleanly fallen behind its parent is fast-forwarded before any worker is cut from it.
 - **Finished work is recognized as finished.** Epic close reconciles deliveries that were squash-merged and later improved, measures against live branch state instead of stored counts, and keeps unproven anchors fail-closed.
 - **Memory keeps instructions, not chatter.** Machine-to-machine relay turns are no longer captured as durable context, while genuine operator instructions are captured again — discriminated by typed delivery provenance instead of text parsing.
 
 ### Fixed
+
 - **Commander is finished work on both surfaces.** A polish pass and a UX pass fixed the unreachable phone message button, empty worker panes, the drawer crushing the terminal, dead connection colours, the keyboard closing mid-word, drafts destroyed by the live refresh, sends without feedback, vanishing confirmations, unexplained disabled controls, duplicate alert cards, stale data posing as live, a dead-end first run, and alert cards missing their ticket.
 - **Sharp edges removed.** Ending a session no longer risks a nested-runtime panic; requesting an isolated worktree no longer gets a false refusal with invalid TOML instructions; the supervisor checklist no longer instructs an action that severs its own tools; a leak test no longer scatters orphan processes through CI cleanup; and memory list filters (tags, tier, scope) actually filter, with counts that match the rows.
 
 ## [2.70.0] - 2026-08-15
 
 ### Added
+
 - **Commander opens a session in kilobytes instead of megabytes.** Attaching sends an authoritative terminal keyframe built from current pane state and then streams live updates, so the first screen arrives in roughly 17 KB where it previously required about 44.7 MB, and history is fetched only when scrolled into view.
 - **Alerts are triaged instead of listed.** Attention cards are grouped by session, ranked critical, warning or info, and repeated failures collapse into a single card with a count that can be dismissed as a group.
 - **The pane you watch gets the room it deserves.** The supervisor pane is dominant by default, panes can be promoted and reordered, and the chosen layout is remembered.
 - **Optional AI enrichment can label session cards and attention events.** It ships default off, applies redaction inside the provider so callers cannot bypass it, and honors a deterministic severity floor that enrichment may raise but never lower.
 
 ### Changed
+
 - **A failing connection explains itself.** Commander reports an explicit staged lifecycle with per-stage deadlines, jittered backoff, heartbeat latency and authenticated diagnosis, and distinguishes an expired credential from a revoked one, instead of showing an indefinite "Connecting" state.
 - **Reporting a viewport is now part of observing a pane, not controlling it.** A read-only viewer can size its own terminal, while a leased pane follows its controller, so an observer can no longer reflow a controller's screen.
 - **Browser pairing can request control when it is needed.** Control is no longer fixed at pairing time, and anything still unavailable states why.
 
 ### Fixed
+
 - **Terminals render at the size of the pane showing them.** Panes no longer arrive as mangled, mid-word-wrapped text, and a replayed byte tail can no longer begin mid-escape or omit terminal modes.
 - **Stopping a registered server is verified rather than assumed.** A stop no longer reports success while a wrapped child process survives it.
 - **Release publication reflects the bytes users actually download.** Local audit archives stay local until publishing is explicit, and announced digests come from the published release.
@@ -2219,20 +2342,24 @@ Tagged but not published; these changes ship in 3.28.1.
 ## [2.69.1] - 2026-08-14
 
 ### Fixed
+
 - **Commander page-initiated pairing now finishes in browsers that require `fetch` to retain its `Window` receiver.** Every pairing handoff binds the browser fetch function before relay creation, polling, acknowledgement, or credential exchange.
 
 ## [2.69.0] - 2026-08-14
 
 ### Added
+
 - **Every CAS harness now receives the MCP integration runbook.** `cas update --sync` distributes the same installation and diagnosis guidance to Claude, Codex, and Grok.
 
 ### Fixed
+
 - **Commander page-initiated machine pairing now completes.** The pairing handoff sends the hub's canonical origin, so the relay accepts the invitation instead of rejecting it at delivery.
 - **A local pairing precondition failure no longer consumes the one-time code.** CAS checks the local hub before claiming and retains the same-machine nonce for a safe retry.
 
 ## [2.68.1] - 2026-08-14
 
 ### Fixed
+
 - **The v2.68 delivery and recovery wave is now installable on Linux x86_64.** Release builds use the compiler-specific portable baseline, rebuild native dependencies from source before auditing, and fail immediately when a declared native target cannot be produced on the current host.
 - **Factory startup and recall keep using the information that is current and relevant.** Base selection consistently prefers the fresh remote-tracking ref, and mid-session recall prioritizes the current request over an overlong task title.
 - **Validation diagnostics remain accurate under edge cases.** Scoped-proof validation recognizes nested integration modules, and the unknown-tool MCP test no longer claims an unproven server-side mechanism when its historical timeout cannot be reproduced from retained evidence.
@@ -2240,13 +2367,16 @@ Tagged but not published; these changes ship in 3.28.1.
 ## [2.68.0] - 2026-08-14
 
 ### Added
+
 - **Workers can flag a same-session peer collision without leaving the supervisor blind.** Peer warnings stay scoped to the active factory session and include a supervisor copy, while task notes can now be read directly without loading the full task record.
 
 ### Changed
+
 - **Delivery and merge decisions now prove the work's content is on its declared target.** Freshness, merge relays, close receipts, and diff attribution follow the actual destination and distinguish present work from commits that were rebased, resolved away, or superseded.
 - **Review and recovery state now reflect the real owner and live task state.** Value-only edits retain normal supervisor review, verification recovery names the available escape hatch, and terminal relay backlogs reconcile automatically.
 
 ### Fixed
+
 - **Lifecycle instructions no longer turn stale or uncertain state into a misleading action.** Replayed prompts carry provenance, terminal assignments are withheld only with positive current evidence, declined merge anchors cannot reappear as live requests, and urgent stops expire with their acknowledged exchange.
 - **Workers start and operate in the correct context more reliably.** Spawned work uses a fresher non-divergent epic base, workers receive queued supervisor corrections before starting, the target checkout is protected from foreign Git writes, and missing local prerequisites are made explicit.
 - **Focused recall and memory saving are more dependable under real workloads.** Search opens a consistent schema under concurrency and overlap scoring measures meaningful content similarity rather than shared note structure.
@@ -2254,14 +2384,17 @@ Tagged but not published; these changes ship in 3.28.1.
 ## [2.67.0] - 2026-08-14
 
 ### Added
+
 - **Task artifacts are now searchable with their work attached.** Bounded Markdown, text, and JSON deliverables enter the shared search index at close and during reindex, while oversized or unsupported files remain safely excluded.
 - **Factory worktrees now surface branch-local prerequisites before work begins.** New checkouts provision the pinned Zig toolchain when available and give lockfile-aware Node installation guidance without sharing path-sensitive dependencies.
 
 ### Changed
+
 - **Factory delivery follows the task's declared target branch end to end.** Epic bases, freshness checks, merge relays, and landing status now resolve against the real destination instead of assuming `main` or counting unrelated commits.
 - **Task-focused recall and core maintenance contracts are more precise.** Relevant saved guidance remains competitive across search fallbacks, workspace dependency and lint policy is centralized, CLI backends share one typed interface, and lifecycle gate failures retain structured meaning internally.
 
 ### Fixed
+
 - **No-code and supervisor-verified work can finish without close-gate deadlocks.** Portable evidence survives parked states, valid updates are no longer discarded alongside one rejected field, stale anchors can be cleared safely, and missing verification dispatches have a bounded recovery path.
 - **Lifecycle notifications now identify and acknowledge the event they actually represent.** Wake relays reach the acknowledgement bridge, supervisor-owned gates do not masquerade as worker events, stale completion prompts are revalidated, and instructions use the receiving harness's live tool namespace.
 - **Search, startup, and delivery edge cases fail safely instead of losing context.** Unknown colon-bearing terms search literally, custom-profile and Grok supervisors receive startup context, spawn-time corrections arrive before assigned work starts, and squash-landed or non-main-target work is reconciled by content.
@@ -2270,13 +2403,16 @@ Tagged but not published; these changes ship in 3.28.1.
 ## [2.66.0] - 2026-08-13
 
 ### Added
+
 - **Commander can now begin machine pairing from the page.** A short-lived code lets the target machine authorize the requesting Commander session, with strict controller, relay, and loopback origin boundaries throughout the exchange.
 - **Cross-project work can be proposed and followed without losing ownership.** Proposals carry explicit source and target projects, support auditable acceptance or rejection, and keep local dependent tasks blocked until the external work is resolved.
 
 ### Changed
+
 - **Proposal synchronization now converges across retries, pagination, and reopen cycles.** Creation is idempotent, replayed feed rows are deduplicated, provenance remains authoritative, and external dependency state follows resolution transitions without duplicating local work.
 
 ### Fixed
+
 - **Factory workers now fail closed before starting in the wrong checkout.** Spawn preparation proves the worker's exact worktree and branch, pre-harness validation rejects drift, commit guards deny sibling branches, and binding diagnostics inspect the assigned checkout.
 - **Commander pairing handles cancellation, replacement, and cleanup races safely.** Aborted or failed exchanges roll back only their own state, replacement rotates live credentials, stale cleanup cannot erase a newer pairing, and incomplete browser fragments are scrubbed before startup.
 - **Coordination and operator surfaces retain truthful state under edge cases.** Supervisor roles survive registration, stale reminders stay quarantined, long code snippets truncate on UTF-8 boundaries, stale-skill warnings render cleanly, and tag CI handles an all-zero base SHA.
@@ -2284,14 +2420,17 @@ Tagged but not published; these changes ship in 3.28.1.
 ## [2.65.0] - 2026-08-13
 
 ### Added
+
 - **Silent coordination failures now become visible, recoverable outcomes.** Aged unread messages return a one-shot notice to their sender, stalled sessions escalate durable attention signals, and status output includes recent progress timestamps.
 - **Concurrent planning now warns before work is duplicated.** Session startup surfaces simultaneous planning activity, sibling titles are checked without collapsing meaningful distinctions, and duplicate plans are identified early.
 
 ### Changed
+
 - **Startup and launch checks fail earlier with actionable context.** Configuration directories are validated before launch, registration failures preserve the relevant terminal tail and reap abandoned processes, and MCP startup applies pending schema migrations only after arming its parent-death watchdog.
 - **Close verification handles real delivery shapes without weakening proof.** No-code work can close with portable evidence, target-branch and squash receipts retain a non-empty lint range, merge receipts receive useful correction hints, and merged delivery facts remain immutable.
 
 ### Fixed
+
 - **Dead or stale sessions no longer leave work looking active.** Held work is returned to a recoverable state with an audit trail, and epic status marks stale ownership instead of presenting it as live progress.
 - **Claude session progress and interrupts are now observable.** Transcript turn watermarks feed stall detection, explicit interrupts report confirmed delivery or a clear failure, and status reports distinguish recent output from recent file changes.
 - **Delivery-stall thresholds and bounce eligibility are fail-safe.** Oversized thresholds return a clean error instead of panicking or wrapping, while broadcasts, synthetic traffic, stale rows, cross-session senders, and prior watchdog notices cannot create false bounces.
@@ -2299,13 +2438,16 @@ Tagged but not published; these changes ship in 3.28.1.
 ## [2.64.0] - 2026-08-12
 
 ### Added
+
 - **Supervisors can make decisions with the context that matters.** Creating work now surfaces related prior recall, and explicit decision gates make consequential choices visible before work proceeds.
 
 ### Changed
+
 - **Release-only changes validate faster.** Workspace version bumps can take the focused required-check path while preserving the heavier validation tier for product changes.
 - **Task handoffs now stay current through delivery.** Merge relays refresh the target tip and fetch remote receipts before reporting an outcome.
 
 ### Fixed
+
 - **Expired memory and session reminders now respect their intended boundaries.** Valid context survives recall, expired entries stay out, and reminder lifecycle actions remain scoped to the session that created them.
 - **Terminal work states and activity reporting are more trustworthy.** Cancelled and superseded work follows a fail-closed lifecycle, and dirty worktrees still report their real activity floor.
 - **Automation recovery is clearer and safer.** Negative-result closures retain their evidence, CI red-run receipts are preserved, socket ownership elects one daemon safely, and session end snapshots the current state.
@@ -2313,13 +2455,16 @@ Tagged but not published; these changes ship in 3.28.1.
 ## [2.63.0] - 2026-08-11
 
 ### Added
+
 - **Every Codex install now carries the CAS safety hooks pre-trusted.** Provisioning registers hook trust and project trust through a single locked configuration transaction, verified before any agent launches, so agents start working immediately without interactive trust prompts.
 
 ### Changed
+
 - **Session startup is leaner and more complete.** The always-injected skill descriptions shrank by two-thirds, team-spawned sessions now receive the same project-memory bundle as direct launches, and retrieval outcomes feed back into recall scoring.
 - **Generated hook configuration is byte-stable.** Regenerating `hooks.json` over an unchanged setup produces a byte-identical file, ending spurious git churn.
 
 ### Fixed
+
 - **Messages to idle Codex agents now reliably surface a turn.** Prompt delivery is classified and watched end-to-end; an unsurfaced delivery wakes the agent instead of sitting unread indefinitely.
 - **Agent cleanup fully tears down what it removes.** Stale-agent maintenance routes through forced shutdown and waits on the terminal process, ending ghost panes and zombie processes after reaps.
 - **Concurrent Codex launches no longer race trust registration.** The pre-launch trust write is a verified happens-before of the agent process start; launch refuses rather than parking on an interactive prompt.
@@ -2328,74 +2473,90 @@ Tagged but not published; these changes ship in 3.28.1.
 ## [2.62.0] - 2026-08-11
 
 ### Added
+
 - **CAS now includes cross-harness data-visualization guidance.** The built-in skill and its quality checks make it easier to turn repository data into readable, reviewable visual artifacts.
 
 ### Changed
+
 - **Pull-request validation is faster while preserving the release gate.** A focused warm suite now protects merge requests, while heavier checks remain available on main, schedules, and manual dispatch.
 - **Workers and release flows now give clearer, more reliable handoffs.** The checked-in guidance covers the supported task surfaces, artifact evidence, and protected-main release sequence.
 
 ### Fixed
+
 - **Hub restarts now complete with live viewers attached.** Existing viewer connections drain within a bounded window, then CAS safely closes any remaining stale connections before the replacement hub starts.
 - **Runtime coordination and cloud sync report actionable truth more consistently.** Stale CI failures no longer trigger misleading alerts, weak ambient matches cannot dominate recall, supervisor memory writes use the intended gate, and rejected cloud records retain itemized reasons.
 
 ## [2.61.1] - 2026-08-10
 
 ### Fixed
+
 - **Hub upgrades now recover Tailscale Serve mappings created by v2.60.0.** Legacy ownership receipts load without the newer diagnostic executable field, so CAS can tear down its exact stale mapping and republish the upgraded hub instead of leaving HTTPS unavailable.
 
 ## [2.61.0] - 2026-08-10
 
 ### Added
+
 - **Commander hubs can now persist as managed services.** `cas hub service install`, `status`, and `uninstall` provide launchd and systemd integration for durable fleet control.
 - **The hosted static Commander origin is explicitly supported.** `https://hub.petrastella.io` is documented as an opt-in trust boundary, and the controller visibly identifies incompatible hub capabilities.
 
 ### Changed
+
 - **Hub restart recovers the public Tailscale Serve endpoint on macOS.** CAS discovers the signed Tailscale app-bundle CLI when it is not on `PATH`, preserving the normal start/restart recovery path.
 
 ### Fixed
+
 - **Hub stop receipts now report the final Tailscale Serve outcome truthfully.** A mapping removed by the foreground hub during shutdown is recognized as removed rather than reported as untouched.
 - **Scoped CI validation now reads ANSI-coloured test summaries correctly.** Matching test failures continue to be reported instead of being obscured by terminal formatting.
 
 ## [2.60.0] - 2026-08-10
 
 ### Added
+
 - **Failed factory CI runs now reach the supervisor automatically.** The daemon watches completed runs for main and active factory lanes, relays one actionable failure per branch and commit, and includes the run, failing job, and first failing test when available.
 - **Merge receipts now report the source lane's latest CI verdict.** A completed red run is surfaced with its URL before a merge decision; unavailable or still-running CI is called out honestly as unknown without changing merge semantics.
 - **Cloud sync rejections now explain which records need attention.** Personal and team push failures retain itemized reasons, including partial server-side rejection, so accepted work can continue while the rejected items remain actionable.
 
 ### Changed
+
 - **Factory coordination exposes more reliable liveness and recovery signals.** Preassigned workers retain live holders, background process activity is observed across threads, close-gate rejections explain their cause, and a worker wakes only when both delivery and inactivity evidence permit it.
 - **Routine checks are more precise and economical.** Scoped test filters explain regex-like input, hook wire captures are audited, migration registry IDs are guarded, workspace write checks recognize valid targets, and CI/test fixtures are isolated consistently.
 
 ### Fixed
+
 - **Destructive worker shutdown and merge handling now stay bound to the intended work.** Shutdown targets are validated safely, task-bound delivery merges retain their correct task identity, and merge-conflict status is limited to the affected contribution.
 - **Factory startup, test, and interface behavior now tell a truer story.** Startup pulls do not requeue work, panic isolation runs under the intended test profile, ambient recall filters weak matches, and the factory strip consistently shows the running version.
 
 ## [2.59.0] - 2026-08-10
 
 ### Added
+
 - **Claude users can select and sign into separate accounts directly from CAS.** Bare launch now offers a profile picker, each profile keeps its credentials isolated, and `cas claude login <profile>` makes switching accounts explicit.
 - **Cloud queue recovery now has an explicit retry command.** `cas cloud queue --retry` lets operators re-attempt failed queued work without guessing at its state.
 
 ### Changed
+
 - **Factory test gates use faster, more targeted defaults.** Scoped nextest runs and shared compiler cache use reduce routine feedback time while retaining the full release checks.
 
 ### Fixed
+
 - **Pending cloud work and workspace checks now report and recover more reliably.** Silent pending work is surfaced, failed rows can be retried, and the workspace guard no longer rejects valid Bash write targets.
 - **CI fixtures are isolated consistently.** Test runs no longer inherit machine-specific state that can make a healthy change look broken.
 
 ## [2.58.0] - 2026-08-10
 
 ### Added
+
 - **CAS now carries its own built-in CLI routing guidance.** Common command-line work can reach the right product guidance without relying on a separate external skill setup.
 - **Workers now checkpoint before compaction and can retain a sync-conflict journal.** A constrained turn leaves a usable handoff, while a conflicted sync keeps enough history to explain and reconcile the result.
 
 ### Changed
+
 - **Factory work now follows a clearer workspace contract.** Writes are constrained to sanctioned roots, durable task artifacts are collected safely, and close evidence cannot point into transient tmpfs paths.
 - **Release inputs now fail fast before artifact builds begin.** The release workflow validates the annotated tag, exact version train, changelog, clean inputs, and locked dependency graph before it spends time building platform artifacts.
 - **Legacy session and model-effort context now remain attached to the work that needs them.** Daemonized sessions retain their source session through muxing, and queued work preserves the selected model effort.
 
 ### Fixed
+
 - **Memory sync no longer drops a daily entry when remote IDs collide.** Collisions are skipped safely instead of silently replacing local history.
 - **Verification storage repairs its required schema at open time.** Existing installations converge before verification state is used.
 - **Rejected supervisor reviews return through the sanctioned amendment path.** Review state and epic close reporting now agree on the intended target.
@@ -2405,15 +2566,18 @@ Tagged but not published; these changes ship in 3.28.1.
 ## [2.57.0] - 2026-08-09
 
 ### Added
+
 - **Memory can now consolidate an overlapping entry in one explicit, safe operation.** The opt-in merge returns the surviving identity and receipt, while concurrent edits are detected rather than silently overwritten.
 - **Memory recency is now deterministic and self-describing.** Recent results state their ordering and use a stable tie-break; lifecycle guidance explains when to merge, archive, or expire a durable memory instead of creating parallel records.
 
 ### Changed
+
 - **A full cloud sync now deliberately re-reads prior history when requested.** `cas cloud sync --full` resets the pull watermark and empty-result streak so recovery starts from a known clean scope.
 - **Cloud sync now explains healthy no-op pulls and the active sync state.** Pull output distinguishes up-to-date, personal-only, and fetched work; status names the active team or personal scope, daemon liveness, queue health, and the last successful pull.
 - **Factory halt responses now lead with a bounded, actionable exit brief.** Operators get the essential stop context without spending the remaining turn budget on repeated coordination detail.
 
 ### Fixed
+
 - **Network probe latency remains an observation, not a one-sample release gate.** Probe conformance now preserves useful p95 telemetry without treating an isolated sample as a verdict.
 - **Cloud pull failures now identify the malformed entity that could not be decoded.** Recovery messages name the affected record instead of leaving a generic parse error.
 - **Knowledge and team sync now converge more reliably.** Missing knowledge attribution schema is repaired safely, team pulls retain required skills, and the pull-url guard ignores inline test scaffolding while continuing to detect production callers.
@@ -2425,43 +2589,52 @@ Tagged but not published; these changes ship in 3.28.1.
 ## [2.56.0] - 2026-08-09
 
 ### Added
+
 - **Cloud sync now exposes configurable queue-health warnings before work is stranded.** `cloud.queue_pending_warning` and `cloud.queue_oldest_warning_secs` make factory preflight report a growing or aging sync backlog while preserving safe defaults.
 
 ### Changed
+
 - **An active CAS daemon now drains cloud work on its regular cadence even when no new activity arrives.** A queued update therefore continues toward the cloud after the event that created it, rather than waiting for a later local action.
 
 ### Fixed
+
 - **Cloud deletions now preserve current local truth and record failed deletes for retry.** A stale tombstone is neutralized when its task or entry exists locally again; successful delete routes, already-absent remote rows, personal/team queues, and skipped upserts now converge consistently instead of silently losing or retaining work.
 
 ## [2.55.5] - 2026-08-09
 
 ### Fixed
+
 - **Commander pairing now returns the exact authorized CORS origin when a bound cross-machine pairing exchange is refused.** A controller-origin browser can read both the successful credential and a generic refusal for its own pairing capability, while unbound, mismatched-origin, or otherwise invalid exchanges remain fail-closed without exposing an allow-origin header.
 
 ## [2.55.4] - 2026-08-09
 
 ### Fixed
+
 - **Commander hub restart now waits for an authoritative machine-lock handoff before starting the replacement.** Restart propagates stop failures, waits for both the old process and its lock ownership to disappear, and acquires the machine lock before stale-state cleanup or replacement launch. If the bounded handoff deadline expires, the command fails truthfully without starting a competing hub; concurrent start and restart attempts preserve exactly one owner.
 
 ## [2.55.3] - 2026-08-09
 
 ### Fixed
+
 - **Commander HTTPS origins now instruct browsers to stay on HTTPS for one year.** Responses reached through CAS's verified Tailscale Serve TLS path emit exactly `Strict-Transport-Security: max-age=31536000`, while the documented plaintext loopback listener cannot opt into HSTS through spoofed proxy or identity headers. The policy is bound to a separate server-owned proxy backend and preserves existing CSP, referrer, content-type, frame, authentication, and CORS behavior across successful and error responses.
 
 ## [2.55.2] - 2026-08-09
 
 ### Fixed
+
 - **Commander now starts securely on a clean installed machine without a manual initialization step.** The hub creates a missing `~/.cas/hub` hierarchy with owner-only permissions for both ordinary and Tailscale Serve startup, preserves existing safe state, and rejects symlinks, non-directories, unsafe final modes, wrong ownership, and unwritable ancestors without exposing filesystem paths.
 - **A real daemon `SIGILL` now reaches Commander as evidence-backed `SIGILL`, not `unknown`.** Spawned daemons record an owner-only exit receipt bound to the exact session, PID, and process-start fingerprint; the live hub consumes only an exact match after disconnect, rejects stale PID epochs, distinguishes a still-live transport loss, and leaves absent or malformed evidence honestly unknown. The replacement guidance therefore identifies portable-release remediation only when the operating system actually reported `SIGILL`.
 
 ## [2.55.1] - 2026-08-09
 
 ### Fixed
+
 - **Do not install the Linux `2.55.0` artifact; use `2.55.1` instead.** The `2.55.0` workflow checked an intermediate Ghostty archive while the final linked executable still contained runtime-dispatched AVX-512 assembly from AWS-LC and BLAKE3. CAS already selects ring as its process-wide TLS provider, so the unused AWS-LC provider is no longer compiled into Linux releases; this intentionally omits AWS-LC's post-quantum-capable paths, which CAS did not exercise. BLAKE3 keeps its portable, SSE, SSE4.1, and AVX2 paths, while an audited 1.8.6 build override makes its upstream runtime-only `no_avx512` feature omit the inactive AVX-512 archive entirely. Explicit portable Rust, C, C++, and Zig targets cover the remaining final-link contributors. Hashes and stored fingerprints are unchanged; AVX-512-capable hosts may see lower throughput only in BLAKE3-heavy indexing and fingerprinting. The strict ISA scanner remains unchanged; the workflow now also checks the locked release features and audits the exact staged executable before it can be uploaded. The immutable `2.55.0` tag, release, and assets remain unchanged for traceability.
 
 ## [2.55.0] - 2026-08-09
 
 ### Added
+
 - **Commander provides one phone-friendly view across paired CAS machines.** Each machine can run a durable local hub, expose it through an explicitly managed Tailscale Serve route, and contribute its live sessions and terminal panes to a controller-origin catalog without creating another runtime session or model request.
 - **Live terminal viewing and control now have an explicit concurrency model.** Multiple observers share one bounded upstream connection per daemon session, one identified controller holds input at a time, slow viewers are isolated, and the embedded offline client supports pane selection, resize, targeted interrupt, and attributed messages through additive protocol negotiation.
 - **Browser control is bound to the paired device, origin, operation, and short-lived proof.** Non-extractable device keys, DPoP request binding, exact Origin/CORS handling, one-use pairing and WebSocket credentials, scoped authorization, revocation, controller leases, and attributed audit all fail closed; non-loopback plaintext service is refused.
@@ -2469,17 +2642,20 @@ Tagged but not published; these changes ship in 3.28.1.
 ## [2.54.1] - 2026-08-09
 
 ### Fixed
+
 - **The Linux x86_64 release no longer inherits AVX-512 from the build runner.** Ghostty VT now receives an explicit portable Zig target for every supported native and cross build, unknown targets fail closed instead of falling back to the host CPU, and the release path audits the bundled Ghostty archive for forbidden EVEX/AVX-512 instructions. Anyone who installed `2.54.0` should upgrade to `2.54.1`; the original `2.54.0` tag and artifacts remain unchanged for traceability.
 
 ## [2.54.0] - 2026-08-09
 
 ### Added
+
 - **Relevant project context now arrives automatically at the start of a turn.** CAS creates one bounded query vector and searches knowledge, code history, and the current source index together, then presents only the best role-relevant matches. The path is on by default for authenticated installs, has explicit latency and corpus limits, falls back safely when semantic search is unavailable, and does not turn prompts into stored memory.
 - **The live source tree is now a first-class semantic search corpus.** Code files are reconciled automatically, embedded through their own queue and cache, and retired from every index when deleted. Exact-symbol history queries now prioritize the commit that actually touched the requested symbol instead of merely mentioning the same text.
 - **"Is this fixed?" can now be answered against the binaries that actually ran.** CAS records executable epochs for its background processes and separates pre-fix, mixed-version, and clean post-fix evidence. Verdicts always include the observed sample size and say when the post-fix window is too small or has not begun, rather than returning an unsupported bare "fixed".
 - **The developer updater is now tracked, installable, and safe around running CAS processes.** `contrib/shell-helpers/install.sh` installs `cas-update`; plain `cas-update` builds, installs, migrates, syncs, and turns over only processes whose executable bytes and process-start fingerprint match the replaced binary. `--no-restart`, `--build-only`, `--sync-only`, and `--dry-run` provide explicit narrower modes.
 
 ### Fixed
+
 - **Cloud knowledge sync now preserves ownership and deletion truth.** Personal pushes are incremental and carry their repository identity, team pulls and pushes stay within the active team, foreign pages are rejected at ingest, and tombstones propagate deletions instead of allowing removed pages to return.
 - **Migration discovery can no longer skip a lower gap or trust a false ledger row forever.** Detection stops at the first missing migration, safe additive migrations recorded without their actual schema effect are reconciled with an audit trail, and the release path automatically runs component-output snapshots whenever the migration registry changes.
 - **History and source indexes no longer publish partially reconciled state.** Watcher, vector, and deletion races are closed; doctor reports missing or stale history tables instead of treating them as an empty repository; lag continues to age honestly; and provenance coverage remains visible even on warning paths.
@@ -2487,6 +2663,7 @@ Tagged but not published; these changes ship in 3.28.1.
 ## [2.53.0] - 2026-08-08
 
 ### Added
+
 - **CAS can now search the history of your code, not just its current state.** Every commit in the repository is indexed — subject, body, the files it touched and, where the symbol index has data, the functions and types whose lines it changed — and that index keeps itself current in the background rather than needing a command typed at it. You can ask what a query returns across that history from the command line or through the tool surface, and the same history is now a full-standing channel in the blended search everything else already uses, so asking a question about the codebase can be answered by what was done to it and why, not only by what the files say today. Files that keep changing together are reported alongside a result, which is the fastest way to find the second place a change always has to land.
 - **A commit can now say which piece of work and which session produced it.** Resolving that link previously depended on a table that had been empty for its entire existence; it is now populated, and each link records both how it was established and how much confidence that method earns, so a reconstructed association is never presented as an observed one. Coverage is reported honestly rather than assumed.
 - **Issues, pull requests, their comments and past release notes are indexed alongside the commits.** The discussion around a change is usually where the reason for it lives, so the searchable corpus now covers the written record as well as the diff.
@@ -2495,6 +2672,7 @@ Tagged but not published; these changes ship in 3.28.1.
 - **"Is this bug fixed?" is now answered against the software that was actually running, not the date a fix was tagged.** A fix does not start working when it is released; it starts working when the processes serving it restart, and older processes routinely keep running for a further half hour. Anything observed in that overlap comes from both versions at once and proves nothing about either — reading it as evidence of a fix is a real mistake this project made and had to withdraw. CAS now records, for every background process it starts, which binary it is running and how long it was seen alive, and reconstructs that timeline for processes that ran before this landed. A question about a symptom is answered in three parts: the window before the fix ran, the ambiguous overlap, and the clean window after the last old process finally stopped — with the overlap excluded from the verdict by rule rather than by convention. The answer is never a bare "fixed": when the clean window is too small to support the claim it says so and reports how much evidence it actually has, and when no process has yet been seen running the fixed build it says that instead. Replayed against the incident that motivated it, the boundary it derives from live records matches the one that had to be established by hand.
 
 ### Fixed
+
 - **A worker running under a second account now receives its messages.** When a session is started against a configuration directory other than the default, its harness reads mail from a mailbox inside that directory — and every routine delivery was being written to the sending daemon's own directory instead, where nothing reads. Such a worker booted deaf: only a forced interruption could reach it, and everything else sat unread forever. Messages are now written into the recipient's own tree, with the roster it needs to make sense of them, while single-account installs are untouched.
 - **A session sitting idle with unread mail is now woken to read it.** Thirty-four of thirty-five wake attempts across an entire fleet were declined, every pass, and the only wake that ever landed was a hand-forced interruption. The cause was not any signal from the session: the search for a session's transcript looked in one hardcoded location, so on any machine using a second account it found nothing for every session, and "no transcript" was being read as "busy, do not disturb". Neighbouring checks had always read the same absence as "not busy", which is why one command cheerfully reported a session as available while another refused to wake it. Transcripts are now resolved across every known configuration directory, and an unknown state is no longer allowed to masquerade as a definite one.
 - **A message you were interrupted to read no longer comes back.** The path that breaks into a session with an urgent message recorded the delivery in the sender's ledger but never in the per-recipient one the recipient's own unread check reads, so a message that had been delivered, read and acted upon was still eligible to be served again. Every terminal delivery path now writes the receipt, keyed by the name the recipient actually answers to rather than the pane it happened to be typed into.
@@ -2503,6 +2681,7 @@ Tagged but not published; these changes ship in 3.28.1.
 ## [2.52.0] - 2026-08-08
 
 ### Fixed
+
 - **Almost every notification about a piece of work changing hands was being destroyed before it could be sent.** 353 of 361 supervisor relays over four days never reached transport — including 34 of 36 "this is ready for you to merge" and 34 of 36 "this close was rejected" notices. The cause was a freshness check that compared the notification's timestamp against the task's timestamp for exact equality, while the two values were read from the clock at two different moments; the test could never pass, and every one of the 397 discarded notices came from that single line. Measured across the discarded rows: zero exact matches, and one missed by 21.9 microseconds. Freshness is now the question it was always meant to be — is the work still in the state this notice announces — which no clock skew can defeat, while the one thing a timestamp can decide soundly is kept. The worst case is a duplicate courtesy notice when a task re-enters the same state; the previous worst case was total silence. Separately, notices withdrawn because their premise expired are no longer filed under the same label as routine de-duplication: a four-day outage sat hidden inside a bucket that reads as normal housekeeping, so a withdrawal now says a decision was made and records which work moved on. (GH #167)
 - **A message you had already read, acted on and replied to no longer comes back.** Whole bursts were being re-served. The suspected cause was a second copy of the message; the live records say the duplicate was in the bookkeeping, not the message. "Read" was determined from a per-recipient receipt ledger that only two of the delivery paths ever wrote to — the path that actually hands a message to a session wrote none — so a message could be reported delivered and be simultaneously unread by the recipient's own check, which then handed it back. Every path that declares a message terminally delivered now records the receipt, which matters most for broadcasts, where that ledger is the only thing that can ever retire one. Delivery still does not count as acknowledgement; nothing about what a real reply proves has changed. (GH #176)
 - **A supervisor's mail stopped hiding from the supervisor.** A supervisor answers to two names — its own and the generic role everyone addresses it by — and the two readers of the receipt ledger had drifted apart on which names to resolve. A message sent to the role name was unreachable from the supervisor's own inbox check: 40 of 50 such messages were never receipted, against 15 of 59 for the personal name. A message retired under one name also kept no record under the other, so the reader that missed it surfaced it again on a later turn. Both readers now share one identity resolver and a receipt is written for every name the recipient answers to. (GH #176)
@@ -2514,11 +2693,13 @@ Tagged but not published; these changes ship in 3.28.1.
 - **The sync report now credits the harness that was actually written to.** Updating built-in files printed its summary and its file list under whichever destination heading happened to print last, so a write to one location was reported under another that had not been touched at all, and two of the three destinations were never reported in readable output. Each destination now reports inline, immediately after its own sync, and every claimed write names the directory it landed in.
 
 ### Added
+
 - **A scoped test run can no longer report success while running nothing at all.** Three separate runs exited successfully having executed zero tests — a wrong crate name, a path that resolves differently depending on where it is run from, and a filter matching nothing — and all three were read as green. A wrapper now requires three things together: the command succeeded, a test harness genuinely reported, and the number that passed is above zero. The middle one carries the weight, because a success code is exactly what failed in all three cases. (GH #173)
 
 ## [2.51.0] - 2026-08-07
 
 ### Fixed
+
 - **A message written to a session's inbox was never actually put in front of that session.** The previous release built the turn-start surfacing path that reads a recipient's unread queue and injects it into the turn that is starting. It had seven passing tests and it had never once run in production. The event it hangs off delivers the submitted text under one key; the code declared a different one, and — the part that made this invisible for a full release — the real key was declared on an unrelated, unread field, so nothing failed, nothing warned, and the handler simply returned before reaching the surfacing block. Independent corroboration that the handler had never got that far: the attribution table it also writes held zero rows across the entire life of the database, so the command that reports who wrote a line had never had data to report. The key is now read where it is actually sent, and surfacing was moved ahead of the early return it was sitting behind, so a blank turn can no longer swallow a turn's mail; either change alone restores delivery. Confirmed against a real waiting message, not a synthetic one. The regression tests parse the raw event as it arrives on the wire — every prior test built the payload by hand, which is exactly why a contract mismatch survived a release with a green suite.
 - **Two more features were dead on the same wire, found by capturing real events instead of trusting the documentation.** The audit that followed the above deliberately read live captured payloads rather than inferring the shape from our own types, since that circularity is what hid the first defect. It found the guard that keeps long assistant output from wedging the interface reading a whole-message field that is never sent — the text arrives as streaming fragments — so the feature could never have worked had anyone switched it on. And the signal that says "you are already being resumed by a previous stop request" was sent on every relevant event and read nowhere, while five separate places could block a session from stopping, with no way to know they were inside a loop of their own making. Both are now wired to what the wire actually carries. A companion rule requires payload tests to parse raw captured events, so this class of silent mismatch cannot be reintroduced by a hand-built test object.
 - **A worker dying no longer leaves its supervisor uninformed.** Death notices were written to one queue that a supervisor only sees if it happens to look, never to the path that actually reaches it, and they were re-emitted every time the death was re-detected — one incident produced over fourteen hundred copies. A death now writes to both places in one idempotent sequence keyed on the death itself, so re-detection collapses onto a single notice while a genuinely separate later death is still reported. The notice carries a wake signal, so it can rouse an idle supervisor and, if it never lands, shows up in the undelivered report instead of vanishing.
@@ -2534,25 +2715,30 @@ Tagged but not published; these changes ship in 3.28.1.
 - **Retrieval quality measurement now includes the global store instead of quietly dropping it.** The parity check was scoped to project storage only, so a whole tier of what a session actually retrieves was invisible to the numbers everyone was reading.
 
 ### Added
+
 - **Reports now ship as a single self-contained HTML file.** A built-in skill produces a report that opens correctly anywhere, with no accompanying folder of assets to keep together or lose.
 - **Workers are taught when a fast check is enough and when only full proof will do.** The distinction between an inner-loop check while iterating and the final evidence a piece of work is done was previously left to judgement, which produced both wasted full runs and claims backed by a scoped one.
 
 ### Changed
+
 - **The built-in worker and supervisor guidance is substantially shorter.** Project-specific material that had accumulated in shared guidance was removed and a size cap now keeps it from growing back, so every session pays less to be told what it needs.
 
 ## [2.50.0] - 2026-08-07
 
 ### Fixed
+
 - **A finished piece of work could be parked behind a supervisor who was never told about it.** One session relayed "this lane is ready to merge" notices normally for a while and then went silent for the rest of the day; four completed lanes produced no notice at all and a person ended up carrying the hand-off by hand. The suspected cause — a notice addressed to a session id captured too early — was not what happened. Every notice existed and every one was written to the supervisor's inbox; each was then re-sent on a one-minute cadence because nothing ever drained that inbox, and each was finally stamped as a withheld duplicate at the exact second its task moved on. That stamp was correct about the payload, which had genuinely expired, and fatal for the fact that a notice had failed to arrive, which nothing anywhere recorded. Three things changed, one per layer. A notice that expires without ever being transported is now recorded as a distinct failure rather than being filed alongside "we withheld a copy nobody needed" — conflating those two is what made this invisible for a full day. That failure is surfaced where people already look: a banner above the worker roster, rendered even when no agents are registered, and a check in the health command that warns rather than reporting health when it cannot read the queue. Because both read columns the queue was already writing, the incident is visible retroactively, not just from now on. And the trigger itself is closed: when a supervisor's session restarts mid-run it re-registers under the same pane name with a new identity, and the tie between the old and new rows was being broken by sorting on a random id — a coin flip that could hand every later notice to the identity the operator had already walked away from. Ties now resolve to the session that exists, so a notice sent after a restart reaches a live recipient. Liveness still outranks recency, so a freshly registered but shut-down row cannot swallow notices.
 - **A notice retried forever instead of ever reaching a conclusion.** Exempting undelivered notices from the withheld-duplicate stamp closed one silent path and opened another: the stamp only fires when a task leaves the state it is waiting in, so a lane parked behind a supervisor who never came back had no ending at all and would re-send indefinitely. Retries are now bounded — long enough that a merely busy supervisor always wins the race, short enough that an absent one produces a recorded failure instead of a zombie. Every notice now reaches exactly one of delivered or visibly failed. Only a real send attempt counts against the budget; waiting out a cooldown does not.
 - **A log line said "delivered" about a message that was never delivered.** The arm that logged success actually fires for an inbox write, which for a message awaiting a turn boundary is not delivery — the row stays untransported and is rewritten every cadence tick. One message logged "delivered" nearly 56,000 times while its row ended up abandoned, never transported. A log line that contradicts the row it describes is a large part of why this took so long to diagnose; deferred writes now say that is what they are.
 
 ### Removed
+
 - **Three superseded storage and search paths are gone.** The distilled knowledge library has fully taken over from the older layered store, the markdown-backed store, and the standalone hybrid search path, so those are removed rather than left as a second way to do the same thing. Behaviour for anyone using CAS is unchanged; what goes away is dead weight and the ambiguity of two code paths claiming the same job. A survey documenting what was retired, what replaced it, and what deliberately stays is included alongside.
 
 ## [2.49.0] - 2026-08-07
 
 ### Fixed
+
 - **A message could be marked delivered to a session that never saw it.** The queue had a delivery path and no surfacing path: a row was written into the recipient's inbox file, stamped `delivered`, and nothing anywhere read it back and put it in front of the recipient. The two explanations that had been argued over — the wake-up never fired, versus a turn starting without a drain — were both true for different populations, and underneath both sat a third defect nobody had named: no hook handler read the queue at all, and the one handler that could have was scoped to a single role and returned early before it could surface anything. A turn-start handler now drains a recipient's unread rows and injects them into the turn that is starting. Selection and receipt happen in one transaction, so a caller can never end up holding content whose receipt failed to persist — the storm guard and the silent-drop guard are the same invariant. The turn-start event is now installed in the generated hooks block, where a handler wired to it would previously have been dead code for exactly the population being stranded; the other twelve events are deliberately untouched. Polling an inbox remains non-consuming.
 - **Whether a session was ever woken is now measured rather than asserted.** "Wake: unobserved" was a hardcoded constant with no backing column, which is why three separate incidents produced no signal at all — and the nudge helper returned the same `Delivered` outcome from its success arm, its deferred arm and its error arm, so the three states it already computed were being discarded. They are now carried and persisted (fired, failed, not attempted), status output reports the attempt, and it names the specific signature of a nudge that fired with nothing surfacing behind it. Urgent delivery records an attempted wake too, so the gated and ungated paths are finally comparable. Migration `m220` adds the receipt-source column.
 - **Clearing a session's context did nothing while reporting success.** The request enqueued the four characters `/clear` as an ordinary queued message; under team routing that row goes to an inbox, so the recipient read the *string* "/clear" as a note, acknowledged it, and carried on with its entire conversation still loaded — while the tool answered "queued". Six such calls across four sessions in one sitting all "succeeded" and none reset anything, so the checkpoint-and-clear discipline silently degraded into working to exhaustion. The reset is now a control instruction matched ahead of every message-routing path and typed over the same interrupt-and-inject channel urgent traffic uses, so it can no longer land in an inbox. Its post-condition was measured against a real session before anything was built: a genuine clear starts a new session whose transcript records the command. A reset that cannot be proven returns an error naming exactly what was and was not observed, never a cheerful "queued", and the confirmed new session id is written back so subsequent status and activity lookups read the live transcript instead of the dead pre-reset file. Harnesses where the reset is unsupported are refused before anything is queued, rather than guessed at.
@@ -2562,6 +2748,7 @@ Tagged but not published; these changes ship in 3.28.1.
 - **Help text no longer advertises a build flag that does not exist.** Session recording was documented as requiring a feature flag that had been removed, sending operators to look for something they cannot pass for a capability they already have; the harness options in the same struct listed a mode name the parser rejects, and whose own error message names the real one. Documentation only — no behaviour changed.
 
 ### Added
+
 - **Legacy notes can be moved into the distilled knowledge library, and moved back out.** The migration previews by default and writes only when told to, records every page it creates in a ledger, and reports honestly on what it drained rather than rounding up. Its rollback is driven from that ledger rather than by restoring a database backup — deliberately, because the database also holds tasks, leases, sessions, verification records and queued messages that are being written continuously, so restoring it would discard more work than it recovered. Anything the migration never touched cannot be affected, because it is not in the ledger; a page whose stored path no longer matches what the ledger recorded is reported as diverged and left alone, and divergence is not counted as success. Building the rollback so it could be exercised caught a real defect in the migration itself: restored rows were being routed to whichever database happened to have the table, which put one store's rows into another — payloads now carry their origin and an unstamped payload is a hard error rather than a guessed destination. Rehearsed against copies of real databases, the post-rollback state matched the pre-migration state on every axis measured.
 - **A retrieval-parity harness proves search does not regress across a migration.** A fixed query set is captured and replayed through read-only channels and the results diffed, so a cutover can be shown not to have degraded retrieval instead of being assumed not to have. Recapturing the baseline inside the frozen window is now a required step, because entries written after a baseline shift a fixed result window and produce parity "regressions" that are nothing of the kind.
 - **Content that belongs to a different project is held back from distilled pages.** A cutover rehearsal put another project's client records at the head of the session briefing. Quarantine matching is proper nouns only, chosen against the real corpus: three obvious-looking generic terms were rejected because they match ordinary prose and type names in this codebase, and sixteen further candidates added nothing beyond the proper nouns. Both directions are pinned by tests.
@@ -2569,24 +2756,29 @@ Tagged but not published; these changes ship in 3.28.1.
 ## [2.48.3] - 2026-08-07
 
 ### Changed
+
 - **The factory supervisor can be steered remotely again, and it stays patched.** Every agent the factory launched was started with non-essential network traffic switched off and its updater pinned. That is the right posture for a worker — a worker must not swap its own binary partway through a piece of work — but it also silently removed two things from the one session an operator actually sits with. Remote Control depends on feature-flag evaluation, which the traffic switch disables outright, so `claude doctor` inside a supervisor reported the feature as unavailable and its rollout unverifiable. The same switch bundles the updater kill switch, so a long-running supervisor never picked up a security fix. Both settings are now applied to workers only; the supervisor gets Remote Control and auto-updates, and worker behaviour is byte-for-byte unchanged. A machine that has been running with the traffic switch set for a long time may hold frozen feature-flag evaluations in `~/.claude/statsig` (or the equivalent path for an alternate config directory); deleting that cache clears them. One trade-off worth watching: with the updater live, a supervisor can update the shared CLI binary mid-run, so workers started either side of that update may differ in version.
 
 ## [2.48.2] - 2026-08-07
 
 ### Internal
+
 - **Nothing users run changed in this release: it corrects a test that was mismeasuring a correct product.** The wiring test for a sync run asserted that each pull endpoint is requested exactly once, and it had been failing — reporting that the personal pull happened twice. It did not. A sync makes two genuinely different pulls that happen to share one URL path and are told apart by their query string: the personal pull, and the knowledge pull that asks for distilled pages. The test recognised requests by path alone, so it counted the knowledge pull as a second copy of the personal one. The failure was therefore a description of two requests the product is supposed to make, not a duplicate to be removed — deleting one, which is what the reported diagnosis called for, would have broken knowledge sync outright to make a test pass. The assertion is now made per endpoint rather than per path: the personal-pull expectation requires the discriminating parameter to be absent, and the knowledge pull is asserted in its own right instead of being silently absorbed. "Each pull endpoint exactly once" now means what it says, and the knowledge tail is covered rather than invisible.
 
 ## [2.48.1] - 2026-08-07
 
 ### Fixed
+
 - **Syncing team knowledge could ask the cloud for every project's pages, not just this one's.** The knowledge pull built its own request and, whenever it could not work out which project it was running in, simply left the project off the request instead of stopping — so in exactly the situation the rest of sync treats as fatal, this one path quietly asked the server for everything and could import another project's pages into your database. That is the cross-project contamination the previous release was cut to clean up, reopened for knowledge pages. Every pull now goes through a single builder that refuses to make the request at all when the project cannot be determined; there is no longer any code path that can produce an unscoped pull, and a test proves the unresolvable case aborts without building a URL.
 
 ## [2.48.0] - 2026-08-07
 
 ### Internal
+
 - **Database migration numbering.** The knowledge store's migration was developed as `m218` on a feature branch while `m218_prompt_queue_recipient_transport_create_table` shipped independently in 2.47.0. Because a released id is immutable, the knowledge migration was renumbered to **`m219`** before landing; the released `m218` is untouched and applies exactly as it did in 2.47.0. Upgrading from any published release — 2.47.0 or earlier — is unaffected: those databases have never seen either number in the other meaning, and they apply `m218` then `m219` in order. The only database that could misbehave is one that ran a pre-release build of the feature branch itself and therefore recorded id 218 against the knowledge migration; on upgrade it would treat the released `m218` as already applied and skip it. Such a database is not expected to exist outside a development checkout, and the skipped table is additionally created as a startup side effect, so even that case self-heals.
 
 ### Added
+
 - **A project can now explain itself to an assistant without anyone writing the explanation.** Understanding an unfamiliar area meant an assistant reading its way there file by file, every session, from scratch — the same expensive rediscovery repeated on every new conversation, and the same questions asked of you again. `cas knowledge build` reads the project's own documentation, README, agent instructions, key configuration and a summary of every indexed code module, and distills them into a wiki of prose pages. The pages are ordinary markdown on disk under `.cas/knowledge/`, so they stay greppable, hand-editable and reviewable in a pull request like any other file. `cas knowledge status`, `list`, `search` and `read` cover the rest of the surface. Distilling costs model tokens, so nothing runs automatically unless you opt in — a pass over an unchanged project is guaranteed to cost nothing at all, because every source is fingerprinted and skipped when it has not moved.
 - **A page you write or edit by hand is never overwritten by the machine.** The obvious failure of any generated-documentation system is that it eventually destroys the thing a human corrected. A page can be locked, and a locked page is untouchable from every direction at once: re-distillation cannot rewrite its text, its index row or its file; a cleanup pass that removes pages whose sources are gone will not remove it; and a teammate's copy arriving over sync cannot overwrite it either. Text you write above the first generated section is treated as hand-written and is never edited, even on an unlocked page.
 - **Sessions start knowing what the project knows.** The startup briefing now includes a one-line pointer to every distilled page — id, type, title and a short snippet — and an instruction to pull the full text of the ones that matter. Page bodies deliberately never enter the briefing: an index of fifty pages costs a fraction of what one body would, and the assistant fetches only what the actual question needs. The index is capped, fits inside the existing briefing budget, and is byte-identical between runs on an unchanged project so it does not defeat prompt caching.
@@ -2595,6 +2787,7 @@ Tagged but not published; these changes ship in 3.28.1.
 - **Teams can share distilled knowledge, and search gets sharper when the cloud is connected.** With an account connected, pages sync alongside memories, tasks and rules, and get semantic embeddings so search matches on meaning rather than only on shared words. Everything here is strictly additive: logged out, no network call is made and no extra files are created on disk, and the local project remains the source of truth either way. `cas cloud status` reports how many pages exist and how many are still awaiting embeddings.
 
 ### Fixed
+
 - **Conceptual searches stopped silently discarding most of their own scoring.** Search blends several ranking signals with a fixed weighting, and one of them — meaning-based matching — had been removed without the weighting being updated. Sixty percent of the weight on every conceptual query was allocated to a signal that could only ever return nothing, so every result was scaled down and the remaining signals were left in the wrong proportion to each other. Ranking signals now declare whether they can actually answer, and a dead one's weight is redistributed across the live ones in proportion, preserving the intended emphasis instead of quietly deleting it. The same check stops the meaning-based channel from claiming it can answer when it is connected but has nothing cached yet.
 - **A test that had been failing on `main` since the previous release passes again.** The health-check snapshot was last re-pinned before two new health rows were added, so it had been red on `main` from the moment those rows landed. It also captured a value derived from a randomly-named temporary directory, which would have made any naive re-pin fail intermittently; that value is now excluded before the comparison.
 - **The startup knowledge index pointed at a command that did not exist.** The index shipped telling readers to fetch page bodies with an action the tool does not accept, so every fetch it invited returned an error — a perfect-looking index where nothing behind it worked. The instruction now names the real action, and a test drives that instruction through the actual tool router so the text and the thing it describes cannot drift apart again.
@@ -2602,6 +2795,7 @@ Tagged but not published; these changes ship in 3.28.1.
 ## [2.47.0] - 2026-08-07
 
 ### Fixed
+
 - **Two different repositories that happen to sit in folders with the same name no longer sync into each other.** A project's cloud bucket was decided by its parent-folder name whenever no explicit id was pinned, so two unrelated checkouts both called `accounting` shared one bucket and merged each other's memories, tasks and rules on every sync — for months, across two different clients' work. The git `origin` remote, which identifies the repository rather than where it happens to sit on disk, is now consulted before the folder name; an explicit `cas cloud project set` pin still wins, and a project with no remote still resolves by folder name exactly as before. Because that changes which bucket an unpinned repository with a remote uses, `cas doctor` now reports which bucket the project resolves to and why, and names the exact command to pin the previous one if that is where the synced data lives.
 - **`cas doctor` warns when two local projects claim the same cloud bucket.** Nothing anywhere reported a collision — the only symptom was one project's notes turning up in another. Doctor now checks every known local project and raises a warning naming both directories and the shared id. Second clones and git worktrees of the *same* repository are correctly silent; only genuinely different repositories are reported.
 - **`cas cloud purge-foreign` can no longer quietly destroy the work it is meant to protect.** Its `--dry-run` reported only how many rows existed, never which ones, so the one preview available before an irreversible delete told you nothing about what you were about to lose; the dry run now lists the concrete delete set (id + title for every entry, task, rule and skill, plus the dependency-edge count) and, with `--json`, the whole set. A real run now refuses — naming the reason — when the last successful cloud pull is missing, unreadable or older than the threshold (`--stale-days`, default 7), or when local changes are still queued and have never reached the cloud; on a long-idle machine the old behaviour deleted everything local and re-pulled a months-old snapshot over it. `--force` is the explicit override. The pre-purge backup is taken with `VACUUM INTO` instead of copying a live WAL database file, which silently omitted every committed transaction still sitting in the `-wal` sidecar — the backup was unreliable exactly when it mattered. A purge whose queue of pending local changes cannot be read now stops and names the reason: that read used to answer "nothing pending" for corruption, schema drift and undecodable rows alike, which disabled the unpushed-work refusal inside the one command that deletes without asking twice.
@@ -2615,11 +2809,13 @@ Tagged but not published; these changes ship in 3.28.1.
 - **A close that cannot verify the tree now says so instead of passing silently.** The check for uncommitted work returned the same empty answer for "the working tree is clean" and "the working tree could not be inspected at all", and closing treated both as a pass — so a tree that had drifted from what was reviewed could close without a word. Those two answers are now distinct: closing still refuses outright when there is uncommitted work, and it now additionally records what it could not verify — an inspection that failed, leftover untracked files, or a checkout sitting on a different commit than the one being claimed. This is detection, not a fix for any specific drift: it makes an unverifiable close announce itself rather than look identical to a verified one. The guidance for completing work carries the same check, including for quick tasks that skip the longer list.
 
 ### Added
+
 - **A one-command way to run tests in a clean environment.** Tests that read configuration from the environment passed locally and failed only on a fresh machine, because the shells they usually run in export a pile of variables — that is how one recently-shipped failure got through. The new command strips them all, enumerated from the live environment rather than a hardcoded list that had already drifted, and prints what it removed.
 
 ## [2.46.0] - 2026-08-06
 
 ### Fixed
+
 - **Finished work can close after the supervisor merges it.** A worker whose branch showed only a sync-merge after the supervisor had already merged its work was refused closure and steered toward resetting the branch — the exact state that success looks like. A close carrying a valid receipt for merged work now passes, and the refusal text for genuinely empty closes names the receipt path instead of implying branch surgery.
 - **A reply no longer counts as having read a message.** Any message back from a recipient used to mark every outstanding message to them "confirmed", silencing the sender's escalation clock while the recipient worked on from a stale premise. Confirmation now requires that the reply came after delivery and that the message was actually shown; without that, the clock keeps counting. Assignments the recipient already acted on are no longer re-served verbatim, and any true redelivery is labeled as one.
 - **"Delivered" now means the recipient can actually find it.** Delivery used to be stamped the moment the daemon wrote a message down, with nothing on the recipient's side to corroborate it — messages could sit invisible for an entire task while their status read delivered, and one acknowledgment shape could erase a never-shown message from the recipient's inbox entirely. Every delivery now leaves a per-recipient record in the same transaction, only an explicit acknowledgment or a real surfacing hides an inbox row, and an urgent interrupt is not considered done until there is evidence it actually woke its target — retried on a throttle, never a storm.
@@ -2631,32 +2827,32 @@ Tagged but not published; these changes ship in 3.28.1.
 - **Epic status tells the truth about branches.** A merged-and-closed lane could show phantom unmerged commits after its local branch was cleaned up — inviting surgery on work that was already safe — while a branch with no readable state at all reported a reassuring zero. Rows now name which branch they read, fall back to the remote when the local copy is gone, say so explicitly when neither exists, and a leftover base commit inherited from a stale spawn can no longer block an epic from closing.
 
 ### Added
+
 - **Workers are told to never sit foreground-blocked.** The worker guides now mandate backgrounding anything long-running, with concrete recipes for builds, test suites, and CI waits — a foreground-blocked worker is unreachable except by turn-breaking interrupt, which was the leading cause of lost in-flight work.
 
 ## [2.45.0] - 2026-08-06
 
 ### Fixed
+
 - **A parked notification no longer floods the recipient.** A lifecycle transition waiting for its recipient to wake up was re-sent on every queue poll — ten times a second, for as long as it stayed parked — producing byte-identical walls of the same message across turns, outliving both an explicit acknowledgement and the close of the task it referred to. Each transition is now delivered once immediately and then at most once per re-nudge interval, and an acknowledgement stops redelivery permanently instead of merely pausing it.
 - **A worker started from a stale branch says so.** When the branch a worker is cut from has fallen behind the trunk or its own remote, the spawn now reports how far behind it is, which commits it is missing, and how to refresh it — in the spawn record and to the supervisor. Previously the only clue was a number in a status column, and workers could quietly begin dozens of commits in the past. Status views also spell out "STALE BASE: N commit(s) behind" instead of leaving that number to be interpreted.
 - **Reviews can't be run by the wrong party anymore.** Under the default setup, where reviews belong to the supervisor, a worker asking to run one is now declined at the point of asking and told what to do instead. The instructions attached to the completion step had been telling workers the opposite of the rule, so the conflict resolved in favour of whichever instruction was closest to the action. Setups that assign reviews to workers are unaffected.
 - **A busy machine no longer fails a passing test.** A cleanup test that plants a short-lived process could see it exit before the check ran and report a failure that had nothing to do with the code under test. It now retries the setup without weakening a single assertion, and if it genuinely cannot get a foothold it says the machine was loaded rather than blaming the feature.
 
 ### Added
+
 - **A recipe for the "hung" test suite that isn't hung.** The recovery guide now covers left-over test processes that sit idle and block the next run — how to tell them apart from a genuinely running suite, how to clear them safely by process, and why clearing them by name is dangerous. One occurrence of this cost an hour; the suite finished in a fraction of a second once cleared.
 
 ## [2.44.0] - 2026-08-06
 
 ### Fixed
+
 - **Codex reviewers stopped rejecting finished work over a turn of phrase.** The Codex flavor of the completion reviewer still screened close reasons with a keyword blacklist ("pending", "partial", "remaining items") long after that approach was removed elsewhere for flagging work that was genuinely done but mentioned something another team still owed. It now judges a close reason against the task's own acceptance criteria, matching every other flavor, and its review recipes cover TypeScript and Python instead of assuming Rust.
 - **The startup briefing always fits, and always arrives.** On busy projects the session-start briefing could outgrow the chat window's size limit, get shunted to a file, and leave the assistant holding only the first couple of KB. The briefing now assembles under a fixed size budget: core guidance is never what gets cut, and bulky sections collapse to a count plus the command that brings the detail back.
 - **Team sessions on a second account find their own team.** Team folders, inboxes, and settings files are created inside whichever account the session is actually running as, instead of always landing in the primary account's folder where that session would never look for them. Single-account setups are unchanged.
 - **Hook setup follows the account you are configuring.** Installing and removing hooks now reads and writes the settings file of the active configuration directory rather than assuming the default one, so a session on an alternate account comes up with its hooks in place.
 - **The operator guides describe the system that actually shipped.** The supervisor and worker guides had drifted from the code: account selection when spawning workers, the long-lived server registry, the merge and fleet-sync commands that keep factory bookkeeping intact, and the evidence a completed review must carry were missing, incomplete, or documented as something the code no longer does. All corrected against the dispatch sites.
 
-### Added
-- **The three assistant flavors can no longer drift apart in silence.** A new test compares every shared builtin guide across all three flavors, normalizing only the differences that are meant to exist, and fails the build on any other divergence — the failure mode that had let one flavor sit four months behind the others.
-
-### Fixed
 - **The supervisor now hears about parked closes.** A worker's close rejected with MERGE REQUIRED previously vanished — fleets idled silently until a human checked in; the event now reaches the supervisor as a push signal.
 - **Messages stop lying about being seen.** Wake-up nudges no longer trust the registry's "busy" claim (an automated git checkpoint counted as activity); pane and transcript evidence decide, vetoed nudges retry instead of stranding, and acks record whether they were explicit or merely inferred from a reply.
 - **Fleet sync can no longer destroy work in progress.** `sync_all_workers` refuses dirty or mid-task worktrees without force, and a failed stash pop notifies both the worker and the supervisor with the stash ref instead of silently stranding the changes.
@@ -2667,28 +2863,12 @@ Tagged but not published; these changes ship in 3.28.1.
 - **An empty review can no longer pass as a clean one.** A review outcome missing any mandatory persona lane — not just personas_run=0 — is rejected at the close gate, with lane presence computed from what the orchestrator dispatched rather than self-reported skips.
 - **The review-workflow parity guard now guards.** The rendered workflow copy had silently drifted from the shipped builtin for two days while the only parity test lived in a suite nothing ran; the guard now runs under `cargo test`, names the divergent line, and states the repair direction.
 
-### Added
-- **Stacked epics are visible.** Creating an epic on top of an unlanded epic branch surfaces the full ancestry chain (depth, not one level) at creation and in `epic_status`, derived live from git topology so it cannot drift.
-
-### Added
-- **The GitHub-issues sweep is now a skill instead of folklore.** `cas-github-issues` ships as a builtin for every harness: dedupe double-filed copies, verify-and-close fixed claims, task new issues into the active github-issues epic (creating a successor epic when none is open — never tasking into a closed one), comment each issue with its task ID, unblock chained tasks when lanes merge, and file defects observed since the last sweep.
-
-### Fixed
 - **Codex workers no longer wedge silently in untrusted directories.** The factory pre-trusts worker and supervisor workdirs in `~/.codex/config.toml` before launch (hardened against config corruption), and the register-timeout diagnostic now names the trust-prompt cause instead of a generic timeout.
 - **Assigning a task actually wakes Codex workers now.** Assignee changes emit durable wake-ups on the Codex path — previously only Claude workers reacted, and assigned P0 work sat idle until a manual nudge. Director idle notices are stamped with the instant their snapshot was read, so stale "worker is idle" claims are identifiable.
 - **`task action=update` honours `blocked_by`.** Previously it silently dropped the field and reported "No changes specified", letting work start on stale inputs; blockers are now pre-validated and gated status re-armed, matching `create` semantics.
 - **`spawn_workers` no longer demands a ceremonial epic.** Supplying a concrete open `task_id` permits spawning after an epic closes, instead of forcing a single-child wrapper epic.
 - **A new epic no longer strands prior work by branching from a stale `main`.** Epic-branch creation compares the intended base against `HEAD`; when `HEAD` is ahead on an epic branch the divergence is surfaced instead of silently basing dozens of commits behind.
 
-### Investigated
-- **Dev-profile `split-debuginfo` measured end to end and rejected.** With mold and `debug = 1` already in place it buys no link time, no cold-build time, and no net disk at measurable scale; `packed` is strictly worse. Full numbers on the issue.
-
-### Added
-- **Long-running services get a registry instead of an ambush.** `server_start`/`server_stop`/`server_list` register agent-launched servers with ownership, logs, and a pid-identity fingerprint; registered shared servers live in their own cgroup scope so worker teardown deliberately spares them, and `stop` refuses to signal a reused pid rather than killing a bystander.
-- **Worker teardown now takes the whole process tree.** Everything a worker spawns dies with it — by process group everywhere, and by cgroup subtree on delegated cgroup-v2 hosts — so escaped `npm run dev`-style stragglers no longer outlive their worker. `gc_report`/`gc_cleanup` additionally sweep dead-parent processes and stale port squatters.
-- **A design-spec skill and a release-notes rubric** ship as builtins for every harness, so projects inherit a DESIGN.md generator and a publication rubric instead of reinventing them.
-
-### Fixed
 - **Finished work closes.** The close guard scopes to task-attributed commits instead of the spawn-repo factory anchor, honors `target_repo`/`target_branch`, measures against fetched remote refs, and accepts unambiguous abbreviated commit receipts; `awaiting_merge` gained a sanctioned amendment path (`request_changes`); the additive-only gate no longer counts a task's own WIP against it; zero-diff investigation closes stopped being a two-stage trap.
 - **Requested workers arrive.** The spawn daemon's queue consumer survives `shutdown_workers count=0`, invalid cli/model combinations are rejected at the door instead of silently defaulting, pre-assigned tasks actually reach the worker, and spawn receipts report liveness instead of hope.
 - **Coordination messages stopped lying.** Drained messages are no longer re-delivered on the idle-nudge path, signals are computed from fresh state at send time, and months-old queue items no longer land on freshly spawned workers.
@@ -2696,17 +2876,36 @@ Tagged but not published; these changes ship in 3.28.1.
 - **The test suite is hermetic against its host.** Close-path test outcomes no longer depend on the ambient `CAS_FACTORY_WORKER_CLI` of whoever runs `cargo test`, `cas doctor` prints its breakdowns in deterministic order, timing-budget assertions tolerate loaded hosts without weakening what they prove, and registry tests neither collide on cgroup scope names nor leak five-minute orphans that stall piped test runs.
 - **Choosing a Claude account starts CAS again.** `cas claude <profile>` resolved the account directory and then exec'd Claude Code directly, so the factory never started — selecting a second subscription and running CAS became two separate commands to be combined by hand with an environment variable. The account is now exported into the launching process before any thread or pane exists, and the command delegates to the same factory path as the other provider shortcuts with Claude pinned as the supervisor, so the supervisor and every worker it spawns land on the chosen account. Bare `cas claude` launches the factory on the ambient account, matching its siblings; the account listing moved to `--list-profiles`, and `--bare` keeps the plain Claude Code launcher with argument passthrough. Explicitly selecting an account now also scrubs an inherited `ANTHROPIC_API_KEY` on this path, which could otherwise override subscription OAuth and silently defeat the selection.
 
+### Added
+
+- **The three assistant flavors can no longer drift apart in silence.** A new test compares every shared builtin guide across all three flavors, normalizing only the differences that are meant to exist, and fails the build on any other divergence — the failure mode that had let one flavor sit four months behind the others.
+
+- **Stacked epics are visible.** Creating an epic on top of an unlanded epic branch surfaces the full ancestry chain (depth, not one level) at creation and in `epic_status`, derived live from git topology so it cannot drift.
+
+- **The GitHub-issues sweep is now a skill instead of folklore.** `cas-github-issues` ships as a builtin for every harness: dedupe double-filed copies, verify-and-close fixed claims, task new issues into the active github-issues epic (creating a successor epic when none is open — never tasking into a closed one), comment each issue with its task ID, unblock chained tasks when lanes merge, and file defects observed since the last sweep.
+
+- **Long-running services get a registry instead of an ambush.** `server_start`/`server_stop`/`server_list` register agent-launched servers with ownership, logs, and a pid-identity fingerprint; registered shared servers live in their own cgroup scope so worker teardown deliberately spares them, and `stop` refuses to signal a reused pid rather than killing a bystander.
+- **Worker teardown now takes the whole process tree.** Everything a worker spawns dies with it — by process group everywhere, and by cgroup subtree on delegated cgroup-v2 hosts — so escaped `npm run dev`-style stragglers no longer outlive their worker. `gc_report`/`gc_cleanup` additionally sweep dead-parent processes and stale port squatters.
+- **A design-spec skill and a release-notes rubric** ship as builtins for every harness, so projects inherit a DESIGN.md generator and a publication rubric instead of reinventing them.
+
+### Investigated
+
+- **Dev-profile `split-debuginfo` measured end to end and rejected.** With mold and `debug = 1` already in place it buys no link time, no cold-build time, and no net disk at measurable scale; `packed` is strictly worse. Full numbers on the issue.
+
 ## [2.40.0] - 2026-08-04
 
 ### Changed
+
 - **The default worker tier is now `gpt-5.6-terra` at high effort.** The previous default is reserved for heavy and frontier work, and the supervisor guidance, model-selection reference and code-review workflow were retiered to match. Current Codex model slugs are documented alongside, so the available options are discoverable rather than folklore.
 
 ### Fixed
+
 - **Releases now publish a macOS binary.** The release workflow built only `x86_64-unknown-linux-gnu`, so a tag produced a single asset — while the local release script targets both platforms and the Homebrew formula requests `cas-aarch64-apple-darwin.tar.gz`. Mac users had no download path from a published release. A macOS job now builds and packages that artifact, using the pinned runner and explicit Xcode selection that Zig requires to link against a compatible SDK. The release step depends on both builds, so a macOS failure blocks the release rather than publishing a partial one — silently shipping an incomplete release is the defect, not the mitigation.
 
 ## [2.39.0] - 2026-08-04
 
 ### Fixed
+
 - **Cross-machine sync actually runs.** The automatic sync path pushed personal changes and then pulled, with no team-queue drain between them, so team-scoped rows were never attempted at all — thousands accumulated over a month showing zero retries and no error, which reads as "nothing to do" rather than "never tried". The drain now runs between push and pull, failures record a retry count and an error per row, and a stalled queue is distinguishable from an idle one.
 - **Filesystem locks are released across `fork`.** Guards released by closing their descriptor, but POSIX `flock` releases only when every descriptor sharing an open file description closes — and `fork` hands the child a duplicate. A parent dropping its guard released nothing while any forked child survived, producing worktrees and delivery targets held by operations that had already finished, with no live holder to point at. `FD_CLOEXEC` does not help, because it acts on `exec` rather than `fork`. Four call sites now issue an explicit `LOCK_UN` before close in a non-panicking `Drop`; five others already did so, and the fix converges on the pattern that was already the majority.
 - **Concurrent atomic writes no longer delete each other's work.** The temporary filename combined only the target name, the process id and a wall-clock timestamp, so same-process writers could collide when clock resolution is coarse — and the loser's unconditional cleanup removed the winner's file, failing a function whose entire purpose is atomicity. Naming now uses a process-local atomic counter, and cleanup is armed only after `create_new` proves ownership, so a collision degrades to a harmless retry instead of corrupting a peer.
@@ -2717,6 +2916,7 @@ Tagged but not published; these changes ship in 3.28.1.
 - **Bug reports reach the project from any machine.** Filing instructions pointed at a local filesystem path that only resolves when two checkouts share a disk, and had no commit step, so reports written elsewhere were lost by construction. Filing now targets a configured issue tracker, the report is written to disk before anything is sent so a failure cannot lose it, and a local fallback states plainly that it must be committed to be visible.
 
 ### Changed
+
 - **The `mcp-server` feature is removed and the server is unconditional.** Building without it compiled out the server while the terminal layer still launched it, so the build produced a binary that advertised orchestration and exposed no tools. A flag that cannot produce a working binary is not a flag. Removing it also un-hid roughly 800 tests that had been silently excluded from every run.
 - **Continuous integration runs for the first time.** Workflows had been registered and inactive for four months. Enabling them surfaced a linker misconfigured since April, a toolchain mismatch on macOS, tests that passed only where a particular CLI happened to be installed, and a process-environment race between concurrent tests — two of which had broken on the same April day and stayed invisible for three months. The pipeline now returns in about twenty minutes, with the expensive release-profile gate moved off the per-change path onto merges and the nightly schedule.
 - **Disk-space checks share one portable helper.** Two call sites read `statvfs` independently and duplicated the platform-width arithmetic that had already caused one macOS-only build failure. They now share a single helper that exposes available and free space as distinct values, because the two callers were never asking the same question.
@@ -2724,6 +2924,7 @@ Tagged but not published; these changes ship in 3.28.1.
 ## [2.33.0] - 2026-07-28
 
 ### Fixed
+
 - **A busy Codex worker is no longer reported as stalled.** `worker_status` resolved a worker's transcript through a Claude-only path, so for Codex it always came back empty — the activity clock froze at the last CAS call and in-flight suppression never engaged. A worker running shell commands continuously read as dead, and the documented response to that is to kill it. `worker_status`, `worker_activity` and `cas factory is-wedged` now share one harness-aware resolution, and a read-only `codex exec` shell-out creating a second rollout in the same directory no longer makes that resolution ambiguous. Codex workers also report a context band again.
 - **Messages to workers actually arrive.** The prompt queue could re-select the same undeliverable batch indefinitely — 513 stranded rows, the oldest four months old, re-scanned roughly nine times a second — blocking every later message behind them. Undeliverable rows now become terminal under a bounded retry, one stuck target cannot hold up delivery to a live one, and retry budgets are measured from the first real attempt so a long wait before a worker registers no longer consumes them. Delivery to an idle worker, including urgent interrupts, is verified against the worker actually starting a turn rather than against a transport acknowledgement.
 - **Restarting a session no longer discards queued work.** The queue's cleanup pass ran on the daemon's first tick with an empty roster, irreversibly abandoning pending messages for workers that were about to be respawned — most likely to fire on exactly the restart that installs a new build. It now waits for a populated roster and counts registered agents, not only attached panes.
@@ -2738,6 +2939,7 @@ Tagged but not published; these changes ship in 3.28.1.
 ## [2.28.5] - 2026-07-22
 
 ### Fixed
+
 - **Code review no longer silently discards reviewer findings.** The deterministic merge dropped any persona finding under its confidence threshold with no trace — a P1 that mattered was lost this way and only recovered by reading raw workflow journals. The merge now returns every rejected finding in a `dropped[]` list with reviewer provenance and the exact reason (schema errors or confidence vs threshold), logs each drop, and counts them in `stats.dropped_findings`. The codex adapter is contractually required to emit schema-complete findings, and parity tests lock the standalone, embedded, and shipped copies of the merge logic together.
 - **Supervisors closing their own epics are no longer told the epic was "orphaned".** A healthy owner-closed epic now reports "epic verification: owner-closed; child tasks individually verified" in both the close response and the audit row; the orphan-recovery wording is reserved for actual orphans.
 - **Workers no longer fire stale merge requests that cross with supervisor replies.** The close-rejection guidance and worker skills now tell workers to re-read just-delivered supervisor messages before escalating (the previously suggested `queue_poll` cannot see supervisor replies), and every escalation carries the current branch tip SHA plus a freshness qualifier so a stale request is self-identifying on sight.
@@ -2750,16 +2952,19 @@ Tagged but not published; these changes ship in 3.28.1.
 ## [2.28.4] - 2026-07-22
 
 ### Added
+
 - **Large writes to memory-backed mounts now trigger a loud warning.** An agent staged 17GB of audio into a 32GB tmpfs `/tmp` over two weeks — swap saturated to 100%, the operator's apps were OOM-killed for days, and the only copies sat one reboot from loss. A new warning-only PostToolUse guardrail tracks per-session writes and usage growth on every tmpfs/ramfs mount (flocked state, single-shot fills detected on first sample, all memory-backed mounts enumerated) and tells the agent where to stage instead. Gated off the hot path: non-Write/Edit/Bash tool calls pay zero config or mount I/O.
 - **Per-host staging convention.** `[staging] large_artifact_dir` in `~/.cas/config.toml` (project config wins; only the staging section is host-scoped — operator-level hooks/telemetry/llm settings can never leak into project config). When set, supervisors and workers get a one-line SessionStart notice and the guardrail names the directory in its warning. Settable via `cas config set staging.large_artifact_dir`.
 - **Host-scoped memories.** Global memories tagged `host:<hostname>` now inject into SessionStart context for every project on that machine (query-layer filtered, size-capped under the SessionStart budgets). Machine facts like "this host's /tmp is tmpfs" no longer get trapped in the project where they were learned.
 
 ### Fixed
+
 - **Task-close lint findings now name the right file and the right line.** The close-gate structural lint reported global diff indices (so multi-file diffs pointed at the wrong line), merged separate comment blocks across files and hunks into false "commented-out code" violations, and pinned findings to a single commit so follow-up fixes could never clear them. Findings are now file-qualified with per-file line numbers, comment runs reset at file and hunk boundaries, XML block doc-headers pass, and the lint evaluates the branch tip — a fix commit clears the finding.
 
 ## [2.28.3] - 2026-07-22
 
 ### Fixed
+
 - **Factory agents can no longer wedge themselves with `AskUserQuestion`.** In factory topology the tool has no human UI surface — a supervisor calling it (as the built-in skills actively suggested for human-directed questions) got a permission prompt apparently sent to itself and paused the whole session until a human rejected it. The PreToolUse hook now denies `AskUserQuestion` for factory supervisors and workers with role-tailored guidance: ask the human in plain text and end the turn (the director relays replies); reach teammates via `coordination action=message`. The deny works even when no CAS root resolves.
 - **The intercept actually fires now: `AskUserQuestion` was missing from every PreToolUse hook matcher.** Both the default settings matcher and the factory per-role settings matcher omitted the tool, so the previous advisory reminder had been dead code in real sessions. Both matchers now include it via an intercept-only list that deliberately stays out of `permissions.allow`, with regression tests preventing matcher/handler drift. Regenerate harness settings (`cas update`) to activate.
 - **Skill guidance no longer steers agents into the trap.** The supervisor hard rules, intake reference, and the brainstorm/ideate skills (which mandated `AskUserQuestion` for blocking questions) now carry the factory-mode plain-text rule across all three harness variants (Claude, Codex, Grok).
@@ -2767,12 +2972,14 @@ Tagged but not published; these changes ship in 3.28.1.
 ## [2.28.2] - 2026-07-22
 
 ### Fixed
+
 - **The full parallel test gate is green again.** Six `supervisor_push` lifecycle tests raced with env-mutating tests in other modules (a module-local mutex can't guard a process-wide env var), poisoning a shared lock and failing every default-parallelism `cargo test` run. All `CAS_FACTORY_SESSION`-mutating tests now serialize on the process-wide poison-tolerant env lock with panic-safe restore — verified with 5 consecutive green parallel runs. Red gates mean real failures again.
 - **Supervisor rubric consistency pass.** Every copyable spawn recipe across the Claude/Codex/Grok supervisor rubrics now specifies explicit `cli`/`model`/`effort` per the GPT-5.6 Sol tier matrix, the harness `reference.md` twins are normalized (including live-worker transfer lifecycle guidance), workflow message examples include every required argument, and a guard test keeps these invariants from drifting.
 
 ## [2.28.1] - 2026-07-22
 
 ### Fixed
+
 - **`message_status` no longer contradicts itself on pre-telemetry messages.** Rows delivered before the lifecycle columns existed reported `legacy_status: Delivered` alongside `stage: enqueued` / `pending_reason: awaiting_delivery`, forcing audits back to raw logs. A one-time migration backfill hydrates `highest_stage`/`transport_delivered_at` from `processed_at` — gated to the column-creation moment only, so live legacy paths (`queue poll`/`ack`) can never be silently promoted to a fabricated "delivered" later.
 - **Lease history records the real release reason.** `release_lease_for_task` hardcoded "Task closed" for every release, so a MERGE-REQUIRED rejected close was indistinguishable from a genuine close. The reason is now threaded through the `AgentStore` trait and all call sites (awaiting-merge park, verification timeout, supervisor-review queue, reset, force-transfer, worker shutdown, preassign abort, wedged recovery, actual close).
 - **Workers posting task notes are no longer flagged stalled.** `task action=notes` now emits a `TaskNoteAdded` activity event with the caller's session (non-fatal if the event store fails), and the director's stall detector counts it as worker activity — steady note-writers no longer trip false "stalled, consider interrupting" alerts.
@@ -2780,10 +2987,12 @@ Tagged but not published; these changes ship in 3.28.1.
 ## [2.25.0] - 2026-06-30
 
 ### Changed
+
 - **Heterogeneous Claude + Codex factories now run mixed-harness workers reliably end to end (cas-3cb7).** A factory with one Codex worker and one Claude worker previously drifted in several places — assignment, status surfaces, director messages, and the verification/close path. These are now consistent across both harnesses (details under Fixed).
 - **The Nuxt + Playwright skill no longer auto-pulls workers into browser E2E during normal dev or verification (cas-e0d1).** Its description advertised proactive triggers ("Trigger when editing files under tests/…", "when investigating Playwright test failures…"), so the model invoked it as a matter of course — doubling dev/verification wall-clock. The description is now explicit opt-in: invoke ONLY when the operator explicitly asks for Playwright/E2E help. Playwright stays fully available locally on demand (the MCP server config is unchanged); it's just no longer a default. Both the Claude and Codex skill mirrors are updated byte-identically.
 
 ### Fixed
+
 - **Director assignment hints now name the worker, so assigning by the suggested target actually moves the task off the ready list (cas-dbbb).** The director surfaced raw session IDs as assignment targets, but assigning by ID left tasks stuck in Ready — only the worker's display name worked. Hints now use display names.
 - **`worker_status` shows worktree, branch, and git detail for Codex workers, matching Claude (cas-4491).** The Clone/git block was printed for Claude workers but silently omitted for Codex workers even when the worktree existed.
 - **The director no longer emits stale idle or close guidance after a task is already assigned or closed (cas-6aaf).** Status messages are now state-aware instead of telling a supervisor to reassign work that's in flight or close a task that's already done.
@@ -2795,16 +3004,19 @@ Tagged but not published; these changes ship in 3.28.1.
 ## [2.24.3] - 2026-06-30
 
 ### Fixed
+
 - **Pasting multi-line text into a factory pane no longer submits the first line and queues the rest (cas-5702).** The client coalesces a paste into one event (the terminal strips the bracketed-paste markers), but it was forwarding the raw bytes to the pane, so the daemon's input parser walked them one at a time and every embedded newline reached the inner CLI as an Enter key — submitting mid-paste and dropping the remainder into the prompt queue. Paste is now carried as a single control event and re-wrapped as a bracketed paste before injection (mirroring the image-drop path), so the whole block — including any embedded newlines or control bytes — lands as one literal multi-line input.
 
 ## [2.24.2] - 2026-06-30
 
 ### Fixed
+
 - **Codex factory no longer panics at INIT with "there is no reactor running" (cas-e202).** Starting a factory on the `codex` profile crashed the supervisor before any agent came up: `Pty::spawn` is a synchronous constructor, but its codex-only branch used `tokio::spawn` to drive the startup cursor-position (DSR) keep-alive, which panics when called from the factory daemon's runtime-free spawn thread. The keep-alive now runs on a detached `std::thread` with `blocking_lock`, mirroring the reader loop that already locks the same Mutex off-runtime — zero Tokio-runtime dependency. The Claude path was never affected (it has no `tokio::spawn`).
 
 ## [2.24.1] - 2026-06-26
 
 ### Fixed
+
 - **`task start` no longer jails on a merge-gated sibling task (cas-6a99).** In a supervisor-deferred-merge workflow, a worker who finished task A and hit the worktree-merge gate on close (work done, awaiting the supervisor's merge) was blocked from `task start`-ing an unrelated/bundled task B — the verification-pending guard treated *awaiting-merge* the same as *actively-verifying*. `check_pending_verification` now skips tasks flagged `pending_worktree_merge` (the worker can't resolve a merge gate); the verification jail (no approved verification) still blocks, covered by a negative control in the new regression test.
 
 ## [2.24.0] - 2026-06-26
@@ -2813,10 +3025,12 @@ Factory-reliability sprint (multi-worker EPIC). Director coordinator hardening,
 provider ergonomics, factory spec config, and cross-cutting sync/skill fixes.
 
 ### Added (this sprint)
+
 - **Provider ergonomics — `cas claude` / `cas codex` shortcuts, `cas default <provider>`, and `--default` (cas-7f2c).** Detailed entries below.
 - **`--worker-spec` / `--supervisor-spec` JSON flags + `[[factory.workers]]` / `[factory.supervisor]` TOML cascade (cas-1948).** Per-worker and per-supervisor spec config for factory spawns.
 
 ### Fixed (this sprint)
+
 - **Director coordinator no longer fabricates "completed" notices, mis-keys assignees by name, or idle-spams (cas-889d).** Root cause: the session filter compared display names against session-id-keyed assignees, dropping every in-progress task and firing false completion events each tick. Now gates completion on real task state, resolves session ids for nudges, and suppresses nudges for workers that already hold an active task.
 - **Supervisor/lead can never be nudged as an idle worker (cas-c790).** Two-layer guard in the event detector and the prompt generator.
 - **Epic + worker worktrees base off the configured trunk, not the supervisor's incidental HEAD (cas-dc28).** Warns and surfaces the chosen base SHA when HEAD diverges from trunk.
@@ -2826,6 +3040,7 @@ provider ergonomics, factory spec config, and cross-cutting sync/skill fixes.
 - **Role-based effort defaults removed from the spawn layer; Effort threaded through PtyConfig (cas-34f7f).**
 
 ### Tests (this sprint)
+
 - **MCP server worktree → parent-repo `.cas/` resolution coverage (cas-9db0).**
 - **Non-feature-gated verification-jail regression tests — Agent-tool task-verifier bypass + factory-worker exemption (cas-c496).**
 
@@ -3140,6 +3355,7 @@ After upgrading, the new gates fire on `task.close` calls. If a worker hits the 
 ### Added
 
 #### Vercel/Neon/GitHub Auto-Integration (EPIC cas-b65f)
+
 - `cas integrate <vercel|neon|github> [init|refresh|verify]` standalone subcommands.
   - **Vercel**: detects `vercel.json` / `@vercel/*` deps, fuzzy-matches via
     `mcp__vercel__list_projects`, captures team + project + env→branch mapping.
@@ -3168,58 +3384,11 @@ After upgrading, the new gates fire on `task.close` calls. If a worker hits the 
   go stale. Default off — preserves the codemap banner's signal.
 
 #### Codemap Skill (cas-4d84)
+
 - `/codemap` skill ships in `.claude/skills/codemap/`, builtins, and codex
   variant. Generates `.claude/CODEMAP.md` and resets the freshness counter
   via `cas codemap clear` after writing. Closes the long-standing gap where
   hooks referenced a `/codemap` slash command that did not exist.
-
-### Changed
-
-#### Factory Skill Bundles (cas-61af)
-- `cas-supervisor.md` split from 44 KB into a 6.8 KB SKILL.md + six
-  references (`preflight`, `intake`, `planning`, `workflow`,
-  `worker-recovery`, `reference`).
-- `cas-worker.md` split from 22 KB into a 5.7 KB SKILL.md + three
-  references (`close-gate`, `recovery`, `details`).
-- `supervisor_guidance()` and `worker_guidance()` no longer bundle
-  `cas-task-tracking`, `cas-memory-management`, or `cas-search` — those are
-  autonomous skills the agent invokes via the Skill tool. Bundled payload
-  dropped from ~61 KB / ~35 KB to ~10 KB / ~5.5 KB respectively.
-- Test ceiling at 12 KB enforces the bundle stays small enough that the
-  Claude Code harness does not truncate the SessionStart additionalContext
-  to a 2 KB preview.
-
-#### Cross-cutting Hardening (cas-fc38)
-- New `cli/integrate/fs.rs` shared module: `atomic_write`,
-  `atomic_write_create_dirs`, `read_capped` (4 MiB cap with symlink
-  rejection), `is_regular_file`, `locate_repo_root[_from]` (with `git -C`
-  discipline that resolves the inner repo on submodule / nested-worktree
-  invocations).
-- New `cli/integrate/md.rs` shared module: `escape_md_cell`,
-  `escape_md_cell_code`, `emit_cas_full_name_tag`, `parse_cas_full_name_tag`.
-- `IntegrationStatus` split: `TransportError` distinct from `Stale` so a
-  failed MCP call is no longer misreported as a stale ID.
-- All three platform handlers consume the shared helpers — atomic-write
-  semantics, symlink defense, file-size cap, markdown escaping, and
-  identity tag behave uniformly.
-
-#### Team Memories
-- `cas cloud team set|show|clear` subcommands to configure the active team
-  (UUID input; slug resolution deferred pending cloud-side endpoint).
-- `cas memory share <id>|--since <duration>|--all [--dry-run]` for retroactive
-  backfill of pre-existing personal memories to the team push queue.
-- `cas memory unshare <id>` to mark a memory `share=Private` (blocks future
-  team dual-enqueue; does not retract cloud-side copies).
-- `share: Option<ShareScope>` (`Private`/`Team`) persisted on Entry, Rule,
-  Skill, and Task via SQLite migrations `m037`/`m060`/`m082`/`m121`.
-- Automatic dual-enqueue: when a team is configured via
-  `cas cloud team set`, `cas memory remember` in any Project-scoped
-  non-Preference context queues the entry to both personal and team
-  push queues. `cas cloud sync` drains both.
-- Coarse kill-switch: `cloud.json.team_auto_promote: false` disables the
-  automatic promotion without requiring the team to be cleared.
-- Integration test suite: `team_sync_test.rs`, `memory_share_test.rs`,
-  `team_memories_e2e_test.rs` cover the full push → pull pipeline.
 
 ### Changed
 
@@ -3246,17 +3415,65 @@ After upgrading, the new gates fire on `task.close` calls. If a worker hits the 
 - Integration test suite: `team_sync_test.rs`, `memory_share_test.rs`,
   `team_memories_e2e_test.rs` cover the full push → pull pipeline.
 
-### Changed
-
 - `cas cloud team-memories`'s "no team configured" error now correctly
   directs users to `cas cloud team set <uuid>` (previously referenced a
   non-existent subcommand with `<slug>` argument).
+
+#### Factory Skill Bundles (cas-61af)
+
+- `cas-supervisor.md` split from 44 KB into a 6.8 KB SKILL.md + six
+  references (`preflight`, `intake`, `planning`, `workflow`,
+  `worker-recovery`, `reference`).
+- `cas-worker.md` split from 22 KB into a 5.7 KB SKILL.md + three
+  references (`close-gate`, `recovery`, `details`).
+- `supervisor_guidance()` and `worker_guidance()` no longer bundle
+  `cas-task-tracking`, `cas-memory-management`, or `cas-search` — those are
+  autonomous skills the agent invokes via the Skill tool. Bundled payload
+  dropped from ~61 KB / ~35 KB to ~10 KB / ~5.5 KB respectively.
+- Test ceiling at 12 KB enforces the bundle stays small enough that the
+  Claude Code harness does not truncate the SessionStart additionalContext
+  to a 2 KB preview.
+
+#### Cross-cutting Hardening (cas-fc38)
+
+- New `cli/integrate/fs.rs` shared module: `atomic_write`,
+  `atomic_write_create_dirs`, `read_capped` (4 MiB cap with symlink
+  rejection), `is_regular_file`, `locate_repo_root[_from]` (with `git -C`
+  discipline that resolves the inner repo on submodule / nested-worktree
+  invocations).
+- New `cli/integrate/md.rs` shared module: `escape_md_cell`,
+  `escape_md_cell_code`, `emit_cas_full_name_tag`, `parse_cas_full_name_tag`.
+- `IntegrationStatus` split: `TransportError` distinct from `Stale` so a
+  failed MCP call is no longer misreported as a stale ID.
+- All three platform handlers consume the shared helpers — atomic-write
+  semantics, symlink defense, file-size cap, markdown escaping, and
+  identity tag behave uniformly.
+
+#### Team Memories
+
+- `cas cloud team set|show|clear` subcommands to configure the active team
+  (UUID input; slug resolution deferred pending cloud-side endpoint).
+- `cas memory share <id>|--since <duration>|--all [--dry-run]` for retroactive
+  backfill of pre-existing personal memories to the team push queue.
+- `cas memory unshare <id>` to mark a memory `share=Private` (blocks future
+  team dual-enqueue; does not retract cloud-side copies).
+- `share: Option<ShareScope>` (`Private`/`Team`) persisted on Entry, Rule,
+  Skill, and Task via SQLite migrations `m037`/`m060`/`m082`/`m121`.
+- Automatic dual-enqueue: when a team is configured via
+  `cas cloud team set`, `cas memory remember` in any Project-scoped
+  non-Preference context queues the entry to both personal and team
+  push queues. `cas cloud sync` drains both.
+- Coarse kill-switch: `cloud.json.team_auto_promote: false` disables the
+  automatic promotion without requiring the team to be cleared.
+- Integration test suite: `team_sync_test.rs`, `memory_share_test.rs`,
+  `team_memories_e2e_test.rs` cover the full push → pull pipeline.
 
 ## [2.0.0] - 2026-04-12
 
 ### Added
 
 #### Factory System
+
 - Multi-agent factory with supervisor/worker architecture and isolated git worktrees.
 - Director event system for task dispatch, worker lifecycle, and epic completion notifications.
 - Worker startup confirmation flag to detect crash-on-startup failures.
@@ -3267,6 +3484,7 @@ After upgrading, the new gates fire on `task.close` calls. If a worker hits the 
 - Minions theme with ASCII art and themed boot screen for factory workers.
 
 #### Cloud Sync
+
 - Bidirectional cloud sync with Petra Stella Cloud — push/pull tasks, memories, rules.
 - Cloud sync queue with shutdown drain, startup push, 10s idle gate, 60s interval.
 - Circuit breaker for TLS retry spam with capped event buffer.
@@ -3275,12 +3493,14 @@ After upgrading, the new gates fire on `task.close` calls. If a worker hits the 
 - Project-scoped pull requests to prevent cross-project data leaks.
 
 #### MCP Proxy
+
 - `cas-mcp-proxy` crate — proxies upstream MCP servers (Playwright, Neon, GitHub, Vercel, Context7) through CAS. Workers get 2 tools instead of 50+.
 - Config-aware hot-reload for proxy server connections.
 - Search with keyword matching and server filtering.
 - Integration tests, catalog caching, and README.
 
 #### TUI
+
 - Tokyo Night theme variant.
 - OSC 52 clipboard copy and auto-inject on image paste.
 - `cas open` interactive TUI project picker.
@@ -3290,6 +3510,7 @@ After upgrading, the new gates fire on `task.close` calls. If a worker hits the 
 - Native terminal selection (replaces custom selection implementation).
 
 #### Compound Engineering
+
 - `cas-code-review` skill — multi-persona code review with 7 reviewer personas (correctness, testing, maintainability, project-standards + conditional security, performance, adversarial). Includes bounded autofix loop, confidence gates, fingerprint dedup, and review-to-task routing.
 - `cas-brainstorm` and `cas-ideate` skills for structured ideation.
 - `git-history-analyzer` and `issue-intelligence-analyst` agent types.
@@ -3299,6 +3520,7 @@ After upgrading, the new gates fire on `task.close` calls. If a worker hits the 
 - `execution_note` field on tasks: `test-first`, `characterization-first`, `additive-only` postures with enforcement at close.
 
 #### Skills & Agents
+
 - Comprehensive `cas-worker` skill with build failure triage, MCP connectivity guidance, tool selection guide, context exhaustion detection, task reassignment protocol, and section reorder for critical-path-first flow.
 - Adversarial supervisor posture with intake gate, scope lock, and rejection authority.
 - Partnership posture for supervisor — counter-propose, trajectory gate, situational awareness.
@@ -3308,6 +3530,7 @@ After upgrading, the new gates fire on `task.close` calls. If a worker hits the 
 - CODEMAP system — auto-maintained breadcrumb navigation map with structural change detection hooks.
 
 #### Infrastructure
+
 - Hetzner CCX23 provisioning script for remote CAS server (Ashburn VA).
 - Slack bridge: Bolt app scaffolding with per-user daemon architecture, SSE adapter, message formatter, file upload passthrough with security sanitization.
 - `cas-install.sh` — portable curl one-liner installer.
@@ -3317,6 +3540,7 @@ After upgrading, the new gates fire on `task.close` calls. If a worker hits the 
 - `cas serve` HTTP bridge for Slack integration.
 
 #### Store & Performance
+
 - Sequence table for ID generation (replaces per-insert MAX+LIKE scan).
 - SQLite `prepare_cached()` for all statement caching.
 - Jitter on SQLite write-retry backoff to break convoy pattern.
@@ -3350,21 +3574,25 @@ After upgrading, the new gates fire on `task.close` calls. If a worker hits the 
 ## [1.0.0] - 2026-03-12
 
 ### Added
+
 - Initial open-source release of CAS.
 - Factory TUI screenshot in README.
 - `.env.worktree.template` for worker environment setup.
 
 ### Changed
+
 - Release workflow updated for GitHub Actions with Homebrew auto-update.
 - MCP config sync added to `cas update` flow.
 
 ### Fixed
+
 - Migration v165 crash when `verifications` table doesn't exist.
 - Release workflow secret check moved from job-level to step script.
 
 ## [0.6.2] - 2026-02-25
 
 ### Added
+
 - Interactive terminal dialog (Ctrl+T) in factory TUI with show/hide/kill.
 - MCP proxy catalog caching for SessionStart context injection.
 - Billing interval switching buttons (monthly/yearly) with savings display.
@@ -3372,12 +3600,14 @@ After upgrading, the new gates fire on `task.close` calls. If a worker hits the 
 - `cas changelog` command to show release notes from GitHub releases.
 
 ### Changed
+
 - Cloud sync on MCP startup runs in background with 5s timeout (non-blocking).
 - Heartbeat uses shorter 5s timeout and spawn_blocking to avoid stalling async loop.
 - Refactored cloud routes: org_billing_settings → billing_settings, org_members → members.
 - Release bump workflow now requires a matching CHANGELOG.md section.
 
 ### Fixed
+
 - Debounced Ctrl+C interrupt to prevent accidental double-sends.
 - Update version check now compares versions properly.
 - Stripe portal return URL redirects back to billing page instead of settings.
@@ -3386,54 +3616,65 @@ After upgrading, the new gates fire on `task.close` calls. If a worker hits the 
 ## [0.5.7] - 2026-02-15
 
 ### Fixed
+
 - Avoided macOS factory startup crash by using subprocess daemon mode with attach/socket retries.
 - Hardened UTF-8-safe truncation behavior in touched UI/tooling paths to prevent char-boundary panics.
 
 ### Changed
+
 - Standardized release-train crate versions to `0.5.7`.
 
 ## [0.5.6] - 2026-02-15
 
 ### Fixed
+
 - Cleared clippy warnings under `-D warnings` across touched workspace crates.
 
 ### Changed
+
 - Standardized release-train crate versions to `0.5.6`.
 - Updated local git hook rustfmt invocation to use Rust 2024 edition.
 
 ## [0.5.5] - 2026-02-15
 
 ### Changed
+
 - Published `0.5.5` release and synchronized release-train crate versions.
 
 ## [0.5.4] - 2026-02-15
 
 ### Changed
+
 - Improved Supabase auth login UX and callback branding.
 
 ## [0.5.3] - 2026-02-15
 
 ### Changed
+
 - Initial release carrying Supabase auth login UX and callback branding improvements.
 
 ## [0.5.2] - 2026-02-13
 
 ### Changed
+
 - Bumped release-train versions to `0.5.2`.
 
 ## [0.5.1] - 2026-02-11
 
 ### Fixed
+
 - Fixed Sentry transport panic triggered during `cas login`.
 
 ## [0.5.0] - 2026-02-11
 
 ### Fixed
+
 - Added missing Sentry transport feature to prevent login-time crash.
 
 ## [0.4.0] - 2026-01-10
 
 ### Added
+
 - Consolidated MCP tool format with unified naming.
 - Sort and task type filtering for MCP and CLI.
 - ID-based search and CLI/MCP feature parity.
@@ -3443,12 +3684,14 @@ After upgrading, the new gates fire on `task.close` calls. If a worker hits the 
 - Statusbar anchoring support.
 
 ### Changed
+
 - Extracted `cas-core` and `cas-mcp` crates for better modularity.
 - Removed `#[tool_router]` macro from CasCore for compile-time improvement.
 - MCP enabled by default in `cas init --yes`.
 - Removed legacy MCP mode and added `list_changed` notifications.
 
 ### Fixed
+
 - Removed duplicate store implementations from `cas-cli`.
 - Fixed scope persistence in crate extraction.
 - Task verifier now uses CLI and checks project rules.
@@ -3456,6 +3699,7 @@ After upgrading, the new gates fire on `task.close` calls. If a worker hits the 
 ## [0.3.0]
 
 ### Added
+
 - Initial stable release with core functionality.
 
 [Unreleased]: https://github.com/Richards-LLC/cassy/compare/v3.7.5...HEAD

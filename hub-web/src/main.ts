@@ -1754,6 +1754,14 @@ function restoreMessageDraft(): void {
   composer.setSelectionRange(caret, caret);
 }
 
+/** A click made with a mouse (fine pointer). Browsers that do not report
+ * `pointerType` on click fall back to the device's primary pointer. */
+function finePointerClick(event: MouseEvent): boolean {
+  const pointerType = (event as Partial<PointerEvent>).pointerType;
+  if (pointerType) return pointerType === "mouse";
+  return window.matchMedia("(pointer: fine)").matches;
+}
+
 /** After a palette jump, hand focus to the opened conversation's composer
  * (restoreMessageDraft already put its caret back). Where the composer cannot
  * take focus — the terminal workspace hides it — the attached pane takes focus
@@ -2854,12 +2862,13 @@ function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | und
       const opened = openSession(machineId, session);
       // openSession paints the conversation before its first await, so its
       // composer exists now. Land there: a jump from the keyboard ends where
-      // the next keystroke belongs, not on <body>. A tap on a phone is the
-      // exception, as with the session picker: a soft keyboard over the
-      // conversation just opened hides it, so the operator lands to read it,
-      // exactly as a tap on a list row does. (Enter reaches this handler as a
-      // click with detail 0; a pointer click or tap has detail >= 1.)
-      if (phoneLayout() && event.detail > 0) return;
+      // the next keystroke belongs, not on <body>. A touch or pen tap is the
+      // exception, as with the session picker on phones: it would raise a soft
+      // keyboard over the conversation just opened, so the operator lands to
+      // read it, exactly as a tap on a list row does. Keyboard activation
+      // (Enter reaches this handler as a click with detail 0) and fine-pointer
+      // clicks land in the reply box.
+      if (event.detail > 0 && !finePointerClick(event)) return;
       focusJumpedComposer(opened);
     };
   }

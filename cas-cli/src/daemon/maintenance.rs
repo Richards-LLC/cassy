@@ -12,8 +12,8 @@ use crate::error::CasError;
 /// lifecycle hooks, so a worker may remain busy while its heartbeat path is
 /// unavailable; a process that identifies itself by argv or `CAS_AGENT_NAME`
 /// is independent liveness evidence and wins over the stale timestamp.
-/// macOS cannot perform the /proc identity scan, so worker death stays
-/// unverified there and automatic cleanup leaves the row and leases intact.
+/// macOS cannot perform the /proc identity scan. A tracked PID that still
+/// exists has unknown identity and must be kept; ESRCH proves that PID exited.
 ///
 /// Non-worker agents retain the historical heartbeat-only cleanup policy.
 pub(crate) fn heartbeat_stale_agent_should_be_reaped(
@@ -30,9 +30,12 @@ pub(crate) fn heartbeat_stale_agent_should_be_reaped(
     #[cfg(not(target_os = "linux"))]
     {
         // RealProcessTable has no identity scan without /proc. A missing
-        // match is unknown, not proof that a stale-heartbeat worker exited.
+        // match is unknown while the tracked PID exists; ESRCH is evidence
+        // that it exited. EPERM counts as existing in pid_alive.
         let _ = find_live_worker_pid;
-        false
+        agent
+            .pid
+            .is_some_and(|pid| !crate::mcp::daemon::pid_alive(pid))
     }
 }
 
@@ -506,7 +509,24 @@ mod tests {
         );
         worker.role = crate::types::AgentRole::Worker;
         assert!(!heartbeat_stale_agent_should_be_reaped(&worker, |_| None));
+        worker.pid = Some(std::process::id());
+        assert!(!heartbeat_stale_agent_should_be_reaped(&worker, |_| None));
         worker.role = crate::types::AgentRole::Supervisor;
+        assert!(heartbeat_stale_agent_should_be_reaped(&worker, |_| None));
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn stale_worker_with_exited_tracked_pid_is_reaped() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("0")
+            .spawn()
+            .expect("spawn short-lived process");
+        let pid = child.id();
+        child.wait().expect("reap short-lived process");
+        let mut worker = crate::types::Agent::new("dead-worker".into(), "dead-owl".into());
+        worker.role = crate::types::AgentRole::Worker;
+        worker.pid = Some(pid);
         assert!(heartbeat_stale_agent_should_be_reaped(&worker, |_| None));
     }
 
@@ -535,6 +555,7 @@ mod tests {
             worker_name.clone(),
         );
         worker.role = crate::types::AgentRole::Worker;
+        worker.pid = Some(child.id());
         worker.last_heartbeat = Utc::now() - chrono::Duration::seconds(601);
         worker.metadata.insert("worker_cli".to_string(), "codex".to_string());
         worker.metadata.insert(
@@ -543,7 +564,7 @@ mod tests {
         );
         store.register(&worker).expect("register stale worker");
 
-        let result = run_maintenance(&DaemonConfig {
+        let config = DaemonConfig {
             cas_root: cas_root.clone(),
             process_observations: false,
             consolidate_memories: false,
@@ -554,16 +575,23 @@ mod tests {
             index_bm25: false,
             agent_purge_age_hours: 0,
             ..DaemonConfig::default()
-        })
-        .expect("maintenance succeeds");
+        };
+        let result = run_maintenance(&config).expect("maintenance succeeds");
 
-        let _ = child.kill();
-        let _ = child.wait();
         assert_eq!(result.agents_cleaned, 0);
         assert_eq!(
             store.get(&worker.id).expect("read worker after maintenance").status,
             crate::types::AgentStatus::Active,
             "a live env-identified Codex worker must not be reaped solely for heartbeat age"
+        );
+        child.kill().expect("stop fixture worker");
+        child.wait().expect("reap fixture worker");
+        let dead_result = run_maintenance(&config).expect("maintenance handles dead worker");
+        assert_eq!(dead_result.agents_cleaned, 1);
+        assert_eq!(
+            store.get(&worker.id).expect("read worker after cleanup").status,
+            crate::types::AgentStatus::Stale,
+            "ESRCH on a tracked PID must allow cleanup"
         );
     }
 }

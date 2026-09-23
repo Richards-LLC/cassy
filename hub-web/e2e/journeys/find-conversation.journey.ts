@@ -31,6 +31,12 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     await expect(page.locator("#command-palette")).toBeHidden();
     await expect(page.getByRole("button", { name: `Send to ${OTTER}`, exact: true })).toBeVisible();
     await expect(page.locator(".conversation-host")).toContainText("gabber-studio · Studio Mac");
+    // A mouse jump lands in the opened conversation's composer too, and
+    // landing there must not freeze the shell at its pre-load state: once
+    // this first visit's lease loads, the palette offers "Release control".
+    await expect(page.getByRole("textbox", { name: "Your message" })).toBeFocused();
+    await expect(page.locator('#command-palette [data-palette-action="control"]')).toContainText("Release control");
+    await expect(page.getByRole("textbox", { name: "Your message" })).toBeFocused();
   });
 
   await journey.stage("Jump to a supervisor from the keyboard", async () => {
@@ -47,5 +53,18 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     await expect(page.locator("#command-palette")).toBeHidden();
     await expect(page.getByRole("button", { name: `Send to ${PELICAN}`, exact: true })).toBeVisible();
     await expect(page.locator(".conversation-host")).toContainText("cas-src · Atlas");
+    // Focus lands in the opened conversation's composer, so the next keystroke
+    // is part of the reply; the other conversation's draft stays its own.
+    const composer = page.getByRole("textbox", { name: "Your message" });
+    await expect(composer).toBeFocused();
+    await expect(composer).toHaveValue("");
+    await page.keyboard.type("On it");
+    await expect(composer).toHaveValue("On it");
+    await page.keyboard.press("ControlOrMeta+k");
+    await page.getByRole("searchbox", { name: "Filter commands" }).fill(OTTER);
+    await page.getByRole("searchbox", { name: "Filter commands" }).press("Enter");
+    await expect(page.getByRole("button", { name: `Send to ${OTTER}`, exact: true })).toBeVisible();
+    await expect(composer).toBeFocused();
+    await expect(composer).toHaveValue("Half a thought");
   });
 });

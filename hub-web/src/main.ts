@@ -1754,6 +1754,39 @@ function restoreMessageDraft(): void {
   composer.setSelectionRange(caret, caret);
 }
 
+/** After a palette jump, hand focus to the opened conversation's composer
+ * (restoreMessageDraft already put its caret back). The terminal workspace has
+ * no composer; there the attached pane takes focus once the attach settles,
+ * unless the operator has already moved focus somewhere themselves. */
+function focusJumpedComposer(opened: Promise<void>): void {
+  const machineId = selectedMachineId;
+  const session = selectedSession;
+  const composer = document.querySelector<HTMLTextAreaElement>("#message-text");
+  if (composer && !composer.disabled) {
+    composer.focus();
+    const landed = composer.value;
+    // A focused composer defers structural rebuilds (cas-8434), so the status
+    // and lease that load after the jump would leave the shell stale — the
+    // control command still offering "Take control" to its holder. Until the
+    // operator types, nothing is lost by flushing that rebuild and landing
+    // back in the fresh composer.
+    void opened.then(() => {
+      if (selectedMachineId !== machineId || selectedSession !== session || !deferredRender.pending) return;
+      const field = document.querySelector<HTMLTextAreaElement>("#message-text");
+      if (!field || document.activeElement !== field || field.value !== landed) return;
+      field.blur();
+      deferredRender.focusLeft();
+      document.querySelector<HTMLTextAreaElement>("#message-text")?.focus();
+    });
+    return;
+  }
+  void opened.then(() => {
+    if (selectedMachineId !== machineId || selectedSession !== session) return;
+    if (document.activeElement && document.activeElement !== document.body) return;
+    activePaneContext()?.surface.focus();
+  });
+}
+
 function syncSpeechComposer(): void {
   const mic = document.querySelector<HTMLButtonElement>("#message-mic");
   if (!mic) return;
@@ -2803,7 +2836,7 @@ function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | und
       // clicks this row with focus still in the input, and render() defers
       // the shell rebuild while an editable field inside #app has focus, so
       // the modal would stay up over the session it just opened. The toggle
-      // is not refocused — the opened session owns focus from here.
+      // is not refocused — the opened conversation's composer takes focus.
       commandPaletteOpen = false;
       palette.close();
       // close() hands focus back to whatever held it before the palette
@@ -2813,7 +2846,12 @@ function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | und
       if (restored instanceof HTMLElement && isEditableElement(restored) && app.contains(restored)) restored.blur();
       const machineId = command.dataset.paletteMachine;
       const session = command.dataset.paletteSession;
-      if (machineId && session) void openSession(machineId, session);
+      if (!machineId || !session) return;
+      const opened = openSession(machineId, session);
+      // openSession paints the conversation before its first await, so its
+      // composer exists now. Land there: a jump from the keyboard ends where
+      // the next keystroke belongs, not on <body>.
+      focusJumpedComposer(opened);
     };
   }
   for (const command of palette.querySelectorAll<HTMLButtonElement>("[data-palette-scheme]")) {

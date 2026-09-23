@@ -129,14 +129,21 @@ impl CasService {
             chrono::Utc::now(),
         )
         .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, format!("qa_waive rejected: {error}")))?;
+        // Same shape as `task action=notes note_type=decision`, so the waiver
+        // reads as a decision in every note view.
         let note = format!(
-            "[{}] Decision: independent QA waived by supervisor {supervisor} for {} (pass {}). Reason: {}",
+            "[{}] ✅ DECISION Independent QA waived by supervisor {supervisor} for @{} (pass {}). Reason: {}",
             chrono::Utc::now().format("%Y-%m-%d %H:%M"),
             pass.head8(),
             pass.id,
             reason.trim(),
         );
-        self.append_task_note(task_id, &note);
+        if let Err(error) = self.inner.open_task_store()?.append_note(task_id, &note) {
+            return Err(Self::error(
+                ErrorCode::INTERNAL_ERROR,
+                format!("qa_waive recorded pass {} but the decision note failed: {error}", pass.id),
+            ));
+        }
         Ok(Self::success(format!(
             "Independent QA waived for {task_id} @{} (pass {}). The waiver is logged on the task; merge and close accept this exact tip only.",
             pass.head8(),
@@ -294,20 +301,6 @@ impl CasService {
             Some(&cas_store::QueueOrigin::Daemon),
         ) {
             tracing::warn!(target = %target, error = %error, "cas-619f: QA verdict notice not queued");
-        }
-    }
-
-    fn append_task_note(&self, task_id: &str, note: &str) {
-        let Ok(store) = self.inner.open_task_store() else {
-            return;
-        };
-        if let Ok(mut task) = store.get(task_id) {
-            task.notes = if task.notes.is_empty() {
-                note.to_string()
-            } else {
-                format!("{}\n\n{note}", task.notes)
-            };
-            let _ = store.update(&task);
         }
     }
 }

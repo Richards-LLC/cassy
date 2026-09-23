@@ -43,26 +43,33 @@ merge. The pass has to live there.
 
 ## 1. Which deliveries are user-facing
 
-A non-epic task needs the pass when any of these hold:
+Decided at the park, from the delivery diff (`merge-base..factory tip`):
 
-1. `demo_statement` is non-empty.
-2. It carries a label in `qa.user_facing_labels` (default
-   `ui, hub, cli-ux, commander, frontend`).
-3. Its delivery diff (the parked anchor base to the factory branch tip)
-   touches a path that matches `qa.user_facing_paths`.
+1. **Docs, tests and CI only → never gated**, even with a demo_statement.
+   Non-surface paths: `docs/`, `tests/`, `test/`, `e2e/`, `fixtures/`,
+   `.github/` and other CI dirs, `*.md`, `*.test.*`, `*.spec.*`,
+   `*_test(s).rs`, `playwright.config.*`, `scripts/test-*`.
+2. Otherwise eligible when any of these hold:
+   - a surface path touches a journey in the project's catalog. Rust
+     calls `scripts/journeys-for-diff.py --paths` (cas-9be7) when the
+     catalog and helper exist.
+   - a surface path matches `qa.user_facing_paths` (generic web globs by
+     default: `**/*.{html,css,scss,vue,svelte,tsx,jsx}`), for projects
+     without a catalog.
+   - the task has a `demo_statement`.
+3. Labels alone do not gate.
 
-`qa.user_facing_paths` is a new config key holding repo-relative globs. It
-defaults to generic web-surface patterns: `**/*.html`, `**/*.css`,
-`**/*.scss`, `**/*.vue`, `**/*.svelte`, `**/*.tsx`, `**/*.jsx`, and
-`**/DESIGN.md`. Projects extend it. cas-src adds `hub-web/**` and `site/**`.
+The merge gates bind only tasks with a recorded round. The park is the
+place that saw the diff, so a docs-only delivery that never got a round is
+never blocked. The close backstop handles a delivery that merged before it
+ever parked: it judges eligibility from the paths that merge integrated.
 
-Rust decides eligibility from config alone. It does not shell out to the
-journey helper at park time. Journey selection happens inside the pass (§4).
+A supervisor can waive the pass with `verification action=qa_waive` and a
+non-empty reason. The waiver is:
 
-A supervisor can waive the pass per task with `supervisor_override=true` and
-a reason. The waiver is logged as a decision note and recorded on the pass as
-`state=waived` with the supervisor as issuer, so the gates treat it as
-recorded, not forgotten.
+- appended as a `✅ DECISION` task note;
+- recorded on the pass as `state=waived` with the supervisor as issuer;
+- listed with its reason in `coordination action=epic_status`.
 
 ## 2. Trigger: the QA dispatch
 

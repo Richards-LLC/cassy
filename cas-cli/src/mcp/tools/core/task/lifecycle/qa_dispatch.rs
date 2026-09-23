@@ -87,13 +87,34 @@ impl CasCore {
         let implementer = task.assignee.as_deref()?;
         let branch = format!("factory/{implementer}");
         let changed = match changed_paths_for_delivery(repo, parent_branch, &branch) {
-            Ok(paths) => paths,
+            Ok(paths) => Some(paths),
             Err(error) => {
-                tracing::warn!(task_id = %task.id, error = %error, "cas-619f: delivery diff unavailable; eligibility uses labels and demo_statement only");
-                Vec::new()
+                tracing::warn!(task_id = %task.id, error = %error, "cas-619f: delivery diff unavailable; eligibility uses the demo_statement only");
+                None
             }
         };
-        let eligibility = delivery_eligibility(task, &qa, &changed);
+        self.independent_qa_for_paths(task, repo, parent_branch, head, changed)
+    }
+
+    /// Shared tail of the park and the close backstop: decide eligibility
+    /// from a known (or unknown) change set, then open the round.
+    fn independent_qa_for_paths(
+        &self,
+        task: &Task,
+        repo: &Path,
+        parent_branch: &str,
+        head: Option<&str>,
+        changed: Option<Vec<String>>,
+    ) -> Option<String> {
+        let config = crate::config::Config::load(&self.cas_root).ok()?;
+        let qa = config.qa();
+        let implementer = task.assignee.as_deref()?;
+        let branch = format!("factory/{implementer}");
+        let journeys = changed
+            .as_deref()
+            .map(|paths| crate::qa_pass::catalog_journeys_for(repo, paths))
+            .unwrap_or_default();
+        let eligibility = delivery_eligibility(task, &qa, changed.as_deref(), &journeys);
         if !eligibility.is_eligible() {
             return None;
         }
@@ -217,10 +238,10 @@ impl CasCore {
     ) -> Option<String> {
         let config = crate::config::Config::load(&self.cas_root).ok()?;
         let qa = config.qa();
-        let passes = cas_store::list_qa_passes(&self.cas_root, &task.id).unwrap_or_default();
-        if !crate::qa_pass::gate_applies(task, &qa, &passes) {
+        if !qa.independent_pass || task.assignee.is_none() {
             return None;
         }
+        let passes = cas_store::list_qa_passes(&self.cas_root, &task.id).unwrap_or_default();
         let covered = passes.iter().any(|pass| {
             pass.state.satisfies_gate()
                 && std::process::Command::new("git")
@@ -232,8 +253,6 @@ impl CasCore {
         if covered {
             return None;
         }
-        // Merged without a verdict (or not yet parked): open a round on the
-        // delivered tip so the pass can still happen, then refuse the close.
         let head = task
             .deliverables
             .factory_branch_anchor
@@ -243,8 +262,25 @@ impl CasCore {
                     super::close_ops::resolve_branch_sha(repo, &format!("factory/{name}"))
                 })
             });
+        // Judge from what the delivery actually integrated, so a
+        // docs/test/CI-only change closes freely even when it merged before
+        // it ever parked through the gate.
+        let changed = head
+            .as_deref()
+            .and_then(|head| crate::qa_pass::integrated_paths(repo, head, target_branch));
+        if passes.is_empty() {
+            let journeys = changed
+                .as_deref()
+                .map(|paths| crate::qa_pass::catalog_journeys_for(repo, paths))
+                .unwrap_or_default();
+            if !delivery_eligibility(task, &qa, changed.as_deref(), &journeys).is_eligible() {
+                return None;
+            }
+        } else if !crate::qa_pass::gate_applies(task, &qa, &passes) {
+            return None;
+        }
         let dispatch = self
-            .dispatch_independent_qa(task, repo, target_branch, head.as_deref())
+            .independent_qa_for_paths(task, repo, target_branch, head.as_deref(), changed)
             .unwrap_or_default();
         Some(format!(
             "INDEPENDENT QA REQUIRED: {} is user-facing and no passed or waived QA round covers a tip \

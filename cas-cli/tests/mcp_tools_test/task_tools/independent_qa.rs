@@ -396,3 +396,97 @@ fn reopened_to_in_progress(cas_dir: &Path, task_id: &str) {
     task.status = TaskStatus::InProgress;
     tasks.update(&task).unwrap();
 }
+
+#[tokio::test]
+async fn docs_and_test_only_deliveries_are_never_gated_even_with_a_demo() {
+    let (temp, core, repo, _) = fixture();
+    let _env = env_test_lock();
+    let cas_dir = repo.join(".cas");
+    let _keep = &temp;
+    git(&repo, &["checkout", "-q", "-b", "factory/docs-agent", "main"]);
+    commit_file(&repo, "docs/qa/journeys.md", "# journeys\n", "docs");
+    commit_file(&repo, "web/e2e/reply.journey.spec.ts", "test('x', () => {});\n", "spec");
+    commit_file(&repo, ".github/workflows/ci.yml", "on: push\n", "ci");
+    let tasks = open_task_store(&cas_dir).unwrap();
+    let mut task = cas::types::Task::new("cas-doc01".to_string(), "Journey docs".to_string());
+    task.status = TaskStatus::InProgress;
+    task.assignee = Some("docs-agent".to_string());
+    task.demo_statement = "Read the journey catalog".to_string();
+    tasks.add(&task).unwrap();
+
+    let parked = close_text(&core, "cas-doc01").await;
+    assert!(parked.contains("MERGE REQUIRED"), "{parked}");
+    assert!(!parked.contains("INDEPENDENT QA"), "{parked}");
+    assert!(cas_store::list_qa_passes(&cas_dir, "cas-doc01").unwrap().is_empty());
+    assert!(
+        cas::qa_pass::supervisor_merge_refusal(&cas_dir, &repo, "git merge factory/docs-agent")
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn supervisor_waiver_needs_a_reason_logs_a_decision_and_shows_in_epic_status() {
+    let (temp, core, repo, task_id) = fixture();
+    let _env = env_test_lock();
+    let cas_dir = repo.join(".cas");
+    let _keep = &temp;
+    close_text(&core, &task_id).await;
+    let service = CasService::new(core.clone(), None);
+
+    let previous_role = std::env::var("CAS_AGENT_ROLE").ok();
+    // SAFETY: env_test_lock is held for the whole test body.
+    unsafe { std::env::set_var("CAS_AGENT_ROLE", "supervisor") };
+    let without_reason = service
+        .verification(Parameters(verification(serde_json::json!({
+            "action": "qa_waive",
+            "task_id": task_id,
+            "summary": "   ",
+        }))))
+        .await;
+    let waived = service
+        .verification(Parameters(verification(serde_json::json!({
+            "action": "qa_waive",
+            "task_id": task_id,
+            "summary": "copy-only tweak reviewed live with the operator",
+        }))))
+        .await;
+    // SAFETY: as above.
+    unsafe {
+        match previous_role {
+            Some(role) => std::env::set_var("CAS_AGENT_ROLE", role),
+            None => std::env::remove_var("CAS_AGENT_ROLE"),
+        }
+    }
+    let refused = without_reason.expect_err("a waiver without a reason is refused");
+    assert!(refused.message.contains("reason"), "{}", refused.message);
+    let waived = extract_text(waived.expect("supervisor may waive with a reason"));
+    assert!(waived.contains("waived"), "{waived}");
+
+    let task = open_task_store(&cas_dir).unwrap().get(&task_id).unwrap();
+    assert!(
+        task.notes.contains("✅ DECISION Independent QA waived")
+            && task.notes.contains("copy-only tweak reviewed live"),
+        "{}",
+        task.notes
+    );
+    assert!(
+        cas::qa_pass::supervisor_merge_refusal(&cas_dir, &repo, "git merge factory/test-agent")
+            .is_none(),
+        "the waived tip may merge"
+    );
+    let section = cas::qa_pass::render_epic_qa_section(&cas_dir, &[task]);
+    assert!(section.contains("Independent QA:"), "{section}");
+    assert!(section.contains("WAIVED by"), "{section}");
+    assert!(section.contains("copy-only tweak reviewed live"), "{section}");
+
+    // Workers cannot waive.
+    let worker_waive = service
+        .verification(Parameters(verification(serde_json::json!({
+            "action": "qa_waive",
+            "task_id": task_id,
+            "summary": "trust me",
+        }))))
+        .await
+        .expect_err("qa_waive is supervisor-only");
+    assert!(worker_waive.message.contains("supervisor-only"), "{}", worker_waive.message);
+}

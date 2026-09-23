@@ -27,12 +27,44 @@ impl QaEligibility {
     }
 }
 
+/// Paths that never make a delivery user-facing: documentation, tests and
+/// test harnesses, fixtures, and CI configuration. A delivery made only of
+/// these is never gated, whatever its demo_statement says.
+pub fn is_non_surface_path(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    let file = lower.rsplit('/').next().unwrap_or(&lower);
+    let in_dir = |dir: &str| lower.starts_with(&format!("{dir}/")) || lower.contains(&format!("/{dir}/"));
+    ["docs", "doc", "tests", "test", "__tests__", "e2e", "fixtures", "testdata", ".github", ".circleci", ".gitlab", ".buildkite"]
+        .iter()
+        .any(|dir| in_dir(dir))
+        || [".md", ".mdx", ".rst", ".adoc"].iter().any(|ext| file.ends_with(ext))
+        || file.contains(".test.")
+        || file.contains(".spec.")
+        || file.ends_with("_test.rs")
+        || file.ends_with("_tests.rs")
+        || file.ends_with("_test.go")
+        || (file.starts_with("test_") && file.ends_with(".py"))
+        || file.starts_with("playwright.config.")
+        || file.starts_with("vitest.config.")
+        || file.starts_with("jest.config.")
+        || file == ".gitlab-ci.yml"
+        || lower.starts_with("scripts/test-")
+}
+
 /// Decide whether a parked delivery needs an independent QA pass.
 ///
-/// Epics and QA work items themselves are never eligible (a QA task reviews a
-/// delivery; it is not one). Otherwise any of: a demo_statement, a
-/// user-facing label, or a changed path matching `qa.user_facing_paths`.
-pub fn delivery_eligibility(task: &Task, qa: &QaConfig, changed_paths: &[String]) -> QaEligibility {
+/// `changed_paths` is the delivery diff when Cassy could compute it.
+/// `journeys` are the catalog journeys (`scripts/journeys-for-diff.py`) its
+/// surface paths touch. Eligible when the diff touches a user-facing
+/// surface (a catalog journey or a `qa.user_facing_paths` glob) or the task
+/// carries a demo_statement — except that a known diff made only of docs,
+/// tests or CI is never gated. Epics and QA work items are never eligible.
+pub fn delivery_eligibility(
+    task: &Task,
+    qa: &QaConfig,
+    changed_paths: Option<&[String]>,
+    journeys: &[String],
+) -> QaEligibility {
     let mut reasons = Vec::new();
     if !qa.independent_pass
         || task.task_type == TaskType::Epic
@@ -40,30 +72,70 @@ pub fn delivery_eligibility(task: &Task, qa: &QaConfig, changed_paths: &[String]
     {
         return QaEligibility { reasons };
     }
+    let surface_paths: Vec<String> = changed_paths
+        .unwrap_or(&[])
+        .iter()
+        .filter(|path| !is_non_surface_path(path))
+        .cloned()
+        .collect();
+    if let Some(paths) = changed_paths
+        && !paths.is_empty()
+        && surface_paths.is_empty()
+    {
+        return QaEligibility { reasons };
+    }
+    if !journeys.is_empty() {
+        reasons.push(format!("journeys:{}", journeys.join(",")));
+    }
+    if let Some((path, glob)) = first_user_facing_path(&surface_paths, &qa.user_facing_paths) {
+        reasons.push(format!("path:{path} ({glob})"));
+    }
     if !task.demo_statement.trim().is_empty() {
         reasons.push("demo_statement".to_string());
-    }
-    if let Some(label) = task.labels.iter().find(|label| {
-        qa.user_facing_labels
-            .iter()
-            .any(|configured| configured.eq_ignore_ascii_case(label.trim()))
-    }) {
-        reasons.push(format!("label:{label}"));
-    }
-    if let Some((path, glob)) = first_user_facing_path(changed_paths, &qa.user_facing_paths) {
-        reasons.push(format!("path:{path} ({glob})"));
     }
     QaEligibility { reasons }
 }
 
-/// Whether a task is bound by the independent QA gates: it already has a
-/// QA round on record (the park found it user-facing, including by path), or
-/// it is user-facing by demo_statement or label.
+/// Catalog journeys the given paths touch, via the project's own
+/// `scripts/journeys-for-diff.py --paths` (cas-9be7). Empty when the project
+/// has no catalog or the helper fails; config globs still apply then.
+pub fn catalog_journeys_for(repo: &Path, paths: &[String]) -> Vec<String> {
+    let script = repo.join("scripts/journeys-for-diff.py");
+    let surface: Vec<&String> = paths.iter().filter(|path| !is_non_surface_path(path)).collect();
+    if surface.is_empty() || !script.is_file() || !repo.join("docs/qa/journeys.md").is_file() {
+        return Vec::new();
+    }
+    let output = Command::new("python3")
+        .arg(&script)
+        .arg("--paths")
+        .args(surface)
+        .env("CAS_JOURNEYS_ROOT", repo)
+        .current_dir(repo)
+        .output();
+    let Ok(output) = output else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    serde_json::from_slice::<serde_json::Value>(&output.stdout)
+        .ok()
+        .and_then(|value| value.get("journeys").and_then(|j| j.as_array()).cloned())
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|journey| journey.get("id").and_then(|id| id.as_str()).map(str::to_string))
+        .collect()
+}
+
+/// Whether a task is bound by the merge gates: the park (which saw the
+/// delivery diff) found it user-facing and opened a round. Deciding from the
+/// recorded round keeps docs/test/CI-only deliveries ungated even when they
+/// carry a demo_statement.
 pub fn gate_applies(task: &Task, qa: &QaConfig, passes: &[QaPass]) -> bool {
     qa.independent_pass
         && task.task_type != TaskType::Epic
         && !task.labels.iter().any(|label| label == QA_PASS_LABEL)
-        && (!passes.is_empty() || delivery_eligibility(task, qa, &[]).is_eligible())
+        && !passes.is_empty()
 }
 
 /// Merge gate for one exact tip: a passed or waived round must cover `head`.
@@ -257,6 +329,95 @@ pub fn changed_paths_for_delivery(
         .collect())
 }
 
+/// Paths a delivery brought into `target` after it merged: the change set of
+/// the first merge on the ancestry path from `head` to `target`, or
+/// `merge-base..head` when the tip has not merged. `None` when neither can
+/// be computed (fast-forward merges carry no merge commit).
+pub fn integrated_paths(repo: &Path, head: &str, target: &str) -> Option<Vec<String>> {
+    let git = |args: &[&str]| -> Option<String> {
+        let out = Command::new("git").args(args).current_dir(repo).output().ok()?;
+        out.status
+            .success()
+            .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+    };
+    let merged = Command::new("git")
+        .args(["merge-base", "--is-ancestor", head, target])
+        .current_dir(repo)
+        .status()
+        .is_ok_and(|status| status.success());
+    let (from, to) = if merged {
+        let merges = git(&[
+            "rev-list",
+            "--ancestry-path",
+            "--merges",
+            "--reverse",
+            &format!("{head}..{target}"),
+        ])?;
+        let merge = merges.lines().next()?.trim().to_string();
+        (format!("{merge}^1"), merge)
+    } else {
+        (git(&["merge-base", target, head])?, head.to_string())
+    };
+    let diff = git(&["diff", "--name-only", &from, &to])?;
+    Some(
+        diff.lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(ToOwned::to_owned)
+            .collect(),
+    )
+}
+
+/// `epic_status` section listing each child's latest independent QA round
+/// (cas-619f). Waivers show who waived and why. Empty when no child has one.
+pub fn render_epic_qa_section(cas_root: &Path, children: &[Task]) -> String {
+    let mut lines = Vec::new();
+    for child in children {
+        let Ok(passes) = cas_store::list_qa_passes(cas_root, &child.id) else {
+            continue;
+        };
+        let Some(latest) = passes.first() else {
+            continue;
+        };
+        let detail = match latest.state {
+            cas_types::QaPassState::Waived => format!(
+                "WAIVED by {} — {}",
+                latest.issuer_agent_id.as_deref().unwrap_or("supervisor"),
+                latest.summary.as_deref().unwrap_or("(no reason recorded)")
+            ),
+            cas_types::QaPassState::Passed | cas_types::QaPassState::Failed => format!(
+                "{} by {}{}",
+                latest.state,
+                latest.reviewer_agent_id.as_deref().unwrap_or("-"),
+                latest
+                    .ledger_path
+                    .as_deref()
+                    .map(|ledger| format!(" — {ledger}"))
+                    .unwrap_or_default()
+            ),
+            state => format!(
+                "{state}{} — QA task {}",
+                latest
+                    .reviewer_agent_id
+                    .as_deref()
+                    .map(|reviewer| format!(" by {reviewer}"))
+                    .unwrap_or_default(),
+                latest.qa_task_id.as_deref().unwrap_or("-")
+            ),
+        };
+        lines.push(format!(
+            "- {} round {} @{}: {detail}",
+            child.id,
+            latest.round,
+            latest.head8()
+        ));
+    }
+    if lines.is_empty() {
+        return String::new();
+    }
+    format!("\n\nIndependent QA:\n{}\n", lines.join("\n"))
+}
+
 /// Title of the QA work item for one round.
 pub fn qa_task_title(delivery: &Task, pass: &QaPass) -> String {
     let mut title = delivery.title.trim().to_string();
@@ -343,46 +504,80 @@ mod tests {
     }
 
     #[test]
-    fn eligibility_from_demo_label_or_path() {
+    fn eligibility_from_demo_journeys_or_surface_path() {
         let qa = QaConfig::default();
-        let mut plain = task();
-        assert!(!delivery_eligibility(&plain, &qa, &paths(&["src/lib.rs"])).is_eligible());
+        let backend = paths(&["cas-cli/src/lib.rs"]);
+        assert!(!delivery_eligibility(&task(), &qa, Some(&backend), &[]).is_eligible());
 
-        plain.demo_statement = "Type a reply and see it land".to_string();
+        let mut demo = task();
+        demo.demo_statement = "Type a reply and see it land".to_string();
         assert_eq!(
-            delivery_eligibility(&plain, &qa, &[]).reasons,
+            delivery_eligibility(&demo, &qa, Some(&backend), &[]).reasons,
             vec!["demo_statement".to_string()]
         );
+        // Unknown diff: the demo statement alone still qualifies.
+        assert!(delivery_eligibility(&demo, &qa, None, &[]).is_eligible());
 
-        let mut labelled = task();
-        labelled.labels = vec!["Hub".to_string()];
+        let css = paths(&["docs/x.md", "hub-web/src/a.css"]);
         assert_eq!(
-            delivery_eligibility(&labelled, &qa, &[]).reasons,
-            vec!["label:Hub".to_string()]
+            delivery_eligibility(&task(), &qa, Some(&css), &[]).reasons,
+            vec!["path:hub-web/src/a.css (**/*.css)".to_string()]
         );
+        let ts = paths(&["hub-web/src/composer-markup.ts"]);
+        assert_eq!(
+            delivery_eligibility(&task(), &qa, Some(&ts), &["HUB-J5".to_string()]).reasons,
+            vec!["journeys:HUB-J5".to_string()]
+        );
+    }
 
-        let pathy = task();
-        let reasons = delivery_eligibility(&pathy, &qa, &paths(&["docs/x.md", "hub-web/src/a.css"]))
-            .reasons;
-        assert_eq!(reasons, vec!["path:hub-web/src/a.css (**/*.css)".to_string()]);
+    #[test]
+    fn labels_alone_do_not_gate() {
+        let qa = QaConfig::default();
+        let mut labelled = task();
+        labelled.labels = vec!["ui".to_string(), "hub".to_string()];
+        let backend = paths(&["cas-cli/src/lib.rs"]);
+        assert!(!delivery_eligibility(&labelled, &qa, Some(&backend), &[]).is_eligible());
+    }
+
+    #[test]
+    fn docs_test_and_ci_only_deliveries_are_never_gated() {
+        let qa = QaConfig::default();
+        let mut demo = task();
+        demo.demo_statement = "Reply lands".to_string();
+        for only in [
+            vec!["docs/qa/journeys.md", "README.md"],
+            vec!["hub-web/e2e/journeys/reply.journey.spec.ts", "hub-web/playwright.config.ts"],
+            vec!["cas-cli/tests/cli_test.rs", "crates/x/src/foo_tests.rs"],
+            vec![".github/workflows/ci.yml", "scripts/test-ci-test-tiers.sh"],
+            vec!["hub-web/src/composer.test.ts", "fixtures/hub/a.json", "hub-web/DESIGN.md"],
+        ] {
+            let changed = paths(&only);
+            assert!(
+                !delivery_eligibility(&demo, &qa, Some(&changed), &["HUB-J1".to_string()])
+                    .is_eligible(),
+                "{only:?} must never be gated"
+            );
+        }
+        // One real surface file among them is enough.
+        let mixed = paths(&["docs/a.md", "hub-web/src/styles.css"]);
+        assert!(delivery_eligibility(&task(), &qa, Some(&mixed), &[]).is_eligible());
     }
 
     #[test]
     fn epics_qa_items_and_disabled_config_are_never_eligible() {
         let mut qa = QaConfig::default();
+        let css = paths(&["a.css"]);
         let mut epic = task();
         epic.task_type = TaskType::Epic;
         epic.demo_statement = "demo".to_string();
-        assert!(!delivery_eligibility(&epic, &qa, &[]).is_eligible());
+        assert!(!delivery_eligibility(&epic, &qa, Some(&css), &[]).is_eligible());
 
         let mut qa_item = task();
-        qa_item.labels = vec![QA_PASS_LABEL.to_string(), "ui".to_string()];
-        assert!(!delivery_eligibility(&qa_item, &qa, &[]).is_eligible());
+        qa_item.labels = vec![QA_PASS_LABEL.to_string()];
+        assert!(!delivery_eligibility(&qa_item, &qa, Some(&css), &[]).is_eligible());
 
-        let mut demo = task();
-        demo.demo_statement = "demo".to_string();
         qa.independent_pass = false;
-        assert!(!delivery_eligibility(&demo, &qa, &[]).is_eligible());
+        assert!(!delivery_eligibility(&task(), &qa, Some(&css), &[]).is_eligible());
     }
 
     fn pass(head: &str, state: cas_types::QaPassState) -> QaPass {
@@ -414,9 +609,9 @@ mod tests {
         let mut demo = task();
         demo.demo_statement = "Reply lands".to_string();
 
-        let refusal = merge_gate(&demo, &qa, &[], "aaaa1111bbbb").unwrap_err();
-        assert!(refusal.contains("INDEPENDENT QA REQUIRED"), "{refusal}");
-        assert!(refusal.contains("no round has been dispatched"), "{refusal}");
+        // No recorded round: the park judged it not user-facing (or it
+        // predates the gate), so merge is not blocked here.
+        assert!(merge_gate(&demo, &qa, &[], "aaaa1111bbbb").is_ok());
 
         let pending = merge_gate(&demo, &qa, &[pass("aaaa1111bbbb", Pending)], "aaaa1111bbbb")
             .unwrap_err();
@@ -431,7 +626,7 @@ mod tests {
     }
 
     #[test]
-    fn merge_gate_ignores_backend_tasks_without_rounds() {
+    fn merge_gate_binds_only_recorded_rounds() {
         let qa = QaConfig::default();
         assert!(merge_gate(&task(), &qa, &[], "aaaa1111").is_ok());
         // A path-eligible delivery is bound once the park recorded a round.
@@ -446,9 +641,15 @@ mod tests {
         );
         let mut disabled = QaConfig::default();
         disabled.independent_pass = false;
-        let mut demo = task();
-        demo.demo_statement = "x".to_string();
-        assert!(merge_gate(&demo, &disabled, &[], "aaaa1111").is_ok());
+        assert!(
+            merge_gate(
+                &task(),
+                &disabled,
+                &[pass("aaaa1111", cas_types::QaPassState::Pending)],
+                "aaaa1111"
+            )
+            .is_ok()
+        );
     }
 
     #[test]

@@ -306,7 +306,6 @@ pub fn default_user_facing_paths() -> Vec<String> {
         "**/*.svelte",
         "**/*.tsx",
         "**/*.jsx",
-        "**/DESIGN.md",
     ]
     .into_iter()
     .map(ToOwned::to_owned)

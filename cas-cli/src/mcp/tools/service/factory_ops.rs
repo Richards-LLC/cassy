@@ -11680,7 +11680,7 @@ mod tests {
                 ));
             }
         }
-        for lane in ["standard", "heavy"] {
+        for lane in ["standard"] {
             let (specs, _, _) = build_lane_spawn_specs(
                 1,
                 lane,
@@ -11733,6 +11733,24 @@ mod tests {
             );
             assert_eq!(agent.metadata["worker_cli"], launched_cli, "{label}");
         }
+    }
+
+    #[test]
+    fn heavy_lane_spawn_specs_use_claude_opus_primary() {
+        let (specs, recipe, warnings) = build_lane_spawn_specs(
+            1,
+            "heavy",
+            None,
+            None,
+            &cas_factory::CapabilitySnapshot::default(),
+        )
+        .unwrap();
+        assert_eq!(recipe, "claude_opus_5_5");
+        assert!(warnings.is_empty());
+        assert_eq!(specs[0].cli, cas_mux::SupervisorCli::Claude);
+        assert_eq!(specs[0].model.as_deref(), Some("claude-opus-5-5"));
+        assert_eq!(specs[0].effort, Some(cas_mux::Effort::High));
+        assert!(spawn_specs_summary(&specs, &[]).contains(": claude model=claude-opus-5-5"));
     }
 
     #[test]
@@ -11815,7 +11833,7 @@ mod tests {
     }
 
     #[test]
-    fn taste_lane_spawn_specs_and_explicit_fable_route_agree() {
+    fn taste_lane_spawn_specs_use_opus_and_explicit_fable_remains_valid() {
         let _home = TestEnvGuard::temp_home();
         let (specs, recipe, warnings) = build_lane_spawn_specs(
             2,
@@ -11825,15 +11843,15 @@ mod tests {
             &cas_factory::CapabilitySnapshot::default(),
         )
         .unwrap();
-        assert_eq!(recipe, "claude_fable");
+        assert_eq!(recipe, "claude_opus_5_5");
         assert!(warnings.is_empty());
         assert_eq!(specs.len(), 2);
         assert_eq!(specs[0].name.as_deref(), Some("taste-a"));
         assert_eq!(specs[1].name.as_deref(), Some("taste-b"));
         for spec in specs {
             assert_eq!(spec.cli, cas_mux::SupervisorCli::Claude);
-            assert_eq!(spec.model.as_deref(), Some("claude-fable-5-1"));
-            assert_eq!(spec.effort, Some(cas_mux::Effort::Medium));
+            assert_eq!(spec.model.as_deref(), Some("claude-opus-5-5"));
+            assert_eq!(spec.effort, Some(cas_mux::Effort::High));
             assert_eq!(spec.config_dir.as_deref(), Some("~/.claude-alt"));
         }
         assert_eq!(
@@ -11872,14 +11890,14 @@ mod tests {
         let mut snapshot = cas_factory::CapabilitySnapshot::default();
         snapshot.record(
             cas_factory::recipe_route_identity(
-                &registry.recipes["claude_fable"],
+                &registry.recipes["claude_opus_5_5"],
                 "default",
             ),
             cas_factory::CapabilityEvidence::new(
                 cas_factory::CapabilityAvailability::Unavailable,
                 now,
             )
-            .with_reason("Claude Fable account unavailable"),
+            .with_reason("Claude Opus account unavailable"),
         );
         snapshot.record(
             cas_factory::recipe_route_identity(
@@ -11905,7 +11923,7 @@ mod tests {
         assert_eq!(specs[0].effort, Some(cas_mux::Effort::High));
         assert_eq!(
             warnings,
-            ["fallback: claude_opus (primary claude_fable unavailable: Claude Fable account unavailable)"],
+            ["fallback: claude_opus (primary claude_opus_5_5 unavailable: Claude Opus account unavailable)"],
         );
     }
 

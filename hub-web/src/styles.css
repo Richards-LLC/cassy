@@ -2040,12 +2040,12 @@ dialog::backdrop { background: var(--overlay-backdrop); }
   /* Forced colors would repaint an author ring in the system Highlight,
      which can carry alpha; opting the focused row out (with every colour
      restated as a system colour) keeps the ring at full strength. */
-  .palette-commands .palette-command:not([aria-current="true"]):focus-visible { forced-color-adjust: none; color: CanvasText; background: Canvas; border-color: ButtonBorder; outline-color: rgb(from Highlight r g b / 1); }
+  .palette-commands .palette-command:not([aria-current="true"]):focus-visible { forced-color-adjust: none; color: CanvasText; background: Canvas; border-color: ButtonBorder; outline-color: color(from Highlight srgb r g b / 1); }
   .palette-commands .palette-command:not([aria-current="true"]):focus-visible * { color: CanvasText; background: transparent; }
-  .session-picker-entry[aria-current="true"] { forced-color-adjust: none; color: HighlightText; background: rgb(from Highlight r g b / 1); border-color: rgb(from Highlight r g b / 1); }
+  .session-picker-entry[aria-current="true"] { forced-color-adjust: none; color: HighlightText; background: color(from Highlight srgb r g b / 1); border-color: color(from Highlight srgb r g b / 1); }
   /* forced-color-adjust: none lets author surfaces through, so the global
      button:hover background would replace the fill under HighlightText. */
-  .palette-commands .session-picker-entry[aria-current="true"]:is(:hover, :active, :focus-visible) { background: rgb(from Highlight r g b / 1); }
+  .palette-commands .session-picker-entry[aria-current="true"]:is(:hover, :active, :focus-visible) { background: color(from Highlight srgb r g b / 1); }
   .session-picker-entry[aria-current="true"] * { color: HighlightText; background: transparent; border-color: HighlightText; }
   .palette-commands .session-picker-entry[aria-current="true"]:focus-visible { outline-color: HighlightText; }
 }

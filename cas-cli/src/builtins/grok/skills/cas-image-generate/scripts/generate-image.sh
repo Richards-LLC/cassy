@@ -94,7 +94,7 @@ for reference in "${references[@]}"; do
 done
 
 reference_mime_type() {
-    case "${1,,}" in
+    case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in
         *.png) printf 'image/png' ;;
         *.webp) printf 'image/webp' ;;
         *.gif) printf 'image/gif' ;;
@@ -107,7 +107,7 @@ reference_mime_type() {
 }
 
 output_extension_for_mime() {
-    case "${1,,}" in
+    case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in
         image/png) printf 'png' ;;
         image/jpeg|image/jpg) printf 'jpg' ;;
         image/webp) printf 'webp' ;;
@@ -117,7 +117,7 @@ output_extension_for_mime() {
 }
 
 extension_matches_mime() {
-    case "${1,,}:${2,,}" in
+    case "$(printf '%s:%s' "$1" "$2" | tr '[:upper:]' '[:lower:]')" in
         image/png:png|image/jpeg:jpg|image/jpeg:jpeg|image/jpg:jpg|image/jpg:jpeg|image/webp:webp|image/gif:gif)
             return 0
             ;;
@@ -134,7 +134,7 @@ printf '%s' "$prompt" > "$work/prompt.txt"
 jq -n --rawfile prompt "$work/prompt.txt" '[{text: $prompt}]' > "$work/parts.json"
 reference_index=0
 for reference in "${references[@]}"; do
-    base64 --wrap=0 "$reference" | tr -d '\r\n' > "$work/reference-$reference_index.b64"
+    base64 < "$reference" | tr -d '\r\n' > "$work/reference-$reference_index.b64"
     reference_mime="$(reference_mime_type "$reference")"
     jq --arg mime "$reference_mime" --rawfile data "$work/reference-$reference_index.b64" \
         '. + [{inlineData: {mimeType: $mime, data: $data}}]' \
@@ -205,5 +205,5 @@ else
 fi
 
 mkdir -p "$(dirname "$final_output")"
-printf '%s' "$image_data" | base64 --decode > "$final_output"
+printf '%s' "$image_data" | base64 -d > "$final_output"
 printf 'wrote=%s\nmodel=%s\n' "$final_output" "$model"

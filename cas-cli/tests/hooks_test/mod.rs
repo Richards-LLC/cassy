@@ -83,24 +83,23 @@ pub(crate) fn assert_maintenance_queued(
     );
     let log = job_dir.join(format!("{name}.log"));
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
-    let prompt = loop {
+    let mut last_content = String::new();
+    loop {
         if let Ok(content) = std::fs::read_to_string(&log) {
-            if !content.is_empty() {
-                break content;
+            if prompt_fragments
+                .iter()
+                .all(|fragment| content.contains(fragment))
+            {
+                break;
             }
+            last_content = content;
         }
         assert!(
             std::time::Instant::now() < deadline,
-            "{name} prompt was not recorded at {}",
-            log.display()
+            "{name} complete prompt was not recorded at {}: {last_content}",
+            log.display(),
         );
         std::thread::sleep(std::time::Duration::from_millis(10));
-    };
-    for fragment in prompt_fragments {
-        assert!(
-            prompt.contains(fragment),
-            "{name} queued prompt lacks {fragment:?}: {prompt}"
-        );
     }
 }
 

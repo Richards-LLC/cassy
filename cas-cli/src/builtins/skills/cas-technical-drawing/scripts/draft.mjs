@@ -36,6 +36,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 
 // ───────────────────────────── constants ─────────────────────────────
 const MM_PER_IN = 25.4;
@@ -2244,4 +2245,4 @@ function main() {
   process.exit(2);
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === new URL(import.meta.url).pathname) main();
+if (process.argv[1] && fs.realpathSync(process.argv[1]) === fs.realpathSync(fileURLToPath(import.meta.url))) main();

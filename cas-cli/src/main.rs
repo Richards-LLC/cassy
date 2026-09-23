@@ -8,6 +8,28 @@ use std::process::ExitCode;
 use cas::{cli, config, duplicate_check, error, logging, sentry, store};
 
 fn main() -> ExitCode {
+    if std::env::args_os().nth(1).as_deref()
+        == Some(std::ffi::OsStr::new("--internal-light-lane-worker"))
+    {
+        let mut args = std::env::args_os().skip(2);
+        let (Some(lock), Some(cwd), Some(prompt), None) =
+            (args.next(), args.next(), args.next(), args.next())
+        else {
+            eprintln!("light-lane worker requires lock, cwd, and prompt");
+            return ExitCode::FAILURE;
+        };
+        return match cas::run_detached_worker(
+            std::path::Path::new(&lock),
+            std::path::Path::new(&cwd),
+            &prompt.to_string_lossy(),
+        ) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("light-lane worker failed: {error}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     // Reset SIGPIPE to default behavior so broken pipes cause a clean exit
     // instead of panicking with "failed printing to stderr: Broken pipe"
     #[cfg(unix)]

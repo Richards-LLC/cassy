@@ -17,7 +17,9 @@ use sha2::{Digest, Sha256};
 use url::{Host, Url};
 
 use crate::cli::Cli;
-use crate::cli::hub::{HubAuthorizeArgs, record_is_live};
+use crate::cli::hub::{
+    HubAuthorizeArgs, HubDisplayState, hub_display_state, hub_state_label, hub_state_remedy,
+};
 use crate::cloud::CloudConfig;
 use crate::hub::{
     AuthStore, HubRuntimePaths, MachineIdentityStore, PairingInvitationTarget, Scope,
@@ -503,9 +505,12 @@ fn resolve_hub_url(
     configured_hub_url: Option<&str>,
 ) -> Result<String> {
     let record = paths.read_process_record()?;
+    let state = hub_display_state(paths, &record);
     anyhow::ensure!(
-        record_is_live(&record),
-        "cas hub is not running; start it before authorizing a Commander page"
+        state == HubDisplayState::Running,
+        "cas hub authorize: {}; {}",
+        hub_state_label(state, record.pid),
+        hub_state_remedy(state, record.pid)
     );
     let remembered_hub_url = read_last_hub_url(paths)?;
     let url = explicit
@@ -1153,6 +1158,27 @@ mod tests {
         assert!(error.contains("cas hub restart --tailscale-serve"), "{error}");
         assert!(!error.contains("service uninstall"), "{error}");
         health.join().unwrap();
+    }
+
+    #[test]
+    fn authorize_names_a_live_hub_that_is_not_answering() {
+        #[cfg(unix)]
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        #[cfg(unix)]
+        std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let paths = HubRuntimePaths::new(temp.path().join("hub"));
+        write_live_record(&paths, 0, Some("https://record.example"));
+
+        let error = resolve_hub_url(&paths, None, None).unwrap_err().to_string();
+        assert!(
+            error.contains(&format!("pid {} is running for", std::process::id())),
+            "{error}"
+        );
+        assert!(error.contains("but not answering"), "{error}");
+        assert!(error.contains("cas hub restart --force"), "{error}");
+        assert!(!error.contains("not running"), "{error}");
     }
 
     #[derive(Default)]

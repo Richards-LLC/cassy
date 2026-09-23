@@ -526,23 +526,6 @@ where
     })
 }
 
-fn has_adjacent_status_number<F>(text: &str, label: &str, predicate: F) -> bool
-where
-    F: Fn(u32) -> bool,
-{
-    text.split([';', ',', '|']).any(|field| {
-        let tokens = proof_field_tokens(field);
-        tokens.windows(2).any(|window| {
-            let number_matches = |token: &str| token.parse::<u32>().ok().is_some_and(&predicate);
-            window[0] == label && number_matches(window[1])
-        }) || tokens.windows(3).any(|window| {
-            window[0] == label
-                && window[1] == "code"
-                && window[2].parse::<u32>().ok().is_some_and(&predicate)
-        })
-    })
-}
-
 fn has_adjacent_words(text: &str, words: &[&str]) -> bool {
     text.split([';', ',', '|']).any(|field| {
         let tokens = proof_field_tokens(field);
@@ -550,62 +533,69 @@ fn has_adjacent_words(text: &str, words: &[&str]) -> bool {
     })
 }
 
-fn has_explicit_nonzero_status(text: &str) -> bool {
-    has_adjacent_words(text, &["exit", "nonzero"])
-        || has_adjacent_words(text, &["status", "nonzero"])
-        || has_adjacent_words(text, &["exit", "non", "zero"])
-        || has_adjacent_words(text, &["status", "non", "zero"])
-        || text.split([';', ',', '|']).any(|field| {
-            let tokens = proof_field_tokens(field);
-            tokens.iter().enumerate().any(|(index, token)| {
-                if *token != "exit" && *token != "status" {
-                    return false;
-                }
-                let value = tokens
-                    .get(index + 1)
-                    .filter(|value| **value == "code")
-                    .and_then(|_| tokens.get(index + 2))
-                    .or_else(|| tokens.get(index + 1))
-                    .and_then(|value| value.parse::<u32>().ok());
-                value.is_some_and(|value| value != 0)
-            })
-        })
-}
-
-fn has_failure_token(text: &str) -> bool {
-    text.split([';', ',', '|']).any(|field| {
-        let tokens = proof_field_tokens(field);
-        tokens.iter().enumerate().any(|(index, token)| {
-            if !matches!(*token, "fail" | "failed" | "failure" | "error" | "errors") {
-                return false;
+fn proof_labeled_values(text: &str, label: &str) -> Vec<String> {
+    // Keep underscores inside command/test names instead of treating them as
+    // field separators. A test named `...failure_cause` is not a result field.
+    let mut values = Vec::new();
+    for field in text.split([';', ',', '|']) {
+        let words = field.split_whitespace().collect::<Vec<_>>();
+        for (index, word) in words.iter().enumerate() {
+            let word = word.trim_start_matches(['(', '[']);
+            let value = if word == label {
+                words.get(index + 1).copied()
+            } else if let Some(rest) = word
+                .strip_prefix(label)
+                .and_then(|rest| rest.strip_prefix([':', '=']))
+            {
+                (!rest.is_empty())
+                    .then_some(rest)
+                    .or_else(|| words.get(index + 1).copied())
+            } else {
+                None
+            };
+            if let Some(value) = value {
+                let value = if value == "code" {
+                    words.get(index + 2).copied().unwrap_or(value)
+                } else if value == "non" && words.get(index + 2).copied() == Some("zero") {
+                    "nonzero"
+                } else {
+                    value
+                };
+                values.push(value.trim_matches(['(', ')', '[', ']', '.']).to_string());
             }
-            tokens
-                .get(index.wrapping_sub(1))
-                .and_then(|value| value.parse::<u32>().ok())
-                != Some(0)
-        })
-    })
+        }
+    }
+    values
 }
 
 fn has_passing_result(lower: &str) -> bool {
-    const SUCCESS_WORDS: &[&str] = &[
+    const SUCCESS: &[&str] = &[
         "pass", "passed", "passing", "success", "successful", "green",
     ];
-    if has_explicit_nonzero_status(lower)
-        || has_failure_token(lower)
-        || SUCCESS_WORDS.iter().any(|word| {
-            has_adjacent_words(lower, &["not", word])
-                || has_adjacent_words(lower, &["no", word])
+    const FAILURE: &[&str] = &["fail", "failed", "failure", "error"];
+    let results = proof_labeled_values(lower, "result");
+    let statuses = proof_labeled_values(lower, "exit")
+        .into_iter()
+        .chain(proof_labeled_values(lower, "status"))
+        .collect::<Vec<_>>();
+    let bare = lower.split([';', ',', '|']).map(str::trim).collect::<Vec<_>>();
+    if results.iter().any(|result| FAILURE.contains(&result.as_str()))
+        || statuses.iter().any(|status| {
+            matches!(status.as_str(), "nonzero" | "non-zero")
+                || status.parse::<u32>().is_ok_and(|code| code != 0)
+        })
+        || bare.iter().any(|field| {
+            FAILURE.contains(field)
+                || SUCCESS.iter().any(|word| {
+                    *field == format!("not {word}") || *field == format!("no {word}")
+                })
         })
     {
         return false;
     }
-
-    SUCCESS_WORDS
-        .iter()
-        .any(|word| contains_word(lower, word))
-        || has_adjacent_status_number(lower, "exit", |value| value == 0)
-        || has_adjacent_status_number(lower, "status", |value| value == 0)
+    results.iter().any(|result| SUCCESS.contains(&result.as_str()))
+        || statuses.iter().any(|status| status == "0")
+        || bare.iter().any(|field| SUCCESS.contains(field))
 }
 
 fn has_platform_command(lower: &str) -> bool {
@@ -1304,6 +1294,26 @@ fn scoped_proof_note_base(notes: &str) -> Option<String> {
     scoped_proof_note_receipt(notes).and_then(|receipt| receipt.base)
 }
 
+fn scoped_proof_base_matches(proof_repo: &std::path::Path, actual: &str, expected: &str) -> bool {
+    if actual == expected {
+        return true;
+    }
+    if actual.len() < 4
+        || actual.len() > 40
+        || !actual.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return false;
+    }
+    let Ok(output) = std::process::Command::new("git")
+        .args(["rev-parse", "--verify", "--quiet", &format!("{actual}^{{commit}}")])
+        .current_dir(proof_repo)
+        .output()
+    else {
+        return false;
+    };
+    output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == expected
+}
+
 fn scoped_proof_note_covers(notes: &str, required_targets: &[String]) -> Vec<String> {
     let Some(receipt) = scoped_proof_note_targets(notes) else {
         return required_targets.to_vec();
@@ -1667,7 +1677,10 @@ fn validate_risk_close_proofs_with_base_and_target_and_cache(
     if !required_targets.is_empty() {
         if let Some(expected_base) = expected_base {
             let actual_base = scoped_proof_note_base(&task.notes);
-            if actual_base.as_deref() != Some(expected_base) {
+            if !actual_base
+                .as_deref()
+                .is_some_and(|base| scoped_proof_base_matches(proof_repo, base, expected_base))
+            {
                 return Err(format!(
                     "TASK CLOSE REJECTED: task {} scoped proof receipt has base {:?}, but this delivery must be proven against SCOPED_PROOF_BASE={expected_base} — the first parent of its earliest commit, which is the diff the required targets were derived from. Run `{}` and add the resulting passing receipt to a progress note.",
                     task.id,
@@ -1919,6 +1932,32 @@ mod risk_proof_tests {
 
         validate_risk_close_proofs(&task, &[], std::path::Path::new("."))
             .expect("a typed xcodebuild PASS receipt should satisfy platform risk");
+    }
+
+    #[test]
+    fn platform_proof_result_ignores_failure_words_in_test_names() {
+        let mut task = Task::new("cas-platform-test-name".into(), "platform proof".into());
+        task.risk = vec![TaskRisk::Platform];
+        for test in [
+            "running_hub_without_public_origin_preserves_transport_failure_cause",
+            "running_hub_fail_branch",
+        ] {
+            task.notes = format!(
+                "[2026-09-23] 🧪 PLATFORM_PROOF macOS command: cargo test {test}; result: PASS; exit 0"
+            );
+            validate_risk_close_proofs(&task, &[], std::path::Path::new("."))
+                .expect("failure words in test names must not veto a passing result");
+        }
+
+        for result in ["result: FAIL; exit 0", "result: PASS; exit 1"] {
+            task.notes = format!(
+                "[2026-09-23] 🧪 PLATFORM_PROOF macOS command: cargo test running_hub_without_public_origin_preserves_transport_failure_cause; {result}"
+            );
+            assert!(
+                validate_risk_close_proofs(&task, &[], std::path::Path::new(".")).is_err(),
+                "a failed result must still be rejected: {result}"
+            );
+        }
     }
 
     #[test]
@@ -2441,6 +2480,34 @@ mod risk_proof_tests {
                 );
         assert!(error.contains("SCOPED_PROOF_BASE"), "{error}");
         assert!(error.contains(&expected_base), "{error}");
+    }
+
+    #[test]
+    fn scoped_proof_accepts_unambiguous_abbreviated_base() {
+        let dir = scoped_proof_fixture();
+        initialize_scoped_proof_git_fixture(dir.path());
+        let output = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let expected_base = String::from_utf8(output.stdout).unwrap().trim().to_string();
+        let abbreviated = &expected_base[..10];
+        let mut task = Task::new("cas-short-base".into(), "scoped proof".into());
+        task.notes = format!(
+            "[2026-09-23] 📝 PROGRESS SCOPED_PROOF: base={abbreviated} targets=lib:factory_ops,test:factory_mcp_ops_test result=PASS"
+        );
+        let changed = vec!["cas-cli/src/mcp/tools/service/factory_ops.rs".to_string()];
+        validate_risk_close_proofs_with_base(&task, &changed, dir.path(), Some(&expected_base))
+            .expect("git must resolve an unambiguous abbreviated base");
+
+        task.notes = task.notes.replace(abbreviated, "deadbeef00");
+        assert!(
+            validate_risk_close_proofs_with_base(&task, &changed, dir.path(), Some(&expected_base))
+                .is_err(),
+            "an abbreviation that does not resolve to the base must be rejected"
+        );
     }
 
     #[test]

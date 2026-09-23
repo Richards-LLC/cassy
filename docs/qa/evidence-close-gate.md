@@ -94,8 +94,9 @@ that produces it:
 
 1. `bundle.json` parses, `schema == 1`, `task_id` equals the task, and
    `producer` is `cas-qa-craft` or `journey`.
-2. Every key the contract marks "always" is present. The exception is a
-   `journey` bundle, which carries no polish keys (the contract addendum). Each listed file exists
+2. Every key the contract marks "always" is present. This includes a
+   `journey` bundle: its polish exemption covers the release evaluation, not
+   a delivery close (supervisor decision). Each listed file exists
    inside the bundle directory, is a regular file, and is non-empty.
    `cells` and `polish_screenshots` each have ≥1 entry, and
    `polish_screenshots` has exactly the four
@@ -248,4 +249,6 @@ The supervisor approved this design (#32353) with two answers:
    escape stays, and each use is logged.
 
 The cas-c3b8 contract addendum (#32364) exempts `journey` bundles from the
-polish keys. The gate follows that exemption.
+polish keys. The supervisor ruled that the exemption covers only the release
+journey evaluation. A journey bundle without polish proof cannot close a
+delivery, so the gate keeps requiring polish.

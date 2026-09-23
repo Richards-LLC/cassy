@@ -725,16 +725,13 @@ fn delivery_range_before_and_after_merge() {
 }
 
 #[test]
-fn journey_bundles_carry_no_polish_evidence_but_other_producers_must() {
-    // Contract addendum: the release journey evaluator scores polish for a
-    // journey bundle, so its polish keys are optional.
+fn journey_polish_exception_does_not_reach_the_delivery_close() {
+    // Supervisor decision (cas-0cd5): a journey bundle without polish proof
+    // is valid for the release evaluation but cannot close a delivery.
     let fx = Fixture::new();
     fx.write_bundle(|manifest| {
         manifest["producer"] = serde_json::json!("journey");
         manifest["visual_qa_status"] = serde_json::json!("unavailable");
-        manifest["journey_id"] = serde_json::json!("J03");
-        manifest["verdict"] = serde_json::json!("PASS");
-        manifest.as_object_mut().unwrap().remove("critique_score");
         for key in [
             "polish_screenshots",
             "visual_qa",
@@ -745,18 +742,18 @@ fn journey_bundles_carry_no_polish_evidence_but_other_producers_must() {
             manifest["files"].as_object_mut().unwrap().remove(key);
         }
     });
-    fx.validate(&fx.notes())
-        .expect("journey bundle without polish keys");
+    let refusal = fx.validate(&fx.notes()).unwrap_err();
+    assert!(
+        refusal
+            .problem
+            .contains("journey bundle without polish proof"),
+        "{refusal:?}"
+    );
 
     let fx = Fixture::new();
-    fx.write_bundle(|manifest| {
-        manifest["files"]
-            .as_object_mut()
-            .unwrap()
-            .remove("visual_qa");
-    });
-    let refusal = fx.validate(&fx.notes()).unwrap_err();
-    assert!(refusal.problem.contains("files.visual_qa"), "{refusal:?}");
+    fx.write_bundle(|manifest| manifest["producer"] = serde_json::json!("journey"));
+    fx.validate(&fx.notes())
+        .expect("a journey bundle with polish proof is accepted");
 }
 
 #[test]

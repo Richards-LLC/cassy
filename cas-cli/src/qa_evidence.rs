@@ -244,28 +244,37 @@ pub fn validate_bundle(ctx: &EvidenceContext<'_>) -> Result<BundleReceipt, Evide
             cite_command(ctx),
         ));
     }
-    // Contract addendum (cas-c3b8): a `journey` bundle carries no polish
-    // evidence because the release journey evaluator's scored report covers
-    // polish for it. Polish keys are enforced for every other producer.
-    let polish_required = manifest.producer != "journey";
+    // The contract lets a `journey` bundle skip polish because the release
+    // journey evaluation scores it. Supervisor decision (cas-0cd5): that
+    // exception does not reach a delivery close; a delivery still needs its
+    // own polish proof.
+    if manifest.producer == "journey" && manifest.visual_qa_status != "pass" {
+        return Err(EvidenceRefusal::new(
+            format!(
+                "a journey bundle without polish proof (visual_qa_status {:?}); the journey polish exception covers the release evaluation, not a delivery close",
+                manifest.visual_qa_status
+            ),
+            format!(
+                "add the polish keys to {} or cite a cas-qa-craft bundle: {}",
+                manifest_path.display(),
+                producing_command("visual_qa_stdout", &bundle_dir)
+            ),
+        ));
+    }
 
     // 2. Required files.
     let files = &manifest.files;
-    let mut singles: Vec<(&str, &Option<String>)> = vec![
+    let singles: [(&str, &Option<String>); 9] = [
         ("trace", &files.trace),
         ("trace_actions", &files.trace_actions),
         ("receipt", &files.receipt),
         ("aria_yaml", &files.aria_yaml),
         ("aria_json", &files.aria_json),
+        ("visual_qa", &files.visual_qa),
+        ("visual_qa_json", &files.visual_qa_json),
+        ("visual_qa_stdout", &files.visual_qa_stdout),
+        ("critique", &files.critique),
     ];
-    if polish_required {
-        singles.extend([
-            ("visual_qa", &files.visual_qa),
-            ("visual_qa_json", &files.visual_qa_json),
-            ("visual_qa_stdout", &files.visual_qa_stdout),
-            ("critique", &files.critique),
-        ]);
-    }
     let mut listed: Vec<(String, PathBuf)> = Vec::new();
     for (key, value) in singles {
         let Some(relative) = value.as_deref().filter(|value| !value.trim().is_empty()) else {
@@ -285,7 +294,7 @@ pub fn validate_bundle(ctx: &EvidenceContext<'_>) -> Result<BundleReceipt, Evide
             resolve_bundle_file(&bundle_dir, "cells", relative)?,
         ));
     }
-    for suffix in POLISH_RENDERS.iter().filter(|_| polish_required) {
+    for suffix in POLISH_RENDERS {
         if !files
             .polish_screenshots
             .iter()
@@ -460,14 +469,6 @@ pub fn validate_bundle(ctx: &EvidenceContext<'_>) -> Result<BundleReceipt, Evide
             "incomplete: files.trace_actions lists no `Expect \"` step",
             producing_command("trace_actions", &bundle_dir),
         ));
-    }
-
-    if !polish_required {
-        return Ok(BundleReceipt {
-            manifest: manifest_path,
-            head_sha: manifest.head_sha,
-            passed_expects: summary.passed,
-        });
     }
 
     // 5. Polish run passed.

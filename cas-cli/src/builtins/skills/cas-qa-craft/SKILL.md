@@ -67,7 +67,7 @@ Close enforces this evidence before a user-facing delivery can park or close
 the delivered commit, cited with `task action=notes note_type=platform_proof
 notes="qa-bundle: <abs path>/bundle.json"`. It must be newer than your last
 commit, record at least one passing `Expect`, and pass visual QA and the
-critique floor. A journey bundle may omit polish. A demo-only change with no web
+critique floor, including for a journey bundle. A demo-only change with no web
 surface needs a fresh `LEDGER.md` with a `PASS` / `real-build` row, plus a
 cas-cli-craft `terminal-qa: PASS` report under `<task-id>/terminal-qa/` when the
 diff touches `qa.terminal_render_paths`. Any delivery that adds `test.fixme`, `.skip` or `.only` is

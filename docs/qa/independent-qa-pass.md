@@ -36,7 +36,7 @@ merge. The pass has to live there.
 | --- | --- |
 | Trigger | A Cassy **QA dispatch** created when a user-facing task parks for merge. It is not a supervisor habit and not a task-verifier step. |
 | Who runs it | A separate factory worker on the **taste** lane (`claude-opus-5-5`/high). It is never the implementer, and the rule is enforced in the store. |
-| What it produces | A typed `VerificationType::Qa` row bound to the reviewed branch tip, plus a ledger with evidence. |
+| What it produces | A typed QA verdict (`qa_passes` row: passed/failed/waived) bound to the reviewed branch tip, plus a ledger with evidence. |
 | What it blocks | `worktree_merge`, a supervisor's raw `git merge factory/<w>` (pre-tool guard), and the re-close (backstop). |
 | Failure | A rejected QA verdict fires `request_changes` automatically, citing the ledger. The implementer keeps the task. |
 | Cost cap | 45 min per round, 1 active pass per task, 3 rounds before escalation. Journeys are limited to those the diff touches. |
@@ -60,9 +60,9 @@ Rust decides eligibility from config alone. It does not shell out to the
 journey helper at park time. Journey selection happens inside the pass (§4).
 
 A supervisor can waive the pass per task with `supervisor_override=true` and
-a reason. The waiver is logged as a decision note and recorded as a `Qa`
-verification with status `skipped` and provenance `SupervisorDirect`, so the
-gates treat it as recorded, not forgotten.
+a reason. The waiver is logged as a decision note and recorded on the pass as
+`state=waived` with the supervisor as issuer, so the gates treat it as
+recorded, not forgotten.
 
 ## 2. Trigger: the QA dispatch
 
@@ -105,18 +105,37 @@ The worker's own close output changes too. MERGE REQUIRED now adds:
   rejects any agent that is the delivery's `implementer_agent_id` or its
   current assignee. The same check runs when `spawn_workers task_id=` would
   pre-assign the task to one of those agents.
-- **Recording the verdict.** A `Qa` verdict (`verification action=add
-  verification_type=qa`) is accepted only from the agent that claimed the
-  active pass, and only when that agent is not the implementer.
+- **Recording the verdict.** A QA verdict (`verification action=qa_record
+  task_id=<delivery> status=approved|rejected summary=… issues=…
+  ledger_path=…`) is accepted only from the agent that claimed the active
+  pass, and only when that agent is not the implementer.
   - This is the only verdict a worker role may record, and it is a new,
     explicit authority path. The general rule stays in place: workers cannot
     attest their own work.
-  - The supervisor cannot record a `passed` Qa verdict. It can only waive
+  - The supervisor cannot record a `passed` QA verdict. It can only waive
     (§1), which is logged and visibly different from a pass.
 - **Unrecognised verification types.** `verification_type` strings Cassy does
   not recognise stop silently mapping to `Task`
-  (`verification_tools.rs:509`). An unknown type is now an error, so a typo
-  of `qa` cannot record a task verdict.
+  (`verification_tools.rs:509`). An unknown type is now an error, and
+  `verification_type=qa` on `add` names `qa_record` instead, so a typo cannot
+  record a task verdict.
+
+### Why the verdict lives in `qa_passes`, not `verifications`
+
+Two facts make a `VerificationType::Qa` row in the shared `verifications`
+table unsafe:
+
+- A non-epic close reads the untyped `get_latest_for_task`
+  (`close_ops.rs:4998`), so a QA approval would count as the task-verifier's
+  verdict.
+- Older binaries parse an unknown type string as `Task`
+  (`verification_store.rs:325`, `unwrap_or_default`). A mixed-version fleet
+  sharing one `cas.db` would read a QA approval as a task approval even
+  after the new binary filters by type.
+
+So the typed QA verdict is its own record: the `qa_passes` row carries
+`verdict` (approved, rejected, waived), `reviewer_agent_id`, `summary`,
+`issues` (JSON) and `ledger_path`. No existing reader ever sees it.
 
 ## 4. What the QA worker does
 
@@ -198,10 +217,9 @@ in the verdict summary, and on approval they become follow-up tasks.
 
 When the verdict is recorded:
 
-- **Approved.** Cassy writes `Verification { type: Qa, status: Approved,
-  provenance: QaReviewer, agent_id: reviewer, summary, issues }`, resolves
-  the pass as `passed`, closes the QA task, and wakes the supervisor with
-  "QA passed for `<task>` @`<head8>`. Merge."
+- **Approved.** Cassy records the verdict on the pass (`state=passed`,
+  reviewer, summary, issues, ledger path), closes the QA task, and wakes the
+  supervisor with "QA passed for `<task>` @`<head8>`. Merge."
 - **Rejected.** Cassy resolves the pass as `failed` and calls
   `request_changes_for_parked_delivery` itself, using the store function the
   supervisor tool already uses. It passes the reason "Independent QA
@@ -219,16 +237,15 @@ dispatches use for repository proof drift.
 ## 7. Gates (where "cannot merge" is enforced)
 
 1. **`worktree_merge task_id=<t>`.** It refuses an eligible task unless a
-   `Qa` verification with status Approved or Skipped exists and its
-   `bound_head` equals the branch tip being merged.
+   pass in state `passed` or `waived` exists and its `bound_head` equals the
+   branch tip being merged.
 2. **Supervisor pre-tool Bash guard.** It denies `git merge [...]
    factory/<w>` when `factory/<w>` is the parked branch of an eligible
    `AwaitingMerge` task that lacks that record. The denial names the pass id
    and its state. Raw git is the documented merge path today, so this is the
    primary enforcement point, not a nicety.
-3. **Re-close backstop.** An eligible task's close requires an Approved or
-   Skipped `Qa` verification whose `bound_head` is an ancestor of the target
-   branch. This catches merges made outside a Claude Code hook, such as
+3. **Re-close backstop.** An eligible task's close requires a `passed` or
+   `waived` pass whose `bound_head` is an ancestor of the target branch. This catches merges made outside a Claude Code hook, such as
    another harness or a shell. The rejection message carries the exact
    command to dispatch a pass.
 
@@ -256,12 +273,12 @@ spawn and is retired after its QA task closes.
   and one wake. An ineligible task creates none. A re-park with the same
   head is idempotent.
 - **No self-review.** The implementer cannot start the QA task or record a
-  Qa verdict. The supervisor cannot record a `passed` Qa verdict. An unknown
+  QA verdict. The supervisor cannot record a `passed` QA verdict. An unknown
   `verification_type` is rejected.
 - **Verdict routing.** A rejected verdict parks the delivery back to open
   with its assignee kept and the ledger cited. An approved verdict writes a
-  typed Qa row. Head drift supersedes the pass.
-- **Gates.** `worktree_merge` refuses without a Qa pass and accepts with
+  typed verdict on the pass. Head drift supersedes the pass.
+- **Gates.** `worktree_merge` refuses without a QA pass and accepts with
   one. The pre-tool guard denies `git merge factory/<w>`. The re-close
   backstop rejects and then accepts.
 - **Rounds and timeout.** The fourth rejection escalates instead of opening

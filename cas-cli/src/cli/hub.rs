@@ -2024,8 +2024,8 @@ fn stop(cli: &Cli, force: bool) -> Result<()> {
 
 /// Stop a live hub that is outside the installed service before the service
 /// manager is asked to start its own instance.
-pub(crate) fn stop_for_service(cli: &Cli) -> Result<()> {
-    stop_with_output(cli, false, None, false).map(|_| ())
+pub(crate) fn stop_for_service(cli: &Cli, force: bool) -> Result<()> {
+    stop_with_output(cli, false, None, force).map(|_| ())
 }
 
 fn stop_with_output(

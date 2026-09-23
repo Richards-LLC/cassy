@@ -25,7 +25,7 @@
       "required": true,
       "status": "pass",
       "evidence_refs": ["live-production-run"],
-      "detail": "The live matrix selected the active standard-lane recipe from the registry: --model gpt-5.6-luna and -c model_reasoning_effort=xhigh; all three recorded turn contexts retained that model and effort."
+      "detail": "The live matrix selected the active standard-lane recipe from the registry: --model gpt-6-sol and -c model_reasoning_effort=medium; all three recorded turn contexts retained that model and effort."
     },
     {
       "id": "developer_role_priming",
@@ -102,8 +102,8 @@
     {
       "id": "live-production-run",
       "kind": "live_test",
-      "reference": "task:cas-27e1#2026-09-23-codex-0.156.0-complex-schema-run; rollout:/home/pippenz/.codex/sessions/2026/09/23/rollout-2026-09-23T09-56-27-01a0ce8d-af1e-7020-80b0-5dfdb596c1d1.jsonl",
-      "summary": "Real Codex 0.156.0 PtyConfig::codex run with freshly built target/debug/cas first on PATH and an initialized disposable CAS_ROOT; the guarded live matrix passed 1 test in 79.35s, including task create and persisted task show schema checks."
+      "reference": "task:cas-3245#2026-09-23-codex-0.156.0-standard-lane-run; log:/home/pippenz/.cas/artifacts/cas-3245/live-matrix.log; rollout:/home/pippenz/.codex/sessions/2026/09/23/rollout-2026-09-23T11-16-16-01a0ced6-c349-7051-8838-23f0acf68123.jsonl",
+      "summary": "Real Codex 0.156.0 PtyConfig::codex run on gpt-6-sol/medium with freshly built target/debug/cas first on PATH and an initialized disposable CAS_ROOT; the guarded live matrix passed 1 test in 64.60s, including task create and persisted task show schema checks."
     },
     {
       "id": "cas-root-initialization",

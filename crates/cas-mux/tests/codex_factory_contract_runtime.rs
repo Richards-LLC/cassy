@@ -220,6 +220,10 @@ fn assert_turn_context(body: &str, scratch: &Path) {
             "--yolo approval bypass must survive every turn"
         );
         assert_eq!(context["sandbox_policy"]["type"], "danger-full-access");
+        assert_eq!(
+            context["collaboration_mode"]["mode"], "default",
+            "factory workers must remain outside Plan mode, where request_user_input is available"
+        );
     }
 }
 
@@ -278,6 +282,21 @@ fn codex_0156_factory_launch_contract_passes_live_matrix() {
         None,
     );
     assert!(config.args.iter().any(|arg| arg == "--yolo"));
+    assert!(
+        config
+            .args
+            .windows(2)
+            .any(|pair| pair == ["-c", "features.default_mode_request_user_input=false"]),
+        "factory worker must disable account-enabled Default-mode input prompts"
+    );
+    assert!(
+        config
+            .args
+            .iter()
+            .any(|arg| arg.contains("developer_instructions=")
+                && arg.contains("Do not enter Plan mode or call `request_user_input`")),
+        "worker launch must guard against unattended input prompts"
+    );
     assert!(config.args.iter().any(|arg| arg == "--no-alt-screen"));
     assert!(
         config
@@ -430,6 +449,20 @@ fn codex_0156_factory_launch_contract_passes_live_matrix() {
             .to_ascii_lowercase()
             .contains("rollout token budget exceeded"),
         "multi-turn worker must not abort under a low rollout-token budget"
+    );
+    assert!(
+        !final_body
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .any(|event| {
+                event["type"] == "response_item"
+                    && matches!(
+                        event["payload"]["type"].as_str(),
+                        Some("function_call" | "custom_tool_call")
+                    )
+                    && event["payload"]["name"] == "request_user_input"
+            }),
+        "default-mode worker must not issue a prompt that could auto-resolve while idle"
     );
     assert_turn_context(&final_body, &scratch);
 

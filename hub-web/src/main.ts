@@ -2162,7 +2162,11 @@ function render(captureDraft = true): void {
     pairingView,
   }) + JSON.stringify([hubPresentation, selectedHubSession?.project_dir]);
   const active = document.activeElement;
-  const composing = isEditableElement(active) && app.contains(active);
+  // Focus anywhere inside the open palette counts as composing too: a rebuild
+  // would replace the dialog under a focused row, wipe its filter and leave
+  // Enter to run whatever command now leads (cas-9648 QA F02).
+  const inOpenPalette = active instanceof HTMLElement && active.closest("#command-palette[open]") !== null;
+  const composing = (isEditableElement(active) && app.contains(active)) || inOpenPalette;
   const decision = renderDecision({
     signatureChanged: signature !== lastShellSignature,
     composing,
@@ -2831,7 +2835,7 @@ function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | und
     else first.focus();
   };
   for (const command of palette.querySelectorAll<HTMLButtonElement>("[data-palette-machine]")) {
-    command.onclick = () => {
+    command.onclick = (event) => {
       // Close the dialog itself, not just the flag: Enter in the filter
       // clicks this row with focus still in the input, and render() defers
       // the shell rebuild while an editable field inside #app has focus, so
@@ -2850,7 +2854,12 @@ function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | und
       const opened = openSession(machineId, session);
       // openSession paints the conversation before its first await, so its
       // composer exists now. Land there: a jump from the keyboard ends where
-      // the next keystroke belongs, not on <body>.
+      // the next keystroke belongs, not on <body>. A tap on a phone is the
+      // exception, as with the session picker: a soft keyboard over the
+      // conversation just opened hides it, so the operator lands to read it,
+      // exactly as a tap on a list row does. (Enter reaches this handler as a
+      // click with detail 0; a pointer click or tap has detail >= 1.)
+      if (phoneLayout() && event.detail > 0) return;
       focusJumpedComposer(opened);
     };
   }

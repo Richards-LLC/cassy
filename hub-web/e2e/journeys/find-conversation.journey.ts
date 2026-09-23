@@ -73,4 +73,33 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     await expect(composer).toBeFocused();
     await expect(composer).toHaveValue("Half a thought");
   });
+
+  await journey.stage("A live update while a palette row is focused", async () => {
+    // Land on a first visit and type straight away, so the conversation's
+    // status and lease load while the reply box is busy and a rebuild is owed.
+    const composer = page.getByRole("textbox", { name: "Your message" });
+    const filter = page.getByRole("searchbox", { name: "Filter commands" });
+    await page.goto("./");
+    await expect(page.locator("#command-palette")).toHaveCount(1);
+    await page.keyboard.press("ControlOrMeta+k");
+    await filter.fill(OTTER);
+    await filter.press("Enter");
+    await expect(composer).toBeFocused();
+    await page.keyboard.type("hi");
+    await page.keyboard.press("ControlOrMeta+k");
+    await filter.fill(PELICAN);
+    await filter.press("ArrowDown");
+    const row = page.getByRole("button", { name: new RegExp(`Jump to ${PELICAN}`) });
+    await expect(row).toBeFocused();
+    // Any render while the row has focus must leave the palette alone.
+    hub.supervisorSays(OTTER, "Still here.", { kind: "status" });
+    await expect(page.locator(".conversation-host")).toBeVisible();
+    await page.waitForTimeout(300);
+    await expect(filter).toHaveValue(PELICAN);
+    await expect(row).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect(page.locator("#command-palette")).toBeHidden();
+    await expect(page.getByRole("button", { name: `Send to ${PELICAN}`, exact: true })).toBeVisible();
+    await expect(composer).toBeFocused();
+  });
 });

@@ -186,6 +186,11 @@ pub struct HubServeArgs {
     /// Cassy-created cgroup scope passed through the detached launch barrier.
     #[arg(long, hide = true)]
     pub cgroup: Option<std::path::PathBuf>,
+    /// Ownership evidence captured before the launcher removes an old record.
+    #[arg(long, hide = true)]
+    pub prior_tailscale_serve_port: Option<u16>,
+    #[arg(long, hide = true)]
+    pub prior_tailscale_serve_target: Option<String>,
     /// Reclaim a wedged hub lock without waiting for the lifecycle timeout.
     #[arg(long)]
     pub force: bool,
@@ -206,6 +211,8 @@ impl Default for HubServeArgs {
             launched_by: "cli".to_owned(),
             launched_at: None,
             cgroup: None,
+            prior_tailscale_serve_port: None,
+            prior_tailscale_serve_target: None,
             force: false,
         }
     }
@@ -1165,10 +1172,11 @@ fn start_with_output_resolved(
             return Ok(());
         }
     };
-    let stale_cgroup = paths
-        .read_process_record()
-        .ok()
-        .and_then(|record| record.cgroup);
+    let prior_record = paths.read_process_record().ok();
+    let stale_cgroup = prior_record.as_ref().and_then(|record| record.cgroup.clone());
+    let prior_serve_target = prior_record.as_ref().and_then(|record| {
+        Some((record.tailscale_serve_port?, record.tailscale_serve_target.clone()?))
+    });
     // A killed hub cannot tear down its owned proxy. Once exclusive ownership
     // is proven, remove only the exact unchanged mapping described by its
     // private receipt; this also recovers record-absent abrupt deaths.
@@ -1231,6 +1239,13 @@ fn start_with_output_resolved(
             .arg("--tailscale-serve")
             .arg("--tailscale-serve-port")
             .arg(tailscale_port.to_string());
+    }
+    if let Some((port, target)) = prior_serve_target {
+        command
+            .arg("--prior-tailscale-serve-port")
+            .arg(port.to_string())
+            .arg("--prior-tailscale-serve-target")
+            .arg(target);
     }
     #[cfg(unix)]
     {
@@ -1416,6 +1431,10 @@ fn serve_foreground(args: &HubServeArgs, tailscale_serve: bool, tailscale_port: 
         let actual = listener.local_addr()?;
         let mut lock = paths.acquire_instance_lock()?;
         let tailscale_manager = TailscaleServeManager::new(paths.root());
+        let prior_serve_target = args.prior_tailscale_serve_port.zip(args.prior_tailscale_serve_target.clone())
+            .or_else(|| paths.read_process_record().ok().and_then(|previous| {
+                Some((previous.tailscale_serve_port?, previous.tailscale_serve_target?))
+            }));
         let started_at = chrono::Utc::now().to_rfc3339();
         let mut record = HubProcessRecord {
             pid: std::process::id(),
@@ -1441,7 +1460,9 @@ fn serve_foreground(args: &HubServeArgs, tailscale_serve: bool, tailscale_port: 
             let proxy_listener =
                 tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
             let proxy_port = proxy_listener.local_addr()?.port();
-            match tailscale_manager.ensure(proxy_port, tailscale_port) {
+            match tailscale_manager.ensure_with_prior_target(
+                proxy_port, tailscale_port, prior_serve_target,
+            ) {
                 Ok(receipt) => (Some(proxy_listener), Some(receipt), None),
                 Err(error) => {
                     let warning = error.to_string();
@@ -1523,16 +1544,16 @@ fn serve_foreground(args: &HubServeArgs, tailscale_serve: bool, tailscale_port: 
             task.abort();
         }
         let _ = lock.set_phase("stopping");
-        paths.remove_process_record()?;
         startup_guard.disarm();
-        #[cfg(debug_assertions)]
-        hold_instance_lock_after_record_removal_for_test()?;
         // A service manager stops a foreground hub with SIGTERM instead of
         // routing through `cas hub stop`. Always tear down only Cassy's exact
         // owned mapping here so an uninstall/reboot cannot leave a stale
         // Tailscale Serve publication behind. A restart republishes it from
         // the same private receipt and keeps machine identity/auth untouched.
         let _ = tailscale_manager.disable_owned();
+        paths.remove_process_record()?;
+        #[cfg(debug_assertions)]
+        hold_instance_lock_after_record_removal_for_test()?;
         result
     })
 }
@@ -1560,8 +1581,8 @@ impl HubStartupGuard {
 impl Drop for HubStartupGuard {
     fn drop(&mut self) {
         if self.armed {
-            let _ = self.paths.remove_process_record();
             let _ = self.tailscale_manager.disable_owned();
+            let _ = self.paths.remove_process_record();
         }
     }
 }

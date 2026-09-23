@@ -41,7 +41,7 @@ fn test_config_defaults() {
     assert!(
         rule_review
             .description
-            .contains("Factory workers are exempt")
+            .contains("including factory sessions")
     );
 }
 

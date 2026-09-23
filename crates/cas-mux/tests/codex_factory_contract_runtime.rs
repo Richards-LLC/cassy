@@ -174,6 +174,69 @@ fn matching_tool_calls(body: &str, name: &str, action: &str) -> usize {
         .count()
 }
 
+fn tool_call_outputs(body: &str, name: &str, action: &str) -> Vec<String> {
+    let events: Vec<Value> = body
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+    let call_ids: Vec<&str> = events
+        .iter()
+        .filter(|event| {
+            event["type"] == "response_item"
+                && event["payload"]["type"] == "function_call"
+                && event["payload"]["name"] == name
+                && event["payload"]["arguments"]
+                    .as_str()
+                    .and_then(|args| serde_json::from_str::<Value>(args).ok())
+                    .is_some_and(|args| args["action"] == action)
+        })
+        .filter_map(|event| event["payload"]["call_id"].as_str())
+        .collect();
+    events
+        .iter()
+        .filter(|event| {
+            event["type"] == "response_item"
+                && event["payload"]["type"] == "function_call_output"
+                && event["payload"]["call_id"]
+                    .as_str()
+                    .is_some_and(|id| call_ids.contains(&id))
+        })
+        .filter_map(|event| {
+            let output = &event["payload"]["output"];
+            if let Some(text) = output.as_str() {
+                return Some(text.to_owned());
+            }
+            output.as_array().map(|parts| {
+                parts
+                    .iter()
+                    .filter_map(|part| part["text"].as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+        })
+        .collect()
+}
+
+#[test]
+fn tool_call_outputs_only_match_server_responses_for_requested_action() {
+    let body = [
+        serde_json::json!({"type":"response_item","payload":{
+            "type":"function_call","name":"task","call_id":"create-1",
+            "arguments":"{\"action\":\"create\"}"}}),
+        serde_json::json!({"type":"response_item","payload":{
+            "type":"function_call_output","call_id":"create-1",
+            "output":[{"type":"input_text","text":"created"}]}}),
+        serde_json::json!({"type":"response_item","payload":{
+            "type":"function_call_output","call_id":"other","output":"unrelated"}}),
+    ]
+    .into_iter()
+    .map(|event| event.to_string())
+    .collect::<Vec<_>>()
+    .join("\n");
+    assert_eq!(tool_call_outputs(&body, "task", "create"), ["created"]);
+    assert!(tool_call_outputs(&body, "task", "show").is_empty());
+}
+
 fn matching_custom_tool_calls(body: &str, name: &str) -> usize {
     body.lines()
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
@@ -414,6 +477,10 @@ fn codex_0156_factory_launch_contract_passes_live_matrix() {
             PANE,
             "Use $cas-1c66-probe. Call coordination whoami and task mine again. \
              Also use the code-mode exec tool to calculate 146 + 1. \
+             In this disposable CAS root, call task create with title=CAS-1C66-SCHEMA-TITLE, \
+             description=CAS-1C66-SCHEMA-DESCRIPTION, design=CAS-1C66-SCHEMA-DESIGN, \
+             acceptance_criteria=CAS-1C66-SCHEMA-ACCEPTANCE, labels=probe,schema, \
+             priority=3, task_type=chore, risk=none. Then call task show with the new task ID. \
              Then reply with CAS-1C66-FOLLOWUP, CAS-1C66-AGENTS, CAS-1C66-SKILL, \
              the calculation result, and whether .codex/agents/cas-1c66-probe.md exists.",
         ))
@@ -421,6 +488,53 @@ fn codex_0156_factory_launch_contract_passes_live_matrix() {
     let second = wait_for_completions(&mut mux, &rollout, 2, Duration::from_secs(60));
     assert!(matching_tool_calls(&second, "coordination", "whoami") >= 2);
     assert!(matching_tool_calls(&second, "task", "mine") >= 2);
+    let created_with_full_schema = second
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|event| {
+            event["type"] == "response_item"
+                && event["payload"]["type"] == "function_call"
+                && event["payload"]["name"] == "task"
+        })
+        .filter_map(|event| {
+            event["payload"]["arguments"]
+                .as_str()
+                .and_then(|args| serde_json::from_str::<Value>(args).ok())
+        })
+        .any(|args| {
+            args["action"] == "create"
+                && args["title"] == "CAS-1C66-SCHEMA-TITLE"
+                && args["description"] == "CAS-1C66-SCHEMA-DESCRIPTION"
+                && args["design"] == "CAS-1C66-SCHEMA-DESIGN"
+                && args["acceptance_criteria"] == "CAS-1C66-SCHEMA-ACCEPTANCE"
+                && args["labels"] == "probe,schema"
+                && args["priority"] == 3
+                && args["task_type"] == "chore"
+                && args["risk"] == "none"
+        });
+    assert!(
+        created_with_full_schema,
+        "Codex must send all task create arguments intact"
+    );
+    assert!(
+        tool_call_outputs(&second, "task", "show")
+            .iter()
+            .any(|output| {
+                [
+                    "Title: CAS-1C66-SCHEMA-TITLE",
+                    "Priority: P3",
+                    "Type: chore",
+                    "CAS-1C66-SCHEMA-DESCRIPTION",
+                    "CAS-1C66-SCHEMA-DESIGN",
+                    "CAS-1C66-SCHEMA-ACCEPTANCE",
+                    "Labels: probe, schema",
+                    "Risk: none",
+                ]
+                .iter()
+                .all(|marker| output.contains(marker))
+            }),
+        "task show must return every persisted complex-schema field from CAS"
+    );
     assert!(
         matching_custom_tool_calls(&second, "exec") >= 1,
         "CAS direct tools and the Codex code-mode exec tool must coexist"
@@ -466,7 +580,7 @@ fn codex_0156_factory_launch_contract_passes_live_matrix() {
     assert_turn_context(&final_body, &scratch, &model, &effort);
 
     eprintln!(
-        "PASS codex-cli 0.156.0 factory contract; model={model}; effort={effort}; isolated_root={}; rollout={}",
+        "PASS codex-cli 0.156.0 factory contract; model={model}; effort={effort}; complex_schema=task_create_show; isolated_root={}; rollout={}",
         cas_root.display(),
         rollout.display()
     );

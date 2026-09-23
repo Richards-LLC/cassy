@@ -25,7 +25,7 @@
       "required": true,
       "status": "pass",
       "evidence_refs": ["live-production-run"],
-      "detail": "The real launch emitted --model gpt-5.6-terra and -c model_reasoning_effort=xhigh; all three recorded turn contexts retained that model and effort."
+      "detail": "The live matrix selected the active standard-lane recipe from the registry: --model gpt-5.6-luna and -c model_reasoning_effort=xhigh; all three recorded turn contexts retained that model and effort."
     },
     {
       "id": "developer_role_priming",
@@ -54,6 +54,13 @@
       "status": "pass",
       "evidence_refs": ["live-production-run"],
       "detail": "A later injected turn called coordination whoami and task mine again through the same production PTY and isolated CAS store."
+    },
+    {
+      "id": "complex_schema_task_create_show",
+      "required": true,
+      "status": "pass",
+      "evidence_refs": ["live-production-run"],
+      "detail": "The follow-up Codex turn sent eight task create fields intact (title, description, design, acceptance criteria, labels, priority, type, risk); task show returned those fields from the disposable CAS store. The matrix paired the show output to its tool call ID before checking persisted values."
     },
     {
       "id": "code_mode_and_direct_cs_coexist",
@@ -95,8 +102,8 @@
     {
       "id": "live-production-run",
       "kind": "live_test",
-      "reference": "task:cas-0d4f#2026-09-23-codex-0.156.0-production-run; rollout:/home/pippenz/.codex/sessions/2026/09/23/rollout-2026-09-23T08-05-47-01a0ce28-5de0-7cf1-90a8-4849e0b4dfbc.jsonl",
-      "summary": "Fresh real Codex 0.156.0 PtyConfig::codex run with target/debug/cas first on PATH, initialized disposable CAS_ROOT, and disposable project fixtures; the guarded live matrix passed with 1 test passed in 62.96s."
+      "reference": "task:cas-27e1#2026-09-23-codex-0.156.0-complex-schema-run; rollout:/home/pippenz/.codex/sessions/2026/09/23/rollout-2026-09-23T09-56-27-01a0ce8d-af1e-7020-80b0-5dfdb596c1d1.jsonl",
+      "summary": "Real Codex 0.156.0 PtyConfig::codex run with freshly built target/debug/cas first on PATH and an initialized disposable CAS_ROOT; the guarded live matrix passed 1 test in 79.35s, including task create and persisted task show schema checks."
     },
     {
       "id": "cas-root-initialization",

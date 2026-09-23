@@ -1754,6 +1754,47 @@ function restoreMessageDraft(): void {
   composer.setSelectionRange(caret, caret);
 }
 
+/** A click made with a mouse (fine pointer). Browsers that do not report
+ * `pointerType` on click fall back to the device's primary pointer. */
+function finePointerClick(event: MouseEvent): boolean {
+  const pointerType = (event as Partial<PointerEvent>).pointerType;
+  if (pointerType) return pointerType === "mouse";
+  return window.matchMedia("(pointer: fine)").matches;
+}
+
+/** After a palette jump, hand focus to the opened conversation's composer
+ * (restoreMessageDraft already put its caret back). Where the composer cannot
+ * take focus — the terminal workspace hides it — the attached pane takes focus
+ * once the attach settles, unless the operator has moved focus themselves. */
+function focusJumpedComposer(opened: Promise<void>): void {
+  const machineId = selectedMachineId;
+  const session = selectedSession;
+  const composer = document.querySelector<HTMLTextAreaElement>("#message-text");
+  composer?.focus();
+  if (composer && document.activeElement === composer) {
+    const landed = composer.value;
+    // A focused composer defers structural rebuilds (cas-8434), so the status
+    // and lease that load after the jump would leave the shell stale — the
+    // control command still offering "Take control" to its holder. Until the
+    // operator types, nothing is lost by flushing that rebuild and landing
+    // back in the fresh composer.
+    void opened.then(() => {
+      if (selectedMachineId !== machineId || selectedSession !== session || !deferredRender.pending) return;
+      const field = document.querySelector<HTMLTextAreaElement>("#message-text");
+      if (!field || document.activeElement !== field || field.value !== landed) return;
+      field.blur();
+      deferredRender.focusLeft();
+      document.querySelector<HTMLTextAreaElement>("#message-text")?.focus();
+    });
+    return;
+  }
+  void opened.then(() => {
+    if (selectedMachineId !== machineId || selectedSession !== session) return;
+    if (document.activeElement && document.activeElement !== document.body) return;
+    activePaneContext()?.surface.focus();
+  });
+}
+
 function syncSpeechComposer(): void {
   const mic = document.querySelector<HTMLButtonElement>("#message-mic");
   if (!mic) return;
@@ -2129,7 +2170,11 @@ function render(captureDraft = true): void {
     pairingView,
   }) + JSON.stringify([hubPresentation, selectedHubSession?.project_dir]);
   const active = document.activeElement;
-  const composing = isEditableElement(active) && app.contains(active);
+  // Focus anywhere inside the open palette counts as composing too: a rebuild
+  // would replace the dialog under a focused row, wipe its filter and leave
+  // Enter to run whatever command now leads (cas-9648 QA F02).
+  const inOpenPalette = active instanceof HTMLElement && active.closest("#command-palette[open]") !== null;
+  const composing = (isEditableElement(active) && app.contains(active)) || inOpenPalette;
   const decision = renderDecision({
     signatureChanged: signature !== lastShellSignature,
     composing,
@@ -2798,12 +2843,12 @@ function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | und
     else first.focus();
   };
   for (const command of palette.querySelectorAll<HTMLButtonElement>("[data-palette-machine]")) {
-    command.onclick = () => {
+    command.onclick = (event) => {
       // Close the dialog itself, not just the flag: Enter in the filter
       // clicks this row with focus still in the input, and render() defers
       // the shell rebuild while an editable field inside #app has focus, so
       // the modal would stay up over the session it just opened. The toggle
-      // is not refocused — the opened session owns focus from here.
+      // is not refocused — the opened conversation's composer takes focus.
       commandPaletteOpen = false;
       palette.close();
       // close() hands focus back to whatever held it before the palette
@@ -2813,7 +2858,18 @@ function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | und
       if (restored instanceof HTMLElement && isEditableElement(restored) && app.contains(restored)) restored.blur();
       const machineId = command.dataset.paletteMachine;
       const session = command.dataset.paletteSession;
-      if (machineId && session) void openSession(machineId, session);
+      if (!machineId || !session) return;
+      const opened = openSession(machineId, session);
+      // openSession paints the conversation before its first await, so its
+      // composer exists now. Land there: a jump from the keyboard ends where
+      // the next keystroke belongs, not on <body>. A touch or pen tap is the
+      // exception, as with the session picker on phones: it would raise a soft
+      // keyboard over the conversation just opened, so the operator lands to
+      // read it, exactly as a tap on a list row does. Keyboard activation
+      // (Enter reaches this handler as a click with detail 0) and fine-pointer
+      // clicks land in the reply box.
+      if (event.detail > 0 && !finePointerClick(event)) return;
+      focusJumpedComposer(opened);
     };
   }
   for (const command of palette.querySelectorAll<HTMLButtonElement>("[data-palette-scheme]")) {
@@ -2990,6 +3046,11 @@ app.addEventListener("focusout", () => {
     // every editable control releases the rebuild.
     const active = document.activeElement;
     if (isEditableElement(active) && app.contains(active)) return;
+    // Arrowing from the palette filter onto its rows is still one palette
+    // interaction: a rebuild here would replace the dialog, wipe the filter
+    // and leave Enter to run whatever row now leads (cas-9648). The owed
+    // rebuild runs when focus leaves the palette.
+    if (active instanceof HTMLElement && active.closest("#command-palette[open]")) return;
     deferredRender.focusLeft();
   });
 });

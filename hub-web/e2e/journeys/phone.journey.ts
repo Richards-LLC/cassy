@@ -1,5 +1,5 @@
 import { test, expect } from "./journey";
-import { ATLAS, STUDIO, PELICAN } from "./world";
+import { ATLAS, STUDIO, PELICAN, OTTER } from "./world";
 
 test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
 
@@ -34,5 +34,15 @@ test("HUB-J9 on a phone: from the list to a reply and back", async ({ page, jour
     await page.getByRole("button", { name: "‹ Conversations", exact: true }).tap();
     await expect(list).toBeVisible();
     await expect(list.getByRole("button", { name: /cas-src/ })).toContainText("Cutting now.");
+  });
+
+  await journey.stage("Jump from the palette with a tap", async () => {
+    await page.getByRole("button", { name: "Appearance & commands" }).tap();
+    await page.getByRole("button", { name: new RegExp(`Jump to ${OTTER}`) }).tap();
+    await expect(page.locator("#command-palette")).toBeHidden();
+    await expect(page.getByRole("button", { name: `Send to ${OTTER}`, exact: true })).toBeVisible();
+    // Like a tap on a list row: land to read, with no soft keyboard raised
+    // over the conversation just opened.
+    await expect(composer).not.toBeFocused();
   });
 });

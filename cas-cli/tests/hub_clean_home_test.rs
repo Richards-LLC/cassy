@@ -14,6 +14,50 @@ use assert_cmd::Command;
 use serde_json::Value;
 use tempfile::TempDir;
 
+#[cfg(unix)]
+fn install_tailscale_mock(home: &Path, path: &Path, script: &str) {
+    use fs2::FileExt;
+    use sha2::{Digest, Sha256};
+    use std::os::unix::fs::{PermissionsExt, symlink};
+
+    // Nextest starts each case in a separate process. Keep each script at one
+    // stable executable path across cases and runs, so macOS only assesses it
+    // once instead of assessing every freshly written HOME/bin/tailscale.
+    let cache = std::env::current_exe().unwrap().parent().unwrap().join("hub-mock-tailscale");
+    fs::create_dir_all(&cache).unwrap();
+    let digest = hex::encode(Sha256::digest(script.as_bytes()));
+    let shared = cache.join(format!("{digest}.sh"));
+    let ready = cache.join(format!("{digest}.ready"));
+    let lock = fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(cache.join(format!("{digest}.lock")))
+        .unwrap();
+    lock.lock_exclusive().unwrap();
+    if !shared.exists() {
+        let staged = cache.join(format!("{digest}.{}.tmp", std::process::id()));
+        fs::write(&staged, script).unwrap();
+        fs::set_permissions(&staged, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::rename(&staged, &shared).unwrap();
+    }
+    if !ready.exists() {
+        // The first launch can wait in macOS dyld for several seconds under
+        // process load. Warm that assessment before the product's bounded
+        // Tailscale command is exercised.
+        let output = std::process::Command::new(&shared)
+            .args(["status", "--json"])
+            .env_clear()
+            .env("HOME", home)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "mock prewarm failed: {output:?}");
+        fs::write(&ready, b"ready").unwrap();
+    }
+    lock.unlock().unwrap();
+    symlink(&shared, path).unwrap();
+}
+
 fn cas_command(home: &Path, path: &OsStr) -> Command {
     let mut command = Command::new(cas::test_paths::cas_binary());
     command
@@ -52,13 +96,12 @@ fn private_home() -> TempDir {
 #[cfg(unix)]
 #[test]
 fn foreground_start_carries_legacy_target_across_process_record_write() {
-    use std::os::unix::fs::PermissionsExt;
-
     let home = private_home();
     let bin = home.path().join("bin");
     fs::create_dir(&bin).unwrap();
     let tailscale = bin.join("tailscale");
-    fs::write(
+    install_tailscale_mock(
+        home.path(),
         &tailscale,
         r##"#!/bin/sh
 case "$*" in
@@ -73,9 +116,7 @@ case "$*" in
   *) exit 9 ;;
 esac
 "##,
-    )
-    .unwrap();
-    fs::set_permissions(&tailscale, fs::Permissions::from_mode(0o700)).unwrap();
+    );
 
     let dead_port = TcpListener::bind("127.0.0.1:0")
         .unwrap()
@@ -168,13 +209,12 @@ esac
 #[cfg(unix)]
 #[test]
 fn detached_start_forwards_prior_target_after_failed_launcher_cleanup() {
-    use std::os::unix::fs::PermissionsExt;
-
     let home = private_home();
     let bin = home.path().join("bin");
     fs::create_dir(&bin).unwrap();
     let tailscale = bin.join("tailscale");
-    fs::write(
+    install_tailscale_mock(
+        home.path(),
         &tailscale,
         r##"#!/bin/sh
 case "$*" in
@@ -194,9 +234,7 @@ case "$*" in
   *) exit 9 ;;
 esac
 "##,
-    )
-    .unwrap();
-    fs::set_permissions(&tailscale, fs::Permissions::from_mode(0o700)).unwrap();
+    );
     let dead_port = TcpListener::bind("127.0.0.1:0")
         .unwrap()
         .local_addr()
@@ -435,13 +473,12 @@ fn hub_serve_does_not_hold_instance_lock_while_auth_lock_is_contended() {
 #[cfg(unix)]
 #[test]
 fn clean_home_tailscale_stop_reports_removal_after_serve_exit_teardown() {
-    use std::os::unix::fs::PermissionsExt;
-
     let home = private_home();
     let bin = home.path().join("bin");
     fs::create_dir(&bin).unwrap();
     let tailscale = bin.join("tailscale");
-    fs::write(
+    install_tailscale_mock(
+        home.path(),
         &tailscale,
         r#"#!/bin/sh
 case "$*" in
@@ -459,9 +496,7 @@ case "$*" in
   *) exit 9 ;;
 esac
 "#,
-    )
-    .unwrap();
-    fs::set_permissions(&tailscale, fs::Permissions::from_mode(0o700)).unwrap();
+    );
 
     let record = start_hub(home.path(), bin.as_os_str(), true);
     assert_eq!(record["public_url"], "https://clean-host.tail.example/");
@@ -689,31 +724,15 @@ esac
 #[cfg(unix)]
 #[test]
 fn slow_tailscale_serve_start_waits_for_bounded_publication() {
-    use std::os::unix::fs::PermissionsExt;
-
     let home = private_home();
     let bin = home.path().join("bin");
     fs::create_dir(&bin).unwrap();
     let tailscale = bin.join("tailscale");
-    fs::write(
+    install_tailscale_mock(
+        home.path(),
         &tailscale,
-        r#"#!/bin/sh
-if [ -f "$HOME/slow-start" ]; then /bin/sleep 2; fi
-case "$*" in
-  'status --json') printf '%s' '{"Self":{"DNSName":"slow.tail.example."}}' ;;
-  'serve status --json')
-    if [ -f "$HOME/mock-serve" ]; then
-      target=$(/bin/cat "$HOME/mock-serve")
-      printf '{"Web":{"slow.tail.example:443":{"Handlers":{"/":{"Proxy":"%s"}}}}}' "$target"
-    else printf '%s' '{}'; fi ;;
-  'serve --bg --yes --https=443 '*) printf '%s' "$5" > "$HOME/mock-serve" ;;
-  'serve --https=443 off') /bin/rm -f "$HOME/mock-serve" ;;
-  *) exit 9 ;;
-esac
-"#,
-    )
-    .unwrap();
-    fs::set_permissions(&tailscale, fs::Permissions::from_mode(0o700)).unwrap();
+        include_str!("fixtures/hub_mock_tailscale_slow.sh"),
+    );
     fs::write(home.path().join("slow-start"), b"").unwrap();
 
     let started = Instant::now();
@@ -798,13 +817,12 @@ fn process_start_rejects_state_collisions_with_sanitized_diagnostics() {
 #[test]
 fn restart_waits_for_record_absent_instance_lock_release_before_replacement() {
     use cas::hub::HubRuntimePaths;
-    use std::os::unix::fs::PermissionsExt;
-
     let home = private_home();
     let bin = home.path().join("bin");
     fs::create_dir(&bin).unwrap();
     let tailscale = bin.join("tailscale");
-    fs::write(
+    install_tailscale_mock(
+        home.path(),
         &tailscale,
         r#"#!/bin/sh
 case "$*" in
@@ -822,9 +840,7 @@ case "$*" in
   *) exit 9 ;;
 esac
 "#,
-    )
-    .unwrap();
-    fs::set_permissions(&tailscale, fs::Permissions::from_mode(0o700)).unwrap();
+    );
 
     let barrier = home.path().join("restart-lock-barrier");
     fs::create_dir(&barrier).unwrap();

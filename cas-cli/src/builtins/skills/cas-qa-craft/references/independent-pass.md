@@ -74,24 +74,47 @@ and mark each item pass or fail:
 - truncation and overflow
 - motion
 
-## 5. Ledger
+## 5. Ledger and evidence bundle
 
-Write `<ledger-dir>/LEDGER.md` beside the evidence. Use the same file layout
-as the implementer's cas-qa-craft bundle: `trace.zip`, `trace-actions.txt`,
-`final.aria.yml`, per-cell PNGs, and `visual-qa/`. Add a `journeys/<ID>/`
-folder per journey. The ledger has these sections:
+The round directory `<ledger-dir>` is a cas-qa-craft evidence bundle, made
+to the same contract as the implementer's bundle. Its `bundle.json` must
+have:
 
-- **Header:** pass id, reviewer, implementer, branch, tip, build command, URL,
-  and Playwright version.
+- `"producer": "independent-qa"`
+- `task_id`: the delivery
+- `head_sha`: the reviewed tip, in full
+
+`qa_record` refuses a verdict whose bundle is missing or names another
+producer, task, or tip. The files, all listed in `bundle.json`:
+
+- `trace.zip`, recorded with
+  `{ mode: 'on', snapshots: { dom: true, aria: true, screen: true }, screenshots: false, sources: true }`
+- `trace-actions.txt`: the output of `npx playwright trace actions`
+- `receipt.webm`: start it with
+  `page.screencast.start({ path, size: page.viewportSize() })` and
+  `showActions`, and add one `showChapter('F01 …', { duration: 1000 })` per
+  finding
+- `final.aria.yml` and `final.aria.json`
+- `F01.png`, `F02.png`, …: one capture per finding, listed in `files.cells`
+- `visual-qa/` and `visual-qa.stdout`
+- `critique.md`, whose scores match `critique_score`
+- the three a11y captures, when the change is visual
+- one `journeys/<ID>/` folder per journey
+
+Write `<ledger-dir>/LEDGER.md` beside `bundle.json`. It has these sections:
+
+- **Header:** pass id, reviewer, implementer, branch, tip, build command,
+  URL, and Playwright version.
 - **Journeys:**
   `| ID | Run | Dead end | Copy | Steps | Context | Waits | Severity | Findings / tasks |`
 - **Correctness:**
   `| # | Path | Viewport · scheme | Expected | Actual | Severity | Evidence |`
-- **Polish:** the rubric table with an evidence sentence per score, the
-  checklist, and the `visual-qa.mjs --strict` verdict line.
+- **Polish:** the rubric table, the checklist, and the
+  `visual-qa.mjs --strict` verdict line.
 
-Every finding cites a `trace action N` from `npx playwright trace actions`
-**and** a screenshot path. A finding without both is not a finding.
+Every finding cites a `trace action N` **and** its `F0N.png`. A finding
+without both is not a finding. Recording the verdict cites the bundle on the
+delivery as a `platform_proof` note (`qa-bundle: <abs>/bundle.json`).
 
 ## 6. Verdict
 

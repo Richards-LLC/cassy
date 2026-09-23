@@ -108,6 +108,25 @@ fn fixture() -> (tempfile::TempDir, CasCore, std::path::PathBuf, String) {
     (temp, core, repo, task_id)
 }
 
+/// A round's LEDGER.md plus its cas-c3b8 `bundle.json` for `head`.
+fn round_evidence(dir: &Path, task_id: &str, head: &str) -> std::path::PathBuf {
+    std::fs::create_dir_all(dir).unwrap();
+    let ledger = dir.join("LEDGER.md");
+    std::fs::write(&ledger, "# independent QA ledger\n").unwrap();
+    std::fs::write(
+        dir.join("bundle.json"),
+        serde_json::json!({
+            "schema": 1,
+            "task_id": task_id,
+            "producer": "independent-qa",
+            "head_sha": head,
+        })
+        .to_string(),
+    )
+    .unwrap();
+    ledger
+}
+
 fn qa_task_id(cas_dir: &Path, delivery: &str) -> String {
     cas_store::latest_qa_pass(cas_dir, delivery, chrono::Utc::now())
         .unwrap()
@@ -225,8 +244,24 @@ async fn rejection_returns_the_delivery_and_approval_unlocks_merge_and_close() {
     assert!(refusal.contains("INDEPENDENT QA REQUIRED"), "{refusal}");
 
     // Reject with evidence: the delivery goes back to its implementer.
-    let ledger1 = repo.join("round-1-LEDGER.md");
-    std::fs::write(&ledger1, "# round 1\n").unwrap();
+    // A verdict without its evidence bundle is refused.
+    let bare = repo.join("bare");
+    std::fs::create_dir_all(&bare).unwrap();
+    std::fs::write(bare.join("LEDGER.md"), "# no bundle\n").unwrap();
+    let unbacked = reviewer_service
+        .verification(Parameters(verification(serde_json::json!({
+            "action": "qa_record",
+            "task_id": task_id,
+            "status": "approved",
+            "summary": "trust me",
+            "ledger_path": bare.join("LEDGER.md").display().to_string(),
+        }))))
+        .await
+        .expect_err("a verdict needs its bundle");
+    assert!(unbacked.message.contains("no evidence bundle"), "{}", unbacked.message);
+
+    let round1_head = git(&repo, &["rev-parse", "factory/test-agent"]);
+    let ledger1 = round_evidence(&repo.join("round-1"), &task_id, &round1_head);
     let rejected = extract_text(
         reviewer_service
             .verification(Parameters(verification(serde_json::json!({
@@ -271,8 +306,7 @@ async fn rejection_returns_the_delivery_and_approval_unlocks_merge_and_close() {
         }))
         .await
         .unwrap();
-    let ledger2 = repo.join("round-2-LEDGER.md");
-    std::fs::write(&ledger2, "# round 2\n").unwrap();
+    let ledger2 = round_evidence(&repo.join("round-2"), &task_id, &fixed_head);
     let approved = extract_text(
         reviewer_service
             .verification(Parameters(verification(serde_json::json!({
@@ -286,6 +320,13 @@ async fn rejection_returns_the_delivery_and_approval_unlocks_merge_and_close() {
             .unwrap(),
     );
     assert!(approved.contains("APPROVAL"), "{approved}");
+    assert!(
+        tasks.get(&task_id).unwrap().notes.contains(&format!(
+            "PLATFORM_PROOF qa-bundle: {}",
+            repo.join("round-2").join("bundle.json").display()
+        )),
+        "the approved round's bundle is cited on the delivery"
+    );
     assert!(
         cas::qa_pass::supervisor_merge_refusal(&cas_dir, &repo, merge_cmd).is_none(),
         "an approved tip may merge"

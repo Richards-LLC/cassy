@@ -4842,7 +4842,7 @@ impl CasCore {
                             &task,
                             "MERGE REQUIRED",
                             &msg,
-                            anchor,
+                            anchor.clone(),
                             merge_conflicted,
                         );
                     } else {
@@ -4864,6 +4864,20 @@ impl CasCore {
                             self.mark_awaiting_merge_conflicted(task_store.as_ref(), &task.id);
                         }
                     }
+
+                    // cas-619f: a user-facing delivery needs an independent
+                    // QA pass before it may merge. Open (or re-find) the
+                    // round for this exact tip and tell the worker where it
+                    // stands. Idempotent per tip, so close retries are cheap.
+                    let msg = match self.dispatch_independent_qa(
+                        &task,
+                        &close_project_root,
+                        &resolved_parent_branch,
+                        anchor.as_deref(),
+                    ) {
+                        Some(qa_status) => format!("{msg}{qa_status}"),
+                        None => msg,
+                    };
 
                     return Ok(Self::tool_error(msg));
                 }

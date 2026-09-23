@@ -1095,6 +1095,10 @@ pub enum SupervisorWakeClass {
     /// factory cannot make progress without: until the supervisor records a
     /// verdict, the worker's close is refused.
     VerificationDispatch,
+    /// CAS's own `<cas-qa-dispatch …>` handoff (cas-619f): a user-facing
+    /// delivery parked for merge and needs an independent reviewer spawned
+    /// before it may merge.
+    QaDispatch,
 }
 
 /// Who CAS observed writing a queued row, resolved for the wake gate
@@ -3131,6 +3135,15 @@ impl FactoryDaemon {
                 {
                     return Some(SupervisorWakeClass::VerificationDispatch);
                 }
+                if crate::prompt_revalidation::parse_qa_dispatch_envelope(prompt).is_some() {
+                    return Some(SupervisorWakeClass::QaDispatch);
+                }
+                // cas-619f: CAS itself escalates a delivery whose independent
+                // QA was rejected `qa.max_rounds` times with a blocker
+                // envelope. Daemon-stamped, so the envelope is CAS's own.
+                if crate::prompt_revalidation::parse_blocker_envelope(prompt).is_some() {
+                    return Some(SupervisorWakeClass::Blocker);
+                }
                 (is_lifecycle_wake_source(source)
                     && crate::prompt_revalidation::is_supervisor_wake_envelope(prompt))
                 .then_some(SupervisorWakeClass::Lifecycle)
@@ -3188,6 +3201,13 @@ impl FactoryDaemon {
                         // written inside the worker's MCP session is not
                         // silently demoted to inbox-only.
                         Some(SupervisorWakeClass::VerificationDispatch)
+                    } else if crate::prompt_revalidation::parse_qa_dispatch_envelope(prompt)
+                        .is_some()
+                    {
+                        // cas-619f: emitted Daemon-stamped from the worker's
+                        // close path; accepted from the registered origin on
+                        // the same terms as the verification handoff.
+                        Some(SupervisorWakeClass::QaDispatch)
                     } else {
                         None
                     }
@@ -3342,6 +3362,9 @@ impl FactoryDaemon {
             }
             SupervisorWakeClass::VerificationDispatch => {
                 "supervisor pane is quiet and the row is a CAS verification-dispatch handoff"
+            }
+            SupervisorWakeClass::QaDispatch => {
+                "supervisor pane is quiet and the row is a CAS independent-QA dispatch"
             }
         })
     }

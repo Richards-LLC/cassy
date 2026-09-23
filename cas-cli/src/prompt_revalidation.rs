@@ -1084,6 +1084,75 @@ pub(crate) fn parse_verification_dispatch_envelope(
     })
 }
 
+const QA_DISPATCH_ENVELOPE_OPEN: &str = "<cas-qa-dispatch ";
+const QA_DISPATCH_ENVELOPE_CLOSE: &str = "</cas-qa-dispatch>";
+
+/// Parsed `<cas-qa-dispatch …>` handoff (cas-619f).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct QaDispatchEnvelope {
+    pub pass_id: String,
+    pub task_id: String,
+    pub qa_task_id: String,
+    pub bound_head: String,
+    pub deadline: String,
+}
+
+/// Build the independent-QA handoff CAS enqueues for the supervisor when a
+/// user-facing delivery parks for merge (cas-619f). Whole-prompt shaped like
+/// the verification-dispatch envelope, so free text cannot impersonate it.
+pub(crate) fn qa_dispatch_envelope(
+    pass_id: &str,
+    task_id: &str,
+    qa_task_id: &str,
+    round: u32,
+    bound_head: &str,
+    deadline: &str,
+    implementer: &str,
+    reasons: &str,
+) -> String {
+    format!(
+        "{QA_DISPATCH_ENVELOPE_OPEN}pass_id=\"{pass}\" task_id=\"{task}\" qa_task_id=\"{qa}\" \
+         round=\"{round}\" bound_head=\"{head}\" deadline=\"{deadline}\">\n\
+         {task} (delivered by {implementer}) is user-facing ({reasons}) and parked for merge. \
+         It needs an independent QA and polish pass before it merges.\n\
+         Spawn a reviewer who is not {implementer}: \
+         mcp__cas__coordination action=spawn_workers lane=taste task_id={qa}\n\
+         Do not merge {task} until the pass records a verdict for {head}; \
+         to skip it, waive with a reason: mcp__cas__verification action=qa_waive task_id={task} summary=\"...\"\n\
+         {QA_DISPATCH_ENVELOPE_CLOSE}",
+        pass = xml_attribute_value(pass_id),
+        task = xml_attribute_value(task_id),
+        qa = xml_attribute_value(qa_task_id),
+        head = xml_attribute_value(bound_head),
+        deadline = xml_attribute_value(deadline),
+        implementer = xml_attribute_value(implementer),
+        reasons = xml_attribute_value(reasons),
+    )
+}
+
+/// Parse an independent-QA handoff, if this prompt is one.
+pub(crate) fn parse_qa_dispatch_envelope(prompt: &str) -> Option<QaDispatchEnvelope> {
+    if !prompt.starts_with(QA_DISPATCH_ENVELOPE_OPEN)
+        || !prompt.trim_end().ends_with(QA_DISPATCH_ENVELOPE_CLOSE)
+    {
+        return None;
+    }
+    let tag_end = prompt.find('>')?;
+    let tag = &prompt[..tag_end];
+    let required = |name: &str| {
+        xml_attribute(tag, name)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    };
+    Some(QaDispatchEnvelope {
+        pass_id: required("pass_id")?,
+        task_id: required("task_id")?,
+        qa_task_id: required("qa_task_id")?,
+        bound_head: required("bound_head")?,
+        deadline: required("deadline")?,
+    })
+}
+
 fn xml_attribute<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
     let needle = format!(" {name}=\"");
     let start = tag.find(&needle)? + needle.len();

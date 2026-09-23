@@ -33,14 +33,18 @@ verify on upgrade) · 🔧 fix shipped · 🏗 EPIC · ⏭ n/a
   `mcp__cs` tools, initialized disposable `CAS_ROOT`, worktree discovery fixtures, and interrupt /
   resume recovery. The typed receipt is
   `crates/cas-pty/conformance/codex-cli-0.149.1-2026-08-25.json`.
-- **Locally installed:** **0.149.1** (`codex-cli 0.149.1`, checked 2026-08-25).
-- **Latest stable:** **0.149.1** (2026-08-24). 0.150.0-alpha.9 is the current prerelease and is
-  skimmed but untracked under this diary's stable-only policy.
-- **Gap:** none between the validated pin, local installation, and latest stable. The fresh matrix
-  found no launch-contract regression across 0.147.0–0.149.1. The non-gating probe also found
-  `-c model_reasoning_effort=max` accepted by Codex 0.149.1; Cassy still maps only its existing
-  `Effort::XHigh` → `xhigh` vocabulary because no Effort implementation change is part of this
-  validation. The older entries below remain a *triage pass* against the touchpoints, not a
+- **Locally installed:** **0.156.0** (`codex-cli 0.156.0`, checked 2026-09-23).
+- **Latest stable:** **0.156.0** (2026-09-22). The 0.150.0–0.156.0 stable releases are tracked
+  below; prereleases remain skimmed but untracked under this diary's stable-only policy.
+- **Gap:** the validated pin is 0.149.1, while the installed and latest stable version is 0.156.0.
+  No 0.150.0–0.156.0 `PtyConfig::codex` matrix was run during this sweep, so the release notes'
+  MCP, approval/sandbox, skills/plugin, instruction-loading, and interrupt/resume touchpoints remain
+  👀 **unvalidated**. Follow-up task `cas-0d4f` owns the
+  0.156.0 matrix; no code fix is indicated until that run produces evidence. The fresh 0.149.1
+  matrix found no launch-contract regression across 0.147.0–0.149.1. The non-gating probe also
+  found `-c model_reasoning_effort=max` accepted by Codex 0.149.1; Cassy still maps only its
+  existing `Effort::XHigh` → `xhigh` vocabulary because no Effort implementation change is part
+  of that validation. The older entries below remain a *triage pass* against the touchpoints, not a
   per-item code audit — future upgrade-time re-verification is the trigger for promoting any 👀 to
   a task. (Contrast the Claude Code diary's .166/.162 entries, which were deep-verified for
   specific user questions.) The
@@ -72,13 +76,19 @@ The load-bearing surface, all in `crates/cas-pty/src/pty.rs::PtyConfig::codex` u
   worktrees, so "AGENTS.md loading / symlinked workspace" changes are 👀.
 - **`CAS_AGENT_ROLE` / `CAS_FACTORY_MODE` env** — drive the same hook-local auto-approve + jail
   exemptions as Claude workers (note: Codex has no Claude-style hook system; Cassy relies on `--yolo`
-  + env, not PreToolUse, on the Codex path).
+  and env, not PreToolUse, on the Codex path).
 
 ## Index
 
 | Codex version | Headline | Cassy verdict | Pointer |
 |---------------|----------|-------------|---------|
-| 0.150.0-alpha.9 | Pre-release as of 2026-08-25 — untracked under stable-only policy | — | — |
+| 0.156.0 | **Fullscreen TUI/voice/usage · worktrees default · MCP credential recovery · sandbox hardening** | 👀 watch | [release](https://github.com/openai/codex/releases/tag/rust-v0.156.0) · cas-0d4f |
+| 0.155.0 | **Voice · daemon recovery/update · MCP Touch ID/OAuth status · sandbox hardening** | 👀 watch | [release](https://github.com/openai/codex/releases/tag/rust-v0.155.0) · cas-0d4f |
+| 0.154.0 | **Worktrees · inline questions · plugin/skill refresh · MCP OAuth coordination · trust-gated startup** | 👀 watch | [release](https://github.com/openai/codex/releases/tag/rust-v0.154.0) · cas-0d4f |
+| 0.153.0 | **MCP approval scoping · app-server reconnect · full-access Guardian behavior · context-management config** | 👀 watch | [release](https://github.com/openai/codex/releases/tag/rust-v0.153.0) · cas-0d4f |
+| 0.152.0 | **MCP naming/output limits · cache refresh and resume · planning default** | 👀 watch | [release](https://github.com/openai/codex/releases/tag/rust-v0.152.0) · cas-0d4f |
+| 0.151.0 | **Optional MCP startup grace · MCP result extensions · model-aware effort fallback · sandbox paths** | 👀 watch | [release](https://github.com/openai/codex/releases/tag/rust-v0.151.0) · cas-0d4f |
+| 0.150.0 | **Task mentions · interrupt hooks · AGENTS trust · required/remote MCP · sandbox hardening** | 👀 watch | [release](https://github.com/openai/codex/releases/tag/rust-v0.150.0) · cas-0d4f |
 | 0.149.1 | Patch release with no release-note body · full factory matrix passed | 🟢 validated | receipt |
 | 0.149.0 | **`codex agents` dashboard · SDK config/`max`+`ultra` effort · rmcp 3.1.2 · MCP hooks** | 🟢 validated | receipt |
 | 0.148.0 | **Async/MCP hooks** · MCP recovery and handler reuse · skills-loader churn · fail-closed sandbox | 🟢 validated | receipt |
@@ -102,6 +112,105 @@ The load-bearing surface, all in `crates/cas-pty/src/pty.rs::PtyConfig::codex` u
 ---
 
 ## Entries
+
+### 0.156.0 — fullscreen TUI, voice, usage analytics, and default worktrees
+
+Reviewed 2026-09-23. Triage pass vs touchpoints. Source: official
+[`rust-v0.156.0 release`](https://github.com/openai/codex/releases/tag/rust-v0.156.0)
+(published 2026-09-22).
+
+- **Fullscreen `/tui`, voice, usage analytics, themes, Mermaid/equation rendering, and daemon
+  controls** are ⏭ **n/a** to the Cassy PTY launch contract. The new default worktree support is
+  Codex-native session management, not Cassy's factory worktree lifecycle.
+- **Streamed answers and plans survive failed or interrupted turns; MCP credentials recover through
+  proxy/auth-discovery failures; and sandbox isolation gaps were closed.** → 👀 **touchpoints:
+  interrupt/resume, MCP (`cs`), and `--yolo`/sandbox behavior.** These are load-bearing client
+  changes, but the 0.149.1 receipt cannot validate 0.156.0. The upgrade matrix is tracked by
+  `cas-0d4f`; no code fix is indicated yet.
+
+### 0.155.0 — voice, daemon recovery, MCP credential state, and sandbox hardening
+
+Reviewed 2026-09-23. Triage pass vs touchpoints. Source: official
+[`rust-v0.155.0 release`](https://github.com/openai/codex/releases/tag/rust-v0.155.0)
+(published 2026-09-17).
+
+- **Voice, live reasoning summaries, task hiding/archiving, daemon update schedules, and Bedrock
+  credential sourcing** are ⏭ **n/a** to the documented Cassy PTY launch contract.
+- **MCP Touch ID requests, expired-OAuth reporting/reconnect guidance, approval evidence continuity,
+  and Windows/WSL sandbox escape fixes** → 👀 **touchpoints: MCP (`cs`), `--yolo`, and
+  interrupt/resume behavior.** Cassy's local stdio server does not use OAuth or Touch ID, but the
+  client/runtime paths remain load-bearing. `cas-0d4f` owns revalidation; no code fix is indicated
+  yet.
+
+### 0.154.0 — worktrees, inline questions, plugin refresh, and trust-gated startup
+
+Reviewed 2026-09-23. Triage pass vs touchpoints. Source: official
+[`rust-v0.154.0 release`](https://github.com/openai/codex/releases/tag/rust-v0.154.0)
+(published 2026-09-09).
+
+- **Codex-native `--worktree`/`/worktree`, inline questions, Windows daemon sharing, and TUI
+  presentation changes** are ⏭ **n/a** to Cassy's `PtyConfig::codex` flags and factory-owned
+  worktrees.
+- **Existing sessions refresh plugin tools, skills, and hooks; MCP OAuth refresh is coordinated;
+  workspace helpers wait for trust; and resumed/forked sessions preserve permissions.** → 👀
+  **touchpoints: `.codex/skills/` + `.codex/agents/`, MCP (`cs`), `AGENTS.md`, and `--yolo`.**
+  `cas-0d4f` owns the required upgrade validation; no code fix is indicated yet.
+
+### 0.153.0 — MCP approval scoping, app-server reconnect, and context configuration
+
+Reviewed 2026-09-23. Triage pass vs touchpoints. Source: official
+[`rust-v0.153.0 release`](https://github.com/openai/codex/releases/tag/rust-v0.153.0)
+(published 2026-09-03).
+
+- **Vim undo/redo, plugin marketplace commands, recap controls, TUI history, usage warnings, and
+  context-management configuration** are ⏭ **n/a** to the Cassy PTY launch contract.
+- **TUI/app-server reconnect, Full Access approval behavior, Guardian history continuity, and
+  remembered MCP approval scoping/relative executable paths** → 👀 **touchpoints: `--yolo`, MCP
+  (`cs`), and interrupt/resume.** No documented Cassy flag or `developer_instructions` rename is
+  present, but the installed version remains unvalidated; `cas-0d4f` owns the matrix.
+
+### 0.152.0 — MCP naming and output limits, cache refresh, and resume fixes
+
+Reviewed 2026-09-23. Triage pass vs touchpoints. Source: official
+[`rust-v0.152.0 release`](https://github.com/openai/codex/releases/tag/rust-v0.152.0)
+(published 2026-09-01).
+
+- **Draft search, rate-limit actions, credential-refresh progress, shell-command timeout settings,
+  Vim behavior, and planning's disabled-by-default configuration** are ⏭ **n/a** to Cassy's launch
+  contract.
+- **MCP server-name punctuation, per-tool output limits, cache-refresh availability, refreshed auth
+  headers, and resumed working-directory restoration** → 👀 **touchpoints: MCP (`cs`),
+  `.codex/config.toml`, `AGENTS.md`, and interrupt/resume.** Existing `mcp__cs__*` names do not
+  require a change; `cas-0d4f` owns verification of the client path.
+
+### 0.151.0 — optional MCP startup grace, result extensions, and model-aware effort fallback
+
+Reviewed 2026-09-23. Triage pass vs touchpoints. Source: official
+[`rust-v0.151.0 release`](https://github.com/openai/codex/releases/tag/rust-v0.151.0)
+(published 2026-08-29).
+
+- **Optional-MCP discovery grace, extensions that inspect/replace tool results, and per-repository
+  plugin catalogs** → 👀 **touchpoints: MCP (`cs`) and `.codex/skills/` + `.codex/agents/`.** The
+  local required stdio server and Cassy mirror are outside the new optional/plugin paths, but need
+  upgrade validation.
+- **Restored permission profiles, model-aware tool/reasoning selection, executor-aware sandbox
+  paths, and structured MCP errors** → 👀 **touchpoints: `--yolo`, `-c
+  model_reasoning_effort=<e>`, MCP (`cs`), and `AGENTS.md`.** No immediate code change is indicated;
+  `cas-0d4f` owns the matrix.
+
+### 0.150.0 — interrupt hooks, AGENTS trust, required MCP, and sandbox hardening
+
+Reviewed 2026-09-23. Triage pass vs touchpoints. Source: official
+[`rust-v0.150.0 release`](https://github.com/openai/codex/releases/tag/rust-v0.150.0)
+(published 2026-08-26).
+
+- **Codex task mentions, `/copy`, generated TUI titles, clickable links, Vim shortcuts, and
+  Bedrock compaction behavior** are ⏭ **n/a** to the Cassy PTY launch contract.
+- **Interrupt hooks can invoke commands/MCP handlers; untrusted projects no longer supply project
+  `AGENTS.md`; required/remote MCP startup and bearer-token lookup changed; and sandbox/permission
+  enforcement was hardened.** → 👀 **touchpoints: interrupt/resume, MCP (`cs`), `AGENTS.md`,
+  `CAS_AGENT_ROLE`/`CAS_FACTORY_MODE`, and `--yolo`.** These changes warrant upgrade validation but
+  show no standalone Cassy code fix; `cas-0d4f` owns the matrix.
 
 ### 0.149.1 — patch release with no release-note body
 
@@ -321,7 +430,7 @@ signal in the patch band after 0.144.0.
   behavior after rolling back a prompting regression" (#32672). → ✅ **no action** for factory. Guardian
   auto-review is Codex's review product surface, not Cassy's `--yolo` worker launch path.
 - **0.144.1 (2026-07-09):** Standalone-install GitHub metadata robustness + macOS code-mode host packaging
-  + embedded runtime fallback when companion host binary missing (#31913). → ⏭ n/a (installer/code-mode
+  and embedded runtime fallback when companion host binary missing (#31913). → ⏭ n/a (installer/code-mode
   packaging; Cassy factory launches `codex` via PTY, not the standalone installer path).
 
 ### 0.144.0 — `writes` app-approval · MCP auth elicitation default · skills plugin ns · Ultra concurrency warn
@@ -451,7 +560,7 @@ Reviewed 2026-06-30. Triage pass.
   hooks.** Codex now has its own hooks.json + PostToolUse path. Cassy's Codex worker model relies on
   `--yolo` + env (no Codex hook system in the loop, per the touchpoints list), so this is mostly
   informational — but if Cassy ever adopts Codex hooks for parity with the Claude path, the trust-bypass
-  + code-mode-rejection semantics are the relevant surface.
+  and code-mode-rejection semantics are the relevant surface.
 - **"Selected executor plugins can activate their stdio MCP servers per thread" (#27870, #27884,
   #27893…).** → 👀 **touchpoint: MCP (`cs`).** How stdio MCP servers (our `cs`) get activated is moving
   to per-thread/plugin-scoped activation. **Verify `mcp__cs__*` still loads** from `.codex/config.toml`

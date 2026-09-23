@@ -15,9 +15,14 @@ use anyhow::{Context, Result, ensure};
 use serde::Serialize;
 
 use super::{Cli, hub::HubServiceCommands};
-use crate::hub::{DEFAULT_HUB_PORT, HubLockOwner, HubProcessRecord, HubRuntimePaths};
+use crate::hub::{
+    DEFAULT_HUB_PORT, HubLockHolder, HubLockOwner, HubProcessRecord, HubRuntimePaths,
+};
 
 const LAUNCHD_LABEL: &str = "dev.cas.commander-hub";
+const LAUNCHD_TEST_LABEL_ENV: &str = "CAS_HUB_LAUNCHD_LABEL";
+const LAUNCHD_TEST_PORT_ENV: &str = "CAS_HUB_SERVICE_PORT";
+const LAUNCHD_CLI_PATH: &str = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin";
 const SYSTEMD_UNIT: &str = "cas-hub.service";
 const SYSTEMCTL_PATH_ENV: &str = "CAS_HUB_SYSTEMCTL";
 pub(crate) const INACTIVE_DETACHED_HUB_WARNING: &str =
@@ -181,22 +186,35 @@ pub(super) fn restart_supervised(
                 return Ok(false);
             }
             let domain = launchd_domain()?;
-            let active =
-                command_succeeds("launchctl", ["print", &format!("{domain}/{LAUNCHD_LABEL}")]);
-            let service_tailscale = service_file_requests_tailscale(&path)?;
-            if tailscale_serve && !service_tailscale {
-                anyhow::bail!(
-                    "cas hub restart --tailscale-serve cannot change launchd service arguments while KeepAlive supervision is active; reinstall the loopback-only service or use an interactive shell for `cas hub start --tailscale-serve`"
-                );
-            }
+            let active = command_succeeds(
+                "launchctl",
+                ["print", &format!("{domain}/{}", launchd_label())],
+            );
+            let definition = fs::read_to_string(&path)?;
+            let service_tailscale = definition.contains("--tailscale-serve");
+            let rewritten = if tailscale_serve && !service_tailscale {
+                Some(rewrite_launchd_publication_flags(
+                    &definition,
+                    true,
+                    tailscale_port,
+                )?)
+            } else {
+                None
+            };
             let paths = HubRuntimePaths::default_for_user()?;
-            stop_detached_hub_if_present(cli, &paths)?;
-            if !active {
+            stop_detached_hub_if_present(cli, &paths, active)?;
+            let previous_pid = paths.read_process_record().ok().map(|record| record.pid);
+            if let Some(rewritten) = rewritten {
+                if active {
+                    run_manager_vec("launchctl", &launchd_bootout_args(&domain, &path))?;
+                }
+                write_service_file(&path, &rewritten)?;
+                run_manager_vec("launchctl", &launchd_bootstrap_args(&domain, &path))?;
+            } else if !active {
                 run_manager_vec("launchctl", &launchd_bootstrap_args(&domain, &path))?;
             }
-            let previous_pid = paths.read_process_record().ok().map(|record| record.pid);
             run_manager_vec("launchctl", &launchd_kickstart_args(&domain))?;
-            wait_for_supervised_hub(previous_pid)?;
+            wait_for_supervised_hub(previous_pid, tailscale_serve || service_tailscale)?;
             Ok(true)
         }
         ServicePlatform::Systemd => {
@@ -209,10 +227,14 @@ pub(super) fn restart_supervised(
                 repair_systemd_publication_flags(&path, tailscale_port)?;
             }
             let paths = HubRuntimePaths::default_for_user()?;
-            stop_detached_hub_if_present(cli, &paths)?;
+            let active = command_succeeds(
+                "systemctl",
+                ["--user", "is-active", "--quiet", SYSTEMD_UNIT],
+            );
+            stop_detached_hub_if_present(cli, &paths, active)?;
             let previous_pid = paths.read_process_record().ok().map(|record| record.pid);
             run_manager("systemctl", ["--user", "restart", SYSTEMD_UNIT], None)?;
-            wait_for_supervised_hub(previous_pid)?;
+            wait_for_supervised_hub(previous_pid, tailscale_serve || service_tailscale)?;
             Ok(true)
         }
         ServicePlatform::ManualLinux => {
@@ -227,18 +249,175 @@ pub(super) fn restart_supervised(
     }
 }
 
-fn stop_detached_hub_if_present(cli: &Cli, paths: &HubRuntimePaths) -> Result<()> {
-    let detached_running = paths.read_process_record().ok().is_some_and(|record| {
-        record.launched_by.as_deref() != Some("service")
+fn stop_detached_hub_if_present(
+    cli: &Cli,
+    paths: &HubRuntimePaths,
+    manager_active: bool,
+) -> Result<()> {
+    let holders = paths.lock_holders();
+    if holders.is_empty() {
+        if let Ok(record) = paths.read_process_record()
+            && (!manager_active || record.launched_by.as_deref() != Some("service"))
             && super::hub::record_is_live(&record)
-            && paths
-                .read_lock_owner()
-                .is_some_and(|owner| lock_owner_is_active(&owner) && owner.pid == record.pid)
-    });
-    if detached_running {
-        super::hub::stop_for_service(cli)?;
+        {
+            super::hub::stop_for_service(cli, false)?;
+        }
+        if !manager_active {
+            ensure!(
+                std::net::TcpListener::bind(("127.0.0.1", service_port())).is_ok(),
+                "hub service port {} is occupied after detached hub takeover; refusing to bootstrap a KeepAlive service. Run `cas hub status --json`, then `cas hub stop --force` and retry `cas hub restart`",
+                service_port()
+            );
+        }
+        return Ok(());
+    }
+    let record = paths.read_process_record().ok();
+    let record_live = record.as_ref().is_some_and(super::hub::record_is_live);
+    let decision = if holders.len() == 1 {
+        detached_hub_takeover(record.as_ref(), &holders[0], manager_active)
+    } else {
+        DetachedTakeover::Refuse
+    };
+    match decision {
+        DetachedTakeover::Stop => {
+            super::hub::stop_for_service(cli, !record_live)?;
+            ensure!(
+                paths.lock_holders().is_empty(),
+                "detached hub still holds the hub lock; refusing to start a supervised hub"
+            );
+        }
+        DetachedTakeover::Refuse => anyhow::bail!(
+            "cannot transfer hub ownership to the service; lock holders: {}. Run `cas hub status --json` to inspect them, then `cas hub stop --force` and retry `cas hub restart`",
+            describe_holders(&holders)
+        ),
+        DetachedTakeover::None => {}
     }
     Ok(())
+}
+
+fn rewrite_launchd_publication_flags(
+    definition: &str,
+    enabled: bool,
+    tailscale_port: u16,
+) -> Result<String> {
+    let key = "<key>ProgramArguments</key>";
+    let key_start = definition
+        .find(key)
+        .context("launchd plist has no ProgramArguments")?;
+    let array_start = definition[key_start + key.len()..]
+        .find("<array>")
+        .map(|offset| key_start + key.len() + offset + "<array>".len())
+        .context("launchd plist has no ProgramArguments array")?;
+    let array_end = definition[array_start..]
+        .find("</array>")
+        .map(|offset| array_start + offset)
+        .context("launchd plist has an unclosed ProgramArguments array")?;
+    let mut args = Vec::new();
+    let mut remaining = definition[array_start..array_end].trim();
+    while !remaining.is_empty() {
+        let content = remaining
+            .strip_prefix("<string>")
+            .context("launchd ProgramArguments contains a non-string element")?;
+        let end = content
+            .find("</string>")
+            .context("unclosed launchd argument")?;
+        args.push(quick_xml::escape::unescape(&content[..end])?.into_owned());
+        remaining = content[end + "</string>".len()..].trim_start();
+    }
+    ensure!(
+        args.first()
+            .is_some_and(|binary| Path::new(binary).is_absolute()),
+        "launchd ProgramArguments must start with an absolute binary path"
+    );
+    let mut rewritten_args = Vec::new();
+    let mut iter = args.into_iter();
+    while let Some(arg) = iter.next() {
+        if arg == "--tailscale-serve" {
+            continue;
+        }
+        if arg == "--tailscale-serve-port" {
+            ensure!(
+                iter.next().is_some(),
+                "launchd plist has a missing Tailscale port"
+            );
+            continue;
+        }
+        rewritten_args.push(arg);
+    }
+    if enabled {
+        rewritten_args.extend([
+            "--tailscale-serve".to_owned(),
+            "--tailscale-serve-port".to_owned(),
+            tailscale_port.to_string(),
+        ]);
+    }
+    let array = rewritten_args
+        .iter()
+        .map(|arg| format!("\n    <string>{}</string>", xml_escape(arg)))
+        .collect::<String>();
+    let rewritten = format!(
+        "{}{}\n  {}",
+        &definition[..array_start],
+        array,
+        &definition[array_end..]
+    );
+    Ok(ensure_launchd_cli_path(&rewritten))
+}
+
+fn ensure_launchd_cli_path(definition: &str) -> String {
+    if definition.contains("<key>EnvironmentVariables</key>") {
+        return definition.to_owned();
+    }
+    definition.replacen(
+        "  <key>StandardOutPath</key>",
+        &format!(
+            "  <key>EnvironmentVariables</key>\n  <dict>\n    <key>PATH</key>\n    <string>{LAUNCHD_CLI_PATH}</string>\n  </dict>\n  <key>StandardOutPath</key>"
+        ),
+        1,
+    )
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum DetachedTakeover {
+    None,
+    Stop,
+    Refuse,
+}
+
+fn detached_hub_takeover(
+    record: Option<&HubProcessRecord>,
+    holder: &HubLockHolder,
+    manager_active: bool,
+) -> DetachedTakeover {
+    let matching_record = record.filter(|record| record.pid == holder.pid);
+    let recognized_command = holder.command.as_deref().is_some_and(|command| {
+        command.contains("cas hub serve") || command.contains("/cas hub serve")
+    });
+    if matching_record.is_some_and(|record| record.launched_by.as_deref() == Some("service"))
+        && manager_active
+    {
+        return DetachedTakeover::None;
+    }
+    if matching_record.is_none() && !recognized_command {
+        return DetachedTakeover::Refuse;
+    }
+    DetachedTakeover::Stop
+}
+
+fn describe_holders(holders: &[HubLockHolder]) -> String {
+    holders
+        .iter()
+        .map(|holder| {
+            format!(
+                "pid {} (phase {}, age {}, command {})",
+                holder.pid,
+                holder.phase.as_deref().unwrap_or("unknown"),
+                holder.age_label(),
+                holder.command.as_deref().unwrap_or("unknown")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn repair_systemd_publication_flags(path: &Path, tailscale_port: u16) -> Result<()> {
@@ -276,7 +455,7 @@ pub(super) fn inactive_detached_warning(
                 path.is_file(),
                 Some(command_succeeds(
                     "launchctl",
-                    ["print", &format!("{domain}/{LAUNCHD_LABEL}")],
+                    ["print", &format!("{domain}/{}", launchd_label())],
                 )),
             )
         }
@@ -336,9 +515,12 @@ fn service_file_requests_tailscale(path: &Path) -> Result<bool> {
     Ok(fs::read_to_string(path)?.contains("--tailscale-serve"))
 }
 
-fn wait_for_supervised_hub(previous_pid: Option<u32>) -> Result<()> {
+fn wait_for_supervised_hub(previous_pid: Option<u32>, tailscale_serve: bool) -> Result<()> {
     let paths = HubRuntimePaths::default_for_user()?;
-    let deadline = Instant::now() + Duration::from_secs(10);
+    // Publication can make six bounded CLI calls before the hub writes its
+    // ready record. Match the detached Serve startup budget.
+    let timeout = if tailscale_serve { 65 } else { 10 };
+    let deadline = Instant::now() + Duration::from_secs(timeout);
     loop {
         if let Ok(record) = paths.read_process_record()
             && previous_pid != Some(record.pid)
@@ -351,7 +533,7 @@ fn wait_for_supervised_hub(previous_pid: Option<u32>) -> Result<()> {
         }
         if Instant::now() >= deadline {
             anyhow::bail!(
-                "supervised cas hub did not become ready after 10.0s; inspect `cas hub service status` and `{}`",
+                "supervised cas hub did not become ready after {timeout}.0s; inspect `cas hub service status` and `{}`",
                 paths.log_path().display()
             );
         }
@@ -365,7 +547,10 @@ fn status(platform: ServicePlatform, cli: &Cli) -> Result<()> {
             let path = launchd_path()?;
             let installed = path.exists();
             let active = launchd_domain().ok().map(|domain| {
-                command_succeeds("launchctl", ["print", &format!("{domain}/{LAUNCHD_LABEL}")])
+                command_succeeds(
+                    "launchctl",
+                    ["print", &format!("{domain}/{}", launchd_label())],
+                )
             });
             print_report(cli, report(platform, installed, active, Some(path), None)?)
         }
@@ -524,9 +709,47 @@ fn print_report(cli: &Cli, report: ServiceReport) -> Result<()> {
 }
 
 fn launchd_path() -> Result<PathBuf> {
+    validate_launchd_test_label()?;
     Ok(home_dir()?
         .join("Library/LaunchAgents")
-        .join(format!("{LAUNCHD_LABEL}.plist")))
+        .join(format!("{}.plist", launchd_label())))
+}
+
+fn validate_launchd_test_label() -> Result<()> {
+    if let Ok(label) = std::env::var(LAUNCHD_TEST_LABEL_ENV) {
+        ensure!(
+            !label.is_empty()
+                && label != LAUNCHD_LABEL
+                && label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b".-".contains(&byte)),
+            "{LAUNCHD_TEST_LABEL_ENV} must be a distinct launchd label using letters, digits, dots, or hyphens"
+        );
+        ensure!(
+            std::env::var(LAUNCHD_TEST_PORT_ENV)
+                .ok()
+                .and_then(|port| port.parse::<u16>().ok())
+                .is_some_and(|port| port != 0 && port != DEFAULT_HUB_PORT),
+            "{LAUNCHD_TEST_PORT_ENV} must be a non-default TCP port when using an isolated launchd label"
+        );
+    }
+    Ok(())
+}
+
+fn launchd_label() -> String {
+    std::env::var(LAUNCHD_TEST_LABEL_ENV).unwrap_or_else(|_| LAUNCHD_LABEL.to_owned())
+}
+
+fn service_port() -> u16 {
+    if std::env::var_os(LAUNCHD_TEST_LABEL_ENV).is_some() {
+        std::env::var(LAUNCHD_TEST_PORT_ENV)
+            .ok()
+            .and_then(|port| port.parse().ok())
+            .filter(|port| *port != 0)
+            .unwrap_or(DEFAULT_HUB_PORT)
+    } else {
+        DEFAULT_HUB_PORT
+    }
 }
 
 fn systemd_path() -> Result<PathBuf> {
@@ -659,7 +882,7 @@ fn launchd_kickstart_args(domain: &str) -> Vec<String> {
     vec![
         "kickstart".into(),
         "-k".into(),
-        format!("{domain}/{LAUNCHD_LABEL}"),
+        format!("{domain}/{}", launchd_label()),
     ]
 }
 
@@ -670,7 +893,7 @@ fn launchd_preview_actions(path: &Path) -> Vec<String> {
             path.display()
         ),
         format!("launchctl bootstrap gui/$UID {}", path.display()),
-        format!("launchctl kickstart -k gui/$UID/{LAUNCHD_LABEL}"),
+        format!("launchctl kickstart -k gui/$UID/{}", launchd_label()),
     ]
 }
 
@@ -725,6 +948,15 @@ fn launchd_plist(
     tailscale_serve: bool,
     tailscale_port: u16,
 ) -> String {
+    let label = launchd_label();
+    let isolated_home = if label != LAUNCHD_LABEL {
+        format!(
+            "    <key>HOME</key>\n    <string>{}</string>\n",
+            xml_escape(&std::env::var("HOME").unwrap_or_default())
+        )
+    } else {
+        String::new()
+    };
     let args = service_args(binary, tailscale_serve, tailscale_port)
         .into_iter()
         .map(|arg| format!("    <string>{}</string>", xml_escape(&arg)))
@@ -736,7 +968,7 @@ fn launchd_plist(
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>{LAUNCHD_LABEL}</string>
+  <string>{label}</string>
   <key>ProgramArguments</key>
   <array>
 {args}
@@ -745,6 +977,11 @@ fn launchd_plist(
   <true/>
   <key>KeepAlive</key>
   <true/>
+  <key>EnvironmentVariables</key>
+  <dict>
+{isolated_home}    <key>PATH</key>
+    <string>{LAUNCHD_CLI_PATH}</string>
+  </dict>
   <key>StandardOutPath</key>
   <string>{log_path}</string>
   <key>StandardErrorPath</key>
@@ -775,7 +1012,7 @@ fn service_args(binary: &Path, tailscale_serve: bool, tailscale_port: u16) -> Ve
         "--bind".into(),
         "127.0.0.1".into(),
         "--port".into(),
-        DEFAULT_HUB_PORT.to_string(),
+        service_port().to_string(),
         "--launched-by".into(),
         "service".into(),
     ];
@@ -840,6 +1077,126 @@ mod tests {
         assert!(plist.contains("/Users/test/.cas/hub/hub.log"));
         assert!(!plist.to_ascii_lowercase().contains("token"));
         assert!(!plist.contains("auth.json"));
+    }
+
+    #[test]
+    fn launchd_publication_rewrite_round_trips_and_preserves_other_keys() {
+        let original = launchd_plist(
+            Path::new("/opt/cas/bin/cas"),
+            Path::new("/Users/test/.cas/hub/hub.log"),
+            false,
+            443,
+        );
+        let enabled = rewrite_launchd_publication_flags(&original, true, 8443).unwrap();
+        assert!(enabled.contains("<string>--tailscale-serve</string>"));
+        assert!(enabled.contains("<string>8443</string>"));
+        assert_eq!(
+            rewrite_launchd_publication_flags(&enabled, true, 9443)
+                .unwrap()
+                .matches("<string>--tailscale-serve</string>")
+                .count(),
+            1
+        );
+        let disabled = rewrite_launchd_publication_flags(&enabled, false, 443).unwrap();
+        assert!(!disabled.contains("--tailscale-serve"));
+        assert!(!disabled.contains("8443"));
+        assert!(disabled.contains("<key>KeepAlive</key>"));
+        assert!(disabled.contains("/Users/test/.cas/hub/hub.log"));
+        assert_eq!(
+            rewrite_launchd_publication_flags(&disabled, true, 8443).unwrap(),
+            enabled
+        );
+    }
+
+    #[test]
+    fn launchd_publication_rewrite_rejects_malformed_arguments() {
+        let plist = "<key>ProgramArguments</key><array><integer>3</integer></array>";
+        assert!(rewrite_launchd_publication_flags(plist, true, 443).is_err());
+    }
+
+    #[test]
+    fn launchd_publication_repair_adds_cli_path_to_older_plist() {
+        let old = launchd_plist(
+            Path::new("/opt/cas/bin/cas"),
+            Path::new("/Users/test/.cas/hub/hub.log"),
+            false,
+            443,
+        );
+        let old = old.replace(
+            &format!(
+                "  <key>EnvironmentVariables</key>\n  <dict>\n    <key>PATH</key>\n    <string>{LAUNCHD_CLI_PATH}</string>\n  </dict>\n"
+            ),
+            "",
+        );
+        let repaired = rewrite_launchd_publication_flags(&old, true, 8443).unwrap();
+        assert!(repaired.contains(LAUNCHD_CLI_PATH));
+        assert!(repaired.contains("<string>--tailscale-serve</string>"));
+    }
+
+    #[test]
+    fn detached_takeover_handles_inactive_service_and_old_wedged_holders() {
+        let owner = HubLockHolder {
+            pid: 42,
+            age: None,
+            phase: Some("running".into()),
+            command: Some("/opt/cas/bin/cas hub serve --port 4173".into()),
+        };
+        let mut record: HubProcessRecord = serde_json::from_value(serde_json::json!({
+            "pid":42,"bind":"127.0.0.1","port":4173,"version":"3.27.0",
+            "started_at":"2026-09-23T21:00:00Z","launched_by":"update"
+        }))
+        .unwrap();
+        assert_eq!(
+            detached_hub_takeover(None, &owner, false),
+            DetachedTakeover::Stop
+        );
+        assert_eq!(
+            detached_hub_takeover(Some(&record), &owner, false),
+            DetachedTakeover::Stop
+        );
+        assert_eq!(
+            detached_hub_takeover(Some(&record), &owner, false),
+            DetachedTakeover::Stop
+        );
+        let old_wedged = HubLockHolder {
+            phase: None,
+            ..owner.clone()
+        };
+        assert_eq!(
+            detached_hub_takeover(Some(&record), &old_wedged, false),
+            DetachedTakeover::Stop
+        );
+        record.launched_by = Some("service".into());
+        assert_eq!(
+            detached_hub_takeover(Some(&record), &owner, true),
+            DetachedTakeover::None
+        );
+        assert_eq!(
+            detached_hub_takeover(Some(&record), &owner, false),
+            DetachedTakeover::Stop
+        );
+        record.pid = 43;
+        assert_eq!(
+            detached_hub_takeover(Some(&record), &owner, false),
+            DetachedTakeover::Stop
+        );
+        let unknown = HubLockHolder {
+            command: None,
+            ..owner
+        };
+        assert_eq!(
+            detached_hub_takeover(Some(&record), &unknown, false),
+            DetachedTakeover::Refuse
+        );
+        record.pid = 42;
+        assert_eq!(
+            detached_hub_takeover(Some(&record), &unknown, false),
+            DetachedTakeover::Stop
+        );
+        assert!(
+            describe_holders(&[unknown])
+                .contains("pid 42 (phase running, age unknown age, command unknown)")
+        );
     }
 
     #[test]

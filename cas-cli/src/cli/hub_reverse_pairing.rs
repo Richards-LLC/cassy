@@ -1298,6 +1298,8 @@ mod tests {
                         Err(error) => panic!("health fixture accept failed: {error}"),
                     }
                 };
+                // BSD can inherit O_NONBLOCK from the polling listener.
+                stream.set_nonblocking(false).unwrap();
                 stream
                     .set_read_timeout(Some(Duration::from_secs(1)))
                     .unwrap();
@@ -1346,6 +1348,8 @@ mod tests {
             while std::time::Instant::now() < deadline {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
+                        // BSD can inherit O_NONBLOCK from the polling listener.
+                        stream.set_nonblocking(false).unwrap();
                         stream
                             .set_read_timeout(Some(Duration::from_secs(1)))
                             .unwrap();
@@ -1631,6 +1635,10 @@ mod tests {
                     }
                 }
             };
+            // BSD can inherit O_NONBLOCK from the polling listener.
+            stream.set_nonblocking(false).unwrap_or_else(|error| {
+                panic!("relay fixture at {address}: failed to set blocking mode: {error}")
+            });
             stream
                 .set_read_timeout(Some(Duration::from_secs(1)))
                 .unwrap_or_else(|error| {

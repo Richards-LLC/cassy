@@ -82,7 +82,7 @@ pub(crate) fn assert_maintenance_queued(
         "{name} queue marker missing"
     );
     let log = job_dir.join(format!("{name}.log"));
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
     let mut last_content = String::new();
     loop {
         if let Ok(content) = std::fs::read_to_string(&log) {

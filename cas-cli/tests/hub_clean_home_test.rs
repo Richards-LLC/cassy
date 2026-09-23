@@ -249,12 +249,82 @@ fn real_legacy_hubs_recover_through_new_post_swap_step() {
     }
 }
 
+#[cfg(unix)]
+#[test]
+fn healthy_current_hub_with_unresolvable_public_url_keeps_its_pid() {
+    let home = private_home();
+    let bin = home.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    install_tailscale_mock(
+        home.path(),
+        &bin.join("tailscale"),
+        include_str!("fixtures/hub_update_mock_tailscale.sh"),
+    );
+    fs::write(home.path().join("mock-port"), "10031").unwrap();
+    fs::write(home.path().join("mock-dns-name"), "no-such-cas-hub.invalid.").unwrap();
+    let hub_port = TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let binary = cas::test_paths::cas_binary();
+    let start = legacy_hub_command(&binary, home.path(), &bin)
+        .args([
+            "hub",
+            "--tailscale-serve",
+            "--tailscale-serve-port",
+            "10031",
+            "start",
+            "--port",
+            &hub_port.to_string(),
+        ])
+        .output()
+        .unwrap();
+    assert!(start.status.success(), "{}", String::from_utf8_lossy(&start.stderr));
+    let paths = cas::hub::HubRuntimePaths::new(home.path().join(".cas/hub"));
+    let pid = paths.read_process_record().unwrap().pid;
+    let _cleanup = LegacyHubCleanup(vec![pid]);
+    let original_route = fs::read_to_string(home.path().join("mock-route")).unwrap();
+    for iteration in 0..2 {
+        let receipt_path = home.path().join(format!("current-update-{iteration}.json"));
+        let update = legacy_hub_command(&binary, home.path(), &bin)
+            .args([
+                "--json",
+                "update",
+                "--post-swap",
+                "--from",
+                env!("CARGO_PKG_VERSION"),
+                "--refresh-receipt",
+                receipt_path.to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        assert!(update.status.success(), "{}", String::from_utf8_lossy(&update.stderr));
+        let receipt: Value = serde_json::from_slice(&fs::read(receipt_path).unwrap()).unwrap();
+        assert_eq!(receipt["hub_restart"]["action"], "verified", "{receipt}");
+        assert_eq!(receipt["hub_restart"]["verified"], true, "{receipt}");
+        assert_eq!(receipt["hub_restart"]["loopback_verified"], true, "{receipt}");
+        assert_eq!(receipt["hub_restart"]["transport_verified"], false, "{receipt}");
+        assert_eq!(receipt["hub_restart"]["recovery_attempted"], false, "{receipt}");
+        assert!(receipt["hub_restart"]["transport_warning"]
+            .as_str()
+            .unwrap()
+            .contains("no-such-cas-hub.invalid"), "{receipt}");
+        assert!(receipt["hub_restart"]["remedy"]
+            .as_str()
+            .unwrap()
+            .contains("MagicDNS"), "{receipt}");
+        assert_eq!(paths.read_process_record().unwrap().pid, pid);
+        assert_eq!(fs::read_to_string(home.path().join("mock-route")).unwrap(), original_route);
+    }
+}
+
 /// Exercise the shared update verifier through a real, isolated launchd
 /// service. This is opt-in because it needs a signed-in local Tailscale node.
 #[cfg(target_os = "macos")]
 #[test]
 #[ignore = "requires real launchd and Tailscale; set CAS_TEST_REAL_TAILSCALE_SERVICE_PORT"]
-fn real_launchd_service_update_verifies_public_transport_twice() {
+fn real_launchd_service_update_restarts_stale_then_preserves_current_pid() {
     let serve_port: u16 = std::env::var("CAS_TEST_REAL_TAILSCALE_SERVICE_PORT")
         .expect("non-443 Tailscale Serve port")
         .parse()
@@ -309,7 +379,13 @@ fn real_launchd_service_update_verifies_public_transport_twice() {
     );
     let paths = cas::hub::HubRuntimePaths::new(home.path().join(".cas/hub"));
     let first_pid = paths.read_process_record().unwrap().pid;
-    for iteration in 0..2 {
+    // The service process is real launchd; only its version metadata is made
+    // stale so the first update must enter restart_supervised and its verifier.
+    let mut stale_record = paths.read_process_record().unwrap();
+    stale_record.version = "3.27.8".to_owned();
+    paths.write_process_record(&stale_record).unwrap();
+    let mut restarted_pid = None;
+    for iteration in 0..3 {
         let receipt_path = home.path().join(format!("service-update-{iteration}.json"));
         let update = command(&[
             "--json",
@@ -331,8 +407,14 @@ fn real_launchd_service_update_verifies_public_transport_twice() {
         assert_eq!(receipt["hub_restart"]["transport_verified"], true);
         assert_eq!(receipt["hub_restart"]["recovery_attempted"], false);
         let record = paths.read_process_record().unwrap();
-        assert_eq!(record.pid, first_pid, "healthy current service must keep its PID");
-        assert_eq!(receipt["hub_restart"]["action"], "verified");
+        if iteration == 0 {
+            assert_ne!(record.pid, first_pid, "stale service must restart");
+            assert_eq!(receipt["hub_restart"]["action"], "restarted");
+            restarted_pid = Some(record.pid);
+        } else {
+            assert_eq!(record.pid, restarted_pid.unwrap(), "healthy current service must keep its PID");
+            assert_eq!(receipt["hub_restart"]["action"], "verified");
+        }
         assert_eq!(record.port, hub_port);
         assert_eq!(record.tailscale_serve_port, Some(serve_port));
     }

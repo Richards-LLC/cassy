@@ -1,13 +1,21 @@
 #!/bin/sh
 case "$*" in
   'status --json')
-    printf '%s' '{"Self":{"DNSName":"localhost."}}'
+    dns_name=localhost.
+    if [ -f "$HOME/mock-dns-name" ]; then
+      dns_name=$(/bin/cat "$HOME/mock-dns-name")
+    fi
+    printf '{"Self":{"DNSName":"%s"}}' "$dns_name"
     ;;
   'serve status --json')
     if [ -f "$HOME/mock-route" ]; then
       port=$(/bin/cat "$HOME/mock-port")
       target=$(/bin/cat "$HOME/mock-route")
-      printf '{"Web":{"localhost:%s":{"Handlers":{"/":{"Proxy":"%s"}}}}}' "$port" "$target"
+      dns_name=localhost.
+      if [ -f "$HOME/mock-dns-name" ]; then
+        dns_name=$(/bin/cat "$HOME/mock-dns-name")
+      fi
+      printf '{"Web":{"%s:%s":{"Handlers":{"/":{"Proxy":"%s"}}}}}' "${dns_name%.}" "$port" "$target"
     else
       printf '%s' '{}'
     fi

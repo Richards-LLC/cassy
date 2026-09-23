@@ -41,7 +41,9 @@ export default defineConfig({
         // its terminal surface; the full Chromium build does not.
         channel: "chromium",
         permissions: ["clipboard-read", "clipboard-write"],
-        trace: { mode: "on", snapshots: { dom: true, aria: true, screen: true } },
+        // screenshots:false keeps the screencast receipt full size (the trace
+        // filmstrip shares it and caps frames at 800 px); screen snapshots stay.
+        trace: { mode: "on", snapshots: { dom: true, aria: true, screen: true }, sources: true, screenshots: false },
         video: "off",
       },
     },

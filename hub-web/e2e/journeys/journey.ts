@@ -1,10 +1,11 @@
 // Journey fixture: one test per catalog journey (docs/qa/journeys.md), one
 // stage per test.step, and a receipt directory per journey:
-//   <receipts>/<ID>/journey.webm      screencast, one chapter per stage
-//   <receipts>/<ID>/NN-<stage>.png    the screen at the end of each stage
-//   <receipts>/<ID>/final.aria.yml    aria snapshot of the goal state
+//   <receipts>/<ID>/receipt.webm      screencast, one chapter per stage
+//   <receipts>/<ID>/J01.png, J02.png  the screen at the end of each stage
+//   <receipts>/<ID>/final.aria.yml    aria snapshot of the goal state (+ .json)
 //   <receipts>/<ID>/result.json       id, title, status, per-stage timings
-// scripts/journey-eval.sh copies each run's trace.zip next to these.
+// scripts/journey-eval.sh adds trace.zip, trace-actions.txt and bundle.json,
+// the cas-qa-craft evidence-bundle shape with producer "journey".
 import { test as base, expect, type Page } from "@playwright/test";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -15,7 +16,7 @@ export { expect };
 
 export const RECEIPTS = resolve(process.env.JOURNEY_RECEIPTS ?? fileURLToPath(new URL("../.results/journeys", import.meta.url)));
 
-type Stage = { title: string; ms: number; screenshot: string };
+type Stage = { title: string; slug: string; ms: number; screenshot: string };
 
 export type Journey = {
   id: string;
@@ -41,9 +42,8 @@ export const test = base.extend<{ journey: Journey }>({
     const errors: string[] = [];
     page.on("pageerror", (error) => errors.push(error.message));
     const viewport = page.viewportSize() ?? { width: 1280, height: 800 };
-    // No explicit size: frames arrive capped at 800 px wide, and a larger canvas
-    // leaves them in one corner of a grey frame.
-    await page.screencast.start({ path: join(dir, "journey.webm") });
+    // Full-size frames need trace `screenshots: false` (see playwright.config.ts).
+    await page.screencast.start({ path: join(dir, "receipt.webm"), size: viewport });
     await page.screencast.showActions({ position: "top-right", duration: 300 });
     let double: HubDouble | undefined;
 
@@ -51,14 +51,14 @@ export const test = base.extend<{ journey: Journey }>({
       id,
       async stage(title, body) {
         await test.step(title, async () => {
-          await page.screencast.showChapter(title, { duration: 800 });
+          await page.screencast.showChapter(title, { duration: 1000 });
           const started = Date.now();
           await body();
           const ms = Date.now() - started;
-          const screenshot = `${String(stages.length + 1).padStart(2, "0")}-${slug(title)}.png`;
+          const screenshot = `J${String(stages.length + 1).padStart(2, "0")}.png`;
           await settle(page);
           await page.screenshot({ path: join(dir, screenshot) });
-          stages.push({ title, ms, screenshot });
+          stages.push({ title, slug: slug(title), ms, screenshot });
         }, { subtitle: id });
       },
       async hub(options) {
@@ -80,6 +80,9 @@ export const test = base.extend<{ journey: Journey }>({
     let aria = "";
     try { aria = await page.locator("body").ariaSnapshot(); } catch (error) { aria = `# aria snapshot failed: ${String(error)}`; }
     writeFileSync(join(dir, "final.aria.yml"), aria + "\n");
+    let ariaJson: unknown = null;
+    try { ariaJson = await page.locator("body").ariaSnapshotJSON(); } catch (error) { ariaJson = { error: String(error) }; }
+    writeFileSync(join(dir, "final.aria.json"), JSON.stringify(ariaJson, null, 2) + "\n");
     await page.screencast.stop().catch(() => undefined);
     const status = testInfo.status === "passed" && errors.length === 0 ? "PASS" : "FAIL";
     writeFileSync(join(dir, "result.json"), JSON.stringify({

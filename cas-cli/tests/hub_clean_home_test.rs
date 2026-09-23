@@ -1,6 +1,7 @@
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::{Read, Write};
+use std::net::TcpListener;
 use std::net::TcpStream;
 use std::path::Path;
 use std::process::Stdio;
@@ -12,6 +13,50 @@ use std::time::Instant;
 use assert_cmd::Command;
 use serde_json::Value;
 use tempfile::TempDir;
+
+#[cfg(unix)]
+fn install_tailscale_mock(home: &Path, path: &Path, script: &str) {
+    use fs2::FileExt;
+    use sha2::{Digest, Sha256};
+    use std::os::unix::fs::{PermissionsExt, symlink};
+
+    // Nextest starts each case in a separate process. Keep each script at one
+    // stable executable path across cases and runs, so macOS only assesses it
+    // once instead of assessing every freshly written HOME/bin/tailscale.
+    let cache = std::env::current_exe().unwrap().parent().unwrap().join("hub-mock-tailscale");
+    fs::create_dir_all(&cache).unwrap();
+    let digest = hex::encode(Sha256::digest(script.as_bytes()));
+    let shared = cache.join(format!("{digest}.sh"));
+    let ready = cache.join(format!("{digest}.ready"));
+    let lock = fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(cache.join(format!("{digest}.lock")))
+        .unwrap();
+    lock.lock_exclusive().unwrap();
+    if !shared.exists() {
+        let staged = cache.join(format!("{digest}.{}.tmp", std::process::id()));
+        fs::write(&staged, script).unwrap();
+        fs::set_permissions(&staged, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::rename(&staged, &shared).unwrap();
+    }
+    if !ready.exists() {
+        // The first launch can wait in macOS dyld for several seconds under
+        // process load. Warm that assessment before the product's bounded
+        // Tailscale command is exercised.
+        let output = std::process::Command::new(&shared)
+            .args(["status", "--json"])
+            .env_clear()
+            .env("HOME", home)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "mock prewarm failed: {output:?}");
+        fs::write(&ready, b"ready").unwrap();
+    }
+    lock.unlock().unwrap();
+    symlink(&shared, path).unwrap();
+}
 
 fn cas_command(home: &Path, path: &OsStr) -> Command {
     let mut command = Command::new(cas::test_paths::cas_binary());
@@ -46,6 +91,193 @@ fn private_home() -> TempDir {
         fs::set_permissions(home.path(), fs::Permissions::from_mode(0o700)).unwrap();
     }
     home
+}
+
+#[cfg(unix)]
+#[test]
+fn foreground_start_carries_legacy_target_across_process_record_write() {
+    let home = private_home();
+    let bin = home.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    let tailscale = bin.join("tailscale");
+    install_tailscale_mock(
+        home.path(),
+        &tailscale,
+        r##"#!/bin/sh
+case "$*" in
+  'status --json') printf '%s' '{"Self":{"DNSName":"legacy.tail.example."}}' ;;
+  'serve status --json')
+    if [ -f "$HOME/mock-serve" ]; then
+      target=$(/bin/cat "$HOME/mock-serve")
+      printf '{"Web":{"legacy.tail.example:443":{"Handlers":{"/":{"Proxy":"%s"}}}}}' "$target"
+    else printf '%s' '{}'; fi ;;
+  'serve --bg --yes --https=443 '*) printf '%s' "$5" > "$HOME/mock-serve" ;;
+  'serve --https=443 off') /bin/rm -f "$HOME/mock-serve"; printf '%s' off >> "$HOME/mock-calls" ;;
+  *) exit 9 ;;
+esac
+"##,
+    );
+
+    let dead_port = TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let old_target = format!("http://127.0.0.1:{dead_port}");
+    let paths = cas::hub::HubRuntimePaths::new(home.path().join(".cas/hub"));
+    let old_record: cas::hub::HubProcessRecord = serde_json::from_value(serde_json::json!({
+        "pid": 999999, "bind": "127.0.0.1", "port": 4173, "version": "3.27.8",
+        "started_at": "2026-01-01T00:00:00Z", "tailscale_serve_port": 443,
+        "tailscale_serve_target": old_target
+    }))
+    .unwrap();
+    paths.write_process_record(&old_record).unwrap();
+    fs::write(home.path().join("mock-serve"), &old_target).unwrap();
+
+    let mut child = cas_process_command(home.path(), bin.as_os_str())
+        .args(["hub", "serve", "--port", "0", "--tailscale-serve"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut replacement = None;
+    while Instant::now() < deadline {
+        if let Ok(record) = paths.read_process_record() {
+            if record.pid == child.id() && record.tailscale_serve_target.is_some() {
+                replacement = record.tailscale_serve_target;
+                break;
+            }
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    let replacement = replacement.unwrap_or_else(|| {
+        let _ = child.kill();
+        let _ = child.wait();
+        let mut stderr = String::new();
+        let _ = child.stderr.take().unwrap().read_to_string(&mut stderr);
+        panic!("foreground start must publish the replacement shim: {stderr}");
+    });
+    assert_ne!(replacement, old_target);
+    assert_eq!(
+        fs::read_to_string(home.path().join("mock-serve")).unwrap(),
+        replacement
+    );
+    assert!(
+        fs::read_to_string(home.path().join("mock-calls"))
+            .unwrap()
+            .contains("off")
+    );
+    let published_port = paths.read_process_record().unwrap().port;
+    let health_url = format!("http://127.0.0.1:{published_port}/v1/health");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        if ureq::get(&health_url)
+            .timeout(Duration::from_millis(200))
+            .call()
+            .is_ok()
+        {
+            break;
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    assert!(
+        ureq::get(&health_url)
+            .timeout(Duration::from_secs(1))
+            .call()
+            .is_ok()
+    );
+    // Simulate a legacy hub whose publish completed but receipt write did not.
+    // Its foreground teardown must still see process.json before deleting it.
+    fs::remove_file(home.path().join(".cas/hub/tailscale-serve.json")).unwrap();
+    nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(child.id() as i32),
+        nix::sys::signal::Signal::SIGTERM,
+    )
+    .unwrap();
+    let _ = child.wait().unwrap();
+    let mut stderr = String::new();
+    child
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut stderr)
+        .unwrap();
+    assert!(!home.path().join("mock-serve").exists(), "{stderr}");
+}
+
+#[cfg(unix)]
+#[test]
+fn detached_start_forwards_prior_target_after_failed_launcher_cleanup() {
+    let home = private_home();
+    let bin = home.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    let tailscale = bin.join("tailscale");
+    install_tailscale_mock(
+        home.path(),
+        &tailscale,
+        r##"#!/bin/sh
+case "$*" in
+  'status --json') printf '%s' '{"Self":{"DNSName":"legacy.tail.example."}}' ;;
+  'serve status --json')
+    if [ -f "$HOME/mock-serve" ]; then
+      target=$(/bin/cat "$HOME/mock-serve")
+      printf '{"Web":{"legacy.tail.example:443":{"Handlers":{"/":{"Proxy":"%s"}}}}}' "$target"
+    else printf '%s' '{}'; fi ;;
+  'serve --bg --yes --https=443 '*) printf '%s' "$5" > "$HOME/mock-serve" ;;
+  'serve --https=443 off')
+    if [ ! -f "$HOME/first-off-failed" ]; then
+      : > "$HOME/first-off-failed"
+      exit 9
+    fi
+    /bin/rm -f "$HOME/mock-serve" ;;
+  *) exit 9 ;;
+esac
+"##,
+    );
+    let dead_port = TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let old_target = format!("http://127.0.0.1:{dead_port}");
+    let paths = cas::hub::HubRuntimePaths::new(home.path().join(".cas/hub"));
+    let old_record: cas::hub::HubProcessRecord = serde_json::from_value(serde_json::json!({
+        "pid": 999999, "bind": "127.0.0.1", "port": 4173, "version": "3.27.8",
+        "started_at": "2026-01-01T00:00:00Z", "tailscale_serve_port": 443,
+        "tailscale_serve_target": old_target
+    }))
+    .unwrap();
+    paths.write_process_record(&old_record).unwrap();
+    fs::write(home.path().join("mock-serve"), &old_target).unwrap();
+
+    let start = cas_command(home.path(), bin.as_os_str())
+        .args(["--json", "hub", "start", "--port", "0", "--tailscale-serve"])
+        .output()
+        .unwrap();
+    assert!(
+        start.status.success(),
+        "{}",
+        String::from_utf8_lossy(&start.stderr)
+    );
+    let record: Value = serde_json::from_slice(&start.stdout).unwrap();
+    let new_target = record["tailscale_serve_target"].as_str().unwrap();
+    assert_ne!(new_target, old_target);
+    assert_eq!(
+        fs::read_to_string(home.path().join("mock-serve")).unwrap(),
+        new_target
+    );
+    assert!(home.path().join("first-off-failed").exists());
+    let stop = cas_command(home.path(), bin.as_os_str())
+        .args(["hub", "stop"])
+        .output()
+        .unwrap();
+    assert!(
+        stop.status.success(),
+        "{}",
+        String::from_utf8_lossy(&stop.stderr)
+    );
+    assert!(!home.path().join("mock-serve").exists());
 }
 
 fn start_hub(home: &Path, path: &OsStr, tailscale: bool) -> Value {
@@ -241,13 +473,12 @@ fn hub_serve_does_not_hold_instance_lock_while_auth_lock_is_contended() {
 #[cfg(unix)]
 #[test]
 fn clean_home_tailscale_stop_reports_removal_after_serve_exit_teardown() {
-    use std::os::unix::fs::PermissionsExt;
-
     let home = private_home();
     let bin = home.path().join("bin");
     fs::create_dir(&bin).unwrap();
     let tailscale = bin.join("tailscale");
-    fs::write(
+    install_tailscale_mock(
+        home.path(),
         &tailscale,
         r#"#!/bin/sh
 case "$*" in
@@ -265,9 +496,7 @@ case "$*" in
   *) exit 9 ;;
 esac
 "#,
-    )
-    .unwrap();
-    fs::set_permissions(&tailscale, fs::Permissions::from_mode(0o700)).unwrap();
+    );
 
     let record = start_hub(home.path(), bin.as_os_str(), true);
     assert_eq!(record["public_url"], "https://clean-host.tail.example/");
@@ -494,6 +723,44 @@ esac
 
 #[cfg(unix)]
 #[test]
+fn slow_tailscale_serve_start_waits_for_bounded_publication() {
+    let home = private_home();
+    let bin = home.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    let tailscale = bin.join("tailscale");
+    install_tailscale_mock(
+        home.path(),
+        &tailscale,
+        include_str!("fixtures/hub_mock_tailscale_slow.sh"),
+    );
+    fs::write(home.path().join("slow-start"), b"").unwrap();
+
+    let started = Instant::now();
+    let record = start_hub(home.path(), bin.as_os_str(), true);
+    let elapsed = started.elapsed();
+    fs::remove_file(home.path().join("slow-start")).unwrap();
+    let startup_log = fs::read_to_string(home.path().join(".cas/hub/hub.log")).unwrap();
+
+    let stop = assert_health_status_and_stop(home.path(), bin.as_os_str(), &record);
+    assert!(
+        elapsed >= Duration::from_secs(8),
+        "{elapsed:?}; {startup_log}"
+    );
+    assert_eq!(
+        record["public_url"], "https://slow.tail.example/",
+        "{record}; {startup_log}"
+    );
+    assert_eq!(
+        record["transport_warning"],
+        Value::Null,
+        "{record}; {startup_log}"
+    );
+    assert_eq!(stop["tailscale_serve_removed"], true);
+    assert!(!home.path().join("mock-serve").exists());
+}
+
+#[cfg(unix)]
+#[test]
 fn process_start_rejects_state_collisions_with_sanitized_diagnostics() {
     use std::os::unix::fs::{PermissionsExt, symlink};
 
@@ -550,13 +817,12 @@ fn process_start_rejects_state_collisions_with_sanitized_diagnostics() {
 #[test]
 fn restart_waits_for_record_absent_instance_lock_release_before_replacement() {
     use cas::hub::HubRuntimePaths;
-    use std::os::unix::fs::PermissionsExt;
-
     let home = private_home();
     let bin = home.path().join("bin");
     fs::create_dir(&bin).unwrap();
     let tailscale = bin.join("tailscale");
-    fs::write(
+    install_tailscale_mock(
+        home.path(),
         &tailscale,
         r#"#!/bin/sh
 case "$*" in
@@ -574,9 +840,7 @@ case "$*" in
   *) exit 9 ;;
 esac
 "#,
-    )
-    .unwrap();
-    fs::set_permissions(&tailscale, fs::Permissions::from_mode(0o700)).unwrap();
+    );
 
     let barrier = home.path().join("restart-lock-barrier");
     fs::create_dir(&barrier).unwrap();
@@ -827,11 +1091,12 @@ fn restart_force_terminates_a_recordless_lock_holder_and_starts_replacement() {
         String::from_utf8_lossy(&restart.stdout),
         String::from_utf8_lossy(&restart.stderr)
     );
+    let stderr = String::from_utf8_lossy(&restart.stderr);
     assert!(
-        String::from_utf8_lossy(&restart.stderr).contains("lock holder pid"),
-        "force recovery must name the terminated holder: {}",
-        String::from_utf8_lossy(&restart.stderr)
+        stderr.contains(&format!("cas hub pid {} is stopping;", initial["pid"])),
+        "force recovery must identify the recordless stopping holder: {stderr}"
     );
+    assert!(stderr.contains("terminating lock holder"), "{stderr}");
 
     let status = cas_command(home.path(), bin.as_os_str())
         .args(["--json", "hub", "status"])
@@ -933,8 +1198,22 @@ fn concurrent_start_and_restart_leave_exactly_one_lock_owner() {
             thread::spawn(move || {
                 let mut command = cas_process_command(&home, bin.as_os_str());
                 command.args(["--json", "hub", action, "--port", "0", "--tailscale-serve"]);
+                // The two CLI commands can launch detached hubs while the
+                // other command still owns a captured pipe. File-backed
+                // output does not wait for an unrelated descendant to close
+                // an inherited pipe after its CLI parent has exited.
+                let stdout = home.join(format!("concurrent-{action}.stdout"));
+                let stderr = home.join(format!("concurrent-{action}.stderr"));
+                command
+                    .stdout(Stdio::from(fs::File::create(&stdout).unwrap()))
+                    .stderr(Stdio::from(fs::File::create(&stderr).unwrap()));
                 gate.wait();
-                command.output().unwrap()
+                let status = command.status().unwrap();
+                std::process::Output {
+                    status,
+                    stdout: fs::read(stdout).unwrap(),
+                    stderr: fs::read(stderr).unwrap(),
+                }
             })
         };
         let start = run("start", gate.clone());

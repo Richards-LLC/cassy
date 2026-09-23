@@ -224,6 +224,7 @@ test-ci-tiers:
 	cd .. && ./scripts/test-find-release-prebuild.sh
 	cd .. && ./scripts/test-check-release-runner-trust.sh
 	cd .. && ./scripts/test-check-release-preflight.sh
+	cd .. && ./scripts/test-journeys.sh
 	cd .. && ./scripts/test-check-release-host.sh
 	cd .. && ./scripts/test-cas-install.sh
 	cd .. && ./scripts/test-check-release-migration-snapshots.sh

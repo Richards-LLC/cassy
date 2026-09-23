@@ -4675,11 +4675,31 @@ async fn test_clear_context_confirms_reset_from_new_session_transcript() {
         .expect("register supervisor");
     store.register(&fixture.worker).expect("register worker");
 
-    // Stand in for the daemon + harness: shortly after the control command is
-    // queued, Claude Code starts a new session and writes its transcript.
+    // Stand in for the daemon + harness. The new transcript must appear after
+    // the control row is queued, because clear_context snapshots existing
+    // transcripts before enqueueing that row.
     let projects = fixture.projects.clone();
-    std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_millis(600));
+    let queue = env.prompt_queue();
+    let write_transcript = async move {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            let queued = queue
+                .peek_all(10)
+                .expect("read context reset queue")
+                .iter()
+                .any(|row| {
+                    row.target == "otter"
+                        && row.prompt == cas::factory_context_reset::CONTEXT_RESET_CONTROL
+                });
+            if queued {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "clear_context never queued the reset control row"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
         std::fs::write(
             projects.join("11112222-3333-4444-5555-666677778888.jsonl"),
             format!(
@@ -4688,11 +4708,11 @@ async fn test_clear_context_confirms_reset_from_new_session_transcript() {
             ),
         )
         .expect("write post-clear transcript");
-    });
+    };
 
     let mut req = factory_req("clear_context");
     req.target = Some("otter".to_string());
-    let result = env.service.factory(Parameters(req)).await;
+    let (result, ()) = tokio::join!(env.service.factory(Parameters(req)), write_transcript);
 
     let text = get_text(&result.expect("a confirmed reset must succeed"));
     assert!(text.contains("CONFIRMED"), "{text}");

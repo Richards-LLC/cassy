@@ -56,6 +56,8 @@ tokio-test = "0.4"
 criterion = "0.6"
 fs2 = "0.4"
 tempfile = "3.14"
+sha2 = "0.10"
+hex = "0.4"
 
 [[bench]]
 name = "alt_screen_scan"

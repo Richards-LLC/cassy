@@ -12257,7 +12257,7 @@ model = "local/qwen3.8"
         for (cli, model) in [
             ("claude", "claude-opus-5"),
             ("claude", "opus"),
-            ("codex", "gpt-5.6-luna"),
+            ("codex", "gpt-6-sol"),
             ("grok", "grok-4.5"),
             ("codex", "some-unreleased-slug"),
         ] {

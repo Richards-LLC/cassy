@@ -3822,11 +3822,11 @@ This is the body content."#;
             "model-selection.md",
             // cas-a7d1: registry lane summary in the small body.
             "Registry lanes",
-            "Claude/Haiku 4.5/low",
-            "Codex/GPT-5.6 Luna/xhigh",
+            "Codex/GPT-6 Luna/xhigh",
+            "Codex/GPT-6 Sol/medium",
             "Claude/Fable 5.1/medium",
+            "Claude/Opus 5.5/high",
             "Codex/GPT-6 Astra/high",
-            "Opus 5/high fallback",
             "standing suspension",
             "generated route table and recipes",
         ] {
@@ -7747,9 +7747,10 @@ This is the body content."#;
             "heavy",
             // cas-a7d1: registry lane summary in the small body.
             "Registry lanes",
-            "Claude/Haiku 4.5/low",
-            "Codex/GPT-5.6 Luna/xhigh",
+            "Codex/GPT-6 Luna/xhigh",
+            "Codex/GPT-6 Sol/medium",
             "Claude/Fable 5.1/medium",
+            "Claude/Opus 5.5/high",
             "Codex/GPT-6 Astra/high",
             "standing suspension",
             "generated route table and recipes",

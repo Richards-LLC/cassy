@@ -388,6 +388,7 @@ fn hub_restart_receipt(outcome: &super::hub::HubRestartOutcome) -> serde_json::V
         "verified": outcome.verified,
         "loopback_verified": outcome.loopback_verified,
         "transport_verified": outcome.transport_verified,
+        "transport_warning": outcome.transport_warning,
         "recovery_attempted": outcome.recovery_attempted,
         "public_url": outcome.public_url,
         "failure": outcome.failure,

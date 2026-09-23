@@ -402,10 +402,18 @@ pub(crate) struct HubRestartOutcome {
     pub(crate) verified: bool,
     pub(crate) loopback_verified: bool,
     pub(crate) transport_verified: Option<bool>,
+    pub(crate) transport_warning: Option<String>,
     pub(crate) recovery_attempted: bool,
     pub(crate) public_url: Option<String>,
     pub(crate) failure: Option<String>,
     pub(crate) remedy: Option<String>,
+}
+
+struct HubUpdateVerification {
+    public_url: Option<String>,
+    transport_verified: Option<bool>,
+    transport_warning: Option<String>,
+    remedy: Option<String>,
 }
 
 fn default_hub_command() -> HubCommands {
@@ -2193,7 +2201,7 @@ fn verify_updated_hub(
     paths: &HubRuntimePaths,
     binary_version: &str,
     spec: &HubRestartSpec,
-) -> Result<Option<String>> {
+) -> Result<HubUpdateVerification> {
     let record = paths.read_process_record().context("new hub has no process record")?;
     anyhow::ensure!(record.version == binary_version, "hub still runs version {}", record.version);
     anyhow::ensure!(record.bind == spec.bind.to_string() && (spec.port == 0 || record.port == spec.port),
@@ -2203,7 +2211,12 @@ fn verify_updated_hub(
         "new hub lock is not in running phase");
     anyhow::ensure!(record_is_live(&record), "new hub loopback /v1/health is not ready");
     if !spec.tailscale_serve {
-        return Ok(None);
+        return Ok(HubUpdateVerification {
+            public_url: None,
+            transport_verified: None,
+            transport_warning: None,
+            remedy: None,
+        });
     }
     let manager = TailscaleServeManager::new(paths.root());
     let receipt = manager.owned_receipt()?.context("Tailscale Serve ownership receipt is missing")?;
@@ -2216,15 +2229,71 @@ fn verify_updated_hub(
         "Tailscale Serve status does not route to the new hub shim");
     let public_url = record.public_url.as_deref().context("new hub has no Tailscale public URL")?;
     let health_url = format!("{}/v1/health", public_url.trim_end_matches('/'));
-    let health: serde_json::Value = ureq::get(&health_url)
+    let public_health: Result<serde_json::Value> = ureq::get(&health_url)
         .timeout(Duration::from_secs(5))
         .call()
-        .with_context(|| format!("public Tailscale /v1/health unavailable at {health_url}"))?
-        .into_json()
-        .context("public Tailscale /v1/health returned invalid JSON")?;
-    anyhow::ensure!(health["schema_version"] == 1 && health["ready"] == true,
-        "public Tailscale /v1/health did not report ready");
-    Ok(Some(public_url.to_owned()))
+        .with_context(|| format!("public Tailscale /v1/health unavailable at {health_url}"))
+        .and_then(|response| {
+            response
+                .into_json()
+                .context("public Tailscale /v1/health returned invalid JSON")
+        });
+    let public_failure = match public_health {
+        Ok(health) if health["schema_version"] == 1 && health["ready"] == true => None,
+        Ok(_) => Some("public Tailscale /v1/health did not report ready".to_owned()),
+        Err(error) => Some(format!("{error:#}")),
+    };
+    let remedy = public_failure.as_ref().map(|_| {
+        "Check MagicDNS and `tailscale status`, then retry the public URL; the hub and Serve route are healthy.".to_owned()
+    });
+    Ok(HubUpdateVerification {
+        public_url: Some(public_url.to_owned()),
+        transport_verified: Some(public_failure.is_none()),
+        transport_warning: public_failure.map(|failure| format!("{health_url}: {failure}")),
+        remedy,
+    })
+}
+
+fn finish_update_hub_verification(
+    outcome: &mut HubRestartOutcome,
+    verification: HubUpdateVerification,
+    binary_version: &str,
+    cli: &Cli,
+) {
+    outcome.verified = true;
+    outcome.loopback_verified = true;
+    outcome.transport_verified = verification.transport_verified;
+    outcome.transport_warning = verification.transport_warning;
+    outcome.current_version = Some(binary_version.to_owned());
+    outcome.public_url = verification.public_url;
+    outcome.failure = None;
+    outcome.remedy = verification.remedy;
+    if !cli.json {
+        let transport = if outcome.transport_verified == Some(false) {
+            "loopback (public Tailscale URL needs attention)"
+        } else {
+            outcome.public_url.as_deref().unwrap_or("loopback")
+        };
+        let restart = if outcome.action == "restarted" {
+            if outcome.recovery_attempted {
+                " → restarted after one recovery"
+            } else {
+                " → restarted"
+            }
+        } else {
+            ""
+        };
+        println!(
+            "cas update: hub was {}{restart} → verified at {transport}",
+            outcome.prior_state,
+        );
+        if let Some(warning) = outcome.transport_warning.as_deref() {
+            eprintln!("cas update: public transport warning: {warning}");
+            if let Some(remedy) = outcome.remedy.as_deref() {
+                eprintln!("cas update: {remedy}");
+            }
+        }
+    }
 }
 
 fn capture_update_hub_evidence(paths: &HubRuntimePaths, reason: &str) {
@@ -2280,6 +2349,17 @@ pub(crate) fn restart_stale_hub(
     if prior_state == "none" {
         return Ok(outcome);
     }
+    if prior_state == "running"
+        && record.as_ref().is_some_and(|record| record.version == binary_version)
+        && let Ok(verification) = verify_updated_hub(&paths, binary_version, &spec)
+    {
+        outcome.action = "verified".to_owned();
+        outcome.service_managed = record
+            .as_ref()
+            .is_some_and(|record| record.launched_by.as_deref() == Some("service"));
+        finish_update_hub_verification(&mut outcome, verification, binary_version, cli);
+        return Ok(outcome);
+    }
     let args = HubServeArgs {
         bind: spec.bind,
         port: spec.port,
@@ -2323,22 +2403,8 @@ pub(crate) fn restart_stale_hub(
             verify_updated_hub(&paths, binary_version, &spec)
         });
         match result {
-            Ok(public_url) => {
-                outcome.verified = true;
-                outcome.loopback_verified = true;
-                outcome.transport_verified = spec.tailscale_serve.then_some(true);
-                outcome.current_version = Some(binary_version.to_owned());
-                outcome.public_url = public_url;
-                outcome.failure = None;
-                outcome.remedy = None;
-                if !cli.json {
-                    let transport = outcome.public_url.as_deref().unwrap_or("loopback");
-                    println!(
-                        "cas update: hub was {} → restarted{} → verified at {transport}",
-                        outcome.prior_state,
-                        if outcome.recovery_attempted { " after one recovery" } else { "" },
-                    );
-                }
+            Ok(verification) => {
+                finish_update_hub_verification(&mut outcome, verification, binary_version, cli);
                 return Ok(outcome);
             }
             Err(error) => {

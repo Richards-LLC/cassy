@@ -207,27 +207,39 @@ fn real_legacy_hubs_recover_through_new_post_swap_step() {
                 }
                 _ => {}
             }
+            let mut updated_pid = None;
             for iteration in 0..2 {
                 let receipt_path = home.path().join(format!("update-{iteration}.json"));
                 let update = legacy_hub_command(&new_binary, home.path(), &bin)
                     .args(["--json", "update", "--post-swap", "--from", tag.trim_start_matches('v'), "--refresh-receipt", receipt_path.to_str().unwrap()])
                     .output().unwrap();
-                assert!(!update.status.success(), "{tag}/{state}/{iteration} must report the unavailable public route");
-                assert!(String::from_utf8_lossy(&update.stderr).contains("hub recovery failed after one retry"),
-                    "{tag}/{state}/{iteration} update: {}", String::from_utf8_lossy(&update.stderr));
+                assert!(update.status.success(), "{tag}/{state}/{iteration} update: {}", String::from_utf8_lossy(&update.stderr));
                 let receipt: Value = serde_json::from_slice(&fs::read(&receipt_path).unwrap()).unwrap();
                 let expected_state = if iteration != 0 || state == "healthy" { "running" } else if state == "dead_route" { "exited" } else if state == "stuck_starting" { "startup_wedged" } else { state };
                 assert_eq!(receipt["hub_restart"]["prior_state"], expected_state, "{tag}/{state}/{iteration}: {receipt}");
+                let expected_action = if iteration == 0 && (tag != "v3.28.1" || state != "healthy") {
+                    "restarted"
+                } else {
+                    "verified"
+                };
+                assert_eq!(receipt["hub_restart"]["action"], expected_action, "{receipt}");
                 if receipt["hub_restart"]["loopback_verified"] != true {
                     eprintln!("hub.log: {}", fs::read_to_string(home.path().join(".cas/hub/hub.log")).unwrap_or_default());
                     eprintln!("lock: {}", fs::read_to_string(home.path().join(".cas/hub/hub.lock")).unwrap_or_default());
                     eprintln!("old pid ps: {}", String::from_utf8_lossy(&ProcessCommand::new("ps").args(["-p", &old.pid.to_string(), "-o", "pid,ppid,state,command"]).output().unwrap().stdout));
                 }
-                assert_eq!(receipt["hub_restart"]["recovery_attempted"], true, "{receipt}");
+                assert_eq!(receipt["hub_restart"]["verified"], true, "{receipt}");
+                assert_eq!(receipt["hub_restart"]["recovery_attempted"], false, "{receipt}");
                 assert_eq!(receipt["hub_restart"]["loopback_verified"], true, "{receipt}");
                 assert_eq!(receipt["hub_restart"]["transport_verified"], false, "{receipt}");
-                assert!(receipt["hub_restart"]["failure"].as_str().unwrap().contains("public Tailscale"), "{receipt}");
+                assert!(receipt["hub_restart"]["transport_warning"].as_str().unwrap().contains("public Tailscale"), "{receipt}");
+                assert!(receipt["hub_restart"]["remedy"].as_str().unwrap().contains("MagicDNS"), "{receipt}");
+                assert!(receipt["hub_restart"]["failure"].is_null(), "{receipt}");
                 let current = paths.read_process_record().unwrap();
+                if let Some(previous_pid) = updated_pid {
+                    assert_eq!(current.pid, previous_pid, "a healthy current hub must keep its PID");
+                }
+                updated_pid = Some(current.pid);
                 cleanup.0.push(current.pid);
                 assert_eq!(current.version, env!("CARGO_PKG_VERSION"));
                 assert!(home.path().join("mock-route").exists(), "{tag}/{state}/{iteration} route lost");
@@ -319,7 +331,8 @@ fn real_launchd_service_update_verifies_public_transport_twice() {
         assert_eq!(receipt["hub_restart"]["transport_verified"], true);
         assert_eq!(receipt["hub_restart"]["recovery_attempted"], false);
         let record = paths.read_process_record().unwrap();
-        assert_ne!(record.pid, first_pid);
+        assert_eq!(record.pid, first_pid, "healthy current service must keep its PID");
+        assert_eq!(receipt["hub_restart"]["action"], "verified");
         assert_eq!(record.port, hub_port);
         assert_eq!(record.tailscale_serve_port, Some(serve_port));
     }

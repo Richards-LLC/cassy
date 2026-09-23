@@ -2013,6 +2013,9 @@ dialog::backdrop { background: var(--overlay-backdrop); }
 .palette-command { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: var(--space-3); min-height: 44px; padding: var(--space-2) var(--space-3); background: var(--bg-raised); text-align: left; }
 /* `display: grid` above outranks the user-agent [hidden] rule; the filter relies on [hidden]. */
 .palette-command[hidden] { display: none; }
+/* An unavailable command drops its raised surface instead of fading to an
+   unreadable ghost; its text stays at the secondary contrast. */
+.palette-command:disabled { opacity: 1; color: var(--text-mid); background: transparent; }
 .palette-command span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .palette-command small, .palette-empty { color: var(--text-mid); }
 .palette-command small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -2021,16 +2024,28 @@ dialog::backdrop { background: var(--overlay-backdrop); }
    off the page behind it, and the open session keeps its mark. */
 @media (forced-colors: active) {
   dialog { border: 1px solid CanvasText; }
-  .palette-command { border: 1px solid ButtonBorder; }
-  .palette-command:disabled { border-color: GrayText; }
+  /* No surface fade: a row opted out of forcing (focus, open session) would
+     otherwise animate from its author surface and flash on every move. */
+  .palette-command { border: 1px solid ButtonBorder; transition: none; }
+  /* GrayText already says "unavailable"; fading it as well would drop it
+     below a readable contrast. */
+  .palette-command:disabled { border-color: GrayText; opacity: 1; }
+  /* Hover is a pointer cue, so it must not look like a frame (the focus ring)
+     or a fill (the open session): underline the command's name instead. */
+  .palette-command:hover:not(:disabled) > :first-child { text-decoration: underline; }
   /* The focus ring is Highlight, so the open session cannot also be a
      Highlight frame: it is filled instead, and its own ring flips to
-     HighlightText so focus still shows on the fill. */
-  .palette-commands .palette-command:focus-visible { outline-color: Highlight; }
-  .session-picker-entry[aria-current="true"] { forced-color-adjust: none; color: HighlightText; background: Highlight; border-color: Highlight; }
+     HighlightText so focus still shows on the fill. Both are drawn at full
+     strength (a system colour can carry alpha). */
+  /* Forced colors would repaint an author ring in the system Highlight,
+     which can carry alpha; opting the focused row out (with every colour
+     restated as a system colour) keeps the ring at full strength. */
+  .palette-commands .palette-command:not([aria-current="true"]):focus-visible { forced-color-adjust: none; color: CanvasText; background: Canvas; border-color: ButtonBorder; outline-color: rgb(from Highlight r g b / 1); }
+  .palette-commands .palette-command:not([aria-current="true"]):focus-visible * { color: CanvasText; background: transparent; }
+  .session-picker-entry[aria-current="true"] { forced-color-adjust: none; color: HighlightText; background: rgb(from Highlight r g b / 1); border-color: rgb(from Highlight r g b / 1); }
   /* forced-color-adjust: none lets author surfaces through, so the global
      button:hover background would replace the fill under HighlightText. */
-  .palette-commands .session-picker-entry[aria-current="true"]:is(:hover, :active, :focus-visible) { background: Highlight; }
+  .palette-commands .session-picker-entry[aria-current="true"]:is(:hover, :active, :focus-visible) { background: rgb(from Highlight r g b / 1); }
   .session-picker-entry[aria-current="true"] * { color: HighlightText; background: transparent; border-color: HighlightText; }
   .palette-commands .session-picker-entry[aria-current="true"]:focus-visible { outline-color: HighlightText; }
 }

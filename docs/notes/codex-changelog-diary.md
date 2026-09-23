@@ -558,11 +558,12 @@ band **currently installed locally** (`codex-cli 0.142.4`).
   safer for our generated `.codex/skills/*.md`, but **verify the synced mirror still loads** post-bump.
 - **"App-server clients can configure multi-agent delegation as disabled / explicit-request-only /
   proactive" (#28685, #28792, #29324) + "Parent agents receive terminal subagent errors instead of
-  empty success" (#28375).** → 👀 strategic (multi-agent v2; same posture as 0.137/0.138 — feed it,
-  don't compete). The terminal-error propagation is a genuine reliability win if Cassy ever consumes
+  empty success" (#28375).** → 👀 strategic (multi-agent v2; the Cassy stance remains an operator
+  decision). The terminal-error propagation is a genuine reliability win if Cassy ever consumes
   Codex-native subagents.
 
-- **2026-09-23 resolution:** Won't-do: app-server delegation settings are outside the PTY worker contract.
+- **2026-09-23 resolution:** Operator decision pending on Cassy's stance toward Codex-native
+  orchestration, including app-server delegation settings.
 - **Indexed web-search mode, scheduled UTC time reminders + current-time tool, `/usage` reset-credit
   redemption, plugin catalog sections.** → ⏭ n/a (orthogonal to the Cassy launch surface).
 
@@ -628,11 +629,13 @@ Reviewed 2026-06-30. Triage pass.
   `mcp__cs__*` tool schemas pass through Codex's schema handling; richer `oneOf`/`allOf` preservation is
   a fidelity win for the Cassy tool surface. Smoke `cs` tool calls on upgrade.
 
-- **2026-09-23 resolution:** Owned by cas-27e1: exercise oneOf/allOf schema fidelity.
+- **2026-09-23 resolution:** Won't-do: the 15 current `cs` input schemas contain no `oneOf` or
+  `allOf`; cas-27e1 covers multi-argument task create/show fidelity.
 - **`cli: add -P sandbox permissions profile alias` (#27054); multi-agent v2 `close_agent`→
   `interrupt_agent` rename (#26994).** → ✅ no action (profile is an alias; Cassy uses `--yolo`, not
   profiles) / 👀 strategic (multi-agent v2 naming churn — informational).
-- **2026-09-23 resolution:** Won't-do: Cassy does not call the native multi-agent API for factory workers.
+- **2026-09-23 resolution:** Operator decision pending on Cassy's stance toward Codex-native
+  orchestration, including the `interrupt_agent` API.
 - **"Exclude external tool output from memories" (#26821).** → ✅ no action; Codex's own "memories"
   concept, orthogonal to Cassy memory exposed via `cs`.
 
@@ -662,7 +665,8 @@ an upgrade actually lands on one of these.
   work (0.139) builds on; all strictly helpful to the Cassy tool surface. The "extra skills roots
   removed" (0.130) is the early signal of the skills-subsystem consolidation that runs through 0.142.
 
-- **2026-09-23 resolution:** Owned by cas-27e1: exercise ref/defs and large cs schemas.
+- **2026-09-23 resolution:** Won't-do: the 15 current `cs` input schemas contain no `$ref` or
+  `$defs`; cas-27e1 covers multi-argument task create/show fidelity.
 - **State/SQLite safety: fail-closed when local state can't open + preserve SQLite data (0.131,
   #21831…); memory runtime state moved to a dedicated SQLite DB (0.135, #24591); memory summaries
   versioned/rebuilt when stale (0.132, #23148).** → ✅ no action; Codex's own state/memory DBs, separate
@@ -696,11 +700,11 @@ Reviewed 2026-06-09 (calm-crane-32 / supervisor). Triage pass vs touchpoints.
   `AGENTS.md` files are picked up" (#26205, #26465).** → 👀 **touchpoint: AGENTS.md.** Factory workers
   run in worktrees; this likely *helps* (more reliable pickup) but verify worker priming still lands.
 - **"catalog multi-agent v2 config" (#26254) + multi-agent v2 work.** → 👀 **strategic.** Codex is
-  building its own multi-agent orchestration — the same "cede the mechanism, own knowledge + quality"
-  fork tracked for Claude Code (Workflow / Agent Teams). Same posture applies: Cassy should feed Codex
-  multi-agent, not compete with it. No action; flagged for the next strategy pass.
+  building its own multi-agent orchestration, which overlaps Cassy's factory lifecycle. The operator
+  has not decided Cassy's long-term stance; this remains flagged for a strategy pass.
 
-- **2026-09-23 resolution:** Won't-do: Cassy owns task leases and worker lifecycle; native subagents remain optional within turns.
+- **2026-09-23 resolution:** Operator decision pending on Cassy's stance toward Codex-native
+  orchestration.
 - **Startup resilience: `/usr/bin/bash` support (#26538), OAuth-backed MCP pre-refresh (#26482).** →
   ✅ no action (strictly helpful; the bash one echoes our shell-form vs exec-form lineage).
 - **`/app` desktop handoff, local-image paths to model, plugin `--json`, Bazel worktree settings,
@@ -722,7 +726,8 @@ Reviewed 2026-06-09. Triage pass.
   env-identity carrying doesn't reintroduce a prompt on the bypass path.
 - **"Multi-agent v2 keeps runtime choice with each thread… cleaner follow-up and metadata defaults
   for spawned agents" (#25266, #25636, …).** → 👀 strategic (see 0.138 note).
-- **2026-09-23 resolution:** Won't-do: native subagents do not replace Cassy factory ownership.
+- **2026-09-23 resolution:** Operator decision pending on Cassy's stance toward Codex-native
+  orchestration.
 - **"Moved repo review rules and contributor conventions into `AGENTS.md`" (#25682).** → ✅ no action
   (Codex repo's own convention; informs that AGENTS.md is the live instruction surface).
 - **F13–F24 keybindings, enterprise credit limits, remote-control pairing, ChatGPT-auth, SQLite
@@ -759,7 +764,8 @@ Reviewed 2026-06-09. Triage pass.
 - **Multi-agent v2 strategic posture:** decide Cassy's stance toward Codex's native multi-agent
   orchestration (mirror of the Claude Code Workflow/Agent-Teams fork). See 0.137/0.138 entries.
 
-- **2026-09-23 resolution:** Won't-do: keep Cassy task and worker lifecycle authority while allowing optional native delegation.
+- **2026-09-23 resolution:** Operator decision pending on Cassy's stance toward Codex-native
+  orchestration.
 - **Future upgrade validation:** rerun the typed 0.146 matrix (effort key, skills/agents and
   AGENTS.md discovery, `--yolo`, direct `cs` MCP calls alongside code mode, interruption, and
   rollout-budget continuity) before advancing the validated pin.

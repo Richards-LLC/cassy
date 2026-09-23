@@ -809,9 +809,12 @@ pub(super) fn hub_state_remedy(state: HubDisplayState, pid: u32) -> String {
             "Run `cas hub restart --force` to recover wedged startup.".to_owned()
         }
         HubDisplayState::Stopping { .. } => "Wait for shutdown, then run `cas hub status` again.".to_owned(),
-        HubDisplayState::Unresponsive { .. } => format!(
-            "Run `sample {pid}` for evidence; then `cas hub restart --force`."
-        ),
+        HubDisplayState::Unresponsive { .. } if cfg!(target_os = "macos") => {
+            format!("Run `sample {pid}` for evidence; then `cas hub restart --force`.")
+        }
+        HubDisplayState::Unresponsive { .. } => {
+            "Run `cas hub restart --force` to recover the hub.".to_owned()
+        }
         HubDisplayState::Running => String::new(),
     }
 }
@@ -2780,12 +2783,17 @@ mod tests {
     #[test]
     fn status_text_and_json_distinguish_lifecycle_states() {
         let record = record("3.4.1", DEFAULT_HUB_PORT, None);
+        let unresponsive_remedy = if cfg!(target_os = "macos") {
+            "Run `sample 42` for evidence; then `cas hub restart --force`."
+        } else {
+            "Run `cas hub restart --force` to recover the hub."
+        };
         let cases = [
             (HubDisplayState::Exited, "exited", "last pid 42 exited", "cas hub start"),
             (HubDisplayState::Starting { age_secs: 3, wedged: false }, "starting", "pid 42 is starting for 3s", "cas hub status"),
             (HubDisplayState::Starting { age_secs: 12, wedged: true }, "startup_wedged", "pid 42 is wedged in startup after 12s", "cas hub restart --force"),
             (HubDisplayState::Stopping { age_secs: 4 }, "stopping", "pid 42 is stopping; lock held for 4s", "cas hub status"),
-            (HubDisplayState::Unresponsive { age_secs: 91 }, "unresponsive", "pid 42 is running for 91s but not answering", "sample 42"),
+            (HubDisplayState::Unresponsive { age_secs: 91 }, "unresponsive", "pid 42 is running for 91s but not answering", unresponsive_remedy),
             (HubDisplayState::Running, "running", "Cassy hub is running and ready", ""),
         ];
         for (state, kind, text, remedy) in cases {
@@ -2796,6 +2804,10 @@ mod tests {
             assert_eq!(json["kind"], kind);
             assert_eq!(json["pid"], 42);
             assert!(json["remedy"].as_str().unwrap().contains(remedy));
+            if state == (HubDisplayState::Unresponsive { age_secs: 91 }) {
+                assert_eq!(json["remedy"], unresponsive_remedy);
+                assert_eq!(rendered.contains("sample 42"), cfg!(target_os = "macos"));
+            }
         }
     }
 

@@ -505,6 +505,10 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
         path: "skills/cas-qa-craft/references/telemetry-sweep.md",
         content: include_str!("builtins/skills/cas-qa-craft/references/telemetry-sweep.md"),
     },
+    BuiltinFile {
+        path: "skills/cas-qa-craft/references/evidence-bundle.md",
+        content: include_str!("builtins/skills/cas-qa-craft/references/evidence-bundle.md"),
+    },
     // cas-619f: the independent reviewer's procedure for a qa-pass task.
     BuiltinFile {
         path: "skills/cas-qa-craft/references/independent-pass.md",
@@ -1079,6 +1083,10 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-qa-craft/references/telemetry-sweep.md",
         content: include_str!("builtins/codex/skills/cas-qa-craft/references/telemetry-sweep.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-qa-craft/references/evidence-bundle.md",
+        content: include_str!("builtins/codex/skills/cas-qa-craft/references/evidence-bundle.md"),
     },
     // cas-619f: the independent reviewer's procedure for a qa-pass task.
     BuiltinFile {
@@ -1664,6 +1672,10 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-qa-craft/references/telemetry-sweep.md",
         content: include_str!("builtins/grok/skills/cas-qa-craft/references/telemetry-sweep.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-qa-craft/references/evidence-bundle.md",
+        content: include_str!("builtins/grok/skills/cas-qa-craft/references/evidence-bundle.md"),
     },
     // cas-619f: the independent reviewer's procedure for a qa-pass task.
     BuiltinFile {
@@ -5316,6 +5328,7 @@ This is the body content."#;
             "skills/cas-qa-craft/references/evidence-ledger.md",
             "skills/cas-qa-craft/references/exemplar.md",
             "skills/cas-qa-craft/references/telemetry-sweep.md",
+            "skills/cas-qa-craft/references/evidence-bundle.md",
             "skills/cas-qa-craft/references/journeys.md",
         ];
         let mut claude_bodies = Vec::new();
@@ -5403,9 +5416,34 @@ This is the body content."#;
             ] {
                 assert!(telemetry.contains(marker), "{label} telemetry reference missing {marker:?}");
             }
+            // cas-c3b8: the Playwright evidence bundle the close gate consumes.
+            assert!(skill.contains("evidence-bundle.md"), "{label} cas-qa-craft omits the bundle");
+            let bundle = get(FILES[5]);
+            for marker in [
+                "~/.cas/artifacts/<task-id>/qa/",
+                "bundle.json",
+                "snapshots: { dom: true, aria: true, screen: true }",
+                "screenshots: false",
+                "page.screencast.start",
+                "showActions",
+                "showChapter",
+                "toMatchAriaSnapshot",
+                "ariaSnapshotJSON",
+                "forcedColors",
+                "reducedMotion",
+                "contrast",
+                "visual-qa.mjs --strict",
+                "critique_score",
+                "note_type=platform_proof",
+                "npx playwright trace actions --errors-only",
+                "trace snapshot <N> --phase after",
+                "Worked example",
+            ] {
+                assert!(bundle.contains(marker), "{label} evidence bundle missing {marker:?}");
+            }
             // cas-9be7: the journey contract every user-facing epic follows.
             assert!(skill.contains("references/journeys.md"), "{label} cas-qa-craft does not link journeys");
-            let journeys = get(FILES[5]);
+            let journeys = get(FILES[6]);
             for marker in [
                 "docs/qa/journeys.md",
                 "journeys-for-diff.py",

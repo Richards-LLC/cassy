@@ -38,6 +38,19 @@ instead of the procedure below.
    `source-inferred`, `fixture`, `real-build`, or `eyewitness`. A label weaker
    than the cell needs is `NOT EXERCISED`, never `PASS`; never write “partial”.
    When the 30-minute box expires, mark every unrun cell `NOT EXERCISED`.
+   For web or hub cells, write the **evidence bundle** to
+   `~/.cas/artifacts/<task-id>/qa/` with
+   [references/evidence-bundle.md](references/evidence-bundle.md). It holds:
+   - a trace recorded with `snapshots: { dom: true, aria: true, screen: true }`
+   - a `page.screencast` receipt with `showActions` and a `showChapter` for
+     each cell
+   - a `toMatchAriaSnapshot`-asserted final state
+   - `forcedColors`/`reducedMotion`/`contrast` captures when the change is
+     visual
+   - polish evidence: desktop and phone renders in light and dark,
+     `scripts/visual-qa.mjs --strict` output, and a cas-ui-craft critique
+     score
+   Cite its `bundle.json` in a `platform_proof` note and in the close reason.
 5. Grep the touched feature for `MIN_`, `MAX_`, `_MINUTES`, `_MS`, `_SECS`,
    `THRESHOLD`, `GRACE`, `DEBOUNCE`, and `RETRY`; record whether each constant is
    predictable from the user's visible contract. For terminal states, dump all

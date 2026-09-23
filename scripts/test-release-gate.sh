@@ -48,8 +48,18 @@ new_fixture() {
     local name="$1" repo
     repo="$tmp/$name"
     mkdir -p "$repo/scripts" "$repo/hub-web/scripts" "$repo/cas-cli/src" "$repo/cas-cli/tests" "$repo/crates" \
+        "$repo/.github/workflows" \
         "$repo/.context/zig"
     cp "$gate" "$repo/scripts/release-gate.sh"
+    cp "$script_dir/check-workflow-run-interpolation.py" "$repo/scripts/check-workflow-run-interpolation.py"
+    cat > "$repo/.github/workflows/release.yml" <<'EOF'
+jobs:
+  publish:
+    steps:
+      - env:
+          NOTES: ${{ steps.notes.outputs.notes }}
+        run: echo "$NOTES"
+EOF
     cp "$script_dir/release-integrate.py" "$repo/scripts/release-integrate.py"
     cp "$script_dir/release-train.sh" "$repo/scripts/release-train.sh"
     cp "$script_dir/test-release-integration.py" "$repo/scripts/test-release-integration.py"
@@ -264,7 +274,7 @@ assert_all_pass() {
     local output="$1"
     for name in scratch-base epic-worktree-fresh epic-worktree-zig failure-log ancestor-proxy-config assemble-stale-base \
         version-literals fixture-paths workspace-tests macos-check nextest doctests archive-mode snapshot-portability \
-        builtin-projections changelog-and-versions release-script procedure-guardrails working-tree \
+        builtin-projections changelog-and-versions release-script release-notes-shell-injection procedure-guardrails working-tree \
         hub-web-dist-drift hub-web-visual-qa; do
         if ! grep -qF "PASS $name" <<<"$output"; then
             bad "passing fixture omitted PASS $name"
@@ -286,6 +296,17 @@ run_scenario() {
 }
 
 # 1-7. Each mechanical or command-backed failure is isolated in its own repo.
+repo="$(new_fixture release-notes-shell-injection)"
+cat > "$repo/.github/workflows/release.yml" <<'EOF'
+jobs:
+  publish:
+    steps:
+      - run: |
+          gh release create "$VERSION" --notes "${{ steps.notes.outputs.notes }}"
+EOF
+output="$(run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 --only release-notes-shell-injection 2>&1 || true)"
+assert_named_failure release-notes-shell-injection "$output"
+
 repo="$(new_fixture version-literal)"
 printf 'const VERSION: &str = "9.99.7-rc.1";\n' >"$repo/cas-cli/src/version.rs"
 output="$(run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 2>&1 || true)"
@@ -1032,7 +1053,7 @@ repo="$(new_fixture row-cache)"
 export CAS_RELEASE_GATE_CACHE_DIR="$tmp/pass-cache"
 export CAS_RELEASE_GATE_LOG_DIR="$tmp/row-logs"
 run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 >"$tmp/cache-first.log" 2>&1 || { cat "$tmp/cache-first.log"; exit 1; }
-if [[ "$(wc -l <"$CAS_RELEASE_GATE_LOG_DIR/timing.tsv")" == 22 ]] \
+if [[ "$(wc -l <"$CAS_RELEASE_GATE_LOG_DIR/timing.tsv")" == 23 ]] \
     && [[ -s "$CAS_RELEASE_GATE_LOG_DIR/archive-mode.log" ]] \
     && grep -qE '^  timing: wall=[0-9]+\.[0-9]+s user=' "$tmp/cache-first.log"; then
     ok 'every row retains wall/CPU timing and successful raw logs'

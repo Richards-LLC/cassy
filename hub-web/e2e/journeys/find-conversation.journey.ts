@@ -28,7 +28,21 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     await expect(commands.visible().first()).toContainText(`Jump to ${OTTER}`);
     await expect(page.getByRole("button", { name: /Appearance · Dark/ })).toBeHidden();
     await page.getByRole("button", { name: new RegExp(`Jump to ${OTTER}`) }).click();
+    await expect(page.locator("#command-palette")).toBeHidden();
     await expect(page.getByRole("button", { name: `Send to ${OTTER}`, exact: true })).toBeVisible();
     await expect(page.locator(".conversation-host")).toContainText("gabber-studio · Studio Mac");
+  });
+
+  await journey.stage("Jump to a supervisor from the keyboard", async () => {
+    await page.keyboard.press("ControlOrMeta+k");
+    const filter = page.getByRole("searchbox", { name: "Filter commands" });
+    await expect(filter).toBeFocused();
+    await filter.fill(PELICAN);
+    await filter.press("Enter");
+    // Enter in the filter picks the leading "Jump to" row; the palette must
+    // close with it rather than keep the modal up over the opened session.
+    await expect(page.locator("#command-palette")).toBeHidden();
+    await expect(page.getByRole("button", { name: `Send to ${PELICAN}`, exact: true })).toBeVisible();
+    await expect(page.locator(".conversation-host")).toContainText("cas-src · Atlas");
   });
 });

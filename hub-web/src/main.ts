@@ -2799,7 +2799,13 @@ function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | und
   };
   for (const command of palette.querySelectorAll<HTMLButtonElement>("[data-palette-machine]")) {
     command.onclick = () => {
+      // Close the dialog itself, not just the flag: Enter in the filter
+      // clicks this row with focus still in the input, and render() defers
+      // the shell rebuild while an editable field inside #app has focus, so
+      // the modal would stay up over the session it just opened. The toggle
+      // is not refocused — the opened session owns focus from here.
       commandPaletteOpen = false;
+      palette.close();
       const machineId = command.dataset.paletteMachine;
       const session = command.dataset.paletteSession;
       if (machineId && session) void openSession(machineId, session);

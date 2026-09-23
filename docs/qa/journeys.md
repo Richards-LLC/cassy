@@ -89,6 +89,7 @@ Suite: `hub-web/e2e/journeys/`. Run it with `npm run journeys` in
 1. See every machine's supervisors in one list — every row names its project and machine
 2. Notice a new reply while away — the row shows an unread count
 3. Jump to a supervisor by name — the command palette filters and opens the conversation
+4. Jump to a supervisor from the keyboard — Ctrl+K, type the name, Enter: the palette closes and the conversation is open
 
 **Expected experience**
 

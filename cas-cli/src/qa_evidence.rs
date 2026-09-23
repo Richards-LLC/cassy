@@ -22,11 +22,22 @@ pub const ALLOW_SKIP: &str = "cas-allow-skip:";
 /// Where the contract's worked example and producing commands live.
 pub const CONTRACT_REFERENCE: &str = "cas-qa-craft references/evidence-bundle.md";
 
-const RUBRIC: [&str; 5] = ["distinctiveness", "fit", "hierarchy", "craft", "accessibility"];
+const RUBRIC: [&str; 5] = [
+    "distinctiveness",
+    "fit",
+    "hierarchy",
+    "craft",
+    "accessibility",
+];
 const FLOOR_DIMENSIONS: [&str; 3] = ["distinctiveness", "fit", "hierarchy"];
 const FLOOR: u8 = 4;
 const A11Y_MODES: [&str; 3] = ["forced-colors", "reduced-motion", "contrast-more"];
-const POLISH_RENDERS: [&str; 4] = ["-light-desktop.png", "-light-phone.png", "-dark-desktop.png", "-dark-phone.png"];
+const POLISH_RENDERS: [&str; 4] = [
+    "-light-desktop.png",
+    "-light-phone.png",
+    "-dark-desktop.png",
+    "-dark-phone.png",
+];
 
 /// Everything the validator needs, resolved by the caller.
 #[derive(Debug, Clone)]
@@ -129,7 +140,9 @@ pub fn cited_bundle_path(notes: &str) -> Option<String> {
 
 fn expand_home(path: &str) -> PathBuf {
     match path.strip_prefix("~/") {
-        Some(rest) => dirs::home_dir().map(|home| home.join(rest)).unwrap_or_else(|| PathBuf::from(path)),
+        Some(rest) => dirs::home_dir()
+            .map(|home| home.join(rest))
+            .unwrap_or_else(|| PathBuf::from(path)),
         None => PathBuf::from(path),
     }
 }
@@ -143,7 +156,11 @@ fn cite_command(ctx: &EvidenceContext<'_>) -> String {
 }
 
 fn git(repo: &Path, args: &[&str]) -> Option<String> {
-    let output = Command::new("git").args(args).current_dir(repo).output().ok()?;
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(repo)
+        .output()
+        .ok()?;
     output
         .status
         .success()
@@ -152,7 +169,9 @@ fn git(repo: &Path, args: &[&str]) -> Option<String> {
 
 /// Committer time (unix seconds) of a commit.
 pub fn committer_time(repo: &Path, commit: &str) -> Option<i64> {
-    git(repo, &["show", "-s", "--format=%ct", commit])?.parse().ok()
+    git(repo, &["show", "-s", "--format=%ct", commit])?
+        .parse()
+        .ok()
 }
 
 fn is_full_sha(value: &str) -> bool {
@@ -169,20 +188,35 @@ fn mtime_secs(path: &Path) -> Option<i64> {
 
 /// Validate the cited cas-c3b8 bundle for the delivered head.
 pub fn validate_bundle(ctx: &EvidenceContext<'_>) -> Result<BundleReceipt, EvidenceRefusal> {
-    let cited = cited_bundle_path(ctx.notes)
-        .ok_or_else(|| EvidenceRefusal::new(format!("not cited (no `{BUNDLE_CITATION}` note)"), cite_command(ctx)))?;
+    let cited = cited_bundle_path(ctx.notes).ok_or_else(|| {
+        EvidenceRefusal::new(
+            format!("not cited (no `{BUNDLE_CITATION}` note)"),
+            cite_command(ctx),
+        )
+    })?;
     let manifest_path = resolve_inside_task_dir(ctx, &cited)?;
     let bundle_dir = manifest_path
         .parent()
         .map(Path::to_path_buf)
-        .ok_or_else(|| EvidenceRefusal::new(format!("cited at {cited}, which has no directory"), cite_command(ctx)))?;
+        .ok_or_else(|| {
+            EvidenceRefusal::new(
+                format!("cited at {cited}, which has no directory"),
+                cite_command(ctx),
+            )
+        })?;
 
     let raw = std::fs::read_to_string(&manifest_path).map_err(|error| {
-        EvidenceRefusal::new(format!("unreadable at {} ({error})", manifest_path.display()), cite_command(ctx))
+        EvidenceRefusal::new(
+            format!("unreadable at {} ({error})", manifest_path.display()),
+            cite_command(ctx),
+        )
     })?;
     let manifest: Manifest = serde_json::from_str(&raw).map_err(|error| {
         EvidenceRefusal::new(
-            format!("malformed: {} does not parse as a v1 manifest ({error})", manifest_path.display()),
+            format!(
+                "malformed: {} does not parse as a v1 manifest ({error})",
+                manifest_path.display()
+            ),
             format!("rewrite bundle.json to the v1 shape in {CONTRACT_REFERENCE}"),
         )
     })?;
@@ -194,7 +228,10 @@ pub fn validate_bundle(ctx: &EvidenceContext<'_>) -> Result<BundleReceipt, Evide
     }
     if manifest.task_id != ctx.task_id {
         return Err(EvidenceRefusal::new(
-            format!("for task {} (bundle.json task_id), not {}", manifest.task_id, ctx.task_id),
+            format!(
+                "for task {} (bundle.json task_id), not {}",
+                manifest.task_id, ctx.task_id
+            ),
             cite_command(ctx),
         ));
     }
@@ -226,16 +263,26 @@ pub fn validate_bundle(ctx: &EvidenceContext<'_>) -> Result<BundleReceipt, Evide
         let Some(relative) = value.as_deref().filter(|value| !value.trim().is_empty()) else {
             return Err(missing_key(key));
         };
-        listed.push((key.to_string(), resolve_bundle_file(&bundle_dir, key, relative)?));
+        listed.push((
+            key.to_string(),
+            resolve_bundle_file(&bundle_dir, key, relative)?,
+        ));
     }
     if files.cells.is_empty() {
         return Err(missing_key("cells"));
     }
     for (index, relative) in files.cells.iter().enumerate() {
-        listed.push((format!("cells[{index}]"), resolve_bundle_file(&bundle_dir, "cells", relative)?));
+        listed.push((
+            format!("cells[{index}]"),
+            resolve_bundle_file(&bundle_dir, "cells", relative)?,
+        ));
     }
     for suffix in POLISH_RENDERS {
-        if !files.polish_screenshots.iter().any(|path| path.ends_with(suffix)) {
+        if !files
+            .polish_screenshots
+            .iter()
+            .any(|path| path.ends_with(suffix))
+        {
             return Err(EvidenceRefusal::new(
                 format!("missing the polish render `*{suffix}` in files.polish_screenshots"),
                 producing_command("polish_screenshots", &bundle_dir),
@@ -259,7 +306,10 @@ pub fn validate_bundle(ctx: &EvidenceContext<'_>) -> Result<BundleReceipt, Evide
         }
     }
     for (index, relative) in files.a11y.iter().enumerate() {
-        listed.push((format!("a11y[{index}]"), resolve_bundle_file(&bundle_dir, "a11y", relative)?));
+        listed.push((
+            format!("a11y[{index}]"),
+            resolve_bundle_file(&bundle_dir, "a11y", relative)?,
+        ));
     }
     for (key, path) in &listed {
         let key_root = key.split('[').next().unwrap_or(key);
@@ -273,7 +323,10 @@ pub fn validate_bundle(ctx: &EvidenceContext<'_>) -> Result<BundleReceipt, Evide
             }
             _ => {
                 return Err(EvidenceRefusal::new(
-                    format!("incomplete: files.{key} ({}) does not exist", path.display()),
+                    format!(
+                        "incomplete: files.{key} ({}) does not exist",
+                        path.display()
+                    ),
                     producing_command(key_root, &bundle_dir),
                 ));
             }
@@ -288,18 +341,34 @@ pub fn validate_bundle(ctx: &EvidenceContext<'_>) -> Result<BundleReceipt, Evide
     );
     if !is_full_sha(&manifest.head_sha) {
         return Err(EvidenceRefusal::new(
-            format!("unbound: head_sha {:?} is not a full 40-hex commit", manifest.head_sha),
+            format!(
+                "unbound: head_sha {:?} is not a full 40-hex commit",
+                manifest.head_sha
+            ),
             rerun,
         ));
     }
     let delivered_time = committer_time(ctx.repo, ctx.delivered_head).ok_or_else(|| {
         EvidenceRefusal::new(
-            format!("uncheckable: the delivered head {} is not readable in {}", short(ctx.delivered_head), ctx.repo.display()),
+            format!(
+                "uncheckable: the delivered head {} is not readable in {}",
+                short(ctx.delivered_head),
+                ctx.repo.display()
+            ),
             "push the delivery commit, then retry close".to_string(),
         )
     })?;
     let head_covers_delivery = manifest.head_sha == ctx.delivered_head
-        || git(ctx.repo, &["merge-base", "--is-ancestor", ctx.delivered_head, &manifest.head_sha]).is_some();
+        || git(
+            ctx.repo,
+            &[
+                "merge-base",
+                "--is-ancestor",
+                ctx.delivered_head,
+                &manifest.head_sha,
+            ],
+        )
+        .is_some();
     if !head_covers_delivery {
         return Err(EvidenceRefusal::new(
             format!(
@@ -314,7 +383,10 @@ pub fn validate_bundle(ctx: &EvidenceContext<'_>) -> Result<BundleReceipt, Evide
         .map(|time| time.timestamp())
         .map_err(|_| {
             EvidenceRefusal::new(
-                format!("unbound: created_at {:?} is not RFC 3339", manifest.created_at),
+                format!(
+                    "unbound: created_at {:?} is not RFC 3339",
+                    manifest.created_at
+                ),
                 rerun.clone(),
             )
         })?;
@@ -342,10 +414,18 @@ pub fn validate_bundle(ctx: &EvidenceContext<'_>) -> Result<BundleReceipt, Evide
     }
 
     // 4. Trace proves a passing assertion and no failing one.
-    let path_of = |key: &str| listed.iter().find(|(name, _)| name == key).map(|(_, path)| path.clone());
+    let path_of = |key: &str| {
+        listed
+            .iter()
+            .find(|(name, _)| name == key)
+            .map(|(_, path)| path.clone())
+    };
     let trace_path = path_of("trace").unwrap_or_default();
     let summary = trace_expect_summary(&trace_path).map_err(|error| {
-        EvidenceRefusal::new(format!("unusable: files.trace {error}"), producing_command("trace", &bundle_dir))
+        EvidenceRefusal::new(
+            format!("unusable: files.trace {error}"),
+            producing_command("trace", &bundle_dir),
+        )
     })?;
     if summary.failed > 0 {
         return Err(EvidenceRefusal::new(
@@ -353,7 +433,10 @@ pub fn validate_bundle(ctx: &EvidenceContext<'_>) -> Result<BundleReceipt, Evide
                 "a failing run: files.trace records {} failed Expect step(s) — evidence must come from a passing run",
                 summary.failed
             ),
-            format!("fix the failure, then {}", producing_command("trace", &bundle_dir)),
+            format!(
+                "fix the failure, then {}",
+                producing_command("trace", &bundle_dir)
+            ),
         ));
     }
     if summary.passed == 0 {
@@ -362,7 +445,8 @@ pub fn validate_bundle(ctx: &EvidenceContext<'_>) -> Result<BundleReceipt, Evide
             producing_command("trace", &bundle_dir),
         ));
     }
-    let actions = std::fs::read_to_string(path_of("trace_actions").unwrap_or_default()).unwrap_or_default();
+    let actions =
+        std::fs::read_to_string(path_of("trace_actions").unwrap_or_default()).unwrap_or_default();
     if !actions.lines().any(|line| line.contains("Expect \"")) {
         return Err(EvidenceRefusal::new(
             "incomplete: files.trace_actions lists no `Expect \"` step",
@@ -380,15 +464,27 @@ pub fn validate_bundle(ctx: &EvidenceContext<'_>) -> Result<BundleReceipt, Evide
             producing_command("visual_qa_stdout", &bundle_dir),
         ));
     }
-    let visual_qa = std::fs::read_to_string(path_of("visual_qa").unwrap_or_default()).unwrap_or_default();
-    if !visual_qa.lines().next().is_some_and(|line| line.contains("PASS")) {
+    let visual_qa =
+        std::fs::read_to_string(path_of("visual_qa").unwrap_or_default()).unwrap_or_default();
+    if !visual_qa
+        .lines()
+        .next()
+        .is_some_and(|line| line.contains("PASS"))
+    {
         return Err(EvidenceRefusal::new(
             "missing polish proof: files.visual_qa does not start with `# Visual QA — PASS`",
             producing_command("visual_qa_stdout", &bundle_dir),
         ));
     }
-    let stdout = std::fs::read_to_string(path_of("visual_qa_stdout").unwrap_or_default()).unwrap_or_default();
-    if stdout.lines().rev().find(|line| !line.trim().is_empty()).map(str::trim) != Some("PASS") {
+    let stdout = std::fs::read_to_string(path_of("visual_qa_stdout").unwrap_or_default())
+        .unwrap_or_default();
+    if stdout
+        .lines()
+        .rev()
+        .find(|line| !line.trim().is_empty())
+        .map(str::trim)
+        != Some("PASS")
+    {
         return Err(EvidenceRefusal::new(
             "missing polish proof: files.visual_qa_stdout does not end with `PASS`",
             producing_command("visual_qa_stdout", &bundle_dir),
@@ -411,7 +507,11 @@ pub fn validate_bundle(ctx: &EvidenceContext<'_>) -> Result<BundleReceipt, Evide
         .iter()
         .filter_map(|dimension| {
             let score = manifest.critique_score[*dimension];
-            let floor = if FLOOR_DIMENSIONS.contains(dimension) { FLOOR as i64 } else { 1 };
+            let floor = if FLOOR_DIMENSIONS.contains(dimension) {
+                FLOOR as i64
+            } else {
+                1
+            };
             (score < floor).then(|| format!("{dimension}={score} (floor {floor})"))
         })
         .collect();
@@ -453,19 +553,30 @@ pub fn producing_command(key: &str, bundle_dir: &Path) -> String {
         "polish_screenshots" | "visual_qa" | "visual_qa_json" | "visual_qa_stdout" => format!(
             "node scripts/visual-qa.mjs --strict --artifact-dir {dir}/visual-qa <url> > {dir}/visual-qa.stdout 2>&1"
         ),
-        "critique" => format!("score the surface with the cas-ui-craft rubric into {dir}/critique.md and bundle.json critique_score"),
+        "critique" => format!(
+            "score the surface with the cas-ui-craft rubric into {dir}/critique.md and bundle.json critique_score"
+        ),
         _ => format!("produce `{key}` per {CONTRACT_REFERENCE}"),
     }
 }
 
-fn resolve_inside_task_dir(ctx: &EvidenceContext<'_>, cited: &str) -> Result<PathBuf, EvidenceRefusal> {
+fn resolve_inside_task_dir(
+    ctx: &EvidenceContext<'_>,
+    cited: &str,
+) -> Result<PathBuf, EvidenceRefusal> {
     let candidate = expand_home(cited);
     let resolved = candidate.canonicalize().map_err(|_| {
-        EvidenceRefusal::new(format!("missing: the cited {cited} does not exist"), cite_command(ctx))
+        EvidenceRefusal::new(
+            format!("missing: the cited {cited} does not exist"),
+            cite_command(ctx),
+        )
     })?;
     let root = ctx.task_artifacts_dir.canonicalize().map_err(|_| {
         EvidenceRefusal::new(
-            format!("missing: the task artifacts dir {} does not exist", ctx.task_artifacts_dir.display()),
+            format!(
+                "missing: the task artifacts dir {} does not exist",
+                ctx.task_artifacts_dir.display()
+            ),
             cite_command(ctx),
         )
     })?;
@@ -493,16 +604,26 @@ fn resolve_inside_task_dir(ctx: &EvidenceContext<'_>, cited: &str) -> Result<Pat
     Ok(resolved)
 }
 
-fn resolve_bundle_file(bundle_dir: &Path, key: &str, relative: &str) -> Result<PathBuf, EvidenceRefusal> {
+fn resolve_bundle_file(
+    bundle_dir: &Path,
+    key: &str,
+    relative: &str,
+) -> Result<PathBuf, EvidenceRefusal> {
     let candidate = bundle_dir.join(relative);
     match candidate.canonicalize() {
         Ok(resolved) if resolved.starts_with(bundle_dir) => Ok(resolved),
         Ok(resolved) => Err(EvidenceRefusal::new(
-            format!("escaping: files.{key} {relative} resolves outside the bundle to {}", resolved.display()),
+            format!(
+                "escaping: files.{key} {relative} resolves outside the bundle to {}",
+                resolved.display()
+            ),
             format!("keep every listed file inside {}", bundle_dir.display()),
         )),
         Err(_) => Err(EvidenceRefusal::new(
-            format!("incomplete: files.{key} ({}) does not exist", candidate.display()),
+            format!(
+                "incomplete: files.{key} ({}) does not exist",
+                candidate.display()
+            ),
             producing_command(key, bundle_dir),
         )),
     }
@@ -519,8 +640,10 @@ pub struct ExpectSummary {
 /// A step fails when its `after` event carries an `error`; a top-level
 /// `error` event also counts as a failure.
 pub fn trace_expect_summary(trace_zip: &Path) -> Result<ExpectSummary, String> {
-    let file = std::fs::File::open(trace_zip).map_err(|error| format!("cannot be opened ({error})"))?;
-    let mut archive = zip::ZipArchive::new(file).map_err(|error| format!("is not a zip ({error})"))?;
+    let file =
+        std::fs::File::open(trace_zip).map_err(|error| format!("cannot be opened ({error})"))?;
+    let mut archive =
+        zip::ZipArchive::new(file).map_err(|error| format!("is not a zip ({error})"))?;
     let mut body = String::new();
     archive
         .by_name("test.trace")
@@ -537,12 +660,24 @@ fn expect_summary_from_events(body: &str) -> ExpectSummary {
         let Ok(event) = serde_json::from_str::<serde_json::Value>(line) else {
             continue;
         };
-        let kind = event.get("type").and_then(|value| value.as_str()).unwrap_or_default();
-        let call = event.get("callId").and_then(|value| value.as_str()).unwrap_or_default();
+        let kind = event
+            .get("type")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default();
+        let call = event
+            .get("callId")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default();
         match kind {
             "before" => {
-                let title = event.get("title").and_then(|value| value.as_str()).unwrap_or_default();
-                let method = event.get("method").and_then(|value| value.as_str()).unwrap_or_default();
+                let title = event
+                    .get("title")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_default();
+                let method = event
+                    .get("method")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_default();
                 if method == "expect" || title.starts_with("Expect \"") {
                     expects.insert(call.to_string());
                 }
@@ -569,26 +704,45 @@ pub fn validate_ledger(ctx: &EvidenceContext<'_>) -> Result<PathBuf, EvidenceRef
         "walk the demo_statement and write the evidence ledger to {} (cas-qa-craft references/evidence-ledger.md)",
         ledger.display()
     );
-    let body = std::fs::read_to_string(&ledger)
-        .map_err(|_| EvidenceRefusal::new(format!("missing: no ledger at {}", ledger.display()), command.clone()))?;
+    let body = std::fs::read_to_string(&ledger).map_err(|_| {
+        EvidenceRefusal::new(
+            format!("missing: no ledger at {}", ledger.display()),
+            command.clone(),
+        )
+    })?;
     if body.trim().is_empty() {
-        return Err(EvidenceRefusal::new(format!("empty: {} has no rows", ledger.display()), command));
+        return Err(EvidenceRefusal::new(
+            format!("empty: {} has no rows", ledger.display()),
+            command,
+        ));
     }
     if let Some(delivered) = committer_time(ctx.repo, ctx.delivered_head)
         && mtime_secs(&ledger).is_some_and(|mtime| mtime < delivered)
     {
         return Err(EvidenceRefusal::new(
-            format!("stale: {} predates the delivered commit {}", ledger.display(), short(ctx.delivered_head)),
+            format!(
+                "stale: {} predates the delivered commit {}",
+                ledger.display(),
+                short(ctx.delivered_head)
+            ),
             command,
         ));
     }
     let has_pass = body.lines().any(|line| {
-        let cells: Vec<&str> = line.trim().trim_matches('|').split('|').map(str::trim).collect();
+        let cells: Vec<&str> = line
+            .trim()
+            .trim_matches('|')
+            .split('|')
+            .map(str::trim)
+            .collect();
         line.trim_start().starts_with('|') && cells.get(4) == Some(&"PASS")
     });
     if !has_pass {
         return Err(EvidenceRefusal::new(
-            format!("unproven: {} has no row with verdict PASS", ledger.display()),
+            format!(
+                "unproven: {} has no row with verdict PASS",
+                ledger.display()
+            ),
             command,
         ));
     }
@@ -627,22 +781,35 @@ pub fn is_js_test_file(path: &str) -> bool {
     let scripted = [".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".mts", ".cts"]
         .iter()
         .any(|ext| file.ends_with(ext));
-    let in_dir = |dir: &str| lower.starts_with(&format!("{dir}/")) || lower.contains(&format!("/{dir}/"));
-    scripted && (file.contains(".spec.") || file.contains(".test.") || ["e2e", "tests", "test", "__tests__"].iter().any(|dir| in_dir(dir)))
+    let in_dir =
+        |dir: &str| lower.starts_with(&format!("{dir}/")) || lower.contains(&format!("/{dir}/"));
+    scripted
+        && (file.contains(".spec.")
+            || file.contains(".test.")
+            || ["e2e", "tests", "test", "__tests__"]
+                .iter()
+                .any(|dir| in_dir(dir)))
 }
 
 fn marker_in(line: &str) -> Option<&'static str> {
     SKIP_MARKERS.iter().copied().find(|marker| {
         line.match_indices(marker).any(|(index, _)| {
             // `xit(` / `it.skip(` must not match inside `exit(` / `unit.skip(`.
-            index == 0 || !line[..index].chars().next_back().is_some_and(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '$')
+            index == 0
+                || !line[..index]
+                    .chars()
+                    .next_back()
+                    .is_some_and(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '$')
         })
     })
 }
 
 fn allow_reason(line: &str) -> Option<String> {
     let index = line.find(ALLOW_SKIP)?;
-    let reason = line[index + ALLOW_SKIP.len()..].trim().trim_end_matches("*/").trim();
+    let reason = line[index + ALLOW_SKIP.len()..]
+        .trim()
+        .trim_end_matches("*/")
+        .trim();
     (!reason.is_empty()).then(|| reason.to_string())
 }
 
@@ -656,7 +823,10 @@ pub fn added_skip_markers(diff: &str) -> Vec<SkipMarker> {
     let mut previous: Option<String> = None;
     for raw in diff.lines() {
         if let Some(path) = raw.strip_prefix("+++ ") {
-            file = path.strip_prefix("b/").map(str::to_string).filter(|_| path != "/dev/null");
+            file = path
+                .strip_prefix("b/")
+                .map(str::to_string)
+                .filter(|_| path != "/dev/null");
             previous = None;
             continue;
         }
@@ -673,7 +843,9 @@ pub fn added_skip_markers(diff: &str) -> Vec<SkipMarker> {
             previous = None;
             continue;
         }
-        let Some(path) = file.as_deref() else { continue };
+        let Some(path) = file.as_deref() else {
+            continue;
+        };
         if let Some(added) = raw.strip_prefix('+') {
             if is_js_test_file(path)
                 && let Some(marker) = marker_in(added)
@@ -682,7 +854,8 @@ pub fn added_skip_markers(diff: &str) -> Vec<SkipMarker> {
                     file: path.to_string(),
                     line: new_line,
                     marker,
-                    allowed: allow_reason(added).or_else(|| previous.as_deref().and_then(allow_reason)),
+                    allowed: allow_reason(added)
+                        .or_else(|| previous.as_deref().and_then(allow_reason)),
                 });
             }
             previous = Some(added.to_string());
@@ -705,11 +878,26 @@ pub fn delivery_test_diff(repo: &Path, from: &str, to: &str, paths: &[String]) -
     if tests.is_empty() {
         return Some(String::new());
     }
-    let mut args: Vec<String> = vec!["diff".into(), "-U1".into(), "--no-color".into(), "--no-ext-diff".into(), from.into(), to.into(), "--".into()];
+    let mut args: Vec<String> = vec![
+        "diff".into(),
+        "-U1".into(),
+        "--no-color".into(),
+        "--no-ext-diff".into(),
+        from.into(),
+        to.into(),
+        "--".into(),
+    ];
     args.extend(tests.into_iter().cloned());
     let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    let output = Command::new("git").args(&refs).current_dir(repo).output().ok()?;
-    output.status.success().then(|| String::from_utf8_lossy(&output.stdout).into_owned())
+    let output = Command::new("git")
+        .args(&refs)
+        .current_dir(repo)
+        .output()
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 /// The commit range a delivery contributes: `merge-base(target, head)..head`
@@ -721,7 +909,13 @@ pub fn delivery_range(repo: &Path, head: &str, target: &str) -> Option<(String, 
     if merged {
         let merges = git(
             repo,
-            &["rev-list", "--ancestry-path", "--merges", "--reverse", &format!("{head}..{target}")],
+            &[
+                "rev-list",
+                "--ancestry-path",
+                "--merges",
+                "--reverse",
+                &format!("{head}..{target}"),
+            ],
         )?;
         let merge = merges.lines().next()?.trim().to_string();
         Some((format!("{merge}^1"), merge))
@@ -769,11 +963,21 @@ pub fn run_close_gate(
     skip_markers: &[SkipMarker],
 ) -> Result<GatePass, String> {
     let mut pass = GatePass::default();
-    let blocked: Vec<&SkipMarker> = skip_markers.iter().filter(|marker| marker.allowed.is_none()).collect();
+    let blocked: Vec<&SkipMarker> = skip_markers
+        .iter()
+        .filter(|marker| marker.allowed.is_none())
+        .collect();
     if !blocked.is_empty() {
         let list = blocked
             .iter()
-            .map(|marker| format!("{}:{} `{}`", marker.file, marker.line, marker.marker.trim_end_matches('(')))
+            .map(|marker| {
+                format!(
+                    "{}:{} `{}`",
+                    marker.file,
+                    marker.line,
+                    marker.marker.trim_end_matches('(')
+                )
+            })
             .collect::<Vec<_>>()
             .join(", ");
         return Err(format!(
@@ -807,7 +1011,8 @@ pub fn run_close_gate(
     match tier {
         EvidenceTier::None => {}
         EvidenceTier::Bundle => {
-            let receipt = validate_bundle(ctx).map_err(|refusal| reject(refusal, "QA evidence bundle"))?;
+            let receipt =
+                validate_bundle(ctx).map_err(|refusal| reject(refusal, "QA evidence bundle"))?;
             pass.notes.push(format!(
                 "QA evidence bundle accepted: {} (head {}, {} passing Expect step(s)).",
                 receipt.manifest.display(),
@@ -816,8 +1021,12 @@ pub fn run_close_gate(
             ));
         }
         EvidenceTier::Ledger => {
-            let ledger = validate_ledger(ctx).map_err(|refusal| reject(refusal, "QA evidence ledger"))?;
-            pass.notes.push(format!("QA evidence ledger accepted: {}.", ledger.display()));
+            let ledger =
+                validate_ledger(ctx).map_err(|refusal| reject(refusal, "QA evidence ledger"))?;
+            pass.notes.push(format!(
+                "QA evidence ledger accepted: {}.",
+                ledger.display()
+            ));
         }
     }
     Ok(pass)

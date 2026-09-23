@@ -63,6 +63,12 @@ Two distinct `close` fields — you supply them, no supervisor needed:
 The 6 checks below apply to every task type. These gates sit on top of them:
 
 - **Spike** (`task_type=spike`) — optional `search_manifest`: a JSON array of the search steps you ran, e.g. `[{"command": "rg -c foo src/", "hits": 3}]`. **Opt-in and warning-only** — it never blocks close. Entries with `hits: 0` (or a manifest that fails to parse) are appended to the task as a loud `ZERO_HIT_SEARCH_WARNING` note, because a search that matches nothing anywhere is more often a broken pattern than a clean corpus (cas-49f1). Supply it whenever your conclusion rests on "I searched and found nothing".
+- **User-facing delivery** (`qa.evidence_gate`, cas-0cd5). This covers a web surface in the diff, a catalog journey, or a `demo_statement`. Before the park, close refuses it until your `cas-qa-craft` evidence validates for the delivered commit:
+  - **Web surface:** the evidence bundle (`<artifacts>/<task-id>/qa/bundle.json`, cited with `note_type=platform_proof notes="qa-bundle: <abs path>/bundle.json"`).
+  - **Demo-only non-web change:** a fresh `LEDGER.md` with a PASS row.
+  - **Staleness:** a commit after the bundle makes it stale; re-run it.
+  - **Docs, test and CI-only diffs** are never gated.
+  - **Skip markers, on every delivery:** added `test.fixme`/`.skip`/`.only` markers are refused unless the marker or the line above it carries `cas-allow-skip: <reason>`.
 - **Epic** — closing an epic additionally walks its children and blocks on any child whose recorded work is not merged into the parent branch, not just on child status.
 - **Risk declaration** — read `Risk:` and `Proof Targets:` from `task show` before
   the final proof. For `risk=blast-radius`, `proof_targets` must cover every

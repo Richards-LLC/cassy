@@ -111,11 +111,19 @@ fn fixture(delivered: &[(&str, &str)], demo: &str) -> Fx {
 
 impl Fx {
     fn status(&self) -> TaskStatus {
-        open_task_store(&self.repo.join(".cas")).unwrap().get(TASK).unwrap().status
+        open_task_store(&self.repo.join(".cas"))
+            .unwrap()
+            .get(TASK)
+            .unwrap()
+            .status
     }
 
     fn notes(&self) -> String {
-        open_task_store(&self.repo.join(".cas")).unwrap().get(TASK).unwrap().notes
+        open_task_store(&self.repo.join(".cas"))
+            .unwrap()
+            .get(TASK)
+            .unwrap()
+            .notes
     }
 
     /// A complete contract-v1 bundle for `head`, cited by a platform_proof note.
@@ -137,7 +145,10 @@ impl Fx {
         .unwrap();
         zip.finish().unwrap();
         for (name, body) in [
-            ("trace-actions.txt", "  1. 0:00.1  Expect \"toHaveText\"  2ms\n"),
+            (
+                "trace-actions.txt",
+                "  1. 0:00.1  Expect \"toHaveText\"  2ms\n",
+            ),
             ("receipt.webm", "webm"),
             ("final.aria.yml", "- heading"),
             ("final.aria.json", "{}"),
@@ -171,7 +182,11 @@ impl Fx {
         std::fs::write(&path, manifest.to_string()).unwrap();
         let tasks = open_task_store(&self.repo.join(".cas")).unwrap();
         let mut task = tasks.get(TASK).unwrap();
-        task.notes = format!("{}\n[now] 🧪 PLATFORM_PROOF qa-bundle: {}", task.notes, path.display());
+        task.notes = format!(
+            "{}\n[now] 🧪 PLATFORM_PROOF qa-bundle: {}",
+            task.notes,
+            path.display()
+        );
         tasks.update(&task).unwrap();
         path
     }
@@ -179,23 +194,42 @@ impl Fx {
 
 #[tokio::test]
 async fn user_facing_close_without_a_bundle_is_rejected_with_the_next_command() {
-    let fx = fixture(&[("web/composer.css", ".composer{gap:8px}\n")], "Open the composer; spacing is even");
+    let fx = fixture(
+        &[("web/composer.css", ".composer{gap:8px}\n")],
+        "Open the composer; spacing is even",
+    );
     let _env = env_test_lock();
 
     let refused = close_text(&fx.core, TASK).await;
-    assert!(refused.starts_with("TASK CLOSE REJECTED: cas-ev01 is user-facing ("), "{refused}");
+    assert!(
+        refused.starts_with("TASK CLOSE REJECTED: cas-ev01 is user-facing ("),
+        "{refused}"
+    );
     assert!(refused.contains("path:web/composer.css"), "{refused}");
     assert!(refused.contains("demo_statement"), "{refused}");
-    assert!(refused.contains("QA evidence bundle is not cited"), "{refused}");
+    assert!(
+        refused.contains("QA evidence bundle is not cited"),
+        "{refused}"
+    );
     assert!(refused.contains("note_type=platform_proof"), "{refused}");
     assert!(refused.contains("qa-bundle:"), "{refused}");
-    assert!(!refused.contains("MERGE REQUIRED"), "must refuse before the park: {refused}");
-    assert_eq!(fx.status(), TaskStatus::InProgress, "an unevidenced delivery must not park");
+    assert!(
+        !refused.contains("MERGE REQUIRED"),
+        "must refuse before the park: {refused}"
+    );
+    assert_eq!(
+        fx.status(),
+        TaskStatus::InProgress,
+        "an unevidenced delivery must not park"
+    );
 }
 
 #[tokio::test]
 async fn valid_bundle_lets_the_delivery_park_and_a_later_commit_makes_it_stale() {
-    let fx = fixture(&[("web/composer.css", ".composer{gap:8px}\n")], "Open the composer; spacing is even");
+    let fx = fixture(
+        &[("web/composer.css", ".composer{gap:8px}\n")],
+        "Open the composer; spacing is even",
+    );
     let _env = env_test_lock();
     let head = git(&fx.repo, &["rev-parse", "factory/test-agent"]);
     let bundle = fx.write_bundle(&head);
@@ -204,7 +238,10 @@ async fn valid_bundle_lets_the_delivery_park_and_a_later_commit_makes_it_stale()
     assert!(parked.contains("MERGE REQUIRED"), "{parked}");
     assert_eq!(fx.status(), TaskStatus::AwaitingMerge);
     assert!(
-        fx.notes().contains(&format!("QA evidence bundle accepted: {}", bundle.canonicalize().unwrap().display())),
+        fx.notes().contains(&format!(
+            "QA evidence bundle accepted: {}",
+            bundle.canonicalize().unwrap().display()
+        )),
         "{}",
         fx.notes()
     );
@@ -213,9 +250,15 @@ async fn valid_bundle_lets_the_delivery_park_and_a_later_commit_makes_it_stale()
     // longer describes the delivery.
     let later = commit_file(&fx.repo, "web/composer.css", ".composer{gap:12px}\n");
     let stale = close_text(&fx.core, TASK).await;
-    assert!(stale.starts_with("TASK CLOSE REJECTED: cas-ev01 is user-facing"), "{stale}");
+    assert!(
+        stale.starts_with("TASK CLOSE REJECTED: cas-ev01 is user-facing"),
+        "{stale}"
+    );
     assert!(stale.contains("QA evidence bundle is stale"), "{stale}");
-    assert!(stale.contains(&later[..8]), "the refusal names the new head: {stale}");
+    assert!(
+        stale.contains(&later[..8]),
+        "the refusal names the new head: {stale}"
+    );
 }
 
 #[tokio::test]
@@ -230,16 +273,29 @@ async fn docs_only_delivery_with_a_demo_statement_is_not_gated() {
 
 #[tokio::test]
 async fn demo_only_non_web_delivery_needs_the_evidence_ledger() {
-    let fx = fixture(&[("cas-cli/src/report.rs", "pub fn report() {}\n")], "Run cas report; it prints totals");
+    let fx = fixture(
+        &[("cas-cli/src/report.rs", "pub fn report() {}\n")],
+        "Run cas report; it prints totals",
+    );
     let _env = env_test_lock();
 
     let refused = close_text(&fx.core, TASK).await;
-    assert!(refused.contains("is user-facing (demo_statement)"), "{refused}");
-    assert!(refused.contains("QA evidence ledger is missing"), "{refused}");
+    assert!(
+        refused.contains("is user-facing (demo_statement)"),
+        "{refused}"
+    );
+    assert!(
+        refused.contains("QA evidence ledger is missing"),
+        "{refused}"
+    );
 
     let ledger = fx.artifacts.join(TASK).join("LEDGER.md");
     std::fs::create_dir_all(ledger.parent().unwrap()).unwrap();
-    std::fs::write(&ledger, "| M01 | cas report | totals | totals | PASS | real-build | qa/M01.txt | - |\n").unwrap();
+    std::fs::write(
+        &ledger,
+        "| M01 | cas report | totals | totals | PASS | real-build | qa/M01.txt | - |\n",
+    )
+    .unwrap();
     let parked = close_text(&fx.core, TASK).await;
     assert!(parked.contains("MERGE REQUIRED"), "{parked}");
 }
@@ -256,8 +312,14 @@ async fn healer_style_fixme_is_refused_even_on_a_test_only_delivery() {
     let _env = env_test_lock();
 
     let refused = close_text(&fx.core, TASK).await;
-    assert!(refused.contains("adds test skip/focus markers without a stated reason"), "{refused}");
-    assert!(refused.contains("hub-web/e2e/generated/fleet.spec.ts:3 `test.fixme`"), "{refused}");
+    assert!(
+        refused.contains("adds test skip/focus markers without a stated reason"),
+        "{refused}"
+    );
+    assert!(
+        refused.contains("hub-web/e2e/generated/fleet.spec.ts:3 `test.fixme`"),
+        "{refused}"
+    );
     assert!(refused.contains("cas-allow-skip:"), "{refused}");
     assert_eq!(fx.status(), TaskStatus::InProgress);
 
@@ -278,11 +340,18 @@ async fn healer_style_fixme_is_refused_even_on_a_test_only_delivery() {
 
 #[tokio::test]
 async fn evidence_gate_can_be_disabled_per_project() {
-    let fx = fixture(&[("web/composer.css", ".composer{gap:8px}\n")], "Open the composer");
+    let fx = fixture(
+        &[("web/composer.css", ".composer{gap:8px}\n")],
+        "Open the composer",
+    );
     let _env = env_test_lock();
     let config = fx.repo.join(".cas").join("config.toml");
     let body = std::fs::read_to_string(&config).unwrap();
-    std::fs::write(&config, body.replace("[qa]\n", "[qa]\nevidence_gate = false\n")).unwrap();
+    std::fs::write(
+        &config,
+        body.replace("[qa]\n", "[qa]\nevidence_gate = false\n"),
+    )
+    .unwrap();
 
     let parked = close_text(&fx.core, TASK).await;
     assert!(parked.contains("MERGE REQUIRED"), "{parked}");

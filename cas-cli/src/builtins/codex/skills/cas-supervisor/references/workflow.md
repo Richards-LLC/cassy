@@ -194,6 +194,14 @@ end-of-lane, once the worker is done with that worktree.
 **Worker hits MERGE REQUIRED / `awaiting_merge` (cas-c145):**
 1. This is a **push signal**, not optional chat. Drain the merge queue before free-form user replies.
 2. Confirm: `mcp__cs__coordination action=epic_status id=<focused-epic>` and/or `mcp__cs__task action=list status=awaiting_merge`.
+   **Implementer evidence gates the park (cas-0cd5).** A user-facing delivery parks
+   only after its own QA evidence bundle validates for the delivered commit. Before
+   that, the worker's close returns `TASK CLOSE REJECTED: <task> is user-facing (…)` with
+   the command that produces the missing piece. Send the worker that command.
+   Waive only with a real reason, by running close yourself with
+   `supervisor_override=true reason="…"`; the waiver is logged as a decision note.
+   Added `test.fixme`/`.skip`/`.only` markers are refused on every delivery unless
+   annotated with `cas-allow-skip: <reason>`.
    **User-facing delivery? Independent QA first (cas-619f).** When the park reports
    `INDEPENDENT QA DISPATCHED`, or a `<cas-qa-dispatch>` wakes you, spawn a reviewer who is
    not the implementer, on the taste recipe:

@@ -21,7 +21,11 @@ fn git_ok(repo: &Path, args: &[&str]) -> String {
         .env("GIT_COMMITTER_EMAIL", "t@example.com")
         .output()
         .expect("git runs");
-    assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     String::from_utf8_lossy(&output.stdout).trim().to_string()
 }
 
@@ -48,7 +52,8 @@ fn commit(repo: &Path, name: &str, secs_ago: i64) -> String {
 fn trace_zip(path: &Path, events: &[&str]) {
     let file = std::fs::File::create(path).unwrap();
     let mut writer = zip::ZipWriter::new(file);
-    let options = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    let options =
+        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
     writer.start_file("test.trace", options).unwrap();
     writer.write_all(events.join("\n").as_bytes()).unwrap();
     writer.finish().unwrap();
@@ -70,7 +75,12 @@ impl Fixture {
         let head = commit(&repo, "app.ts", 120);
         let task_dir = tmp.path().join("artifacts").join(TASK);
         std::fs::create_dir_all(&task_dir).unwrap();
-        Self { _tmp: tmp, repo, task_dir, head }
+        Self {
+            _tmp: tmp,
+            repo,
+            task_dir,
+            head,
+        }
     }
 
     fn bundle_dir(&self) -> PathBuf {
@@ -83,7 +93,10 @@ impl Fixture {
         std::fs::create_dir_all(dir.join("visual-qa")).unwrap();
         trace_zip(&dir.join("trace.zip"), &PASSING);
         let files = [
-            ("trace-actions.txt", "   1. 0:00.1  Expect \"toHaveText\"   2ms\n"),
+            (
+                "trace-actions.txt",
+                "   1. 0:00.1  Expect \"toHaveText\"   2ms\n",
+            ),
             ("receipt.webm", "webm"),
             ("final.aria.yml", "- heading \"x\""),
             ("final.aria.json", "{}"),
@@ -95,7 +108,10 @@ impl Fixture {
             ("visual-qa/visual-qa.md", "# Visual QA — PASS\n"),
             ("visual-qa/visual-qa.json", "{}"),
             ("visual-qa.stdout", "rendered 4\nPASS\n"),
-            ("critique.md", "| Dimension | Score |\nScored by t on 2026-09-23\n"),
+            (
+                "critique.md",
+                "| Dimension | Score |\nScored by t on 2026-09-23\n",
+            ),
             ("a11y-forced-colors.png", "png"),
             ("a11y-reduced-motion.png", "png"),
             ("a11y-contrast-more.png", "png"),
@@ -181,7 +197,10 @@ fn missing_citation_names_the_note_command() {
     fx.write_bundle(|_| {});
     let refusal = fx.validate("no citation here").unwrap_err();
     assert!(refusal.problem.contains("not cited"), "{refusal:?}");
-    assert!(refusal.command.contains("note_type=platform_proof"), "{refusal:?}");
+    assert!(
+        refusal.command.contains("note_type=platform_proof"),
+        "{refusal:?}"
+    );
     assert!(refusal.command.contains("qa-bundle:"), "{refusal:?}");
 }
 
@@ -198,18 +217,30 @@ fn each_missing_or_empty_required_file_is_named_with_its_command() {
     fx.write_bundle(|_| {});
     std::fs::remove_file(fx.bundle_dir().join("trace-actions.txt")).unwrap();
     let refusal = fx.validate(&fx.notes()).unwrap_err();
-    assert!(refusal.problem.contains("files.trace_actions"), "{refusal:?}");
-    assert!(refusal.command.contains("npx playwright trace actions"), "{refusal:?}");
+    assert!(
+        refusal.problem.contains("files.trace_actions"),
+        "{refusal:?}"
+    );
+    assert!(
+        refusal.command.contains("npx playwright trace actions"),
+        "{refusal:?}"
+    );
 
     let fx = Fixture::new();
     fx.write_bundle(|_| {});
     std::fs::write(fx.bundle_dir().join("receipt.webm"), "").unwrap();
     let refusal = fx.validate(&fx.notes()).unwrap_err();
-    assert!(refusal.problem.contains("files.receipt") && refusal.problem.contains("empty"), "{refusal:?}");
+    assert!(
+        refusal.problem.contains("files.receipt") && refusal.problem.contains("empty"),
+        "{refusal:?}"
+    );
 
     let fx = Fixture::new();
     fx.write_bundle(|manifest| {
-        manifest["files"].as_object_mut().unwrap().remove("critique");
+        manifest["files"]
+            .as_object_mut()
+            .unwrap()
+            .remove("critique");
     });
     let refusal = fx.validate(&fx.notes()).unwrap_err();
     assert!(refusal.problem.contains("files.critique"), "{refusal:?}");
@@ -219,18 +250,25 @@ fn each_missing_or_empty_required_file_is_named_with_its_command() {
 fn polish_renders_must_cover_light_dark_desktop_phone() {
     let fx = Fixture::new();
     fx.write_bundle(|manifest| {
-        manifest["files"]["polish_screenshots"] = serde_json::json!(["visual-qa/app-light-desktop.png"]);
+        manifest["files"]["polish_screenshots"] =
+            serde_json::json!(["visual-qa/app-light-desktop.png"]);
     });
     let refusal = fx.validate(&fx.notes()).unwrap_err();
     assert!(refusal.problem.contains("-light-phone.png"), "{refusal:?}");
-    assert!(refusal.command.contains("visual-qa.mjs --strict"), "{refusal:?}");
+    assert!(
+        refusal.command.contains("visual-qa.mjs --strict"),
+        "{refusal:?}"
+    );
 }
 
 #[test]
 fn stale_head_sha_is_rejected_after_a_later_commit() {
     let fx = Fixture::new();
     fx.write_bundle(|_| {});
-    let later = Fixture { head: commit(&fx.repo, "fix.ts", 60), ..fx };
+    let later = Fixture {
+        head: commit(&fx.repo, "fix.ts", 60),
+        ..fx
+    };
     let refusal = later.validate(&later.notes()).unwrap_err();
     assert!(refusal.problem.starts_with("stale"), "{refusal:?}");
     assert!(refusal.command.contains(&later.head[..8]), "{refusal:?}");
@@ -242,7 +280,10 @@ fn stale_file_mtime_is_rejected() {
     fx.write_bundle(|_| {});
     set_mtime_secs_ago(&fx.bundle_dir().join("M01.png"), 3600);
     let refusal = fx.validate(&fx.notes()).unwrap_err();
-    assert!(refusal.problem.contains("stale") && refusal.problem.contains("cells[0]"), "{refusal:?}");
+    assert!(
+        refusal.problem.contains("stale") && refusal.problem.contains("cells[0]"),
+        "{refusal:?}"
+    );
 }
 
 #[test]
@@ -260,7 +301,8 @@ fn descendant_head_sha_covers_the_delivery() {
     let fx = Fixture::new();
     let descendant = commit(&fx.repo, "merge-tip.ts", 30);
     fx.write_bundle(|manifest| manifest["head_sha"] = serde_json::json!(descendant));
-    fx.validate(&fx.notes()).expect("descendant build covers the delivery");
+    fx.validate(&fx.notes())
+        .expect("descendant build covers the delivery");
 }
 
 #[test]
@@ -310,7 +352,9 @@ fn polish_proof_and_critique_floor_are_enforced() {
 #[test]
 fn visual_change_requires_all_three_a11y_modes() {
     let fx = Fixture::new();
-    fx.write_bundle(|manifest| manifest["files"]["a11y"] = serde_json::json!(["a11y-forced-colors.png"]));
+    fx.write_bundle(|manifest| {
+        manifest["files"]["a11y"] = serde_json::json!(["a11y-forced-colors.png"])
+    });
     let refusal = fx.validate(&fx.notes()).unwrap_err();
     assert!(refusal.problem.contains("reduced-motion"), "{refusal:?}");
 
@@ -319,7 +363,8 @@ fn visual_change_requires_all_three_a11y_modes() {
         manifest["visual_change"] = serde_json::json!(false);
         manifest["files"]["a11y"] = serde_json::json!([]);
     });
-    fx.validate(&fx.notes()).expect("non-visual change needs no a11y captures");
+    fx.validate(&fx.notes())
+        .expect("non-visual change needs no a11y captures");
 }
 
 #[test]
@@ -328,7 +373,11 @@ fn citations_outside_the_task_or_from_an_independent_round_are_rejected() {
     fx.write_bundle(|_| {});
     let outside = fx.task_dir.parent().unwrap().join("other");
     std::fs::create_dir_all(&outside).unwrap();
-    std::fs::copy(fx.bundle_dir().join("bundle.json"), outside.join("bundle.json")).unwrap();
+    std::fs::copy(
+        fx.bundle_dir().join("bundle.json"),
+        outside.join("bundle.json"),
+    )
+    .unwrap();
     let refusal = fx
         .validate(&format!("qa-bundle: {}/bundle.json", outside.display()))
         .unwrap_err();
@@ -346,7 +395,11 @@ fn citations_outside_the_task_or_from_an_independent_round_are_rejected() {
 
     let round = fx.task_dir.join("independent-qa/round-1");
     std::fs::create_dir_all(&round).unwrap();
-    std::fs::copy(fx.bundle_dir().join("bundle.json"), round.join("bundle.json")).unwrap();
+    std::fs::copy(
+        fx.bundle_dir().join("bundle.json"),
+        round.join("bundle.json"),
+    )
+    .unwrap();
     let refusal = fx
         .validate(&format!("qa-bundle: {}/bundle.json", round.display()))
         .unwrap_err();
@@ -359,7 +412,9 @@ fn citations_outside_the_task_or_from_an_independent_round_are_rejected() {
 #[test]
 fn listed_files_may_not_escape_the_bundle() {
     let fx = Fixture::new();
-    fx.write_bundle(|manifest| manifest["files"]["receipt"] = serde_json::json!("../../../repo/app.ts"));
+    fx.write_bundle(|manifest| {
+        manifest["files"]["receipt"] = serde_json::json!("../../../repo/app.ts")
+    });
     let refusal = fx.validate(&fx.notes()).unwrap_err();
     assert!(refusal.problem.contains("escaping"), "{refusal:?}");
 }
@@ -386,20 +441,52 @@ fn ledger_tier_requires_a_fresh_pass_row() {
         delivered_head: &fx.head,
         notes: "",
     };
-    assert!(validate_ledger(&ctx).unwrap_err().problem.contains("missing"));
+    assert!(
+        validate_ledger(&ctx)
+            .unwrap_err()
+            .problem
+            .contains("missing")
+    );
     let ledger = fx.task_dir.join("LEDGER.md");
     std::fs::write(&ledger, "| id | cell | expected | observed | verdict | label | evidence | defect |\n| M01 | cli | ok | ok | NOT EXERCISED | fixture | - | - |\n").unwrap();
-    assert!(validate_ledger(&ctx).unwrap_err().problem.contains("no row with verdict PASS"));
-    std::fs::write(&ledger, "| M01 | cli | ok | ok | PASS | real-build | qa/M01.txt | - |\n").unwrap();
+    assert!(
+        validate_ledger(&ctx)
+            .unwrap_err()
+            .problem
+            .contains("no row with verdict PASS")
+    );
+    std::fs::write(
+        &ledger,
+        "| M01 | cli | ok | ok | PASS | real-build | qa/M01.txt | - |\n",
+    )
+    .unwrap();
     validate_ledger(&ctx).expect("fresh PASS row");
     set_mtime_secs_ago(&ledger, 3600);
-    assert!(validate_ledger(&ctx).unwrap_err().problem.starts_with("stale"));
+    assert!(
+        validate_ledger(&ctx)
+            .unwrap_err()
+            .problem
+            .starts_with("stale")
+    );
 }
 
 #[test]
 fn trace_summary_counts_top_level_errors_as_failures() {
-    let summary = expect_summary_from_events(&[PASSING[0], PASSING[1], r#"{"type":"error","message":"boom"}"#].join("\n"));
-    assert_eq!(summary, ExpectSummary { passed: 1, failed: 1 });
+    let summary = expect_summary_from_events(
+        &[
+            PASSING[0],
+            PASSING[1],
+            r#"{"type":"error","message":"boom"}"#,
+        ]
+        .join("\n"),
+    );
+    assert_eq!(
+        summary,
+        ExpectSummary {
+            passed: 1,
+            failed: 1
+        }
+    );
 }
 
 const HEALER_DIFF: &str = r#"diff --git a/hub-web/e2e/generated/fleet.spec.ts b/hub-web/e2e/generated/fleet.spec.ts
@@ -439,9 +526,15 @@ fn healer_fixme_is_found_and_allowed_skips_carry_their_reason() {
     );
     assert_eq!(markers[1].marker, "test.skip(");
     assert_eq!(markers[1].line, 2);
-    assert_eq!(markers[1].allowed.as_deref(), Some("WebKit lacks the clipboard permission this test needs"));
+    assert_eq!(
+        markers[1].allowed.as_deref(),
+        Some("WebKit lacks the clipboard permission this test needs")
+    );
     assert_eq!(markers[2].marker, "test.only(");
-    assert_eq!(markers[2].allowed, None, "the allow reason covers only the next line");
+    assert_eq!(
+        markers[2].allowed, None,
+        "the allow reason covers only the next line"
+    );
 }
 
 #[test]
@@ -449,7 +542,10 @@ fn skip_marker_matching_respects_word_boundaries_and_file_kinds() {
     assert_eq!(marker_in("process.exit(1)"), None);
     assert_eq!(marker_in("unit.skip(x)"), None);
     assert_eq!(marker_in("  xit('pending', () => {})"), Some("xit("));
-    assert_eq!(marker_in("test.describe.skip('group')"), Some("test.describe.skip("));
+    assert_eq!(
+        marker_in("test.describe.skip('group')"),
+        Some("test.describe.skip(")
+    );
     assert!(is_js_test_file("hub-web/e2e/a.ts"));
     assert!(is_js_test_file("src/button.test.tsx"));
     assert!(!is_js_test_file("hub-web/src/main.ts"));
@@ -464,13 +560,34 @@ fn delivery_test_diff_reads_only_js_test_files() {
     std::fs::write(fx.repo.join("e2e/a.spec.ts"), "test.fixme(true, 'x');\n").unwrap();
     std::fs::write(fx.repo.join("notes.md"), "test.skip(\n").unwrap();
     git_ok(&fx.repo, &["add", "."]);
-    git_ok(&fx.repo, &["-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "-m", "heal"]);
+    git_ok(
+        &fx.repo,
+        &[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@example.com",
+            "commit",
+            "-q",
+            "-m",
+            "heal",
+        ],
+    );
     let head = git_ok(&fx.repo, &["rev-parse", "HEAD"]);
-    let diff = delivery_test_diff(&fx.repo, &base, &head, &["e2e/a.spec.ts".into(), "notes.md".into()]).unwrap();
+    let diff = delivery_test_diff(
+        &fx.repo,
+        &base,
+        &head,
+        &["e2e/a.spec.ts".into(), "notes.md".into()],
+    )
+    .unwrap();
     let markers = added_skip_markers(&diff);
     assert_eq!(markers.len(), 1, "{diff}");
     assert_eq!(markers[0].file, "e2e/a.spec.ts");
-    assert_eq!(delivery_test_diff(&fx.repo, &base, &head, &["notes.md".into()]).as_deref(), Some(""));
+    assert_eq!(
+        delivery_test_diff(&fx.repo, &base, &head, &["notes.md".into()]).as_deref(),
+        Some("")
+    );
 }
 
 #[test]
@@ -487,16 +604,47 @@ fn close_gate_rejects_unexplained_markers_before_evidence() {
     };
     let markers = added_skip_markers(HEALER_DIFF);
     let error = run_close_gate(&ctx, EvidenceTier::None, &[], &markers).unwrap_err();
-    assert!(error.starts_with("TASK CLOSE REJECTED: cas-test adds test skip/focus markers"), "{error}");
-    assert!(error.contains("hub-web/e2e/generated/fleet.spec.ts:12 `test.fixme`"), "{error}");
-    assert!(error.contains("hub-web/e2e/webkit.spec.ts:3 `test.only`"), "{error}");
-    assert!(!error.contains("webkit.spec.ts:2"), "allowed skip must not be listed: {error}");
+    assert!(
+        error.starts_with("TASK CLOSE REJECTED: cas-test adds test skip/focus markers"),
+        "{error}"
+    );
+    assert!(
+        error.contains("hub-web/e2e/generated/fleet.spec.ts:12 `test.fixme`"),
+        "{error}"
+    );
+    assert!(
+        error.contains("hub-web/e2e/webkit.spec.ts:3 `test.only`"),
+        "{error}"
+    );
+    assert!(
+        !error.contains("webkit.spec.ts:2"),
+        "allowed skip must not be listed: {error}"
+    );
     assert!(error.contains(ALLOW_SKIP), "{error}");
 
-    let allowed_only: Vec<SkipMarker> = markers.into_iter().filter(|marker| marker.allowed.is_some()).collect();
-    let pass = run_close_gate(&ctx, EvidenceTier::Bundle, &["demo_statement".into()], &allowed_only).unwrap();
-    assert!(pass.notes.iter().any(|note| note.contains("Allowed skip marker hub-web/e2e/webkit.spec.ts:2")), "{pass:?}");
-    assert!(pass.notes.iter().any(|note| note.starts_with("QA evidence bundle accepted")), "{pass:?}");
+    let allowed_only: Vec<SkipMarker> = markers
+        .into_iter()
+        .filter(|marker| marker.allowed.is_some())
+        .collect();
+    let pass = run_close_gate(
+        &ctx,
+        EvidenceTier::Bundle,
+        &["demo_statement".into()],
+        &allowed_only,
+    )
+    .unwrap();
+    assert!(
+        pass.notes
+            .iter()
+            .any(|note| note.contains("Allowed skip marker hub-web/e2e/webkit.spec.ts:2")),
+        "{pass:?}"
+    );
+    assert!(
+        pass.notes
+            .iter()
+            .any(|note| note.starts_with("QA evidence bundle accepted")),
+        "{pass:?}"
+    );
 }
 
 #[test]
@@ -509,17 +657,28 @@ fn close_gate_message_names_reasons_problem_and_next_command() {
         delivered_head: &fx.head,
         notes: "",
     };
-    let error = run_close_gate(&ctx, EvidenceTier::Bundle, &["journeys:J03".into(), "demo_statement".into()], &[])
-        .unwrap_err();
+    let error = run_close_gate(
+        &ctx,
+        EvidenceTier::Bundle,
+        &["journeys:J03".into(), "demo_statement".into()],
+        &[],
+    )
+    .unwrap_err();
     assert!(
         error.starts_with("TASK CLOSE REJECTED: cas-test is user-facing (journeys:J03; demo_statement) and its QA evidence bundle is not cited"),
         "{error}"
     );
     assert!(error.contains("Next: produce the bundle under"), "{error}");
     assert!(error.contains(CONTRACT_REFERENCE), "{error}");
-    let error = run_close_gate(&ctx, EvidenceTier::Ledger, &["demo_statement".into()], &[]).unwrap_err();
+    let error =
+        run_close_gate(&ctx, EvidenceTier::Ledger, &["demo_statement".into()], &[]).unwrap_err();
     assert!(error.contains("QA evidence ledger is missing"), "{error}");
-    assert!(run_close_gate(&ctx, EvidenceTier::None, &[], &[]).unwrap().notes.is_empty());
+    assert!(
+        run_close_gate(&ctx, EvidenceTier::None, &[], &[])
+            .unwrap()
+            .notes
+            .is_empty()
+    );
 }
 
 #[test]
@@ -531,11 +690,31 @@ fn delivery_range_before_and_after_merge() {
     let tip = commit(&fx.repo, "ui.tsx", 30);
     let (from, to) = delivery_range(&fx.repo, &tip, "main").unwrap();
     assert_eq!((from.as_str(), to.as_str()), (base.as_str(), tip.as_str()));
-    assert_eq!(range_paths(&fx.repo, &from, &to).unwrap(), vec!["ui.tsx".to_string()]);
+    assert_eq!(
+        range_paths(&fx.repo, &from, &to).unwrap(),
+        vec!["ui.tsx".to_string()]
+    );
     git_ok(&fx.repo, &["checkout", "-q", "main"]);
     commit(&fx.repo, "other.rs", 20);
-    git_ok(&fx.repo, &["-c", "user.name=t", "-c", "user.email=t@example.com", "merge", "-q", "--no-ff", "-m", "merge", "factory/w"]);
+    git_ok(
+        &fx.repo,
+        &[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@example.com",
+            "merge",
+            "-q",
+            "--no-ff",
+            "-m",
+            "merge",
+            "factory/w",
+        ],
+    );
     let (from, to) = delivery_range(&fx.repo, &tip, "main").unwrap();
     assert!(from.ends_with("^1"), "{from}");
-    assert_eq!(range_paths(&fx.repo, &from, &to).unwrap(), vec!["ui.tsx".to_string()]);
+    assert_eq!(
+        range_paths(&fx.repo, &from, &to).unwrap(),
+        vec!["ui.tsx".to_string()]
+    );
 }

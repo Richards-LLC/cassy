@@ -16,8 +16,8 @@ use std::process::Command;
 
 use crate::mcp::tools::core::imports::*;
 use crate::qa_evidence::{
-    EvidenceContext, EvidenceTier, SkipMarker, added_skip_markers, delivery_range, delivery_test_diff,
-    range_paths, run_close_gate,
+    EvidenceContext, EvidenceTier, SkipMarker, added_skip_markers, delivery_range,
+    delivery_test_diff, range_paths, run_close_gate,
 };
 use crate::qa_pass::{catalog_journeys_for, user_facing_reasons};
 
@@ -135,7 +135,13 @@ mod tests {
             evidence_tier(&["path:web/a.css (**/*.css)".into(), "demo_statement".into()]),
             EvidenceTier::Bundle
         );
-        assert_eq!(evidence_tier(&["journeys:J03".into()]), EvidenceTier::Bundle);
-        assert_eq!(evidence_tier(&["demo_statement".into()]), EvidenceTier::Ledger);
+        assert_eq!(
+            evidence_tier(&["journeys:J03".into()]),
+            EvidenceTier::Bundle
+        );
+        assert_eq!(
+            evidence_tier(&["demo_statement".into()]),
+            EvidenceTier::Ledger
+        );
     }
 }

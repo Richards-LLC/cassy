@@ -46,6 +46,19 @@ instead of the procedure below.
    ledger path, build revision, label split, and verdict counts to a task note
    and the `task action=close` reason. Stop registered servers before close.
 
+## Close gate
+
+Close enforces this evidence before a user-facing delivery can park or close
+(`qa.evidence_gate`, cas-0cd5). A web-surface delivery needs the evidence bundle
+(`references/evidence-bundle.md`): `<artifacts>/<task-id>/qa/bundle.json` for
+the delivered commit, cited with `task action=notes note_type=platform_proof
+notes="qa-bundle: <abs path>/bundle.json"`. It must be newer than your last
+commit, record at least one passing `Expect`, and pass visual QA and the
+critique floor. A demo-only change with no web surface needs a fresh `LEDGER.md`
+with a PASS row. Any delivery that adds `test.fixme`, `.skip` or `.only` is
+refused unless the marker or the line above it carries `cas-allow-skip: <reason>`.
+Rejections name the exact command that produces what is missing.
+
 ## Boundaries
 
 Keep this skill focused on user-flow evidence. The worked matrix is in

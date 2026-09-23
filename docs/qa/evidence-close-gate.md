@@ -79,7 +79,9 @@ or the commit receipt for a standalone task.
 ## 2. Bundle validation
 
 The gate finds the citation first. The newest task note containing
-`qa-bundle: <path>` gives the path. That path must canonicalise inside
+`qa-bundle: <path>` gives the path, but citations under `independent-qa/` are
+skipped. cas-619f cites each reviewer round on the same delivery task, and a
+later round must never shadow the implementer's bundle. That path must canonicalise inside
 `<artifacts_root>/<task-id>/`; a symlink escape fails, using the
 `artifacts::paths` resolution. It must not be under `independent-qa/`,
 because a reviewer's bundle is not the implementer's evidence. The check
@@ -226,14 +228,19 @@ healer-only delivery is test-only, so eligibility alone would never see it.
 - **cas-qa-craft `SKILL.md`** (3 mirrors): a short "Close gate" pointer. The
   body lives in the cas-c3b8 reference `references/evidence-bundle.md`, so
   the 120-line cap holds.
-- **cas-worker:** one line saying user-facing closes need the `qa-bundle:`
-  note, and new skip markers need `cas-allow-skip:`.
+- **cas-worker:** a "User-facing delivery" entry in
+  `references/close-gate.md`. `cas-worker.md` sits at its 8,000-byte
+  session-start budget, so the guidance lives in the reference.
 - **cas-supervisor:** how to read the rejection and when an override is
   legitimate.
 
 ## Open questions for the supervisor
 
+The implementation ships the proposed defaults; each can be reversed with
+a one-line change.
+
 1. Is the ledger tier (demo_statement with no web surface) acceptable, or
-   should demo-only CLI tasks be ungated?
+   should demo-only CLI tasks be ungated? `evidence_tier` currently maps
+   them to Ledger.
 2. Should the skip-marker check apply to every delivery (as proposed), or
-   only to user-facing ones?
+   only to user-facing ones? It currently applies to every delivery.

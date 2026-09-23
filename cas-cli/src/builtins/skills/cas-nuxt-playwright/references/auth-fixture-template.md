@@ -1,6 +1,6 @@
 # Auth Fixture Template
 
-Ready-to-copy Playwright fixture for Nuxt (3 & 4) apps with Firebase auth. Modeled after the gabber-studio production test suite.
+Ready-to-copy Playwright fixture for Nuxt (3 & 4) apps with Firebase auth, written for `@playwright/test` 1.63. Modeled after the gabber-studio production test suite.
 
 ## tests/config/environments.ts
 
@@ -98,7 +98,31 @@ async function navigateTo(page: Page, path: string) {
       window.dispatchEvent(new PopStateEvent('popstate'));
     }
   }, path);
-  await page.waitForLoadState('domcontentloaded');
+  // A client-side push fires no load event; wait for the route itself.
+  await page.waitForURL((url) => url.pathname === new URL(path, url).pathname);
+}
+
+/**
+ * Wait until Nuxt finishes hydrating. Before that, form inputs are not bound
+ * to Vue state and NuxtLink clicks trigger full-page loads.
+ */
+async function waitForHydration(page: Page) {
+  await page.waitForFunction(() => {
+    try { return (window as any).useNuxtApp?.().isHydrating === false; }
+    catch { return false; }
+  });
+}
+
+/** Real login via the sign-in form — adapt labels to your app. */
+async function signIn(page: Page, user: { email: string; password: string }) {
+  await page.goto('/sign-in');
+  await waitForHydration(page);
+  await page.getByLabel('Email').fill(user.email);
+  await page.getByLabel('Password').fill(user.password);
+  await page.getByRole('button', { name: /^sign in$/i }).click();
+  await page.waitForURL((url) => !url.pathname.includes('/sign-in'), {
+    timeout: 20_000,
+  });
 }
 
 export const test = base.extend<
@@ -107,19 +131,11 @@ export const test = base.extend<
 >({
   authedPage: [
     async ({ browser }, use) => {
-      const context = await browser.newContext();
+      // Worker-scoped fixtures do not inherit `use` options such as
+      // baseURL, so pass them to the context explicitly.
+      const context = await browser.newContext({ baseURL: env.frontendUrl });
       const page = await context.newPage();
-
-      // Real login via the sign-in form — adapt selectors to your app
-      await page.goto('/sign-in');
-      await page.waitForLoadState('networkidle');
-      await page.getByLabel('Email').fill(env.testUser.email);
-      await page.getByLabel('Password').fill(env.testUser.password);
-      await page.getByRole('button', { name: /^sign in$/i }).click();
-
-      await page.waitForURL((url) => !url.pathname.includes('/sign-in'), {
-        timeout: 20_000,
-      });
+      await signIn(page, env.testUser);
 
       await use(page);
       await context.close();
@@ -132,22 +148,40 @@ export const test = base.extend<
   },
 });
 
-export { expect, env };
+export { expect, env, navigateTo, signIn, waitForHydration };
 ```
 
 ## Usage in test files
 
 ```ts
 // tests/my-feature.spec.ts
-import { test, expect } from './config/auth-fixture';
+import { test, expect, env } from './config/auth-fixture';
 
 test.describe('My feature', () => {
   test('can navigate to protected page', async ({ authedPage: page, navigateTo }) => {
     // Use navigateTo for protected routes (required on SSR apps)
     await navigateTo('/dashboard');
-    await page.waitForLoadState('networkidle');
 
-    await expect(page.getByText('Dashboard')).toBeVisible();
+    // Web-first assertion: retries until the page renders, no load-state wait.
+    await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible();
+  });
+
+  // Every test in this worker shares one account. Tests that change its state
+  // declare a lock so they never run concurrently with each other.
+  test('updates display name', { lock: 'test-user-profile' }, async ({ authedPage: page, navigateTo }) => {
+    await navigateTo('/settings/profile');
+
+    await test.step('rename', async () => {
+      await page.getByLabel('Display name').fill('Renamed Tester');
+      const saved = page.waitForResponse('**/api/accounts/me');
+      await page.getByRole('button', { name: 'Save' }).click();
+      await saved;
+    }, { subtitle: env.name });
+
+    await expect(page.getByRole('main')).toMatchAriaSnapshot(`
+      - heading "Profile"
+      - textbox "Display name": Renamed Tester
+    `);
   });
 
   test('unauthenticated page works with page.goto', async ({ page }) => {
@@ -171,14 +205,19 @@ export default defineConfig({
   fullyParallel: false, // Tests share auth context per worker
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 2 : 0,
-  workers: process.env.CI ? 1 : 4,
+  retryStrategy: 'isolated',             // 1.62: retries run last, one at a time
+  failOnFlakyTests: !!process.env.CI,    // a pass-on-retry fails CI
+  workers: process.env.CI ? 2 : 4,       // shared-account tests use `lock`, not workers: 1
   reporter: 'html',
   timeout: 30_000,
   use: {
     baseURL: env.frontendUrl,
-    trace: 'on-first-retry',
+    trace: {
+      mode: 'retain-on-failure-and-retries',
+      snapshots: { dom: true, aria: true, screen: true }, // 1.63
+    },
     screenshot: 'only-on-failure',
-    video: 'retain-on-failure',
+    video: 'retain-on-failure-and-retries', // 1.61
   },
   projects: [
     {
@@ -236,6 +275,9 @@ For tests that need admin/super-admin access, create a parallel fixture:
 
 ```ts
 // tests/config/admin-fixture.ts — same pattern, uses env.adminUser
+import { test as base, type Page } from '@playwright/test';
+import { env, navigateTo, signIn } from './auth-fixture';
+
 export const test = base.extend<
   { navigateTo: (path: string) => Promise<void> },
   { adminPage: Page }
@@ -245,14 +287,9 @@ export const test = base.extend<
       if (!env.adminUser) {
         throw new Error(`Environment "${env.name}" has no adminUser configured`);
       }
-      const context = await browser.newContext();
+      const context = await browser.newContext({ baseURL: env.frontendUrl });
       const page = await context.newPage();
-      await page.goto('/sign-in');
-      await page.waitForLoadState('networkidle');
-      await page.getByLabel('Email').fill(env.adminUser.email);
-      await page.getByLabel('Password').fill(env.adminUser.password);
-      await page.getByRole('button', { name: /^sign in$/i }).click();
-      await page.waitForURL((url) => !url.pathname.includes('/sign-in'), { timeout: 20_000 });
+      await signIn(page, env.adminUser);
       await use(page);
       await context.close();
     },

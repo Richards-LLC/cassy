@@ -285,15 +285,18 @@ impl HubTransportReport {
         } else {
             "cas hub restart --force"
         };
+        let state = lock_holder_display_state(holder);
+        let remedy = match state {
+            HubDisplayState::Starting { wedged: false, .. } | HubDisplayState::Stopping { .. } => {
+                "Run `cas hub status` again after this phase completes.".to_owned()
+            }
+            _ => format!("Run `{command}` to recover the hub."),
+        };
         Self::fail_with_remedy(
-            format!(
-                "hub machine lock is held by pid {} ({}) but no live runtime endpoint is responding",
-                holder.pid,
-                holder.age_label()
-            ),
+            format!("hub machine lock: {}", hub_state_label(state, holder.pid)),
             None,
             None,
-            format!("Run `{command}` to terminate the wedged holder and restore the hub."),
+            remedy,
         )
     }
 
@@ -604,11 +607,7 @@ fn terminate_lock_holder(paths: &HubRuntimePaths, holder: &HubLockHolder) -> Res
         holder.pid != std::process::id(),
         "refusing to terminate the current cas hub lifecycle process"
     );
-    eprintln!(
-        "cas hub lock holder pid {} ({}) has no completed runtime state; terminating it",
-        holder.pid,
-        holder.age_label()
-    );
+    eprintln!("{}", lock_holder_termination_message(paths, holder));
 
     #[cfg(unix)]
     {
@@ -748,22 +747,167 @@ fn restart_spec_for_record(
     }))
 }
 
-fn render_status(record: &HubProcessRecord, live: bool, binary_version: &str) -> String {
-    if live {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum HubDisplayState {
+    Exited,
+    Starting { age_secs: u64, wedged: bool },
+    Stopping { age_secs: u64 },
+    Unresponsive { age_secs: u64 },
+    Running,
+}
+
+fn record_age_secs(record: &HubProcessRecord) -> u64 {
+    chrono::DateTime::parse_from_rfc3339(&record.started_at)
+        .ok()
+        .map(|started| {
+            (chrono::Utc::now() - started.with_timezone(&chrono::Utc))
+                .num_seconds()
+                .max(0) as u64
+        })
+        .unwrap_or(0)
+}
+
+pub(super) fn hub_display_state(
+    paths: &HubRuntimePaths,
+    record: &HubProcessRecord,
+) -> HubDisplayState {
+    if !process_is_running(record.pid) {
+        return HubDisplayState::Exited;
+    }
+    let ready = record_is_ready(paths, record);
+    if ready {
+        return HubDisplayState::Running;
+    }
+    let holder = paths
+        .lock_holders()
+        .into_iter()
+        .find(|holder| holder.pid == record.pid);
+    let age_secs = holder
+        .as_ref()
+        .and_then(|holder| holder.age)
+        .map(|age| age.as_secs())
+        .unwrap_or_else(|| record_age_secs(record));
+    if holder.as_ref().and_then(|holder| holder.phase.as_deref()) == Some("starting") {
+        return HubDisplayState::Starting {
+            age_secs,
+            wedged: age_secs >= HUB_LAUNCH_TIMEOUT.as_secs(),
+        };
+    }
+    if holder.as_ref().and_then(|holder| holder.phase.as_deref()) == Some("stopping") {
+        return HubDisplayState::Stopping { age_secs };
+    }
+    HubDisplayState::Unresponsive { age_secs }
+}
+
+pub(super) fn hub_state_remedy(state: HubDisplayState, pid: u32) -> String {
+    match state {
+        HubDisplayState::Exited => "Run `cas hub start`.".to_owned(),
+        HubDisplayState::Starting { wedged: false, .. } => {
+            "Wait for startup, then run `cas hub status` again.".to_owned()
+        }
+        HubDisplayState::Starting { wedged: true, .. } => {
+            "Run `cas hub restart --force` to recover wedged startup.".to_owned()
+        }
+        HubDisplayState::Stopping { .. } => "Wait for shutdown, then run `cas hub status` again.".to_owned(),
+        HubDisplayState::Unresponsive { .. } => format!(
+            "Run `sample {pid}` for evidence; then `cas hub restart --force`."
+        ),
+        HubDisplayState::Running => String::new(),
+    }
+}
+
+pub(super) fn hub_state_label(state: HubDisplayState, pid: u32) -> String {
+    match state {
+        HubDisplayState::Exited => format!("last pid {pid} exited"),
+        HubDisplayState::Starting { age_secs, wedged: false } => {
+            format!("pid {pid} is starting for {age_secs}s")
+        }
+        HubDisplayState::Starting { age_secs, wedged: true } => {
+            format!("pid {pid} is wedged in startup after {age_secs}s")
+        }
+        HubDisplayState::Stopping { age_secs } => {
+            format!("pid {pid} is stopping; lock held for {age_secs}s")
+        }
+        HubDisplayState::Unresponsive { age_secs } => {
+            format!("pid {pid} is running for {age_secs}s but not answering")
+        }
+        HubDisplayState::Running => format!("pid {pid} is running and ready"),
+    }
+}
+
+fn lock_holder_display_state(holder: &HubLockHolder) -> HubDisplayState {
+    let age_secs = holder.age.map(|age| age.as_secs()).unwrap_or(0);
+    if holder.phase.as_deref() == Some("starting") {
+        HubDisplayState::Starting {
+            age_secs,
+            wedged: age_secs >= HUB_LAUNCH_TIMEOUT.as_secs(),
+        }
+    } else if holder.phase.as_deref() == Some("stopping") {
+        HubDisplayState::Stopping { age_secs }
+    } else {
+        HubDisplayState::Unresponsive { age_secs }
+    }
+}
+
+fn lock_holder_state_json(holder: &HubLockHolder) -> serde_json::Value {
+    hub_state_json(lock_holder_display_state(holder), holder.pid)
+}
+
+fn lock_holder_termination_label(paths: &HubRuntimePaths, holder: &HubLockHolder) -> String {
+    let state = paths
+        .read_process_record()
+        .ok()
+        .filter(|record| record.pid == holder.pid)
+        .map(|record| hub_display_state(paths, &record))
+        .unwrap_or_else(|| lock_holder_display_state(holder));
+    hub_state_label(state, holder.pid)
+}
+
+fn lock_holder_termination_message(paths: &HubRuntimePaths, holder: &HubLockHolder) -> String {
+    format!(
+        "cas hub {}; terminating lock holder",
+        lock_holder_termination_label(paths, holder)
+    )
+}
+
+fn hub_state_json(state: HubDisplayState, pid: u32) -> serde_json::Value {
+    let (kind, age_secs) = match state {
+        HubDisplayState::Exited => ("exited", None),
+        HubDisplayState::Starting { age_secs, wedged: false } => ("starting", Some(age_secs)),
+        HubDisplayState::Starting { age_secs, wedged: true } => ("startup_wedged", Some(age_secs)),
+        HubDisplayState::Stopping { age_secs } => ("stopping", Some(age_secs)),
+        HubDisplayState::Unresponsive { age_secs } => ("unresponsive", Some(age_secs)),
+        HubDisplayState::Running => ("running", None),
+    };
+    serde_json::json!({
+        "kind": kind,
+        "pid": pid,
+        "age_secs": age_secs,
+        "message": hub_state_label(state, pid),
+        "remedy": hub_state_remedy(state, pid),
+    })
+}
+
+fn render_status(
+    record: &HubProcessRecord,
+    state: HubDisplayState,
+    binary_version: &str,
+) -> String {
+    if state == HubDisplayState::Running {
         let endpoint = record
             .public_url
             .as_deref()
             .map(str::to_owned)
             .unwrap_or_else(|| format!("http://{}:{}", record.bind, record.port));
         format!(
-            "Cassy hub is running at {endpoint}\n  pid {}, version {}, binary: {binary_version}",
+            "Cassy hub is running and ready at {endpoint}\n  pid {}, version {}, binary: {binary_version}",
             record.pid, record.version
         )
     } else {
         format!(
-            "Cassy hub is not running (last pid {} exited)\n  started by {} at {} \
-             (version {}, binary: {binary_version})",
-            record.pid,
+            "Cassy hub: {}\n  remedy: {}\n  started by {} at {}\n  version {}, binary: {binary_version}",
+            hub_state_label(state, record.pid),
+            hub_state_remedy(state, record.pid),
             record.launched_by.as_deref().unwrap_or("unknown"),
             record
                 .launched_at
@@ -925,7 +1069,11 @@ fn start_with_output_resolved(
                         } else {
                             println!(
                                 "{}",
-                                render_status(&record, true, env!("CARGO_PKG_VERSION"))
+                                render_status(
+                                    &record,
+                                    HubDisplayState::Running,
+                                    env!("CARGO_PKG_VERSION"),
+                                )
                             );
                         }
                     }
@@ -1671,6 +1819,13 @@ fn status(cli: &Cli) -> Result<()> {
                     "{}",
                     serde_json::json!({
                         "running": false,
+                        "state": holder.as_ref().map(lock_holder_state_json).unwrap_or_else(|| serde_json::json!({
+                            "kind": "missing",
+                            "pid": null,
+                            "age_secs": null,
+                            "message": "no runtime record",
+                            "remedy": "Run `cas hub start`.",
+                        })),
                         "record": null,
                         "binary": env!("CARGO_PKG_VERSION"),
                         "lock_holder": holder.as_ref().map(lock_holder_json),
@@ -1679,17 +1834,19 @@ fn status(cli: &Cli) -> Result<()> {
                     })
                 );
             } else if let Some(holder) = &holder {
+                let state = lock_holder_display_state(holder);
                 println!(
-                    "Cassy hub is not ready: lock holder pid {} ({}) has no runtime record",
-                    holder.pid,
-                    holder.age_label()
+                    "Cassy hub: {}; no runtime record",
+                    hub_state_label(state, holder.pid)
                 );
+                println!("  remedy: {}", hub_state_remedy(state, holder.pid));
                 if let Some(warning) = service_warning {
                     println!("WARNING: {warning}");
                 }
                 println!("{}", render_transport_status(&transport));
             } else {
-                println!("Cassy hub is not ready: no runtime record");
+                println!("Cassy hub is not running: no runtime record");
+                println!("  remedy: Run `cas hub start`.");
             }
             let detail = holder
                 .as_ref()
@@ -1705,7 +1862,8 @@ fn status(cli: &Cli) -> Result<()> {
             anyhow::bail!("cas hub runtime record unavailable: {detail}");
         }
     };
-    let live = record_is_ready(&paths, &record);
+    let state = hub_display_state(&paths, &record);
+    let live = state == HubDisplayState::Running;
     let service_warning = super::hub_service::inactive_detached_warning(&paths, Some(&record))?;
     let transport = hub_transport_report(&paths, Some(&record));
     if cli.json {
@@ -1713,6 +1871,7 @@ fn status(cli: &Cli) -> Result<()> {
             "{}",
             serde_json::json!({
                 "running": live,
+                "state": hub_state_json(state, record.pid),
                 "record": record,
                 "binary": env!("CARGO_PKG_VERSION"),
                 "tailscale_serve": transport,
@@ -1722,14 +1881,14 @@ fn status(cli: &Cli) -> Result<()> {
     } else {
         println!(
             "{}",
-            render_status(&record, live, env!("CARGO_PKG_VERSION"))
+            render_status(&record, state, env!("CARGO_PKG_VERSION"))
         );
         if let Some(warning) = service_warning {
             println!("WARNING: {warning}");
         }
         println!("{}", render_transport_status(&transport));
     }
-    anyhow::ensure!(live, "cas hub is not running");
+    anyhow::ensure!(live, "cas hub is not ready; see status above");
     anyhow::ensure!(
         !transport.is_failure(),
         "Tailscale Serve check failed: {}",
@@ -1766,7 +1925,10 @@ fn render_transport_status(report: &HubTransportReport) -> String {
     let mut lines = if report.message.starts_with("hub is supervised but not publishable") {
         vec!["Tailscale Serve: FAIL - supervised hub is not publishable".to_owned()]
     } else if report.message.starts_with("hub machine lock") {
-        vec!["Tailscale Serve: FAIL - hub startup is wedged".to_owned()]
+        vec![format!(
+            "Tailscale Serve: FAIL - {}",
+            report.message.trim_start_matches("hub machine lock: ")
+        )]
     } else if report.expected_target.is_some() && report.actual_target.is_some() {
         vec!["Tailscale Serve: FAIL - route target differs from the live hub shim".to_owned()]
     } else {
@@ -2379,15 +2541,29 @@ mod tests {
         let report = HubTransportReport::wedged_lock(&holder, true);
 
         assert_eq!(report.status, "fail");
-        assert!(report.message.contains("pid 804 (1m 31s)"));
+        assert!(report.message.contains("pid 804 is wedged in startup after 91s"));
         assert!(report
             .remedy
             .as_deref()
             .is_some_and(|remedy| remedy.contains("cas hub restart --force --tailscale-serve")));
         assert_eq!(
             render_transport_status(&report),
-            "Tailscale Serve: FAIL - hub startup is wedged\n  remedy: Run `cas hub restart --force --tailscale-serve` to terminate the wedged holder and restore the hub."
+            "Tailscale Serve: FAIL - pid 804 is wedged in startup after 91s\n  remedy: Run `cas hub restart --force --tailscale-serve` to recover the hub."
         );
+    }
+
+    #[test]
+    fn running_lock_transport_failure_does_not_claim_startup_is_wedged() {
+        let holder = HubLockHolder {
+            pid: 804,
+            age: Some(Duration::from_secs(91)),
+            phase: Some("running".to_owned()),
+            command: None,
+        };
+        let report = HubTransportReport::wedged_lock(&holder, true);
+        let rendered = render_transport_status(&report);
+        assert!(rendered.contains("but not answering"), "{rendered}");
+        assert!(!rendered.contains("startup is wedged"), "{rendered}");
     }
 
     #[test]
@@ -2578,7 +2754,7 @@ mod tests {
     fn status_rendering_shows_record_and_binary_versions() {
         let rendered = render_status(
             &record("3.4.1", DEFAULT_HUB_PORT, None),
-            true,
+            HubDisplayState::Running,
             "3.7.7",
         );
 
@@ -2592,13 +2768,75 @@ mod tests {
         stale.launched_by = Some("update".to_owned());
         stale.launched_at = Some("2026-09-01T12:34:56Z".to_owned());
 
-        let rendered = render_status(&stale, false, "3.7.7");
+        let rendered = render_status(&stale, HubDisplayState::Exited, "3.7.7");
 
-        assert!(rendered.contains("not running (last pid 42 exited)"), "{rendered}");
+        assert!(rendered.contains("last pid 42 exited"), "{rendered}");
         assert!(
             rendered.contains("started by update at 2026-09-01T12:34:56Z"),
             "{rendered}"
         );
+    }
+
+    #[test]
+    fn status_text_and_json_distinguish_lifecycle_states() {
+        let record = record("3.4.1", DEFAULT_HUB_PORT, None);
+        let cases = [
+            (HubDisplayState::Exited, "exited", "last pid 42 exited", "cas hub start"),
+            (HubDisplayState::Starting { age_secs: 3, wedged: false }, "starting", "pid 42 is starting for 3s", "cas hub status"),
+            (HubDisplayState::Starting { age_secs: 12, wedged: true }, "startup_wedged", "pid 42 is wedged in startup after 12s", "cas hub restart --force"),
+            (HubDisplayState::Stopping { age_secs: 4 }, "stopping", "pid 42 is stopping; lock held for 4s", "cas hub status"),
+            (HubDisplayState::Unresponsive { age_secs: 91 }, "unresponsive", "pid 42 is running for 91s but not answering", "sample 42"),
+            (HubDisplayState::Running, "running", "Cassy hub is running and ready", ""),
+        ];
+        for (state, kind, text, remedy) in cases {
+            let rendered = render_status(&record, state, "3.7.7");
+            let json = hub_state_json(state, record.pid);
+            assert!(rendered.contains(text), "{rendered}");
+            assert!(rendered.contains(remedy), "{rendered}");
+            assert_eq!(json["kind"], kind);
+            assert_eq!(json["pid"], 42);
+            assert!(json["remedy"].as_str().unwrap().contains(remedy));
+        }
+    }
+
+    #[test]
+    fn live_process_classification_uses_lock_phase_without_changing_readiness() {
+        #[cfg(unix)]
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        #[cfg(unix)]
+        std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let paths = HubRuntimePaths::new(temp.path());
+        let mut lock = paths.acquire_instance_lock().unwrap();
+        let mut record = record(env!("CARGO_PKG_VERSION"), 0, None);
+        record.pid = std::process::id();
+        record.started_at = chrono::Utc::now().to_rfc3339();
+        paths.write_process_record(&record).unwrap();
+
+        assert!(matches!(hub_display_state(&paths, &record), HubDisplayState::Starting { wedged: false, .. }));
+        lock.set_phase("running").unwrap();
+        assert!(matches!(hub_display_state(&paths, &record), HubDisplayState::Unresponsive { .. }));
+        record.pid = 999_999;
+        assert_eq!(hub_display_state(&paths, &record), HubDisplayState::Exited);
+    }
+
+    #[test]
+    fn lock_holder_termination_label_names_its_phase() {
+        let paths = HubRuntimePaths::new("/nonexistent/cas-c67c");
+        let mut holder = HubLockHolder {
+            pid: 804,
+            age: Some(Duration::from_secs(91)),
+            phase: Some("starting".to_owned()),
+            command: None,
+        };
+        assert!(lock_holder_termination_message(&paths, &holder).contains("wedged in startup"));
+        holder.phase = Some("running".to_owned());
+        let message = lock_holder_termination_message(&paths, &holder);
+        assert!(message.contains("but not answering"), "{message}");
+        assert!(!message.contains("no completed runtime state"), "{message}");
+        holder.phase = Some("stopping".to_owned());
+        assert!(lock_holder_termination_message(&paths, &holder).contains("is stopping"));
     }
 
     #[test]

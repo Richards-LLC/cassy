@@ -19,6 +19,7 @@ pub enum Harness {
 pub enum ConformanceStatus {
     Pass,
     Fail,
+    NotCovered,
 }
 
 /// Serving route covered by a harness conformance/support claim.
@@ -122,6 +123,7 @@ const CODEX_0149_RECEIPT: &str = include_str!("../conformance/codex-cli-0.149.1-
 const CODEX_0156_RECEIPT: &str = include_str!("../conformance/codex-cli-0.156.0-2026-09-23.json");
 const GROK_02114_RECEIPT: &str = include_str!("../conformance/grok-build-0.2.114-2026-07-30.json");
 const GROK_0105_RECEIPT: &str = include_str!("../conformance/grok-build-1.0.5-2026-08-25.json");
+const GROK_0140_RECEIPT: &str = include_str!("../conformance/grok-build-1.0.40-2026-09-23.json");
 const OPENCODE_11823_TOKEN_PLAN_RECEIPT: &str =
     include_str!("../conformance/opencode-1.18.23-hosted-token-plan-2026-08-27.json");
 
@@ -141,6 +143,10 @@ pub fn grok_0105_conformance_receipt() -> Result<HarnessConformanceReceipt, serd
     serde_json::from_str(GROK_0105_RECEIPT)
 }
 
+pub fn grok_0140_conformance_receipt() -> Result<HarnessConformanceReceipt, serde_json::Error> {
+    serde_json::from_str(GROK_0140_RECEIPT)
+}
+
 pub fn opencode_11823_token_plan_conformance_receipt()
 -> Result<HarnessConformanceReceipt, serde_json::Error> {
     serde_json::from_str(OPENCODE_11823_TOKEN_PLAN_RECEIPT)
@@ -151,7 +157,7 @@ pub fn opencode_11823_token_plan_conformance_receipt()
 pub fn harness_conformance_receipts() -> Result<Vec<HarnessConformanceReceipt>, serde_json::Error> {
     Ok(vec![
         codex_0156_conformance_receipt()?,
-        grok_0105_conformance_receipt()?,
+        grok_0140_conformance_receipt()?,
         opencode_11823_token_plan_conformance_receipt()?,
     ])
 }
@@ -296,6 +302,53 @@ mod tests {
         );
         assert_eq!(receipt.observed_default_matches_validated(), Some(true));
         assert_eq!(receipt.validated_at, "2026-08-25");
+        assert_eq!(receipt.result, ConformanceStatus::Pass);
+        assert!(receipt.validates_pin());
+
+        let evidence_ids: HashSet<&str> = receipt
+            .evidence
+            .iter()
+            .map(|evidence| evidence.id.as_str())
+            .collect();
+        assert!(!receipt.checklist.is_empty());
+        for check in &receipt.checklist {
+            assert!(
+                !check.evidence_refs.is_empty(),
+                "{} must cite evidence",
+                check.id
+            );
+            assert!(
+                check
+                    .evidence_refs
+                    .iter()
+                    .all(|id| evidence_ids.contains(id.as_str())),
+                "{} cites missing evidence: {:?}",
+                check.id,
+                check.evidence_refs
+            );
+        }
+        assert!(
+            receipt
+                .checklist
+                .iter()
+                .filter(|check| check.required)
+                .all(|check| check.status == ConformanceStatus::Pass),
+            "a PASS receipt must pass every required check"
+        );
+    }
+
+    #[test]
+    fn grok_0140_receipt_is_typed_complete_and_passes_every_required_check() {
+        let receipt = grok_0140_conformance_receipt().expect("embedded receipt must parse");
+        assert_eq!(receipt.schema_version, 1);
+        assert_eq!(receipt.harness, Harness::GrokBuild);
+        assert_eq!(receipt.harness_version, "1.0.40");
+        assert_eq!(
+            receipt.observed_default_harness_version.as_deref(),
+            Some("1.0.41")
+        );
+        assert_eq!(receipt.observed_default_matches_validated(), Some(false));
+        assert_eq!(receipt.validated_at, "2026-09-23");
         assert_eq!(receipt.result, ConformanceStatus::Pass);
         assert!(receipt.validates_pin());
 

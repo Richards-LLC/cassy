@@ -1097,7 +1097,7 @@ mod tests {
 
     #[test]
     fn hub_url_resolution_obeys_explicit_record_config_then_remembered_precedence() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_support::private_hub_tempdir();
         let paths = HubRuntimePaths::new(temp.path().join("hub"));
         let (port, health) = serve_ready_health_checks(4);
         write_live_record(&paths, port, Some("https://record.example"));
@@ -1127,7 +1127,7 @@ mod tests {
 
     #[test]
     fn running_hub_without_public_origin_has_state_aware_recovery() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_support::private_hub_tempdir();
         let paths = HubRuntimePaths::new(temp.path().join("hub"));
         let (port, health) = serve_ready_health_checks(1);
         write_live_record(&paths, port, None);
@@ -1141,7 +1141,7 @@ mod tests {
 
     #[test]
     fn running_hub_without_public_origin_preserves_transport_failure_cause() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_support::private_hub_tempdir();
         let paths = HubRuntimePaths::new(temp.path().join("hub"));
         let (port, health) = serve_ready_health_checks(1);
         write_live_record(&paths, port, None);
@@ -1162,12 +1162,7 @@ mod tests {
 
     #[test]
     fn authorize_names_a_live_hub_that_is_not_answering() {
-        #[cfg(unix)]
-        use std::os::unix::fs::PermissionsExt;
-
-        let temp = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
-        #[cfg(unix)]
-        std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let temp = crate::test_support::private_hub_tempdir();
         let paths = HubRuntimePaths::new(temp.path().join("hub"));
         write_live_record(&paths, 0, Some("https://record.example"));
 
@@ -1401,7 +1396,7 @@ mod tests {
 
     #[test]
     fn stopped_hub_does_not_consume_code_and_same_code_claims_after_start() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_support::private_hub_tempdir();
         let paths = HubRuntimePaths::new(temp.path().join("hub"));
         let relay = RecordingRelay::default();
         let args = authorize_args("K7MW-4H2Q");
@@ -1439,7 +1434,7 @@ mod tests {
 
     #[test]
     fn strict_readiness_refuses_unreachable_hub_but_explicit_bypass_continues() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_support::private_hub_tempdir();
         let paths = HubRuntimePaths::new(temp.path().join("hub"));
         let relay = RecordingRelay::default();
         let args = authorize_args("K7MW-4H2Q");
@@ -1472,7 +1467,7 @@ mod tests {
 
     #[test]
     fn redirected_health_cannot_authorize_a_different_origin() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_support::private_hub_tempdir();
         let paths = HubRuntimePaths::new(temp.path().join("hub"));
         let relay = RecordingRelay::default();
         let (hub_port, health) = serve_ready_health_checks(1);
@@ -1504,7 +1499,7 @@ mod tests {
 
     #[test]
     fn reachable_public_hub_completes_authorization_delivery() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_support::private_hub_tempdir();
         let paths = HubRuntimePaths::new(temp.path().join("hub"));
         let relay = RecordingRelay::default();
         let args = authorize_args("K7MW-4H2Q");
@@ -1529,7 +1524,7 @@ mod tests {
 
     #[test]
     fn successful_explicit_origin_is_saved_to_project_hub_config() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_support::private_hub_tempdir();
         let paths = HubRuntimePaths::new(temp.path().join("hub"));
         let config_root = temp.path().join("cas");
         fs::create_dir_all(&config_root).unwrap();
@@ -1561,7 +1556,7 @@ mod tests {
 
     #[test]
     fn hosted_relay_completion_uses_the_two_key_invitation_contract() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_support::private_hub_tempdir();
         let paths = HubRuntimePaths::new(temp.path().join("hub"));
         let (port, health) = serve_ready_health_checks(1);
         write_live_record(&paths, port, Some("https://workstation.tail.example/"));
@@ -1702,7 +1697,7 @@ mod tests {
 
     #[test]
     fn same_machine_retry_reuses_nonce_and_resumes_its_claim() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_support::private_hub_tempdir();
         let paths = HubRuntimePaths::new(temp.path().join("hub"));
         let relay = RecordingRelay::failing_first_completion();
         let args = authorize_args("K7MW-4H2Q");

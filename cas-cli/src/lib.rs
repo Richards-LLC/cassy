@@ -91,6 +91,22 @@ pub(crate) mod test_support {
     use std::path::Path;
     use std::sync::{Mutex, MutexGuard, OnceLock};
 
+    /// Hub state rejects symlinked ancestors. On macOS, TMPDIR normally starts
+    /// with /var, which is a symlink to /private/var.
+    pub(crate) fn private_hub_tempdir() -> tempfile::TempDir {
+        let parent = std::env::temp_dir()
+            .canonicalize()
+            .expect("temporary directory must be canonicalizable");
+        let temp = tempfile::tempdir_in(parent).expect("canonical temporary fixture directory");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700))
+                .expect("private temporary fixture directory");
+        }
+        temp
+    }
+
     /// Cargo's in-process test harness runs otherwise isolated Tantivy
     /// fixtures concurrently. Keep the tests that intentionally exercise
     /// short-lived disk writers out of each other's lock lifecycle; nextest

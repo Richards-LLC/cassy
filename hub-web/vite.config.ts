@@ -13,11 +13,13 @@ for (const dir of ['src', 'public']) {
 }
 for (const file of ['index.html', 'vite.config.ts', 'package-lock.json']) digest.update(readFileSync(join(root, file)));
 const hubBuild = digest.digest('hex').slice(0, 8);
-import { defineConfig } from "vite";
+import { configDefaults, defineConfig } from "vitest/config";
 
 export default defineConfig({
   define: { __HUB_BUILD__: JSON.stringify(hubBuild) },
   base: "/commander/",
+  // Playwright specs live under e2e/ and must not be collected by vitest.
+  test: { exclude: [...configDefaults.exclude, "e2e/**"] },
   build: {
     assetsInlineLimit: 0,
     sourcemap: false,

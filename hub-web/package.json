@@ -11,6 +11,7 @@
     "visual-qa": "npm exec --yes --package=playwright -- node scripts/visual-qa.mjs"
   },
   "devDependencies": {
+    "@playwright/test": "1.63.0",
     "@types/node": "^24.2.1",
     "jsdom": "^26.1.0",
     "typescript": "^5.9.2",

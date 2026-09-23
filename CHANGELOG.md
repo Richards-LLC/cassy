@@ -7,6 +7,52 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.28.2] - 2026-09-23
+
+### Added
+
+- Independent QA pass: when a factory delivery changes something a person
+  sees, Cassy opens a review for a different agent before the change can
+  merge. The reviewer walks the demo and the nearby cases (empty results,
+  phone width, dark mode, keyboard only, reduced motion) on the real build,
+  scores the polish, and approves or sends the work back with evidence. The
+  implementer can never review its own work, and a supervisor can waive a
+  review only with a logged reason. Settings: `qa.independent_pass`,
+  `qa.user_facing_paths`, `qa.pass_timeout_mins`, `qa.max_rounds`.
+- Evidence at close: a user-facing delivery cannot close without a QA
+  evidence bundle for its exact commit. The bundle holds a Playwright trace
+  with at least one passing check, a screen recording, the final
+  accessibility snapshot, light and dark renders at desktop and phone widths,
+  a strict visual-QA pass and a critique score. Demo-only changes outside the
+  web need a real-build ledger entry, plus a terminal QA receipt when they
+  change terminal output. Newly skipped tests are refused unless marked with
+  a reason. Setting: `qa.evidence_gate`.
+- Hub user journeys: the eleven hub flows people rely on each have an
+  end-to-end Playwright test, and a release that changes the hub stops until
+  a scored walkthrough of those flows covers the new build.
+- `cas-qa-craft` documents the evidence bundle, the independent review and
+  the journey walkthrough in all three harness flavours.
+
+### Fixed
+
+- The hub command palette works properly again. Typing narrows the list to
+  matching commands and sessions, session matches come first, the panel stays
+  still while you type, and a search with no matches says so. Pressing Enter
+  opens the chosen conversation, and a keyboard or mouse jump puts you straight
+  into its reply box; a touch tap opens it without raising the keyboard.
+  Reopening the palette starts from a clean, unfiltered list, and live
+  updates no longer wipe what you typed.
+- In high-contrast (forced colours) mode the command palette and session
+  picker have visible edges, a full focus ring, and a clearly marked open
+  session that stays readable on hover.
+- A QA evidence ledger written exactly as the `cas-qa-craft` guide shows is no
+  longer rejected at close.
+- The scoped-proof surface check now qualifies nested test modules, so their
+  tests are no longer missed.
+- A merged task no longer gets stuck when its declared test scope or risk was
+  too narrow. Supervisors can correct scope or risk on a merged delivery, or
+  close with a logged override that still requires the real test run.
+
 ## [3.28.1] - 2026-09-23
 
 3.28.0 was tagged but never published. 3.28.1 ships every 3.28.0 change listed

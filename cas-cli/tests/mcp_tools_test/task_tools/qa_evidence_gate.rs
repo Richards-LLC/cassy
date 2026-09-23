@@ -301,6 +301,30 @@ async fn demo_only_non_web_delivery_needs_the_evidence_ledger() {
 }
 
 #[tokio::test]
+async fn demo_only_ledger_accepts_a_row_without_outer_pipes() {
+    let fx = fixture(
+        &[("cas-cli/src/report.rs", "pub fn report() {}\n")],
+        "Run cas report; it prints totals",
+    );
+    let _env = env_test_lock();
+    let ledger = fx.artifacts.join(TASK).join("LEDGER.md");
+    std::fs::create_dir_all(ledger.parent().unwrap()).unwrap();
+    std::fs::write(
+        &ledger,
+        "M01 | cas report | totals | totals | PASS | real-build | qa/M01.txt | -\n",
+    )
+    .unwrap();
+
+    let parked = close_text(&fx.core, TASK).await;
+    assert!(parked.contains("MERGE REQUIRED"), "{parked}");
+    assert!(
+        fx.notes().contains("QA evidence ledger accepted"),
+        "{}",
+        fx.notes()
+    );
+}
+
+#[tokio::test]
 async fn healer_style_fixme_is_refused_even_on_a_test_only_delivery() {
     let fx = fixture(
         &[(

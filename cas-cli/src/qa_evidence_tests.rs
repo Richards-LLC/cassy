@@ -460,7 +460,13 @@ fn ledger_tier_requires_a_fresh_pass_row() {
         "| M01 | cli | ok | ok | PASS | real-build | qa/M01.txt | - |\n",
     )
     .unwrap();
-    validate_ledger(&ctx).expect("fresh PASS row");
+    validate_ledger(&ctx).expect("fresh pipe-form PASS row");
+    std::fs::write(
+        &ledger,
+        "M01 | cli | ok | ok | PASS | real-build | qa/M01.txt | -\n",
+    )
+    .unwrap();
+    validate_ledger(&ctx).expect("fresh doc-style PASS row");
     set_mtime_secs_ago(&ledger, 3600);
     assert!(
         validate_ledger(&ctx)

@@ -2012,6 +2012,14 @@ dialog::backdrop { background: var(--overlay-backdrop); }
 .palette-command span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .palette-command small, .palette-empty { color: var(--text-mid); }
 .palette-command small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Forced colors drops the surfaces and shadows that separate rows and lift the
+   dialog, so each needs a real edge: rows read as buttons, the dialog stands
+   off the page behind it, and the open session keeps its mark. */
+@media (forced-colors: active) {
+  dialog { border: 1px solid CanvasText; }
+  .palette-command { border: 1px solid ButtonBorder; }
+  .session-picker-entry[aria-current="true"] { border: 2px solid Highlight; }
+}
 /* == End Unit 3: command palette == */
 
 /* The flow is focused only so the dialog opens on its title instead of a text

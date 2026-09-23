@@ -201,7 +201,19 @@ fn tool_call_outputs(body: &str, name: &str, action: &str) -> Vec<String> {
                     .as_str()
                     .is_some_and(|id| call_ids.contains(&id))
         })
-        .filter_map(|event| event["payload"]["output"].as_str().map(str::to_owned))
+        .filter_map(|event| {
+            let output = &event["payload"]["output"];
+            if let Some(text) = output.as_str() {
+                return Some(text.to_owned());
+            }
+            output.as_array().map(|parts| {
+                parts
+                    .iter()
+                    .filter_map(|part| part["text"].as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+        })
         .collect()
 }
 
@@ -212,7 +224,8 @@ fn tool_call_outputs_only_match_server_responses_for_requested_action() {
             "type":"function_call","name":"task","call_id":"create-1",
             "arguments":"{\"action\":\"create\"}"}}),
         serde_json::json!({"type":"response_item","payload":{
-            "type":"function_call_output","call_id":"create-1","output":"created"}}),
+            "type":"function_call_output","call_id":"create-1",
+            "output":[{"type":"input_text","text":"created"}]}}),
         serde_json::json!({"type":"response_item","payload":{
             "type":"function_call_output","call_id":"other","output":"unrelated"}}),
     ]

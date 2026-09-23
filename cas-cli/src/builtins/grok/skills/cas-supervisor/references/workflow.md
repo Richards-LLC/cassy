@@ -196,7 +196,8 @@ end-of-lane, once the worker is done with that worktree.
 2. Confirm: `cas__coordination action=epic_status id=<focused-epic>` and/or `cas__task action=list status=awaiting_merge`.
    **User-facing delivery? Independent QA first (cas-619f).** When the park reports
    `INDEPENDENT QA DISPATCHED`, or a `<cas-qa-dispatch>` wakes you, spawn a reviewer who is
-   not the implementer: `cas__coordination action=spawn_workers lane=taste task_id=<qa-task>`.
+   not the implementer, on the taste recipe:
+   `cas__coordination action=spawn_workers cli=claude model=claude-opus-5-5 effort=high task_id=<qa-task>`.
    Merge only after that reviewer's `qa_record` approves the exact tip. `worktree_merge`, a raw
    `git merge factory/<worker>`, and the re-close all refuse until then. A rejection sends the
    task back to its implementer automatically. To skip the pass, waive it with a logged reason:

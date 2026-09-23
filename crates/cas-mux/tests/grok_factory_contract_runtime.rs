@@ -607,7 +607,7 @@ fn run_grok_factory_contract(grok_binary: PathBuf, version: &str) {
         runtime
             .block_on(mux.inject(
                 PANE,
-                "You are being checked for the worker rules loaded at process start. Do not call tools, run commands, inspect files, create files, or use this message as an answer. Reply with exactly one line beginning RULES-CANARY and then fill these two fields solely from your Cassy Factory Worker rules: the namespace used for Cassy MCP tools and the action used to record progress notes. Do not include any other text.",
+                "You are being checked for the worker rules loaded at process start. Do not call tools, run commands, inspect files, create files, or use this message as an answer. Reply with exactly one line beginning RULES-CANARY and then fill these three fields solely from your Cassy Factory Worker rules: the namespace used for Cassy MCP tools, the action used to record progress notes, and what the worker must do when context headroom drops below 20 percent. Do not include any other text.",
             ))
             .expect("inject rules-only canary");
         events_before_lifecycle = wait_for_turn_end(
@@ -624,6 +624,7 @@ fn run_grok_factory_contract(grok_binary: PathBuf, version: &str) {
                 line.starts_with("RULES-CANARY")
                     && lower.contains("cas__")
                     && lower.contains("notes")
+                    && lower.contains("checkpoint")
             }),
             "Grok 1.0.40 must derive the Cassy namespace and progress action from worker rules; assistant text:\n{canary_response}"
         );

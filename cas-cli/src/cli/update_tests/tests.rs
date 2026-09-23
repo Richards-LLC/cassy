@@ -447,20 +447,13 @@ fn strip_deleted_suffix_from_linux_process_path() {
 #[cfg(unix)]
 fn post_swap_hook_invokes_the_installed_binary() {
     use std::fs;
-    use std::os::unix::fs::PermissionsExt;
 
     let temp_dir = tempfile::tempdir().expect("create post-swap test directory");
     let installed_binary = temp_dir.path().join("cas-new");
-    fs::write(
+    crate::test_paths::warm_stub(
         &installed_binary,
         "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$0.args\"\n",
-    )
-    .expect("write fake installed binary");
-    let mut permissions = fs::metadata(&installed_binary)
-        .expect("stat fake installed binary")
-        .permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(&installed_binary, permissions).expect("make fake binary executable");
+    );
 
     run_post_swap_hook(&installed_binary, "3.7.7", true)
         .expect("post-swap hook should run successfully");
@@ -525,13 +518,7 @@ fn post_swap_mode_is_a_terminal_update_path() {
 
 #[cfg(unix)]
 fn write_stub_binary(path: &Path, body: &str) {
-    use std::fs;
-    use std::os::unix::fs::PermissionsExt;
-
-    fs::write(path, body).expect("write stub binary");
-    let mut permissions = fs::metadata(path).expect("stat stub binary").permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(path, permissions).expect("make stub binary executable");
+    crate::test_paths::warm_stub(path, body);
 }
 
 #[cfg(unix)]

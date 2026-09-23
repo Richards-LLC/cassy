@@ -376,8 +376,6 @@ enum IsolatedCodexState {
 /// environment can reach it only when the whole service call runs in this
 /// child. The parent test process never mutates PATH.
 fn run_isolated_codex_test(child_test: &str, state: IsolatedCodexState) {
-    use std::os::unix::fs::PermissionsExt;
-
     let home = TempDir::new().expect("isolated Codex child HOME");
     let bin_dir = home.path().join(match state {
         IsolatedCodexState::Available => "fake-bin",
@@ -387,13 +385,7 @@ fn run_isolated_codex_test(child_test: &str, state: IsolatedCodexState) {
 
     if matches!(state, IsolatedCodexState::Available) {
         let codex = bin_dir.join("codex");
-        std::fs::write(&codex, "#!/bin/sh\nprintf 'codex-cli 0.0.0-test\\n'\n")
-            .expect("write fake codex executable");
-        let mut permissions = std::fs::metadata(&codex)
-            .expect("stat fake codex executable")
-            .permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&codex, permissions).expect("chmod fake codex executable");
+        cas::test_paths::warm_stub(&codex, "#!/bin/sh\nprintf 'codex-cli 0.0.0-test\\n'\n");
 
         let auth = home.path().join(".codex/auth.json");
         std::fs::create_dir_all(auth.parent().expect("auth parent"))

@@ -1185,7 +1185,6 @@ mod tests {
     fn ai_session_start_telemeters_selected_memory_ids() {
         use cas_store::{RuleStore, SqliteRetrievalStore, SqliteRuleStore, Store};
         use rusqlite::Connection;
-        use std::os::unix::fs::PermissionsExt;
 
         let temp = tempfile::tempdir().unwrap();
         let store = crate::store::SqliteStore::open(temp.path()).unwrap();
@@ -1203,12 +1202,10 @@ mod tests {
 
         let fake_bin = tempfile::tempdir().unwrap();
         let claude = fake_bin.path().join("claude");
-        std::fs::write(
+        crate::test_paths::warm_stub(
             &claude,
             "#!/bin/sh\nprintf '%s' '{\"selected\": [\"ai-session-memory\"]}'\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         let original_path = std::env::var_os("PATH").unwrap_or_default();
         let path = format!(
             "{}:{}",

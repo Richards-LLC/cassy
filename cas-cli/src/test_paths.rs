@@ -6,6 +6,93 @@
 
 use std::path::{Path, PathBuf};
 
+/// Install a shell test double at `path` after its first macOS launch has
+/// completed outside the command-under-test's deadline. Nextest runs tests in
+/// separate processes, so the content-addressed target and ready marker live
+/// beside the test executable and are shared across those processes.
+#[cfg(unix)]
+pub fn warm_stub(path: &Path, script: &str) {
+    use fs2::FileExt;
+    use sha2::{Digest, Sha256};
+    use std::fs::{self, OpenOptions};
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    use std::process::Command;
+
+    let (shebang, body) = script
+        .split_once('\n')
+        .expect("shell stub must have a shebang and body");
+    assert!(shebang.starts_with("#!"), "shell stub needs a shebang");
+    let digest = hex::encode(Sha256::digest(script.as_bytes()));
+    let cache = std::env::current_exe()
+        .expect("test executable")
+        .parent()
+        .expect("test executable directory")
+        .join("warm-test-stubs");
+    fs::create_dir_all(&cache).expect("stub cache directory");
+    let shared = cache.join(format!("{digest}.sh"));
+    let ready = cache.join(format!("{digest}.ready"));
+    let lock = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(cache.join(format!("{digest}.lock")))
+        .expect("stub cache lock");
+    lock.lock_exclusive().expect("lock stub cache");
+    if !shared.exists() {
+        let staged = cache.join(format!("{digest}.{}.tmp", std::process::id()));
+        // The warm-up guard prevents commands in the fixture from recording
+        // calls, sleeping, or changing state during the assessment launch.
+        fs::write(
+            &staged,
+            format!("{shebang}\n[ \"${{CAS_TEST_STUB_WARMUP:-}}\" = 1 ] && exit 0\n{body}"),
+        )
+        .expect("write stub");
+        fs::set_permissions(&staged, fs::Permissions::from_mode(0o700))
+            .expect("make stub executable");
+        fs::rename(&staged, &shared).expect("publish stub");
+    }
+    if !ready.exists() {
+        let output = Command::new(&shared)
+            .env("CAS_TEST_STUB_WARMUP", "1")
+            .output()
+            .expect("launch stub warm-up");
+        assert!(output.status.success(), "stub warm-up failed: {output:?}");
+        fs::write(&ready, b"ready").expect("record warmed stub");
+    }
+    lock.unlock().expect("unlock stub cache");
+    if path.exists() || path.is_symlink() {
+        fs::remove_file(path).expect("replace test stub");
+    }
+    symlink(&shared, path).expect("link warmed test stub");
+}
+
+#[cfg(all(test, unix))]
+mod warm_stub_tests {
+    use super::warm_stub;
+    use std::fs;
+    use std::process::Command;
+
+    #[test]
+    fn warm_launch_is_side_effect_free_and_paths_share_an_assessed_target() {
+        let temp = tempfile::tempdir().unwrap();
+        let marker = temp.path().join("called");
+        let script = format!("#!/bin/sh\nprintf called >> '{}'\n", marker.display());
+        let first = temp.path().join("first");
+        let second = temp.path().join("second");
+        warm_stub(&first, &script);
+        assert!(!marker.exists(), "warm-up must not run fixture commands");
+        warm_stub(&second, &script);
+        assert_eq!(first.canonicalize().unwrap(), second.canonicalize().unwrap());
+        assert!(Command::new(&first).status().unwrap().success());
+        assert_eq!(fs::read_to_string(marker).unwrap(), "called");
+    }
+}
+
+#[cfg(not(unix))]
+pub fn warm_stub(path: &Path, script: &str) {
+    std::fs::write(path, script).expect("write test stub");
+}
+
 /// Create a private hub fixture beneath a canonical temporary directory.
 /// macOS commonly spells TMPDIR through /var, a symlink rejected by hub state.
 pub fn private_hub_tempdir() -> tempfile::TempDir {

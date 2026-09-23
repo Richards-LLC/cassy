@@ -59,12 +59,10 @@ pub(crate) fn cas_cmd(dir: &TempDir) -> Command {
 
 /// Replace the detached light-lane process with a local prompt recorder.
 pub(crate) fn install_fake_maintenance_runner(dir: &TempDir) {
-    use std::os::unix::fs::PermissionsExt;
     let bin = dir.path().join(".test-bin");
     std::fs::create_dir_all(&bin).unwrap();
     let executable = bin.join("codex");
-    std::fs::write(&executable, "#!/bin/sh\nprintf '%s\\n' \"$@\"\n").unwrap();
-    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+    cas::test_paths::warm_stub(&executable, "#!/bin/sh\nprintf '%s\\n' \"$@\"\n");
 }
 
 /// Check both the immediate Stop response and the detached job's recorded prompt.

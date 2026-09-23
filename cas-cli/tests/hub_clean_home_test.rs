@@ -15,47 +15,8 @@ use serde_json::Value;
 use tempfile::TempDir;
 
 #[cfg(unix)]
-fn install_tailscale_mock(home: &Path, path: &Path, script: &str) {
-    use fs2::FileExt;
-    use sha2::{Digest, Sha256};
-    use std::os::unix::fs::{PermissionsExt, symlink};
-
-    // Nextest starts each case in a separate process. Keep each script at one
-    // stable executable path across cases and runs, so macOS only assesses it
-    // once instead of assessing every freshly written HOME/bin/tailscale.
-    let cache = std::env::current_exe().unwrap().parent().unwrap().join("hub-mock-tailscale");
-    fs::create_dir_all(&cache).unwrap();
-    let digest = hex::encode(Sha256::digest(script.as_bytes()));
-    let shared = cache.join(format!("{digest}.sh"));
-    let ready = cache.join(format!("{digest}.ready"));
-    let lock = fs::OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .open(cache.join(format!("{digest}.lock")))
-        .unwrap();
-    lock.lock_exclusive().unwrap();
-    if !shared.exists() {
-        let staged = cache.join(format!("{digest}.{}.tmp", std::process::id()));
-        fs::write(&staged, script).unwrap();
-        fs::set_permissions(&staged, fs::Permissions::from_mode(0o700)).unwrap();
-        fs::rename(&staged, &shared).unwrap();
-    }
-    if !ready.exists() {
-        // The first launch can wait in macOS dyld for several seconds under
-        // process load. Warm that assessment before the product's bounded
-        // Tailscale command is exercised.
-        let output = std::process::Command::new(&shared)
-            .args(["status", "--json"])
-            .env_clear()
-            .env("HOME", home)
-            .output()
-            .unwrap();
-        assert!(output.status.success(), "mock prewarm failed: {output:?}");
-        fs::write(&ready, b"ready").unwrap();
-    }
-    lock.unlock().unwrap();
-    symlink(&shared, path).unwrap();
+fn install_tailscale_mock(_home: &Path, path: &Path, script: &str) {
+    cas::test_paths::warm_stub(path, script);
 }
 
 fn cas_command(home: &Path, path: &OsStr) -> Command {

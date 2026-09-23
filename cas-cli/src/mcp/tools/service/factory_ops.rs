@@ -15797,12 +15797,8 @@ effort = "high"
 
     #[cfg(unix)]
     fn write_gh_stub(dir: &std::path::Path, script: &str) -> std::path::PathBuf {
-        use std::os::unix::fs::PermissionsExt;
-
         let path = dir.join("gh-stub");
-        std::fs::write(&path, script).expect("write gh stub");
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
-            .expect("make gh stub executable");
+        crate::test_paths::warm_stub(&path, script);
         path
     }
 

@@ -1180,7 +1180,6 @@ fn test_knowledge_search_and_read_round_trip() {
 #[cfg(unix)]
 #[test]
 fn knowledge_build_timeout_returns_nonzero_and_does_not_start_another_call() {
-    use std::os::unix::fs::PermissionsExt;
 
     let temp = TempDir::new().unwrap();
     cas_cmd(temp.path())
@@ -1192,15 +1191,13 @@ fn knowledge_build_timeout_returns_nonzero_and_does_not_start_another_call() {
     std::fs::write(temp.path().join("README.md"), "# Slow source\n\ncontent\n").unwrap();
     let provider = temp.path().join("provider");
     let calls = temp.path().join("provider-calls");
-    std::fs::write(
+    cas::test_paths::warm_stub(
         &provider,
-        format!(
+        &format!(
             "#!/bin/sh\nprintf call >> '{}'\nsleep 30\n",
             calls.display()
         ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&provider, std::fs::Permissions::from_mode(0o755)).unwrap();
+    );
 
     let output = cas_cmd(temp.path())
         .current_dir(&temp)
@@ -1235,7 +1232,6 @@ fn knowledge_build_timeout_returns_nonzero_and_does_not_start_another_call() {
 #[cfg(unix)]
 #[test]
 fn knowledge_build_verbose_and_status_full_explain_a_failed_source() {
-    use std::os::unix::fs::PermissionsExt;
 
     let temp = TempDir::new().unwrap();
     cas_cmd(temp.path())
@@ -1250,12 +1246,10 @@ fn knowledge_build_verbose_and_status_full_explain_a_failed_source() {
     )
     .unwrap();
     let provider = temp.path().join("provider");
-    std::fs::write(
+    cas::test_paths::warm_stub(
         &provider,
         "#!/bin/sh\ncat >/dev/null\nprintf 'provider refused this source\\n' >&2\nexit 7\n",
-    )
-    .unwrap();
-    std::fs::set_permissions(&provider, std::fs::Permissions::from_mode(0o755)).unwrap();
+    );
 
     let build = cas_cmd(temp.path())
         .current_dir(&temp)

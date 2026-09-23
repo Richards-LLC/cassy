@@ -92,18 +92,14 @@ fn server_stop_reaps_script_wrapped_cas_factory_descendants() {
     let bin = temp.path().join("bin");
     std::fs::create_dir_all(&bin).unwrap();
     let fake_cas = bin.join("cas");
-    std::fs::write(
+    crate::test_paths::warm_stub(
         &fake_cas,
         "#!/bin/sh\n\
          test \"$1 $2 $3 $4\" = \"factory --new -n cas-44d2-proof\" || exit 64\n\
          trap '' HUP TERM\n\
          printf '%s' \"$$\" > \"$CAS_44D2_CHILD_PID\"\n\
          while :; do sleep 300; done\n",
-    )
-    .unwrap();
-    let mut permissions = std::fs::metadata(&fake_cas).unwrap().permissions();
-    permissions.set_mode(0o755);
-    std::fs::set_permissions(&fake_cas, permissions).unwrap();
+    );
 
     let child_pid_file = temp.path().join("cas-factory.pid");
     let transcript = temp.path().join("typescript");

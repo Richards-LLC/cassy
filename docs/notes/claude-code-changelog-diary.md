@@ -29,10 +29,10 @@ When a new Claude Code version ships:
    Codex**. Follow [the release Slack rubric](../RELEASE_SLACK_RUBRIC.md), including
    its version-range, verdict/action, source-gap, and no-internal-narration rules.
 
-**Verdict legend**
+### Verdict legend
 
 | Verdict | Meaning |
-|---------|---------|
+| --------- | --------- |
 | ✅ no action | Reviewed; Cassy unaffected or already insulated |
 | 🟢 already covered | Cassy already does the equivalent on its own surface |
 | 👀 opportunity | Not required, but a cleaner path Cassy could adopt — tracked, not urgent |
@@ -43,7 +43,42 @@ When a new Claude Code version ships:
 ## Index
 
 | CC version | Headline | Cassy verdict | Pointer |
-|------------|----------|-------------|---------|
+| ------------ | ---------- | ------------- | --------- |
+| 2.1.280 | Opus 5.5 default · MCP description cap · hook telemetry · subagent/message reliability | 🟢 / ✅ | this doc |
+| 2.1.279 | No section in Anthropic's official changelog | ⏭ source gap | this doc |
+| 2.1.278 | Server-side auto-mode classifier default | ✅ no action | this doc |
+| 2.1.277 | AGENTS.md support · headless/MCP/plugin reliability | 🟢 / ✅ | this doc |
+| 2.1.276 | Proxy/gateway advisor-tag regression fix | ✅ no action | this doc |
+| 2.1.275 | Account gateway sign-in · send-now · account skill/plugin sync | ✅ no action | this doc |
+| 2.1.274 | MCP startup/protocol negotiation · managed-settings telemetry | 🟢 / ✅ | this doc |
+| 2.1.273 | MCP disconnect diagnostics · gateway hints · subagent delivery | 🟢 / ✅ | this doc |
+| 2.1.272 | Generic bug-fix and reliability rollup | ⏭ source-limited | this doc |
+| 2.1.271 | Remote fast mode · MCP progress · hook feedback | 🟢 / ✅ | this doc |
+| 2.1.270 | Read-only Bash git permission regression fix | ✅ no action | this doc |
+| 2.1.269 | Plugin eval · workflow concurrency · repository OTEL metrics | ✅ no action | this doc |
+| 2.1.268 | Managed MCP · task-tool gating · MCP/path hardening | 🟢 / ✅ | this doc |
+| 2.1.267 | MCP/tool-list prompt-cache stability · managed policy fixes | 🟢 / ✅ | this doc |
+| 2.1.266 | Gateway environment-variable regression repair | ✅ no action | this doc |
+| 2.1.265 | Plugin directories · MCP legacy SSE · subagent resume correctness | 🟢 / ✅ | this doc |
+| 2.1.264 | No section in Anthropic's official changelog | ⏭ source gap | this doc |
+| 2.1.263 | Generic bug-fix and reliability rollup | ⏭ source-limited | this doc |
+| 2.1.262 | No section in Anthropic's official changelog | ⏭ source gap | this doc |
+| 2.1.261 | SendMessage offline delivery · MCP/tool-output settings | 🟢 / ✅ | this doc |
+| 2.1.260 | Permission/path safety · agent-team transcript/message fixes | 🟢 / ✅ | this doc |
+| 2.1.259 | Managed MCP · cross-session messaging · worktree isolation | 🟢 / ✅ | this doc |
+| 2.1.258 | macOS launch and remote-session message fixes | ✅ no action | this doc |
+| 2.1.257 | Fable 5.1 default · subagent model controls · MCP policy | 🟢 / ✅ | this doc |
+| 2.1.256 | No section in Anthropic's official changelog | ⏭ source gap | this doc |
+| 2.1.255 | No section in Anthropic's official changelog | ⏭ source gap | this doc |
+| 2.1.254 | No section in Anthropic's official changelog | ⏭ source gap | this doc |
+| 2.1.253 | No section in Anthropic's official changelog | ⏭ source gap | this doc |
+| 2.1.252 | Bash output, project permissions, Remote Control reliability | ✅ no action | this doc |
+| 2.1.251 | Model-switch hooks · agent streaming · SendMessage/MCP fixes | 🟢 / ✅ | this doc |
+| 2.1.250 | Generic bug-fix and reliability rollup | ⏭ source-limited | this doc |
+| 2.1.249 | No section in Anthropic's official changelog | ⏭ source gap | this doc |
+| 2.1.248 | Restricted mode · cross-session messaging · MCP diagnostics | 🟢 / ✅ | this doc |
+| 2.1.247 | Hook/background output limits · runner/message reliability | 🟢 / ✅ | this doc |
+| 2.1.246 | MCP interruption/arguments · hook and runner hardening | 🟢 / ✅ | this doc |
 | 2.1.245 | Linux glibc 2.44 startup crash | ✅ no action | this doc |
 | 2.1.244 | No section in Anthropic's official changelog | ⏭ source gap | this doc |
 | 2.1.243 | MCP reconnect · hook matcher · background/session diagnostics | 🟢 / ✅ | this doc |
@@ -120,6 +155,250 @@ When a new Claude Code version ships:
 ---
 
 ## Entries
+
+### 2.1.280 — Opus 5.5 default · MCP description cap · hook telemetry · subagent/message reliability
+
+Reviewed 2026-09-23. Source: [Anthropic's official changelog](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md#21280).
+
+- **Claude Opus 5.5 (`claude-opus-5-5`) became the default Opus model, with a 1M context window and new pricing.** → 🟢 **already covered.** Model availability and lane-placement drift are recorded for the active Cassy task `cas-8505` (model-lane refresh); that task owns the evidence brief, while this diary does not change the registry.
+- **MCP descriptions can use a configurable length cap, hook completion telemetry includes output sizes, and symlinked writes are checked by their landing path.** → 🟢 / ✅ **already covered / no action.** Cassy's MCP server, hook routing, and factory path guard remain Cassy-owned (`cas-cli/src/mcp/`, `.claude/settings.json`, and `cas-cli/src/factory_isolation.rs`); these host-side controls add no new Cassy contract.
+- **Background subagent messages/reports, resumed transcripts, MCP reconnects, and malformed settings/transcripts are handled more reliably.** → 🟢 **lifecycle win.** Cassy's durable coordination queues, task leases, transcript records, and PTY/worktree ownership remain authoritative; no Cassy change follows.
+- **Fullscreen controls, dialogs, plugins, artifacts, cloud sessions, VS Code, Claude Tag, and Code Review receive UI/reliability fixes.** → ⏭ **n/a.** These are outside Cassy surfaces.
+
+### 2.1.279 — official changelog source gap
+
+Reviewed 2026-09-23. Source: [Anthropic's official changelog](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md).
+
+- The official changelog has no **2.1.279** section between 2.1.280 and 2.1.278. → ⏭ **source gap.** No release item or Cassy verdict is invented.
+
+### 2.1.278 — server-side auto-mode classifier default
+
+Reviewed 2026-09-23. Source: [Anthropic's official changelog](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md#21278).
+
+- **Auto mode defaults to the server-side classifier for Claude API/Enterprise and Bedrock, Vertex, Foundry, and gateway users; `/status` reports the classifier location.** → ✅ **no action.** Cassy's hook and factory policy gates remain independent of Claude Code's classifier and do not infer approval from this status row.
+
+### 2.1.277 — AGENTS.md support · headless/MCP/plugin reliability
+
+Reviewed 2026-09-23. Source: [Anthropic's official changelog](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md#21277).
+
+- **Projects without `CLAUDE.md` now read `AGENTS.md`; gateway proxy headers/egress controls and background-task notices were added.** → 🟢 / ✅ **already covered / no action.** This repository already carries the generated `AGENTS.md` surface, and Cassy's own agent mirrors and coordination messages remain separate from host instruction discovery.
+- **Headless/SDK hangs, malformed transcripts/settings, MCP/plugin installs, Grep/Glob errors, and background-session crashes are repaired.** → 🟢 **host reliability win.** Cassy consumes the host through its PTY and MCP boundary, so no runtime or task-contract change is indicated.
+- **VS Code, web, Claude Tag, and UI rendering fixes are outside Cassy.** → ⏭ **n/a.**
+
+### 2.1.276 — proxy/gateway advisor-tag regression repair
+
+Reviewed 2026-09-23. Source: [Anthropic's official changelog](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md#21276).
+
+- **Requests through `ANTHROPIC_BASE_URL` proxies no longer fail because of the unsupported `advisor_20260301` input tag introduced in 2.1.275.** → ✅ **no action.** Cassy's gateway and MCP dispatch do not construct Claude advisor request tags.
+
+### 2.1.275 — account gateway sign-in · send-now · account skill/plugin sync
+
+Reviewed 2026-09-23. Source: [Anthropic's official changelog](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md#21275).
+
+- **Gateway sign-in now confirms the named account; queued prompts can be sent immediately; account skills/plugins can sync into terminal sessions.** → ✅ **no action.** Cassy uses its own authenticated coordination and checked-in skill-sync surfaces; host account sync does not alter Cassy's task, hook, or worker contracts.
+- **Forked subagent text, background notices, resumed transcripts, MCP reconnects, hook matching, and sandboxed output handling are repaired.** → 🟢 **already covered.** Cassy's durable queue/lease evidence and path guards remain authoritative around the host's improved delivery and safety behavior.
+- **Plugin marketplace, artifact, VS Code, web, and cloud UI changes are outside Cassy.** → ⏭ **n/a.**
+
+### 2.1.274 — MCP startup/protocol negotiation · managed-settings telemetry
+
+Reviewed 2026-09-23. Source: [Anthropic's official changelog](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md#21274).
+
+- **Non-interactive MCP startup can be bounded; MCP reconnects, legacy HTTP+SSE, list-change notifications, OAuth scope errors, and tool-call timeouts are clearer or more reliable.** → 🟢 **already covered.** Cassy's local `cas serve` owns its stdio server lifecycle and uses its own dispatch/runtime health; the host's remote MCP behavior does not change `mcp__cs__*`.
+- **Managed-settings and OpenTelemetry events gain diagnostics; Bedrock, Vertex, Foundry, runner, hook, and transcript handling improve.** → ✅ **no action.** These are host/provider observability and lifecycle changes, not Cassy's task or verification records.
+- **VS Code, artifact, web, Slack, and Code Review changes are outside Cassy.** → ⏭ **n/a.**
+
+### 2.1.273 — MCP disconnect diagnostics · gateway hints · subagent delivery
+
+Reviewed 2026-09-23. Source: [Anthropic's official changelog](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md#21273).
+
+- **Gateway hint headers and an MCP disconnect/reconnect notification were added; MCP sign-in errors and provider login guidance improved.** → 🟢 **already covered / ✅ no action.** Cassy's stdio MCP server and coordination health are independently tracked; no new protocol or config is required.
+- **Subagent/background result delivery, hooks, memory isolation, worktree/path checks, and long-session responsiveness were hardened.** → 🟢 **lifecycle win.** Cassy's queues, transcript evidence, and factory isolation remain the source of truth.
+- **Cloud, VS Code, Claude Tag, and Code Review items are outside Cassy.** → ⏭ **n/a.**
+
+### 2.1.272 — generic bug-fix and reliability rollup
+
+Reviewed 2026-09-23. Source: [Anthropic's official changelog](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md#21272).
+
+- Anthropic publishes only **“Bug fixes and reliability improvements”**, with no affected component or behavior named. → ⏭ **source-limited.** There is no evidence to attribute a change to Cassy's hooks, MCP server, PTY, factory, or verifier surfaces.
+
+### 2.1.271 — remote fast mode · MCP progress · hook feedback
+
+Reviewed 2026-09-23. Source: [Anthropic's official changelog](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md#21271).
+
+- **Remote sessions gain fast mode, Bash allowed domains, hook feedback, and bounded runner drain behavior; `claude mcp serve` sends progress while a tool call runs.** → 🟢 / ✅ **already covered / no action.** Cassy's PTY and MCP runtime retain their own timeouts, progress, and worker leases; host fast-mode policy is not Cassy's lane or verification policy.
+- **MCP reconnect, cross-session delivery, worktree isolation, skill cleanup, and background-session fixes improve host reliability.** → 🟢 **lifecycle win.** No Cassy protocol or coordination change follows.
+- **UI, artifact, web, Slack, and Code Review items are outside Cassy.** → ⏭ **n/a.**
+
+### 2.1.270 — read-only Bash git permission regression repair
+
+Reviewed 2026-09-23. Source: [Anthropic's official changelog](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md#21270).
+
+- **Read-only git commands in Bash no longer unexpectedly prompt after a long session.** → ✅ **no action.** Cassy's factory path/command guards and task verification do not depend on this host permission-cache behavior.
+
+### 2.1.269 — plugin eval · workflow concurrency · repository OTEL metrics
+
+Reviewed 2026-09-23. Source: [Anthropic's official changelog](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md#21269).
+
+- **Plugin evaluation, output styles, Bash edit diffs, repository-tagged OTEL metrics, gateway model-discovery timeout, and workflow concurrency controls were added.** → ✅ **no action.** Cassy has its own skill/plugin sync, factory concurrency, lane registry, and durable verification metrics; the host features do not replace them.
+- **Prompt caching, MCP reconnects, sandbox/path checks, background-agent delivery, and headless/VS Code reliability were repaired.** → 🟢 **already covered / lifecycle win.** Cassy's queue, transcript, and worktree records remain authoritative.
+- **Cloud, Slack, and Code Review changes are outside Cassy.** → ⏭ **n/a.**
+
+### 2.1.268 — managed MCP · task-tool gating · MCP/path hardening
+
+Reviewed 2026-09-23. Source: [Anthropic's official changelog](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md#21268).
+
+- **Managed MCP servers, JSON plugin commands, MCP secret redaction, OAuth recovery, and server/tool diagnostics were added or repaired.** → 🟢 / ✅ **already covered / no action.** Cassy's `cas serve` and `mcp__cs__*` tools have their own registration, credentials, and dispatch contracts.
+- **Native Task tools are limited to selected Claude models; symlinked permission checks, worktree safety, runner sessions, and plugin paths were hardened.** → 🟢 **already covered.** Cassy uses its own CAS task tool and factory isolation, so host-native task availability does not change worker lifecycle.
+- **Provider, UI, artifact, web, Slack, and Code Review items are outside Cassy.** → ⏭ **n/a.**
+
+### 2.1.267 — MCP/tool-list prompt-cache stability · managed policy fixes
+
+Reviewed 2026-09-23. Source: [Anthropic's official changelog](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md#21267).
+
+- **MCP/plugin tools, resumed sessions, subagents, and connector changes no longer rewrite tool lists or discard earlier reasoning; managed hook/MCP policy parsing is safer.** → 🟢 **already covered / no action.** Cassy's MCP dispatch and durable coordination state do not rely on Claude's prompt-cache representation.
+- **`maxEffortLevel`, workflow schema checks, runner registration, and provider/session fixes were added.** → ✅ **no action.** Effort and lane placement remain Cassy registry concerns tracked by `cas-8505`; this release does not require a code change here.
+- **UI, cloud, Slack, and Code Review items are outside Cassy.** → ⏭ **n/a.**
+
+### 2.1.266 — gateway environment-variable regression repair
+
+Reviewed 2026-09-23. Source: [Anthropic's official changelog](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md#21266).
+
+- **`CLAUDE_CODE_USE_GATEWAY` no longer forces Cloud-gateway sign-in when used alone with custom API-key or gateway configuration.** → ✅ **no action.** Cassy's worker launch environment does not delegate authentication policy to this Claude variable.
+
+### 2.1.265 — plugin directories · MCP legacy SSE · subagent resume correctness
+
+Reviewed 2026-09-23. Source: [Anthropic's official changelog](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md#21265).
+
+- **Plugin directories, MCP legacy HTTP+SSE fallback, tool-result limits, OAuth, and MCP/server diagnostics were added or repaired.** → 🟢 **already covered / ✅ no action.** Cassy's MCP runtime is local stdio and its tool results, credentials, and dispatch are independently bounded.
+- **Subagent resume, `SubagentStart` hook context, worktree/path containment, settings reload, and Remote Control delivery were repaired.** → 🟢 **host lifecycle win.** Cassy's hook mirror and worker lease/queue records remain authoritative.
+- **VS Code and artifact changes are outside Cassy.** → ⏭ **n/a.**
+
+### 2.1.264 — official changelog source gap
+
+Reviewed 2026-09-23. Source: [Anthropic's official changelog](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md).
+
+- The official changelog has no **2.1.264** section between 2.1.265 and 2.1.263. → ⏭ **source gap.** No release item or Cassy verdict is invented.
+
+### 2.1.263 — generic bug-fix and reliability rollup
+
+Reviewed 2026-09-23. Source: [Anthropic's official changelog](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md#21263).
+
+- Anthropic publishes only **“Bug fixes and reliability improvements”**, with no affected component or behavior named. → ⏭ **source-limited.** There is no evidence to attribute a change to Cassy's hooks, MCP server, PTY, factory, or verifier surfaces.
+
+### 2.1.262 — official changelog source gap
+
+Reviewed 2026-09-23. Source: [Anthropic's official changelog](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md).
+
+- The official changelog has no **2.1.262** section between 2.1.263 and 2.1.261. → ⏭ **source gap.** No release item or Cassy verdict is invented.
+
+### 2.1.261 — SendMessage offline delivery · MCP/tool-output settings
+
+Reviewed 2026-09-23. Source: [Anthropic's official changelog](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md#21261).
+
+- **Offline Remote Control `SendMessage` now reports queued delivery, while output caps, policy diagnostics, and MCP reconnect/tool-list behavior improve.** → 🟢 / ✅ **already covered / no action.** Cassy's coordination queue already distinguishes durable enqueue/acknowledgment from receipt, and `cas serve` owns its MCP lifecycle.
+- **Hook output, agent-team messages, background workflows, worktree checks, and runner liveness were repaired.** → 🟢 **lifecycle win.** Cassy's worker leases, transcript evidence, and factory isolation remain independent.
+- **VS Code, provider, cloud, and artifact changes are outside Cassy.** → ⏭ **n/a.**
+
+### 2.1.260 — permission/path safety · agent-team transcript/message fixes
+
+Reviewed 2026-09-23. Source: [Anthropic's official changelog](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md#21260).
+
+- **Permission-rule path handling, worktree-isolated reads, and MCP/tool availability were hardened; agent-team transcripts and `SendMessage` wakeups were repaired.** → 🟢 **already covered.** Cassy independently checks factory paths and uses durable coordination queues; host fixes reduce adjacent false positives without changing Cassy's contract.
+- **The fullscreen diff/cost UI, gateway settings, self-hosted runner, model picker, and Fable 5.1 handling are host/provider features.** → ✅ **no action.** Model availability remains recorded by the lane-rubric work (`cas-8505`).
+
+### 2.1.259 — managed MCP · cross-session messaging · worktree isolation
+
+Reviewed 2026-09-23. Source: [Anthropic's official changelog](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md#21259).
+
+- **Managed HTTP/SSE MCP servers, cross-session policy, MCP disconnect diagnostics, and headless/subagent delivery were improved.** → 🟢 **already covered.** Cassy uses its own `mcp__cs__*` server and durable coordination queue; host cross-session messaging does not replace CAS task ownership.
+- **Worktree isolation, managed-settings parsing, stop/restart behavior, and plugin containment were hardened.** → 🟢 **already covered.** Cassy's factory worktree and PreToolUse guards remain separate defense in depth.
+- **VS Code and cloud UI items are outside Cassy.** → ⏭ **n/a.**
+
+### 2.1.258 — macOS launch and remote-session message fixes
+
+Reviewed 2026-09-23. Source: [Anthropic's official changelog](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md#21258).
+
+- **A macOS 12 launch regression and empty-content errors after re-sent permission approvals were fixed.** → ✅ **no action.** Cassy’s PTY launch support and task/verification flow do not depend on this host-specific regression.
+
+### 2.1.257 — Fable 5.1 default · subagent model controls · MCP policy
+
+Reviewed 2026-09-23. Source: [Anthropic's official changelog](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md#21257).
+
+- **Claude Fable 5.1 (`claude-fable-5-1`) became the default Fable model with a 1M context window; gateway model discovery and subagent model controls were added.** → 🟢 **already covered.** Fable 5.1 placement is already shipped in the lane registry (`cas-bddf`), and the current measurement/rubric refresh (`cas-8505`) records model availability and any drift; no duplicate task or diary-side registry edit is needed.
+- **MCP allow/deny behavior, hook/permission checks, worktree isolation, agent-team messaging, and runner/session recovery were hardened.** → 🟢 **already covered / ✅ no action.** Cassy's own task queue, hook mirror, and factory guards remain authoritative.
+- **UI, artifact, cloud, provider, Slack, and Code Review changes are outside Cassy.** → ⏭ **n/a.**
+
+### 2.1.256 — official changelog source gap
+
+Reviewed 2026-09-23. Source: [Anthropic's official changelog](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md).
+
+- The official changelog has no **2.1.256** section between 2.1.257 and 2.1.255. → ⏭ **source gap.** No release item or Cassy verdict is invented.
+
+### 2.1.255 — official changelog source gap
+
+Reviewed 2026-09-23. Source: [Anthropic's official changelog](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md).
+
+- The official changelog has no **2.1.255** section between 2.1.257 and 2.1.254. → ⏭ **source gap.** No release item or Cassy verdict is invented.
+
+### 2.1.254 — official changelog source gap
+
+Reviewed 2026-09-23. Source: [Anthropic's official changelog](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md).
+
+- The official changelog has no **2.1.254** section between 2.1.255 and 2.1.253. → ⏭ **source gap.** No release item or Cassy verdict is invented.
+
+### 2.1.253 — official changelog source gap
+
+Reviewed 2026-09-23. Source: [Anthropic's official changelog](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md).
+
+- The official changelog has no **2.1.253** section between 2.1.254 and 2.1.252. → ⏭ **source gap.** No release item or Cassy verdict is invented.
+
+### 2.1.252 — Bash output, project permissions, Remote Control reliability
+
+Reviewed 2026-09-23. Source: [Anthropic's official changelog](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md#21252).
+
+- **Bash output swapping, project-level “always allow” persistence, Remote Control stalls, and oversized background-task notifications were fixed.** → ✅ **no action.** Cassy's task evidence and worker coordination do not use Claude's background output swap or Remote Control notification path.
+
+### 2.1.251 — model-switch hooks · agent streaming · SendMessage/MCP fixes
+
+Reviewed 2026-09-23. Source: [Anthropic's official changelog](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md#21251).
+
+- **`PreModelSwitch`/`PostModelSwitch` hooks, Opus 5 as the seat-based Enterprise default, prompt-cache reporting, and foreground-agent streaming were added.** → 🟢 / ✅ **already covered / no action.** Model availability and placement are tracked by `cas-8505`; Cassy's hook/task contracts are independent of host model-switch events.
+- **Symlink/path permissions, `SendMessage` delivery, agent-team final messages, MCP handshake timeouts, and runner cleanup were repaired.** → 🟢 **lifecycle win.** Cassy's queue, lease, and factory isolation records remain authoritative.
+- **UI, provider, cloud, Slack, and Code Review items are outside Cassy.** → ⏭ **n/a.**
+
+### 2.1.250 — generic bug-fix and reliability rollup
+
+Reviewed 2026-09-23. Source: [Anthropic's official changelog](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md#21250).
+
+- Anthropic publishes only **“Bug fixes and reliability improvements”**, with no affected component or behavior named. → ⏭ **source-limited.** There is no evidence to attribute a change to Cassy's hooks, MCP server, PTY, factory, or verifier surfaces.
+
+### 2.1.249 — official changelog source gap
+
+Reviewed 2026-09-23. Source: [Anthropic's official changelog](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md).
+
+- The official changelog has no **2.1.249** section between 2.1.250 and 2.1.248. → ⏭ **source gap.** No release item or Cassy verdict is invented.
+
+### 2.1.248 — restricted mode · cross-session messaging · MCP diagnostics
+
+Reviewed 2026-09-23. Source: [Anthropic's official changelog](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md#21248).
+
+- **`--restricted`, managed-settings diagnostics, cross-session `SendMessage`/`ListAgents`, and MCP authentication/configuration diagnostics were added or improved.** → 🟢 **already covered.** Cassy has its own typed task/coordination permissions and queue, and its MCP server registration remains independent of host cross-session messaging.
+- **Worktree locks, hook errors, session cleanup, provider auth, and cloud/UI features were repaired.** → 🟢 / ✅ **already covered / no action.** Cassy's factory isolation and worker leases provide separate safeguards; no code change follows.
+
+### 2.1.247 — hook/background output limits · runner/message reliability
+
+Reviewed 2026-09-23. Source: [Anthropic's official changelog](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md#21247).
+
+- **Hook/background output can no longer wedge a session; subagent fallback and runner readiness/reporting are clearer; cross-session messages collapse safely.** → 🟢 **already covered / lifecycle win.** Cassy's verifier evidence, task notes, queue acknowledgments, and factory lifecycle are independently durable.
+- **Provider auth, plugin marketplace, Remote Control, cloud, and terminal UI fixes are outside Cassy.** → ⏭ **n/a.**
+
+### 2.1.246 — MCP interruption/arguments · hook and runner hardening
+
+Reviewed 2026-09-23. Source: [Anthropic's official changelog](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md#21246).
+
+- **Headless/remote MCP interruptions now report an explicit error; empty-schema arguments retain their real type; `Notification` hooks and strict MCP startup behavior are repaired.** → 🟢 **already covered / ✅ no action.** Cassy's MCP dispatch, hook routing, and verification records are Cassy-owned and do not depend on Claude's host-side transcript wording.
+- **Background/session startup, worktree retention, dynamic workflow, plugin, runner polling, and Remote Control reliability were improved.** → 🟢 **lifecycle win.** Cassy's PTY/worktree manager and coordination leases remain authoritative.
+- **UI, cloud, provider, artifact, and Code Review items are outside Cassy.** → ⏭ **n/a.**
 
 ### 2.1.245 — Linux glibc 2.44 startup crash
 

@@ -7,6 +7,54 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.29.0] - 2026-09-23
+
+### Fixed
+
+- `cas update` now leaves the Commander hub running and verified, whatever
+  state it was in before. A hub from an older version that has stopped
+  answering, is stuck starting, or has died and left its lock or Tailscale
+  route behind is stopped, restarted on the new binary with the same
+  Tailscale setting, and checked. The checks cover the lock, the local
+  health check, the Tailscale route and the public URL. If the check fails,
+  evidence is saved under `~/.cas/hub/` and one recovery is tried. A healthy
+  hub that is already current is only checked, so an update no longer drops
+  Commander. If only the public URL cannot be reached (for example with
+  MagicDNS off), the hub is reported healthy with a warning.
+- On macOS, `cas update` and `cas hub restart --tailscale-serve` now update a
+  hub service that was installed without Tailscale, instead of refusing, as
+  Linux already did. The service takes over a hand-started hub safely,
+  including a stuck one from an older version, and names every lock holder
+  when it refuses. The service can now find the Homebrew `tailscale` command.
+- `cas hub status`, `cas hub authorize` and `cas hub stop` now report the
+  hub's real state: stopped, starting, stuck starting, shutting down, alive
+  but not answering, or running. Each state comes with the matching fix.
+  Previously a live hub that had stopped answering was reported as exited.
+- A forced hub restart or stop no longer leaves a Tailscale Serve route
+  pointing at a dead port. The next start reclaims a dead Cassy route left
+  by an older version, and routes set up by anyone else are never touched.
+- A hub started with `--tailscale-serve` now gets enough time to finish its
+  Tailscale setup and reports "starting" instead of failing early.
+- On macOS, `cas update` removes the download quarantine flag from the new
+  binary and records how long its first launch took.
+- On macOS, a worker that is still running is no longer cleaned up as dead,
+  and `cas factory kill` checks the process identity before stopping it.
+- On macOS, image generation, technical drawing and background maintenance
+  jobs work with the stock system tools (Bash 3, BSD `base64`, and no `flock`
+  or `timeout`).
+- On macOS, supervisor memory writes and release-worktree discovery work
+  under the `/var` → `/private/var` path alias.
+- A merged task's delivery record no longer moves when its worker reuses the
+  branch for its next task.
+- Closing a task no longer rejects a passing proof note because a test name
+  contains "failure", or because it uses a short commit ID.
+
+### Added
+
+- A supervisor can close a task whose scoped test run fails only on tests
+  that already fail at the base commit. Both runs must use the same command,
+  and the decision is recorded on the task.
+
 ## [3.28.2] - 2026-09-23
 
 ### Added

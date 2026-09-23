@@ -2866,7 +2866,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(report.login_profile, WriteState::Written);
-        assert_eq!(report.login_profile_path, Some(profile_target.clone()));
+        assert_eq!(report.login_profile_path, Some(profile_target.canonicalize().unwrap()));
         let written = std::fs::read_to_string(profile_target).unwrap();
         assert!(written.contains(&profile_source_line(&paths.credentials_file)));
     }

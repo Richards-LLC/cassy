@@ -1169,6 +1169,7 @@ pub(crate) fn execute_is_wedged(cas_root: Option<&Path>, worker: &str, json: boo
             process_cpu_busy,
             pending_permission,
         );
+        let fallback = unverified_death_without_identity(fallback, resolved_pid);
         let opencode_observation = if w.cli == cas_mux::SupervisorCli::OpenCode {
             opencode_liveness::observe(
                 cas_root,
@@ -1292,8 +1293,8 @@ pub(crate) trait ProcessTable {
 
 /// Live `/proc` implementation. Linux-only, matching the existing
 /// `read_pid_starttime` / fingerprint-guard gating in `daemon.rs` — other
-/// platforms get an empty table and [`find_worker_pid`] always falls back
-/// to the tracked pid.
+/// platforms get an empty table. Their missing matches are unknown, so
+/// automatic cleanup and kill cannot treat a tracked PID as worker identity.
 pub(crate) struct RealProcessTable;
 
 impl ProcessTable for RealProcessTable {
@@ -1717,6 +1718,34 @@ pub(crate) fn pick_kill_pid(tracked_pid: Option<u32>, resolved_pid: Option<u32>)
     resolved_pid.or(tracked_pid)
 }
 
+fn kill_identity_is_verified(resolved_pid: Option<u32>) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        let _ = resolved_pid;
+        true // Existing tracked-PID fingerprint checks remain in force.
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        resolved_pid.is_some()
+    }
+}
+
+/// A tracked PID can belong to an MCP child or a recycled process. Without a
+/// process-table identity match, its absence does not prove worker death on
+/// platforms where the identity scan is unavailable.
+fn unverified_death_without_identity(
+    state: WorkerLivenessState,
+    resolved_pid: Option<u32>,
+) -> WorkerLivenessState {
+    #[cfg(not(target_os = "linux"))]
+    if resolved_pid.is_none() && state == WorkerLivenessState::Dead {
+        return WorkerLivenessState::Unverified;
+    }
+    #[cfg(target_os = "linux")]
+    let _ = resolved_pid;
+    state
+}
+
 /// Decide whether `execute_kill` should proceed to reset the worker's
 /// task leases, given the kill verdict and (for the `Go` case) whether
 /// death was actually confirmed after the SIGKILL was delivered. cas-f781
@@ -1822,6 +1851,12 @@ pub(crate) fn execute_kill(cas_root: Option<&Path>, worker: &str, force: bool) -
     let mut summary = Vec::<String>::new();
 
     let resolved_pid = find_worker_pid(&RealProcessTable, &w.name);
+    if !kill_identity_is_verified(resolved_pid) {
+        bail!(
+            "cannot verify process identity for `{}` on this platform; refusing to kill or reset its leases",
+            w.name
+        );
+    }
     if let (Some(tracked), Some(resolved)) = (w.pid, resolved_pid) {
         if tracked != resolved {
             summary.push(format!(
@@ -2674,7 +2709,12 @@ mod tests {
             |_| false,
             Some(pending.clone()),
         );
+        // Only Linux can inspect the child tree. macOS must keep the pending
+        // request visible without claiming that no child is doing the work.
+        #[cfg(target_os = "linux")]
         assert_eq!(state, WorkerLivenessState::ApprovalHang);
+        #[cfg(not(target_os = "linux"))]
+        assert_eq!(state, WorkerLivenessState::Unverified);
         assert_eq!(evidence.pending_permission, Some(pending));
         assert!(!evidence.in_flight_tool_call);
         let human = format_state_human(&state, &evidence);
@@ -2682,7 +2722,10 @@ mod tests {
         assert!(human.contains("python3 -<<'PY' rewrite.html PY"));
         let json: serde_json::Value =
             serde_json::from_str(&format_state_json(&state, &evidence)).expect("valid JSON");
+        #[cfg(target_os = "linux")]
         assert_eq!(json["approval_status"], "awaiting leader approval");
+        #[cfg(not(target_os = "linux"))]
+        assert_eq!(json["approval_status"], "leader approval pending");
         assert_eq!(json["pending_permission"]["tool_name"], "Bash");
         assert!(
             json["pending_permission"]["command_excerpt"]
@@ -3895,6 +3938,25 @@ mod tests {
     #[test]
     fn pick_kill_pid_none_when_nothing_available() {
         assert_eq!(pick_kill_pid(None, None), None);
+    }
+
+    #[test]
+    fn missing_process_identity_never_proves_dead_on_macos() {
+        let state = unverified_death_without_identity(WorkerLivenessState::Dead, None);
+        #[cfg(target_os = "linux")]
+        assert_eq!(state, WorkerLivenessState::Dead);
+        #[cfg(not(target_os = "linux"))]
+        assert_eq!(state, WorkerLivenessState::Unverified);
+        assert_eq!(
+            unverified_death_without_identity(WorkerLivenessState::Alive, None),
+            WorkerLivenessState::Alive
+        );
+    }
+
+    #[test]
+    fn kill_requires_identity_when_process_table_is_unavailable() {
+        assert!(kill_identity_is_verified(Some(4242)));
+        assert_eq!(kill_identity_is_verified(None), cfg!(target_os = "linux"));
     }
 
     #[test]

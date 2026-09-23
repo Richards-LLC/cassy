@@ -1993,6 +1993,9 @@ dialog::backdrop { background: var(--overlay-backdrop); }
 .command-palette {
   width: min(620px, calc(100vw - var(--space-6)));
   max-height: min(76dvh, 680px);
+  /* Anchored near the top, not centred: filtering shrinks the list, and a
+     centred dialog would jump its search field on every keystroke. */
+  margin-block: min(12dvh, 96px) auto;
   padding: 0;
   overflow: hidden;
   background: var(--bg-panel);
@@ -2452,7 +2455,7 @@ dialog form > *,
     grid-template-columns: minmax(0, 1fr);
     gap: var(--space-1);
   }
-  .command-palette { width: calc(100vw - var(--space-4)); max-height: calc(100dvh - var(--toolbar-height)); }
+  .command-palette { width: calc(100vw - var(--space-4)); max-height: calc(100dvh - var(--toolbar-height)); margin-block: var(--space-2) auto; }
   .terminal-search { right: var(--space-1); left: var(--space-1); grid-template-columns: minmax(0, 1fr) auto var(--button-compact-height); }
 
   .context-panel,

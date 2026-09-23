@@ -2218,6 +2218,7 @@ function render(captureDraft = true): void {
           <button type="button" class="palette-command" data-palette-action="dismiss-info" ${infoItems.length === 0 ? "disabled" : ""}><span>Dismiss all info</span><small>${infoItems.length} outstanding</small></button>
           <button type="button" class="palette-command" id="palette-paired-machines"><span>Paired machines</span><small>Hosts, connection and last seen</small></button>
           ${sessionCommands || '<p class="palette-empty">No live sessions available.</p>'}
+          <p class="palette-empty" id="palette-no-match" role="status" hidden></p>
         </div>
       </section>
     </dialog>
@@ -2780,6 +2781,12 @@ function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | und
       ? [...paletteList.querySelectorAll<HTMLElement>("[data-palette-machine]")].filter((command) => !command.hidden)
       : [];
     paletteList.replaceChildren(...sessionMatches, ...paletteOrder.filter((node) => !sessionMatches.includes(node as HTMLElement)));
+    const noMatch = palette.querySelector<HTMLElement>("#palette-no-match");
+    if (noMatch) {
+      const anyVisible = [...palette.querySelectorAll<HTMLElement>(".palette-command")].some((command) => !command.hidden);
+      noMatch.hidden = query.length === 0 || anyVisible;
+      noMatch.textContent = noMatch.hidden ? "" : `No commands or sessions match “${paletteQuery.value.trim()}”.`;
+    }
   };
   paletteQuery.onkeydown = (event) => {
     if (event.key !== "ArrowDown" && event.key !== "Enter") return;

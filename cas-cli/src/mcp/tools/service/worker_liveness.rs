@@ -12,6 +12,7 @@ const TAIL_BYTES: u64 = 256 * 1024;
 pub(crate) enum Liveness {
     Executing,
     WaitingForInput,
+    BudgetAborted,
     Stalled,
     Dead,
 }
@@ -20,6 +21,7 @@ impl Liveness {
         match self {
             Self::Executing => "executing",
             Self::WaitingForInput => "waiting_for_input",
+            Self::BudgetAborted => "budget_aborted",
             Self::Stalled => "stalled",
             Self::Dead => "dead",
         }
@@ -99,7 +101,9 @@ fn event(value: &Value, cli: SupervisorCli) -> Option<TurnEvent> {
         SupervisorCli::Codex => {
             if let Some(end) = super::harness_observation::codex_turn_end_kind(value) {
                 (
-                    if end == "error"
+                    if codex_budget_terminal(value) {
+                        Liveness::BudgetAborted
+                    } else if end == "error"
                         || value
                             .pointer("/payload/error")
                             .is_some_and(|e| !e.is_null())
@@ -186,6 +190,24 @@ fn event(value: &Value, cli: SupervisorCli) -> Option<TurnEvent> {
         state,
         kind: kind.into(),
     })
+}
+
+fn codex_budget_terminal(value: &Value) -> bool {
+    let payload = &value["payload"];
+    let reason = payload["reason"].as_str().unwrap_or_default();
+    if reason == "budget_limited" || reason == "budget" {
+        return true;
+    }
+    // Codex also exposes rolloutBudgetExceeded through its error information;
+    // tolerate both the structured and human-readable terminal forms.
+    ["error", "message", "codex_error_info"]
+        .into_iter()
+        .any(|field| {
+            let body = payload[field].to_string().to_ascii_lowercase();
+            body.contains("rolloutbudgetexceeded")
+                || body.contains("rollout_budget_exceeded")
+                || body.contains("rollout token budget")
+        })
 }
 
 pub(crate) fn observe(

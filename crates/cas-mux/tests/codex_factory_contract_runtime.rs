@@ -18,8 +18,38 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 const PANE: &str = "cas-1c66-codex-contract";
-const MODEL: &str = "gpt-5.6-terra";
-const EFFORT: &str = "xhigh";
+
+fn standard_codex_recipe() -> (String, String) {
+    let registry: toml::Value =
+        toml::from_str(include_str!("../../cas-factory/policy/lane-registry.toml"))
+            .expect("parse factory lane registry");
+    let candidates = registry["lanes"]["standard"]["candidates"]
+        .as_array()
+        .expect("standard lane candidates");
+    let recipe = candidates
+        .iter()
+        .filter_map(toml::Value::as_str)
+        .map(|name| &registry["recipes"][name])
+        .find(|recipe| {
+            recipe["harness"].as_str() == Some("codex")
+                && recipe["status"].as_str() == Some("active")
+        })
+        .expect("standard lane must have an active Codex recipe");
+    (
+        recipe["model"].as_str().expect("Codex model").to_owned(),
+        recipe["default_effort"]
+            .as_str()
+            .expect("Codex effort")
+            .to_owned(),
+    )
+}
+
+#[test]
+fn live_matrix_uses_active_standard_codex_recipe() {
+    let (model, effort) = standard_codex_recipe();
+    assert!(!model.is_empty());
+    assert!(!effort.is_empty());
+}
 
 fn codex_0156_available() -> bool {
     std::process::Command::new("codex")
@@ -144,6 +174,69 @@ fn matching_tool_calls(body: &str, name: &str, action: &str) -> usize {
         .count()
 }
 
+fn tool_call_outputs(body: &str, name: &str, action: &str) -> Vec<String> {
+    let events: Vec<Value> = body
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+    let call_ids: Vec<&str> = events
+        .iter()
+        .filter(|event| {
+            event["type"] == "response_item"
+                && event["payload"]["type"] == "function_call"
+                && event["payload"]["name"] == name
+                && event["payload"]["arguments"]
+                    .as_str()
+                    .and_then(|args| serde_json::from_str::<Value>(args).ok())
+                    .is_some_and(|args| args["action"] == action)
+        })
+        .filter_map(|event| event["payload"]["call_id"].as_str())
+        .collect();
+    events
+        .iter()
+        .filter(|event| {
+            event["type"] == "response_item"
+                && event["payload"]["type"] == "function_call_output"
+                && event["payload"]["call_id"]
+                    .as_str()
+                    .is_some_and(|id| call_ids.contains(&id))
+        })
+        .filter_map(|event| {
+            let output = &event["payload"]["output"];
+            if let Some(text) = output.as_str() {
+                return Some(text.to_owned());
+            }
+            output.as_array().map(|parts| {
+                parts
+                    .iter()
+                    .filter_map(|part| part["text"].as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+        })
+        .collect()
+}
+
+#[test]
+fn tool_call_outputs_only_match_server_responses_for_requested_action() {
+    let body = [
+        serde_json::json!({"type":"response_item","payload":{
+            "type":"function_call","name":"task","call_id":"create-1",
+            "arguments":"{\"action\":\"create\"}"}}),
+        serde_json::json!({"type":"response_item","payload":{
+            "type":"function_call_output","call_id":"create-1",
+            "output":[{"type":"input_text","text":"created"}]}}),
+        serde_json::json!({"type":"response_item","payload":{
+            "type":"function_call_output","call_id":"other","output":"unrelated"}}),
+    ]
+    .into_iter()
+    .map(|event| event.to_string())
+    .collect::<Vec<_>>()
+    .join("\n");
+    assert_eq!(tool_call_outputs(&body, "task", "create"), ["created"]);
+    assert!(tool_call_outputs(&body, "task", "show").is_empty());
+}
+
 fn matching_custom_tool_calls(body: &str, name: &str) -> usize {
     body.lines()
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
@@ -200,7 +293,7 @@ fn assistant_text_does_not_accept_markers_from_user_prompts() {
     assert!(text.contains("REAL-ASSISTANT-MARKER"));
 }
 
-fn assert_turn_context(body: &str, scratch: &Path) {
+fn assert_turn_context(body: &str, scratch: &Path, model: &str, effort: &str) {
     let contexts: Vec<Value> = body
         .lines()
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
@@ -213,13 +306,17 @@ fn assert_turn_context(body: &str, scratch: &Path) {
     );
     for context in contexts.iter().take(3) {
         assert_eq!(context["cwd"], scratch.to_string_lossy().as_ref());
-        assert_eq!(context["model"], MODEL);
-        assert_eq!(context["effort"], EFFORT);
+        assert_eq!(context["model"], model);
+        assert_eq!(context["effort"], effort);
         assert_eq!(
             context["approval_policy"], "never",
             "--yolo approval bypass must survive every turn"
         );
         assert_eq!(context["sandbox_policy"]["type"], "danger-full-access");
+        assert_eq!(
+            context["collaboration_mode"]["mode"], "default",
+            "factory workers must remain outside Plan mode, where request_user_input is available"
+        );
     }
 }
 
@@ -252,6 +349,7 @@ fn wait_for_completions(mux: &mut Mux, rollout: &Path, wanted: usize, timeout: D
 #[ignore = "requires real Codex 0.156.0, authentication, and model traffic"]
 fn codex_0156_factory_launch_contract_passes_live_matrix() {
     let _serial = real_pty_serial::lock();
+    let (model, effort) = standard_codex_recipe();
     assert!(
         codex_0156_available(),
         "this receipt is valid only when run against codex-cli 0.156.0"
@@ -273,23 +371,39 @@ fn codex_0156_factory_launch_contract_passes_live_matrix() {
         Some(&cas_root),
         Some("cas-1c66-supervisor"),
         Some("codex"),
-        Some(MODEL),
-        Some(EFFORT),
+        Some(&model),
+        Some(&effort),
         None,
     );
     assert!(config.args.iter().any(|arg| arg == "--yolo"));
+    assert!(
+        config
+            .args
+            .windows(2)
+            .any(|pair| pair == ["-c", "features.default_mode_request_user_input=false"]),
+        "factory worker must disable account-enabled Default-mode input prompts"
+    );
+    assert!(
+        config
+            .args
+            .iter()
+            .any(|arg| arg.contains("developer_instructions=")
+                && arg.contains("Do not enter Plan mode or call `request_user_input`")),
+        "worker launch must guard against unattended input prompts"
+    );
     assert!(config.args.iter().any(|arg| arg == "--no-alt-screen"));
     assert!(
         config
             .args
             .windows(2)
-            .any(|pair| pair == ["--model", MODEL])
+            .any(|pair| pair == ["--model", model.as_str()])
     );
+    let effort_config = format!("model_reasoning_effort={effort}");
     assert!(
         config
             .args
             .windows(2)
-            .any(|pair| pair == ["-c", "model_reasoning_effort=xhigh"])
+            .any(|pair| pair == ["-c", effort_config.as_str()])
     );
     assert!(
         config
@@ -303,8 +417,8 @@ fn codex_0156_factory_launch_contract_passes_live_matrix() {
         ("CAS_AGENT_ROLE", "worker"),
         ("CAS_FACTORY_MODE", "1"),
         ("CAS_FACTORY_WORKER_CLI", "codex"),
-        ("CAS_FACTORY_WORKER_MODEL", MODEL),
-        ("CAS_FACTORY_WORKER_EFFORT", EFFORT),
+        ("CAS_FACTORY_WORKER_MODEL", model.as_str()),
+        ("CAS_FACTORY_WORKER_EFFORT", effort.as_str()),
     ] {
         assert!(
             config
@@ -382,6 +496,10 @@ fn codex_0156_factory_launch_contract_passes_live_matrix() {
             PANE,
             "Use $cas-1c66-probe. Call coordination whoami and task mine again. \
              Also use the code-mode exec tool to calculate 146 + 1. \
+             In this disposable CAS root, call task create with title=CAS-1C66-SCHEMA-TITLE, \
+             description=CAS-1C66-SCHEMA-DESCRIPTION, design=CAS-1C66-SCHEMA-DESIGN, \
+             acceptance_criteria=CAS-1C66-SCHEMA-ACCEPTANCE, labels=probe,schema, \
+             priority=3, task_type=chore, risk=none. Then call task show with the new task ID. \
              Then reply with CAS-1C66-FOLLOWUP, CAS-1C66-AGENTS, CAS-1C66-SKILL, \
              the calculation result, and whether .codex/agents/cas-1c66-probe.md exists.",
         ))
@@ -389,6 +507,53 @@ fn codex_0156_factory_launch_contract_passes_live_matrix() {
     let second = wait_for_completions(&mut mux, &rollout, 2, Duration::from_secs(60));
     assert!(matching_tool_calls(&second, "coordination", "whoami") >= 2);
     assert!(matching_tool_calls(&second, "task", "mine") >= 2);
+    let created_with_full_schema = second
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|event| {
+            event["type"] == "response_item"
+                && event["payload"]["type"] == "function_call"
+                && event["payload"]["name"] == "task"
+        })
+        .filter_map(|event| {
+            event["payload"]["arguments"]
+                .as_str()
+                .and_then(|args| serde_json::from_str::<Value>(args).ok())
+        })
+        .any(|args| {
+            args["action"] == "create"
+                && args["title"] == "CAS-1C66-SCHEMA-TITLE"
+                && args["description"] == "CAS-1C66-SCHEMA-DESCRIPTION"
+                && args["design"] == "CAS-1C66-SCHEMA-DESIGN"
+                && args["acceptance_criteria"] == "CAS-1C66-SCHEMA-ACCEPTANCE"
+                && args["labels"] == "probe,schema"
+                && args["priority"] == 3
+                && args["task_type"] == "chore"
+                && args["risk"] == "none"
+        });
+    assert!(
+        created_with_full_schema,
+        "Codex must send all task create arguments intact"
+    );
+    assert!(
+        tool_call_outputs(&second, "task", "show")
+            .iter()
+            .any(|output| {
+                [
+                    "Title: CAS-1C66-SCHEMA-TITLE",
+                    "Priority: P3",
+                    "Type: chore",
+                    "CAS-1C66-SCHEMA-DESCRIPTION",
+                    "CAS-1C66-SCHEMA-DESIGN",
+                    "CAS-1C66-SCHEMA-ACCEPTANCE",
+                    "Labels: probe, schema",
+                    "Risk: none",
+                ]
+                .iter()
+                .all(|marker| output.contains(marker))
+            }),
+        "task show must return every persisted complex-schema field from CAS"
+    );
     assert!(
         matching_custom_tool_calls(&second, "exec") >= 1,
         "CAS direct tools and the Codex code-mode exec tool must coexist"
@@ -431,10 +596,24 @@ fn codex_0156_factory_launch_contract_passes_live_matrix() {
             .contains("rollout token budget exceeded"),
         "multi-turn worker must not abort under a low rollout-token budget"
     );
-    assert_turn_context(&final_body, &scratch);
+    assert!(
+        !final_body
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .any(|event| {
+                event["type"] == "response_item"
+                    && matches!(
+                        event["payload"]["type"].as_str(),
+                        Some("function_call" | "custom_tool_call")
+                    )
+                    && event["payload"]["name"] == "request_user_input"
+            }),
+        "default-mode worker must not issue a prompt that could auto-resolve while idle"
+    );
+    assert_turn_context(&final_body, &scratch, &model, &effort);
 
     eprintln!(
-        "PASS codex-cli 0.156.0 factory contract; isolated_root={}; rollout={}",
+        "PASS codex-cli 0.156.0 factory contract; model={model}; effort={effort}; complex_schema=task_create_show; isolated_root={}; rollout={}",
         cas_root.display(),
         rollout.display()
     );

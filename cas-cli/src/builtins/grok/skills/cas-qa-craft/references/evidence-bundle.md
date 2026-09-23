@@ -27,7 +27,10 @@ journey uses `journeys/<journey-id>/`, each with the same shape and its own
 | `a11y` | `a11y-forced-colors.png`, `a11y-reduced-motion.png`, `a11y-contrast-more.png` | visual change |
 
 Polish evidence is required for every web bundle, not only for visual changes.
-An unpolished delivery is a defect, the same as a bug.
+An unpolished delivery is a defect, the same as a bug. The one exception is a
+`journey` bundle ([journeys.md](journeys.md)). It may set
+`visual_qa_status: "unavailable"` and omit the polish keys, because the release
+journey evaluation scores polish for it.
 
 `bundle.json` is the manifest. It records:
 

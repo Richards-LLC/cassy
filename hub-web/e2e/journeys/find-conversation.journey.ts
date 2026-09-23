@@ -34,6 +34,9 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
   });
 
   await journey.stage("Jump to a supervisor from the keyboard", async () => {
+    // Mid-draft in the composer: closing the palette hands focus back to it,
+    // which must not hold the switch back either.
+    await page.getByRole("textbox", { name: "Your message" }).fill("Half a thought");
     await page.keyboard.press("ControlOrMeta+k");
     const filter = page.getByRole("searchbox", { name: "Filter commands" });
     await expect(filter).toBeFocused();

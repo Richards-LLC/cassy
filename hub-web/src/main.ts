@@ -2806,6 +2806,11 @@ function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | und
       // is not refocused — the opened session owns focus from here.
       commandPaletteOpen = false;
       palette.close();
+      // close() hands focus back to whatever held it before the palette
+      // opened. When that was the composer (Ctrl+K mid-draft), render() would
+      // defer again, so release it before the session switch renders.
+      const restored = document.activeElement;
+      if (restored instanceof HTMLElement && isEditableElement(restored) && app.contains(restored)) restored.blur();
       const machineId = command.dataset.paletteMachine;
       const session = command.dataset.paletteSession;
       if (machineId && session) void openSession(machineId, session);

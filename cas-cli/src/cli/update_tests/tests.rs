@@ -782,6 +782,74 @@ fn combined_receipt_merges_the_installed_binary_refresh_into_one_document() {
 }
 
 #[test]
+fn post_swap_first_launch_time_is_kept_in_refresh_receipt() {
+    let refresh = serde_json::json!({
+        "refresh_binary_version": "3.28.2",
+        "refresh_status": "complete",
+    });
+    let child_receipt = with_first_launch_ms(refresh, Some(4187));
+    let parent_receipt = combined_update_receipt("3.28.2", true, Some(&child_receipt), None, None);
+    assert_eq!(parent_receipt["binary_first_launch_ms"], 4187);
+    assert_eq!(parent_receipt["refresh_binary_version"], "3.28.2");
+    assert!(
+        with_first_launch_ms(serde_json::json!({}), None)
+            .get("binary_first_launch_ms")
+            .is_none()
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn installed_binary_quarantine_is_removed_before_hub_relaunch() {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let home = tempfile::tempdir().expect("isolated update fixture");
+    let binary = home.path().join("cas");
+    std::fs::write(&binary, "fixture").unwrap();
+    let path = CString::new(binary.as_os_str().as_bytes()).unwrap();
+    let attribute = c"com.apple.quarantine";
+    let value = b"0081;00000000;Cassy;";
+    // SAFETY: The NUL-terminated path/name and value buffer remain valid.
+    let result = unsafe {
+        libc::setxattr(
+            path.as_ptr(),
+            attribute.as_ptr(),
+            value.as_ptr().cast(),
+            value.len(),
+            0,
+            0,
+        )
+    };
+    assert_eq!(result, 0, "{}", std::io::Error::last_os_error());
+
+    remove_quarantine_if_present(&binary).unwrap();
+    remove_quarantine_if_present(&binary).unwrap();
+    // SAFETY: The path/name pointers are valid and a null output requests size.
+    let remaining = unsafe {
+        libc::getxattr(
+            path.as_ptr(),
+            attribute.as_ptr(),
+            std::ptr::null_mut(),
+            0,
+            0,
+            0,
+        )
+    };
+    assert_eq!(remaining, -1);
+    assert_eq!(
+        std::io::Error::last_os_error().raw_os_error(),
+        Some(libc::ENOATTR)
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn post_swap_age_includes_process_creation_before_cli_entry() {
+    assert!(post_swap_first_launch_ms().unwrap() > 0);
+}
+
+#[test]
 fn update_receipt_proves_the_hub_version_transition_and_manager() {
     let restart = HubRestartOutcome {
         previous_version: Some("3.26.0".to_owned()),

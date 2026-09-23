@@ -2846,7 +2846,10 @@ fn is_harness_file_memory_path(path: &std::path::Path, home: Option<&std::path::
     let Some(home) = home else {
         return false;
     };
-    let Ok(relative) = path.strip_prefix(home) else {
+    let Ok(home) = home.canonicalize() else {
+        return false;
+    };
+    let Ok(relative) = path.strip_prefix(&home) else {
         return false;
     };
     let mut components = relative.components();
@@ -2887,6 +2890,23 @@ fn is_non_creation_stream_device(path: &std::path::Path) -> bool {
 mod workspace_contract_tests {
     use super::*;
     use crate::test_support::TestEnvGuard;
+
+    #[cfg(unix)]
+    #[test]
+    fn harness_file_memory_canonicalizes_home_without_allowing_symlink_escape() {
+        use std::os::unix::fs::symlink;
+
+        let home = tempfile::tempdir().expect("home");
+        let outside = tempfile::tempdir().expect("outside");
+        let memory = home.path().join(".claude/projects/project/memory");
+        std::fs::create_dir_all(&memory).expect("memory directory");
+        let inside = canonicalize_for_containment(&memory.join("context.md")).unwrap();
+        assert!(is_harness_file_memory_path(&inside, Some(home.path())));
+
+        symlink(outside.path(), memory.join("escape")).expect("escape symlink");
+        let escaped = canonicalize_for_containment(&memory.join("escape/secret.md")).unwrap();
+        assert!(!is_harness_file_memory_path(&escaped, Some(home.path())));
+    }
 
     fn bash_input(command: &str, cwd: &Path) -> HookInput {
         HookInput {
@@ -2988,7 +3008,7 @@ mod workspace_contract_tests {
         assert_eq!(
             factory_write_violation(&outside_redirect, &None, None, false, Some(cwd.path()))
                 .map(|violation| violation.resolved_path),
-            Some(std::path::PathBuf::from("/etc/x")),
+            canonicalize_for_containment(std::path::Path::new("/etc/x")),
             "an absolute redirect target must remain guarded"
         );
     }
@@ -3073,7 +3093,7 @@ mod workspace_contract_tests {
             assert_eq!(
                 factory_write_violation(&input, &None, None, false, Some(cwd.path()))
                     .map(|violation| violation.resolved_path),
-                Some(std::path::PathBuf::from(expected)),
+                canonicalize_for_containment(std::path::Path::new(expected)),
                 "outside script/install targets must remain denied: {command}"
             );
         }
@@ -3120,7 +3140,7 @@ mod workspace_contract_tests {
             let input = bash_input(command, cwd.path());
             assert_eq!(
                 factory_unsanctioned_write_path(&input, &None, None, false),
-                Some(home.path().join(expected)),
+                canonicalize_for_containment(&home.path().join(expected)),
                 "write must remain guarded: {command}"
             );
         }
@@ -3153,7 +3173,7 @@ mod workspace_contract_tests {
                 false,
                 &scratch.join("../escape.log").to_string_lossy(),
             ),
-            Some(scratch.parent().unwrap().join("escape.log")),
+            canonicalize_for_containment(&scratch.parent().unwrap().join("escape.log")),
             "a lexical parent traversal must not escape the configured root"
         );
         assert_eq!(
@@ -3164,7 +3184,7 @@ mod workspace_contract_tests {
                 false,
                 &outside.to_string_lossy(),
             ),
-            Some(outside),
+            canonicalize_for_containment(&outside),
             "configured scratch enforcement must deny unrelated host paths"
         );
     }
@@ -3190,7 +3210,7 @@ mod workspace_contract_tests {
                     .join("cas-3bd6-tool-temp.log")
                     .to_string_lossy(),
             ),
-            Some(std::env::temp_dir().join("cas-3bd6-tool-temp.log")),
+            canonicalize_for_containment(&std::env::temp_dir().join("cas-3bd6-tool-temp.log")),
             "bare system temp must remain outside the workspace contract"
         );
     }
@@ -3270,7 +3290,7 @@ mod workspace_contract_tests {
 
         assert_eq!(
             unsanctioned_factory_path(&input, &None, None, false, &target.to_string_lossy(),),
-            Some(outside.join("escape.txt")),
+            canonicalize_for_containment(&outside.join("escape.txt")),
             "canonical containment must reject a symlinked subtree outside the worktree"
         );
     }
@@ -3413,7 +3433,7 @@ mod workspace_contract_tests {
 
         assert_eq!(
             unsanctioned_factory_path(&input, &None, None, false, &target.to_string_lossy(),),
-            Some(target),
+            canonicalize_for_containment(&target),
             "a sibling path sharing the root's string prefix must remain outside"
         );
     }
@@ -3430,7 +3450,7 @@ mod workspace_contract_tests {
 
         assert_eq!(
             unsanctioned_factory_path(&input, &None, None, false, &target.to_string_lossy()),
-            Some(target),
+            canonicalize_for_containment(&target),
             "an out-of-worktree cwd must not become a sanctioned write root"
         );
     }

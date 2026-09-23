@@ -447,20 +447,13 @@ fn strip_deleted_suffix_from_linux_process_path() {
 #[cfg(unix)]
 fn post_swap_hook_invokes_the_installed_binary() {
     use std::fs;
-    use std::os::unix::fs::PermissionsExt;
 
     let temp_dir = tempfile::tempdir().expect("create post-swap test directory");
     let installed_binary = temp_dir.path().join("cas-new");
-    fs::write(
+    crate::test_paths::warm_stub(
         &installed_binary,
         "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$0.args\"\n",
-    )
-    .expect("write fake installed binary");
-    let mut permissions = fs::metadata(&installed_binary)
-        .expect("stat fake installed binary")
-        .permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(&installed_binary, permissions).expect("make fake binary executable");
+    );
 
     run_post_swap_hook(&installed_binary, "3.7.7", true)
         .expect("post-swap hook should run successfully");
@@ -525,13 +518,7 @@ fn post_swap_mode_is_a_terminal_update_path() {
 
 #[cfg(unix)]
 fn write_stub_binary(path: &Path, body: &str) {
-    use std::fs;
-    use std::os::unix::fs::PermissionsExt;
-
-    fs::write(path, body).expect("write stub binary");
-    let mut permissions = fs::metadata(path).expect("stat stub binary").permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(path, permissions).expect("make stub binary executable");
+    crate::test_paths::warm_stub(path, body);
 }
 
 #[cfg(unix)]
@@ -782,11 +769,85 @@ fn combined_receipt_merges_the_installed_binary_refresh_into_one_document() {
 }
 
 #[test]
+fn post_swap_first_launch_time_is_kept_in_refresh_receipt() {
+    let refresh = serde_json::json!({
+        "refresh_binary_version": "3.28.2",
+        "refresh_status": "complete",
+    });
+    let child_receipt = with_first_launch_ms(refresh, Some(4187));
+    let parent_receipt = combined_update_receipt("3.28.2", true, Some(&child_receipt), None, None);
+    assert_eq!(parent_receipt["binary_first_launch_ms"], 4187);
+    assert_eq!(parent_receipt["refresh_binary_version"], "3.28.2");
+    assert!(
+        with_first_launch_ms(serde_json::json!({}), None)
+            .get("binary_first_launch_ms")
+            .is_none()
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn installed_binary_quarantine_is_removed_before_hub_relaunch() {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let home = tempfile::tempdir().expect("isolated update fixture");
+    let binary = home.path().join("cas");
+    std::fs::write(&binary, "fixture").unwrap();
+    let path = CString::new(binary.as_os_str().as_bytes()).unwrap();
+    let attribute = c"com.apple.quarantine";
+    let value = b"0081;00000000;Cassy;";
+    // SAFETY: The NUL-terminated path/name and value buffer remain valid.
+    let result = unsafe {
+        libc::setxattr(
+            path.as_ptr(),
+            attribute.as_ptr(),
+            value.as_ptr().cast(),
+            value.len(),
+            0,
+            0,
+        )
+    };
+    assert_eq!(result, 0, "{}", std::io::Error::last_os_error());
+
+    remove_quarantine_if_present(&binary).unwrap();
+    remove_quarantine_if_present(&binary).unwrap();
+    // SAFETY: The path/name pointers are valid and a null output requests size.
+    let remaining = unsafe {
+        libc::getxattr(
+            path.as_ptr(),
+            attribute.as_ptr(),
+            std::ptr::null_mut(),
+            0,
+            0,
+            0,
+        )
+    };
+    assert_eq!(remaining, -1);
+    assert_eq!(
+        std::io::Error::last_os_error().raw_os_error(),
+        Some(libc::ENOATTR)
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn post_swap_age_includes_process_creation_before_cli_entry() {
+    assert!(post_swap_first_launch_ms().unwrap() > 0);
+}
+
+#[test]
 fn update_receipt_proves_the_hub_version_transition_and_manager() {
     let restart = HubRestartOutcome {
         previous_version: Some("3.26.0".to_owned()),
         current_version: Some("3.27.0".to_owned()),
         service_managed: true,
+        prior_state: "unresponsive".to_owned(),
+        action: "restarted".to_owned(),
+        verified: true,
+        loopback_verified: true,
+        transport_verified: Some(true),
+        public_url: Some("https://hub.tail.ts.net/".to_owned()),
         ..Default::default()
     };
     let receipt = combined_update_receipt(
@@ -800,6 +861,11 @@ fn update_receipt_proves_the_hub_version_transition_and_manager() {
     assert_eq!(receipt["hub_restart"]["from_version"], "3.26.0");
     assert_eq!(receipt["hub_restart"]["to_version"], "3.27.0");
     assert_eq!(receipt["hub_restart"]["via"], "service");
+    assert_eq!(receipt["hub_restart"]["prior_state"], "unresponsive");
+    assert_eq!(receipt["hub_restart"]["action"], "restarted");
+    assert_eq!(receipt["hub_restart"]["verified"], true);
+    assert_eq!(receipt["hub_restart"]["transport_verified"], true);
+    assert_eq!(receipt["hub_restart"]["public_url"], "https://hub.tail.ts.net/");
 }
 
 #[test]

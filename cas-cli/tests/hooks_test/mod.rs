@@ -59,12 +59,10 @@ pub(crate) fn cas_cmd(dir: &TempDir) -> Command {
 
 /// Replace the detached light-lane process with a local prompt recorder.
 pub(crate) fn install_fake_maintenance_runner(dir: &TempDir) {
-    use std::os::unix::fs::PermissionsExt;
     let bin = dir.path().join(".test-bin");
     std::fs::create_dir_all(&bin).unwrap();
     let executable = bin.join("codex");
-    std::fs::write(&executable, "#!/bin/sh\nprintf '%s\\n' \"$@\"\n").unwrap();
-    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+    cas::test_paths::warm_stub(&executable, "#!/bin/sh\nprintf '%s\\n' \"$@\"\n");
 }
 
 /// Check both the immediate Stop response and the detached job's recorded prompt.
@@ -82,25 +80,24 @@ pub(crate) fn assert_maintenance_queued(
         "{name} queue marker missing"
     );
     let log = job_dir.join(format!("{name}.log"));
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
-    let prompt = loop {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let mut last_content = String::new();
+    loop {
         if let Ok(content) = std::fs::read_to_string(&log) {
-            if !content.is_empty() {
-                break content;
+            if prompt_fragments
+                .iter()
+                .all(|fragment| content.contains(fragment))
+            {
+                break;
             }
+            last_content = content;
         }
         assert!(
             std::time::Instant::now() < deadline,
-            "{name} prompt was not recorded at {}",
-            log.display()
+            "{name} complete prompt was not recorded at {}: {last_content}",
+            log.display(),
         );
         std::thread::sleep(std::time::Duration::from_millis(10));
-    };
-    for fragment in prompt_fragments {
-        assert!(
-            prompt.contains(fragment),
-            "{name} queued prompt lacks {fragment:?}: {prompt}"
-        );
     }
 }
 

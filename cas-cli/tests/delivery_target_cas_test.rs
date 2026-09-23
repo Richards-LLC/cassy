@@ -115,9 +115,9 @@ impl GitRepo {
         let hook = hooks.join("post-checkout");
         // The marker lives under .git/ so firing the hook never dirties any
         // work tree the merge is about to operate on.
-        std::fs::write(
+        cas::test_paths::warm_stub(
             &hook,
-            format!(
+            &format!(
                 "#!/bin/sh\n\
                  set -e\n\
                  marker=\"$(git rev-parse --git-common-dir)/{marker}\"\n\
@@ -130,13 +130,7 @@ impl GitRepo {
                  git update-ref refs/heads/{branch} \"$new\" \"$tip\"\n\
                  exit 0\n"
             ),
-        )
-        .unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        );
     }
 }
 

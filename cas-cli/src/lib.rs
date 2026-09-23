@@ -39,6 +39,8 @@ pub mod duplicate_check;
 pub mod error;
 pub mod extraction;
 mod light_lane;
+#[doc(hidden)]
+pub use light_lane::run_detached_worker;
 pub mod factory_auth_health;
 pub(crate) mod factory_build_guard;
 pub mod factory_context_reset;
@@ -90,6 +92,7 @@ mod test_env_guard;
 #[cfg(test)]
 pub(crate) mod test_support {
     pub(crate) use crate::test_env_guard::TestEnvGuard;
+    pub(crate) use crate::test_paths::private_hub_tempdir;
     use std::path::Path;
     use std::sync::{Mutex, MutexGuard, OnceLock};
 

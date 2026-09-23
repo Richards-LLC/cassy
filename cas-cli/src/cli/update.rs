@@ -232,7 +232,7 @@ pub fn execute(args: &UpdateArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
     if args.all_projects {
         let mut steps = UpdateStepTracker::new(1, !cli.json);
         let report = steps.run("Refreshing all local Cassy projects", || {
-            refresh_all_projects(args, cli, cas_root, None, None)
+            refresh_all_projects(args, cli, cas_root, None, None, None)
         })?;
         if !cli.json {
             let mut out = io::stdout();
@@ -320,7 +320,7 @@ pub fn execute(args: &UpdateArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
     let hub_proof = hub_restart.clone();
     let (report, hub_transport_error) = refresh_after_hub_restart(hub_restart, |error| {
         steps.run("Refreshing all local Cassy projects", || {
-            refresh_all_projects(args, cli, cas_root, error, Some(&hub_proof))
+            refresh_all_projects(args, cli, cas_root, error, Some(&hub_proof), None)
         })
     })?;
 
@@ -330,6 +330,14 @@ pub fn execute(args: &UpdateArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
         let mut fmt = Formatter::stdout(&mut out, theme);
         fmt.newline()?;
         print_update_banner_with_formatter(&mut fmt, &report, hub_transport_error.as_deref())?;
+    }
+
+    if hub_proof.action == "failed" {
+        anyhow::bail!(
+            "hub recovery failed after one retry: {}; {}",
+            hub_proof.failure.as_deref().unwrap_or("unknown verification error"),
+            hub_proof.remedy.as_deref().unwrap_or("Run `cas hub restart --force`."),
+        );
     }
 
     Ok(())
@@ -364,19 +372,28 @@ fn combined_update_receipt(
             "message": error,
         });
     }
-    if let Some(hub_restart) = hub_restart
-        && let (Some(previous), Some(current)) = (
-            hub_restart.previous_version.as_deref(),
-            hub_restart.current_version.as_deref(),
-        )
-    {
-        receipt["hub_restart"] = serde_json::json!({
-            "from_version": previous,
-            "to_version": current,
-            "via": if hub_restart.service_managed { "service" } else { "detached" },
-        });
+    if let Some(hub_restart) = hub_restart {
+        receipt["hub_restart"] = hub_restart_receipt(hub_restart);
     }
     receipt
+}
+
+fn hub_restart_receipt(outcome: &super::hub::HubRestartOutcome) -> serde_json::Value {
+    serde_json::json!({
+        "from_version": outcome.previous_version,
+        "to_version": outcome.current_version,
+        "via": if outcome.service_managed { "service" } else { "detached" },
+        "prior_state": outcome.prior_state,
+        "action": outcome.action,
+        "verified": outcome.verified,
+        "loopback_verified": outcome.loopback_verified,
+        "transport_verified": outcome.transport_verified,
+        "transport_warning": outcome.transport_warning,
+        "recovery_attempted": outcome.recovery_attempted,
+        "public_url": outcome.public_url,
+        "failure": outcome.failure,
+        "remedy": outcome.remedy,
+    })
 }
 
 fn refresh_after_hub_restart<T>(
@@ -972,6 +989,7 @@ fn refresh_all_projects(
     current_cas_root: Option<&Path>,
     hub_transport_error: Option<&str>,
     hub_restart: Option<&super::hub::HubRestartOutcome>,
+    first_launch_ms: Option<u64>,
 ) -> anyhow::Result<RefreshReport> {
     let started_at = Instant::now();
     let discovery = discover_local_projects(current_cas_root);
@@ -1045,16 +1063,20 @@ fn refresh_all_projects(
         cli,
         hub_transport_error,
         hub_restart,
+        first_launch_ms,
     );
 
     let failed_count = receipts.iter().filter(|receipt| receipt.failed()).count()
         + usize::from(user_level.failed());
-    let receipt = project_refresh_receipt_json(
-        &receipts,
-        &user_level,
-        &discovery.skipped_unregistered,
-        hub_transport_error,
-        hub_restart,
+    let receipt = with_first_launch_ms(
+        project_refresh_receipt_json(
+            &receipts,
+            &user_level,
+            &discovery.skipped_unregistered,
+            hub_transport_error,
+            hub_restart,
+        ),
+        first_launch_ms,
     );
     if let Some(path) = &args.refresh_receipt {
         write_refresh_receipt(path, &receipt)?;
@@ -1415,7 +1437,8 @@ fn project_refresh_receipt_json(
         // receipt from the pre-update image is what made an operator's first
         // `cas update` look converged when it was not.
         "refresh_binary_version": env!("CARGO_PKG_VERSION"),
-        "refresh_status": if receipts.iter().any(|receipt| receipt.failed())
+        "refresh_status": if hub_restart.is_some_and(|hub| hub.action == "failed")
+            || receipts.iter().any(|receipt| receipt.failed())
             || user_level.failed()
         {
             "refresh_failed"
@@ -1444,17 +1467,8 @@ fn project_refresh_receipt_json(
             "message": error,
         });
     }
-    if let Some(hub_restart) = hub_restart
-        && let (Some(previous), Some(current)) = (
-            hub_restart.previous_version.as_deref(),
-            hub_restart.current_version.as_deref(),
-        )
-    {
-        receipt["hub_restart"] = serde_json::json!({
-            "from_version": previous,
-            "to_version": current,
-            "via": if hub_restart.service_managed { "service" } else { "detached" },
-        });
+    if let Some(hub_restart) = hub_restart {
+        receipt["hub_restart"] = hub_restart_receipt(hub_restart);
     }
     receipt
 }
@@ -1474,18 +1488,20 @@ fn print_project_refresh_summary(
     cli: &Cli,
     hub_transport_error: Option<&str>,
     hub_restart: Option<&super::hub::HubRestartOutcome>,
+    first_launch_ms: Option<u64>,
 ) {
     if cli.json {
-        println!(
-            "{}",
+        let receipt = with_first_launch_ms(
             project_refresh_receipt_json(
                 receipts,
                 user_level,
                 skipped_unregistered,
                 hub_transport_error,
                 hub_restart,
-            )
+            ),
+            first_launch_ms,
         );
+        println!("{}", receipt);
         return;
     }
 
@@ -1556,6 +1572,16 @@ fn print_project_refresh_summary(
         }
     }
     print!("{}", warnings.render(cli.verbose));
+}
+
+fn with_first_launch_ms(
+    mut receipt: serde_json::Value,
+    first_launch_ms: Option<u64>,
+) -> serde_json::Value {
+    if let Some(first_launch_ms) = first_launch_ms {
+        receipt["binary_first_launch_ms"] = serde_json::json!(first_launch_ms);
+    }
+    receipt
 }
 
 /// How far below each scan root discovery will walk. Deep enough for the
@@ -2688,6 +2714,79 @@ fn render_check_report(fmt: &mut Formatter<'_>, view: &CheckView<'_>) -> io::Res
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
+fn remove_quarantine_if_present(installed_binary: &Path) -> anyhow::Result<()> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let path = CString::new(installed_binary.as_os_str().as_bytes())
+        .context("installed binary path contains a NUL byte")?;
+    // SAFETY: The pointers refer to valid NUL-terminated strings.
+    let result = unsafe { libc::removexattr(path.as_ptr(), c"com.apple.quarantine".as_ptr(), 0) };
+    if result == 0 {
+        return Ok(());
+    }
+    let error = io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::ENOATTR) {
+        return Ok(());
+    }
+    Err(error).with_context(|| {
+        format!(
+            "could not remove com.apple.quarantine from installed binary {}",
+            installed_binary.display()
+        )
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+fn remove_quarantine_if_present(_installed_binary: &Path) -> anyhow::Result<()> {
+    Ok(())
+}
+
+/// Time from process creation through dyld and CLI dispatch to the post-swap
+/// entry. The old updater cannot time this first launch, but its new child can
+/// include the measurement in the refresh receipt the old parent merges.
+#[cfg(target_os = "macos")]
+fn post_swap_first_launch_ms() -> anyhow::Result<u64> {
+    use std::mem::MaybeUninit;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let mut info = MaybeUninit::<libc::proc_bsdinfo>::uninit();
+    let size = std::mem::size_of::<libc::proc_bsdinfo>();
+    // SAFETY: proc_pidinfo writes no more than the supplied buffer length.
+    let written = unsafe {
+        libc::proc_pidinfo(
+            libc::getpid(),
+            libc::PROC_PIDTBSDINFO,
+            0,
+            info.as_mut_ptr().cast(),
+            size as i32,
+        )
+    };
+    anyhow::ensure!(
+        written == size as i32,
+        "could not read installed binary process start time: {}",
+        io::Error::last_os_error()
+    );
+    // SAFETY: A full proc_bsdinfo was written above.
+    let info = unsafe { info.assume_init() };
+    let started_us =
+        u128::from(info.pbi_start_tvsec) * 1_000_000 + u128::from(info.pbi_start_tvusec);
+    let now_us = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system clock is before the Unix epoch")?
+        .as_micros();
+    Ok(now_us
+        .saturating_sub(started_us)
+        .div_ceil(1_000)
+        .min(u64::MAX as u128) as u64)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn post_swap_first_launch_ms() -> anyhow::Result<u64> {
+    Ok(0)
+}
+
 /// Download and install the latest (or specified) version
 fn perform_update(
     args: &UpdateArgs,
@@ -2743,6 +2842,12 @@ fn perform_update(
 
     // Perform the update
     let status = updater.update()?;
+    if matches!(&status, Status::Updated(_)) {
+        // A new updater can remove quarantine before the first child launch.
+        // An older parent cannot, so execute_post_swap repeats this before
+        // relaunching the hub and leaves the installed binary clean.
+        remove_quarantine_if_present(&installed_binary)?;
+    }
 
     // cas-91ba: once the binary is swapped, THIS process is the old image.
     // Everything the new release changes — discovery, the user-level store,
@@ -2873,6 +2978,22 @@ fn configure_updater(
         updater.auth_token(&token);
     }
 
+    // Debug builds alone may point update E2E tests at a loopback release
+    // server. Release builds cannot redirect binary downloads through env.
+    #[cfg(debug_assertions)]
+    if let Ok(api_url) = std::env::var("CAS_UPDATE_GITHUB_API_URL") {
+        let parsed = url::Url::parse(&api_url).context("invalid CAS_UPDATE_GITHUB_API_URL")?;
+        anyhow::ensure!(
+            parsed.scheme() == "http"
+                && matches!(parsed.host_str(), Some("127.0.0.1" | "::1" | "localhost"))
+                && parsed.port().is_some()
+                && parsed.username().is_empty()
+                && parsed.password().is_none(),
+            "CAS_UPDATE_GITHUB_API_URL must be an unauthenticated loopback HTTP URL with a port"
+        );
+        updater.with_url(api_url.trim_end_matches('/'));
+    }
+
     if let Some(ref version) = args.version {
         updater.target_version_tag(&format!("v{}", version.trim_start_matches('v')));
     }
@@ -2921,12 +3042,14 @@ impl std::fmt::Display for PostSwapRefreshFailure {
 impl std::error::Error for PostSwapRefreshFailure {}
 
 fn execute_post_swap(args: &UpdateArgs, cli: &Cli, current_version: &str) -> anyhow::Result<()> {
+    let first_launch_ms = post_swap_first_launch_ms()?;
     // Keep the old version available to the internal protocol and future
     // diagnostics without rendering it into the normal update receipt.
     let _previous_version = args
         .from
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("post-swap mode requires --from"))?;
+    remove_quarantine_if_present(&std::env::current_exe()?)?;
     // The hub goes first so it picks up the new binary immediately rather than
     // waiting behind a full refresh.
     let hub_restart = super::hub::restart_stale_hub(current_version, cli)?;
@@ -2934,12 +3057,26 @@ fn execute_post_swap(args: &UpdateArgs, cli: &Cli, current_version: &str) -> any
     // These are the phases that must not run in the pre-update image.
     let hub_proof = hub_restart.clone();
     let (report, hub_transport_error) = refresh_after_hub_restart(hub_restart, |error| {
-        refresh_all_projects(args, cli, None, error, Some(&hub_proof))
+        refresh_all_projects(
+            args,
+            cli,
+            None,
+            error,
+            Some(&hub_proof),
+            Some(first_launch_ms),
+        )
     })?;
     if !cli.json {
         let mut out = io::stdout();
         let mut fmt = Formatter::stdout(&mut out, ActiveTheme::default());
         print_update_banner_with_formatter(&mut fmt, &report, hub_transport_error.as_deref())?;
+    }
+    if hub_proof.action == "failed" {
+        anyhow::bail!(
+            "hub recovery failed after one retry: {}; {}",
+            hub_proof.failure.as_deref().unwrap_or("unknown verification error"),
+            hub_proof.remedy.as_deref().unwrap_or("Run `cas hub restart --force`."),
+        );
     }
     Ok(())
 }

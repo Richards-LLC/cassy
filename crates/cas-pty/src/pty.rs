@@ -2909,7 +2909,8 @@ mod tests {
         format!("'{}'", value.replace('\'', "'\"'\"'"))
     }
 
-    fn spawn_delayed_wait_status_probe() -> (
+    fn spawn_delayed_wait_status_probe(gated: bool) -> (
+        std::path::PathBuf,
         std::path::PathBuf,
         std::path::PathBuf,
         std::path::PathBuf,
@@ -2926,21 +2927,30 @@ mod tests {
         std::fs::create_dir(&temp).expect("temporary PTY evidence directory");
         let ready = temp.join("eof-ready");
         let done = temp.join("wait-status-ready");
+        let release = temp.join("release-wait-status");
         let ready_shell = shell_quote(&ready.to_string_lossy());
         let done_shell = shell_quote(&done.to_string_lossy());
+        let delay = if gated {
+            format!(
+                "while [ ! -e {} ]; do sleep 0.01; done",
+                shell_quote(&release.to_string_lossy())
+            )
+        } else {
+            "sleep 2".to_string()
+        };
         let config = PtyConfig {
             command: "sh".to_string(),
             args: vec![
                 "-c".to_string(),
                 format!(
-                    "printf ready > {ready_shell}; exec 0<&- 1>&- 2>&-; sleep 2; printf done > {done_shell}; exit 37"
+                    "printf ready > {ready_shell}; exec 0<&- 1>&- 2>&-; {delay}; printf done > {done_shell}; exit 37"
                 ),
             ],
             ..PtyConfig::default()
         };
         let pty = Pty::spawn("delayed-wait-status-probe", config)
             .expect("delayed wait-status probe must spawn");
-        (temp, ready, done, pty)
+        (temp, ready, done, release, pty)
     }
 
     impl ScopedEnv {
@@ -3039,7 +3049,7 @@ mod tests {
 
     #[tokio::test]
     async fn eof_before_wait_status_retries_without_blocking_try_recv() {
-        let (temp, ready, done, mut pty) = spawn_delayed_wait_status_probe();
+        let (temp, ready, done, _, mut pty) = spawn_delayed_wait_status_probe(false);
         let deadline = tokio::time::Instant::now() + PTY_CONTROL_EVENT_TIMEOUT;
 
         while !ready.exists() {
@@ -3077,7 +3087,7 @@ mod tests {
 
     #[tokio::test]
     async fn recv_after_try_recv_consumes_eof_retries_wait_status() {
-        let (temp, ready, done, mut pty) = spawn_delayed_wait_status_probe();
+        let (temp, ready, done, release, mut pty) = spawn_delayed_wait_status_probe(true);
         let deadline = tokio::time::Instant::now() + PTY_CONTROL_EVENT_TIMEOUT;
         while !ready.exists() {
             assert!(
@@ -3087,21 +3097,18 @@ mod tests {
             tokio::time::sleep(PTY_EVENT_POLL_INTERVAL).await;
         }
 
-        // Drive try_recv until it consumes EOF and records the pending state,
-        // then switch APIs. The reader channel is disconnected by this point,
-        // so recv must poll the child rather than await that channel forever.
-        while !pty.exit_status_pending {
-            let _ = pty.try_recv();
-            assert!(
-                !done.exists(),
-                "the child must remain alive while try_recv records EOF"
-            );
-            assert!(
-                tokio::time::Instant::now() < deadline,
-                "try_recv must observe the PTY EOF before the delayed wait status"
-            );
-            tokio::time::sleep(PTY_EVENT_POLL_INTERVAL).await;
-        }
+        // Inject the reader's EOF event while the gated child is provably
+        // alive. macOS may retain an extra slave descriptor until child exit,
+        // so relying on physical terminal EOF here races the wait status.
+        let (tx, rx) = mpsc::channel(1);
+        pty.event_rx = rx;
+        tx.try_send(PtyEvent::Exited(None)).expect("inject PTY EOF");
+        drop(tx);
+        assert!(pty.try_recv().is_none());
+        assert!(pty.exit_status_pending);
+        assert!(!done.exists(), "child must be alive before release");
+
+        std::fs::write(&release, "continue").expect("release child wait status");
 
         let event = tokio::time::timeout(PTY_CONTROL_EVENT_TIMEOUT, pty.recv())
             .await
@@ -3120,7 +3127,7 @@ mod tests {
 
     #[tokio::test]
     async fn recv_only_retries_wait_status_after_pty_eof() {
-        let (temp, ready, done, mut pty) = spawn_delayed_wait_status_probe();
+        let (temp, ready, done, _, mut pty) = spawn_delayed_wait_status_probe(false);
         let deadline = tokio::time::Instant::now() + PTY_CONTROL_EVENT_TIMEOUT;
         while !ready.exists() {
             assert!(
@@ -3428,7 +3435,7 @@ mod tests {
         let load = Command::new("sh")
             .args([
                 "-c",
-                "test \"$CLAUDE_PROJECT_DIR\" = \"$PWD\" && cat \"$CLAUDE_PROJECT_DIR/.claude/skills/cas-history-probe/SKILL.md\" >/dev/null",
+                "test \"$(cd \"$CLAUDE_PROJECT_DIR\" && pwd -P)\" = \"$(pwd -P)\" && cat \"$CLAUDE_PROJECT_DIR/.claude/skills/cas-history-probe/SKILL.md\" >/dev/null",
             ])
             .current_dir(&worker)
             .env("CLAUDE_PROJECT_DIR", &main)

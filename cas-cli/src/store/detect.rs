@@ -895,7 +895,7 @@ mod tests {
         init_cas_dir(&temp.path().join("packages/widget")).unwrap();
 
         let found = find_cas_root_from(&subdir).unwrap();
-        assert_eq!(found, temp.path().join(".cas"));
+        assert_eq!(found, temp.path().canonicalize().unwrap().join(".cas"));
     }
 
     #[test]

@@ -6931,15 +6931,12 @@ mod tests {
             let cas_root = temp.path().join(".cas");
             fs::create_dir_all(&cas_root).unwrap();
             let executable = temp.path().join("stdio-server");
-            fs::write(&executable, "#!/bin/sh\nexit 0\n").unwrap();
+            crate::test_paths::warm_stub(&executable, "#!/bin/sh\nexit 0\n");
             let stale_interpreter = temp.path().join("stale-interpreter");
             fs::write(&stale_interpreter, "#!/missing/interpreter\nexit 0\n").unwrap();
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
-                let mut permissions = fs::metadata(&executable).unwrap().permissions();
-                permissions.set_mode(0o755);
-                fs::set_permissions(&executable, permissions).unwrap();
                 let mut permissions = fs::metadata(&stale_interpreter).unwrap().permissions();
                 permissions.set_mode(0o755);
                 fs::set_permissions(&stale_interpreter, permissions).unwrap();

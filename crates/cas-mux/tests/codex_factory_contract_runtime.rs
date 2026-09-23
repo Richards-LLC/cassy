@@ -18,8 +18,38 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 const PANE: &str = "cas-1c66-codex-contract";
-const MODEL: &str = "gpt-5.6-terra";
-const EFFORT: &str = "xhigh";
+
+fn standard_codex_recipe() -> (String, String) {
+    let registry: toml::Value =
+        toml::from_str(include_str!("../../cas-factory/policy/lane-registry.toml"))
+            .expect("parse factory lane registry");
+    let candidates = registry["lanes"]["standard"]["candidates"]
+        .as_array()
+        .expect("standard lane candidates");
+    let recipe = candidates
+        .iter()
+        .filter_map(toml::Value::as_str)
+        .map(|name| &registry["recipes"][name])
+        .find(|recipe| {
+            recipe["harness"].as_str() == Some("codex")
+                && recipe["status"].as_str() == Some("active")
+        })
+        .expect("standard lane must have an active Codex recipe");
+    (
+        recipe["model"].as_str().expect("Codex model").to_owned(),
+        recipe["default_effort"]
+            .as_str()
+            .expect("Codex effort")
+            .to_owned(),
+    )
+}
+
+#[test]
+fn live_matrix_uses_active_standard_codex_recipe() {
+    let (model, effort) = standard_codex_recipe();
+    assert!(!model.is_empty());
+    assert!(!effort.is_empty());
+}
 
 fn codex_0156_available() -> bool {
     std::process::Command::new("codex")
@@ -200,7 +230,7 @@ fn assistant_text_does_not_accept_markers_from_user_prompts() {
     assert!(text.contains("REAL-ASSISTANT-MARKER"));
 }
 
-fn assert_turn_context(body: &str, scratch: &Path) {
+fn assert_turn_context(body: &str, scratch: &Path, model: &str, effort: &str) {
     let contexts: Vec<Value> = body
         .lines()
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
@@ -213,8 +243,8 @@ fn assert_turn_context(body: &str, scratch: &Path) {
     );
     for context in contexts.iter().take(3) {
         assert_eq!(context["cwd"], scratch.to_string_lossy().as_ref());
-        assert_eq!(context["model"], MODEL);
-        assert_eq!(context["effort"], EFFORT);
+        assert_eq!(context["model"], model);
+        assert_eq!(context["effort"], effort);
         assert_eq!(
             context["approval_policy"], "never",
             "--yolo approval bypass must survive every turn"
@@ -252,6 +282,7 @@ fn wait_for_completions(mux: &mut Mux, rollout: &Path, wanted: usize, timeout: D
 #[ignore = "requires real Codex 0.156.0, authentication, and model traffic"]
 fn codex_0156_factory_launch_contract_passes_live_matrix() {
     let _serial = real_pty_serial::lock();
+    let (model, effort) = standard_codex_recipe();
     assert!(
         codex_0156_available(),
         "this receipt is valid only when run against codex-cli 0.156.0"
@@ -273,8 +304,8 @@ fn codex_0156_factory_launch_contract_passes_live_matrix() {
         Some(&cas_root),
         Some("cas-1c66-supervisor"),
         Some("codex"),
-        Some(MODEL),
-        Some(EFFORT),
+        Some(&model),
+        Some(&effort),
         None,
     );
     assert!(config.args.iter().any(|arg| arg == "--yolo"));
@@ -283,13 +314,14 @@ fn codex_0156_factory_launch_contract_passes_live_matrix() {
         config
             .args
             .windows(2)
-            .any(|pair| pair == ["--model", MODEL])
+            .any(|pair| pair == ["--model", model.as_str()])
     );
+    let effort_config = format!("model_reasoning_effort={effort}");
     assert!(
         config
             .args
             .windows(2)
-            .any(|pair| pair == ["-c", "model_reasoning_effort=xhigh"])
+            .any(|pair| pair == ["-c", effort_config.as_str()])
     );
     assert!(
         config
@@ -303,8 +335,8 @@ fn codex_0156_factory_launch_contract_passes_live_matrix() {
         ("CAS_AGENT_ROLE", "worker"),
         ("CAS_FACTORY_MODE", "1"),
         ("CAS_FACTORY_WORKER_CLI", "codex"),
-        ("CAS_FACTORY_WORKER_MODEL", MODEL),
-        ("CAS_FACTORY_WORKER_EFFORT", EFFORT),
+        ("CAS_FACTORY_WORKER_MODEL", model.as_str()),
+        ("CAS_FACTORY_WORKER_EFFORT", effort.as_str()),
     ] {
         assert!(
             config
@@ -431,10 +463,10 @@ fn codex_0156_factory_launch_contract_passes_live_matrix() {
             .contains("rollout token budget exceeded"),
         "multi-turn worker must not abort under a low rollout-token budget"
     );
-    assert_turn_context(&final_body, &scratch);
+    assert_turn_context(&final_body, &scratch, &model, &effort);
 
     eprintln!(
-        "PASS codex-cli 0.156.0 factory contract; isolated_root={}; rollout={}",
+        "PASS codex-cli 0.156.0 factory contract; model={model}; effort={effort}; isolated_root={}; rollout={}",
         cas_root.display(),
         rollout.display()
     );

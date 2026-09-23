@@ -2,7 +2,7 @@
 
 ## Application Overview
 
-Base URL: http://127.0.0.1:4791. Every scenario starts from a fresh browser page, selects its fixture with /?fixture=<name>, uses Seed e2e/seed.spec.ts, and can run in any order. The plan covers the six requested fixture states with happy paths, invalid input, and failure-state affordances. Commander shell fixtures render production UI with placeholder callbacks for backend actions; assertions stop at observable fixture behavior. A scenario fails whenever any listed expectation is unmet.
+Base URL: <http://127.0.0.1:4791>. Every scenario starts from a fresh browser page, selects its fixture with /?fixture=<name>, uses Seed e2e/seed.spec.ts, and can run in any order. The plan covers the six requested fixture states with happy paths, invalid input, and failure-state affordances. Commander shell fixtures render production UI with placeholder callbacks for backend actions; assertions stop at observable fixture behavior. A scenario fails whenever any listed expectation is unmet.
 
 ## Test Scenarios
 
@@ -15,6 +15,7 @@ Base URL: http://127.0.0.1:4791. Every scenario starts from a fresh browser page
 **File:** `e2e/generated/conversation-composer-draft.spec.ts`
 
 **Steps:**
+
   1. From a fresh page, navigate to /?fixture=conversation-composer.
     - expect: The patient-pelican-9 conversation is open and the Your message textbox contains “Cut 3.26.0 once the gate is green, then post the release notes.”
     - expect: The send button is named Send to patient-pelican-9 and the attachment button is disabled.
@@ -33,6 +34,7 @@ Base URL: http://127.0.0.1:4791. Every scenario starts from a fresh browser page
 **File:** `e2e/generated/conversation-ask-fix-option.spec.ts`
 
 **Steps:**
+
   1. From a fresh page, navigate to /?fixture=conversation-ask.
     - expect: A Waiting on you region contains the gate-run question and buttons Fix in-train and Ship with allowlist.
     - expect: The thread contains the related blocker and attention.rs:212 evidence.
@@ -50,6 +52,7 @@ Base URL: http://127.0.0.1:4791. Every scenario starts from a fresh browser page
 **File:** `e2e/generated/conversation-ask-allowlist-option.spec.ts`
 
 **Steps:**
+
   1. From a fresh page, navigate to /?fixture=conversation-ask and locate the pinned gate-run question.
     - expect: Both response options are present and no reply has been recorded yet.
   2. Click Ship with allowlist once.
@@ -66,6 +69,7 @@ Base URL: http://127.0.0.1:4791. Every scenario starts from a fresh browser page
 **File:** `e2e/generated/conversation-ask-status-history.spec.ts`
 
 **Steps:**
+
   1. From a fresh page, navigate to /?fixture=conversation-ask.
     - expect: The gate progress appears as one condensed update with a Show full update button.
     - expect: The pending question remains in the Waiting on you region.
@@ -84,12 +88,13 @@ Base URL: http://127.0.0.1:4791. Every scenario starts from a fresh browser page
 **File:** `e2e/generated/pairing-step-1-email-validation.spec.ts`
 
 **Steps:**
+
   1. From a fresh page, navigate to /?fixture=pairing-step-1.
     - expect: The Pair a machine modal is open.
     - expect: It displays the current Cassy Cloud origin, the six exact scopes, the ten-minute code explanation, an optional Email code field, and Create pairing code.
   2. Fill Email code (optional) with “not-an-email” and click Create pairing code.
     - expect: The browser reports the email input invalid and retains the dialog on step 1; fail if the malformed value passes native email validation.
-  3. Replace the field with “operator@example.com”.
+  3. Replace the field with “<operator@example.com>”.
     - expect: The field value is valid and the Create pairing code control remains available; this fixture does not supply a relay response to assert a later step.
 
 ### 6. Pairing entry
@@ -101,6 +106,7 @@ Base URL: http://127.0.0.1:4791. Every scenario starts from a fresh browser page
 **File:** `e2e/generated/pairing-step-1-escape.spec.ts`
 
 **Steps:**
+
   1. From a fresh page, navigate to /?fixture=pairing-step-1.
     - expect: The Pair a machine dialog is open and the underlying pairing workspace is inert.
   2. Press Escape.
@@ -115,6 +121,7 @@ Base URL: http://127.0.0.1:4791. Every scenario starts from a fresh browser page
 **File:** `e2e/generated/attention-12-severity-actions.spec.ts`
 
 **Steps:**
+
   1. From a fresh page, navigate to /?fixture=attention-12.
     - expect: Attention is the selected tab, the panel says 12 events need attention, and the session group is expanded with count 12.
   2. Inspect the Daemon connection lost article, a Connection attempt warning article, and the Connection attempt 4 info article.
@@ -130,6 +137,7 @@ Base URL: http://127.0.0.1:4791. Every scenario starts from a fresh browser page
 **File:** `e2e/generated/attention-12-details.spec.ts`
 
 **Steps:**
+
   1. From a fresh page, navigate to /?fixture=attention-12 and locate the Daemon connection lost article.
     - expect: Its Details disclosure is closed and the diagnostic JSON is not visible.
   2. Click the article's Details disclosure.
@@ -147,6 +155,7 @@ Base URL: http://127.0.0.1:4791. Every scenario starts from a fresh browser page
 **File:** `e2e/generated/fleet-populated-summary.spec.ts`
 
 **Steps:**
+
   1. From a fresh page, navigate to /?fixture=fleet-populated.
     - expect: Fleet shows 2 machines, 3 sessions, 1 not live, and the status “1 of 3 sessions needs you; 2 working.”
   2. Inspect the work-state table and Session ledger.
@@ -162,6 +171,7 @@ Base URL: http://127.0.0.1:4791. Every scenario starts from a fresh browser page
 **File:** `e2e/generated/fleet-populated-session-controls.spec.ts`
 
 **Steps:**
+
   1. From a fresh page, navigate to /?fixture=fleet-populated.
     - expect: The Session ledger is visible.
   2. Locate each ledger button by accessible name: Open bright-otter on Atlas laptop, Open calm-heron on Atlas laptop, and Open quiet-marten on Forge desktop.
@@ -179,6 +189,7 @@ Base URL: http://127.0.0.1:4791. Every scenario starts from a fresh browser page
 **File:** `e2e/generated/connection-failed-retry-actions.spec.ts`
 
 **Steps:**
+
   1. From a fresh page, navigate to /?fixture=connection-failed-retry.
     - expect: The page says “Connection failed — retry available.”
     - expect: Connection attempts lists two earlier attempts, failed Attempt 3, and “The machine did not answer its hub address.”

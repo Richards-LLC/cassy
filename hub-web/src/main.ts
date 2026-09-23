@@ -2766,12 +2766,20 @@ function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | und
   document.querySelector<HTMLButtonElement>("#command-palette-close")!.onclick = closePalette;
   palette.oncancel = () => { commandPaletteOpen = false; };
   const paletteQuery = document.querySelector<HTMLInputElement>("#command-palette-query")!;
+  const paletteList = palette.querySelector<HTMLElement>(".palette-commands")!;
+  const paletteOrder = [...paletteList.children];
   paletteQuery.oninput = () => {
     const query = paletteQuery.value.trim().toLocaleLowerCase();
     for (const command of palette.querySelectorAll<HTMLElement>(".palette-command")) {
       const searchable = `${command.textContent ?? ""} ${command.dataset.searchText ?? ""}`.toLocaleLowerCase();
       command.hidden = query.length > 0 && !searchable.includes(query);
     }
+    // A query that names a session leads with its "Jump to" rows, so Enter
+    // and ArrowDown land on the conversation rather than a setting.
+    const sessionMatches = query.length > 0
+      ? [...paletteList.querySelectorAll<HTMLElement>("[data-palette-machine]")].filter((command) => !command.hidden)
+      : [];
+    paletteList.replaceChildren(...sessionMatches, ...paletteOrder.filter((node) => !sessionMatches.includes(node as HTMLElement)));
   };
   paletteQuery.onkeydown = (event) => {
     if (event.key !== "ArrowDown" && event.key !== "Enter") return;

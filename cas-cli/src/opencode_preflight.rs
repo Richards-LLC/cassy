@@ -794,13 +794,35 @@ fn hosted_transport_error_class(error: &ureq::Error) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::{Read, Write};
+    use std::io::{BufRead, BufReader, Read, Write};
     use std::net::{TcpListener, TcpStream};
     use std::thread;
 
+    fn read_request(stream: &mut TcpStream) -> String {
+        let mut reader = BufReader::new(stream);
+        let mut headers = String::new();
+        let mut content_length = 0;
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).expect("read request headers");
+            assert!(!line.is_empty(), "request ended before headers");
+            if let Some((name, value)) = line.split_once(':') {
+                if name.eq_ignore_ascii_case("content-length") {
+                    content_length = value.trim().parse().expect("content length");
+                }
+            }
+            headers.push_str(&line);
+            if line == "\r\n" {
+                break;
+            }
+        }
+        let mut body = vec![0; content_length];
+        reader.read_exact(&mut body).expect("read request body");
+        headers
+    }
+
     fn respond(mut stream: TcpStream, body: &str) {
-        let mut request = [0; 4096];
-        let _ = stream.read(&mut request);
+        read_request(&mut stream);
         respond_body(stream, body);
     }
 
@@ -939,11 +961,8 @@ mod tests {
                 r#"{"choices":[{"message":{"content":"READY"}}]}"#,
             ] {
                 let (mut stream, _) = listener.accept().unwrap();
-                let mut request = [0; 4096];
-                let size = stream.read(&mut request).unwrap();
-                requests_tx
-                    .send(String::from_utf8_lossy(&request[..size]).into_owned())
-                    .unwrap();
+                let request = read_request(&mut stream);
+                requests_tx.send(request).unwrap();
                 respond_body(stream, body);
             }
         });

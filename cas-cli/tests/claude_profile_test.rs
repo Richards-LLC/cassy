@@ -2,7 +2,6 @@
 
 use assert_cmd::Command;
 use predicates::prelude::*;
-use std::os::unix::fs::PermissionsExt;
 use tempfile::TempDir;
 
 fn cas_cmd(home: &std::path::Path) -> Command {
@@ -28,7 +27,7 @@ fn home_with_profiles() -> TempDir {
     let bin = home.path().join("bin");
     std::fs::create_dir_all(&bin).unwrap();
     let claude = bin.join("claude");
-    std::fs::write(
+    cas::test_paths::warm_stub(
         &claude,
         r#"#!/bin/sh
 if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
@@ -46,11 +45,7 @@ if [ "$1" = "auth" ] && [ "$2" = "login" ]; then
 fi
 exit 0
 "#,
-    )
-    .unwrap();
-    let mut permissions = std::fs::metadata(&claude).unwrap().permissions();
-    permissions.set_mode(0o755);
-    std::fs::set_permissions(&claude, permissions).unwrap();
+    );
     home
 }
 

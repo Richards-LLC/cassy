@@ -1564,7 +1564,6 @@ mod tests {
 
     #[test]
     fn runtime_union_sweep_receipt_and_close_reopen_with_stub_cargo() {
-        use std::os::unix::fs::PermissionsExt;
         let repo = fixture();
         let first = epic(repo.path(), "cas-0081", "a", "one");
         let second = epic(repo.path(), "cas-ed91a", "b", "two");
@@ -1574,7 +1573,7 @@ mod tests {
             &["remote", "add", "origin", repo.path().to_str().unwrap()],
         );
         let stub = repo.path().join("cargo-stub.sh");
-        fs::write(
+        crate::test_paths::warm_stub(
             &stub,
             r#"#!/bin/sh
 if [ -f a ] && [ -f b ]; then
@@ -1584,9 +1583,7 @@ if [ -f a ] && [ -f b ]; then
 fi
 echo 'Summary: 1 passed'
 "#,
-        )
-        .unwrap();
-        fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
+        );
         let _env = crate::test_support::TestEnvGuard::with_vars(&[
             ("CARGO", stub.to_str().unwrap()),
             ("CAS_FACTORY_BUILD_GUARD", "off"),
@@ -1771,12 +1768,7 @@ echo 'Summary: 1 passed'
             &["remote", "add", "origin", repo.path().to_str().unwrap()],
         );
         let stub = repo.path().join("cargo-stub.sh");
-        fs::write(&stub, "#!/bin/sh\necho 'Summary: 1 passed'\n").unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        crate::test_paths::warm_stub(&stub, "#!/bin/sh\necho 'Summary: 1 passed'\n");
         let _env = crate::test_support::TestEnvGuard::with_vars(&[
             ("CARGO", stub.to_str().unwrap()),
             ("CAS_FACTORY_BUILD_GUARD", "off"),
@@ -1977,12 +1969,7 @@ echo 'Summary: 1 passed'
             &["remote", "add", "origin", repo.path().to_str().unwrap()],
         );
         let stub = repo.path().join("cargo-stub.sh");
-        fs::write(&stub, "#!/bin/sh\necho 'Summary: 1 passed'\n").unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        crate::test_paths::warm_stub(&stub, "#!/bin/sh\necho 'Summary: 1 passed'\n");
         let _env = crate::test_support::TestEnvGuard::with_vars(&[
             ("CARGO", stub.to_str().unwrap()),
             ("CAS_FACTORY_BUILD_GUARD", "off"),
@@ -2034,20 +2021,17 @@ echo 'Summary: 1 passed'
 
     #[test]
     fn recovery_cancellation_terminates_the_owned_test_runner() {
-        use std::os::unix::fs::PermissionsExt;
         let repo = fixture();
         let cas_dir = crate::store::init_cas_dir(repo.path()).unwrap();
         let marker = cas_dir.join("runner-started");
         let stub = repo.path().join("cargo-stub.sh");
-        fs::write(
+        crate::test_paths::warm_stub(
             &stub,
-            format!(
+            &format!(
                 "#!/bin/sh\nprintf started > '{}'\nexec sleep 30\n",
                 marker.display()
             ),
-        )
-        .unwrap();
-        fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
+        );
         let _env = crate::test_support::TestEnvGuard::with_vars(&[
             ("CARGO", stub.to_str().unwrap()),
             ("CAS_FACTORY_BUILD_GUARD", "off"),

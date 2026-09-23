@@ -4630,7 +4630,6 @@ mod spawn_base_tests {
 
     #[test]
     fn work_target_spawn_uses_unpublished_refreshed_epic_tip_after_push_rejection_cas_5504() {
-        use std::os::unix::fs::PermissionsExt;
 
         let tmp = TempDir::new().unwrap();
         let origin = tmp.path().join("origin");
@@ -4642,14 +4641,10 @@ mod spawn_base_tests {
             .output()
             .unwrap();
         let reject_hook = origin.join(".git/hooks/pre-receive");
-        std::fs::write(
+        crate::test_paths::warm_stub(
             &reject_hook,
             "#!/bin/sh\necho push rejected by test hook >&2\nexit 1\n",
-        )
-        .unwrap();
-        let mut permissions = std::fs::metadata(&reject_hook).unwrap().permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&reject_hook, permissions).unwrap();
+        );
 
         let repo = tmp.path().join("repo");
         Command::new("git")

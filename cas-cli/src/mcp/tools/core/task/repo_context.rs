@@ -1060,12 +1060,10 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn bounded_git_probe_returns_typed_timeout_without_command_details() {
-        use std::os::unix::fs::PermissionsExt;
 
         let dir = tempfile::tempdir().unwrap();
         let fake_git = dir.path().join("slow-git");
-        std::fs::write(&fake_git, "#!/bin/sh\nsleep 10\n").unwrap();
-        std::fs::set_permissions(&fake_git, std::fs::Permissions::from_mode(0o700)).unwrap();
+        crate::test_paths::warm_stub(&fake_git, "#!/bin/sh\nsleep 10\n");
         let probe = BoundedRepoProbe::new(
             Deadline::after(Duration::from_millis(75)),
             Duration::from_millis(75),

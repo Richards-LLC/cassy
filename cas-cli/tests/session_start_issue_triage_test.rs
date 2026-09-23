@@ -46,18 +46,14 @@ fn init(project: &TempDir) {
 
 #[cfg(unix)]
 fn install_fake_gh(project: &TempDir, body: &str) -> (PathBuf, PathBuf) {
-    use std::os::unix::fs::PermissionsExt;
-
     let bin = project.path().join("fake-bin");
     fs::create_dir_all(&bin).unwrap();
     let gh = bin.join("gh");
     let log = project.path().join("gh-calls.log");
-    fs::write(
+    cas::test_paths::warm_stub(
         &gh,
-        format!("#!/bin/sh\nprintf '%s\\n' called >> \"$GH_CALL_LOG\"\n{body}\n"),
-    )
-    .unwrap();
-    fs::set_permissions(&gh, fs::Permissions::from_mode(0o755)).unwrap();
+        &format!("#!/bin/sh\nprintf '%s\\n' called >> \"$GH_CALL_LOG\"\n{body}\n"),
+    );
     (bin, log)
 }
 

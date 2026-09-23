@@ -106,6 +106,10 @@ fn entry(id: &str, content: &str, ty: EntryType, tier: MemoryTier, tags: &[&str]
     e.memory_tier = tier;
     e.tags = tags.iter().map(|t| t.to_string()).collect();
     e.title = Some(format!("title for {id}"));
+    // Both independently seeded stores must have identical ordering keys.
+    // Otherwise creation-time scheduling can reorder real rows before the
+    // exclusion code ever sees them.
+    e.created = "2026-01-01T00:00:00Z".parse().unwrap();
     e
 }
 

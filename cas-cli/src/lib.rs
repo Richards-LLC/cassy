@@ -39,6 +39,8 @@ pub mod duplicate_check;
 pub mod error;
 pub mod extraction;
 mod light_lane;
+#[doc(hidden)]
+pub use light_lane::run_detached_worker;
 pub mod factory_auth_health;
 pub(crate) mod factory_build_guard;
 pub mod factory_context_reset;

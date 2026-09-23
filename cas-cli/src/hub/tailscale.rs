@@ -663,7 +663,6 @@ mod tests {
 
     #[cfg(unix)]
     fn stateful_mock(temp: &Path) -> (PathBuf, PathBuf, PathBuf) {
-        use std::os::unix::fs::PermissionsExt;
         let binary = temp.join("tailscale");
         let state = temp.join("serve-state");
         let calls = temp.join("calls");
@@ -675,8 +674,7 @@ mod tests {
             state.display(),
             state.display()
         );
-        fs::write(&binary, script).unwrap();
-        fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
+        crate::test_paths::warm_stub(&binary, &script);
         (binary, state, calls)
     }
 
@@ -910,7 +908,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn mocked_binary_proves_idempotent_setup_and_owned_teardown() {
-        use std::os::unix::fs::PermissionsExt;
 
         let temp = private_tempdir();
         let binary = temp.path().join("tailscale");
@@ -923,8 +920,7 @@ mod tests {
             state.display(),
             state.display()
         );
-        fs::write(&binary, script).unwrap();
-        fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
+        crate::test_paths::warm_stub(&binary, &script);
         let manager = TailscaleServeManager::with_executable(temp.path().join("hub"), &binary);
 
         let first = manager.ensure(4173, 443).unwrap();
@@ -943,7 +939,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn legacy_v2_60_receipt_is_owned_and_tears_down_with_current_code() {
-        use std::os::unix::fs::PermissionsExt;
 
         let temp = private_tempdir();
         let binary = temp.path().join("tailscale");
@@ -955,8 +950,7 @@ mod tests {
             state.display(),
             state.display(),
         );
-        fs::write(&binary, script).unwrap();
-        fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
+        crate::test_paths::warm_stub(&binary, &script);
         fs::write(&state, "owned").unwrap();
 
         let hub = temp.path().join("hub");
@@ -1011,7 +1005,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn mocked_binary_refuses_unrelated_mapping_without_mutation() {
-        use std::os::unix::fs::PermissionsExt;
 
         let temp = private_tempdir();
         let binary = temp.path().join("tailscale");
@@ -1020,8 +1013,7 @@ mod tests {
             "#!/bin/sh\necho \"$*\" >> '{}'\ncase \"$*\" in\n'status --json') printf '%s' '{{\"Self\":{{\"DNSName\":\"node.tail.ts.net.\"}}}}' ;;\n'serve status --json') printf '%s' '{{\"Web\":{{\"node.tail.ts.net:443\":{{\"Handlers\":{{\"/\":{{\"Proxy\":\"http://127.0.0.1:9999\"}}}}}}}}}}' ;;\n*) exit 9 ;;\nesac\n",
             calls.display()
         );
-        fs::write(&binary, script).unwrap();
-        fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
+        crate::test_paths::warm_stub(&binary, &script);
         let manager = TailscaleServeManager::with_executable(temp.path().join("hub"), &binary);
 
         let error = manager.ensure(4173, 443).unwrap_err().to_string();
@@ -1032,7 +1024,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn failed_post_creation_verification_rolls_back_without_receipt() {
-        use std::os::unix::fs::PermissionsExt;
 
         let temp = private_tempdir();
         let binary = temp.path().join("tailscale");
@@ -1048,8 +1039,7 @@ mod tests {
             state.display(),
             state.display(),
         );
-        fs::write(&binary, script).unwrap();
-        fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
+        crate::test_paths::warm_stub(&binary, &script);
         let hub = temp.path().join("hub");
         let manager = TailscaleServeManager::with_executable(&hub, &binary);
 
@@ -1065,7 +1055,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn owned_teardown_refuses_externally_altered_mapping_and_keeps_receipt() {
-        use std::os::unix::fs::PermissionsExt;
 
         let temp = private_tempdir();
         let binary = temp.path().join("tailscale");
@@ -1079,8 +1068,7 @@ mod tests {
             state.display(),
             state.display(),
         );
-        fs::write(&binary, script).unwrap();
-        fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
+        crate::test_paths::warm_stub(&binary, &script);
         let hub = temp.path().join("hub");
         let manager = TailscaleServeManager::with_executable(&hub, &binary);
 

@@ -1085,6 +1085,7 @@ pub(crate) fn resolve_worker(cas_root: &Path, worker_name: &str) -> Result<Resol
     Ok(ResolvedWorker {
         name: worker_name.to_string(),
         pid,
+        registered_at: agent.registered_at,
         // cas-4513 adversarial P0: thread the pid_starttime fingerprint
         // from the agent row so `execute_kill` can guard against a PID
         // that was recycled after the agent record was written. Falls
@@ -1109,6 +1110,7 @@ pub(crate) fn resolve_worker(cas_root: &Path, worker_name: &str) -> Result<Resol
 pub(crate) struct ResolvedWorker {
     pub name: String,
     pub pid: Option<u32>,
+    pub registered_at: chrono::DateTime<chrono::Utc>,
     /// `/proc/<pid>/stat` starttime fingerprint, when the registration
     /// path captured one. Used by `execute_kill` to refuse SIGKILL on a
     /// PID whose fingerprint no longer matches (= PID was recycled).
@@ -1168,6 +1170,12 @@ pub(crate) fn execute_is_wedged(cas_root: Option<&Path>, worker: &str, json: boo
             worktree_recent_edit_age,
             process_cpu_busy,
             pending_permission,
+        );
+        let fallback = unverified_death_without_identity(
+            fallback,
+            w.pid,
+            evidence.pid_alive,
+            resolved_pid,
         );
         let opencode_observation = if w.cli == cas_mux::SupervisorCli::OpenCode {
             opencode_liveness::observe(
@@ -1292,8 +1300,8 @@ pub(crate) trait ProcessTable {
 
 /// Live `/proc` implementation. Linux-only, matching the existing
 /// `read_pid_starttime` / fingerprint-guard gating in `daemon.rs` — other
-/// platforms get an empty table and [`find_worker_pid`] always falls back
-/// to the tracked pid.
+/// platforms get an empty table. Their missing matches are unknown while a
+/// tracked PID still exists; macOS kill validates that PID with libproc.
 pub(crate) struct RealProcessTable;
 
 impl ProcessTable for RealProcessTable {
@@ -1717,6 +1725,96 @@ pub(crate) fn pick_kill_pid(tracked_pid: Option<u32>, resolved_pid: Option<u32>)
     resolved_pid.or(tracked_pid)
 }
 
+#[cfg(target_os = "macos")]
+fn macos_kill_identity_matches(
+    executable: &Path,
+    cli: cas_mux::SupervisorCli,
+    started_at_micros: u64,
+    registered_at_micros: u64,
+    stored_starttime: Option<u64>,
+) -> std::result::Result<(), String> {
+    let basename = executable
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let expected = match cli {
+        cas_mux::SupervisorCli::Claude => "claude",
+        cas_mux::SupervisorCli::Codex => "codex",
+        cas_mux::SupervisorCli::Grok => "grok",
+        cas_mux::SupervisorCli::OpenCode => "opencode",
+    };
+    // `cas serve` may overwrite the tracked PID, but it is an MCP child,
+    // not the harness to which the lease belongs. Match the registered
+    // harness instead of treating every Cassy executable as a worker.
+    if basename != expected && !basename.starts_with(&format!("{expected}-")) {
+        return Err(format!(
+            "expected {expected} harness executable, found {}",
+            if basename.is_empty() { "<unknown>" } else { &basename }
+        ));
+    }
+    if started_at_micros > registered_at_micros {
+        return Err("process started after agent registration (PID may be recycled)".into());
+    }
+    if stored_starttime.is_some_and(|stored| stored != started_at_micros) {
+        return Err("process starttime fingerprint differs from the agent record".into());
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn macos_process_executable(pid: u32) -> Result<PathBuf> {
+    let mut path = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+    // SAFETY: proc_pidpath writes at most the supplied buffer size and does
+    // not retain its pointer. The returned byte count bounds every read.
+    let written = unsafe {
+        libc::proc_pidpath(
+            pid as libc::c_int,
+            path.as_mut_ptr().cast(),
+            path.len() as u32,
+        )
+    };
+    if written <= 0 {
+        bail!("cannot read executable path for tracked pid {pid}; refusing kill");
+    }
+    let bytes = &path[..written as usize];
+    let end = bytes.iter().position(|byte| *byte == 0).unwrap_or(bytes.len());
+    use std::os::unix::ffi::OsStrExt;
+    Ok(PathBuf::from(std::ffi::OsStr::from_bytes(&bytes[..end])))
+}
+
+#[cfg(target_os = "macos")]
+fn verify_macos_tracked_worker(w: &ResolvedWorker, pid: u32) -> Result<()> {
+    let executable = macos_process_executable(pid)?;
+    let started_at = crate::mcp::daemon::read_pid_starttime(pid)
+        .ok_or_else(|| anyhow!("cannot read start time for tracked pid {pid}; refusing kill"))?;
+    let registered_at = u64::try_from(w.registered_at.timestamp_micros())
+        .map_err(|_| anyhow!("invalid registration time for `{}`; refusing kill", w.name))?;
+    macos_kill_identity_matches(&executable, w.cli, started_at, registered_at, w.pid_starttime)
+        .map_err(|reason| anyhow!("tracked pid {pid} identity mismatch: {reason}; refusing kill"))
+}
+
+/// A tracked PID can belong to an MCP child or a recycled process. Without a
+/// process-table identity match, a missing PID is unknown only if no tracked
+/// PID has returned ESRCH; that syscall result is direct exit evidence.
+fn unverified_death_without_identity(
+    state: WorkerLivenessState,
+    tracked_pid: Option<u32>,
+    tracked_pid_alive: bool,
+    resolved_pid: Option<u32>,
+) -> WorkerLivenessState {
+    #[cfg(not(target_os = "linux"))]
+    if resolved_pid.is_none()
+        && state == WorkerLivenessState::Dead
+        && (tracked_pid.is_none() || tracked_pid_alive)
+    {
+        return WorkerLivenessState::Unverified;
+    }
+    #[cfg(target_os = "linux")]
+    let _ = (tracked_pid, tracked_pid_alive, resolved_pid);
+    state
+}
+
 /// Decide whether `execute_kill` should proceed to reset the worker's
 /// task leases, given the kill verdict and (for the `Go` case) whether
 /// death was actually confirmed after the SIGKILL was delivered. cas-f781
@@ -1799,6 +1897,9 @@ fn verify_death(pid: u32) -> bool {
 /// without the fingerprint guard we could SIGKILL an unrelated process.
 /// When the fingerprint check fails, we refuse unless `--force` is set.
 /// Legacy agents without a stored fingerprint also require `--force`.
+/// On macOS, a live tracked PID additionally needs a matching harness path
+/// and a process start no later than registration; `--force` cannot bypass
+/// that identity check.
 ///
 /// Process resolution (cas-f781 P0): the agent store's `pid` column is not
 /// trusted blindly — it can be overwritten by an unrelated process's
@@ -1822,6 +1923,28 @@ pub(crate) fn execute_kill(cas_root: Option<&Path>, worker: &str, force: bool) -
     let mut summary = Vec::<String>::new();
 
     let resolved_pid = find_worker_pid(&RealProcessTable, &w.name);
+    let kill_pid = pick_kill_pid(w.pid, resolved_pid);
+    #[cfg(target_os = "macos")]
+    let tracked_identity_verified = match kill_pid {
+        Some(pid) if crate::mcp::daemon::pid_alive(pid) => {
+            verify_macos_tracked_worker(&w, pid)?;
+            true
+        }
+        Some(_) => false, // ESRCH: the tracked process is already dead.
+        None => bail!(
+            "no tracked PID or process identity for `{}`; refusing lease reset",
+            w.name
+        ),
+    };
+    #[cfg(not(target_os = "macos"))]
+    let tracked_identity_verified = false;
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    if resolved_pid.is_none() {
+        bail!(
+            "cannot verify process identity for `{}` on this platform; refusing to kill or reset its leases",
+            w.name
+        );
+    }
     if let (Some(tracked), Some(resolved)) = (w.pid, resolved_pid) {
         if tracked != resolved {
             summary.push(format!(
@@ -1831,8 +1954,8 @@ pub(crate) fn execute_kill(cas_root: Option<&Path>, worker: &str, force: bool) -
             ));
         }
     }
-    let kill_pid = pick_kill_pid(w.pid, resolved_pid);
-    let scan_confirmed = resolved_pid.is_some() && kill_pid == resolved_pid;
+    let scan_confirmed = (resolved_pid.is_some() && kill_pid == resolved_pid)
+        || tracked_identity_verified;
 
     // Inner scope so the SqliteAgentStore / SqliteTaskStore connections
     // opened by `reset_worker_tasks` drop (and any WAL checkpoints fire)
@@ -2674,7 +2797,12 @@ mod tests {
             |_| false,
             Some(pending.clone()),
         );
+        // Only Linux can inspect the child tree. macOS must keep the pending
+        // request visible without claiming that no child is doing the work.
+        #[cfg(target_os = "linux")]
         assert_eq!(state, WorkerLivenessState::ApprovalHang);
+        #[cfg(not(target_os = "linux"))]
+        assert_eq!(state, WorkerLivenessState::Unverified);
         assert_eq!(evidence.pending_permission, Some(pending));
         assert!(!evidence.in_flight_tool_call);
         let human = format_state_human(&state, &evidence);
@@ -2682,7 +2810,10 @@ mod tests {
         assert!(human.contains("python3 -<<'PY' rewrite.html PY"));
         let json: serde_json::Value =
             serde_json::from_str(&format_state_json(&state, &evidence)).expect("valid JSON");
+        #[cfg(target_os = "linux")]
         assert_eq!(json["approval_status"], "awaiting leader approval");
+        #[cfg(not(target_os = "linux"))]
+        assert_eq!(json["approval_status"], "leader approval pending");
         assert_eq!(json["pending_permission"]["tool_name"], "Bash");
         assert!(
             json["pending_permission"]["command_excerpt"]
@@ -3895,6 +4026,80 @@ mod tests {
     #[test]
     fn pick_kill_pid_none_when_nothing_available() {
         assert_eq!(pick_kill_pid(None, None), None);
+    }
+
+    #[test]
+    fn missing_process_identity_never_proves_dead_on_macos() {
+        let state = unverified_death_without_identity(WorkerLivenessState::Dead, None, false, None);
+        #[cfg(target_os = "linux")]
+        assert_eq!(state, WorkerLivenessState::Dead);
+        #[cfg(not(target_os = "linux"))]
+        assert_eq!(state, WorkerLivenessState::Unverified);
+        assert_eq!(
+            unverified_death_without_identity(WorkerLivenessState::Alive, None, false, None),
+            WorkerLivenessState::Alive
+        );
+        assert_eq!(
+            unverified_death_without_identity(WorkerLivenessState::Dead, Some(42), false, None),
+            WorkerLivenessState::Dead,
+            "ESRCH on a tracked PID proves it exited"
+        );
+        #[cfg(not(target_os = "linux"))]
+        assert_eq!(
+            unverified_death_without_identity(WorkerLivenessState::Dead, Some(42), true, None),
+            WorkerLivenessState::Unverified,
+            "an existing tracked PID with no identity proof is unknown"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_kill_requires_harness_path_and_pre_registration_start() {
+        let codex = Path::new("/Applications/Codex.app/Contents/MacOS/codex");
+        assert!(
+            macos_kill_identity_matches(codex, cas_mux::SupervisorCli::Codex, 100, 101, None)
+                .is_ok()
+        );
+        let recycled =
+            macos_kill_identity_matches(codex, cas_mux::SupervisorCli::Codex, 102, 101, None)
+                .unwrap_err();
+        assert!(recycled.contains("after agent registration"), "{recycled}");
+        let foreign = macos_kill_identity_matches(
+            Path::new("/usr/bin/sleep"),
+            cas_mux::SupervisorCli::Codex,
+            100,
+            101,
+            None,
+        )
+        .unwrap_err();
+        assert!(foreign.contains("expected codex"), "{foreign}");
+        let mcp_child = macos_kill_identity_matches(
+            Path::new("/usr/local/bin/cas"),
+            cas_mux::SupervisorCli::Codex,
+            100,
+            101,
+            None,
+        )
+        .unwrap_err();
+        assert!(mcp_child.contains("expected codex"), "{mcp_child}");
+        let fingerprint = macos_kill_identity_matches(
+            codex,
+            cas_mux::SupervisorCli::Codex,
+            100,
+            101,
+            Some(99),
+        )
+        .unwrap_err();
+        assert!(fingerprint.contains("fingerprint"), "{fingerprint}");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_process_executable_reads_the_current_binary() {
+        let actual = macos_process_executable(std::process::id()).unwrap();
+        let expected = std::env::current_exe().unwrap();
+        assert_eq!(actual.file_name(), expected.file_name());
+        assert!(crate::mcp::daemon::read_pid_starttime(std::process::id()).is_some());
     }
 
     #[test]

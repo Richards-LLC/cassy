@@ -8,7 +8,6 @@ use std::path::PathBuf;
 use tempfile::TempDir;
 
 #[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
 
 fn repo_root() -> PathBuf {
     cas::test_paths::workspace_root()
@@ -33,7 +32,7 @@ fn helper_streams_large_reference_and_honors_returned_mime() {
     fs::create_dir(&bin).expect("create fake provider bin");
     let payload_capture = project.path().join("payload.json");
     let fake_curl = bin.join("curl");
-    fs::write(
+    cas::test_paths::warm_stub(
         &fake_curl,
         r##"#!/usr/bin/env bash
 set -euo pipefail
@@ -53,13 +52,7 @@ done
 cp "$payload" "$CURL_PAYLOAD_CAPTURE"
 printf '%s' '{"candidates":[{"content":{"parts":[{"inlineData":{"mimeType":"image/jpeg","data":"anBlZy1maXh0dXJl"}}]}}]}'
 "##,
-    )
-    .expect("write fake curl");
-    let mut permissions = fs::metadata(&fake_curl)
-        .expect("stat fake curl")
-        .permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(&fake_curl, permissions).expect("make fake curl executable");
+    );
 
     let script = repo_root()
         .join("cas-cli/src/builtins/skills/cas-image-generate/scripts/generate-image.sh");

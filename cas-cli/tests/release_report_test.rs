@@ -69,10 +69,9 @@ fn generated_docs_lint_skips_when_npx_is_missing() {
 
 #[cfg(unix)]
 fn install_fake_gh(project: &TempDir) -> PathBuf {
-    use std::os::unix::fs::PermissionsExt;
 
     let path = project.path().join("fake-gh");
-    fs::write(
+    cas::test_paths::warm_stub(
         &path,
         r##"#!/bin/sh
 case "$1 $2" in
@@ -88,18 +87,15 @@ case "$1 $2" in
   *) exit 1 ;;
 esac
 "##
-    )
-    .unwrap();
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    );
     path
 }
 
 #[cfg(unix)]
 fn install_followup_fake_gh(project: &TempDir) -> PathBuf {
-    use std::os::unix::fs::PermissionsExt;
 
     let path = project.path().join("fake-gh-followup");
-    fs::write(
+    cas::test_paths::warm_stub(
         &path,
         r##"#!/bin/sh
 case "$1 $2" in
@@ -115,9 +111,7 @@ case "$1 $2" in
   *) exit 1 ;;
 esac
 "##
-    )
-    .unwrap();
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    );
     path
 }
 

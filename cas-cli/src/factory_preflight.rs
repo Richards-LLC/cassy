@@ -959,6 +959,11 @@ fn classify_harnesses(
             };
 
             let validates = receipt.validates_pin();
+            let below_claude_floor = harness == Harness::ClaudeCode
+                && default_version.as_deref().is_some_and(|installed| {
+                    compare_claude_version_to_pin(installed, &receipt.harness_version)
+                        == Some(std::cmp::Ordering::Less)
+                });
             let drift = default_version
                 .as_ref()
                 .is_some_and(|default| default != &receipt.harness_version);
@@ -975,6 +980,26 @@ fn classify_harnesses(
                         "harness.validation_failed",
                         &format!("harness.{harness_name}"),
                         &format!("{harness_name} receipt does not pass every required check."),
+                        &action,
+                        Some(receipt.validated_at.clone()),
+                    ));
+                }
+                remediation = Some(action);
+            } else if below_claude_floor {
+                state = ComponentState::Stale;
+                let installed = default_version.as_deref().unwrap_or("unavailable");
+                let action = format!(
+                    "Run `claude update` to reach Claude Code {} or newer, then rerun `cas factory preflight`.",
+                    receipt.harness_version
+                );
+                if required {
+                    findings.push(warning(
+                        "harness.claude_below_validated",
+                        &format!("harness.{harness_name}"),
+                        &format!(
+                            "Claude Code installed version {installed} is below validated version {}.",
+                            receipt.harness_version
+                        ),
                         &action,
                         Some(receipt.validated_at.clone()),
                     ));
@@ -1392,6 +1417,43 @@ fn parse_version(output: &str) -> Option<String> {
                     .all(|ch| ch.is_ascii_alphanumeric() || ch == '.' || ch == '-')
         })
         .map(ToOwned::to_owned)
+}
+
+/// Compare an observed Claude Code version with the validated receipt's pin.
+/// The CLI's version line may include a `v` prefix or `(Claude Code)` suffix.
+/// Unknown forms retain the existing generic version-drift diagnostic.
+pub(crate) fn compare_claude_version_to_pin(
+    observed: &str,
+    validated: &str,
+) -> Option<std::cmp::Ordering> {
+    fn parse(value: &str) -> Option<([u64; 3], bool)> {
+        value.split_whitespace().find_map(|word| {
+            let word =
+                word.trim_matches(|ch: char| !ch.is_ascii_alphanumeric() && ch != '.' && ch != '-');
+            let word = word
+                .strip_prefix('v')
+                .or_else(|| word.strip_prefix('V'))
+                .unwrap_or(word);
+            let (core, prerelease) = word
+                .split_once('-')
+                .map_or((word, false), |(core, suffix)| (core, !suffix.is_empty()));
+            let mut parts = core.split('.');
+            let triplet = [
+                parts.next()?.parse().ok()?,
+                parts.next()?.parse().ok()?,
+                parts.next()?.parse().ok()?,
+            ];
+            parts.next().is_none().then_some((triplet, prerelease))
+        })
+    }
+
+    let (observed, observed_prerelease) = parse(observed)?;
+    let (validated, validated_prerelease) = parse(validated)?;
+    Some(
+        observed
+            .cmp(&validated)
+            .then_with(|| validated_prerelease.cmp(&observed_prerelease)),
+    )
 }
 
 /// Concise human projection of the stable report.
@@ -1976,6 +2038,104 @@ mod tests {
             claude.receipt_id.as_deref(),
             Some("claude-code-2.1.280-2026-09-23")
         );
+    }
+
+    fn report_for_claude_version(version: &str) -> FactoryPreflightReport {
+        let mut facts = healthy_facts();
+        facts.receipts = harness_conformance_receipts().unwrap();
+        facts.default_versions.insert(
+            Harness::ClaudeCode,
+            VersionProbe::Observed(version.to_string()),
+        );
+        facts.required_harnesses = [Harness::ClaudeCode].into_iter().collect();
+        build_report(facts)
+    }
+
+    #[test]
+    fn claude_version_floor_warns_below_without_blocking_and_names_upgrade() {
+        let report = report_for_claude_version("2.1.279");
+        let claude = report
+            .harnesses
+            .iter()
+            .find(|row| row.harness == "claude")
+            .unwrap();
+        assert_eq!(claude.state, ComponentState::Stale);
+        assert_eq!(claude.default_version.as_deref(), Some("2.1.279"));
+        assert_eq!(claude.validated_version.as_deref(), Some("2.1.280"));
+        assert_eq!(report.overall, PreflightOverall::Warn);
+        assert!(!report.factory_blocked);
+        let finding = report
+            .findings
+            .iter()
+            .find(|finding| finding.code == "harness.claude_below_validated")
+            .unwrap();
+        assert_eq!(finding.severity, PreflightSeverity::Warning);
+        assert!(finding.message.contains("2.1.279"));
+        assert!(finding.message.contains("2.1.280"));
+        assert!(finding.remediation.contains("`claude update`"));
+        let human = render_factory_preflight_human(&report);
+        assert!(human.contains("2.1.279"));
+        assert!(human.contains("2.1.280"));
+        assert!(human.contains("`claude update`"));
+    }
+
+    #[test]
+    fn claude_version_floor_accepts_pin_and_keeps_newer_version_as_drift() {
+        let at = report_for_claude_version("2.1.280");
+        let at_claude = at
+            .harnesses
+            .iter()
+            .find(|row| row.harness == "claude")
+            .unwrap();
+        assert_eq!(at_claude.state, ComponentState::Ready);
+        assert!(
+            !at.findings
+                .iter()
+                .any(|finding| finding.code == "harness.claude_below_validated")
+        );
+
+        let above = report_for_claude_version("2.1.281");
+        let above_claude = above
+            .harnesses
+            .iter()
+            .find(|row| row.harness == "claude")
+            .unwrap();
+        assert_eq!(above_claude.state, ComponentState::Stale);
+        assert!(!above.factory_blocked);
+        assert!(
+            above
+                .findings
+                .iter()
+                .any(|finding| finding.code == "harness.version_drift")
+        );
+        assert!(
+            !above
+                .findings
+                .iter()
+                .any(|finding| finding.code == "harness.claude_below_validated")
+        );
+    }
+
+    #[test]
+    fn claude_version_comparison_handles_cli_suffix_prefix_and_prerelease() {
+        use std::cmp::Ordering;
+        assert_eq!(
+            compare_claude_version_to_pin("2.1.279 (Claude Code)", "2.1.280"),
+            Some(Ordering::Less)
+        );
+        assert_eq!(
+            compare_claude_version_to_pin("v2.1.280", "2.1.280"),
+            Some(Ordering::Equal)
+        );
+        assert_eq!(
+            compare_claude_version_to_pin("2.1.281", "2.1.280"),
+            Some(Ordering::Greater)
+        );
+        assert_eq!(
+            compare_claude_version_to_pin("2.1.280-beta.1", "2.1.280"),
+            Some(Ordering::Less)
+        );
+        assert_eq!(compare_claude_version_to_pin("unknown", "2.1.280"), None);
     }
 
     #[test]

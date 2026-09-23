@@ -1021,11 +1021,12 @@ fn restart_force_terminates_a_recordless_lock_holder_and_starts_replacement() {
         String::from_utf8_lossy(&restart.stdout),
         String::from_utf8_lossy(&restart.stderr)
     );
+    let stderr = String::from_utf8_lossy(&restart.stderr);
     assert!(
-        String::from_utf8_lossy(&restart.stderr).contains("lock holder pid"),
-        "force recovery must name the terminated holder: {}",
-        String::from_utf8_lossy(&restart.stderr)
+        stderr.contains(&format!("cas hub pid {} is stopping;", initial["pid"])),
+        "force recovery must identify the recordless stopping holder: {stderr}"
     );
+    assert!(stderr.contains("terminating lock holder"), "{stderr}");
 
     let status = cas_command(home.path(), bin.as_os_str())
         .args(["--json", "hub", "status"])
@@ -1127,8 +1128,22 @@ fn concurrent_start_and_restart_leave_exactly_one_lock_owner() {
             thread::spawn(move || {
                 let mut command = cas_process_command(&home, bin.as_os_str());
                 command.args(["--json", "hub", action, "--port", "0", "--tailscale-serve"]);
+                // The two CLI commands can launch detached hubs while the
+                // other command still owns a captured pipe. File-backed
+                // output does not wait for an unrelated descendant to close
+                // an inherited pipe after its CLI parent has exited.
+                let stdout = home.join(format!("concurrent-{action}.stdout"));
+                let stderr = home.join(format!("concurrent-{action}.stderr"));
+                command
+                    .stdout(Stdio::from(fs::File::create(&stdout).unwrap()))
+                    .stderr(Stdio::from(fs::File::create(&stderr).unwrap()));
                 gate.wait();
-                command.output().unwrap()
+                let status = command.status().unwrap();
+                std::process::Output {
+                    status,
+                    stdout: fs::read(stdout).unwrap(),
+                    stderr: fs::read(stderr).unwrap(),
+                }
             })
         };
         let start = run("start", gate.clone());

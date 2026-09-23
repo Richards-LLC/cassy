@@ -27,14 +27,14 @@ Run column is copied from the suite. PASS means the journey reached its goal.
 One entry per finding, most severe first. Each entry names:
 
 - the journey and stage
-- the receipt: `NN-stage.png`, `journey.webm @mm:ss` or `trace action N`
+- the receipt: `J03.png`, `receipt.webm @mm:ss` or `trace action N`
 - what a user would experience
 - the suggested fix
 - the task id, or `report only` for a Note
 
 ## Stage timings
 
-Paste the slowest stages from `SUMMARY.md`, with a note on any wait that has
+Paste the slowest stages from `journeys/JOURNEYS.md`, with a note on any wait that has
 no visible progress.
 
 ## Not covered

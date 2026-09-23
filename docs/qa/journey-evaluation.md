@@ -55,14 +55,17 @@ For the Commander hub, the suite is `hub-web/e2e/journeys/`. It runs as the
   protocol-double`: the UI code is the shipped code, and the hub is not.
   The double replays payload shapes recorded from a real hub. When a journey
   depends on data a double cannot fake honestly, the catalog says so.
-- **Receipts per journey**, written under the run's receipt directory:
-  - `trace.zip`, recorded with `snapshots: { dom, aria, screen }`
-  - `journey.webm`, a `page.screencast` recording with `showActions` on and
-    one `showChapter` per stage
-  - `NN-<stage>.png`, one screenshot at the end of every stage
-  - `final.aria.yml`, an aria snapshot of the goal state
-  - `result.json`, holding the id, the stages, the duration of each stage and
-    the pass/fail result
+- **Receipts per journey.** Each journey is one cas-qa-craft evidence
+  bundle in `<artifact-dir>/journeys/<ID>/`, and its `bundle.json` names
+  `journey` as the producer. The bundle holds:
+  - `trace.zip`, recorded with `snapshots: { dom, aria, screen }` and
+    `screenshots: false`, plus `trace-actions.txt`
+  - `receipt.webm`, a full-size `page.screencast` recording with
+    `showActions` on and one `showChapter` per stage
+  - `J01.png`, `J02.png` and so on, one screenshot at the end of every stage
+  - `final.aria.yml` and `final.aria.json`, aria snapshots of the goal state
+  - `result.json`, with the id, the stage titles and durations, and the
+    pass/fail result
 - **Variants.** Phone (390×844), light and dark themes are separate journeys
   (`HUB-J9`, `HUB-J10`) that walk the core path in that mode. They are not a
   full matrix; `cas-619f`'s per-delivery pass owns the matrix.
@@ -85,7 +88,7 @@ of exactly the UI it ships.
    the assembled epic tip, with `npm ci` done in `hub-web/`. It runs the
    `journeys` project against the committed `hub-web/dist` and copies each
    journey's receipts, including its trace, to
-   `<artifact-dir>/journeys/<id>/`. It also writes `SUMMARY.md`, with the
+   `<artifact-dir>/journeys/<id>/`. It also writes `journeys/JOURNEYS.md`, with the
    `hub-web/dist` tree hash, the pass/fail result and the stage timings.
 2. **Evaluate.** A different agent from any implementer of the epic, on the
    `taste` lane, gets [journey-evaluator-brief.md](journey-evaluator-brief.md).

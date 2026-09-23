@@ -486,6 +486,10 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
         content: include_str!("builtins/skills/cas-qa-craft/SKILL.md"),
     },
     BuiltinFile {
+        path: "skills/cas-qa-craft/references/journeys.md",
+        content: include_str!("builtins/skills/cas-qa-craft/references/journeys.md"),
+    },
+    BuiltinFile {
         path: "skills/cas-qa-craft/references/matrix-builder.md",
         content: include_str!("builtins/skills/cas-qa-craft/references/matrix-builder.md"),
     },
@@ -1050,6 +1054,10 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-qa-craft/SKILL.md",
         content: include_str!("builtins/codex/skills/cas-qa-craft/SKILL.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-qa-craft/references/journeys.md",
+        content: include_str!("builtins/codex/skills/cas-qa-craft/references/journeys.md"),
     },
     BuiltinFile {
         path: "skills/cas-qa-craft/references/matrix-builder.md",
@@ -1626,6 +1634,10 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-qa-craft/SKILL.md",
         content: include_str!("builtins/grok/skills/cas-qa-craft/SKILL.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-qa-craft/references/journeys.md",
+        content: include_str!("builtins/grok/skills/cas-qa-craft/references/journeys.md"),
     },
     BuiltinFile {
         path: "skills/cas-qa-craft/references/matrix-builder.md",
@@ -5289,6 +5301,7 @@ This is the body content."#;
             "skills/cas-qa-craft/references/evidence-ledger.md",
             "skills/cas-qa-craft/references/exemplar.md",
             "skills/cas-qa-craft/references/telemetry-sweep.md",
+            "skills/cas-qa-craft/references/journeys.md",
         ];
         let mut claude_bodies = Vec::new();
         for (label, catalog) in [
@@ -5374,6 +5387,18 @@ This is the body content."#;
                 "task id",
             ] {
                 assert!(telemetry.contains(marker), "{label} telemetry reference missing {marker:?}");
+            }
+            // cas-9be7: the journey contract every user-facing epic follows.
+            assert!(skill.contains("references/journeys.md"), "{label} cas-qa-craft does not link journeys");
+            let journeys = get(FILES[5]);
+            for marker in [
+                "docs/qa/journeys.md",
+                "journeys-for-diff.py",
+                "producer",
+                "dead end",
+                "cannot reach its goal",
+            ] {
+                assert!(journeys.contains(marker), "{label} journeys reference missing {marker:?}");
             }
             if label == "claude" {
                 claude_bodies = FILES.iter().map(|path| (*path, get(path))).collect();

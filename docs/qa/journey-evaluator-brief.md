@@ -19,13 +19,13 @@ object to unpolished work as much as to bugs.
   expected experience and edge paths.
 - The rubric and severity routing: `<repo>/docs/qa/journey-evaluation.md`.
 - The report template: `<repo>/docs/qa/journey-evaluations/TEMPLATE.md`.
-- The receipts: `<run>/SUMMARY.md` and `<run>/journeys/<ID>/`. Each journey
+- The receipts: `<run>/journeys/JOURNEYS.md` and `<run>/journeys/<ID>/`. Each journey
   directory holds:
-  - `NN-<stage>.png`, the screen at the end of each stage
-  - `journey.webm`, a screencast with a title card for each stage
+  - `J01.png`, `J02.png` and so on, the screen at the end of each stage, in `result.json` stage order
+  - `receipt.webm`, a screencast with a title card for each stage
   - `final.aria.yml`, the accessibility tree of the final screen
   - `result.json`, the stage timings
-  - `trace.zip`
+  - `trace.zip`, plus `trace-actions.txt`
 
 **How to look:**
 
@@ -33,7 +33,7 @@ object to unpolished work as much as to bugs.
    evidence.
 2. For flow between stages, extract frames from the screencast into a
    scratch directory and look at the ones that differ:
-   `ffmpeg -loglevel error -i journey.webm -vf fps=2 /tmp/jeval/<ID>/f%03d.png`
+   `ffmpeg -loglevel error -i receipt.webm -vf fps=2 /tmp/jeval/<ID>/f%03d.png`
 3. Use `final.aria.yml` to judge what a screen-reader user hears.
 4. For detail, open the trace from `hub-web/`, list its actions, then view
    the snapshot after the action you need:

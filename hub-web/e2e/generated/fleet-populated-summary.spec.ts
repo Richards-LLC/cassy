@@ -10,8 +10,6 @@ test.describe("Populated fleet", () => {
 
     const fleet = page.locator('[aria-label="Fleet"]');
     await expect(fleet).toContainText("2 machines · 3 sessions · 1 not live");
-    // The table marks quiet-marten as Needs you, but the fleet verdict currently says no sessions need you.
-    test.fixme(true, "Fleet verdict disagrees with its work-state table and the fixture plan");
     await expect(fleet.getByRole("status")).toHaveText(
       "1 of 3 sessions needs you; 2 working.",
     );

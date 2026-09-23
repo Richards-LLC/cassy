@@ -5,13 +5,15 @@
 
 #![cfg(unix)]
 
+#[path = "support/hub_fixture.rs"]
+mod hub_fixture;
+
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use serde_json::Value;
-use tempfile::TempDir;
 
 fn cas_command(home: &Path, path: &OsStr) -> Command {
     let mut command = Command::new(cas::test_paths::cas_binary());
@@ -22,12 +24,8 @@ fn cas_command(home: &Path, path: &OsStr) -> Command {
         .env("CAS_SKIP_FACTORY_TOOLING", "1");
     command
 }
-fn private_home() -> TempDir {
-    let parent = std::env::temp_dir().canonicalize().unwrap();
-    let home = tempfile::tempdir_in(parent).unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(home.path(), fs::Permissions::from_mode(0o700)).unwrap();
-    home
+fn private_home() -> hub_fixture::PrivateHubTempDir {
+    hub_fixture::private_hub_tempdir()
 }
 
 #[cfg(target_os = "linux")]

@@ -192,7 +192,8 @@ pub(super) fn restart_supervised(
             );
             let definition = fs::read_to_string(&path)?;
             let service_tailscale = definition.contains("--tailscale-serve");
-            let rewritten = if tailscale_serve && !service_tailscale {
+            let rewritten = if service_publication_repair_needed(tailscale_serve, service_tailscale)
+            {
                 Some(rewrite_launchd_publication_flags(
                     &definition,
                     true,
@@ -223,7 +224,7 @@ pub(super) fn restart_supervised(
                 return Ok(false);
             }
             let service_tailscale = service_file_requests_tailscale(&path)?;
-            if tailscale_serve && !service_tailscale {
+            if service_publication_repair_needed(tailscale_serve, service_tailscale) {
                 repair_systemd_publication_flags(&path, tailscale_port)?;
             }
             let paths = HubRuntimePaths::default_for_user()?;
@@ -361,20 +362,61 @@ fn rewrite_launchd_publication_flags(
         array,
         &definition[array_end..]
     );
-    Ok(ensure_launchd_cli_path(&rewritten))
+    ensure_launchd_cli_path(&rewritten)
 }
 
-fn ensure_launchd_cli_path(definition: &str) -> String {
-    if definition.contains("<key>EnvironmentVariables</key>") {
-        return definition.to_owned();
+fn ensure_launchd_cli_path(definition: &str) -> Result<String> {
+    if let Some(key_start) = definition.find("<key>EnvironmentVariables</key>") {
+        let after_key = key_start + "<key>EnvironmentVariables</key>".len();
+        let value_start = definition.len() - definition[after_key..].trim_start().len();
+        if definition[value_start..].starts_with("<dict/>") {
+            return Ok(format!(
+                "{}<dict>\n    <key>PATH</key>\n    <string>{LAUNCHD_CLI_PATH}</string>\n  </dict>{}",
+                &definition[..value_start],
+                &definition[value_start + "<dict/>".len()..]
+            ));
+        }
+        ensure!(
+            definition[value_start..].starts_with("<dict>"),
+            "launchd EnvironmentVariables has no dict"
+        );
+        let dict_start = value_start + "<dict>".len();
+        let dict_end = definition[dict_start..]
+            .find("</dict>")
+            .map(|offset| dict_start + offset)
+            .context("launchd EnvironmentVariables has an unclosed dict")?;
+        if definition[dict_start..dict_end].contains("<key>PATH</key>") {
+            return Ok(definition.to_owned());
+        }
+        let insert_at = definition[..dict_end]
+            .rfind('\n')
+            .map_or(dict_end, |newline| newline + 1);
+        return Ok(format!(
+            "{}    <key>PATH</key>\n    <string>{LAUNCHD_CLI_PATH}</string>\n{}",
+            &definition[..insert_at],
+            &definition[insert_at..]
+        ));
     }
-    definition.replacen(
+    ensure!(
+        definition.contains("  <key>StandardOutPath</key>"),
+        "launchd plist has no StandardOutPath after ProgramArguments"
+    );
+    Ok(definition.replacen(
         "  <key>StandardOutPath</key>",
         &format!(
             "  <key>EnvironmentVariables</key>\n  <dict>\n    <key>PATH</key>\n    <string>{LAUNCHD_CLI_PATH}</string>\n  </dict>\n  <key>StandardOutPath</key>"
         ),
         1,
-    )
+    ))
+}
+
+fn service_publication_repair_needed(requested: bool, configured: bool) -> bool {
+    // The CLI boolean is additive: bare `restart` does not mean "turn Serve off".
+    // Lifecycle also recovers intent from the owned receipt. Systemd repairs
+    // only the false -> true case, so launchd must preserve an existing route
+    // when the request is false as well. Reinstalling a loopback-only service
+    // is the explicit flag-off operation today.
+    requested && !configured
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1131,6 +1173,74 @@ mod tests {
         let repaired = rewrite_launchd_publication_flags(&old, true, 8443).unwrap();
         assert!(repaired.contains(LAUNCHD_CLI_PATH));
         assert!(repaired.contains("<string>--tailscale-serve</string>"));
+    }
+
+    #[test]
+    fn launchd_publication_repair_adds_missing_path_inside_existing_environment() {
+        let original = launchd_plist(
+            Path::new("/opt/cas/bin/cas"),
+            Path::new("/Users/test/.cas/hub/hub.log"),
+            false,
+            443,
+        );
+        let existing = original.replace(
+            &format!("    <key>PATH</key>\n    <string>{LAUNCHD_CLI_PATH}</string>"),
+            "    <key>HOME</key>\n    <string>/Users/test</string>",
+        );
+        let repaired = rewrite_launchd_publication_flags(&existing, true, 8443).unwrap();
+        assert_eq!(
+            repaired.matches("<key>EnvironmentVariables</key>").count(),
+            1
+        );
+        assert!(repaired.contains("<key>HOME</key>\n    <string>/Users/test</string>"));
+        assert!(repaired.contains(&format!(
+            "<key>PATH</key>\n    <string>{LAUNCHD_CLI_PATH}</string>"
+        )));
+    }
+
+    #[test]
+    fn launchd_publication_repair_preserves_operator_path() {
+        let original = launchd_plist(
+            Path::new("/opt/cas/bin/cas"),
+            Path::new("/Users/test/.cas/hub/hub.log"),
+            false,
+            443,
+        );
+        let custom_path = "/custom/bin:/usr/bin:/bin";
+        let existing = original.replace(LAUNCHD_CLI_PATH, custom_path);
+        let repaired = rewrite_launchd_publication_flags(&existing, true, 8443).unwrap();
+        assert!(repaired.contains(&format!("<string>{custom_path}</string>")));
+        assert!(!repaired.contains(LAUNCHD_CLI_PATH));
+        assert_eq!(repaired.matches("<key>PATH</key>").count(), 1);
+    }
+
+    #[test]
+    fn launchd_publication_repair_expands_empty_environment_dict() {
+        let original = launchd_plist(
+            Path::new("/opt/cas/bin/cas"),
+            Path::new("/Users/test/.cas/hub/hub.log"),
+            false,
+            443,
+        );
+        let existing = original.replace(
+            &format!(
+                "<dict>\n    <key>PATH</key>\n    <string>{LAUNCHD_CLI_PATH}</string>\n  </dict>"
+            ),
+            "<dict/>",
+        );
+        let repaired = rewrite_launchd_publication_flags(&existing, true, 8443).unwrap();
+        assert!(repaired.contains(&format!(
+            "<key>PATH</key>\n    <string>{LAUNCHD_CLI_PATH}</string>"
+        )));
+        assert!(!repaired.contains("<dict/>"));
+    }
+
+    #[test]
+    fn service_restart_publication_policy_matches_systemd_additive_repair() {
+        assert!(!service_publication_repair_needed(false, false));
+        assert!(!service_publication_repair_needed(false, true));
+        assert!(service_publication_repair_needed(true, false));
+        assert!(!service_publication_repair_needed(true, true));
     }
 
     #[test]

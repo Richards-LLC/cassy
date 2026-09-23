@@ -151,9 +151,8 @@ candidates = ["codex_sol_6"]
 fallbacks = ["codex_luna_6"]
 
 [lanes.taste]
-candidates = ["claude_fable"]
-# Fable/medium is the taste route; an unavailable Fable falls back loudly to
-# Claude Opus 5/high so the operator can see the degraded route.
+candidates = ["claude_opus_5_5"]
+# An unavailable Opus 5.5 falls back loudly to the existing Opus 5/high route.
 fallbacks = ["claude_opus"]
 no_fallback = false
 
@@ -163,5 +162,5 @@ fallbacks = ["claude_fable_high"]
 no_fallback = false
 
 [lanes.heavy]
-candidates = ["codex_astra_high"]
-fallbacks = ["codex_sol"]
+candidates = ["claude_opus_5_5"]
+fallbacks = ["codex_astra_high"]

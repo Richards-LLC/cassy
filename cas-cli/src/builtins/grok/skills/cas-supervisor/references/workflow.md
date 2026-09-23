@@ -64,7 +64,7 @@ and the "all subtasks closed -> verify and close the epic" flow, so this is the 
    Omit `isolate` for shared mode.
 
    **Hard rule:** every `spawn_workers` call MUST include explicit `cli=`,
-   `model=`, and `effort=`. The active registry matrix is Codex GPT-6 Luna/xhigh for light (Claude Opus 5.5/low fallback), Codex GPT-6 Sol/medium for standard (GPT-6 Luna/xhigh fallback), Claude Fable 5.1/medium for taste (Claude Opus 5/high fallback), Claude Opus 5.5/high for supervisor (Claude Fable 5.1/high fallback), and Codex GPT-6 Astra/high for heavy (Codex GPT-5.6 Sol/high fallback). Use taste for judgment and public decisions and heavy for implementation risk; Terra is a standing suspension.
+   `model=`, and `effort=`. The active registry matrix is Codex GPT-6 Luna/xhigh for light (Claude Opus 5.5/low fallback), Codex GPT-6 Sol/medium for standard (GPT-6 Luna/xhigh fallback), Claude Opus 5.5/high for taste (Claude Opus 5/high fallback), Claude Opus 5.5/high for supervisor (Claude Fable 5.1/high fallback), and Claude Opus 5.5/high for heavy (Codex GPT-6 Astra/high fallback). Use taste for judgment and public decisions and heavy for implementation risk; Terra is a standing suspension.
    Omitted fields fall back through the factory config cascade and stock floor;
    the spawn acknowledgement nags because supervisors should make worker tier
    selection intentional and visible.
@@ -81,11 +81,11 @@ cas__coordination action=spawn_workers count=1 isolate=true cli=codex model=gpt-
 # standard — recipe codex_sol_6 (fallback: codex_luna_6)
 cas__coordination action=spawn_workers count=1 isolate=true cli=codex model=gpt-6-sol effort=medium
 
-# taste — recipe claude_fable (fallback: claude_opus)
-cas__coordination action=spawn_workers count=1 isolate=true cli=claude model=claude-fable-5-1 effort=medium
+# taste — recipe claude_opus_5_5 (fallback: claude_opus)
+cas__coordination action=spawn_workers count=1 isolate=true cli=claude model=claude-opus-5-5 effort=high
 
-# heavy — recipe codex_astra_high (fallback: codex_sol)
-cas__coordination action=spawn_workers count=1 isolate=true cli=codex model=gpt-6-astra effort=high
+# heavy — recipe claude_opus_5_5 (fallback: codex_astra_high)
+cas__coordination action=spawn_workers count=1 isolate=true cli=claude model=claude-opus-5-5 effort=high
 
 # supervisor — recipe claude_opus_5_5 (fallback: claude_fable_high)
 cas__coordination action=spawn_workers count=1 isolate=true cli=claude model=claude-opus-5-5 effort=high

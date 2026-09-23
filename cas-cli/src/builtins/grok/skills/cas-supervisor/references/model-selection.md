@@ -13,8 +13,8 @@ Routing is two stages. **Stage 1 — tier the task** by complexity; the tier is 
 - **Light** is Codex GPT-6 Luna at xhigh, with Claude Opus 5.5/low as fallback: bounded chores, docs, and mechanical work still carry an explicit effort.
 - **Standard** is Codex GPT-6 Sol at medium, with Codex GPT-6 Luna/xhigh as fallback: the stock engineering floor for normal feature and bug work.
 - **Supervisor** is Claude Opus 5.5 at high, with Claude Fable 5.1/high as fallback.
-- **Taste** is Claude Fable 5.1 at medium: public surfaces, prompts, docs, naming, release notes, and general judgment are normal taste work, with Claude Opus 5/high as its loud fallback when Fable is unavailable.
-- **Heavy** is Codex GPT-6 Astra at high: cross-cutting refactors, concurrency/lifecycle code, migrations, and critical-path work, with Codex GPT-5.6 Sol/high as its loud fallback.
+- **Taste** is Claude Opus 5.5 at high: public surfaces, prompts, docs, naming, release notes, and general judgment are normal taste work, with Claude Opus 5/high as its loud fallback when Opus 5.5 is unavailable.
+- **Heavy** is Claude Opus 5.5 at high: cross-cutting refactors, concurrency/lifecycle code, migrations, and critical-path work, with Codex GPT-6 Astra/high as its loud fallback.
 - **OpenCode is route-specific** — its local and hosted Qwen lanes each require their
   own live receipt before production spawning. Never infer provider auth or effort
   support from the selector alone. The operator's default hosted lane is the explicit
@@ -31,11 +31,13 @@ The route table below is generated from the embedded `cas-factory` registry. Kee
 |---|---|---|---|---|---|---|---|---|
 | `light` | `codex_luna_6` | `openai` | `codex` | `gpt-6-luna` | `xhigh` | `active` | `fallback: claude_opus_5_5_low` |  |
 | `standard` | `codex_sol_6` | `openai` | `codex` | `gpt-6-sol` | `medium` | `active` | `fallback: codex_luna_6` |  |
-| `taste` | `claude_fable` | `anthropic` | `claude` | `claude-fable-5-1` | `medium` | `active` | `fallback: claude_opus` |  |
-| `heavy` | `codex_astra_high` | `openai` | `codex` | `gpt-6-astra` | `high` | `active` | `fallback: codex_sol` |  |
+| `taste` | `claude_opus_5_5` | `anthropic` | `claude` | `claude-opus-5-5` | `high` | `active` | `fallback: claude_opus` |  |
+| `heavy` | `claude_opus_5_5` | `anthropic` | `claude` | `claude-opus-5-5` | `high` | `active` | `fallback: codex_astra_high` |  |
 | `supervisor` | `claude_opus_5_5` | `anthropic` | `claude` | `claude-opus-5-5` | `high` | `active` | `fallback: claude_fable_high` |  |
+| `— (explicit only)` | `claude_fable` | `anthropic` | `claude` | `claude-fable-5-1` | `medium` | `active` | `not lane-routed` |  |
 | `— (explicit only)` | `codex_astra` | `openai` | `codex` | `gpt-6-astra` | `medium` | `active` | `not lane-routed` | Heavy route; excluded from supervisor and taste after the observed 2026-09-05 stall holding finished workers and stopping epic drive. |
 | `— (explicit only)` | `codex_luna` | `openai` | `codex` | `gpt-5.6-luna` | `xhigh` | `active` | `not lane-routed` |  |
+| `— (explicit only)` | `codex_sol` | `openai` | `codex` | `gpt-5.6-sol` | `high` | `active` | `not lane-routed` |  |
 | `— (explicit only)` | `codex_terra` | `openai` | `codex` | `gpt-5.6-terra` | `xhigh` | `suspended` | `not lane-routed` | Standing operator suspension (2026-08-27) |
 | `— (explicit only)` | `qwencloud_qwen` | `qwencloud` | `opencode` | `qwen3.8-max` | `medium` | `active` | `not lane-routed` | Receipt-gated by opencode-1.18.23-hosted-token-plan-2026-08-27; explicit recipe/model only |
 
@@ -46,7 +48,7 @@ Token-heavy read-only investigation belongs in a `cas-codex-exec` shell-out, not
 
 ### Taste lane
 
-Use Claude Fable 5.1 at medium for architecture judgment, public decisions, rescue assessment, and independent challenge. Route safety-critical implementation through heavy. Taste falls back to Claude Opus 5/high when Fable is unavailable, and the spawn receipt names the fallback and primary-unavailable reason. Claude Opus 5 remains the taste fallback; Claude Opus 5.5/high is the supervisor primary. Claude Sonnet is not a normal worker lane and must not appear in copyable supervisor recipes.
+Use Claude Opus 5.5 at high for architecture judgment, public decisions, rescue assessment, and independent challenge. Route safety-critical implementation through heavy. Taste falls back to Claude Opus 5/high when Opus 5.5 is unavailable, and the spawn receipt names the fallback and primary-unavailable reason. Claude Opus 5 remains the taste fallback; Claude Opus 5.5/high is the supervisor, taste, and heavy primary. Claude Sonnet is not a normal worker lane and must not appear in copyable supervisor recipes.
 
 ### Capacity overlays
 
@@ -101,8 +103,8 @@ carry the operator-declared tier as metadata when supplied.
 
 | `cli=` | Accepted `model=` slugs | Notes |
 |---|---|---|
-| `codex` | `gpt-6-astra`, `gpt-6-sol`, `gpt-6-luna`, `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna` | Plain slugs only — `-codex`-suffixed slugs are rejected by the API, and bare `gpt-5.6` is invalid. Astra/high is the heavy route; Sol/high is its fallback; the medium Astra recipe remains explicit-only; GPT-6 Sol/medium is the standard route; GPT-6 Luna/xhigh is the light route; Luna is the gpt-5.4-mini successor. |
-| `claude` | any canonical `claude-*` id (e.g. `claude-fable-5-1`, `claude-opus-5-5`, `claude-opus-5`, `claude-sonnet-5`) or the `opus`/`sonnet` aliases | Canonical IDs accept future numeric family/version releases and the CLI's optional `[1m]` context suffix; Haiku requests are rejected. Fable/medium is the taste lane; Opus 5.5/high is the supervisor lane and its low effort variant is the light fallback. |
+| `codex` | `gpt-6-astra`, `gpt-6-sol`, `gpt-6-luna`, `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna` | Plain slugs only — `-codex`-suffixed slugs are rejected by the API, and bare `gpt-5.6` is invalid. Astra/high is the heavy fallback; the medium Astra recipe remains explicit-only; GPT-6 Sol/medium is the standard route; GPT-6 Luna/xhigh is the light route; Luna is the gpt-5.4-mini successor. |
+| `claude` | any canonical `claude-*` id (e.g. `claude-fable-5-1`, `claude-opus-5-5`, `claude-opus-5`, `claude-sonnet-5`) or the `opus`/`sonnet` aliases | Canonical IDs accept future numeric family/version releases and the CLI's optional `[1m]` context suffix; Haiku requests are rejected. Opus 5.5/high is the taste, heavy, and supervisor primary and its low effort variant is the light fallback. |
 | `grok` | `grok-4.5`, `grok-4.6` | Provider capacity is not an active registry lane in this matrix; never invent `cli=cursor` or a fallback recipe. |
 | `opencode` | `local/<model>`, `qwencloud/qwen3.8-max`, `alibaba/qwen3.8-max`, `alibaba-cn/qwen3.8-max` | Explicit local, Token Plan, or DashScope pay-as-you-go lane; per-lane conformance receipt required. Hosted auth/model availability are operator preflight inputs. |
 
@@ -131,7 +133,7 @@ How each backend receives them:
 | Grok | `--reasoning-effort <level>` |
 | OpenCode | generated primary-agent `variant` (local: endpoint-specific; Token Plan/pay-as-you-go qwen3.8-max: `low`, `medium`, `xhigh`; Token Plan also pins `enable_thinking`) |
 
-For multi-step workers, choose the lane default. GPT-6 Luna defaults to `xhigh` in the light lane; legacy GPT-5.6 Luna only permits `xhigh`. The registry sets GPT-6 Luna light to xhigh, GPT-6 Sol standard to medium, Opus 5.5 supervisor to high, Fable taste to medium, and Astra heavy to high; `max` is never a lane default and `ultra` is not a Cassy effort value.
+For multi-step workers, choose the lane default. GPT-6 Luna defaults to `xhigh` in the light lane; legacy GPT-5.6 Luna only permits `xhigh`. The registry sets GPT-6 Luna light to xhigh, GPT-6 Sol standard to medium, Opus 5.5 supervisor to high, Opus 5.5 taste and heavy to high; `max` is never a lane default and `ultra` is not a Cassy effort value.
 
 ### `max` effort (explicit request only)
 
@@ -175,7 +177,7 @@ Glossary:
 - **Speed** is wall-clock and throughput: decode TPS, agent task wall time, and tokens burned per task.
 - **Taste** is the quality of what ships: UI/UX judgment, API and SDK shape, naming, code style, prompts, docs, release notes, and error-message wording.
 
-Taste-sensitive work uses the registry's Claude Fable 5.1/medium lane even when the diff is mechanically simple. Skill wording, supervisor guidance, release notes, public docs, API/SDK surfaces, and user-facing error text are not "light" just because the diff is small.
+Taste-sensitive work uses the registry's Claude Opus 5.5/high lane even when the diff is mechanically simple. Skill wording, supervisor guidance, release notes, public docs, API/SDK surfaces, and user-facing error text are not "light" just because the diff is small.
 
 ## Reading the task signals
 

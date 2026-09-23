@@ -2400,7 +2400,7 @@ mod tests {
     }
 
     #[test]
-    fn taste_lane_cli_resolves_fable_medium() {
+    fn taste_lane_cli_resolves_opus_high() {
         let (specs, notice) = resolve_lane_worker_specs(
             "taste",
             1,
@@ -2412,9 +2412,9 @@ mod tests {
         .unwrap();
         assert_eq!(specs[0].name.as_deref(), Some("taste-worker"));
         assert_eq!(specs[0].cli, cas_mux::SupervisorCli::Claude);
-        assert_eq!(specs[0].model.as_deref(), Some("claude-fable-5-1"));
-        assert_eq!(specs[0].effort, Some(cas_mux::Effort::Medium));
-        assert!(notice.contains("claude_fable"), "{notice}");
+        assert_eq!(specs[0].model.as_deref(), Some("claude-opus-5-5"));
+        assert_eq!(specs[0].effort, Some(cas_mux::Effort::High));
+        assert!(notice.contains("claude_opus_5_5"), "{notice}");
     }
 
     #[test]

@@ -15,7 +15,7 @@ test.describe("Conversation composer", () => {
     await expect(attachment).toBeDisabled();
     const conversationLog = page.getByRole("log");
     await expect(conversationLog).toContainText("Rebased and pushed; nothing waiting.");
-    const originalLog = await conversationLog.innerText();
+    const originalLog = await conversationLog.textContent();
 
     // 2. Replace the textbox contents with “Please verify the gate first.”
     await message.fill("Please verify the gate first.");

@@ -52,7 +52,12 @@
 #   CARGO         cargo binary to invoke (default: cargo)
 #   CARGO_CMD     subcommand: "nextest run" (default) or "test"
 #   SCOPED_TEST_LOG
-#                 path to keep the captured run log (default: a temp file)
+#                 path to keep the captured run log (default: a temp file).
+#                 With --proof, the log also records the exact command, HEAD,
+#                 base, platform, and cargo exit for supervisor base-red
+#                 comparisons. Place both logs under the task's durable
+#                 artifacts directory and use the same SCOPED_PROOF_BASE and
+#                 command in base and delivery checkouts.
 #   SCOPED_PROOF_BASE
 #                 git ref for the committed-diff proof baseline (default:
 #                 SCOPED_PROOF_TARGET_BRANCH merge-base, then origin/main,
@@ -154,13 +159,26 @@ else
     trap 'rm -f "${log}" "${clean_log}"' EXIT
 fi
 
+# A failed --proof run cannot emit a PASS receipt. Keep its exact invocation
+# and revision in the durable raw log so a supervisor can compare the same
+# scoped command at the delivery base and head when the base is already red.
+if [[ "${proof_mode}" -eq 1 && -n "${SCOPED_TEST_LOG:-}" ]]; then
+    scoped_run_head="$(git -C "${REPO_ROOT}" rev-parse HEAD)"
+    printf 'SCOPED_RUN: version=1 head=%s base=%s runner=%s platform=%s/%s command=scripts/run-scoped-tests.sh --proof %s\n' \
+        "${scoped_run_head}" "${SCOPED_PROOF_BASE:-}" "${CARGO_CMD// /_}" \
+        "$(uname -s)" "$(uname -m)" "$*" >>"${log}"
+fi
+
 echo "Running: ${CARGO} ${CARGO_CMD} $*"
 echo
 
 # Interleave stderr into the captured log: the build-script panic and the
 # package-spec error both arrive on stderr, and the verdict below reads them.
-(cd "${REPO_ROOT}" && "${CARGO}" ${CARGO_CMD} "$@" 2>&1) | tee "${log}"
+(cd "${REPO_ROOT}" && "${CARGO}" ${CARGO_CMD} "$@" 2>&1) | tee -a "${log}"
 cargo_status="${PIPESTATUS[0]}"
+if [[ "${proof_mode}" -eq 1 && -n "${SCOPED_TEST_LOG:-}" ]]; then
+    printf 'SCOPED_RUN_RESULT: cargo_exit=%s\n' "${cargo_status}" >>"${log}"
+fi
 
 # Cargo and nextest color their summary text in CI. Keep the requested raw log
 # intact, but make every verdict parse against one ANSI-free view so a green

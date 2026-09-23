@@ -6882,7 +6882,8 @@ This is the body content."#;
             );
         }
         assert!(claude.content.contains("Claude Fable 5.1 at medium"));
-        assert!(claude.content.contains("Claude Haiku 4.5"));
+        assert!(claude.content.contains("Codex GPT-6 Luna"));
+        assert!(!claude.content.contains("claude_haiku"));
         assert!(!claude.content.contains("operator decision pending"));
         assert!(!claude.content.contains("exceptional-only"));
         // cas-b342 edge case: the exact frontier slug is `gpt-5.6-sol`; a bare

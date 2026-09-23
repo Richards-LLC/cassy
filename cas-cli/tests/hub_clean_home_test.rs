@@ -1,6 +1,7 @@
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::{Read, Write};
+use std::net::TcpListener;
 use std::net::TcpStream;
 use std::path::Path;
 use std::process::Stdio;
@@ -46,6 +47,193 @@ fn private_home() -> TempDir {
         fs::set_permissions(home.path(), fs::Permissions::from_mode(0o700)).unwrap();
     }
     home
+}
+
+#[cfg(unix)]
+#[test]
+fn foreground_start_carries_legacy_target_across_process_record_write() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let home = private_home();
+    let bin = home.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    let tailscale = bin.join("tailscale");
+    fs::write(
+        &tailscale,
+        r##"#!/bin/sh
+case "$*" in
+  'status --json') printf '%s' '{"Self":{"DNSName":"legacy.tail.example."}}' ;;
+  'serve status --json')
+    if [ -f "$HOME/mock-serve" ]; then
+      target=$(/bin/cat "$HOME/mock-serve")
+      printf '{"Web":{"legacy.tail.example:443":{"Handlers":{"/":{"Proxy":"%s"}}}}}' "$target"
+    else printf '%s' '{}'; fi ;;
+  'serve --bg --yes --https=443 '*) printf '%s' "$5" > "$HOME/mock-serve" ;;
+  'serve --https=443 off') /bin/rm -f "$HOME/mock-serve"; printf '%s' off >> "$HOME/mock-calls" ;;
+  *) exit 9 ;;
+esac
+"##,
+    )
+    .unwrap();
+    fs::set_permissions(&tailscale, fs::Permissions::from_mode(0o700)).unwrap();
+
+    let dead_port = TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let old_target = format!("http://127.0.0.1:{dead_port}");
+    let paths = cas::hub::HubRuntimePaths::new(home.path().join(".cas/hub"));
+    let old_record: cas::hub::HubProcessRecord = serde_json::from_value(serde_json::json!({
+        "pid": 999999, "bind": "127.0.0.1", "port": 4173, "version": "3.27.8",
+        "started_at": "2026-01-01T00:00:00Z", "tailscale_serve_port": 443,
+        "tailscale_serve_target": old_target
+    }))
+    .unwrap();
+    paths.write_process_record(&old_record).unwrap();
+    fs::write(home.path().join("mock-serve"), &old_target).unwrap();
+
+    let mut child = cas_process_command(home.path(), bin.as_os_str())
+        .args(["hub", "serve", "--port", "0", "--tailscale-serve"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(8);
+    let mut replacement = None;
+    while Instant::now() < deadline {
+        if let Ok(record) = paths.read_process_record() {
+            if record.pid == child.id() && record.tailscale_serve_target.is_some() {
+                replacement = record.tailscale_serve_target;
+                break;
+            }
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    let replacement = replacement.expect("foreground start must publish the replacement shim");
+    assert_ne!(replacement, old_target);
+    assert_eq!(
+        fs::read_to_string(home.path().join("mock-serve")).unwrap(),
+        replacement
+    );
+    assert!(
+        fs::read_to_string(home.path().join("mock-calls"))
+            .unwrap()
+            .contains("off")
+    );
+    let published_port = paths.read_process_record().unwrap().port;
+    let health_url = format!("http://127.0.0.1:{published_port}/v1/health");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        if ureq::get(&health_url)
+            .timeout(Duration::from_millis(200))
+            .call()
+            .is_ok()
+        {
+            break;
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    assert!(
+        ureq::get(&health_url)
+            .timeout(Duration::from_secs(1))
+            .call()
+            .is_ok()
+    );
+    // Simulate a legacy hub whose publish completed but receipt write did not.
+    // Its foreground teardown must still see process.json before deleting it.
+    fs::remove_file(home.path().join(".cas/hub/tailscale-serve.json")).unwrap();
+    nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(child.id() as i32),
+        nix::sys::signal::Signal::SIGTERM,
+    )
+    .unwrap();
+    let _ = child.wait().unwrap();
+    let mut stderr = String::new();
+    child
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut stderr)
+        .unwrap();
+    assert!(!home.path().join("mock-serve").exists(), "{stderr}");
+}
+
+#[cfg(unix)]
+#[test]
+fn detached_start_forwards_prior_target_after_failed_launcher_cleanup() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let home = private_home();
+    let bin = home.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    let tailscale = bin.join("tailscale");
+    fs::write(
+        &tailscale,
+        r##"#!/bin/sh
+case "$*" in
+  'status --json') printf '%s' '{"Self":{"DNSName":"legacy.tail.example."}}' ;;
+  'serve status --json')
+    if [ -f "$HOME/mock-serve" ]; then
+      target=$(/bin/cat "$HOME/mock-serve")
+      printf '{"Web":{"legacy.tail.example:443":{"Handlers":{"/":{"Proxy":"%s"}}}}}' "$target"
+    else printf '%s' '{}'; fi ;;
+  'serve --bg --yes --https=443 '*) printf '%s' "$5" > "$HOME/mock-serve" ;;
+  'serve --https=443 off')
+    if [ ! -f "$HOME/first-off-failed" ]; then
+      : > "$HOME/first-off-failed"
+      exit 9
+    fi
+    /bin/rm -f "$HOME/mock-serve" ;;
+  *) exit 9 ;;
+esac
+"##,
+    )
+    .unwrap();
+    fs::set_permissions(&tailscale, fs::Permissions::from_mode(0o700)).unwrap();
+    let dead_port = TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let old_target = format!("http://127.0.0.1:{dead_port}");
+    let paths = cas::hub::HubRuntimePaths::new(home.path().join(".cas/hub"));
+    let old_record: cas::hub::HubProcessRecord = serde_json::from_value(serde_json::json!({
+        "pid": 999999, "bind": "127.0.0.1", "port": 4173, "version": "3.27.8",
+        "started_at": "2026-01-01T00:00:00Z", "tailscale_serve_port": 443,
+        "tailscale_serve_target": old_target
+    }))
+    .unwrap();
+    paths.write_process_record(&old_record).unwrap();
+    fs::write(home.path().join("mock-serve"), &old_target).unwrap();
+
+    let start = cas_command(home.path(), bin.as_os_str())
+        .args(["--json", "hub", "start", "--port", "0", "--tailscale-serve"])
+        .output()
+        .unwrap();
+    assert!(
+        start.status.success(),
+        "{}",
+        String::from_utf8_lossy(&start.stderr)
+    );
+    let record: Value = serde_json::from_slice(&start.stdout).unwrap();
+    let new_target = record["tailscale_serve_target"].as_str().unwrap();
+    assert_ne!(new_target, old_target);
+    assert_eq!(
+        fs::read_to_string(home.path().join("mock-serve")).unwrap(),
+        new_target
+    );
+    assert!(home.path().join("first-off-failed").exists());
+    let stop = cas_command(home.path(), bin.as_os_str())
+        .args(["hub", "stop"])
+        .output()
+        .unwrap();
+    assert!(
+        stop.status.success(),
+        "{}",
+        String::from_utf8_lossy(&stop.stderr)
+    );
+    assert!(!home.path().join("mock-serve").exists());
 }
 
 fn start_hub(home: &Path, path: &OsStr, tailscale: bool) -> Value {

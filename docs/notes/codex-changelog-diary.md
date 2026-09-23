@@ -562,8 +562,7 @@ band **currently installed locally** (`codex-cli 0.142.4`).
   decision). The terminal-error propagation is a genuine reliability win if Cassy ever consumes
   Codex-native subagents.
 
-- **2026-09-23 resolution:** Operator decision pending on Cassy's stance toward Codex-native
-  orchestration, including app-server delegation settings.
+- **2026-09-23: operator decision — ignore; Cassy keeps factory ownership and does not adopt or compete with Codex-native orchestration.**
 - **Indexed web-search mode, scheduled UTC time reminders + current-time tool, `/usage` reset-credit
   redemption, plugin catalog sections.** → ⏭ n/a (orthogonal to the Cassy launch surface).
 
@@ -634,8 +633,7 @@ Reviewed 2026-06-30. Triage pass.
 - **`cli: add -P sandbox permissions profile alias` (#27054); multi-agent v2 `close_agent`→
   `interrupt_agent` rename (#26994).** → ✅ no action (profile is an alias; Cassy uses `--yolo`, not
   profiles) / 👀 strategic (multi-agent v2 naming churn — informational).
-- **2026-09-23 resolution:** Operator decision pending on Cassy's stance toward Codex-native
-  orchestration, including the `interrupt_agent` API.
+- **2026-09-23: operator decision — ignore; Cassy keeps factory ownership and does not adopt or compete with Codex-native orchestration.**
 - **"Exclude external tool output from memories" (#26821).** → ✅ no action; Codex's own "memories"
   concept, orthogonal to Cassy memory exposed via `cs`.
 
@@ -703,8 +701,7 @@ Reviewed 2026-06-09 (calm-crane-32 / supervisor). Triage pass vs touchpoints.
   building its own multi-agent orchestration, which overlaps Cassy's factory lifecycle. The operator
   has not decided Cassy's long-term stance; this remains flagged for a strategy pass.
 
-- **2026-09-23 resolution:** Operator decision pending on Cassy's stance toward Codex-native
-  orchestration.
+- **2026-09-23: operator decision — ignore; Cassy keeps factory ownership and does not adopt or compete with Codex-native orchestration.**
 - **Startup resilience: `/usr/bin/bash` support (#26538), OAuth-backed MCP pre-refresh (#26482).** →
   ✅ no action (strictly helpful; the bash one echoes our shell-form vs exec-form lineage).
 - **`/app` desktop handoff, local-image paths to model, plugin `--json`, Bazel worktree settings,
@@ -726,8 +723,7 @@ Reviewed 2026-06-09. Triage pass.
   env-identity carrying doesn't reintroduce a prompt on the bypass path.
 - **"Multi-agent v2 keeps runtime choice with each thread… cleaner follow-up and metadata defaults
   for spawned agents" (#25266, #25636, …).** → 👀 strategic (see 0.138 note).
-- **2026-09-23 resolution:** Operator decision pending on Cassy's stance toward Codex-native
-  orchestration.
+- **2026-09-23: operator decision — ignore; Cassy keeps factory ownership and does not adopt or compete with Codex-native orchestration.**
 - **"Moved repo review rules and contributor conventions into `AGENTS.md`" (#25682).** → ✅ no action
   (Codex repo's own convention; informs that AGENTS.md is the live instruction surface).
 - **F13–F24 keybindings, enterprise credit limits, remote-control pairing, ChatGPT-auth, SQLite
@@ -764,8 +760,7 @@ Reviewed 2026-06-09. Triage pass.
 - **Multi-agent v2 strategic posture:** decide Cassy's stance toward Codex's native multi-agent
   orchestration (mirror of the Claude Code Workflow/Agent-Teams fork). See 0.137/0.138 entries.
 
-- **2026-09-23 resolution:** Operator decision pending on Cassy's stance toward Codex-native
-  orchestration.
+- **2026-09-23: operator decision — ignore; Cassy keeps factory ownership and does not adopt or compete with Codex-native orchestration.**
 - **Future upgrade validation:** rerun the typed 0.146 matrix (effort key, skills/agents and
   AGENTS.md discovery, `--yolo`, direct `cs` MCP calls alongside code mode, interruption, and
   rollout-budget continuity) before advancing the validated pin.

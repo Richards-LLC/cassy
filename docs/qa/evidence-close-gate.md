@@ -61,7 +61,8 @@ This gate adds one refinement, because the bundle is a Playwright artifact:
 | Reason the delivery is user-facing | Evidence required |
 | --- | --- |
 | Journey, or `user_facing_paths` match (a web surface) | The cas-c3b8 bundle (§2) |
-| `demo_statement` only, with no web surface in the diff (for example a CLI change) | `<task>/LEDGER.md`: non-empty, fresher than the delivered head, with ≥1 `PASS` row. The contract says CLI-only cells produce no Playwright bundle (§2 of the contract). |
+| `demo_statement` only, with no web surface in the diff (for example a CLI change) | `<task>/LEDGER.md`: non-empty, fresher than the delivered head, with ≥1 row whose verdict is `PASS` and label is `real-build`. The contract says CLI-only cells produce no Playwright bundle (§2 of the contract). |
+| …and the diff touches `qa.terminal_render_paths` (terminal rendering) | Also a cas-cli-craft terminal-qa receipt: a `report.md` under `<task>/terminal-qa/` whose first line starts `terminal-qa: PASS` and which is fresher than the delivered head. |
 
 Where the diff comes from:
 
@@ -93,7 +94,8 @@ that produces it:
 
 1. `bundle.json` parses, `schema == 1`, `task_id` equals the task, and
    `producer` is `cas-qa-craft` or `journey`.
-2. Every key the contract marks "always" is present. Each listed file exists
+2. Every key the contract marks "always" is present. The exception is a
+   `journey` bundle, which carries no polish keys (the contract addendum). Each listed file exists
    inside the bundle directory, is a regular file, and is non-empty.
    `cells` and `polish_screenshots` each have ≥1 entry, and
    `polish_screenshots` has exactly the four
@@ -234,13 +236,16 @@ healer-only delivery is test-only, so eligibility alone would never see it.
 - **cas-supervisor:** how to read the rejection and when an override is
   legitimate.
 
-## Open questions for the supervisor
+## Supervisor decisions (2026-09-23)
 
-The implementation ships the proposed defaults; each can be reversed with
-a one-line change.
+The supervisor approved this design (#32353) with two answers:
 
-1. Is the ledger tier (demo_statement with no web surface) acceptable, or
-   should demo-only CLI tasks be ungated? `evidence_tier` currently maps
-   them to Ledger.
-2. Should the skip-marker check apply to every delivery (as proposed), or
-   only to user-facing ones? It currently applies to every delivery.
+1. **Demo-only CLI tasks are gated, but more lightly.** They need a
+   real-build PASS ledger row. When the diff changes terminal rendering,
+   they also need a terminal-qa PASS receipt. They never need a Playwright
+   bundle.
+2. **The skip-marker check covers every delivery.** The `cas-allow-skip:`
+   escape stays, and each use is logged.
+
+The cas-c3b8 contract addendum (#32364) exempts `journey` bundles from the
+polish keys. The gate follows that exemption.

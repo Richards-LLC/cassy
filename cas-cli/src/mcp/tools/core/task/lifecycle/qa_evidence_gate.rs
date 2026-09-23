@@ -19,7 +19,9 @@ use crate::qa_evidence::{
     EvidenceContext, EvidenceTier, SkipMarker, added_skip_markers, delivery_range,
     delivery_test_diff, range_paths, run_close_gate,
 };
-use crate::qa_pass::{catalog_journeys_for, user_facing_reasons};
+use crate::qa_pass::{
+    catalog_journeys_for, first_user_facing_path, is_non_surface_path, user_facing_reasons,
+};
 
 use super::close_ops::resolve_branch_sha;
 
@@ -58,8 +60,9 @@ pub(crate) fn delivered_head(
     commit_receipt.and_then(rev).or_else(|| rev("HEAD"))
 }
 
-/// Which evidence the shared user-facing reasons demand.
-pub(crate) fn evidence_tier(reasons: &[String]) -> EvidenceTier {
+/// Which evidence the shared user-facing reasons demand. `terminal_render`
+/// says the diff touches a `qa.terminal_render_paths` glob.
+pub(crate) fn evidence_tier(reasons: &[String], terminal_render: bool) -> EvidenceTier {
     if reasons.is_empty() {
         EvidenceTier::None
     } else if reasons
@@ -68,7 +71,9 @@ pub(crate) fn evidence_tier(reasons: &[String]) -> EvidenceTier {
     {
         EvidenceTier::Bundle
     } else {
-        EvidenceTier::Ledger
+        EvidenceTier::Ledger {
+            terminal_qa: terminal_render,
+        }
     }
 }
 
@@ -105,6 +110,14 @@ pub(crate) fn qa_evidence_close_gate(
         .map(|paths| catalog_journeys_for(repo, paths))
         .unwrap_or_default();
     let reasons = user_facing_reasons(task, &qa, changed.as_deref(), &journeys).reasons;
+    let terminal_render = changed.as_deref().is_some_and(|paths| {
+        let surface: Vec<String> = paths
+            .iter()
+            .filter(|path| !is_non_surface_path(path))
+            .cloned()
+            .collect();
+        first_user_facing_path(&surface, &qa.terminal_render_paths).is_some()
+    });
     let markers: Vec<SkipMarker> = match (range.as_ref(), changed.as_deref()) {
         (Some((from, to)), Some(paths)) => delivery_test_diff(repo, from, to, paths)
             .map(|diff| added_skip_markers(&diff))
@@ -121,7 +134,13 @@ pub(crate) fn qa_evidence_close_gate(
         delivered_head: &head,
         notes: &task.notes,
     };
-    run_close_gate(&ctx, evidence_tier(&reasons), &reasons, &markers).map(|pass| pass.notes)
+    run_close_gate(
+        &ctx,
+        evidence_tier(&reasons, terminal_render),
+        &reasons,
+        &markers,
+    )
+    .map(|pass| pass.notes)
 }
 
 #[cfg(test)]
@@ -130,18 +149,25 @@ mod tests {
 
     #[test]
     fn web_surface_reasons_need_the_bundle_and_demo_only_needs_the_ledger() {
-        assert_eq!(evidence_tier(&[]), EvidenceTier::None);
+        assert_eq!(evidence_tier(&[], true), EvidenceTier::None);
         assert_eq!(
-            evidence_tier(&["path:web/a.css (**/*.css)".into(), "demo_statement".into()]),
+            evidence_tier(
+                &["path:web/a.css (**/*.css)".into(), "demo_statement".into()],
+                true
+            ),
             EvidenceTier::Bundle
         );
         assert_eq!(
-            evidence_tier(&["journeys:J03".into()]),
+            evidence_tier(&["journeys:J03".into()], false),
             EvidenceTier::Bundle
         );
         assert_eq!(
-            evidence_tier(&["demo_statement".into()]),
-            EvidenceTier::Ledger
+            evidence_tier(&["demo_statement".into()], false),
+            EvidenceTier::Ledger { terminal_qa: false }
+        );
+        assert_eq!(
+            evidence_tier(&["demo_statement".into()], true),
+            EvidenceTier::Ledger { terminal_qa: true }
         );
     }
 }

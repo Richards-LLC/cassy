@@ -71,6 +71,23 @@ pub(super) fn register_qa(registry: &mut ConfigRegistry) {
     });
 
     registry.register(ConfigMeta {
+        key: "qa.terminal_render_paths",
+        section: "qa",
+        name: "Terminal Rendering Paths",
+        description: "Comma-separated repo-relative globs. A demo-only (non-web) delivery whose diff touches one changes terminal rendering and needs a cas-cli-craft terminal-qa PASS receipt under the task artifacts dir, in addition to its evidence ledger.",
+        value_type: ConfigType::String,
+        default: "**/ui/**,**/tui/**,**/*render*,**/*output*,**/*theme*,**/*progress*",
+        constraint: Constraint::None,
+        advanced: true,
+        requires_feature: None,
+        keywords: &["qa", "terminal", "cli", "render", "evidence", "terminal-qa"],
+        use_cases: &[
+            "Name the modules that draw your CLI or TUI output",
+            "Leave empty to never require a terminal-qa receipt",
+        ],
+    });
+
+    registry.register(ConfigMeta {
         key: "qa.user_facing_paths",
         section: "qa",
         name: "User-Facing Paths",

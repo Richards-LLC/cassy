@@ -356,3 +356,78 @@ async fn evidence_gate_can_be_disabled_per_project() {
     let parked = close_text(&fx.core, TASK).await;
     assert!(parked.contains("MERGE REQUIRED"), "{parked}");
 }
+
+#[tokio::test]
+async fn demo_only_terminal_rendering_change_also_needs_a_terminal_qa_receipt() {
+    let fx = fixture(
+        &[("cas-cli/src/ui/status.rs", "pub fn draw() {}\n")],
+        "Run cas status; the table fits 80 columns",
+    );
+    let _env = env_test_lock();
+    let task_dir = fx.artifacts.join(TASK);
+    std::fs::create_dir_all(&task_dir).unwrap();
+    std::fs::write(
+        task_dir.join("LEDGER.md"),
+        "| M01 | cas status | fits | fits | PASS | real-build | qa/M01.txt | - |\n",
+    )
+    .unwrap();
+
+    let refused = close_text(&fx.core, TASK).await;
+    assert!(
+        refused.contains("terminal-qa receipt is missing"),
+        "{refused}"
+    );
+    assert!(refused.contains("scripts/terminal-qa.mjs"), "{refused}");
+
+    let report = task_dir.join("terminal-qa/cas-status/report.md");
+    std::fs::create_dir_all(report.parent().unwrap()).unwrap();
+    std::fs::write(
+        &report,
+        "terminal-qa: PASS cas-status · 14 runs · 0 fail · 0 warn\n",
+    )
+    .unwrap();
+    let parked = close_text(&fx.core, TASK).await;
+    assert!(parked.contains("MERGE REQUIRED"), "{parked}");
+}
+
+#[tokio::test]
+async fn supervisor_override_waives_the_gate_with_a_logged_decision() {
+    let fx = fixture(
+        &[("web/composer.css", ".composer{gap:8px}\n")],
+        "Open the composer",
+    );
+    let _env = env_test_lock();
+    let cas_dir = fx.repo.join(".cas");
+    let id = format!("supervisor-session-{}", std::process::id());
+    cas::store::open_agent_store(&cas_dir)
+        .unwrap()
+        .register(&cas::types::Agent::new_with_role(
+            id.clone(),
+            "fixture-supervisor".to_string(),
+            cas::types::AgentRole::Supervisor,
+        ))
+        .unwrap();
+    let supervisor = CasCore::with_daemon(cas_dir.clone(), None, None);
+    supervisor.set_agent_id_for_testing(id);
+
+    let mut request = close_req(TASK);
+    request.supervisor_override = Some(true);
+    request.reason = Some("copy-only change reviewed live with the operator".to_string());
+    let text = match supervisor.cas_task_close(Parameters(request)).await {
+        Ok(result) => extract_text(result),
+        Err(error) => error.message.to_string(),
+    };
+    assert!(
+        !text.contains("TASK CLOSE REJECTED: cas-ev01 is user-facing"),
+        "{text}"
+    );
+    let notes = fx.notes();
+    assert!(
+        notes.contains("✅ DECISION QA evidence gate waived by supervisor override: copy-only change reviewed live with the operator"),
+        "{notes}"
+    );
+    assert!(
+        notes.contains("QA evidence bundle is not cited"),
+        "the waived refusal is recorded: {notes}"
+    );
+}

@@ -670,8 +670,13 @@ fn close_gate_message_names_reasons_problem_and_next_command() {
     );
     assert!(error.contains("Next: produce the bundle under"), "{error}");
     assert!(error.contains(CONTRACT_REFERENCE), "{error}");
-    let error =
-        run_close_gate(&ctx, EvidenceTier::Ledger, &["demo_statement".into()], &[]).unwrap_err();
+    let error = run_close_gate(
+        &ctx,
+        EvidenceTier::Ledger { terminal_qa: false },
+        &["demo_statement".into()],
+        &[],
+    )
+    .unwrap_err();
     assert!(error.contains("QA evidence ledger is missing"), "{error}");
     assert!(
         run_close_gate(&ctx, EvidenceTier::None, &[], &[])
@@ -720,11 +725,16 @@ fn delivery_range_before_and_after_merge() {
 }
 
 #[test]
-fn journey_polish_exception_does_not_reach_the_delivery_close() {
+fn journey_bundles_carry_no_polish_evidence_but_other_producers_must() {
+    // Contract addendum: the release journey evaluator scores polish for a
+    // journey bundle, so its polish keys are optional.
     let fx = Fixture::new();
     fx.write_bundle(|manifest| {
         manifest["producer"] = serde_json::json!("journey");
         manifest["visual_qa_status"] = serde_json::json!("unavailable");
+        manifest["journey_id"] = serde_json::json!("J03");
+        manifest["verdict"] = serde_json::json!("PASS");
+        manifest.as_object_mut().unwrap().remove("critique_score");
         for key in [
             "polish_screenshots",
             "visual_qa",
@@ -735,16 +745,113 @@ fn journey_polish_exception_does_not_reach_the_delivery_close() {
             manifest["files"].as_object_mut().unwrap().remove(key);
         }
     });
+    fx.validate(&fx.notes())
+        .expect("journey bundle without polish keys");
+
+    let fx = Fixture::new();
+    fx.write_bundle(|manifest| {
+        manifest["files"]
+            .as_object_mut()
+            .unwrap()
+            .remove("visual_qa");
+    });
     let refusal = fx.validate(&fx.notes()).unwrap_err();
+    assert!(refusal.problem.contains("files.visual_qa"), "{refusal:?}");
+}
+
+#[test]
+fn ledger_pass_row_must_be_real_build() {
+    let fx = Fixture::new();
+    let ctx = EvidenceContext {
+        task_id: TASK,
+        task_artifacts_dir: &fx.task_dir,
+        repo: &fx.repo,
+        delivered_head: &fx.head,
+        notes: "",
+    };
+    let ledger = fx.task_dir.join("LEDGER.md");
+    std::fs::write(
+        &ledger,
+        "| M01 | cli | ok | ok | PASS | fixture | qa/M01.txt | - |\n",
+    )
+    .unwrap();
+    let refusal = validate_ledger(&ctx).unwrap_err();
+    assert!(refusal.problem.contains("label real-build"), "{refusal:?}");
+}
+
+#[test]
+fn terminal_qa_receipt_must_pass_and_be_fresh() {
+    let fx = Fixture::new();
+    let ctx = EvidenceContext {
+        task_id: TASK,
+        task_artifacts_dir: &fx.task_dir,
+        repo: &fx.repo,
+        delivered_head: &fx.head,
+        notes: "",
+    };
+    let refusal = validate_terminal_qa(&ctx).unwrap_err();
+    assert!(refusal.problem.starts_with("missing"), "{refusal:?}");
     assert!(
-        refusal
-            .problem
-            .contains("journey bundle without polish proof"),
+        refusal.command.contains("scripts/terminal-qa.mjs"),
         "{refusal:?}"
     );
 
-    let fx = Fixture::new();
-    fx.write_bundle(|manifest| manifest["producer"] = serde_json::json!("journey"));
-    fx.validate(&fx.notes())
-        .expect("a journey bundle with polish proof is accepted");
+    let dir = fx.task_dir.join("terminal-qa/cas-status");
+    std::fs::create_dir_all(&dir).unwrap();
+    let report = dir.join("report.md");
+    std::fs::write(&report, "terminal-qa: FAIL cas-status · 14 runs · 2 fail\n").unwrap();
+    assert!(
+        validate_terminal_qa(&ctx)
+            .unwrap_err()
+            .problem
+            .starts_with("failing")
+    );
+
+    std::fs::write(
+        &report,
+        "terminal-qa: PASS cas-status · 14 runs · 0 fail · 0 warn\n",
+    )
+    .unwrap();
+    assert_eq!(validate_terminal_qa(&ctx).unwrap(), report);
+
+    set_mtime_secs_ago(&report, 3600);
+    assert!(
+        validate_terminal_qa(&ctx)
+            .unwrap_err()
+            .problem
+            .starts_with("stale")
+    );
+
+    // The ledger tier composes both requirements.
+    std::fs::write(
+        fx.task_dir.join("LEDGER.md"),
+        "| M01 | cas status | ok | ok | PASS | real-build | qa/M01.txt | - |\n",
+    )
+    .unwrap();
+    let error = run_close_gate(
+        &ctx,
+        EvidenceTier::Ledger { terminal_qa: true },
+        &["demo_statement".into()],
+        &[],
+    )
+    .unwrap_err();
+    assert!(error.contains("terminal-qa receipt is stale"), "{error}");
+    std::fs::write(
+        &report,
+        "terminal-qa: PASS cas-status · 14 runs · 0 fail · 0 warn\n",
+    )
+    .unwrap();
+    let pass = run_close_gate(
+        &ctx,
+        EvidenceTier::Ledger { terminal_qa: true },
+        &["demo_statement".into()],
+        &[],
+    )
+    .unwrap();
+    assert!(
+        pass.notes
+            .iter()
+            .any(|note| note.starts_with("terminal-qa receipt accepted")),
+        "{pass:?}"
+    );
 }

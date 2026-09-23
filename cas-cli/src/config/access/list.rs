@@ -149,6 +149,10 @@ impl Config {
                 qa.evidence_gate.to_string(),
             ),
             (
+                "qa.terminal_render_paths".to_string(),
+                qa.terminal_render_paths.join(","),
+            ),
+            (
                 "qa.user_facing_paths".to_string(),
                 qa.user_facing_paths.join(","),
             ),

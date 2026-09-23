@@ -244,36 +244,28 @@ pub fn validate_bundle(ctx: &EvidenceContext<'_>) -> Result<BundleReceipt, Evide
             cite_command(ctx),
         ));
     }
-    // The contract lets a `journey` bundle skip polish because the release
-    // journey evaluation scores it. That exception does not reach the
-    // implementer's close: a delivery still needs its own polish proof.
-    if manifest.producer == "journey" && manifest.visual_qa_status != "pass" {
-        return Err(EvidenceRefusal::new(
-            format!(
-                "a journey bundle without polish proof (visual_qa_status {:?}); the journey polish exception covers the release evaluation, not a delivery close",
-                manifest.visual_qa_status
-            ),
-            format!(
-                "add the polish keys to {} or cite a cas-qa-craft bundle: {}",
-                manifest_path.display(),
-                producing_command("visual_qa_stdout", &bundle_dir)
-            ),
-        ));
-    }
+    // Contract addendum (cas-c3b8): a `journey` bundle carries no polish
+    // evidence because the release journey evaluator's scored report covers
+    // polish for it. Polish keys are enforced for every other producer.
+    let polish_required = manifest.producer != "journey";
 
     // 2. Required files.
     let files = &manifest.files;
-    let singles: [(&str, &Option<String>); 9] = [
+    let mut singles: Vec<(&str, &Option<String>)> = vec![
         ("trace", &files.trace),
         ("trace_actions", &files.trace_actions),
         ("receipt", &files.receipt),
         ("aria_yaml", &files.aria_yaml),
         ("aria_json", &files.aria_json),
-        ("visual_qa", &files.visual_qa),
-        ("visual_qa_json", &files.visual_qa_json),
-        ("visual_qa_stdout", &files.visual_qa_stdout),
-        ("critique", &files.critique),
     ];
+    if polish_required {
+        singles.extend([
+            ("visual_qa", &files.visual_qa),
+            ("visual_qa_json", &files.visual_qa_json),
+            ("visual_qa_stdout", &files.visual_qa_stdout),
+            ("critique", &files.critique),
+        ]);
+    }
     let mut listed: Vec<(String, PathBuf)> = Vec::new();
     for (key, value) in singles {
         let Some(relative) = value.as_deref().filter(|value| !value.trim().is_empty()) else {
@@ -293,7 +285,7 @@ pub fn validate_bundle(ctx: &EvidenceContext<'_>) -> Result<BundleReceipt, Evide
             resolve_bundle_file(&bundle_dir, "cells", relative)?,
         ));
     }
-    for suffix in POLISH_RENDERS {
+    for suffix in POLISH_RENDERS.iter().filter(|_| polish_required) {
         if !files
             .polish_screenshots
             .iter()
@@ -468,6 +460,14 @@ pub fn validate_bundle(ctx: &EvidenceContext<'_>) -> Result<BundleReceipt, Evide
             "incomplete: files.trace_actions lists no `Expect \"` step",
             producing_command("trace_actions", &bundle_dir),
         ));
+    }
+
+    if !polish_required {
+        return Ok(BundleReceipt {
+            manifest: manifest_path,
+            head_sha: manifest.head_sha,
+            passed_expects: summary.passed,
+        });
     }
 
     // 5. Polish run passed.
@@ -751,18 +751,93 @@ pub fn validate_ledger(ctx: &EvidenceContext<'_>) -> Result<PathBuf, EvidenceRef
             .split('|')
             .map(str::trim)
             .collect();
-        line.trim_start().starts_with('|') && cells.get(4) == Some(&"PASS")
+        // Row grammar: id | cell | expected | observed | verdict | label | evidence | defect.
+        line.trim_start().starts_with('|')
+            && cells.get(4) == Some(&"PASS")
+            && cells.get(5) == Some(&"real-build")
     });
     if !has_pass {
         return Err(EvidenceRefusal::new(
             format!(
-                "unproven: {} has no row with verdict PASS",
+                "unproven: {} has no row with verdict PASS and label real-build",
                 ledger.display()
             ),
             command,
         ));
     }
     Ok(ledger)
+}
+
+/// First line of a passing cas-cli-craft `scripts/terminal-qa.mjs` report.
+pub const TERMINAL_QA_PASS: &str = "terminal-qa: PASS";
+
+/// Validate a terminal-qa receipt under `<task>/terminal-qa/`: some
+/// `report.md` whose first line is a PASS receipt and which is at least as
+/// fresh as the delivered commit.
+pub fn validate_terminal_qa(ctx: &EvidenceContext<'_>) -> Result<PathBuf, EvidenceRefusal> {
+    let root = ctx.task_artifacts_dir.join("terminal-qa");
+    let command = format!(
+        "node scripts/terminal-qa.mjs --label <command> --out {}/<command> -- <command> (cas-cli-craft step 7)",
+        root.display()
+    );
+    let delivered = committer_time(ctx.repo, ctx.delivered_head);
+    let mut reports = Vec::new();
+    let mut stack = vec![root.clone()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.file_name().is_some_and(|name| name == "report.md") {
+                reports.push(path);
+            }
+        }
+    }
+    if reports.is_empty() {
+        return Err(EvidenceRefusal::new(
+            format!(
+                "missing: the diff changes terminal rendering and {} holds no terminal-qa report.md",
+                root.display()
+            ),
+            command,
+        ));
+    }
+    reports.sort();
+    let mut stale = None;
+    for report in &reports {
+        let first = std::fs::read_to_string(report)
+            .unwrap_or_default()
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        if !first.starts_with(TERMINAL_QA_PASS) {
+            continue;
+        }
+        if delivered.is_some_and(|time| mtime_secs(report).is_some_and(|mtime| mtime < time)) {
+            stale = Some(report.clone());
+            continue;
+        }
+        return Ok(report.clone());
+    }
+    Err(EvidenceRefusal::new(
+        match stale {
+            Some(report) => format!(
+                "stale: {} passed before the delivered commit {}",
+                report.display(),
+                short(ctx.delivered_head)
+            ),
+            None => format!(
+                "failing: no report.md under {} starts with `{TERMINAL_QA_PASS}`",
+                root.display()
+            ),
+        },
+        command,
+    ))
 }
 
 /// One skip marker the delivery adds.
@@ -959,8 +1034,10 @@ pub enum EvidenceTier {
     None,
     /// Web surface touched: the cas-c3b8 bundle.
     Bundle,
-    /// demo_statement only, no web surface in the diff: the evidence ledger.
-    Ledger,
+    /// demo_statement only, no web surface in the diff: the evidence ledger
+    /// with a real-build PASS row, plus a cas-cli-craft terminal-qa PASS
+    /// receipt when the diff changes terminal rendering.
+    Ledger { terminal_qa: bool },
 }
 
 /// Result of the close gate when it does not reject.
@@ -1036,13 +1113,21 @@ pub fn run_close_gate(
                 receipt.passed_expects
             ));
         }
-        EvidenceTier::Ledger => {
+        EvidenceTier::Ledger { terminal_qa } => {
             let ledger =
                 validate_ledger(ctx).map_err(|refusal| reject(refusal, "QA evidence ledger"))?;
             pass.notes.push(format!(
                 "QA evidence ledger accepted: {}.",
                 ledger.display()
             ));
+            if terminal_qa {
+                let report = validate_terminal_qa(ctx)
+                    .map_err(|refusal| reject(refusal, "terminal-qa receipt"))?;
+                pass.notes.push(format!(
+                    "terminal-qa receipt accepted: {}.",
+                    report.display()
+                ));
+            }
         }
     }
     Ok(pass)

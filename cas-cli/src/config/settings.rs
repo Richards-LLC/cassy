@@ -283,6 +283,12 @@ pub struct QaConfig {
     #[serde(default = "default_evidence_gate")]
     pub evidence_gate: bool,
 
+    /// cas-0cd5: repo-relative globs whose change means a delivery alters
+    /// terminal rendering. A demo-only (non-web) delivery touching one needs a
+    /// cas-cli-craft terminal-qa PASS receipt as well as its evidence ledger.
+    #[serde(default = "default_terminal_render_paths")]
+    pub terminal_render_paths: Vec<String>,
+
     /// cas-619f: repo-relative globs whose change makes a delivery
     /// user-facing even without a label or demo_statement.
     #[serde(default = "default_user_facing_paths")]
@@ -305,6 +311,13 @@ pub fn default_independent_pass() -> bool {
 
 pub fn default_evidence_gate() -> bool {
     true
+}
+
+pub fn default_terminal_render_paths() -> Vec<String> {
+    ["**/ui/**", "**/tui/**", "**/*render*", "**/*output*", "**/*theme*", "**/*progress*"]
+        .into_iter()
+        .map(ToOwned::to_owned)
+        .collect()
 }
 
 pub fn default_user_facing_paths() -> Vec<String> {
@@ -344,6 +357,7 @@ impl Default for QaConfig {
             telemetry_sweep: None,
             independent_pass: default_independent_pass(),
             evidence_gate: default_evidence_gate(),
+            terminal_render_paths: default_terminal_render_paths(),
             user_facing_paths: default_user_facing_paths(),
             pass_timeout_mins: default_pass_timeout_mins(),
             max_rounds: default_max_rounds(),

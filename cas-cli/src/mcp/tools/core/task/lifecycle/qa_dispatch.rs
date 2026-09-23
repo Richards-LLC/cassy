@@ -172,6 +172,88 @@ impl CasCore {
         })
     }
 
+    /// cas-619f merge gate for `worktree_merge task_id=…`: the refusal text
+    /// when the delivery's current branch tip lacks a passed/waived round.
+    pub(crate) fn independent_qa_merge_refusal(
+        &self,
+        task_id: &str,
+        merge_id: &str,
+        repo: &Path,
+    ) -> Option<String> {
+        let config = crate::config::Config::load(&self.cas_root).ok()?;
+        let qa = config.qa();
+        let task = self.open_task_store().ok()?.get(task_id).ok()?;
+        let passes = cas_store::list_qa_passes(&self.cas_root, task_id).unwrap_or_default();
+        if !crate::qa_pass::gate_applies(&task, &qa, &passes) {
+            return None;
+        }
+        let branch = if merge_id.starts_with("factory/") {
+            merge_id.to_string()
+        } else {
+            task.deliverables
+                .parked_branch
+                .clone()
+                .or_else(|| task.assignee.as_deref().map(|name| format!("factory/{name}")))
+                .unwrap_or_else(|| format!("factory/{merge_id}"))
+        };
+        let Some(head) = super::close_ops::resolve_branch_sha(repo, &branch) else {
+            return Some(format!(
+                "INDEPENDENT QA REQUIRED before {task_id} merges, but {branch} could not be resolved in {}; \
+                 Cassy cannot prove which tip was reviewed.",
+                repo.display()
+            ));
+        };
+        crate::qa_pass::merge_gate(&task, &qa, &passes, &head).err()
+    }
+
+    /// cas-619f close backstop: after a merge, an independently reviewed tip
+    /// must be contained in the target branch. Returns the refusal when not,
+    /// dispatching a round first if none is open so the task can progress.
+    pub(crate) fn independent_qa_close_refusal(
+        &self,
+        task: &Task,
+        repo: &Path,
+        target_branch: &str,
+    ) -> Option<String> {
+        let config = crate::config::Config::load(&self.cas_root).ok()?;
+        let qa = config.qa();
+        let passes = cas_store::list_qa_passes(&self.cas_root, &task.id).unwrap_or_default();
+        if !crate::qa_pass::gate_applies(task, &qa, &passes) {
+            return None;
+        }
+        let covered = passes.iter().any(|pass| {
+            pass.state.satisfies_gate()
+                && std::process::Command::new("git")
+                    .args(["merge-base", "--is-ancestor", &pass.bound_head, target_branch])
+                    .current_dir(repo)
+                    .status()
+                    .is_ok_and(|status| status.success())
+        });
+        if covered {
+            return None;
+        }
+        // Merged without a verdict (or not yet parked): open a round on the
+        // delivered tip so the pass can still happen, then refuse the close.
+        let head = task
+            .deliverables
+            .factory_branch_anchor
+            .clone()
+            .or_else(|| {
+                task.assignee.as_deref().and_then(|name| {
+                    super::close_ops::resolve_branch_sha(repo, &format!("factory/{name}"))
+                })
+            });
+        let dispatch = self
+            .dispatch_independent_qa(task, repo, target_branch, head.as_deref())
+            .unwrap_or_default();
+        Some(format!(
+            "INDEPENDENT QA REQUIRED: {} is user-facing and no passed or waived QA round covers a tip \
+             merged into {target_branch}. The close waits for the reviewer's verdict (or a logged \
+             supervisor waiver: verification action=qa_waive task_id={}).{dispatch}",
+            task.id, task.id,
+        ))
+    }
+
     fn materialize_qa_round(
         &self,
         task: &Task,

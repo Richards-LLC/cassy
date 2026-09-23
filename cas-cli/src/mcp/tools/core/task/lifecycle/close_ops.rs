@@ -4882,6 +4882,16 @@ impl CasCore {
                     return Ok(Self::tool_error(msg));
                 }
             }
+
+            // cas-619f backstop: the delivery is integrated. A user-facing
+            // task closes only when an independently reviewed tip (passed
+            // or waived) is contained in the target. Catches merges made
+            // outside the guarded paths (raw git in another harness/shell).
+            if let Some(refusal) =
+                self.independent_qa_close_refusal(&task, &close_project_root, &resolved_parent_branch)
+            {
+                return Ok(Self::tool_error(refusal));
+            }
         }
 
         // cas-87e7 (GH #382): a child delivery that is already proven on an

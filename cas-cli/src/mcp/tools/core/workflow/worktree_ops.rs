@@ -2352,6 +2352,19 @@ impl CasCore {
             .map(|context| context.repo_root.clone())
             .unwrap_or_else(|| cas_root.parent().unwrap_or(&cas_root).to_path_buf());
 
+        // cas-619f: a user-facing delivery merges only after an independent
+        // QA round (reviewed by someone other than the implementer) passed
+        // or was waived for the exact tip being merged.
+        if let Some(task_id) = task_id
+            && let Some(refusal) = self.independent_qa_merge_refusal(task_id, id, &cwd)
+        {
+            return Err(McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from(refusal),
+                data: None,
+            });
+        }
+
         let manager_config = WorktreeConfig {
             enabled: wt_config.enabled,
             base_path: wt_config.base_path.clone(),

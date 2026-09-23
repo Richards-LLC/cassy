@@ -56,6 +56,53 @@ pub fn delivery_eligibility(task: &Task, qa: &QaConfig, changed_paths: &[String]
     QaEligibility { reasons }
 }
 
+/// Whether a task is bound by the independent QA gates: it already has a
+/// QA round on record (the park found it user-facing, including by path), or
+/// it is user-facing by demo_statement or label.
+pub fn gate_applies(task: &Task, qa: &QaConfig, passes: &[QaPass]) -> bool {
+    qa.independent_pass
+        && task.task_type != TaskType::Epic
+        && !task.labels.iter().any(|label| label == QA_PASS_LABEL)
+        && (!passes.is_empty() || delivery_eligibility(task, qa, &[]).is_eligible())
+}
+
+/// Merge gate for one exact tip: a passed or waived round must cover `head`.
+/// Returns the refusal text when the merge must wait.
+pub fn merge_gate(task: &Task, qa: &QaConfig, passes: &[QaPass], head: &str) -> Result<(), String> {
+    if !gate_applies(task, qa, passes) {
+        return Ok(());
+    }
+    if passes
+        .iter()
+        .any(|pass| pass.bound_head == head && pass.state.satisfies_gate())
+    {
+        return Ok(());
+    }
+    let head8 = &head[..head.len().min(8)];
+    let status = match passes.first() {
+        Some(latest) => format!(
+            "latest round {} ({}) is {} for @{}{}",
+            latest.round,
+            latest.id,
+            latest.state,
+            latest.head8(),
+            latest
+                .qa_task_id
+                .as_deref()
+                .map(|qa_task| format!(", QA task {qa_task}"))
+                .unwrap_or_default()
+        ),
+        None => "no round has been dispatched yet (the worker's close dispatches it)".to_string(),
+    };
+    Err(format!(
+        "INDEPENDENT QA REQUIRED before {task} merges: no passed or waived QA round covers @{head8}; {status}. \
+         Spawn a reviewer who is not the implementer (spawn_workers lane=taste task_id=<QA task>), \
+         or waive with a logged reason: verification action=qa_waive task_id={task} summary=\"...\". \
+         Check with: verification action=qa_status task_id={task}",
+        task = task.id,
+    ))
+}
+
 /// First changed path matching a configured glob, with the glob it matched.
 pub fn first_user_facing_path<'a>(
     changed_paths: &'a [String],
@@ -83,6 +130,94 @@ pub fn first_user_facing_path<'a>(
             (pattern.matches_with(path, options) || root_match).then_some((path.as_str(), *raw))
         })
     })
+}
+
+/// Factory branches a shell command would `git merge` (cas-619f pre-tool
+/// guard). `--abort`/`--continue`/`--quit` statements merge nothing new.
+pub fn factory_branches_merged_by(command: &str) -> Vec<String> {
+    let mut branches = Vec::new();
+    for statement in command.split(['\n', ';', '|', '&']) {
+        let tokens: Vec<&str> = statement
+            .split_whitespace()
+            .map(|token| token.trim_matches(|ch: char| matches!(ch, '\'' | '"' | '`' | '(' | ')')))
+            .collect();
+        let Some(git) = tokens.iter().position(|token| *token == "git" || token.ends_with("/git"))
+        else {
+            continue;
+        };
+        let Some(merge) = tokens[git + 1..].iter().position(|token| *token == "merge") else {
+            continue;
+        };
+        let args = &tokens[git + 1 + merge + 1..];
+        if args
+            .iter()
+            .any(|arg| matches!(*arg, "--abort" | "--continue" | "--quit"))
+        {
+            continue;
+        }
+        for arg in args {
+            let name = arg
+                .trim_start_matches("refs/remotes/")
+                .trim_start_matches("refs/heads/")
+                .trim_start_matches("origin/");
+            if let Some(worker) = name.strip_prefix("factory/")
+                && !worker.is_empty()
+                && !branches.iter().any(|branch: &String| branch == name)
+            {
+                branches.push(name.to_string());
+            }
+        }
+    }
+    branches
+}
+
+/// Supervisor pre-tool guard: the refusal when a `git merge` would integrate
+/// a parked user-facing delivery whose current tip has no passed or waived
+/// independent QA round. Fails open (None) when Cassy state is unreadable —
+/// the close backstop still refuses such a task later.
+pub fn supervisor_merge_refusal(cas_root: &Path, cwd: &Path, command: &str) -> Option<String> {
+    let branches = factory_branches_merged_by(command);
+    if branches.is_empty() {
+        return None;
+    }
+    let config = crate::config::Config::load(cas_root).ok()?;
+    let qa = config.qa();
+    if !qa.independent_pass {
+        return None;
+    }
+    let task_store = crate::store::open_task_store(cas_root).ok()?;
+    let parked = task_store.list(Some(cas_types::TaskStatus::AwaitingMerge)).ok()?;
+    for branch in branches {
+        let worker = branch.trim_start_matches("factory/");
+        for task in parked.iter().filter(|task| {
+            task.deliverables.parked_branch.as_deref() == Some(branch.as_str())
+                || task.assignee.as_deref() == Some(worker)
+        }) {
+            let passes = cas_store::list_qa_passes(cas_root, &task.id).unwrap_or_default();
+            if !gate_applies(task, &qa, &passes) {
+                continue;
+            }
+            let head = Command::new("git")
+                .args(["rev-parse", "--verify", &branch])
+                .current_dir(cwd)
+                .output()
+                .ok()
+                .filter(|out| out.status.success())
+                .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
+                .filter(|sha| !sha.is_empty());
+            let refusal = match head {
+                Some(head) => merge_gate(task, &qa, &passes, &head).err(),
+                None => Some(format!(
+                    "INDEPENDENT QA REQUIRED before {} merges, and {branch} does not resolve here.",
+                    task.id
+                )),
+            };
+            if let Some(refusal) = refusal {
+                return Some(format!("🚫 {refusal}"));
+            }
+        }
+    }
+    None
 }
 
 /// Paths the delivery changes: `merge-base(parent, branch)..branch`.
@@ -136,10 +271,15 @@ pub fn qa_task_title(delivery: &Task, pass: &QaPass) -> String {
 }
 
 /// Ledger directory for one round, under the delivery's artifacts dir.
+///
+/// Deliberately beside, not inside, the implementer's own cas-qa-craft
+/// bundle (`<task>/qa/`): the close-time evidence gate reads that directory
+/// as the implementer's evidence, and an independent round must never be
+/// mistaken for it (or vice versa).
 pub fn round_dir(artifacts_root: &Path, pass: &QaPass) -> std::path::PathBuf {
     artifacts_root
         .join(&pass.task_id)
-        .join("qa")
+        .join("independent-qa")
         .join(format!("round-{}", pass.round))
 }
 
@@ -243,6 +383,90 @@ mod tests {
         demo.demo_statement = "demo".to_string();
         qa.independent_pass = false;
         assert!(!delivery_eligibility(&demo, &qa, &[]).is_eligible());
+    }
+
+    fn pass(head: &str, state: cas_types::QaPassState) -> QaPass {
+        let now = chrono::Utc::now();
+        QaPass {
+            id: format!("qapass-{head}"),
+            task_id: "cas-ui1".to_string(),
+            round: 1,
+            implementer_agent_id: "impl".to_string(),
+            branch: "factory/impl".to_string(),
+            bound_head: head.to_string(),
+            qa_task_id: Some("cas-qa1".to_string()),
+            reviewer_agent_id: None,
+            state,
+            summary: None,
+            issues_json: None,
+            ledger_path: None,
+            issuer_agent_id: None,
+            requested_at: now,
+            deadline_at: now,
+            resolved_at: None,
+        }
+    }
+
+    #[test]
+    fn merge_gate_requires_a_satisfying_round_for_the_exact_head() {
+        use cas_types::QaPassState::*;
+        let qa = QaConfig::default();
+        let mut demo = task();
+        demo.demo_statement = "Reply lands".to_string();
+
+        let refusal = merge_gate(&demo, &qa, &[], "aaaa1111bbbb").unwrap_err();
+        assert!(refusal.contains("INDEPENDENT QA REQUIRED"), "{refusal}");
+        assert!(refusal.contains("no round has been dispatched"), "{refusal}");
+
+        let pending = merge_gate(&demo, &qa, &[pass("aaaa1111bbbb", Pending)], "aaaa1111bbbb")
+            .unwrap_err();
+        assert!(pending.contains("is pending"), "{pending}");
+        assert!(pending.contains("cas-qa1"), "{pending}");
+
+        assert!(merge_gate(&demo, &qa, &[pass("aaaa1111bbbb", Passed)], "aaaa1111bbbb").is_ok());
+        assert!(merge_gate(&demo, &qa, &[pass("aaaa1111bbbb", Waived)], "aaaa1111bbbb").is_ok());
+        // A pass for an older tip does not cover new commits.
+        assert!(merge_gate(&demo, &qa, &[pass("aaaa1111bbbb", Passed)], "cccc2222").is_err());
+        assert!(merge_gate(&demo, &qa, &[pass("aaaa1111bbbb", Failed)], "aaaa1111bbbb").is_err());
+    }
+
+    #[test]
+    fn merge_gate_ignores_backend_tasks_without_rounds() {
+        let qa = QaConfig::default();
+        assert!(merge_gate(&task(), &qa, &[], "aaaa1111").is_ok());
+        // A path-eligible delivery is bound once the park recorded a round.
+        assert!(
+            merge_gate(
+                &task(),
+                &qa,
+                &[pass("aaaa1111", cas_types::QaPassState::Pending)],
+                "aaaa1111"
+            )
+            .is_err()
+        );
+        let mut disabled = QaConfig::default();
+        disabled.independent_pass = false;
+        let mut demo = task();
+        demo.demo_statement = "x".to_string();
+        assert!(merge_gate(&demo, &disabled, &[], "aaaa1111").is_ok());
+    }
+
+    #[test]
+    fn merge_commands_name_the_factory_branches_they_integrate() {
+        assert_eq!(
+            factory_branches_merged_by("git merge --no-ff factory/zealous-cheetah-52"),
+            vec!["factory/zealous-cheetah-52".to_string()]
+        );
+        assert_eq!(
+            factory_branches_merged_by(
+                "cd /repo && git fetch && git merge --no-edit origin/factory/a-1 factory/b-2"
+            ),
+            vec!["factory/a-1".to_string(), "factory/b-2".to_string()]
+        );
+        assert!(factory_branches_merged_by("git merge --abort").is_empty());
+        assert!(factory_branches_merged_by("git merge epic/x").is_empty());
+        assert!(factory_branches_merged_by("git log factory/a-1").is_empty());
+        assert!(factory_branches_merged_by("echo factory/a-1 merge").is_empty());
     }
 
     #[test]

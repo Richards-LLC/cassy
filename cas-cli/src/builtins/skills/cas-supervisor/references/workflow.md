@@ -194,6 +194,14 @@ end-of-lane, once the worker is done with that worktree.
 **Worker hits MERGE REQUIRED / `awaiting_merge` (cas-c145):**
 1. This is a **push signal**, not optional chat. Drain the merge queue before free-form user replies.
 2. Confirm: `mcp__cas__coordination action=epic_status id=<focused-epic>` and/or `mcp__cas__task action=list status=awaiting_merge`.
+   **User-facing delivery? Independent QA first (cas-619f).** When the park reports
+   `INDEPENDENT QA DISPATCHED`, or a `<cas-qa-dispatch>` wakes you, spawn a reviewer who is
+   not the implementer: `mcp__cas__coordination action=spawn_workers lane=taste task_id=<qa-task>`.
+   Merge only after that reviewer's `qa_record` approves the exact tip. `worktree_merge`, a raw
+   `git merge factory/<worker>`, and the re-close all refuse until then. A rejection sends the
+   task back to its implementer automatically. To skip the pass, waive it with a logged reason:
+   `mcp__cas__verification action=qa_waive task_id=<task-id> summary="..."`. Check a task's rounds
+   with `mcp__cas__verification action=qa_status task_id=<task-id>`.
 3. Merge into the epic branch:
    ```
    mcp__cas__coordination action=worktree_merge id=<worker> task_id=<task-id>

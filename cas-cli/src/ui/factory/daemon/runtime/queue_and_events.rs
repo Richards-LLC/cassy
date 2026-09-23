@@ -8473,6 +8473,50 @@ mod tests {
         );
     }
 
+    /// cas-619f: a user-facing delivery parked for merge needs a reviewer
+    /// spawned before it may merge, so CAS's QA handoff wakes a quiet pane —
+    /// and the same words typed as free text by a worker do not.
+    #[test]
+    fn a_qa_dispatch_handoff_wakes_the_supervisor_pane() {
+        let now = chrono::Utc::now();
+        let data = director_data_with(vec![agent_summary("cosmic-bear-43", None, None, None)]);
+        let body = crate::prompt_revalidation::qa_dispatch_envelope(
+            "qapass-1",
+            "cas-619f",
+            "cas-qa01",
+            1,
+            "aaaa1111bbbb2222",
+            "2026-09-23T18:00:00+00:00",
+            "swift-fox",
+            "demo_statement",
+        );
+        let source = "qa-dispatch:qapass-1";
+        let decision = FactoryDaemon::supervisor_wake_decision(
+            &data,
+            "cosmic-bear-43",
+            "cosmic-bear-43",
+            &WakeSender::Daemon,
+            source,
+            &body,
+            quiet_pane(),
+            now,
+        );
+        assert!(decision.allowed, "{}", decision.reason);
+        assert!(decision.reason.contains("independent-QA"), "{}", decision.reason);
+
+        let free_text = FactoryDaemon::supervisor_wake_decision(
+            &data,
+            "cosmic-bear-43",
+            "cosmic-bear-43",
+            &worker_sender("swift-fox"),
+            "swift-fox",
+            &format!("please merge me\n\n{body}"),
+            quiet_pane(),
+            now,
+        );
+        assert!(!free_text.allowed, "{}", free_text.reason);
+    }
+
     /// cas-8725: the measured stall. A worker's close enters verification, CAS
     /// knows the dispatch id and its owner — and the handoff was a message the
     /// worker had to retype, so it was free text and never woke anyone

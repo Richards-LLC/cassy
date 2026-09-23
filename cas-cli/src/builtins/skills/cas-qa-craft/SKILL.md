@@ -13,6 +13,9 @@ and not a substitute for unit or integration tests. Time-box the whole pass to
 For an epic with child demos, use the supervisor's
 [epic flow walk](../cas-supervisor/references/epic-flow-walk.md):
 one combined matrix with a **60-minute** box overrides the task defaults below.
+If you started a `qa-pass` task, you are the independent reviewer of someone
+else's delivery: follow [references/independent-pass.md](references/independent-pass.md)
+instead of the procedure below.
 
 ## Procedure
 

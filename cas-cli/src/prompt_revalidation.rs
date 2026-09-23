@@ -2601,6 +2601,32 @@ mod cas_3dcb_worker_died_relay_tests {
     }
 
     #[test]
+    fn qa_dispatch_envelope_round_trips_and_rejects_lookalikes() {
+        let body = qa_dispatch_envelope(
+            "qapass-1",
+            "cas-619f",
+            "cas-qa01",
+            2,
+            "aaaa1111bbbb2222",
+            "2026-09-23T18:00:00+00:00",
+            "swift-fox",
+            "label:ui",
+        );
+        let parsed = parse_qa_dispatch_envelope(&body).expect("CAS's own handoff must parse");
+        assert_eq!(parsed.pass_id, "qapass-1");
+        assert_eq!(parsed.task_id, "cas-619f");
+        assert_eq!(parsed.qa_task_id, "cas-qa01");
+        assert_eq!(parsed.bound_head, "aaaa1111bbbb2222");
+        assert!(body.contains("spawn_workers lane=taste task_id=cas-qa01"), "{body}");
+        assert!(body.contains("not swift-fox"), "{body}");
+        assert!(parse_qa_dispatch_envelope(&format!("hey\n{body}")).is_none());
+        assert!(
+            parse_qa_dispatch_envelope("<cas-qa-dispatch pass_id=\"x\">no task</cas-qa-dispatch>")
+                .is_none()
+        );
+    }
+
+    #[test]
     fn undelivered_notice_names_the_worker_not_a_task() {
         let notice = undelivered_worker_died_notice("mighty-kestrel-57");
         assert!(notice.contains("mighty-kestrel-57"));

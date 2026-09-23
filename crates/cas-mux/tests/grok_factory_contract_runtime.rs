@@ -641,8 +641,10 @@ fn run_grok_factory_contract(grok_binary: PathBuf, version: &str) {
     assert!(chat.contains(PROBE_MARKER));
     let system_prompt = std::fs::read_to_string(session_dir.join("system_prompt.txt"))
         .expect("read Grok system prompt");
-    assert!(system_prompt.contains("Cassy Factory Worker"));
-    assert!(system_prompt.contains("cas__task") && system_prompt.contains("cas__coordination"));
+    assert!(
+        !system_prompt.contains("--rules"),
+        "Grok 1.0.40 must not serialize the --rules launch argument into system_prompt.txt"
+    );
     assert!(
         chat.lines()
             .filter_map(|line| serde_json::from_str::<Value>(line).ok())

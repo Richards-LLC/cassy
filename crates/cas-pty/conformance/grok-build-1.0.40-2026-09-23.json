@@ -47,7 +47,7 @@
       "required": true,
       "status": "pass",
       "evidence_refs": ["live-production-run"],
-      "detail": "The production --rules payload contained the Cassy Factory Worker role and cas__ namespace, and the exact text appeared in system_prompt.txt."
+      "detail": "Grok 1.0.40 no longer writes --rules into system_prompt.txt. The rules still apply: PtyConfig argv contains the complete Cassy Factory Worker/cas__ payload, the effective prompt omits the raw --rules token, and the live worker completed whoami, mine, show, start, and notes through cas__coordination/cas__task before committing the probe."
     },
     {
       "id": "persistent_mcp_discovery_and_namespace",
@@ -132,13 +132,13 @@
       "id": "live-production-run",
       "kind": "live_test",
       "reference": "task:cas-ef93#2026-09-23-production-run",
-      "summary": "Fresh real Grok Build 1.0.40 PtyConfig::grok run with target/debug/cas first on PATH, a disposable repository/CAS_ROOT, compatible hooks disabled, persistent cas__ MCP discovery, worker lifecycle, and urgent interrupt redirect; all required assertions passed. Session evidence: 6e2b0561-9889-434f-bbc9-905195a32571 under /home/pippenz/.grok/sessions/%2Ftmp%2Fcas-9bd9-grok-contract-3455669/."
+      "summary": "Fresh real Grok Build 1.0.40 PtyConfig::grok run with target/debug/cas first on PATH, a disposable repository/CAS_ROOT, compatible hooks disabled, persistent cas__ MCP discovery, worker lifecycle, and urgent interrupt redirect; all required assertions passed. Session evidence: 14e2c719-99b0-40cf-8ce5-e65bca3203a8 under /home/pippenz/.grok/sessions/%2Ftmp%2Fcas-9bd9-grok-contract-3744591/."
     },
     {
       "id": "scoped-test-proof",
       "kind": "test",
       "reference": "scripts/run-scoped-tests.sh -p cas-mux --test grok_factory_contract_runtime --run-ignored all -E test(grok_0140_factory_launch_contract_passes_live_matrix) --no-capture",
-      "summary": "Guarded nextest run a530d3d7-7250-43bc-9d53-0c670ec49460 reported 1 test passed, 0 failed, 2 skipped in 27.147 seconds; the scoped-test guard exited 0 and reported PASS across 2 harness summary lines."
+      "summary": "Guarded nextest run dc87f010-4215-47bb-8cd9-e8f98104643b reported 1 test passed, 0 failed, 2 skipped in 28.791 seconds; the scoped-test guard exited 0 and reported PASS across 2 harness summary lines."
     }
   ]
 }

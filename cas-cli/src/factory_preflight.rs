@@ -1069,6 +1069,7 @@ fn classify_harnesses(
                 receipt_result: Some(match receipt.result {
                     ConformanceStatus::Pass => "pass",
                     ConformanceStatus::Fail => "fail",
+                    ConformanceStatus::NotCovered => "not_covered",
                 }
                 .to_string()),
                 validated_at: Some(receipt.validated_at.clone()),
@@ -1558,7 +1559,7 @@ mod tests {
         let receipts = vec![
             receipt(Harness::ClaudeCode, "2.1.0"),
             receipt(Harness::CodexCli, "0.146.0"),
-            receipt(Harness::GrokBuild, "0.2.114"),
+            receipt(Harness::GrokBuild, "1.0.40"),
         ];
         let default_versions = receipts
             .iter()
@@ -1940,7 +1941,7 @@ mod tests {
         let mut facts = healthy_facts();
         facts.default_versions.insert(
             Harness::GrokBuild,
-            VersionProbe::Observed("0.2.117".to_string()),
+            VersionProbe::Observed("1.0.41".to_string()),
         );
         let report = build_report(facts);
         let grok = report
@@ -1948,8 +1949,8 @@ mod tests {
             .iter()
             .find(|harness| harness.harness == "grok")
             .unwrap();
-        assert_eq!(grok.validated_version.as_deref(), Some("0.2.114"));
-        assert_eq!(grok.default_version.as_deref(), Some("0.2.117"));
+        assert_eq!(grok.validated_version.as_deref(), Some("1.0.40"));
+        assert_eq!(grok.default_version.as_deref(), Some("1.0.41"));
         assert_eq!(grok.state, ComponentState::Stale);
         assert!(!report.factory_blocked);
     }

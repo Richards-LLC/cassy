@@ -4007,21 +4007,49 @@ impl CasCore {
         self.record_close_rejection_activity(&task.id, reason, message);
     }
 
-    /// Advance a parked task's delivery boundary when the worker has pushed
-    /// since the first AwaitingMerge park (GH #744 / #743). The first park's
-    /// anchor remains in `notes` for auditability; the persisted deliverable
-    /// must follow the current branch tip so the next merge request cannot be
-    /// mistaken for an invalidated prior cycle.
+    /// Advance a parked task's delivery boundary when its worker continues
+    /// the same unmerged delivery after the first AwaitingMerge park (GH #744 /
+    /// #743). The first anchor remains in `notes` for auditability. A later
+    /// task on the mutable factory branch must not change this task's anchor.
     fn advance_awaiting_merge_anchor(
         &self,
         task_store: &dyn cas_store::TaskStore,
         task: &Task,
         repo_path: &std::path::Path,
+        parent_branch: &str,
         factory_branch_anchor: Option<&str>,
     ) {
         let Some(factory_branch_anchor) = factory_branch_anchor else {
             return;
         };
+        // A worker can have an explicitly parked task while doing a later
+        // task on the same mutable factory branch. Query task ownership, not
+        // the caller's lease: a supervisor may be the one retrying A's close.
+        let Ok(in_progress) = task_store.list(Some(TaskStatus::InProgress)) else {
+            return;
+        };
+        let same_worker = |other: &Task| {
+            other.id != task.id
+                && task.assignee.as_deref().is_some_and(|assignee| {
+                    other
+                        .assignee
+                        .as_deref()
+                        .is_some_and(|name| name.eq_ignore_ascii_case(assignee))
+                })
+        };
+        if in_progress.iter().any(|other| same_worker(other)) {
+            return;
+        }
+        let Ok(other_parked) = task_store.list(Some(TaskStatus::AwaitingMerge)) else {
+            return;
+        };
+        if other_parked.iter().any(|other| {
+            same_worker(other)
+                && other.deliverables.factory_branch_anchor.as_deref()
+                    == Some(factory_branch_anchor)
+        }) {
+            return;
+        }
         let mut advanced = task.clone();
         let now = chrono::Utc::now();
         let Some(audit) = Self::apply_awaiting_merge_anchor_advance(
@@ -4029,6 +4057,7 @@ impl CasCore {
             factory_branch_anchor,
             now,
             Some(repo_path),
+            Some(parent_branch),
         )
         else {
             return;
@@ -4078,6 +4107,7 @@ impl CasCore {
         factory_branch_anchor: &str,
         now: chrono::DateTime<chrono::Utc>,
         repo_path: Option<&std::path::Path>,
+        parent_branch: Option<&str>,
     ) -> Option<String> {
         if task.status != TaskStatus::AwaitingMerge
             || task.deliverables.factory_branch_anchor.as_deref()
@@ -4097,6 +4127,23 @@ impl CasCore {
             task.deliverables.factory_branch_anchor.as_deref(),
         ) && merge_tip_contains_recorded_anchor(repo_path, factory_branch_anchor, recorded_anchor)
         {
+            return None;
+        }
+
+        // Once the recorded task delivery has landed, a later mutable
+        // factory-branch tip cannot become this task's new delivery boundary.
+        if let (Some(repo_path), Some(parent_branch), Some(recorded_anchor)) = (
+            repo_path,
+            parent_branch,
+            task.deliverables.factory_branch_anchor.as_deref(),
+        ) && matches!(
+            crate::prompt_revalidation::revalidate_merge_request(
+                repo_path,
+                recorded_anchor,
+                parent_branch,
+            ),
+            crate::prompt_revalidation::MergeRequestDecision::AlreadyIntegrated { .. }
+        ) {
             return None;
         }
 
@@ -5282,6 +5329,7 @@ impl CasCore {
                             task_store.as_ref(),
                             &task,
                             &close_project_root,
+                            &resolved_parent_branch,
                             anchor.as_deref(),
                         );
                         if merge_conflicted && !task.deliverables.merge_conflicted {
@@ -11216,6 +11264,7 @@ fn format_close_success_message(
 #[cfg(test)]
 mod awaiting_merge_anchor_tests {
     use super::*;
+    use cas_store::TaskStore;
     use chrono::TimeZone;
 
     #[test]
@@ -11230,7 +11279,7 @@ mod awaiting_merge_anchor_tests {
             .single()
             .expect("fixed timestamp");
 
-        let audit = CasCore::apply_awaiting_merge_anchor_advance(&mut task, "second-tip", now, None)
+        let audit = CasCore::apply_awaiting_merge_anchor_advance(&mut task, "second-tip", now, None, None)
             .expect("a pushed tip advances the parked anchor");
 
         assert_eq!(
@@ -11249,7 +11298,7 @@ mod awaiting_merge_anchor_tests {
         assert_eq!(task.updated_at, now);
 
         assert!(
-            CasCore::apply_awaiting_merge_anchor_advance(&mut task, "second-tip", now, None)
+            CasCore::apply_awaiting_merge_anchor_advance(&mut task, "second-tip", now, None, None)
                 .is_none(),
             "repeating close at the same tip is idempotent"
         );
@@ -11265,9 +11314,40 @@ mod awaiting_merge_anchor_tests {
                 "new-tip",
                 chrono::Utc::now(),
                 None,
+                None,
             )
             .is_none()
         );
+    }
+
+    #[test]
+    fn parked_task_does_not_claim_branch_tip_owned_by_next_task() {
+        for next_status in [TaskStatus::InProgress, TaskStatus::AwaitingMerge] {
+            let mut parked = Task::new("cas-task-a".to_string(), "parked A".to_string());
+            parked.status = TaskStatus::AwaitingMerge;
+            parked.assignee = Some("worker".to_string());
+            parked.deliverables.factory_branch_anchor = Some("task-a-tip".to_string());
+            let mut next = Task::new("cas-task-b".to_string(), "next B".to_string());
+            next.status = next_status;
+            next.assignee = Some("worker".to_string());
+            next.deliverables.factory_branch_anchor = Some("task-b-tip".to_string());
+            let store = crate::store::mock::MockTaskStore::with_tasks(vec![parked.clone(), next]);
+            let temp = tempfile::tempdir().unwrap();
+            let core = CasCore::with_daemon(temp.path().join(".cas"), None, None);
+
+            core.advance_awaiting_merge_anchor(
+                &store,
+                &parked,
+                temp.path(),
+                "main",
+                Some("task-b-tip"),
+            );
+            assert_eq!(
+                store.get(&parked.id).unwrap().deliverables.factory_branch_anchor,
+                Some("task-a-tip".to_string()),
+                "task B at {next_status} owns its own tip"
+            );
+        }
     }
 }
 
@@ -21288,6 +21368,7 @@ mod merge_state_gate_tests {
                 &supervisor_merge,
                 chrono::Utc::now(),
                 Some(p),
+                Some("main"),
             )
             .is_none(),
             "a supervisor merge carrying the parked anchor must not become a new delivery boundary"
@@ -21328,6 +21409,75 @@ mod merge_state_gate_tests {
             matches!(out, MergeStateGateOutcome::Proceed),
             "an original content commit receipt must be accepted when it is an ancestor of the merged target, got {out:?}"
         );
+    }
+
+    #[test]
+    fn merged_parked_anchor_does_not_follow_reused_factory_branch() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        let base = rev_parse_local(p, "main");
+        std::fs::write(p.join("a.rs"), "// task A\n").unwrap();
+        git(p, &["add", "a.rs"]);
+        git(p, &["commit", "-q", "-m", "task A"]);
+        let anchor_a = rev_parse_local(p, "factory/worker");
+        git(p, &["checkout", "-q", "main"]);
+        git(p, &["merge", "-q", "--no-ff", "factory/worker"]);
+        git(p, &["checkout", "-q", "factory/worker"]);
+        git(p, &["reset", "--hard", &base]);
+        std::fs::write(p.join("b.rs"), "// unrelated task B\n").unwrap();
+        git(p, &["add", "b.rs"]);
+        git(p, &["commit", "-q", "-m", "task B"]);
+        let tip_b = rev_parse_local(p, "factory/worker");
+        assert!(!git_commit_is_ancestor(p, &anchor_a, &tip_b));
+
+        let mut task_a = worker_task("worker");
+        task_a.status = TaskStatus::AwaitingMerge;
+        task_a.deliverables.factory_branch_anchor = Some(anchor_a.clone());
+        assert!(
+            CasCore::apply_awaiting_merge_anchor_advance(
+                &mut task_a,
+                &tip_b,
+                chrono::Utc::now(),
+                Some(p),
+                Some("main"),
+            )
+            .is_none(),
+            "merged task A must not absorb task B's branch tip"
+        );
+        assert_eq!(
+            task_a.deliverables.factory_branch_anchor.as_deref(),
+            Some(anchor_a.as_str())
+        );
+    }
+
+    #[test]
+    fn unmerged_parked_task_can_advance_its_own_branch_tip() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        std::fs::write(p.join("first.rs"), "// first delivery\n").unwrap();
+        git(p, &["add", "first.rs"]);
+        git(p, &["commit", "-q", "-m", "first delivery"]);
+        let first = rev_parse_local(p, "factory/worker");
+        std::fs::write(p.join("second.rs"), "// continuation\n").unwrap();
+        git(p, &["add", "second.rs"]);
+        git(p, &["commit", "-q", "-m", "same-task continuation"]);
+        let second = rev_parse_local(p, "factory/worker");
+
+        let mut task = worker_task("worker");
+        task.status = TaskStatus::AwaitingMerge;
+        task.deliverables.factory_branch_anchor = Some(first);
+        assert!(
+            CasCore::apply_awaiting_merge_anchor_advance(
+                &mut task,
+                &second,
+                chrono::Utc::now(),
+                Some(p),
+                Some("main"),
+            )
+            .is_some(),
+            "a task must still be able to update its delivery before merge"
+        );
+        assert_eq!(task.deliverables.factory_branch_anchor, Some(second));
     }
 
     /// GH #819: the worker syncs the current target into its factory branch

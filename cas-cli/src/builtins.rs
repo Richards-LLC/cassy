@@ -501,6 +501,10 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
         path: "skills/cas-qa-craft/references/telemetry-sweep.md",
         content: include_str!("builtins/skills/cas-qa-craft/references/telemetry-sweep.md"),
     },
+    BuiltinFile {
+        path: "skills/cas-qa-craft/references/evidence-bundle.md",
+        content: include_str!("builtins/skills/cas-qa-craft/references/evidence-bundle.md"),
+    },
     // release-notes skill (GH #65): drafts/posts the user + dev Slack threads
     // for every staging/main merge and installs the canonical rubric template
     // at docs/release-notes/RUBRIC.md when a project has none.
@@ -1066,6 +1070,10 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-qa-craft/references/telemetry-sweep.md",
         content: include_str!("builtins/codex/skills/cas-qa-craft/references/telemetry-sweep.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-qa-craft/references/evidence-bundle.md",
+        content: include_str!("builtins/codex/skills/cas-qa-craft/references/evidence-bundle.md"),
     },
     // release-notes skill (GH #65) — codex mirror.
     BuiltinFile {
@@ -1642,6 +1650,10 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-qa-craft/references/telemetry-sweep.md",
         content: include_str!("builtins/grok/skills/cas-qa-craft/references/telemetry-sweep.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-qa-craft/references/evidence-bundle.md",
+        content: include_str!("builtins/grok/skills/cas-qa-craft/references/evidence-bundle.md"),
     },
     // release-notes skill (GH #65) — grok twin.
     BuiltinFile {
@@ -5289,6 +5301,7 @@ This is the body content."#;
             "skills/cas-qa-craft/references/evidence-ledger.md",
             "skills/cas-qa-craft/references/exemplar.md",
             "skills/cas-qa-craft/references/telemetry-sweep.md",
+            "skills/cas-qa-craft/references/evidence-bundle.md",
         ];
         let mut claude_bodies = Vec::new();
         for (label, catalog) in [
@@ -5374,6 +5387,31 @@ This is the body content."#;
                 "task id",
             ] {
                 assert!(telemetry.contains(marker), "{label} telemetry reference missing {marker:?}");
+            }
+            // cas-c3b8: the Playwright evidence bundle the close gate consumes.
+            assert!(skill.contains("evidence-bundle.md"), "{label} cas-qa-craft omits the bundle");
+            let bundle = get(FILES[5]);
+            for marker in [
+                "~/.cas/artifacts/<task-id>/qa/",
+                "bundle.json",
+                "snapshots: { dom: true, aria: true, screen: true }",
+                "screenshots: false",
+                "page.screencast.start",
+                "showActions",
+                "showChapter",
+                "toMatchAriaSnapshot",
+                "ariaSnapshotJSON",
+                "forcedColors",
+                "reducedMotion",
+                "contrast",
+                "visual-qa.mjs --strict",
+                "critique_score",
+                "note_type=platform_proof",
+                "npx playwright trace actions --errors-only",
+                "trace snapshot <N> --phase after",
+                "Worked example",
+            ] {
+                assert!(bundle.contains(marker), "{label} evidence bundle missing {marker:?}");
             }
             if label == "claude" {
                 claude_bodies = FILES.iter().map(|path| (*path, get(path))).collect();

@@ -791,13 +791,8 @@ mod tests {
             .write_process_record(&record)
             .unwrap();
         fs::write(&state, &target).unwrap();
-        assert!(
-            manager
-                .ensure(4174, 443)
-                .unwrap_err()
-                .to_string()
-                .contains("already owned")
-        );
+        let error = manager.ensure(4174, 443).unwrap_err().to_string();
+        assert!(error.contains("already owned"), "{error}");
         assert!(manager.disable_owned().unwrap().is_none());
         assert_eq!(fs::read_to_string(&state).unwrap(), target);
         assert!(

@@ -2124,9 +2124,11 @@ fn sync_user_builtins(cli: &Cli) -> anyhow::Result<()> {
 
     let claude_result = if claude_dir.exists() {
         let r = sync_all_builtins_for_harness(cas_mux::SupervisorCli::Claude, &claude_dir)?;
-        // Prune legacy non-managed cas-* orphans (e.g. cas-playwright-debug) the
-        // project-level sync already drops but the user-level path historically
-        // never did (cas-e0d1).
+        // Prune legacy non-managed cas-* orphans (e.g. a retired, unmarked skill
+        // dir) the project-level sync already drops but the user-level path
+        // historically never did (cas-e0d1). The old unmarked
+        // cas-playwright-debug copy is now overwritten by the managed builtin
+        // of the same name (cas-5e54) instead of being pruned.
         claude_pruned =
             prune_stale_user_skills_for_harness(cas_mux::SupervisorCli::Claude, &claude_dir)?;
         if !cli.json {

@@ -12,10 +12,11 @@ pub(super) fn register_skills(registry: &mut ConfigRegistry) {
         constraint: Constraint::None,
         advanced: false,
         requires_feature: None,
-        keywords: &["skills", "optional", "fallow", "nuxt", "stack", "project"],
+        keywords: &["skills", "optional", "fallow", "nuxt", "playwright", "stack", "project"],
         use_cases: &[
             "Enable fallow in a JavaScript or TypeScript repository without package metadata",
             "Enable cas-nuxt-playwright in a project whose Nuxt dependency is indirect",
+            "Enable cas-playwright-debug when Playwright Test lives outside the root package.json",
         ],
     });
 }

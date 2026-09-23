@@ -469,10 +469,11 @@ discover_builtin_test_targets() {
 lib_filter_covers() {
     local module="$1" filter
     # An unfiltered --lib run covers every library module. A module filter must
-    # name the module itself, not one newly-added test inside it.
+    # occur in the module path, so every test in that module matches it. A
+    # filter naming one test below the module cannot cover its siblings.
     [[ ${#filters[@]} -eq 0 ]] && return 0
     for filter in "${filters[@]}"; do
-        [[ "$filter" == "$module" || "$filter" == *"::$module" ]] && return 0
+        [[ "$module" == *"$filter"* || "$filter" == *"::$module" ]] && return 0
     done
     return 1
 }
@@ -484,10 +485,15 @@ while IFS= read -r path; do
         cas-cli/src/*.rs|cas-cli/src/*/*.rs|cas-cli/src/*/*/*.rs|cas-cli/src/*/*/*/*.rs|cas-cli/src/*/*/*/*/*.rs)
             source_file="$repo_root/$path"
             [[ -f "$source_file" ]] || continue
+            module_path="$(source_module_path_for "$path")"
             found_test_module=false
             while IFS= read -r module; do
                 [[ -z "$module" ]] && continue
-                required_lib_modules+=("$module")
+                if [[ "$module_path" == lib ]]; then
+                    required_lib_modules+=("$module")
+                else
+                    required_lib_modules+=("${module_path}::${module}")
+                fi
                 found_test_module=true
             done < <(sed -nE 's/^[[:space:]]*mod[[:space:]]+([[:alnum:]_]*tests)[[:space:]]*\{.*/\1/p' "$source_file")
             if ! "$found_test_module"; then

@@ -339,7 +339,7 @@ git -C "${surface_repo}" add .
 git -C "${surface_repo}" -c user.name=scoped-test-fixture -c user.email=scoped-test-fixture@example.invalid \
     commit -qm source-change
 
-expect fail "missing library module 'worker_commit_guard_tests'" \
+expect fail "missing library module 'hooks::pre_tool::worker_commit_guard_tests'" \
     "proof: narrow two-test filter is refused for a changed 42-test module" \
     bash -c "cd '${surface_repo}' && '${SURFACE_GUARD}' --base main -- -p cas --lib cas_8fd4"
 
@@ -625,6 +625,28 @@ runner_stub="$(make_stub cargo-proof-runner 0 <<'EOF'
     Summary [   0.001s] 1 tests run: 1 passed, 0 skipped
 EOF
 )"
+
+# cas-ac65: a single `cli::hub` nextest filter covers test modules in both
+# hub.rs and hub_reverse_pairing.rs. Exercise the runner and checker together.
+sibling_repo="${tmpdir}/sibling-hub-repo"
+mkdir -p "${sibling_repo}/cas-cli/src/cli" "${sibling_repo}/cas-cli/tests" "${sibling_repo}/scripts"
+cp "${SURFACE_GUARD}" "${sibling_repo}/scripts/check-scoped-test-surface.sh"
+cp "${GUARD}" "${sibling_repo}/scripts/run-scoped-tests.sh"
+printf 'mod tests { #[test] fn status_case() {} }\n' >"${sibling_repo}/cas-cli/src/cli/hub.rs"
+printf 'mod tests { #[test] fn authorize_case() {} }\n' >"${sibling_repo}/cas-cli/src/cli/hub_reverse_pairing.rs"
+git -C "${sibling_repo}" init -q -b main
+git -C "${sibling_repo}" add .
+git -C "${sibling_repo}" -c user.name=scoped-test-fixture -c user.email=scoped-test-fixture@example.invalid commit -qm base
+git -C "${sibling_repo}" checkout -qb proof
+printf '// status changed\n' >>"${sibling_repo}/cas-cli/src/cli/hub.rs"
+printf '// authorize changed\n' >>"${sibling_repo}/cas-cli/src/cli/hub_reverse_pairing.rs"
+git -C "${sibling_repo}" add .
+git -C "${sibling_repo}" -c user.name=scoped-test-fixture -c user.email=scoped-test-fixture@example.invalid commit -qm sibling-change
+expect pass "SCOPED_PROOF: targets=lib:cli::hub::tests,lib:cli::hub_reverse_pairing::tests result=PASS" \
+    "proof runner: one prefix filter covers two sibling nested test modules" \
+    env CARGO="${runner_stub}" SCOPED_PROOF_BASE=main \
+    "${sibling_repo}/scripts/run-scoped-tests.sh" --proof -p cas --lib cli::hub
+
 expect fail "SCOPED PROOF INCOMPLETE" \
     "proof runner: missing integration target is a nonzero delivery result" \
     env CARGO="${runner_stub}" SCOPED_PROOF_BASE=main \

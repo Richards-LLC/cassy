@@ -71,7 +71,6 @@ for expected in \
 done
 
 printf 'ok   no-rg backend preserves scoped target mapping\n'
-printf 'PASS: scoped test surface backend verified.\n'
 
 manifest_repo="$tmpdir/manifest-repo"
 mkdir -p "$manifest_repo/cas-cli/tests/hooks_test" "$manifest_repo/scripts"
@@ -94,3 +93,33 @@ git -C "$manifest_repo" -c user.name=scoped-test-fixture -c user.email=scoped-te
 manifest_output="$(cd "$manifest_repo" && bash ./scripts/check-scoped-test-surface.sh --resolve-targets --base main --)"
 [[ "$manifest_output" == 'SCOPED_PROOF_TARGET_ARGS: --test custom_hooks' ]]
 printf 'ok   manifest test target mapping is preserved\n'
+
+# Two sibling source files can each have an inner `mod tests`. Their proof
+# paths must keep the parent module, and a shared prefix filter must cover
+# both (the same substring matching used by cargo nextest).
+nested_repo="$tmpdir/nested-modules-repo"
+mkdir -p "$nested_repo/cas-cli/src/cli" "$nested_repo/cas-cli/tests" "$nested_repo/scripts"
+cp "$checker" "$nested_repo/scripts/check-scoped-test-surface.sh"
+chmod +x "$nested_repo/scripts/check-scoped-test-surface.sh"
+printf '%s\n' 'mod tests { #[test] fn status_case() {} }' \
+    >"$nested_repo/cas-cli/src/cli/hub.rs"
+printf '%s\n' 'mod tests { #[test] fn authorize_case() {} }' \
+    >"$nested_repo/cas-cli/src/cli/hub_reverse_pairing.rs"
+git -C "$nested_repo" init -q -b main
+git -C "$nested_repo" add .
+git -C "$nested_repo" -c user.name=scoped-test-fixture -c user.email=scoped-test-fixture@example.invalid commit -qm baseline
+git -C "$nested_repo" checkout -qb changed
+printf '%s\n' '// status changed' >>"$nested_repo/cas-cli/src/cli/hub.rs"
+printf '%s\n' '// authorize changed' >>"$nested_repo/cas-cli/src/cli/hub_reverse_pairing.rs"
+git -C "$nested_repo" add .
+git -C "$nested_repo" -c user.name=scoped-test-fixture -c user.email=scoped-test-fixture@example.invalid commit -qm 'change sibling modules'
+nested_targets="$(cd "$nested_repo" && bash ./scripts/check-scoped-test-surface.sh --resolve-targets --base main --)"
+[[ "$nested_targets" == 'SCOPED_PROOF_TARGET_ARGS: --lib cli::hub::tests cli::hub_reverse_pairing::tests' ]]
+nested_proof="$(cd "$nested_repo" && bash ./scripts/check-scoped-test-surface.sh --base main -- -p cas --lib cli::hub)"
+grep -qF 'SCOPED_PROOF: targets=lib:cli::hub::tests,lib:cli::hub_reverse_pairing::tests result=PASS' <<<"$nested_proof"
+if (cd "$nested_repo" && bash ./scripts/check-scoped-test-surface.sh --base main -- -p cas --lib status_case) >/dev/null 2>&1; then
+    echo 'FAIL: one status test incorrectly covered both sibling modules' >&2
+    exit 1
+fi
+printf 'ok   sibling nested test modules preserve paths and accept a shared prefix filter\n'
+printf 'PASS: scoped test surface backend and nested-module mapping verified.\n'

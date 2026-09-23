@@ -237,6 +237,94 @@ fn real_legacy_hubs_recover_through_new_post_swap_step() {
     }
 }
 
+/// Exercise the shared update verifier through a real, isolated launchd
+/// service. This is opt-in because it needs a signed-in local Tailscale node.
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "requires real launchd and Tailscale; set CAS_TEST_REAL_TAILSCALE_SERVICE_PORT"]
+fn real_launchd_service_update_verifies_public_transport_twice() {
+    let serve_port: u16 = std::env::var("CAS_TEST_REAL_TAILSCALE_SERVICE_PORT")
+        .expect("non-443 Tailscale Serve port")
+        .parse()
+        .unwrap();
+    assert_ne!(serve_port, 443);
+    let home = private_home();
+    let bin = home.path().join("cas");
+    fs::copy(cas::test_paths::cas_binary(), &bin).unwrap();
+    let hub_port = TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let label = format!("dev.cas.update-proof-{}", std::process::id());
+    let command = |args: &[&str]| {
+        ProcessCommand::new(&bin)
+            .args(args)
+            .env_clear()
+            .env("HOME", home.path())
+            .env("PATH", "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin")
+            .env("CAS_SKIP_FACTORY_TOOLING", "1")
+            .env("CAS_HUB_LAUNCHD_LABEL", &label)
+            .env("CAS_HUB_SERVICE_PORT", hub_port.to_string())
+            .output()
+            .unwrap()
+    };
+    struct Cleanup<'a>(&'a dyn Fn(&[&str]) -> std::process::Output);
+    impl Drop for Cleanup<'_> {
+        fn drop(&mut self) {
+            let _ = (self.0)(&["hub", "service", "uninstall"]);
+            let _ = (self.0)(&["hub", "stop", "--force"]);
+        }
+    }
+    let _cleanup = Cleanup(&command);
+    let install = command(&["hub", "service", "install"]);
+    assert!(
+        install.status.success(),
+        "service install: {}",
+        String::from_utf8_lossy(&install.stderr)
+    );
+    let publish = command(&[
+        "hub",
+        "--tailscale-serve",
+        "--tailscale-serve-port",
+        &serve_port.to_string(),
+        "restart",
+    ]);
+    assert!(
+        publish.status.success(),
+        "service publication: {}",
+        String::from_utf8_lossy(&publish.stderr)
+    );
+    let paths = cas::hub::HubRuntimePaths::new(home.path().join(".cas/hub"));
+    let first_pid = paths.read_process_record().unwrap().pid;
+    for iteration in 0..2 {
+        let receipt_path = home.path().join(format!("service-update-{iteration}.json"));
+        let update = command(&[
+            "--json",
+            "update",
+            "--post-swap",
+            "--from",
+            "3.27.8",
+            "--refresh-receipt",
+            receipt_path.to_str().unwrap(),
+        ]);
+        assert!(
+            update.status.success(),
+            "service update {iteration}: {}",
+            String::from_utf8_lossy(&update.stderr)
+        );
+        let receipt: Value = serde_json::from_slice(&fs::read(receipt_path).unwrap()).unwrap();
+        assert_eq!(receipt["hub_restart"]["via"], "service");
+        assert_eq!(receipt["hub_restart"]["verified"], true);
+        assert_eq!(receipt["hub_restart"]["transport_verified"], true);
+        assert_eq!(receipt["hub_restart"]["recovery_attempted"], false);
+        let record = paths.read_process_record().unwrap();
+        assert_ne!(record.pid, first_pid);
+        assert_eq!(record.port, hub_port);
+        assert_eq!(record.tailscale_serve_port, Some(serve_port));
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn foreground_start_carries_legacy_target_across_process_record_write() {

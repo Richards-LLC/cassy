@@ -274,8 +274,10 @@ jobs:
 
       - name: Report full-tier routing
         if: steps.classify-diff.outputs.fast-admission != 'true'
+        env:
+          FAST_ADMISSION_REASON: ${{ steps.classify-diff.outputs.fast-admission-reason }}
         run: >-
-          echo "Fast tier skipped: ${{ steps.classify-diff.outputs.fast-admission-reason }};
+          echo "Fast tier skipped: $FAST_ADMISSION_REASON;
           Scoped Validation (factory/PR) owns this delta."
 
       # The bridge is Node-only and its whole suite is bounded to the fast
@@ -481,11 +483,14 @@ jobs:
         if: >-
           steps.pr-dedupe.outputs.covered == 'true'
           || steps.classify-diff.outputs.rust-unaffected == 'true'
+        env:
+          PR_COVERED: ${{ steps.pr-dedupe.outputs.covered }}
+          DIFF_CLASS: ${{ steps.classify-diff.outputs.class }}
         run: |
-          if [[ "${{ steps.pr-dedupe.outputs.covered }}" == "true" ]]; then
+          if [[ "$PR_COVERED" == "true" ]]; then
             echo "Skipped: a pull request event is validating this exact head SHA." >> "$GITHUB_STEP_SUMMARY"
           else
-            echo "Skipped: diff class '${{ steps.classify-diff.outputs.class }}' is Rust-unaffected." >> "$GITHUB_STEP_SUMMARY"
+            echo "Skipped: diff class '$DIFF_CLASS' is Rust-unaffected." >> "$GITHUB_STEP_SUMMARY"
           fi
 
       - name: Report sccache stats
@@ -555,7 +560,9 @@ jobs:
 
       - name: Report Rust short-circuit
         if: steps.classify-diff.outputs.rust-unaffected == 'true'
-        run: echo "Rust work skipped for ${{ steps.classify-diff.outputs.class }} diff."
+        env:
+          DIFF_CLASS: ${{ steps.classify-diff.outputs.class }}
+        run: echo "Rust work skipped for $DIFF_CLASS diff."
 
       - if: >-
           steps.classify-diff.outputs.rust-unaffected != 'true'
@@ -693,7 +700,9 @@ jobs:
 
       - name: Report Rust short-circuit
         if: steps.classify-diff.outputs.rust-unaffected == 'true'
-        run: echo "Rust suite archive build skipped for ${{ steps.classify-diff.outputs.class }} diff."
+        env:
+          DIFF_CLASS: ${{ steps.classify-diff.outputs.class }}
+        run: echo "Rust suite archive build skipped for $DIFF_CLASS diff."
 
       - if: >-
           steps.classify-diff.outputs.rust-unaffected != 'true'
@@ -824,7 +833,9 @@ jobs:
 
       - name: Report Rust short-circuit
         if: steps.classify-diff.outputs.rust-unaffected == 'true'
-        run: echo "Rust suite shard skipped for ${{ steps.classify-diff.outputs.class }} diff."
+        env:
+          DIFF_CLASS: ${{ steps.classify-diff.outputs.class }}
+        run: echo "Rust suite shard skipped for $DIFF_CLASS diff."
 
       - name: Install nextest
         if: steps.classify-diff.outputs.rust-unaffected != 'true'
@@ -853,7 +864,8 @@ jobs:
         if: steps.classify-diff.outputs.rust-unaffected != 'true'
         env:
           INSTA_WORKSPACE_ROOT: ${{ github.workspace }}
-        run: scripts/run-verified-tests.sh nextest run --archive-file fast-validation-suite.tar.zst --workspace-remap "$GITHUB_WORKSPACE" --no-fail-fast --partition count:${{ matrix.shard }}/3
+          SHARD: ${{ matrix.shard }}
+        run: scripts/run-verified-tests.sh nextest run --archive-file fast-validation-suite.tar.zst --workspace-remap "$GITHUB_WORKSPACE" --no-fail-fast --partition "count:$SHARD/3"
 
   # Keep the protected ruleset's exact full-suite context while the actual
   # test execution fans out after the shared archive. This job runs even when a shard fails and
@@ -883,7 +895,9 @@ jobs:
 
       - name: Report Rust short-circuit
         if: steps.classify-diff.outputs.rust-unaffected == 'true'
-        run: echo "Full-suite fan-in short-circuited for ${{ steps.classify-diff.outputs.class }} diff."
+        env:
+          DIFF_CLASS: ${{ steps.classify-diff.outputs.class }}
+        run: echo "Full-suite fan-in short-circuited for $DIFF_CLASS diff."
 
       - name: Require every suite shard to pass
         env:
@@ -936,7 +950,9 @@ jobs:
 
       - name: Report Rust short-circuit
         if: steps.classify-diff.outputs.rust-unaffected == 'true'
-        run: echo "Doctests skipped for ${{ steps.classify-diff.outputs.class }} diff."
+        env:
+          DIFF_CLASS: ${{ steps.classify-diff.outputs.class }}
+        run: echo "Doctests skipped for $DIFF_CLASS diff."
 
       - if: >-
           steps.classify-diff.outputs.rust-unaffected != 'true'
@@ -1047,9 +1063,12 @@ jobs:
           github.event_name == 'push'
           && github.ref == 'refs/heads/main'
           && needs.fast-validation-main-push-dedupe.outputs.run-fast-validation == 'false'
+        env:
+          VALIDATING_RUN_ID: ${{ needs.fast-validation-main-push-dedupe.outputs.validating-run-id }}
+          PRIOR_RUN_URL: ${{ needs.fast-validation-main-push-dedupe.outputs.prior-run-url }}
         run: |
-          echo "::notice title=Fast Validation deduplicated::Skipped the main-push suite because merge-queue run ${{ needs.fast-validation-main-push-dedupe.outputs.validating-run-id }} already validated this exact tree: ${{ needs.fast-validation-main-push-dedupe.outputs.prior-run-url }}"
-          echo "Fast Validation reused successful merge-queue run [${{ needs.fast-validation-main-push-dedupe.outputs.validating-run-id }}](${{ needs.fast-validation-main-push-dedupe.outputs.prior-run-url }})." >> "$GITHUB_STEP_SUMMARY"
+          echo "::notice title=Fast Validation deduplicated::Skipped the main-push suite because merge-queue run $VALIDATING_RUN_ID already validated this exact tree: $PRIOR_RUN_URL"
+          echo "Fast Validation reused successful merge-queue run [$VALIDATING_RUN_ID]($PRIOR_RUN_URL)." >> "$GITHUB_STEP_SUMMARY"
 
       # This artifact is published only after the merge-group Fast Validation
       # fan-in passes. A later main push may reuse it only after the workflow
@@ -1068,8 +1087,8 @@ jobs:
           tree_hash="$(git rev-parse 'HEAD^{tree}')"
           echo "hash=$tree_hash" >> "$GITHUB_OUTPUT"
           printf 'tree=%s\ncommit=%s\nrun=%s/actions/runs/%s\n' \
-            "$tree_hash" "${{ github.sha }}" \
-            "${{ github.server_url }}/${{ github.repository }}" "${{ github.run_id }}" \
+            "$tree_hash" "$GITHUB_SHA" \
+            "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" \
             > merge-queue-validation-receipt.txt
 
       - name: Publish successful merge-queue tree receipt
@@ -1113,7 +1132,9 @@ jobs:
 
       - name: Report deduplicated heavy validation
         if: steps.tree-dedupe.outputs.run-heavy == 'false'
-        run: echo "Skipping Clippy; this tree was validated by ${{ steps.tree-dedupe.outputs.prior-run-url }}"
+        env:
+          PRIOR_RUN_URL: ${{ steps.tree-dedupe.outputs.prior-run-url }}
+        run: echo "Skipping Clippy; this tree was validated by $PRIOR_RUN_URL"
 
       - uses: ./.github/actions/setup-rust-linux
         if: steps.tree-dedupe.outputs.run-heavy != 'false'
@@ -1200,7 +1221,9 @@ jobs:
         if: >-
           github.event_name != 'pull_request'
           && steps.classify-diff.outputs.rust-unaffected == 'true'
-        run: echo "macOS Rust checks skipped for ${{ steps.classify-diff.outputs.class }} diff."
+        env:
+          DIFF_CLASS: ${{ steps.classify-diff.outputs.class }}
+        run: echo "macOS Rust checks skipped for $DIFF_CLASS diff."
 
       - name: Install Rust
         if: >-
@@ -1242,13 +1265,14 @@ jobs:
         if: >-
           github.event_name != 'pull_request'
           && steps.classify-diff.outputs.rust-unaffected != 'true'
+        env:
+          SCCACHE_OUTCOME: ${{ steps.setup-sccache.outcome }}
         shell: bash
         run: |
-          if [[ "${{ steps.setup-sccache.outcome }}" != "success" ]] || ! sccache --start-server; then
+          if [[ "$SCCACHE_OUTCOME" != "success" ]] || ! sccache --start-server; then
             echo "::warning::sccache backend unavailable — building uncached"
-            echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
-            echo "SCCACHE_GHA_ENABLED=false" >> "$GITHUB_ENV"
-            echo "SCCACHE_PATH=$GITHUB_WORKSPACE/scripts/sccache-unavailable.sh" >> "$GITHUB_ENV"
+            printf 'RUSTC_WRAPPER=\nSCCACHE_GHA_ENABLED=false\nSCCACHE_PATH=%s/scripts/sccache-unavailable.sh\n' \
+              "$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
           fi
 
       - name: Cache cargo
@@ -1302,12 +1326,14 @@ jobs:
 
       - id: tree
         name: Compute validated tree receipt
+        env:
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           tree_hash="$(git rev-parse 'HEAD^{tree}')"
           echo "hash=$tree_hash" >> "$GITHUB_OUTPUT"
           printf 'tree=%s\ncommit=%s\nrun=%s/actions/runs/%s\n' \
-            "$tree_hash" "${{ github.event.pull_request.head.sha }}" \
-            "${{ github.server_url }}/${{ github.repository }}" "${{ github.run_id }}" \
+            "$tree_hash" "$PR_HEAD_SHA" \
+            "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" \
             > pr-validation-receipt.txt
 
       - name: Publish tree validation receipt
@@ -1357,7 +1383,9 @@ jobs:
 
       - name: Report deduplicated heavy validation
         if: steps.tree-dedupe.outputs.run-heavy == 'false'
-        run: echo "Skipping test compilation; this tree was validated by ${{ steps.tree-dedupe.outputs.prior-run-url }}"
+        env:
+          PRIOR_RUN_URL: ${{ steps.tree-dedupe.outputs.prior-run-url }}
+        run: echo "Skipping test compilation; this tree was validated by $PRIOR_RUN_URL"
 
       - uses: ./.github/actions/setup-rust-linux
         if: steps.tree-dedupe.outputs.run-heavy != 'false'

@@ -69,8 +69,11 @@ jobs:
         run: ./scripts/detect-pending-release.sh | tee -a "$GITHUB_OUTPUT"
 
       - name: Report gate decision
+        env:
+          PENDING: ${{ steps.detect.outputs.pending }}
+          TAG: ${{ steps.detect.outputs.tag }}
         run: |
-          echo "pending=${{ steps.detect.outputs.pending }} tag=${{ steps.detect.outputs.tag }}" \
+          echo "pending=$PENDING tag=$TAG" \
             >> "$GITHUB_STEP_SUMMARY"
 
   # GitHub Actions cannot fall back after assigning an offline self-hosted
@@ -144,16 +147,16 @@ jobs:
 
       - name: Probe sccache backend
         if: needs.prebuild-runner-route.outputs.mode == 'hosted'
+        env:
+          SCCACHE_OUTCOME: ${{ steps.setup-sccache.outcome }}
         shell: bash
         run: |
-          if [[ "${{ steps.setup-sccache.outcome }}" == "success" ]] && sccache --start-server; then
-            echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
-            echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+          if [[ "$SCCACHE_OUTCOME" == "success" ]] && sccache --start-server; then
+            printf 'RUSTC_WRAPPER=sccache\nSCCACHE_GHA_ENABLED=true\n' >> "$GITHUB_ENV"
           else
             echo "::warning::sccache backend unavailable — building uncached"
-            echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
-            echo "SCCACHE_GHA_ENABLED=false" >> "$GITHUB_ENV"
-            echo "SCCACHE_PATH=$GITHUB_WORKSPACE/scripts/sccache-unavailable.sh" >> "$GITHUB_ENV"
+            printf 'RUSTC_WRAPPER=\nSCCACHE_GHA_ENABLED=false\nSCCACHE_PATH=%s/scripts/sccache-unavailable.sh\n' \
+              "$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
           fi
 
       # cas-065a: the box's private sccache server is an optimization behind a
@@ -251,16 +254,16 @@ jobs:
         uses: mozilla-actions/sccache-action@v0.0.11
 
       - name: Probe sccache backend
+        env:
+          SCCACHE_OUTCOME: ${{ steps.setup-sccache.outcome }}
         shell: bash
         run: |
-          if [[ "${{ steps.setup-sccache.outcome }}" == "success" ]] && sccache --start-server; then
-            echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
-            echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+          if [[ "$SCCACHE_OUTCOME" == "success" ]] && sccache --start-server; then
+            printf 'RUSTC_WRAPPER=sccache\nSCCACHE_GHA_ENABLED=true\n' >> "$GITHUB_ENV"
           else
             echo "::warning::sccache backend unavailable — building uncached"
-            echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
-            echo "SCCACHE_GHA_ENABLED=false" >> "$GITHUB_ENV"
-            echo "SCCACHE_PATH=$GITHUB_WORKSPACE/scripts/sccache-unavailable.sh" >> "$GITHUB_ENV"
+            printf 'RUSTC_WRAPPER=\nSCCACHE_GHA_ENABLED=false\nSCCACHE_PATH=%s/scripts/sccache-unavailable.sh\n' \
+              "$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
           fi
 
       - name: Cache release dependencies
@@ -314,16 +317,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Report prebuild readiness
+        env:
+          TAG: ${{ needs.pending-release.outputs.tag }}
+          LINUX_RESULT: ${{ needs.build.result }}
+          MACOS_RESULT: ${{ needs.build-macos.result }}
         run: |
           {
-            echo "## Release prebuild for ${{ needs.pending-release.outputs.tag }}"
+            echo "## Release prebuild for $TAG"
             echo
-            echo "commit: \`${{ github.sha }}\`"
-            echo "linux: ${{ needs.build.result }}"
-            echo "macos: ${{ needs.build-macos.result }}"
+            echo "commit: \`$GITHUB_SHA\`"
+            echo "linux: $LINUX_RESULT"
+            echo "macos: $MACOS_RESULT"
             echo
-            if [[ "${{ needs.build.result }}" == success && "${{ needs.build-macos.result }}" == success ]]; then
-              echo "Pushing ${{ needs.pending-release.outputs.tag }} will adopt these artifacts and publish without compiling."
+            if [[ "$LINUX_RESULT" == success && "$MACOS_RESULT" == success ]]; then
+              echo "Pushing $TAG will adopt these artifacts and publish without compiling."
             else
               echo "Prebuild incomplete — the tag will fall back to building release artifacts inline."
             fi

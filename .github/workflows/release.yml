@@ -124,13 +124,14 @@ jobs:
 
       - name: Probe sccache backend
         if: needs.release-runner-route.outputs.mode == 'hosted'
+        env:
+          SCCACHE_OUTCOME: ${{ steps.setup-sccache.outcome }}
         shell: bash
         run: |
-          if [[ "${{ steps.setup-sccache.outcome }}" != "success" ]] || ! sccache --start-server; then
+          if [[ "$SCCACHE_OUTCOME" != "success" ]] || ! sccache --start-server; then
             echo "::warning::sccache backend unavailable — building uncached"
-            echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
-            echo "SCCACHE_GHA_ENABLED=false" >> "$GITHUB_ENV"
-            echo "SCCACHE_PATH=$GITHUB_WORKSPACE/scripts/sccache-unavailable.sh" >> "$GITHUB_ENV"
+            printf 'RUSTC_WRAPPER=\nSCCACHE_GHA_ENABLED=false\nSCCACHE_PATH=%s/scripts/sccache-unavailable.sh\n' \
+              "$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
           fi
 
       # cas-065a: on the box the warm persistent target directory is what makes
@@ -221,13 +222,14 @@ jobs:
 
       - name: Probe sccache backend
         if: needs.release-runner-route.outputs.mode == 'hosted'
+        env:
+          SCCACHE_OUTCOME: ${{ steps.setup-sccache.outcome }}
         shell: bash
         run: |
-          if [[ "${{ steps.setup-sccache.outcome }}" != "success" ]] || ! sccache --start-server; then
+          if [[ "$SCCACHE_OUTCOME" != "success" ]] || ! sccache --start-server; then
             echo "::warning::sccache backend unavailable — building uncached"
-            echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
-            echo "SCCACHE_GHA_ENABLED=false" >> "$GITHUB_ENV"
-            echo "SCCACHE_PATH=$GITHUB_WORKSPACE/scripts/sccache-unavailable.sh" >> "$GITHUB_ENV"
+            printf 'RUSTC_WRAPPER=\nSCCACHE_GHA_ENABLED=false\nSCCACHE_PATH=%s/scripts/sccache-unavailable.sh\n' \
+              "$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
           fi
 
       - name: Use the isolated runner cache settings
@@ -323,13 +325,14 @@ jobs:
         uses: mozilla-actions/sccache-action@v0.0.11
 
       - name: Probe sccache backend
+        env:
+          SCCACHE_OUTCOME: ${{ steps.setup-sccache.outcome }}
         shell: bash
         run: |
-          if [[ "${{ steps.setup-sccache.outcome }}" != "success" ]] || ! sccache --start-server; then
+          if [[ "$SCCACHE_OUTCOME" != "success" ]] || ! sccache --start-server; then
             echo "::warning::sccache backend unavailable — building uncached"
-            echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
-            echo "SCCACHE_GHA_ENABLED=false" >> "$GITHUB_ENV"
-            echo "SCCACHE_PATH=$GITHUB_WORKSPACE/scripts/sccache-unavailable.sh" >> "$GITHUB_ENV"
+            printf 'RUSTC_WRAPPER=\nSCCACHE_GHA_ENABLED=false\nSCCACHE_PATH=%s/scripts/sccache-unavailable.sh\n' \
+              "$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
           fi
 
       - name: Cache release dependencies
@@ -484,18 +487,15 @@ jobs:
           sha256sum release/*.tar.gz | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Generate release notes
-        id: notes
         run: |
+          set -euo pipefail
           # Get the previous tag
-          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || true)
           if [ -n "$PREV_TAG" ]; then
-            NOTES=$(git log --pretty=format:"- %s" $PREV_TAG..HEAD)
+            git log --pretty=format:'- %s' "$PREV_TAG..HEAD" > "$RUNNER_TEMP/notes.md"
           else
-            NOTES=$(git log --pretty=format:"- %s" -10)
+            git log --pretty=format:'- %s' -10 > "$RUNNER_TEMP/notes.md"
           fi
-          echo "notes<<EOF" >> $GITHUB_OUTPUT
-          echo "$NOTES" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
 
       - name: Create Release
         env:
@@ -508,15 +508,15 @@ jobs:
           # receipt had already verified and announced their digests. A retry
           # after a partial creation must fail loudly for deliberate recovery,
           # never silently attach or replace assets.
-          if gh release view "$VERSION" --repo ${{ github.repository }} >/dev/null 2>&1; then
+          if gh release view "$VERSION" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             echo "::error::Release $VERSION already exists; refusing to replace its assets. See docs/RELEASE_SLACK_RUBRIC.md#recovering-a-failed-or-partial-release before rerunning."
             exit 1
           fi
 
           gh release create "$VERSION" \
-            --repo ${{ github.repository }} \
+            --repo "$GITHUB_REPOSITORY" \
             --title "CAS $VERSION" \
-            --notes "${{ steps.notes.outputs.notes }}" \
+            --notes-file "$RUNNER_TEMP/notes.md" \
             release/*
 
       # GITHUB_TOKEN-created releases do not fan out a release.published event
@@ -528,7 +528,8 @@ jobs:
           VERSION: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          export DISPATCH_STARTED_AT="$(date -u +%s)"
+          DISPATCH_STARTED_AT="$(date -u +%s)"
+          export DISPATCH_STARTED_AT
           gh workflow run install-path-proof.yml \
             --repo "$GITHUB_REPOSITORY" \
             --ref "$VERSION" \

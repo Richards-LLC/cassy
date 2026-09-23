@@ -1993,6 +1993,9 @@ dialog::backdrop { background: var(--overlay-backdrop); }
 .command-palette {
   width: min(620px, calc(100vw - var(--space-6)));
   max-height: min(76dvh, 680px);
+  /* Anchored near the top, not centred: filtering shrinks the list, and a
+     centred dialog would jump its search field on every keystroke. */
+  margin-block: min(12dvh, 96px) auto;
   padding: 0;
   overflow: hidden;
   background: var(--bg-panel);
@@ -2003,10 +2006,34 @@ dialog::backdrop { background: var(--overlay-backdrop); }
 .command-palette header button { width: var(--space-8); min-height: var(--space-8); padding: 0; }
 .command-palette input { min-height: var(--button-height); padding: var(--space-2) var(--space-3); color: var(--text-hi); background: var(--bg-panel); border: var(--line-width) solid var(--line-subtle); border-radius: var(--radius-card); }
 .palette-commands { display: grid; gap: var(--space-1); overflow: auto; }
+/* The list scrolls, so it clips anything painted outside a row. Draw the
+   focus ring inside the row: an outset ring loses its sides (and the first
+   row's top), and the underline that survives reads as the next row. */
+.palette-commands .palette-command:focus-visible { outline-offset: calc(-2 * var(--focus-ring-width)); }
 .palette-command { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: var(--space-3); min-height: 44px; padding: var(--space-2) var(--space-3); background: var(--bg-raised); text-align: left; }
+/* `display: grid` above outranks the user-agent [hidden] rule; the filter relies on [hidden]. */
+.palette-command[hidden] { display: none; }
 .palette-command span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .palette-command small, .palette-empty { color: var(--text-mid); }
 .palette-command small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Forced colors drops the surfaces and shadows that separate rows and lift the
+   dialog, so each needs a real edge: rows read as buttons, the dialog stands
+   off the page behind it, and the open session keeps its mark. */
+@media (forced-colors: active) {
+  dialog { border: 1px solid CanvasText; }
+  .palette-command { border: 1px solid ButtonBorder; }
+  .palette-command:disabled { border-color: GrayText; }
+  /* The focus ring is Highlight, so the open session cannot also be a
+     Highlight frame: it is filled instead, and its own ring flips to
+     HighlightText so focus still shows on the fill. */
+  .palette-commands .palette-command:focus-visible { outline-color: Highlight; }
+  .session-picker-entry[aria-current="true"] { forced-color-adjust: none; color: HighlightText; background: Highlight; border-color: Highlight; }
+  /* forced-color-adjust: none lets author surfaces through, so the global
+     button:hover background would replace the fill under HighlightText. */
+  .palette-commands .session-picker-entry[aria-current="true"]:is(:hover, :active, :focus-visible) { background: Highlight; }
+  .session-picker-entry[aria-current="true"] * { color: HighlightText; background: transparent; border-color: HighlightText; }
+  .palette-commands .session-picker-entry[aria-current="true"]:focus-visible { outline-color: HighlightText; }
+}
 /* == End Unit 3: command palette == */
 
 /* The flow is focused only so the dialog opens on its title instead of a text
@@ -2450,7 +2477,7 @@ dialog form > *,
     grid-template-columns: minmax(0, 1fr);
     gap: var(--space-1);
   }
-  .command-palette { width: calc(100vw - var(--space-4)); max-height: calc(100dvh - var(--toolbar-height)); }
+  .command-palette { width: calc(100vw - var(--space-4)); max-height: calc(100dvh - var(--toolbar-height)); margin-block: var(--space-2) auto; }
   .terminal-search { right: var(--space-1); left: var(--space-1); grid-template-columns: minmax(0, 1fr) auto var(--button-compact-height); }
 
   .context-panel,

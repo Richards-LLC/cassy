@@ -831,6 +831,54 @@ pub fn emit_verification_dispatch_handoff(
         .map_err(|error| format!("verification-dispatch handoff enqueue failed: {error}"))
 }
 
+/// Source prefix for independent-QA dispatch handoffs (cas-619f).
+pub const QA_DISPATCH_SOURCE_PREFIX: &str = "qa-dispatch:";
+
+/// Hand a just-opened independent QA round to the supervisor (cas-619f).
+///
+/// Same delivery contract as [`emit_verification_dispatch_handoff`]: CAS
+/// composes every byte, stamps it Daemon-origin, and dedupes on the pass id
+/// so a retried close never queues a second copy.
+#[allow(clippy::too_many_arguments)]
+pub fn emit_qa_dispatch_handoff(
+    prompt_queue: &dyn PromptQueueStore,
+    pass_id: &str,
+    task_id: &str,
+    qa_task_id: &str,
+    round: u32,
+    bound_head: &str,
+    deadline: DateTime<Utc>,
+    implementer: &str,
+    reasons: &str,
+) -> Result<(), String> {
+    let body = crate::prompt_revalidation::qa_dispatch_envelope(
+        pass_id,
+        task_id,
+        qa_task_id,
+        round,
+        bound_head,
+        &deadline.to_rfc3339(),
+        implementer,
+        reasons,
+    );
+    let factory_session = std::env::var("CAS_FACTORY_SESSION").ok();
+    let source = format!("{QA_DISPATCH_SOURCE_PREFIX}{pass_id}");
+    let summary = format!("Independent QA required: {task_id} (QA task {qa_task_id})");
+    prompt_queue
+        .enqueue_idempotent(
+            &source,
+            "supervisor",
+            &body,
+            factory_session.as_deref(),
+            Some(&summary),
+            Some(NotificationPriority::High),
+            &source,
+            Some(&cas_store::QueueOrigin::Daemon),
+        )
+        .map(|_| ())
+        .map_err(|error| format!("qa-dispatch handoff enqueue failed: {error}"))
+}
+
 /// Idempotent prompt handoff + stamp for one durable notification (cas-ecff).
 ///
 /// Uses `lifecycle-outbox:{notification_id}` as prompt_queue dedupe_key so a

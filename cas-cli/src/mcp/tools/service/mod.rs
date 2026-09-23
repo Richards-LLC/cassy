@@ -963,7 +963,7 @@ impl CasService {
     // ========================================================================
 
     #[tool(
-        description = "Verification operations (task quality gates). Actions: add (record verification result), show (verification details), list (verifications for task), latest (most recent for task), external_verify (registered-supervisor-only receipted external production verification)."
+        description = "Verification operations (task quality gates). Actions: add (record verification result), show (verification details), list (verifications for task), latest (most recent for task), qa_record (independent QA reviewer's verdict on a parked user-facing delivery: task_id, status approved|rejected, summary, issues, ledger_path; never the implementer), qa_waive (supervisor-only logged waiver of the independent QA pass), qa_status (QA rounds for a task), external_verify (registered-supervisor-only receipted external production verification)."
     )]
     pub async fn verification(
         &self,
@@ -978,12 +978,15 @@ impl CasService {
                 "show" => this.verification_show(req).await,
                 "list" => this.verification_list(req).await,
                 "latest" => this.verification_latest(req).await,
+                "qa_record" => this.verification_qa_record(req).await,
+                "qa_waive" => this.verification_qa_waive(req).await,
+                "qa_status" => this.verification_qa_status(req).await,
                 #[cfg(feature = "mcp-proxy")]
                 "external_verify" => this.verification_external(req).await,
                 _ => Err(Self::error(
                     ErrorCode::INVALID_PARAMS,
                     format!(
-                        "Unknown verification action: {}. Valid: add, show, list, latest{}",
+                        "Unknown verification action: {}. Valid: add, show, list, latest, qa_record, qa_waive, qa_status{}",
                         req.action,
                         if cfg!(feature = "mcp-proxy") {
                             ", external_verify"
@@ -1451,6 +1454,7 @@ mod panic_catch;
 #[cfg(test)]
 mod panic_regression_test;
 mod pattern_ops;
+mod qa_pass_ops;
 mod server_handler;
 /// cas-7c93 (GH #87): server_start / server_stop / server_list.
 mod server_ops;

@@ -51,6 +51,8 @@ pub(crate) mod close_ops;
 #[cfg(test)]
 mod gate_error_tests;
 pub(crate) mod proof_scope;
+mod qa_dispatch;
+pub(crate) mod qa_evidence_gate;
 pub(crate) mod repository_proof;
 pub(crate) mod stale_close_guard;
 pub(crate) mod supervisor_push;
@@ -1337,14 +1339,18 @@ impl CasCore {
             ));
         }
 
+        // cas-619f: a QA work item may never be started by the implementer of
+        // the delivery it reviews; starting it claims the round.
+        let qa_claim_note = self.claim_qa_round_on_start(&task)?.unwrap_or_default();
+
         let open_blocker_ids = super::open_blocker_ids(task_store.as_ref(), &req.id)?;
         super::ensure_no_start_gates(task_store.as_ref(), &req.id)?;
         super::ensure_no_external_blockers(&self.cas_root, &req.id, "start")?;
         let blocker_warning = if open_blocker_ids.is_empty() {
-            String::new()
+            qa_claim_note
         } else {
             format!(
-                "\n⚠️ STARTING WITH OPEN BLOCKERS: {}. Start is allowed for parallel preparation, but close remains gated until these tasks are done.",
+                "{qa_claim_note}\n⚠️ STARTING WITH OPEN BLOCKERS: {}. Start is allowed for parallel preparation, but close remains gated until these tasks are done.",
                 open_blocker_ids.join(", ")
             )
         };

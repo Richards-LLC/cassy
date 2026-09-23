@@ -4790,6 +4790,50 @@ impl CasCore {
             return Ok(Self::tool_error(message));
         }
 
+        // cas-0cd5: the implementer's QA evidence must be valid for the
+        // delivered head before the delivery may park for merge (and before
+        // its post-merge re-close can finish). Runs ahead of the merge gate
+        // so an unevidenced user-facing delivery never parks and never gets an
+        // independent reviewer spawned (cas-619f). A live supervisor's
+        // override (already validated above) waives it with a logged reason.
+        if close_disposition.requires_delivery_gates()
+            && task.task_type != TaskType::Epic
+            && task.assignee.is_some()
+            && (close_repo_verified || worker_worktree_path.is_some())
+        {
+            let evidence_repo = if close_repo_verified {
+                close_project_root.clone()
+            } else {
+                worker_worktree_path
+                    .clone()
+                    .unwrap_or_else(|| close_project_root.clone())
+            };
+            match super::qa_evidence_gate::qa_evidence_close_gate(
+                &self.cas_root,
+                &task,
+                &evidence_repo,
+                &resolved_parent_branch,
+                req.commit_receipt.as_deref(),
+            ) {
+                Ok(notes) => {
+                    for note in notes {
+                        append_close_decision_note(task_store.as_ref(), &mut task, &note);
+                    }
+                }
+                Err(message) if supervisor_override => {
+                    append_close_decision_note(
+                        task_store.as_ref(),
+                        &mut task,
+                        &format!(
+                            "✅ DECISION QA evidence gate waived by supervisor override: {}. Waived refusal: {message}",
+                            req.reason.as_deref().unwrap_or("").trim()
+                        ),
+                    );
+                }
+                Err(message) => return Ok(Self::tool_error(message)),
+            }
+        }
+
         if close_disposition.requires_delivery_gates()
             && task.task_type != TaskType::Epic
             && task.assignee.is_some()
@@ -4883,7 +4927,7 @@ impl CasCore {
                             &task,
                             "MERGE REQUIRED",
                             &msg,
-                            anchor,
+                            anchor.clone(),
                             merge_conflicted,
                         );
                     } else {
@@ -4906,8 +4950,32 @@ impl CasCore {
                         }
                     }
 
+                    // cas-619f: a user-facing delivery needs an independent
+                    // QA pass before it may merge. Open (or re-find) the
+                    // round for this exact tip and tell the worker where it
+                    // stands. Idempotent per tip, so close retries are cheap.
+                    let msg = match self.dispatch_independent_qa(
+                        &task,
+                        &close_project_root,
+                        &resolved_parent_branch,
+                        anchor.as_deref(),
+                    ) {
+                        Some(qa_status) => format!("{msg}{qa_status}"),
+                        None => msg,
+                    };
+
                     return Ok(Self::tool_error(msg));
                 }
+            }
+
+            // cas-619f backstop: the delivery is integrated. A user-facing
+            // task closes only when an independently reviewed tip (passed
+            // or waived) is contained in the target. Catches merges made
+            // outside the guarded paths (raw git in another harness/shell).
+            if let Some(refusal) =
+                self.independent_qa_close_refusal(&task, &close_project_root, &resolved_parent_branch)
+            {
+                return Ok(Self::tool_error(refusal));
             }
         }
 

@@ -61,6 +61,12 @@ impl Config {
             "tasks.block_exit_on_open" => Some(tasks.block_exit_on_open.to_string()),
             "qa.user_facing_labels" => Some(qa.user_facing_labels.join(",")),
             "qa.telemetry_sweep" => Some(qa.telemetry_sweep.unwrap_or_default()),
+            "qa.independent_pass" => Some(qa.independent_pass.to_string()),
+            "qa.evidence_gate" => Some(qa.evidence_gate.to_string()),
+            "qa.terminal_render_paths" => Some(qa.terminal_render_paths.join(",")),
+            "qa.user_facing_paths" => Some(qa.user_facing_paths.join(",")),
+            "qa.pass_timeout_mins" => Some(qa.pass_timeout_mins.to_string()),
+            "qa.max_rounds" => Some(qa.max_rounds.to_string()),
             // Dev section
             "dev.dev_mode" => Some(dev.dev_mode.to_string()),
             "dev.trace_commands" => Some(dev.trace_commands.to_string()),

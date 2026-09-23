@@ -13,6 +13,9 @@ and not a substitute for unit or integration tests. Time-box the whole pass to
 For an epic with child demos, use the supervisor's
 [epic flow walk](../cas-supervisor/references/epic-flow-walk.md):
 one combined matrix with a **60-minute** box overrides the task defaults below.
+If you started a `qa-pass` task, you are the independent reviewer of someone
+else's delivery: follow [references/independent-pass.md](references/independent-pass.md)
+instead of the procedure below.
 
 ## Procedure
 
@@ -35,6 +38,19 @@ one combined matrix with a **60-minute** box overrides the task defaults below.
    `source-inferred`, `fixture`, `real-build`, or `eyewitness`. A label weaker
    than the cell needs is `NOT EXERCISED`, never `PASS`; never write “partial”.
    When the 30-minute box expires, mark every unrun cell `NOT EXERCISED`.
+   For web or hub cells, write the **evidence bundle** to
+   `~/.cas/artifacts/<task-id>/qa/` with
+   [references/evidence-bundle.md](references/evidence-bundle.md). It holds:
+   - a trace recorded with `snapshots: { dom: true, aria: true, screen: true }`
+   - a `page.screencast` receipt with `showActions` and a `showChapter` for
+     each cell
+   - a `toMatchAriaSnapshot`-asserted final state
+   - `forcedColors`/`reducedMotion`/`contrast` captures when the change is
+     visual
+   - polish evidence: desktop and phone renders in light and dark,
+     `scripts/visual-qa.mjs --strict` output, and a cas-ui-craft critique
+     score
+   Cite its `bundle.json` in a `platform_proof` note and in the close reason.
 5. Grep the touched feature for `MIN_`, `MAX_`, `_MINUTES`, `_MS`, `_SECS`,
    `THRESHOLD`, `GRACE`, `DEBOUNCE`, and `RETRY`; record whether each constant is
    predictable from the user's visible contract. For terminal states, dump all
@@ -42,6 +58,21 @@ one combined matrix with a **60-minute** box overrides the task defaults below.
 6. Record one task per defect found; do not patch from this QA pass. Add the
    ledger path, build revision, label split, and verdict counts to a task note
    and the `task action=close` reason. Stop registered servers before close.
+
+## Close gate
+
+Close enforces this evidence before a user-facing delivery can park or close
+(`qa.evidence_gate`, cas-0cd5). A web-surface delivery needs the evidence bundle
+(`references/evidence-bundle.md`): `<artifacts>/<task-id>/qa/bundle.json` for
+the delivered commit, cited with `task action=notes note_type=platform_proof
+notes="qa-bundle: <abs path>/bundle.json"`. It must be newer than your last
+commit, record at least one passing `Expect`, and pass visual QA and the
+critique floor, including for a journey bundle. A demo-only change with no web
+surface needs a fresh `LEDGER.md` with a `PASS` / `real-build` row, plus a
+cas-cli-craft `terminal-qa: PASS` report under `<task-id>/terminal-qa/` when the
+diff touches `qa.terminal_render_paths`. Any delivery that adds `test.fixme`, `.skip` or `.only` is
+refused unless the marker or the line above it carries `cas-allow-skip: <reason>`.
+Rejections name the exact command that produces what is missing.
 
 ## Boundaries
 
@@ -71,3 +102,9 @@ then add every valid finding as a `telemetry sweep` row labeled
 `eyewitness/telemetry` using [references/telemetry-sweep.md](references/telemetry-sweep.md).
 If it is unset, write the exact header line `sweep: not configured` and
 continue the ordinary matrix.
+
+## User journeys
+
+Walk the user journeys a change touches, from the real entry point to the
+user's goal, and score the experience, not just pass/fail. User-facing epics
+keep `docs/qa/journeys.md` current. See [references/journeys.md](references/journeys.md).

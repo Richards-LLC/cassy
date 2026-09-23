@@ -9,7 +9,7 @@ sweep state (`sweep: configured — <path>` or the exact line
 Use this exact row grammar so the verifier can consume it:
 
 ```text
-id | cell | expected | observed | verdict | label | evidence path | defect task
+| id | cell | expected | observed | verdict | label | evidence path | defect task |
 ```
 
 Every row uses one label: `source-inferred` (code read only; proves nothing

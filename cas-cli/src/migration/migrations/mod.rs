@@ -232,6 +232,7 @@ mod m253_history_embedding_error;
 mod m254_code_index_skipped_files;
 mod m255_tasks_add_risk_declarations;
 mod m256_artifacts_create_table;
+mod m257_qa_passes;
 
 /// All migrations in order. IDs must be sequential and never reused.
 pub const MIGRATIONS: &[Migration] = &[
@@ -500,6 +501,7 @@ pub const MIGRATIONS: &[Migration] = &[
     m254_code_index_skipped_files::MIGRATION,
     m255_tasks_add_risk_declarations::MIGRATION,
     m256_artifacts_create_table::MIGRATION,
+    m257_qa_passes::MIGRATION,
 ];
 
 #[cfg(test)]

@@ -1755,15 +1755,15 @@ function restoreMessageDraft(): void {
 }
 
 /** After a palette jump, hand focus to the opened conversation's composer
- * (restoreMessageDraft already put its caret back). The terminal workspace has
- * no composer; there the attached pane takes focus once the attach settles,
- * unless the operator has already moved focus somewhere themselves. */
+ * (restoreMessageDraft already put its caret back). Where the composer cannot
+ * take focus — the terminal workspace hides it — the attached pane takes focus
+ * once the attach settles, unless the operator has moved focus themselves. */
 function focusJumpedComposer(opened: Promise<void>): void {
   const machineId = selectedMachineId;
   const session = selectedSession;
   const composer = document.querySelector<HTMLTextAreaElement>("#message-text");
-  if (composer && !composer.disabled) {
-    composer.focus();
+  composer?.focus();
+  if (composer && document.activeElement === composer) {
     const landed = composer.value;
     // A focused composer defers structural rebuilds (cas-8434), so the status
     // and lease that load after the jump would leave the shell stale — the

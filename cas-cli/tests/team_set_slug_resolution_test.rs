@@ -436,11 +436,12 @@ async fn team_show_never_shows_not_resolved_for_active_project() {
     // `cas_root.parent().file_name()` — typically `tmp` on Linux.  The
     // exact value doesn't matter; what matters is that it is non-null and is
     // NOT the sentinel `<not resolved>`.
-    let expected_id = cas_root
+    let expected_folder = cas_root
         .parent()
         .and_then(|p| p.file_name())
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| cas_root.to_string_lossy().to_string());
+    let expected_id = cas::cloud::canonical_project_id(&expected_folder).unwrap();
 
     // Seed cloud.json with a team_id but DO NOT write config.toml —
     // that is the condition under which the old code showed <not resolved>.

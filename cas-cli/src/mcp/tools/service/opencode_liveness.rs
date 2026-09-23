@@ -125,6 +125,15 @@ fn export_session_with(
     observation: &OpenCodeObservation,
     account_dir: Option<&str>,
 ) -> Result<String, String> {
+    export_session_with_deadline(executable, observation, account_dir, EXPORT_DEADLINE)
+}
+
+fn export_session_with_deadline(
+    executable: &Path,
+    observation: &OpenCodeObservation,
+    account_dir: Option<&str>,
+    deadline: Duration,
+) -> Result<String, String> {
     let session_id = mapped_session_id(observation)
         .ok_or_else(|| "OpenCode session mapping is unavailable/delayed".to_string())?;
     let directory = PathBuf::from(&observation.state.directory);
@@ -146,8 +155,8 @@ fn export_session_with(
     }
     let output = crate::bounded_process::run_command(
         &mut command,
-        crate::bounded_process::Deadline::after(EXPORT_DEADLINE),
-        EXPORT_DEADLINE,
+        crate::bounded_process::Deadline::after(deadline),
+        deadline,
     )
     .map_err(|error| format!("bounded OpenCode export failed: {error:?}"))?;
     if !output.status.success() {
@@ -297,18 +306,19 @@ mod tests {
         permissions.set_mode(0o700);
         std::fs::set_permissions(&script, permissions).unwrap();
 
-        let rendered = export_session_with(
+        let rendered = export_session_with_deadline(
             &script,
             &OpenCodeObservation {
                 state,
                 verdict: OpenCodeLivenessVerdict::Signal(OpenCodeLiveness::Idle),
             },
             Some(account.path().to_str().unwrap()),
+            Duration::from_secs(30),
         )
         .unwrap();
         assert!(rendered.starts_with(&format!(
             "{}|{}|ses_test-root",
-            directory.path().display(),
+            directory.path().canonicalize().unwrap().display(),
             account.path().display()
         )));
     }

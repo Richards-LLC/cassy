@@ -339,9 +339,19 @@ fn redact_temp_roots(s: &str) -> String {
         .into_iter()
         .chain(std::env::var_os("TMPDIR").map(std::path::PathBuf::from))
     {
-        let root = root.to_string_lossy().trim_end_matches('/').to_string();
-        if root.len() > 1 && !root.starts_with("/tmp") {
-            result = result.replace(&root, "/tmp");
+        // macOS exposes /var and /tmp symlinks through their /private paths
+        // in subprocess diagnostics. Replace the physical spelling first so
+        // a later lexical replacement cannot leave a stray /private prefix.
+        for spelling in root
+            .canonicalize()
+            .ok()
+            .into_iter()
+            .chain(std::iter::once(root))
+        {
+            let spelling = spelling.to_string_lossy().trim_end_matches('/').to_string();
+            if spelling.len() > 1 && spelling != "/tmp" {
+                result = result.replace(&spelling, "/tmp");
+            }
         }
     }
     result

@@ -635,7 +635,13 @@ fn linked_worktree_admin_dir(path: &Path, common_git_dir: &Path) -> Option<PathB
 }
 
 fn managed_worktree_path(path: &Path, cas_root: &Path) -> bool {
-    path.parent() == Some(cas_root)
+    let Some(parent) = path.parent().and_then(|parent| parent.canonicalize().ok()) else {
+        return false;
+    };
+    let Ok(cas_root) = cas_root.canonicalize() else {
+        return false;
+    };
+    parent == cas_root
         && path.file_name().is_some_and(|name| {
             let name = name.to_string_lossy();
             MANAGED_WORKTREE_PREFIXES
@@ -1140,19 +1146,33 @@ mod tests {
             true,
         )
         .unwrap();
-        assert!(report.caches.iter().any(|cache| {
-            cache.worktree == epic.canonicalize().unwrap()
-                && cache.disposition == CacheDisposition::OwnershipUncertain
-        }));
-        assert!(report.caches.iter().any(|cache| {
-            cache.worktree == user_release.canonicalize().unwrap()
-                && cache.disposition == CacheDisposition::OwnershipUncertain
-        }));
-        assert!(report.caches.iter().any(|cache| {
-            cache.worktree == release.canonicalize().unwrap()
-                && cache.disposition == CacheDisposition::Selected
-        }));
-        assert_eq!(report.selected_bytes, 7);
+        #[cfg(target_os = "linux")]
+        {
+            assert!(report.caches.iter().any(|cache| {
+                cache.worktree == epic.canonicalize().unwrap()
+                    && cache.disposition == CacheDisposition::OwnershipUncertain
+            }));
+            assert!(report.caches.iter().any(|cache| {
+                cache.worktree == user_release.canonicalize().unwrap()
+                    && cache.disposition == CacheDisposition::OwnershipUncertain
+            }));
+            assert!(report.caches.iter().any(|cache| {
+                cache.worktree == release.canonicalize().unwrap()
+                    && cache.disposition == CacheDisposition::Selected
+            }));
+            assert_eq!(report.selected_bytes, 7);
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            // Without /proc liveness evidence, GC deliberately stays report-only.
+            assert!(
+                report
+                    .caches
+                    .iter()
+                    .all(|cache| cache.disposition == CacheDisposition::LiveProcess)
+            );
+            assert_eq!(report.selected_bytes, 0);
+        }
     }
 
     #[test]

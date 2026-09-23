@@ -1955,7 +1955,7 @@ fn merging_refuses_when_a_linked_checkout_of_the_target_is_dirty() {
             branch, checkout, ..
         } => {
             assert_eq!(branch, &target);
-            assert_eq!(checkout, &sibling);
+            assert_eq!(checkout, &sibling.canonicalize().unwrap());
         }
         other => panic!("expected TargetCheckedOutDirty, got {other:?}"),
     }

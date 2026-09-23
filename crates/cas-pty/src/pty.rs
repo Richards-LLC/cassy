@@ -3428,7 +3428,7 @@ mod tests {
         let load = Command::new("sh")
             .args([
                 "-c",
-                "test \"$CLAUDE_PROJECT_DIR\" = \"$PWD\" && cat \"$CLAUDE_PROJECT_DIR/.claude/skills/cas-history-probe/SKILL.md\" >/dev/null",
+                "test \"$(cd \"$CLAUDE_PROJECT_DIR\" && pwd -P)\" = \"$(pwd -P)\" && cat \"$CLAUDE_PROJECT_DIR/.claude/skills/cas-history-probe/SKILL.md\" >/dev/null",
             ])
             .current_dir(&worker)
             .env("CLAUDE_PROJECT_DIR", &main)

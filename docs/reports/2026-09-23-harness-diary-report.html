@@ -82,27 +82,27 @@ a[href^="http"]::after{content:" (" attr(href) ")";font-size:.85em}.skip{display
 <div class="hero-text">
 <p class="eyebrow">Harness diary audit · Claude Code · Codex · Grok · 2026-09-23</p>
 <h1>A third of what the harness diaries flagged was never acted on: <span class="v">52 of 146 items</span>.</h1>
-<p class="lede">No task, no commit, no recorded check. Three of these can fail a factory silently: a Grok worker whose <code>cas</code> MCP server is disabled; no minimum Claude Code version on factory hosts; and no proof that a message reaches a busy Grok worker mid-turn.</p>
-<p class="lede2">This sweep (Claude Code 2.1.246→2.1.280, Codex 0.150.0→0.156.0, Grok 1.0.6→1.0.40) added no new code work. It widened the gap between the validated pin and the installed version for Codex (0.149.1→0.156.0) and Grok (1.0.5→1.0.40).</p>
+<p class="lede">No task, no commit, no recorded check. Another 30 are in flight (26 on the open Grok conformance run <code>cas-ef93</code>). Three of these can fail a factory silently: a Grok worker whose <code>cas</code> MCP server is disabled; no minimum Claude Code version on factory hosts; and no proof that a message reaches a busy Grok worker mid-turn.</p>
+<p class="lede2">This sweep (Claude Code 2.1.246→2.1.280, Codex 0.150.0→0.156.0, Grok 1.0.6→1.0.40) added no new code work. Codex was revalidated at 0.156.0 the same day, closing its gap between the validated pin and the installed version. Grok's gap (validated 1.0.5, installed 1.0.40) stays open until <code>cas-ef93</code> runs.</p>
 </div>
 <figure class="hero-fig"><svg class="waffle" viewBox="-2 -2 531 208" role="img" aria-labelledby="wf-t wf-d" preserveAspectRatio="xMinYMin meet">
 <title id="wf-t">Diary items by class, one square per item, per harness</title>
-<desc id="wf-d">Claude Code: 16 of 42 never addressed, 4 in flight, 20 addressed, 2 no longer applicable. Codex: 13 of 32 never addressed, 2 in flight, 17 addressed. Grok: 23 of 72 never addressed, 26 in flight, 23 addressed.</desc>
+<desc id="wf-d">Claude Code: 16 of 42 never addressed, 4 in flight, 20 addressed, 2 no longer applicable. Codex: 13 of 32 never addressed, 0 in flight, 19 addressed. Grok: 23 of 72 never addressed, 26 in flight, 23 addressed.</desc>
 <defs><pattern id="hatch" width="4" height="4" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><line x1="0" y1="0" x2="0" y2="4" class="w-hatch"/></pattern></defs>
-<rect class="w-n" x="0" y="0" width="14" height="14"/><rect class="w-n" x="0" y="17" width="14" height="14"/><rect class="w-n" x="0" y="34" width="14" height="14"/><rect class="w-n" x="0" y="51" width="14" height="14"/><rect class="w-n" x="0" y="68" width="14" height="14"/><rect class="w-n" x="0" y="85" width="14" height="14"/><rect class="w-n" x="17" y="0" width="14" height="14"/><rect class="w-n" x="17" y="17" width="14" height="14"/><rect class="w-n" x="17" y="34" width="14" height="14"/><rect class="w-n" x="17" y="51" width="14" height="14"/><rect class="w-n" x="17" y="68" width="14" height="14"/><rect class="w-n" x="17" y="85" width="14" height="14"/><rect class="w-n" x="34" y="0" width="14" height="14"/><rect class="w-n" x="34" y="17" width="14" height="14"/><rect class="w-n" x="34" y="34" width="14" height="14"/><rect class="w-n" x="34" y="51" width="14" height="14"/><rect class="w-f" x="34.75" y="68.75" width="12.5" height="12.5"/><rect class="w-f" x="34.75" y="85.75" width="12.5" height="12.5"/><rect class="w-f" x="51.75" y="0.75" width="12.5" height="12.5"/><rect class="w-f" x="51.75" y="17.75" width="12.5" height="12.5"/><rect class="w-a" x="51.75" y="34.75" width="12.5" height="12.5"/><rect class="w-a" x="51.75" y="51.75" width="12.5" height="12.5"/><rect class="w-a" x="51.75" y="68.75" width="12.5" height="12.5"/><rect class="w-a" x="51.75" y="85.75" width="12.5" height="12.5"/><rect class="w-a" x="68.75" y="0.75" width="12.5" height="12.5"/><rect class="w-a" x="68.75" y="17.75" width="12.5" height="12.5"/><rect class="w-a" x="68.75" y="34.75" width="12.5" height="12.5"/><rect class="w-a" x="68.75" y="51.75" width="12.5" height="12.5"/><rect class="w-a" x="68.75" y="68.75" width="12.5" height="12.5"/><rect class="w-a" x="68.75" y="85.75" width="12.5" height="12.5"/><rect class="w-a" x="85.75" y="0.75" width="12.5" height="12.5"/><rect class="w-a" x="85.75" y="17.75" width="12.5" height="12.5"/><rect class="w-a" x="85.75" y="34.75" width="12.5" height="12.5"/><rect class="w-a" x="85.75" y="51.75" width="12.5" height="12.5"/><rect class="w-a" x="85.75" y="68.75" width="12.5" height="12.5"/><rect class="w-a" x="85.75" y="85.75" width="12.5" height="12.5"/><rect class="w-a" x="102.75" y="0.75" width="12.5" height="12.5"/><rect class="w-a" x="102.75" y="17.75" width="12.5" height="12.5"/><rect class="w-a" x="102.75" y="34.75" width="12.5" height="12.5"/><rect class="w-a" x="102.75" y="51.75" width="12.5" height="12.5"/><circle class="w-x" cx="109.0" cy="75.0" r="3"/><circle class="w-x" cx="109.0" cy="92.0" r="3"/><text class="w-num" x="0" y="144">16</text><text class="w-lab" x="0" y="164">Claude Code</text><text class="w-sub" x="0" y="182">of 42 items</text><text class="w-sub" x="0" y="200">4 in flight</text><rect class="w-n" x="165" y="0" width="14" height="14"/><rect class="w-n" x="165" y="17" width="14" height="14"/><rect class="w-n" x="165" y="34" width="14" height="14"/><rect class="w-n" x="165" y="51" width="14" height="14"/><rect class="w-n" x="165" y="68" width="14" height="14"/><rect class="w-n" x="165" y="85" width="14" height="14"/><rect class="w-n" x="182" y="0" width="14" height="14"/><rect class="w-n" x="182" y="17" width="14" height="14"/><rect class="w-n" x="182" y="34" width="14" height="14"/><rect class="w-n" x="182" y="51" width="14" height="14"/><rect class="w-n" x="182" y="68" width="14" height="14"/><rect class="w-n" x="182" y="85" width="14" height="14"/><rect class="w-n" x="199" y="0" width="14" height="14"/><rect class="w-f" x="199.75" y="17.75" width="12.5" height="12.5"/><rect class="w-f" x="199.75" y="34.75" width="12.5" height="12.5"/><rect class="w-a" x="199.75" y="51.75" width="12.5" height="12.5"/><rect class="w-a" x="199.75" y="68.75" width="12.5" height="12.5"/><rect class="w-a" x="199.75" y="85.75" width="12.5" height="12.5"/><rect class="w-a" x="216.75" y="0.75" width="12.5" height="12.5"/><rect class="w-a" x="216.75" y="17.75" width="12.5" height="12.5"/><rect class="w-a" x="216.75" y="34.75" width="12.5" height="12.5"/><rect class="w-a" x="216.75" y="51.75" width="12.5" height="12.5"/><rect class="w-a" x="216.75" y="68.75" width="12.5" height="12.5"/><rect class="w-a" x="216.75" y="85.75" width="12.5" height="12.5"/><rect class="w-a" x="233.75" y="0.75" width="12.5" height="12.5"/><rect class="w-a" x="233.75" y="17.75" width="12.5" height="12.5"/><rect class="w-a" x="233.75" y="34.75" width="12.5" height="12.5"/><rect class="w-a" x="233.75" y="51.75" width="12.5" height="12.5"/><rect class="w-a" x="233.75" y="68.75" width="12.5" height="12.5"/><rect class="w-a" x="233.75" y="85.75" width="12.5" height="12.5"/><rect class="w-a" x="250.75" y="0.75" width="12.5" height="12.5"/><rect class="w-a" x="250.75" y="17.75" width="12.5" height="12.5"/><text class="w-num" x="165" y="144">13</text><text class="w-lab" x="165" y="164">Codex</text><text class="w-sub" x="165" y="182">of 32 items</text><text class="w-sub" x="165" y="200">2 in flight</text><rect class="w-n" x="313" y="0" width="14" height="14"/><rect class="w-n" x="313" y="17" width="14" height="14"/><rect class="w-n" x="313" y="34" width="14" height="14"/><rect class="w-n" x="313" y="51" width="14" height="14"/><rect class="w-n" x="313" y="68" width="14" height="14"/><rect class="w-n" x="313" y="85" width="14" height="14"/><rect class="w-n" x="330" y="0" width="14" height="14"/><rect class="w-n" x="330" y="17" width="14" height="14"/><rect class="w-n" x="330" y="34" width="14" height="14"/><rect class="w-n" x="330" y="51" width="14" height="14"/><rect class="w-n" x="330" y="68" width="14" height="14"/><rect class="w-n" x="330" y="85" width="14" height="14"/><rect class="w-n" x="347" y="0" width="14" height="14"/><rect class="w-n" x="347" y="17" width="14" height="14"/><rect class="w-n" x="347" y="34" width="14" height="14"/><rect class="w-n" x="347" y="51" width="14" height="14"/><rect class="w-n" x="347" y="68" width="14" height="14"/><rect class="w-n" x="347" y="85" width="14" height="14"/><rect class="w-n" x="364" y="0" width="14" height="14"/><rect class="w-n" x="364" y="17" width="14" height="14"/><rect class="w-n" x="364" y="34" width="14" height="14"/><rect class="w-n" x="364" y="51" width="14" height="14"/><rect class="w-n" x="364" y="68" width="14" height="14"/><rect class="w-f" x="364.75" y="85.75" width="12.5" height="12.5"/><rect class="w-f" x="381.75" y="0.75" width="12.5" height="12.5"/><rect class="w-f" x="381.75" y="17.75" width="12.5" height="12.5"/><rect class="w-f" x="381.75" y="34.75" width="12.5" height="12.5"/><rect class="w-f" x="381.75" y="51.75" width="12.5" height="12.5"/><rect class="w-f" x="381.75" y="68.75" width="12.5" height="12.5"/><rect class="w-f" x="381.75" y="85.75" width="12.5" height="12.5"/><rect class="w-f" x="398.75" y="0.75" width="12.5" height="12.5"/><rect class="w-f" x="398.75" y="17.75" width="12.5" height="12.5"/><rect class="w-f" x="398.75" y="34.75" width="12.5" height="12.5"/><rect class="w-f" x="398.75" y="51.75" width="12.5" height="12.5"/><rect class="w-f" x="398.75" y="68.75" width="12.5" height="12.5"/><rect class="w-f" x="398.75" y="85.75" width="12.5" height="12.5"/><rect class="w-f" x="415.75" y="0.75" width="12.5" height="12.5"/><rect class="w-f" x="415.75" y="17.75" width="12.5" height="12.5"/><rect class="w-f" x="415.75" y="34.75" width="12.5" height="12.5"/><rect class="w-f" x="415.75" y="51.75" width="12.5" height="12.5"/><rect class="w-f" x="415.75" y="68.75" width="12.5" height="12.5"/><rect class="w-f" x="415.75" y="85.75" width="12.5" height="12.5"/><rect class="w-f" x="432.75" y="0.75" width="12.5" height="12.5"/><rect class="w-f" x="432.75" y="17.75" width="12.5" height="12.5"/><rect class="w-f" x="432.75" y="34.75" width="12.5" height="12.5"/><rect class="w-f" x="432.75" y="51.75" width="12.5" height="12.5"/><rect class="w-f" x="432.75" y="68.75" width="12.5" height="12.5"/><rect class="w-f" x="432.75" y="85.75" width="12.5" height="12.5"/><rect class="w-f" x="449.75" y="0.75" width="12.5" height="12.5"/><rect class="w-a" x="449.75" y="17.75" width="12.5" height="12.5"/><rect class="w-a" x="449.75" y="34.75" width="12.5" height="12.5"/><rect class="w-a" x="449.75" y="51.75" width="12.5" height="12.5"/><rect class="w-a" x="449.75" y="68.75" width="12.5" height="12.5"/><rect class="w-a" x="449.75" y="85.75" width="12.5" height="12.5"/><rect class="w-a" x="466.75" y="0.75" width="12.5" height="12.5"/><rect class="w-a" x="466.75" y="17.75" width="12.5" height="12.5"/><rect class="w-a" x="466.75" y="34.75" width="12.5" height="12.5"/><rect class="w-a" x="466.75" y="51.75" width="12.5" height="12.5"/><rect class="w-a" x="466.75" y="68.75" width="12.5" height="12.5"/><rect class="w-a" x="466.75" y="85.75" width="12.5" height="12.5"/><rect class="w-a" x="483.75" y="0.75" width="12.5" height="12.5"/><rect class="w-a" x="483.75" y="17.75" width="12.5" height="12.5"/><rect class="w-a" x="483.75" y="34.75" width="12.5" height="12.5"/><rect class="w-a" x="483.75" y="51.75" width="12.5" height="12.5"/><rect class="w-a" x="483.75" y="68.75" width="12.5" height="12.5"/><rect class="w-a" x="483.75" y="85.75" width="12.5" height="12.5"/><rect class="w-a" x="500.75" y="0.75" width="12.5" height="12.5"/><rect class="w-a" x="500.75" y="17.75" width="12.5" height="12.5"/><rect class="w-a" x="500.75" y="34.75" width="12.5" height="12.5"/><rect class="w-a" x="500.75" y="51.75" width="12.5" height="12.5"/><rect class="w-a" x="500.75" y="68.75" width="12.5" height="12.5"/><rect class="w-a" x="500.75" y="85.75" width="12.5" height="12.5"/><text class="w-num" x="313" y="144">23</text><text class="w-lab" x="313" y="164">Grok</text><text class="w-sub" x="313" y="182">of 72 items</text><text class="w-sub" x="313" y="200">26 in flight</text></svg><ul class="key" aria-label="Key">
+<rect class="w-n" x="0" y="0" width="14" height="14"/><rect class="w-n" x="0" y="17" width="14" height="14"/><rect class="w-n" x="0" y="34" width="14" height="14"/><rect class="w-n" x="0" y="51" width="14" height="14"/><rect class="w-n" x="0" y="68" width="14" height="14"/><rect class="w-n" x="0" y="85" width="14" height="14"/><rect class="w-n" x="17" y="0" width="14" height="14"/><rect class="w-n" x="17" y="17" width="14" height="14"/><rect class="w-n" x="17" y="34" width="14" height="14"/><rect class="w-n" x="17" y="51" width="14" height="14"/><rect class="w-n" x="17" y="68" width="14" height="14"/><rect class="w-n" x="17" y="85" width="14" height="14"/><rect class="w-n" x="34" y="0" width="14" height="14"/><rect class="w-n" x="34" y="17" width="14" height="14"/><rect class="w-n" x="34" y="34" width="14" height="14"/><rect class="w-n" x="34" y="51" width="14" height="14"/><rect class="w-f" x="34.75" y="68.75" width="12.5" height="12.5"/><rect class="w-f" x="34.75" y="85.75" width="12.5" height="12.5"/><rect class="w-f" x="51.75" y="0.75" width="12.5" height="12.5"/><rect class="w-f" x="51.75" y="17.75" width="12.5" height="12.5"/><rect class="w-a" x="51.75" y="34.75" width="12.5" height="12.5"/><rect class="w-a" x="51.75" y="51.75" width="12.5" height="12.5"/><rect class="w-a" x="51.75" y="68.75" width="12.5" height="12.5"/><rect class="w-a" x="51.75" y="85.75" width="12.5" height="12.5"/><rect class="w-a" x="68.75" y="0.75" width="12.5" height="12.5"/><rect class="w-a" x="68.75" y="17.75" width="12.5" height="12.5"/><rect class="w-a" x="68.75" y="34.75" width="12.5" height="12.5"/><rect class="w-a" x="68.75" y="51.75" width="12.5" height="12.5"/><rect class="w-a" x="68.75" y="68.75" width="12.5" height="12.5"/><rect class="w-a" x="68.75" y="85.75" width="12.5" height="12.5"/><rect class="w-a" x="85.75" y="0.75" width="12.5" height="12.5"/><rect class="w-a" x="85.75" y="17.75" width="12.5" height="12.5"/><rect class="w-a" x="85.75" y="34.75" width="12.5" height="12.5"/><rect class="w-a" x="85.75" y="51.75" width="12.5" height="12.5"/><rect class="w-a" x="85.75" y="68.75" width="12.5" height="12.5"/><rect class="w-a" x="85.75" y="85.75" width="12.5" height="12.5"/><rect class="w-a" x="102.75" y="0.75" width="12.5" height="12.5"/><rect class="w-a" x="102.75" y="17.75" width="12.5" height="12.5"/><rect class="w-a" x="102.75" y="34.75" width="12.5" height="12.5"/><rect class="w-a" x="102.75" y="51.75" width="12.5" height="12.5"/><circle class="w-x" cx="109.0" cy="75.0" r="3"/><circle class="w-x" cx="109.0" cy="92.0" r="3"/><text class="w-num" x="0" y="144">16</text><text class="w-lab" x="0" y="164">Claude Code</text><text class="w-sub" x="0" y="182">of 42 items</text><text class="w-sub" x="0" y="200">4 in flight</text><rect class="w-n" x="165" y="0" width="14" height="14"/><rect class="w-n" x="165" y="17" width="14" height="14"/><rect class="w-n" x="165" y="34" width="14" height="14"/><rect class="w-n" x="165" y="51" width="14" height="14"/><rect class="w-n" x="165" y="68" width="14" height="14"/><rect class="w-n" x="165" y="85" width="14" height="14"/><rect class="w-n" x="182" y="0" width="14" height="14"/><rect class="w-n" x="182" y="17" width="14" height="14"/><rect class="w-n" x="182" y="34" width="14" height="14"/><rect class="w-n" x="182" y="51" width="14" height="14"/><rect class="w-n" x="182" y="68" width="14" height="14"/><rect class="w-n" x="182" y="85" width="14" height="14"/><rect class="w-n" x="199" y="0" width="14" height="14"/><rect class="w-a" x="199.75" y="17.75" width="12.5" height="12.5"/><rect class="w-a" x="199.75" y="34.75" width="12.5" height="12.5"/><rect class="w-a" x="199.75" y="51.75" width="12.5" height="12.5"/><rect class="w-a" x="199.75" y="68.75" width="12.5" height="12.5"/><rect class="w-a" x="199.75" y="85.75" width="12.5" height="12.5"/><rect class="w-a" x="216.75" y="0.75" width="12.5" height="12.5"/><rect class="w-a" x="216.75" y="17.75" width="12.5" height="12.5"/><rect class="w-a" x="216.75" y="34.75" width="12.5" height="12.5"/><rect class="w-a" x="216.75" y="51.75" width="12.5" height="12.5"/><rect class="w-a" x="216.75" y="68.75" width="12.5" height="12.5"/><rect class="w-a" x="216.75" y="85.75" width="12.5" height="12.5"/><rect class="w-a" x="233.75" y="0.75" width="12.5" height="12.5"/><rect class="w-a" x="233.75" y="17.75" width="12.5" height="12.5"/><rect class="w-a" x="233.75" y="34.75" width="12.5" height="12.5"/><rect class="w-a" x="233.75" y="51.75" width="12.5" height="12.5"/><rect class="w-a" x="233.75" y="68.75" width="12.5" height="12.5"/><rect class="w-a" x="233.75" y="85.75" width="12.5" height="12.5"/><rect class="w-a" x="250.75" y="0.75" width="12.5" height="12.5"/><rect class="w-a" x="250.75" y="17.75" width="12.5" height="12.5"/><text class="w-num" x="165" y="144">13</text><text class="w-lab" x="165" y="164">Codex</text><text class="w-sub" x="165" y="182">of 32 items</text><text class="w-sub" x="165" y="200">0 in flight</text><rect class="w-n" x="313" y="0" width="14" height="14"/><rect class="w-n" x="313" y="17" width="14" height="14"/><rect class="w-n" x="313" y="34" width="14" height="14"/><rect class="w-n" x="313" y="51" width="14" height="14"/><rect class="w-n" x="313" y="68" width="14" height="14"/><rect class="w-n" x="313" y="85" width="14" height="14"/><rect class="w-n" x="330" y="0" width="14" height="14"/><rect class="w-n" x="330" y="17" width="14" height="14"/><rect class="w-n" x="330" y="34" width="14" height="14"/><rect class="w-n" x="330" y="51" width="14" height="14"/><rect class="w-n" x="330" y="68" width="14" height="14"/><rect class="w-n" x="330" y="85" width="14" height="14"/><rect class="w-n" x="347" y="0" width="14" height="14"/><rect class="w-n" x="347" y="17" width="14" height="14"/><rect class="w-n" x="347" y="34" width="14" height="14"/><rect class="w-n" x="347" y="51" width="14" height="14"/><rect class="w-n" x="347" y="68" width="14" height="14"/><rect class="w-n" x="347" y="85" width="14" height="14"/><rect class="w-n" x="364" y="0" width="14" height="14"/><rect class="w-n" x="364" y="17" width="14" height="14"/><rect class="w-n" x="364" y="34" width="14" height="14"/><rect class="w-n" x="364" y="51" width="14" height="14"/><rect class="w-n" x="364" y="68" width="14" height="14"/><rect class="w-f" x="364.75" y="85.75" width="12.5" height="12.5"/><rect class="w-f" x="381.75" y="0.75" width="12.5" height="12.5"/><rect class="w-f" x="381.75" y="17.75" width="12.5" height="12.5"/><rect class="w-f" x="381.75" y="34.75" width="12.5" height="12.5"/><rect class="w-f" x="381.75" y="51.75" width="12.5" height="12.5"/><rect class="w-f" x="381.75" y="68.75" width="12.5" height="12.5"/><rect class="w-f" x="381.75" y="85.75" width="12.5" height="12.5"/><rect class="w-f" x="398.75" y="0.75" width="12.5" height="12.5"/><rect class="w-f" x="398.75" y="17.75" width="12.5" height="12.5"/><rect class="w-f" x="398.75" y="34.75" width="12.5" height="12.5"/><rect class="w-f" x="398.75" y="51.75" width="12.5" height="12.5"/><rect class="w-f" x="398.75" y="68.75" width="12.5" height="12.5"/><rect class="w-f" x="398.75" y="85.75" width="12.5" height="12.5"/><rect class="w-f" x="415.75" y="0.75" width="12.5" height="12.5"/><rect class="w-f" x="415.75" y="17.75" width="12.5" height="12.5"/><rect class="w-f" x="415.75" y="34.75" width="12.5" height="12.5"/><rect class="w-f" x="415.75" y="51.75" width="12.5" height="12.5"/><rect class="w-f" x="415.75" y="68.75" width="12.5" height="12.5"/><rect class="w-f" x="415.75" y="85.75" width="12.5" height="12.5"/><rect class="w-f" x="432.75" y="0.75" width="12.5" height="12.5"/><rect class="w-f" x="432.75" y="17.75" width="12.5" height="12.5"/><rect class="w-f" x="432.75" y="34.75" width="12.5" height="12.5"/><rect class="w-f" x="432.75" y="51.75" width="12.5" height="12.5"/><rect class="w-f" x="432.75" y="68.75" width="12.5" height="12.5"/><rect class="w-f" x="432.75" y="85.75" width="12.5" height="12.5"/><rect class="w-f" x="449.75" y="0.75" width="12.5" height="12.5"/><rect class="w-a" x="449.75" y="17.75" width="12.5" height="12.5"/><rect class="w-a" x="449.75" y="34.75" width="12.5" height="12.5"/><rect class="w-a" x="449.75" y="51.75" width="12.5" height="12.5"/><rect class="w-a" x="449.75" y="68.75" width="12.5" height="12.5"/><rect class="w-a" x="449.75" y="85.75" width="12.5" height="12.5"/><rect class="w-a" x="466.75" y="0.75" width="12.5" height="12.5"/><rect class="w-a" x="466.75" y="17.75" width="12.5" height="12.5"/><rect class="w-a" x="466.75" y="34.75" width="12.5" height="12.5"/><rect class="w-a" x="466.75" y="51.75" width="12.5" height="12.5"/><rect class="w-a" x="466.75" y="68.75" width="12.5" height="12.5"/><rect class="w-a" x="466.75" y="85.75" width="12.5" height="12.5"/><rect class="w-a" x="483.75" y="0.75" width="12.5" height="12.5"/><rect class="w-a" x="483.75" y="17.75" width="12.5" height="12.5"/><rect class="w-a" x="483.75" y="34.75" width="12.5" height="12.5"/><rect class="w-a" x="483.75" y="51.75" width="12.5" height="12.5"/><rect class="w-a" x="483.75" y="68.75" width="12.5" height="12.5"/><rect class="w-a" x="483.75" y="85.75" width="12.5" height="12.5"/><rect class="w-a" x="500.75" y="0.75" width="12.5" height="12.5"/><rect class="w-a" x="500.75" y="17.75" width="12.5" height="12.5"/><rect class="w-a" x="500.75" y="34.75" width="12.5" height="12.5"/><rect class="w-a" x="500.75" y="51.75" width="12.5" height="12.5"/><rect class="w-a" x="500.75" y="68.75" width="12.5" height="12.5"/><rect class="w-a" x="500.75" y="85.75" width="12.5" height="12.5"/><text class="w-num" x="313" y="144">23</text><text class="w-lab" x="313" y="164">Grok</text><text class="w-sub" x="313" y="182">of 72 items</text><text class="w-sub" x="313" y="200">26 in flight</text></svg><ul class="key" aria-label="Key">
 <li><span class="sw sw-n" aria-hidden="true"></span>never addressed</li>
 <li><span class="sw sw-f" aria-hidden="true"></span>in flight</li>
 <li><span class="sw sw-a" aria-hidden="true"></span>addressed</li>
-<li><span class="sw sw-x" aria-hidden="true"></span>no longer applicable</li></ul><figcaption>One square per audited diary item (👀, 🏗, or naming a Cassy task), full diary history. Source: <a href="#evidence-appendix-every-audited-item">evidence appendix</a>; worktree commit <code>4929bf38</code>.</figcaption></figure>
+<li><span class="sw sw-x" aria-hidden="true"></span>no longer applicable</li></ul><figcaption>One square per audited diary item (👀, 🏗, or naming a Cassy task), full diary history. Source: <a href="#evidence-appendix-every-audited-item">evidence appendix</a>; epic commit <code>2172d952</code>.</figcaption></figure>
 </div>
 <hr class="vrule">
-<p class="prov">Source: <a href="2026-09-23-harness-diary-report.md">2026-09-23-harness-diary-report.md</a> · the three diaries in <code>docs/notes/</code> at <code>4929bf38</code> · task <code>cas-df20</code> · report only</p>
+<p class="prov">Source: <a href="2026-09-23-harness-diary-report.md">2026-09-23-harness-diary-report.md</a> · the three diaries in <code>docs/notes/</code> at <code>2172d952</code> · task <code>cas-df20</code> · report only</p>
 <details class="figdata" open><summary>Figure data</summary><div class="table-wrap" tabindex="0" role="region" aria-label="Figure data"><table class="num"><caption>Audited diary items by class (rows per harness)</caption>
 <thead><tr><th scope="col">Harness</th><th scope="col">Never addressed</th><th scope="col">In flight</th><th scope="col">Addressed</th><th scope="col">No longer applicable</th><th scope="col">Total</th></tr></thead>
 <tbody><tr><th scope="row">Claude Code</th><td>16</td><td>4</td><td>20</td><td>2</td><td>42</td></tr>
-<tr><th scope="row">Codex</th><td>13</td><td>2</td><td>17</td><td>0</td><td>32</td></tr>
+<tr><th scope="row">Codex</th><td>13</td><td>0</td><td>19</td><td>0</td><td>32</td></tr>
 <tr><th scope="row">Grok</th><td>23</td><td>26</td><td>23</td><td>0</td><td>72</td></tr>
-<tr class="sum"><th scope="row">Total</th><td>52</td><td>32</td><td>60</td><td>2</td><td>146</td></tr></tbody></table></div></details>
+<tr class="sum"><th scope="row">Total</th><td>52</td><td>30</td><td>62</td><td>2</td><td>146</td></tr></tbody></table></div></details>
 </header>
 <main id="content">
 <div class="table-wrap" tabindex="0" role="region" aria-label="Overview"><table><caption>Overview</caption>
@@ -127,7 +127,7 @@ a[href^="http"]::after{content:" (" attr(href) ")";font-size:.85em}.skip{display
 </tr>
 <tr>
 <td>Commit examined</td>
-<td><code>4929bf38</code> (epic branch <code>epic/epic-2026-09-23-harness-diary-sweep-claude-codex-g-cas-6f39</code>, Grok sweep merged)</td>
+<td><code>2172d952</code> (epic branch <code>epic/epic-2026-09-23-harness-diary-sweep-claude-codex-g-cas-6f39</code>, with the Grok sweep and the Codex 0.156.0 receipt merged); per-item audit read the diaries at <code>4929bf38</code>, and the Codex rows were rechecked at <code>2172d952</code></td>
 </tr>
 <tr>
 <td>Confidence</td>
@@ -719,8 +719,8 @@ a[href^="http"]::after{content:" (" attr(href) ")";font-size:.85em}.skip{display
 <td>0.150.0 → 0.156.0</td>
 <td style="text-align: right;">7</td>
 <td style="text-align: right;">14</td>
-<td>8 👀 · 6 ⏭</td>
-<td>MCP (<code>cs</code>), <code>--yolo</code>/sandbox, AGENTS.md trust, skills/plugins, interrupt/resume</td>
+<td>8 🟢 · 6 ⏭</td>
+<td>MCP (<code>cs</code>), <code>--yolo</code>/sandbox, AGENTS.md trust, skills/plugins, interrupt/resume — all 8 validated by the 0.156.0 receipt</td>
 <td>None</td>
 </tr>
 <tr>
@@ -728,13 +728,13 @@ a[href^="http"]::after{content:" (" attr(href) ")";font-size:.85em}.skip{display
 <td>1.0.6 → 1.0.40</td>
 <td style="text-align: right;">35</td>
 <td style="text-align: right;">55</td>
-<td>27 👀 · 11 🟢 · 1 ✅ · 16 ⏭</td>
+<td>26 👀 · 12 🟢 · 1 ✅ · 16 ⏭</td>
 <td>Esc no longer cancels (1.0.24), MCP input/consent, permissions, worktrees, sessions</td>
 <td>13 versions (1.0.14–16, 1.0.26–29, 1.0.35–40) with no per-version notes</td>
 </tr>
 </tbody>
 </table></div>
-<p>Verdict counts are the first verdict glyph on each entry bullet added by the sweep. Grok's two single-line entries (1.0.20, 1.0.23) count as one ⏭ each. Source: <code>git diff main...4929bf38 -- docs/notes/</code>.</p>
+<p>Verdict counts are the first verdict glyph on each entry bullet added by the sweep. Grok's two single-line entries (1.0.20, 1.0.23) count as one ⏭ each. Codex's 8 were 👀 when the sweep landed and became 🟢 when the 0.156.0 receipt merged. Grok 1.0.24 is 🟢 after the correction made in this task. Source: <code>git diff main...HEAD -- docs/notes/</code>.</p>
 <h3 id="validated-pin-vs-installed">Validated pin vs installed</h3>
 <div class="table-wrap" tabindex="0" role="region" aria-label="Validated pin vs installed"><table><caption>Validated pin vs installed</caption>
 <thead>
@@ -756,10 +756,10 @@ a[href^="http"]::after{content:" (" attr(href) ")";font-size:.85em}.skip{display
 </tr>
 <tr>
 <td>Codex</td>
-<td>0.149.1 (<code>crates/cas-pty/conformance/codex-cli-0.149.1-2026-08-25.json</code>)</td>
+<td>0.156.0 (<code>crates/cas-pty/conformance/codex-cli-0.156.0-2026-09-23.json</code>; was 0.149.1 when the sweep landed)</td>
 <td>0.156.0</td>
-<td>7 stable releases unvalidated</td>
-<td><code>cas-0d4f</code> — in progress: matrix retargeted to 0.156.0; no receipt yet</td>
+<td>none</td>
+<td><code>cas-0d4f</code>, merged to the epic at <code>2172d952</code>. Caveat: the matrix ran on the suspended <code>gpt-5.6-terra</code> model rather than the production Codex lane model; open follow-up <code>cas-a564</code></td>
 </tr>
 <tr>
 <td>Grok</td>
@@ -772,13 +772,20 @@ a[href^="http"]::after{content:" (" attr(href) ")";font-size:.85em}.skip{display
 </table></div>
 <h3 id="per-harness-notes">Per-harness notes</h3>
 <p><strong>Claude Code.</strong> This sweep produced no 👀. Model-default changes (Opus 5.5 at 2.1.280, Fable 5.1 at 2.1.257) route to the model-lane refresh <code>cas-8505</code>, which is in progress and scoped to a decision brief. The operator's decision, recorded 2026-09-23, is that no lane-registry edit happens without his approval. <code>crates/cas-factory/policy/lane-registry.toml</code> still pins <code>claude-opus-5</code>.</p>
-<p><strong>Codex.</strong> Every Cassy-relevant 0.150–0.156 item is an upgrade-validation 👀 grouped under <code>cas-0d4f</code>. No release-note item names a standalone code fix.</p>
-<p><strong>Grok.</strong> The headline item is 1.0.24: Esc no longer cancels a running turn. The Grok code path already accounts for it:</p>
+<p><strong>Codex.</strong> Every Cassy-relevant 0.150–0.156 item was an upgrade-validation 👀 grouped under <code>cas-0d4f</code>. That matrix passed on 0.156.0 across 12 checks, including:</p>
+<ul>
+<li>AGENTS.md, skill and agent discovery;</li>
+<li>interrupt/resume approval continuity;</li>
+<li>code-mode coexistence;</li>
+<li>root and follow-up <code>mcp__cs</code> turns.</li>
+</ul>
+<p>The diary now marks all seven versions 🟢 validated. No release-note item names a standalone code fix. The receipt validated the launch contract on <code>gpt-5.6-terra</code>, a model whose lane recipe was suspended on 2026-08-27, rather than the model production Codex workers run; <code>cas-a564</code> (open) owns pointing the matrix at the standard-lane model. None of the 13 Codex never-addressed items is covered by the new receipt: its MCP checks still call only <code>whoami</code> and <code>task mine</code>, it runs on Linux, and it sets no proxy, import, or second-server scenario.</p>
+<p><strong>Grok.</strong> The headline item is 1.0.24: Esc no longer cancels a running turn. The sweep first recorded it as a 👀 watch, but the Grok code path already accounts for it, so this task corrected the diary to 🟢 already covered (entry, Index row, and the version-status Gap paragraph):</p>
 <ul>
 <li><code>Pane::break_turn</code> writes the harness's cancel bytes (<code>crates/cas-mux/src/pane/mod.rs:1462-1466</code>).</li>
 <li>The Grok backend returns Ctrl+C <code>0x03</code>, not Esc (<code>crates/cas-mux/src/backend/grok.rs:70-72</code>, pinned by <code>crates/cas-mux/src/harness.rs:293-296</code>, commit <code>415a30de</code>).</li>
 </ul>
-<p>A live confirmation on 1.0.40 remains with <code>cas-ef93</code>. The diary's citation <code>pty.rs:5421-5426</code> points at a Pty-layer test comment, not the break path.</p>
+<p>A live confirmation on 1.0.40 remains with <code>cas-ef93</code>.</p>
 <h3 id="scope-gaps-in-cas-ef93">Scope gaps in cas-ef93</h3>
 <p>The Grok diary hands four checks to "the matrix" that <code>cas-ef93</code>'s description and acceptance criteria do not list:</p>
 <ul>
@@ -790,10 +797,10 @@ a[href^="http"]::after{content:" (" attr(href) ")";font-size:.85em}.skip{display
 <p>Unless the matrix adds these four checks, cas-ef93 will close with them still open.</p>
 <h3 id="stale-diary-text-found-during-the-audit">Stale diary text found during the audit</h3>
 <ul>
-<li><strong>Codex touchpoints (diary L77–78)</strong> still say Codex has no Claude-style hook system. Trusted Codex hooks shipped in <code>1b4e03bf</code> (cas-ba048) and PostToolUse wiring in <code>cb7ce9a6</code> (cas-5ae8).</li>
-<li><strong>Codex version status (L41–43, L226–227)</strong> says Cassy maps only <code>Effort::XHigh</code>. <code>Effort::Max</code> shipped in <code>47430713</code> (PR #813, cas-556a).</li>
+<li><strong>Codex touchpoints (diary L76–77 at <code>2172d952</code>)</strong> still say Codex has no Claude-style hook system. Trusted Codex hooks shipped in <code>1b4e03bf</code> (cas-ba048) and PostToolUse wiring in <code>cb7ce9a6</code> (cas-5ae8).</li>
+<li><strong>Codex version status (the Gap bullet, and the 0.149.1 entry)</strong> says Cassy maps only <code>Effort::XHigh</code>. <code>Effort::Max</code> shipped in <code>47430713</code> (PR #813, cas-556a). The 0.156.0 update kept this sentence.</li>
 <li><strong>Claude Code 2.1.219 (L665)</strong> and <strong>2.1.187 (L1160)</strong> cite the <code>cas-code-review</code> Workflow, which was removed in <code>9cf31b2a</code> (cas-7216, 2026-09-01).</li>
-<li><strong>Grok 1.0.24 / version status</strong> cites <code>pty.rs:5421-5426</code> as the interrupt path. The real path is <code>crates/cas-mux/src/pane/mod.rs:1462</code> together with <code>crates/cas-mux/src/backend/grok.rs:70</code>.</li>
+<li><strong>Grok 1.0.24 / version status</strong> cited <code>pty.rs:5421-5426</code> as the interrupt path and graded the item 👀. <strong>Corrected in this task:</strong> the diary now cites <code>crates/cas-mux/src/pane/mod.rs:1462</code> and <code>crates/cas-mux/src/backend/grok.rs:70-72</code> and grades it 🟢 already covered, with live confirmation left to <code>cas-ef93</code>.</li>
 </ul>
 <h2 id="how-the-classification-was-done">How the classification was done</h2>
 <p>Each harness diary was read in full (Entries and Backlog). Every candidate item was checked against four sources:</p>
@@ -836,8 +843,8 @@ a[href^="http"]::after{content:" (" attr(href) ")";font-size:.85em}.skip{display
 <tr>
 <td>Codex</td>
 <td style="text-align: right;">32</td>
-<td style="text-align: right;">17</td>
-<td style="text-align: right;">2</td>
+<td style="text-align: right;">19</td>
+<td style="text-align: right;">0</td>
 <td style="text-align: right;">13</td>
 <td style="text-align: right;">0</td>
 </tr>
@@ -852,8 +859,8 @@ a[href^="http"]::after{content:" (" attr(href) ")";font-size:.85em}.skip{display
 <tr>
 <td><strong>Total</strong></td>
 <td style="text-align: right;"><strong>146</strong></td>
-<td style="text-align: right;"><strong>60</strong></td>
-<td style="text-align: right;"><strong>32</strong></td>
+<td style="text-align: right;"><strong>62</strong></td>
+<td style="text-align: right;"><strong>30</strong></td>
 <td style="text-align: right;"><strong>52</strong></td>
 <td style="text-align: right;"><strong>2</strong></td>
 </tr>
@@ -861,6 +868,7 @@ a[href^="http"]::after{content:" (" attr(href) ")";font-size:.85em}.skip{display
 </table></div>
 <p>Codex's 0.144 auth-elicitation row is split. The <code>cs</code> smoke test is addressed, but the case of a second MCP server that needs auth is not, so the row counts as never addressed here. Grok's 1.0.24 row counts as addressed in code, with its live proof in flight.</p>
 <h2 id="evidence-appendix-every-audited-item" class="appendix">Evidence appendix — every audited item</h2>
+<p>Diary line numbers (<code>L…</code>) refer to each diary at <code>4929bf38</code>. The Codex diary's 0.156.0 update at <code>2172d952</code> shifts some Codex lines by a line or two. Codex and Grok rows updated after that commit say so in their evidence.</p>
 <h3 id="claude-code">Claude Code</h3>
 <div class="table-wrap" tabindex="0" role="region" aria-label="Claude Code"><table><caption>Claude Code</caption>
 <thead>
@@ -1230,8 +1238,8 @@ a[href^="http"]::after{content:" (" attr(href) ")";font-size:.85em}.skip{display
 <td>L122–213 (7 entries)</td>
 <td>Interrupt hooks, AGENTS trust gating, required/remote MCP, MCP OAuth/credential recovery, sandbox hardening, resume/permission restore, model-aware effort fallback</td>
 <td>Every Cassy touchpoint (<code>--yolo</code>, <code>cs</code> MCP, AGENTS.md, skills mirror, effort, interrupt/resume) unvalidated past 0.149.1</td>
-<td><span class="cls cls-flight">▨ IN FLIGHT</span></td>
-<td>cas-0d4f InProgress (matrix retargeted to 0.156.0, build running); no 0.15x receipt in <code>crates/cas-pty/conformance/</code></td>
+<td><span class="cls cls-done">□ ADDRESSED</span></td>
+<td>0.156.0 receipt <code>crates/cas-pty/conformance/codex-cli-0.156.0-2026-09-23.json</code> (result=pass, 12 checks incl. <code>skills_agents_and_agents_md_discovery</code>, <code>interruption_resume_approval_continuity</code>, <code>code_mode_and_direct_cs_coexist</code>, <code>mcp_cs_root_turn</code>/<code>followup_turn</code>); cas-0d4f merged to the epic at <code>2172d952</code>; diary index rows now 🟢 validated. Caveat: the matrix ran on suspended <code>gpt-5.6-terra</code>, not the production lane model (open follow-up cas-a564)</td>
 </tr>
 <tr>
 <td>0.149.1</td>
@@ -1478,8 +1486,8 @@ a[href^="http"]::after{content:" (" attr(href) ")";font-size:.85em}.skip{display
 <td>L727–729</td>
 <td>Future upgrade validation: rerun typed matrix before advancing pin</td>
 <td>Keeps validated pin current</td>
-<td><span class="cls cls-flight">▨ IN FLIGHT</span></td>
-<td>0.149.1 done (cas-b9a4, R149); 0.156.0 run = cas-0d4f InProgress</td>
+<td><span class="cls cls-done">□ ADDRESSED</span></td>
+<td>0.149.1 (cas-b9a4, R149) and 0.156.0 (cas-0d4f, <code>codex-cli-0.156.0-2026-09-23.json</code>, epic <code>2172d952</code>) receipts; diary pin now 0.156.0</td>
 </tr>
 </tbody>
 </table></div>
@@ -1590,7 +1598,7 @@ a[href^="http"]::after{content:" (" attr(href) ")";font-size:.85em}.skip{display
 <td>Esc no longer cancels a running turn</td>
 <td>Urgent interrupt-and-redirect must break Grok turns</td>
 <td><span class="cls cls-done">□ ADDRESSED (code) / live proof IN FLIGHT</span></td>
-<td>Grok cancel already Ctrl+C: <code>crates/cas-mux/src/backend/grok.rs:70-72</code> (0x03), <code>crates/cas-mux/src/pane/mod.rs:1462</code> break_turn uses harness bytes, urgent path <code>cas-cli/src/ui/factory/daemon/runtime/delivery.rs:748</code>; pinned by test <code>cas-cli/src/ui/factory/app/sidecar_and_selection.rs:1873-1888</code> (cas-7f6f, 415a30de). Diary cite pty.rs:5421-5426 is a stale Pty-layer test comment. Live check: cas-ef93 note 12:08</td>
+<td>Grok cancel is Ctrl+C: <code>crates/cas-mux/src/backend/grok.rs:70-72</code> (0x03); <code>crates/cas-mux/src/pane/mod.rs:1462</code> break_turn writes harness cancel bytes; pinned by <code>crates/cas-mux/src/harness.rs:293-296</code> (cas-7f6f, 415a30de). Diary corrected in this task to 🟢 already covered (it previously cited a Pty-layer test comment, pty.rs:5421-5426). Live check: cas-ef93</td>
 </tr>
 <tr>
 <td>1.0.22</td>
@@ -2077,14 +2085,21 @@ a[href^="http"]::after{content:" (" attr(href) ")";font-size:.85em}.skip{display
 <h2 id="provenance">Provenance</h2>
 <ul>
 <li><strong>Markdown source:</strong> <code>docs/reports/2026-09-23-harness-diary-report.md</code>; HTML beside it; concept brief <code>2026-09-23-harness-diary-report.brief.md</code>.</li>
-<li><strong>Commit examined:</strong> <code>4929bf38</code> (epic branch after the Grok sweep merge). The diff base is <code>main</code> at <code>f2af1fc7</code>.</li>
+<li><strong>Commits examined:</strong> <code>4929bf38</code> (per-item audit, epic after the Grok sweep merge) and <code>2172d952</code> (epic after the Codex 0.156.0 receipt merge; Codex rows rechecked). The diff base is <code>main</code> at <code>f2af1fc7</code>.</li>
 <li><strong>Installed versions checked 2026-09-23:</strong>
 <ul>
 <li><code>claude --version</code> → 2.1.280</li>
 <li><code>codex --version</code> → codex-cli 0.156.0</li>
 <li><code>grok --version</code> → 1.0.40 (eb1a2256660d)</li>
 </ul></li>
-<li><strong>Task statuses read 2026-09-23 (~12:10–12:20 UTC):</strong> <code>cas-0d4f</code> in progress; <code>cas-ef93</code> in progress; <code>cas-a073</code> closed and delivered; <code>cas-8505</code> in progress.</li>
+<li><strong>Task statuses read 2026-09-23 (~12:10–12:25 UTC):</strong>
+<ul>
+<li><code>cas-0d4f</code> merged to the epic at <code>2172d952</code> (0.156.0 receipt);</li>
+<li><code>cas-ef93</code> in progress;</li>
+<li><code>cas-a073</code> closed and delivered;</li>
+<li><code>cas-8505</code> in progress;</li>
+<li><code>cas-a564</code> open.</li>
+</ul></li>
 <li><strong>Sweep counts:</strong> <code>git diff main...HEAD -- docs/notes/*-changelog-diary.md</code>, first verdict glyph per added entry bullet.</li>
 <li><strong>Audit working files:</strong> <code>/home/pippenz/.cas/artifacts/cas-df20/</code>.</li>
 </ul>

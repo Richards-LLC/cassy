@@ -1,8 +1,9 @@
 # Harness diary report — 2026-09-23: 52 diary items Cassy never addressed
 
 **Verdict:** across the full history of the three harness diaries, **52 of 146 audited items
-(36%) were never addressed**. That means no task, no commit, and no recorded check. Another 32 are
-in flight, almost all owned by two open conformance runs (Codex `cas-0d4f`, Grok `cas-ef93`).
+(36%) were never addressed**. That means no task, no commit, and no recorded check. Another 30 are
+in flight: 26 owned by the open Grok conformance run `cas-ef93`, 4 by the model-lane refresh
+`cas-8505`.
 Three of the gaps can fail a factory silently:
 
 - a Grok worker that starts with the `cas` MCP server disabled;
@@ -10,15 +11,16 @@ Three of the gaps can fail a factory silently:
 - no proof that a message reaches a busy Grok worker mid-turn.
 
 This sweep (Claude Code 2.1.246→2.1.280, Codex 0.150.0→0.156.0, Grok 1.0.6→1.0.40) added no new
-code work. It widened the gap between the validated pin and the installed version for Codex
-(0.149.1 → 0.156.0) and Grok (1.0.5 → 1.0.40).
+code work. Codex was revalidated at 0.156.0 the same day, closing its gap between the validated
+pin and the installed version. Grok's gap (validated 1.0.5, installed 1.0.40) stays open until
+`cas-ef93` runs.
 
 | Field | Value |
 | --- | --- |
 | Question | Which diary items did Cassy never act on, and what changed in the 2026-09-23 sweep? |
 | Scope | `docs/notes/{claude-code,codex,grok}-changelog-diary.md`, full history (Entries + Backlog) |
 | Items audited | 146 rows: every 👀 bullet, every 🏗 EPIC, every item naming a Cassy task |
-| Commit examined | `4929bf38` (epic branch `epic/epic-2026-09-23-harness-diary-sweep-claude-codex-g-cas-6f39`, Grok sweep merged) |
+| Commit examined | `2172d952` (epic branch `epic/epic-2026-09-23-harness-diary-sweep-claude-codex-g-cas-6f39`, with the Grok sweep and the Codex 0.156.0 receipt merged); per-item audit read the diaries at `4929bf38`, and the Codex rows were rechecked at `2172d952` |
 | Confidence | High for classifications (each cites a task, commit, file:line, or a zero-hit search); impact ranks are judgement |
 | Date / author | 2026-09-23 · factory worker for task `cas-df20` (report only — no tasks filed, no code changed) |
 
@@ -109,19 +111,20 @@ marked *duplicate* restate an earlier row and are counted once in the 50 distinc
 | Harness | Range reviewed | Versions | Items verdicted | Verdicts | Touches Cassy | Source gaps |
 | --- | --- | ---: | ---: | --- | --- | --- |
 | Claude Code | 2.1.246 → 2.1.280 | 35 | 69 | 31 🟢 · 11 ✅ · 27 ⏭ · 0 👀 | Model defaults (Opus 5.5, Fable 5.1), MCP, hooks, subagent/message reliability — all 🟢 or ✅ | 8 versions absent from the official changelog; 3 generic "bug fixes" rollups |
-| Codex | 0.150.0 → 0.156.0 | 7 | 14 | 8 👀 · 6 ⏭ | MCP (`cs`), `--yolo`/sandbox, AGENTS.md trust, skills/plugins, interrupt/resume | None |
-| Grok | 1.0.6 → 1.0.40 | 35 | 55 | 27 👀 · 11 🟢 · 1 ✅ · 16 ⏭ | Esc no longer cancels (1.0.24), MCP input/consent, permissions, worktrees, sessions | 13 versions (1.0.14–16, 1.0.26–29, 1.0.35–40) with no per-version notes |
+| Codex | 0.150.0 → 0.156.0 | 7 | 14 | 8 🟢 · 6 ⏭ | MCP (`cs`), `--yolo`/sandbox, AGENTS.md trust, skills/plugins, interrupt/resume — all 8 validated by the 0.156.0 receipt | None |
+| Grok | 1.0.6 → 1.0.40 | 35 | 55 | 26 👀 · 12 🟢 · 1 ✅ · 16 ⏭ | Esc no longer cancels (1.0.24), MCP input/consent, permissions, worktrees, sessions | 13 versions (1.0.14–16, 1.0.26–29, 1.0.35–40) with no per-version notes |
 
 Verdict counts are the first verdict glyph on each entry bullet added by the sweep. Grok's two
-single-line entries (1.0.20, 1.0.23) count as one ⏭ each. Source: `git diff main...4929bf38 --
-docs/notes/`.
+single-line entries (1.0.20, 1.0.23) count as one ⏭ each. Codex's 8 were 👀 when the sweep landed
+and became 🟢 when the 0.156.0 receipt merged. Grok 1.0.24 is 🟢 after the correction made in
+this task. Source: `git diff main...HEAD -- docs/notes/`.
 
 ### Validated pin vs installed
 
 | Harness | Validated pin | Installed (2026-09-23) | Gap | Owner |
 | --- | --- | --- | --- | --- |
 | Claude Code | no pin concept; host tracks latest | 2.1.280 | none | — |
-| Codex | 0.149.1 (`crates/cas-pty/conformance/codex-cli-0.149.1-2026-08-25.json`) | 0.156.0 | 7 stable releases unvalidated | `cas-0d4f` — in progress: matrix retargeted to 0.156.0; no receipt yet |
+| Codex | 0.156.0 (`crates/cas-pty/conformance/codex-cli-0.156.0-2026-09-23.json`; was 0.149.1 when the sweep landed) | 0.156.0 | none | `cas-0d4f`, merged to the epic at `2172d952`. Caveat: the matrix ran on the suspended `gpt-5.6-terra` model rather than the production Codex lane model; open follow-up `cas-a564` |
 | Grok | 1.0.5 (`crates/cas-pty/conformance/grok-build-1.0.5-2026-08-25.json`) | 1.0.40 | 35 version numbers unvalidated | `cas-ef93` — in progress: full `PtyConfig::grok` matrix plus the 1.0.24 urgent-interrupt check |
 
 ### Per-harness notes
@@ -132,18 +135,30 @@ decision brief. The operator's decision, recorded 2026-09-23, is that no lane-re
 happens without his approval. `crates/cas-factory/policy/lane-registry.toml` still pins
 `claude-opus-5`.
 
-**Codex.** Every Cassy-relevant 0.150–0.156 item is an upgrade-validation 👀 grouped under
-`cas-0d4f`. No release-note item names a standalone code fix.
+**Codex.** Every Cassy-relevant 0.150–0.156 item was an upgrade-validation 👀 grouped under
+`cas-0d4f`. That matrix passed on 0.156.0 across 12 checks, including:
 
-**Grok.** The headline item is 1.0.24: Esc no longer cancels a running turn. The Grok code path
-already accounts for it:
+- AGENTS.md, skill and agent discovery;
+- interrupt/resume approval continuity;
+- code-mode coexistence;
+- root and follow-up `mcp__cs` turns.
+
+The diary now marks all seven versions 🟢 validated. No release-note item names a standalone code
+fix. The receipt validated the launch contract on `gpt-5.6-terra`, a model whose lane recipe was
+suspended on 2026-08-27, rather than the model production Codex workers run; `cas-a564` (open)
+owns pointing the matrix at the standard-lane model. None of the 13 Codex never-addressed items is
+covered by the new receipt: its MCP checks still call only `whoami` and `task mine`, it runs on
+Linux, and it sets no proxy, import, or second-server scenario.
+
+**Grok.** The headline item is 1.0.24: Esc no longer cancels a running turn. The sweep first
+recorded it as a 👀 watch, but the Grok code path already accounts for it, so this task corrected
+the diary to 🟢 already covered (entry, Index row, and the version-status Gap paragraph):
 
 - `Pane::break_turn` writes the harness's cancel bytes (`crates/cas-mux/src/pane/mod.rs:1462-1466`).
 - The Grok backend returns Ctrl+C `0x03`, not Esc (`crates/cas-mux/src/backend/grok.rs:70-72`,
   pinned by `crates/cas-mux/src/harness.rs:293-296`, commit `415a30de`).
 
-A live confirmation on 1.0.40 remains with `cas-ef93`. The diary's citation `pty.rs:5421-5426`
-points at a Pty-layer test comment, not the break path.
+A live confirmation on 1.0.40 remains with `cas-ef93`.
 
 ### Scope gaps in cas-ef93
 
@@ -159,14 +174,17 @@ Unless the matrix adds these four checks, cas-ef93 will close with them still op
 
 ### Stale diary text found during the audit
 
-- **Codex touchpoints (diary L77–78)** still say Codex has no Claude-style hook system. Trusted
+- **Codex touchpoints (diary L76–77 at `2172d952`)** still say Codex has no Claude-style hook system. Trusted
   Codex hooks shipped in `1b4e03bf` (cas-ba048) and PostToolUse wiring in `cb7ce9a6` (cas-5ae8).
-- **Codex version status (L41–43, L226–227)** says Cassy maps only `Effort::XHigh`. `Effort::Max`
-  shipped in `47430713` (PR #813, cas-556a).
+- **Codex version status (the Gap bullet, and the 0.149.1 entry)** says Cassy maps only
+  `Effort::XHigh`. `Effort::Max` shipped in `47430713` (PR #813, cas-556a). The 0.156.0 update
+  kept this sentence.
 - **Claude Code 2.1.219 (L665)** and **2.1.187 (L1160)** cite the `cas-code-review` Workflow,
   which was removed in `9cf31b2a` (cas-7216, 2026-09-01).
-- **Grok 1.0.24 / version status** cites `pty.rs:5421-5426` as the interrupt path. The real path
-  is `crates/cas-mux/src/pane/mod.rs:1462` together with `crates/cas-mux/src/backend/grok.rs:70`.
+- **Grok 1.0.24 / version status** cited `pty.rs:5421-5426` as the interrupt path and graded the
+  item 👀. **Corrected in this task:** the diary now cites
+  `crates/cas-mux/src/pane/mod.rs:1462` and `crates/cas-mux/src/backend/grok.rs:70-72` and grades it
+  🟢 already covered, with live confirmation left to `cas-ef93`.
 
 ## How the classification was done
 
@@ -198,15 +216,19 @@ that the listed searches missed. Every row names the search terms used, so this 
 | Harness | Rows | Addressed | In flight | Never addressed | No longer applicable |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | Claude Code | 42 | 20 | 4 | 16 | 2 |
-| Codex | 32 | 17 | 2 | 13 | 0 |
+| Codex | 32 | 19 | 0 | 13 | 0 |
 | Grok | 72 | 23 | 26 | 23 | 0 |
-| **Total** | **146** | **60** | **32** | **52** | **2** |
+| **Total** | **146** | **62** | **30** | **52** | **2** |
 
 Codex's 0.144 auth-elicitation row is split. The `cs` smoke test is addressed, but the case of a
 second MCP server that needs auth is not, so the row counts as never addressed here. Grok's 1.0.24
 row counts as addressed in code, with its live proof in flight.
 
 ## Evidence appendix — every audited item
+
+Diary line numbers (`L…`) refer to each diary at `4929bf38`. The Codex diary's 0.156.0 update at
+`2172d952` shifts some Codex lines by a line or two. Codex and Grok rows updated after that commit
+say so in their evidence.
 
 ### Claude Code
 
@@ -259,7 +281,7 @@ row counts as addressed in code, with its live proof in flight.
 
 | Version | Diary line | Item | Why it matters to Cassy | Class | Evidence |
 | --- | --- | --- | --- | --- | --- |
-| 0.150.0–0.156.0 | L122–213 (7 entries) | Interrupt hooks, AGENTS trust gating, required/remote MCP, MCP OAuth/credential recovery, sandbox hardening, resume/permission restore, model-aware effort fallback | Every Cassy touchpoint (`--yolo`, `cs` MCP, AGENTS.md, skills mirror, effort, interrupt/resume) unvalidated past 0.149.1 | IN FLIGHT | cas-0d4f InProgress (matrix retargeted to 0.156.0, build running); no 0.15x receipt in `crates/cas-pty/conformance/` |
+| 0.150.0–0.156.0 | L122–213 (7 entries) | Interrupt hooks, AGENTS trust gating, required/remote MCP, MCP OAuth/credential recovery, sandbox hardening, resume/permission restore, model-aware effort fallback | Every Cassy touchpoint (`--yolo`, `cs` MCP, AGENTS.md, skills mirror, effort, interrupt/resume) unvalidated past 0.149.1 | ADDRESSED | 0.156.0 receipt `crates/cas-pty/conformance/codex-cli-0.156.0-2026-09-23.json` (result=pass, 12 checks incl. `skills_agents_and_agents_md_discovery`, `interruption_resume_approval_continuity`, `code_mode_and_direct_cs_coexist`, `mcp_cs_root_turn`/`followup_turn`); cas-0d4f merged to the epic at `2172d952`; diary index rows now 🟢 validated. Caveat: the matrix ran on suspended `gpt-5.6-terra`, not the production lane model (open follow-up cas-a564) |
 | 0.149.1 | L221–227 | `-c model_reasoning_effort=max` probe accepted; Cassy maps only XHigh | Effort vocabulary gap for max-capable models | ADDRESSED | cas-556a closed/delivered, commit 47430713 (PR #813, main 7331d9e3); `Effort::Max` at `crates/cas-mux/src/spec.rs:29`; pty test `crates/cas-pty/src/pty.rs:4338-4356` |
 | 0.146.0 | L347–370 | MCP live refresh/reconnect; executor skills + truncation; Agent Plugins shadowing; approval continuity on resume | `cs` catalog staleness, hidden worker guidance, lost `--yolo` bypass on resume | ADDRESSED | R146 + R149 checks `mcp_cs_root_turn`, `mcp_cs_followup_turn`, `skills_agents_and_agents_md_discovery`, `interruption_resume_approval_continuity` all pass; fix commit 02226d1a (cas-8c80) |
 | 0.146.0 / 0.139.0 / 0.143.0 | L371–375, L602–605, L509 | Proxy routing / proxy-only networking under host proxy policy | A host proxy policy could block `cs` startup or worker network under `--yolo` | NEVER ADDRESSED | Receipts run with `danger-full-access`, no proxy config; `grep -rn -i -E 'proxy.only' crates cas-cli/src` hits=0; `git log --all -i -E --grep='proxy.only'` hits=0 |
@@ -290,7 +312,7 @@ row counts as addressed in code, with its live proof in flight.
 | 0.138.0 / 0.137.0 | L658–663 | Verify `model_reasoning_effort` key and vocabulary still validate | Effort passthrough | ADDRESSED | R149 `model_and_reasoning_effort` (xhigh) pass |
 | 0.130–0.135 | L646–649 | Codex git helpers ignore repo hook/fsmonitor config in worktrees | Interaction with factory commit guard | NEVER ADDRESSED | Informational ("no conflict expected"); no receipt check covers commits; `git log --all -i --grep=fsmonitor` hits=0 |
 | 0.136.0 | L714–715 | Codex "memories" root moved; confirm no collision with Cassy memory via MCP | Naming collision with Cassy memory tools | NEVER ADDRESSED | No task/commit (`git log --all -i -E --grep='codex.*memor'` hits=0); no receipt check |
-| Backlog | L727–729 | Future upgrade validation: rerun typed matrix before advancing pin | Keeps validated pin current | IN FLIGHT | 0.149.1 done (cas-b9a4, R149); 0.156.0 run = cas-0d4f InProgress |
+| Backlog | L727–729 | Future upgrade validation: rerun typed matrix before advancing pin | Keeps validated pin current | ADDRESSED | 0.149.1 (cas-b9a4, R149) and 0.156.0 (cas-0d4f, `codex-cli-0.156.0-2026-09-23.json`, epic `2172d952`) receipts; diary pin now 0.156.0 |
 
 ### Grok
 
@@ -307,7 +329,7 @@ row counts as addressed in code, with its live proof in flight.
 | 1.0.30 | L270 | Session timing/workflow status/tmux lag | Diagnostic only; liveness uses transcripts | NEVER ADDRESSED | diary: no action indicated; no task (cas-ef93 AC silent); low |
 | 1.0.25 | L280 | Successful hooks silent; only blocking/failing shown | Could hide a blocking hook signal needed for cleanup | IN FLIGHT | cas-ef93 (hooks-disabled posture) |
 | 1.0.25 | L285 | Headless timeout, `grok -c` session fix, concurrent-boot settings clobber | Session UUID + discovery; factory boots workers concurrently | IN FLIGHT | cas-ef93 (session UUID, discovery); caveat: matrix is single-worker, concurrent boot not enumerated |
-| 1.0.24 | L298 | Esc no longer cancels a running turn | Urgent interrupt-and-redirect must break Grok turns | ADDRESSED (code) / live proof IN FLIGHT | Grok cancel already Ctrl+C: `crates/cas-mux/src/backend/grok.rs:70-72` (0x03), `crates/cas-mux/src/pane/mod.rs:1462` break_turn uses harness bytes, urgent path `cas-cli/src/ui/factory/daemon/runtime/delivery.rs:748`; pinned by test `cas-cli/src/ui/factory/app/sidecar_and_selection.rs:1873-1888` (cas-7f6f, 415a30de). Diary cite pty.rs:5421-5426 is a stale Pty-layer test comment. Live check: cas-ef93 note 12:08 |
+| 1.0.24 | L298 | Esc no longer cancels a running turn | Urgent interrupt-and-redirect must break Grok turns | ADDRESSED (code) / live proof IN FLIGHT | Grok cancel is Ctrl+C: `crates/cas-mux/src/backend/grok.rs:70-72` (0x03); `crates/cas-mux/src/pane/mod.rs:1462` break_turn writes harness cancel bytes; pinned by `crates/cas-mux/src/harness.rs:293-296` (cas-7f6f, 415a30de). Diary corrected in this task to 🟢 already covered (it previously cited a Pty-layer test comment, pty.rs:5421-5426). Live check: cas-ef93 |
 | 1.0.22 | L317 | Built-in tools beat user MCP on name collision; MCP reauth state | cas__ tools could be shadowed | IN FLIGHT | cas-ef93 (cas__ namespace/discovery) |
 | 1.0.22 | L321 | Subagent continuation/background completion/monitor wakeups | Grok subagents are not Cassy workers | NEVER ADDRESSED | no follow-up; cas-ef93 AC omits Grok-owned subagents; low |
 | 1.0.22 | L326 | Auto mode refuses destructive checkout; bash settings propagate | Bypass mode must stay authoritative | IN FLIGHT | cas-ef93 (permission bypass) |
@@ -373,14 +395,19 @@ row counts as addressed in code, with its live proof in flight.
 
 - **Markdown source:** `docs/reports/2026-09-23-harness-diary-report.md`; HTML beside it; concept
   brief `2026-09-23-harness-diary-report.brief.md`.
-- **Commit examined:** `4929bf38` (epic branch after the Grok sweep merge). The diff base is
+- **Commits examined:** `4929bf38` (per-item audit, epic after the Grok sweep merge) and
+  `2172d952` (epic after the Codex 0.156.0 receipt merge; Codex rows rechecked). The diff base is
   `main` at `f2af1fc7`.
 - **Installed versions checked 2026-09-23:**
   - `claude --version` → 2.1.280
   - `codex --version` → codex-cli 0.156.0
   - `grok --version` → 1.0.40 (eb1a2256660d)
-- **Task statuses read 2026-09-23 (~12:10–12:20 UTC):** `cas-0d4f` in progress; `cas-ef93` in
-  progress; `cas-a073` closed and delivered; `cas-8505` in progress.
+- **Task statuses read 2026-09-23 (~12:10–12:25 UTC):**
+  - `cas-0d4f` merged to the epic at `2172d952` (0.156.0 receipt);
+  - `cas-ef93` in progress;
+  - `cas-a073` closed and delivered;
+  - `cas-8505` in progress;
+  - `cas-a564` open.
 - **Sweep counts:** `git diff main...HEAD -- docs/notes/*-changelog-diary.md`, first verdict glyph
   per added entry bullet.
 - **Audit working files:** `/home/pippenz/.cas/artifacts/cas-df20/`.

@@ -21,13 +21,13 @@ const PANE: &str = "cas-1c66-codex-contract";
 const MODEL: &str = "gpt-5.6-terra";
 const EFFORT: &str = "xhigh";
 
-fn codex_0149_available() -> bool {
+fn codex_0156_available() -> bool {
     std::process::Command::new("codex")
         .arg("--version")
         .output()
         .map(|out| {
             out.status.success()
-                && String::from_utf8_lossy(&out.stdout).contains("codex-cli 0.149.1")
+                && String::from_utf8_lossy(&out.stdout).contains("codex-cli 0.156.0")
         })
         .unwrap_or(false)
 }
@@ -249,12 +249,12 @@ fn wait_for_completions(mux: &mut Mux, rollout: &Path, wanted: usize, timeout: D
 }
 
 #[test]
-#[ignore = "requires real Codex 0.149.1, authentication, and model traffic"]
-fn codex_0149_factory_launch_contract_passes_live_matrix() {
+#[ignore = "requires real Codex 0.156.0, authentication, and model traffic"]
+fn codex_0156_factory_launch_contract_passes_live_matrix() {
     let _serial = real_pty_serial::lock();
     assert!(
-        codex_0149_available(),
-        "this receipt is valid only when run against codex-cli 0.149.1"
+        codex_0156_available(),
+        "this receipt is valid only when run against codex-cli 0.156.0"
     );
 
     let scratch =
@@ -434,7 +434,7 @@ fn codex_0149_factory_launch_contract_passes_live_matrix() {
     assert_turn_context(&final_body, &scratch);
 
     eprintln!(
-        "PASS codex-cli 0.149.1 factory contract; isolated_root={}; rollout={}",
+        "PASS codex-cli 0.156.0 factory contract; isolated_root={}; rollout={}",
         cas_root.display(),
         rollout.display()
     );

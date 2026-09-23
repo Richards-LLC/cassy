@@ -102,4 +102,47 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     await expect(page.getByRole("button", { name: `Send to ${PELICAN}`, exact: true })).toBeVisible();
     await expect(composer).toBeFocused();
   });
+
+  await journey.stage("Reopen the palette to the full list", async () => {
+    const palette = page.locator("#command-palette");
+    const filter = page.getByRole("searchbox", { name: "Filter commands" });
+    const commands = page.locator("#command-palette .palette-command");
+    const noMatch = page.locator("#palette-no-match");
+    const all = await commands.count();
+    const reopen = async () => {
+      await page.keyboard.press("ControlOrMeta+k");
+      await expect(filter).toBeFocused();
+      await expect(filter).toHaveValue("");
+      await expect(commands.visible()).toHaveCount(all);
+      await expect(noMatch).toBeHidden();
+    };
+    // Start with focus outside any field (a fresh load), so no deferred
+    // rebuild happens to replace the dialog on close and hide the bug.
+    await page.goto("./");
+    await expect(palette).toHaveCount(1);
+    await expect(page.getByRole("button", { name: `Send to ${PELICAN}`, exact: true })).toBeVisible();
+    // Close with ×, which does not rebuild the shell: the dialog comes back.
+    await page.keyboard.press("ControlOrMeta+k");
+    await filter.fill("zzzz");
+    await expect(noMatch).toHaveText("No commands or sessions match “zzzz”.");
+    await page.getByRole("button", { name: "Close command palette" }).click();
+    await expect(palette).toBeHidden();
+    await reopen();
+    // A setting row closes it the same way.
+    await filter.fill("Appearance · Light");
+    await filter.press("Enter");
+    await expect(palette).toBeHidden();
+    await reopen();
+    // So does jumping to the conversation that is already open.
+    await expect(page.getByRole("button", { name: `Send to ${PELICAN}`, exact: true })).toBeVisible();
+    await filter.fill(PELICAN);
+    await filter.press("Enter");
+    await expect(palette).toBeHidden();
+    await expect(page.getByRole("button", { name: `Send to ${PELICAN}`, exact: true })).toBeVisible();
+    await reopen();
+    // Typing after the reopen filters from scratch.
+    await filter.pressSequentially(OTTER.slice(0, 6));
+    await expect(commands.visible().first()).toContainText(`Jump to ${OTTER}`);
+    await page.keyboard.press("Escape");
+  });
 });

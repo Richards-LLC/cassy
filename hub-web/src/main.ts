@@ -2726,13 +2726,22 @@ async function toggleControl(selected: StoredMachine | undefined, lease: LeaseSt
 }
 
 function openCommandPalette(): void {
+  const wasOpen = document.querySelector<HTMLDialogElement>("#command-palette")?.open === true;
   commandPaletteOpen = true;
   render();
   // Closing a dialog does not rebuild the shell. Reopening can therefore have
   // the same shell signature; open the existing dialog in that case too.
   const palette = document.querySelector<HTMLDialogElement>("#command-palette");
   if (palette && !palette.open) palette.showModal();
-  document.querySelector<HTMLInputElement>("#command-palette-query")?.focus();
+  // That reused dialog still carries the last filter, its hidden rows and the
+  // no-match line. Every fresh open starts from the full list; Ctrl+K on an
+  // already open palette keeps what is being typed.
+  const query = document.querySelector<HTMLInputElement>("#command-palette-query");
+  if (query && !wasOpen && query.value) {
+    query.value = "";
+    query.dispatchEvent(new Event("input"));
+  }
+  query?.focus();
 }
 
 function focusPaneByNumber(index: number): void {

@@ -319,15 +319,21 @@ fn pane_text(pane: &Pane) -> String {
 }
 
 fn wait_for_turn_end(mux: &mut Mux, events: &Path, timeout: Duration) -> String {
+    wait_for_next_turn_end(mux, events, 0, timeout)
+}
+
+fn wait_for_next_turn_end(
+    mux: &mut Mux,
+    events: &Path,
+    completed_before: usize,
+    timeout: Duration,
+) -> String {
     let deadline = Instant::now() + timeout;
     let mut body = String::new();
     while Instant::now() < deadline {
         let _ = mux.poll_batch();
         body = std::fs::read_to_string(events).unwrap_or_default();
-        if body.lines().any(|line| {
-            serde_json::from_str::<Value>(line)
-                .is_ok_and(|event| event["type"] == "turn_ended" && event["outcome"] == "completed")
-        }) {
+        if completed_turn_count(&body) > completed_before {
             return body;
         }
         std::thread::sleep(Duration::from_millis(300));
@@ -349,6 +355,32 @@ fn completed_turn_count(body: &str) -> usize {
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
         .filter(|event| event["type"] == "turn_ended" && event["outcome"] == "completed")
         .count()
+}
+
+fn cas_tool_call_count(body: &str) -> usize {
+    body.lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|event| event["type"] == "mcp_tool_call_started" && event["server_name"] == "cas")
+        .count()
+}
+
+fn assistant_text(body: &str) -> String {
+    body.lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|event| event["type"] == "assistant")
+        .filter_map(|event| match &event["content"] {
+            Value::String(content) => Some(content.clone()),
+            Value::Array(content) => Some(
+                content
+                    .iter()
+                    .filter_map(|item| item["text"].as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 #[test]
@@ -567,6 +599,41 @@ fn run_grok_factory_contract(grok_binary: PathBuf, version: &str) {
             pane_text(pane)
         )
     });
+
+    let mut events_before_lifecycle =
+        std::fs::read_to_string(session_dir.join("events.jsonl")).unwrap_or_default();
+    if version == "1.0.40" {
+        let cas_calls_before_canary = cas_tool_call_count(&events_before_lifecycle);
+        runtime
+            .block_on(mux.inject(
+                PANE,
+                "You are being checked for the worker rules loaded at process start. Do not call tools, run commands, inspect files, create files, or use this message as an answer. Reply with exactly one line beginning RULES-CANARY and then fill these two fields solely from your Cassy Factory Worker rules: the namespace used for Cassy MCP tools and the action used to record progress notes. Do not include any other text.",
+            ))
+            .expect("inject rules-only canary");
+        events_before_lifecycle = wait_for_turn_end(
+            &mut mux,
+            &session_dir.join("events.jsonl"),
+            Duration::from_secs(60),
+        );
+        let canary_chat = std::fs::read_to_string(session_dir.join("chat_history.jsonl"))
+            .expect("read Grok rules canary chat history");
+        let canary_response = assistant_text(&canary_chat);
+        assert!(
+            canary_response.lines().any(|line| {
+                let lower = line.to_ascii_lowercase();
+                line.starts_with("RULES-CANARY")
+                    && lower.contains("cas__")
+                    && lower.contains("notes")
+            }),
+            "Grok 1.0.40 must derive the Cassy namespace and progress action from worker rules; assistant text:\n{canary_response}"
+        );
+        assert_eq!(
+            cas_tool_call_count(&events_before_lifecycle),
+            cas_calls_before_canary,
+            "rules-only canary must answer without invoking a CAS tool"
+        );
+    }
+    let completed_before_lifecycle = completed_turn_count(&events_before_lifecycle);
     runtime
         .block_on(mux.inject(
             PANE,
@@ -580,9 +647,10 @@ fn run_grok_factory_contract(grok_binary: PathBuf, version: &str) {
             ),
         ))
         .expect("inject isolated lifecycle assignment");
-    let events = wait_for_turn_end(
+    let events = wait_for_next_turn_end(
         &mut mux,
         &session_dir.join("events.jsonl"),
+        completed_before_lifecycle,
         Duration::from_secs(180),
     );
     mux.get(PANE).expect("pane").refresh_harness_turn_state();
@@ -641,10 +709,15 @@ fn run_grok_factory_contract(grok_binary: PathBuf, version: &str) {
     assert!(chat.contains(PROBE_MARKER));
     let system_prompt = std::fs::read_to_string(session_dir.join("system_prompt.txt"))
         .expect("read Grok system prompt");
-    assert!(
-        !system_prompt.contains("--rules"),
-        "Grok 1.0.40 must not serialize the --rules launch argument into system_prompt.txt"
-    );
+    if version == "1.0.40" {
+        assert!(
+            !system_prompt.contains("--rules"),
+            "Grok 1.0.40 must not serialize the --rules launch argument into system_prompt.txt"
+        );
+    } else {
+        assert!(system_prompt.contains("Cassy Factory Worker"));
+        assert!(system_prompt.contains("cas__task") && system_prompt.contains("cas__coordination"));
+    }
     assert!(
         chat.lines()
             .filter_map(|line| serde_json::from_str::<Value>(line).ok())

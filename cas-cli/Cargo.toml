@@ -176,6 +176,9 @@ cmcp_core = { package = "code-mode-mcp", path = "../crates/cas-mcp-proxy", optio
 # HTTP Client (for auth and cloud sync)
 ureq = { version = "2.12", features = ["json", "tls"] }
 flate2 = "1.0"
+# Playwright trace.zip reading for the QA evidence close gate (cas-0cd5);
+# already in the graph via self_update, so no new download.
+zip = { version = "2.4", default-features = false, features = ["deflate"] }
 
 # Self-update from GitHub releases
 self_update = { version = "0.42", default-features = false, features = ["archive-tar", "archive-zip", "compression-flate2", "compression-zip-deflate", "rustls"] }

@@ -63,6 +63,7 @@ pub mod migration;
 pub mod notifications;
 pub mod orchestration;
 pub mod otel;
+pub mod qa_evidence;
 pub mod opencode_preflight;
 pub(crate) mod prompt_revalidation;
 pub mod retrieval_eval;

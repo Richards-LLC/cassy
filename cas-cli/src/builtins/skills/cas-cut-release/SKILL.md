@@ -33,6 +33,11 @@ version and worktree, never a version-keyed path.
    terms. Real-project fixtures use
    `cas::test_paths::runtime_fixture_parent()`, and fixture versions use
    `9.99.x`. An intentional doctor row change is a reviewed snapshot update.
+   When `hub-web/dist` changed since the last tag, commit a passing journey
+   evaluation of the assembled bundle before the cut
+   (`docs/qa/journey-evaluation.md`: `scripts/journey-eval.sh`, then a
+   taste-lane evaluator's report). `prep` stops with `journey-evaluation`
+   without one.
 4. Run one command:
    `scripts/release-train.sh <version> <release-worktree> --cut`.
    It runs `preflight, assemble, prep, ledger, gate, pr-body, pipeline,

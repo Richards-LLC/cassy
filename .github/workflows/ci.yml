@@ -611,6 +611,14 @@ jobs:
           fi
           npm run visual-qa
           git diff --exit-code -- dist
+          # User journeys (docs/qa/journeys.md) against the committed bundle,
+          # on the Chromium build pinned by @playwright/test.
+          if sudo -n true 2>/dev/null; then
+            npx playwright install --with-deps chromium
+          else
+            npx playwright install chromium
+          fi
+          npm run journeys
 
       - name: Check
         if: steps.classify-diff.outputs.rust-unaffected != 'true'

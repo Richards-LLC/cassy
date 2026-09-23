@@ -68,6 +68,12 @@ release_train_prep() {
         printf '  → create the draft, then rerun --prep\n' >&2
         return 1
     fi
+    # Runs after assemble, so HEAD:hub-web is the UI this release ships.
+    local journey_check="${CAS_RELEASE_TRAIN_JOURNEY_CHECK:-$script_dir/check-journey-evaluation.sh}"
+    if [[ -x "$journey_check" ]] && ! "$journey_check" "$worktree"; then
+        printf 'ERROR prep journey-evaluation: the release changes hub-web without a passing journey evaluation\n' >&2
+        return 1
+    fi
     bump_cmd="${CAS_RELEASE_TRAIN_BUMP_CMD:-$worktree/scripts/bump-release-version.sh}"
     if [[ ! -x "$bump_cmd" ]]; then
         printf 'ERROR prep version: bump command is not executable: %s\n' "$bump_cmd" >&2

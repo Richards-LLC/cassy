@@ -850,8 +850,16 @@ describe("binding Cassy Cloud browser invariants", () => {
     // The system Highlight can carry alpha (0.8 in Chromium's emulation); the
     // focus ring and the open session's fill restate it at full strength.
     expect(forced).toContain("outline-color: color(from Highlight srgb r g b / 1);");
-    expect(forced).toContain('.session-picker-entry[aria-current="true"] { forced-color-adjust: none; color: HighlightText; background: color(from Highlight srgb r g b / 1);');
-    expect(forced).not.toMatch(/background: Highlight;|outline-color: Highlight;/);
+    expect(forced).toContain('.session-picker-entry[aria-current="true"] { forced-color-adjust: none; color: HighlightText; background: Highlight; background: color(from Highlight srgb r g b / 1);');
+    // Relative colour is newer than the support floor (Chrome/Edge 110,
+    // Firefox 115): every restatement is preceded by the plain system colour
+    // on the same property, which older engines keep (QA round 1, F1).
+    const relative = [...forced.matchAll(/([a-z-]+): color\(from Highlight srgb r g b \/ 1\);/g)];
+    expect(relative.length).toBeGreaterThanOrEqual(4);
+    for (const match of relative) {
+      const before = forced.slice(0, match.index);
+      expect(before.endsWith(`${match[1]}: Highlight; `), `${match[1]} has a plain Highlight fallback`).toBe(true);
+    }
     // Hover is a pointer cue distinct from the focus ring and the open fill.
     expect(forced).toContain(".palette-command:hover:not(:disabled) > :first-child { text-decoration: underline; }");
     expect(css).toContain('.palette-commands .session-picker-entry[aria-current="true"]:is(:hover, :active) > .session-name { text-decoration: underline; }');

@@ -104,6 +104,17 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
       const label = node.querySelector<HTMLElement>(".conversation-machine-name")!;
       return { ellipsised: label.scrollWidth > label.clientWidth, clear: !time || name.right <= time.left + 0.5 };
     });
+    // A machine that wraps to its own line never starts it with the separator
+    // dot: the dot sits past the title's left edge, clipped (cas-1ca1 F02).
+    const noLeadingDot = () => list.locator(".conversation-row").evaluateAll((rows) => rows.every((node) => {
+      const title = node.querySelector(".conversation-title")!.getBoundingClientRect();
+      const project = node.querySelector(".conversation-project")!.getBoundingClientRect();
+      const machine = node.querySelector(".conversation-machine-name")!.getBoundingClientRect();
+      const dot = node.querySelector(".conversation-sep")!.getBoundingClientRect();
+      const wrapped = machine.top > project.top + 4;
+      return wrapped ? dot.right <= title.left + 0.5 : dot.left >= project.right;
+    }));
+    expect(await noLeadingDot()).toBe(true);
     // Desktop: the 40-character name ellipsises before the time stamp.
     await expect(row.locator(".conversation-when")).toBeVisible();
     expect(await clearOfTime()).toEqual({ ellipsised: true, clear: true });
@@ -113,6 +124,7 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     await page.getByRole("button", { name: "‹ Conversations", exact: true }).click();
     await expect(row).toBeVisible();
     expect(await clearOfTime()).toEqual({ ellipsised: true, clear: true });
+    expect(await noLeadingDot()).toBe(true);
     // Receipt beside the stage screenshots: the 390 px list with the long name.
     await page.screenshot({ path: join(RECEIPTS, journey.id, "long-machine-phone.png") });
     await page.setViewportSize({ width: 1280, height: 720 });

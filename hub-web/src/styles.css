@@ -3015,12 +3015,20 @@ dialog form > *,
 .conversation-who { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; min-width: 0; }
 /* Journey F7: users think in projects. The title is the project, then the
    machine; the generated codename is tertiary text on its own line beneath. */
-.conversation-title { display: inline-flex; flex-wrap: wrap; align-items: center; column-gap: 7px; min-width: 0; max-width: 100%; }
-.conversation-project { min-width: 0; max-width: 100%; font: var(--weight-semibold) var(--fs-md)/1.35 var(--font-ui); overflow-wrap: anywhere; }
+/* cas-1ca1 F02: the separator rides with the machine but must never lead a
+   line. The machine is pulled back over the project's trailing space by the
+   separator's width plus its gap (10px); on a shared line the project's 17px
+   end margin leaves the usual 7px before the dot, and when the machine wraps
+   to its own line the dot lands left of the title and is clipped (x only). */
+.conversation-title { display: inline-flex; flex-wrap: wrap; align-items: center; column-gap: 0; min-width: 0; max-width: 100%; overflow-x: clip; }
+.conversation-project { min-width: 0; max-width: 100%; margin-inline-end: 17px; font: var(--weight-semibold) var(--fs-md)/1.35 var(--font-ui); overflow-wrap: anywhere; }
 .conversation-sep { width: 3px; height: 3px; border-radius: var(--radius-pill); background: var(--ink-soft); flex: none; }
-.conversation-machine { display: inline-flex; align-items: center; gap: 7px; min-width: 0; max-width: 100%; color: var(--ink-mid); font: var(--weight-medium) var(--fs-meta)/1.35 var(--font-ui); white-space: nowrap; }
+.conversation-machine { display: inline-flex; align-items: center; gap: 7px; min-width: 0; max-width: calc(100% + 10px); margin-inline-start: -10px; color: var(--ink-mid); font: var(--weight-medium) var(--fs-meta)/1.35 var(--font-ui); white-space: nowrap; }
 /* cas-1ca1: a long machine name ellipsises inside the title column, clear of the time stamp. */
-.conversation-machine-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+/* cas-1ca1 F01: the glyph box of a 13px/1.35 line sits about 1px taller than
+   the line, so the clipping span gets 2px of block padding (given back by the
+   margin) to hold whole glyphs; the CI visual gate flagged the shaved tops. */
+.conversation-machine-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; padding-block: 2px; margin-block: -2px; }
 .conversation-supervisor { flex-basis: 100%; color: var(--ink-soft); font: var(--weight-regular) var(--fs-xs)/1.35 var(--font-mono); }
 .conversation-when { justify-self: end; font-size: var(--fs-xs); color: var(--ink-soft); white-space: nowrap; }
 .conversation-when.hot { color: var(--warn-text); font-weight: var(--weight-semibold); }

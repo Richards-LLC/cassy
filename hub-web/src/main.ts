@@ -1,4 +1,4 @@
-import { cloudBrand, projectName } from "./cloud-brand";
+import { cloudBrand, projectTitle } from "./cloud-brand";
 import { machineFooterMarkup, pairedMachinesDialogMarkup, renderPairedMachines, type PairedMachineRow } from "./paired-machines";
 import { retainPendingSessions, visibleCatalog } from "./worker-visibility";
 import "./styles.css";
@@ -301,7 +301,7 @@ function mountConversation(key: string, mount: HTMLElement): void {
     conversation = new ConversationView(document, history, {
       supervisor: target,
       machine: machines.get(selectedMachineId!)?.label,
-      project: projectName(hubSession?.project_dir),
+      project: projectTitle(hubSession?.project_dir),
       header: false,
       // The supervisor is executing while a send awaits its reply or the
       // pane produced output in the last half minute.

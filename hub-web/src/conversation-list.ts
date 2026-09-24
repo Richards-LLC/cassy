@@ -1,4 +1,4 @@
-import { escapeHtml, projectName } from "./cloud-brand";
+import { escapeHtml, projectTitle } from "./cloud-brand";
 import { machineAccentClass, machineMonogram } from "./machine-accent";
 import { plainTextMarkdown } from "./markdown-renderer";
 
@@ -48,7 +48,7 @@ export function machineName(host: string): string {
 
 /** The words a list search matches: project, machine and supervisor codename. */
 export function conversationSearchText(row: Pick<ConversationRow, "projectDir" | "host" | "supervisor">): string {
-  return `${projectName(row.projectDir)} ${row.host} ${row.supervisor}`.toLocaleLowerCase();
+  return `${projectTitle(row.projectDir) ?? ""} ${row.host} ${row.supervisor}`.toLocaleLowerCase();
 }
 
 /** Rows whose project, machine or supervisor contains every word of the query (case-insensitive). */
@@ -72,6 +72,8 @@ export function conversationRowMarkup(row: ConversationRow): string {
   const count = unread > 0 ? `<span class="conversation-unread" aria-label="${unread} unread">${unread}</span>` : "";
   const flag = waiting ? `<span class="conversation-flag" role="img" aria-label="${row.attention === 1 ? "Waiting for you" : `${row.attention} waiting for you`}"></span>` : "";
   const marks = count || flag ? `<span class="conversation-marks">${count}${flag}</span>` : "";
+  // No project named: the codename is the title (cas-1ca1 F03), not a status phrase.
+  const project = projectTitle(row.projectDir);
   // The title is "project · machine": the project leads, never a dot (P13);
   // the one separator rides with the machine, so a dot never dangles at a
   // line end when a long project pushes the machine to the next line. The
@@ -80,7 +82,7 @@ export function conversationRowMarkup(row: ConversationRow): string {
   // inside the title column (its title attribute carries it whole) instead of
   // running under the time stamp (cas-1ca1). The codename sits beneath.
   return `<span class="conversation-avatar" aria-hidden="true">${escapeHtml(machineMonogram(row.host))}</span>`
-    + `<span class="conversation-who"><span class="conversation-title"><strong class="conversation-project">${escapeHtml(projectName(row.projectDir))}</strong><span class="conversation-machine" title="${escapeHtml(machineName(row.host))}"><span class="conversation-sep" aria-hidden="true"></span><span class="conversation-machine-name">${escapeHtml(machineName(row.host))}</span></span></span><span class="conversation-supervisor codename">${escapeHtml(row.supervisor)}</span></span>`
+    + `<span class="conversation-who"><span class="conversation-title"><strong class="conversation-project${project ? "" : " codename"}">${escapeHtml(project ?? row.supervisor)}</strong><span class="conversation-machine" title="${escapeHtml(machineName(row.host))}"><span class="conversation-sep" aria-hidden="true"></span><span class="conversation-machine-name">${escapeHtml(machineName(row.host))}</span></span></span>${project ? `<span class="conversation-supervisor codename">${escapeHtml(row.supervisor)}</span>` : ""}</span>`
     + time
     + `<span class="conversation-preview${row.unreachable ? " unreachable" : row.interrupted ? " interrupted" : waiting || unread > 0 ? " bold" : ""}">${escapeHtml(preview)}</span>`
     + marks;

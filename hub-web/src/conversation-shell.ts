@@ -1,4 +1,4 @@
-import { cloudBrand, escapeHtml, projectName } from "./cloud-brand";
+import { cloudBrand, escapeHtml, projectTitle } from "./cloud-brand";
 import { machineAccentClass, machineMonogram } from "./machine-accent";
 
 export interface ConversationShellModel {
@@ -52,8 +52,11 @@ export const composeFabMarkup = '<button id="compose-fab" class="compose-fab" ty
  */
 export function conversationHeaderMarkup(model: ConversationShellModel): string {
   const host = model.host || "";
-  const project = projectName(model.projectDir);
-  return `<header class="conversation-heading thead"><div class="conversation-topline"><button id="conversation-back" type="button" aria-label="‹ Conversations"><span class="back-glyph">‹</span><span class="back-label"> Conversations</span></button>${cloudBrand()}<button id="conversation-terminal" type="button" aria-label="Terminal view">Terminal<span class="terminal-suffix"> view</span></button></div><div class="conversation-identity"><span class="conversation-avatar" aria-hidden="true">${escapeHtml(machineMonogram(host || model.supervisor || "?"))}</span><div class="id"><h1><b title="${escapeHtml(project)}">${escapeHtml(project)}</b></h1><span class="conversation-host"><span class="host-where">${host ? `${escapeHtml(host)} · ` : ""}<span class="codename">${escapeHtml(model.supervisor || "Supervisor unavailable")}</span></span><span id="conversation-connection" role="status"></span></span></div></div></header>`;
+  // No project named: the codename is the title and the host line names only the machine (cas-1ca1 F03).
+  const project = projectTitle(model.projectDir);
+  const supervisor = model.supervisor || "Supervisor unavailable";
+  const title = project ?? supervisor;
+  return `<header class="conversation-heading thead"><div class="conversation-topline"><button id="conversation-back" type="button" aria-label="‹ Conversations"><span class="back-glyph">‹</span><span class="back-label"> Conversations</span></button>${cloudBrand()}<button id="conversation-terminal" type="button" aria-label="Terminal view">Terminal<span class="terminal-suffix"> view</span></button></div><div class="conversation-identity"><span class="conversation-avatar" aria-hidden="true">${escapeHtml(machineMonogram(host || model.supervisor || "?"))}</span><div class="id"><h1><b title="${escapeHtml(title)}"${project ? "" : ' class="codename"'}>${escapeHtml(title)}</b></h1><span class="conversation-host"><span class="host-where">${project ? `${host ? `${escapeHtml(host)} · ` : ""}<span class="codename">${escapeHtml(supervisor)}</span>` : escapeHtml(host)}</span><span id="conversation-connection" role="status"></span></span></div></div></header>`;
 }
 
 /** Attaching files from this browser has no transport yet; the clip stays out of the composer until it does. */

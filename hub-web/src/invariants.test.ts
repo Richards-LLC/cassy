@@ -860,6 +860,9 @@ describe("binding Cassy Cloud browser invariants", () => {
       const before = forced.slice(0, match.index);
       expect(before.endsWith(`${match[1]}: Highlight; `), `${match[1]} has a plain Highlight fallback`).toBe(true);
     }
+    // Only the open session opts out of the opaque ring; the current
+    // Appearance row (aria-current since cas-479a) keeps it.
+    expect(forced).toContain('.palette-commands .palette-command:not(.session-picker-entry[aria-current="true"]):focus-visible {');
     // Hover is a pointer cue distinct from the focus ring and the open fill.
     expect(forced).toContain(".palette-command:hover:not(:disabled) > :first-child { text-decoration: underline; }");
     expect(css).toContain('.palette-commands .session-picker-entry[aria-current="true"]:is(:hover, :active) > .session-name { text-decoration: underline; }');

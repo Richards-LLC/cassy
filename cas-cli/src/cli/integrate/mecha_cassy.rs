@@ -1,4 +1,4 @@
-//! `cas integrate mecha-cassy` — one command that makes the MechaCassy Slack
+//! `cas integrate violet` — one command that makes the MechaCassy Slack
 //! hub reachable from every project on a machine (task **cas-8fad**).
 //!
 //! ## What this replaces
@@ -55,7 +55,7 @@ pub const HUB_BYPASS_ROUTE: &str = "/api/bypass";
 pub const HUB_CLIENT_ISSUE: &str = "mecha-cassy#5";
 pub const VERCEL_PROJECT: &str = "mecha-cassy";
 pub const CREDENTIALS_HINT: &str =
-    "run `cas login`, then re-run `cas integrate mecha-cassy`; credentials are stored in the \
+    "run `cas login`, then re-run `cas integrate violet`; credentials are stored in the \
      machine credentials file sourced by your login shell — see \
      docs/MECHA_CASSY_ONBOARDING.md";
 
@@ -1674,7 +1674,7 @@ fn run_with_credentials(
                     .join(", ")
             ),
             None => format!(
-                "{drift}. Re-run `cas integrate mecha-cassy` to rewrite the allowlist against \
+                "{drift}. Re-run `cas integrate violet` to rewrite the allowlist against \
                  the hub's current contract."
             ),
         }
@@ -1734,11 +1734,11 @@ fn build_remedy(
     match probe {
         ProbeOutcome::Unauthorized => Some(format!(
             "The hub rejected this machine's bearer (HTTP 401; Authorization: Bearer <set>). \
-             Confirm `cas login`, then run `cas integrate mecha-cassy` again."
+             Confirm `cas login`, then run `cas integrate violet` again."
         )),
         ProbeOutcome::Unreachable { code } => Some(format!(
             "The hub did not answer ({code}). Check connectivity, then re-run \
-             `cas integrate mecha-cassy`."
+             `cas integrate violet`."
         )),
         _ => None,
     }
@@ -1967,7 +1967,7 @@ pub fn doctor_row(
                 severity: DoctorSeverity::Error,
                 message: format!(
                     "proxy configuration could not be read ({error:#}). Repair it, then run \
-                     `cas integrate mecha-cassy`"
+                     `cas integrate violet`"
                 ),
             };
         }
@@ -1978,7 +1978,7 @@ pub fn doctor_row(
             severity: DoctorSeverity::Warning,
             message: format!(
                 "not registered on this machine ({} has no {MECHA_CASSY_SERVER} server). Run \
-                 `cas integrate mecha-cassy`",
+                 `cas integrate violet`",
                 paths.user_proxy.display()
             ),
         };
@@ -1988,7 +1988,7 @@ pub fn doctor_row(
             severity: DoctorSeverity::Error,
             message: format!(
                 "the {MECHA_CASSY_SERVER} registration does not reference its bearer by \
-                 environment-variable name. Run `cas integrate mecha-cassy` to rewrite it as an \
+                 environment-variable name. Run `cas integrate violet` to rewrite it as an \
                  env: reference"
             ),
         };
@@ -2064,7 +2064,7 @@ pub fn doctor_row(
                         DoctorSeverity::Warning
                     },
                     message: format!(
-                        "{}. Run `cas integrate mecha-cassy` to rewrite that file",
+                        "{}. Run `cas integrate violet` to rewrite that file",
                         drift.describe(&tools, &allowlist, Some(source)),
                     ),
                 }
@@ -2074,13 +2074,13 @@ pub fn doctor_row(
             severity: DoctorSeverity::Error,
             message: format!(
                 "hub rejected this machine (HTTP 401; Authorization: Bearer <set>). Confirm \
-                 `cas login`, then run `cas integrate mecha-cassy`"
+                 `cas login`, then run `cas integrate violet`"
             ),
         },
         ProbeOutcome::Unreachable { code } => DoctorRow {
             severity: DoctorSeverity::Warning,
             message: format!(
-                "registered, but {}; run `cas integrate mecha-cassy` once connectivity is back",
+                "registered, but {}; run `cas integrate violet` once connectivity is back",
                 probe_failure_detail(&code)
             ),
         },
@@ -3061,7 +3061,7 @@ mod tests {
         // Unregistered machine: a warning that names the one command.
         let row = doctor_row(None, &paths, &env, &FakeProbe(live_tools()));
         assert_eq!(row.severity, DoctorSeverity::Warning);
-        assert!(row.message.contains("cas integrate mecha-cassy"), "{row:?}");
+        assert!(row.message.contains("cas integrate violet"), "{row:?}");
 
         let args = MechaCassyArgs {
             bypass_env: MECHA_CASSY_DEFAULT_BYPASS_ENV.to_string(),
@@ -3155,7 +3155,7 @@ mod tests {
         );
         assert_eq!(row.severity, DoctorSeverity::Error);
         assert!(row.message.contains("mecha_broadcast"), "{row:?}");
-        assert!(row.message.contains("cas integrate mecha-cassy"), "{row:?}");
+        assert!(row.message.contains("cas integrate violet"), "{row:?}");
     }
 
     /// A machine whose project file still lists the retired `slack_*` names
@@ -3488,7 +3488,7 @@ mod tests {
         assert!(remedy.contains(&project.display().to_string()), "{remedy}");
         assert!(remedy.contains("mecha-cassy.mecha_read"), "{remedy}");
         assert!(
-            !remedy.contains("Re-run `cas integrate mecha-cassy`"),
+            !remedy.contains("Re-run `cas integrate violet`"),
             "re-running cannot fix this, so it must not be offered: {remedy}"
         );
     }

@@ -95,16 +95,25 @@ pub enum IntegrateCommands {
         #[command(subcommand)]
         action: github::GithubAction,
     },
-    /// Set this machine up for the MechaCassy Slack hub: one user-level proxy
-    /// registration (every project inherits it), the Claude Code and Codex MCP
-    /// entries, and an authenticated `tools/list` as the receipt.
+    /// Set this machine up for the Violet (formerly MechaCassy) Slack hub: one
+    /// user-level proxy registration (every project inherits it), the Claude
+    /// Code and Codex MCP entries, and an authenticated `tools/list` as the
+    /// receipt.
     ///
     /// Takes no `init|refresh|verify` verb: the operation is idempotent, so
     /// re-running it *is* refresh, and it always ends in a verification.
     #[cfg(feature = "mcp-proxy")]
-    #[command(name = "mecha-cassy")]
+    #[command(name = "violet")]
+    Violet(mecha_cassy::MechaCassyArgs),
+    /// Deprecated name of `cas integrate violet`, accepted for one release
+    /// (GH #963).
+    #[cfg(feature = "mcp-proxy")]
+    #[command(name = "mecha-cassy", hide = true)]
     MechaCassy(mecha_cassy::MechaCassyArgs),
 }
+
+/// GH #963: the warning `cas integrate mecha-cassy` prints before it runs.
+pub const MECHA_CASSY_COMMAND_DEPRECATION: &str = "warning: `cas integrate mecha-cassy` is deprecated; use `cas integrate violet`. The old name is accepted for one release.";
 
 /// `cas integrate <platform> <action>` — pick an action.
 #[derive(Subcommand, Debug, Clone, Copy)]
@@ -135,7 +144,12 @@ pub fn execute(cmd: &IntegrateCommands, _cli: &Cli) -> anyhow::Result<()> {
         IntegrateCommands::Neon { action } => neon::execute((*action).into())?,
         IntegrateCommands::Github { action } => github::execute(action.clone())?,
         #[cfg(feature = "mcp-proxy")]
-        IntegrateCommands::MechaCassy(args) => mecha_cassy::execute(args, _cli.json)?,
+        IntegrateCommands::Violet(args) => mecha_cassy::execute(args, _cli.json)?,
+        #[cfg(feature = "mcp-proxy")]
+        IntegrateCommands::MechaCassy(args) => {
+            eprintln!("{MECHA_CASSY_COMMAND_DEPRECATION}");
+            mecha_cassy::execute(args, _cli.json)?
+        }
     };
     render_outcome(&outcome);
     Ok(())
@@ -187,8 +201,8 @@ mod tests {
             // in this module must never execute it. Its behaviour is covered
             // against a tempdir + fake environment in `mecha_cassy::tests`.
             #[cfg(feature = "mcp-proxy")]
-            IntegrateCommands::MechaCassy(_) => {
-                anyhow::bail!("mecha-cassy is exercised in mecha_cassy::tests, not via dispatch")
+            IntegrateCommands::Violet(_) | IntegrateCommands::MechaCassy(_) => {
+                anyhow::bail!("violet is exercised in mecha_cassy::tests, not via dispatch")
             }
         }
     }
@@ -283,5 +297,24 @@ mod tests {
             } => assert_eq!(repo.as_deref(), Some("acme/widget")),
             other => panic!("unexpected variant: {other:?}"),
         }
+    }
+
+    /// GH #963: `cas integrate violet` is canonical; `mecha-cassy` still
+    /// parses (hidden, deprecated) with the same arguments for one release.
+    #[cfg(feature = "mcp-proxy")]
+    #[test]
+    fn violet_is_canonical_and_mecha_cassy_still_parses() {
+        match parse(&["violet", "--label", "laptop"]) {
+            IntegrateCommands::Violet(args) => assert_eq!(args.label.as_deref(), Some("laptop")),
+            other => panic!("unexpected variant: {other:?}"),
+        }
+        match parse(&["mecha-cassy", "--label", "laptop"]) {
+            IntegrateCommands::MechaCassy(args) => {
+                assert_eq!(args.label.as_deref(), Some("laptop"))
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+        assert!(MECHA_CASSY_COMMAND_DEPRECATION.contains("cas integrate violet"));
+        assert_eq!(types::Platform::MechaCassy.as_str(), "violet");
     }
 }

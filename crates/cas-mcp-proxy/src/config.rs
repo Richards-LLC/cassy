@@ -37,6 +37,13 @@ pub const MECHA_CASSY_BYPASS_HEADER: &str = "x-vercel-protection-bypass";
 /// `tools/list` on 2026-09-03. The retired `slack_*` quartet is deliberately
 /// absent: an allowlist naming it produces "denied by policy" on every call.
 pub const MECHA_CASSY_TOOLS: [&str; 2] = ["mecha_read", "mecha_post"];
+/// Violet is the hub's new name (GH #963). The same hub is registered under
+/// this server name too, and its `violet_*` tools are allowlisted ahead of the
+/// hub serving them. Until it does they are simply absent upstream, while the
+/// `mecha-cassy` routes keep working for one release.
+pub const VIOLET_SERVER: &str = "violet";
+/// The hub's tool contract under its new name.
+pub const VIOLET_TOOLS: [&str; 2] = ["violet_read", "violet_post"];
 
 /// MCP proxy configuration containing upstream server definitions.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -457,30 +464,36 @@ impl Config {
             oauth: false,
         };
         let mut changed = false;
-        if self.servers.get(MECHA_CASSY_SERVER) != Some(&desired_server) {
-            self.servers
-                .insert(MECHA_CASSY_SERVER.to_string(), desired_server);
-            changed = true;
-        }
+        // GH #963: the same hub under its canonical Violet name, with the
+        // same env-referenced credentials.
+        for (server, tools) in [
+            (MECHA_CASSY_SERVER, MECHA_CASSY_TOOLS),
+            (VIOLET_SERVER, VIOLET_TOOLS),
+        ] {
+            if self.servers.get(server) != Some(&desired_server) {
+                self.servers
+                    .insert(server.to_string(), desired_server.clone());
+                changed = true;
+            }
 
-        let desired_routes = MECHA_CASSY_TOOLS
-            .iter()
-            .map(|tool| ExternalToolConfig {
-                server: MECHA_CASSY_SERVER.to_string(),
-                tool: (*tool).to_string(),
-                supervisor_only: false,
-            })
-            .collect::<Vec<_>>();
-        if self
-            .allowlist
-            .iter()
-            .filter(|route| route.server == MECHA_CASSY_SERVER)
-            .ne(desired_routes.iter())
-        {
-            self.allowlist
-                .retain(|route| route.server != MECHA_CASSY_SERVER);
-            self.allowlist.extend(desired_routes);
-            changed = true;
+            let desired_routes = tools
+                .iter()
+                .map(|tool| ExternalToolConfig {
+                    server: server.to_string(),
+                    tool: (*tool).to_string(),
+                    supervisor_only: false,
+                })
+                .collect::<Vec<_>>();
+            if self
+                .allowlist
+                .iter()
+                .filter(|route| route.server == server)
+                .ne(desired_routes.iter())
+            {
+                self.allowlist.retain(|route| route.server != server);
+                self.allowlist.extend(desired_routes);
+                changed = true;
+            }
         }
         changed
     }
@@ -923,6 +936,43 @@ tool = "get_file_download_url"
         assert!(serialized.contains("env:MECHA_SLACK_TOKEN_LAPTOP"));
         assert!(serialized.contains("mecha-cassy.mecha_read"));
         assert!(!serialized.contains("xoxb-"));
+    }
+
+    /// GH #963: the registration also names the hub `violet` and allowlists
+    /// its `violet_*` tools, with the same env-referenced credentials, and
+    /// stays idempotent. The `mecha-cassy` contract is untouched.
+    #[test]
+    fn mecha_cassy_registration_also_registers_the_violet_name() {
+        let mut config = Config::default();
+        assert!(config.ensure_mecha_cassy_registration(
+            MECHA_CASSY_MCP_URL,
+            MECHA_CASSY_DEFAULT_TOKEN_ENV,
+            MECHA_CASSY_DEFAULT_BYPASS_ENV,
+        ));
+        assert_eq!(
+            config.servers.get(VIOLET_SERVER),
+            config.servers.get(MECHA_CASSY_SERVER)
+        );
+        assert!(config.servers.contains_key(VIOLET_SERVER));
+        let violet_tools: Vec<&str> = config
+            .allowlist
+            .iter()
+            .filter(|route| route.server == VIOLET_SERVER)
+            .map(|route| route.tool.as_str())
+            .collect();
+        assert_eq!(violet_tools, VIOLET_TOOLS);
+        assert_eq!(config.mecha_cassy_allowlisted_tools(), MECHA_CASSY_TOOLS);
+        assert!(!config.ensure_mecha_cassy_registration(
+            MECHA_CASSY_MCP_URL,
+            MECHA_CASSY_DEFAULT_TOKEN_ENV,
+            MECHA_CASSY_DEFAULT_BYPASS_ENV,
+        ));
+        let serialized = toml::to_string(&config).unwrap();
+        assert!(serialized.contains("violet.violet_read"), "{serialized}");
+        assert!(
+            serialized.contains("mecha-cassy.mecha_read"),
+            "{serialized}"
+        );
     }
 
     #[test]

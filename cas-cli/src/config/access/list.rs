@@ -269,8 +269,12 @@ impl Config {
                 issue_repos.cassy,
             ),
             (
+                "issues.components.violet".to_string(),
+                issue_repos.violet.clone(),
+            ),
+            (
                 "issues.components.mecha_cassy".to_string(),
-                issue_repos.mecha_cassy,
+                issue_repos.violet,
             ),
             (
                 "issues.components.cloud".to_string(),

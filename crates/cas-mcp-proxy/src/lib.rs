@@ -1619,7 +1619,7 @@ fn safe_error_detail(error: &anyhow::Error) -> String {
             .map(|missing| missing.name.as_str())
     }) {
         let remedy = (name == "MECHA_VERCEL_BYPASS" || name.starts_with("MECHA_SLACK_TOKEN_"))
-            .then_some("; run `cas integrate mecha-cassy` to refresh credentials")
+            .then_some("; run `cas integrate violet` to refresh credentials")
             .unwrap_or_default();
         return format!("missing required environment variable {name}{remedy}");
     }
@@ -2944,7 +2944,7 @@ mod tests {
             .expect("configured upstream health must be present");
 
         let expected = format!(
-            "missing required environment variable {missing}; run `cas integrate mecha-cassy` to refresh credentials"
+            "missing required environment variable {missing}; run `cas integrate violet` to refresh credentials"
         );
         assert_eq!(server.last_error.as_deref(), Some(expected.as_str()));
     }

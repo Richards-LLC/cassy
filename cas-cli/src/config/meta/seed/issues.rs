@@ -1,7 +1,7 @@
 use crate::config::meta::registry::ConfigRegistry;
 use crate::config::meta::types::{ConfigMeta, ConfigType, Constraint};
 use crate::config::settings::{
-    DEFAULT_CASSY_ISSUES_REPO, DEFAULT_CLOUD_ISSUES_REPO, DEFAULT_MECHA_CASSY_ISSUES_REPO,
+    DEFAULT_CASSY_ISSUES_REPO, DEFAULT_CLOUD_ISSUES_REPO, DEFAULT_VIOLET_ISSUES_REPO,
 };
 
 pub(super) fn register_issues(registry: &mut ConfigRegistry) {
@@ -35,17 +35,30 @@ pub(super) fn register_issues(registry: &mut ConfigRegistry) {
         use_cases: &["Override only when operating a fork or alternate Cassy distribution"],
     });
     registry.register(ConfigMeta {
-        key: "issues.components.mecha_cassy",
+        key: "issues.components.violet",
         section: "issues.components",
-        name: "MechaCassy Issue Repository",
-        description: "GitHub repository for MechaCassy Slack hub and message delivery bugs.",
+        name: "Violet Issue Repository",
+        description: "GitHub repository for Violet (formerly MechaCassy) Slack hub and message delivery bugs.",
         value_type: ConfigType::String,
-        default: DEFAULT_MECHA_CASSY_ISSUES_REPO,
+        default: DEFAULT_VIOLET_ISSUES_REPO,
         constraint: Constraint::None,
         advanced: false,
         requires_feature: None,
-        keywords: &["issues", "github", "bugs", "repository", "component"],
-        use_cases: &["Route bugs in the MechaCassy hub to its component repository"],
+        keywords: &["issues", "github", "bugs", "repository", "component", "violet", "mecha_cassy"],
+        use_cases: &["Route bugs in the Violet hub to its component repository"],
+    });
+    registry.register(ConfigMeta {
+        key: "issues.components.mecha_cassy",
+        section: "issues.components",
+        name: "MechaCassy Issue Repository (deprecated)",
+        description: "Deprecated alias of issues.components.violet, read for one release (GH #963). issues.components.violet wins when both are set.",
+        value_type: ConfigType::String,
+        default: DEFAULT_VIOLET_ISSUES_REPO,
+        constraint: Constraint::None,
+        advanced: true,
+        requires_feature: None,
+        keywords: &["issues", "github", "bugs", "repository", "component", "deprecated"],
+        use_cases: &["Existing configs; use issues.components.violet instead"],
     });
     registry.register(ConfigMeta {
         key: "issues.components.cloud",

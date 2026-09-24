@@ -30,7 +30,9 @@ version and worktree, never a version-keyed path.
    Zig, the `x86_64-unknown-linux-gnu` Rust target); a dated CHANGELOG heading
    and draft; and a passing integration receipt. A macOS host needs only
    Homebrew `jq binutils`, those Cargo tools and that target: the train
-   supplies the `stat`, `sha256sum`, `setsid` and Cargo-PATH fallbacks itself. Pin the cut date in `run.env` from `started_at` and
+   supplies the `stat`, `sha256sum`, `setsid` and Cargo-PATH fallbacks itself,
+   and defaults its scratch base to `/Users/Shared/cas-release-gate` there
+   (`/tmp` and `/var/tmp` are Cassy disposable roots on macOS). Pin the cut date in `run.env` from `started_at` and
    use that date for every draft path, including after midnight. Run the same
    announcement lint during preflight that `announce` will run. User thread
    wording must avoid `agent`, `worker`, `supervisor`, `daemon`, and `factory`

@@ -6,6 +6,7 @@ describe("refusal (F6: plain reasons with a next step)", () => {
     ["forbidden", "This device isn't the one in control of the session.", "Take control from the header, then retry."],
     ["authorization refused", "This device isn't the one in control of the session.", "Take control from the header, then retry."],
     ["Permission refused", "This device isn't the one in control of the session.", "Take control from the header, then retry."],
+    ["The session no longer grants this device control.", "This device isn't the one in control of the session.", "Take control from the header, then retry."],
     ["semantic message enqueue failed: in_reply_to notification 7 does not exist", "The question it answered is no longer open.", "Edit it and send it as a new message."],
     ["semantic message enqueue failed: in_reply_to notification 7 belongs to factory session a, not b", "The question it answered is no longer open.", "Edit it and send it as a new message."],
     ["semantic message enqueue failed: database is locked", "The supervisor's machine couldn't take the message.", "Retry in a moment."],

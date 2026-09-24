@@ -21,7 +21,7 @@ const RULES: ReadonlyArray<readonly [RegExp, Refusal]> = [
     reason: "The question it answered is no longer open.",
     next: "Edit it and send it as a new message.",
   }],
-  [/forbidden|authori[sz]ation|permission|not allowed|denied|lease|observ/i, {
+  [/forbidden|authori[sz]ation|permission|not allowed|denied|lease|observ|control/i, {
     reason: "This device isn't the one in control of the session.",
     next: "Take control from the header, then retry.",
   }],

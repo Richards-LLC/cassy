@@ -3237,6 +3237,9 @@ dialog form > *,
  * equals --ask-bg in dark. */
 .obj.t-a.ask-collapsed { border-radius: 18px 18px 18px 6px; box-shadow: var(--lift); }
 .obj.t-a.ask-collapsed .obj-body { padding: 12px 19px; border-left: 4px solid var(--warn-text); border-radius: 18px 18px 18px 6px; background: var(--sup-bg); color: var(--sup-fg); }
+/* The flow copy of a pinned ask is a one-line reference (cas-97ea): the
+   pinned card below carries the whole question. */
+.obj.t-a.ask-collapsed .ask-excerpt { margin: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: 1.4; }
 .obj.t-a.ask-collapsed .ask-waiting { margin-top: 6px; font: var(--weight-semibold) 12px/1.3 var(--font-ui); color: var(--warn-text); }
 .chip { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-width: 0; margin: 0; padding: 8px 17px; border: 0; border-radius: var(--radius-pill); background: var(--panel); color: var(--ink); font: var(--weight-medium) 13px/1.2 var(--font-ui); text-align: center; overflow-wrap: anywhere; }
 button.chip { cursor: pointer; }
@@ -3252,6 +3255,9 @@ button.chip:disabled { cursor: default; }
 .pinned-label { padding: 0 6px; font: var(--weight-medium) 12px/1.3 var(--font-ui); color: var(--warn-text); letter-spacing: 0.02em; }
 .conversation-jump { position: sticky; bottom: var(--space-2); display: block; margin: var(--space-4) auto 0; background: var(--bg-panel); color: var(--color-action); }
 .conversation-jump[hidden] { display: none; }
+/* Mounted above the composer (cas-97ea): an in-flow row that takes space from
+   the thread while it shows, instead of a sticky chip over a turn. */
+#conversation-composer-slot > .conversation-jump { position: static; margin: var(--space-2) auto 0; }
 /* ---- Pebble 4 (cas-3800): sheet, composer, nothing waiting ---------------
  * Attachment: treatment A from round-3/pebble.css — a sheet laid on the
  * thread, no bubble around it, dog-eared at the top right. The ear is two

@@ -49,6 +49,9 @@ test("HUB-J7 answer a pinned question", async ({ page, journey }) => {
     // one-line reference and the rail does not list this question again.
     const reference = page.getByRole("log").locator(".obj.t-a.ask-collapsed");
     await expect(reference.locator(".ask-excerpt")).toHaveText("The gate failed on one clippy warning. Fix it in the train, or ship with it allowlisted?");
+    // One line, ellipsised if it must be (cas-97ea).
+    const lines = await reference.locator(".ask-excerpt").evaluate((element) => Math.round(element.getBoundingClientRect().height / parseFloat(getComputedStyle(element).lineHeight)));
+    expect(lines, "the reference is one line").toBe(1);
     await expect(reference.getByRole("button")).toHaveCount(0);
     // The rail lists only the hydrated blocker (cas-ce17), never the pinned question.
     await expect(waiting.locator("li")).toHaveCount(1);

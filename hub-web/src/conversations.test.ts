@@ -159,7 +159,9 @@ describe('conversation evidence', () => {
     expect(waiting.querySelector('.conversation-supervisor')?.classList.contains('codename')).toBe(true);
     // The machine is named as text on every row, after the project, with its own wrapping separator.
     expect(waiting.querySelector('.conversation-machine')?.textContent).toBe('Atlas');
-    expect(waiting.querySelector('.conversation-machine')?.innerHTML).toBe('<span class="conversation-sep" aria-hidden="true"></span>Atlas');
+    expect(waiting.querySelector('.conversation-machine')?.innerHTML).toBe('<span class="conversation-sep" aria-hidden="true"></span><span class="conversation-machine-name">Atlas</span>');
+    // cas-1ca1: the machine name can ellipsise; the title attribute keeps it whole.
+    expect(waiting.querySelector('.conversation-machine')?.getAttribute('title')).toBe('Atlas');
     expect(unread.querySelector('.conversation-machine')?.textContent).toBe('Studio Mac');
     expect(unread.querySelector('.conversation-project')?.textContent).toBe('gabber-studio');
     expect(waiting.querySelector('.conversation-preview')?.textContent).toBe('Fix <it>?');

@@ -76,9 +76,11 @@ export function conversationRowMarkup(row: ConversationRow): string {
   // the one separator rides with the machine, so a dot never dangles at a
   // line end when a long project pushes the machine to the next line. The
   // machine is legible as text on every row (operator direction): the
-  // monogram and accent alone do not name it. The codename sits beneath.
+  // monogram and accent alone do not name it. A long machine name ellipsises
+  // inside the title column (its title attribute carries it whole) instead of
+  // running under the time stamp (cas-1ca1). The codename sits beneath.
   return `<span class="conversation-avatar" aria-hidden="true">${escapeHtml(machineMonogram(row.host))}</span>`
-    + `<span class="conversation-who"><span class="conversation-title"><strong class="conversation-project">${escapeHtml(projectName(row.projectDir))}</strong><span class="conversation-machine"><span class="conversation-sep" aria-hidden="true"></span>${escapeHtml(machineName(row.host))}</span></span><span class="conversation-supervisor codename">${escapeHtml(row.supervisor)}</span></span>`
+    + `<span class="conversation-who"><span class="conversation-title"><strong class="conversation-project">${escapeHtml(projectName(row.projectDir))}</strong><span class="conversation-machine" title="${escapeHtml(machineName(row.host))}"><span class="conversation-sep" aria-hidden="true"></span><span class="conversation-machine-name">${escapeHtml(machineName(row.host))}</span></span></span><span class="conversation-supervisor codename">${escapeHtml(row.supervisor)}</span></span>`
     + time
     + `<span class="conversation-preview${row.unreachable ? " unreachable" : row.interrupted ? " interrupted" : waiting || unread > 0 ? " bold" : ""}">${escapeHtml(preview)}</span>`
     + marks;

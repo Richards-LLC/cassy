@@ -44,6 +44,6 @@ export function dormantRoute(search: string, revealed: boolean): string {
 
 export function dormantCommandLabel(revealed: boolean): { title: string; hint: string } {
   return revealed
-    ? { title: "Dormant · Shown", hint: "Hide sessions without a live supervisor" }
-    : { title: "Dormant · Hidden", hint: "Show sessions for recovery" };
+    ? { title: "Hide dormant sessions", hint: "List only sessions with a live supervisor" }
+    : { title: "Show dormant sessions", hint: "Sessions without a live supervisor, for recovery" };
 }

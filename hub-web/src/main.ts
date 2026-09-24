@@ -2,13 +2,13 @@ import { cloudBrand, projectName } from "./cloud-brand";
 import { machineFooterMarkup, pairedMachinesDialogMarkup, renderPairedMachines, type PairedMachineRow } from "./paired-machines";
 import { retainPendingSessions, visibleCatalog } from "./worker-visibility";
 import "./styles.css";
-import { ConversationList, type ConversationRow } from "./conversation-list";
+import { ConversationList, filterConversationRows, type ConversationRow } from "./conversation-list";
 import { ConversationHistory } from "./conversation-history";
 import { ConversationView } from "./conversation-view";
 import { refusalSentence } from "./refusal";
 import { installAttentionObjects } from "./attention-objects";
 import { installAttachmentSheet } from "./attachment-sheet";
-import { arrangeConversationShell, bindKeyboardViewport, conversationEmptyText } from "./conversation-shell";
+import { arrangeConversationShell, bindKeyboardViewport, conversationEmptyText, conversationNoMatchText } from "./conversation-shell";
 import { syncContextRail } from "./context-rail";
 import { applyScheme, setScheme, type SchemePreference } from "./scheme";
 import { applyAttentionEnrichment, attentionCounts, attentionSummary, attentionUrl, createAttentionItem, dismissableInfoItems, groupAttention, machineEventAttention, mergeAttentionItem, type AttentionAction, type AttentionContent, type AttentionEnrichment } from "./attention";
@@ -101,6 +101,8 @@ const conversationHistories = new Map<string, ConversationHistory>();
 const readReplies = new Map<string, number>();
 /** Rows as last rendered, so the compose FAB can pick the thread that most wants the operator. */
 let conversationRows: ConversationRow[] = [];
+/** The list search's text (journey F8); rows render filtered by it. */
+let conversationSearchQuery = "";
 const conversationList = new ConversationList();
 let hubPresentation: "conversation" | "terminal" = "conversation";
 const pendingSubmissions = new Set<string>();
@@ -2268,14 +2270,23 @@ function render(captureDraft = true): void {
         <header><strong>Commands</strong><button id="command-palette-close" type="button" aria-label="Close command palette">×</button></header>
         <input id="command-palette-query" type="search" aria-label="Filter commands" placeholder="Type a command or session">
         <div class="palette-commands">
-          ${(["system", "light", "dark"] as const).map((scheme) => `<button type="button" class="palette-command" data-palette-scheme="${scheme}"><span>Appearance · ${scheme === "system" ? "System" : scheme === "light" ? "Light" : "Dark"}</span><small>${scheme === "system" ? "Follow this device" : "Use this scheme"}</small></button>`).join("")}
-          <button type="button" class="palette-command" data-palette-action="terminal-view"><span>Terminal workspace</span><small>Machines, sessions and terminal controls</small></button>
-          <button type="button" class="palette-command" data-palette-action="workers" aria-pressed="${revealWorkers}"><span>${escapeHtml(workersCommandLabel(revealWorkers).title)}</span><small>${escapeHtml(workersCommandLabel(revealWorkers).hint)}</small></button>
-          <button type="button" class="palette-command" data-palette-action="dormant" aria-pressed="${revealDormant}"><span>${escapeHtml(dormantCommandLabel(revealDormant).title)}</span><small>${escapeHtml(dormantCommandLabel(revealDormant).hint)}</small></button>
-          <button type="button" class="palette-command" data-palette-action="control" ${controlActionDisabled ? "disabled" : ""}><span>${controlActionLabel}</span><small>${controlActionDisabled ? escapeHtml(takeControlReason ?? "Control unavailable") : "Current session"}</small></button>
-          <button type="button" class="palette-command" data-palette-action="dismiss-info" ${infoItems.length === 0 ? "disabled" : ""}><span>Dismiss all info</span><small>${infoItems.length} outstanding</small></button>
-          <button type="button" class="palette-command" id="palette-paired-machines"><span>Paired machines</span><small>Hosts, connection and last seen</small></button>
-          ${sessionCommands || '<p class="palette-empty">No live sessions available.</p>'}
+          <section class="palette-group" data-palette-group="conversations" aria-labelledby="palette-group-conversations">
+            <h3 id="palette-group-conversations" class="palette-group-heading">Conversations</h3>
+            ${sessionCommands || '<p class="palette-empty">No live sessions available.</p>'}
+            <button type="button" class="palette-command" data-palette-action="control" ${controlActionDisabled ? "disabled" : ""}><span>${controlActionLabel}</span><small>${controlActionDisabled ? escapeHtml(takeControlReason ?? "Control unavailable") : "Current session"}</small></button>
+            <button type="button" class="palette-command" data-palette-action="dismiss-info" ${infoItems.length === 0 ? "disabled" : ""}><span>Dismiss all info</span><small>${infoItems.length} outstanding</small></button>
+            <button type="button" class="palette-command" id="palette-paired-machines"><span>Paired machines</span><small>Hosts, connection and last seen</small></button>
+          </section>
+          <section class="palette-group" data-palette-group="appearance" aria-labelledby="palette-group-appearance">
+            <h3 id="palette-group-appearance" class="palette-group-heading">Appearance</h3>
+            ${(["system", "light", "dark"] as const).map((scheme) => `<button type="button" class="palette-command" data-palette-scheme="${scheme}"><span>Appearance · ${scheme === "system" ? "System" : scheme === "light" ? "Light" : "Dark"}</span><small>${scheme === "system" ? "Follow this device" : "Use this scheme"}</small></button>`).join("")}
+          </section>
+          <details class="palette-group palette-advanced" data-palette-group="advanced">
+            <summary class="palette-group-heading">Advanced</summary>
+            <button type="button" class="palette-command" data-palette-action="terminal-view"><span>Open the terminal view</span><small>Machines, sessions and terminal controls</small></button>
+            <button type="button" class="palette-command" data-palette-action="workers"><span>${escapeHtml(workersCommandLabel(revealWorkers).title)}</span><small>${escapeHtml(workersCommandLabel(revealWorkers).hint)}</small></button>
+            <button type="button" class="palette-command" data-palette-action="dormant"><span>${escapeHtml(dormantCommandLabel(revealDormant).title)}</span><small>${escapeHtml(dormantCommandLabel(revealDormant).hint)}</small></button>
+          </details>
           <p class="palette-empty" id="palette-no-match" role="status" hidden></p>
         </div>
       </section>
@@ -2294,7 +2305,7 @@ function render(captureDraft = true): void {
     machineDialog.close(); machineDialog.showModal();
   }
   if (hubPresentation === "conversation") {
-    arrangeConversationShell(app, { selected: Boolean(selectedSession), supervisor, projectDir: selectedHubSession?.project_dir, host: selected?.label, machineId: selectedSession ? selected?.id : undefined, loaded: machineCatalogLoaded, paired: machines.size > 0 });
+    arrangeConversationShell(app, { selected: Boolean(selectedSession), supervisor, projectDir: selectedHubSession?.project_dir, host: selected?.label, machineId: selectedSession ? selected?.id : undefined, loaded: machineCatalogLoaded, paired: machines.size > 0, searchQuery: conversationSearchQuery });
   } else {
     const returnControl = app.querySelector<HTMLButtonElement>("#talk-supervisor");
     if (returnControl) { returnControl.id = "conversation-return"; returnControl.textContent = "Conversations"; }
@@ -2435,9 +2446,13 @@ function renderConversationList(): void {
     return { key, machineId: machine.id, session: session.name, supervisor: session.supervisor, projectDir: session.project_dir, host: machine.label, freshness: updated ? `Catalog checked ${relativeTimestamp(Date.parse(updated))}` : "Catalog not yet checked", when: updated ? relativeTimestamp(Date.parse(updated)) : undefined, preview: conversationHistories.get(key)?.preview(), unreachable: Boolean(session.unreachable), connection: session.unreachable ? "Unreachable · message pending" : session.dormant ? "Dormant" : session.liveness === "live" ? fleetConnectionLabel(connectionStates.get(machine.id)) : "Session unavailable", attention: waiting, unread: Math.max(0, replies - (readReplies.get(key) ?? 0)), selected };
   }));
   conversationRows = rows;
-  conversationList.render(container, rows, (row) => { void openSession(row.machineId, row.session); });
+  const shown = filterConversationRows(rows, conversationSearchQuery);
+  conversationList.render(container, shown, (row) => { void openSession(row.machineId, row.session); });
   const empty = document.querySelector<HTMLElement>("#conversation-empty");
-  if (empty) { empty.hidden = rows.length > 0; empty.textContent = conversationEmptyText(machineCatalogLoaded, machines.size); }
+  if (empty) {
+    empty.hidden = shown.length > 0;
+    empty.textContent = rows.length > 0 ? conversationNoMatchText(conversationSearchQuery) : conversationEmptyText(machineCatalogLoaded, machines.size);
+  }
   const state = document.querySelector<HTMLElement>("#conversation-connection");
   if (state && selectedMachineId) state.textContent = ` · ${visibleSessions(selectedMachineId).find(session => session.name === selectedSession)?.unreachable ? "Unreachable · message pending" : fleetConnectionLabel(connectionStates.get(selectedMachineId))}`;
 }
@@ -2803,6 +2818,14 @@ function globalShortcut(event: KeyboardEvent): void {
   if (command && event.key.toLowerCase() === "k") {
     event.preventDefault();
     event.stopPropagation();
+    // The list's search field owns the shortcut wherever it is on screen
+    // (journey F8); from the field itself, a second press opens the palette.
+    const search = document.querySelector<HTMLInputElement>("#conversation-search");
+    if (search && !commandPaletteOpen && document.activeElement !== search && search.getClientRects().length > 0) {
+      search.focus();
+      search.select();
+      return;
+    }
     openCommandPalette();
     return;
   }
@@ -2841,6 +2864,42 @@ function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | und
     if (!row) { openPairDialog(); return; }
     void openSession(row.machineId, row.session).then(() => queueMicrotask(() => document.querySelector<HTMLTextAreaElement>("#message-text")?.focus()));
   };
+  // The list search (journey F8): typing filters rows by project, machine or
+  // supervisor in place; Enter opens the leading match, ArrowDown steps onto
+  // the rows, Escape clears.
+  const search = document.querySelector<HTMLInputElement>("#conversation-search");
+  if (search) {
+    search.oninput = () => { conversationSearchQuery = search.value; renderConversationList(); };
+    search.onkeydown = (event) => {
+      if (event.key === "Escape" && search.value) {
+        event.preventDefault();
+        event.stopPropagation();
+        search.value = "";
+        conversationSearchQuery = "";
+        renderConversationList();
+        return;
+      }
+      if (event.key === "ArrowDown") {
+        const first = document.querySelector<HTMLButtonElement>("#conversation-list .conversation-row");
+        if (first) { event.preventDefault(); first.focus(); }
+        return;
+      }
+      if (event.key !== "Enter" || event.isComposing) return;
+      const row = filterConversationRows(conversationRows, conversationSearchQuery)[0];
+      if (!row) return;
+      event.preventDefault();
+      // The search was a jump: the full list is back for the next visit, and
+      // the field lets go of focus first, because render() defers the shell
+      // rebuild while an editable field in #app is focused.
+      conversationSearchQuery = "";
+      search.value = "";
+      search.blur();
+      const opened = openSession(row.machineId, row.session);
+      // A keyboard lands in the reply box, as a palette jump does; a phone's
+      // soft-keyboard Enter lands to read, with no keyboard raised again.
+      if (window.matchMedia("(pointer: fine)").matches) focusJumpedComposer(opened);
+    };
+  }
 
   const paletteToggle = document.querySelector<HTMLButtonElement>("#command-palette-toggle");
   if (paletteToggle) paletteToggle.onclick = openCommandPalette;
@@ -2853,20 +2912,28 @@ function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | und
   document.querySelector<HTMLButtonElement>("#command-palette-close")!.onclick = closePalette;
   palette.oncancel = () => { commandPaletteOpen = false; };
   const paletteQuery = document.querySelector<HTMLInputElement>("#command-palette-query")!;
-  const paletteList = palette.querySelector<HTMLElement>(".palette-commands")!;
-  const paletteOrder = [...paletteList.children];
+  const paletteAdvanced = palette.querySelector<HTMLDetailsElement>(".palette-advanced");
+  // Commands in order, grouped Conversations / Appearance / Advanced. A row
+  // inside the collapsed Advanced group is not on screen, so Enter and
+  // ArrowDown never pick it.
+  const paletteRowShown = (command: HTMLElement) => !command.hidden && command.closest("details:not([open])") === null;
   paletteQuery.oninput = () => {
     const query = paletteQuery.value.trim().toLocaleLowerCase();
     for (const command of palette.querySelectorAll<HTMLElement>(".palette-command")) {
       const searchable = `${command.textContent ?? ""} ${command.dataset.searchText ?? ""}`.toLocaleLowerCase();
       command.hidden = query.length > 0 && !searchable.includes(query);
     }
-    // A query that names a session leads with its "Jump to" rows, so Enter
-    // and ArrowDown land on the conversation rather than a setting.
-    const sessionMatches = query.length > 0
-      ? [...paletteList.querySelectorAll<HTMLElement>("[data-palette-machine]")].filter((command) => !command.hidden)
-      : [];
-    paletteList.replaceChildren(...sessionMatches, ...paletteOrder.filter((node) => !sessionMatches.includes(node as HTMLElement)));
+    // A group with nothing left to offer steps aside, heading and all.
+    for (const group of palette.querySelectorAll<HTMLElement>(".palette-group")) {
+      group.hidden = query.length > 0 && ![...group.querySelectorAll<HTMLElement>(".palette-command")].some((command) => !command.hidden);
+    }
+    // A query that names an Advanced command opens the group to show it; the
+    // group folds again once the query no longer needs it.
+    if (paletteAdvanced) {
+      const wanted = query.length > 0 && !paletteAdvanced.hidden;
+      if (wanted && !paletteAdvanced.open) { paletteAdvanced.open = true; paletteAdvanced.dataset.autoOpened = "true"; }
+      else if (!wanted && paletteAdvanced.dataset.autoOpened) { paletteAdvanced.open = false; delete paletteAdvanced.dataset.autoOpened; }
+    }
     const noMatch = palette.querySelector<HTMLElement>("#palette-no-match");
     if (noMatch) {
       const anyVisible = [...palette.querySelectorAll<HTMLElement>(".palette-command")].some((command) => !command.hidden);
@@ -2874,10 +2941,13 @@ function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | und
       noMatch.textContent = noMatch.hidden ? "" : `No commands or sessions match “${paletteQuery.value.trim()}”.`;
     }
   };
+  if (paletteAdvanced) paletteAdvanced.ontoggle = () => { if (!paletteAdvanced.open) delete paletteAdvanced.dataset.autoOpened; };
   paletteQuery.onkeydown = (event) => {
     if (event.key !== "ArrowDown" && event.key !== "Enter") return;
+    // Session "Jump to" rows lead the Conversations group, so a query that
+    // names a session lands Enter and ArrowDown on the conversation.
     const first = [...palette.querySelectorAll<HTMLButtonElement>(".palette-command")]
-      .find((command) => !command.hidden && !command.disabled);
+      .find((command) => paletteRowShown(command) && !command.disabled);
     if (!first) return;
     event.preventDefault();
     if (event.key === "Enter") first.click();

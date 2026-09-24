@@ -12,7 +12,8 @@ test("HUB-J10 switch to dark and keep reading", async ({ page, journey }) => {
   });
 
   await journey.stage("Choose the dark appearance", async () => {
-    await page.keyboard.press("ControlOrMeta+k");
+    // Ctrl+K lands in the list search; the appearance lives behind the list's Appearance & commands button.
+    await page.getByRole("button", { name: "Appearance & commands" }).click();
     await page.getByRole("button", { name: /^Appearance · Dark/ }).click();
     await expect(page.locator("html")).toHaveAttribute("data-scheme", "dark");
   });

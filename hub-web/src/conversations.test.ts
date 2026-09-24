@@ -1,9 +1,9 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from "vitest";
 import { ConversationHistory } from "./conversation-history";
-import { ConversationList, conversationRowMarkup, truncateConversationPreview, type ConversationRow } from "./conversation-list";
+import { ConversationList, conversationRowMarkup, filterConversationRows, truncateConversationPreview, type ConversationRow } from "./conversation-list";
 import { ConversationView } from "./conversation-view";
-import { ATTACH_DISABLED_REASON, arrangeConversationShell, conversationShellMarkup, dressComposer } from "./conversation-shell";
+import { ATTACH_DISABLED_REASON, arrangeConversationShell, conversationNoMatchText, conversationShellMarkup, dressComposer } from "./conversation-shell";
 import { renderConversationFixture } from "../fixtures/conversations";
 import { projectName, projectBadge } from "./cloud-brand";
 
@@ -146,21 +146,22 @@ describe('conversation evidence', () => {
     expect(quiet.className).toBe('conversation-row machine-accent-0');
     expect(unread.className).toBe('conversation-row machine-accent-1');
     expect(waiting.querySelector('.conversation-avatar')?.textContent).toBe('A');
-    expect(waiting.querySelector('.conversation-supervisor')?.textContent).toBe('patient-pelican-9');
-    expect(waiting.querySelector('.project-badge')?.textContent).toBe('cas-src');
-    // P13: the meta leads with the project, never a stray dot; the only separator rides with the machine.
-    expect(waiting.querySelector('.conversation-project')?.innerHTML).toBe('<span class="project-badge">cas-src</span>');
-    expect(waiting.querySelector('.conversation-who > .conversation-sep')).toBeNull();
+    // Journey F7: the title is the project, then the machine; the codename is tertiary text beneath.
+    expect(waiting.querySelector('.conversation-who > .conversation-title > strong.conversation-project')?.textContent).toBe('cas-src');
+    expect(waiting.querySelector('.conversation-title > .conversation-project + .conversation-machine')).not.toBeNull();
+    expect(waiting.querySelector('.conversation-who > .conversation-title + .conversation-supervisor')?.textContent).toBe('patient-pelican-9');
+    expect(waiting.querySelector('.conversation-who')?.textContent).toBe('cas-srcAtlaspatient-pelican-9');
+    expect(waiting.querySelector('.project-badge')).toBeNull();
+    // P13: the title leads with the project, never a stray dot; the only separator rides with the machine.
+    expect(waiting.querySelector('.conversation-who > .conversation-sep, .conversation-title > .conversation-sep')).toBeNull();
     expect(waiting.querySelectorAll('.conversation-sep')).toHaveLength(1);
-    expect(waiting.querySelector('.conversation-meta')?.firstElementChild?.firstElementChild?.className).toBe('project-badge');
     // P14: the codename is one unbreakable word.
     expect(waiting.querySelector('.conversation-supervisor')?.classList.contains('codename')).toBe(true);
     // The machine is named as text on every row, after the project, with its own wrapping separator.
     expect(waiting.querySelector('.conversation-machine')?.textContent).toBe('Atlas');
     expect(waiting.querySelector('.conversation-machine')?.innerHTML).toBe('<span class="conversation-sep" aria-hidden="true"></span>Atlas');
     expect(unread.querySelector('.conversation-machine')?.textContent).toBe('Studio Mac');
-    expect(waiting.querySelector('.conversation-who')?.textContent).toBe('patient-pelican-9cas-srcAtlas');
-    expect(waiting.querySelector('.conversation-who > .conversation-meta > .conversation-project + .conversation-machine')).not.toBeNull();
+    expect(unread.querySelector('.conversation-project')?.textContent).toBe('gabber-studio');
     expect(waiting.querySelector('.conversation-preview')?.textContent).toBe('Fix <it>?');
     expect(waiting.querySelector('script, it')).toBeNull();
     expect(waiting.querySelector('.conversation-when')?.className).toBe('conversation-when hot');
@@ -205,6 +206,40 @@ describe('conversation evidence', () => {
     expect(toggle.querySelector('svg')?.getAttribute('aria-hidden')).toBe('true');
     expect(paired.querySelector('.conversation-sidebar footer #command-palette-toggle')).toBeNull();
   });
+  it('puts a visible "Search conversations (Ctrl K)" field at the top of the list once a machine is paired (journey F8)', () => {
+    const paired = document.createElement('div');
+    paired.innerHTML = conversationShellMarkup({ selected: false, loaded: true, paired: true, searchQuery: 'gab"ber' });
+    const search = paired.querySelector<HTMLInputElement>('.conversation-list-heading #conversation-search')!;
+    expect(search.type).toBe('search');
+    expect(search.getAttribute('aria-label')).toBe('Search conversations');
+    expect(search.placeholder).toBe('Search conversations (Ctrl K)');
+    expect(search.getAttribute('aria-controls')).toBe('conversation-list');
+    expect(search.value).toBe('gab"ber');
+    // It sits above the rows it filters.
+    expect(search.compareDocumentPosition(paired.querySelector('#conversation-list')!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    const unpaired = document.createElement('div');
+    unpaired.innerHTML = conversationShellMarkup({ selected: false, loaded: true, paired: false });
+    expect(unpaired.querySelector('#conversation-search')).toBeNull();
+    expect(conversationNoMatchText(' zzz ')).toBe('No conversation matches “zzz”. Search looks at project, machine and supervisor names.');
+  });
+  it('filters rows by project, machine or supervisor, every word, ignoring case (journey F8)', () => {
+    const base = { session: 's', freshness: 'now', connection: 'Live', attention: 0, selected: false };
+    const rows: ConversationRow[] = [
+      { ...base, key: 'a:1', machineId: 'a', supervisor: 'patient-pelican-9', projectDir: '/p/cas-src', host: 'Atlas · Linux' },
+      { ...base, key: 'b:1', machineId: 'b', supervisor: 'calm-otter-4', projectDir: '/p/gabber-studio', host: 'Studio Mac · macOS' },
+      { ...base, key: 'a:2', machineId: 'a', supervisor: 'steady-heron-2', projectDir: '/p/petra-stella-cloud', host: 'Atlas · Linux' },
+    ];
+    const keys = (query: string) => filterConversationRows(rows, query).map((row) => row.key);
+    expect(keys('')).toEqual(['a:1', 'b:1', 'a:2']);
+    expect(keys('  ')).toEqual(['a:1', 'b:1', 'a:2']);
+    expect(keys('Gabber')).toEqual(['b:1']);
+    expect(keys('atlas')).toEqual(['a:1', 'a:2']);
+    expect(keys('heron')).toEqual(['a:2']);
+    expect(keys('atlas cas')).toEqual(['a:1']);
+    // The project is matched by its name, not the path above it.
+    expect(keys('/p/')).toEqual([]);
+    expect(keys('zzz')).toEqual([]);
+  });
   it('strips supervisor markdown from conversation-list previews', () => {
     const list = new ConversationList(); const container = document.createElement('nav');
     list.render(container, [{ key: 'a:s', machineId: 'a', session: 's', supervisor: 'sup', host: 'Atlas', freshness: 'now', connection: 'Live', attention: 0, preview: '**Ready**\n\n- `cargo check`', selected: false }], vi.fn());
@@ -232,7 +267,7 @@ describe('conversation evidence', () => {
     expect(rows).toBe(6);
     expect(app.querySelector('.hub-footer-meta span')?.textContent).toBe(`${rows} conversations`);
     expect(new Set([...app.querySelectorAll('.conversation-row')].map((row) => row.className)).size).toBe(3);
-    expect([...app.querySelectorAll('.project-badge')].map((badge) => badge.textContent)).toContain('petra-stella-cloud');
+    expect([...app.querySelectorAll('.conversation-project')].map((project) => project.textContent)).toContain('petra-stella-cloud');
   });
   it('puts the selected machine accent on the shell root and a compose FAB in the operator colour', () => {
     const shell = conversationShellMarkup({ selected: true, supervisor: 'patient-pelican-9', projectDir: '/projects/cas-src', host: 'Atlas · Linux', machineId: 'atlas-linux', loaded: true, paired: true });
@@ -268,12 +303,14 @@ describe('conversation evidence', () => {
     expect(header.querySelector('#conversation-back .back-label')?.textContent).toBe(' Conversations');
     expect(header.querySelector('#conversation-terminal .terminal-suffix')?.textContent).toBe(' view');
     expect(header.querySelector('.conversation-avatar')?.textContent).toBe('A');
-    expect(header.querySelector('h1 b')?.textContent).toBe('patient-pelican-9');
-    expect(header.querySelector('h1 .project-badge')?.textContent).toBe('cas-src');
-    expect(header.querySelector('.conversation-host')?.textContent).toBe('cas-src · Atlas · Linux');
-    expect(header.querySelector('.conversation-host > .host-where')?.textContent).toBe('cas-src · Atlas · Linux');
+    // Journey F7: the project is the title, once; machine and codename sit beneath it.
+    expect(header.querySelector('h1')?.textContent).toBe('cas-src');
+    expect(header.querySelector('h1 b')?.getAttribute('title')).toBe('cas-src');
+    expect(header.querySelector('h1 .project-badge')).toBeNull();
+    expect(header.textContent?.split('cas-src')).toHaveLength(2);
+    expect(header.querySelector('.conversation-host')?.textContent).toBe('Atlas · Linux · patient-pelican-9');
+    expect(header.querySelector('.conversation-host > .host-where > .codename')?.textContent).toBe('patient-pelican-9');
     expect(header.querySelector('.conversation-host > .host-where + #conversation-connection')).not.toBeNull();
-    expect(header.querySelector('h1 b')?.getAttribute('title')).toBe('patient-pelican-9');
     expect(header.querySelector('#conversation-connection')).not.toBeNull();
     expect(main.querySelector('.conversation-identity h1')).not.toBeNull(); expect(main.querySelectorAll('h1')).toHaveLength(1);
     const view = new ConversationView(document, new ConversationHistory(), { supervisor: 'patient-pelican-9', machine: 'Atlas', project: 'cas-src', header: false });

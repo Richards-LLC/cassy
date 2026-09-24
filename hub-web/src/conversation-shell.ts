@@ -1,4 +1,4 @@
-import { cloudBrand, escapeHtml, projectBadge, projectName } from "./cloud-brand";
+import { cloudBrand, escapeHtml, projectName } from "./cloud-brand";
 import { machineAccentClass, machineMonogram } from "./machine-accent";
 
 export interface ConversationShellModel {
@@ -10,6 +10,23 @@ export interface ConversationShellModel {
   selected: boolean;
   loaded: boolean;
   paired: boolean;
+  /** The list search's text, kept across shell rebuilds. */
+  searchQuery?: string;
+}
+
+export const CONVERSATION_SEARCH_LABEL = "Search conversations";
+export const CONVERSATION_SEARCH_PLACEHOLDER = "Search conversations (Ctrl K)";
+
+/** The list's visible name search (journey F8): filters rows by project,
+ * machine or supervisor. Ctrl/Cmd+K focuses it; pressed again from the field,
+ * it opens the command palette. */
+export function conversationSearchMarkup(query = ""): string {
+  return `<div class="conversation-search" role="search"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true" focusable="false"><circle cx="8.5" cy="8.5" r="5.5"/><path d="M13 13l4 4"/></svg><input id="conversation-search" type="search" aria-label="${CONVERSATION_SEARCH_LABEL}" aria-controls="conversation-list" aria-keyshortcuts="Control+K Meta+K" placeholder="${CONVERSATION_SEARCH_PLACEHOLDER}" autocomplete="off" spellcheck="false" enterkeyhint="go" value="${escapeHtml(query)}"></div>`;
+}
+
+/** The list's empty line while a search hides every row. */
+export function conversationNoMatchText(query: string): string {
+  return `No conversation matches “${query.trim()}”. Search looks at project, machine and supervisor names.`;
 }
 
 /** Compose is a YOU action: the FAB takes the operator's constant colour
@@ -19,21 +36,23 @@ export const composeFabMarkup = '<button id="compose-fab" class="compose-fab" ty
 
 /**
  * The one header above the thread (cas-5b2d): the Pebble thead — machine
- * monogram in the accent, supervisor bold with the project badge beside it,
- * project · machine · connection in mono beneath (same order as a list row) — with the cas-11b01 back link and
+ * monogram in the accent, the project bold as the title (once: journey F7),
+ * machine · supervisor codename · connection in mono beneath (same order as a
+ * list row) — with the cas-11b01 back link and
  * Terminal view control on the row above it. Elevated with --lift-head; the
  * thread view itself renders no header inside this shell.
  *
  * On phone the two rows fold into one (cas-1776): the back link shows only its
  * "‹" glyph and the Terminal control only "Terminal"; each button's aria-label
  * keeps its accessible name ("‹ Conversations", "Terminal view") the same at
- * every width. The codename ellipsises (its title carries it whole) and the
- * host line ellipsises its project · machine part while the connection state
+ * every width. The project ellipsises (its title carries it whole) and the
+ * host line ellipsises its machine · codename part while the connection state
  * after it stays visible.
  */
 export function conversationHeaderMarkup(model: ConversationShellModel): string {
   const host = model.host || "";
-  return `<header class="conversation-heading thead"><div class="conversation-topline"><button id="conversation-back" type="button" aria-label="‹ Conversations"><span class="back-glyph">‹</span><span class="back-label"> Conversations</span></button>${cloudBrand()}<button id="conversation-terminal" type="button" aria-label="Terminal view">Terminal<span class="terminal-suffix"> view</span></button></div><div class="conversation-identity"><span class="conversation-avatar" aria-hidden="true">${escapeHtml(machineMonogram(host || model.supervisor || "?"))}</span><div class="id"><h1><b title="${escapeHtml(model.supervisor || "Supervisor unavailable")}">${escapeHtml(model.supervisor || "Supervisor unavailable")}</b>${projectBadge(model.projectDir)}</h1><span class="conversation-host"><span class="host-where">${escapeHtml([projectName(model.projectDir), host].filter(Boolean).join(" · "))}</span><span id="conversation-connection" role="status"></span></span></div></div></header>`;
+  const project = projectName(model.projectDir);
+  return `<header class="conversation-heading thead"><div class="conversation-topline"><button id="conversation-back" type="button" aria-label="‹ Conversations"><span class="back-glyph">‹</span><span class="back-label"> Conversations</span></button>${cloudBrand()}<button id="conversation-terminal" type="button" aria-label="Terminal view">Terminal<span class="terminal-suffix"> view</span></button></div><div class="conversation-identity"><span class="conversation-avatar" aria-hidden="true">${escapeHtml(machineMonogram(host || model.supervisor || "?"))}</span><div class="id"><h1><b title="${escapeHtml(project)}">${escapeHtml(project)}</b></h1><span class="conversation-host"><span class="host-where">${host ? `${escapeHtml(host)} · ` : ""}<span class="codename">${escapeHtml(model.supervisor || "Supervisor unavailable")}</span></span><span id="conversation-connection" role="status"></span></span></div></div></header>`;
 }
 
 /** Attach is a real affordance beside the field but has no transport yet, so it is disabled and says so. */
@@ -95,7 +114,7 @@ function contextRailMarkup(selected: boolean): string {
 }
 
 /** Appearance & commands as a header icon button (P13): out of the phone thumb zone, named for assistive tech. */
-export const appearanceButtonMarkup = '<button id="command-palette-toggle" class="icon-button" type="button" aria-label="Appearance &amp; commands" title="Appearance &amp; commands"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" aria-hidden="true" focusable="false"><path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="17" r="2"/></svg></button>';
+export const appearanceButtonMarkup = '<button id="command-palette-toggle" class="icon-button" type="button" aria-label="Appearance &amp; commands" title="Appearance &amp; commands (Ctrl K twice)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" aria-hidden="true" focusable="false"><path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="17" r="2"/></svg></button>';
 
 export function conversationShellMarkup(model: ConversationShellModel): string {
   // First run: the welcome carries the one primary "Pair a machine". The list
@@ -105,7 +124,7 @@ export function conversationShellMarkup(model: ConversationShellModel): string {
   const welcomePairs = !model.selected && model.loaded && !model.paired;
   return `<div class="conversation-shell${model.selected ? " thread-open" : ""}${welcomePairs ? " welcome-pairs" : ""}${model.machineId ? ` ${machineAccentClass(model.machineId)}` : ""}">
     <aside class="conversation-sidebar" aria-label="Supervisor conversations">
-      <header class="conversation-list-heading"><div class="conversation-list-top">${cloudBrand()}${appearanceButtonMarkup}</div><div class="conversation-list-title"><h1>Conversations</h1><button id="pair-toggle"${welcomePairs ? ' class="primary"' : ""} type="button">Pair a machine</button></div><p>Your projects. Your supervisors.</p></header>
+      <header class="conversation-list-heading"><div class="conversation-list-top">${cloudBrand()}${appearanceButtonMarkup}</div><div class="conversation-list-title"><h1>Conversations</h1><button id="pair-toggle"${welcomePairs ? ' class="primary"' : ""} type="button">Pair a machine</button></div><p>Your projects. Your supervisors.</p>${model.paired ? conversationSearchMarkup(model.searchQuery) : ""}</header>
       <nav id="conversation-list" aria-label="Choose a supervisor"></nav>
       <div id="conversation-empty" class="conversation-empty" hidden></div>
       <footer><div id="hub-footer-badges" class="hub-footer-badges" aria-label="Hub status"></div></footer>

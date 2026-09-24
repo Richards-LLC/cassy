@@ -86,16 +86,18 @@ Suite: `hub-web/e2e/journeys/`. Run it with `npm run journeys` in
 
 **Steps**
 
-1. See every machine's supervisors in one list — every row names its project and machine
+1. See every machine's supervisors in one list — every row is titled by its project, then its machine, with the supervisor codename beneath
 2. Notice a new reply while away — the row shows an unread count
-3. Jump to a supervisor by name — the command palette filters and opens the conversation
-4. Jump to a supervisor from the keyboard — Ctrl+K, type the name, Enter: the palette closes, the conversation is open and the reply box has focus
+3. Find the conversation through the list search — "Search conversations (Ctrl K)" at the top of the list filters rows by project, machine or supervisor; the header names the project once
+4. Find the conversation from the keyboard — Ctrl+K lands in the search, type the project, Enter: the conversation is open and the reply box has focus
+5. Jump to a supervisor by name — the command palette (grouped Conversations / Appearance / Advanced, Advanced collapsed) filters and opens the conversation
+6. Jump to a supervisor from the keyboard — Ctrl+K twice opens the palette, type the name, Enter: the palette closes, the conversation is open and the reply box has focus
 
 **Expected experience**
 
-- Rows read project first, then machine, so two machines never look alike.
+- Rows read project first, then machine, so two machines never look alike; the generated codename is tertiary.
 - New replies and questions waiting for me are visible on the row without opening it.
-- The palette finds a supervisor by name from anywhere.
+- A visible search field finds a conversation by project, machine or supervisor; the palette does too, from anywhere.
 
 **Edge paths**
 

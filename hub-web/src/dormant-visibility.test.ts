@@ -43,7 +43,7 @@ describe("dormant visibility", () => {
   });
 
   it("labels the off-by-default recovery command", () => {
-    expect(dormantCommandLabel(false)).toEqual({ title: "Dormant · Hidden", hint: "Show sessions for recovery" });
-    expect(dormantCommandLabel(true)).toEqual({ title: "Dormant · Shown", hint: "Hide sessions without a live supervisor" });
+    expect(dormantCommandLabel(false)).toEqual({ title: "Show dormant sessions", hint: "Sessions without a live supervisor, for recovery" });
+    expect(dormantCommandLabel(true)).toEqual({ title: "Hide dormant sessions", hint: "List only sessions with a live supervisor" });
   });
 });

@@ -423,7 +423,7 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(main).toContain('empty.className = "empty empty-pane-slot"');
     // Cassy Cloud has no pane drag-and-drop, so the empty slot must not promise one.
     expect(main).not.toContain("drag it here");
-    expect(attentionView).toContain('message.textContent = "All clear"');
+    expect(attentionView).toContain('message.textContent = options.outage ?? "All clear"');
     expect(attentionView).toContain("Last event ${new Date(latest.createdAt).toLocaleString()}");
   });
 

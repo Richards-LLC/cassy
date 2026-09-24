@@ -132,4 +132,49 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
     await expect(banner).toBeHidden({ timeout: 15_000 });
     await page.emulateMedia({ colorScheme: null });
   });
+
+  await journey.stage("In Terminal view, nothing claims all clear or live during an outage", async () => {
+    // cas-edcd / cas-4a93: beside "Lost connection … Reconnecting…" the
+    // Attention rail used to say "All clear", the machine rail "live · 8ms",
+    // and the header kept "CONTROL" and a latency chip.
+    await page.setViewportSize({ width: 1280, height: 720 });
+    await page.getByRole("button", { name: "Terminal view" }).click();
+    const atlas = page.locator("#machine-rail-list .machine-icon").filter({ hasText: "Atlas" });
+    const read = () => page.evaluate(() => {
+      const text = (selector: string) => document.querySelector<HTMLElement>(selector)?.innerText.trim() ?? "";
+      const mode = document.querySelector<HTMLElement>(".mode-badge");
+      return {
+        banner: text(".terminal-disconnected-banner"),
+        rail: text("#attention-panel .attention-empty p"),
+        machine: [...document.querySelectorAll<HTMLElement>("#machine-rail-list .machine-icon")].map((button) => button.getAttribute("aria-label") ?? "").find((label) => label.startsWith("Atlas")) ?? "",
+        mode: mode && !mode.hidden && mode.getClientRects().length > 0 ? mode.innerText : "",
+        latency: text("[data-machine-latency]"),
+      };
+    });
+    await expect(atlas).toHaveAttribute("aria-label", /^Atlas · Linux, live/);
+    const before = await read();
+    expect(before.rail).toBe("All clear");
+    expect(before.mode).toBe("CONTROL");
+    hub.hold(PELICAN);
+    hub.drop(PELICAN);
+    const together = await page.waitForFunction(() => {
+      const banner = document.querySelector<HTMLElement>(".terminal-disconnected-banner")?.innerText ?? "";
+      const rail = document.querySelector<HTMLElement>("#attention-panel .attention-empty p")?.innerText ?? "";
+      return banner.includes("Reconnecting") && rail !== "All clear";
+    });
+    expect(await together.jsonValue()).toBe(true);
+    const during = await read();
+    expect(during.banner).toBe("Lost connection to Atlas · Linux. Reconnecting…");
+    expect(during.rail).toBe("Not all clear. Atlas · Linux is reconnecting.");
+    expect(during.machine).toBe("Atlas · Linux, Reconnecting");
+    expect(during.mode, "no control is claimed while the session is down").toBe("");
+    expect(during.latency).toBe("Reconnecting");
+    hub.release(PELICAN);
+    await expect(banner).toBeHidden({ timeout: 15_000 });
+    await expect.poll(async () => (await read()).rail, { timeout: 15_000 }).toBe("All clear");
+    const after = await read();
+    expect(after.machine).toMatch(/^Atlas · Linux, live/);
+    expect(after.mode).toBe("CONTROL");
+    expect(after.latency).toMatch(/^\d+ms$/);
+  });
 });

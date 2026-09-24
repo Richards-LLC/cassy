@@ -728,6 +728,8 @@ main {
 }
 
 .mode-badge.observer { color: var(--text-mid); }
+/* No control to claim while the session is reconnecting (cas-edcd, cas-4a93). */
+.mode-badge[hidden] { display: none; }
 
 .session-header .actions {
   display: flex;
@@ -1615,6 +1617,10 @@ main {
   margin: 0 0 var(--space-1);
   color: var(--text-hi);
 }
+
+/* Beside a reconnect banner the empty rail names the outage in the warning
+   ink the footer's partial dot uses, never "All clear" (cas-edcd). */
+.attention-empty.outage p { color: var(--state-warn); }
 
 .attention-last-event {
   font-family: var(--font-ui);

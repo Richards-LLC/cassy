@@ -2427,10 +2427,16 @@ function render(captureDraft = true): void {
   // heartbeat can fill or empty it without rebuilding the status section.
   const staleStatusText = statusIsStale ? `Not live — reconnecting.${staleStatusTail}` : undefined;
   const terminalSessionKey = selected && selectedSession ? sessionKey(selected.id, selectedSession) : undefined;
-  const connectionState = connectionClass(connectionSnapshot);
-  const connectionText = selected ? connectionLabel(connectionSnapshot) : "idle";
+  // The header reads the same one connection state as the banner, the row and
+  // the footer (cas-a447). While the session is down it names that state
+  // instead of the machine's live latency, and it claims no control
+  // (cas-edcd, cas-4a93): the lease cannot be exercised until it is back.
+  const headerConnection = selected && selectedSession ? conversationConnection(selected.id, selectedSession) : machineConnectionSnapshot;
+  const sessionDown = Boolean(selected && selectedSession) && headerConnection !== undefined && headerConnection.phase !== "live";
+  const connectionState = connectionClass(sessionDown ? headerConnection : connectionSnapshot);
+  const connectionText = selected ? connectionLabel(sessionDown ? headerConnection : connectionSnapshot) : "idle";
   const latency = machineConnectionSnapshot?.latencyMs;
-  const latencyText = latency === undefined ? "Status unavailable" : `${latency}ms`;
+  const latencyText = sessionDown ? fleetConnectionLabel(headerConnection, selected?.id) : latency === undefined ? "Status unavailable" : `${latency}ms`;
   const counts = attentionCounts(attention);
   const infoItems = dismissableInfoItems(attention);
   // With no paired machine and no event to inspect, the canvas is the only
@@ -2466,7 +2472,7 @@ function render(captureDraft = true): void {
   const liveRegions: LiveRegionView = {
     ...(selected ? {
       connection: { state: connectionState, title: compatibility ?? connectionText, latencyText },
-      mode: { badge: mode, compact: lease?.held_by_me ? "CTL" : "OBS" },
+      mode: { badge: mode, compact: lease?.held_by_me ? "CTL" : "OBS", hidden: sessionDown },
     } : {}),
     ...(showSessionControls ? {
       controlAction: { label: controlActionLabel, ...(takeControlReason ? { disabledReason: takeControlReason } : {}) },
@@ -2573,7 +2579,7 @@ function render(captureDraft = true): void {
             ${backTarget ? `<button id="session-back" class="session-back" type="button" aria-label="${escapeAttr(backText)}" title="${escapeAttr(backText)}"><span aria-hidden="true">‹</span></button>` : ""}
             <h1 class="${selectedSession ? "toolbar-session-title" : ""}"><button id="session-picker-toggle" class="session-picker-toggle" type="button" aria-haspopup="dialog" aria-expanded="${sessionPickerOpen}" aria-label="${escapeAttr(sessionPickerLabel)}" title="${escapeAttr(sessionPickerLabel)}"><span class="session-picker-name">${escapeHtml(sessionTitleLead)}</span>${sessionTitleCodename ? `<span class="session-picker-codename codename">${escapeHtml(sessionTitleCodename)}</span>` : ""}<span class="session-picker-caret" aria-hidden="true">▾</span></button></h1>
           </div>
-          ${selected ? `<span class="machine-chip" data-compact-label="${escapeAttr(compactMachineLabel)}" title="${escapeAttr(machineLabel)}">${escapeHtml(machineLabel)}</span><span class="mode-badge ${mode.toLowerCase()}" data-compact-label="${lease?.held_by_me ? "CTL" : "OBS"}">${mode}</span><span class="connection-summary ${connectionState}" title="${escapeAttr(compatibility ?? connectionText)}"><span class="connection-dot"></span><span data-machine-latency="${escapeAttr(selected.id)}">${latencyText}</span></span>` : ""}
+          ${selected ? `<span class="machine-chip" data-compact-label="${escapeAttr(compactMachineLabel)}" title="${escapeAttr(machineLabel)}">${escapeHtml(machineLabel)}</span><span class="mode-badge ${mode.toLowerCase()}" data-compact-label="${lease?.held_by_me ? "CTL" : "OBS"}"${sessionDown ? " hidden" : ""}>${mode}</span><span class="connection-summary ${connectionState}" title="${escapeAttr(compatibility ?? connectionText)}"><span class="connection-dot"></span><span data-machine-latency="${escapeAttr(selected.id)}">${latencyText}</span></span>` : ""}
           <div class="actions"><button id="command-palette-toggle" class="command-palette-trigger" type="button" aria-label="Open command palette" title="Command palette (Ctrl or Cmd + K)">⌘K</button>${showSessionControls ? `<span class="control-action" title="${escapeAttr(takeControlReason ?? controlActionLabel)}"><button id="lease" data-compact-label="${lease?.held_by_me ? "Rel" : "Ctrl"}" aria-label="${escapeAttr(controlActionLabel)}"${takeControlReason ? ` aria-disabled="true" data-disabled-reason="${escapeAttr(takeControlReason)}" aria-describedby="control-disabled-reason"` : ""}>${controlActionLabel}</button>${takeControlReason ? `<span id="control-disabled-reason" class="sr-only">${escapeHtml(takeControlReason)}</span>` : ""}</span><button id="interrupt" class="danger" data-compact-label="Int" aria-label="Interrupt selected pane" title="${escapeAttr(interruptReason ?? "Interrupt selected pane")}"${interruptReason ? ` aria-disabled="true" data-disabled-reason="${escapeAttr(interruptReason)}"` : ""}>Interrupt</button>` : ""}</div>
         </header>
         <section id="pane-grid" class="pane-grid"${terminalSessionKey ? ` data-session-key="${escapeAttr(terminalSessionKey)}"` : ""}>${selectedSession ? '<div class="empty">Connecting to terminal…</div>' : showFleetBoard ? '<div id="fleet-board" class="fleet-board" aria-label="Fleet"></div>' : `<div class="empty empty-pane-slot">${emptyCanvasMarkup()}</div>`}</section>
@@ -2704,7 +2710,8 @@ function renderRegions(context: RegionContext): void {
     railCounts.setAttribute("aria-label", `Open attention. ${attentionSummary(context.counts).description}`);
     const summary = renderAttentionSummary(context.counts);
     const label = summary.querySelector(".attention-summary-label");
-    if (label) label.textContent = attentionSummary(context.counts).total > 0 ? "Needs you" : "Clear";
+    // "Clear" beside a reconnect banner is a claim the page contradicts (cas-edcd).
+    if (label) label.textContent = attentionSummary(context.counts).total > 0 ? "Needs you" : attentionOutage() ? "Reconnecting" : "Clear";
     railCounts.replaceChildren(summary);
   }
   renderAttention();
@@ -2738,8 +2745,8 @@ function renderMachineNavigation(): void {
     ...[...machines.values()].map((machine) => [
       machine.id,
       machine.label,
-      connectionClass(connectionStates.get(machine.id)),
-      connectionLabel(connectionStates.get(machine.id)),
+      connectionClass(machineFooterConnection(machine.id)),
+      machineRailLabel(machine.id, machineFooterConnection(machine.id)),
       visibleSessions(machine.id).map((item) => item.name).join(","),
     ].join("|")),
   ].join("~");
@@ -2883,8 +2890,15 @@ function selectMachine(machine: StoredMachine): void {
   render();
 }
 
+/** "live · 8ms" while live; otherwise the plain phase the footer and rows use ("Reconnecting"). */
+function machineRailLabel(machineId: string, snapshot: ConnectionState | undefined): string {
+  return !snapshot || snapshot.phase === "live" ? connectionLabel(snapshot) : fleetConnectionLabel(snapshot, machineId);
+}
+
 function machineRailButton(machine: StoredMachine): HTMLButtonElement {
-  const snapshot = connectionStates.get(machine.id);
+  // The footer's view of the machine: a dropped session makes it reconnecting,
+  // as the banner, header and row already say (cas-edcd).
+  const snapshot = machineFooterConnection(machine.id);
   const state = connectionClass(snapshot);
   const button = document.createElement("button");
   button.className = `machine-icon ${machineAccentClass(machine.id)} ${machine.id === selectedMachineId ? "active" : ""}`;
@@ -2892,8 +2906,8 @@ function machineRailButton(machine: StoredMachine): HTMLButtonElement {
   // The dot leads so it can never be clipped by the chip's corner radius, and
   // the phone shows the machine's actual name instead of two initials.
   button.innerHTML = `<span class="machine-state ${state}"></span><span class="machine-initials">${escapeHtml(machineInitials(machine.label))}</span><span class="machine-name">${escapeHtml(machine.label)}</span>`;
-  button.title = `${machine.label} · ${connectionLabel(snapshot)}`;
-  button.setAttribute("aria-label", `${machine.label}, ${connectionLabel(snapshot)}`);
+  button.title = `${machine.label} · ${machineRailLabel(machine.id, snapshot)}`;
+  button.setAttribute("aria-label", `${machine.label}, ${machineRailLabel(machine.id, snapshot)}`);
   button.onclick = () => selectMachine(machine);
   return button;
 }
@@ -2904,9 +2918,9 @@ function machineTreeGroup(machine: StoredMachine): HTMLElement {
   const machineRow = document.createElement("button");
   machineRow.className = "machine-row";
   machineRow.type = "button";
-  const snapshot = connectionStates.get(machine.id);
+  const snapshot = machineFooterConnection(machine.id);
   const state = connectionClass(snapshot);
-  machineRow.innerHTML = `<span class="machine-state ${state}"></span><strong>${escapeHtml(machine.label)}</strong><small>${escapeHtml(connectionLabel(snapshot))}</small>`;
+  machineRow.innerHTML = `<span class="machine-state ${state}"></span><strong>${escapeHtml(machine.label)}</strong><small>${escapeHtml(machineRailLabel(machine.id, snapshot))}</small>`;
   machineRow.onclick = () => selectMachine(machine);
   group.append(machineRow);
   if (machine.id === selectedMachineId) {
@@ -3079,7 +3093,27 @@ function renderAttention(): void {
       await navigator.clipboard.writeText(payload);
       toast("Event payload copied");
     },
-  }, { animateIds: newCriticalAttentionIds, reclassifyIds: reclassifiedAttentionIds });
+  }, { animateIds: newCriticalAttentionIds, reclassifyIds: reclassifiedAttentionIds, outage: attentionOutage() });
+}
+
+/**
+ * The outage the Attention rail sits beside, in the words the rest of the page
+ * uses, or undefined when everything it covers is live (cas-edcd). The
+ * conversation's rail covers its own session; Terminal view's rail covers the
+ * fleet. A machine that has never been live in this visit is still
+ * connecting, not an outage.
+ */
+function attentionOutage(): string | undefined {
+  const down = (hubPresentation === "conversation" && selectedMachineId
+    ? [[selectedMachineId, conversationConnection(selectedMachineId, selectedSession)] as const]
+    : [...machines.keys()].map((id) => [id, machineFooterConnection(id)] as const))
+    .filter(([id, state]) => lastLiveAt.has(id) && state !== undefined && state.phase !== "live" && state.phase !== "idle")
+    .map(([id, state]) => {
+      const label = machines.get(id)?.label ?? "A machine";
+      const phase = fleetConnectionLabel(state, id);
+      return phase === "Reconnecting" ? `${label} is reconnecting` : `${label}: ${phase}`;
+    });
+  return down.length ? `Not all clear. ${down.join("; ")}.` : undefined;
 }
 
 async function performAttentionAction(item: AttentionItem, action: AttentionAction): Promise<void> {

@@ -7,6 +7,63 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.31.0] - 2026-09-24
+
+### Added
+
+- Commander opens published reports through a signed, team-scoped link.
+- `cas integrate violet` adds Violet as an integration with its own issue
+  routing and tools; the previous MechaCassy names remain available for one
+  release.
+- A disposable Neon database branch can be provisioned for one task, keeping
+  its SQL work away from production.
+- Read-only proxy access exposes runtime errors and logs without granting
+  write access.
+
+### Changed
+
+- Commander shows a supervisor session even when it has no workers, leads
+  with the project in the terminal, picker and command palette, and keeps
+  conversation turns in order across reloads and clock skew.
+- A team-linked project syncs in team scope only; it no longer mixes personal
+  push or pull into that project's sync.
+- Memory keeps one current handoff per project and role while retaining older
+  handoffs as superseded history. Task creation, start and spawn surface
+  relevant rules and memories more reliably.
+- The release train runs on stock macOS without manual GNU-tool or session
+  shims. A guarded release checkout hands tag publication to an operator
+  before the audit instead of failing at the final push.
+
+### Fixed
+
+- Commander no longer offers live controls for a disconnected session. A
+  failed send becomes "Not confirmed" with Retry instead of spinning forever;
+  refused replies explain the next action and keep keyboard focus there.
+- Commander clears the command palette after a jump, dismisses the phone
+  keyboard after an Enter jump, keeps notices clear of headings, and sizes
+  phone actions for touch. Long names and composer hints stay readable.
+- Opening a report now distinguishes a Cloud failure from a machine that did
+  not answer. Fleet summaries no longer start with a stray separator.
+- On macOS, `cas-update` no longer claims it verified old running processes
+  without inspecting them. It names the processes to restart manually and
+  finds the source checkout through the explicit setting, its own Git tree,
+  or the existing default path.
+- A rejected independent review can be reclaimed after its task resets, and
+  re-parking a changed commit retires the earlier round. Close gates judge
+  only the task's own diff and report required proof targets.
+- Spawn requests reject an undeliverable `prompt` instead of silently dropping
+  it, and their receipts state whether a brief was delivered. Assignment
+  warnings no longer mistake a path mentioned in prose for an output location.
+- Task transfer accepts a worker name and moves a blocked task. Merge recovery
+  keeps the rebased delivery attached to its task, and the integration sweep
+  no longer blames a failure on the base when that test exists only in the
+  new changes.
+- Tag reminders wait for the published tag, red-run notifications require
+  the branch tip and a failed job, and inbox delivery no longer buries the
+  message that triggered a wake behind old replays.
+- Retrieval evaluation uses one clock across its modes, and timing-sensitive
+  terminal and preflight tests are more reliable on loaded machines.
+
 ## [3.30.0] - 2026-09-24
 
 ### Changed

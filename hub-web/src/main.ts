@@ -2937,7 +2937,22 @@ function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | und
   const terminal = document.querySelector<HTMLButtonElement>("#conversation-terminal");
   if (terminal) terminal.onclick = () => { hubPresentation = "terminal"; const storage = paneLayoutStorage(); if (storage && selectedMachineId && selectedSession) saveTranscriptView(storage, sessionKey(selectedMachineId, selectedSession), "terminal"); render(); };
   const returning = document.querySelector<HTMLButtonElement>("#conversation-return");
-  if (returning) returning.onclick = () => { hubPresentation = "conversation"; render(); };
+  if (returning) returning.onclick = (event) => {
+    hubPresentation = "conversation";
+    render();
+    // Back from the terminal workspace, land where the next keystroke belongs,
+    // as a palette jump does (cas-9648): the reply box for the keyboard (Enter
+    // arrives as a click with detail 0) and a mouse. A touch tap would raise a
+    // soft keyboard over the thread, so it lands on the thread to read instead.
+    // Either way, never on <body> (cas-cf8e).
+    const keyboardOrMouse = event.detail === 0 || finePointerClick(event);
+    queueMicrotask(() => {
+      const composer = document.querySelector<HTMLTextAreaElement>("#message-text");
+      if (keyboardOrMouse && composer) composer.focus();
+      if (keyboardOrMouse && composer && document.activeElement === composer) return;
+      document.querySelector<HTMLElement>(".conversation-reading.thread")?.focus({ preventScroll: true });
+    });
+  };
   // Phone compose FAB: open the thread that is waiting on the operator, else
   // the first one, and land in its composer; with nothing paired, pair.
   const compose = document.querySelector<HTMLButtonElement>("#compose-fab");

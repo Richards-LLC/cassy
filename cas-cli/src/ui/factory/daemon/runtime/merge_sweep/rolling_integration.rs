@@ -579,6 +579,7 @@ fn integrate(
     let mut affected = vec![request.epic_id.clone()];
     let mut base_failure = None;
     if result.status == SweepStatus::Failed {
+        let failed_targets = normalized_failures(&result.failures);
         let mut probe_settings = settings.clone();
         probe_settings.nextest_filter = failing_filter(&result.failures);
         let mut probe = |commit: &str| {
@@ -592,15 +593,12 @@ fn integrate(
                 probe_settings.clone(),
                 Arc::clone(cancel),
             );
-            match probe_result.status {
-                SweepStatus::Passed => Ok(true),
-                SweepStatus::Failed => Ok(false),
-                other => Err(format!(
-                    "attribution probe {} at {commit}; log {}",
-                    status_text(other),
+            target_probe_passed(&failed_targets, &probe_result).map_err(|error| {
+                format!(
+                    "attribution probe at {commit}: {error}; log {}",
                     probe_result.log_path.display()
-                )),
-            }
+                )
+            })
         };
         if let Some(prior) = &previous {
             match probe(prior) {
@@ -631,7 +629,7 @@ fn integrate(
                 affected = receipt.epics.iter().map(|epic| epic.id.clone()).collect();
                 let evidence = BaseFailure {
                     base: base.clone(),
-                    failing: normalized_failures(&result.failures),
+                    failing: failed_targets,
                 };
                 base_failure = Some(evidence.clone());
                 result.base_failure = Some(evidence);
@@ -687,9 +685,9 @@ fn integrate(
             accepted_at: None,
         })
     };
-    match sweep_tasks.and_then(|report| {
-        crate::factory_sweep_tasks::write_report(&shared_cas, &report)
-    }) {
+    match sweep_tasks
+        .and_then(|report| crate::factory_sweep_tasks::write_report(&shared_cas, &report))
+    {
         Ok(path) if result.status == SweepStatus::Failed && !result.failures.is_empty() => {
             result
                 .summary
@@ -698,7 +696,9 @@ fn integrate(
         Ok(_) => {}
         Err(error) => {
             tracing::warn!(%error, "could not publish sweep task report");
-            result.summary.push_str(&format!("; fix proposal report failed: {error}"));
+            result
+                .summary
+                .push_str(&format!("; fix proposal report failed: {error}"));
         }
     }
     write_receipt(&receipt_path, &receipt)?;
@@ -943,6 +943,29 @@ fn normalized_failures(failures: &[String]) -> Vec<String> {
         .collect()
 }
 
+/// A failing process does not prove that the integration tip's named tests
+/// failed on this prefix. Nextest can fail before selecting a test, and an
+/// unfiltered/custom runner can fail on a different test entirely.
+fn target_probe_passed(targets: &[String], probe: &SweepResult) -> Result<bool, String> {
+    if targets.is_empty() {
+        return Err("integration failure has no named test targets".to_owned());
+    }
+    match probe.status {
+        SweepStatus::Passed => Ok(true),
+        SweepStatus::Failed => {
+            let failed = normalized_failures(&probe.failures);
+            if failed.is_empty() {
+                if probe.summary.contains("0 tests run") {
+                    return Ok(true);
+                }
+                return Err("probe failed without named test results".to_owned());
+            }
+            Ok(!targets.iter().all(|target| failed.contains(target)))
+        }
+        other => Err(format!("probe {}", status_text(other))),
+    }
+}
+
 fn write_receipt(path: &Path, receipt: &IntegrationReceipt) -> Result<(), String> {
     fs::create_dir_all(path.parent().ok_or("receipt parent missing")?)
         .map_err(|error| error.to_string())?;
@@ -1110,9 +1133,7 @@ fn failing_filter(failures: &[String]) -> Option<String> {
     let names: Vec<String> = failures
         .iter()
         .filter_map(|line| failure_target(line))
-        .map(|name| {
-            format!("test(/^{}$/)", regex::escape(&name).replace('/', "\\/"))
-        })
+        .map(|name| format!("test(/^{}$/)", regex::escape(&name).replace('/', "\\/")))
         .collect();
     (!names.is_empty()).then(|| names.join(" | "))
 }
@@ -1682,6 +1703,90 @@ mod tests {
     }
 
     #[test]
+    fn probe_requires_the_same_named_test_to_fail() {
+        let mut probe = SweepResult {
+            request: SweepRequest {
+                epic_id: "fixture".into(),
+                target_branch: "main".into(),
+                commit: "base".into(),
+            },
+            status: SweepStatus::Failed,
+            log_path: PathBuf::from("probe.log"),
+            summary: "Summary: 1 failed".into(),
+            failures: vec!["FAIL [0.1s] cas::fixture unrelated_test".into()],
+            integration_epics: Vec::new(),
+            base_failure: None,
+            after_deferrals: 0,
+        };
+        let targets = vec!["cas::fixture epic_added_test".to_owned()];
+        assert_eq!(target_probe_passed(&targets, &probe), Ok(true));
+        probe.failures = vec!["FAIL [0.1s] cas::fixture epic_added_test".into()];
+        assert_eq!(target_probe_passed(&targets, &probe), Ok(false));
+        probe.failures.clear();
+        probe.summary = "Summary: 0 tests run".into();
+        assert_eq!(target_probe_passed(&targets, &probe), Ok(true));
+        probe.summary = "compilation failed".into();
+        assert!(target_probe_passed(&targets, &probe).is_err());
+    }
+
+    #[test]
+    fn epic_added_test_is_not_attributed_to_unrelated_base_failure() {
+        let repo = fixture();
+        let added = epic(repo.path(), "cas-added", "epic-test", "test exists\n");
+        git(repo.path(), &["checkout", "--detach", "main"]);
+        git(
+            repo.path(),
+            &["remote", "add", "origin", repo.path().to_str().unwrap()],
+        );
+        let stub = repo.path().join("cargo-stub.sh");
+        crate::test_paths::warm_stub(
+            &stub,
+            "#!/bin/sh\nif [ -f epic-test ]; then\n  echo 'FAIL [0.1s] cas::fixture epic_added_test'\nelse\n  echo 'FAIL [0.1s] cas::fixture unrelated_base_test'\nfi\necho 'Summary: 1 failed'\nexit 1\n",
+        );
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[
+            ("CARGO", stub.to_str().unwrap()),
+            ("CAS_FACTORY_BUILD_GUARD", "off"),
+        ]);
+        let cas_dir = crate::store::init_cas_dir(repo.path()).unwrap();
+        let tasks = crate::store::open_task_store(&cas_dir).unwrap();
+        let mut task = Task::new(added.id.clone(), added.id.clone());
+        task.task_type = TaskType::Epic;
+        task.branch = Some(added.branch.clone());
+        tasks.add(&task).unwrap();
+        let mut settings = SweepSettings::from(&FactoryConfig::default());
+        settings.nice_cargo = false;
+        let result = execute(
+            repo.path(),
+            &cas_dir,
+            SweepRequest {
+                epic_id: added.id.clone(),
+                target_branch: added.branch,
+                commit: added.tip,
+            },
+            settings,
+            Arc::new(AtomicBool::new(false)),
+            false,
+        );
+        assert_eq!(result.status, SweepStatus::Failed);
+        assert!(
+            result.summary.contains("introduced by cas-added"),
+            "{}",
+            result.summary
+        );
+        assert!(
+            !result.summary.contains("also fail on origin/main"),
+            "{}",
+            result.summary
+        );
+        assert!(result.base_failure.is_none());
+        let receipt: IntegrationReceipt = serde_json::from_slice(
+            &fs::read(cas_dir.join(LOG_DIR).join("integration.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(receipt.base_failure.is_none());
+    }
+
+    #[test]
     fn runtime_union_sweep_receipt_and_close_reopen_with_stub_cargo() {
         let repo = fixture();
         let first = epic(repo.path(), "cas-0081", "a", "one");
@@ -2214,12 +2319,8 @@ echo 'Summary: 1 passed'
         )
         .unwrap();
 
-        let request = recovery_request_for_any_open_epic(
-            repo.path(),
-            &cas_dir,
-            "recovery-session",
-        )
-        .unwrap();
+        let request =
+            recovery_request_for_any_open_epic(repo.path(), &cas_dir, "recovery-session").unwrap();
         assert_eq!(request.epic_id, open_delivery.id);
         assert_eq!(request.target_branch, open_delivery.branch);
         assert_eq!(request.commit, open_delivery.tip);
@@ -2395,10 +2496,7 @@ echo 'Summary: 1 passed'
                 .collect::<Vec<_>>(),
             [open.id.as_str()]
         );
-        assert!(!receipt
-            .epics
-            .iter()
-            .any(|epic| epic.id == closed.id));
+        assert!(!receipt.epics.iter().any(|epic| epic.id == closed.id));
         assert_eq!(
             receipt.test_process_env_scrubbed,
             scrubbed_test_process_identity_names()

@@ -98,6 +98,41 @@ pub(crate) fn qa_evidence_close_gate(
     target_branch: &str,
     commit_receipt: Option<&str>,
 ) -> Result<Vec<String>, String> {
+    qa_evidence_close_gate_for_paths(cas_root, task, repo, target_branch, commit_receipt, None)
+}
+
+/// The target a delivery is diffed against: `origin/<target>` when that ref
+/// exists, since a worker's local target is routinely stale after a PR merge,
+/// otherwise the local branch (cas-bde8, GH #978).
+fn live_target_ref(repo: &Path, target_branch: &str) -> String {
+    let origin = format!("origin/{target_branch}");
+    if resolve_branch_sha(repo, &origin).is_some() {
+        origin
+    } else {
+        target_branch.to_string()
+    }
+}
+
+/// [`qa_evidence_close_gate`] judged on `attributed_paths`: the paths this
+/// task's own delivery commits changed, as selected by the close path's task
+/// attribution (cas-bde8, GH #978).
+///
+/// Diffing the branch from its merge-base with the target counted an earlier
+/// task's commits on a reused factory branch as this task's diff. That happens
+/// whenever the target has not absorbed them as ancestors: a stale local
+/// target, or a squash-merged PR. A backend-only task was then asked for web
+/// QA evidence for the previous task's UI. When the attribution found this
+/// task's changes, only those are judged. Otherwise (no attributable commits,
+/// or legacy history) the branch diff against the live target applies, as
+/// before.
+pub(crate) fn qa_evidence_close_gate_for_paths(
+    cas_root: &Path,
+    task: &Task,
+    repo: &Path,
+    target_branch: &str,
+    commit_receipt: Option<&str>,
+    attributed_paths: Option<&[String]>,
+) -> Result<Vec<String>, String> {
     let Ok(config) = crate::config::Config::load(cas_root) else {
         return Ok(Vec::new());
     };
@@ -112,11 +147,14 @@ pub(crate) fn qa_evidence_close_gate(
         return Ok(Vec::new());
     };
     let range = (!target_branch.is_empty())
-        .then(|| delivery_range(repo, &head, target_branch))
+        .then(|| delivery_range(repo, &head, &live_target_ref(repo, target_branch)))
         .flatten();
-    let changed = range
-        .as_ref()
-        .and_then(|(from, to)| range_paths(repo, from, to));
+    let changed = match attributed_paths.filter(|paths| !paths.is_empty()) {
+        Some(paths) => Some(paths.to_vec()),
+        None => range
+            .as_ref()
+            .and_then(|(from, to)| range_paths(repo, from, to)),
+    };
     let journeys = changed
         .as_deref()
         .map(|paths| catalog_journeys_for(repo, paths))
@@ -213,6 +251,92 @@ mod tests {
         let refusal = qa_evidence_close_gate(&cas_root, &task, &repo, "main", None)
             .expect_err("the live tip carries a web surface");
         assert!(refusal.contains("app.css"), "{refusal}");
+    }
+
+    /// cas-bde8 (GH #978): task A's UI commits on a reused factory branch were
+    /// merged by PR, but the local `main` was never refreshed. Backend-only
+    /// task B, next on the same branch, is judged against `origin/main`, where
+    /// A's commits already live, so it owes no web QA evidence.
+    #[test]
+    fn a_stale_local_target_does_not_charge_the_previous_tasks_ui_to_this_task() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        commit_file(&repo, "README.md", "base\n");
+        git(&repo, &["switch", "-q", "-c", "factory/worker"]);
+        let task_a = commit_file(&repo, "hub-web/dist/app.css", "body { color: red }\n");
+        // The PR merged A into the remote main; local main is stale.
+        git(&repo, &["switch", "-q", "--detach", "main"]);
+        git(
+            &repo,
+            &["merge", "-q", "--no-ff", "-m", "Merge PR: task A", &task_a],
+        );
+        let merged = git(&repo, &["rev-parse", "HEAD"]);
+        git(&repo, &["update-ref", "refs/remotes/origin/main", &merged]);
+        git(&repo, &["switch", "-q", "factory/worker"]);
+        commit_file(&repo, "src/lib.rs", "pub fn backend() {}\n");
+        let cas_root = temp.path().join(".cas");
+        std::fs::create_dir_all(&cas_root).unwrap();
+        let mut task = Task::new("cas-bde8-b".to_string(), "Backend fix".to_string());
+        task.assignee = Some("worker".to_string());
+
+        qa_evidence_close_gate(&cas_root, &task, &repo, "main", None)
+            .expect("task B's own diff is backend-only against origin/main");
+    }
+
+    /// cas-bde8 (GH #978): a squash-merged PR leaves task A's commits outside
+    /// the target's ancestry, so no branch diff can separate them. The close
+    /// path's task-attributed paths can, and they are what is judged.
+    #[test]
+    fn attributed_paths_judge_only_this_tasks_delivery_after_a_squash_merge() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        commit_file(&repo, "README.md", "base\n");
+        git(&repo, &["switch", "-q", "-c", "factory/worker"]);
+        commit_file(&repo, "hub-web/dist/app.css", "body { color: red }\n");
+        // Squash merge: the remote main carries A's change as a new commit.
+        git(&repo, &["switch", "-q", "--detach", "main"]);
+        commit_file(&repo, "hub-web/dist/app.css", "body { color: red }\n");
+        let squashed = git(&repo, &["rev-parse", "HEAD"]);
+        git(
+            &repo,
+            &["update-ref", "refs/remotes/origin/main", &squashed],
+        );
+        git(&repo, &["switch", "-q", "factory/worker"]);
+        commit_file(&repo, "src/lib.rs", "pub fn backend() {}\n");
+        let cas_root = temp.path().join(".cas");
+        std::fs::create_dir_all(&cas_root).unwrap();
+        let mut task = Task::new("cas-bde8-squash".to_string(), "Backend fix".to_string());
+        task.assignee = Some("worker".to_string());
+
+        let own = vec!["src/lib.rs".to_string()];
+        qa_evidence_close_gate_for_paths(
+            &cas_root,
+            &task,
+            &repo,
+            "main",
+            None,
+            Some(own.as_slice()),
+        )
+        .expect("only this task's backend change is judged");
+        // Without attribution the branch diff still sees A's UI: this is why
+        // the close path passes the attributed paths.
+        qa_evidence_close_gate(&cas_root, &task, &repo, "main", None)
+            .expect_err("the branch-wide diff alone cannot tell A from B");
+        // Nothing attributed falls back to the branch diff rather than
+        // waving the gate through.
+        qa_evidence_close_gate_for_paths(
+            &cas_root,
+            &task,
+            &repo,
+            "main",
+            None,
+            Some(Vec::<String>::new().as_slice()),
+        )
+        .expect_err("an empty attribution is not evidence of a backend-only task");
     }
 
     #[test]

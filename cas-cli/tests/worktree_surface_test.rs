@@ -5378,3 +5378,179 @@ async fn test_system_a_crud_refusal_names_real_gate_and_prints_valid_toml() {
         );
     }
 }
+
+/// cas-c85e (GH #997) fixture: a repo whose selector is
+/// `remote:github.com/org/c85e-target`, a live `epic/c85e` lane, and alice's
+/// committed worktree. Returns the repo, env guard, and CAS root.
+fn c85e_repo_with_alice_work() -> (GitRepo, TestEnvGuard, PathBuf, PathBuf) {
+    let repo = GitRepo::new();
+    let mut env = test_env();
+    run_git(
+        &["remote", "add", "origin", "git@github.com:org/c85e-target.git"],
+        &repo.root,
+    );
+    let cas_root = init_cas_dir(&repo.root, &mut env).expect("init_cas_dir");
+    disable_system_a(&cas_root);
+    run_git(&["branch", "epic/c85e"], &repo.root);
+
+    let wt_path = cas_root.join("worktrees").join("alice");
+    repo.add_worktree(&wt_path, "factory/alice");
+    std::fs::write(wt_path.join("c85e-work.txt"), "moved task work").unwrap();
+    run_git(&["add", "c85e-work.txt"], &wt_path);
+    run_git(&["commit", "-m", "moved task work"], &wt_path);
+    env.set_current_dir(&repo.root);
+    (repo, env, cas_root, wt_path)
+}
+
+const C85E_SELECTOR: &str = "remote:github.com/org/c85e-target";
+
+fn c85e_trunk_target() -> WorkTarget {
+    WorkTarget {
+        repo_selector: C85E_SELECTOR.to_string(),
+        target_branch: "main".to_string(),
+    }
+}
+
+/// cas-c85e (GH #997), the incident shape end to end through the public
+/// surface: a task created on main is moved into an epic with
+/// `task update epic=`, and worktree_merge (with or without task_id) lands on
+/// the epic lane — never on main — and says so.
+#[tokio::test]
+async fn task_moved_into_epic_merges_to_epic_lane_not_main_cas_c85e() {
+    let (repo, _env, cas_root, _wt) = c85e_repo_with_alice_work();
+    let main_before = git_stdout(&repo.root, &["rev-parse", "main"]);
+
+    let task_store = open_task_store(&cas_root).expect("open_task_store");
+    let mut epic = Task::new("cas-c85e-epic".to_string(), "Burn-down epic".to_string());
+    epic.task_type = TaskType::Epic;
+    epic.branch = Some("epic/c85e".to_string());
+    epic.deliverables.work_target = Some(c85e_trunk_target());
+    task_store.add(&epic).expect("add epic");
+    let mut task = Task::new("cas-c85e-task".to_string(), "Created on main".to_string());
+    task.assignee = Some("alice".to_string());
+    task.status = TaskStatus::InProgress;
+    task.deliverables.work_target = Some(c85e_trunk_target());
+    task_store.add(&task).expect("add standalone trunk task");
+
+    let svc = make_service(cas_root);
+    svc.task(Parameters(task_req(serde_json::json!({
+        "action": "update",
+        "id": task.id,
+        "epic": epic.id,
+    }))))
+    .await
+    .expect("move the task into the epic");
+    assert_eq!(
+        task_store
+            .get(&task.id)
+            .unwrap()
+            .deliverables
+            .work_target
+            .unwrap()
+            .target_branch,
+        "epic/c85e",
+        "task update epic= must move the WorkTarget onto the epic lane"
+    );
+
+    for task_id in [None, Some(task.id.clone())] {
+        let mut req = coord_req("worktree_merge");
+        req.id = Some("factory/alice".to_string());
+        req.task_id = task_id.clone();
+        req.cleanup = Some(false);
+        let text = get_text(
+            &svc.coordination(Parameters(req))
+                .await
+                .unwrap_or_else(|e| panic!("merge (task_id={task_id:?}): {}", e.message)),
+        );
+        assert!(
+            text.contains("Merged worktree") && text.contains("to epic/c85e"),
+            "must merge to the epic lane (task_id={task_id:?}):\n{text}"
+        );
+        assert!(
+            !text.contains("to main") && !text.contains("epic branch main"),
+            "must never land on or label trunk (task_id={task_id:?}):\n{text}"
+        );
+    }
+    assert!(
+        git_stdout(&repo.root, &["ls-tree", "-r", "--name-only", "epic/c85e"])
+            .contains("c85e-work.txt"),
+        "the epic lane receives the work"
+    );
+    assert_eq!(
+        git_stdout(&repo.root, &["rev-parse", "main"]),
+        main_before,
+        "main must not move"
+    );
+}
+
+/// cas-c85e (GH #997): when a task under an epic still resolves to trunk
+/// (here a legacy epic with no WorkTarget, so the stale main target cannot be
+/// recognised as inherited), worktree_merge refuses trunk without
+/// allow_trunk=true — with and without task_id — and an authorized merge is
+/// receipted as trunk, never as "epic branch main".
+#[tokio::test]
+async fn epic_child_resolving_to_trunk_requires_allow_trunk_cas_c85e() {
+    let (repo, _env, cas_root, _wt) = c85e_repo_with_alice_work();
+    let main_before = git_stdout(&repo.root, &["rev-parse", "main"]);
+
+    let task_store = open_task_store(&cas_root).expect("open_task_store");
+    let mut epic = Task::new("cas-c85e-legacy".to_string(), "Legacy epic".to_string());
+    epic.task_type = TaskType::Epic;
+    epic.branch = Some("epic/c85e".to_string());
+    task_store.add(&epic).expect("add legacy epic");
+    let mut task = Task::new("cas-c85e-stale".to_string(), "Stale main".to_string());
+    task.assignee = Some("alice".to_string());
+    task.status = TaskStatus::InProgress;
+    task.deliverables.work_target = Some(c85e_trunk_target());
+    task_store
+        .create_atomic(&task, &[], Some(&epic.id), None)
+        .expect("create child under epic");
+
+    let svc = make_service(cas_root);
+    for task_id in [None, Some(task.id.clone())] {
+        let mut req = coord_req("worktree_merge");
+        req.id = Some("factory/alice".to_string());
+        req.task_id = task_id.clone();
+        req.cleanup = Some(false);
+        let refused = svc
+            .coordination(Parameters(req))
+            .await
+            .expect_err("trunk must not replace the epic lane silently");
+        assert!(
+            refused.message.contains("refusing to bypass the epic lane")
+                && refused.message.contains("would merge to: main")
+                && refused.message.contains("epic/c85e"),
+            "refusal must name trunk and the bypassed lane (task_id={task_id:?}):\n{}",
+            refused.message
+        );
+    }
+    assert_eq!(
+        git_stdout(&repo.root, &["rev-parse", "main"]),
+        main_before,
+        "a refused merge must not move main"
+    );
+
+    let mut req = coord_req("worktree_merge");
+    req.id = Some("factory/alice".to_string());
+    req.task_id = Some(task.id.clone());
+    req.allow_trunk = Some(true);
+    req.cleanup = Some(false);
+    let text = get_text(
+        &svc.coordination(Parameters(req))
+            .await
+            .unwrap_or_else(|e| panic!("authorized trunk merge: {}", e.message)),
+    );
+    assert!(
+        text.contains("to main") && text.contains("trunk main (explicit allow_trunk=true"),
+        "authorized merge must be receipted as trunk:\n{text}"
+    );
+    assert!(
+        !text.contains("epic branch main"),
+        "trunk is never an epic branch:\n{text}"
+    );
+    assert!(
+        git_stdout(&repo.root, &["ls-tree", "-r", "--name-only", "main"])
+            .contains("c85e-work.txt"),
+        "the explicitly authorized destination receives the work"
+    );
+}

@@ -538,6 +538,32 @@ pub(crate) fn default_child_work_target_from_epic(
     }
 }
 
+/// cas-c85e (GH #997): the WorkTarget a task should carry after being moved
+/// into `epic` (`task update epic=`), or `None` to keep its current target.
+///
+/// Extends [`default_child_work_target_from_epic`] to a move between epics: a
+/// target that is still exactly a previous parent epic's base or lane was
+/// inherited, not chosen, so it follows the task to the new epic. Any other
+/// distinct target is an explicit pin and stays authoritative.
+pub(crate) fn work_target_for_task_moved_into_epic(
+    task: &cas_types::Task,
+    epic: &cas_types::Task,
+    previous_parents: &[cas_types::Task],
+) -> Option<WorkTarget> {
+    if let Some(target) = default_child_work_target_from_epic(task, epic) {
+        return Some(target);
+    }
+    let task_target = task.deliverables.work_target.as_ref()?;
+    let inherited = inherited_work_target_from_epic(epic)?;
+    let inherited_from_previous_parent = previous_parents.iter().any(|parent| {
+        parent.id != epic.id
+            && parent.task_type == cas_types::TaskType::Epic
+            && (parent.deliverables.work_target.as_ref() == Some(task_target)
+                || inherited_work_target_from_epic(parent).as_ref() == Some(task_target))
+    });
+    inherited_from_previous_parent.then_some(inherited)
+}
+
 /// Local evidence about whether a task is anchored in the current project.
 ///
 /// cas-156b (GH #135). `declare_work_target` returns `Ok(None)` whenever a task

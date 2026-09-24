@@ -589,3 +589,118 @@ async fn supervisor_waiver_needs_a_reason_logs_a_decision_and_shows_in_epic_stat
         .expect_err("qa_waive is supervisor-only");
     assert!(worker_waive.message.contains("supervisor-only"), "{}", worker_waive.message);
 }
+
+/// Reject round 1 of the fixture delivery (on `main`) and hand the task back
+/// to its implementer, as `qa_record status=rejected` does.
+async fn reject_round_one(core: &CasCore, repo: &Path, task_id: &str) -> CasCore {
+    let cas_dir = repo.join(".cas");
+    let parked = close_text(core, task_id).await;
+    assert!(parked.contains("INDEPENDENT QA DISPATCHED"), "{parked}");
+    let reviewer = reviewer_core(&cas_dir, "qa-reviewer");
+    reviewer
+        .cas_task_start(Parameters(IdRequest {
+            id: qa_task_id(&cas_dir, task_id),
+        }))
+        .await
+        .unwrap();
+    let head = git(repo, &["rev-parse", "factory/test-agent"]);
+    let ledger = round_evidence(&repo.join("round-1"), task_id, &head);
+    let rejected = extract_text(
+        CasService::new(reviewer.clone(), None)
+            .verification(Parameters(verification(serde_json::json!({
+                "action": "qa_record",
+                "task_id": task_id,
+                "status": "rejected",
+                "summary": "the new spacing has no regression test",
+                "ledger_path": ledger.display().to_string(),
+            }))))
+            .await
+            .unwrap(),
+    );
+    assert!(rejected.contains("REJECTION"), "{rejected}");
+    reopened_to_in_progress(&cas_dir, task_id);
+    reviewer
+}
+
+/// GH #1001 (cas-627c): a rejected round must lead to round N+1 on the next
+/// park even when the corrective commit is not itself user-facing (a test)
+/// and the task's target moved between rounds to a branch that already holds
+/// round 1. Re-deciding eligibility from the new, smaller diff found nothing
+/// user-facing, so no round opened, the gate kept refusing the merge, and a
+/// reviewer's qa_record failed with "not found: open independent QA pass".
+#[tokio::test]
+async fn rejected_round_reopens_after_a_target_change_and_a_test_only_fix() {
+    let (temp, core, repo, task_id) = fixture();
+    let _env = env_test_lock();
+    let cas_dir = repo.join(".cas");
+    let _keep = &temp;
+    // `task update target_branch=` needs a canonical project identity; use
+    // the one the fixture's rows already carry (the checkout's name).
+    let config = cas_dir.join("config.toml");
+    let body = std::fs::read_to_string(&config).unwrap();
+    let identity = repo.file_name().unwrap().to_string_lossy().to_string();
+    std::fs::write(&config, format!("{body}[project]\ncanonical_id = {identity:?}\n")).unwrap();
+    cas::store::known_repos::ensure_host_schema().unwrap();
+    let reviewer = reject_round_one(&core, &repo, &task_id).await;
+
+    // The supervisor moves the task onto an epic cut from the reviewed tip,
+    // so the epic already contains round 1's user-facing change.
+    git(&repo, &["branch", "epic/polish", "factory/test-agent"]);
+    let request: cas_mcp::TaskRequest = serde_json::from_value(serde_json::json!({
+        "action": "update",
+        "id": task_id,
+        "target_repo": repo.display().to_string(),
+        "target_branch": "epic/polish",
+    }))
+    .unwrap();
+    let retargeted = CasService::new(core.clone(), None).task(Parameters(request)).await;
+    let retargeted = match retargeted {
+        Ok(result) => extract_text(result),
+        Err(error) => error.message.to_string(),
+    };
+    let tasks = open_task_store(&cas_dir).unwrap();
+    assert_eq!(
+        tasks.get(&task_id).unwrap().deliverables.work_target.map(|target| target.target_branch),
+        Some("epic/polish".to_string()),
+        "{retargeted}"
+    );
+
+    // The fix the reviewer asked for is a test only.
+    let fixed_head = commit_file(
+        &repo,
+        "web/composer.test.ts",
+        "test('gap', () => expect(gap()).toBe(8));\n",
+        "regression test for the spacing",
+    );
+    let parked = close_text(&core, &task_id).await;
+    assert!(parked.contains("MERGE REQUIRED"), "{parked}");
+    assert!(parked.contains("INDEPENDENT QA DISPATCHED"), "{parked}");
+    let round2 = cas_store::latest_qa_pass(&cas_dir, &task_id, chrono::Utc::now())
+        .unwrap()
+        .expect("round two");
+    assert_eq!(round2.round, 2);
+    assert_eq!(round2.bound_head, fixed_head);
+    assert!(round2.qa_task_id.is_some(), "round two has its work item");
+
+    // qa_record against the open round succeeds.
+    reviewer
+        .cas_task_start(Parameters(IdRequest {
+            id: round2.qa_task_id.clone().unwrap(),
+        }))
+        .await
+        .unwrap();
+    let ledger2 = round_evidence(&repo.join("round-2"), &task_id, &fixed_head);
+    let approved = extract_text(
+        CasService::new(reviewer, None)
+            .verification(Parameters(verification(serde_json::json!({
+                "action": "qa_record",
+                "task_id": task_id,
+                "status": "approved",
+                "summary": "regression test present; journeys clean",
+                "ledger_path": ledger2.display().to_string(),
+            }))))
+            .await
+            .unwrap(),
+    );
+    assert!(approved.contains("APPROVAL"), "{approved}");
+}

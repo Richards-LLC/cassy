@@ -873,6 +873,13 @@ impl CasCore {
         } else {
             task.notes = format!("{}\n\n{}", task.notes, handoff_note);
         }
+        // cas-e33f (GH #1004): the task's commits stay on the handing-off
+        // agent's factory branch. Record it so a close by the new assignee
+        // measures that branch instead of a non-existent factory/<to_agent>.
+        if let Some(prior) = task.assignee.clone().filter(|prior| *prior != req.to_agent) {
+            task.deliverables
+                .record_handoff_branch(&format!("factory/{prior}"));
+        }
         // Update assignee to the target agent
         task.assignee = Some(req.to_agent.clone());
         task.updated_at = chrono::Utc::now();

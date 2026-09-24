@@ -63,6 +63,11 @@ The merge gates bind only tasks with a recorded round. The park is the
 place that saw the diff, so a docs-only delivery that never got a round is
 never blocked. The close backstop handles a delivery that merged before it
 ever parked: it judges eligibility from the paths that merge integrated.
+Once a round is on record, every later park or close backstop opens the next
+round, whatever that park's own diff looks like. A test-only fix for a
+rejection, or a target moved to a branch that already holds the reviewed
+change, would otherwise leave the merge gated with no round to review
+(GH #1001).
 
 A supervisor can waive the pass with `verification action=qa_waive` and a
 non-empty reason. The waiver is:

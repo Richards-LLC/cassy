@@ -1236,6 +1236,16 @@ impl CasCore {
                         }
                     }
 
+                    // cas-e33f (GH #1004): a reassignment leaves the prior
+                    // assignee's commits on their factory branch.
+                    if let Some(prior) = task
+                        .assignee
+                        .clone()
+                        .filter(|prior| *prior != canonical_assignee)
+                    {
+                        task.deliverables
+                            .record_handoff_branch(&format!("factory/{prior}"));
+                    }
                     task.assignee = Some(canonical_assignee);
                     changes.push("assignee");
 

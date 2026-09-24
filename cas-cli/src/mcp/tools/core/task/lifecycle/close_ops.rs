@@ -5330,7 +5330,11 @@ impl CasCore {
                             factory_branch_merge_conflict_paths(
                                 &close_project_root,
                                 &resolved_parent_branch,
-                                &format!("factory/{assignee}"),
+                                &close_measured_factory_branch(
+                                    &close_project_root,
+                                    &task,
+                                    assignee,
+                                ),
                             )
                         })
                         .unwrap_or_else(|| Ok(Vec::new()));
@@ -5372,7 +5376,10 @@ impl CasCore {
                     // parked, a retry gets the same rejection message unless
                     // a new branch tip requires the delivery anchor to move.
                     let anchor = task.assignee.as_deref().and_then(|assignee| {
-                        resolve_branch_sha(&close_project_root, &format!("factory/{assignee}"))
+                        resolve_branch_sha(
+                            &close_project_root,
+                            &close_measured_factory_branch(&close_project_root, &task, assignee),
+                        )
                     });
                     if task.status != TaskStatus::AwaitingMerge {
                         // cas-4b3f: snapshot the factory branch's current
@@ -9706,6 +9713,105 @@ pub(crate) fn count_task_attributable_unmerged_commits(
         })
 }
 
+/// cas-e33f (GH #1004): agents that held this task before a transfer,
+/// recovered from the audit notes the transfer path writes
+/// (`Handoff from <agent> to …` and a supervisor force-transfer's
+/// `released live lease from '<agent>'`). Legacy tasks transferred before
+/// `handoff_branches` existed have only this record. Most recent first.
+fn handoff_prior_holders(notes: &str) -> Vec<&str> {
+    let mut holders = Vec::new();
+    for line in notes.lines().rev() {
+        let holder = if let Some((_, rest)) = line.split_once("] Handoff from ") {
+            rest.split_once(" to ").map(|(holder, _)| holder)
+        } else if let Some((_, rest)) = line.split_once("released live lease from '") {
+            rest.split_once('\'').map(|(holder, _)| holder)
+        } else {
+            None
+        };
+        if let Some(holder) = holder.map(str::trim).filter(|holder| {
+            !holder.is_empty() && !holder.contains(char::is_whitespace)
+        }) {
+            if !holders.contains(&holder) {
+                holders.push(holder);
+            }
+        }
+    }
+    holders
+}
+
+/// cas-e33f (GH #1004): whether this task changed hands after work began —
+/// a recorded handoff branch, a commit-time `parked_branch` that is not the
+/// current assignee's, or a transfer audit note.
+pub(crate) fn task_changed_hands(task: &Task) -> bool {
+    let own = task
+        .assignee
+        .as_deref()
+        .map(|assignee| format!("factory/{assignee}"));
+    let foreign = |branch: &str| own.as_deref() != Some(branch);
+    task.deliverables
+        .handoff_branches
+        .iter()
+        .any(|branch| foreign(branch))
+        || task
+            .deliverables
+            .parked_branch
+            .as_deref()
+            .is_some_and(foreign)
+        || !handoff_prior_holders(&task.notes).is_empty()
+}
+
+/// cas-e33f (GH #1004): the branch that holds this task's commits.
+///
+/// Normally that is the assignee's own `factory/<assignee>`. After a
+/// handoff (worker → supervisor) the new assignee has no such branch; the
+/// commits live on the original worker's branch instead. Candidates, in
+/// order: the assignee's branch, the commit-time `parked_branch`, recorded
+/// handoff branches (most recent first), then branches named by transfer
+/// audit notes — each checked locally, then as `origin/<branch>`. Returns
+/// `None` when the task has no assignee or none of them resolves.
+pub(crate) fn task_delivery_branch(repo_path: &std::path::Path, task: &Task) -> Option<String> {
+    let assignee = task.assignee.as_deref()?;
+    let mut candidates = vec![format!("factory/{assignee}")];
+    candidates.extend(task.deliverables.parked_branch.clone());
+    candidates.extend(task.deliverables.handoff_branches.iter().rev().cloned());
+    candidates.extend(
+        handoff_prior_holders(&task.notes)
+            .into_iter()
+            .map(|holder| format!("factory/{holder}")),
+    );
+    let mut unique: Vec<String> = Vec::new();
+    for candidate in candidates {
+        if is_safe_git_refname(&candidate) && !unique.contains(&candidate) {
+            unique.push(candidate);
+        }
+    }
+    unique
+        .iter()
+        .find(|branch| git_ref_exists(repo_path, branch))
+        .cloned()
+        .or_else(|| {
+            unique
+                .iter()
+                .map(|branch| format!("origin/{branch}"))
+                .find(|branch| git_ref_exists(repo_path, branch))
+        })
+}
+
+/// cas-e33f: the branch every close-time git probe for `task` should name —
+/// [`task_delivery_branch`] for a task that changed hands, otherwise the
+/// assignee's own `factory/<assignee>` exactly as before.
+pub(crate) fn close_measured_factory_branch(
+    repo_path: &std::path::Path,
+    task: &Task,
+    assignee: &str,
+) -> String {
+    let own = format!("factory/{assignee}");
+    if !task_changed_hands(task) || git_ref_exists(repo_path, &own) {
+        return own;
+    }
+    task_delivery_branch(repo_path, task).unwrap_or(own)
+}
+
 pub(crate) fn run_factory_branch_merge_gate_with_attribution(
     task: &Task,
     _req: &TaskCloseRequest,
@@ -9734,7 +9840,10 @@ pub(crate) fn run_factory_branch_merge_gate_with_attribution(
              call — fix the task's assignee/epic-branch fields and retry."
         ));
     }
-    let factory_branch = format!("factory/{assignee}");
+    // cas-e33f (GH #1004): after a handoff the assignee (often the
+    // supervisor) has no factory branch; measure the branch that actually
+    // holds the task's commits.
+    let factory_branch = close_measured_factory_branch(repo_path, task, assignee);
     let fallback_content_identity = TaskCommitIdentity {
         task_id: Some(task.id.clone()),
         known_commits: Vec::new(),
@@ -9758,7 +9867,33 @@ pub(crate) fn run_factory_branch_merge_gate_with_attribution(
         }
         _ => None,
     };
-    let commit_ish = trusted_anchor.unwrap_or(factory_branch.as_str());
+    let mut commit_ish = trusted_anchor.unwrap_or(factory_branch.as_str());
+    // cas-e33f (GH #1004): a task that changed hands and has no resolvable
+    // branch left is measured by its recorded delivery anchor. With neither,
+    // there are no deliverable commits to strand — the new assignee's
+    // non-existent branch is not unmerged work.
+    if trusted_anchor.is_none()
+        && task_changed_hands(task)
+        && !git_ref_exists(repo_path, &factory_branch)
+    {
+        match task
+            .deliverables
+            .factory_branch_anchor
+            .as_deref()
+            .map(str::trim)
+            .filter(|anchor| is_safe_git_refname(anchor) && git_ref_exists(repo_path, anchor))
+        {
+            Some(anchor) => commit_ish = anchor,
+            None => {
+                return MergeStateGateOutcome::ProceedWithNote(format!(
+                    "decision: merge-state guard cleared — this task changed hands and no \
+                     branch holding its commits exists ({factory_branch} is absent and no \
+                     handoff or parked branch resolves), so there are no deliverable \
+                     commits to strand on {parent_branch}."
+                ));
+            }
+        }
+    }
     let local_merge = task.delivery_mode == cas_types::DeliveryMode::LocalMerge;
     let origin_parent_branch = format!("origin/{parent_branch}");
     let mut origin_fetch_attempted = false;
@@ -20032,6 +20167,171 @@ mod merge_state_gate_tests {
             matches!(out, MergeStateGateOutcome::Proceed),
             "missing factory branch must be treated as merged (graceful pass), got {out:?}"
         );
+    }
+
+    // --- cas-e33f (GH #1004): close after a worker → supervisor handoff -----
+
+    /// A `main` repo with a bare `origin` (so the trunk target is
+    /// remote-backed, the shape the GH #1004 staging target had) and a
+    /// worker branch `factory/worker` carrying one task commit.
+    fn handoff_repo() -> (TempDir, TempDir) {
+        let bare = tempfile::tempdir().unwrap();
+        git(bare.path(), &["init", "-q", "--bare"]);
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        git(p, &["remote", "add", "origin", bare.path().to_str().unwrap()]);
+        git(p, &["push", "-q", "origin", "main"]);
+        std::fs::write(p.join("delivery.rs"), "// task delivery\n").unwrap();
+        git(p, &["add", "delivery.rs"]);
+        git(p, &["commit", "-q", "-m", "feat: task delivery"]);
+        (dir, bare)
+    }
+
+    /// The task as `task action=transfer` leaves it: assignee is the
+    /// supervisor session (which has no factory branch), the worker's branch
+    /// is recorded, and the audit note names the handing-off agent.
+    fn handed_off_task() -> Task {
+        let mut task = worker_task("0f4c2d9e-supervisor-session");
+        task.deliverables
+            .record_handoff_branch("factory/worker");
+        task.notes = "[2026-09-24 15:05] Handoff from worker-session to \
+                      0f4c2d9e-supervisor-session: merged to main"
+            .to_string();
+        task
+    }
+
+    fn merge_worker_into_origin_main(p: &std::path::Path) {
+        git(p, &["checkout", "-q", "main"]);
+        git(p, &["merge", "-q", "--no-ff", "factory/worker", "-m", "merge worker"]);
+        git(p, &["push", "-q", "origin", "main"]);
+        git(p, &["checkout", "-q", "factory/worker"]);
+    }
+
+    /// GH #1004 regression: worker merges to the target, transfers the task
+    /// to the supervisor, supervisor closes. The gate must measure the
+    /// worker's branch (merged) — not `factory/<supervisor>`, which does not
+    /// exist and used to read as one stranded commit.
+    #[test]
+    fn supervisor_close_after_handoff_measures_worker_branch_cas_e33f() {
+        let (dir, _bare) = handoff_repo();
+        let p = dir.path();
+        merge_worker_into_origin_main(p);
+
+        let task = handed_off_task();
+        assert!(
+            !git_ref_exists(p, "factory/0f4c2d9e-supervisor-session"),
+            "precondition: the supervisor has no factory branch"
+        );
+        assert_eq!(
+            close_measured_factory_branch(p, &task, "0f4c2d9e-supervisor-session"),
+            "factory/worker"
+        );
+        let mut req = base_req(&task.id);
+        req.supervisor_override = Some(true);
+        let out = run_factory_branch_merge_gate(&task, &req, "main", p);
+        assert!(
+            matches!(out, MergeStateGateOutcome::Proceed),
+            "merged worker delivery must close cleanly after a handoff, got {out:?}"
+        );
+    }
+
+    /// The same handoff with the worker's commit NOT merged still refuses —
+    /// and names the worker's real branch, never the supervisor's.
+    #[test]
+    fn handoff_with_unmerged_worker_commit_rejects_naming_worker_branch_cas_e33f() {
+        let (dir, _bare) = handoff_repo();
+        let p = dir.path();
+
+        let task = handed_off_task();
+        let req = base_req(&task.id);
+        match run_factory_branch_merge_gate(&task, &req, "main", p) {
+            MergeStateGateOutcome::Reject(msg) => {
+                assert!(msg.contains("factory/worker has 1 commit"), "{msg}");
+                assert!(!msg.contains("0f4c2d9e-supervisor-session"), "{msg}");
+            }
+            other => panic!("unmerged handed-off work must still reject, got {other:?}"),
+        }
+    }
+
+    /// A handoff whose worker branch is gone (pruned after merge) and that
+    /// left no anchor has no deliverable commits: the missing
+    /// supervisor-owned branch is not unmerged work.
+    #[test]
+    fn handoff_with_no_resolvable_branch_counts_no_deliverable_commits_cas_e33f() {
+        let (dir, _bare) = handoff_repo();
+        let p = dir.path();
+        merge_worker_into_origin_main(p);
+        git(p, &["checkout", "-q", "main"]);
+        git(p, &["branch", "-D", "factory/worker"]);
+
+        let task = handed_off_task();
+        let req = base_req(&task.id);
+        match run_factory_branch_merge_gate(&task, &req, "main", p) {
+            MergeStateGateOutcome::ProceedWithNote(note) => {
+                assert!(note.contains("no deliverable commits"), "{note}");
+            }
+            other => panic!("absent branches after a handoff must not strand, got {other:?}"),
+        }
+    }
+
+    /// With the worker branch gone but the commit-time delivery anchor
+    /// recorded, the anchor is what gets measured: unmerged anchored work
+    /// still refuses.
+    #[test]
+    fn handoff_without_branch_measures_recorded_anchor_cas_e33f() {
+        let (dir, _bare) = handoff_repo();
+        let p = dir.path();
+        let anchor = rev_parse_local(p, "factory/worker");
+        git(p, &["checkout", "-q", "main"]);
+        git(p, &["branch", "-D", "factory/worker"]);
+
+        let mut task = handed_off_task();
+        task.deliverables.factory_branch_anchor = Some(anchor);
+        let req = base_req(&task.id);
+        let out = run_factory_branch_merge_gate(&task, &req, "main", p);
+        assert!(
+            matches!(out, MergeStateGateOutcome::Reject(_)),
+            "an unmerged anchored delivery must still reject, got {out:?}"
+        );
+    }
+
+    /// Legacy transfers recorded only the audit note. The branch named by
+    /// the handing-off agent is found from it.
+    #[test]
+    fn legacy_handoff_note_alone_locates_worker_branch_cas_e33f() {
+        let (dir, _bare) = handoff_repo();
+        let p = dir.path();
+        merge_worker_into_origin_main(p);
+
+        let mut task = worker_task("0f4c2d9e-supervisor-session");
+        task.notes = "[2026-09-24 15:05] Handoff from worker to 0f4c2d9e-supervisor-session".into();
+        assert_eq!(task_delivery_branch(p, &task).as_deref(), Some("factory/worker"));
+        let out = run_factory_branch_merge_gate(&task, &base_req(&task.id), "main", p);
+        assert!(matches!(out, MergeStateGateOutcome::Proceed), "got {out:?}");
+    }
+
+    /// Scope guard: a task that never changed hands keeps measuring its own
+    /// assignee branch exactly as before.
+    #[test]
+    fn untransferred_task_keeps_measuring_own_branch_cas_e33f() {
+        let (dir, _bare) = handoff_repo();
+        let p = dir.path();
+        let mut task = worker_task("worker");
+        task.deliverables.parked_branch = Some("factory/worker".into());
+        assert!(!task_changed_hands(&task));
+        assert_eq!(close_measured_factory_branch(p, &task, "worker"), "factory/worker");
+        let out = run_factory_branch_merge_gate(&task, &base_req(&task.id), "main", p);
+        assert!(matches!(out, MergeStateGateOutcome::Reject(_)), "got {out:?}");
+    }
+
+    #[test]
+    fn handoff_prior_holders_reads_transfer_audit_notes_cas_e33f() {
+        let notes = "[2026-09-24 14:00] Handoff from alpha to beta: first\n\n\
+                     free text mentioning Handoff from nobody\n\n\
+                     [2026-09-24 15:00] SUPERVISOR FORCE-TRANSFER by sup: released live lease \
+                     from 'beta', reassigned to 'gamma'\n\n\
+                     [2026-09-24 16:00] Handoff from gamma to sup";
+        assert_eq!(handoff_prior_holders(notes), vec!["gamma", "beta", "alpha"]);
     }
 
     // --- cas-e74c (GH #80 / #62 symptoms 3-4): delivery-scoped guard -------

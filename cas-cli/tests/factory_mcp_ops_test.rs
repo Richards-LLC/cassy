@@ -727,6 +727,70 @@ async fn remind_external_condition_defaults_to_non_expiring_cross_session_row() 
     );
 }
 
+/// GH #984 (cas-57c1): a 24,900s delay under the default 3,600s TTL used to
+/// expire unseen before it was due. It now stays pending until due, and
+/// `remind_list` shows reminders that ended without firing.
+#[tokio::test]
+async fn remind_delay_beyond_ttl_stays_pending_and_list_shows_ended_reminders() {
+    let env = FactoryTestEnv::new();
+    let mut remind = factory_req("remind");
+    remind.remind_message = Some("overnight checkpoint".to_string());
+    remind.remind_delay_secs = Some(24_900);
+    env.service
+        .factory(Parameters(remind))
+        .await
+        .expect("a delay longer than the TTL is accepted");
+
+    let reminders = open_reminder_store(&env.cas_root).unwrap();
+    let pending = reminders.list_pending("test-agent-id").unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].ttl_secs, 3600);
+    // Created 11h ago and due in a moment: long past created_at + TTL, which
+    // the old rule expired; not past due + TTL, so it stays pending now.
+    rusqlite::Connection::open(env.cas_root.join("cas.db"))
+        .unwrap()
+        .execute(
+            "UPDATE reminders SET created_at = ?1 WHERE id = ?2",
+            rusqlite::params![
+                (chrono::Utc::now() - chrono::Duration::hours(11)).to_rfc3339(),
+                pending[0].id
+            ],
+        )
+        .unwrap();
+    assert_eq!(reminders.expire_stale().unwrap(), 0);
+    assert_eq!(reminders.list_pending("test-agent-id").unwrap().len(), 1);
+
+    let mut cancelled = factory_req("remind");
+    cancelled.remind_message = Some("superseded wake".to_string());
+    cancelled.remind_delay_secs = Some(60);
+    env.service
+        .factory(Parameters(cancelled))
+        .await
+        .expect("second reminder");
+    let superseded = reminders
+        .list_pending("test-agent-id")
+        .unwrap()
+        .into_iter()
+        .find(|reminder| reminder.message == "superseded wake")
+        .expect("second reminder is pending");
+    reminders.cancel(superseded.id, "test-agent-id").unwrap();
+
+    let listed = get_text(
+        &env.service
+            .factory(Parameters(factory_req("remind_list")))
+            .await
+            .expect("remind_list"),
+    );
+    assert!(listed.contains("Pending reminders (1):"), "{listed}");
+    assert!(listed.contains("overnight checkpoint"), "{listed}");
+    assert!(
+        listed.contains("Expired or cancelled in the last 24h (1); these will not fire:")
+            && listed.contains(&format!("#{}: [cancelled ", superseded.id))
+            && listed.contains("superseded wake"),
+        "{listed}"
+    );
+}
+
 fn get_text(result: &rmcp::model::CallToolResult) -> String {
     result
         .content

@@ -728,7 +728,7 @@ pub struct FactoryRequest {
 
     /// TTL in seconds for the reminder (default: 3600; zero means no expiry)
     #[schemars(
-        description = "Time-to-live in seconds for the reminder before auto-expiry (default: 3600; zero means no expiry)"
+        description = "Time-to-live in seconds before an undelivered reminder expires (default: 3600; zero means no expiry). A time reminder's TTL counts from its due time, so any delay still fires; an event reminder's counts from creation."
     )]
     #[serde(default, deserialize_with = "deser::option_i64")]
     pub remind_ttl_secs: Option<i64>,
@@ -1178,7 +1178,7 @@ pub struct CoordinationRequest {
 
     /// Time-to-live in seconds for the reminder (default: 3600; zero means no expiry)
     #[schemars(
-        description = "Time-to-live in seconds for the reminder before auto-expiry (default: 3600; zero means no expiry)"
+        description = "Time-to-live in seconds before an undelivered reminder expires (default: 3600; zero means no expiry). A time reminder's TTL counts from its due time, so any delay still fires; an event reminder's counts from creation."
     )]
     #[serde(default, deserialize_with = "deser::option_i64")]
     pub remind_ttl_secs: Option<i64>,

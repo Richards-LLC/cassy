@@ -88,6 +88,12 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     await expect(palette.getByRole("button", { name: /Open the terminal view/ })).toBeHidden();
     await filter.fill("worker");
     await expect(palette.getByRole("button", { name: /Show worker panes/ })).toBeVisible();
+    // A project name finds its session too, and the row names that project.
+    const rows = palette.locator(".palette-command");
+    await filter.fill("gabber");
+    await expect(rows.visible()).toHaveCount(1);
+    await expect(rows.visible().first()).toContainText(`Jump to ${OTTER}`);
+    await expect(rows.visible().first()).toContainText("gabber-studio · Studio Mac");
     await filter.fill(OTTER);
     await expect(palette.getByRole("button", { name: /Show worker panes/ })).toBeHidden();
     const commands = page.locator("#command-palette .palette-command");

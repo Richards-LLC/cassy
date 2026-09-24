@@ -265,6 +265,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 3. Reply with the phone keyboard — send, then see the answer
 4. Go back to the list — the row shows the latest turn
 5. See the switched-off machine named plainly — the footer counts it with a warning dot, and Paired machines says "Can't reach · retrying"
+6. Pair another machine and read its header at once — pairing from the phone opens its conversation, and the "connected" toast sits below the thread header, never over the back link, project and host
 
 **Expected experience**
 

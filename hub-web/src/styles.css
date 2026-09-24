@@ -2685,6 +2685,10 @@ dialog form > *,
 
   /* Toasts span the top of a narrow screen, under the status bar. */
   #toast { left: var(--space-3); right: var(--space-3); top: calc(var(--space-3) + env(safe-area-inset-top)); max-width: none; }
+  /* With a conversation open, the toast drops below the one-row thread header
+     (56 px: 44 px targets + 6 px padding) so the back link, project and host
+     stay readable (cas-002e). */
+  body:has(.conversation-shell.thread-open) #toast { top: calc(env(safe-area-inset-top) + 56px + var(--space-2)); }
   .context-body { min-height: 0; }
   /* == Unit 4: Phone attention and composer == */
   .attention-group-label { max-width: 100%; }

@@ -4,11 +4,13 @@ import { ATLAS, STUDIO, PELICAN, OTTER } from "./world";
 
 /** A paired machine that is switched off: it never answers this visit (cas-b789). */
 const SHED: Machine = { id: "shed", label: "Shed NAS · Linux", sessions: [] };
+/** A machine paired from the phone mid-journey (cas-002e). */
+const FORGE: Machine = { id: "forge", label: "Forge · Linux", sessions: [{ name: "steady-wren-3", supervisor: "steady-wren-3", project_dir: "/projects/forge-tools", workers: ["quick-finch-8"], liveness: "live" }] };
 
 test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
 
 test("HUB-J9 on a phone: from the list to a reply and back", async ({ page, journey }) => {
-  const hub = await journey.hub({ machines: [ATLAS, STUDIO, SHED], paired: ["atlas", "studio", "shed"] });
+  const hub = await journey.hub({ machines: [ATLAS, STUDIO, SHED, FORGE], paired: ["atlas", "studio", "shed"], relay: { machine: "forge", claimAfter: 2, authorizeAfter: 4 } });
   await page.route("https://shed.test/**", (route) => route.abort("connectionrefused"));
   await page.routeWebSocket(/shed\.test/, (ws) => { void ws.close({ code: 1006 }); });
   const list = page.getByRole("navigation", { name: "Choose a supervisor" });
@@ -96,5 +98,26 @@ test("HUB-J9 on a phone: from the list to a reply and back", async ({ page, jour
     await expect(dialog.getByText("Shed NAS · Linux")).toBeVisible();
     await expect(dialog).toContainText("Can't reach · retrying");
     await expect(dialog).not.toContainText("Connecting");
+  });
+
+  await journey.stage("Pair another machine and read its header at once", async () => {
+    // The paired-machines dialog from the stage before is still open.
+    await page.keyboard.press("Escape");
+    await expect(page.locator("#paired-machines-dialog")).toBeHidden();
+    const dialog = page.locator("#pair-dialog");
+    await page.getByRole("button", { name: "Pair a machine" }).filter({ visible: true }).first().tap();
+    await dialog.getByRole("button", { name: "Create pairing code" }).tap();
+    await expect(dialog.getByRole("heading", { name: "Machine authorized" })).toBeVisible({ timeout: 15_000 });
+    await dialog.getByRole("textbox", { name: "Your name (shown on the machine)" }).fill("Daniel");
+    await dialog.getByRole("button", { name: "Pair", exact: true }).tap();
+    await expect(dialog).toBeHidden();
+    const toast = page.locator("#toast");
+    await expect(toast).toHaveText("Forge · Linux connected", { timeout: 15_000 });
+    await list.getByRole("button", { name: /forge-tools/ }).tap();
+    await expect(page.locator(".conversation-identity h1")).toHaveText("forge-tools");
+    // The "connected" toast sits below the thread header, never over the
+    // back link, project and host (cas-002e).
+    const [notice, heading] = await Promise.all([toast.boundingBox(), page.locator(".conversation-heading").boundingBox()]);
+    expect(notice!.y, "toast below the thread header").toBeGreaterThanOrEqual(heading!.y + heading!.height);
   });
 });

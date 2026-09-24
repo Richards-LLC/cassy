@@ -1,4 +1,6 @@
 import { defineConfig, devices } from "@playwright/test";
+import { fileURLToPath } from "node:url";
+import { checkoutPorts } from "./e2e/checkout-ports";
 
 // One Playwright config for hub-web, two projects:
 // - fixtures (cas-d7b7 Test Agents spike): specs under e2e/ against the Vite
@@ -7,9 +9,15 @@ import { defineConfig, devices } from "@playwright/test";
 //   driving the committed production bundle (dist/) at /commander/ through a
 //   hub protocol double. Receipts: e2e/.results/journeys/<ID>/ or
 //   $JOURNEY_RECEIPTS (scripts/journey-eval.sh).
-const port = Number(process.env.HUB_E2E_PORT ?? 4791);
+//
+// Ports (cas-00ad): HUB_E2E_PORT / HUB_JOURNEY_PORT when set (use a pair in
+// 20000–32767 per concurrent run), else this checkout's own pair from its
+// path. Servers are never reused, so a run always serves this checkout's
+// fixtures and dist; a port someone else holds fails the run loudly.
+const defaults = checkoutPorts(fileURLToPath(new URL(".", import.meta.url)));
+const port = Number(process.env.HUB_E2E_PORT ?? defaults.fixtures);
 const origin = `http://127.0.0.1:${port}`;
-const journeyPort = Number(process.env.HUB_JOURNEY_PORT ?? 4792);
+const journeyPort = Number(process.env.HUB_JOURNEY_PORT ?? defaults.journeys);
 const journeyOrigin = `http://127.0.0.1:${journeyPort}`;
 
 export default defineConfig({
@@ -52,12 +60,12 @@ export default defineConfig({
     {
       command: `npx vite fixtures --base / --port ${port} --strictPort --host 127.0.0.1`,
       url: `${origin}/`,
-      reuseExistingServer: !process.env.CI,
+      reuseExistingServer: false,
     },
     {
       command: `node e2e/journeys/serve-dist.mjs ${journeyPort}`,
       url: `${journeyOrigin}/commander/`,
-      reuseExistingServer: !process.env.CI,
+      reuseExistingServer: false,
     },
   ],
 });

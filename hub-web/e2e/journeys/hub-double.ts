@@ -99,11 +99,26 @@ export class HubDouble {
       localStorage.clear();
       const pair = await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, false, ["sign", "verify"]);
       const publicKey = await crypto.subtle.exportKey("jwk", pair.publicKey);
+      // Wait for the app to create its database (cas-00ad). Opening it first
+      // created an empty version-1 database with no object stores; the app's
+      // own open at version 1 then had no upgrade to run, so every later
+      // transaction failed with "object store not found". On a loaded machine
+      // the app boots late enough for this seed to win the race.
+      const deadline = Date.now() + 15_000;
+      while (!(await indexedDB.databases()).some((db) => db.name === "cas-commander-v1")) {
+        if (Date.now() > deadline) throw new Error("hub double: the app never opened cas-commander-v1; call seedPaired after the page has booted");
+        await new Promise((ok) => setTimeout(ok, 50));
+      }
+      // No version: join the app's database as it is, after any upgrade it runs.
       const db: IDBDatabase = await new Promise((ok, fail) => {
-        const req = indexedDB.open("cas-commander-v1", 1);
+        const req = indexedDB.open("cas-commander-v1");
         req.onsuccess = () => ok(req.result);
         req.onerror = () => fail(req.error);
       });
+      if (!db.objectStoreNames.contains("machines")) {
+        db.close();
+        throw new Error("hub double: cas-commander-v1 has no machines store; the app's schema did not run");
+      }
       await new Promise<void>((ok, fail) => {
         const tx = db.transaction("machines", "readwrite");
         for (const m of machines) {

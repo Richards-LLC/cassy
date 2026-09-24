@@ -4076,6 +4076,31 @@ mod tests {
             String::from_utf8_lossy(&initial_push.stderr)
         );
 
+        // Release tags remain a supervisor/operator duty even when the
+        // worker owns the source branch and created an annotated tag locally.
+        let tag = std::process::Command::new("git")
+            .args(["tag", "-a", "v9.99.9", "-m", "release v9.99.9"])
+            .current_dir(&wt_path)
+            .output()
+            .unwrap();
+        assert!(tag.status.success());
+        let tag_push = std::process::Command::new("git")
+            .args(["push", "origin", "v9.99.9"])
+            .env("CAS_AGENT_NAME", "credit-repairs")
+            .current_dir(&wt_path)
+            .output()
+            .unwrap();
+        assert!(!tag_push.status.success());
+        let stderr = String::from_utf8_lossy(&tag_push.stderr);
+        assert!(stderr.contains("refs/tags/v9.99.9"), "{stderr}");
+        let remote_tag = std::process::Command::new("git")
+            .args(["ls-remote", "--tags", "--refs", "origin", "refs/tags/v9.99.9"])
+            .current_dir(&wt_path)
+            .output()
+            .unwrap();
+        assert!(remote_tag.status.success());
+        assert!(remote_tag.stdout.is_empty());
+
         // A worker may push only its exact factory destination. Both the
         // ordinary HEAD:staging spelling and an explicit foreign source ref
         // must be refused even while HEAD remains correctly bound.

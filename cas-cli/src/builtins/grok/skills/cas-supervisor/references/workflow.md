@@ -158,6 +158,12 @@ detached merged-tip worktree. The sweep is asynchronous and capped by
 `<cas-root>/merge-sweeps/` log before accepting another merge when it reports
 `FAILED`, `TIMED OUT`, or `SETUP FAILED`. Set `[factory].merge_sweep = false`
 only when the host cannot absorb this additional validation load.
+A project whose suites need their own script or environment sets
+`[factory].merge_sweep_command` (run via `sh -c` instead of the detected
+runner) and a `[factory.merge_sweep_env]` table in `config.toml`; the sweep
+log shows only the variable names. A sweep the build guard defers is noted on
+the epic without a relay; the run that finally goes ahead sends one relay
+naming its result and integration tip.
 
 `id` accepts the worker name or `factory/<worker>`. Target resolution: an explicit
 `task_id` first, then the assignee's current task binding. A `focus_epic` pin is a

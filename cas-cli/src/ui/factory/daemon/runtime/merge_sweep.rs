@@ -74,6 +74,9 @@ struct SweepResult {
     failures: Vec<String>,
     integration_epics: Vec<String>,
     base_failure: Option<rolling_integration::BaseFailure>,
+    /// GH #1006: how many times the rolling integration deferred before this
+    /// run went ahead. Non-zero makes the eventual result report itself once.
+    after_deferrals: u32,
 }
 
 #[derive(Debug)]
@@ -92,12 +95,19 @@ struct SweepSettings {
     nice_cargo: bool,
     max_concurrent_builders: usize,
     nextest_filter: Option<String>,
+    /// GH #1006: `factory.merge_sweep_command`, run via `sh -c` instead of
+    /// the detected runner.
+    command: Option<String>,
+    /// GH #1006: `factory.merge_sweep_env`. Values are never logged.
+    env: crate::config::SweepEnv,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TestRunnerKind {
     Cargo,
     Package,
+    /// The operator's `factory.merge_sweep_command`.
+    Configured,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -117,6 +127,13 @@ impl From<&FactoryConfig> for SweepSettings {
             nice_cargo: config.nice_cargo,
             max_concurrent_builders: config.max_concurrent_builders,
             nextest_filter: None,
+            command: config
+                .merge_sweep_command
+                .as_deref()
+                .map(str::trim)
+                .filter(|command| !command.is_empty())
+                .map(str::to_owned),
+            env: config.merge_sweep_env.valid(),
         }
     }
 }
@@ -311,6 +328,7 @@ impl MergeSweepCoordinator {
                     failures: Vec::new(),
                     integration_epics: Vec::new(),
                     base_failure: None,
+                    after_deferrals: 0,
                 },
             };
             let superseded = active.pending.is_some() || result.status == SweepStatus::Superseded;
@@ -398,6 +416,7 @@ impl MergeSweepCoordinator {
             failures: Vec::new(),
             integration_epics: Vec::new(),
             base_failure: None,
+            after_deferrals: 0,
         };
         append_epic_note(cas_dir, &result);
         tracing::warn!(epic = %request.epic_id, reason, "post-merge workspace sweep deferred");
@@ -442,6 +461,7 @@ fn failed_join_result(cas_dir: &Path, request: &SweepRequest, error: String) -> 
         failures: Vec::new(),
         integration_epics: vec![request.epic_id.clone()],
         base_failure: None,
+        after_deferrals: 0,
     }
 }
 
@@ -636,6 +656,21 @@ fn settings_to_config(settings: &SweepSettings) -> FactoryConfig {
 /// projects use the repository's lockfile/package-manager convention and
 /// invoke only the declared `test` script. No install or shell interpolation
 /// is performed by the sweep.
+/// GH #1006: the configured `factory.merge_sweep_command` wins over
+/// detection, so a project whose suites need a particular script or setup
+/// step is swept the way it is actually tested.
+fn resolve_sweep_runner(worktree: &Path, settings: &SweepSettings) -> Result<TestRunner, String> {
+    match settings.command.as_deref() {
+        Some(command) => Ok(TestRunner {
+            kind: TestRunnerKind::Configured,
+            program: "sh".to_owned(),
+            args: vec!["-c".to_owned(), command.to_owned()],
+            package_manager: None,
+        }),
+        None => resolve_test_runner(worktree),
+    }
+}
+
 fn resolve_test_runner(worktree: &Path) -> Result<TestRunner, String> {
     if worktree.join("Cargo.toml").is_file() {
         return Ok(TestRunner {
@@ -884,6 +919,7 @@ fn execute_sweep(
                 failures: Vec::new(),
                 integration_epics: Vec::new(),
                 base_failure: None,
+                after_deferrals: 0,
             };
         }
     };
@@ -900,10 +936,11 @@ fn execute_sweep(
                 failures: Vec::new(),
                 integration_epics: Vec::new(),
                 base_failure: None,
+                after_deferrals: 0,
             };
         }
     };
-    let runner = match resolve_test_runner(&worktree) {
+    let runner = match resolve_sweep_runner(&worktree, &settings) {
         Ok(runner) => runner,
         Err(error) => {
             let _ = writeln!(log, "{error}");
@@ -915,6 +952,7 @@ fn execute_sweep(
                 failures: Vec::new(),
                 integration_epics: Vec::new(),
                 base_failure: None,
+                after_deferrals: 0,
             };
         }
     };
@@ -928,9 +966,13 @@ fn execute_sweep(
             failures: Vec::new(),
             integration_epics: Vec::new(),
             base_failure: None,
+            after_deferrals: 0,
         };
     }
-    let mut command_display = format_command(&runner.program, &runner.args);
+    let mut command_display = match (runner.kind, settings.command.as_deref()) {
+        (TestRunnerKind::Configured, Some(command)) => command.to_owned(),
+        _ => format_command(&runner.program, &runner.args),
+    };
     if runner.kind == TestRunnerKind::Cargo && settings.nice_cargo {
         command_display = format!("nice -n {} {command_display}", nice_level());
     }
@@ -940,6 +982,9 @@ fn execute_sweep(
         worktree.display(),
         request.commit
     );
+    if !settings.env.is_empty() {
+        let _ = writeln!(log, "env: {}", settings.env.redacted_listing());
+    }
     let Some(mut child) = spawn_test_runner(&worktree, &settings, &log, &runner) else {
         let summary = format!(
             "sweep unavailable: could not start `{}`; ensure the target project's configured test runner is installed and on PATH",
@@ -954,6 +999,7 @@ fn execute_sweep(
             failures: Vec::new(),
             integration_epics: Vec::new(),
             base_failure: None,
+            after_deferrals: 0,
         };
     };
 
@@ -994,6 +1040,7 @@ fn execute_sweep(
         failures,
         integration_epics: Vec::new(),
         base_failure: None,
+        after_deferrals: 0,
     }
 }
 
@@ -1133,6 +1180,9 @@ fn spawn_test_runner(
             command.env("ZIG", zig);
         }
     }
+    // GH #1006: the operator's sweep env, applied before the identity scrub
+    // so a configured value can never reintroduce a CAS identity variable.
+    command.envs(settings.env.iter());
     scrub_test_process_identity(&mut command);
     #[cfg(unix)]
     {
@@ -2038,5 +2088,84 @@ mod tests {
         let log = fs::read_to_string(result.log_path).unwrap();
         assert!(log.contains("sweep: npm test"), "{log}");
         assert!(log.contains("declared-script-failure"), "{log}");
+    }
+
+    /// GH #1006: a configured sweep command replaces the detected runner and
+    /// gets the configured env. Only the variable names reach the log, and a
+    /// configured CAS identity variable is still scrubbed.
+    #[test]
+    fn configured_sweep_command_runs_with_configured_env_and_never_logs_values() {
+        let temp = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .current_dir(temp.path())
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "git {args:?}: {:?}", output.stderr);
+            String::from_utf8_lossy(&output.stdout).trim().to_owned()
+        };
+        git(&["init", "-b", "main"]);
+        git(&["config", "user.name", "Runner Fixture"]);
+        git(&["config", "user.email", "runner@example.invalid"]);
+        // The detected runner would fail: proof that the configured command
+        // replaced it rather than running beside it.
+        fs::write(
+            temp.path().join("package.json"),
+            r#"{"packageManager":"npm@11.0.0","scripts":{"test":"node -e process.exit(9)"}}"#,
+        )
+        .unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-m", "configured command fixture"]);
+        let seen = temp.path().join("seen-env.txt");
+        let mut config = FactoryConfig::default();
+        config.merge_sweep_command = Some(format!(
+            "printf '%s|%s' \"$SWEEP_DB_URL\" \"${{CAS_AGENT_NAME:-scrubbed}}\" > '{}' && echo configured-command-ran",
+            seen.display()
+        ));
+        config.merge_sweep_env = crate::config::SweepEnv(
+            [
+                (
+                    "SWEEP_DB_URL".to_owned(),
+                    "postgres://sweep:hunter2@db/test".to_owned(),
+                ),
+                ("CAS_AGENT_NAME".to_owned(), "spoofed-agent".to_owned()),
+                ("not a name".to_owned(), "dropped".to_owned()),
+            ]
+            .into_iter()
+            .collect(),
+        );
+
+        let result = execute_sweep(
+            temp.path(),
+            &temp.path().join("cas-data"),
+            SweepRequest {
+                epic_id: "cas-configured".to_owned(),
+                target_branch: "epic/configured".to_owned(),
+                commit: git(&["rev-parse", "HEAD"]),
+            },
+            SweepSettings::from(&config),
+            Arc::new(AtomicBool::new(false)),
+        );
+
+        assert_eq!(result.status, SweepStatus::Passed, "{}", result.summary);
+        assert_eq!(
+            fs::read_to_string(&seen).unwrap(),
+            "postgres://sweep:hunter2@db/test|scrubbed",
+            "the command sees the configured value; the identity scrub still wins"
+        );
+        let log = fs::read_to_string(&result.log_path).unwrap();
+        assert!(log.contains("configured-command-ran"), "{log}");
+        assert!(log.contains("sweep: printf"), "{log}");
+        assert!(
+            log.contains("env: CAS_AGENT_NAME=<redacted>, SWEEP_DB_URL=<redacted>"),
+            "{log}"
+        );
+        assert!(
+            !log.contains("hunter2"),
+            "a configured env value leaked: {log}"
+        );
+        assert!(!log.contains("not a name"), "{log}");
+        assert!(!format!("{:?}", SweepSettings::from(&config)).contains("hunter2"));
     }
 }

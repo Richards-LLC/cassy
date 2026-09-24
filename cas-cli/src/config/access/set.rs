@@ -81,6 +81,11 @@ impl Config {
                     .parse()
                     .map_err(|_| MemError::Parse(format!("Invalid boolean value: {value}")))?;
             }
+            "factory.merge_sweep_command" => {
+                let factory = self.factory.get_or_insert_with(FactoryConfig::default);
+                let command = value.trim();
+                factory.merge_sweep_command = (!command.is_empty()).then(|| command.to_string());
+            }
             "factory.merge_sweep_timeout_secs" => {
                 let factory = self.factory.get_or_insert_with(FactoryConfig::default);
                 factory.merge_sweep_timeout_secs = value.parse().map_err(|_| {

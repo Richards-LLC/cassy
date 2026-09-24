@@ -2031,6 +2031,8 @@ dialog::backdrop { background: var(--overlay-backdrop); }
 .palette-command[hidden] { display: none; }
 .palette-command span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .palette-command small, .palette-empty { color: var(--text-mid); }
+/* Journey F20: the Appearance row in effect carries a check and "Current". */
+.palette-check { margin-inline-end: var(--space-2); color: var(--accent, var(--you-bg)); font-weight: var(--weight-semibold); }
 .palette-command small { justify-self: end; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* A phone row is too narrow for both on one line: the description drops under
    the title, both at full row width, so each reads in full or ellipsises alone. */
@@ -3054,6 +3056,10 @@ dialog form > *,
 /* The single header above the thread (cas-5b2d): Pebble thead shape, cas-11b01 controls on the row above. */
 .conversation-heading { display: flex; flex-direction: column; gap: var(--space-3); padding: var(--space-3) 30px 17px; background: var(--canvas); color: var(--ink); box-shadow: var(--lift-head); position: relative; z-index: 1; }
 .conversation-topline { display: flex; justify-content: space-between; align-items: center; gap: var(--space-2); }
+/* Journey F17: where the list is on screen beside the thread, "‹ Conversations"
+   is a step that goes nowhere; the phone layout below shows it again. */
+#conversation-back { display: none; }
+#conversation-terminal { margin-inline-start: auto; }
 .conversation-topline .cloud-brand { display: none; }
 .conversation-topline button { font-size: var(--fs-meta); color: var(--ink); background: var(--color-transparent); }
 .conversation-identity { display: flex; align-items: center; gap: 13px; min-width: 0; }

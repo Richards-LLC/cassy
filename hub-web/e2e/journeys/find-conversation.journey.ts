@@ -32,7 +32,11 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
   await journey.stage("Notice a new reply while away", async () => {
     await list.getByRole("button", { name: /cas-src/ }).click();
     await expect(page.getByRole("button", { name: `Send to ${PELICAN}`, exact: true })).toBeVisible();
-    await page.getByRole("button", { name: "‹ Conversations", exact: true }).click();
+    // The list is on screen beside the thread, so there is no back step (F17):
+    // moving to another conversation is one click on its row.
+    await expect(page.getByRole("button", { name: "‹ Conversations", exact: true })).toBeHidden();
+    await list.getByRole("button", { name: /gabber-studio/ }).click();
+    await expect(page.getByRole("button", { name: `Send to ${OTTER}`, exact: true })).toBeVisible();
     hub.supervisorSays(PELICAN, "The staging deploy finished; nothing needs you yet.", { kind: "status" });
     await expect(list.getByRole("button", { name: /cas-src/ }).getByLabel("1 unread")).toBeVisible();
   });

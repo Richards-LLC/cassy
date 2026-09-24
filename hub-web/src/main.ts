@@ -11,7 +11,7 @@ import { installAttentionObjects } from "./attention-objects";
 import { installAttachmentSheet } from "./attachment-sheet";
 import { arrangeConversationShell, bindKeyboardViewport, conversationListState, conversationNoMatchText, conversationSkeletonMarkup } from "./conversation-shell";
 import { syncContextRail } from "./context-rail";
-import { applyScheme, setScheme, type SchemePreference } from "./scheme";
+import { applyScheme, markAppearanceCommands, setScheme, type SchemePreference } from "./scheme";
 import { applyAttentionEnrichment, attentionCounts, attentionSummary, attentionUrl, createAttentionItem, dismissableInfoItems, groupAttention, machineEventAttention, mergeAttentionItem, type AttentionAction, type AttentionContent, type AttentionEnrichment } from "./attention";
 import { cycleAttentionGroup, renderAttentionPanel, renderAttentionSummary } from "./attention-view";
 import { HubConnectionSupervisor, type ConnectionState, type HubMachineInfo } from "./connection";
@@ -2382,7 +2382,7 @@ function render(captureDraft = true): void {
           </section>
           <section class="palette-group" data-palette-group="appearance" aria-labelledby="palette-group-appearance">
             <h3 id="palette-group-appearance" class="palette-group-heading">Appearance</h3>
-            ${(["system", "light", "dark"] as const).map((scheme) => `<button type="button" class="palette-command" data-palette-scheme="${scheme}"><span>Appearance · ${scheme === "system" ? "System" : scheme === "light" ? "Light" : "Dark"}</span><small>${scheme === "system" ? "Follow this device" : "Use this scheme"}</small></button>`).join("")}
+            ${(["system", "light", "dark"] as const).map((scheme) => `<button type="button" class="palette-command" data-palette-scheme="${scheme}"><span><span class="palette-check" aria-hidden="true" hidden>✓</span>Appearance · ${scheme === "system" ? "System" : scheme === "light" ? "Light" : "Dark"}</span><small>${scheme === "system" ? "Follow this device" : "Use this scheme"}</small></button>`).join("")}
           </section>
           <details class="palette-group palette-advanced" data-palette-group="advanced">
             <summary class="palette-group-heading">Advanced</summary>
@@ -3157,8 +3157,9 @@ function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | und
       focusJumpedComposer(opened);
     };
   }
+  markAppearanceCommands(palette);
   for (const command of palette.querySelectorAll<HTMLButtonElement>("[data-palette-scheme]")) {
-    command.onclick = () => { setScheme(command.dataset.paletteScheme as SchemePreference); closePalette(); };
+    command.onclick = () => { setScheme(command.dataset.paletteScheme as SchemePreference); markAppearanceCommands(palette); closePalette(); };
   }
   const paletteTerminal = palette.querySelector<HTMLButtonElement>("[data-palette-action=terminal-view]");
   if (paletteTerminal) paletteTerminal.onclick = () => { closePalette(); hubPresentation = "terminal"; render(); };

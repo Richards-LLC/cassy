@@ -5,6 +5,7 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
   const hub = await journey.hub({ machines: [ATLAS, STUDIO], paired: ["atlas", "studio"] });
   const list = page.getByRole("navigation", { name: "Choose a supervisor" });
   const composer = page.getByRole("textbox", { name: "Your message" });
+  // The list stays beside the thread on desktop, so a switch is one click on a row (F17).
   const back = page.getByRole("button", { name: "‹ Conversations", exact: true });
 
   await journey.stage("Start a draft on the Linux machine", async () => {
@@ -22,7 +23,7 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
   });
 
   await journey.stage("Switch to the Mac and send there", async () => {
-    await back.click();
+    await expect(back).toBeHidden();
     await list.getByRole("button", { name: /gabber-studio/ }).click();
     await expect(page.locator(".conversation-identity h1")).toHaveText("gabber-studio");
     await expect(page.locator(".conversation-host")).toContainText(`Studio Mac · macOS · ${OTTER}`);
@@ -34,7 +35,6 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
   });
 
   await journey.stage("Come back to the draft", async () => {
-    await back.click();
     await list.getByRole("button", { name: /cas-src/ }).click();
     await expect(page.locator(".conversation-host")).toContainText("Atlas · Linux");
     await expect(composer).toHaveValue("Draft: ask about the flaky pairing test");

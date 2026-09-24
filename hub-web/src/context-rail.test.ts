@@ -70,22 +70,24 @@ describe("desktop context rail (P10)", () => {
     expect(links[0]!.querySelector(".context-meta")?.textContent).toBe("86 KB");
   });
 
-  it("lists open asks and blockers, newest first, and a click lands on the turn in the thread", () => {
+  it("lists open asks and blockers, newest first, leaving out the ask pinned above the composer (F18), and a click lands on the turn", () => {
     const rail = mountShell();
     const history = new ConversationHistory();
     const view = new ConversationView(document, history, { supervisor: "patient-pelican-9", header: false });
     document.querySelector("#conversation-pane-slot")!.append(view.element);
+    history.reply(reply(9, "ask", "Keep the old runner pool for now?"), at(9, 56));
     history.reply(reply(10, "blocker", "The release gate went red.\nattention.rs:212 · needless_borrow"), at(9, 57));
     history.reply(reply(11, "ask", "Fix it in-train, or ship 3.26.0 with it allowlisted?"), at(9, 58));
     view.update();
     syncContextRail(document, { history, progress: false, attention: 0 });
     expect(section(rail, "waiting").hidden).toBe(false);
+    expect(history.pinnedAsk()?.notification_id).toBe(11);
     const jumps = [...rail.querySelectorAll<HTMLButtonElement>(".context-jump")];
     expect(jumps.map((jump) => [jump.dataset.kind, jump.querySelector(".context-kind")?.textContent, jump.querySelector(".context-text")?.textContent])).toEqual([
-      ["ask", "Question", "Fix it in-train, or ship 3.26.0 with it allowlisted?"],
       ["blocker", "Blocker", "The release gate went red."],
+      ["ask", "Question", "Keep the old runner pool for now?"],
     ]);
-    jumps[1]!.click();
+    jumps[0]!.click();
     const turn = document.querySelector<HTMLElement>('.thread [data-key="reply:10"]')!;
     expect(document.activeElement).toBe(turn);
     expect(turn.tabIndex).toBe(-1);
@@ -98,12 +100,15 @@ describe("desktop context rail (P10)", () => {
     expect(cut.length).toBeLessThanOrEqual(CONTEXT_ENTRY_LIMIT + 1);
     expect(entryText("Ship it?\nMore detail below.")).toBe("Ship it?");
   });
-  it("closes the ask entry once answered, and folds when nothing else is left", () => {
+  it("closes an ask entry once answered, and folds when nothing else is left", () => {
     const rail = mountShell();
     const history = new ConversationHistory();
-    history.reply(reply(11, "ask", "Ship it?"), at(9, 58));
+    history.reply(reply(10, "ask", "Ship it?"), at(9, 57));
+    history.reply(reply(11, "ask", "And tag it?"), at(9, 58));
+    // Only the older ask is listed; the newest is the pinned one.
     expect(syncContextRail(document, { history, progress: false, attention: 0 })).toBe(true);
-    history.submit("r", "patient-pelican-9", "Ship it.", at(9, 59), 11);
+    expect(rail.querySelectorAll(".context-jump")).toHaveLength(1);
+    history.submit("r", "patient-pelican-9", "Ship it.", at(9, 59), 10);
     expect(syncContextRail(document, { history, progress: false, attention: 0 })).toBe(false);
     expect(rail.querySelectorAll(".context-jump")).toHaveLength(0);
     expect(shell().classList.contains("context-open")).toBe(false);

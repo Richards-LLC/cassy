@@ -1150,6 +1150,8 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(source).toContain('fleetConnectionLabel(conversationConnection(machine.id, session.name))');
     expect(source).toContain('fleetConnectionLabel(conversationConnection(selectedMachineId, selectedSession))');
     expect(source).toContain("const state = machineFooterConnection(machine.id);");
+    // The header status reads "Live", not "· Live": the dot is aria-hidden (cas-17e3).
+    expect(source).toContain('const separator = document.createElement("span"); separator.setAttribute("aria-hidden", "true"); separator.textContent = " · ";');
     expect(source).toContain("resolveAttention(`${machine.id}:${session}:session_transport`);");
     expect(styles).toContain(".terminal-state");
     expect(styles).toContain(".terminal-connecting-step");

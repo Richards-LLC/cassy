@@ -250,6 +250,18 @@ describe("ConversationView (Pebble thread)", () => {
     expect(sending.querySelector(".conversation-delivery")?.textContent).toBe("Sending…");
     expect(sending.querySelector(".conversation-refused, .conversation-actions")).toBeNull();
   });
+  it("names each message group's speaker and time for assistive tech (cas-17e3)", () => {
+    const history = new ConversationHistory();
+    const view = new ConversationView(document, history, { supervisor: "sup" }); document.body.replaceChildren(view.element);
+    history.submit("a", "sup", "Are we back?", at(12, 45));
+    history.reply(reply(2, "answer", "Back. Nothing was lost."), at(12, 45));
+    history.reply(reply(3, "status", "gate 1 of 3"), at(12, 46)); history.reply(reply(4, "status", "gate 2 of 3"), at(12, 46));
+    view.update();
+    const groups = [...view.element.querySelectorAll<HTMLElement>('.msgs [role="group"]')];
+    expect(groups.map((group) => group.getAttribute("aria-label")?.replace(/\d{1,2}:\d{2}/, "<t>"))).toEqual(["You, <t>", "sup, <t>", "sup, status, <t>"]);
+    // The visible time is not read twice: the group label carries it.
+    for (const time of view.element.querySelectorAll(".msgs time")) expect(time.getAttribute("aria-hidden")).toBe("true");
+  });
   it("says Delivered on the latest delivered send until the reply lands (F5)", () => {
     const history = new ConversationHistory();
     const view = new ConversationView(document, history, { supervisor: "sup" }); document.body.replaceChildren(view.element);

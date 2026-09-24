@@ -35,6 +35,15 @@ test("HUB-J5 reply by typing", async ({ page, journey }) => {
     await expect(page.getByRole("log").getByText("Understood — two lines per item, no process talk.")).toBeVisible();
     await expect(page.locator('.conversation-turn[data-state="replied"]')).toHaveCount(1);
     await expect(page.locator(".conversation-delivered")).toHaveCount(0);
+    // A screen reader hears who spoke and when (cas-17e3), not bare paragraphs.
+    await expect(page.getByRole("log")).toMatchAriaSnapshot(`
+      - group /^You, \\d{1,2}:\\d{2}/:
+        - paragraph: Please keep the release notes short this time.
+      - group /^patient-pelican-9, \\d{1,2}:\\d{2}/:
+        - paragraph: Understood — two lines per item, no process talk.
+    `);
+    await expect(page.locator("#conversation-connection")).toMatchAriaSnapshot(`- status: Live`);
+    await expect(page.getByRole("button", { name: /Attach a file/ })).toHaveCount(0);
   });
 
   await journey.stage("A refused message says why", async () => {

@@ -530,7 +530,8 @@ pre { font-family: var(--font-mono); }
 .attention-ticket,
 .status-identifier,
 .pair-code,
-.pair-details dd.pair-identifier {
+.pair-details dd.pair-identifier,
+.pair-address-actions .pair-identifier {
   font-family: var(--font-mono);
 }
 
@@ -2035,6 +2036,7 @@ dialog::backdrop { background: var(--overlay-backdrop); }
    off the page behind it, and the open session keeps its mark. */
 @media (forced-colors: active) {
   dialog { border: 1px solid CanvasText; }
+  button.secondary { border-color: ButtonBorder; }
   .palette-command { border: 1px solid ButtonBorder; }
   .palette-command:disabled { border-color: GrayText; }
   /* The focus ring is Highlight, so the open session cannot also be a
@@ -2239,21 +2241,52 @@ fieldset {
 
 .field-hint code { font-size: var(--fs-xs); }
 
-.pair-address-actions { justify-content: flex-start; }
-
-/* The page origin can be long; the control wraps inside the dialog instead
-   of forcing the form wider than a phone. */
-.pair-address-actions button {
-  min-width: 0;
-  max-width: 100%;
-  min-height: var(--space-8);
-  padding: var(--space-1) var(--space-3);
-  font-family: var(--font-mono);
-  font-size: var(--fs-xs);
-  overflow-wrap: anywhere;
-  text-align: left;
-  white-space: normal;
+/* A secondary action: outlined in the UI face, so it reads as a button and
+   never as a code sample. The edge is --ink-mid for the 3:1 a control
+   boundary needs on the warm dialog surface (P15). */
+button.secondary {
+  color: var(--text-hi);
+  background: var(--color-transparent);
+  border: var(--line-width) solid var(--ink-mid);
+  font-family: var(--font-ui);
 }
+
+/* Address guidance sits behind one quiet disclosure under the field. */
+.pair-address-help {
+  margin-top: calc(-1 * var(--space-2));
+  color: var(--text-mid);
+  font-size: var(--fs-xs);
+}
+
+.pair-address-help summary {
+  width: fit-content;
+  padding: var(--space-1) 0;
+  cursor: pointer;
+}
+
+.pair-address-help summary:focus-visible {
+  outline: var(--focus-ring-width) solid var(--color-focus);
+  outline-offset: var(--focus-ring-width);
+}
+
+.pair-address-help p { margin: var(--space-1) 0 var(--space-2); }
+
+.pair-address-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.pair-address-actions button {
+  flex: none;
+  min-height: var(--space-8);
+  font-size: var(--fs-meta);
+}
+
+/* The page origin can be long; it wraps inside the dialog instead of forcing
+   the form wider than a phone. */
+.pair-address-actions .field-hint { min-width: 0; overflow-wrap: anywhere; }
 
 /* Every grid child in the dialog may shrink; a nowrap child otherwise sets
    the form's minimum width and scrolls the whole dialog sideways. */

@@ -197,7 +197,9 @@ let pairingCountdownTimer: number | undefined;
 let connectionViewTicker: number | undefined;
 let pairingCreateInFlight = false;
 let pairingExchangeInFlight = false;
-let pairingDraft = createPairingDraft(location.origin, preselectedScopes(pendingPairing));
+// A `cas hub pair` link names its machine's address and display name; both open
+// prefilled (and editable), so only the operator's own name is left to type.
+let pairingDraft = createPairingDraft(location.origin, preselectedScopes(pendingPairing), pendingPairing?.kind === "invitation" ? pendingPairing : undefined);
 let machineDrawerOpen = false;
 let attentionPanelCollapsed = window.matchMedia(PHONE_MEDIA_QUERY).matches;
 // Off by default (cas-6261): the Hub lists supervisors only until the operator
@@ -541,6 +543,14 @@ watchPairingFragment(window, pendingPairingStore, (fragment) => {
   pairingCancellations.supersede();
   pairingCleanupFailed = false;
   pendingPairing = fragment;
+  // The new link's machine, address and ceiling replace the old ones; who is
+  // pairing, and from which browser, has not changed.
+  pairingDraft = {
+    ...createPairingDraft(location.origin, preselectedScopes(fragment), fragment),
+    deviceLabel: pairingDraft.deviceLabel,
+    operatorLabel: pairingDraft.operatorLabel,
+    email: pairingDraft.email,
+  };
   pairingStatus = "";
   render();
   openPairDialog();
@@ -2052,6 +2062,9 @@ function capturePairingDraft(): void {
   const email = document.querySelector<HTMLInputElement>("#pair-email");
   if (email) pairingDraft.email = email.value;
   const form = document.querySelector<HTMLFormElement>("#pair-form");
+  // A background re-render rebuilds the dialog; an opened disclosure stays open.
+  const addressHelp = form?.querySelector<HTMLDetailsElement>("details.pair-address-help");
+  if (addressHelp) pairingDraft.addressHelpOpen = addressHelp.open;
   if (form) pairingDraft = updatePairingDraft(pairingDraft, new FormData(form).entries(), pendingPairing?.kind === "invitation" && !pendingPairing.hubUrl);
 }
 

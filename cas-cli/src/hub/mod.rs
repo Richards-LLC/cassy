@@ -31,8 +31,8 @@ mod worker_gate;
 pub(crate) use attention::spawn_attention_enricher;
 pub use auth::{
     AuthContext, AuthStore, DeviceCredential, DeviceSession, DeviceSummary, LeaseSummary,
-    PairingExchange, PairingExchangeError, PairingInvitation, PublicJwk, Scope, WsTicket,
-    required_scope,
+    PairingExchange, PairingExchangeError, PairingInvitation, PairingPrefill, PublicJwk, Scope,
+    WsTicket, required_scope,
 };
 pub(crate) use auth::PairingInvitationTarget;
 pub use connector::DaemonConnector;

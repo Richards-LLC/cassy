@@ -1,3 +1,4 @@
+import type { PairingPrefill } from "./fragment";
 import type { Scope } from "./types";
 
 const STORAGE_KEY = "cas.commander.pending-pairing.v1";
@@ -24,8 +25,13 @@ export interface PendingInvitation {
   kind: "invitation";
   token: string;
   hubId: string;
+  /** Relay-verified hub origin; when present the exchange uses it and the form does not ask. */
   hubUrl?: string;
   machineLabel?: string;
+  /** From a `cas hub pair` link: prefills the editable address field, never trusted as `hubUrl`. */
+  suggestedHubUrl?: string;
+  /** From a `cas hub pair` link: prefills the editable machine label. */
+  suggestedMachineLabel?: string;
   controllerOrigin?: string;
   scopes?: readonly Scope[];
   expiresAt?: string;
@@ -74,6 +80,8 @@ function isPendingPairing(value: unknown): value is PendingPairing {
   if (typeof value.token !== "string" || !value.token || typeof value.hubId !== "string" || !value.hubId) return false;
   if (value.expiresAt !== undefined && typeof value.expiresAt !== "string") return false;
   if (value.scopes !== undefined && !isStringArray(value.scopes)) return false;
+  if (value.suggestedHubUrl !== undefined && typeof value.suggestedHubUrl !== "string") return false;
+  if (value.suggestedMachineLabel !== undefined && typeof value.suggestedMachineLabel !== "string") return false;
   if (value.relay !== undefined) {
     if (!isRecord(value.relay)) return false;
     if (![value.relay.pairingRequestId, value.relay.pollSecret, value.relay.deliveryId].every((field) => typeof field === "string" && field.length > 0)) return false;
@@ -125,8 +133,15 @@ export class PendingPairingStore {
     try { this.storage?.setItem(STORAGE_KEY, serialized); } catch { /* private storage can be denied */ }
   }
 
-  saveLegacy(token: string, hubId: string, scopes?: readonly Scope[]): PendingInvitation {
-    const invitation: PendingInvitation = { kind: "invitation", token, hubId, ...(scopes?.length ? { scopes: [...scopes] } : {}) };
+  saveLegacy(token: string, hubId: string, scopes?: readonly Scope[], prefill: PairingPrefill = {}): PendingInvitation {
+    const invitation: PendingInvitation = {
+      kind: "invitation",
+      token,
+      hubId,
+      ...(scopes?.length ? { scopes: [...scopes] } : {}),
+      ...(prefill.suggestedHubUrl ? { suggestedHubUrl: prefill.suggestedHubUrl } : {}),
+      ...(prefill.suggestedMachineLabel ? { suggestedMachineLabel: prefill.suggestedMachineLabel } : {}),
+    };
     this.save(invitation);
     return invitation;
   }

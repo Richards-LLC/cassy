@@ -37,8 +37,20 @@ export class ConversationHistory {
   hasPending(): boolean {
     return this.events.some(event => event.kind === "send" && (event.value.state === "sending" || event.value.state === "acknowledged"));
   }
+  /**
+   * A new send comes after everything already in the thread, whatever the
+   * clocks say (cas-ce17). Turns hydrated from the machine carry its clock;
+   * when that runs ahead of this browser's, a send stamped with the browser
+   * clock would sort before the blocker or ask it answers, leaving it
+   * "waiting". The send is placed at or after the latest turn instead.
+   */
   submit(id: string, target: string, text: string, at: number = Date.now(), replyTo?: number, session?: string): void {
-    this.insert({ kind: "send", value: { id, target, text, state: "sending", ...(replyTo === undefined ? {} : { replyTo }) }, at, session });
+    this.insert({ kind: "send", value: { id, target, text, state: "sending", ...(replyTo === undefined ? {} : { replyTo }) }, at: Math.max(at, this.latestAt()), session });
+  }
+
+  /** The latest stamp already in the thread; live events are placed at or after it. */
+  private latestAt(): number {
+    return this.events.reduce((max, event) => (event.at !== undefined && Number.isFinite(event.at) && event.at > max ? event.at : max), Number.NEGATIVE_INFINITY);
   }
 
   /** Merge one durable operator message without duplicating a live ack. */
@@ -178,6 +190,16 @@ export class ConversationHistory {
     for (const event of this.events) {
       if (event.kind === "send" && normalized.reply_to !== null && event.value.notificationId === normalized.reply_to) event.value.state = "replied";
     }
+  }
+
+  /**
+   * A supervisor turn arriving live happens after everything already shown,
+   * like a send (cas-ce17): with a machine clock ahead of this browser's, a
+   * browser-stamped turn would otherwise sort before the operator's last
+   * answer and read as already acknowledged.
+   */
+  receive(reply: OperatorReply, at: number = Date.now(), session?: string): void {
+    this.reply(reply, Math.max(at, this.latestAt()), session);
   }
 
   /** Merge a durable supervisor turn using its original queue timestamp. */

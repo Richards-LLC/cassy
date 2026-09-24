@@ -212,15 +212,17 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 **Steps**
 
 1. Open the conversation — the thread is live
-2. The supervisor asks a question — it is pinned above the composer with its choices, and the thread keeps a one-line reference to it
+2. The supervisor asks a question — it is pinned above the composer with its choices, and the thread keeps a one-line reference to it; the machine's earlier blocker, stamped by a clock that runs ahead, sits above the session line at its arrival time and is marked "machine clock ahead"
 3. Answer with one tap — the pin clears, the thread records the chosen answer, and nothing is left waiting in the context rail, even when the machine's clock runs ahead; the answer shows the time it was sent, under today
 4. See the supervisor act on the answer — the reply follows, and a new blocker after the answer waits
-5. Reply to a machine a day ahead — the reply shows the time it was sent, under today, below the machine's future-dated turn
+5. Reply to a machine a day ahead — no future day header: the machine's turn sits under Today at its arrival time, marked "machine clock ahead", and the reply shows the time it was sent below it
+6. Reopen the page — the thread rebuilt from history keeps every turn where the visit showed it, in the machine's order, under Today, with times reading in order
 
 **Expected experience**
 
 - The question is impossible to miss, and its choices are buttons.
 - After answering, the question stays readable in the thread with the answer shown.
+- Turns read in time order under the right day, even when the machine's clock runs ahead: no future day header, and a quiet "machine clock ahead" instead of a time from the future.
 
 **Edge paths**
 
@@ -329,7 +331,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 2. The network drops — "Lost connection to Atlas · Linux. Reconnecting…" appears; the header and the row say Reconnecting, and the footer counts 1 of 2 connected with a warning dot; a send is refused for the connection; the attention rail raises no transport alarm of its own, and its counts agree
 3. It reconnects on its own — the banner and the refusal line clear, everything says Live again, the draft is kept, and no transport alarm is left
 4. Sending works again — a message goes through and is answered
-5. On a phone, the banner stays readable through an outage — no toast sits on the reconnect banner, in light and dark
+5. On a phone, the banner stays readable through an outage — no toast sits on the reconnect banner, in light and dark; after it reconnects, every turn keeps its place (the message stays below its session line)
 
 **Expected experience**
 

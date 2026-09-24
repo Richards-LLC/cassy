@@ -390,7 +390,7 @@ export class ConversationView {
     const document = node.ownerDocument;
     const expanded = this.expanded.has(item.key);
     node.className = "turn coalesce-turn";
-    speaker(node, `${this.options.supervisor}, status`, item.time);
+    speaker(node, `${this.options.supervisor}, status`, item.time, item.clockAhead);
     const line = document.createElement("div"); line.className = "coalesce";
     line.id = `coalesce-${item.key.replace(/[^\w-]/g, "-")}`;
     line.dataset.count = String(item.count);
@@ -412,7 +412,7 @@ export class ConversationView {
       node.querySelector<HTMLButtonElement>(".coalesce-expand")?.focus();
     };
     node.replaceChildren(line, more);
-    if (item.time) { const time = document.createElement("time"); time.textContent = item.time; time.setAttribute("aria-hidden", "true"); node.append(time); }
+    if (item.time) node.append(timeElement(document, item.time, item.clockAhead));
     // A single status can still overflow three lines at a narrow width; offer
     // the way in once layout says the clamp hid something.
     if (more.hidden && typeof requestAnimationFrame !== "undefined") requestAnimationFrame(() => syncClampPill(node));
@@ -423,7 +423,7 @@ export class ConversationView {
     node.className = `turn ${group.side === "you" ? "you" : "sup"}`;
     // F19 (cas-17e3): a screen reader hears who spoke and when, not bare
     // paragraphs and times. The visible time stays for sighted readers.
-    speaker(node, group.side === "you" ? "You" : this.options.supervisor, group.time);
+    speaker(node, group.side === "you" ? "You" : this.options.supervisor, group.time, group.clockAhead);
     // Bubbles are keyed too: a later turn re-derives the earlier one's corner
     // classes without replacing its node, so a selection or focus inside it
     // survives the update.
@@ -448,7 +448,7 @@ export class ConversationView {
       bubble.classList.toggle("group-last", turn.last);
       children.push(bubble, ...sheets);
     }
-    if (group.time) { const time = document.createElement("time"); time.textContent = group.time; time.setAttribute("aria-hidden", "true"); children.push(time as unknown as HTMLElement); }
+    if (group.time) children.push(timeElement(document, group.time, group.clockAhead));
     node.replaceChildren(...children);
   }
 
@@ -622,15 +622,30 @@ function signatureOf(item: ThreadItem, turnSignature: (turn: ThreadTurn) => stri
     case "session": return `session:${item.label}`;
     case "history-end": return "history-end";
     case "working": return "working";
-    case "coalesce": return JSON.stringify([item.count, item.latest, item.time, item.replies.map((reply) => reply.notification_id)]);
-    case "group": return JSON.stringify([item.side, item.time, item.turns.map((turn) => [turn.key, turn.first, turn.last, turnSignature(turn)])]);
+    case "coalesce": return JSON.stringify([item.count, item.latest, item.time, item.clockAhead === true, item.replies.map((reply) => reply.notification_id)]);
+    case "group": return JSON.stringify([item.side, item.time, item.clockAhead === true, item.turns.map((turn) => [turn.key, turn.first, turn.last, turnSignature(turn)])]);
   }
 }
 
 /** Names a message group for assistive tech: "You, 12:45" or "<supervisor>, 12:45". */
-function speaker(node: HTMLElement, who: string, time: string | undefined): void {
+function speaker(node: HTMLElement, who: string, time: string | undefined, clockAhead = false): void {
   node.setAttribute("role", "group");
-  node.setAttribute("aria-label", time ? `${who}, ${time}` : who);
+  node.setAttribute("aria-label", time ? `${who}, ${time}${clockAhead ? `, ${CLOCK_AHEAD}` : ""}` : who);
+}
+
+/** The quiet hint beside a time that is the arrival time, not the machine's own stamp (cas-1f13). */
+export const CLOCK_AHEAD = "machine clock ahead";
+const CLOCK_AHEAD_TITLE = "This machine's clock is ahead of yours, so this shows when the message arrived.";
+
+/** A group's one visible time, with the clock-ahead hint when it applies. */
+function timeElement(document: Document, time: string, clockAhead: boolean | undefined): HTMLElement {
+  const element = document.createElement("time"); element.textContent = time; element.setAttribute("aria-hidden", "true");
+  if (clockAhead) {
+    element.title = CLOCK_AHEAD_TITLE;
+    const hint = document.createElement("span"); hint.className = "clock-ahead"; hint.textContent = ` · ${CLOCK_AHEAD}`;
+    element.append(hint);
+  }
+  return element;
 }
 
 function paragraphs(document: Document, text: string): HTMLElement[] {

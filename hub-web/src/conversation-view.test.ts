@@ -355,9 +355,10 @@ describe("ConversationView (Pebble thread)", () => {
     const history = new ConversationHistory();
     const now = Date.now();
     // Hydrated from a machine whose clock is five minutes ahead of this browser.
-    history.hydrateReply({ notification_id: 51, reply_to: null, message: "The gate went red.", summary: "", device_id: "d", kind: "blocker", attachments: [], at: new Date(now + 300_000).toISOString() });
-    history.reply({ notification_id: 52, reply_to: null, message: "Fix or ship?", summary: "", device_id: "d", kind: "ask", options: ["Fix", "Ship"] }, now);
-    expect(history.waiting().map((reply) => reply.notification_id)).toEqual([52, 51]);
+    // Its future stamp is clamped to the arrival (cas-1f13), so the ask that follows sorts after it.
+    history.hydrateReply({ notification_id: 51, reply_to: null, message: "The gate went red.", summary: "", device_id: "d", kind: "blocker", attachments: [], at: new Date(now + 300_000).toISOString() }, now);
+    history.receive({ notification_id: 52, reply_to: null, message: "Fix or ship?", summary: "", device_id: "d", kind: "ask", options: ["Fix", "Ship"] }, now);
+    expect(history.waiting().map((reply) => reply.notification_id)).toEqual([51, 52]);
     history.submit("answer", "sup", "Fix", now, 52);
     expect(history.events.at(-1)).toMatchObject({ kind: "send", value: { id: "answer" } });
     // The ask is answered and the blocker acknowledged: nothing waits.
@@ -366,6 +367,28 @@ describe("ConversationView (Pebble thread)", () => {
     history.receive({ notification_id: 53, reply_to: null, message: "A second gate went red.", summary: "", device_id: "d", kind: "blocker" }, Date.now());
     expect(history.waiting().map((reply) => reply.notification_id)).toEqual([53]);
     expect(history.events.at(-1)).toMatchObject({ kind: "reply", value: { notification_id: 53 } });
+  });
+  it("marks a turn from a machine clock ahead quietly, at its arrival time, with no future day (cas-1f13)", () => {
+    const history = new ConversationHistory();
+    const now = Date.now() - 180_000;
+    history.hydrateReply({ notification_id: 61, reply_to: null, message: "Mac build is queued.", summary: "", device_id: "d", kind: "answer", attachments: [], at: new Date(now + 86_400_000).toISOString() }, now);
+    const view = new ConversationView(document, history, { supervisor: "calm-otter-4" }); document.body.replaceChildren(view.element); view.update();
+    expect([...view.element.querySelectorAll(".day")].map((day) => day.textContent)).toEqual(["Today"]);
+    const group = view.element.querySelector<HTMLElement>('.turn.sup[role="group"]')!;
+    const clock = `${String(new Date(now).getHours()).padStart(2, "0")}:${String(new Date(now).getMinutes()).padStart(2, "0")}`;
+    expect(group.getAttribute("aria-label")).toBe(`calm-otter-4, ${clock}, machine clock ahead`);
+    const time = group.querySelector<HTMLElement>(":scope > time")!;
+    expect(time.textContent).toBe(`${clock} · machine clock ahead`);
+    expect(time.querySelector(".clock-ahead")).not.toBeNull();
+    expect(time.title).toContain("clock is ahead");
+    // My own message carries no hint.
+    history.receive({ notification_id: 62, reply_to: null, message: "Started.", summary: "", device_id: "d", kind: "answer" }, now + 60_000);
+    history.submit("s", "calm-otter-4", "Thanks", now + 61_000); view.update();
+    // A live turn from a machine seen running ahead is marked the same way (review F02).
+    expect(group.querySelector(".clock-ahead")).not.toBeNull();
+    const you = view.element.querySelector<HTMLElement>('.turn.you[role="group"]')!;
+    expect(you.querySelector(".clock-ahead")).toBeNull();
+    expect(you.getAttribute("aria-label")).not.toContain("clock");
   });
   it("discards only a refused send when a retry replaces it", () => {
     const history = new ConversationHistory();

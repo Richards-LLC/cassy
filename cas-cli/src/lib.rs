@@ -51,6 +51,7 @@ pub mod factory_supervisor_overlap;
 pub mod factory_target_cache;
 pub mod fs_space;
 pub mod gh_graphql;
+pub mod github_issue_attach;
 pub mod git_log;
 pub mod harness_policy;
 pub mod history;

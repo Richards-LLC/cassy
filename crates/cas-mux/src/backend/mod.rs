@@ -128,7 +128,42 @@ pub(super) fn finish_worker_config(
     for name in &project_grants {
         config.grant_worker_credential(name);
     }
+    grant_worker_github_read_token(config, &project_grants);
     config.apply_worker_credential_policy();
+}
+
+/// Operator-provisioned, read-only GitHub token for factory workers
+/// (cas-ea9c item 1, GH #1005).
+///
+/// Workers never inherit the operator's `GH_TOKEN`/`GITHUB_TOKEN`. When the
+/// launching process holds this variable (a fine-grained token limited to
+/// read access on issues, pull requests, checks and actions), every worker
+/// gets it as its own `GH_TOKEN`. `gh issue view`, `gh pr checks` and
+/// `gh run view` then work, and the token's own scope keeps the worker
+/// read-only. The variable itself is not passed on, and `GITHUB_TOKEN` stays
+/// stripped. A project `.cas/proxy.toml` that already grants `GH_TOKEN` wins.
+pub const WORKER_GITHUB_READ_TOKEN_ENV: &str = "CAS_WORKER_GITHUB_READ_TOKEN";
+
+fn grant_worker_github_read_token(config: &mut PtyConfig, project_grants: &BTreeSet<String>) {
+    let token = std::env::var(WORKER_GITHUB_READ_TOKEN_ENV)
+        .ok()
+        .map(|token| token.trim().to_string())
+        .filter(|token| !token.is_empty());
+    if !config
+        .env_remove
+        .iter()
+        .any(|key| key == WORKER_GITHUB_READ_TOKEN_ENV)
+    {
+        config.env_remove.push(WORKER_GITHUB_READ_TOKEN_ENV.to_string());
+    }
+    // A project proxy that already grants GH_TOKEN is a deliberate,
+    // auditable decision; the read-only token never downgrades it.
+    let Some(token) = token.filter(|_| !project_grants.contains("GH_TOKEN")) else {
+        return;
+    };
+    config.env.retain(|(key, _)| key != "GH_TOKEN");
+    config.env.push(("GH_TOKEN".to_string(), token));
+    config.grant_worker_credential("GH_TOKEN");
 }
 
 /// Return protected credential names authorized by the project proxy config.

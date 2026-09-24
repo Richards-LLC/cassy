@@ -29,6 +29,11 @@ test("HUB-J9 on a phone: from the list to a reply and back", async ({ page, jour
     expect(coldLoad.join(" | "), "cold-load list and footer text").not.toMatch(/Not paired|No live supervisors|Reconnecting/);
     expect(coldLoad.some((text) => text.includes("Loading")), "the cold load shows it is loading").toBe(true);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), "no sideways scrolling").toBe(true);
+    // The compose button says what it does and keeps clear of the status footer (journey F15).
+    const compose = page.getByRole("button", { name: "Write to a supervisor" });
+    await expect(compose).toHaveText("Write to a supervisor");
+    const [button, footer] = await Promise.all([compose.boundingBox(), page.locator(".conversation-sidebar > footer").boundingBox()]);
+    expect(button!.y + button!.height, "compose button above the status footer").toBeLessThanOrEqual(footer!.y);
   });
 
   await journey.stage("Tap a conversation", async () => {

@@ -75,13 +75,17 @@ test("HUB-J5 reply by typing", async ({ page, journey }) => {
     // on the refused message itself.
     const bubble = page.locator('.conversation-turn[data-state="error"]');
     const leaseRequest = page.waitForRequest((request) => request.method() === "POST" && new URL(request.url()).pathname.endsWith(`/sessions/${PELICAN}/lease`));
-    await bubble.getByRole("button", { name: "Take control of the session", exact: true }).click();
+    // By keyboard, as QA round 1 did (C06): Enter on the focused control.
+    await bubble.getByRole("button", { name: "Take control of the session", exact: true }).focus();
+    await page.keyboard.press("Enter");
     await leaseRequest;
     await expect(page.locator("#message-status")).toHaveText("You control this session now. Retry to send the message.");
     // cas-8e0a: the message itself agrees. Take control leaves it, and it no
     // longer says this device isn't in control.
     await expect(bubble.getByRole("button", { name: "Take control of the session", exact: true })).toHaveCount(0);
     await expect(bubble.getByRole("status")).toHaveText("Not sent · This device controls the session now. Retry to send it.");
+    // F01 (round 1): focus moves to Retry, the next step, not to the page body.
+    await expect(bubble.getByRole("button", { name: "Retry sending", exact: true })).toBeFocused();
     // On a phone its actions are 44px targets.
     const desktop = page.viewportSize()!;
     await page.setViewportSize({ width: 390, height: 844 });

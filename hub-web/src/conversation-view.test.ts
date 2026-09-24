@@ -256,12 +256,17 @@ describe("ConversationView (Pebble thread)", () => {
     const leased = new ConversationView(document, history, { supervisor: "sup", editMessage: edit, retryMessage: retry, takeControl: take, controlHeld: () => held }); document.body.replaceChildren(leased.element); leased.update();
     const leasedBubble = () => leased.element.querySelector<HTMLElement>('.bub[data-state="error"]')!;
     expect(leasedBubble().querySelector(".conversation-take-control")).not.toBeNull();
+    leasedBubble().querySelector<HTMLButtonElement>(".conversation-take-control")!.focus();
     held = true; leased.update();
+    // F01: the focused Take control is gone, so Retry, the next step, takes focus, never the body.
+    expect(document.activeElement).toBe(leasedBubble().querySelector(".conversation-retry"));
     expect(leasedBubble().querySelector(".conversation-take-control")).toBeNull();
     expect(leasedBubble().querySelector(".conversation-refused")?.textContent).toBe("Not sent · This device controls the session now. Retry to send it.");
     expect([...leasedBubble().querySelectorAll(".conversation-actions button")].map((button) => button.textContent)).toEqual(["Edit", "Retry"]);
     held = false; leased.update();
     expect(leasedBubble().querySelector(".conversation-take-control")).not.toBeNull();
+    // A control that survives the rebuild keeps focus.
+    expect(document.activeElement).toBe(leasedBubble().querySelector(".conversation-retry"));
     expect(leasedBubble().querySelector(".conversation-refused-next")?.textContent).toBe(" Take control, then retry.");
     // Only a control refusal offers it: taking control fixes nothing else.
     const other = new ConversationHistory();

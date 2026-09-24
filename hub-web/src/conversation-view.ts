@@ -138,6 +138,20 @@ const TICK = '<svg class="tick" viewBox="0 0 16 16" fill="none" stroke="currentC
 /** Warning triangle for a refused send; decorative — the "Not sent" text carries the meaning. */
 const WARN = '<svg class="warn" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 1.9 14.6 13.6H1.4Z"/><path d="M8 6.2v3.4"/><path d="M8 11.7v.1"/></svg>';
 
+/**
+ * Give focus back inside a rebuilt bubble (cas-8e0a F01). The same control
+ * keeps it when it survived the rebuild. Otherwise Retry takes it (after
+ * Take control, Retry is the next step), then any action, then the message
+ * itself. Never the page body.
+ */
+function landFocusIn(bubble: HTMLElement, className: string): void {
+  const same = className ? [...bubble.querySelectorAll<HTMLElement>("button")].find((button) => button.className === className) : undefined;
+  const target = same ?? bubble.querySelector<HTMLElement>(".conversation-retry") ?? bubble.querySelector<HTMLElement>("button");
+  if (target) { target.focus({ preventScroll: true }); return; }
+  bubble.tabIndex = -1;
+  bubble.focus({ preventScroll: true });
+}
+
 export class ConversationView {
   readonly element: HTMLElement;
   /**
@@ -438,6 +452,11 @@ export class ConversationView {
     const existing = new Map<string, HTMLElement>();
     for (const child of node.querySelectorAll<HTMLElement>(":scope > [data-key]")) existing.set(child.dataset.key!, child);
     const children: HTMLElement[] = [];
+    // cas-8e0a F01: a bubble rebuilt while focus is inside it (Take control
+    // leaves a refused message once it succeeds) hands focus to its
+    // replacement instead of dropping it to the page body.
+    const active = document.activeElement;
+    let refocus: { bubble: HTMLElement; className: string } | undefined;
     for (const turn of group.turns) {
       const signature = this.turnSignature(turn);
       let bubble = existing.get(turn.key);
@@ -445,12 +464,15 @@ export class ConversationView {
       if (bubble && bubble.dataset.signature === signature) {
         for (let index = 0; ; index += 1) { const sheet = existing.get(`${turn.key}#${index}`); if (!sheet) break; sheets.push(sheet); }
       } else {
+        const previous = bubble;
+        const focusedClass = previous && active instanceof HTMLElement && previous.contains(active) ? active.className : undefined;
         if (turn.event.kind === "send") bubble = this.renderSend(document, turn, turn.event.value);
         else ({ bubble, sheets } = this.renderReply(document, turn, turn.event.value));
         bubble.classList.add("conversation-turn");
         bubble.dataset.key = turn.key;
         bubble.dataset.signature = signature;
         sheets.forEach((sheet, index) => { sheet.classList.add("conversation-sheet"); sheet.dataset.key = `${turn.key}#${index}`; });
+        if (focusedClass !== undefined) refocus = { bubble, className: focusedClass };
       }
       bubble.classList.toggle("group-first", turn.first);
       bubble.classList.toggle("group-last", turn.last);
@@ -458,6 +480,7 @@ export class ConversationView {
     }
     if (group.time) { const time = document.createElement("time"); time.textContent = group.time; time.setAttribute("aria-hidden", "true"); children.push(time as unknown as HTMLElement); }
     node.replaceChildren(...children);
+    if (refocus) landFocusIn(refocus.bubble, refocus.className);
   }
 
   private renderSend(document: Document, turn: ThreadTurn, send: ConversationSend): HTMLElement {

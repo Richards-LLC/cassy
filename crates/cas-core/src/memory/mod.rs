@@ -6,6 +6,7 @@
 //! and implemented here as a pure-Rust function with no MCP or store
 //! dependency — callers fetch candidates and pass them in.
 
+pub mod handoff;
 pub mod overlap;
 pub mod hygiene;
 

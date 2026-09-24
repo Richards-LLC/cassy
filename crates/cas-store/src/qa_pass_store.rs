@@ -689,6 +689,31 @@ mod tests {
     }
 
     #[test]
+    fn reset_qa_task_releases_claim_for_a_replacement_reviewer_cas_1aef3() {
+        let dir = TempDir::new().unwrap();
+        let now = Utc::now();
+        let opened = dispatched(open_qa_pass(dir.path(), &new("aaaa1111", now), now).unwrap());
+        set_qa_task(dir.path(), &opened.id, "cas-qa1").unwrap();
+        claim_qa_pass(dir.path(), "cas-ui1", "dead-reviewer", now).unwrap();
+
+        let second = claim_qa_pass(dir.path(), "cas-ui1", "replacement", now).unwrap_err();
+        assert!(second.to_string().contains("already claimed"), "{second}");
+
+        let released = release_qa_claim_for_task(dir.path(), "cas-qa1").unwrap();
+        assert!(released, "reset releases the QA work item's active claim");
+        let pending = latest_qa_pass(dir.path(), "cas-ui1", now).unwrap().unwrap();
+        assert_eq!(pending.id, opened.id, "reset keeps the same round");
+        assert_eq!(pending.state, QaPassState::Pending);
+        assert!(pending.reviewer_agent_id.is_none());
+        assert_eq!(pending.deadline_at, opened.deadline_at);
+
+        let reclaimed = claim_qa_pass(dir.path(), "cas-ui1", "replacement", now).unwrap();
+        assert_eq!(reclaimed.id, opened.id);
+        assert_eq!(reclaimed.state, QaPassState::Claimed);
+        assert_eq!(reclaimed.reviewer_agent_id.as_deref(), Some("replacement"));
+    }
+
+    #[test]
     fn withdrawal_takes_only_an_unclaimed_round_unless_asked_cas_5c38() {
         let dir = TempDir::new().unwrap();
         let now = Utc::now();

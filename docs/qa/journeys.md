@@ -85,7 +85,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 - **Entry:** `/commander/` with two paired machines, each running one supervisor
 - **Goal:** I can tell which conversation has something new and get to it quickly
-- **Touches:** `hub-web/src/conversation-list.ts`, `hub-web/src/worker-visibility.ts`, `hub-web/src/dormant-visibility.ts`, `hub-web/src/session-selection.ts`, `hub-web/src/conversation-shell.ts`, `hub-web/src/attention*.ts`, `hub-web/src/time.ts`
+- **Touches:** `hub-web/src/conversation-list.ts`, `hub-web/src/palette-commands.ts`, `hub-web/src/worker-visibility.ts`, `hub-web/src/dormant-visibility.ts`, `hub-web/src/session-selection.ts`, `hub-web/src/conversation-shell.ts`, `hub-web/src/attention*.ts`, `hub-web/src/time.ts`
 - **Suite:** `hub-web/e2e/journeys/find-conversation.journey.ts`
 - **Gaps:** none
 
@@ -97,7 +97,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 4. Find the conversation from the keyboard — Ctrl+K lands in the search, type the project, Enter: the conversation is open and the reply box has focus
    - An empty thread's card also leads with the project, with machine and codename beneath it
    - A 40-character machine name ellipsises in its row and never runs under the time stamp, on desktop and at 390px
-5. Jump to a supervisor by name — the command palette (grouped Conversations / Appearance / Advanced, Advanced collapsed) filters by supervisor or project and opens the conversation
+5. Jump to a supervisor by name — the command palette (grouped Conversations / Appearance / Advanced, Advanced collapsed) filters by supervisor or project and opens the conversation; each "Jump to" row leads with the project, the codename first on the line beneath
 6. Jump to a supervisor from the keyboard — Ctrl+K twice opens the palette, type the name, Enter: the palette closes, the conversation is open and the reply box has focus
 
 **Expected experience**
@@ -243,6 +243,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 8. Keyboard focus lands somewhere real on every route — entering Terminal view lands in the terminal (or on the way back, which is first in the Tab order though drawn at the foot), choosing a session in the picker lands in it, and opening a conversation from the list by Enter or a click lands in its reply box; none leaves focus on the page body
 9. Read every session's details on a phone — at 390px each picker row, the open one included, shows project, role, workers and status in full
 10. Pair a third machine; the others keep their colours — each machine's accent is stored when it first pairs, so a new pairing (even one whose id sorts first) never re-colours the fleet, the new machine gets its own accent, and the colours survive a reload
+11. Know each session and machine by name in Terminal view — the session title, every picker row and every palette "Jump to" row lead with the project, with the supervisor codename secondary; the machine rail and the compact machine chip read two letters of the machine's own name ("AT" for "Atlas · Linux"), never a separator
 
 **Expected experience**
 

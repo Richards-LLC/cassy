@@ -168,7 +168,8 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
     await expect(picker.locator(".session-picker-entry:visible")).toHaveCount(1);
     await page.keyboard.press("Enter");
     await expect(picker).toBeHidden();
-    await expect(page.locator(".session-picker-name")).toHaveText(OTTER);
+    await expect(page.locator(".session-picker-name")).toHaveText("gabber-studio");
+    await expect(page.locator(".session-picker-codename")).toHaveText(OTTER);
   });
 
   await journey.stage("See which session is open while pointing at it", async () => {
@@ -240,7 +241,7 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
     await page.locator("#session-picker").getByRole("button", { name: new RegExp(OTTER) }).focus();
     await page.keyboard.press("Enter");
     await expect(page.locator("#session-picker")).toBeHidden();
-    await expect(page.locator(".session-picker-name")).toHaveText(OTTER);
+    await expect(page.locator(".session-picker-name")).toHaveText("gabber-studio");
     await expect.poll(offBody).toBe(true);
     // Focus the operator moves after the pick is theirs: the landing that
     // waits for the terminal must not pull it back (cas-7eaf QA F01).
@@ -274,8 +275,10 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
     // Every row, the open one included, shows its project, role and status in
     // full: nothing is cut off by an ellipsis or the row edge.
     await expect(picker.locator(".picker-machine")).toHaveText(["Studio Mac · macOS", "Atlas · Linux"]);
-    await expect(picker.locator('.session-picker-entry[aria-current="true"] .session-meta')).toHaveText("gabber-studio · supervisor calm-otter-4 · 1 worker · live");
-    await expect(picker.locator('.session-picker-entry:not([aria-current="true"]) .session-meta')).toHaveText("cas-src · supervisor patient-pelican-9 · 1 worker · live");
+    await expect(picker.locator('.session-picker-entry[aria-current="true"] .session-name')).toHaveText("gabber-studio");
+    await expect(picker.locator('.session-picker-entry[aria-current="true"] .session-meta')).toHaveText("supervisor calm-otter-4 · 1 worker · live");
+    await expect(picker.locator('.session-picker-entry:not([aria-current="true"]) .session-name')).toHaveText("cas-src");
+    await expect(picker.locator('.session-picker-entry:not([aria-current="true"]) .session-meta')).toHaveText("supervisor patient-pelican-9 · 1 worker · live");
     const clipped = await rows.evaluateAll((entries) => entries.flatMap((entry) => {
       const box = entry.getBoundingClientRect();
       return [...entry.querySelectorAll<HTMLElement>(".session-name, .session-meta, .session-summary-title, .session-picker-current")]
@@ -320,5 +323,41 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
     await page.reload();
     await expect(list.getByRole("button", { name: /orion/ })).toBeVisible();
     expect([await colour(/cas-src/), await colour(/gabber-studio/)]).toEqual([atlas, studio]);
+  });
+
+  await journey.stage("Know each session and machine by name in Terminal view", async () => {
+    // 3.30.0 journey F2/F3: Terminal view leads with the project, as the list
+    // and the conversation header do, and the machine rail's letters come from
+    // the machine's own name ("Atlas · Linux" read "A·").
+    await list.getByRole("button", { name: /cas-src/ }).click();
+    await page.getByRole("button", { name: "Terminal view" }).click();
+    await expect(page.locator(".session-picker-name")).toHaveText("cas-src");
+    await expect(page.locator(".session-picker-codename")).toHaveText(PELICAN);
+    const initials = page.locator("#machine-rail-list .machine-initials");
+    await expect(initials).toHaveCount(3);
+    expect((await initials.allTextContents()).sort()).toEqual(["AL", "AT", "SM"]);
+    expect(await page.locator(".machine-chip").getAttribute("data-compact-label")).toBe("AT");
+    // The picker: every row leads with its project, the codename beneath it.
+    const picker = page.locator("#session-picker");
+    await page.locator("#session-picker-toggle").click();
+    await expect(picker).toBeVisible();
+    const names = picker.locator(".session-picker-entry .session-name");
+    expect((await names.allTextContents()).sort()).toEqual(["cas-src", "gabber-studio", "orion"]);
+    await expect(picker.locator(`.session-picker-entry[data-picker-session="${OTTER}"] .session-meta`)).toHaveText(`supervisor ${OTTER} · 1 worker · live`);
+    await expect(picker.locator('.session-picker-entry[data-picker-session="keen-lynx-1"] .session-meta')).toHaveText("supervisor keen-lynx-1 · 1 worker · live");
+    await page.keyboard.press("Escape");
+    await expect(picker).toBeHidden();
+    // The palette: "Jump to <project>", the codename first on the line beneath
+    // (a session summary, when one has arrived, follows the machine).
+    await page.keyboard.press("ControlOrMeta+k");
+    const palette = page.locator("#command-palette");
+    await expect(palette).toBeVisible();
+    const jump = (project: string) => palette.locator(".palette-command[data-palette-session]").filter({ hasText: `Jump to ${project}` });
+    await expect(jump("gabber-studio").locator("span")).toHaveText("Jump to gabber-studio");
+    await expect(jump("gabber-studio").locator("small")).toHaveText(new RegExp(`^${OTTER} · Studio Mac · macOS`));
+    await expect(jump("cas-src").locator("small")).toHaveText(new RegExp(`^${PELICAN} · Atlas · Linux`));
+    await expect(jump("orion").locator("small")).toHaveText(/^keen-lynx-1 · Alpha · Linux/);
+    await page.keyboard.press("Escape");
+    await expect(palette).toBeHidden();
   });
 });

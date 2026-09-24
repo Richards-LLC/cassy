@@ -157,19 +157,19 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     const rows = palette.locator(".palette-command");
     await filter.fill("gabber");
     await expect(rows.visible()).toHaveCount(1);
-    await expect(rows.visible().first()).toContainText(`Jump to ${OTTER}`);
-    await expect(rows.visible().first()).toContainText("gabber-studio · Studio Mac");
+    await expect(rows.visible().first()).toContainText("Jump to gabber-studio");
+    await expect(rows.visible().first()).toContainText(`${OTTER} · Studio Mac`);
     // Every word must match, not the whole phrase, as in the list search.
     await filter.fill("gabber studio");
     await expect(rows.visible()).toHaveCount(1);
-    await expect(rows.visible().first()).toContainText(`Jump to ${OTTER}`);
+    await expect(rows.visible().first()).toContainText("Jump to gabber-studio");
     await filter.fill(OTTER);
     await expect(palette.getByRole("button", { name: /Show worker panes/ })).toBeHidden();
     const commands = page.locator("#command-palette .palette-command");
     await expect(commands.visible()).toHaveCount(1);
-    await expect(commands.visible().first()).toContainText(`Jump to ${OTTER}`);
+    await expect(commands.visible().first()).toContainText("Jump to gabber-studio");
     await expect(page.getByRole("button", { name: /Appearance · Dark/ })).toBeHidden();
-    await page.getByRole("button", { name: new RegExp(`Jump to ${OTTER}`) }).click();
+    await page.getByRole("button", { name: /Jump to gabber-studio/ }).click();
     await expect(page.locator("#command-palette")).toBeHidden();
     await expect(page.getByRole("button", { name: `Send to ${OTTER}`, exact: true })).toBeVisible();
     await expect(page.locator(".conversation-identity h1")).toHaveText("gabber-studio");
@@ -205,7 +205,7 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     await openPaletteFromKeyboard();
     await filter.fill(OTTER);
     await filter.press("ArrowDown");
-    await expect(page.getByRole("button", { name: new RegExp(`Jump to ${OTTER}`) })).toBeFocused();
+    await expect(page.getByRole("button", { name: /Jump to gabber-studio/ })).toBeFocused();
     await expect(filter).toHaveValue(OTTER);
     await page.keyboard.press("Enter");
     await expect(page.locator("#command-palette")).toBeHidden();
@@ -228,7 +228,7 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     await openPaletteFromKeyboard();
     await filter.fill(PELICAN);
     await filter.press("ArrowDown");
-    const row = page.getByRole("button", { name: new RegExp(`Jump to ${PELICAN}`) });
+    const row = page.getByRole("button", { name: /Jump to cas-src/ });
     await expect(row).toBeFocused();
     // Any render while the row has focus must leave the palette alone.
     hub.supervisorSays(OTTER, "Still here.", { kind: "status" });
@@ -282,7 +282,7 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     await reopen();
     // Typing after the reopen filters from scratch.
     await filter.pressSequentially(OTTER.slice(0, 6));
-    await expect(commands.visible().first()).toContainText(`Jump to ${OTTER}`);
+    await expect(commands.visible().first()).toContainText("Jump to gabber-studio");
     await page.keyboard.press("Escape");
   });
 });

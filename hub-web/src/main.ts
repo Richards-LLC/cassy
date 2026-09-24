@@ -37,11 +37,11 @@ import { toastTopClearOfBanner } from "./toast-placement";
 import { absoluteTimestamp, relativeTimestamp } from "./time";
 import { loadPaneLayout, movePane, normalizePaneLayout, orderedPaneIds, promotePane, savePaneLayout, type PaneLayout, type PaneLayoutStorage } from "./pane-layout";
 import { detectSpeechInput, SpeechDictationController, type SpeechInputCapability, type SpeechInputState } from "./speech-input";
-import { backLabel, clearStoredSelection, forgetMachine, goBackSelection, loadStoredSelection, previousSelection, restorableSession, saveStoredSelection, selectSelection, sessionPickerEntries, sessionPickerMeta, workerCountLabel, type SelectionState, type SessionPickerEntry, type SelectionStorage, type SessionSelection } from "./session-selection";
+import { backLabel, clearStoredSelection, forgetMachine, goBackSelection, loadStoredSelection, previousSelection, restorableSession, saveStoredSelection, selectSelection, sessionPickerEntries, sessionPickerHeadline, sessionPickerRowMeta, workerCountLabel, type SelectionState, type SessionPickerEntry, type SelectionStorage, type SessionSelection } from "./session-selection";
 import { composerFocusWinner, planSupervisorSend, sendsOnEnter, supervisorMessage, supervisorTarget } from "./supervisor-message";
 import { hiddenWorkersLabel, saveWorkersRevealed, splitVisiblePanes, workersCommandLabel, workersRevealed, workersRoute } from "./worker-visibility";
 import { dormantCommandLabel, dormantRevealed, dormantRoute, saveDormantRevealed } from "./dormant-visibility";
-import { machineAccentClass, setMachineAccentFleet, storageAccentStore } from "./machine-accent";
+import { machineAccentClass, machineInitials, setMachineAccentFleet, storageAccentStore } from "./machine-accent";
 import { COMPACT_MEDIA_QUERY, PHONE_MEDIA_QUERY } from "./viewport";
 import { defaultTranscriptView, loadTranscriptView, saveTranscriptView, type TranscriptViewMode } from "./transcript";
 import { TranscriptView } from "./transcript-view";
@@ -2400,7 +2400,7 @@ function render(captureDraft = true): void {
   const mode = lease?.held_by_me ? "CONTROL" : "OBSERVER";
   const controlActionLabel = lease?.held_by_me ? "Release control" : lease?.controller_label && selected?.scopes.includes("hub-admin") ? "Force takeover" : "Take control";
   const machineLabel = selected?.label ?? "No machine";
-  const compactMachineLabel = machineLabel.split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part[0]?.toUpperCase()).join("") || "—";
+  const compactMachineLabel = machineInitials(machineLabel);
   const controlActionDisabled = takeControlReason !== undefined;
   const sessionCommands = [...machines.values()].flatMap((machine) => visibleSessions(machine.id).map((session) =>
     sessionJumpCommandMarkup(machine, session, sessionSummaries.get(sessionKey(machine.id, session.name))))).join("");
@@ -2409,6 +2409,12 @@ function render(captureDraft = true): void {
   // The session name is the switch: on a phone it is the only always-visible
   // chrome that can carry one, and the ⌘K palette is hidden below 500px.
   const sessionCount = [...machines.values()].reduce((total, machine) => total + visibleSessions(machine.id).length, 0);
+  // The Terminal view title leads with the project, as the list and the
+  // conversation header do; the generated codename follows it, secondary
+  // (3.30.0 journey F2). No project named: the session name is the title.
+  const selectedProject = projectTitle(selectedHubSession?.project_dir);
+  const sessionTitleLead = selectedSession ? selectedProject ?? selectedSession : "Fleet overview";
+  const sessionTitleCodename = selectedSession && selectedProject ? selectedHubSession?.supervisor || selectedSession : undefined;
   const sessionPickerLabel = sessionCount === 0
     ? "Switch session — no sessions listed yet"
     : `Switch session — ${sessionCount} available`;
@@ -2520,7 +2526,7 @@ function render(captureDraft = true): void {
         <header class="session-header">
           <div class="session-identity">
             ${backTarget ? `<button id="session-back" class="session-back" type="button" aria-label="${escapeAttr(backText)}" title="${escapeAttr(backText)}"><span aria-hidden="true">‹</span></button>` : ""}
-            <h1 class="${selectedSession ? "toolbar-session-title" : ""}"><button id="session-picker-toggle" class="session-picker-toggle" type="button" aria-haspopup="dialog" aria-expanded="${sessionPickerOpen}" aria-label="${escapeAttr(sessionPickerLabel)}" title="${escapeAttr(sessionPickerLabel)}"><span class="session-picker-name">${escapeHtml(selectedSession ?? "Fleet overview")}</span><span class="session-picker-caret" aria-hidden="true">▾</span></button></h1>
+            <h1 class="${selectedSession ? "toolbar-session-title" : ""}"><button id="session-picker-toggle" class="session-picker-toggle" type="button" aria-haspopup="dialog" aria-expanded="${sessionPickerOpen}" aria-label="${escapeAttr(sessionPickerLabel)}" title="${escapeAttr(sessionPickerLabel)}"><span class="session-picker-name">${escapeHtml(sessionTitleLead)}</span>${sessionTitleCodename ? `<span class="session-picker-codename codename">${escapeHtml(sessionTitleCodename)}</span>` : ""}<span class="session-picker-caret" aria-hidden="true">▾</span></button></h1>
           </div>
           ${selected ? `<span class="machine-chip" data-compact-label="${escapeAttr(compactMachineLabel)}" title="${escapeAttr(machineLabel)}">${escapeHtml(machineLabel)}</span><span class="mode-badge ${mode.toLowerCase()}" data-compact-label="${lease?.held_by_me ? "CTL" : "OBS"}">${mode}</span><span class="connection-summary ${connectionState}" title="${escapeAttr(compatibility ?? connectionText)}"><span class="connection-dot"></span><span data-machine-latency="${escapeAttr(selected.id)}">${latencyText}</span></span>` : ""}
           <div class="actions"><button id="command-palette-toggle" class="command-palette-trigger" type="button" aria-label="Open command palette" title="Command palette (Ctrl or Cmd + K)">⌘K</button>${showSessionControls ? `<span class="control-action" title="${escapeAttr(takeControlReason ?? controlActionLabel)}"><button id="lease" data-compact-label="${lease?.held_by_me ? "Rel" : "Ctrl"}" aria-label="${escapeAttr(controlActionLabel)}"${takeControlReason ? ` aria-disabled="true" data-disabled-reason="${escapeAttr(takeControlReason)}" aria-describedby="control-disabled-reason"` : ""}>${controlActionLabel}</button>${takeControlReason ? `<span id="control-disabled-reason" class="sr-only">${escapeHtml(takeControlReason)}</span>` : ""}</span><button id="interrupt" class="danger" data-compact-label="Int" aria-label="Interrupt selected pane" title="${escapeAttr(interruptReason ?? "Interrupt selected pane")}"${interruptReason ? ` aria-disabled="true" data-disabled-reason="${escapeAttr(interruptReason)}"` : ""}>Interrupt</button>` : ""}</div>
@@ -2816,11 +2822,6 @@ function compatibilityWarning(machineId: string): string | undefined {
   return undefined;
 }
 
-function machineInitials(label: string): string {
-  const words = label.trim().split(/\s+/).filter(Boolean);
-  return (words.length > 1 ? `${words[0][0]}${words[1][0]}` : words[0]?.slice(0, 2) ?? "?").toUpperCase();
-}
-
 function selectMachine(machine: StoredMachine): void {
   commitSelection({ machineId: machine.id });
   machineDrawerOpen = true;
@@ -2994,12 +2995,14 @@ function rebuildSessionPickerList(list: HTMLElement, entries: readonly SessionPi
     button.className = "palette-command session-picker-entry";
     button.dataset.pickerMachine = entry.machineId;
     button.dataset.pickerSession = entry.session;
-    button.dataset.searchText = `${entry.machineLabel} ${entry.supervisor ?? ""} ${entry.title ?? ""} ${entry.status}`;
+    button.dataset.searchText = `${entry.machineLabel} ${entry.project ?? ""} ${entry.session} ${entry.supervisor ?? ""} ${entry.title ?? ""} ${entry.status}`;
     if (entry.current) button.setAttribute("aria-current", "true");
-    // Role and status are what tell one supervisor from another; the name
-    // alone reads as a random animal. The hub now derives the roster from the
-    // live agent registry, so the count is stated rather than hidden.
-    button.innerHTML = `<span class="session-name">${escapeHtml(entry.session)}</span><small class="session-meta">${escapeHtml(sessionPickerMeta(entry))}</small>${entry.title ? `<span class="session-summary-title">${escapeHtml(entry.title)}</span>` : ""}${entry.phase ? `<span class="phase-chip phase-${escapeAttr(entry.phase)}">${escapeHtml(entry.phase)}</span>` : ""}${entry.current ? '<span class="session-picker-current">Open</span>' : ""}`;
+    // The project leads, as in the conversation list and the palette; the
+    // generated codename is secondary on the line beneath it, with the role
+    // and status that tell one supervisor from another (3.30.0 journey F2).
+    // The hub derives the roster from the live agent registry, so the count
+    // is stated rather than hidden.
+    button.innerHTML = `<span class="session-name">${escapeHtml(sessionPickerHeadline(entry))}</span><small class="session-meta">${escapeHtml(sessionPickerRowMeta(entry))}</small>${entry.title ? `<span class="session-summary-title">${escapeHtml(entry.title)}</span>` : ""}${entry.phase ? `<span class="phase-chip phase-${escapeAttr(entry.phase)}">${escapeHtml(entry.phase)}</span>` : ""}${entry.current ? '<span class="session-picker-current">Open</span>' : ""}`;
     button.onclick = (event) => {
       closeSessionPicker(false);
       machineDrawerOpen = false;

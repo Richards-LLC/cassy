@@ -351,6 +351,172 @@ async fn registered_supervisor(cas_dir: &std::path::Path, name: &str) -> cas::mc
 }
 
 #[tokio::test]
+async fn public_verdicts_project_only_their_receipt_bound_delivery() {
+    let (temp, service) = setup_cas();
+    let _env_lock = env_test_lock();
+    let cas_dir = temp.path().join(".cas");
+    let supervisor_id = format!("delivery-supervisor-{}", std::process::id());
+    let supervisor = registered_supervisor(&cas_dir, &supervisor_id).await;
+    let task_store = open_task_store(&cas_dir).unwrap();
+    let mut previous_dispatch = None;
+
+    for (status, use_child) in [("approved", false), ("rejected", true)] {
+        let created = service
+            .cas_task_create(Parameters(simple_task_req("Receipt-bound verdict")))
+            .await
+            .unwrap();
+        let task_id = extract_task_id(&extract_text(created)).unwrap().to_string();
+        let mut task = task_store.get(&task_id).unwrap();
+        task.status = TaskStatus::InProgress;
+        task.pending_verification = true;
+        task_store.update(&task).unwrap();
+
+        let receipt = cas_store::build_worker_completion_receipt(
+            &cas::types::WorkerCompletionReceiptInput {
+                task_id: task_id.clone(),
+                worker_agent_id: "delivery-worker".into(),
+                repo_selector: "repo:delivery".into(),
+                source_branch: "factory/delivery-worker".into(),
+                commit_sha: "a".repeat(40),
+                merge_base_sha: "b".repeat(40),
+                target_branch: "main".into(),
+                target_sha: "c".repeat(40),
+                proof_reference: "proof:delivery".into(),
+                scope_summary: "delivery projection regression".into(),
+                artifact_path: None,
+            },
+            "delivery-worker",
+            chrono::Utc::now(),
+        );
+        let (delivery, dispatch) = cas_store::create_worker_delivery_with_dispatch(
+            &cas_dir,
+            &receipt,
+            cas::types::WorkerDeliveryState::AwaitingVerification,
+            "delivery-worker",
+            &supervisor_id,
+            chrono::Utc::now() + chrono::Duration::minutes(10),
+        )
+        .unwrap();
+
+        if let Some(unrelated_dispatch) = previous_dispatch.as_ref() {
+            let before_events = cas_store::list_worker_delivery_events(&cas_dir, &delivery.id)
+                .unwrap()
+                .len();
+            supervisor
+                .cas_verification_add(Parameters(VerificationAddRequest {
+                    task_id: task_id.clone(),
+                    status: status.into(),
+                    summary: "unrelated dispatch must not project".into(),
+                    confidence: None,
+                    issues: None,
+                    files_reviewed: None,
+                    duration_ms: None,
+                    verification_type: None,
+                    verifier_capability: None,
+                    dispatch_id: Some(unrelated_dispatch.clone()),
+                }))
+                .await
+                .expect_err("public unrelated dispatch fails closed");
+            assert!(
+                open_verification_store(&cas_dir)
+                    .unwrap()
+                    .get_latest_for_task(&task_id)
+                    .unwrap()
+                    .is_none()
+            );
+            assert_eq!(task_store.get(&task_id).unwrap().status, TaskStatus::InProgress);
+            assert!(task_store.get(&task_id).unwrap().pending_verification);
+            assert_eq!(
+                cas_store::get_latest_worker_delivery(&cas_dir, &task_id)
+                    .unwrap()
+                    .unwrap()
+                    .1
+                    .state,
+                cas::types::WorkerDeliveryState::AwaitingVerification
+            );
+            assert_eq!(
+                cas_store::list_worker_delivery_events(&cas_dir, &delivery.id)
+                    .unwrap()
+                    .len(),
+                before_events
+            );
+        }
+        previous_dispatch = Some(dispatch.id.clone());
+
+        let (caller, capability) = if use_child {
+            let issued = cas_store::issue_verifier_capability(&cas_dir, &task_id, &supervisor_id)
+                .unwrap();
+            let child_id = format!("delivery-verifier-{}", std::process::id());
+            cas_store::bind_verifier_capability(&cas_dir, &issued.token, &child_id).unwrap();
+            cas_store::claim_verification_dispatch(
+                &cas_dir,
+                &task_id,
+                &supervisor_id,
+                &child_id,
+                &issued.capability.id,
+            )
+            .unwrap();
+            let mut child = cas::types::Agent::new_sub_agent(
+                child_id.clone(),
+                "task-verifier".into(),
+                supervisor_id.clone(),
+            );
+            child.role = AgentRole::Standard;
+            open_agent_store(&cas_dir).unwrap().register(&child).unwrap();
+            let core = cas::mcp::CasCore::with_daemon(cas_dir.clone(), None, None);
+            core.set_agent_id_for_testing(child_id);
+            (core, Some(issued.token))
+        } else {
+            (supervisor.clone(), None)
+        };
+        caller
+            .cas_verification_add(Parameters(VerificationAddRequest {
+                task_id: task_id.clone(),
+                status: status.into(),
+                summary: format!("exact {status} delivery verdict"),
+                confidence: None,
+                issues: None,
+                files_reviewed: None,
+                duration_ms: None,
+                verification_type: None,
+                verifier_capability: capability,
+                dispatch_id: (!use_child).then(|| dispatch.id.clone()),
+            }))
+            .await
+            .expect("public exact-dispatch verdict projects");
+
+        let (_, projected) = cas_store::get_latest_worker_delivery(&cas_dir, &task_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(projected.id, delivery.id);
+        let verification = open_verification_store(&cas_dir)
+            .unwrap()
+            .get_latest_for_task(&task_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(projected.verification_id.as_deref(), Some(verification.id.as_str()));
+        assert_eq!(
+            projected.state,
+            if status == "approved" {
+                cas::types::WorkerDeliveryState::AwaitingMerge
+            } else {
+                cas::types::WorkerDeliveryState::VerificationFailed
+            }
+        );
+        let projected_task = task_store.get(&task_id).unwrap();
+        assert_eq!(
+            projected_task.status,
+            if status == "approved" {
+                TaskStatus::AwaitingMerge
+            } else {
+                TaskStatus::Blocked
+            }
+        );
+        assert!(!projected_task.pending_verification);
+    }
+}
+
+#[tokio::test]
 async fn test_verdict_survives_the_worker_branch_advancing_after_dispatch() {
     let (_temp, service, cas_dir, task_id, worker_dir, _env_lock) =
         delivered_worktree_fixture("factory/proof-mover").await;

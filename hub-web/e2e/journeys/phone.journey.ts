@@ -121,6 +121,19 @@ test("HUB-J9 on a phone: from the list to a reply and back", async ({ page, jour
       const active = document.activeElement as HTMLElement | null;
       return Boolean(active && (active.tagName === "INPUT" || active.tagName === "TEXTAREA" || active.isContentEditable));
     }), { message: "no text field holds focus, so no soft keyboard is up" }).toBe(false);
+    // The thread it lands on draws the house focus ring, never the browser's
+    // default 1px outline (cas-0bf5).
+    const ring = await page.locator(".conversation-reading.thread").evaluate((thread) => {
+      const style = getComputedStyle(thread);
+      const probe = document.createElement("span");
+      probe.style.color = "var(--color-focus)";
+      thread.append(probe);
+      const focus = getComputedStyle(probe).color;
+      probe.remove();
+      return { focused: document.activeElement === thread, style: style.outlineStyle, width: style.outlineWidth, color: style.outlineColor, focus };
+    });
+    expect(ring.focused, "the jump lands on the thread").toBe(true);
+    expect(ring).toMatchObject({ style: "solid", width: "2px", color: ring.focus });
   });
 
   await journey.stage("See the switched-off machine named plainly", async () => {

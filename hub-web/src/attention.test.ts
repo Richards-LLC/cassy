@@ -307,6 +307,9 @@ describe("Commander attention triage queue", () => {
     merge = mergeAttentionItem(merge.items, item({ id: "a3", kind: "hub_disconnected", fingerprint: "soundwave:hub_disconnected", createdAt: "2026-08-15T02:30:09Z" }));
     expect(merge.stored.repeatCount).toBe(3);
     expect(coalesceAttention(merge.items)[0].count).toBe(3);
+    // The group, the panel summary and the badge all count one outage once;
+    // only the card says it repeated (cas-90d4: "1 event" vs "2" vs "×2").
+    expect(groupAttention(merge.items)[0].count).toBe(1);
   });
 
   it("starts a new entry once the repeating one is acknowledged, or when it is a different failure", () => {

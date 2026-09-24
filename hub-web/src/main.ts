@@ -17,7 +17,7 @@ import { applyAttentionEnrichment, attentionCounts, attentionSummary, attentionU
 import { cycleAttentionGroup, renderAttentionPanel, renderAttentionSummary } from "./attention-view";
 import { HubConnectionSupervisor, type ConnectionState, type HubMachineInfo } from "./connection";
 import { attachElapsedSeconds, elapsedSeconds, type AttachSnapshot } from "./connection-state";
-import { disconnectedView, renderConnectionSurfaceInto, shouldRetainDisconnectedFrame } from "./connection-state-view";
+import { disconnectedView, renderConnectionSurfaceInto, shouldRetainDisconnectedFrame, transportFailureNeedsAttention } from "./connection-state-view";
 import { ensureMachineConnection, replaceMachineConnection } from "./connection-lifecycle";
 import { createDeviceKey } from "./dpop";
 import { readPairingFragment, watchPairingFragment } from "./fragment";
@@ -773,7 +773,10 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
     },
     onSocketError: (session, detail) => {
       renderTerminalFailure(machine.id, session, detail);
-      void addAttention(machine, session, "session_transport", { headline: "Terminal transport problem", detail, severity: "critical", action: "view_pane", payload: detail, fingerprint: `${machine.id}:${session}:session_transport` });
+      // A retrying drop is already one plain status on the banner, header, row
+      // and footer; the rail defers to it instead of repeating it (cas-90d4).
+      if (!transportFailureNeedsAttention(attachStates.get(sessionKey(machine.id, session)))) return;
+      void addAttention(machine, session, "session_transport", { headline: `Lost connection to ${machine.label}`, detail: `Not retrying: ${detail}`, severity: "critical", action: "none", payload: detail, fingerprint: `${machine.id}:${session}:session_transport` });
     },
   });
 }

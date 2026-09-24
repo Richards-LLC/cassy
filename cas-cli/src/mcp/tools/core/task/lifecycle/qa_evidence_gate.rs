@@ -303,6 +303,8 @@ mod tests {
         // A's own id, A becomes an ancestor of origin/main, and the fixture is
         // no longer a squash merge (cas-e5ac: red in CI, empty branch diff).
         git(&repo, &["switch", "-q", "--detach", "main"]);
+        // main predates A, so its checkout has no hub-web/dist yet.
+        std::fs::create_dir_all(repo.join("hub-web/dist")).unwrap();
         std::fs::write(repo.join("hub-web/dist/app.css"), "body { color: red }\n").unwrap();
         git(&repo, &["add", "hub-web/dist/app.css"]);
         git(&repo, &["commit", "-q", "-m", "Task A (#1) (squashed)"]);

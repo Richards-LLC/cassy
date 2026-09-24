@@ -57,6 +57,7 @@ pub mod github_issue_attach;
 pub mod git_log;
 pub mod harness_policy;
 pub mod history;
+pub mod db_branch;
 pub mod hooks;
 pub mod hub;
 pub mod hybrid_search;

@@ -6039,6 +6039,9 @@ impl CasService {
             }
         }
 
+        // cas-0033: disposable database branches past their task, worktree or TTL.
+        out.push_str(&self.db_branch_gc_section());
+
         Ok(Self::success(out))
     }
 

@@ -1614,6 +1614,33 @@ fn declared_risk_close_gaps(task: &Task, changed_paths: &[String]) -> Vec<String
     gaps
 }
 
+/// The latest passing `ASSEMBLY_PROOF:` line recorded on an epic (cas-4cbb):
+/// the supervisor's single build and test of the epic tip.
+fn assembly_proof_line(notes: &str) -> Option<String> {
+    notes
+        .lines()
+        .filter_map(|line| {
+            let start = line.find("ASSEMBLY_PROOF:")?;
+            let proof = line[start..].trim();
+            proof
+                .to_ascii_lowercase()
+                .contains("result=pass")
+                .then(|| proof.to_string())
+        })
+        .last()
+}
+
+/// Whether a close must carry its own Rust build proofs (cas-4cbb).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BuildProofs {
+    /// Scoped `--proof` receipt and, for concurrency risk, a loaded proof.
+    Required,
+    /// A factory worker's close: it never builds. The supervisor's
+    /// ASSEMBLY_PROOF on the epic, one build and test of the epic tip, stands
+    /// for it.
+    DeferredToAssembly,
+}
+
 fn validate_risk_close_proofs(
     task: &Task,
     changed_paths: &[String],
@@ -1627,6 +1654,7 @@ fn validate_risk_close_proofs(
         proof_repo,
         None,
         None,
+        BuildProofs::Required,
         &mut scoped_proof_cache,
     )
 }
@@ -1661,6 +1689,7 @@ fn validate_risk_close_proofs_with_base_and_head(
         proof_repo,
         expected_base,
         delivery_head,
+        BuildProofs::Required,
         &mut scoped_proof_cache,
     )
 }
@@ -1672,6 +1701,7 @@ fn validate_risk_close_proofs_with_base_and_target_and_cache(
     target_repo: &std::path::Path,
     expected_base: Option<&str>,
     delivery_head: Option<&str>,
+    build_proofs: BuildProofs,
     scoped_proof_cache: &mut ScopedProofTargetCache,
 ) -> Result<(), String> {
     if task.risk.contains(&TaskRisk::Platform) && !has_platform_proof_note(&task.notes) {
@@ -1682,7 +1712,10 @@ fn validate_risk_close_proofs_with_base_and_target_and_cache(
             task.id,
         ));
     }
-    if task.risk.contains(&TaskRisk::Concurrency) && !has_loaded_proof_note(&task.notes) {
+    if task.risk.contains(&TaskRisk::Concurrency)
+        && build_proofs == BuildProofs::Required
+        && !has_loaded_proof_note(&task.notes)
+    {
         let missing = loaded_proof_missing_evidence(&task.notes).join(", ");
         return Err(format!(
             "TASK CLOSE REJECTED: task {} declares risk=concurrency but its loaded_proof receipt is incomplete (missing evidence: {missing}). Add one with action=notes note_type=loaded_proof proving the whole or explicit non-Rust target under -j16 for at least 3 loops with a passing result, then retry close.",
@@ -1699,6 +1732,12 @@ fn validate_risk_close_proofs_with_base_and_target_and_cache(
                 proof_targets_scope_fix_command(task, &uncovered),
             ));
         }
+    }
+    // cas-4cbb: a factory worker never builds, so its close carries no
+    // scoped or loaded build proof; the supervisor's single build of the epic
+    // tip at assembly proves every child at once.
+    if build_proofs == BuildProofs::DeferredToAssembly {
+        return Ok(());
     }
     let required_targets = required_scoped_proof_targets(
         proof_repo,
@@ -2586,6 +2625,75 @@ mod risk_proof_tests {
         );
         validate_risk_close_proofs_with_base(&task, &changed, dir.path(), Some(&expected_base))
             .expect("a receipt on the delivery's own base closes");
+    }
+
+    /// cas-4cbb: a factory worker's close carries no build proof. The same
+    /// diff and risk that refuse a supervisor close without a scoped receipt
+    /// or loaded proof pass when the proofs are deferred to epic assembly.
+    #[test]
+    fn worker_close_needs_no_scoped_or_loaded_proof_when_deferred_to_assembly() {
+        let dir = scoped_proof_fixture();
+        let mut task = Task::new("cas-4cbb-close".into(), "worker close".into());
+        task.risk = vec![TaskRisk::Concurrency];
+        let changed = vec!["cas-cli/src/mcp/tools/service/factory_ops.rs".to_string()];
+        let expected_base = "a".repeat(40);
+        let mut cache = ScopedProofTargetCache::default();
+
+        let required = validate_risk_close_proofs_with_base_and_target_and_cache(
+            &task,
+            &changed,
+            dir.path(),
+            dir.path(),
+            Some(&expected_base),
+            None,
+            BuildProofs::Required,
+            &mut cache,
+        );
+        assert!(
+            required.is_err(),
+            "a non-worker close still needs its proofs"
+        );
+
+        validate_risk_close_proofs_with_base_and_target_and_cache(
+            &task,
+            &changed,
+            dir.path(),
+            dir.path(),
+            Some(&expected_base),
+            None,
+            BuildProofs::DeferredToAssembly,
+            &mut cache,
+        )
+        .expect("a worker close needs neither a scoped receipt nor a loaded proof");
+
+        // Non-build evidence is still required: platform risk keeps its gate.
+        task.risk = vec![TaskRisk::Platform];
+        assert!(
+            validate_risk_close_proofs_with_base_and_target_and_cache(
+                &task,
+                &changed,
+                dir.path(),
+                dir.path(),
+                Some(&expected_base),
+                None,
+                BuildProofs::DeferredToAssembly,
+                &mut cache,
+            )
+            .is_err(),
+            "deferring build proofs does not waive platform evidence"
+        );
+    }
+
+    #[test]
+    fn assembly_proof_line_takes_the_latest_passing_epic_proof() {
+        let notes = "[2026-09-24 10:00] PROGRESS ASSEMBLY_PROOF: head=aaa result=FAIL\n\
+                     [2026-09-24 11:00] PROGRESS ASSEMBLY_PROOF: head=bbb result=PASS command=cargo nextest run -p cas\n\
+                     [2026-09-24 12:00] PROGRESS unrelated note";
+        assert_eq!(
+            assembly_proof_line(notes).as_deref(),
+            Some("ASSEMBLY_PROOF: head=bbb result=PASS command=cargo nextest run -p cas")
+        );
+        assert_eq!(assembly_proof_line("no proof here"), None);
     }
 
     /// cas-a9a1: a worker's proof run without SCOPED_PROOF_BASE records the
@@ -6956,6 +7064,50 @@ impl CasCore {
                 .as_deref()
                 .and_then(|receipt| resolve_branch_sha(proof_repo, receipt))
                 .or_else(|| resolve_branch_sha(proof_repo, "HEAD"));
+            // cas-4cbb: workers never build; their build proof is the
+            // supervisor's epic-assembly run. An ASSEMBLY_PROOF on the parent
+            // epic whose tested head contains this delivery also stands for a
+            // supervisor's close of the child.
+            let assembly_proof = parent_epic.as_ref().and_then(|epic| {
+                let line = assembly_proof_line(&epic.notes)?;
+                let head = scoped_proof_receipt_field(&line, "head=")?;
+                let delivered = delivered_tip.as_deref()?;
+                std::process::Command::new("git")
+                    .args(["merge-base", "--is-ancestor", delivered, &head])
+                    .current_dir(proof_repo)
+                    .status()
+                    .is_ok_and(|status| status.success())
+                    .then(|| (epic.id.clone(), line))
+            });
+            let build_proofs = if is_factory_worker || assembly_proof.is_some() {
+                BuildProofs::DeferredToAssembly
+            } else {
+                BuildProofs::Required
+            };
+            if build_proofs == BuildProofs::DeferredToAssembly {
+                let reference = match (&assembly_proof, parent_epic.as_ref()) {
+                    (Some((epic_id, line)), _) => format!("covered by {epic_id}'s {line}"),
+                    (None, Some(epic)) => format!(
+                        "pending the supervisor's ASSEMBLY_PROOF on {} (one build and test of the epic tip)",
+                        epic.id
+                    ),
+                    (None, None) => {
+                        "pending the supervisor's assembly build of the integration branch"
+                            .to_string()
+                    }
+                };
+                let ts = chrono::Utc::now().format("%Y-%m-%d %H:%M");
+                let note = format!(
+                    "[{ts}] BUILD PROOF deferred to epic assembly (cas-4cbb): factory workers do not build; {reference}."
+                );
+                if !task.notes.contains("BUILD PROOF deferred to epic assembly") {
+                    task.notes = if task.notes.is_empty() {
+                        note
+                    } else {
+                        format!("{}\n\n{}", task.notes, note)
+                    };
+                }
+            }
             if let Err(message) = validate_risk_close_proofs_with_base_and_target_and_cache(
                 &task,
                 &changed_paths,
@@ -6963,6 +7115,7 @@ impl CasCore {
                 target_repo,
                 scoped_proof_base.as_deref(),
                 delivered_tip.as_deref(),
+                build_proofs,
                 &mut scoped_proof_cache,
             ) {
                 let measured_gaps = declared_risk_close_gaps(&task, &changed_paths);
@@ -6981,6 +7134,7 @@ impl CasCore {
                     target_repo,
                     scoped_proof_base.as_deref(),
                     delivered_tip.as_deref(),
+                    build_proofs,
                     &mut scoped_proof_cache,
                 ) {
                     let required_targets = required_scoped_proof_targets(

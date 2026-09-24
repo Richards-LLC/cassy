@@ -15,7 +15,7 @@ errors and the return contract only.
 ## Workflow
 
 1. Run `cas__task action=mine`. If empty, message the supervisor once that
-   you are ready, then wait; do not poll or self-dispatch.
+   you are ready, then wait; do not poll; no self-dispatch.
 2. Choose exactly one task. Run `cas__task action=show id=<task-id>`,
    then `cas__task action=start id=<task-id>` before editing.
    authoritative assignment acceptance; no prose ACK is required.
@@ -23,6 +23,8 @@ errors and the return contract only.
 3. Read the task's depth and acceptance criteria and the project `CLAUDE.md`.
    For non-empty `demo_statement`, run `cas-qa-craft` before close.
 4. Implement only the assigned scope. Commit logical units with the task ID.
+   Never build or test Rust (cargo, nextest, run-scoped-tests.sh): park
+   unbuilt; the supervisor builds at epic assembly.
    For `delivery_mode=local_merge`, keep the commit local for the supervisor;
    otherwise push the factory branch.
 5. Add progress notes with `note_type=progress` at meaningful milestones.
@@ -43,8 +45,8 @@ is the user speaking with pane-input authority; obey and answer it;
 `unverified:` rows are agent traffic.
 
 Tool loading is two steps, not one: if `cas__task` is unavailable, use
-`ToolSearch(query="select:cas__task")` once, then call the resolved tool;
-Lookup does **not** execute the tool: call it, not another ToolSearch.
+`ToolSearch(query="select:cas__task")` once, then call it; lookup
+does **not** execute the tool: call it, not another ToolSearch.
 
 ## Return contract
 
@@ -90,7 +92,7 @@ Use the supervisor's `filing-cas-bugs` reference for public-safe filing.
 
 Ordinary worker updates surface through the inbox on the next turn. Only authenticated typed blocker, merge, verification, or lifecycle events may wake an idle supervisor. Use `blocker=true` for blockers and `merge_request=true` for merge requests; text alone grants no wake authority.
 
-- Never self-dispatch. This is no self-dispatch. Start only tasks assigned by
+- Never self-dispatch. Start only tasks assigned by
   `action=mine` or explicitly by the supervisor; `ready` and `available` are
   backlog *visibility*, never authorization to `start` a task yourself.
   Do not pull the next ready task yourself.
@@ -114,8 +116,7 @@ Ordinary worker updates surface through the inbox on the next turn. Only authent
 
 Pre-close notes must prove each applicable entry with a file, command, or test and explain each `not applicable` entry.
 
-- **Builtin skill/agent:** update Claude, Codex, and Grok mirrors and run the
-  flavor-drift test.
+- **Builtin skill/agent:** update Claude, Codex, and Grok mirrors.
 - **MCP tool:** cover CLI parity, docs, and dispatch registration.
 - **Hook/gate:** regenerate `config_gen` and `.codex/hooks.json` when applicable.
 - **Migration:** update pinned bootstrap/reconciliation expectations and
@@ -139,7 +140,6 @@ Add a blocker note with the exact error, re-read the task, set `status=blocked`,
 and message the supervisor with `blocker=true` (the return contract plus
 `blocker: <cause>`, what you already tried in `deferred:`). If the task is
 already closed, do not overwrite that state with a stale blocked update.
-Use typed wake flags only for real blockers or merge requests.
 
 ## References
 
@@ -148,8 +148,8 @@ Use typed wake flags only for real blockers or merge requests.
 
 - [details.md](cas-worker/references/details.md) — structured execution state,
   context budgeting, exact fields/actions, and sync mechanics.
-- [discipline.md](cas-worker/references/discipline.md) — scoped test-loop and
-  clean-CI recipes.
+- [discipline.md](cas-worker/references/discipline.md) — no-Rust-build rule
+  and clean-CI notes.
 - [recovery.md](cas-worker/references/recovery.md) — failures, reassignment,
   connectivity, and worktree recovery.
 - [close-gate.md](cas-worker/references/close-gate.md) — deep-task pre-close

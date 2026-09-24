@@ -10,10 +10,13 @@ Code tasks (`task`, `bug`, and `feature`) must carry `risk=blast-radius`,
 `platform`, `concurrency`, or `none` at creation. A `blast-radius` declaration
 also requires non-empty comma-separated `proof_targets`, which must cover every
 source module in the attributed delivery diff. Supervisor overrides require a
-non-empty audit reason and are recorded as a decision note; they do not waive
-the close-time proof gate. Before merging, inspect `task show` and reject a
-narrow proof, a missing `platform_proof` receipt, or a missing `loaded_proof`
-receipt with the exact uncovered module or receipt type.
+non-empty audit reason and are recorded as a decision note. Workers never run
+Rust builds or tests, so do not demand a scoped `--proof` receipt or a
+`loaded_proof` note from them: the declared risk and `proof_targets` tell you
+what your one assembly build + test of the epic tip must cover, and its
+`ASSEMBLY_PROOF: head=<epic tip sha> result=PASS command=<cmd> log=<path>`
+note on the epic is the proof child closes reference. A non-Rust
+`risk=platform` task still carries its worker `platform_proof` receipt.
 
 Two of those are supervisor-specific and easy to confuse:
 

@@ -15,6 +15,9 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
   const row = page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ });
   const footer = page.locator("#hub-footer-badges");
   const banner = page.locator(".terminal-disconnected-banner");
+  /** The thread as painted, top to bottom: day and session lines by text, message groups by their spoken label. */
+  const threadOrder = () => page.locator(".msgs > *").evaluateAll((nodes) => nodes.filter((node) => node.matches(".day, .session-divider, [role=group]")).map((node) => node.getAttribute("role") === "group" ? node.getAttribute("aria-label") ?? "" : node.textContent ?? ""));
+  let beforeOutage: string[] = [];
 
   await journey.stage("The network drops", async () => {
     await expect(header).toHaveText(" · Live");
@@ -80,6 +83,9 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
     hub.answerLatest(PELICAN, "Back. Nothing was lost.");
     await expect(page.getByRole("log").getByText("Back. Nothing was lost.")).toBeVisible();
     await expect(page.getByText("Terminal transport problem")).toHaveCount(0);
+    beforeOutage = await threadOrder();
+    // The session line comes first in its session, above the message sent in it.
+    expect(beforeOutage.findIndex((line) => line.startsWith(`session ${PELICAN} started`))).toBeLessThan(beforeOutage.findIndex((line) => line.startsWith("You, ")));
   });
 
   await journey.stage("On a phone, the banner stays readable through an outage", async () => {
@@ -118,5 +124,9 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
     hub.release(PELICAN);
     await expect(banner).toBeHidden({ timeout: 15_000 });
     await page.emulateMedia({ colorScheme: null });
+    // cas-1f13: the reconnect re-hydrates the thread from history, and every
+    // turn keeps its place: "Are we back?" stays below the session line.
+    await expect.poll(() => hub.hasSocket(PELICAN), { timeout: 30_000 }).toBe(true);
+    await expect.poll(threadOrder, { message: "thread order after the reconnect" }).toEqual(beforeOutage);
   });
 });

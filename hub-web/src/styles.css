@@ -3165,6 +3165,7 @@ dialog form > *,
 .thread .turn { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; max-width: 70%; min-width: 0; }
 .thread .turn.you { align-self: flex-end; align-items: flex-end; }
 .thread .turn > time { font-size: 12px; color: var(--ink-mid); padding: 2px 6px 0; }
+.thread time .clock-ahead { font-style: italic; }
 /* --lift-sup adds an inset accent hairline (no layout shift): the light
    --sup-bg tints alone sit about 1.1:1 on the cream thread (journey F11). */
 .thread .bub { max-width: 100%; min-width: 0; padding: 12px 19px; background: var(--sup-bg); color: var(--sup-fg); border-radius: 8px 22px 22px 8px; box-shadow: var(--lift-sup); }

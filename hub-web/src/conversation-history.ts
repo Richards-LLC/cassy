@@ -36,14 +36,24 @@ export interface ConversationSend {
 /** `at` is the sort key. `shownAt`, when set, is the time to display: a live
  * event sorted after a turn stamped by a clock that runs ahead keeps its own
  * time on screen (cas-ac1f). */
-export type ConversationEvent = { kind: "send"; value: ConversationSend; at?: number; shownAt?: number; session?: string } | { kind: "reply"; value: OperatorReply; at?: number; shownAt?: number; session?: string };
+/** `stampedAt`, when set, is a durable turn's own machine stamp that lay in
+ * this browser's future when it arrived: `at` was clamped back to the arrival
+ * time so the thread never shows a future day or a turn above an earlier one,
+ * and the view marks the machine's clock as ahead (cas-1f13). */
+export type ConversationEvent = { kind: "send"; value: ConversationSend; at?: number; shownAt?: number; stampedAt?: number; session?: string } | { kind: "reply"; value: OperatorReply; at?: number; shownAt?: number; stampedAt?: number; session?: string };
 
 /** In-memory per-thread evidence. A submitted socket frame is never a receipt. */
 export class ConversationHistory {
   readonly events: ConversationEvent[] = [];
   private insert(event: ConversationEvent): void {
     const at = event.at ?? Number.POSITIVE_INFINITY;
-    const index = this.events.findIndex((existing) => (existing.at ?? Number.POSITIVE_INFINITY) > at);
+    // Equal keys keep arrival order, except that turns clamped to the same
+    // arrival time keep the machine's own order among themselves (cas-1f13).
+    const index = this.events.findIndex((existing) => {
+      const existingAt = existing.at ?? Number.POSITIVE_INFINITY;
+      if (existingAt !== at) return existingAt > at;
+      return existing.stampedAt !== undefined && event.stampedAt !== undefined && existing.stampedAt > event.stampedAt;
+    });
     if (index < 0) this.events.push(event);
     else this.events.splice(index, 0, event);
   }
@@ -52,6 +62,18 @@ export class ConversationHistory {
     if (!value) return undefined;
     const parsed = Date.parse(value);
     return Number.isFinite(parsed) ? parsed : undefined;
+  }
+
+  /**
+   * Where a durable turn sorts. A machine stamp in this browser's future (a
+   * machine clock running ahead) is clamped to `now`, the time it arrived:
+   * otherwise a future day header lands above Today and a turn sits above
+   * earlier ones (cas-1f13). The machine's stamp is kept as `stampedAt`.
+   */
+  private static durable(value: string | undefined, now: number): { at?: number; stampedAt?: number } {
+    const stamped = ConversationHistory.timestamp(value);
+    if (stamped === undefined) return {};
+    return stamped > now ? { at: now, stampedAt: stamped } : { at: stamped };
   }
 
   hasPending(): boolean {
@@ -75,15 +97,19 @@ export class ConversationHistory {
   }
 
   /** Merge one durable operator message without duplicating a live ack. */
-  hydrateSend(message: ConversationHistoryMessage): void {
+  hydrateSend(message: ConversationHistoryMessage, now: number = Date.now()): void {
     const existing = this.events.find((event) => event.kind === "send" && event.value.notificationId === message.notification_id);
     if (existing?.kind === "send") {
       existing.value.target = message.target;
       existing.value.text = message.text;
       existing.value.state = message.state;
       existing.value.stamped = message.stamped;
-      existing.value.replyTo = message.reply_to;
-      existing.session = message.session;
+      // A turn already in the thread keeps what it is known to be. A
+      // reconnect's history row that omits in_reply_to or the session must
+      // not re-open the ask it answered or move it across the session line
+      // (cas-1f13); in_reply_to never changes after the send.
+      existing.value.replyTo = message.reply_to ?? existing.value.replyTo;
+      existing.session ??= message.session;
       return;
     }
     this.insert({
@@ -97,7 +123,7 @@ export class ConversationHistory {
         stamped: message.stamped,
         ...(message.reply_to === undefined ? {} : { replyTo: message.reply_to }),
       },
-      at: ConversationHistory.timestamp(message.at),
+      ...ConversationHistory.durable(message.at, now),
       session: message.session,
     });
   }
@@ -234,7 +260,7 @@ export class ConversationHistory {
     }
     return undefined;
   }
-  reply(reply: OperatorReply, at: number | undefined = Date.now(), session?: string, shownAt?: number): void {
+  reply(reply: OperatorReply, at: number | undefined = Date.now(), session?: string, shownAt?: number, stampedAt?: number): void {
     if (this.events.some((event) => event.kind === "reply" && event.value.notification_id === reply.notification_id)) return;
     const normalized: OperatorReply = {
       ...reply,
@@ -242,7 +268,7 @@ export class ConversationHistory {
       kind: reply.kind ?? "answer",
       attachments: reply.attachments ?? [],
     };
-    this.insert({ kind: "reply", value: normalized, at, ...(shownAt === undefined ? {} : { shownAt }), session });
+    this.insert({ kind: "reply", value: normalized, at, ...(shownAt === undefined ? {} : { shownAt }), ...(stampedAt === undefined ? {} : { stampedAt }), session });
     for (const event of this.events) {
       if (event.kind === "send" && normalized.reply_to !== null && event.value.notificationId === normalized.reply_to) event.value.state = "replied";
     }
@@ -259,9 +285,10 @@ export class ConversationHistory {
     this.reply(reply, key, session, key === at ? undefined : at);
   }
 
-  /** Merge a durable supervisor turn using its original queue timestamp. */
-  hydrateReply(reply: ConversationHistoryReply): void {
+  /** Merge a durable supervisor turn using its original queue timestamp, clamped to `now` when it lies ahead (cas-1f13). */
+  hydrateReply(reply: ConversationHistoryReply, now: number = Date.now()): void {
     const { at, ...live } = reply;
-    this.reply(live, ConversationHistory.timestamp(at), reply.session);
+    const placed = ConversationHistory.durable(at, now);
+    this.reply(live, placed.at, reply.session, undefined, placed.stampedAt);
   }
 }

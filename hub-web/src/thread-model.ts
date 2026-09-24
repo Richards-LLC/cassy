@@ -33,6 +33,8 @@ export interface ThreadGroup {
   turns: ThreadTurn[];
   /** Shown once beneath the group, never once per bubble. */
   time: string | undefined;
+  /** The turn whose time is shown was stamped by a machine clock ahead of this browser, so the time is its arrival (cas-1f13). */
+  clockAhead?: boolean;
 }
 
 export interface ThreadCoalesce {
@@ -44,6 +46,7 @@ export interface ThreadCoalesce {
   latest: string;
   replies: OperatorReply[];
   time: string | undefined;
+  clockAhead?: boolean;
 }
 
 export interface ThreadDay { type: "day"; key: string; label: string }
@@ -73,6 +76,15 @@ export function clockLabel(at: number | undefined): string | undefined {
   if (at === undefined) return undefined;
   const date = new Date(at);
   return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+}
+
+/**
+ * Whether a turn was clamped from a machine stamp ahead of this browser far
+ * enough to read differently: a few seconds of skew changes nothing on
+ * screen, so it earns no hint (cas-1f13).
+ */
+export function clockAheadOf(event: ConversationEvent): boolean {
+  return event.stampedAt !== undefined && event.at !== undefined && Math.floor(event.stampedAt / 60_000) !== Math.floor(event.at / 60_000);
 }
 
 function dayKey(at: number): string {
@@ -173,6 +185,8 @@ export function threadModel(events: readonly ConversationEvent[], options: Threa
       coalesce.latest = event.value.message;
       coalesce.replies.push(event.value);
       coalesce.time = clockLabel(at) ?? coalesce.time;
+      // The hint belongs to the time shown, which is the latest turn's.
+      if (at !== undefined) coalesce.clockAhead = clockAheadOf(event);
       continue;
     }
     coalesce = undefined;
@@ -185,6 +199,7 @@ export function threadModel(events: readonly ConversationEvent[], options: Threa
     }
     group.turns.push(turn);
     group.time = clockLabel(at) ?? group.time;
+    if (at !== undefined) group.clockAhead = clockAheadOf(event);
   }
   closeGroup();
   // An empty durable page owns the empty state. Do not let pagination or a

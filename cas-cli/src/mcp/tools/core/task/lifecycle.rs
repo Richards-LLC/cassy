@@ -545,22 +545,79 @@ fn task_similarity(
     None
 }
 
+/// One open task that overlaps a task being created.
+type SimilarTask = (String, String, f64, Vec<String>);
+
+/// The overlap checks for a new task, split by whether they may block it.
+#[derive(Debug, Default)]
+struct OpenTaskOverlap {
+    /// The best-scoring overlap with any open task other than the new task's
+    /// own parent epic and its siblings. This one requires confirmation.
+    blocking: Option<SimilarTask>,
+    /// The best-scoring overlap with a sibling under the same epic. Children
+    /// of one epic naturally share its identifiers, so this only warns.
+    sibling: Option<SimilarTask>,
+}
+
+/// Compare a new task with every open task (cas-60e3, GH #1006 item 2).
+///
+/// A child created with `epic=X` naturally repeats X's identifiers, so X is
+/// never a duplicate candidate for its own child. X's other children are still
+/// compared, but a match among them only warns.
 fn open_task_similarity(
     task_store: &dyn cas_store::TaskStore,
     title: &str,
     description: &str,
-) -> Result<Option<(String, String, f64, Vec<String>)>, String> {
-    let best = task_store
-        .list(None)
-        .map_err(|error| error.to_string())?
-        .into_iter()
-        .filter(|task| !matches!(task.status, TaskStatus::Closed | TaskStatus::Cancelled))
-        .filter_map(|task| {
+    epic_id: Option<&str>,
+) -> Result<OpenTaskOverlap, String> {
+    let siblings: std::collections::HashSet<String> = match epic_id {
+        Some(epic) => task_store
+            .get_dependents(epic)
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .filter(|dependency| dependency.dep_type == crate::types::DependencyType::ParentChild)
+            .map(|dependency| dependency.from_id)
+            .collect(),
+        None => std::collections::HashSet::new(),
+    };
+    let mut overlap = OpenTaskOverlap::default();
+    for task in task_store.list(None).map_err(|error| error.to_string())? {
+        if matches!(task.status, TaskStatus::Closed | TaskStatus::Cancelled)
+            || epic_id == Some(task.id.as_str())
+        {
+            continue;
+        }
+        let Some((score, identifiers)) =
             task_similarity(title, description, &task.title, &task.description)
-                .map(|(score, identifiers)| (task.id, task.title, score, identifiers))
-        })
-        .max_by(|left, right| left.2.total_cmp(&right.2));
-    Ok(best)
+        else {
+            continue;
+        };
+        let slot = if siblings.contains(&task.id) {
+            &mut overlap.sibling
+        } else {
+            &mut overlap.blocking
+        };
+        if slot.as_ref().is_none_or(|best| score > best.2) {
+            *slot = Some((task.id, task.title, score, identifiers));
+        }
+    }
+    Ok(overlap)
+}
+
+/// Describe an overlap in the shared warning format.
+fn overlap_description(existing: &SimilarTask) -> (String, &'static str) {
+    let (_, _, _, identifiers) = existing;
+    let identifier_note = if identifiers.is_empty() {
+        String::new()
+    } else {
+        format!("; overlapping identifiers: {}", identifiers.join(", "))
+    };
+    let overlap_subject = if identifiers.is_empty() {
+        "title"
+    } else {
+        "task"
+    };
+    (identifier_note, overlap_subject)
 }
 
 fn recent_other_epic_planner(
@@ -751,6 +808,10 @@ impl CasCore {
             .map(ToString::to_string);
         let created_by = self.get_agent_id().ok();
 
+        // Set when the new task overlaps a sibling under its own epic; shown
+        // in the create receipt, never a reason to refuse the write.
+        let mut sibling_warning = String::new();
+
         // A recent sibling plan is a strong signal that another supervisor is
         // decomposing the same epic. Refuse the write until the caller makes a
         // conscious override; no task row or dependency is created on this path.
@@ -778,26 +839,30 @@ impl CasCore {
                 }
             }
 
-            if let Some((existing_id, existing_title, score, identifiers)) = open_task_similarity(
+            let overlap = open_task_similarity(
                 task_store.as_ref(),
                 &req.title,
                 req.description.as_deref().unwrap_or_default(),
+                epic_id.as_deref(),
             )
             .map_err(|error| McpError {
                 code: ErrorCode::INTERNAL_ERROR,
                 message: Cow::from(format!("Failed to inspect open task overlap: {error}")),
                 data: None,
-            })? {
-                let identifier_note = if identifiers.is_empty() {
-                    String::new()
-                } else {
-                    format!("; overlapping identifiers: {}", identifiers.join(", "))
-                };
-                let overlap_subject = if identifiers.is_empty() {
-                    "title"
-                } else {
-                    "task"
-                };
+            })?;
+            if let Some(existing) = &overlap.sibling {
+                let (existing_id, existing_title, score, _) = existing;
+                let (identifier_note, overlap_subject) = overlap_description(existing);
+                sibling_warning = format!(
+                    "\n\n⚠️ SIBLING OVERLAP: {existing_id} ({existing_title:?}), under the same epic, \
+                     overlaps this {overlap_subject} at {:.0}%{identifier_note}. Created anyway; check \
+                     the two do not duplicate each other's scope.",
+                    score * 100.0,
+                );
+            }
+            if let Some(existing) = &overlap.blocking {
+                let (existing_id, existing_title, score, _) = existing;
+                let (identifier_note, overlap_subject) = overlap_description(existing);
                 return Err(McpError {
                     code: ErrorCode::INVALID_PARAMS,
                     message: Cow::from(format!(
@@ -1047,10 +1112,11 @@ impl CasCore {
 
         // Recall before indexing this task so an epic cannot surface itself as
         // "prior context" and turn an otherwise clean create receipt noisy.
-        let related_context = (task.task_type == crate::types::TaskType::Epic)
-            .then(|| self.related_recall(&format!("{} {}", task.title, task.description)))
-            .flatten()
-            .unwrap_or_default();
+        let related_context = sibling_warning
+            + &(task.task_type == crate::types::TaskType::Epic)
+                .then(|| self.related_recall(&format!("{} {}", task.title, task.description)))
+                .flatten()
+                .unwrap_or_default();
 
         if let Ok(search) = self.open_search_index() {
             let _ = search.index_task(&task);
@@ -2363,6 +2429,90 @@ mod related_recall_response_tests {
                 "Task B — no-dep-found error regression",
             ),
             0.0
+        );
+    }
+
+    /// cas-60e3 (GH #1006 item 2): a child created under an epic repeats the
+    /// epic's identifiers; the epic is not its duplicate. A near-identical
+    /// sibling still shows up, but only as a warning on the receipt. A
+    /// matching task outside the epic still requires confirmation.
+    #[tokio::test]
+    async fn duplicate_check_skips_the_parent_epic_and_only_warns_on_siblings() {
+        let temp = TempDir::new().expect("temporary project");
+        let core = CasCore::with_daemon(temp.path().to_path_buf(), None, None);
+        let identifiers = "Migrate refund readers in payments.service.ts:412 and \
+                           refunds.controller.ts:88 to read paymentIntentId from the payments table";
+
+        let mut epic = described_task_request(
+            "Payments SOW: refund readers read the payments table",
+            identifiers,
+        );
+        epic.task_type = "epic".to_string();
+        epic.risk = None;
+        core.cas_task_create(Parameters(epic))
+            .await
+            .expect("epic is created");
+        let epic_id = core
+            .open_task_store()
+            .expect("task store")
+            .list(None)
+            .expect("list tasks")
+            .into_iter()
+            .find(|task| task.task_type == crate::types::TaskType::Epic)
+            .expect("epic row")
+            .id;
+
+        let mut first = child_request(
+            "E1.8 refund readers read the payments table",
+            epic_id.clone(),
+        );
+        first.description = Some(identifiers.to_string());
+        let created = core
+            .cas_task_create(Parameters(first))
+            .await
+            .expect("a child that repeats its epic's identifiers is not a duplicate of the epic");
+        let text = format!("{:?}", created.content);
+        assert!(!text.contains("SIBLING OVERLAP"), "{text}");
+        let first_id = core
+            .open_task_store()
+            .expect("task store")
+            .list(None)
+            .expect("list tasks")
+            .into_iter()
+            .find(|task| task.title.starts_with("E1.8"))
+            .expect("first child")
+            .id;
+
+        let mut second = child_request(
+            "E1.9 refund readers read the payments table",
+            epic_id.clone(),
+        );
+        second.description = Some(identifiers.to_string());
+        let created = core
+            .cas_task_create(Parameters(second))
+            .await
+            .expect("a sibling overlap never blocks creation");
+        let text = format!("{:?}", created.content);
+        assert!(
+            text.contains("SIBLING OVERLAP") && text.contains(&first_id),
+            "the sibling overlap is reported on the receipt: {text}"
+        );
+        assert!(
+            !text.contains(&epic_id),
+            "the parent epic is never named: {text}"
+        );
+
+        let outside = core
+            .cas_task_create(Parameters(described_task_request(
+                "E1.10 refund readers read the payments table",
+                identifiers,
+            )))
+            .await
+            .expect_err("a matching task outside the epic still needs confirmation");
+        assert!(
+            outside.message.contains("DUPLICATE TASK WARNING"),
+            "unexpected: {}",
+            outside.message
         );
     }
 

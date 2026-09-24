@@ -49,6 +49,9 @@ export function refusal(detail: string | undefined): Refusal {
   return RULES.find(([pattern]) => pattern.test(text))?.[1] ?? UNKNOWN;
 }
 
+/** The composer's line when the refused bubble already says why (cas-4d92). */
+export const REFUSED_SEE_ABOVE = "Not sent — see the message above.";
+
 /** One line for the composer status: reason, then next step. */
 export function refusalSentence(detail: string | undefined): string {
   const { reason, next } = refusal(detail);

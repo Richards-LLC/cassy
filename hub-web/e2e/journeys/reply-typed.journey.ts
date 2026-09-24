@@ -57,6 +57,9 @@ test("HUB-J5 reply by typing", async ({ page, journey }) => {
     await expect(bubble.getByRole("status")).toContainText("Take control from the header, then retry.");
     await expect(bubble.getByRole("status")).not.toContainText("forbidden");
     await expect(list.getByText("Not sent: Ship it without the gate.")).toBeVisible();
+    // The reason is said once, on the message; the composer only points at it (cas-4d92).
+    await expect(page.locator("#message-status")).toHaveText("Not sent — see the message above.");
+    await expect(page.getByText("This device isn't the one in control of the session.")).toHaveCount(1);
   });
 
   await journey.stage("Edit and resend retires the refused message", async () => {

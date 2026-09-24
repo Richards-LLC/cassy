@@ -542,9 +542,13 @@ watchPairingFragment(window, pendingPairingStore, (fragment) => {
   // dialog no longer applies to it, and the fresh invitation takes the store.
   pairingCancellations.supersede();
   pairingCleanupFailed = false;
+  // Keep what the operator typed into the form that is still on screen, then
+  // replace the machine, address and ceiling with the new link's. The render
+  // below must not capture the form again: the old link's address and machine
+  // name are still in it and would overwrite the new prefill, sending the new
+  // token to the old machine (QA F01).
+  capturePairingDraft();
   pendingPairing = fragment;
-  // The new link's machine, address and ceiling replace the old ones; who is
-  // pairing, and from which browser, has not changed.
   pairingDraft = {
     ...createPairingDraft(location.origin, preselectedScopes(fragment), fragment),
     deviceLabel: pairingDraft.deviceLabel,
@@ -552,7 +556,7 @@ watchPairingFragment(window, pendingPairingStore, (fragment) => {
     email: pairingDraft.email,
   };
   pairingStatus = "";
-  render();
+  render(false);
   openPairDialog();
 }, () => {
   if (pendingPairing) return;

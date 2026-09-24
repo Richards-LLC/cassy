@@ -2071,6 +2071,10 @@ dialog form,
   scroll-padding-bottom: calc(var(--button-height) + var(--space-4));
 }
 
+/* A focused field brings its hint with it, so a hint never ends up under the
+   sticky action row on a short phone screen (QA F03). */
+dialog label:has(> .field-hint) > input { scroll-margin-bottom: 3em; }
+
 dialog h2,
 dialog p { margin: 0; }
 

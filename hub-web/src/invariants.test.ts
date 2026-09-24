@@ -594,6 +594,9 @@ describe("binding Cassy Cloud browser invariants", () => {
     // an optional email on open pops it and scrolls the title off the screen.
     expect(main).toContain('<section class="pair-flow" tabindex="-1" autofocus>');
     expect(main).not.toContain('<input id="pair-email" type="email" autofocus');
+    // A focused field scrolls clear of the sticky action row, hint included (QA F03).
+    expect(css).toContain("scroll-padding-bottom: calc(var(--button-height) + var(--space-4));");
+    expect(css).toContain("dialog label:has(> .field-hint) > input { scroll-margin-bottom: 3em; }");
     // Focus goes to the first field still empty, so a prefilled link opens on the operator's name.
     expect(main).toContain("const autofocus = firstEmptyField(pairingDraft, ");
     expect(main).toContain('<input name="url" type="url" required${autofocus === "url" ? " autofocus" : ""}');

@@ -21,6 +21,12 @@ export interface AttentionPanelCallbacks {
 
 export interface AttentionPanelOptions {
   now?: number;
+  /**
+   * A connection the rail covers is down ("Atlas · Linux is reconnecting").
+   * With no events, the empty state says this instead of "All clear": the
+   * banner beside it is saying the same thing (cas-edcd).
+   */
+  outage?: string;
   animateIds?: ReadonlySet<string>;
   reclassifyIds?: ReadonlySet<string>;
 }
@@ -269,9 +275,9 @@ export function renderAttentionPanel(
   const groups = groupAttention(items);
   if (groups.length === 0) {
     const empty = document.createElement("div");
-    empty.className = "attention-empty";
+    empty.className = options.outage ? "attention-empty outage" : "attention-empty";
     const message = document.createElement("p");
-    message.textContent = "All clear";
+    message.textContent = options.outage ?? "All clear";
     const latest = items.toSorted((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
     const timestamp = document.createElement("time");
     timestamp.className = "attention-last-event";

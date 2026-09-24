@@ -84,6 +84,19 @@ beforeEach(() => {
   root = document.body;
 });
 
+describe("the mode badge while the session is down (cas-edcd, cas-4a93)", () => {
+  it("hides the control claim while reconnecting and brings it back when live", () => {
+    const mode = root.querySelector<HTMLElement>(".mode-badge")!;
+    expect(mode).not.toBeNull();
+    applyLiveRegions(root, { ...live, connection: { state: "backoff", title: "Reconnecting", latencyText: "Reconnecting" }, mode: { ...live.mode, hidden: true } });
+    expect(mode.hidden).toBe(true);
+    expect(root.querySelector("[data-machine-latency]")?.textContent).toBe("Reconnecting");
+    applyLiveRegions(root, live);
+    expect(mode.hidden).toBe(false);
+    expect(mode.textContent).toBe("CONTROL");
+  });
+});
+
 describe("live regions and node identity", () => {
   it("leaves the composer node itself untouched across repeated heartbeats", () => {
     const composer = root.querySelector("#message-text");

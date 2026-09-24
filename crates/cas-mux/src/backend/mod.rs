@@ -185,7 +185,62 @@ fn project_proxy_credential_names(cas_root: Option<&PathBuf>) -> BTreeSet<String
         return names;
     };
     collect_env_references(&document, &mut names);
+    // cas-ff74 (GH #1005 item 2): a server the project marks
+    // `worker_access = "read-only"` may be defined only in the operator's
+    // user config (the usual home of VERCEL_TOKEN or NEON_API_KEY). The
+    // project file naming it is the auditable grant, so that server's
+    // credential references are granted too. The worker's proxy then
+    // forwards only its read routes.
+    let read_only = project_read_only_servers(&document);
+    if !read_only.is_empty()
+        && let Some(user) = user_proxy_config_document()
+        && let Some(servers) = user.get("servers").and_then(toml::Value::as_table)
+    {
+        for name in &read_only {
+            if let Some(server) = servers.get(name) {
+                collect_env_references(server, &mut names);
+            }
+        }
+    }
     names
+}
+
+/// Server names the project proxy config gives `worker_access = "read-only"`,
+/// written per server or as a top-level `[worker_access]` table (cas-ff74).
+fn project_read_only_servers(document: &toml::Value) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    let read_only = |value: &toml::Value| value.as_str() == Some("read-only");
+    if let Some(table) = document
+        .get("worker_access")
+        .and_then(toml::Value::as_table)
+    {
+        names.extend(
+            table
+                .iter()
+                .filter(|(_, access)| read_only(*access))
+                .map(|(name, _)| name.clone()),
+        );
+    }
+    if let Some(servers) = document.get("servers").and_then(toml::Value::as_table) {
+        names.extend(
+            servers
+                .iter()
+                .filter(|(_, server)| server.get("worker_access").is_some_and(read_only))
+                .map(|(name, _)| name.clone()),
+        );
+    }
+    names
+}
+
+/// The operator's user-level proxy config (`code-mode-mcp/config.toml`), as
+/// the proxy itself resolves it.
+fn user_proxy_config_document() -> Option<toml::Value> {
+    let config_home = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))?;
+    let contents =
+        std::fs::read_to_string(config_home.join("code-mode-mcp").join("config.toml")).ok()?;
+    toml::from_str::<toml::Value>(&contents).ok()
 }
 
 /// Pass configured proxy credentials to each worker.

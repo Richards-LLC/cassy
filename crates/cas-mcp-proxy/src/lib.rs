@@ -103,6 +103,10 @@ pub struct ProxyPolicyRequest<'a> {
     pub tool: &'a str,
     pub arguments: &'a Option<serde_json::Map<String, Value>>,
     pub dispatch_kind: ProxyDispatchKind,
+    /// The upstream catalog annotates this tool `readOnlyHint = true` and
+    /// not `destructiveHint = true` (cas-ff74). False when the tool or its
+    /// annotations are unknown.
+    pub read_only_hint: bool,
 }
 
 /// Server-selected dispatch path. This value is never decoded from tool
@@ -231,6 +235,11 @@ pub struct ExternalToolAllowlistPolicy {
     supervisor_delegation_routes: BTreeSet<ExternalToolRoute>,
     /// GH #988: `supervisor:` allowlist entries.
     supervisor_routes: BTreeSet<ExternalToolRoute>,
+    /// cas-ff74: servers a factory worker may use only for read routes.
+    worker_read_only_servers: BTreeSet<String>,
+    /// cas-ff74: routes that count as read-only on those servers even
+    /// without upstream annotations.
+    worker_read_routes: BTreeSet<ExternalToolRoute>,
 }
 
 /// Whether `routes` admits `server.tool` exactly or through a `server.*` or
@@ -258,7 +267,24 @@ impl ExternalToolAllowlistPolicy {
             allowed_routes: routes.into_iter().collect(),
             supervisor_delegation_routes: BTreeSet::new(),
             supervisor_routes: BTreeSet::new(),
+            worker_read_only_servers: BTreeSet::new(),
+            worker_read_routes: BTreeSet::new(),
         }
+    }
+
+    /// Restrict factory workers to read routes on `servers` (cas-ff74,
+    /// `worker_access = "read-only"`). A route counts as read-only when the
+    /// upstream annotates it so, or when it is in `read_routes`. The routes
+    /// must still be allowlisted; this only narrows. Supervisors and plain
+    /// sessions are unaffected.
+    pub fn with_worker_read_only(
+        mut self,
+        servers: impl IntoIterator<Item = String>,
+        read_routes: impl IntoIterator<Item = ExternalToolRoute>,
+    ) -> Self {
+        self.worker_read_only_servers = servers.into_iter().collect();
+        self.worker_read_routes = read_routes.into_iter().collect();
+        self
     }
 
     /// Routes callable only by supervisors (`supervisor:` allowlist entries,
@@ -321,6 +347,21 @@ impl ProxyPolicy for ExternalToolAllowlistPolicy {
                 reason: Self::denial_reason(request.server, request.tool),
             };
         }
+        // cas-ff74: a worker on a read-only server gets read routes only.
+        if request.caller.role == cas_types::AgentRole::Worker
+            && self.worker_read_only_servers.contains(request.server)
+            && !request.read_only_hint
+            && !route_set_matches(&self.worker_read_routes, request.server, request.tool)
+        {
+            return ProxyPolicyDecision::Deny {
+                reason: format!(
+                    "denied by policy: \"{}\" is read-only for workers (worker_access = \"read-only\") and \"{}.{}\" is not a read route",
+                    public_upstream_id(request.server),
+                    public_upstream_id(request.server),
+                    public_tool_id(request.tool)
+                ),
+            };
+        }
         let route = ExternalToolRoute::new(request.server, request.tool);
         if self.supervisor_delegation_routes.contains(&route)
             && (request.dispatch_kind != ProxyDispatchKind::ExternalProductionVerification
@@ -353,6 +394,12 @@ impl ProxyPolicy for ExternalToolAllowlistPolicy {
             CatalogAccess::Denied
         }
     }
+}
+
+/// An MCP tool annotated `readOnlyHint = true` whose `destructiveHint` is not
+/// `true` counts as read-only for a worker on a read-only server (cas-ff74).
+fn tool_annotations_read_only(annotations: &rmcp::model::ToolAnnotations) -> bool {
+    annotations.read_only_hint == Some(true) && annotations.destructive_hint != Some(true)
 }
 
 /// Request-free record of an authorization decision made by the proxy.
@@ -1139,12 +1186,14 @@ impl ProxyEngine {
         arguments: &Option<serde_json::Map<String, Value>>,
     ) -> Result<()> {
         let policy = self.policy.read().await.clone();
+        let read_only_hint = self.tool_read_only_hint(server_name, tool_name).await;
         let request = ProxyPolicyRequest {
             caller,
             server: server_name,
             tool: tool_name,
             arguments,
             dispatch_kind,
+            read_only_hint,
         };
         let decision = policy.decide(&request);
         let (allowed, reason) = match decision {
@@ -1179,6 +1228,22 @@ impl ProxyEngine {
                 reason
             );
         }
+    }
+
+    /// Whether the connected upstream annotates `tool_name` as read-only and
+    /// not destructive (cas-ff74). Unknown tools and missing annotations are
+    /// not read-only.
+    async fn tool_read_only_hint(&self, server_name: &str, tool_name: &str) -> bool {
+        let servers = self.servers.read().await;
+        let Some(server) = servers.get(server_name) else {
+            return false;
+        };
+        server
+            .tools
+            .iter()
+            .find(|tool| &*tool.name == tool_name)
+            .and_then(|tool| tool.annotations.as_ref())
+            .is_some_and(tool_annotations_read_only)
     }
 
     fn record_policy_decision(
@@ -2262,6 +2327,7 @@ mod tests {
                 tool,
                 arguments: &arguments,
                 dispatch_kind: ProxyDispatchKind::Direct,
+                read_only_hint: false,
             })
         };
         use cas_types::AgentRole::{Director, Standard, Supervisor, Worker};
@@ -2308,6 +2374,104 @@ mod tests {
         );
     }
 
+    /// cas-ff74 (GH #1005 item 2): on a `worker_access = "read-only"` server
+    /// a worker reaches allowlisted read routes (the default observability
+    /// list, or tools the upstream annotates read-only) and is denied every
+    /// other route with a reason naming the mode. Supervisors keep the full
+    /// allowlist, and servers without the mode are unchanged.
+    #[test]
+    fn read_only_worker_access_forwards_read_routes_and_denies_writes() {
+        let policy = ExternalToolAllowlistPolicy::new([
+            ExternalToolRoute::parse_allowlist_entry("vercel.*").unwrap(),
+            ExternalToolRoute::parse_allowlist_entry("neon.*").unwrap(),
+            ExternalToolRoute::new("viktor", "ask_viktor"),
+        ])
+        .with_worker_read_only(
+            ["vercel".to_string(), "neon".to_string()],
+            config::DEFAULT_WORKER_READ_ROUTES
+                .iter()
+                .map(|(server, tool)| ExternalToolRoute::new(*server, *tool)),
+        );
+        let arguments = None;
+        let decide = |role, server, tool, read_only_hint| {
+            let mut caller = registered_worker_caller();
+            caller.role = role;
+            policy.decide(&ProxyPolicyRequest {
+                caller: &caller,
+                server,
+                tool,
+                arguments: &arguments,
+                dispatch_kind: ProxyDispatchKind::Direct,
+                read_only_hint,
+            })
+        };
+        use cas_types::AgentRole::{Standard, Supervisor, Worker};
+
+        // The default read routes forward for a worker without annotations.
+        for (server, tool) in [
+            ("vercel", "get_runtime_errors"),
+            ("vercel", "get_runtime_logs"),
+            ("neon", "list_branches"),
+        ] {
+            assert_eq!(
+                decide(Worker, server, tool, false),
+                ProxyPolicyDecision::Allow
+            );
+        }
+        // A tool the upstream annotates read-only forwards too.
+        assert_eq!(
+            decide(Worker, "vercel", "get_project", true),
+            ProxyPolicyDecision::Allow
+        );
+        // A write route is denied for a worker, naming the mode.
+        let ProxyPolicyDecision::Deny { reason } = decide(Worker, "neon", "create_branch", false)
+        else {
+            panic!("a worker must not reach neon.create_branch");
+        };
+        assert!(reason.starts_with("denied by policy"), "{reason}");
+        assert!(reason.contains("worker_access = \"read-only\""), "{reason}");
+        assert!(reason.contains("neon.create_branch"), "{reason}");
+        // Supervisors and plain sessions keep the full allowlist.
+        for role in [Supervisor, Standard] {
+            assert_eq!(
+                decide(role, "neon", "create_branch", false),
+                ProxyPolicyDecision::Allow
+            );
+        }
+        // Read-only narrows the allowlist; it never widens it.
+        assert_eq!(
+            decide(Worker, "github", "list_issues", true),
+            ProxyPolicyDecision::Deny {
+                reason: ExternalToolAllowlistPolicy::denial_reason("github", "list_issues"),
+            }
+        );
+        // A server without the mode is unchanged for workers.
+        assert_eq!(
+            decide(Worker, "viktor", "ask_viktor", false),
+            ProxyPolicyDecision::Allow
+        );
+    }
+
+    #[test]
+    fn read_only_annotation_requires_read_only_and_not_destructive() {
+        let annotations = |read_only_hint, destructive_hint| rmcp::model::ToolAnnotations {
+            read_only_hint,
+            destructive_hint,
+            ..Default::default()
+        };
+        assert!(tool_annotations_read_only(&annotations(Some(true), None)));
+        assert!(tool_annotations_read_only(&annotations(
+            Some(true),
+            Some(false)
+        )));
+        assert!(!tool_annotations_read_only(&annotations(
+            Some(true),
+            Some(true)
+        )));
+        assert!(!tool_annotations_read_only(&annotations(Some(false), None)));
+        assert!(!tool_annotations_read_only(&annotations(None, None)));
+    }
+
     #[test]
     fn parses_external_mcp_tool_names_into_server_and_tool_components() {
         let viktor = ExternalToolRoute::parse_mcp_tool_name("mcp__viktor__ask_viktor")
@@ -2339,6 +2503,7 @@ mod tests {
                 tool,
                 arguments: &arguments,
                 dispatch_kind: ProxyDispatchKind::Direct,
+                read_only_hint: false,
             })
         };
 
@@ -2391,6 +2556,7 @@ mod tests {
                 tool: "run_sql",
                 arguments: &arguments,
                 dispatch_kind: ProxyDispatchKind::Direct,
+                read_only_hint: false,
             }),
             ProxyPolicyDecision::Deny {
                 reason: "external tool is not explicitly allowlisted; add \"neon.run_sql\" to [proxy].allowlist".to_string(),
@@ -2425,6 +2591,7 @@ mod tests {
                 tool,
                 arguments: &arguments,
                 dispatch_kind,
+                read_only_hint: false,
             })
         };
 

@@ -38,6 +38,13 @@ test("HUB-J9 on a phone: from the list to a reply and back", async ({ page, jour
 
   await journey.stage("Jump from the palette with a tap", async () => {
     await page.getByRole("button", { name: "Appearance & commands" }).tap();
+    // On a phone every command name reads in full: the description drops under
+    // it instead of squeezing it (cas-cfcb, cas-5478).
+    const titles = page.locator("#command-palette .palette-command:not([hidden]) > span");
+    await expect(titles.first()).toBeVisible();
+    const clipped = await titles.evaluateAll((spans) => spans.filter((span) => span.getClientRects().length > 0 && span.scrollWidth > span.clientWidth + 1).map((span) => span.textContent));
+    expect(clipped, "command names cut off at 390 px").toEqual([]);
+    await expect(page.locator("#command-palette [data-palette-machine] small").filter({ hasText: "gabber-studio" })).toBeVisible();
     await page.getByRole("button", { name: new RegExp(`Jump to ${OTTER}`) }).tap();
     await expect(page.locator("#command-palette")).toBeHidden();
     await expect(page.getByRole("button", { name: `Send to ${OTTER}`, exact: true })).toBeVisible();

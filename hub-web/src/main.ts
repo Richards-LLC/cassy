@@ -3,6 +3,7 @@ import { machineFooterMarkup, pairedMachinesDialogMarkup, renderPairedMachines, 
 import { retainPendingSessions, visibleCatalog } from "./worker-visibility";
 import "./styles.css";
 import { ConversationList, filterConversationRows, type ConversationRow } from "./conversation-list";
+import { sessionJumpCommandMarkup } from "./palette-commands";
 import { ConversationHistory } from "./conversation-history";
 import { ConversationView } from "./conversation-view";
 import { refusalSentence } from "./refusal";
@@ -2211,12 +2212,8 @@ function render(captureDraft = true): void {
   const machineLabel = selected?.label ?? "No machine";
   const compactMachineLabel = machineLabel.split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part[0]?.toUpperCase()).join("") || "—";
   const controlActionDisabled = takeControlReason !== undefined;
-  const sessionCommands = [...machines.values()].flatMap((machine) => visibleSessions(machine.id).map((session) => {
-    const summary = sessionSummaries.get(sessionKey(machine.id, session.name));
-    const searchMetadata = summary ? `${summary.title} ${summary.description} ${summary.phase}` : "";
-    const secondary = summary ? `${machine.label} · ${summary.title} · ${summary.phase}` : machine.label;
-    return `<button type="button" class="palette-command" data-palette-machine="${escapeAttr(machine.id)}" data-palette-session="${escapeAttr(session.name)}" data-search-text="${escapeAttr(searchMetadata)}"><span>Jump to ${escapeHtml(session.name)}</span><small${summary ? ` title="${escapeAttr(summary.description)}"` : ""}>${escapeHtml(secondary)}</small></button>`;
-  })).join("");
+  const sessionCommands = [...machines.values()].flatMap((machine) => visibleSessions(machine.id).map((session) =>
+    sessionJumpCommandMarkup(machine, session, sessionSummaries.get(sessionKey(machine.id, session.name))))).join("");
   const backTarget = previousSelection(selection);
   const backText = backLabel(backTarget, (machineId) => machines.get(machineId)?.label);
   // The session name is the switch: on a phone it is the only always-visible
@@ -3044,9 +3041,12 @@ function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | und
   const paletteRowShown = (command: HTMLElement) => !command.hidden && command.closest("details:not([open])") === null;
   paletteQuery.oninput = () => {
     const query = paletteQuery.value.trim().toLocaleLowerCase();
+    // Every word must match somewhere in the row, as in the list search:
+    // "gabber studio" finds the gabber-studio session on Studio Mac.
+    const words = query.split(/\s+/).filter(Boolean);
     for (const command of palette.querySelectorAll<HTMLElement>(".palette-command")) {
       const searchable = `${command.textContent ?? ""} ${command.dataset.searchText ?? ""}`.toLocaleLowerCase();
-      command.hidden = query.length > 0 && !searchable.includes(query);
+      command.hidden = words.length > 0 && !words.every((word) => searchable.includes(word));
     }
     // A group with nothing left to offer steps aside, heading and all.
     for (const group of palette.querySelectorAll<HTMLElement>(".palette-group")) {

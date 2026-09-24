@@ -5437,10 +5437,23 @@ impl CasCore {
             // task closes only when an independently reviewed tip (passed
             // or waived) is contained in the target. Catches merges made
             // outside the guarded paths (raw git in another harness/shell).
-            if let Some(refusal) =
-                self.independent_qa_close_refusal(&task, &close_project_root, &resolved_parent_branch)
-            {
-                return Ok(Self::tool_error(refusal));
+            // cas-5c38: a live supervisor's override (validated above) with
+            // its reason waives the pass for the delivered commit, exactly as
+            // it waives the implementer's evidence gate.
+            match self.independent_qa_close_gate(
+                &task,
+                &close_project_root,
+                &resolved_parent_branch,
+                req.commit_receipt.as_deref(),
+                supervisor_override.then(|| req.reason.as_deref().unwrap_or("")),
+            ) {
+                super::qa_dispatch::QaCloseGate::Clear => {}
+                super::qa_dispatch::QaCloseGate::Refuse(refusal) => {
+                    return Ok(Self::tool_error(refusal));
+                }
+                super::qa_dispatch::QaCloseGate::Waived(note) => {
+                    append_close_decision_note(task_store.as_ref(), &mut task, &note);
+                }
             }
         }
 

@@ -410,8 +410,116 @@ async fn pending_round_refuses_both_merge_paths_in_progress_and_awaiting_merge()
     assert!(refusal.contains(&qa_task), "{refusal}");
 }
 
+/// A delivery merged into a non-trunk lane (an epic) outside the guarded
+/// paths is still sent for review before it closes. The supervisor's handoff
+/// says it was merged, never that it "parked for merge" (cas-5c38).
 #[tokio::test]
-async fn merged_without_a_verdict_is_refused_at_close_and_dispatched() {
+async fn merged_into_an_epic_without_a_verdict_is_refused_at_close_and_dispatched() {
+    let (temp, core, repo, task_id) = fixture();
+    let _env = env_test_lock();
+    let cas_dir = repo.join(".cas");
+    let _keep = &temp;
+    let tasks = open_task_store(&cas_dir).unwrap();
+    let mut task = tasks.get(&task_id).unwrap();
+    task.demo_statement = "Open the composer and see even spacing".to_string();
+    tasks.update(&task).unwrap();
+    let mut epic = cas::types::Task::new("cas-uiepic".to_string(), "UI epic".to_string());
+    epic.task_type = cas::types::TaskType::Epic;
+    epic.branch = Some("epic/ui".to_string());
+    tasks.add(&epic).unwrap();
+    tasks
+        .add_dependency(&cas::types::Dependency::new(
+            task_id.clone(),
+            epic.id.clone(),
+            DependencyType::ParentChild,
+        ))
+        .unwrap();
+
+    // Someone merged into the epic outside the guarded paths before the
+    // worker closed.
+    git(&repo, &["branch", "epic/ui", "main"]);
+    git(&repo, &["checkout", "-q", "epic/ui"]);
+    git(&repo, &["merge", "-q", "--no-ff", "-m", "merge", "factory/test-agent"]);
+    git(&repo, &["checkout", "-q", "factory/test-agent"]);
+
+    let refused = close_text(&core, &task_id).await;
+    assert!(refused.contains("INDEPENDENT QA REQUIRED"), "{refused}");
+    assert!(refused.contains("INDEPENDENT QA DISPATCHED"), "{refused}");
+    assert!(refused.contains("the close waits for its verdict"), "{refused}");
+    assert_eq!(tasks.get(&task_id).unwrap().status, TaskStatus::InProgress);
+    let passes = cas_store::list_qa_passes(&cas_dir, &task_id).unwrap();
+    assert_eq!(passes.len(), 1);
+    let handoff = open_prompt_queue_store(&cas_dir)
+        .unwrap()
+        .peek_all(50)
+        .unwrap()
+        .into_iter()
+        .find(|row| row.source == format!("qa-dispatch:{}", passes[0].id))
+        .expect("QA handoff queued for the supervisor");
+    assert!(
+        handoff
+            .prompt
+            .contains("was merged into epic/ui before any QA round (it never parked)"),
+        "{}",
+        handoff.prompt
+    );
+    assert!(!handoff.prompt.contains("parked for merge"), "{}", handoff.prompt);
+    let guard = cas::qa_pass::supervisor_merge_refusal(
+        &cas_dir,
+        &repo,
+        "git merge --no-ff --no-commit factory/test-agent",
+    )
+    .expect("the backstop's InProgress round must block a raw merge");
+    assert!(guard.contains(&qa_task_id(&cas_dir, &task_id)), "{guard}");
+}
+
+/// A live supervisor registered in `cas_dir`, acting through its own core.
+fn supervisor_core(cas_dir: &Path) -> CasCore {
+    let id = format!("supervisor-session-{}", std::process::id());
+    open_agent_store(cas_dir)
+        .unwrap()
+        .register(&Agent::new_with_role(
+            id.clone(),
+            "qa-supervisor".to_string(),
+            AgentRole::Supervisor,
+        ))
+        .unwrap();
+    let core = CasCore::with_daemon(cas_dir.to_path_buf(), None, None);
+    core.set_agent_id_for_testing(id);
+    core
+}
+
+struct SupervisorRole(Option<String>);
+
+impl SupervisorRole {
+    fn enter() -> Self {
+        let previous = std::env::var("CAS_AGENT_ROLE").ok();
+        // SAFETY: callers hold env_test_lock for the whole test body.
+        unsafe { std::env::set_var("CAS_AGENT_ROLE", "supervisor") };
+        Self(previous)
+    }
+}
+
+impl Drop for SupervisorRole {
+    fn drop(&mut self) {
+        // SAFETY: as in `enter`.
+        unsafe {
+            match self.0.take() {
+                Some(role) => std::env::set_var("CAS_AGENT_ROLE", role),
+                None => std::env::remove_var("CAS_AGENT_ROLE"),
+            }
+        }
+    }
+}
+
+/// cas-5c38 (GH #999), the domdms cas-0019 shape: a user-facing delivery
+/// (demo_statement) was merged to trunk long before anyone closed it, and it
+/// never parked. Cassy must not dispatch a review of code already on trunk,
+/// qa_waive must not claim the task "must park for merge first", and the
+/// supervisor's override with a reason and commit_receipt closes it, with
+/// the waiver recorded against that commit.
+#[tokio::test]
+async fn merged_to_trunk_before_close_is_not_dispatched_and_closes_by_override_cas_5c38() {
     let (temp, core, repo, task_id) = fixture();
     let _env = env_test_lock();
     let cas_dir = repo.join(".cas");
@@ -421,23 +529,171 @@ async fn merged_without_a_verdict_is_refused_at_close_and_dispatched() {
     task.demo_statement = "Open the composer and see even spacing".to_string();
     tasks.update(&task).unwrap();
 
-    // Someone merged outside the guarded paths before the worker closed.
     git(&repo, &["checkout", "-q", "main"]);
-    git(&repo, &["merge", "-q", "--no-ff", "-m", "merge", "factory/test-agent"]);
+    git(&repo, &["merge", "-q", "--no-ff", "-m", "merged in May", "factory/test-agent"]);
+    let merged = git(&repo, &["rev-parse", "factory/test-agent"]);
     git(&repo, &["checkout", "-q", "factory/test-agent"]);
 
     let refused = close_text(&core, &task_id).await;
     assert!(refused.contains("INDEPENDENT QA REQUIRED"), "{refused}");
-    assert!(refused.contains("INDEPENDENT QA DISPATCHED"), "{refused}");
-    assert_eq!(tasks.get(&task_id).unwrap().status, TaskStatus::InProgress);
-    assert_eq!(cas_store::list_qa_passes(&cas_dir, &task_id).unwrap().len(), 1);
-    let guard = cas::qa_pass::supervisor_merge_refusal(
+    assert!(refused.contains("already on trunk main"), "{refused}");
+    assert!(refused.contains("no QA pass was opened"), "{refused}");
+    assert!(refused.contains("supervisor_override=true"), "{refused}");
+    assert!(!refused.contains("DISPATCHED"), "{refused}");
+    assert!(
+        cas_store::list_qa_passes(&cas_dir, &task_id).unwrap().is_empty(),
+        "no QA pass may be opened for a head already on trunk"
+    );
+    assert!(
+        !open_prompt_queue_store(&cas_dir)
+            .unwrap()
+            .peek_all(50)
+            .unwrap()
+            .iter()
+            .any(|row| row.source.starts_with("qa-dispatch:")),
+        "no QA handoff may be queued for code already on trunk"
+    );
+
+    let supervisor = supervisor_core(&cas_dir);
+    let _role = SupervisorRole::enter();
+    let waive = CasService::new(supervisor.clone(), None)
+        .verification(Parameters(verification(serde_json::json!({
+            "action": "qa_waive",
+            "task_id": task_id,
+            "summary": "shipped in May; live in production since",
+        }))))
+        .await
+        .expect_err("no recorded delivery tip to bind a waiver to");
+    assert!(!waive.message.contains("must park"), "{}", waive.message);
+    assert!(
+        waive.message.contains("supervisor_override=true")
+            && waive.message.contains("commit_receipt"),
+        "the refusal must name the route that works: {}",
+        waive.message
+    );
+
+    let mut request = close_req(&task_id);
+    request.supervisor_override = Some(true);
+    request.reason = Some("shipped in May; live in production since".to_string());
+    request.commit_receipt = Some(merged[..12].to_string());
+    let closed = match supervisor.cas_task_close(Parameters(request)).await {
+        Ok(result) => extract_text(result),
+        Err(error) => error.message.to_string(),
+    };
+    let task = tasks.get(&task_id).unwrap();
+    assert_eq!(task.status, TaskStatus::Closed, "{closed}");
+    let passes = cas_store::list_qa_passes(&cas_dir, &task_id).unwrap();
+    assert_eq!(passes.len(), 1, "exactly the override's waiver is on record");
+    assert_eq!(passes[0].state, cas::types::QaPassState::Waived);
+    assert_eq!(passes[0].bound_head, merged, "the waiver binds the merged commit");
+    assert!(
+        task.notes.contains("Independent QA waived by supervisor")
+            && task.notes.contains("shipped in May"),
+        "{}",
+        task.notes
+    );
+}
+
+/// cas-5c38: clearing the demo_statement withdraws the pending round it
+/// caused, so the gates stop demanding QA for a delivery whose diff is not
+/// user-facing.
+#[tokio::test]
+async fn clearing_the_demo_statement_withdraws_a_pending_round_cas_5c38() {
+    let (temp, core, repo, task_id) = fixture();
+    let _env = env_test_lock();
+    let cas_dir = repo.join(".cas");
+    let _keep = &temp;
+    // A backend-only delivery that is user-facing only through its demo.
+    git(&repo, &["checkout", "-q", "main"]);
+    git(&repo, &["branch", "-D", "factory/test-agent"]);
+    git(&repo, &["checkout", "-q", "-b", "factory/test-agent"]);
+    commit_file(&repo, "src/ops.rs", "pub fn ops() {}\n", "ops tweak");
+    let tasks = open_task_store(&cas_dir).unwrap();
+    let mut task = tasks.get(&task_id).unwrap();
+    task.demo_statement = "Run the ops job and see it finish".to_string();
+    tasks.update(&task).unwrap();
+
+    let parked = close_text(&core, &task_id).await;
+    assert!(parked.contains("INDEPENDENT QA DISPATCHED"), "{parked}");
+    let qa_task = qa_task_id(&cas_dir, &task_id);
+    // The domdms shape: the task is back in progress with the round pending.
+    reopened_to_in_progress(&cas_dir, &task_id);
+
+    let request: cas_mcp::TaskRequest = serde_json::from_value(serde_json::json!({
+        "action": "update",
+        "id": task_id,
+        "demo_statement": "",
+    }))
+    .unwrap();
+    let updated = match CasService::new(core.clone(), None).task(Parameters(request)).await {
+        Ok(result) => extract_text(result),
+        Err(error) => error.message.to_string(),
+    };
+    let passes = cas_store::list_qa_passes(&cas_dir, &task_id).unwrap();
+    assert_eq!(passes.len(), 1, "{updated}");
+    assert!(passes[0].is_withdrawn(), "{updated}\n{:?}", passes[0]);
+    assert!(tasks.get(&qa_task).unwrap().is_terminal(), "its QA work item is cancelled");
+    assert!(
+        cas::qa_pass::supervisor_merge_refusal(&cas_dir, &repo, "git merge factory/test-agent")
+            .is_none(),
+        "a withdrawn round no longer gates the merge"
+    );
+}
+
+/// cas-5c38: a no-code task has no delivery for a reviewer to walk, so the
+/// independent QA gate never binds it, even with a demo_statement.
+#[tokio::test]
+async fn no_code_tasks_are_never_gated_by_independent_qa_cas_5c38() {
+    let (temp, core, repo, task_id) = fixture();
+    let _env = env_test_lock();
+    let cas_dir = repo.join(".cas");
+    let _keep = &temp;
+    let tasks = open_task_store(&cas_dir).unwrap();
+    let mut task = tasks.get(&task_id).unwrap();
+    task.demo_statement = "The ops dashboard shows the new tenant".to_string();
+    task.execution_note = Some("no-code".to_string());
+    tasks.update(&task).unwrap();
+
+    let text = close_text(&core, &task_id).await;
+    assert!(!text.contains("INDEPENDENT QA"), "{text}");
+    assert!(cas_store::list_qa_passes(&cas_dir, &task_id).unwrap().is_empty(), "{text}");
+
+    // A round an older Cassy opened for it no longer binds the merge, and a
+    // supervisor's qa_waive withdraws it although there is no delivery tip.
+    let now = chrono::Utc::now();
+    cas_store::open_qa_pass(
         &cas_dir,
-        &repo,
-        "git merge --no-ff --no-commit factory/test-agent",
+        &cas_store::NewQaPass {
+            task_id: &task_id,
+            implementer_agent_id: "test-agent",
+            branch: "factory/test-agent",
+            bound_head: "aaaa1111bbbb2222",
+            deadline_at: now + chrono::Duration::minutes(30),
+            max_rounds: 3,
+        },
+        now,
     )
-    .expect("the backstop's InProgress round must block a raw merge");
-    assert!(guard.contains(&qa_task_id(&cas_dir, &task_id)), "{guard}");
+    .unwrap();
+    assert!(
+        cas::qa_pass::supervisor_merge_refusal(&cas_dir, &repo, "git merge factory/test-agent")
+            .is_none(),
+        "no-code tasks are never gated"
+    );
+    let supervisor = supervisor_core(&cas_dir);
+    let _role = SupervisorRole::enter();
+    let waived = extract_text(
+        CasService::new(supervisor, None)
+            .verification(Parameters(verification(serde_json::json!({
+                "action": "qa_waive",
+                "task_id": task_id,
+                "summary": "ops change verified on the dashboard",
+            }))))
+            .await
+            .expect("qa_waive accepts a no-code task with no delivery tip"),
+    );
+    assert!(waived.contains("no-code"), "{waived}");
+    let passes = cas_store::list_qa_passes(&cas_dir, &task_id).unwrap();
+    assert!(passes[0].is_withdrawn(), "{waived}");
 }
 
 #[tokio::test]

@@ -138,7 +138,22 @@ pub struct QaPass {
     pub resolved_at: Option<DateTime<Utc>>,
 }
 
+/// Summary prefix of a round withdrawn because its delivery stopped needing
+/// independent QA (cas-5c38): the `demo_statement` that made it user-facing
+/// was cleared, or the task is a no-code task with nothing to review. A
+/// withdrawn round stays on record for audit but never binds the gates.
+pub const QA_PASS_WITHDRAWN_PREFIX: &str = "withdrawn: ";
+
 impl QaPass {
+    /// Whether this round was withdrawn rather than superseded by a new tip.
+    pub fn is_withdrawn(&self) -> bool {
+        self.state == QaPassState::Superseded
+            && self
+                .summary
+                .as_deref()
+                .is_some_and(|summary| summary.starts_with(QA_PASS_WITHDRAWN_PREFIX))
+    }
+
     /// Short head used in titles and messages.
     pub fn head8(&self) -> &str {
         let end = self.bound_head.len().min(8);

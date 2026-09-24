@@ -995,10 +995,19 @@ impl CasCore {
             changes.push("acceptance_criteria");
         }
 
+        // cas-5c38 (GH #999): a demo_statement is what made many deliveries
+        // user-facing. Clearing it (or declaring the task no-code) must not
+        // leave a pending independent QA round that still gates the close.
+        let demo_statement_cleared = req
+            .demo_statement
+            .as_deref()
+            .is_some_and(|demo| demo.trim().is_empty())
+            && !task.demo_statement.trim().is_empty();
         if let Some(demo_statement) = req.demo_statement {
             task.demo_statement = demo_statement;
             changes.push("demo_statement");
         }
+        let was_no_code = crate::qa_pass::is_no_code(&task);
 
         if let Some(raw) = req.execution_note.as_deref() {
             let validated =
@@ -1886,6 +1895,40 @@ impl CasCore {
             message: Cow::from(format!("Failed to update: {e}")),
             data: None,
         })?;
+
+        let qa_withdraw_reason = if demo_statement_cleared {
+            Some("demo_statement cleared")
+        } else if !was_no_code && crate::qa_pass::is_no_code(&task) {
+            Some("task declared no-code")
+        } else {
+            None
+        };
+        if let Some(reason) = qa_withdraw_reason {
+            // Only an unclaimed round: a reviewer already at work keeps it.
+            // If the diff itself is user-facing, the next park or close
+            // opens a fresh round from the paths.
+            match cas_store::withdraw_open_qa_pass(
+                &self.cas_root,
+                &task.id,
+                reason,
+                false,
+                chrono::Utc::now(),
+            ) {
+                Ok(Some(pass)) => {
+                    let cancelled = self.cancel_withdrawn_qa_task(&pass, reason);
+                    warnings.push(format!(
+                        "Independent QA round {} (pass {}) for @{} withdrawn: {reason}.{cancelled}",
+                        pass.round,
+                        pass.id,
+                        pass.head8(),
+                    ));
+                }
+                Ok(None) => {}
+                Err(error) => warnings.push(format!(
+                    "⚠️ The pending independent QA round could not be withdrawn: {error}"
+                )),
+            }
+        }
 
         if let Some(patch) = state_patch.as_ref() {
             task_store

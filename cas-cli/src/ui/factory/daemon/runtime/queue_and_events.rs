@@ -8498,6 +8498,7 @@ mod tests {
             "2026-09-23T18:00:00+00:00",
             "swift-fox",
             "demo_statement",
+            None,
         );
         let source = "qa-dispatch:qapass-1";
         let decision = FactoryDaemon::supervisor_wake_decision(

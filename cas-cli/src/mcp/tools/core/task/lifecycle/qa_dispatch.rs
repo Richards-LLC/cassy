@@ -16,6 +16,45 @@ use crate::qa_pass::{
 use cas_store::{NewQaPass, QaPassOpen};
 use cas_types::{Dependency, DependencyType, QaPass};
 
+/// Outcome of the cas-619f close backstop.
+pub(crate) enum QaCloseGate {
+    /// No independent QA is owed (or a satisfying round already covers it).
+    Clear,
+    /// The close must wait; the text is the refusal.
+    Refuse(String),
+    /// A supervisor override waived the pass; the text is the decision note.
+    Waived(String),
+}
+
+fn is_ancestor(repo: &Path, commit: &str, target: &str) -> bool {
+    std::process::Command::new("git")
+        .args(["merge-base", "--is-ancestor", commit, target])
+        .current_dir(repo)
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+fn resolve_commit(repo: &Path, reference: &str) -> Option<String> {
+    let reference = reference.trim();
+    if reference.is_empty() || reference.starts_with('-') {
+        return None;
+    }
+    std::process::Command::new("git")
+        .args(["rev-parse", "--verify", "--quiet", &format!("{reference}^{{commit}}")])
+        .current_dir(repo)
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+        .filter(|sha| !sha.is_empty())
+}
+
+/// The repository's trunk when `commit` is already on it.
+fn trunk_containing(repo: &Path, commit: &str) -> Option<String> {
+    let trunk = crate::mcp::tools::core::task::repo_context::resolve_default_branch(repo).ok()?;
+    is_ancestor(repo, commit, &trunk).then_some(trunk)
+}
+
 impl CasCore {
     /// The caller's QA identity: its registered name (what `task.assignee`
     /// and therefore `implementer_agent_id` hold) plus its session id. The
@@ -93,11 +132,15 @@ impl CasCore {
                 None
             }
         };
-        self.independent_qa_for_paths(task, repo, parent_branch, head, changed)
+        self.independent_qa_for_paths(task, repo, parent_branch, head, changed, None)
     }
 
     /// Shared tail of the park and the close backstop: decide eligibility
     /// from a known (or unknown) change set, then open the round.
+    ///
+    /// `merged_into` names the target when the delivery was already merged
+    /// there before any round (the close backstop). It is `None` for a park,
+    /// and the supervisor's handoff must describe which one happened.
     fn independent_qa_for_paths(
         &self,
         task: &Task,
@@ -105,6 +148,7 @@ impl CasCore {
         parent_branch: &str,
         head: Option<&str>,
         changed: Option<Vec<String>>,
+        merged_into: Option<&str>,
     ) -> Option<String> {
         let config = crate::config::Config::load(&self.cas_root).ok()?;
         let qa = config.qa();
@@ -126,7 +170,7 @@ impl CasCore {
             if !crate::qa_pass::gate_applies(task, &qa, &prior) {
                 return None;
             }
-            let latest = &prior[0];
+            let latest = prior.iter().find(|pass| !pass.is_withdrawn())?;
             eligibility
                 .reasons
                 .push(format!("re-review after round {} ({})", latest.round, latest.state));
@@ -159,17 +203,17 @@ impl CasCore {
         };
         Some(match outcome {
             QaPassOpen::Dispatched(pass) => {
-                self.materialize_qa_round(task, pass, &reasons, parent_branch, &config)
+                self.materialize_qa_round(task, pass, &reasons, parent_branch, &config, merged_into)
             }
             QaPassOpen::AlreadyOpen(pass) => {
                 if pass.qa_task_id.is_none() {
                     // A previous park opened the round but crashed before
                     // its work item existed; finish the job.
-                    self.materialize_qa_round(task, pass, &reasons, parent_branch, &config)
+                    self.materialize_qa_round(task, pass, &reasons, parent_branch, &config, merged_into)
                 } else {
                     format!(
                         "\n\nINDEPENDENT QA PENDING: pass {} (round {}) for {} is {}{}; QA task {}. \
-                         The merge waits for its verdict.",
+                         The {} waits for its verdict.",
                         pass.id,
                         pass.round,
                         pass.head8(),
@@ -179,11 +223,12 @@ impl CasCore {
                             .map(|reviewer| format!(" by {reviewer}"))
                             .unwrap_or_default(),
                         pass.qa_task_id.as_deref().unwrap_or("-"),
+                        if merged_into.is_some() { "close" } else { "merge" },
                     )
                 }
             }
             QaPassOpen::AlreadySatisfied(pass) => format!(
-                "\n\nINDEPENDENT QA {}: pass {} covers {}. Ready for the supervisor to merge.",
+                "\n\nINDEPENDENT QA {}: pass {} covers {}. Ready for the supervisor to {}.",
                 if pass.state == cas_types::QaPassState::Waived {
                     "WAIVED"
                 } else {
@@ -191,6 +236,7 @@ impl CasCore {
                 },
                 pass.id,
                 pass.head8(),
+                if merged_into.is_some() { "close" } else { "merge" },
             ),
             QaPassOpen::Escalate {
                 failed_rounds,
@@ -243,37 +289,57 @@ impl CasCore {
     /// cas-619f close backstop: after a merge, an independently reviewed tip
     /// must be contained in the target branch. Returns the refusal when not,
     /// dispatching a round first if none is open so the task can progress.
-    pub(crate) fn independent_qa_close_refusal(
+    ///
+    /// cas-5c38 (GH #999): a delivery merged before it was ever closed (the
+    /// domdms cas-0019 shape) used to deadlock here. The backstop dispatched
+    /// a review for code already on trunk, and `qa_waive` then refused for
+    /// lack of a parked tip. Now:
+    /// - the delivered commit is the parked anchor, the close's
+    ///   `commit_receipt`, or the implementer's branch tip only when that tip
+    ///   is itself merged;
+    /// - a live supervisor's override with a reason records a waiver against
+    ///   that commit;
+    /// - code already on trunk is never sent for review.
+    pub(crate) fn independent_qa_close_gate(
         &self,
         task: &Task,
         repo: &Path,
         target_branch: &str,
-    ) -> Option<String> {
-        let config = crate::config::Config::load(&self.cas_root).ok()?;
+        commit_receipt: Option<&str>,
+        supervisor_waiver: Option<&str>,
+    ) -> QaCloseGate {
+        let Ok(config) = crate::config::Config::load(&self.cas_root) else {
+            return QaCloseGate::Clear;
+        };
         let qa = config.qa();
-        if !qa.independent_pass || task.assignee.is_none() {
-            return None;
+        let Some(implementer) = task.assignee.as_deref() else {
+            return QaCloseGate::Clear;
+        };
+        if !qa.independent_pass {
+            return QaCloseGate::Clear;
         }
         let passes = cas_store::list_qa_passes(&self.cas_root, &task.id).unwrap_or_default();
         let covered = passes.iter().any(|pass| {
-            pass.state.satisfies_gate()
-                && std::process::Command::new("git")
-                    .args(["merge-base", "--is-ancestor", &pass.bound_head, target_branch])
-                    .current_dir(repo)
-                    .status()
-                    .is_ok_and(|status| status.success())
+            pass.state.satisfies_gate() && is_ancestor(repo, &pass.bound_head, target_branch)
         });
         if covered {
-            return None;
+            return QaCloseGate::Clear;
         }
+        let branch = task
+            .deliverables
+            .parked_branch
+            .clone()
+            .unwrap_or_else(|| format!("factory/{implementer}"));
         let head = task
             .deliverables
             .factory_branch_anchor
             .clone()
+            .or_else(|| commit_receipt.and_then(|receipt| resolve_commit(repo, receipt)))
             .or_else(|| {
-                task.assignee.as_deref().and_then(|name| {
-                    super::close_ops::resolve_branch_sha(repo, &format!("factory/{name}"))
-                })
+                // The live branch tip is the delivery only while it is itself
+                // merged: months later it carries unrelated work.
+                super::close_ops::resolve_branch_sha(repo, &branch)
+                    .filter(|tip| is_ancestor(repo, tip, target_branch))
             });
         // Judge from what the delivery actually integrated, so a
         // docs/test/CI-only change closes freely even when it merged before
@@ -281,21 +347,83 @@ impl CasCore {
         let changed = head
             .as_deref()
             .and_then(|head| crate::qa_pass::integrated_paths(repo, head, target_branch));
-        if passes.is_empty() {
+        if passes.iter().all(|pass| pass.is_withdrawn()) {
             let journeys = changed
                 .as_deref()
                 .map(|paths| crate::qa_pass::catalog_journeys_for(repo, paths))
                 .unwrap_or_default();
             if !delivery_eligibility(task, &qa, changed.as_deref(), &journeys).is_eligible() {
-                return None;
+                return QaCloseGate::Clear;
             }
         } else if !crate::qa_pass::gate_applies(task, &qa, &passes) {
-            return None;
+            return QaCloseGate::Clear;
+        }
+
+        if let Some(reason) = supervisor_waiver.map(str::trim).filter(|r| !r.is_empty()) {
+            let Some(head) = head.as_deref() else {
+                return QaCloseGate::Waived(format!(
+                    "✅ DECISION Independent QA waived by supervisor override at close; no delivered \
+                     commit resolved to bind it to (pass commit_receipt to record one). Reason: {reason}"
+                ));
+            };
+            let supervisor = self
+                .get_agent_id()
+                .unwrap_or_else(|_| "supervisor".to_string());
+            return match cas_store::waive_qa_pass(
+                &self.cas_root,
+                &task.id,
+                &supervisor,
+                implementer,
+                &branch,
+                head,
+                reason,
+                chrono::Utc::now(),
+            ) {
+                Ok(pass) => QaCloseGate::Waived(format!(
+                    "✅ DECISION Independent QA waived by supervisor {supervisor} at close for @{} \
+                     (pass {}), already merged into {target_branch}. Reason: {reason}",
+                    pass.head8(),
+                    pass.id,
+                )),
+                Err(error) => QaCloseGate::Refuse(format!(
+                    "INDEPENDENT QA REQUIRED: {} is user-facing and the supervisor override could not \
+                     record its waiver: {error}",
+                    task.id
+                )),
+            };
+        }
+
+        let remedy = "A live supervisor closes it with supervisor_override=true, a reason and \
+             commit_receipt=<merged sha>; the waiver is recorded against that commit";
+        let Some(head) = head else {
+            return QaCloseGate::Refuse(format!(
+                "INDEPENDENT QA REQUIRED: {} is user-facing and merged into {target_branch} without a \
+                 QA round, but Cassy cannot tell which commit delivered it: it never parked, and \
+                 {branch} is not contained in {target_branch}. Close with commit_receipt=<merged sha>. \
+                 {remedy}.",
+                task.id
+            ));
+        };
+        if let Some(trunk) = trunk_containing(repo, &head) {
+            return QaCloseGate::Refuse(format!(
+                "INDEPENDENT QA REQUIRED: {} is user-facing and its delivery @{} is already on trunk \
+                 {trunk} with no passed or waived QA round. Cassy does not dispatch a review of code \
+                 that is already on trunk, so no QA pass was opened. {remedy}.",
+                task.id,
+                &head[..head.len().min(8)],
+            ));
         }
         let dispatch = self
-            .independent_qa_for_paths(task, repo, target_branch, head.as_deref(), changed)
+            .independent_qa_for_paths(
+                task,
+                repo,
+                target_branch,
+                Some(&head),
+                changed,
+                Some(target_branch),
+            )
             .unwrap_or_default();
-        Some(format!(
+        QaCloseGate::Refuse(format!(
             "INDEPENDENT QA REQUIRED: {} is user-facing and no passed or waived QA round covers a tip \
              merged into {target_branch}. The close waits for the reviewer's verdict (or a logged \
              supervisor waiver: verification action=qa_waive task_id={}).{dispatch}",
@@ -310,6 +438,7 @@ impl CasCore {
         reasons: &str,
         parent_branch: &str,
         config: &crate::config::Config,
+        merged_into: Option<&str>,
     ) -> String {
         let artifacts_root =
             crate::config::resolved_factory_artifacts_root(config.factory().artifacts_root.as_deref());
@@ -342,6 +471,7 @@ impl CasCore {
                     pass.deadline_at,
                     &pass.implementer_agent_id,
                     reasons,
+                    merged_into,
                 ) {
                     tracing::warn!(task_id = %task.id, error = %error, "cas-619f: QA handoff not queued");
                     handoff = "NOT queued — message the supervisor".to_string();
@@ -354,11 +484,12 @@ impl CasCore {
         }
         format!(
             "\n\nINDEPENDENT QA DISPATCHED ({reasons}): pass {} round {} for {}; QA task {qa_task_id} ({handoff}). \
-             A different agent reviews the running build; the merge waits for its verdict, and a rejection \
+             A different agent reviews the running build; the {} waits for its verdict, and a rejection \
              returns this task to you with the ledger at {}/LEDGER.md.",
             pass.id,
             pass.round,
             pass.head8(),
+            if merged_into.is_some() { "close" } else { "merge" },
             ledger_dir.display(),
         )
     }
@@ -438,6 +569,43 @@ impl CasCore {
             Some(&cas_store::QueueOrigin::Daemon),
         ) {
             tracing::warn!(task_id = %task.id, error = %error, "cas-619f: QA escalation not queued");
+        }
+    }
+}
+
+impl CasCore {
+    /// Cancel the QA work item of a withdrawn round (cas-5c38) so no
+    /// reviewer is spawned for a pass that no longer binds the delivery.
+    pub(crate) fn cancel_withdrawn_qa_task(&self, pass: &QaPass, reason: &str) -> String {
+        let Some(qa_task_id) = pass.qa_task_id.as_deref() else {
+            return String::new();
+        };
+        let Ok(store) = self.open_task_store() else {
+            return format!(" QA task {qa_task_id} could not be closed (task store unavailable).");
+        };
+        let Ok(mut qa_task) = store.get(qa_task_id) else {
+            return String::new();
+        };
+        if qa_task.is_terminal() {
+            return String::new();
+        }
+        let now = chrono::Utc::now();
+        qa_task.status = TaskStatus::Cancelled;
+        qa_task.closed_at = Some(now);
+        qa_task.terminal_outcome = Some(cas_types::TaskTerminalOutcome::Cancelled {
+            superseded_by: None,
+        });
+        qa_task.close_reason = Some(format!(
+            "Independent QA round {} for {} @{} withdrawn: {}",
+            pass.round,
+            pass.task_id,
+            pass.head8(),
+            reason.trim()
+        ));
+        qa_task.pending_verification = false;
+        match store.update(&qa_task) {
+            Ok(_) => format!(" QA task {qa_task_id} cancelled."),
+            Err(error) => format!(" QA task {qa_task_id} could not be cancelled: {error}"),
         }
     }
 }

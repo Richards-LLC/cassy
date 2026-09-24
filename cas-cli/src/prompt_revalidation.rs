@@ -1109,15 +1109,34 @@ pub(crate) fn qa_dispatch_envelope(
     deadline: &str,
     implementer: &str,
     reasons: &str,
+    merged_into: Option<&str>,
 ) -> String {
+    // cas-5c38 (GH #999): say what actually happened. The close backstop
+    // dispatches for a delivery that was merged without ever parking, and
+    // calling that "parked for merge" sent supervisors to a qa_waive that
+    // needs a parked tip.
+    let (stage, gate) = match merged_into {
+        None => (
+            "parked for merge. It needs an independent QA and polish pass before it merges"
+                .to_string(),
+            "merge",
+        ),
+        Some(target) => (
+            format!(
+                "was merged into {} before any QA round (it never parked). \
+                 It needs an independent QA and polish pass before it closes",
+                xml_attribute_value(target)
+            ),
+            "close",
+        ),
+    };
     format!(
         "{QA_DISPATCH_ENVELOPE_OPEN}pass_id=\"{pass}\" task_id=\"{task}\" qa_task_id=\"{qa}\" \
          round=\"{round}\" bound_head=\"{head}\" deadline=\"{deadline}\">\n\
-         {task} (delivered by {implementer}) is user-facing ({reasons}) and parked for merge. \
-         It needs an independent QA and polish pass before it merges.\n\
+         {task} (delivered by {implementer}) is user-facing ({reasons}) and {stage}.\n\
          Spawn a reviewer who is not {implementer}: \
          mcp__cas__coordination action=spawn_workers lane=taste task_id={qa}\n\
-         Do not merge {task} until the pass records a verdict for {head}; \
+         Do not {gate} {task} until the pass records a verdict for {head}; \
          to skip it, waive with a reason: mcp__cas__verification action=qa_waive task_id={task} summary=\"...\"\n\
          {QA_DISPATCH_ENVELOPE_CLOSE}",
         pass = xml_attribute_value(pass_id),
@@ -2611,6 +2630,32 @@ mod cas_3dcb_worker_died_relay_tests {
             "2026-09-23T18:00:00+00:00",
             "swift-fox",
             "label:ui",
+            None,
+        );
+        assert!(body.contains("and parked for merge"), "{body}");
+        assert!(body.contains("Do not merge cas-619f"), "{body}");
+        // cas-5c38 (GH #999): a delivery the close backstop found already
+        // merged is never described as parked.
+        let merged = qa_dispatch_envelope(
+            "qapass-2",
+            "cas-0019",
+            "cas-qa02",
+            1,
+            "cccc3333dddd4444",
+            "2026-09-23T18:00:00+00:00",
+            "swift-fox",
+            "demo_statement",
+            Some("epic/burn-down"),
+        );
+        assert!(!merged.contains("parked for merge"), "{merged}");
+        assert!(
+            merged.contains("was merged into epic/burn-down before any QA round (it never parked)"),
+            "{merged}"
+        );
+        assert!(merged.contains("Do not close cas-0019"), "{merged}");
+        assert_eq!(
+            parse_qa_dispatch_envelope(&merged).map(|parsed| parsed.bound_head),
+            Some("cccc3333dddd4444".to_string())
         );
         let parsed = parse_qa_dispatch_envelope(&body).expect("CAS's own handoff must parse");
         assert_eq!(parsed.pass_id, "qapass-1");

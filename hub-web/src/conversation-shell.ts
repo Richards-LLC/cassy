@@ -115,7 +115,7 @@ export function dressComposer(composer: HTMLElement, supervisor?: string): void 
 }
 
 /** Longest supervisor name the composer placeholder spells out in full. */
-export const COMPOSER_NAME_MAX_CHARS = 32;
+export const COMPOSER_NAME_MAX_CHARS = 20;
 
 /** The name as the placeholder shows it: whole, or cut with an ellipsis. */
 export function composerNameHint(name: string): string {

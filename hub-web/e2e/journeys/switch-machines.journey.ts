@@ -11,7 +11,11 @@ const ALPHA: Machine = {
     { name: "keen-lynx-1", supervisor: "keen-lynx-1", project_dir: "/projects/orion", workers: ["quick-wren-2"], liveness: "live" },
     // A live supervisor that has not spawned workers yet (cas-645e).
     { name: "lone-heron-2", supervisor: "lone-heron-2", project_dir: "/projects/lighthouse", workers: [], liveness: "live" },
-  ],
+    // Not reachable, and no supervisor: hidden on every surface, the fleet
+    // board included (cas-645e QA F01).
+    { name: "stale-owl-3", supervisor: "stale-owl-3", project_dir: "/projects/attic", workers: ["w1"], liveness: "stale_metadata" },
+    { name: "headless-5", supervisor: "", project_dir: "/projects/nobody", workers: [], liveness: "live" },
+  ] as Machine["sessions"],
 };
 
 test("HUB-J8 switch between machines without losing my place", async ({ page, journey }) => {
@@ -391,7 +395,15 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
     expect(jumpCount, "palette Jump rows").toBe(pickerRows);
     await expect(toggle).toHaveAttribute("aria-label", `Switch session — ${pickerRows} available`);
     expect(listRows, "conversation list rows").toBe(pickerRows);
+    const pickerSessions = (await picker.locator(".session-picker-entry").evaluateAll((rows) => rows.map((row) => (row as HTMLElement).dataset.pickerSession))).sort();
     await page.keyboard.press("Escape");
     await expect(picker).toBeHidden();
+    // The fleet board, on the same screen, lists the same sessions and
+    // counts them the same way (cas-645e QA F01).
+    await page.locator("#machine-rail-list .machine-icon").filter({ hasText: "AL" }).click();
+    const board = page.locator("#fleet-board");
+    await expect(board.locator("button.fleet-session")).toHaveCount(pickerRows);
+    expect((await board.locator("button.fleet-session").evaluateAll((cards) => cards.map((card) => (card as HTMLElement).dataset.fleetSession))).sort(), "fleet board sessions").toEqual(pickerSessions);
+    await expect(board.locator(".fleet-board-summary")).toHaveText(new RegExp(`^3 machines · ${pickerRows} sessions`));
   });
 });

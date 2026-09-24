@@ -251,7 +251,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 9. Read every session's details on a phone — at 390px each picker row, the open one included, shows project, role, workers and status in full
 10. Pair a third machine; the others keep their colours — each machine's accent is stored when it first pairs, so a new pairing (even one whose id sorts first) never re-colours the fleet, the new machine gets its own accent, and the colours survive a reload
 11. Know each session and machine by name in Terminal view — the session title, every picker row and every palette "Jump to" row lead with the project, with the supervisor codename secondary; the machine rail and the compact machine chip read two letters of the machine's own name ("AT" for "Atlas · Linux"), never a separator
-12. A supervisor with no workers yet is listed everywhere — a live supervisor that has not spawned workers is in the conversation list, the palette's Jump rows and the session picker ("no workers · live"), and the "Switch session — N available" count matches all three
+12. A supervisor with no workers yet is listed everywhere — a live supervisor that has not spawned workers is in the conversation list, the palette's Jump rows and the session picker ("no workers · live"), and the "Switch session — N available" count and the Terminal view fleet board match all three; a stale or supervisor-less session is hidden from every one of them
 
 **Expected experience**
 

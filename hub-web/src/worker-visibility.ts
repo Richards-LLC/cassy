@@ -103,7 +103,11 @@ export function visibleCatalog(sessions: readonly HubSession[], pending: (name: 
   return sessions.flatMap(session => {
     if (sessionReachable(session, catalogFresh)) return [session];
     if (pending(session.name)) return [{ ...session, unreachable: true }];
-    return recovery ? [session] : [];
+    // The recovery view ("Show dormant sessions") lists every supervisor,
+    // whatever its state, but not a row with no supervisor: there is no one
+    // to talk to, so the conversation list cannot show it either
+    // (cas-645e QA F02).
+    return recovery && Boolean(session.supervisor.trim()) ? [session] : [];
   });
 }
 

@@ -2881,7 +2881,9 @@ function renderFleetBoard(): void {
   const board = document.querySelector<HTMLElement>("#fleet-board");
   const entries = sessionPickerEntries({
     machines: [...machines.values()].map((machine) => ({ id: machine.id, label: machine.label })),
-    sessions,
+    // The fleet board is a fifth list of sessions on the same screen as the
+    // picker and its count, so it reads the same rule (cas-645e QA F01).
+    sessions: visibleSessionMap(),
     includeDormant: revealDormant,
     selection: selectedMachineId ? { machineId: selectedMachineId } : undefined,
     summaries: sessionSummaries,

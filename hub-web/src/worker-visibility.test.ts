@@ -91,7 +91,9 @@ describe('staffed session catalog', () => {
   it('hides dead, worker-only and unreachable rows; keeps live supervisors, with or without workers (cas-7103, cas-645e)', () => {
     const rows = [liveSession, { ...liveSession, name: 'dead', dormant: true }, { ...liveSession, name: 'empty', workers: [] }, { ...liveSession, name: 'worker', supervisor: '' }, { ...liveSession, name: 'missing', liveness: 'missing_endpoint' as const }];
     expect(visibleCatalog(rows, () => false).map(row => row.name)).toEqual(['live', 'empty']);
-    expect(visibleCatalog(rows, () => false, true, true)).toHaveLength(5);
+    // Recovery lists every supervisor, whatever its state, but never a row
+    // with no supervisor: the list cannot show one (cas-645e QA F02).
+    expect(visibleCatalog(rows, () => false, true, true).map(row => row.name)).toEqual(['live', 'dead', 'empty', 'missing']);
   });
   it('retains missing in-flight destinations as unreachable through sending and acknowledgment', () => {
     const rows = retainPendingSessions([liveSession], [], () => true);

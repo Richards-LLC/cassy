@@ -1972,6 +1972,25 @@ pub trait PromptQueueStore: Send + Sync {
     /// the recipient affinity for unprompted supervisor turns.
     fn latest_verified_operator_device(&self, factory_session: &str) -> Result<Option<String>>;
 
+    /// Earliest trusted Commander message in this factory session. A new
+    /// daemon may initialize its mirror cursor after the first reply ended.
+    fn first_verified_operator_at(&self, factory_session: &str) -> Result<Option<DateTime<Utc>>>;
+
+    /// Atomically mirror a completed supervisor turn unless that turn already
+    /// sent an explicit operator reply. The turn key also makes daemon replay
+    /// and concurrent polls harmless.
+    fn mirror_supervisor_turn(
+        &self,
+        factory_session: &str,
+        turn_key: &str,
+        started_at: DateTime<Utc>,
+        completed_at: DateTime<Utc>,
+        payload: &str,
+        summary: &str,
+        device_id: &str,
+        kind: &str,
+    ) -> Result<Option<i64>>;
+
     /// Find the newest verified Commander message for a supervisor and an
     /// operator selector.  Unlike pending-message peeks, this includes rows
     /// already surfaced or acknowledged, because a supervisor may answer a
@@ -4576,6 +4595,63 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         )
         .optional()
         .map_err(Into::into)
+    }
+
+    fn first_verified_operator_at(&self, factory_session: &str) -> Result<Option<DateTime<Utc>>> {
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        let at: Option<String> = conn.query_row(
+            "SELECT created_at FROM prompt_queue
+              WHERE factory_session = ? AND source LIKE 'commander:%'
+                AND origin_kind = 'paired_device' AND operator_verified = 1
+              ORDER BY id ASC LIMIT 1",
+            params![factory_session],
+            |row| row.get(0),
+        ).optional()?;
+        at.map(|at| DateTime::parse_from_rfc3339(&at)
+            .map(|at| at.with_timezone(&Utc))
+            .map_err(|error| StoreError::Parse(error.to_string())))
+            .transpose()
+    }
+
+    fn mirror_supervisor_turn(
+        &self,
+        factory_session: &str,
+        turn_key: &str,
+        started_at: DateTime<Utc>,
+        completed_at: DateTime<Utc>,
+        payload: &str,
+        summary: &str,
+        device_id: &str,
+        kind: &str,
+    ) -> Result<Option<i64>> {
+        crate::shared_db::with_write_retry(|| {
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
+            let changed = conn.execute(
+                "INSERT OR IGNORE INTO prompt_queue
+                   (source, target, prompt, created_at, factory_session, summary,
+                    priority, urgent, dedupe_key, origin_kind, recipient_device_id, kind)
+                 SELECT 'supervisor', 'operator', ?1, ?2, ?3, ?4, 2, 0, ?5,
+                        'daemon', ?6, ?7
+                 WHERE NOT EXISTS (
+                   SELECT 1 FROM prompt_queue
+                   WHERE factory_session = ?3 AND lower(target) = 'operator'
+                     AND source = 'supervisor' AND dedupe_key IS NULL
+                     AND created_at >= ?8 AND created_at <= ?9
+                 )",
+                params![
+                    payload,
+                    Utc::now().to_rfc3339(),
+                    factory_session,
+                    summary,
+                    turn_key,
+                    device_id,
+                    kind,
+                    started_at.to_rfc3339(),
+                    completed_at.to_rfc3339(),
+                ],
+            )?;
+            Ok((changed > 0).then(|| conn.last_insert_rowid()))
+        })
     }
 
     fn latest_verified_operator_message(

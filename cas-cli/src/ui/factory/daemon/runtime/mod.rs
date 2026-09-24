@@ -1,6 +1,7 @@
 mod ci_watch;
 mod client_input;
 mod cloud;
+mod commander_mirror;
 pub(crate) mod delivery;
 #[cfg(test)]
 mod delivery_matrix_tests;

@@ -70,6 +70,13 @@ pub(crate) fn apply_factory_worker_metadata(agent: &mut Agent, clone_path: Optio
         if let Ok(cli) = std::env::var("CAS_FACTORY_SUPERVISOR_CLI") {
             agent.metadata.insert("supervisor_cli".to_string(), cli);
         }
+        if let Ok(account_dir) = std::env::var("CODEX_HOME") {
+            if !account_dir.trim().is_empty() {
+                agent
+                    .metadata
+                    .insert("supervisor_account_dir".to_string(), account_dir);
+            }
+        }
     }
 
     let is_worker = agent.role == AgentRole::Worker

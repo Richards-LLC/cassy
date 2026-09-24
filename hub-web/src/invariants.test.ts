@@ -1189,7 +1189,9 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(source).toContain("if (shown) placeToastClearOfBanner(shown);");
     expect(styles).toContain(".terminal-state");
     expect(styles).toContain(".terminal-connecting-step");
-    expect(styles).toContain(".terminal-disconnected .terminal-mount { opacity: .4; }");
+    // Only the terminal dims; the conversation reading view stays readable (cas-3446).
+    expect(styles).toContain(".terminal-disconnected .terminal-mount:not(.conversation-active) { opacity: .4; }");
+    expect(styles).not.toContain(".terminal-disconnected .terminal-mount { opacity: .4; }");
   });
 
   it("drives pane recovery from the selected session attach lifecycle", async () => {

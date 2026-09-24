@@ -61,7 +61,11 @@ impl FactoryApp {
 
         let (cols, rows) = crossterm::terminal::size().unwrap_or((120, 40));
 
-        let director_data = DirectorData::load_fast(&cas_dir)?;
+        // cas-0c98 (GH #995): the director only ever reasons about this
+        // project's tasks; a foreign-origin row must never be suggested.
+        let project_id = crate::cloud::resolve_canonical_id(&cas_dir);
+        let director_data =
+            DirectorData::load_for_project(&cas_dir, None, false, project_id.as_deref())?;
         let preferred_epic_focus = preferred_epic_focus_from_session_metadata();
         let epic_state = resolve_epic_state_for_focus(&director_data, &preferred_epic_focus);
 
@@ -200,7 +204,9 @@ impl FactoryApp {
         };
 
         // Cache store handles for efficient periodic refresh
-        let director_stores = DirectorStores::open(&cas_dir).ok();
+        let director_stores = DirectorStores::open(&cas_dir)
+            .ok()
+            .map(|stores| stores.with_project_id(crate::cloud::resolve_canonical_id(&cas_dir)));
 
         let mut mux = Mux::factory(mux_config)?;
         mux.focus(&supervisor_name);
@@ -379,7 +385,9 @@ impl FactoryApp {
         let notifier = Notifier::new(notify_config);
 
         // Cache store handles for efficient periodic refresh
-        let director_stores = DirectorStores::open(&cas_dir).ok();
+        let director_stores = DirectorStores::open(&cas_dir)
+            .ok()
+            .map(|stores| stores.with_project_id(crate::cloud::resolve_canonical_id(&cas_dir)));
 
         // Resolve theme: explicit config overrides auto-detection
         let cas_config = Config::load(&cas_dir).unwrap_or_default();

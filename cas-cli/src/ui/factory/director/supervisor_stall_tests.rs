@@ -475,3 +475,85 @@ fn start_gated_task_is_never_named_for_assignment() {
         })
     );
 }
+
+/// cas-0c98 (GH #995): the pulse-card supervisor was nudged to assign
+/// gabber-studio tasks to its idle workers. Seed a real store with a
+/// foreign-origin open task linked under the session's focused epic plus a
+/// foreign epic with its own ready child; the stall nudge built from the
+/// session's project-scoped load names only the local task.
+#[test]
+fn stall_nudge_never_suggests_foreign_origin_tasks_cas_0c98() {
+    use cas_store::{AgentStore, EventStore, TaskStore};
+    use cas_types::{Dependency, DependencyType, Task};
+
+    let temp = tempfile::tempdir().unwrap();
+    let stores = cas_factory::DirectorStores::open(temp.path()).unwrap();
+    stores.task_store.init().unwrap();
+    stores.agent_store.init().unwrap();
+    stores.event_store.init().unwrap();
+    let add = |id: &str, task_type: TaskType, origin: &str, epic: Option<&str>| {
+        let mut task = Task::new(id.to_string(), format!("{id} title"));
+        task.task_type = task_type;
+        task.origin_project = Some(origin.to_string());
+        if task_type == TaskType::Epic {
+            task.status = TaskStatus::InProgress;
+            task.branch = Some(format!("epic/{id}"));
+        }
+        stores.task_store.add(&task).unwrap();
+        if let Some(epic) = epic {
+            stores
+                .task_store
+                .add_dependency(&Dependency::new(
+                    id.to_string(),
+                    epic.to_string(),
+                    DependencyType::ParentChild,
+                ))
+                .unwrap();
+        }
+    };
+    add("cas-epic", TaskType::Epic, "pulse-card", None);
+    add("cas-local-ready", TaskType::Task, "pulse-card", Some("cas-epic"));
+    add("cas-1aec", TaskType::Task, "gabber-studio", Some("cas-epic"));
+    add("cas-foreign-epic", TaskType::Epic, "gabber-studio", None);
+    add("cas-72d3", TaskType::Task, "gabber-studio", Some("cas-foreign-epic"));
+
+    let now = Utc::now();
+    let nudge = |project: Option<&str>, focus: &str| {
+        let mut snapshot =
+            DirectorData::load_for_project(temp.path(), None, false, project).unwrap();
+        snapshot
+            .agents
+            .push(worker("gold-fox", now - Duration::seconds(3_600)));
+        supervisor_actionable_state(
+            &snapshot,
+            Some(focus),
+            "supervisor",
+            &HashSet::new(),
+            now,
+            600,
+            |_| None,
+        )
+    };
+
+    assert_eq!(
+        nudge(Some("pulse-card"), "cas-epic"),
+        Some(SupervisorActionableState::AssignReadyWork {
+            task_ids: vec!["cas-local-ready".into()],
+            idle_workers: vec!["gold-fox".into()],
+        }),
+        "the stall nudge must name only this project's task"
+    );
+    assert_eq!(
+        nudge(Some("pulse-card"), "cas-foreign-epic"),
+        None,
+        "a foreign epic is not in the session's snapshot, so its children are never suggested"
+    );
+    // Precondition: without a project scope the foreign rows reach the nudge,
+    // which is the GH #995 symptom.
+    let Some(SupervisorActionableState::AssignReadyWork { task_ids, .. }) =
+        nudge(None, "cas-epic")
+    else {
+        panic!("unscoped load should still offer ready work");
+    };
+    assert!(task_ids.contains(&"cas-1aec".to_string()), "{task_ids:?}");
+}

@@ -3272,6 +3272,9 @@ button.chip:disabled { cursor: default; }
 .thread .empty .mono { display: flex; align-items: center; justify-content: center; flex: none; width: 76px; height: 76px; border-radius: var(--radius-pill); background: var(--accent, var(--you-bg)); color: var(--accent-fg); font: var(--weight-semibold) 30px/1 var(--font-ui); box-shadow: var(--lift-strong); }
 .thread .empty b { max-width: 100%; font: var(--weight-semibold) 21px/1.2 var(--font-ui); letter-spacing: -0.015em; white-space: normal; overflow-wrap: anywhere; } /* b.codename: wrap, not the codename's nowrap (cas-1334 QA F2) */
 .thread .empty .proj2 { font: var(--weight-regular) 13px/1.3 var(--font-mono); color: var(--ink-mid); overflow-wrap: anywhere; }
+/* The project-led card puts the codename in .proj2; it wraps like the rest of
+   the line, not with the codename's nowrap (cas-1334 QA round 2). */
+.thread .empty .proj2 .codename { white-space: normal; overflow-wrap: anywhere; }
 .thread .empty .proj2:empty { display: none; }
 .thread .empty .said { margin: 0; max-width: 34ch; color: var(--ink-mid); font-size: 15px; overflow-wrap: anywhere; }
 .thread .empty .said .codename { font: var(--weight-medium) 0.93em/1 var(--font-mono); color: var(--ink); white-space: normal; overflow-wrap: anywhere; }

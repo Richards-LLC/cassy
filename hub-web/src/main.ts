@@ -2541,6 +2541,12 @@ function sessionButton(machineId: string, session: HubSession): HTMLButtonElemen
 function openSessionPicker(): void {
   sessionPickerOpen = true;
   render();
+  // Closing the picker does not rebuild the shell, so the last shell signature
+  // can still read "picker open" and render() skips the rebuild that would
+  // show it. Show the existing dialog in that case too (as the palette does).
+  const picker = document.querySelector<HTMLDialogElement>("#session-picker");
+  if (picker && !picker.open) picker.showModal();
+  syncSessionPickerToggle();
   queueMicrotask(() => {
     // A phone keyboard over a three-row list hides the list. The filter is
     // there for a fleet, not for the four sessions a laptop usually has.
@@ -2550,8 +2556,22 @@ function openSessionPicker(): void {
 }
 
 function closeSessionPicker(): void {
-  sessionPickerOpen = false;
+  sessionPickerClosed();
   document.querySelector<HTMLDialogElement>("#session-picker")?.close();
+}
+
+/**
+ * Every way the picker closes (×, Escape, choosing a session) lands here. It
+ * does not rebuild the shell, so the toggle's aria-expanded is set in place;
+ * a stale "true" would also let the next rebuild pop the picker back open.
+ */
+function sessionPickerClosed(): void {
+  sessionPickerOpen = false;
+  syncSessionPickerToggle();
+}
+
+function syncSessionPickerToggle(): void {
+  document.querySelector<HTMLButtonElement>("#session-picker-toggle")?.setAttribute("aria-expanded", String(sessionPickerOpen));
 }
 
 function renderSessionPicker(): void {
@@ -2898,7 +2918,10 @@ function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | und
   const back = document.querySelector<HTMLButtonElement>("#session-back");
   if (back) back.onclick = goBack;
   const picker = document.querySelector<HTMLDialogElement>("#session-picker")!;
-  picker.oncancel = () => { sessionPickerOpen = false; };
+  picker.oncancel = sessionPickerClosed;
+  // Any other close (a form, a browser close request) settles the same state.
+  // A dialog replaced by a shell rebuild is detached and must not reset it.
+  picker.onclose = () => { if (picker.isConnected && !picker.open) sessionPickerClosed(); };
   document.querySelector<HTMLButtonElement>("#session-picker-close")!.onclick = closeSessionPicker;
   const pickerQuery = document.querySelector<HTMLInputElement>("#session-picker-query")!;
   pickerQuery.oninput = () => {

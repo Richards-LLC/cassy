@@ -3140,6 +3140,12 @@ dialog form > *,
  * redefined here. Shape system: 22px pebble, 8px spoken corner; grouped
  * turns tighten their adjacent corners so a run reads as one voice. */
 .conversation-reading.thread { display: flex; flex-direction: column; height: 100%; min-width: 0; overflow: auto; overscroll-behavior: contain; padding: 0; position: relative; background: var(--canvas); color: var(--ink); font: var(--weight-regular) 15px/1.5 var(--font-ui); }
+/* cas-0bf5: the thread is a Tab stop (tabindex 0) and where a palette or
+ * keyboard jump lands, so keyboard focus draws the house ring, inset so the
+ * scroll container never clips it; a pointer focus draws nothing. The
+ * browser's default 1px outline never shows. */
+.conversation-reading.thread:focus-visible { outline: var(--focus-ring-width) solid var(--color-focus); outline-offset: calc(-1 * var(--focus-ring-width)); }
+.conversation-reading.thread:focus:not(:focus-visible) { outline: none; }
 .thread .thead { position: sticky; top: 0; z-index: 1; display: flex; align-items: center; gap: 13px; padding: 17px 30px; background: var(--canvas); box-shadow: var(--lift-head); }
 .thread .thead b { display: block; font: var(--weight-semibold) 16px/1.25 var(--font-ui); overflow-wrap: anywhere; }
 .thread .thead .id span { display: block; margin-top: 1px; font: var(--weight-regular) 13px/1.25 var(--font-mono); color: var(--ink-mid); overflow-wrap: anywhere; }

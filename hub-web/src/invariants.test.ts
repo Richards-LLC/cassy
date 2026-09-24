@@ -620,6 +620,9 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(css).toContain("  position: sticky;\n  bottom: 0;");
 
     expect(css).toContain('.pair-flow[tabindex="-1"]:focus-visible { outline: none; }');
+    // cas-0bf5: the conversation thread takes the house ring from the keyboard, nothing from a pointer.
+    expect(css).toContain(".conversation-reading.thread:focus-visible { outline: var(--focus-ring-width) solid var(--color-focus); outline-offset: calc(-1 * var(--focus-ring-width)); }");
+    expect(css).toContain(".conversation-reading.thread:focus:not(:focus-visible) { outline: none; }");
 
     // D13: a sized card, not a full-viewport dashed rectangle.
     expect(css).toContain(".empty-pane-slot {\n  place-self: center;");

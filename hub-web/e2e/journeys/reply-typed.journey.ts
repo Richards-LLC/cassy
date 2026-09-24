@@ -84,6 +84,9 @@ test("HUB-J5 reply by typing", async ({ page, journey }) => {
     await expect(page.locator("#message-status")).toContainText("Studio iPad controls this session");
     await expect(take).toBeVisible();
     await expect(take).toBeFocused();
+    // cas-1730 (cas-008f N01): the message agrees with the composer — it names
+    // the device in control and says to take control once it is released.
+    await expect(bubble.getByRole("status")).toContainText("Studio iPad is in control. Take control when it's released, then retry.");
     await page.unroute(lease);
   });
 

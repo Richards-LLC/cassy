@@ -268,6 +268,19 @@ describe("ConversationView (Pebble thread)", () => {
     // A control that survives the rebuild keeps focus.
     expect(document.activeElement).toBe(leasedBubble().querySelector(".conversation-retry"));
     expect(leasedBubble().querySelector(".conversation-refused-next")?.textContent).toBe(" Take control, then retry.");
+    // cas-1730 (cas-008f N01): while another device holds control and this
+    // one cannot take over, the message names it and says to take control
+    // once it is released, as the composer does. Take control stays, and a
+    // focused Take control keeps focus through the repaint.
+    let holder: string | undefined;
+    const contested = new ConversationView(document, history, { supervisor: "sup", editMessage: edit, retryMessage: retry, takeControl: take, controlHolder: () => holder }); document.body.replaceChildren(contested.element); contested.update();
+    const contestedBubble = () => contested.element.querySelector<HTMLElement>('.bub[data-state="error"]')!;
+    contestedBubble().querySelector<HTMLButtonElement>(".conversation-take-control")!.focus();
+    holder = "Studio iPad"; contested.update();
+    expect(contestedBubble().querySelector(".conversation-refused-next")?.textContent).toBe(" Studio iPad is in control. Take control when it's released, then retry.");
+    expect(document.activeElement).toBe(contestedBubble().querySelector(".conversation-take-control"));
+    holder = undefined; contested.update();
+    expect(contestedBubble().querySelector(".conversation-refused-next")?.textContent).toBe(" Take control, then retry.");
     // Only a control refusal offers it: taking control fixes nothing else.
     const other = new ConversationHistory();
     other.submit("z", "sup", "Late answer", at(9, 2), 7); other.reject("z", "semantic message enqueue failed: in_reply_to notification 7 does not exist");

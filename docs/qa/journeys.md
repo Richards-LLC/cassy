@@ -154,7 +154,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 3. See it delivered — the hub's receipt turns "Sending…" into "Delivered" with a check
 4. See it answered — the supervisor's reply arrives under it and "Delivered" steps aside
 5. A refused message says why — "Not sent", a plain reason and the next step on the message, said once (the composer only points at it); the list does not preview it as said
-   - A refused Take control keeps focus on the message — when another device holds the session the take is refused, the message keeps Take control, and keyboard focus stays on it, never the page body
+   - A refused Take control keeps focus on the message — when another device holds the session the take is refused, the message keeps Take control, names the device in control and says to take control once it is released (as the composer does), and keyboard focus stays on it, never the page body
 6. Take control from the message, then retry — the refused message carries the Take control its refusal names (the conversation header has none); once control is taken it drops Take control and says Retry will send it, its actions are 44px targets on a phone, and Retry then sends it
 7. Edit and resend retires the refused message — it collapses to "Not sent · replaced by your edit" with no Retry
 8. A late receipt after the supervisor talks on never offers Retry — the supervisor's turn crosses the send and the receipt comes 3.4 s later; the message goes from "Sending…" to delivered without ever showing "Not confirmed" or Retry, and it is sent once
@@ -333,7 +333,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 3. It reconnects on its own — the banner and the refusal line clear, everything says Live again, the draft is kept, and no transport alarm is left
 4. Sending works again — a message goes through and is answered
 5. On a phone, the banner stays readable through an outage — no toast sits on the reconnect banner, in light and dark; after it reconnects, every turn keeps its place (the message stays below its session line)
-6. In Terminal view, nothing claims all clear or live during an outage — the Attention rail names the outage instead of "All clear", the machine rail says Reconnecting, and the header drops CONTROL and shows Reconnecting in place of a latency; all return when the session is back
+6. In Terminal view, nothing claims all clear or live during an outage — the Attention rail names the outage instead of "All clear", the machine rail says Reconnecting, the header drops CONTROL and shows Reconnecting in place of a latency, Take/Release control and Interrupt say why they are unavailable, and the machine drawer's session row says Reconnecting, not live; all return when the session is back
 
 **Expected experience**
 

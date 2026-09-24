@@ -179,6 +179,17 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
     expect(during.machine).toBe("Atlas · Linux, Reconnecting");
     expect(during.mode, "no control is claimed while the session is down").toBe("");
     expect(during.latency).toBe("Reconnecting");
+    // cas-1730: controls that need the machine say why instead of acting, and
+    // the drawer's session row does not call the session live.
+    const outage = "Atlas · Linux is reconnecting. Control and interrupts come back when it is live.";
+    await expect(page.locator("#lease")).toHaveAttribute("aria-disabled", "true");
+    await expect(page.locator("#lease")).toHaveAttribute("data-disabled-reason", outage);
+    await expect(page.locator("#interrupt")).toHaveAttribute("data-disabled-reason", outage);
+    await page.getByRole("button", { name: "Open machines and sessions" }).click();
+    const drawerSession = page.locator("#machine-tree .session-meta").first();
+    await expect(drawerSession).toContainText("Reconnecting");
+    await expect(drawerSession).not.toContainText("live");
+    await page.getByRole("button", { name: "Close machines and sessions" }).click();
     hub.release(PELICAN);
     await expect(banner).toBeHidden({ timeout: 15_000 });
     await expect.poll(async () => (await read()).rail, { timeout: 15_000 }).toBe("All clear");
@@ -186,5 +197,7 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
     expect(after.machine).toMatch(/^Atlas · Linux, live/);
     expect(after.mode).toBe("CONTROL");
     expect(after.latency).toMatch(/^\d+ms$/);
+    await expect(page.locator("#lease")).not.toHaveAttribute("aria-disabled", "true");
+    await expect(page.locator("#interrupt")).not.toHaveAttribute("aria-disabled", "true");
   });
 });

@@ -405,5 +405,11 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
     await expect(board.locator("button.fleet-session")).toHaveCount(pickerRows);
     expect((await board.locator("button.fleet-session").evaluateAll((cards) => cards.map((card) => (card as HTMLElement).dataset.fleetSession))).sort(), "fleet board sessions").toEqual(pickerSessions);
     await expect(board.locator(".fleet-board-summary")).toHaveText(new RegExp(`^3 machines · ${pickerRows} sessions`));
+    // The summary and the refresh time start with their own words, not a
+    // separator drawn before them (cas-e503): "2 machines · 2 sessions",
+    // "16:56". The " · " stays only between the summary's items.
+    for (const selector of [".fleet-board-summary", ".fleet-catalog-time"]) {
+      expect(await board.locator(selector).evaluate((element) => getComputedStyle(element, "::before").content), selector).toBe("none");
+    }
   });
 });

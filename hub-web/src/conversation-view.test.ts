@@ -68,6 +68,27 @@ describe("ConversationView (Pebble thread)", () => {
     expect(view.element.querySelector(".history-end")).toBeNull();
     expect(view.element.querySelector(".working")).toBeNull();
   });
+  it("shows a loading line, not the empty state, until the first history page lands (cas-04ee)", () => {
+    const history = new ConversationHistory();
+    let loading = true;
+    const view = new ConversationView(document, history, { supervisor: "sup", loadingHistory: () => loading });
+    document.body.replaceChildren(view.element);
+    expect(view.element.dataset.mountOverlay).toBe("");
+    view.update();
+    const empty = view.element.querySelector<HTMLElement>(".empty")!;
+    expect(empty.hidden).toBe(false);
+    expect(empty.dataset.state).toBe("loading");
+    expect(empty.querySelector('[role="status"]')?.textContent).toBe("Loading your conversation with sup…");
+    expect(empty.textContent).not.toContain("Nothing waiting");
+    // The page lands empty: now the empty state is the truth.
+    loading = false; view.update();
+    expect(empty.dataset.state).toBeUndefined();
+    expect(empty.querySelector(".said")?.textContent).toBe("Nothing waiting on you. sup will write here when it needs a decision.");
+    // A page with turns shows the turns, whatever the flag says.
+    loading = true; history.reply(reply(1, "answer", "Ready."), at(9, 0)); view.update();
+    expect(empty.hidden).toBe(true);
+    expect(view.element.querySelector(".msgs")?.textContent).toContain("Ready.");
+  });
   it("coalesces status runs into one quiet line and shows the working indicator while executing", () => {
     const history = new ConversationHistory();
     let working = false;

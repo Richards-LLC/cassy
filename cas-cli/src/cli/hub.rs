@@ -1290,6 +1290,9 @@ fn start_with_output_resolved(
             .arg("--tailscale-serve-port")
             .arg(tailscale_port.to_string());
     }
+    if let Some(executable) = std::env::var_os("TAILSCALE").filter(|value| !value.is_empty()) {
+        command.env("TAILSCALE", executable);
+    }
     if let Some((port, target)) = prior_serve_target {
         command
             .arg("--prior-tailscale-serve-port")

@@ -213,6 +213,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 3. Answer with one tap — the pin clears, the thread records the chosen answer, and nothing is left waiting in the context rail, even when the machine's clock runs ahead; the answer shows the time it was sent, under today
 4. See the supervisor act on the answer — the reply follows, and a new blocker after the answer waits
 5. Reply to a machine a day ahead — no future day header: the machine's turn sits under Today at its arrival time, marked "machine clock ahead", and the reply shows the time it was sent below it
+6. Reopen the page — the thread rebuilt from history keeps every turn where the visit showed it, in the machine's order, under Today, with times reading in order
 
 **Expected experience**
 

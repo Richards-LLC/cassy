@@ -45,6 +45,9 @@ export type DoubleOptions = {
   history?: Record<string, HistoryPage[]>;
   /** Relay pairing: which machine the relay authorizes, and after how many polls. */
   relay?: { machine: string; claimAfter: number; authorizeAfter: number };
+  /** How far each session's machine clock runs ahead of this browser (ms): the
+   * stamps its replayed history carries, as a skewed daemon's would. */
+  clockAheadMs?: Record<string, number>;
 };
 
 const PANE_TEXT = "The supervisor is ready.\r\n";
@@ -150,9 +153,9 @@ export class HubDouble {
     const reply = this.nextId++;
     this.send(session, { MessageQueued: { client_ref: sent.client_ref, notification_id: queued, target: sent.target, stamped: true } });
     this.send(session, { OperatorReply: { notification_id: reply, reply_to: queued, message, summary: "", device_id: "journey-device", ...extra } });
-    const now = new Date().toISOString();
-    this.remember(session).messages.push({ notification_id: queued, target: sent.target, text: sent.text, state: "acknowledged", stamped: true, device_id: "journey-device", at: now });
-    this.remember(session).replies.push({ notification_id: reply, reply_to: queued, message, summary: "", device_id: "journey-device", attachments: [], at: now, ...extra });
+    const now = this.machineNow(session);
+    this.remember(session).messages.push({ notification_id: queued, target: sent.target, text: sent.text, state: "acknowledged", stamped: true, device_id: "journey-device", session, ...(sent.in_reply_to === undefined || sent.in_reply_to === null ? {} : { reply_to: sent.in_reply_to }), at: now });
+    this.remember(session).replies.push({ notification_id: reply, reply_to: queued, message, summary: "", device_id: "journey-device", attachments: [], session, at: now, ...extra });
     return { queued, reply };
   }
 
@@ -162,7 +165,7 @@ export class HubDouble {
     if (!sent) throw new Error("hub double: nothing was sent");
     const queued = this.nextId++;
     this.send(session, { MessageQueued: { client_ref: sent.client_ref, notification_id: queued, target: sent.target, stamped: true } });
-    this.remember(session).messages.push({ notification_id: queued, target: sent.target, text: sent.text, state: "acknowledged", stamped: true, device_id: "journey-device", at: new Date().toISOString() });
+    this.remember(session).messages.push({ notification_id: queued, target: sent.target, text: sent.text, state: "acknowledged", stamped: true, device_id: "journey-device", session, ...(sent.in_reply_to === undefined || sent.in_reply_to === null ? {} : { reply_to: sent.in_reply_to }), at: this.machineNow(session) });
     return queued;
   }
 
@@ -170,7 +173,7 @@ export class HubDouble {
   answerQueued(session: string, queued: number, message: string, extra: Record<string, unknown> = {}): number {
     const reply = this.nextId++;
     this.send(session, { OperatorReply: { notification_id: reply, reply_to: queued, message, summary: "", device_id: "journey-device", ...extra } });
-    this.remember(session).replies.push({ notification_id: reply, reply_to: queued, message, summary: "", device_id: "journey-device", attachments: [], at: new Date().toISOString(), ...extra });
+    this.remember(session).replies.push({ notification_id: reply, reply_to: queued, message, summary: "", device_id: "journey-device", attachments: [], session, at: this.machineNow(session), ...extra });
     return reply;
   }
 
@@ -178,10 +181,16 @@ export class HubDouble {
   supervisorSays(session: string, message: string, extra: Record<string, unknown> = {}): number {
     const id = this.nextId++;
     this.send(session, { OperatorReply: { notification_id: id, reply_to: null, message, summary: "", device_id: "journey-device", ...extra } });
-    this.remember(session).replies.push({ notification_id: id, reply_to: null, message, summary: "", device_id: "journey-device", attachments: [], at: new Date().toISOString(), ...extra });
+    this.remember(session).replies.push({ notification_id: id, reply_to: null, message, summary: "", device_id: "journey-device", attachments: [], session, at: this.machineNow(session), ...extra });
     return id;
   }
 
+  /** The session's machine clock, for the stamps its history replays. */
+  private machineNow(session: string): string {
+    return new Date(Date.now() + (this.options.clockAheadMs?.[session] ?? 0)).toISOString();
+  }
+
+  /** Replayed like the daemon's history page: every row names its session, and a message its in_reply_to (protocol.rs ConversationHistoryMessage). */
   private remember(session: string) {
     let turns = this.live.get(session);
     if (!turns) this.live.set(session, (turns = { messages: [], replies: [] }));

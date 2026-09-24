@@ -79,12 +79,33 @@ export function clockLabel(at: number | undefined): string | undefined {
 }
 
 /**
- * Whether a turn was clamped from a machine stamp ahead of this browser far
- * enough to read differently: a few seconds of skew changes nothing on
- * screen, so it earns no hint (cas-1f13).
+ * The time each turn shows, in thread order (cas-1f13). The thread is in the
+ * machine's order, and a time never reads later than a turn below it, than
+ * the moment this browser received it, or than now: each turn shows the
+ * earliest of its own time (capped at its arrival), every later turn's and
+ * now. The operator's own message is the exception: it shows the time it was
+ * sent. A stamp from a clock that runs ahead therefore shows the time the
+ * turns after it arrived, never a future day. `clockAhead` is set when that
+ * pulled the minute back, or the thread marked a live turn from a machine it
+ * has seen running ahead. A few seconds of skew changes nothing on screen, so
+ * it earns no hint.
  */
-export function clockAheadOf(event: ConversationEvent): boolean {
-  return event.stampedAt !== undefined && event.at !== undefined && Math.floor(event.stampedAt / 60_000) !== Math.floor(event.at / 60_000);
+export function shownTimes(events: readonly ConversationEvent[], now: number): Array<{ at: number | undefined; clockAhead: boolean }> {
+  const shown: Array<{ at: number | undefined; clockAhead: boolean }> = new Array(events.length);
+  let floor = now;
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index]!;
+    const stamp = eventAt(event);
+    if (stamp === undefined) { shown[index] = { at: undefined, clockAhead: false }; continue; }
+    const own = Math.min(stamp, event.arrivedAt ?? stamp);
+    floor = Math.min(own, floor);
+    // The operator's own message keeps the time it was sent: it is this
+    // browser's clock, never the machine's, so it is never pulled back or
+    // marked. It still bounds the turns above it.
+    if (event.kind === "send") { shown[index] = { at: own, clockAhead: false }; continue; }
+    shown[index] = { at: floor, clockAhead: event.clockAhead === true || Math.floor(stamp / 60_000) !== Math.floor(floor / 60_000) };
+  }
+  return shown;
 }
 
 function dayKey(at: number): string {
@@ -146,8 +167,9 @@ export function threadModel(events: readonly ConversationEvent[], options: Threa
     group = undefined;
   };
 
-  for (const event of events) {
-    const at = eventAt(event);
+  const times = shownTimes(events, now);
+  events.forEach((event, index) => {
+    const { at, clockAhead } = times[index]!;
     if (at !== undefined) {
       const day = dayKey(at);
       if (day !== lastDay) {
@@ -186,8 +208,8 @@ export function threadModel(events: readonly ConversationEvent[], options: Threa
       coalesce.replies.push(event.value);
       coalesce.time = clockLabel(at) ?? coalesce.time;
       // The hint belongs to the time shown, which is the latest turn's.
-      if (at !== undefined) coalesce.clockAhead = clockAheadOf(event);
-      continue;
+      if (at !== undefined) coalesce.clockAhead = clockAhead;
+      return;
     }
     coalesce = undefined;
 
@@ -199,8 +221,8 @@ export function threadModel(events: readonly ConversationEvent[], options: Threa
     }
     group.turns.push(turn);
     group.time = clockLabel(at) ?? group.time;
-    if (at !== undefined) group.clockAhead = clockAheadOf(event);
-  }
+    if (at !== undefined) group.clockAhead = clockAhead;
+  });
   closeGroup();
   // An empty durable page owns the empty state. Do not let pagination or a
   // transient working signal turn it into a fake history marker/thread.

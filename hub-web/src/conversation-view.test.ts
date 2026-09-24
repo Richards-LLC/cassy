@@ -370,7 +370,7 @@ describe("ConversationView (Pebble thread)", () => {
   });
   it("marks a turn from a machine clock ahead quietly, at its arrival time, with no future day (cas-1f13)", () => {
     const history = new ConversationHistory();
-    const now = Date.now();
+    const now = Date.now() - 180_000;
     history.hydrateReply({ notification_id: 61, reply_to: null, message: "Mac build is queued.", summary: "", device_id: "d", kind: "answer", attachments: [], at: new Date(now + 86_400_000).toISOString() }, now);
     const view = new ConversationView(document, history, { supervisor: "calm-otter-4" }); document.body.replaceChildren(view.element); view.update();
     expect([...view.element.querySelectorAll(".day")].map((day) => day.textContent)).toEqual(["Today"]);
@@ -381,11 +381,11 @@ describe("ConversationView (Pebble thread)", () => {
     expect(time.textContent).toBe(`${clock} · machine clock ahead`);
     expect(time.querySelector(".clock-ahead")).not.toBeNull();
     expect(time.title).toContain("clock is ahead");
-    // A turn on time carries no hint.
+    // My own message carries no hint.
     history.receive({ notification_id: 62, reply_to: null, message: "Started.", summary: "", device_id: "d", kind: "answer" }, now + 60_000);
     history.submit("s", "calm-otter-4", "Thanks", now + 61_000); view.update();
-    // The hint belongs to the time shown: once an on-time turn is the group's latest, it goes.
-    expect(group.querySelector(".clock-ahead")).toBeNull();
+    // A live turn from a machine seen running ahead is marked the same way (review F02).
+    expect(group.querySelector(".clock-ahead")).not.toBeNull();
     const you = view.element.querySelector<HTMLElement>('.turn.you[role="group"]')!;
     expect(you.querySelector(".clock-ahead")).toBeNull();
     expect(you.getAttribute("aria-label")).not.toContain("clock");

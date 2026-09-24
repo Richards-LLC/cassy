@@ -36,44 +36,68 @@ export interface ConversationSend {
 /** `at` is the sort key. `shownAt`, when set, is the time to display: a live
  * event sorted after a turn stamped by a clock that runs ahead keeps its own
  * time on screen (cas-ac1f). */
-/** `stampedAt`, when set, is a durable turn's own machine stamp that lay in
- * this browser's future when it arrived: `at` was clamped back to the arrival
- * time so the thread never shows a future day or a turn above an earlier one,
- * and the view marks the machine's clock as ahead (cas-1f13). */
-export type ConversationEvent = { kind: "send"; value: ConversationSend; at?: number; shownAt?: number; stampedAt?: number; session?: string } | { kind: "reply"; value: OperatorReply; at?: number; shownAt?: number; stampedAt?: number; session?: string };
+/** `clockAhead` marks a live supervisor turn from a machine whose clock this
+ * thread has seen running ahead: its time is the arrival time, as a reloaded
+ * copy of it would show, and says so the same way (cas-1f13). */
+/** `arrivedAt` is when this browser received a durable turn: a machine stamp
+ * later than that shows the arrival instead, so it cannot drift with the
+ * render clock. */
+export type ConversationEvent = { kind: "send"; value: ConversationSend; at?: number; shownAt?: number; arrivedAt?: number; clockAhead?: boolean; session?: string } | { kind: "reply"; value: OperatorReply; at?: number; shownAt?: number; arrivedAt?: number; clockAhead?: boolean; session?: string };
+
+/**
+ * The machine's durable sequence for a turn: its prompt-queue row id. Operator
+ * messages and supervisor replies share that one sequence (daemon
+ * `conversation_history_page`), so it is the order the machine received them,
+ * whatever its clock says (cas-1f13).
+ */
+export function durableSeq(event: ConversationEvent): number | undefined {
+  return event.kind === "send" ? event.value.notificationId : event.value.notification_id;
+}
+
+/** A machine stamp this far past the browser's clock means the machine's clock runs ahead. */
+const CLOCK_AHEAD_MS = 60_000;
 
 /** In-memory per-thread evidence. A submitted socket frame is never a receipt. */
 export class ConversationHistory {
   readonly events: ConversationEvent[] = [];
+  /** A durable stamp from this thread's machine has been seen in this browser's future. */
+  private machineAhead = false;
   private insert(event: ConversationEvent): void {
     const at = event.at ?? Number.POSITIVE_INFINITY;
-    // Equal keys keep arrival order, except that turns clamped to the same
-    // arrival time keep the machine's own order among themselves (cas-1f13).
-    const index = this.events.findIndex((existing) => {
-      const existingAt = existing.at ?? Number.POSITIVE_INFINITY;
-      if (existingAt !== at) return existingAt > at;
-      return existing.stampedAt !== undefined && event.stampedAt !== undefined && existing.stampedAt > event.stampedAt;
-    });
+    const index = this.events.findIndex((existing) => (existing.at ?? Number.POSITIVE_INFINITY) > at);
     if (index < 0) this.events.push(event);
     else this.events.splice(index, 0, event);
+  }
+
+  /**
+   * Place a durable turn by the machine's sequence, not its clock (cas-1f13):
+   * before the first turn the machine sequenced after it. With none, it goes
+   * after the last turn sequenced before it and then by time among the live
+   * turns that follow. A reload therefore rebuilds the same order a visit saw,
+   * even when the machine's clock runs ahead.
+   */
+  private insertDurable(event: ConversationEvent): void {
+    const seq = durableSeq(event);
+    if (seq === undefined) { this.insert(event); return; }
+    const later = this.events.findIndex((existing) => { const other = durableSeq(existing); return other !== undefined && other > seq; });
+    if (later >= 0) { this.events.splice(later, 0, event); return; }
+    let start = 0;
+    this.events.forEach((existing, index) => { const other = durableSeq(existing); if (other !== undefined && other < seq) start = index + 1; });
+    const at = event.at ?? Number.POSITIVE_INFINITY;
+    const index = this.events.findIndex((existing, position) => position >= start && (existing.at ?? Number.POSITIVE_INFINITY) > at);
+    if (index < 0) this.events.push(event);
+    else this.events.splice(index, 0, event);
+  }
+
+  /** Note a machine stamp ahead of this browser: later live turns say the clock is ahead. */
+  private observeStamp(at: number | undefined, now: number): void {
+    if (at !== undefined && at - now >= CLOCK_AHEAD_MS) this.machineAhead = true;
   }
 
   private static timestamp(value: string | undefined): number | undefined {
     if (!value) return undefined;
     const parsed = Date.parse(value);
     return Number.isFinite(parsed) ? parsed : undefined;
-  }
-
-  /**
-   * Where a durable turn sorts. A machine stamp in this browser's future (a
-   * machine clock running ahead) is clamped to `now`, the time it arrived:
-   * otherwise a future day header lands above Today and a turn sits above
-   * earlier ones (cas-1f13). The machine's stamp is kept as `stampedAt`.
-   */
-  private static durable(value: string | undefined, now: number): { at?: number; stampedAt?: number } {
-    const stamped = ConversationHistory.timestamp(value);
-    if (stamped === undefined) return {};
-    return stamped > now ? { at: now, stampedAt: stamped } : { at: stamped };
   }
 
   hasPending(): boolean {
@@ -112,7 +136,9 @@ export class ConversationHistory {
       existing.session ??= message.session;
       return;
     }
-    this.insert({
+    const at = ConversationHistory.timestamp(message.at);
+    this.observeStamp(at, now);
+    this.insertDurable({
       kind: "send",
       value: {
         id: `history:${message.notification_id}`,
@@ -123,7 +149,8 @@ export class ConversationHistory {
         stamped: message.stamped,
         ...(message.reply_to === undefined ? {} : { replyTo: message.reply_to }),
       },
-      ...ConversationHistory.durable(message.at, now),
+      at,
+      arrivedAt: now,
       session: message.session,
     });
   }
@@ -260,7 +287,7 @@ export class ConversationHistory {
     }
     return undefined;
   }
-  reply(reply: OperatorReply, at: number | undefined = Date.now(), session?: string, shownAt?: number, stampedAt?: number): void {
+  reply(reply: OperatorReply, at: number | undefined = Date.now(), session?: string, shownAt?: number, durable?: { arrivedAt: number }, clockAhead = false): void {
     if (this.events.some((event) => event.kind === "reply" && event.value.notification_id === reply.notification_id)) return;
     const normalized: OperatorReply = {
       ...reply,
@@ -268,7 +295,9 @@ export class ConversationHistory {
       kind: reply.kind ?? "answer",
       attachments: reply.attachments ?? [],
     };
-    this.insert({ kind: "reply", value: normalized, at, ...(shownAt === undefined ? {} : { shownAt }), ...(stampedAt === undefined ? {} : { stampedAt }), session });
+    const event: ConversationEvent = { kind: "reply", value: normalized, at, ...(shownAt === undefined ? {} : { shownAt }), ...(durable ? { arrivedAt: durable.arrivedAt } : {}), ...(clockAhead ? { clockAhead } : {}), session };
+    if (durable) this.insertDurable(event);
+    else this.insert(event);
     for (const event of this.events) {
       if (event.kind === "send" && normalized.reply_to !== null && event.value.notificationId === normalized.reply_to) event.value.state = "replied";
     }
@@ -282,13 +311,14 @@ export class ConversationHistory {
    */
   receive(reply: OperatorReply, at: number = Date.now(), session?: string): void {
     const key = Math.max(at, this.latestAt());
-    this.reply(reply, key, session, key === at ? undefined : at);
+    this.reply(reply, key, session, key === at ? undefined : at, undefined, this.machineAhead);
   }
 
-  /** Merge a durable supervisor turn using its original queue timestamp, clamped to `now` when it lies ahead (cas-1f13). */
+  /** Merge a durable supervisor turn in the machine's sequence, keeping its own stamp (cas-1f13). */
   hydrateReply(reply: ConversationHistoryReply, now: number = Date.now()): void {
     const { at, ...live } = reply;
-    const placed = ConversationHistory.durable(at, now);
-    this.reply(live, placed.at, reply.session, undefined, placed.stampedAt);
+    const stamped = ConversationHistory.timestamp(at);
+    this.observeStamp(stamped, now);
+    this.reply(live, stamped, reply.session, undefined, { arrivedAt: now });
   }
 }

@@ -75,4 +75,19 @@ describe("cold-load list states (journey F14)", () => {
     expect(text(machineFooterMarkup([row, { ...row, id: "b" }], 0, "b"))).toBe("2 paired machinesConnecting…");
     expect(text(machineFooterMarkup([row, { ...row, id: "b", everConnected: true }], 0, "b"))).toBe("2 paired machinesReconnecting");
   });
+
+  it("footer names never-live machines that failed as unreachable, and its dot shows the worst machine (cas-b789)", async () => {
+    const { CANT_REACH_RETRYING, machineFooterMarkup } = await import("./paired-machines");
+    const row = { id: "a", label: "Atlas", address: "atlas.test", connection: CANT_REACH_RETRYING, connected: false, lastSeen: "" };
+    const live = { ...row, id: "b", connection: "Connected", connected: true };
+    const node = (markup: string) => { const div = document.createElement("div"); div.innerHTML = markup; return div.querySelector("#paired-machines-toggle")!; };
+    // Every machine failed without ever being live: the words the list uses.
+    expect(node(machineFooterMarkup([row, { ...row, id: "c" }], 0, "b")).textContent).toBe("2 paired machinesCan't reach · retrying");
+    // One still on its first attempt: still connecting.
+    expect(node(machineFooterMarkup([row, { ...row, id: "c", connection: "Connecting" }], 0, "b")).textContent).toBe("2 paired machinesConnecting…");
+    // Dot: green only when all are connected; warning when some are down; neutral when none.
+    expect(node(machineFooterMarkup([live, { ...live, id: "c" }], 0, "b")).querySelector(".pairing-dot")?.className).toBe("pairing-dot connected");
+    expect(node(machineFooterMarkup([live, row], 0, "b")).querySelector(".pairing-dot")?.className).toBe("pairing-dot partial");
+    expect(node(machineFooterMarkup([row], 0, "b")).querySelector(".pairing-dot")?.className).toBe("pairing-dot");
+  });
 });

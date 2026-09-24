@@ -333,7 +333,10 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(regions).toContain('element.setAttribute("aria-disabled", "true");');
     expect(regions).not.toMatch(/\.disabled\s*=\s*true/);
     expect(main).toContain('<p id="message-status" class="message-status');
-    expect(main).toContain('function showComposerStatus(text: string, tone: "info" | "error"): void {');
+    expect(main).toContain('function showComposerStatus(text: string, tone: "info" | "error", transport = false): void {');
+    // A reconnecting refusal clears when the session is live again (cas-b789).
+    expect(main).toContain('"The hub connection is reconnecting, so this message was not delivered. Try again once the session is live.", "error", true);');
+    expect(main).toContain("sessionsEverLive.add(key);\n        clearTransportStatus(key);");
     expect(css).toContain(".message-status {");
     expect(css).toContain(".message-status.error {");
   });

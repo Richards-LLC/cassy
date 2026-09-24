@@ -57,6 +57,7 @@ export class HubDouble {
   readonly historyRequests: Array<Record<string, unknown>> = [];
   private readonly sockets = new Map<string, WebSocketRoute>();
   private readonly waiters: Array<() => void> = [];
+  private readonly held = new Set<string>();
   private polls = 0;
   private requestedScopes: string[] = [];
   private nextId = 1000;
@@ -180,6 +181,15 @@ export class HubDouble {
     void ws.close({ code: 1011, reason: "journey: network dropped" });
   }
 
+  /** Refuse reconnects for a session until `release`: an outage that lasts. */
+  hold(session: string): void {
+    this.held.add(session);
+  }
+
+  release(session: string): void {
+    this.held.delete(session);
+  }
+
   hasSocket(session: string): boolean {
     return this.sockets.has(session);
   }
@@ -265,6 +275,7 @@ export class HubDouble {
 
   private socket(ws: WebSocketRoute): void {
     const session = decodeURIComponent(new URL(ws.url()).pathname.split("/")[3] ?? "");
+    if (this.held.has(session)) { void ws.close({ code: 1011, reason: "journey: still offline" }); return; }
     const machineId = new URL(ws.url()).hostname.replace(/\.test$/, "");
     this.sockets.set(session, ws);
     const pages = [...(this.options.history?.[session] ?? [])];

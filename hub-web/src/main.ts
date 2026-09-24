@@ -1,5 +1,5 @@
 import { cloudBrand, projectName } from "./cloud-brand";
-import { machineFooterMarkup, pairedMachinesDialogMarkup, renderPairedMachines, type PairedMachineRow } from "./paired-machines";
+import { CANT_REACH_RETRYING, machineFooterMarkup, pairedMachinesDialogMarkup, renderPairedMachines, type PairedMachineRow } from "./paired-machines";
 import { retainPendingSessions, visibleCatalog } from "./worker-visibility";
 import "./styles.css";
 import { ConversationList, filterConversationRows, type ConversationRow } from "./conversation-list";
@@ -92,7 +92,7 @@ const attachStates = new Map<string, AttachSnapshot>();
 /** Sessions whose socket has been live this visit: a later drop is a reconnect, not a first connect. */
 const sessionsEverLive = new Set<string>();
 /** Connection labels a conversation row shows in place of its last turn (cas-a447). */
-const INTERRUPTED_LABELS = new Set(["Reconnecting", "Unreachable", "Needs pairing"]);
+const INTERRUPTED_LABELS = new Set(["Reconnecting", "Unreachable", "Needs pairing", CANT_REACH_RETRYING]);
 const machineInfo = new Map<string, HubMachineInfo | undefined>();
 const statuses = new Map<string, Record<string, unknown>>();
 const leases = new Map<string, LeaseState>();
@@ -230,7 +230,8 @@ const operatorReplies = new Map<string, OperatorReply[]>();
 // Why a send did not happen has to survive the render that follows it, and has
 // to sit beside the composer: a toast is gone before a phone operator has
 // finished reading it, and a disabled button says nothing at all.
-let messageStatus: { session: string | undefined; text: string; tone: "info" | "error" } | undefined;
+/** `transport` marks a refusal caused by the connection itself: it clears when the session is live again (cas-b789). */
+let messageStatus: { session: string | undefined; text: string; tone: "info" | "error"; transport?: boolean } | undefined;
 
 // An engine cannot gain an API mid-session, so this is probed once. Saying so
 // in one line beats a "Connecting…" spinner that can never finish
@@ -625,6 +626,7 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       attachStates.set(key, state);
       if (state.phase === "live") {
         sessionsEverLive.add(key);
+        clearTransportStatus(key);
         // The socket is back: its transport alarm is history, not attention.
         resolveAttention(`${machine.id}:${session}:session_transport`);
       }
@@ -1980,8 +1982,8 @@ function openSupervisorComposer(): void {
  * session someone else controls, a transport that is reconnecting — and each of
  * those used to look identical to a Send button that does nothing.
  */
-function showComposerStatus(text: string, tone: "info" | "error"): void {
-  messageStatus = { session: selectedMachineId && selectedSession ? sessionKey(selectedMachineId, selectedSession) : undefined, text, tone };
+function showComposerStatus(text: string, tone: "info" | "error", transport = false): void {
+  messageStatus = { session: selectedMachineId && selectedSession ? sessionKey(selectedMachineId, selectedSession) : undefined, text, tone, ...(transport ? { transport } : {}) };
   // A stale "Message sent" beside a refusal reads as a contradiction.
   messageDelivery = undefined;
   const delivery = document.querySelector<HTMLElement>("#message-delivery");
@@ -1991,6 +1993,15 @@ function showComposerStatus(text: string, tone: "info" | "error"): void {
   status.hidden = false;
   status.textContent = text;
   status.classList.toggle("error", tone === "error");
+}
+
+/**
+ * A "reconnecting" refusal is about the connection, not the message: once the
+ * session is live again it would contradict the header's "Live", so it clears.
+ * The draft stays in the composer to send again (cas-b789).
+ */
+function clearTransportStatus(key: string): void {
+  if (messageStatus?.transport && messageStatus.session === key) clearComposerStatus();
 }
 
 function clearComposerStatus(): void {
@@ -2041,7 +2052,7 @@ function deliverSupervisorMessage(machine: StoredMachine, session: string, super
   // Without an outcome the operator cannot tell a sent message from a lost
   // one, and the natural response is to send it a second time.
   if (!sent) {
-    showComposerStatus("The hub connection is reconnecting, so this message was not delivered. Try again once the session is live.", "error");
+    showComposerStatus("The hub connection is reconnecting, so this message was not delivered. Try again once the session is live.", "error", true);
     return;
   }
   const history = conversationHistory(sessionKey(machine.id, session));
@@ -2570,7 +2581,11 @@ function renderConversationList(): void {
 function fleetConnectionLabel(state: ConnectionState | undefined, machineId?: string): string {
   if (!state) return "Idle";
   if (state.phase === "live") return state.degraded ? "Degraded" : "Live";
-  if (state.phase === "backoff") return machineId && !lastLiveAt.has(machineId) ? "Connecting" : "Reconnecting";
+  // Never live and already failed (cas-b789): not "Connecting…" forever; say
+  // it cannot be reached, as the list does, while retries continue.
+  const retrying = state.phase === "backoff" || (state.phase === "failed" && state.fatal !== true && !state.authFailure);
+  if (retrying && machineId && !lastLiveAt.has(machineId)) return CANT_REACH_RETRYING;
+  if (state.phase === "backoff") return "Reconnecting";
   if (state.phase === "failed") return state.authFailure ? "Needs pairing" : "Unreachable";
   return "Connecting";
 }

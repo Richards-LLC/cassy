@@ -1,10 +1,16 @@
 import { test, expect } from "./journey";
+import type { Machine } from "./hub-double";
 import { ATLAS, STUDIO, PELICAN, OTTER } from "./world";
+
+/** A paired machine that is switched off: it never answers this visit (cas-b789). */
+const SHED: Machine = { id: "shed", label: "Shed NAS · Linux", sessions: [] };
 
 test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
 
 test("HUB-J9 on a phone: from the list to a reply and back", async ({ page, journey }) => {
-  const hub = await journey.hub({ machines: [ATLAS, STUDIO], paired: ["atlas", "studio"] });
+  const hub = await journey.hub({ machines: [ATLAS, STUDIO, SHED], paired: ["atlas", "studio", "shed"] });
+  await page.route("https://shed.test/**", (route) => route.abort("connectionrefused"));
+  await page.routeWebSocket(/shed\.test/, (ws) => { void ws.close({ code: 1006 }); });
   const list = page.getByRole("navigation", { name: "Choose a supervisor" });
   const composer = page.getByRole("textbox", { name: "Your message" });
 
@@ -73,5 +79,19 @@ test("HUB-J9 on a phone: from the list to a reply and back", async ({ page, jour
     // Like a tap on a list row: land to read, with no soft keyboard raised
     // over the conversation just opened.
     await expect(composer).not.toBeFocused();
+  });
+
+  await journey.stage("See the switched-off machine named plainly", async () => {
+    // Never live and failing: "Can't reach · retrying" in the dialog, not
+    // "Connecting…" forever; the footer counts it and its dot is not all-clear.
+    await page.getByRole("button", { name: "‹ Conversations", exact: true }).tap();
+    const footer = page.locator("#paired-machines-toggle");
+    await expect(footer).toContainText("2 connected");
+    await expect(footer.locator(".pairing-dot")).toHaveClass("pairing-dot partial");
+    await footer.tap();
+    const dialog = page.locator("#paired-machines-dialog");
+    await expect(dialog.getByText("Shed NAS · Linux")).toBeVisible();
+    await expect(dialog).toContainText("Can't reach · retrying");
+    await expect(dialog).not.toContainText("Connecting");
   });
 });

@@ -3403,6 +3403,8 @@ button.chip:disabled { cursor: default; }
 .machine-badge-state { color: var(--text-mid); font-size: var(--fs-xs); }
 .pairing-dot { width: var(--space-2); height: var(--space-2); border-radius: var(--radius-pill); background: var(--color-series-neutral); flex: none; }
 .pairing-dot.connected { background: var(--state-ok); }
+/* cas-b789: some machines connected, some down — not all-clear. */
+.pairing-dot.partial { background: var(--state-warn); }
 .hub-footer-meta { display: flex; flex-wrap: wrap; justify-content: space-between; gap: var(--space-2); font-size: var(--fs-xs); color: var(--text-mid); }
 .machines-dialog-heading { display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); }
 .machines-dialog-heading button { min-width: var(--rail-item-min); min-height: var(--rail-item-min); }

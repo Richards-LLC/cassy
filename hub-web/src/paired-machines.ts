@@ -17,11 +17,20 @@ export interface PairedMachineRow {
  * count, so it says so instead of "0 paired machines · Not paired"; a machine
  * never live in this visit is "Connecting…", not "Reconnecting" (journey F14).
  */
+/** A machine never live in this visit whose attempts have failed; retries continue. */
+export const CANT_REACH_RETRYING = "Can't reach · retrying";
+
 export function machineFooterMarkup(rows: readonly PairedMachineRow[], sessions: number, build: string, loading = false): string {
   const connected = rows.filter(row => row.connected).length;
   const machine = loading ? 'Paired machines' : rows.length === 1 ? rows[0].label : `${rows.length} paired machines`;
-  const state = loading ? 'Loading…' : connected ? `${connected === rows.length ? 'Connected' : `${connected} connected`}` : rows.length ? (rows.some(row => row.everConnected) ? 'Reconnecting' : 'Connecting…') : 'Not paired';
-  return `<button id="paired-machines-toggle" type="button" aria-haspopup="dialog"><span class="pairing-dot${connected ? ' connected' : ''}" aria-hidden="true"></span><span>${escapeHtml(machine)}</span><span class="machine-badge-state">${state}</span></button><div class="hub-footer-meta"><span>${sessions} ${sessions === 1 ? 'conversation' : 'conversations'}</span><span title="Hub build">Hub ${escapeHtml(build)}</span></div>`;
+  // A machine never live that has already failed is named as unreachable, the
+  // words the list and the dialog use (cas-b789).
+  const unreachable = rows.length > 0 && rows.every(row => row.connection === CANT_REACH_RETRYING);
+  const state = loading ? 'Loading…' : connected ? `${connected === rows.length ? 'Connected' : `${connected} connected`}` : rows.length ? (rows.some(row => row.everConnected) ? 'Reconnecting' : unreachable ? CANT_REACH_RETRYING : 'Connecting…') : 'Not paired';
+  // The dot shows the worst machine: green only when every machine is
+  // connected, the warning tone when some are down (cas-b789).
+  const dot = connected && connected === rows.length ? ' connected' : connected ? ' partial' : '';
+  return `<button id="paired-machines-toggle" type="button" aria-haspopup="dialog"><span class="pairing-dot${dot}" aria-hidden="true"></span><span>${escapeHtml(machine)}</span><span class="machine-badge-state">${state}</span></button><div class="hub-footer-meta"><span>${sessions} ${sessions === 1 ? 'conversation' : 'conversations'}</span><span title="Hub build">Hub ${escapeHtml(build)}</span></div>`;
 }
 
 export function pairedMachinesDialogMarkup(): string {

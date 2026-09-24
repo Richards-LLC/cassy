@@ -1,8 +1,8 @@
 import { test, expect } from "./journey";
-import { ATLAS, PELICAN } from "./world";
+import { ATLAS, STUDIO, PELICAN } from "./world";
 
 test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page, journey }) => {
-  const hub = await journey.hub({ machines: [ATLAS], paired: ["atlas"] });
+  const hub = await journey.hub({ machines: [ATLAS, STUDIO], paired: ["atlas", "studio"] });
   const composer = page.getByRole("textbox", { name: "Your message" });
 
   await journey.stage("Open the conversation", async () => {
@@ -18,6 +18,8 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
 
   await journey.stage("The network drops", async () => {
     await expect(header).toHaveText(" · Live");
+    // The outage lasts until released, so a send can be tried while it is down.
+    hub.hold(PELICAN);
     hub.drop(PELICAN);
     // One connection state: in the same frame, the banner, the header, the row
     // and the footer all say so. The double retries within about a second, so
@@ -36,8 +38,14 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
     expect(seen.banner).toBe("Lost connection to Atlas · Linux. Reconnecting…");
     expect(seen.header).toContain("Reconnecting");
     expect(seen.row).toContain("Reconnecting");
-    expect(seen.footer).toContain("Reconnecting");
-    expect(seen.footer).not.toContain("Connected");
+    // Two machines, one of them down: the footer counts it and its dot is not all-clear (cas-b789).
+    expect(seen.footer).toContain("1 connected");
+    await expect(footer.locator(".pairing-dot")).toHaveClass("pairing-dot partial");
+    // A send during the outage is refused for the connection, and says so.
+    await composer.fill("Are you there?");
+    await page.getByRole("button", { name: `Send to ${PELICAN}`, exact: true }).click();
+    await expect(page.locator("#message-status")).toHaveText("The hub connection is reconnecting, so this message was not delivered. Try again once the session is live.");
+    hub.release(PELICAN);
   });
 
   await journey.stage("It reconnects on its own", async () => {
@@ -46,6 +54,10 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
     await expect(header).toHaveText(" · Live");
     await expect(row).toContainText("Live");
     await expect(footer).toContainText("Connected");
+    await expect(footer.locator(".pairing-dot")).toHaveClass("pairing-dot connected");
+    // The reconnecting refusal cleared with the reconnect; the draft is kept to send again (cas-b789).
+    await expect(page.locator("#message-status")).toBeHidden();
+    await expect(composer).toHaveValue("Are you there?");
     // The transport alarm resolved itself with the reconnect.
     await expect(page.getByText("Terminal transport problem")).toHaveCount(0);
   });

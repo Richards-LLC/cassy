@@ -249,7 +249,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 ### HUB-J9 · On a phone: from the list to a reply and back
 
-- **Entry:** `/commander/` on a 390 px wide phone with two paired machines
+- **Entry:** `/commander/` on a 390 px wide phone with two paired machines, plus one that is switched off
 - **Goal:** I reply to a supervisor from my phone and get back to the list
 - **Touches:** `hub-web/src/viewport.ts`, `hub-web/src/pane-layout.ts`, `hub-web/src/conversation-shell.ts`, `hub-web/src/composer-markup.ts`
 - **Suite:** `hub-web/e2e/journeys/phone.journey.ts`
@@ -261,6 +261,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 2. Tap a conversation — the thread replaces the list, with a back control
 3. Reply with the phone keyboard — send, then see the answer
 4. Go back to the list — the row shows the latest turn
+5. See the switched-off machine named plainly — the footer counts it with a warning dot, and Paired machines says "Can't reach · retrying"
 
 **Expected experience**
 
@@ -308,8 +309,8 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 **Steps**
 
 1. Open the conversation — the thread is live
-2. The network drops — "Lost connection to Atlas · Linux. Reconnecting…" appears, and the header, the row and the footer all say Reconnecting
-3. It reconnects on its own — the banner clears, everything says Live again, and no transport alarm is left
+2. The network drops — "Lost connection to Atlas · Linux. Reconnecting…" appears; the header and the row say Reconnecting, and the footer counts 1 of 2 connected with a warning dot; a send is refused for the connection
+3. It reconnects on its own — the banner and the refusal line clear, everything says Live again, the draft is kept, and no transport alarm is left
 4. Sending works again — a message goes through and is answered
 
 **Expected experience**

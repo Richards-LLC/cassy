@@ -1536,13 +1536,26 @@ impl TeamsManager {
     /// Claude Code's /doctor validator regardless of Anthropic #58441 state.
     pub const WORKER_PRE_COMMIT_HOOK: &'static str = "#!/bin/sh
 # Cassy factory worker guard — installed by `cas factory` when spawning isolated workers.
-# Workers may ONLY commit on their own factory/<name> branch. All other branches
-# (main, master, staging, epic/*, arbitrary branches, and detached HEAD) are denied.
+# Workers may ONLY commit on their own factory/<name> branch, or on their own
+# per-task branch factory/<name>-<task-id> while factory/<name> is frozen for a
+# parked delivery (cas-73b8). All other branches (main, master, staging, epic/*,
+# arbitrary branches, and detached HEAD) are denied.
 branch=$(git symbolic-ref --short HEAD 2>/dev/null)
 expected=\"factory/$CAS_AGENT_NAME\"
-if [ -n \"$CAS_AGENT_NAME\" ] && [ \"$branch\" != \"$expected\" ]; then
+own_task_branch() {
+  case \"$1\" in
+    \"$expected\"-*) suffix=${1#\"$expected\"-} ;;
+    *) return 1 ;;
+  esac
+  case \"$suffix\" in
+    \"\"|*[!A-Za-z0-9._-]*) return 1 ;;
+    [A-Za-z]*-[A-Za-z0-9]*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+if [ -n \"$CAS_AGENT_NAME\" ] && [ \"$branch\" != \"$expected\" ] && ! own_task_branch \"$branch\"; then
   echo \"Cassy COMMIT GUARD: worker '$CAS_AGENT_NAME' cannot commit from '$branch'.\" >&2
-  echo \"Expected the exact worker branch '$expected'. The checkout may belong to another worker.\" >&2
+  echo \"Expected the exact worker branch '$expected', or your per-task branch '$expected-<task-id>'. The checkout may belong to another worker.\" >&2
   exit 1
 fi
 case \"$branch\" in
@@ -1568,6 +1581,19 @@ esac
 # Cassy factory worker push guard — installed by cas factory in the worker-private hooksPath.
 branch=$(git symbolic-ref --short HEAD 2>/dev/null)
 expected=\"factory/$CAS_AGENT_NAME\"
+# cas-73b8: a worker's own per-task branch factory/<name>-<task-id> is also its
+# own while factory/<name> is frozen for a parked delivery.
+own_task_branch() {
+  case \"$1\" in
+    \"$expected\"-*) suffix=${1#\"$expected\"-} ;;
+    *) return 1 ;;
+  esac
+  case \"$suffix\" in
+    \"\"|*[!A-Za-z0-9._-]*) return 1 ;;
+    [A-Za-z]*-[A-Za-z0-9]*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
 record_push_rejection() {
   CAS_PUSH_GUARD_BRANCH=\"$branch\" CAS_PUSH_GUARD_REMOTE_REF=\"$1\" \\
     cas hook WorkerPushRejected >/dev/null 2>&1 || true
@@ -1576,16 +1602,18 @@ if [ -z \"$CAS_AGENT_NAME\" ]; then
   echo \"Cassy PUSH GUARD: CAS_AGENT_NAME is missing; cannot prove which factory branch this worker owns.\" >&2
   exit 1
 fi
-if [ \"$branch\" != \"$expected\" ]; then
+if [ \"$branch\" != \"$expected\" ] && ! own_task_branch \"$branch\"; then
   record_push_rejection \"<head:$branch>\"
   echo \"Cassy PUSH GUARD: worker '$CAS_AGENT_NAME' cannot push from '$branch' — this is not your branch.\" >&2
-  echo \"Expected the exact worker branch '$expected'. Refusing to graft the current HEAD onto another branch.\" >&2
+  echo \"Expected the exact worker branch '$expected' or your per-task branch '$expected-<task-id>'. Refusing to graft the current HEAD onto another branch.\" >&2
   exit 1
 fi
+# Push only the branch you are on, to the same name: a per-task branch never
+# advances the frozen factory/<name>, and factory/<name> never another ref.
 while read local_ref local_sha remote_ref remote_sha; do
-  if [ \"$remote_ref\" != \"refs/heads/$expected\" ]; then
+  if [ \"$remote_ref\" != \"refs/heads/$branch\" ]; then
     record_push_rejection \"$remote_ref\"
-    echo \"Cassy PUSH GUARD: worker '$CAS_AGENT_NAME' may push only to 'refs/heads/$expected', not '$remote_ref' — this is not your branch.\" >&2
+    echo \"Cassy PUSH GUARD: worker '$CAS_AGENT_NAME' on '$branch' may push only to 'refs/heads/$branch', not '$remote_ref' — this is not your branch.\" >&2
     exit 1
   fi
 done
@@ -4137,6 +4165,95 @@ mod tests {
             String::from_utf8_lossy(&local_parent.stdout).trim(),
             "rejected push must leave the remote worker branch unchanged"
         );
+
+        let _ = std::process::Command::new("git")
+            .args(["worktree", "remove", "--force", &wt_path.to_string_lossy()])
+            .current_dir(repo)
+            .output();
+    }
+
+    /// cas-73b8: while `factory/<name>` is frozen for a parked delivery, the
+    /// worker commits and pushes its next task on `factory/<name>-<task-id>`.
+    /// The hooks allow exactly that branch, pushed to its own name, and still
+    /// refuse advancing the frozen branch, another worker's task branch, or a
+    /// suffix that is not a task id.
+    #[test]
+    fn worker_hooks_allow_the_own_per_task_branch_cas_73b8() {
+        let tmp = make_git_repo_for_hook_test();
+        let repo = tmp.path();
+        let remote = repo.join("remote.git");
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "--bare", &remote.to_string_lossy()])
+                .output()
+                .unwrap()
+                .status
+                .success()
+        );
+        std::process::Command::new("git")
+            .args(["remote", "add", "origin", &remote.to_string_lossy()])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        let wt_path = repo.parent().unwrap().join(format!(
+            "{}-task-wt",
+            repo.file_name().unwrap().to_string_lossy()
+        ));
+        assert!(
+            std::process::Command::new("git")
+                .args([
+                    "worktree",
+                    "add",
+                    "-b",
+                    "factory/credit-repairs",
+                    &wt_path.to_string_lossy(),
+                    "main",
+                ])
+                .current_dir(repo)
+                .output()
+                .unwrap()
+                .status
+                .success()
+        );
+        TeamsManager::install_worker_pre_commit_hook(&wt_path).unwrap();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .env("CAS_AGENT_NAME", "credit-repairs")
+                .current_dir(&wt_path)
+                .output()
+                .unwrap()
+        };
+        // The frozen delivery branch is on origin.
+        let frozen = git(&["push", "-u", "origin", "factory/credit-repairs"]);
+        assert!(frozen.status.success(), "{}", String::from_utf8_lossy(&frozen.stderr));
+
+        // Next task on the per-task branch: commit and push both succeed.
+        assert!(git(&["switch", "-c", "factory/credit-repairs-cas-1185"]).status.success());
+        std::fs::write(wt_path.join("next.txt"), "next task\n").unwrap();
+        assert!(git(&["add", "next.txt"]).status.success());
+        let commit = git(&["commit", "-m", "next task"]);
+        assert!(commit.status.success(), "{}", String::from_utf8_lossy(&commit.stderr));
+        let push = git(&["push", "-u", "origin", "factory/credit-repairs-cas-1185"]);
+        assert!(push.status.success(), "{}", String::from_utf8_lossy(&push.stderr));
+
+        // It must not advance the frozen branch.
+        let onto_frozen = git(&["push", "origin", "HEAD:refs/heads/factory/credit-repairs"]);
+        assert!(!onto_frozen.status.success(), "the frozen branch must not move");
+        let stderr = String::from_utf8_lossy(&onto_frozen.stderr);
+        assert!(stderr.contains("not your branch"), "{stderr}");
+
+        // Another worker's task branch, and a suffix that is not a task id,
+        // stay refused at commit time.
+        for foreign in ["factory/support-triage-cas-1185", "factory/credit-repairs-scratch"] {
+            assert!(git(&["switch", "-c", foreign]).status.success(), "{foreign}");
+            std::fs::write(wt_path.join("foreign.txt"), foreign).unwrap();
+            assert!(git(&["add", "foreign.txt"]).status.success());
+            let refused = git(&["commit", "-m", "foreign"]);
+            assert!(!refused.status.success(), "{foreign} must be refused");
+            let stderr = String::from_utf8_lossy(&refused.stderr);
+            assert!(stderr.contains("Cassy COMMIT GUARD"), "{foreign}: {stderr}");
+        }
 
         let _ = std::process::Command::new("git")
             .args(["worktree", "remove", "--force", &wt_path.to_string_lossy()])

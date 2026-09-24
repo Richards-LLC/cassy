@@ -31,6 +31,48 @@ pub fn expected_worker_branch(worker_name: &str) -> String {
     format!("factory/{}", worker_name.trim())
 }
 
+/// The per-task branch a worker uses while its own `factory/<name>` is frozen
+/// for a parked delivery under QA (cas-73b8): `factory/<name>-<task-id>`.
+///
+/// It cannot be `factory/<name>/<task-id>`: git refs are files, so a ref named
+/// `factory/<name>` and one inside a `factory/<name>/` directory cannot
+/// coexist.
+pub fn worker_task_branch(worker_name: &str, task_id: &str) -> String {
+    format!("factory/{}-{}", worker_name.trim(), task_id.trim())
+}
+
+/// Whether `value` reads as a task id: a letter first, a `-`, then more
+/// letters, digits, `.`, `_` or `-` (for example `cas-73b8` or `cas-73b8.1`).
+/// Mirrors the pattern the worker git hooks accept.
+pub fn is_task_id_like(value: &str) -> bool {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    first.is_ascii_alphabetic()
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+        && value
+            .split_once('-')
+            .is_some_and(|(_, rest)| rest.starts_with(|c: char| c.is_ascii_alphanumeric()))
+}
+
+/// The task id of `branch` when it is `worker_name`'s own per-task branch
+/// (`factory/<worker>-<task-id>`), else `None`.
+pub fn own_task_branch_task_id<'a>(worker_name: &str, branch: &'a str) -> Option<&'a str> {
+    let worker_name = worker_name.trim();
+    if worker_name.is_empty() {
+        return None;
+    }
+    branch
+        .trim()
+        .strip_prefix("factory/")?
+        .strip_prefix(worker_name)?
+        .strip_prefix('-')
+        .filter(|task_id| is_task_id_like(task_id))
+}
+
 /// The worker named by a `factory/<name>` branch, if it is one.
 pub fn factory_branch_owner(branch: &str) -> Option<&str> {
     branch
@@ -66,6 +108,12 @@ pub fn classify_worker_binding(worker_name: &str, branch: Option<&str>) -> Worke
     let branch = branch.map(str::trim).unwrap_or("");
     if branch.is_empty() {
         return WorkerBinding::SharedTrunk;
+    }
+    // cas-73b8: the worker's own per-task branch is as much its own as
+    // `factory/<name>`; it is what the worker commits on while that branch is
+    // frozen for a parked delivery under QA.
+    if own_task_branch_task_id(worker_name, branch).is_some() {
+        return WorkerBinding::Own;
     }
     match factory_branch_owner(branch) {
         Some(owner) if owner == worker_name => WorkerBinding::Own,
@@ -167,6 +215,14 @@ pub fn verify_worker_worktree_binding(
 
     let branch = branch_at(path);
     if branch.as_deref().map(str::trim) == Some(expected_branch.as_str()) {
+        return Ok(());
+    }
+    // cas-73b8: a worktree left on the worker's own per-task branch is still
+    // that worker's worktree.
+    if branch
+        .as_deref()
+        .is_some_and(|branch| own_task_branch_task_id(worker_name, branch).is_some())
+    {
         return Ok(());
     }
     match classify_worker_binding(worker_name, branch.as_deref()) {
@@ -472,5 +528,71 @@ mod tests {
         let rendered = render_worker_binding("wise-viper-85", false, Some("/repo"), Some("main"));
         assert!(rendered.contains("**Git Branch**: main"), "{rendered}");
         assert!(!rendered.contains("MISBINDING"), "{rendered}");
+    }
+
+    /// cas-73b8: a worker whose `factory/<name>` is frozen for a parked
+    /// delivery commits its next task on `factory/<name>-<task-id>`.
+    #[test]
+    fn own_per_task_branch_is_the_workers_own() {
+        assert_eq!(
+            worker_task_branch("loyal-crow-4", "cas-1185"),
+            "factory/loyal-crow-4-cas-1185"
+        );
+        assert_eq!(
+            own_task_branch_task_id("loyal-crow-4", "factory/loyal-crow-4-cas-1185"),
+            Some("cas-1185")
+        );
+        assert_eq!(
+            classify_worker_binding("loyal-crow-4", Some("factory/loyal-crow-4-cas-1185")),
+            WorkerBinding::Own
+        );
+        // A sibling whose name only shares a prefix is not this worker's.
+        assert_eq!(
+            own_task_branch_task_id("loyal-crow-4", "factory/loyal-crow-40"),
+            None
+        );
+        assert_eq!(
+            classify_worker_binding("loyal-crow-4", Some("factory/loyal-crow-40")),
+            WorkerBinding::Sibling {
+                owner: "loyal-crow-40".to_string()
+            }
+        );
+        // Another worker's per-task branch stays a sibling's.
+        assert!(matches!(
+            classify_worker_binding("loyal-crow-4", Some("factory/nimble-wolf-5-cas-1185")),
+            WorkerBinding::Sibling { .. }
+        ));
+        // The suffix must read as a task id.
+        for branch in [
+            "factory/loyal-crow-4-",
+            "factory/loyal-crow-4-cas",
+            "factory/loyal-crow-4-cas-",
+            "factory/loyal-crow-4-1185",
+            "factory/loyal-crow-4-cas-11 85",
+            "factory/loyal-crow-4-cas-1185/x",
+        ] {
+            assert_eq!(
+                own_task_branch_task_id("loyal-crow-4", branch),
+                None,
+                "{branch}"
+            );
+        }
+        assert!(is_task_id_like("cas-73b8.1"));
+        assert_eq!(own_task_branch_task_id("", "factory/-cas-1"), None);
+    }
+
+    #[test]
+    fn a_worktree_left_on_the_own_task_branch_still_verifies() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        init_repo(repo);
+        Command::new("git")
+            .args(["checkout", "-q", "-b", "factory/own-worker-cas-1234"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        verify_worker_worktree_binding("own-worker", repo, None)
+            .expect("the worker's own per-task branch is its binding");
+        assert!(verify_worker_worktree_binding("other-worker", repo, None).is_err());
     }
 }

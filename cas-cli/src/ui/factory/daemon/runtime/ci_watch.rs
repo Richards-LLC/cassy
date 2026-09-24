@@ -1711,7 +1711,8 @@ mod tests {
         git(&repo, &["add", "file"]);
         git(&repo, &["commit", "-qm", "first"]);
         let first = git_output(&repo, &["rev-parse", "HEAD"]);
-        git(&repo, &["tag", "v1"]);
+        // release.sh creates an annotated tag before the build and push.
+        git(&repo, &["tag", "-a", "v1", "-m", "release v1"]);
         git(&repo, &["branch", "-M", "factory/crisp-crane-67"]);
         git(&repo, &["checkout", "--orphan", "main"]);
         git(&repo, &["rm", "-rf", "."]);
@@ -1742,6 +1743,12 @@ mod tests {
             commit: first.clone(),
             target_branch: "main".to_string(),
         };
+        let tag_condition = ExternalWakeCondition::TagExists {
+            tag: "v1".to_string(),
+        };
+        assert!(external_wake_condition_observation(&repo, &tag_condition)
+            .unwrap()
+            .is_none());
         assert!(!external_wake_condition_satisfied(&repo, &condition).unwrap());
         assert!(external_wake_condition_observation(&repo, &condition)
             .unwrap()
@@ -1754,6 +1761,19 @@ mod tests {
             &repo,
             &["remote", "set-url", "origin", origin.to_str().unwrap()],
         );
+        // The tag only becomes observable once it is published to origin.
+        git(&repo, &["push", "-q", "origin", "refs/tags/v1"]);
+        let tag_observation = external_wake_condition_observation(&repo, &tag_condition)
+            .unwrap()
+            .unwrap();
+        assert_eq!(tag_observation.compared_ref, "refs/tags/v1");
+        assert_eq!(
+            tag_observation.compared_sha,
+            git_output(&repo, &["rev-parse", "refs/tags/v1"])
+        );
+        assert!(tag_condition
+            .description_with_observation(&tag_observation)
+            .contains(&format!("refs/tags/v1@{}", tag_observation.compared_sha)));
         git(
             &repo,
             &[
@@ -1779,13 +1799,14 @@ mod tests {
             }
         )
         .unwrap());
-        assert!(external_wake_condition_satisfied(
+        assert!(external_wake_condition_satisfied(&repo, &tag_condition).unwrap());
+        git(
             &repo,
-            &ExternalWakeCondition::TagExists {
-                tag: "v1".to_string(),
-            }
-        )
-        .unwrap());
+            &["remote", "set-url", "origin", missing_origin.to_str().unwrap()],
+        );
+        assert!(external_wake_condition_observation(&repo, &tag_condition)
+            .unwrap()
+            .is_none());
         assert!(!external_wake_condition_satisfied(
             &repo,
             &ExternalWakeCondition::TagExists {

@@ -428,7 +428,7 @@ impl TailscaleServeManager {
     }
 
     fn run(&self, args: &[String]) -> Result<Vec<u8>> {
-        let mut command = Command::new(&self.executable);
+        let mut command = tailscale_command(&self.executable);
         if let Some(socket) = env::var_os("TAILSCALE_SOCKET").filter(|socket| !socket.is_empty()) {
             command.arg(format!("--socket={}", socket.to_string_lossy()));
         }
@@ -451,7 +451,19 @@ impl TailscaleServeManager {
     }
 }
 
-fn tailscale_executable() -> OsString {
+pub(super) fn tailscale_command(executable: &OsStr) -> Command {
+    tailscale_command_with_term(executable, env::var_os("TERM"))
+}
+
+fn tailscale_command_with_term(executable: &OsStr, term: Option<OsString>) -> Command {
+    let mut command = Command::new(executable);
+    if term.is_none() {
+        command.env("TERM", "dumb");
+    }
+    command
+}
+
+pub(super) fn tailscale_executable() -> OsString {
     // `TAILSCALE` is an operator-controlled escape hatch for service
     // environments whose PATH does not contain the CLI. Do not discover the
     // macOS app by running `version`: that binary can start the menubar
@@ -466,14 +478,22 @@ fn tailscale_executable() -> OsString {
 }
 
 fn select_tailscale_executable(path_cli: Option<PathBuf>) -> OsString {
-    select_tailscale_executable_with_app(path_cli, macos_tailscale_app_executable())
+    select_tailscale_executable_with_app(
+        path_cli,
+        macos_homebrew_tailscale_executable(),
+        macos_tailscale_app_executable(),
+    )
 }
 
 fn select_tailscale_executable_with_app(
     path_cli: Option<PathBuf>,
+    homebrew_cli: Option<PathBuf>,
     macos_app_cli: Option<PathBuf>,
 ) -> OsString {
     if let Some(path) = path_cli {
+        return path.into_os_string();
+    }
+    if let Some(path) = homebrew_cli {
         return path.into_os_string();
     }
     if let Some(path) = macos_app_cli {
@@ -482,6 +502,19 @@ fn select_tailscale_executable_with_app(
         return path.into_os_string();
     }
     OsString::from("tailscale")
+}
+
+#[cfg(target_os = "macos")]
+fn macos_homebrew_tailscale_executable() -> Option<PathBuf> {
+    ["/opt/homebrew/bin/tailscale", "/usr/local/bin/tailscale"]
+        .into_iter()
+        .map(PathBuf::from)
+        .find(|candidate| candidate.is_file())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn macos_homebrew_tailscale_executable() -> Option<PathBuf> {
+    None
 }
 
 #[cfg(target_os = "macos")]
@@ -510,7 +543,7 @@ fn tailscale_unavailable_message() -> String {
         })
         .unwrap_or_else(|| "~/Applications/Tailscale.app/Contents/MacOS/Tailscale".to_owned());
     format!(
-        "tailscale CLI is unavailable; looked for `tailscale` on PATH, `{MACOS_TAILSCALE_APP_CLI}`, and `{user_app}`; install Tailscale and sign in first"
+        "tailscale CLI is unavailable; looked for `tailscale` on PATH, `/opt/homebrew/bin/tailscale`, `/usr/local/bin/tailscale`, `{MACOS_TAILSCALE_APP_CLI}`, and `{user_app}`; install Tailscale and sign in first"
     )
 }
 
@@ -869,8 +902,36 @@ mod tests {
     #[test]
     fn no_cli_keeps_existing_unavailable_command() {
         assert_eq!(
-            select_tailscale_executable_with_app(None, None),
+            select_tailscale_executable_with_app(None, None, None),
             OsString::from("tailscale")
+        );
+    }
+
+    #[test]
+    fn child_command_sets_term_only_when_missing() {
+        let command = tailscale_command_with_term(OsStr::new("tailscale"), None);
+        assert_eq!(
+            command
+                .get_envs()
+                .find(|(key, _)| *key == OsStr::new("TERM"))
+                .unwrap()
+                .1,
+            Some(OsStr::new("dumb"))
+        );
+        let command = tailscale_command_with_term(
+            OsStr::new("tailscale"),
+            Some(OsString::from("xterm-256color")),
+        );
+        assert!(command.get_envs().all(|(key, _)| key != OsStr::new("TERM")));
+    }
+
+    #[test]
+    fn homebrew_cli_precedes_app_bundle_when_path_has_no_cli() {
+        let brew = PathBuf::from("/opt/homebrew/bin/tailscale");
+        let app = PathBuf::from(MACOS_TAILSCALE_APP_CLI);
+        assert_eq!(
+            select_tailscale_executable_with_app(None, Some(brew.clone()), Some(app)),
+            brew.into_os_string()
         );
     }
 
@@ -878,7 +939,7 @@ mod tests {
     fn macos_app_cli_is_used_when_path_cli_is_missing() {
         let app_cli = PathBuf::from("/Applications/Tailscale.app/Contents/MacOS/Tailscale");
         assert_eq!(
-            select_tailscale_executable_with_app(None, Some(app_cli.clone())),
+            select_tailscale_executable_with_app(None, None, Some(app_cli.clone())),
             app_cli.into_os_string()
         );
     }
@@ -886,9 +947,14 @@ mod tests {
     #[test]
     fn path_cli_wins_over_macos_app_cli() {
         let path_cli = PathBuf::from("/opt/homebrew/bin/tailscale");
+        let other_cli = PathBuf::from("/usr/local/bin/tailscale");
         let app_cli = PathBuf::from("/Applications/Tailscale.app/Contents/MacOS/Tailscale");
         assert_eq!(
-            select_tailscale_executable_with_app(Some(path_cli.clone()), Some(app_cli)),
+            select_tailscale_executable_with_app(
+                Some(path_cli.clone()),
+                Some(other_cli),
+                Some(app_cli)
+            ),
             path_cli.into_os_string()
         );
     }

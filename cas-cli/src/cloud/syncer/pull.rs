@@ -11,7 +11,8 @@ use crate::cloud::syncer::{
     TaskStatusTransition, TeamPullResponse, UpsertResult,
 };
 use crate::cloud::{
-    EntityType, SyncOperation, SyncQueue, project_ids_match as canonical_project_ids_match,
+    EntityType, PULL_ID_COLLISION, SyncOperation, SyncQueue,
+    project_ids_match as canonical_project_ids_match,
 };
 use crate::error::CasError;
 use crate::store::{
@@ -1151,12 +1152,12 @@ fn task_wire_origin_project(raw: &serde_json::Value) -> Option<&str> {
         .and_then(serde_json::Value::as_str)
 }
 
-/// Return the server-attested project key for a task row, when one exists.
+/// Return the project key the cloud attached to a task row, when one exists.
 ///
-/// The requested scope is deliberately not a fallback: on a team pull the
-/// response may contain a replica from another project, and stamping that row
-/// with the request would make it look native to doctor. A legacy row with no
-/// origin and no server project is parked by the caller.
+/// This key is only used to recognize an owner row (its origin matches the
+/// key). It is never copied into `origin_project`: the cloud fills it from the
+/// requested scope, so a foreign row without an origin carries the puller's
+/// own project here (cas-7a63). Rows without an origin are parked.
 fn task_wire_cloud_project(raw: &serde_json::Value) -> Option<&str> {
     ["project_canonical_id", "project_id"]
         .into_iter()
@@ -1398,6 +1399,111 @@ fn append_sync_status_provenance(merged: &mut Task, local: &Task, sync_id: &str,
 }
 
 impl CloudSyncer {
+    /// Park a pulled task row that will not be applied (cas-7a63, GH #1000).
+    ///
+    /// The quarantine ledger is keyed by bare task id, and short ids collide
+    /// across projects. When the id already names a live local task that
+    /// belongs to this project, quarantining it would hide that local task
+    /// from the board and drop its queued pushes. So that row goes only to the
+    /// conflict journal and the local task is left untouched: as
+    /// [`PULL_ID_COLLISION`] when the titles differ (a different task that
+    /// shares the id, which `cas doctor` reports), or under the original
+    /// strategy when they match (a stale legacy copy of the same task). Every
+    /// other rejected row keeps the park-and-quarantine behaviour.
+    fn park_pulled_task_row(
+        &self,
+        task_store: &dyn TaskStore,
+        raw: &serde_json::Value,
+        strategy: &str,
+        reason: &str,
+        current_project_id: &str,
+    ) -> Result<(), CasError> {
+        let id = pull_wire_id(raw);
+        let local = task_store.get(id).ok().filter(|local| {
+            local
+                .origin_project
+                .as_deref()
+                .is_none_or(|origin| project_ids_match(origin, current_project_id))
+        });
+        let Some(local) = local else {
+            return record_parked_pull_row(
+                &self.queue,
+                EntityType::Task.as_str(),
+                raw,
+                strategy,
+                reason,
+            );
+        };
+        let same_task =
+            raw.get("title").and_then(serde_json::Value::as_str) == Some(local.title.as_str());
+        let journal_strategy = if same_task {
+            strategy
+        } else {
+            PULL_ID_COLLISION
+        };
+        if !same_task {
+            record_project_warning(
+                "task",
+                task_wire_origin_project(raw).unwrap_or("<unattributed>"),
+                &format!(
+                    "parking task '{id}' — a different pulled task shares the id of local task \
+                     '{}' ({reason}); the local task is unchanged",
+                    local.title
+                ),
+            );
+        }
+        let discarded = serde_json::json!({
+            "row": raw,
+            "reason": reason,
+            "parked_as": strategy,
+            "local_title": local.title,
+            "local_origin_project": local.origin_project,
+        })
+        .to_string();
+        self.queue.record_conflict(
+            EntityType::Task.as_str(),
+            id,
+            &discarded,
+            "local",
+            journal_strategy,
+            None,
+            crate::cloud::wire_revision(raw),
+        )
+    }
+
+    /// Park a pulled task row that carries no `origin_project` (cas-7a63).
+    ///
+    /// The cloud stamps `project_id` with the scope the client asked for, so
+    /// on a row without its own origin that field only repeats the request.
+    /// Adopting it gave foreign legacy rows the puller's identity and made
+    /// them look like the local task with the same id. The store would stamp
+    /// a missing origin with this project too, so no such row can be admitted
+    /// without being mis-attributed: it is parked instead.
+    fn park_unattributed_task_row(
+        &self,
+        task_store: &dyn TaskStore,
+        raw: &serde_json::Value,
+        task_id: &str,
+        current_project_id: &str,
+    ) -> Result<(), CasError> {
+        let reason = format!(
+            "no origin_project for {task_id}; the project scope on a pulled row echoes the \
+             request and cannot prove which project owns it"
+        );
+        record_project_warning(
+            "task",
+            "<missing>",
+            &format!("parking task '{task_id}' — {reason}"),
+        );
+        self.park_pulled_task_row(
+            task_store,
+            raw,
+            "pull_missing_origin",
+            &reason,
+            current_project_id,
+        )
+    }
+
     fn record_owner_conflict_value(
         &self,
         task_id: &str,
@@ -1818,12 +1924,12 @@ impl CloudSyncer {
             }
             if !entity_matches_project(&raw_task, &current_project_id, "task") {
                 let (strategy, reason) = pull_scope_rejection(&raw_task, current_project_id);
-                record_parked_pull_row(
-                    &self.queue,
-                    EntityType::Task.as_str(),
+                self.park_pulled_task_row(
+                    task_store,
                     &raw_task,
                     strategy,
                     &reason,
+                    current_project_id,
                 )?;
                 continue;
             }
@@ -1837,46 +1943,33 @@ impl CloudSyncer {
                 self.note_incoming_revision(EntityType::Task, id, &raw_task);
             }
             render_task_proposal_provenance(&mut raw_task);
-            let server_owner = task_wire_cloud_project(&raw_task).map(str::to_owned);
             let raw_task_for_parking = raw_task.clone();
-            let mut remote_task: Task = match deserialize_pulled_entity(raw_task, "task") {
+            let remote_task: Task = match deserialize_pulled_entity(raw_task, "task") {
                 Ok(t) => t,
                 Err(e) => {
-                    record_parked_pull_row(
-                        &self.queue,
-                        EntityType::Task.as_str(),
+                    self.park_pulled_task_row(
+                        task_store,
                         &raw_task_for_parking,
                         "pull_deserialize",
                         &e,
+                        current_project_id,
                     )?;
                     result.errors.push(e);
                     continue;
                 }
             };
-            // The scoped response proves which project supplied a legacy row;
-            // preserve an explicit origin or use only the server-attested
-            // project identity. The request scope is not an ownership stamp.
+            // cas-7a63: a row without its own origin cannot be attributed.
+            // Its project scope field echoes the request, so stamping it (as
+            // this code once did) gave a foreign legacy row the puller's
+            // identity and let it replace a local task by id alone.
             if remote_task.origin_project.is_none() {
-                let Some(server_owner) = server_owner else {
-                    let reason = format!(
-                        "no origin_project or server project identity for {}",
-                        remote_task.id
-                    );
-                    record_project_warning(
-                        "task",
-                        "<missing>",
-                        &format!("parking task '{}' — {reason}", remote_task.id),
-                    );
-                    record_parked_pull_row(
-                        &self.queue,
-                        EntityType::Task.as_str(),
-                        &raw_task_for_parking,
-                        "pull_missing_origin",
-                        &reason,
-                    )?;
-                    continue;
-                };
-                remote_task.origin_project = Some(server_owner);
+                self.park_unattributed_task_row(
+                    task_store,
+                    &raw_task_for_parking,
+                    &remote_task.id,
+                    current_project_id,
+                )?;
+                continue;
             }
             let incoming_is_owner = remote_task
                 .origin_project
@@ -2884,16 +2977,15 @@ impl CloudSyncer {
         for raw_task in raw_tasks {
             if !entity_matches_project(&raw_task, current_project_id, "task") {
                 let (strategy, reason) = pull_scope_rejection(&raw_task, current_project_id);
-                record_parked_pull_row(
-                    &self.queue,
-                    EntityType::Task.as_str(),
+                self.park_pulled_task_row(
+                    task_store,
                     &raw_task,
                     strategy,
                     &reason,
+                    current_project_id,
                 )?;
                 continue;
             }
-            let server_owner = task_wire_cloud_project(&raw_task).map(str::to_owned);
             let mut raw_task = raw_task;
             render_task_proposal_provenance(&mut raw_task);
             let wire_is_owner = task_wire_is_owner(&raw_task);
@@ -2902,44 +2994,32 @@ impl CloudSyncer {
                 self.note_incoming_revision(EntityType::Task, id, &raw_task);
             }
             let raw_task_for_parking = raw_task.clone();
-            let mut remote_task: Task = match deserialize_pulled_entity(raw_task, "task") {
+            let remote_task: Task = match deserialize_pulled_entity(raw_task, "task") {
                 Ok(t) => t,
                 Err(e) => {
-                    record_parked_pull_row(
-                        &self.queue,
-                        EntityType::Task.as_str(),
+                    self.park_pulled_task_row(
+                        task_store,
                         &raw_task_for_parking,
                         "pull_deserialize",
                         &e,
+                        current_project_id,
                     )?;
                     result.errors.push(e);
                     continue;
                 }
             };
-            // Preserve explicit origin. For legacy rows without an origin,
-            // only a server-attested project is safe to persist; an unscoped
-            // row was already rejected by entity_matches_project above.
+            // cas-7a63: a row without its own origin cannot be attributed.
+            // Its project scope field echoes the request, so stamping it (as
+            // this code once did) gave a foreign legacy row the puller's
+            // identity and let it replace a local task by id alone.
             if remote_task.origin_project.is_none() {
-                let Some(server_owner) = server_owner else {
-                    let reason = format!(
-                        "no origin_project or server project identity for {}",
-                        remote_task.id
-                    );
-                    record_project_warning(
-                        "task",
-                        "<missing>",
-                        &format!("parking task '{}' — {reason}", remote_task.id),
-                    );
-                    record_parked_pull_row(
-                        &self.queue,
-                        EntityType::Task.as_str(),
-                        &raw_task_for_parking,
-                        "pull_missing_origin",
-                        &reason,
-                    )?;
-                    continue;
-                };
-                remote_task.origin_project = Some(server_owner);
+                self.park_unattributed_task_row(
+                    task_store,
+                    &raw_task_for_parking,
+                    &remote_task.id,
+                    current_project_id,
+                )?;
+                continue;
             }
             let incoming_is_owner = wire_is_owner
                 || remote_task

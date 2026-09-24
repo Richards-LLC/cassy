@@ -429,18 +429,29 @@ async fn task_pull_and_direct_writes_remain_isolated_by_store() {
         value
     };
 
-    let matching = task_json("cas-project-pull", Some(&expected_project_id));
+    let mut matching = task_json("cas-project-pull", Some(&expected_project_id));
+    matching["origin_project"] = serde_json::json!(expected_project_id);
     let foreign = task_json("cas-foreign-pull", Some("unrelated/product"));
     let mut replicated = task_json("cas-replicated-pull", Some(&expected_project_id));
     replicated["origin_project"] = serde_json::json!("unrelated/product");
     let unscoped = task_json("cas-unscoped-pull", None);
+    // cas-7a63: the scope field alone echoes the request, so an originless
+    // row is parked, and one that shares a local task's id never replaces it.
+    let echo_only = task_json("cas-echo-only-pull", Some(&expected_project_id));
+    let mut colliding = serde_json::to_value(Task::new(
+        "cas-project-only".to_string(),
+        "a different project's task".to_string(),
+    ))
+    .expect("serialize colliding fixture");
+    colliding["status"] = serde_json::json!("closed");
+    colliding["project_canonical_id"] = serde_json::json!(expected_project_id);
 
     Mock::given(method("GET"))
         .and(path("/api/sync/pull"))
         .and(query_param("project_id", expected_project_id.as_str()))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "entries": [],
-            "tasks": [matching, foreign, replicated, unscoped],
+            "tasks": [matching, foreign, replicated, unscoped, echo_only, colliding],
             "rules": [],
             "skills": [],
             "pulled_at": chrono::Utc::now().to_rfc3339(),
@@ -517,6 +528,23 @@ async fn task_pull_and_direct_writes_remain_isolated_by_store() {
     assert!(project_tasks.get("cas-replicated-pull").is_err());
     assert!(project_tasks.get("cas-unscoped-pull").is_err());
     assert!(project_tasks.get("cas-global-only").is_err());
+    assert!(project_tasks.get("cas-echo-only-pull").is_err());
+    let kept = project_tasks
+        .get("cas-project-only")
+        .expect("local task survives");
+    assert_eq!(kept.title, "project only");
+    assert_eq!(kept.status, cas::types::TaskStatus::Open);
+    assert_eq!(
+        queue.pull_id_collision_ids().expect("collision ids"),
+        vec!["cas-project-only".to_string()]
+    );
+    assert!(
+        !queue
+            .quarantined_ids(cas::cloud::QUARANTINE_TASK)
+            .expect("quarantine ledger")
+            .contains("cas-project-only"),
+        "a collision must not hide the local task"
+    );
 
     assert!(global_tasks.get("cas-global-only").is_ok());
     assert!(global_tasks.get("cas-project-only").is_err());

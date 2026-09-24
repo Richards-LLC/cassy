@@ -9952,7 +9952,9 @@ pub(crate) fn run_factory_branch_merge_gate(
 /// cas-e74c: count commits on `commit_ish` that are not on `parent_branch`
 /// AND either fall inside this task's work cycle (committer date at or after
 /// `window.not_before`, with the same clock-skew allowance the commit
-/// receipt uses) OR are explicitly known to belong to the task. The latter
+/// receipt uses) OR are explicitly known to belong to the task, OR name the
+/// task in their message and are not already on the target as an equivalent
+/// patch (cas-08f9: a merge-recovery rebase made before the restart). The latter
 /// includes durable task identity evidence and the receipt supplied by this
 /// close, because a restart after commit moves the lease boundary forward but
 /// must never turn the already-known delivery into somebody else's residue.
@@ -9997,11 +9999,15 @@ pub(crate) fn count_task_attributable_unmerged_commits(
     // must still be visible for attribution below.
     let range = format!("{merge_base}..{commit_ish}");
     let origin_parent = format!("origin/{parent_branch}");
-    let mut args = vec!["rev-list", "--timestamp", range.as_str()];
-    if git_ref_exists(repo_path, &origin_parent) {
+    let origin_parent_exists = git_ref_exists(repo_path, &origin_parent);
+    // One record per commit: committer epoch, id, then the message, so the
+    // task-id attribution below costs no subprocess per commit.
+    let mut args = vec!["log", "--format=%ct %H%x1f%B%x1e", range.as_str()];
+    if origin_parent_exists {
         args.push("--not");
         args.push(origin_parent.as_str());
     }
+    args.push("--");
     let count_out = Command::new("git")
         .args(&args)
         .current_dir(repo_path)
@@ -10018,17 +10024,76 @@ pub(crate) fn count_task_attributable_unmerged_commits(
         .chain(receipt)
         .collect::<std::collections::HashSet<_>>();
     let cutoff = window.not_before.timestamp() - COMMIT_RECEIPT_CLOCK_SKEW_SECS;
-    String::from_utf8_lossy(&count_out.stdout)
-        .lines()
-        .map(|line| {
-            let (timestamp, sha) = line.split_once(' ')?;
+    let task_id = window.identity.task_id.as_deref();
+    // cas-08f9: a merge-recovery restart moves the lease boundary past a
+    // rebase the worker already made, and the rebase gave the delivery new
+    // ids that no retained anchor matches. A commit whose message names the
+    // task is still this task's delivery, unless the target already carries
+    // an equivalent patch (the delivery landed as a cherry-pick or rebase).
+    let mut integrated_patches: Option<std::collections::HashSet<String>> = None;
+    let stdout = String::from_utf8_lossy(&count_out.stdout);
+    stdout
+        .split('\u{1e}')
+        .map(str::trim)
+        .filter(|record| !record.is_empty())
+        .map(|record| {
+            let (header, message) = record.split_once('\u{1f}')?;
+            let (timestamp, sha) = header.trim().split_once(' ')?;
             let timestamp = timestamp.parse::<i64>().ok()?;
-            Some((timestamp, sha))
+            Some((timestamp, sha.trim(), message))
         })
         .try_fold(0u32, |count, entry| {
-            let (timestamp, sha) = entry?;
-            Some(count + u32::from(timestamp >= cutoff || known_commits.contains(sha)))
+            let (timestamp, sha, message) = entry?;
+            let names_task =
+                task_id.is_some_and(|task_id| message_references_task(message, task_id));
+            let attributable = timestamp >= cutoff
+                || known_commits.contains(sha)
+                || (names_task
+                    && !integrated_patches
+                        .get_or_insert_with(|| {
+                            patch_equivalent_on_targets(
+                                repo_path,
+                                commit_ish,
+                                parent_branch,
+                                origin_parent_exists.then_some(origin_parent.as_str()),
+                            )
+                        })
+                        .contains(sha));
+            Some(count + u32::from(attributable))
         })
+}
+
+/// cas-08f9: commits on `commit_ish` whose patch is already on `parent_branch`
+/// (or its remote-tracking ref), per `git cherry`. Unknowable Git state yields
+/// an empty set, so a commit that names the task stays attributed (the guard
+/// fails closed).
+fn patch_equivalent_on_targets(
+    repo_path: &std::path::Path,
+    commit_ish: &str,
+    parent_branch: &str,
+    origin_parent: Option<&str>,
+) -> std::collections::HashSet<String> {
+    use std::process::Command;
+
+    let mut equivalent = std::collections::HashSet::new();
+    for upstream in std::iter::once(parent_branch).chain(origin_parent) {
+        let Ok(output) = Command::new("git")
+            .args(["cherry", upstream, commit_ish])
+            .current_dir(repo_path)
+            .output()
+        else {
+            continue;
+        };
+        if !output.status.success() {
+            continue;
+        }
+        for line in String::from_utf8_lossy(&output.stdout).lines() {
+            if let Some(sha) = line.strip_prefix("- ") {
+                equivalent.insert(sha.trim().to_string());
+            }
+        }
+    }
+    equivalent
 }
 
 /// cas-e33f (GH #1004): agents that held this task before a transfer,
@@ -21009,6 +21074,144 @@ mod merge_state_gate_tests {
             }
             other => panic!("unmerged task-own commits must still reject, got {other:?}"),
         }
+    }
+
+    fn commit_file_with_message_at(dir: &std::path::Path, name: &str, message: &str, date: &str) {
+        std::fs::write(dir.join(name), format!("// {name}\n")).unwrap();
+        git_at(dir, &["add", name], date);
+        git_at(dir, &["commit", "-q", "-m", message], date);
+    }
+
+    /// cas-08f9: a parked delivery bounced for a merge conflict. The worker
+    /// rebased (new commit ids, committed before the restart), then ran the
+    /// merge-recovery `task start`, which moved the lease window past those
+    /// commits and retired the old anchor. The rebased commits name the task,
+    /// so they are still this task's unmerged delivery: MERGE REQUIRED, not a
+    /// silent pass that later reads as "merged without a QA round".
+    #[test]
+    fn merge_recovery_rebase_before_restart_is_still_this_tasks_delivery_cas_08f9() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        // Someone else's residue on the reused lane.
+        commit_file_at(p, "other-1.rs", "// 1\n", "2020-01-01T00:00:00Z");
+        // The rebased delivery: made before the restart, message names the task.
+        commit_file_with_message_at(
+            p,
+            "fix.rs",
+            "hub-web: the fix (cas-test1)",
+            "2026-08-04T12:00:00Z",
+        );
+        commit_file_with_message_at(
+            p,
+            "dist.js",
+            "hub-web: rebuild dist for cas-test1",
+            "2026-08-04T12:00:05Z",
+        );
+
+        let mut task = worker_task("worker");
+        // The pre-rebase anchor survives only as history, under an id the
+        // rebase replaced.
+        task.deliverables.historical_factory_branch_anchors =
+            vec!["0123456789abcdef0123456789abcdef01234567".to_string()];
+        let req = base_req(&task.id);
+        // The restart's lease claim is later than the rebase.
+        let mut window = window_at(1_800_000_000, "latest task lease claim/transfer");
+        window.identity = task_commit_identity(&task, None);
+
+        let out = run_factory_branch_merge_gate_with_attribution(
+            &task,
+            &req,
+            "main",
+            p,
+            TaskCommitAttribution {
+                receipt: None,
+                window: Some(&window),
+            },
+        );
+        match out {
+            MergeStateGateOutcome::Reject(msg) => {
+                assert!(msg.contains("MERGE REQUIRED"), "missing header: {msg}");
+                assert!(
+                    msg.contains("2 commit(s) from this task"),
+                    "both rebased commits name the task; the residue does not: {msg}"
+                );
+            }
+            other => {
+                panic!("a rebased, unmerged delivery must not clear the guard, got {other:?}")
+            }
+        }
+        assert_eq!(
+            count_task_attributable_unmerged_commits(p, "factory/worker", "main", &window, None),
+            Some(2)
+        );
+    }
+
+    /// cas-08f9 counterpart: a commit that names the task but whose patch is
+    /// already on the target (it landed as a cherry-pick) is not stranded work.
+    #[test]
+    fn task_named_commit_already_on_target_as_an_equivalent_patch_is_not_attributed_cas_08f9() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        commit_file_with_message_at(
+            p,
+            "fix.rs",
+            "hub-web: the fix (cas-test1)",
+            "2026-08-04T12:00:00Z",
+        );
+        let delivered = head_sha(p);
+        git(p, &["checkout", "-q", "main"]);
+        git_at(p, &["cherry-pick", &delivered], "2026-08-04T13:00:00Z");
+        git(p, &["checkout", "-q", "factory/worker"]);
+
+        let task = worker_task("worker");
+        let mut window = window_at(1_800_000_000, "latest task lease claim/transfer");
+        window.identity = task_commit_identity(&task, None);
+        assert_eq!(
+            count_task_attributable_unmerged_commits(p, "factory/worker", "main", &window, None),
+            Some(0)
+        );
+        // A message naming another task (a longer id) is never attributed.
+        commit_file_with_message_at(
+            p,
+            "other.rs",
+            "fix: unrelated (cas-test10)",
+            "2026-08-04T14:00:00Z",
+        );
+        assert_eq!(
+            count_task_attributable_unmerged_commits(p, "factory/worker", "main", &window, None),
+            Some(0)
+        );
+    }
+
+    /// cas-08f9: the QA backstop's "cannot tell which commit" refusal never
+    /// claims a merge when the branch tip is not on the target.
+    #[test]
+    fn unresolved_delivery_refusal_never_claims_an_unmerged_branch_merged_cas_08f9() {
+        let tip = "59f25d1ac0000000000000000000000000000000";
+        let refusal = super::super::qa_dispatch::unresolved_delivery_refusal(
+            "cas-1622",
+            "epic/burn-down",
+            "factory/proud-shark-78",
+            Some(tip),
+            "remedy",
+        );
+        assert!(!refusal.contains("merged into epic/burn-down"), "{refusal}");
+        assert!(
+            refusal.contains("is not contained in epic/burn-down, so it is not merged"),
+            "{refusal}"
+        );
+        assert!(
+            refusal.contains(&format!("commit_receipt={tip}")),
+            "{refusal}"
+        );
+        let missing = super::super::qa_dispatch::unresolved_delivery_refusal(
+            "cas-1622",
+            "epic/burn-down",
+            "factory/gone",
+            None,
+            "remedy",
+        );
+        assert!(missing.contains("does not resolve here"), "{missing}");
     }
 
     /// GH #849: `request_changes` deliberately clears the active parked

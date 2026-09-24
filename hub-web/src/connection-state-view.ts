@@ -202,3 +202,14 @@ export function renderConnectionSurfaceInto(
 export function shouldRetainDisconnectedFrame(snapshot: ConnectionSnapshotView): boolean {
   return snapshot.degraded || snapshot.phase !== "live";
 }
+
+/**
+ * Whether a terminal socket failure earns its own attention card. A failure
+ * that retries is already told in plain words by the banner, the header, the
+ * row and the footer ("Reconnecting…"); a rail card beside them repeated it in
+ * transport terms with counts that disagreed (cas-90d4). A pairing loss has its
+ * own machine card. Only a failure that will not retry needs the rail.
+ */
+export function transportFailureNeedsAttention(attach: ConnectionSnapshotView | undefined): boolean {
+  return attach?.fatal === true && !attach.authFailure;
+}

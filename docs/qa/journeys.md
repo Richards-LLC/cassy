@@ -319,7 +319,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 **Steps**
 
 1. Open the conversation — the thread is live
-2. The network drops — "Lost connection to Atlas · Linux. Reconnecting…" appears; the header and the row say Reconnecting, and the footer counts 1 of 2 connected with a warning dot; a send is refused for the connection
+2. The network drops — "Lost connection to Atlas · Linux. Reconnecting…" appears; the header and the row say Reconnecting, and the footer counts 1 of 2 connected with a warning dot; a send is refused for the connection; the attention rail raises no transport alarm of its own, and its counts agree
 3. It reconnects on its own — the banner and the refusal line clear, everything says Live again, the draft is kept, and no transport alarm is left
 4. Sending works again — a message goes through and is answered
 5. On a phone, the banner stays readable through an outage — no toast sits on the reconnect banner, in light and dark
@@ -327,6 +327,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 **Expected experience**
 
 - The user always knows whether the conversation is live: the header, the row and the footer never disagree.
+- The attention rail defers to the banner while it reconnects; only a failure that will not retry gets a card, in the same plain words.
 - A transport alarm resolves itself when the connection comes back.
 - Nothing typed is lost, and recovery needs no action.
 

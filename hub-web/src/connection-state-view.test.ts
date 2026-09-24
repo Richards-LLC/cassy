@@ -5,6 +5,7 @@ import {
   disconnectedView,
   elapsedSeconds,
   shouldRetainDisconnectedFrame,
+  transportFailureNeedsAttention,
   type ConnectionSnapshotView,
 } from "./connection-state-view";
 
@@ -120,5 +121,23 @@ describe("Commander designed connection states", () => {
     expect(shouldRetainDisconnectedFrame(state)).toBe(true);
     expect(shouldRetainDisconnectedFrame(snapshot({ phase: "dialing", stage: "dialing" }))).toBe(true);
     expect(shouldRetainDisconnectedFrame(snapshot({ phase: "live" }))).toBe(false);
+  });
+});
+
+describe("transportFailureNeedsAttention", () => {
+  it("leaves a retrying drop to the banner, header, row and footer (cas-90d4)", () => {
+    // The rail used to raise "Terminal transport problem" beside the plain
+    // "Reconnecting…" banner, with counts that disagreed.
+    expect(transportFailureNeedsAttention(snapshot({ phase: "failed", reason: "Terminal connection closed before it became ready" }))).toBe(false);
+    expect(transportFailureNeedsAttention(snapshot({ phase: "backoff" }))).toBe(false);
+    expect(transportFailureNeedsAttention(undefined)).toBe(false);
+  });
+
+  it("leaves a pairing loss to its machine card", () => {
+    expect(transportFailureNeedsAttention(snapshot({ phase: "failed", fatal: true, authFailure: "revoked" }))).toBe(false);
+  });
+
+  it("raises a failure that will not retry", () => {
+    expect(transportFailureNeedsAttention(snapshot({ phase: "failed", fatal: true, reason: "This browser cannot open the terminal stream." }))).toBe(true);
   });
 });

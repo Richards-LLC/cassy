@@ -71,7 +71,7 @@ const MACHINE_EVENT_TEMPLATES: Record<string, DeterministicTemplate> = {
   ci_hard_failure: { headline: "CI failed", severity: "critical", action: "retry" },
   build_failed: { headline: "Build failed", severity: "critical", action: "retry" },
   build_hard_failure: { headline: "Build failed", severity: "critical", action: "retry" },
-  session_transport: { headline: "Terminal transport problem", severity: "critical", action: "view_pane" },
+  session_transport: { headline: "Lost connection to the session", severity: "critical", action: "none" },
   session_unreachable: { headline: "Session unreachable", severity: "critical", action: "view_pane" },
   pane_exited: { headline: "Worker stopped", detail: "Open the session to inspect the worker and its terminal output.", severity: "critical", action: "view_pane" },
   awaiting_merge: { headline: "Change is ready to merge", severity: "warning", action: "open_pr" },
@@ -345,7 +345,7 @@ export function coalesceAttention(items: readonly AttentionItem[]): AttentionCar
 
 function appendCard(group: AttentionGroup, card: AttentionCard): void {
   group.cards.push(card);
-  group.count += card.count;
+  group.count += card.items.length;
   if (SEVERITY_RANK[card.content.severity] < SEVERITY_RANK[group.worstSeverity]) {
     group.worstSeverity = card.content.severity;
   }
@@ -367,7 +367,9 @@ export function groupAttention(items: readonly AttentionItem[], maxGroups = 6): 
       machineLabel: item.machineLabel,
       session: item.session,
       cards: [card],
-      count: card.count,
+      // The group counts outstanding events, as the panel summary and the rail
+      // badge do; a card's retries show on the card as ×N, not here (cas-90d4).
+      count: card.items.length,
       worstSeverity: card.content.severity,
     });
   }

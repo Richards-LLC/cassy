@@ -7,6 +7,19 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.29.1] - 2026-09-24
+
+### Fixed
+
+- On macOS, a hub restarted by `cas update`, `cas hub restart` or the hub
+  service no longer comes back reachable only on this machine. When the
+  service's limited PATH had no `tailscale` command, Cassy used the one
+  inside the Tailscale app. Without a terminal setting, that command tries to
+  open the Tailscale window instead of answering, so the Tailscale route was
+  never published and Commander showed the host as unreachable. Cassy now
+  prefers the Homebrew `tailscale` command, always runs Tailscale with a
+  terminal setting, and adds both to the hub service on every restart.
+
 ## [3.29.0] - 2026-09-24
 
 ### Fixed

@@ -1763,10 +1763,34 @@ fn resolve_sync_all_workers_target(
 fn parse_worker_name_filter(filter: Option<&String>) -> std::collections::HashSet<String> {
     filter
         .into_iter()
-        .flat_map(|names| names.split(','))
-        .map(strip_target_wrapping)
-        .filter(|s| !s.is_empty())
+        .flat_map(|names| parse_worker_name_list(names))
         .collect()
+}
+
+/// cas-4691 (GH #976): read a `worker_names` value in either shape a caller
+/// sends. The parameter is a comma-separated string, but its plural name
+/// invites a JSON array, and `shutdown_workers` rejected `["wild-phoenix-59"]`
+/// as unknown while listing that worker as known. A value that parses as a
+/// JSON array of strings is taken element by element; anything else is split
+/// on commas with brackets and quotes stripped. Order is kept and repeats are
+/// dropped.
+fn parse_worker_name_list(raw: &str) -> Vec<String> {
+    let trimmed = raw.trim();
+    let names: Vec<String> = match trimmed
+        .starts_with('[')
+        .then(|| serde_json::from_str::<Vec<String>>(trimmed).ok())
+        .flatten()
+    {
+        Some(array) => array.iter().map(|name| strip_target_wrapping(name)).collect(),
+        None => trimmed.split(',').map(strip_target_wrapping).collect(),
+    };
+    let mut unique = Vec::with_capacity(names.len());
+    for name in names {
+        if !name.is_empty() && !unique.contains(&name) {
+            unique.push(name);
+        }
+    }
+    unique
 }
 
 /// Trim one element of a target list down to the bare identifier.
@@ -2062,14 +2086,8 @@ impl CasService {
         let isolate = req.isolate.unwrap_or(false);
         let mut worker_names: Vec<String> = req
             .worker_names
-            .as_ref()
-            .map(|names| {
-                names
-                    .split(',')
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect()
-            })
+            .as_deref()
+            .map(parse_worker_name_list)
             .unwrap_or_default();
 
         // cas-6913: task_id pre-assigns a task to the (single) spawned
@@ -2632,13 +2650,7 @@ impl CasService {
         let requested_names: Vec<String> = req
             .worker_names
             .as_deref()
-            .map(|names| {
-                names
-                    .split(',')
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect()
-            })
+            .map(parse_worker_name_list)
             .unwrap_or_default();
         let requested_id = req.id.as_deref().map(str::trim).filter(|id| !id.is_empty());
         if requested_id.is_some() && (!requested_names.is_empty() || req.count.is_some()) {
@@ -5564,11 +5576,8 @@ impl CasService {
         }
 
         if let Some(filter) = req.worker_names.as_ref() {
-            let names: std::collections::HashSet<String> = filter
-                .split(',')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect();
+            let names: std::collections::HashSet<String> =
+                parse_worker_name_list(filter).into_iter().collect();
             workers.retain(|w| names.contains(&w.name));
         }
 
@@ -11130,6 +11139,26 @@ mod tests {
         );
         assert!(parse_worker_name_filter(None).is_empty());
         assert!(parse_worker_name_filter(Some(&"[]".to_string())).is_empty());
+    }
+
+    /// cas-4691 (GH #976): the list parser every factory action shares keeps
+    /// order, reads a real JSON array element by element, and still accepts
+    /// the documented comma form.
+    #[test]
+    fn worker_name_list_accepts_json_arrays_and_commas_cas_4691() {
+        assert_eq!(parse_worker_name_list("[\"wild-phoenix-59\"]"), vec!["wild-phoenix-59"]);
+        assert_eq!(parse_worker_name_list("wild-phoenix-59"), vec!["wild-phoenix-59"]);
+        assert_eq!(
+            parse_worker_name_list(" [ \"b-2\" , \"a-1\" , \"b-2\" ] "),
+            vec!["b-2", "a-1"],
+            "array order kept, repeats dropped"
+        );
+        assert_eq!(parse_worker_name_list("b-2, a-1,,b-2"), vec!["b-2", "a-1"]);
+        // A bracketed list that is not valid JSON still falls back to the
+        // stripped comma form.
+        assert_eq!(parse_worker_name_list("[b-2, 'a-1']"), vec!["b-2", "a-1"]);
+        assert!(parse_worker_name_list("[]").is_empty());
+        assert!(parse_worker_name_list("  ").is_empty());
     }
 
     #[test]

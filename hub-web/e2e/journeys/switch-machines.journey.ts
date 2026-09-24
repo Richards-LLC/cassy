@@ -32,4 +32,43 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
     await expect(composer).toHaveValue("Draft: ask about the flaky pairing test");
     await expect(page.getByRole("button", { name: `Send to ${PELICAN}`, exact: true })).toBeVisible();
   });
+
+  await journey.stage("Reopen the session picker after closing it", async () => {
+    const picker = page.locator("#session-picker");
+    const toggle = page.locator("#session-picker-toggle");
+    const palette = page.locator("#command-palette");
+    await page.getByRole("button", { name: "Terminal view" }).click();
+    await expect(toggle).toBeVisible();
+    // Closing the picker does not rebuild the shell, and the next periodic
+    // render papers over a stale "open" state within a few seconds. So each
+    // check is short: the picker must open, and say so, at once — not when a
+    // later render happens to rebuild the shell.
+    const soon = { timeout: 1_000 };
+    const open = async () => {
+      await toggle.click();
+      await expect(picker).toBeVisible(soon);
+      await expect(toggle).toHaveAttribute("aria-expanded", "true", soon);
+    };
+    const closed = async () => {
+      await expect(picker).toBeHidden(soon);
+      await expect(toggle).toHaveAttribute("aria-expanded", "false", soon);
+    };
+    await open();
+    await page.keyboard.press("Escape");
+    await closed();
+    await open();
+    await page.getByRole("button", { name: "Close session picker" }).click();
+    await closed();
+    await open();
+    // A closed picker must not pop back open over the next dialog either.
+    await page.keyboard.press("Escape");
+    await closed();
+    await page.keyboard.press("ControlOrMeta+k");
+    await expect(palette).toBeVisible(soon);
+    await expect(picker).toBeHidden();
+    await page.keyboard.press("Escape");
+    await expect(palette).toBeHidden();
+    await expect(picker).toBeHidden();
+    await expect(toggle).toHaveAttribute("aria-expanded", "false");
+  });
 });

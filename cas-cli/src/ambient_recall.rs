@@ -1591,6 +1591,13 @@ fn query_terms(canonical: &str) -> Vec<String> {
     terms
 }
 
+/// cas-3e41 (GH #993): the content-bearing terms of free text, under the same
+/// stopword, tool-word, envelope and hex-shard floor ambient recall uses, so
+/// task-time recall queries cannot be carried by filler.
+pub(crate) fn content_terms(text: &str) -> Vec<String> {
+    terms_from_text(text)
+}
+
 fn terms_from_text(text: &str) -> Vec<String> {
     let mut terms = Vec::new();
     for raw in

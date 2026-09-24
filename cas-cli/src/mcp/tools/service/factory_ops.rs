@@ -2607,20 +2607,42 @@ impl CasService {
              to resolve request {request_id} to a worker and a state (registered / FAILED); \
              do not report dispatch complete until it shows registered."
         );
-        // Recall is response-only: use the active epic as the task-planning
-        // query and add nothing when the shared BM25 index has no useful
-        // project-local memory/epic result.
-        let related_context = task_store
-            .list(None)
-            .ok()
-            .and_then(|tasks| {
-                tasks.into_iter().find(|task| {
-                    task.task_type == TaskType::Epic && task.status != TaskStatus::Closed
-                })
+        // Recall is response-only and adds nothing when the shared BM25 index
+        // has no useful project-local rule, memory or epic result. cas-3e41
+        // (GH #993): recall for the work being spawned — the pre-assigned
+        // task, else the session's pinned epic — not whichever open epic the
+        // store happens to list first.
+        let recall_subject = req
+            .task_id
+            .as_deref()
+            .and_then(|task_id| task_store.get(task_id).ok())
+            .or_else(|| {
+                let session = current_factory_session()?;
+                let raw = std::fs::read_to_string(metadata_path(&session)).ok()?;
+                let metadata =
+                    serde_json::from_str::<crate::ui::factory::SessionMetadata>(&raw).ok()?;
+                let epic_id = metadata
+                    .pinned_epic_id
+                    .or(metadata.epic_id)
+                    .filter(|id| !id.trim().is_empty())?;
+                task_store.get(epic_id.trim()).ok()
             })
-            .and_then(|epic| {
-                self.inner
-                    .related_recall(&format!("{} {}", epic.title, epic.description))
+            .or_else(|| {
+                task_store.list(None).ok().and_then(|tasks| {
+                    tasks.into_iter().find(|task| {
+                        task.task_type == TaskType::Epic && task.status != TaskStatus::Closed
+                    })
+                })
+            });
+        let related_context = recall_subject
+            .and_then(|subject| {
+                self.inner.related_recall(
+                    &crate::mcp::tools::core::task::lifecycle::task_recall_query(
+                        &subject.title,
+                        &subject.labels,
+                        &subject.description,
+                    ),
+                )
             })
             .unwrap_or_default();
 

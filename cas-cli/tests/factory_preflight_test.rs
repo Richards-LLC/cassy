@@ -163,6 +163,19 @@ fn human_cli_reports_ready_and_leaves_home_cas_state_unchanged() {
     let project = project(true);
     let nested = project.path().join("nested/deeper");
     std::fs::create_dir_all(&nested).unwrap();
+    let bin = TempDir::new().unwrap();
+    cas::test_paths::warm_stub(
+        &bin.path().join("claude"),
+        "#!/bin/sh\nprintf 'Claude Code 2.1.280\\n'\n",
+    );
+    cas::test_paths::warm_stub(
+        &bin.path().join("codex"),
+        "#!/bin/sh\nprintf 'codex-cli 0.147.0\\n'\n",
+    );
+    let path = std::env::join_paths(std::iter::once(bin.path().to_path_buf()).chain(
+        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
+    ))
+    .unwrap();
     let home = TempDir::new().unwrap();
     std::fs::create_dir_all(home.path().join(".cas")).unwrap();
     std::fs::create_dir_all(home.path().join(".config/cas")).unwrap();
@@ -179,6 +192,7 @@ fn human_cli_reports_ready_and_leaves_home_cas_state_unchanged() {
     let before = file_snapshot(home.path());
 
     let output = human_command_at(&nested, &home)
+        .env("PATH", path)
         .args(["--cas-root", project.path().join(".cas").to_str().unwrap()])
         .assert()
         .success()

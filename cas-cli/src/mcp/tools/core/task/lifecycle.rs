@@ -2451,24 +2451,19 @@ mod related_recall_response_tests {
         let identifiers = "Migrate refund readers in payments.service.ts:412 and \
                            refunds.controller.ts:88 to read paymentIntentId from the payments table";
 
-        let mut epic = described_task_request(
-            "Payments SOW: refund readers read the payments table",
-            identifiers,
+        // Seed the epic straight into the store: a factory epic create needs
+        // a resolvable agent identity for epic_verification_owner, and this
+        // test is about the child's duplicate check, not epic creation.
+        let store = core.open_task_store().expect("task store");
+        store.init().expect("initialize task store");
+        let mut epic = Task::new(
+            "cas-60e3-epic".into(),
+            "Payments SOW: refund readers read the payments table".into(),
         );
-        epic.task_type = "epic".to_string();
-        epic.risk = None;
-        core.cas_task_create(Parameters(epic))
-            .await
-            .expect("epic is created");
-        let epic_id = core
-            .open_task_store()
-            .expect("task store")
-            .list(None)
-            .expect("list tasks")
-            .into_iter()
-            .find(|task| task.task_type == crate::types::TaskType::Epic)
-            .expect("epic row")
-            .id;
+        epic.task_type = TaskType::Epic;
+        epic.description = identifiers.to_string();
+        store.add(&epic).expect("add epic");
+        let epic_id = epic.id.clone();
 
         let mut first = child_request(
             "E1.8 refund readers read the payments table",

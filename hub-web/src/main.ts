@@ -297,6 +297,7 @@ function mountConversation(key: string, mount: HTMLElement): void {
   let conversation = conversationViews.get(key);
   if (!conversation) {
     const threadKey = sessionKey(selectedMachineId!, selectedSession!);
+    const threadMachineId = selectedMachineId!, threadSession = selectedSession!;
     const hubSession = sessions.get(selectedMachineId!)?.find((item) => item.name === selectedSession);
     const target = supervisorTarget(hubSession) || "Supervisor";
     const history = conversationHistory(threadKey);
@@ -322,6 +323,9 @@ function mountConversation(key: string, mount: HTMLElement): void {
       // keeping its original in_reply_to; the refused bubble leaves the
       // thread only once the new send is actually on the wire.
       retryMessage: (send) => { void submitSupervisorMessage({ text: send.text, replyTo: send.replyTo, retryOf: send.id }); },
+      // The refusal says "Take control, then retry"; the control is on the
+      // refused message because the conversation header has none (cas-3433).
+      takeControl: () => { void takeControlForRefused(threadMachineId, threadSession); },
       hasEarlier: () => conversationHistoryPage(threadKey).hasEarlier,
       loadingEarlier: () => conversationHistoryPage(threadKey).loading,
       loadingHistory: () => {
@@ -2163,6 +2167,44 @@ async function takeControlForMessage(machine: StoredMachine, session: string): P
   return leases.get(sessionKey(machine.id, session))?.held_by_me === true;
 }
 
+/**
+ * Take control from a refused message (cas-3433). The refusal tells the
+ * operator to take control, and the conversation header carries no such
+ * control, so the refused bubble offers it beside Retry. The hub's refusal is
+ * itself evidence that the cached lease is stale, so this always asks the hub
+ * rather than trusting `held_by_me`.
+ */
+async function takeControlForRefused(machineId: string, session: string): Promise<void> {
+  const machine = machines.get(machineId);
+  const key = sessionKey(machineId, session);
+  if (!machine || pendingSubmissions.has(key)) return;
+  const stillHere = () => selectedMachineId === machineId && selectedSession === session;
+  const before = leases.get(key);
+  const force = Boolean(before?.controller_label && !before.held_by_me && machine.scopes.includes("hub-admin"));
+  pendingSubmissions.add(key);
+  try {
+    showComposerStatus("Taking control of this session…", "info");
+    let requested = true;
+    try {
+      await connections.get(machineId)?.requestControl(session, force);
+    } catch {
+      requested = false;
+    }
+    await loadLease(machineId, session);
+    if (!stillHere()) return;
+    const after = leases.get(key);
+    if (requested && after?.held_by_me) {
+      showComposerStatus("You control this session now. Retry to send the message.", "info");
+      return;
+    }
+    showComposerStatus(after?.controller_label && !after.held_by_me
+      ? `${after.controller_label} controls this session, and the hub only accepts a message from its controller. Wait for control to be released, then take control and retry.`
+      : "Could not take control of this session. Check that it is live, then take control again.", "error");
+  } finally {
+    pendingSubmissions.delete(key);
+  }
+}
+
 function deliverSupervisorMessage(machine: StoredMachine, session: string, supervisor: string, text: string, replyTo?: number, retryOf?: string, editOf?: string): void {
   const clientRef = crypto.randomUUID();
   const sent = sendControl(machine.id, session, supervisorMessage(supervisor, text, clientRef, replyTo));
@@ -2238,7 +2280,7 @@ async function submitSupervisorMessage(quick?: { text: string; replyTo?: number;
     if (plan.kind === "take-control-then-send") {
     showComposerStatus(plan.notice, "info");
     if (!await takeControlForMessage(machine, session)) {
-      showComposerStatus(`Could not take control of ${session}, and the hub refuses a message from a device that is only observing. Take control from the header, then send again.`, "error");
+      showComposerStatus(`Could not take control of ${session}, and the hub refuses a message from a device that is only observing. Send again to retry; if another device controls the session, wait for it to release control.`, "error");
       return;
     }
   }

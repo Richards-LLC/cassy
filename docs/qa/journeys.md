@@ -153,14 +153,15 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 3. See it delivered — the hub's receipt turns "Sending…" into "Delivered" with a check
 4. See it answered — the supervisor's reply arrives under it and "Delivered" steps aside
 5. A refused message says why — "Not sent", a plain reason and the next step on the message, said once (the composer only points at it); the list does not preview it as said
-6. Edit and resend retires the refused message — it collapses to "Not sent · replaced by your edit" with no Retry
+6. Take control from the message, then retry — the refused message carries the Take control its refusal names (the conversation header has none), and Retry then sends it
+7. Edit and resend retires the refused message — it collapses to "Not sent · replaced by your edit" with no Retry
 
 **Expected experience**
 
 - Enter sends and Shift+Enter adds a new line.
 - The user can tell sent from delivered without reading attributes.
 - The composer status is in plain words, never protocol vocabulary.
-- A refusal says why in plain words, names the next step, and offers Edit and Retry right on the message.
+- A refusal says why in plain words, names the next step, and offers Edit and Retry right on the message; a control refusal also offers Take control there, so the step it names is always on screen.
 - Once its edit is sent, a refused message cannot be retried.
 - A screen reader hears who spoke and when for each message group ("You, 12:45"), the status as "Live", and meets no dead attach control.
 

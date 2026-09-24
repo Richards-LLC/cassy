@@ -352,6 +352,11 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(source).toContain("await connections.get(machine.id)?.requestControl(session, false);");
     expect(source).toContain("return leases.get(sessionKey(machine.id, session))?.held_by_me === true;");
     expect(source).toContain("Could not take control of ${session}");
+    // cas-3433: the conversation header has no Take control, so no copy may
+    // send the operator there; a refused message carries the control itself.
+    expect(source).not.toContain("Take control from the header");
+    expect(source).toContain("takeControl: () => { void takeControlForRefused(threadMachineId, threadSession); },");
+    expect(source).toContain("await connections.get(machineId)?.requestControl(session, force);");
   });
 
   it("collapses one outage into one attention card per machine and session", async () => {

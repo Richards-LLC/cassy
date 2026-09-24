@@ -74,5 +74,16 @@ test("HUB-J2 pair a machine from a cas hub pair link", async ({ page, journey })
     await expect(row).toBeVisible({ timeout: 15_000 });
     await row.click();
     await expect(page.getByRole("button", { name: `Send to ${PELICAN}`, exact: true })).toBeVisible();
+    await expect(page.locator("#toast")).toHaveText(/connected/);
+    // It covers no heading either: at the top right it used to land on the
+    // context rail's "Tasks & progress" (3.30.0 journey F8).
+    const covered = await page.evaluate(() => {
+      const t = document.querySelector<HTMLElement>("#toast")!.getBoundingClientRect();
+      return [...document.querySelectorAll<HTMLElement>("h1, h2, h3")].filter((h) => h.getClientRects().length > 0).filter((h) => {
+        const r = h.getBoundingClientRect();
+        return r.width > 0 && t.left < r.right && t.right > r.left && t.top < r.bottom && t.bottom > r.top;
+      }).map((h) => h.textContent?.trim());
+    });
+    expect(covered, "headings under the toast").toEqual([]);
   });
 });

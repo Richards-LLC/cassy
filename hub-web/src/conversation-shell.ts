@@ -12,16 +12,28 @@ export interface ConversationShellModel {
   paired: boolean;
   /** The list search's text, kept across shell rebuilds. */
   searchQuery?: string;
+  /** Offer the Ctrl K hint in the search placeholder (not on a phone). */
+  keyboardHint?: boolean;
 }
 
 export const CONVERSATION_SEARCH_LABEL = "Search conversations";
 export const CONVERSATION_SEARCH_PLACEHOLDER = "Search conversations (Ctrl K)";
+/** Without a keyboard shortcut to offer (a touch device, or narrower than the
+ * palette's breakpoint), the placeholder names the search alone (journey F10). */
+export const CONVERSATION_SEARCH_PLACEHOLDER_TOUCH = "Search conversations";
+/** Where the Ctrl K hint is worth printing: a fine pointer (so, in practice, a
+ * keyboard) and wide enough that the palette it leads to is on screen. */
+export const KEYBOARD_HINT_MEDIA_QUERY = "(any-pointer: fine) and (min-width: 500px)";
+
+export function conversationSearchPlaceholder(keyboardHint: boolean): string {
+  return keyboardHint ? CONVERSATION_SEARCH_PLACEHOLDER : CONVERSATION_SEARCH_PLACEHOLDER_TOUCH;
+}
 
 /** The list's visible name search (journey F8): filters rows by project,
  * machine or supervisor. Ctrl/Cmd+K focuses it; pressed again from the field,
  * it opens the command palette. */
-export function conversationSearchMarkup(query = ""): string {
-  return `<div class="conversation-search" role="search"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true" focusable="false"><circle cx="8.5" cy="8.5" r="5.5"/><path d="M13 13l4 4"/></svg><input id="conversation-search" type="search" aria-label="${CONVERSATION_SEARCH_LABEL}" aria-controls="conversation-list" aria-keyshortcuts="Control+K Meta+K" placeholder="${CONVERSATION_SEARCH_PLACEHOLDER}" autocomplete="off" spellcheck="false" enterkeyhint="go" value="${escapeHtml(query)}"></div>`;
+export function conversationSearchMarkup(query = "", keyboardHint = true): string {
+  return `<div class="conversation-search" role="search"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true" focusable="false"><circle cx="8.5" cy="8.5" r="5.5"/><path d="M13 13l4 4"/></svg><input id="conversation-search" type="search" aria-label="${CONVERSATION_SEARCH_LABEL}" aria-controls="conversation-list" aria-keyshortcuts="Control+K Meta+K" placeholder="${conversationSearchPlaceholder(keyboardHint)}" autocomplete="off" spellcheck="false" enterkeyhint="go" value="${escapeHtml(query)}"></div>`;
 }
 
 /** The list's empty line while a search hides every row. */
@@ -56,7 +68,7 @@ export function conversationHeaderMarkup(model: ConversationShellModel): string 
   const project = projectTitle(model.projectDir);
   const supervisor = model.supervisor || "Supervisor unavailable";
   const title = project ?? supervisor;
-  return `<header class="conversation-heading thead"><div class="conversation-topline"><button id="conversation-back" type="button" aria-label="‹ Conversations"><span class="back-glyph">‹</span><span class="back-label"> Conversations</span></button>${cloudBrand()}<button id="conversation-terminal" type="button" aria-label="Terminal view">Terminal<span class="terminal-suffix"> view</span></button></div><div class="conversation-identity"><span class="conversation-avatar" aria-hidden="true">${escapeHtml(machineMonogram(host || model.supervisor || "?"))}</span><div class="id"><h1><b title="${escapeHtml(title)}"${project ? "" : ' class="codename"'}>${escapeHtml(title)}</b></h1><span class="conversation-host"><span class="host-where">${project ? `${host ? `${escapeHtml(host)} · ` : ""}<span class="codename">${escapeHtml(supervisor)}</span>` : escapeHtml(host)}</span><span id="conversation-connection" role="status"></span></span></div></div></header>`;
+  return `<header class="conversation-heading thead"><div class="conversation-topline"><button id="conversation-back" type="button" aria-label="‹ Conversations"><span class="back-glyph">‹</span><span class="back-label"> Conversations</span></button>${cloudBrand()}<button id="conversation-terminal" type="button" aria-label="Terminal view">Terminal<span class="terminal-suffix"> view</span></button></div><div class="conversation-identity"><span class="conversation-avatar" aria-hidden="true">${escapeHtml(machineMonogram(host || model.supervisor || "?"))}</span><div class="id"><h1><b title="${escapeHtml(title)}"${project ? "" : ' class="codename"'}>${escapeHtml(title)}</b></h1><span class="conversation-host"><span class="host-where" title="${escapeHtml(project ? [host, supervisor].filter(Boolean).join(" · ") : host)}">${project ? `${host ? `${escapeHtml(host)} · ` : ""}<span class="codename">${escapeHtml(supervisor)}</span>` : escapeHtml(host)}</span><span id="conversation-connection" role="status"></span></span></div></div></header>`;
 }
 
 /** Attaching files from this browser has no transport yet; the clip stays out of the composer until it does. */
@@ -81,7 +93,10 @@ export function dressComposer(composer: HTMLElement, supervisor?: string): void 
   composer.querySelector("h2")?.classList.add("sr-only");
   const input = composer.querySelector("textarea");
   if (input) {
-    input.placeholder = `Message ${name}`;
+    // A placeholder that cannot fit is ellipsised here as well as by the
+    // stylesheet, so no engine wraps it into a taller field (journey F9); the
+    // header and the Send button's accessible name carry the name whole.
+    input.placeholder = `Message ${composerNameHint(name)}`;
     input.rows = 1;
     // Hidden until attaching works (cas-17e3): a control that can never be
     // used is noise for every reader, and a dead stop for keyboard users.
@@ -97,6 +112,15 @@ export function dressComposer(composer: HTMLElement, supervisor?: string): void 
     const text = composer.ownerDocument.createElement("span"); text.className = "send-label"; text.textContent = `Send to ${supervisor || "supervisor"}`;
     button.append(text);
   }
+}
+
+/** Longest supervisor name the composer placeholder spells out in full. */
+export const COMPOSER_NAME_MAX_CHARS = 20;
+
+/** The name as the placeholder shows it: whole, or cut with an ellipsis. */
+export function composerNameHint(name: string): string {
+  const characters = Array.from(name);
+  return characters.length <= COMPOSER_NAME_MAX_CHARS ? name : `${characters.slice(0, COMPOSER_NAME_MAX_CHARS - 1).join("")}…`;
 }
 
 /** The list's empty line: loading, unpaired, or paired with nothing live. */
@@ -165,7 +189,7 @@ export function conversationShellMarkup(model: ConversationShellModel): string {
   const welcomePairs = !model.selected && model.loaded && !model.paired;
   return `<div class="conversation-shell${model.selected ? " thread-open" : ""}${welcomePairs ? " welcome-pairs" : ""}${model.machineId ? ` ${machineAccentClass(model.machineId)}` : ""}">
     <aside class="conversation-sidebar" aria-label="Supervisor conversations">
-      <header class="conversation-list-heading"><div class="conversation-list-top">${cloudBrand()}${appearanceButtonMarkup}</div><div class="conversation-list-title"><h1>Conversations</h1><button id="pair-toggle"${welcomePairs ? ' class="primary"' : ""} type="button">Pair a machine</button></div><p>Your projects. Your supervisors.</p>${model.paired ? conversationSearchMarkup(model.searchQuery) : ""}</header>
+      <header class="conversation-list-heading"><div class="conversation-list-top">${cloudBrand()}${appearanceButtonMarkup}</div><div class="conversation-list-title"><h1>Conversations</h1><button id="pair-toggle"${welcomePairs ? ' class="primary"' : ""} type="button">Pair a machine</button></div><p>Your projects. Your supervisors.</p>${model.paired ? conversationSearchMarkup(model.searchQuery, model.keyboardHint ?? true) : ""}</header>
       <nav id="conversation-list" aria-label="Choose a supervisor"></nav>
       <div id="conversation-empty" class="conversation-empty" hidden></div>
       ${model.paired ? composeFabMarkup : ""}

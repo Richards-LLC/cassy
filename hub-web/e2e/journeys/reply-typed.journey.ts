@@ -134,6 +134,17 @@ test("HUB-J5 reply by typing", async ({ page, journey }) => {
     expect(field!.width, "message field width").toBeGreaterThan(row!.width * 0.33);
     expect(button!.x + button!.width, "Send stays inside the composer").toBeLessThanOrEqual(row!.x + row!.width);
     expect(await longSend.locator(".send-label").evaluate((label) => label.scrollWidth > label.clientWidth), "the label ellipsises").toBe(true);
+    // The empty field stays one line tall (a 64-character name used to grow it
+    // to three), and the header's machine · codename line stays one line with
+    // the connection state visible (3.30.0 journey F9).
+    const lineHeight = await composer.evaluate((field) => parseFloat(getComputedStyle(field).lineHeight));
+    const oneLine = await composer.evaluate((field) => field.getBoundingClientRect().height);
+    expect(oneLine, "empty composer height").toBeLessThan(2 * lineHeight + 26);
+    expect(await composer.getAttribute("placeholder")).toMatch(/…$/);
+    const host = page.locator(".conversation-host");
+    const hostLine = await host.evaluate((element) => parseFloat(getComputedStyle(element).lineHeight));
+    expect((await host.boundingBox())!.height, "header meta on one line").toBeLessThan(hostLine * 1.5);
+    await expect(page.locator("#conversation-connection")).toBeVisible();
     // The empty-thread card wraps the long name, and nothing scrolls sideways,
     // at desktop, a narrow laptop and a phone (QA F2, rounds 1 and 2).
     const thread = page.locator(".conversation-reading.thread");

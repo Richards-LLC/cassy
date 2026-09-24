@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { CHECKING_VOICE_INPUT, LISTENING_PLACEHOLDER, VOICE_INPUT_UNSUPPORTED, applyMicState, composerMarkup, micPresentation, type MicState } from "./composer-markup";
-import { dressComposer } from "./conversation-shell";
+import { COMPOSER_NAME_MAX_CHARS, composerNameHint, dressComposer } from "./conversation-shell";
 
 // WCAG 2.x contrast, the same arithmetic as machine-accent.test.ts.
 const luminance = (hex: string) => [1, 3, 5].map((o) => Number.parseInt(hex.slice(o, o + 2), 16) / 255).map((c) => (c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4)).reduce((sum, c, i) => sum + c * [0.2126, 0.7152, 0.0722][i], 0);
@@ -130,3 +130,26 @@ describe("mic state styling (P6)", () => {
     }
   });
 });
+
+describe("a long supervisor name keeps the composer one line (3.30.0 journey F9)", () => {
+  const LONG = "an-extraordinarily-long-supervisor-name-for-truncation-checks-77";
+  it("ellipsises the name in the placeholder, keeps a short one whole", () => {
+    expect(LONG).toHaveLength(64);
+    expect(composerNameHint("patient-pelican-9")).toBe("patient-pelican-9");
+    expect(Array.from(composerNameHint(LONG))).toHaveLength(COMPOSER_NAME_MAX_CHARS);
+    expect(composerNameHint(LONG)).toBe(`${LONG.slice(0, COMPOSER_NAME_MAX_CHARS - 1)}…`);
+  });
+  it("dresses the field with the shortened placeholder and the Send button with the full name", () => {
+    const slot = document.createElement("div");
+    slot.innerHTML = composerMarkup(LONG);
+    dressComposer(slot.querySelector<HTMLElement>(".message")!, LONG);
+    expect(slot.querySelector<HTMLTextAreaElement>("#message-text")!.placeholder).toBe(`Message ${composerNameHint(LONG)}`);
+    expect(slot.querySelector("#message-send")!.getAttribute("aria-label")).toBe(`Send to ${LONG}`);
+  });
+  it("keeps the empty field to one line in the stylesheet", () => {
+    const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "styles.css"), "utf8");
+    expect(css).toContain(".conversation-composer textarea:placeholder-shown { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }");
+    expect(css).toContain(".conversation-identity .conversation-host { display: flex; margin-top: 1px; font: var(--weight-regular) 13px/1.25 var(--font-mono); color: var(--ink-mid); white-space: nowrap; }");
+  });
+});
+

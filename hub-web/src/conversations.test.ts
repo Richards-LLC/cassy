@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { ConversationHistory, RECEIPT_REPLY_GRACE_MS, RECEIPT_TIMEOUT_MS } from "./conversation-history";
 import { ConversationList, conversationRowMarkup, filterConversationRows, truncateConversationPreview, type ConversationRow } from "./conversation-list";
 import { ConversationView } from "./conversation-view";
-import { ATTACH_DISABLED_REASON, ATTACH_SUPPORTED, arrangeConversationShell, conversationNoMatchText, conversationShellMarkup, dressComposer } from "./conversation-shell";
+import { ATTACH_DISABLED_REASON, ATTACH_SUPPORTED, arrangeConversationShell, conversationNoMatchText, conversationShellMarkup, dressComposer, KEYBOARD_HINT_MEDIA_QUERY } from "./conversation-shell";
 import { renderConversationFixture } from "../fixtures/conversations";
 import { projectName, projectBadge } from "./cloud-brand";
 
@@ -238,6 +238,11 @@ describe('conversation evidence', () => {
     expect(row.querySelector('.conversation-flag')?.getAttribute('aria-label')).toBe('2 waiting for you');
   });
   it('gates the compose FAB on a paired machine and puts Appearance & commands in the header as a named icon button (P13)', () => {
+    // A phone has no Ctrl K to press: the hint is dropped (3.30.0 journey F10).
+    const phone = document.createElement('div');
+    phone.innerHTML = conversationShellMarkup({ selected: false, loaded: true, paired: true, keyboardHint: false });
+    expect(phone.querySelector<HTMLInputElement>('#conversation-search')!.placeholder).toBe('Search conversations');
+    expect(KEYBOARD_HINT_MEDIA_QUERY).toBe('(any-pointer: fine) and (min-width: 500px)');
     const unpaired = document.createElement('div');
     unpaired.innerHTML = conversationShellMarkup({ selected: false, loaded: true, paired: false });
     expect(unpaired.querySelector('#compose-fab')).toBeNull();

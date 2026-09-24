@@ -62,5 +62,15 @@ test("HUB-J1 first open and pair a machine with a code", async ({ page, journey 
     await expect(toast).toHaveText("Atlas · Linux connected");
     const [notice, composer] = await Promise.all([toast.boundingBox(), page.locator(".conversation-composer").boundingBox()]);
     expect(notice!.y + notice!.height, "toast above the composer").toBeLessThan(composer!.y);
+    // It covers no heading either: at the top right it used to land on the
+    // context rail's "Tasks & progress" (3.30.0 journey F8).
+    const covered = await page.evaluate(() => {
+      const t = document.querySelector<HTMLElement>("#toast")!.getBoundingClientRect();
+      return [...document.querySelectorAll<HTMLElement>("h1, h2, h3")].filter((h) => h.getClientRects().length > 0).filter((h) => {
+        const r = h.getBoundingClientRect();
+        return r.width > 0 && t.left < r.right && t.right > r.left && t.top < r.bottom && t.bottom > r.top;
+      }).map((h) => h.textContent?.trim());
+    });
+    expect(covered, "headings under the toast").toEqual([]);
   });
 });

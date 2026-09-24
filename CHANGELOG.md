@@ -7,7 +7,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
-## [3.29.0] - 2026-09-23
+## [3.29.0] - 2026-09-24
 
 ### Fixed
 
@@ -51,6 +51,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+- Commander now shows every supervisor reply. At the end of each supervisor
+  turn, its final reply is posted to the paired Commander's conversation
+  history, as an answer when Commander started the turn and as a status
+  update otherwise. It carries the reply text only, with secrets redacted,
+  capped at 4,000 characters and never duplicated. It starts once a Commander
+  is paired and never applies to workers.
 - A supervisor can close a task whose scoped test run fails only on tests
   that already fail at the base commit. Both runs must use the same command,
   and the decision is recorded on the task.

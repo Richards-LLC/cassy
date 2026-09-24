@@ -51,6 +51,7 @@ new_fixture() {
         "$repo/.github/workflows" \
         "$repo/.context/zig"
     cp "$gate" "$repo/scripts/release-gate.sh"
+    cp "$script_dir/release-portable.sh" "$repo/scripts/release-portable.sh"
     cp "$script_dir/check-workflow-run-interpolation.py" "$repo/scripts/check-workflow-run-interpolation.py"
     cat > "$repo/.github/workflows/release.yml" <<'EOF'
 jobs:

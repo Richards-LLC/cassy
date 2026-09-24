@@ -2,7 +2,7 @@ import { machineFooterMarkup, pairedMachinesDialogMarkup, renderPairedMachines }
 import { ConversationList, type ConversationRow } from '../src/conversation-list';
 import { ConversationHistory } from '../src/conversation-history';
 import { ConversationView } from '../src/conversation-view';
-import { applyKeyboardViewport, conversationEmptyText, conversationShellMarkup, dressComposer, keyboardViewportHeight } from '../src/conversation-shell';
+import { applyKeyboardViewport, conversationListState, conversationShellMarkup, conversationSkeletonMarkup, dressComposer, keyboardViewportHeight } from '../src/conversation-shell';
 import { applyMicState, composerMarkup, type MicState } from '../src/composer-markup';
 import { syncContextRail } from '../src/context-rail';
 import { installAttentionObjects, renderAskObject, renderBlockerObject } from '../src/attention-objects';
@@ -73,9 +73,12 @@ export function renderConversationFixture(app: HTMLElement, state: string): void
   // The list's empty line, exactly as main.ts renderConversationList sets it.
   const empty = app.querySelector<HTMLElement>('#conversation-empty')!;
   empty.hidden = listRows.length > 0;
-  empty.textContent = conversationEmptyText(!loading, machines.length);
+  const listState = conversationListState(!loading, machines.map(() => ({ catalogReceived: true, phase: 'live' })));
+  if (listState.kind === 'loading') empty.innerHTML = conversationSkeletonMarkup();
+  else empty.textContent = listState.text;
+  empty.dataset.state = listState.kind;
   // The footer counts conversations, not machines: it must equal the rows rendered above.
-  app.querySelector('#hub-footer-badges')!.innerHTML = machineFooterMarkup(machines, listRows.length, 'fixture');
+  app.querySelector('#hub-footer-badges')!.innerHTML = machineFooterMarkup(machines, listRows.length, 'fixture', loading);
   app.insertAdjacentHTML('beforeend', pairedMachinesDialogMarkup());
   renderPairedMachines(app.querySelector('#paired-machines-list')!, machines, async () => {});
   const dialog = app.querySelector<HTMLDialogElement>('#paired-machines-dialog')!;

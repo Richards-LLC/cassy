@@ -1147,8 +1147,8 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(source).not.toContain("Connection interrupted — ${view.retryLabel}");
     // Header, row and footer read one conversation connection, and the
     // transport alarm resolves itself once the socket is live again.
-    expect(source).toContain('fleetConnectionLabel(conversationConnection(machine.id, session.name))');
-    expect(source).toContain('fleetConnectionLabel(conversationConnection(selectedMachineId, selectedSession))');
+    expect(source).toContain('fleetConnectionLabel(conversationConnection(machine.id, session.name), machine.id)');
+    expect(source).toContain('fleetConnectionLabel(conversationConnection(selectedMachineId, selectedSession), selectedMachineId)');
     expect(source).toContain("const state = machineFooterConnection(machine.id);");
     expect(source).toContain("resolveAttention(`${machine.id}:${session}:session_transport`);");
     expect(styles).toContain(".terminal-state");

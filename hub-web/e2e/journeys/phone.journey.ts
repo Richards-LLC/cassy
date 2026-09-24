@@ -9,8 +9,25 @@ test("HUB-J9 on a phone: from the list to a reply and back", async ({ page, jour
   const composer = page.getByRole("textbox", { name: "Your message" });
 
   await journey.stage("Open the list on a phone", async () => {
+    // Record every word the list and the footer badge show during the cold
+    // load: they must not claim "Not paired", "No live supervisors" or
+    // "Reconnecting" before the rows arrive (journey F14).
+    await page.addInitScript(() => {
+      const seen = new Set<string>();
+      (window as unknown as { __coldLoadText: Set<string> }).__coldLoadText = seen;
+      const record = () => {
+        for (const selector of ["#hub-footer-badges", "#conversation-empty:not([hidden])"]) {
+          const text = document.querySelector(selector)?.textContent?.trim();
+          if (text) seen.add(text);
+        }
+      };
+      new MutationObserver(record).observe(document, { subtree: true, childList: true, characterData: true, attributes: true });
+    });
     await journey.open();
     await expect(list.getByRole("button")).toHaveCount(2);
+    const coldLoad = await page.evaluate(() => [...(window as unknown as { __coldLoadText: Set<string> }).__coldLoadText]);
+    expect(coldLoad.join(" | "), "cold-load list and footer text").not.toMatch(/Not paired|No live supervisors|Reconnecting/);
+    expect(coldLoad.some((text) => text.includes("Loading")), "the cold load shows it is loading").toBe(true);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), "no sideways scrolling").toBe(true);
   });
 

@@ -6,14 +6,22 @@ export interface PairedMachineRow {
   address: string;
   connection: string;
   connected: boolean;
+  /** Live at least once in this visit; until then a retry is still "Connecting". */
+  everConnected?: boolean;
   lastSeen: string;
   runtime?: string;
 }
 
-export function machineFooterMarkup(rows: readonly PairedMachineRow[], sessions: number, build: string): string {
+/**
+ * The footer badge. While browser storage is still loading there is nothing to
+ * count, so it says so instead of "0 paired machines · Not paired"; a machine
+ * never live in this visit is "Connecting…", not "Reconnecting" (journey F14).
+ */
+export function machineFooterMarkup(rows: readonly PairedMachineRow[], sessions: number, build: string, loading = false): string {
   const connected = rows.filter(row => row.connected).length;
-  const machine = rows.length === 1 ? rows[0].label : `${rows.length} paired machines`;
-  return `<button id="paired-machines-toggle" type="button" aria-haspopup="dialog"><span class="pairing-dot${connected ? ' connected' : ''}" aria-hidden="true"></span><span>${escapeHtml(machine)}</span><span class="machine-badge-state">${connected ? `${connected === rows.length ? 'Connected' : `${connected} connected`}` : rows.length ? 'Reconnecting' : 'Not paired'}</span></button><div class="hub-footer-meta"><span>${sessions} ${sessions === 1 ? 'conversation' : 'conversations'}</span><span title="Hub build">Hub ${escapeHtml(build)}</span></div>`;
+  const machine = loading ? 'Paired machines' : rows.length === 1 ? rows[0].label : `${rows.length} paired machines`;
+  const state = loading ? 'Loading…' : connected ? `${connected === rows.length ? 'Connected' : `${connected} connected`}` : rows.length ? (rows.some(row => row.everConnected) ? 'Reconnecting' : 'Connecting…') : 'Not paired';
+  return `<button id="paired-machines-toggle" type="button" aria-haspopup="dialog"><span class="pairing-dot${connected ? ' connected' : ''}" aria-hidden="true"></span><span>${escapeHtml(machine)}</span><span class="machine-badge-state">${state}</span></button><div class="hub-footer-meta"><span>${sessions} ${sessions === 1 ? 'conversation' : 'conversations'}</span><span title="Hub build">Hub ${escapeHtml(build)}</span></div>`;
 }
 
 export function pairedMachinesDialogMarkup(): string {

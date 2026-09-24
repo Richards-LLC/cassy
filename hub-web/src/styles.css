@@ -3022,6 +3022,19 @@ dialog form > *,
 .conversation-flag { width: 10px; height: 10px; border-radius: var(--radius-pill); background: var(--warn-text); }
 .conversation-unread { min-width: 21px; padding: 2px 7px; border-radius: var(--radius-pill); text-align: center; background: var(--accent); color: var(--accent-fg); font: var(--weight-semibold) var(--fs-xs)/1.4 var(--font-ui); }
 .conversation-empty { margin: var(--space-6) 18px; color: var(--ink-mid); }
+/* F14: until storage and the first catalog answer arrive, the list shows its
+ * own shape, not a claim ("Not paired", "No live supervisors") it cannot make yet. */
+.conversation-empty[data-state="loading"] { margin: 0; }
+.conversation-skeleton { display: grid; gap: var(--space-1); padding: 0 var(--space-2); }
+.conversation-skeleton-row { display: grid; grid-template-columns: 42px minmax(0, 1fr); column-gap: 13px; align-items: center; padding: var(--space-3) 14px; }
+.conversation-skeleton-avatar { width: 42px; height: 42px; border-radius: 50%; background: var(--bg-raised); }
+.conversation-skeleton-lines { display: grid; gap: var(--space-2); }
+.conversation-skeleton-lines span { height: 12px; border-radius: var(--radius-pill); background: var(--bg-raised); }
+.conversation-skeleton-lines span:first-child { width: 62%; }
+.conversation-skeleton-lines span:last-child { width: 84%; }
+.conversation-skeleton-row { animation: conversation-skeleton-pulse 1.4s ease-in-out infinite; }
+@keyframes conversation-skeleton-pulse { 50% { opacity: .55; } }
+@media (prefers-reduced-motion: reduce) { .conversation-skeleton-row { animation: none; } }
 .compose-fab { display: none; position: fixed; right: 18px; bottom: calc(18px + env(safe-area-inset-bottom)); z-index: 2; width: 56px; height: 56px; padding: 0; border: 0; border-radius: var(--radius-pill); background: var(--you-bg); color: var(--you-fg); box-shadow: var(--lift-strong); align-items: center; justify-content: center; }
 .compose-fab:hover { background: var(--you-bg); color: var(--you-fg); }
 .compose-fab svg { width: 24px; height: 24px; display: block; }

@@ -2011,12 +2011,22 @@ dialog::backdrop { background: var(--overlay-backdrop); }
    focus ring inside the row: an outset ring loses its sides (and the first
    row's top), and the underline that survives reads as the next row. */
 .palette-commands .palette-command:focus-visible { outline-offset: calc(-2 * var(--focus-ring-width)); }
-.palette-command { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: var(--space-3); min-height: 44px; padding: var(--space-2) var(--space-3); background: var(--bg-raised); text-align: left; }
+/* The command name outranks its description (cas-cfcb, cas-5478): the title
+   track grows to its full width first and the description takes what is left,
+   ellipsised at the row's end, so a long "project · machine" line can never
+   squeeze "Jump to <supervisor>" away. */
+.palette-command { display: grid; grid-template-columns: minmax(0, max-content) minmax(0, 1fr); align-items: baseline; gap: var(--space-3); min-height: 44px; padding: var(--space-2) var(--space-3); background: var(--bg-raised); text-align: left; }
 /* `display: grid` above outranks the user-agent [hidden] rule; the filter relies on [hidden]. */
 .palette-command[hidden] { display: none; }
 .palette-command span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .palette-command small, .palette-empty { color: var(--text-mid); }
-.palette-command small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.palette-command small { justify-self: end; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* A phone row is too narrow for both on one line: the description drops under
+   the title, both at full row width, so each reads in full or ellipsises alone. */
+@media (max-width: 40rem) {
+  .palette-command { grid-template-columns: minmax(0, 1fr); row-gap: 2px; align-content: center; }
+  .palette-command small { justify-self: start; }
+}
 /* Journey F8: commands grouped Conversations / Appearance / Advanced; the
    debugging switches sit in Advanced, collapsed until asked for. */
 .palette-group { display: grid; gap: var(--space-1); }

@@ -2,6 +2,9 @@ import { test, expect } from "./journey";
 import { ATLAS, STUDIO, PELICAN, OTTER } from "./world";
 
 test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => {
+  // Eight stages, two searches and the palette: under a loaded factory host it
+  // ran at the project's 60 s budget (QA N01/N3), so it gets its own headroom.
+  test.setTimeout(120_000);
   const hub = await journey.hub({ machines: [ATLAS, STUDIO], paired: ["atlas", "studio"] });
   const list = page.getByRole("navigation", { name: "Choose a supervisor" });
   const search = page.getByRole("searchbox", { name: "Search conversations" });
@@ -94,6 +97,10 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     await expect(rows.visible()).toHaveCount(1);
     await expect(rows.visible().first()).toContainText(`Jump to ${OTTER}`);
     await expect(rows.visible().first()).toContainText("gabber-studio · Studio Mac");
+    // Every word must match, not the whole phrase, as in the list search.
+    await filter.fill("gabber studio");
+    await expect(rows.visible()).toHaveCount(1);
+    await expect(rows.visible().first()).toContainText(`Jump to ${OTTER}`);
     await filter.fill(OTTER);
     await expect(palette.getByRole("button", { name: /Show worker panes/ })).toBeHidden();
     const commands = page.locator("#command-palette .palette-command");

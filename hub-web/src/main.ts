@@ -2996,9 +2996,12 @@ function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | und
   const paletteRowShown = (command: HTMLElement) => !command.hidden && command.closest("details:not([open])") === null;
   paletteQuery.oninput = () => {
     const query = paletteQuery.value.trim().toLocaleLowerCase();
+    // Every word must match somewhere in the row, as in the list search:
+    // "gabber studio" finds the gabber-studio session on Studio Mac.
+    const words = query.split(/\s+/).filter(Boolean);
     for (const command of palette.querySelectorAll<HTMLElement>(".palette-command")) {
       const searchable = `${command.textContent ?? ""} ${command.dataset.searchText ?? ""}`.toLocaleLowerCase();
-      command.hidden = query.length > 0 && !searchable.includes(query);
+      command.hidden = words.length > 0 && !words.every((word) => searchable.includes(word));
     }
     // A group with nothing left to offer steps aside, heading and all.
     for (const group of palette.querySelectorAll<HTMLElement>(".palette-group")) {

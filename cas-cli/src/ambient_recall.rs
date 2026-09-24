@@ -1710,12 +1710,82 @@ fn is_high_document_frequency_term(term: &str) -> bool {
         "every",
         "please",
         "implement",
+        // cas-3c98 (GH #991, a regression of #188/#213): function words and
+        // tool words that alone manufactured matches such as "you,cli",
+        // "its,next" and "cas,not".
+        "you",
+        "your",
+        "yours",
+        "our",
+        "its",
+        "not",
+        "any",
+        "all",
+        "each",
+        "other",
+        "here",
+        "there",
+        "they",
+        "their",
+        "these",
+        "those",
+        "than",
+        "but",
+        "now",
+        "yes",
+        "via",
+        "per",
+        "may",
+        "might",
+        "must",
+        "let",
+        "one",
+        "see",
+        "add",
+        "next",
+        "cli",
+        "cas",
+        // Harness envelope words: every CAS wake, teammate message and task
+        // notification carries them, so they say nothing about the request
+        // ("task-notification, status, summary"; "wake, message, inbox, see").
+        "message",
+        "messages",
+        "summary",
+        "status",
+        "notification",
+        "wake",
+        "inbox",
+        "body",
+        "repeated",
+        "teammate",
+        "teammate-message",
+        "teammate_id",
+        "task-notification",
+        "task-id",
+        "tool-use-id",
+        "output-file",
+        "system-reminder",
+        "redelivery",
+        "replay",
+        "supervisor-authored",
+        "agent-authored",
     ];
     STOP.contains(&term)
 }
 
+/// cas-3c98 (GH #213 regression): a short token of mixed hex letters and
+/// digits ("e7e", "4f2", "a94") is an id shard, not a word; it matches
+/// arbitrary hashes in stored text. Plain numbers (issue, PR and error codes)
+/// and seven or more hex characters (a commit-sha prefix) stay searchable.
+fn is_short_hex_fragment(term: &str) -> bool {
+    term.len() < 7
+        && term.chars().all(|ch| ch.is_ascii_hexdigit())
+        && term.chars().any(|ch| ch.is_ascii_digit())
+        && term.chars().any(|ch| ch.is_ascii_alphabetic())
+}
+
 fn is_content_bearing_term(term: &str) -> bool {
-    term.len() >= 3 && !is_high_document_frequency_term(term)
+    term.len() >= 3 && !is_high_document_frequency_term(term) && !is_short_hex_fragment(term)
 }
 
 fn lexical_match_is_eligible(matched: &[&str]) -> bool {
@@ -4456,6 +4526,38 @@ mod tests {
         assert!(weak_task.lexical_weak);
         assert_eq!(weak_task.role_score, 0.08);
         assert_eq!(closed_task.role_score, 0.08);
+    }
+
+    /// cas-3c98 (GH #991): the reported match shapes, and matches built only
+    /// from harness envelope words, are not content and are not injected.
+    #[test]
+    fn stopword_tool_word_and_envelope_matches_are_not_eligible_cas_3c98() {
+        for matched in [
+            &["you", "cli"][..],
+            &["its", "next"][..],
+            &["cas", "not"][..],
+            &["task-notification", "status", "summary"][..],
+            &["wake", "message", "your", "inbox", "see", "not"][..],
+            &["message", "not", "here"][..],
+            &["e7e", "4f2"][..],
+        ] {
+            assert!(!lexical_match_is_eligible(matched), "{matched:?}");
+        }
+        assert!(
+            query_terms(
+                "request=CAS wake: message 33981 from supervisor is in your inbox — see inbox \
+                 (body not repeated here)."
+            )
+            .is_empty(),
+            "a bare wake envelope carries no recall terms"
+        );
+        // Real content still counts, including a commit-sha prefix and a task id.
+        assert!(lexical_match_is_eligible(&["you", "prompt_queue_store"]));
+        assert!(is_content_bearing_term("a944ee56c"));
+        assert!(is_content_bearing_term("cas-098d"));
+        assert!(is_content_bearing_term("deadbeef"));
+        assert!(!is_content_bearing_term("4f2"));
+        assert!(is_content_bearing_term("904"), "an issue number is content");
     }
 
     #[test]

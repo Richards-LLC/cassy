@@ -799,12 +799,17 @@ impl SemanticRecallRetriever {
 /// LMDB, an embedding provider, or a network client.
 pub(crate) struct SqliteRecallRetriever {
     db_path: PathBuf,
+    as_of: DateTime<Utc>,
 }
 
 impl SqliteRecallRetriever {
     pub(crate) fn existing(cas_root: &Path) -> Option<Self> {
+        Self::existing_at(cas_root, Utc::now())
+    }
+
+    pub(crate) fn existing_at(cas_root: &Path, as_of: DateTime<Utc>) -> Option<Self> {
         let db_path = cas_root.join("cas.db");
-        db_path.is_file().then_some(Self { db_path })
+        db_path.is_file().then_some(Self { db_path, as_of })
     }
 }
 
@@ -876,7 +881,7 @@ impl RecallRetriever for SqliteRecallRetriever {
         }
         let mut candidates: Vec<EvidenceCandidate> = rows
             .into_iter()
-            .map(|row| local_candidate(row, query, &terms))
+            .map(|row| local_candidate(row, query, &terms, self.as_of))
             .collect();
         sort_candidates(&mut candidates);
         candidates.truncate(limit);
@@ -992,7 +997,7 @@ impl RecallRetriever for SemanticRecallRetriever {
             if score <= 0.0 {
                 continue;
             }
-            let mut candidate = local_candidate(semantic.row, query, &terms);
+            let mut candidate = local_candidate(semantic.row, query, &terms, Utc::now());
             candidate.semantic_score = Some(f64::from(score));
             candidate.relevance = candidate.lexical_score * 0.32
                 + f64::from(score) * 0.52
@@ -1929,7 +1934,12 @@ fn is_task_id_char(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_'
 }
 
-fn local_candidate(row: LocalRow, query: &RecallQuery, terms: &[String]) -> EvidenceCandidate {
+fn local_candidate(
+    row: LocalRow,
+    query: &RecallQuery,
+    terms: &[String],
+    as_of: DateTime<Utc>,
+) -> EvidenceCandidate {
     let haystack = row.snippet.to_ascii_lowercase();
     let matched: Vec<&str> = terms
         .iter()
@@ -1939,7 +1949,7 @@ fn local_candidate(row: LocalRow, query: &RecallQuery, terms: &[String]) -> Evid
     let lexical_eligible = lexical_match_is_eligible(&matched);
     let lexical = matched.len() as f64 / terms.len().max(1) as f64;
     let lexical_match_count = matched.len();
-    let recency_score = recency_score(&row.revision);
+    let recency_score = recency_score(&row.revision, as_of);
     let binding = query.task_id.as_deref() == Some(row.id.as_str())
         || names_current_task(query.task_id.as_deref(), &haystack)
         || query.files.iter().any(|file| haystack.contains(file))
@@ -2017,8 +2027,7 @@ fn lexical_depth_bonus(matched_terms: usize) -> f64 {
     matched_terms.saturating_sub(1).min(3) as f64 * 0.08
 }
 
-fn recency_score(revision: &str) -> f64 {
-    let now = Utc::now();
+fn recency_score(revision: &str, now: DateTime<Utc>) -> f64 {
     let parsed = DateTime::parse_from_rfc3339(revision)
         .map(|value| value.with_timezone(&Utc))
         .ok()
@@ -3657,6 +3666,15 @@ mod tests {
         SqliteKnowledgeStore, SqliteSurfacedArtifactStore,
     };
 
+    #[test]
+    fn recency_score_uses_the_supplied_utc_snapshot() {
+        let before_midnight = "2026-09-23T23:59:59Z".parse().expect("UTC instant");
+        let after_midnight = "2026-09-24T00:00:00Z".parse().expect("UTC instant");
+        let revision = "2026-09-23T23:59:00Z";
+        assert_eq!(recency_score(revision, before_midnight), 0.22);
+        assert_eq!(recency_score(revision, after_midnight), 0.08);
+    }
+
     fn identity(role: RecallRole) -> RecallIdentity {
         RecallIdentity {
             session_id: "session-1".into(),
@@ -5218,6 +5236,7 @@ mod tests {
             },
             &query,
             &query_terms(&query.canonical),
+            Utc::now(),
         );
         assert!(weak.lexical_weak);
         assert!(weak.why_relevant.starts_with("lexical(weak)"));

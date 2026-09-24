@@ -65,6 +65,9 @@
 //! `age_days`. `updated_at` is rewritten to equal `created` after seeding so
 //! the ambient retriever's `ORDER BY coalesce(updated_at, created) DESC` sees
 //! the real recency order rather than insertion order.
+//! A full run snapshots one clock for both tier modes and their ambient
+//! retrievers, so crossing UTC midnight cannot change a same-day bonus
+//! between rows that are supposed to be compared exactly.
 //!
 //! # Metrics
 //!
@@ -112,7 +115,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::Duration as StdDuration;
 
-use chrono::{Duration, Utc};
+use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 
 use cas_store::{SqliteStore, Store};
@@ -438,6 +441,7 @@ pub struct EvalCorpus {
     cas_dir: PathBuf,
     active_entries: usize,
     has_search_index: bool,
+    as_of: DateTime<Utc>,
 }
 
 impl EvalCorpus {
@@ -468,7 +472,16 @@ impl EvalCorpus {
         cas_dir: &Path,
         mode: TierMode,
     ) -> Result<Self, EvalError> {
-        let mut corpus = Self::materialize(fixture, cas_dir, mode)?;
+        Self::materialize_with_index_at(fixture, cas_dir, mode, Utc::now())
+    }
+
+    fn materialize_with_index_at(
+        fixture: &EvalFixture,
+        cas_dir: &Path,
+        mode: TierMode,
+        as_of: DateTime<Utc>,
+    ) -> Result<Self, EvalError> {
+        let mut corpus = Self::materialize_at(fixture, cas_dir, mode, as_of)?;
 
         let store = SqliteStore::open(cas_dir)
             .map_err(|e| EvalError::Store(format!("open for index: {e}")))?;
@@ -498,12 +511,20 @@ impl EvalCorpus {
         cas_dir: &Path,
         mode: TierMode,
     ) -> Result<Self, EvalError> {
+        Self::materialize_at(fixture, cas_dir, mode, Utc::now())
+    }
+
+    fn materialize_at(
+        fixture: &EvalFixture,
+        cas_dir: &Path,
+        mode: TierMode,
+        as_of: DateTime<Utc>,
+    ) -> Result<Self, EvalError> {
         // Ordered oldest-last so `created` descends with the fixture position
         // and each row gets a unique timestamp.
         let mut ordered: Vec<&FixtureEntry> = fixture.entries.iter().collect();
         ordered.sort_by(|a, b| a.age_days.cmp(&b.age_days).then_with(|| a.id.cmp(&b.id)));
 
-        let now = Utc::now();
         let store =
             SqliteStore::open(cas_dir).map_err(|e| EvalError::Store(format!("open: {e}")))?;
         store
@@ -512,7 +533,7 @@ impl EvalCorpus {
 
         let mut active = 0usize;
         for (position, fe) in ordered.iter().enumerate() {
-            let entry = build_entry(fe, mode, now, position)?;
+            let entry = build_entry(fe, mode, as_of, position)?;
             if entry.memory_tier.is_active() {
                 active += 1;
             }
@@ -535,6 +556,7 @@ impl EvalCorpus {
             cas_dir: cas_dir.to_path_buf(),
             active_entries: active,
             has_search_index: false,
+            as_of,
         })
     }
 }
@@ -1389,7 +1411,7 @@ fn recall_request(case: &EvalCase) -> RecallRequest {
 pub fn ambient_packet_ranking(corpus: &EvalCorpus, case: &EvalCase) -> Vec<String> {
     let identity = recall_identity(case);
     let request = recall_request(case);
-    let Some(retriever) = SqliteRecallRetriever::existing(corpus.cas_dir()) else {
+    let Some(retriever) = SqliteRecallRetriever::existing_at(corpus.cas_dir(), corpus.as_of) else {
         return Vec::new();
     };
     let retrievers: Vec<&dyn RecallRetriever> = vec![&retriever];
@@ -1413,7 +1435,7 @@ pub fn ambient_packet_ranking(corpus: &EvalCorpus, case: &EvalCase) -> Vec<Strin
 pub fn ambient_candidate_ranking(corpus: &EvalCorpus, case: &EvalCase) -> Vec<String> {
     let identity = recall_identity(case);
     let request = recall_request(case);
-    let Some(retriever) = SqliteRecallRetriever::existing(corpus.cas_dir()) else {
+    let Some(retriever) = SqliteRecallRetriever::existing_at(corpus.cas_dir(), corpus.as_of) else {
         return Vec::new();
     };
     let retrievers: Vec<&dyn RecallRetriever> = vec![&retriever];
@@ -1614,11 +1636,14 @@ pub fn run_all(
 ) -> Result<(Vec<SelectorMetrics>, CaseBreakdown), EvalError> {
     let mut metrics = Vec::new();
     let mut details = Vec::new();
+    // Both tier modes must use the same recency clock. A run straddling UTC
+    // midnight otherwise gives identical rows different same-day bonuses.
+    let as_of = Utc::now();
 
     for mode in [TierMode::Live, TierMode::AllWorking] {
         let dir = tempfile::tempdir()
             .map_err(|e| EvalError::Io(format!("tempdir for {}: {e}", mode.as_str())))?;
-        let corpus = EvalCorpus::materialize_with_index(fixture, dir.path(), mode)?;
+        let corpus = EvalCorpus::materialize_with_index_at(fixture, dir.path(), mode, as_of)?;
 
         // The production path, in both SessionStart shapes. This is the row
         // that describes what a real session receives.
@@ -1658,6 +1683,39 @@ pub fn run_all(
     }
 
     Ok((metrics, details))
+}
+
+#[cfg(test)]
+mod clock_tests {
+    use super::*;
+
+    #[test]
+    fn ambient_tier_modes_share_a_clock_at_utc_midnight() {
+        let fixture = EvalFixture::load(&EvalFixture::committed_path()).expect("fixture");
+        let as_of = "2026-09-23T23:59:59Z".parse().expect("UTC instant");
+        let live_dir = tempfile::tempdir().expect("live tempdir");
+        let working_dir = tempfile::tempdir().expect("working tempdir");
+        let live = EvalCorpus::materialize_at(&fixture, live_dir.path(), TierMode::Live, as_of)
+            .expect("live corpus");
+        let working =
+            EvalCorpus::materialize_at(&fixture, working_dir.path(), TierMode::AllWorking, as_of)
+                .expect("working corpus");
+
+        for case in &fixture.cases {
+            assert_eq!(
+                ambient_packet_ranking(&live, case),
+                ambient_packet_ranking(&working, case),
+                "{}: ambient packet ranking changed with tier mode",
+                case.case_id
+            );
+            assert_eq!(
+                ambient_candidate_ranking(&live, case),
+                ambient_candidate_ranking(&working, case),
+                "{}: ambient candidate ranking changed with tier mode",
+                case.case_id
+            );
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

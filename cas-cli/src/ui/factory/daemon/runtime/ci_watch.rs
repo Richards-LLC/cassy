@@ -91,7 +91,16 @@ impl std::fmt::Display for CiWatchError {
 
 pub(crate) trait CiTransport {
     fn completed_runs(&self) -> Result<Vec<CiRun>, CiWatchError>;
-    fn failing_job(&self, run_id: u64) -> Result<String, CiWatchError>;
+    /// The run's first job that actually failed (`failure` or `timed_out`),
+    /// or `None` when no job did — a run whose jobs were only cancelled is not
+    /// a red run (cas-c188).
+    fn failing_job(&self, run_id: u64) -> Result<Option<String>, CiWatchError>;
+    /// cas-c188: the branch's current tip on the forge, so a red run for an
+    /// older commit is never relayed as the branch's state. `None` when the tip
+    /// cannot be read; the watcher then keeps its previous behaviour.
+    fn branch_tip(&self, _branch: &str) -> Result<Option<String>, CiWatchError> {
+        Ok(None)
+    }
     fn failed_log(&self, run_id: u64) -> Result<Option<String>, CiWatchError>;
     fn merge_queue_pull_requests(&self) -> Result<Vec<MergeQueuePullRequest>, CiWatchError>;
     fn delivery_pull_requests(
@@ -492,6 +501,22 @@ struct CiJob {
     conclusion: Option<String>,
 }
 
+/// A job conclusion that makes a run red. `cancelled` and `skipped` do not:
+/// a run whose jobs were all cancelled failed nothing (cas-c188).
+fn job_conclusion_is_failure(conclusion: Option<&str>) -> bool {
+    matches!(conclusion, Some("failure" | "timed_out"))
+}
+
+#[derive(Deserialize)]
+struct BranchResponse {
+    commit: BranchCommit,
+}
+
+#[derive(Deserialize)]
+struct BranchCommit {
+    sha: String,
+}
+
 #[derive(Deserialize)]
 struct MergeQueueGraphqlResponse {
     data: MergeQueueGraphqlData,
@@ -610,7 +635,7 @@ impl CiTransport for GhCiTransport {
         Ok(response.workflow_runs)
     }
 
-    fn failing_job(&self, run_id: u64) -> Result<String, CiWatchError> {
+    fn failing_job(&self, run_id: u64) -> Result<Option<String>, CiWatchError> {
         let response: JobsResponse = self.gh_json(&[
             "api".to_string(),
             "-X".to_string(),
@@ -620,9 +645,23 @@ impl CiTransport for GhCiTransport {
         Ok(response
             .jobs
             .into_iter()
-            .find(|job| job.conclusion.as_deref() == Some("failure"))
-            .map(|job| job.name)
-            .unwrap_or_else(|| "unknown failing job".to_string()))
+            .find(|job| job_conclusion_is_failure(job.conclusion.as_deref()))
+            .map(|job| job.name))
+    }
+
+    fn branch_tip(&self, branch: &str) -> Result<Option<String>, CiWatchError> {
+        // An unreadable tip (a deleted branch, a transient API error) keeps
+        // the pre-cas-c188 behaviour rather than silencing a real red run.
+        Ok(self
+            .gh_json::<BranchResponse>(&[
+                "api".to_string(),
+                "-X".to_string(),
+                "GET".to_string(),
+                format!("repos/{}/branches/{branch}", self.repo),
+            ])
+            .ok()
+            .map(|response| response.commit.sha)
+            .filter(|sha| !sha.is_empty()))
     }
 
     fn failed_log(&self, run_id: u64) -> Result<Option<String>, CiWatchError> {
@@ -855,7 +894,9 @@ pub(crate) fn collect_pr_lane_failures(
 
     let mut failures = Vec::new();
     for ((pr_number, head_sha), (delivery, run)) in latest {
-        let check_name = transport.failing_job(run.id)?;
+        let Some(check_name) = transport.failing_job(run.id)? else {
+            continue;
+        };
         if check_name != REQUIRED_PR_LANE_CHECK {
             continue;
         }
@@ -903,6 +944,20 @@ pub(crate) fn collect_failures(
         if run.conclusion.as_deref() != Some("failure") {
             continue;
         }
+        // cas-c188: a run for a commit the branch has moved past is history,
+        // not the branch's state. Main can go weeks without a completed run of
+        // its own (merge-queue receipts are reused), which made a seven-week-old
+        // run the "latest" and relayed it as current.
+        if let Some(tip) = transport.branch_tip(&run.head_branch)?
+            && tip != run.head_sha
+        {
+            continue;
+        }
+        // A run whose jobs were cancelled, not failed, is not red; with no
+        // failed job there is nothing to name or fix.
+        let Some(failing_job) = transport.failing_job(run.id)? else {
+            continue;
+        };
 
         let mut suppressed_red_runs: Vec<_> = runs
             .iter()
@@ -919,7 +974,6 @@ pub(crate) fn collect_failures(
             .collect();
         suppressed_red_runs.sort_by_key(|older| older.run_id);
 
-        let failing_job = transport.failing_job(run.id)?;
         let failing_test = transport
             .failed_log(run.id)?
             .as_deref()
@@ -1028,9 +1082,9 @@ mod tests {
         fn completed_runs(&self) -> Result<Vec<CiRun>, CiWatchError> {
             Ok(self.runs.clone())
         }
-        fn failing_job(&self, _: u64) -> Result<String, CiWatchError> {
+        fn failing_job(&self, _: u64) -> Result<Option<String>, CiWatchError> {
             self.calls.set(self.calls.get() + 1);
-            Ok(self.job.clone())
+            Ok(Some(self.job.clone()))
         }
         fn failed_log(&self, _: u64) -> Result<Option<String>, CiWatchError> {
             Ok(self.log.clone())
@@ -1219,6 +1273,103 @@ mod tests {
         assert!(body.contains("First failing test: contract_conflict_regression"));
         assert!(crate::prompt_revalidation::parse_ci_red_run_envelope(&body));
         assert_eq!(transport.calls.get(), 1);
+    }
+
+    /// cas-c188: a transport that knows the branch tip and the run's failed
+    /// job (or that the run only had cancelled jobs).
+    struct TipTransport {
+        runs: Vec<CiRun>,
+        tip: Option<&'static str>,
+        failed_job: Option<&'static str>,
+        job_lookups: Cell<u8>,
+    }
+
+    impl CiTransport for TipTransport {
+        fn completed_runs(&self) -> Result<Vec<CiRun>, CiWatchError> {
+            Ok(self.runs.clone())
+        }
+        fn failing_job(&self, _: u64) -> Result<Option<String>, CiWatchError> {
+            self.job_lookups.set(self.job_lookups.get() + 1);
+            Ok(self.failed_job.map(str::to_string))
+        }
+        fn branch_tip(&self, _: &str) -> Result<Option<String>, CiWatchError> {
+            Ok(self.tip.map(str::to_string))
+        }
+        fn failed_log(&self, _: u64) -> Result<Option<String>, CiWatchError> {
+            Ok(None)
+        }
+        fn merge_queue_pull_requests(&self) -> Result<Vec<MergeQueuePullRequest>, CiWatchError> {
+            Ok(Vec::new())
+        }
+        fn delivery_pull_requests(
+            &self,
+            _: &str,
+        ) -> Result<Vec<DeliveryPullRequest>, CiWatchError> {
+            Ok(Vec::new())
+        }
+    }
+
+    /// cas-c188: main's latest completed run was seven weeks old, for commit
+    /// 5cf566c4, while main stood at fb1fb4da. A red run for a commit that is
+    /// not the branch tip is history and must not wake the supervisor.
+    #[test]
+    fn a_red_run_for_a_commit_that_is_not_the_branch_tip_is_silent_cas_c188() {
+        let transport = TipTransport {
+            runs: vec![run_with(
+                "main",
+                "5cf566c4",
+                31_120_167_290,
+                Some("failure"),
+            )],
+            tip: Some("fb1fb4da"),
+            failed_job: Some("Fast Validation"),
+            job_lookups: Cell::new(0),
+        };
+        let failures = collect_failures(&transport, &BTreeSet::from(["main".to_string()]))
+            .expect("the run list is valid");
+        assert!(failures.is_empty());
+        assert_eq!(
+            transport.job_lookups.get(),
+            0,
+            "no job lookup for a stale run"
+        );
+    }
+
+    /// cas-c188: a run whose jobs were cancelled (and the rest passed) failed
+    /// nothing; it is not a red run and there is no failing job to name.
+    #[test]
+    fn a_run_with_only_cancelled_jobs_is_not_red_cas_c188() {
+        let transport = TipTransport {
+            runs: vec![run_with("main", "fb1fb4da", 43, Some("failure"))],
+            tip: Some("fb1fb4da"),
+            failed_job: None,
+            job_lookups: Cell::new(0),
+        };
+        let failures = collect_failures(&transport, &BTreeSet::from(["main".to_string()]))
+            .expect("the run list is valid");
+        assert!(failures.is_empty());
+        assert!(job_conclusion_is_failure(Some("failure")));
+        assert!(job_conclusion_is_failure(Some("timed_out")));
+        assert!(!job_conclusion_is_failure(Some("cancelled")));
+        assert!(!job_conclusion_is_failure(Some("skipped")));
+        assert!(!job_conclusion_is_failure(None));
+    }
+
+    /// cas-c188: a red run at the branch tip with a failed job still wakes the
+    /// supervisor, naming that job.
+    #[test]
+    fn a_red_run_at_the_tip_names_its_failed_job_cas_c188() {
+        let transport = TipTransport {
+            runs: vec![run_with("main", "fb1fb4da", 44, Some("failure"))],
+            tip: Some("fb1fb4da"),
+            failed_job: Some("Fast Validation"),
+            job_lookups: Cell::new(0),
+        };
+        let failures = collect_failures(&transport, &BTreeSet::from(["main".to_string()]))
+            .expect("the run list is valid");
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].failing_job, "Fast Validation");
+        assert!(relay_body(&failures[0]).contains("Failing job: Fast Validation"));
     }
 
     #[test]
@@ -1641,7 +1792,7 @@ mod tests {
                     "gh auth login required".to_string(),
                 ))
             }
-            fn failing_job(&self, _: u64) -> Result<String, CiWatchError> {
+            fn failing_job(&self, _: u64) -> Result<Option<String>, CiWatchError> {
                 unreachable!()
             }
             fn failed_log(&self, _: u64) -> Result<Option<String>, CiWatchError> {

@@ -2217,6 +2217,10 @@ async function takeControlForRefused(machineId: string, session: string): Promis
   const key = sessionKey(machineId, session);
   if (!machine || pendingSubmissions.has(key)) return;
   const stillHere = () => selectedMachineId === machineId && selectedSession === session;
+  // The message's control the operator pressed (cas-008f): the lease refresh
+  // can rebuild the shell around the conversation, which drops focus to the
+  // page body, so it is handed back to the same message afterwards.
+  const pressed = document.activeElement instanceof HTMLElement && document.activeElement.closest(".conversation-reading.thread") ? document.activeElement : null;
   const before = leases.get(key);
   const force = Boolean(before?.controller_label && !before.held_by_me && machine.scopes.includes("hub-admin"));
   pendingSubmissions.add(key);
@@ -2244,7 +2248,27 @@ async function takeControlForRefused(machineId: string, session: string): Promis
       : "Could not take control of this session. Check that it is live, then take control again.", "error");
   } finally {
     pendingSubmissions.delete(key);
+    if (pressed && stillHere()) landFocus([messageControl(pressed), focusTargets.thread], { keep: true, nextTask: true, waitMs: 1_000, since: pressed });
   }
+}
+
+/**
+ * The control a keyboard user pressed on a message, or its stand-in once the
+ * message repaints (cas-008f): the same element while it is still on screen
+ * (a refused take leaves Take control in place), otherwise the same kind of
+ * control on the same message, otherwise that message's Take control or
+ * Retry. The message is found again by its bubble key.
+ */
+function messageControl(pressed: HTMLElement): FocusTarget {
+  const bubbleKey = pressed.closest<HTMLElement>("[data-key]")?.dataset.key;
+  const kind = pressed.className;
+  return () => {
+    if (pressed.isConnected && pressed.getClientRects().length > 0) return pressed;
+    const bubble = bubbleKey ? [...document.querySelectorAll<HTMLElement>(".conversation-reading.thread [data-key]")].find((node) => node.dataset.key === bubbleKey) : undefined;
+    if (!bubble) return null;
+    return [...bubble.querySelectorAll<HTMLElement>("button")].find((button) => button.className === kind)
+      ?? bubble.querySelector<HTMLElement>(".conversation-take-control, .conversation-retry");
+  };
 }
 
 /** One pending receipt check per thread (cas-1622). */

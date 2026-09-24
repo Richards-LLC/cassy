@@ -69,6 +69,24 @@ test("HUB-J5 reply by typing", async ({ page, journey }) => {
     await expect(page.getByText("This device isn't the one in control of the session.")).toHaveCount(1);
   });
 
+  await journey.stage("A refused Take control keeps focus on the message", async () => {
+    // Another device holds the session, so the hub refuses the take. The
+    // message keeps its Take control, and the keyboard user keeps their place
+    // on it rather than landing on the page body (cas-008f).
+    const bubble = page.locator('.conversation-turn[data-state="error"]');
+    const take = bubble.getByRole("button", { name: "Take control of the session", exact: true });
+    const lease = (url: URL) => /\/v1\/sessions\/[^/]+\/lease$/.test(url.pathname);
+    await page.route(lease, (route) => route.request().method() === "POST"
+      ? route.fulfill({ status: 409, json: { error: "lease held" } })
+      : route.fulfill({ json: { held_by_me: false, controller_label: "Studio iPad" } }));
+    await take.focus();
+    await page.keyboard.press("Enter");
+    await expect(page.locator("#message-status")).toContainText("Studio iPad controls this session");
+    await expect(take).toBeVisible();
+    await expect(take).toBeFocused();
+    await page.unroute(lease);
+  });
+
   await journey.stage("Take control from the message, then retry", async () => {
     // The refusal says "Take control, then retry". The conversation header
     // has no Take control (cas-3433), so the operator follows the instruction

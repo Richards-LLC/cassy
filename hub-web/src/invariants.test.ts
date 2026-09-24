@@ -371,6 +371,8 @@ describe("binding Cassy Cloud browser invariants", () => {
     // cas-8e0a: only a control refusal makes the cached lease stale; an
     // in_reply_to refusal must not bring Take control back on another message.
     expect(source).toContain('if (refusal(detail).action === "take-control") controlTakenAfterRefusal.delete(key);');
+    // cas-008f: whatever the take's outcome, focus goes back to the message's control, never the body.
+    expect(source).toContain("if (pressed && stillHere()) landFocus([messageControl(pressed), focusTargets.thread], { keep: true, nextTask: true, waitMs: 1_000, since: pressed });");
   });
 
   it("collapses one outage into one attention card per machine and session", async () => {

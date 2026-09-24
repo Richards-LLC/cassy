@@ -1,8 +1,13 @@
 import { test, expect } from "./journey";
+import type { Machine } from "./hub-double";
 import { ATLAS, STUDIO, PELICAN } from "./world";
 
+// A machine whose supervisor has a 64-character codename (cas-1334).
+const LONG_NAME = "an-extraordinarily-long-supervisor-name-for-truncation-checks-77";
+const FORGE: Machine = { id: "forge", label: "Forge · Linux", sessions: [{ name: LONG_NAME, supervisor: LONG_NAME, project_dir: "/projects/forge-tools", workers: ["steady-wren-3"], liveness: "live" }] };
+
 test("HUB-J5 reply by typing", async ({ page, journey }) => {
-  const hub = await journey.hub({ machines: [ATLAS, STUDIO], paired: ["atlas", "studio"] });
+  const hub = await journey.hub({ machines: [ATLAS, STUDIO, FORGE], paired: ["atlas", "studio", "forge"] });
   const list = page.getByRole("navigation", { name: "Choose a supervisor" });
   const composer = page.getByRole("textbox", { name: "Your message" });
   const send = page.getByRole("button", { name: `Send to ${PELICAN}`, exact: true });
@@ -74,5 +79,17 @@ test("HUB-J5 reply by typing", async ({ page, journey }) => {
     await expect(page.getByRole("button", { name: "Retry sending" })).toHaveCount(0);
     await expect(list.getByText("You: Ship it after the gate passes.")).toBeVisible();
     await expect(list.getByText(/Not sent: /)).toHaveCount(0);
+  });
+
+  await journey.stage("A long supervisor name leaves the message box usable", async () => {
+    await list.getByRole("button", { name: /forge-tools/ }).click();
+    const longSend = page.getByRole("button", { name: `Send to ${LONG_NAME}`, exact: true });
+    await expect(longSend).toBeVisible();
+    const [field, button, row] = await Promise.all([composer.boundingBox(), longSend.boundingBox(), page.locator(".conversation-composer").boundingBox()]);
+    // The field keeps about its usual share of the row (a normal name leaves
+    // it ~40%); the send group takes at most half and its label ellipsises.
+    expect(field!.width, "message field width").toBeGreaterThan(row!.width * 0.33);
+    expect(button!.x + button!.width, "Send stays inside the composer").toBeLessThanOrEqual(row!.x + row!.width);
+    expect(await longSend.locator(".send-label").evaluate((label) => label.scrollWidth > label.clientWidth), "the label ellipsises").toBe(true);
   });
 });

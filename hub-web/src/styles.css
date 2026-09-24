@@ -3273,8 +3273,8 @@ button.chip:disabled { cursor: default; }
 .thread .empty b { max-width: 100%; font: var(--weight-semibold) 21px/1.2 var(--font-ui); letter-spacing: -0.015em; overflow-wrap: anywhere; }
 .thread .empty .proj2 { font: var(--weight-regular) 13px/1.3 var(--font-mono); color: var(--ink-mid); overflow-wrap: anywhere; }
 .thread .empty .proj2:empty { display: none; }
-.thread .empty .said { margin: 0; max-width: 34ch; color: var(--ink-mid); font-size: 15px; }
-.thread .empty .said .codename { font: var(--weight-medium) 0.93em/1 var(--font-mono); color: var(--ink); }
+.thread .empty .said { margin: 0; max-width: 34ch; color: var(--ink-mid); font-size: 15px; overflow-wrap: anywhere; }
+.thread .empty .said .codename { font: var(--weight-medium) 0.93em/1 var(--font-mono); color: var(--ink); white-space: normal; overflow-wrap: anywhere; }
 .thread .empty .quiet { max-width: min(100%, 56ch); background: var(--sup-bg); color: var(--sup-fg); border-radius: 22px; padding: 12px 22px; box-shadow: var(--lift); overflow-wrap: anywhere; }
 .thread .empty .conversation-loading { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 10px; }
 
@@ -3283,23 +3283,26 @@ button.chip:disabled { cursor: default; }
    clip is present beside the field but disabled — there is no operator
    attachment transport yet and its title says so. The ids inside are the
    send handler's and the live-region updater's; only the dress changes. */
-.conversation-composer { position: relative; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; grid-template-areas: "clip field send" "status status status"; align-items: center; column-gap: 11px; row-gap: var(--space-2); padding: 14px 30px 22px; padding-bottom: max(22px, env(safe-area-inset-bottom)); margin: 0; border-top: 0; background: var(--canvas); color: var(--ink); }
+/* The send column is fit-content(50%) and the button may shrink (cas-1334): a
+   60-character supervisor name ellipsises in the button instead of crushing
+   the message field to a sliver. The aria-label keeps the whole name. */
+.conversation-composer { position: relative; display: grid; grid-template-columns: auto minmax(0, 1fr) fit-content(50%); grid-template-areas: "clip field send" "status status status"; align-items: center; column-gap: 11px; row-gap: var(--space-2); padding: 14px 30px 22px; padding-bottom: max(22px, env(safe-area-inset-bottom)); margin: 0; border-top: 0; background: var(--canvas); color: var(--ink); }
 .conversation-composer h2 { margin: 0; } /* .sr-only from dressComposer: the label is for the reader */
 /* Without the attach clip (cas-17e3) the field takes the first column. */
-.conversation-composer:not(:has(.composer-clip)) { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "field send" "status status"; }
+.conversation-composer:not(:has(.composer-clip)) { grid-template-columns: minmax(0, 1fr) fit-content(50%); grid-template-areas: "field send" "status status"; }
 .conversation-composer .composer-clip { grid-area: clip; display: flex; align-items: center; justify-content: center; width: 44px; height: 44px; min-height: 44px; padding: 0; border: 0; border-radius: var(--radius-pill); background: var(--panel); color: var(--ink-mid); box-shadow: var(--lift); }
 .conversation-composer .composer-clip:disabled { opacity: 1; color: var(--ink-mid); }
 .conversation-composer .composer-clip svg { width: 19px; height: 19px; display: block; opacity: 0.55; }
 .conversation-composer textarea { grid-area: field; width: 100%; min-width: 0; min-height: 46px; height: auto; field-sizing: content; max-height: 25dvh; padding: 12px 22px; border: var(--line-width) solid var(--line-strong); border-radius: 23px; resize: none; background: var(--panel); color: var(--ink); box-shadow: var(--lift); font: var(--weight-regular) 14px/1.55 var(--font-ui); }
 .conversation-composer textarea::placeholder { color: var(--ink-mid); opacity: 1; }
-.conversation-composer .composer-actions { grid-area: send; display: flex; align-items: center; gap: var(--space-2); margin: 0; }
+.conversation-composer .composer-actions { grid-area: send; display: flex; align-items: center; gap: var(--space-2); min-width: 0; margin: 0; }
 .conversation-composer .composer-actions button { width: auto; }
 .conversation-composer #message-mic { width: 44px; min-width: 44px; height: 44px; min-height: 44px; color: var(--ink-mid); border-color: var(--line-strong); background: var(--panel); }
 .conversation-composer #message-mic:not(:disabled) { box-shadow: var(--lift); }
 .conversation-composer #message-mic.listening { color: var(--crit-fg); border-color: var(--crit-bg); background: var(--crit-bg); box-shadow: var(--lift-strong); }
 .conversation-composer #message-mic:disabled { color: var(--ink-mid); border-style: dashed; border-color: var(--line-strong); background: var(--color-transparent); }
 .conversation-composer #message-keyboard { display: none; }
-.conversation-composer #message-send.send { display: inline-flex; align-items: center; gap: 8px; margin: 0; min-height: 46px; padding: 0 20px 0 16px; border: 0; border-radius: var(--radius-pill); background: var(--accent, var(--you-bg)); color: var(--accent-fg); box-shadow: var(--lift-strong); font: var(--weight-semibold) 14px/1.2 var(--font-ui); white-space: nowrap; }
+.conversation-composer #message-send.send { display: inline-flex; flex: 0 1 auto; align-items: center; gap: 8px; min-width: 0; max-width: 100%; margin: 0; min-height: 46px; padding: 0 20px 0 16px; border: 0; border-radius: var(--radius-pill); background: var(--accent, var(--you-bg)); color: var(--accent-fg); box-shadow: var(--lift-strong); font: var(--weight-semibold) 14px/1.2 var(--font-ui); white-space: nowrap; }
 .conversation-composer #message-send.send:hover:not([aria-disabled="true"]) { background: var(--accent, var(--you-bg)); color: var(--accent-fg); filter: brightness(1.08); }
 .conversation-composer .send-glyph { width: 19px; height: 19px; display: block; flex: none; }
 /* Forced colours (cas-ac7d) drop the accent tint that marks the open
@@ -3331,6 +3334,7 @@ button.chip:disabled { cursor: default; }
   button.primary:focus-visible,
   .conversation-composer #message-send.send:focus-visible { outline: var(--focus-ring-width) solid Highlight; outline: var(--focus-ring-width) solid color(from Highlight srgb r g b / 1); outline-offset: var(--focus-ring-width); }
 }
+.conversation-composer .send-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .conversation-composer .control-disabled-reason { display: none; }
 .conversation-composer .composer-status, .conversation-composer .message-status, .conversation-composer .message-delivery { grid-area: status; font-size: var(--fs-meta); margin: 0; }
 .conversation-composer .composer-status[hidden], .conversation-composer .message-status[hidden], .conversation-composer .message-delivery[hidden] { display: none; }

@@ -70,7 +70,7 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
     // title, and Enter there reopens the picker (cas-7eaf).
     await expect(toggle).toBeFocused();
     await page.keyboard.press("Enter");
-    await expect(picker).toBeVisible(soon);
+    await expect(picker).toBeVisible();
     await page.getByRole("button", { name: "Close session picker" }).click();
     await closed();
     await expect(toggle).toBeFocused();
@@ -207,6 +207,12 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
     await expect(page.locator("#session-picker")).toBeHidden();
     await expect(page.locator(".session-picker-name")).toHaveText(OTTER);
     await expect.poll(offBody).toBe(true);
+    // Focus the operator moves after the pick is theirs: the landing that
+    // waits for the terminal must not pull it back (cas-7eaf QA F01).
+    const interrupt = page.locator("#interrupt");
+    await interrupt.focus();
+    await page.waitForTimeout(2_500);
+    await expect(interrupt).toBeFocused();
     // Back in the conversation list: Enter on a row, and a mouse click on a
     // row, land in its reply box.
     await back.click();

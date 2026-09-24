@@ -1873,7 +1873,7 @@ const focusTargets = {
   terminal: (() => activePaneContext()?.surface.element.querySelector<HTMLElement>(".t3-ghostty-input")) as FocusTarget,
   conversationReturn: (() => document.querySelector<HTMLElement>("#conversation-return")) as FocusTarget,
 };
-function landFocus(targets: readonly FocusTarget[], options: { keep?: boolean; nextTask?: boolean; waitMs?: number } = {}): void {
+function landFocus(targets: readonly FocusTarget[], options: { keep?: boolean; nextTask?: boolean; waitMs?: number; since?: Element | null } = {}): void {
   // `nextTask` waits a task, not a microtask: a dialog's cancel event runs
   // before the dialog hands focus back, and a tap's deferred render runs in
   // the task after its click (DeferredRenderScheduler.afterGesture).
@@ -1882,9 +1882,12 @@ function landFocus(targets: readonly FocusTarget[], options: { keep?: boolean; n
   // and for that long re-lands if a re-mount drops the landed focus to
   // <body>; focus the operator moves elsewhere is never taken back.
   const deadline = Date.now() + (options.waitMs ?? 0);
-  // Where focus was when the landing was asked for: moving away from it is
-  // the operator's own choice, which `keep` respects.
-  const initial = document.activeElement;
+  // Where focus was when the operator acted: moving away from it is their own
+  // choice, which `keep` respects. A landing scheduled for later passes the
+  // moment it was asked for as `since`; capturing it when the timer fires
+  // would treat a control the operator has since chosen as the baseline and
+  // pull focus off it (cas-7eaf QA F01).
+  const initial = options.since !== undefined ? options.since : document.activeElement;
   let landed: Element | undefined;
   const attempt = (): void => {
     const active = document.activeElement;
@@ -1941,6 +1944,9 @@ function landAfterOpen(opened: Promise<void>, event: MouseEvent | undefined): vo
  * take focus — the terminal workspace hides it — the attached pane takes focus
  * once the attach settles, unless the operator has moved focus themselves. */
 function focusJumpedComposer(opened: Promise<void>): void {
+  // Captured at the pick, before anything moves focus: the landings below
+  // run later and must not take focus the operator moved in the meantime.
+  const pickedFrom = document.activeElement;
   const machineId = selectedMachineId;
   const session = selectedSession;
   const composer = document.querySelector<HTMLTextAreaElement>("#message-text");
@@ -1967,8 +1973,8 @@ function focusJumpedComposer(opened: Promise<void>): void {
     // The attached terminal once it is ready (attaching takes a moment),
     // else the session title: never <body> (cas-7eaf). Focus the operator
     // moved themselves is kept.
-    landFocus([focusTargets.terminal], { keep: true, waitMs: 1_500 });
-    window.setTimeout(() => landFocus([focusTargets.terminal, focusTargets.sessionTitle], { keep: true }), 1_600);
+    landFocus([focusTargets.terminal], { keep: true, waitMs: 1_500, since: pickedFrom });
+    window.setTimeout(() => landFocus([focusTargets.terminal, focusTargets.sessionTitle], { keep: true, since: pickedFrom }), 1_600);
   });
 }
 
@@ -2508,7 +2514,7 @@ function render(captureDraft = true): void {
   if (focusWinner === "terminal") queueMicrotask(() => activePaneContext()?.surface.focus());
   restoreMessageDraft();
   if (focusWinner === "composer") queueMicrotask(() => document.querySelector<HTMLTextAreaElement>("#message-text")?.focus());
-  if (threadWasFocused && focusWinner !== "composer" && focusWinner !== "terminal") landFocus([focusTargets.thread], { waitMs: 500 });
+  if (threadWasFocused && focusWinner !== "composer" && focusWinner !== "terminal") landFocus([focusTargets.thread], { keep: true, waitMs: 500 });
   lastRailSignature = undefined;
   lastShellSignature = signature;
   lastPairingView = pairingView;
@@ -2814,7 +2820,9 @@ function sessionPickerClosed(landOnTitle: boolean): void {
   // The first open rebuilds the shell, so the toggle that opened the picker
   // is gone and the dialog hands focus back to <body>. Escape and × land on
   // the session title every time, so Enter reopens it (cas-7eaf).
-  if (landOnTitle) landFocus([focusTargets.sessionTitle], { keep: true, nextTask: true, waitMs: 500 });
+  // 2 s: on a loaded machine the modal can still be closing when 500 ms run
+  // out, and a title behind a modal cannot take focus.
+  if (landOnTitle) landFocus([focusTargets.sessionTitle], { keep: true, nextTask: true, waitMs: 2_000 });
 }
 
 function syncSessionPickerToggle(): void {

@@ -3174,12 +3174,17 @@ dialog form > *,
  * in --ink, a 13px semibold "Not sent" lead with a warning glyph, and Edit /
  * Retry below as outline pills. The review asked for 1.5px; Chrome 153
  * computes a 1.5px border as 1px at DPR 1 and 2 (measured), so it is 2px. */
-.thread .turn.you .bub[data-state="error"] { background: transparent; color: var(--ink); border: 2px dashed var(--crit-bg); box-shadow: none; padding: 10px 17px; }
+.thread .turn.you .bub:is([data-state="error"], [data-state="unconfirmed"]) { background: transparent; color: var(--ink); border: 2px dashed var(--crit-bg); box-shadow: none; padding: 10px 17px; }
 .thread .conversation-refused { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; margin-top: 8px; opacity: 1; color: var(--ink); font: var(--weight-regular) 12px/1.35 var(--font-ui); }
 .thread .conversation-refused b { color: var(--crit-bg); font: var(--weight-semibold) 13px/1.3 var(--font-ui); }
 .thread .conversation-refused .warn { width: 15px; height: 15px; flex: none; color: var(--crit-bg); }
 .thread .conversation-refused-reason { flex-basis: 100%; min-width: 0; color: var(--ink-mid); overflow-wrap: anywhere; }
 .thread .conversation-refused-next { color: var(--ink); }
+/* cas-1622: a send whose receipt never came is unknown, not refused. It
+ * shares the refused outline and layout above, in the caution ink instead of
+ * critical red (--warn-text is text-grade in both schemes), with Retry only. */
+.thread .turn.you .bub[data-state="unconfirmed"] { border-color: var(--warn-text); }
+.thread .conversation-unconfirmed b, .thread .conversation-unconfirmed .warn { color: var(--warn-text); }
 /* F6: once its edited version is sent, a refused send is only a record — a
  * quiet dashed outline in --line-strong, its text clamped to one line, the
  * "Not sent · replaced by your edit" line, and no actions. */

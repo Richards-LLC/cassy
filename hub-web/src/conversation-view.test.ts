@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from "vitest";
-import { ConversationHistory } from "./conversation-history";
+import { ConversationHistory, RECEIPT_TIMEOUT_MS } from "./conversation-history";
 import { ConversationView, registerTurnRenderer } from "./conversation-view";
 import type { OperatorReply, OperatorTurnKind } from "./types";
 import ROW_20812 from "./fixtures/hub-row-20812.txt?raw";
@@ -249,6 +249,32 @@ describe("ConversationView (Pebble thread)", () => {
     const sending = view.element.querySelector<HTMLElement>('.bub[data-state="sending"]')!;
     expect(sending.querySelector(".conversation-delivery")?.textContent).toBe("Sending…");
     expect(sending.querySelector(".conversation-refused, .conversation-actions")).toBeNull();
+  });
+  it("turns a send whose receipt never came into Not confirmed with Retry, not Sending… forever (cas-1622)", () => {
+    const history = new ConversationHistory();
+    const retry = vi.fn();
+    const view = new ConversationView(document, history, { supervisor: "sup", editMessage: vi.fn(), retryMessage: retry }); document.body.replaceChildren(view.element);
+    history.submit("x", "sup", "Is the gate green?", at(9, 0), 52);
+    expect(history.unconfirmSilent(at(9, 0) + RECEIPT_TIMEOUT_MS - 1)).toEqual([]);
+    view.update();
+    expect(view.element.querySelector(".conversation-delivery")?.textContent).toBe("Sending…");
+    expect(history.unconfirmSilent(at(9, 0) + RECEIPT_TIMEOUT_MS)).toEqual(["x"]);
+    view.update();
+    const bubble = view.element.querySelector<HTMLElement>('.turn.you .bub[data-state="unconfirmed"]')!;
+    const label = bubble.querySelector<HTMLElement>(".conversation-unconfirmed")!;
+    expect(label.getAttribute("role")).toBe("status");
+    expect(label.querySelector("svg.warn")?.getAttribute("aria-hidden")).toBe("true");
+    expect(label.textContent).toBe("Not confirmed · The hub never confirmed this reached sup. Retry sends it again.");
+    // It may have arrived: no "Not sent", and only Retry (an edit could reach the supervisor twice as easily).
+    expect(label.textContent).not.toContain("Not sent");
+    const buttons = [...bubble.querySelectorAll<HTMLButtonElement>(".conversation-actions button")];
+    expect(buttons.map((button) => [button.textContent, button.getAttribute("aria-label")])).toEqual([["Retry", "Retry sending"]]);
+    buttons[0]!.click(); expect(retry).toHaveBeenCalledWith(expect.objectContaining({ id: "x", text: "Is the gate green?", replyTo: 52, state: "unconfirmed" }));
+    // A late receipt still turns it into Delivered.
+    expect(history.acknowledge({ client_ref: "x", notification_id: 60, target: "sup", stamped: true })).toBe(true);
+    view.update();
+    expect(view.element.querySelector(".conversation-unconfirmed")).toBeNull();
+    expect(view.element.querySelector(".conversation-delivered")?.textContent).toBe("Delivered");
   });
   it("names each message group's speaker and time for assistive tech (cas-17e3)", () => {
     const history = new ConversationHistory();

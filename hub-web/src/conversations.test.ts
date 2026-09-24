@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from "vitest";
-import { ConversationHistory } from "./conversation-history";
+import { ConversationHistory, RECEIPT_REPLY_GRACE_MS, RECEIPT_TIMEOUT_MS } from "./conversation-history";
 import { ConversationList, conversationRowMarkup, filterConversationRows, truncateConversationPreview, type ConversationRow } from "./conversation-list";
 import { ConversationView } from "./conversation-view";
 import { ATTACH_DISABLED_REASON, ATTACH_SUPPORTED, arrangeConversationShell, conversationNoMatchText, conversationShellMarkup, dressComposer } from "./conversation-shell";
@@ -22,6 +22,37 @@ describe('conversation evidence', () => {
     expect(history.events[0]).toMatchObject({ value: { state: 'replied' } });
     history.acknowledge({ client_ref: 'own', notification_id: 41, target: 'supervisor', stamped: true });
     expect(history.events[0]).toMatchObject({ value: { state: 'replied' } });
+  });
+  it('gives up on a missing receipt after a bounded wait, sooner once a later reply lands (cas-1622)', () => {
+    const history = new ConversationHistory();
+    const sent = 1_000_000;
+    history.submit('own', 'supervisor', 'Instruction', sent);
+    expect(history.hasPending()).toBe(true);
+    expect(history.nextReceiptCheck(sent)).toBe(RECEIPT_TIMEOUT_MS);
+    // A supervisor turn after it means its receipt should already be here; it gets a short grace.
+    history.receive({ notification_id: 9, reply_to: null, message: 'Status', summary: '', device_id: 'd' }, sent + 500);
+    expect(history.nextReceiptCheck(sent + 500)).toBe(RECEIPT_REPLY_GRACE_MS - 500);
+    expect(history.unconfirmSilent(sent + RECEIPT_REPLY_GRACE_MS - 1)).toEqual([]);
+    expect(history.unconfirmSilent(sent + RECEIPT_REPLY_GRACE_MS)).toEqual(['own']);
+    expect(history.events[0]).toMatchObject({ value: { state: 'unconfirmed' } });
+    // Nothing is left to wait for, and the thread is no longer "working" on it.
+    expect(history.nextReceiptCheck(sent + RECEIPT_REPLY_GRACE_MS)).toBeUndefined();
+    expect(history.hasPending()).toBe(false);
+    expect(history.unconfirmSilent(sent + RECEIPT_TIMEOUT_MS)).toEqual([]);
+    // A retry discards it once the new send is on the wire; a delivered send is never discarded.
+    expect(history.discardRefused('own')).toBe(true);
+    history.submit('ok', 'supervisor', 'Delivered one', sent + 3_000);
+    history.acknowledge({ client_ref: 'ok', notification_id: 12, target: 'supervisor', stamped: true });
+    expect(history.discardRefused('ok')).toBe(false);
+    expect(history.unconfirmSilent(sent + 3_000 + RECEIPT_TIMEOUT_MS)).toEqual([]);
+  });
+  it('never times out a hydrated send or a refused one (cas-1622)', () => {
+    const history = new ConversationHistory();
+    history.hydrateSend({ notification_id: 11, target: 'supervisor', text: 'Stored', state: 'sending', stamped: true, device_id: 'phone', operator_label: 'Daniel', at: '2026-09-21T14:01:00Z' });
+    history.submit('refused', 'supervisor', 'No', 5_000);
+    history.reject('refused', 'forbidden');
+    expect(history.nextReceiptCheck(Number.MAX_SAFE_INTEGER)).toBeUndefined();
+    expect(history.unconfirmSilent(Number.MAX_SAFE_INTEGER)).toEqual([]);
   });
   it('hydrates durable sends and replies in order, then dedupes live receipts and replies', () => {
     const history = new ConversationHistory();

@@ -14,6 +14,12 @@ export interface Refusal {
   readonly reason: string;
   /** What to do next. */
   readonly next: string;
+  /**
+   * The control that performs the next step, when the refused message can
+   * carry it. The copy names only controls the operator can reach from the
+   * message itself (cas-3433): the conversation header has no Take control.
+   */
+  readonly action?: "take-control";
 }
 
 const RULES: ReadonlyArray<readonly [RegExp, Refusal]> = [
@@ -23,7 +29,8 @@ const RULES: ReadonlyArray<readonly [RegExp, Refusal]> = [
   }],
   [/forbidden|authori[sz]ation|permission|not allowed|denied|lease|observ|control/i, {
     reason: "This device isn't the one in control of the session.",
-    next: "Take control from the header, then retry.",
+    next: "Take control, then retry.",
+    action: "take-control",
   }],
   [/authenticat|credential|expired|revoked|pair/i, {
     reason: "This device's pairing is no longer accepted.",

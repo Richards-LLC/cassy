@@ -102,6 +102,12 @@ export interface ConversationViewOptions {
   /** Refused sends offer to go out again unchanged (same text, same in_reply_to). */
   retryMessage?: (send: ConversationSend) => void;
   /**
+   * A send refused because this device does not control the session offers
+   * Take control on the message itself, beside Retry (cas-3433): the refusal
+   * tells the operator to take control, so the control sits where they read it.
+   */
+  takeControl?: (send: ConversationSend) => void;
+  /**
    * Quick replies and composer replies to an ask go through this; the caller
    * sends with in_reply_to = the ask's notification_id and records the send
    * in the history with the same replyTo, which is what marks the ask answered.
@@ -496,6 +502,12 @@ export class ConversationView {
       state.append(glyph.content.firstElementChild!, label, separator, reason);
       bubble.append(state);
       const actions = document.createElement("div"); actions.className = "conversation-actions";
+      if (plain.action === "take-control" && this.options.takeControl) {
+        const take = document.createElement("button"); take.type = "button"; take.className = "conversation-take-control"; take.textContent = "Take control";
+        take.setAttribute("aria-label", "Take control of the session");
+        take.onclick = () => this.options.takeControl?.(send);
+        actions.append(take);
+      }
       if (this.options.editMessage) {
         const edit = document.createElement("button"); edit.type = "button"; edit.className = "conversation-edit"; edit.textContent = "Edit";
         edit.setAttribute("aria-label", "Edit message");

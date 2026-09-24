@@ -59,12 +59,33 @@ test("HUB-J5 reply by typing", async ({ page, journey }) => {
     const bubble = page.locator('.conversation-turn[data-state="error"]');
     await expect(bubble).toBeVisible();
     await expect(bubble.getByRole("status")).toContainText("This device isn't the one in control of the session.");
-    await expect(bubble.getByRole("status")).toContainText("Take control from the header, then retry.");
+    await expect(bubble.getByRole("status")).toContainText("Take control, then retry.");
+    // cas-3433: the control the refusal names is on the message itself.
+    await expect(bubble.getByRole("button", { name: "Take control of the session", exact: true })).toBeVisible();
     await expect(bubble.getByRole("status")).not.toContainText("forbidden");
     await expect(list.getByText("Not sent: Ship it without the gate.")).toBeVisible();
     // The reason is said once, on the message; the composer only points at it (cas-4d92).
     await expect(page.locator("#message-status")).toHaveText("Not sent — see the message above.");
     await expect(page.getByText("This device isn't the one in control of the session.")).toHaveCount(1);
+  });
+
+  await journey.stage("Take control from the message, then retry", async () => {
+    // The refusal says "Take control, then retry". The conversation header
+    // has no Take control (cas-3433), so the operator follows the instruction
+    // on the refused message itself.
+    const bubble = page.locator('.conversation-turn[data-state="error"]');
+    const leaseRequest = page.waitForRequest((request) => request.method() === "POST" && new URL(request.url()).pathname.endsWith(`/sessions/${PELICAN}/lease`));
+    await bubble.getByRole("button", { name: "Take control of the session", exact: true }).click();
+    await leaseRequest;
+    await expect(page.locator("#message-status")).toHaveText("You control this session now. Retry to send the message.");
+    const retried = hub.nextSend();
+    await bubble.getByRole("button", { name: "Retry sending", exact: true }).click();
+    expect((await retried).text).toBe("Ship it without the gate.");
+    await expect(page.locator('.conversation-turn[data-state="sending"]')).toBeVisible();
+    await expect(page.locator('.conversation-turn[data-state="error"]')).toHaveCount(0);
+    // The hub refuses it again, so the next stage has a refused message to edit.
+    hub.send(PELICAN, { Error: { client_ref: (await retried).client_ref, message: "forbidden" } });
+    await expect(page.locator('.conversation-turn[data-state="error"]')).toHaveCount(1);
   });
 
   await journey.stage("Edit and resend retires the refused message", async () => {

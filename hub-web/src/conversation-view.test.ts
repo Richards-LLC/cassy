@@ -217,7 +217,7 @@ describe("ConversationView (Pebble thread)", () => {
     expect(view.element.querySelector('.conversation-turn[data-state="sending"] .conversation-delivery')?.textContent).toBe("Sending…");
     history.reject("x", "forbidden"); view.update();
     const refused = view.element.querySelector<HTMLElement>('.conversation-turn[data-state="error"]')!;
-    expect(refused.querySelector(".conversation-delivery")?.textContent).toBe("Not sent · This device isn't the one in control of the session. Take control from the header, then retry.");
+    expect(refused.querySelector(".conversation-delivery")?.textContent).toBe("Not sent · This device isn't the one in control of the session. Take control, then retry.");
     refused.querySelector("button")!.click(); expect(edit).toHaveBeenCalledWith("Ship it", expect.objectContaining({ id: "x" }));
   });
   it("marks a refused send as not sent: warning glyph, a Not sent lead, the reason, then Edit and Retry (P8, cas-b1ee)", () => {
@@ -232,7 +232,7 @@ describe("ConversationView (Pebble thread)", () => {
     expect(label.querySelector("b")?.textContent).toBe("Not sent");
     // F6: the hub's code becomes a plain reason and the step that gets it through.
     expect(label.querySelector(".conversation-refused-reason")?.firstChild?.textContent).toBe("This device isn't the one in control of the session.");
-    expect(label.querySelector(".conversation-refused-next")?.textContent).toBe(" Take control from the header, then retry.");
+    expect(label.querySelector(".conversation-refused-next")?.textContent).toBe(" Take control, then retry.");
     expect(label.textContent).not.toContain("forbidden");
     const buttons = [...refused.querySelectorAll<HTMLButtonElement>(".conversation-actions button")];
     expect(buttons.map((button) => [button.className, button.textContent, button.getAttribute("aria-label")])).toEqual([
@@ -240,6 +240,22 @@ describe("ConversationView (Pebble thread)", () => {
     ]);
     buttons[0]!.click(); expect(edit).toHaveBeenCalledWith("Ship it", expect.objectContaining({ id: "x" }));
     buttons[1]!.click(); expect(retry).toHaveBeenCalledWith(expect.objectContaining({ id: "x", text: "Ship it", replyTo: 52, state: "error" }));
+    // cas-3433: the refusal says "Take control, then retry", so with a
+    // takeControl handler the control sits on the message, first in the row.
+    const take = vi.fn();
+    const controlled = new ConversationView(document, history, { supervisor: "sup", editMessage: edit, retryMessage: retry, takeControl: take }); controlled.update();
+    const withControl = [...controlled.element.querySelectorAll<HTMLButtonElement>('.bub[data-state="error"] .conversation-actions button')];
+    expect(withControl.map((button) => [button.className, button.textContent, button.getAttribute("aria-label"), button.type])).toEqual([
+      ["conversation-take-control", "Take control", "Take control of the session", "button"],
+      ["conversation-edit", "Edit", "Edit message", "button"], ["conversation-retry", "Retry", "Retry sending", "button"],
+    ]);
+    withControl[0]!.click(); expect(take).toHaveBeenCalledWith(expect.objectContaining({ id: "x", state: "error" }));
+    // Only a control refusal offers it: taking control fixes nothing else.
+    const other = new ConversationHistory();
+    other.submit("z", "sup", "Late answer", at(9, 2), 7); other.reject("z", "semantic message enqueue failed: in_reply_to notification 7 does not exist");
+    const stale = new ConversationView(document, other, { supervisor: "sup", editMessage: edit, retryMessage: retry, takeControl: take }); stale.update();
+    expect(stale.element.querySelector(".conversation-take-control")).toBeNull();
+    expect(stale.element.querySelector(".conversation-retry")).not.toBeNull();
     // Without the callbacks a refused send still says Not sent, with no dead buttons.
     const bare = new ConversationView(document, history, "sup"); bare.update();
     expect(bare.element.querySelector(".conversation-refused b")?.textContent).toBe("Not sent");

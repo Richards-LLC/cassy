@@ -3194,9 +3194,9 @@ dialog form > *,
 .thread .conversation-delivered { display: flex; align-items: center; justify-content: flex-end; gap: 4px; }
 .thread .conversation-delivered .tick { width: 13px; height: 13px; margin: 0; color: currentColor; }
 .thread .conversation-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 10px; }
-.thread .conversation-edit, .thread .conversation-retry { min-height: 32px; padding: 0 14px; border-radius: 999px; border: 1.5px solid var(--line-strong); background: transparent; color: var(--ink); font: var(--weight-medium) 13px/1.2 var(--font-ui); cursor: pointer; }
-.thread .conversation-edit:hover, .thread .conversation-retry:hover { border-color: var(--ink); }
-.thread .conversation-edit:focus-visible, .thread .conversation-retry:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+.thread .conversation-edit, .thread .conversation-retry, .thread .conversation-take-control { min-height: 32px; padding: 0 14px; border-radius: 999px; border: 1.5px solid var(--line-strong); background: transparent; color: var(--ink); font: var(--weight-medium) 13px/1.2 var(--font-ui); cursor: pointer; }
+.thread .conversation-edit:hover, .thread .conversation-retry:hover, .thread .conversation-take-control:hover { border-color: var(--ink); }
+.thread .conversation-edit:focus-visible, .thread .conversation-retry:focus-visible, .thread .conversation-take-control:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
 /* coalesced statuses — one quiet box, never a ledger. Long or ask-bearing
  * statuses never land here (thread-model foldsAsStatus); what does is clamped
  * at three lines. The transparent bottom border is the bottom padding: the

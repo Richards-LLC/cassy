@@ -358,7 +358,7 @@ async fn public_verdicts_project_only_their_receipt_bound_delivery() {
     let supervisor_id = format!("delivery-supervisor-{}", std::process::id());
     let supervisor = registered_supervisor(&cas_dir, &supervisor_id).await;
     let task_store = open_task_store(&cas_dir).unwrap();
-    let mut previous_dispatch = None;
+    let mut previous_dispatch: Option<String> = None;
 
     for (status, use_child) in [("approved", false), ("rejected", true)] {
         let created = service

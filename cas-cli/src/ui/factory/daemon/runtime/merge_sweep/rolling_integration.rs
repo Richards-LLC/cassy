@@ -24,6 +24,9 @@ pub(super) struct BaseFailure {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct IntegrationReceipt {
     base: String,
+    /// GH #954: the trunk branch `base` was read from (`origin/<trunk>`).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    trunk: String,
     epics: Vec<EpicTip>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     already_integrated: Vec<EpicTip>,
@@ -191,6 +194,64 @@ fn ref_tip(root: &Path, reference: &str) -> Option<String> {
         &["rev-parse", "--verify", &format!("{reference}^{{commit}}")],
     )
     .ok()
+}
+
+/// GH #954: the trunk the rolling union is built on, and its fetched tip.
+///
+/// The sweep used to read `origin/main` unconditionally, so a repository whose
+/// trunk is `master` (or anything else) failed before it assembled anything.
+/// Resolution order, first match wins:
+/// 1. the configured trunk, `[factory] epic_base_branch` (an explicit setting
+///    that does not resolve on origin is an error, never silently skipped);
+/// 2. `origin/HEAD`, the remote's own default;
+/// 3. `origin/main`, then `origin/master`.
+///
+/// Every candidate must resolve under `refs/remotes/origin/`: the union is
+/// built on what origin holds, not on a local branch that may be ahead of it.
+fn resolve_integration_trunk(
+    root: &Path,
+    configured: Option<&str>,
+) -> Result<(String, String), String> {
+    let remote_tip = |branch: &str| ref_tip(root, &format!("refs/remotes/origin/{branch}"));
+    if let Some(configured) = configured
+        .map(str::trim)
+        .map(|branch| branch.strip_prefix("origin/").unwrap_or(branch))
+        .filter(|branch| !branch.is_empty())
+    {
+        return remote_tip(configured)
+            .map(|tip| (configured.to_owned(), tip))
+            .ok_or_else(|| {
+                format!(
+                    "configured trunk `{configured}` ([factory] epic_base_branch) does not \
+                     resolve as origin/{configured}"
+                )
+            });
+    }
+    if let Ok(reference) = git_output(
+        root,
+        &["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"],
+    ) && let Some(branch) = reference.trim().strip_prefix("refs/remotes/origin/")
+        && !branch.is_empty()
+        && let Some(tip) = remote_tip(branch)
+    {
+        return Ok((branch.to_owned(), tip));
+    }
+    for candidate in ["main", "master"] {
+        if let Some(tip) = remote_tip(candidate) {
+            return Ok((candidate.to_owned(), tip));
+        }
+    }
+    Err(
+        "cannot resolve the trunk to integrate on: origin/HEAD is unset and neither \
+         origin/main nor origin/master exists; set [factory] epic_base_branch or run \
+         `git remote set-head origin --auto`"
+            .to_owned(),
+    )
+}
+
+/// The configured trunk for the repository at `main_root`, if any.
+fn configured_trunk(main_root: &Path) -> Option<String> {
+    crate::config::Config::configured_epic_base_branch(main_root)
 }
 
 fn merge_tree_conflicts(root: &Path, left: &str, right: &str) -> Result<bool, String> {
@@ -361,6 +422,7 @@ fn integrate(
     // fetch or missing epic can never leave release assembly looking green.
     let mut receipt = IntegrationReceipt {
         base: String::new(),
+        trunk: String::new(),
         epics: Vec::new(),
         already_integrated: Vec::new(),
         tip: None,
@@ -397,11 +459,12 @@ fn integrate(
         },
     )?;
     git_output(project_root, &["fetch", "--prune", "origin"])?;
-    let base = git_output(
-        project_root,
-        &["rev-parse", "--verify", "refs/remotes/origin/main^{commit}"],
-    )?;
+    // GH #954: the trunk is resolved, not assumed to be main.
+    let (trunk, base) =
+        resolve_integration_trunk(project_root, configured_trunk(main_root).as_deref())?;
+    let base_label = format!("origin/{trunk}");
     receipt.base = base.clone();
+    receipt.trunk = trunk.clone();
     let store = crate::store::open_task_store(&shared_cas).map_err(|error| error.to_string())?;
     let mut tasks = store.list(None).map_err(|error| error.to_string())?;
     if let Some(focused_id) = focused_epic_id_for_project(main_root) {
@@ -429,7 +492,7 @@ fn integrate(
         ],
     )
     .ok();
-    let (tip, prefixes) = match assemble(&worktree, &base, "origin/main", &receipt.epics)? {
+    let (tip, prefixes) = match assemble(&worktree, &base, &base_label, &receipt.epics)? {
         Assembly::Conflict { detail, affected } => {
             receipt.status = "CONFLICT".to_owned();
             receipt.detail = detail.clone();
@@ -562,9 +625,9 @@ fn integrate(
                     .collect();
             }
             Ok(None) => {
-                result
-                    .summary
-                    .push_str("; failing targets also fail on origin/main (no epic attribution)");
+                result.summary.push_str(&format!(
+                    "; failing targets also fail on {base_label} (no epic attribution)"
+                ));
                 affected = receipt.epics.iter().map(|epic| epic.id.clone()).collect();
                 let evidence = BaseFailure {
                     base: base.clone(),
@@ -835,13 +898,18 @@ pub(super) fn recovery_request_for_any_open_epic(
 }
 
 /// A base-only recovery has no event-owned branch to validate. The rolling
-/// integration path fetches origin/main before it constructs the union, so
-/// this request only identifies the recovery mode in logs and receipts.
+/// integration path fetches and resolves the trunk before it constructs the
+/// union, so this request only identifies the recovery mode in logs and
+/// receipts. It names the trunk the same way (GH #954), falling back to
+/// `main` only as a label when nothing resolves yet.
 pub(super) fn base_only_recovery_request(project_root: &Path) -> Result<SweepRequest, String> {
-    let _ = project_root;
+    let target_branch =
+        resolve_integration_trunk(project_root, configured_trunk(project_root).as_deref())
+            .map(|(trunk, _)| trunk)
+            .unwrap_or_else(|_| "main".to_owned());
     Ok(SweepRequest {
         epic_id: "base-only".to_owned(),
-        target_branch: "main".to_owned(),
+        target_branch,
         commit: "base-only".to_owned(),
     })
 }
@@ -2155,6 +2223,125 @@ echo 'Summary: 1 passed'
         assert_eq!(request.epic_id, open_delivery.id);
         assert_eq!(request.target_branch, open_delivery.branch);
         assert_eq!(request.commit, open_delivery.tip);
+    }
+
+    /// GH #954: the trunk is resolved, not assumed: an explicit setting first,
+    /// then origin/HEAD, then origin/main and origin/master.
+    #[test]
+    fn integration_trunk_resolves_config_then_origin_head_then_main_or_master_gh954() {
+        let repo = fixture();
+        git(repo.path(), &["branch", "-m", "main", "master"]);
+        git(repo.path(), &["branch", "release"]);
+        git(
+            repo.path(),
+            &["remote", "add", "origin", repo.path().to_str().unwrap()],
+        );
+        git(repo.path(), &["fetch", "origin"]);
+        let master = git(repo.path(), &["rev-parse", "master"]);
+
+        // No origin/HEAD and no origin/main: origin/master is the trunk.
+        assert_eq!(
+            resolve_integration_trunk(repo.path(), None).unwrap(),
+            ("master".to_owned(), master.clone())
+        );
+        // An explicit setting wins, written with or without "origin/".
+        for configured in ["release", "origin/release", " release "] {
+            assert_eq!(
+                resolve_integration_trunk(repo.path(), Some(configured))
+                    .unwrap()
+                    .0,
+                "release"
+            );
+        }
+        // A setting that does not resolve on origin is an error, never skipped.
+        let error = resolve_integration_trunk(repo.path(), Some("staging")).unwrap_err();
+        assert!(error.contains("staging"), "{error}");
+        // origin/HEAD, when set, wins over the main/master fallback.
+        git(repo.path(), &["remote", "set-head", "origin", "release"]);
+        assert_eq!(
+            resolve_integration_trunk(repo.path(), None).unwrap().0,
+            "release"
+        );
+        // Nothing to resolve: a clear error naming both ways out.
+        let bare = tempfile::tempdir().unwrap();
+        git(bare.path(), &["init", "-b", "trunk"]);
+        let error = resolve_integration_trunk(bare.path(), None).unwrap_err();
+        assert!(error.contains("epic_base_branch"), "{error}");
+        assert!(error.contains("set-head"), "{error}");
+    }
+
+    /// GH #954: a repository whose trunk is `master` integrates and sweeps.
+    /// Before the fix the sweep failed at `rev-parse refs/remotes/origin/main`.
+    #[test]
+    fn base_only_recovery_integrates_on_a_master_trunk_gh954() {
+        let repo = fixture();
+        git(repo.path(), &["branch", "-m", "main", "master"]);
+        git(
+            repo.path(),
+            &["checkout", "-b", "epic/cas-master-open", "master"],
+        );
+        fs::write(repo.path().join("open"), "open\n").unwrap();
+        git(repo.path(), &["add", "."]);
+        git(repo.path(), &["commit", "-m", "cas-master-open"]);
+        let epic_tip = git(repo.path(), &["rev-parse", "HEAD"]);
+        git(repo.path(), &["checkout", "--detach", "master"]);
+        git(
+            repo.path(),
+            &["remote", "add", "origin", repo.path().to_str().unwrap()],
+        );
+        let stub = repo.path().join("cargo-stub.sh");
+        crate::test_paths::warm_stub(&stub, "#!/bin/sh\necho 'Summary: 1 passed'\n");
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[
+            ("CARGO", stub.to_str().unwrap()),
+            ("CAS_FACTORY_BUILD_GUARD", "off"),
+        ]);
+        let cas_dir = crate::store::init_cas_dir(repo.path()).unwrap();
+        let tasks = crate::store::open_task_store(&cas_dir).unwrap();
+        let mut open_task = Task::new("cas-master-open".to_owned(), "cas-master-open".to_owned());
+        open_task.task_type = TaskType::Epic;
+        open_task.branch = Some("epic/cas-master-open".to_owned());
+        tasks.add(&open_task).unwrap();
+
+        assert_eq!(
+            base_only_recovery_request(repo.path())
+                .unwrap()
+                .target_branch,
+            "main",
+            "before the fetch nothing resolves on origin yet; the label falls back"
+        );
+        let summary = crate::ui::factory::daemon::FactoryDaemon::recover_integration(
+            repo.path(),
+            &cas_dir,
+            "master-trunk-session",
+            None,
+            true,
+            &FactoryConfig::default(),
+        )
+        .unwrap();
+        assert!(summary.starts_with("PASSED:"), "{summary}");
+        let receipt: IntegrationReceipt = serde_json::from_slice(
+            &fs::read(cas_dir.join(LOG_DIR).join("integration.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(receipt.status, "PASSED");
+        assert_eq!(receipt.trunk, "master");
+        assert_eq!(receipt.base, git(repo.path(), &["rev-parse", "master"]));
+        let tip = receipt.tip.as_deref().expect("integration tip published");
+        git(
+            repo.path(),
+            &["merge-base", "--is-ancestor", &receipt.base, tip],
+        );
+        git(
+            repo.path(),
+            &["merge-base", "--is-ancestor", &epic_tip, tip],
+        );
+        assert_eq!(
+            base_only_recovery_request(repo.path())
+                .unwrap()
+                .target_branch,
+            "master",
+            "after the fetch the recovery label names the resolved trunk"
+        );
     }
 
     #[test]

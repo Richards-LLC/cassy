@@ -73,15 +73,16 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(draft).toContain('hubUrl: prefill.suggestedHubUrl ?? "",');
     expect(draft).not.toContain("hubUrl: controllerOrigin");
     expect(draft).toContain("pageOrigin: controllerOrigin,");
-    expect(main).toContain("<label>Machine's hub address<input name=\"url\" type=\"url\" required${autofocus === \"url\" ? \" autofocus\" : \"\"} placeholder=");
+    expect(main).toContain("<label>Machine's hub address<input name=\"url\" type=\"url\" required${focus(\"url\")} placeholder=");
     expect(main).toContain("It is not this page's address unless this page is served by that machine.");
     expect(main).toContain('<summary>Where do I find this?</summary>');
     expect(main).toContain('id="pair-use-page-origin" type="button" class="secondary"');
-    expect(main).toContain("<dt>Machine's hub address</dt>");
-    // Consent keeps the exact origin and the exact scope list beside the summary.
-    expect(main).toContain("<dt>This browser will be able to</dt>");
-    expect(main).toContain("<dt>Exact scopes</dt>");
-    expect(main).toContain("<dt>Granted scopes</dt>");
+    expect(main).toContain('detailRow("Machine\'s hub address", hubUrl)');
+    // Consent leads with the plain summary; the exact origin and scope list stay one tap away (F3).
+    expect(main).toContain('<p class="pair-lead">This browser will be able to: <strong class="pair-summary">');
+    expect(main).toContain('<summary>Technical details</summary>');
+    expect(main).toContain('detailRow("Exact scopes", exactScopes(');
+    expect(main).toContain('detailRow("Granted scopes", exactScopes(invitationScopes))');
   });
 
   it("names the remedy when an observer-only credential disables control", async () => {
@@ -89,7 +90,7 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(source).toContain("Relay pairing granted read-only scopes for ${location.origin}");
     expect(source).toContain("cas hub pair --origin ${location.origin}");
     expect(source).toContain("Pairings are specific to each Cassy Cloud origin.");
-    expect(source).toContain("<dt>Cassy Cloud origin</dt>");
+    expect(source).toContain('detailRow("Cassy Cloud origin", ');
     expect(source).toContain('class="control-action" title="${escapeAttr(takeControlReason');
     expect(source).toContain('class="control-disabled-reason"');
     // A phone cannot hover, so an unavailable control keeps its reason in the DOM
@@ -599,8 +600,9 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(css).toContain("dialog label:has(> .field-hint) > input { scroll-margin-bottom: 3em; }");
     // Focus goes to the first field still empty, so a prefilled link opens on the operator's name.
     expect(main).toContain("const autofocus = firstEmptyField(pairingDraft, ");
-    expect(main).toContain('<input name="url" type="url" required${autofocus === "url" ? " autofocus" : ""}');
-    expect(main).toContain('<input name="device" required${autofocus === "device" ? " autofocus" : ""}');
+    expect(main).toContain('<input name="url" type="url" required${focus("url")}');
+    expect(main).toContain('<input name="operator" required${focus("operator")}');
+    expect(main).toContain('<input name="device" required${focus("device")}');
 
     // With the keyboard up the dialog can be 300px tall: the fields scroll and
     // the action row does not, so Pair stays reachable.
@@ -1366,7 +1368,7 @@ describe("design polish P3/P4/P12/P16 (D3/D4/D12/D17)", () => {
     expect(css).toContain(".pair-details dd { margin: 0; overflow-wrap: anywhere; font-family: var(--font-ui); }");
     expect(css).toContain(".pair-details dd.pair-identifier,\n.pair-address-actions .pair-identifier {\n  font-family: var(--font-mono);");
     expect(rule("\n.attention-detail")).toContain("font-family: var(--font-ui);");
-    expect(markup).toContain('<dd class="pair-summary">');
-    expect(markup).toContain('<dt>Exact scopes</dt><dd class="pair-identifier">');
+    expect(markup).toContain('<strong class="pair-summary">');
+    expect(markup).toContain('<dt>${escapeHtml(term)}</dt><dd${identifier ? \' class="pair-identifier"\' : ""}>');
   });
 });

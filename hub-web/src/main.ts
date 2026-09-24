@@ -1042,7 +1042,7 @@ async function pollRelay(request: PendingRelayRequest): Promise<void> {
             signal: AbortSignal.timeout(3_000),
           });
           if (!pairingOperations.isCurrent(operation) || pendingPairing?.kind !== "invitation") return;
-          pairingStatus = "Machine authorized. Confirm the exact details and finish pairing.";
+          pairingStatus = "Machine authorized. Add your name, then press Pair.";
         } catch {
           if (!pairingOperations.isCurrent(operation) || pendingPairing?.kind !== "invitation") return;
           const machine = result.invitation.machineLabel ?? result.invitation.hubId;
@@ -2095,6 +2095,8 @@ function emptyCanvasMarkup(): string {
 function capturePairingDraft(): void {
   const email = document.querySelector<HTMLInputElement>("#pair-email");
   if (email) pairingDraft.email = email.value;
+  const technical = document.querySelector<HTMLDetailsElement>("#pair-dialog details.pair-technical");
+  if (technical) pairingDraft.technicalOpen = technical.open;
   const form = document.querySelector<HTMLFormElement>("#pair-form");
   // A background re-render rebuilds the dialog; an opened disclosure stays open.
   const addressHelp = form?.querySelector<HTMLDetailsElement>("details.pair-address-help");

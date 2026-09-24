@@ -91,8 +91,8 @@ Base URL: <http://127.0.0.1:4791>. Every scenario starts from a fresh browser pa
 
   1. From a fresh page, navigate to /?fixture=pairing-step-1.
     - expect: The Pair a machine modal is open.
-    - expect: It displays the current Cassy Cloud origin, the six exact scopes, the ten-minute code explanation, an optional Email code field, and Create pairing code.
-  2. Fill Email code (optional) with “not-an-email” and click Create pairing code.
+    - expect: It leads with what this browser will be able to do, then the ten-minute code explanation, an optional "Email me the code too" field, and Create pairing code; the Cassy Cloud origin and the six exact scopes sit under a collapsed Technical details.
+  2. Fill Email me the code too (optional) with “not-an-email” and click Create pairing code.
     - expect: The browser reports the email input invalid and retains the dialog on step 1; fail if the malformed value passes native email validation.
   3. Replace the field with “<operator@example.com>”.
     - expect: The field value is valid and the Create pairing code control remains available; this fixture does not supply a relay response to assert a later step.

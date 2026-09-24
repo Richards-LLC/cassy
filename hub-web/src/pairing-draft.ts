@@ -12,6 +12,8 @@ export interface PairingDraft {
   machineLabel: string;
   /** "Where do I find this?" stays open across the dialog's re-renders once opened. */
   addressHelpOpen: boolean;
+  /** "Technical details" stays open across the dialog's re-renders once opened. */
+  technicalOpen: boolean;
   deviceLabel: string;
   operatorLabel: string;
   scopes: Scope[];
@@ -29,6 +31,7 @@ export function createPairingDraft(controllerOrigin: string, scopes?: readonly S
     pageOrigin: controllerOrigin,
     machineLabel: prefill.suggestedMachineLabel ?? "",
     addressHelpOpen: false,
+    technicalOpen: false,
     deviceLabel: "Cassy Cloud browser",
     operatorLabel: "",
     scopes: scopes ? [...scopes] : [...PAIRING_SCOPES],

@@ -134,6 +134,26 @@ const UNSURFACED_UNLESS_EXPLICIT_ACK_SQL: &str = "AND (q.target = 'all_workers'
 const UNCLAIMED_RECIPIENT_RECEIPT_SQL: &str =
     "AND (seen.prompt_id IS NULL OR seen.source = 'transport_delivered')";
 
+/// Which transport-delivered rows a drain may surface.
+#[derive(Debug, Clone, Copy)]
+enum TransportEligibility {
+    /// Unread rows, including those holding only a provisional transport
+    /// receipt (inbox poll and turn start).
+    Any,
+    /// Only rows with no transport marker at all (cas-9568).
+    NoneRecorded,
+    /// cas-b5e4 (GH #989): rows with no transport marker, plus rows whose
+    /// transport handoff happened after the current turn began — a message
+    /// that reached a busy worker mid-turn and cannot be that turn's prompt.
+    After(chrono::DateTime<Utc>),
+}
+
+/// Eligibility for [`TransportEligibility::After`]; binds the turn start.
+const DELIVERED_AFTER_TURN_START_RECEIPT_SQL: &str =
+    "AND (seen.prompt_id IS NULL OR seen.source = 'transport_delivered')
+     AND (q.transport_delivered_at IS NULL
+          OR julianday(q.transport_delivered_at) > julianday(?))";
+
 /// Eligibility for a fallback invoked after a tool result. Unlike a new
 /// turn, this path must never replay a row whose transport handoff was
 /// already recorded: the preceding injected turn is precisely the delivery
@@ -1708,6 +1728,27 @@ pub trait PromptQueueStore: Send + Sync {
         limit: usize,
     ) -> Result<Vec<QueuedPrompt>>;
 
+    /// cas-b5e4 (GH #989): surface unread rows at a tool boundary inside a
+    /// turn that began at `turn_started_at`. Like
+    /// [`Self::surface_unseen_for_recipient_without_transport_delivery`], but a
+    /// row whose transport handoff happened after the turn began is eligible:
+    /// it reached a busy recipient mid-turn and the harness has not shown it.
+    /// Rows handed off before the turn began stay excluded (cas-9568).
+    fn surface_unseen_for_recipient_delivered_after(
+        &self,
+        recipient: &str,
+        factory_session: Option<&str>,
+        limit: usize,
+        turn_started_at: chrono::DateTime<Utc>,
+    ) -> Result<Vec<QueuedPrompt>> {
+        let _ = turn_started_at;
+        self.surface_unseen_for_recipient_without_transport_delivery(
+            recipient,
+            factory_session,
+            limit,
+        )
+    }
+
     /// Atomically surface unread rows from a bounded set of senders.
     ///
     /// This source-filtered counterpart leaves unrelated daemon/director
@@ -2191,7 +2232,60 @@ pub struct SqlitePromptQueueStore {
     conn: Arc<Mutex<Connection>>,
 }
 
+/// cas-b5e4 (GH #989): directory of per-recipient "new mail" stamps next to
+/// `cas.db`. A hook at every tool boundary compares one small file against
+/// its last check instead of opening the database, so a busy recipient sees a
+/// new row within one tool call while a quiet turn stays store-free.
+pub const INBOX_SIGNAL_DIR: &str = "inbox-signal";
+
+/// File name of a recipient's inbox stamp under [`INBOX_SIGNAL_DIR`].
+pub fn inbox_signal_file_name(recipient: &str) -> String {
+    let name: String = recipient
+        .trim()
+        .to_ascii_lowercase()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .collect();
+    format!("{name}.stamp")
+}
+
+/// Read a recipient's inbox stamp (milliseconds since the epoch of the most
+/// recent enqueue addressed to it). `None` when nothing was ever enqueued.
+pub fn read_inbox_signal(cas_dir: &Path, recipient: &str) -> Option<i64> {
+    std::fs::read_to_string(
+        cas_dir
+            .join(INBOX_SIGNAL_DIR)
+            .join(inbox_signal_file_name(recipient)),
+    )
+    .ok()?
+    .trim()
+    .parse()
+    .ok()
+}
+
 impl SqlitePromptQueueStore {
+    /// Stamp `recipient`'s inbox signal after a committed enqueue.
+    /// Best-effort: a failed stamp only delays surfacing to the next turn.
+    fn signal_inbox(&self, recipient: &str) {
+        let Ok(conn) = crate::shared_db::lock_connection(&self.conn) else {
+            return;
+        };
+        let Some(dir) = conn
+            .path()
+            .filter(|path| !path.is_empty())
+            .and_then(|path| Path::new(path).parent().map(Path::to_path_buf))
+        else {
+            return;
+        };
+        drop(conn);
+        let dir = dir.join(INBOX_SIGNAL_DIR);
+        if std::fs::create_dir_all(&dir).is_err() {
+            return;
+        }
+        let stamp = Utc::now().timestamp_millis().to_string();
+        let _ = std::fs::write(dir.join(inbox_signal_file_name(recipient)), stamp);
+    }
+
     /// Open or create a SQLite prompt queue store
     pub fn open(cas_dir: &Path) -> Result<Self> {
         let db_path = cas_dir.join("cas.db");
@@ -3036,7 +3130,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         urgent: bool,
         origin: Option<&QueueOrigin>,
     ) -> Result<WorkerPeerMessageEnqueue> {
-        crate::shared_db::with_write_retry(|| {
+        let enqueued = crate::shared_db::with_write_retry(|| {
             let conn = crate::shared_db::lock_connection(&self.conn)?;
             let tx = crate::shared_db::ImmediateTx::new(&conn)?;
             let now = Utc::now();
@@ -3081,7 +3175,10 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                 recipient_id,
                 supervisor_copy_id,
             })
-        })
+        })?;
+        self.signal_inbox(recipient);
+        self.signal_inbox(supervisor);
+        Ok(enqueued)
     }
 
     fn enqueue_operator_message(
@@ -3142,7 +3239,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         attribution: Option<&serde_json::Value>,
         origin: Option<&QueueOrigin>,
     ) -> Result<EnqueueOutcome> {
-        crate::shared_db::with_write_retry(|| {
+        let outcome = crate::shared_db::with_write_retry(|| {
             let conn = crate::shared_db::lock_connection(&self.conn)?;
             let tx = crate::shared_db::ImmediateTx::new(&conn)?;
             let now = Utc::now();
@@ -3199,7 +3296,11 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             let _ = capture_message_event(&tx, source, target);
             tx.commit()?;
             Ok(EnqueueOutcome::Created(id))
-        }) // with_write_retry
+        })?; // with_write_retry
+        if matches!(outcome, EnqueueOutcome::Created(_)) {
+            self.signal_inbox(target);
+        }
+        Ok(outcome)
     }
 
     fn enqueue_idempotent(
@@ -3557,7 +3658,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             limit,
             SurfacingSource::InboxPoll,
             None,
-            false,
+            TransportEligibility::Any,
         )
     }
 
@@ -3576,7 +3677,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             limit,
             SurfacingSource::HookSurfaced,
             None,
-            false,
+            TransportEligibility::Any,
         )
     }
 
@@ -3592,7 +3693,24 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             limit,
             SurfacingSource::HookSurfaced,
             None,
-            true,
+            TransportEligibility::NoneRecorded,
+        )
+    }
+
+    fn surface_unseen_for_recipient_delivered_after(
+        &self,
+        recipient: &str,
+        factory_session: Option<&str>,
+        limit: usize,
+        turn_started_at: chrono::DateTime<Utc>,
+    ) -> Result<Vec<QueuedPrompt>> {
+        self.drain_unseen_for_recipient(
+            recipient,
+            factory_session,
+            limit,
+            SurfacingSource::HookSurfaced,
+            None,
+            TransportEligibility::After(turn_started_at),
         )
     }
 
@@ -3609,7 +3727,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             limit,
             SurfacingSource::HookSurfaced,
             Some(sources),
-            false,
+            TransportEligibility::Any,
         )
     }
 
@@ -5377,7 +5495,7 @@ impl SqlitePromptQueueStore {
         limit: usize,
         source: SurfacingSource,
         source_filter: Option<&[&str]>,
-        exclude_transport_delivery: bool,
+        transport: TransportEligibility,
     ) -> Result<Vec<QueuedPrompt>> {
         if recipient.trim().is_empty() {
             return Err(StoreError::Other(
@@ -5416,10 +5534,16 @@ impl SqlitePromptQueueStore {
                  AND (q.highest_stage IS NULL
                       OR q.highest_stage NOT IN {TERMINAL_NON_DELIVERY_STAGES})"
             );
-            let receipt_sql = if exclude_transport_delivery {
-                UNSEEN_RECIPIENT_RECEIPT_SQL
-            } else {
-                UNCLAIMED_RECIPIENT_RECEIPT_SQL
+            let receipt_sql = match transport {
+                TransportEligibility::Any => UNCLAIMED_RECIPIENT_RECEIPT_SQL,
+                TransportEligibility::NoneRecorded => UNSEEN_RECIPIENT_RECEIPT_SQL,
+                TransportEligibility::After(_) => DELIVERED_AFTER_TURN_START_RECEIPT_SQL,
+            };
+            // The receipt clause precedes every other bound predicate, so its
+            // one parameter follows the join's recipient.
+            let turn_start_param = match transport {
+                TransportEligibility::After(at) => Some(at.to_rfc3339()),
+                _ => None,
             };
             let source_sql = if normalized_sources.is_empty() {
                 String::new()
@@ -5432,11 +5556,15 @@ impl SqlitePromptQueueStore {
 
             let (sql, query_params): (String, Vec<Box<dyn rusqlite::ToSql>>) =
                 if let Some(session) = factory_session {
-                    let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![
-                        Box::new(recipient.to_string()),
-                        Box::new(stale_cutoff.clone()),
-                        Box::new(recipient.to_string()),
-                    ];
+                    let mut params: Vec<Box<dyn rusqlite::ToSql>> =
+                        vec![Box::new(recipient.to_string())];
+                    params.extend(
+                        turn_start_param
+                            .clone()
+                            .map(|at| Box::new(at) as Box<dyn rusqlite::ToSql>),
+                    );
+                    params.push(Box::new(stale_cutoff.clone()));
+                    params.push(Box::new(recipient.to_string()));
                     params.extend(
                         normalized_sources
                             .iter()
@@ -5466,11 +5594,15 @@ impl SqlitePromptQueueStore {
                         params,
                     )
                 } else {
-                    let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![
-                        Box::new(recipient.to_string()),
-                        Box::new(stale_cutoff.clone()),
-                        Box::new(recipient.to_string()),
-                    ];
+                    let mut params: Vec<Box<dyn rusqlite::ToSql>> =
+                        vec![Box::new(recipient.to_string())];
+                    params.extend(
+                        turn_start_param
+                            .clone()
+                            .map(|at| Box::new(at) as Box<dyn rusqlite::ToSql>),
+                    );
+                    params.push(Box::new(stale_cutoff.clone()));
+                    params.push(Box::new(recipient.to_string()));
                     params.extend(
                         normalized_sources
                             .iter()
@@ -5629,6 +5761,68 @@ mod tests {
         let store = SqlitePromptQueueStore::open(temp.path()).unwrap();
         store.init().unwrap();
         (temp, store)
+    }
+
+    /// cas-b5e4 (GH #989): at a tool boundary, a row handed off after the
+    /// turn began is surfaced; one handed off before it (the turn's own
+    /// injection, cas-9568) is not; an untransported row is; each only once.
+    #[test]
+    fn tool_boundary_surfaces_rows_delivered_after_the_turn_began_cas_b5e4() {
+        let (_temp, store) = create_test_store();
+        let session = "factory-b5e4";
+        let before = store
+            .enqueue_with_session("sup", "worker-1", "turn prompt", session)
+            .unwrap();
+        store.mark_transport_delivered(before).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let turn_started_at = Utc::now();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let mid_turn = store
+            .enqueue_with_session("peer", "worker-1", "peer reply mid-turn", session)
+            .unwrap();
+        store.mark_transport_delivered(mid_turn).unwrap();
+        let pending = store
+            .enqueue_with_session("sup", "worker-1", "not yet handed off", session)
+            .unwrap();
+
+        let ids = |rows: Vec<QueuedPrompt>| rows.into_iter().map(|row| row.id).collect::<Vec<_>>();
+        let mut surfaced = ids(store
+            .surface_unseen_for_recipient_delivered_after("worker-1", Some(session), 10, turn_started_at)
+            .unwrap());
+        surfaced.sort();
+        assert_eq!(surfaced, vec![mid_turn, pending]);
+        assert!(
+            store
+                .surface_unseen_for_recipient_delivered_after("worker-1", Some(session), 10, turn_started_at)
+                .unwrap()
+                .is_empty(),
+            "a surfaced row is receipted and never replayed"
+        );
+        assert!(
+            store
+                .surface_unseen_for_recipient_without_transport_delivery("worker-1", Some(session), 10)
+                .unwrap()
+                .is_empty(),
+            "the pre-turn injection stays excluded"
+        );
+    }
+
+    #[test]
+    fn enqueue_stamps_the_recipient_inbox_signal_cas_b5e4() {
+        let (temp, store) = create_test_store();
+        assert_eq!(read_inbox_signal(temp.path(), "worker-1"), None);
+        let before = Utc::now().timestamp_millis();
+        store
+            .enqueue_with_session("sup", "Worker-1", "hello", "factory-b5e4")
+            .unwrap();
+        let stamp = read_inbox_signal(temp.path(), "worker-1").expect("enqueue stamps the signal");
+        assert!(stamp >= before, "{stamp} < {before}");
+        store
+            .enqueue_worker_peer_with_supervisor_copy(
+                "worker-2", "worker-1", "sup", "peer", "copy", "factory-b5e4", None, None, false, None,
+            )
+            .unwrap();
+        assert!(read_inbox_signal(temp.path(), "sup").is_some(), "the supervisor copy is signalled too");
     }
 
     /// GH #894: the operator-escalation scan returns exactly the supervisor

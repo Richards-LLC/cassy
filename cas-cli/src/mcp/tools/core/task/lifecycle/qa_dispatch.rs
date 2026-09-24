@@ -420,12 +420,12 @@ impl CasCore {
         let remedy = "A live supervisor closes it with supervisor_override=true, a reason and \
              commit_receipt=<merged sha>; the waiver is recorded against that commit";
         let Some(head) = head else {
-            return QaCloseGate::Refuse(format!(
-                "INDEPENDENT QA REQUIRED: {} is user-facing and merged into {target_branch} without a \
-                 QA round, but Cassy cannot tell which commit delivered it: it never parked, and \
-                 {branch} is not contained in {target_branch}. Close with commit_receipt=<merged sha>. \
-                 {remedy}.",
-                task.id
+            return QaCloseGate::Refuse(unresolved_delivery_refusal(
+                &task.id,
+                target_branch,
+                &branch,
+                super::close_ops::resolve_branch_sha(repo, &branch).as_deref(),
+                remedy,
             ));
         };
         if let Some(trunk) = trunk_containing(repo, &head) {
@@ -631,5 +631,37 @@ impl CasCore {
             Ok(_) => format!(" QA task {qa_task_id} cancelled."),
             Err(error) => format!(" QA task {qa_task_id} could not be cancelled: {error}"),
         }
+    }
+}
+
+/// The refusal for a user-facing close whose delivering commit cannot be
+/// resolved: no parked anchor, no receipt, and a branch tip that is not on the
+/// target (cas-08f9). The wording must never claim a merge the target does
+/// not contain: an unmerged branch tip is sent back to park for merge and QA
+/// with its tip as the receipt, and only a missing branch is described as an
+/// out-of-band merge.
+pub(crate) fn unresolved_delivery_refusal(
+    task_id: &str,
+    target_branch: &str,
+    branch: &str,
+    branch_tip: Option<&str>,
+    remedy: &str,
+) -> String {
+    match branch_tip {
+        Some(tip) => format!(
+            "INDEPENDENT QA REQUIRED: {task_id} is user-facing and has no QA round, and Cassy \
+             cannot tell which commit delivered it: it is not parked, and {branch} @{} is not \
+             contained in {target_branch}, so it is not merged. If that tip is this task's \
+             delivery, close again with commit_receipt={tip}: it parks for merge and opens the \
+             QA round. If the delivery already merged another way, close with \
+             commit_receipt=<merged sha>. {remedy}.",
+            &tip[..tip.len().min(8)],
+        ),
+        None => format!(
+            "INDEPENDENT QA REQUIRED: {task_id} is user-facing and has no QA round, and Cassy \
+             cannot tell which commit delivered it: it never parked and {branch} does not \
+             resolve here. If it merged into {target_branch}, close with \
+             commit_receipt=<merged sha>. {remedy}."
+        ),
     }
 }

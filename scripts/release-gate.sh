@@ -894,7 +894,7 @@ make_archive_path() {
         ln -s "$command" "$archive_bin/$name"
     done
     if [[ "$(uname -s)" == Darwin ]]; then
-        printf '/usr/bin:/bin:/usr/sbin:/sbin'
+        printf '/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin'
     else
         printf '/usr/bin:/bin'
     fi

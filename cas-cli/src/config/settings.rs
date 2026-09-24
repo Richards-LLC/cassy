@@ -16,7 +16,11 @@ pub struct HubConfig {
 /// upstream repository, and inferring the current git origin would route Cassy
 /// bugs into a downstream consumer's issue tracker.
 pub const DEFAULT_CASSY_ISSUES_REPO: &str = "Richards-LLC/cassy";
-pub const DEFAULT_MECHA_CASSY_ISSUES_REPO: &str = "Richards-LLC/mecha-cassy";
+/// Violet's issue repository (formerly MechaCassy). The GitHub slug keeps the
+/// old name until the repository itself is renamed (GH #963).
+pub const DEFAULT_VIOLET_ISSUES_REPO: &str = "Richards-LLC/mecha-cassy";
+/// Deprecated name of [`DEFAULT_VIOLET_ISSUES_REPO`], kept for one release.
+pub const DEFAULT_MECHA_CASSY_ISSUES_REPO: &str = DEFAULT_VIOLET_ISSUES_REPO;
 pub const DEFAULT_CLOUD_ISSUES_REPO: &str = "Richards-LLC/petra-stella-cloud";
 
 /// Optional overrides for the issue repositories of Cassy's component
@@ -28,7 +32,11 @@ pub struct IssueComponentsConfig {
     /// Repository for Cassy runtime, hooks, MCP, factory, and skills bugs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cassy: Option<String>,
-    /// Repository for MechaCassy Slack hub bugs.
+    /// Repository for Violet (formerly MechaCassy) Slack hub bugs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub violet: Option<String>,
+    /// Deprecated key (`issues.components.mecha_cassy`), read for one release
+    /// (GH #963). `violet` wins when both are set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mecha_cassy: Option<String>,
     /// Repository for Cassy Cloud sync, hub relay, and pairing bugs.
@@ -43,7 +51,8 @@ pub struct IssueComponentsConfig {
 pub struct IssueRepoRegistry {
     pub project: Option<String>,
     pub cassy: String,
-    pub mecha_cassy: String,
+    /// Violet (formerly MechaCassy).
+    pub violet: String,
     pub cloud: String,
 }
 
@@ -76,9 +85,12 @@ impl IssueComponentsConfig {
                 .filter(|value| !value.is_empty())
                 .map(ToOwned::to_owned),
             cassy: Self::resolved_value(self.cassy.as_ref(), DEFAULT_CASSY_ISSUES_REPO),
-            mecha_cassy: Self::resolved_value(
-                self.mecha_cassy.as_ref(),
-                DEFAULT_MECHA_CASSY_ISSUES_REPO,
+            violet: Self::resolved_value(
+                self.violet
+                    .as_ref()
+                    .filter(|value| !value.trim().is_empty())
+                    .or(self.mecha_cassy.as_ref()),
+                DEFAULT_VIOLET_ISSUES_REPO,
             ),
             cloud: Self::resolved_value(self.cloud.as_ref(), DEFAULT_CLOUD_ISSUES_REPO),
         }

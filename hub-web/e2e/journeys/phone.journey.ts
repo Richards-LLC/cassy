@@ -70,6 +70,9 @@ test("HUB-J9 on a phone: from the list to a reply and back", async ({ page, jour
     // it instead of squeezing it (cas-cfcb, cas-5478).
     const titles = page.locator("#command-palette .palette-command:not([hidden]) > span");
     await expect(titles.first()).toBeVisible();
+    // Advanced too: its long plain names are the ones that used to clip first.
+    await page.locator("#command-palette .palette-advanced > summary").tap();
+    await expect(page.getByRole("button", { name: /Open the terminal view/ })).toBeVisible();
     const clipped = await titles.evaluateAll((spans) => spans.filter((span) => span.getClientRects().length > 0 && span.scrollWidth > span.clientWidth + 1).map((span) => span.textContent));
     expect(clipped, "command names cut off at 390 px").toEqual([]);
     await expect(page.locator("#command-palette [data-palette-machine] small").filter({ hasText: "gabber-studio" })).toBeVisible();

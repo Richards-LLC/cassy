@@ -1,11 +1,21 @@
-import { test, expect } from "./journey";
+import { join } from "node:path";
+import { test, expect, RECEIPTS } from "./journey";
 import { ATLAS, STUDIO, PELICAN, OTTER } from "./world";
+import type { Machine } from "./hub-double";
+
+// A third machine with a 40-character name (cas-1ca1): its row must ellipsise
+// the name and keep the time stamp readable.
+const FORGE: Machine = {
+  id: "forge",
+  label: "Forge build box with an unusual hostname · Linux",
+  sessions: [{ name: "quiet-heron-7", supervisor: "quiet-heron-7", project_dir: "/projects/lighthouse", workers: ["swift-lark-3"], liveness: "live" }],
+};
 
 test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => {
   // Eight stages, two searches and the palette: under a loaded factory host it
   // ran at the project's 60 s budget (QA N01/N3), so it gets its own headroom.
   test.setTimeout(120_000);
-  const hub = await journey.hub({ machines: [ATLAS, STUDIO], paired: ["atlas", "studio"] });
+  const hub = await journey.hub({ machines: [ATLAS, STUDIO, FORGE], paired: ["atlas", "studio", "forge"] });
   const list = page.getByRole("navigation", { name: "Choose a supervisor" });
   const search = page.getByRole("searchbox", { name: "Search conversations" });
   const filter = page.getByRole("searchbox", { name: "Filter commands" });
@@ -20,11 +30,11 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
 
   await journey.stage("See every machine's supervisors in one list", async () => {
     await journey.open();
-    await expect(list.getByRole("button")).toHaveCount(2);
-    // Rows are titled by project, then machine; the codename is tertiary.
-    await expect(list.locator(".conversation-project")).toHaveText(["cas-src", "gabber-studio"]);
-    await expect(list.locator(".conversation-machine")).toHaveText(["Atlas", "Studio Mac"]);
-    await expect(list.locator(".conversation-supervisor")).toHaveText([PELICAN, OTTER]);
+    await expect(list.getByRole("button")).toHaveCount(3);
+    // Machines list in id order (atlas, forge, studio). Rows are titled by project, then machine; the codename is tertiary.
+    await expect(list.locator(".conversation-project")).toHaveText(["cas-src", "lighthouse", "gabber-studio"]);
+    await expect(list.locator(".conversation-machine")).toHaveText(["Atlas", "Forge build box with an unusual hostname", "Studio Mac"]);
+    await expect(list.locator(".conversation-supervisor")).toHaveText([PELICAN, "quiet-heron-7", OTTER]);
     await expect(search).toBeVisible();
     await expect(search).toHaveAttribute("placeholder", "Search conversations (Ctrl K)");
   });
@@ -59,16 +69,20 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     // Escape brings the whole list back.
     await search.press("Escape");
     await expect(search).toHaveValue("");
-    await expect(list.getByRole("button")).toHaveCount(2);
+    await expect(list.getByRole("button")).toHaveCount(3);
     await search.fill("gabber-studio");
     await list.getByRole("button", { name: /gabber-studio/ }).click();
     await expect(page.getByRole("button", { name: `Send to ${OTTER}`, exact: true })).toBeVisible();
     // The header names the project once; machine and codename sit beneath it.
     await expect(page.locator(".conversation-identity h1")).toHaveText("gabber-studio");
     await expect(page.locator(".conversation-host")).toContainText(`Studio Mac · macOS · ${OTTER}`);
+    // An empty thread's card leads with the project too, machine and codename beneath (cas-1ca1).
+    const card = page.locator(".thread .empty");
+    await expect(card.locator("b")).toHaveText("gabber-studio");
+    await expect(card.locator(".proj2")).toHaveText(`Studio Mac · macOS · ${OTTER}`);
     await search.fill("");
     await search.blur();
-    await expect(list.getByRole("button")).toHaveCount(2);
+    await expect(list.getByRole("button")).toHaveCount(3);
   });
 
   await journey.stage("Find the conversation from the keyboard", async () => {
@@ -83,7 +97,41 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     await expect(page.locator(".conversation-identity h1")).toHaveText("cas-src");
     await expect(page.getByRole("textbox", { name: "Your message" })).toBeFocused();
     await expect(search).toHaveValue("");
-    await expect(list.getByRole("button")).toHaveCount(2);
+    await expect(list.getByRole("button")).toHaveCount(3);
+  });
+
+  await journey.stage("A long machine name keeps every time stamp readable", async () => {
+    const row = list.getByRole("button", { name: /lighthouse/ });
+    const clearOfTime = () => row.evaluate((node) => {
+      const name = node.querySelector(".conversation-machine-name")!.getBoundingClientRect();
+      const time = node.querySelector(".conversation-when")?.getBoundingClientRect();
+      const label = node.querySelector<HTMLElement>(".conversation-machine-name")!;
+      return { ellipsised: label.scrollWidth > label.clientWidth, clear: !time || name.right <= time.left + 0.5 };
+    });
+    // A machine that wraps to its own line never starts it with the separator
+    // dot: the dot sits past the title's left edge, clipped (cas-1ca1 F02).
+    const noLeadingDot = () => list.locator(".conversation-row").evaluateAll((rows) => rows.every((node) => {
+      const title = node.querySelector(".conversation-title")!.getBoundingClientRect();
+      const project = node.querySelector(".conversation-project")!.getBoundingClientRect();
+      const machine = node.querySelector(".conversation-machine-name")!.getBoundingClientRect();
+      const dot = node.querySelector(".conversation-sep")!.getBoundingClientRect();
+      const wrapped = machine.top > project.top + 4;
+      return wrapped ? dot.right <= title.left + 0.5 : dot.left >= project.right;
+    }));
+    expect(await noLeadingDot()).toBe(true);
+    // Desktop: the 40-character name ellipsises before the time stamp.
+    await expect(row.locator(".conversation-when")).toBeVisible();
+    expect(await clearOfTime()).toEqual({ ellipsised: true, clear: true });
+    await expect(row.locator(".conversation-machine")).toHaveAttribute("title", "Forge build box with an unusual hostname");
+    // Phone width: the same, with the list as the whole page.
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.getByRole("button", { name: "‹ Conversations", exact: true }).click();
+    await expect(row).toBeVisible();
+    expect(await clearOfTime()).toEqual({ ellipsised: true, clear: true });
+    expect(await noLeadingDot()).toBe(true);
+    // Receipt beside the stage screenshots: the 390 px list with the long name.
+    await page.screenshot({ path: join(RECEIPTS, journey.id, "long-machine-phone.png") });
+    await page.setViewportSize({ width: 1280, height: 720 });
   });
 
   await journey.stage("Jump to a supervisor by name", async () => {

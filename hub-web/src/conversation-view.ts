@@ -287,7 +287,7 @@ export class ConversationView {
 
   /**
    * Nothing waiting (empty.html): the machine's monogram in its accent, the
-   * supervisor's name, a quiet centred line, and the last message as a faint
+   * project (then machine · codename), a quiet centred line, and the last message as a faint
    * echo. Lives beside `.msgs`, never inside it, so the log stays a log.
    */
   private renderEmpty(show: boolean, loading = false): void {
@@ -318,10 +318,17 @@ export class ConversationView {
     const document = this.element.ownerDocument;
     const mono = document.createElement("span"); mono.className = "mono"; mono.setAttribute("aria-hidden", "true");
     mono.textContent = machineMonogram(machine || supervisor);
-    const name = document.createElement("b"); name.className = "codename"; name.textContent = supervisor;
-    // project · machine, the order of the header and every list row (P14).
+    // The project titles the card, as it titles the header and every list row
+    // (journey F7); machine and codename sit beneath it. Without a project the
+    // codename is the only name there is, and it keeps the title.
+    const name = document.createElement("b"); name.textContent = project || supervisor;
+    if (!project) name.className = "codename";
     const where = document.createElement("span"); where.className = "proj2";
-    where.textContent = [project, machine].filter(Boolean).join(" · ");
+    if (machine) where.append(machine);
+    if (project) {
+      const secondary = document.createElement("span"); secondary.className = "codename"; secondary.textContent = supervisor;
+      where.append(...(machine ? [" · "] : []), secondary);
+    }
     const said = document.createElement("p"); said.className = "said"; said.setAttribute("role", "status");
     // The codename is an identifier: mono and never broken at its hyphen, even inside prose.
     const codename = document.createElement("span"); codename.className = "codename"; codename.textContent = supervisor;

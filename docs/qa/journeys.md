@@ -95,6 +95,8 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 2. Notice a new reply while away — the row shows an unread count
 3. Find the conversation through the list search — "Search conversations (Ctrl K)" at the top of the list filters rows by project, machine or supervisor; the header names the project once
 4. Find the conversation from the keyboard — Ctrl+K lands in the search, type the project, Enter: the conversation is open and the reply box has focus
+   - An empty thread's card also leads with the project, with machine and codename beneath it
+   - A 40-character machine name ellipsises in its row and never runs under the time stamp, on desktop and at 390px
 5. Jump to a supervisor by name — the command palette (grouped Conversations / Appearance / Advanced, Advanced collapsed) filters by supervisor or project and opens the conversation
 6. Jump to a supervisor from the keyboard — Ctrl+K twice opens the palette, type the name, Enter: the palette closes, the conversation is open and the reply box has focus
 

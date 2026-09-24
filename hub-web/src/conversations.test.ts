@@ -159,7 +159,9 @@ describe('conversation evidence', () => {
     expect(waiting.querySelector('.conversation-supervisor')?.classList.contains('codename')).toBe(true);
     // The machine is named as text on every row, after the project, with its own wrapping separator.
     expect(waiting.querySelector('.conversation-machine')?.textContent).toBe('Atlas');
-    expect(waiting.querySelector('.conversation-machine')?.innerHTML).toBe('<span class="conversation-sep" aria-hidden="true"></span>Atlas');
+    expect(waiting.querySelector('.conversation-machine')?.innerHTML).toBe('<span class="conversation-sep" aria-hidden="true"></span><span class="conversation-machine-name">Atlas</span>');
+    // cas-1ca1: the machine name can ellipsise; the title attribute keeps it whole.
+    expect(waiting.querySelector('.conversation-machine')?.getAttribute('title')).toBe('Atlas');
     expect(unread.querySelector('.conversation-machine')?.textContent).toBe('Studio Mac');
     expect(unread.querySelector('.conversation-project')?.textContent).toBe('gabber-studio');
     expect(waiting.querySelector('.conversation-preview')?.textContent).toBe('Fix <it>?');
@@ -180,6 +182,21 @@ describe('conversation evidence', () => {
     expect(quiet.querySelector('.conversation-preview')?.textContent).toBe('Live');
     expect(quiet.querySelector('.conversation-preview')?.className).toBe('conversation-preview');
     expect(quiet.querySelector('.conversation-flag, .conversation-unread, .conversation-marks')).toBeNull();
+  });
+  it('titles a row with no project by its codename, not a status phrase (cas-1ca1 F03)', () => {
+    const markup = conversationRowMarkup({ key: 'a:s', machineId: 'a', session: 's', supervisor: 'calm-otter-4', host: 'Atlas · Linux', freshness: 'now', connection: 'Live', attention: 0, selected: false });
+    const row = document.createElement('div'); row.innerHTML = markup;
+    expect(row.querySelector('.conversation-project')?.textContent).toBe('calm-otter-4');
+    expect(row.querySelector('.conversation-project')?.classList.contains('codename')).toBe(true);
+    expect(row.querySelector('.conversation-supervisor')).toBeNull();
+    expect(row.textContent).not.toContain('Project unavailable');
+    expect(row.querySelector('.conversation-machine-name')?.textContent).toBe('Atlas');
+    const header = document.createElement('div');
+    header.innerHTML = conversationShellMarkup({ selected: true, supervisor: 'calm-otter-4', host: 'Atlas · Linux', machineId: 'a', loaded: true, paired: true });
+    expect(header.querySelector('.conversation-identity h1')?.textContent).toBe('calm-otter-4');
+    expect(header.querySelector('.host-where')?.textContent).toBe('Atlas · Linux');
+    expect(header.textContent).not.toContain('Project unavailable');
+    expect(filterConversationRows([{ supervisor: 'calm-otter-4', host: 'Atlas · Linux' }], 'unavailable')).toEqual([]);
   });
   it('keeps the time and stacks both marks when a row is waiting and unread (P13)', () => {
     const list = new ConversationList(); const container = document.createElement('nav');

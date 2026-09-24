@@ -326,16 +326,23 @@ describe("ConversationView (Pebble thread)", () => {
     expect(empty.hidden).toBe(false); expect(view.element.querySelector<HTMLElement>(".msgs")?.hidden).toBe(true);
     expect(view.element.querySelector(".msgs")?.children).toHaveLength(0);
     expect(empty.querySelector(".mono")?.textContent).toBe("B");
-    expect(empty.querySelector("b")?.textContent).toBe("calm-heron-5");
-    // P14: project · machine, as in the header and the list.
-    expect(empty.querySelector(".proj2")?.textContent).toBe("cas-hub-static · Bench");
+    // Journey F7: the project titles the card as it titles the header and the list; machine · codename beneath.
+    expect(empty.querySelector("b")?.textContent).toBe("cas-hub-static");
+    expect(empty.querySelector(".proj2")?.textContent).toBe("Bench · calm-heron-5");
+    expect(empty.querySelector(".proj2 > .codename")?.textContent).toBe("calm-heron-5");
     expect(empty.querySelector(".said")?.textContent).toBe("Nothing waiting on you. calm-heron-5 will write here when it needs a decision.");
     // The codename in the sentence is an identifier span that never breaks at its hyphen.
     expect(empty.querySelector(".said .codename")?.textContent).toBe("calm-heron-5");
-    expect(empty.querySelector("b")?.classList.contains("codename")).toBe(true);
+    expect(empty.querySelector("b")?.classList.contains("codename")).toBe(false);
     expect(empty.querySelector(".quiet")?.textContent).toBe("Promoted the hub to production on Monday.");
     echo = undefined; view.update();
     expect(empty.querySelector(".quiet")).toBeNull();
+    // No project: the codename is the only name and keeps the title.
+    const bare = new ConversationView(document, new ConversationHistory(), { supervisor: "calm-heron-5", machine: "Bench" });
+    bare.update();
+    const bareEmpty = bare.element.querySelector<HTMLElement>(".empty")!;
+    expect(bareEmpty.querySelector("b.codename")?.textContent).toBe("calm-heron-5");
+    expect(bareEmpty.querySelector(".proj2")?.textContent).toBe("Bench");
     history.reply(reply(1, "answer", "Back on it."), at(10, 0)); view.update();
     expect(empty.hidden).toBe(true); expect(view.element.querySelector<HTMLElement>(".msgs")?.hidden).toBe(false);
     expect(empty.children).toHaveLength(0);

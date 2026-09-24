@@ -30,7 +30,9 @@ pub(crate) use task_intents::{TaskSyncFulfillResult, TaskSyncIntent, TaskSyncPay
 pub use dependency_tombstones::{
     TASK_DEPENDENCY_TOMBSTONE_RETENTION_DAYS, TASK_DEPENDENCY_TOMBSTONE_STATEMENTS,
 };
-pub use quarantine::{QUARANTINE_TASK, QUARANTINED_ROW_STATEMENTS, QuarantinedRow};
+pub use quarantine::{
+    PULL_ID_COLLISION, QUARANTINE_TASK, QUARANTINED_ROW_STATEMENTS, QuarantinedRow,
+};
 pub use revisions::{SYNC_REVISION_STATEMENTS, parse_wire_revision, wire_revision};
 pub use types::{
     EntityType, PendingByType, QueueHealth, QueueStats, QueuedSync, SyncConflictRecord,

@@ -49,6 +49,16 @@ pub const QUARANTINED_ROW_STATEMENTS: &[&str] = &[
 /// Entity type stored for quarantined task rows.
 pub const QUARANTINE_TASK: &str = "task";
 
+/// Conflict-journal strategy for a pulled task row that was parked because
+/// its id already names a live local task this project owns (cas-7a63).
+///
+/// Short task ids collide across projects, so a pulled row that cannot prove
+/// it is the same task must never replace the local one. Such a row is kept
+/// only in the conflict journal. It is deliberately **not** written to the
+/// quarantine ledger, because that ledger is keyed by bare id and would hide
+/// the local task and drop its queued pushes.
+pub const PULL_ID_COLLISION: &str = "pull_id_collision";
+
 /// One quarantined row, for reporting and for release.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QuarantinedRow {

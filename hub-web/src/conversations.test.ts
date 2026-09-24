@@ -258,6 +258,8 @@ describe('conversation evidence', () => {
   it('names an unreachable session with a pending instruction on its row, over the last turn (cas-7294)', () => {
     const row: ConversationRow = { key: 'a:s', machineId: 'a', session: 's', supervisor: 'sup', host: 'Atlas', freshness: 'now', connection: 'Unreachable · message pending', attention: 0, preview: 'You: Keep this instruction visible.', selected: false };
     expect(conversationRowMarkup({ ...row, unreachable: true })).toContain('<span class="conversation-preview unreachable">Unreachable · message pending</span>');
+    // A dropped connection names itself in place of the last turn, so the row agrees with the header (cas-a447).
+    expect(conversationRowMarkup({ ...row, connection: 'Reconnecting', interrupted: true })).toContain('<span class="conversation-preview interrupted">Reconnecting</span>');
     expect(conversationRowMarkup({ ...row, connection: 'Live' })).toContain('<span class="conversation-preview">You: Keep this instruction visible.</span>');
   });
   it('renders the fixture list with a footer count equal to the rows rendered', () => {

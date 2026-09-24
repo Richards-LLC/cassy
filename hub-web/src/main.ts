@@ -2284,6 +2284,14 @@ function render(captureDraft = true): void {
   // A shell rebuild re-mounts the thread, which would drop focus a touch
   // landed there to <body> (cas-7eaf).
   const threadWasFocused = document.activeElement?.matches(".conversation-reading.thread") === true;
+  // A shell rebuild replaces every control. A keyboard user on one of them
+  // (the Terminal-view return, a toolbar button) would drop to <body> and
+  // their next Enter would do nothing, so the rebuilt control with the same id
+  // takes focus back. Dialogs, the composer and the terminal have their own
+  // rules below.
+  const focusedControl = document.activeElement instanceof HTMLElement && document.activeElement.id
+    && document.activeElement.id !== "message-text" && app.contains(document.activeElement)
+    && !document.activeElement.closest("dialog") ? document.activeElement.id : undefined;
   const selected = selectedMachineId ? machines.get(selectedMachineId) : undefined;
   const lease = selected && selectedSession ? leases.get(sessionKey(selected.id, selectedSession)) : undefined;
   const status = selected && selectedSession ? statuses.get(sessionKey(selected.id, selectedSession)) : undefined;
@@ -2556,6 +2564,9 @@ function render(captureDraft = true): void {
   // A five-second heartbeat render must not slam the picker shut mid-choice.
   if (sessionPickerOpen) document.querySelector<HTMLDialogElement>("#session-picker")?.showModal();
   if (pairDialogWasOpen) document.querySelector<HTMLDialogElement>("#pair-dialog")?.showModal();
+  if (focusWinner === "none" && focusedControl && (document.activeElement === document.body || document.activeElement === null)) {
+    document.getElementById(focusedControl)?.focus({ preventScroll: true });
+  }
   renderRegions({ selected, session: selectedSession, status, connectionSnapshot, counts, liveRegions });
 }
 

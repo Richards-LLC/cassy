@@ -11,7 +11,9 @@ const ALPHA: Machine = {
 };
 
 test("HUB-J8 switch between machines without losing my place", async ({ page, journey }) => {
-  // Thirteen stages including a pairing and palette/picker sweeps: past the 60 s default.
+  // Fourteen stages including a pairing, palette/picker sweeps, two render
+  // waits (6 s each) and a phone viewport: past the 60 s default, and a loaded
+  // factory host needs the headroom.
   test.setTimeout(120_000);
   const hub = await journey.hub({ machines: [ATLAS, STUDIO, ALPHA], paired: ["atlas", "studio"] });
   const list = page.getByRole("navigation", { name: "Choose a supervisor" });
@@ -236,9 +238,43 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
     await expect(composer).toBeFocused();
   });
 
+  await journey.stage("Read every session's details on a phone", async () => {
+    await page.getByRole("button", { name: "Terminal view" }).click();
+    await page.setViewportSize({ width: 390, height: 844 });
+    const picker = page.locator("#session-picker");
+    await page.locator("#session-picker-toggle").click();
+    await expect(picker).toBeVisible();
+    await page.mouse.move(0, 0);
+    const rows = picker.locator(".session-picker-entry");
+    await expect(rows).toHaveCount(2);
+    // Every row, the open one included, shows its project, role and status in
+    // full: nothing is cut off by an ellipsis or the row edge.
+    await expect(picker.locator(".picker-machine")).toHaveText(["Studio Mac · macOS", "Atlas · Linux"]);
+    await expect(picker.locator('.session-picker-entry[aria-current="true"] .session-meta')).toHaveText("gabber-studio · supervisor calm-otter-4 · 1 worker · live");
+    await expect(picker.locator('.session-picker-entry:not([aria-current="true"]) .session-meta')).toHaveText("cas-src · supervisor patient-pelican-9 · 1 worker · live");
+    const clipped = await rows.evaluateAll((entries) => entries.flatMap((entry) => {
+      const box = entry.getBoundingClientRect();
+      return [...entry.querySelectorAll<HTMLElement>(".session-name, .session-meta, .session-summary-title, .session-picker-current")]
+        .filter((text) => {
+          const r = text.getBoundingClientRect();
+          return text.scrollWidth > text.clientWidth + 1 || r.right > box.right + 0.5 || r.left < box.left - 0.5;
+        })
+        .map((text) => text.textContent);
+    }));
+    expect(clipped).toEqual([]);
+    // Left open: this stage's screenshot (J09.png) is the phone receipt.
+  });
+
   await journey.stage("Pair a third machine; the others keep their colours", async () => {
     // cas-50a7: each machine's accent is stored when it first pairs, so a new
     // pairing never re-colours the fleet, and a third machine gets its own.
+    // Back from the phone stage: desktop viewport, picker closed, out of
+    // Terminal view to the conversation list.
+    await page.setViewportSize({ width: 1280, height: 720 });
+    await page.keyboard.press("Escape");
+    await expect(page.locator("#session-picker")).toBeHidden();
+    await page.locator("#conversation-return").click();
+    await expect(composer).toBeVisible();
     const avatar = (project: RegExp) => list.getByRole("button", { name: project }).locator(".conversation-avatar");
     const colour = (project: RegExp) => avatar(project).evaluate((element) => getComputedStyle(element).backgroundColor);
     const atlas = await colour(/cas-src/);

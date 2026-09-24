@@ -240,7 +240,8 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 6. See which session is open while pointing at it — in light and dark, the open session keeps its tint under the pointer (lifting as feedback) and still differs from an ordinary hovered row
 7. Come back from the terminal to the reply box — returning from Terminal view by keyboard or mouse puts focus in the reply box, never on the page body
 8. Keyboard focus lands somewhere real on every route — entering Terminal view lands in the terminal (or on the way back, which is first in the Tab order though drawn at the foot), choosing a session in the picker lands in it, and opening a conversation from the list by Enter or a click lands in its reply box; none leaves focus on the page body
-9. Pair a third machine; the others keep their colours — each machine's accent is stored when it first pairs, so a new pairing (even one whose id sorts first) never re-colours the fleet, the new machine gets its own accent, and the colours survive a reload
+9. Read every session's details on a phone — at 390px each picker row, the open one included, shows project, role, workers and status in full
+10. Pair a third machine; the others keep their colours — each machine's accent is stored when it first pairs, so a new pairing (even one whose id sorts first) never re-colours the fleet, the new machine gets its own accent, and the colours survive a reload
 
 **Expected experience**
 

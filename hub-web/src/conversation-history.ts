@@ -9,9 +9,12 @@ export const RECEIPT_TIMEOUT_MS = 15_000;
 /**
  * A supervisor turn that lands after a send is later traffic on the same
  * socket; the send's receipt would have come first. It still gets this long,
- * so a reply racing the receipt never flashes "Not confirmed" (cas-1622).
+ * counted from when that turn arrived here, so a reply racing the receipt
+ * never flashes "Not confirmed" (cas-1622). Counted from the send, a 2 s grace
+ * turned a receipt 1.9–3.4 s late into a brief "Not confirmed" with Retry, and
+ * a Retry tapped then sent the message twice (cas-1185).
  */
-export const RECEIPT_REPLY_GRACE_MS = 2_000;
+export const RECEIPT_REPLY_GRACE_MS = 5_000;
 
 export interface ConversationSend {
   id: string;
@@ -36,7 +39,9 @@ export interface ConversationSend {
 /** `at` is the sort key. `shownAt`, when set, is the time to display: a live
  * event sorted after a turn stamped by a clock that runs ahead keeps its own
  * time on screen (cas-ac1f). */
-export type ConversationEvent = { kind: "send"; value: ConversationSend; at?: number; shownAt?: number; session?: string } | { kind: "reply"; value: OperatorReply; at?: number; shownAt?: number; session?: string };
+/** A reply's `arrivedAt` is when this browser received it (ms epoch): the
+ * receipt grace for an earlier send counts from it (cas-1185). */
+export type ConversationEvent = { kind: "send"; value: ConversationSend; at?: number; shownAt?: number; session?: string } | { kind: "reply"; value: OperatorReply; at?: number; shownAt?: number; session?: string; arrivedAt?: number };
 
 /** In-memory per-thread evidence. A submitted socket frame is never a receipt. */
 export class ConversationHistory {
@@ -155,8 +160,8 @@ export class ConversationHistory {
   /**
    * Live sends still waiting on a receipt past their deadline become
    * `unconfirmed`: RECEIPT_TIMEOUT_MS after they went out, or
-   * RECEIPT_REPLY_GRACE_MS once a supervisor turn has landed after them
-   * (cas-1622). Returns the ids that changed. A late receipt still turns one
+   * RECEIPT_REPLY_GRACE_MS after a later supervisor turn arrived here,
+   * whichever comes first (cas-1622, cas-1185). Returns the ids that changed. A late receipt still turns one
    * into "Delivered" (acknowledge), and a late refusal into "Not sent".
    */
   unconfirmSilent(now: number): string[] {
@@ -181,8 +186,13 @@ export class ConversationHistory {
   private receiptDeadline(index: number): number | undefined {
     const event = this.events[index];
     if (event?.kind !== "send" || event.value.state !== "sending" || event.value.notificationId !== undefined || event.value.sentAt === undefined) return undefined;
-    const answeredLater = this.events.slice(index + 1).some((later) => later.kind === "reply");
-    return event.value.sentAt + (answeredLater ? RECEIPT_REPLY_GRACE_MS : RECEIPT_TIMEOUT_MS);
+    const sentAt = event.value.sentAt;
+    const timeout = sentAt + RECEIPT_TIMEOUT_MS;
+    // The grace starts when the later turn reached this browser, not at the
+    // send: a turn that crosses the send must not shorten the receipt's wait.
+    const arrivals = this.events.slice(index + 1).flatMap((later) => later.kind === "reply" ? [later.arrivedAt ?? sentAt] : []);
+    if (!arrivals.length) return timeout;
+    return Math.min(timeout, Math.max(sentAt, Math.min(...arrivals)) + RECEIPT_REPLY_GRACE_MS);
   }
   /**
    * Drop a refused or unconfirmed send that a retry replaced. Only those can
@@ -234,7 +244,7 @@ export class ConversationHistory {
     }
     return undefined;
   }
-  reply(reply: OperatorReply, at: number | undefined = Date.now(), session?: string, shownAt?: number): void {
+  reply(reply: OperatorReply, at: number | undefined = Date.now(), session?: string, shownAt?: number, arrivedAt: number = Date.now()): void {
     if (this.events.some((event) => event.kind === "reply" && event.value.notification_id === reply.notification_id)) return;
     const normalized: OperatorReply = {
       ...reply,
@@ -242,7 +252,7 @@ export class ConversationHistory {
       kind: reply.kind ?? "answer",
       attachments: reply.attachments ?? [],
     };
-    this.insert({ kind: "reply", value: normalized, at, ...(shownAt === undefined ? {} : { shownAt }), session });
+    this.insert({ kind: "reply", value: normalized, at, ...(shownAt === undefined ? {} : { shownAt }), session, arrivedAt });
     for (const event of this.events) {
       if (event.kind === "send" && normalized.reply_to !== null && event.value.notificationId === normalized.reply_to) event.value.state = "replied";
     }
@@ -256,7 +266,7 @@ export class ConversationHistory {
    */
   receive(reply: OperatorReply, at: number = Date.now(), session?: string): void {
     const key = Math.max(at, this.latestAt());
-    this.reply(reply, key, session, key === at ? undefined : at);
+    this.reply(reply, key, session, key === at ? undefined : at, at);
   }
 
   /** Merge a durable supervisor turn using its original queue timestamp. */

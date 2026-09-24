@@ -102,9 +102,43 @@ test("HUB-J5 reply by typing", async ({ page, journey }) => {
     await expect(list.getByText(/Not sent: /)).toHaveCount(0);
   });
 
-  await journey.stage("A message the hub never confirms offers Retry", async () => {
+  await journey.stage("A late receipt after the supervisor talks on never offers Retry", async () => {
     hub.deliverLatest(PELICAN);
     await expect(page.locator('.conversation-turn[data-state="acknowledged"]')).toHaveCount(1);
+    // Watch every frame: a "Not confirmed" that flashes before a late receipt
+    // is a Retry that sends the message twice (cas-1185).
+    await page.evaluate(() => {
+      const w = window as unknown as { __unconfirmedFrames: number; __watchUnconfirmed: boolean };
+      w.__unconfirmedFrames = 0;
+      w.__watchUnconfirmed = true;
+      const tick = () => {
+        if (document.querySelector('.conversation-turn[data-state="unconfirmed"]')) w.__unconfirmedFrames += 1;
+        if (w.__watchUnconfirmed) requestAnimationFrame(tick);
+      };
+      requestAnimationFrame(tick);
+    });
+    await composer.fill("Run the gate once more.");
+    const crossing = hub.nextSend();
+    await send.click();
+    expect((await crossing).text).toBe("Run the gate once more.");
+    // The supervisor's turn crosses the send, and the receipt comes 3.4 s
+    // later: the slowest late receipt measured in the cas-1622 QA.
+    hub.supervisorSays(PELICAN, "Gate run 2 of 3 is going.");
+    await page.waitForTimeout(3_400);
+    hub.deliverLatest(PELICAN);
+    const crossed = page.locator('.conversation-turn[data-state="acknowledged"]').filter({ hasText: "Run the gate once more." });
+    await expect(crossed).toHaveCount(1);
+    const flashed = await page.evaluate(() => {
+      const w = window as unknown as { __unconfirmedFrames: number; __watchUnconfirmed: boolean };
+      w.__watchUnconfirmed = false;
+      return w.__unconfirmedFrames;
+    });
+    expect(flashed, "frames that showed Not confirmed before the late receipt").toBe(0);
+    await expect(page.getByRole("button", { name: "Retry sending" })).toHaveCount(0);
+    await expect(page.getByRole("log").getByText("Run the gate once more.")).toHaveCount(1);
+  });
+
+  await journey.stage("A message the hub never confirms offers Retry", async () => {
     await composer.fill("Is the gate green yet?");
     const unreceipted = hub.nextSend();
     await send.click();
@@ -112,7 +146,8 @@ test("HUB-J5 reply by typing", async ({ page, journey }) => {
     // No receipt comes; the supervisor talks on, so the receipt is overdue (cas-1622).
     hub.supervisorSays(PELICAN, "Still running the release gate.");
     const bubble = page.locator('.conversation-turn[data-state="unconfirmed"]');
-    await expect(bubble.getByRole("status")).toHaveText(`Not confirmed · The hub never confirmed this reached ${PELICAN}. Retry sends it again.`);
+    // It gives up 5 s after that turn arrived (cas-1185), not at once.
+    await expect(bubble.getByRole("status")).toHaveText(`Not confirmed · The hub never confirmed this reached ${PELICAN}. Retry sends it again.`, { timeout: 10_000 });
     await expect(page.locator('.conversation-turn[data-state="sending"]')).toHaveCount(0);
     await expect(page.getByText(`Sending to ${PELICAN}…`)).toBeHidden();
     const retried = hub.nextSend();

@@ -176,10 +176,13 @@ export function sessionPickerHeadline(entry: Pick<SessionPickerEntry, "project" 
  * The picker row's second line under a project headline: the generated
  * codename is secondary, with the role, roster and status after it. The
  * machine is the group heading above the row. With no project the session
- * name is already the headline, so the line does not repeat it.
+ * name is already the headline, so the line does not repeat it: a supervisor
+ * that shares the session's name is named once, in the headline (cas-3055).
  */
 export function sessionPickerRowMeta(entry: SessionPickerEntry): string {
-  const codename = entry.supervisor ?? (entry.project ? entry.session : undefined);
+  const codename = entry.project
+    ? entry.supervisor ?? entry.session
+    : entry.supervisor && entry.supervisor !== entry.session ? entry.supervisor : undefined;
   const role = codename ? `${entry.role} ${codename}` : entry.role;
   return [role, workerCountLabel(entry.workerCount), entry.status].join(" · ");
 }

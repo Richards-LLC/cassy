@@ -51,7 +51,11 @@ pub(crate) fn delivered_head(
         return Some(receipt);
     }
     if let Some(assignee) = task.assignee.as_deref()
-        && let Some(tip) = resolve_branch_sha(repo, &format!("factory/{assignee}"))
+        // cas-73b8: the per-task branch when the worker used one.
+        && let Some(tip) = resolve_branch_sha(
+            repo,
+            &super::close_ops::close_measured_factory_branch(repo, task, assignee),
+        )
     {
         let merged = !target_branch.is_empty()
             && Command::new("git")

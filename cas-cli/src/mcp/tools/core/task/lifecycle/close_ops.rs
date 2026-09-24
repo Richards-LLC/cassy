@@ -3844,9 +3844,11 @@ impl CasCore {
             ));
         }
         let expected_source = format!("factory/{}", caller.name);
-        if input.source_branch != expected_source {
+        // cas-73b8: or the worker's own per-task branch for this task.
+        let task_source = crate::factory_isolation::worker_task_branch(&caller.name, &task.id);
+        if input.source_branch != expected_source && input.source_branch != task_source {
             return Ok(Self::tool_error(format!(
-                "DELIVERY RECEIPT REJECTED: source branch must be the registered worker branch `{expected_source}`."
+                "DELIVERY RECEIPT REJECTED: source branch must be the registered worker branch `{expected_source}` or its per-task branch `{task_source}`."
             )));
         }
         let receipt =
@@ -4193,6 +4195,7 @@ impl CasCore {
         message: &str,
         factory_branch_anchor: Option<String>,
         merge_conflicted: bool,
+        measured_branch: Option<String>,
     ) {
         let mut parked = task.clone();
         let now = chrono::Utc::now();
@@ -4216,10 +4219,20 @@ impl CasCore {
         // field is reassigned or cleared. Never overwrite an existing value —
         // this only fires once per task, same as the anchor above.
         if parked.deliverables.parked_branch.is_none() {
-            parked.deliverables.parked_branch = task
-                .assignee
-                .as_deref()
-                .map(|assignee| format!("factory/{assignee}"));
+            // cas-73b8: the branch the merge gate measured (a per-task branch
+            // when the worker used one), so merge requests name it too.
+            parked.deliverables.parked_branch = measured_branch
+                .map(|branch| {
+                    branch
+                        .strip_prefix("origin/")
+                        .map(str::to_string)
+                        .unwrap_or(branch)
+                })
+                .or_else(|| {
+                    task.assignee
+                        .as_deref()
+                        .map(|assignee| format!("factory/{assignee}"))
+                });
         }
         // Parking precedes verification dispatch. Clear only this task's
         // pending flag so the next close attempt can create a fresh typed
@@ -5643,6 +5656,9 @@ impl CasCore {
                             &msg,
                             anchor.clone(),
                             merge_conflicted,
+                            task.assignee.as_deref().map(|assignee| {
+                                close_measured_factory_branch(&close_project_root, &task, assignee)
+                            }),
                         );
                     } else {
                         // GH #744 / #743: a worker may push again after the
@@ -8021,7 +8037,16 @@ impl CasCore {
                 .assignee
                 .as_deref()
                 .expect("System B requires assignee");
-            let expected_branch = format!("factory/{assignee}");
+            // cas-73b8: a worktree on the worker's per-task branch for this
+            // task is the task's worktree too.
+            let task_branch = crate::factory_isolation::worker_task_branch(assignee, &task.id);
+            let expected_branch = if crate::factory_isolation::branch_at(path).as_deref()
+                == Some(task_branch.as_str())
+            {
+                task_branch
+            } else {
+                format!("factory/{assignee}")
+            };
             validate_pre_close_worktree(path, expected, Some(&expected_branch))
                 .map_err(|error| error.to_string())?;
         }
@@ -8809,7 +8834,7 @@ fn current_factory_branch_receipt_for_identity(
     receipt: &str,
 ) -> Option<String> {
     let assignee = task.assignee.as_deref()?;
-    let branch = format!("factory/{assignee}");
+    let branch = close_measured_factory_branch(repo_path, task, assignee);
     let full_receipt = resolve_task_commit_receipt_sha(repo_path, receipt).ok()?;
     let current_tip = resolve_branch_sha(repo_path, &branch)?;
     (current_tip == full_receipt).then_some(full_receipt)
@@ -10122,6 +10147,24 @@ fn handoff_prior_holders(notes: &str) -> Vec<&str> {
     holders
 }
 
+/// cas-73b8: `factory/<assignee>-<task-id>` when it exists locally, else
+/// `origin/factory/<assignee>-<task-id>` when only the remote has it.
+pub(crate) fn worker_task_branch_ref(
+    repo_path: &std::path::Path,
+    assignee: &str,
+    task_id: &str,
+) -> Option<String> {
+    let branch = crate::factory_isolation::worker_task_branch(assignee, task_id);
+    if !is_safe_git_refname(&branch) {
+        return None;
+    }
+    if git_ref_exists(repo_path, &branch) {
+        return Some(branch);
+    }
+    let remote = format!("origin/{branch}");
+    git_ref_exists(repo_path, &remote).then_some(remote)
+}
+
 /// cas-e33f (GH #1004): whether this task changed hands after work began —
 /// a recorded handoff branch, a commit-time `parked_branch` that is not the
 /// current assignee's, or a transfer audit note.
@@ -10130,7 +10173,13 @@ pub(crate) fn task_changed_hands(task: &Task) -> bool {
         .assignee
         .as_deref()
         .map(|assignee| format!("factory/{assignee}"));
-    let foreign = |branch: &str| own.as_deref() != Some(branch);
+    // cas-73b8: the assignee's own per-task branch is not a handoff.
+    let own_task = task
+        .assignee
+        .as_deref()
+        .map(|assignee| crate::factory_isolation::worker_task_branch(assignee, &task.id));
+    let foreign =
+        |branch: &str| own.as_deref() != Some(branch) && own_task.as_deref() != Some(branch);
     task.deliverables
         .handoff_branches
         .iter()
@@ -10154,7 +10203,12 @@ pub(crate) fn task_changed_hands(task: &Task) -> bool {
 /// `None` when the task has no assignee or none of them resolves.
 pub(crate) fn task_delivery_branch(repo_path: &std::path::Path, task: &Task) -> Option<String> {
     let assignee = task.assignee.as_deref()?;
-    let mut candidates = vec![format!("factory/{assignee}")];
+    // cas-73b8: the per-task branch, when the worker used one, holds exactly
+    // this task's commits.
+    let mut candidates = vec![
+        crate::factory_isolation::worker_task_branch(assignee, &task.id),
+        format!("factory/{assignee}"),
+    ];
     candidates.extend(task.deliverables.parked_branch.clone());
     candidates.extend(task.deliverables.handoff_branches.iter().rev().cloned());
     candidates.extend(
@@ -10188,6 +10242,13 @@ pub(crate) fn close_measured_factory_branch(
     task: &Task,
     assignee: &str,
 ) -> String {
+    // cas-73b8: a worker whose `factory/<assignee>` is frozen for another
+    // task's parked delivery commits this task on its per-task branch. When
+    // that branch exists (locally, else on origin) it is the one to measure;
+    // the frozen branch holds the other task's commits.
+    if let Some(branch) = worker_task_branch_ref(repo_path, assignee, &task.id) {
+        return branch;
+    }
     let own = format!("factory/{assignee}");
     if !task_changed_hands(task) || git_ref_exists(repo_path, &own) {
         return own;
@@ -20715,6 +20776,92 @@ mod merge_state_gate_tests {
                      from 'beta', reassigned to 'gamma'\n\n\
                      [2026-09-24 16:00] Handoff from gamma to sup";
         assert_eq!(handoff_prior_holders(notes), vec!["gamma", "beta", "alpha"]);
+    }
+
+    // --- cas-73b8: a per-task branch while factory/<worker> is frozen -------
+
+    /// `factory/worker` carries another task's parked delivery (frozen, one
+    /// unmerged commit). This task's commits live on the worker's per-task
+    /// branch `factory/worker-<task-id>`. The gate measures that branch: it
+    /// refuses naming it while unmerged, and proceeds once it is merged, even
+    /// though the frozen branch is still unmerged.
+    #[test]
+    fn per_task_branch_is_measured_while_the_worker_branch_is_frozen_cas_73b8() {
+        let (dir, _bare) = handoff_repo();
+        let p = dir.path();
+        let task = worker_task("worker");
+        let task_branch = format!("factory/worker-{}", task.id);
+        git(p, &["checkout", "-q", "-b", &task_branch, "main"]);
+        std::fs::write(p.join("next.rs"), "// next task\n").unwrap();
+        git(p, &["add", "next.rs"]);
+        git(p, &["commit", "-q", "-m", "feat: next task"]);
+
+        assert_eq!(
+            close_measured_factory_branch(p, &task, "worker"),
+            task_branch
+        );
+        assert_eq!(
+            task_delivery_branch(p, &task).as_deref(),
+            Some(task_branch.as_str())
+        );
+        assert!(!task_changed_hands(&task));
+        match run_factory_branch_merge_gate(&task, &base_req(&task.id), "main", p) {
+            MergeStateGateOutcome::Reject(msg) => {
+                assert!(msg.contains(&task_branch), "{msg}");
+            }
+            other => panic!("an unmerged per-task branch must refuse, got {other:?}"),
+        }
+
+        // Merge only the per-task branch; the frozen factory/worker stays out.
+        git(p, &["checkout", "-q", "main"]);
+        git(
+            p,
+            &[
+                "merge",
+                "-q",
+                "--no-ff",
+                &task_branch,
+                "-m",
+                "merge next task",
+            ],
+        );
+        git(p, &["push", "-q", "origin", "main"]);
+        let out = run_factory_branch_merge_gate(&task, &base_req(&task.id), "main", p);
+        assert!(
+            matches!(
+                out,
+                MergeStateGateOutcome::Proceed | MergeStateGateOutcome::ProceedWithNote(_)
+            ),
+            "the merged per-task delivery must close, got {out:?}"
+        );
+
+        // A park that recorded the per-task branch is not a handoff.
+        let mut parked = task.clone();
+        parked.deliverables.parked_branch = Some(task_branch.clone());
+        assert!(!task_changed_hands(&parked));
+
+        // Only the remote copy left locally: origin/<branch> is measured.
+        git(p, &["push", "-q", "origin", &task_branch]);
+        git(p, &["fetch", "-q", "origin"]);
+        git(p, &["branch", "-D", &task_branch]);
+        assert_eq!(
+            close_measured_factory_branch(p, &task, "worker"),
+            format!("origin/{task_branch}")
+        );
+    }
+
+    /// Without a per-task branch the worker's own branch is measured, as
+    /// before.
+    #[test]
+    fn without_a_per_task_branch_the_worker_branch_is_measured_cas_73b8() {
+        let (dir, _bare) = handoff_repo();
+        let p = dir.path();
+        let task = worker_task("worker");
+        assert_eq!(
+            close_measured_factory_branch(p, &task, "worker"),
+            "factory/worker"
+        );
+        assert!(worker_task_branch_ref(p, "worker", &task.id).is_none());
     }
 
     // --- cas-e74c (GH #80 / #62 symptoms 3-4): delivery-scoped guard -------

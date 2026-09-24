@@ -1249,6 +1249,8 @@ fn resolve_scoped_proof_targets_without_cache(
 struct ScopedProofReceipt {
     targets: String,
     base: Option<String>,
+    /// The tip the proof ran at, when the runner recorded it (cas-a9a1).
+    head: Option<String>,
 }
 
 fn scoped_proof_receipt_field(line: &str, field: &str) -> Option<String> {
@@ -1281,7 +1283,14 @@ fn scoped_proof_note_receipt(notes: &str) -> Option<ScopedProofReceipt> {
             let base = ["SCOPED_PROOF_BASE=", "base_sha=", "base="]
                 .into_iter()
                 .find_map(|field| scoped_proof_receipt_field(line, field));
-            Some(ScopedProofReceipt { targets, base })
+            let head = ["head_sha=", "head="]
+                .into_iter()
+                .find_map(|field| scoped_proof_receipt_field(line, field));
+            Some(ScopedProofReceipt {
+                targets,
+                base,
+                head,
+            })
         })
         .last()
 }
@@ -1292,6 +1301,10 @@ fn scoped_proof_note_targets(notes: &str) -> Option<String> {
 
 fn scoped_proof_note_base(notes: &str) -> Option<String> {
     scoped_proof_note_receipt(notes).and_then(|receipt| receipt.base)
+}
+
+fn scoped_proof_note_head(notes: &str) -> Option<String> {
+    scoped_proof_note_receipt(notes).and_then(|receipt| receipt.head)
 }
 
 fn scoped_proof_base_matches(proof_repo: &std::path::Path, actual: &str, expected: &str) -> bool {
@@ -1613,6 +1626,7 @@ fn validate_risk_close_proofs(
         proof_repo,
         proof_repo,
         None,
+        None,
         &mut scoped_proof_cache,
     )
 }
@@ -1623,6 +1637,22 @@ fn validate_risk_close_proofs_with_base(
     proof_repo: &std::path::Path,
     expected_base: Option<&str>,
 ) -> Result<(), String> {
+    validate_risk_close_proofs_with_base_and_head(
+        task,
+        changed_paths,
+        proof_repo,
+        expected_base,
+        None,
+    )
+}
+
+fn validate_risk_close_proofs_with_base_and_head(
+    task: &Task,
+    changed_paths: &[String],
+    proof_repo: &std::path::Path,
+    expected_base: Option<&str>,
+    delivery_head: Option<&str>,
+) -> Result<(), String> {
     let mut scoped_proof_cache = ScopedProofTargetCache::default();
     validate_risk_close_proofs_with_base_and_target_and_cache(
         task,
@@ -1630,6 +1660,7 @@ fn validate_risk_close_proofs_with_base(
         proof_repo,
         proof_repo,
         expected_base,
+        delivery_head,
         &mut scoped_proof_cache,
     )
 }
@@ -1640,6 +1671,7 @@ fn validate_risk_close_proofs_with_base_and_target_and_cache(
     proof_repo: &std::path::Path,
     target_repo: &std::path::Path,
     expected_base: Option<&str>,
+    delivery_head: Option<&str>,
     scoped_proof_cache: &mut ScopedProofTargetCache,
 ) -> Result<(), String> {
     if task.risk.contains(&TaskRisk::Platform) && !has_platform_proof_note(&task.notes) {
@@ -1677,9 +1709,21 @@ fn validate_risk_close_proofs_with_base_and_target_and_cache(
     if !required_targets.is_empty() {
         if let Some(expected_base) = expected_base {
             let actual_base = scoped_proof_note_base(&task.notes);
-            if !actual_base
-                .as_deref()
-                .is_some_and(|base| scoped_proof_base_matches(proof_repo, base, expected_base))
+            // cas-a9a1: the gate's base comes from the task's attributed
+            // delivery window, which a worker cannot see and which can take in
+            // a neighbour's commit, so honest receipts from another base were
+            // refused ("base None" / a different SHA). A receipt that names
+            // the exact delivered tip and covers every target the gate's own
+            // diff requires proves the same thing, whatever base it measured.
+            let proves_delivered_tip = delivery_head.is_some_and(|delivered| {
+                scoped_proof_note_head(&task.notes)
+                    .as_deref()
+                    .is_some_and(|head| scoped_proof_base_matches(proof_repo, head, delivered))
+            }) && scoped_proof_note_covers(&task.notes, &required_targets).is_empty();
+            if !proves_delivered_tip
+                && !actual_base
+                    .as_deref()
+                    .is_some_and(|base| scoped_proof_base_matches(proof_repo, base, expected_base))
             {
                 return Err(format!(
                     "TASK CLOSE REJECTED: task {} scoped proof receipt has base {:?}, but this delivery must be proven against SCOPED_PROOF_BASE={expected_base} — the first parent of its earliest commit, which is the diff the required targets were derived from. Run `{}` and add the resulting passing receipt to a progress note.",
@@ -1692,7 +1736,7 @@ fn validate_risk_close_proofs_with_base_and_target_and_cache(
         let missing = scoped_proof_note_covers(&task.notes, &required_targets);
         if !missing.is_empty() {
             return Err(format!(
-                "TASK CLOSE REJECTED: task {} changed a module with integration-test proof targets that were not run or recorded as passing; missing targets: {}. Run `{}` and add `SCOPED_PROOF: targets=<complete target set> result=PASS` to a progress note before retrying close. If the scoped command cannot run, a registered supervisor may record an equivalent full `cargo nextest run -p cas` receipt with its durable log path in the note; every real required target must be covered.",
+                "TASK CLOSE REJECTED: task {} changed a module with integration-test proof targets that were not run or recorded as passing; missing targets: {}. Run `{}` and add its `SCOPED_PROOF: targets=<complete target set> result=PASS base=<sha> head=<sha>` line to a progress note before retrying close. If the scoped command cannot run, a registered supervisor may record an equivalent full `cargo nextest run -p cas` receipt with its durable log path in the note; every real required target must be covered.",
                 task.id,
                 missing.join(", "),
                 scoped_proof_command(&required_targets, expected_base),
@@ -2542,6 +2586,90 @@ mod risk_proof_tests {
         );
         validate_risk_close_proofs_with_base(&task, &changed, dir.path(), Some(&expected_base))
             .expect("a receipt on the delivery's own base closes");
+    }
+
+    /// cas-a9a1: a worker's proof run without SCOPED_PROOF_BASE records the
+    /// base it measured, which need not be the one the gate derives from the
+    /// task's delivery window. A receipt that names the delivered tip and
+    /// covers every required target closes; one for another tip, or missing a
+    /// target, still does not.
+    #[test]
+    fn scoped_proof_for_the_delivered_tip_closes_whatever_base_it_measured() {
+        let dir = scoped_proof_fixture();
+        initialize_scoped_proof_git_fixture(dir.path());
+        let head = String::from_utf8(
+            std::process::Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(dir.path())
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_string();
+        let expected_base = "e".repeat(40);
+        let other_base = "f".repeat(40);
+        let changed = vec!["cas-cli/src/mcp/tools/service/factory_ops.rs".to_string()];
+        let mut task = Task::new("cas-a9a1-proof".into(), "proof without base".into());
+
+        // The runner's line: its own base, plus the tip it proved.
+        task.notes = format!(
+            "[2026-09-24] 📝 PROGRESS SCOPED_PROOF: targets=lib:factory_ops,test:factory_mcp_ops_test result=PASS base={other_base} head={head}"
+        );
+        validate_risk_close_proofs_with_base_and_head(
+            &task,
+            &changed,
+            dir.path(),
+            Some(&expected_base),
+            Some(&head),
+        )
+        .expect("a complete receipt for the delivered tip closes on any measured base");
+
+        // No base at all ("base None") is fine too when the tip matches.
+        task.notes = format!(
+            "[2026-09-24] 📝 PROGRESS SCOPED_PROOF: targets=lib:factory_ops,test:factory_mcp_ops_test result=PASS head={}",
+            &head[..12]
+        );
+        validate_risk_close_proofs_with_base_and_head(
+            &task,
+            &changed,
+            dir.path(),
+            Some(&expected_base),
+            Some(&head),
+        )
+        .expect("an abbreviated head that resolves to the delivered tip closes");
+
+        // Another tip does not.
+        task.notes = format!(
+            "[2026-09-24] 📝 PROGRESS SCOPED_PROOF: targets=lib:factory_ops,test:factory_mcp_ops_test result=PASS base={other_base} head={}",
+            "0".repeat(40)
+        );
+        let error = validate_risk_close_proofs_with_base_and_head(
+            &task,
+            &changed,
+            dir.path(),
+            Some(&expected_base),
+            Some(&head),
+        )
+        .expect_err("a receipt for another tip must not stand in for this delivery");
+        assert!(error.contains(&expected_base), "{error}");
+
+        // The delivered tip with a missing target does not either.
+        task.notes = format!(
+            "[2026-09-24] 📝 PROGRESS SCOPED_PROOF: targets=lib:factory_ops result=PASS base={other_base} head={head}"
+        );
+        assert!(
+            validate_risk_close_proofs_with_base_and_head(
+                &task,
+                &changed,
+                dir.path(),
+                Some(&expected_base),
+                Some(&head),
+            )
+            .is_err(),
+            "the delivered tip must still cover every required target"
+        );
     }
 
     #[test]
@@ -6821,12 +6949,20 @@ impl CasCore {
                 .map(|context| context.repo_root.as_path())
                 .unwrap_or(close_project_root.as_path());
             let mut scoped_proof_cache = ScopedProofTargetCache::default();
+            // The tip this close delivers: the named commit receipt, else the
+            // proof checkout's HEAD (the worker's branch).
+            let delivered_tip = req
+                .commit_receipt
+                .as_deref()
+                .and_then(|receipt| resolve_branch_sha(proof_repo, receipt))
+                .or_else(|| resolve_branch_sha(proof_repo, "HEAD"));
             if let Err(message) = validate_risk_close_proofs_with_base_and_target_and_cache(
                 &task,
                 &changed_paths,
                 proof_repo,
                 target_repo,
                 scoped_proof_base.as_deref(),
+                delivered_tip.as_deref(),
                 &mut scoped_proof_cache,
             ) {
                 let measured_gaps = declared_risk_close_gaps(&task, &changed_paths);
@@ -6844,6 +6980,7 @@ impl CasCore {
                     proof_repo,
                     target_repo,
                     scoped_proof_base.as_deref(),
+                    delivered_tip.as_deref(),
                     &mut scoped_proof_cache,
                 ) {
                     let required_targets = required_scoped_proof_targets(

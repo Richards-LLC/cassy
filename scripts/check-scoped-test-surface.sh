@@ -608,7 +608,9 @@ if [[ ${#missing[@]} -eq 0 ]]; then
     if [[ ${#proof_targets[@]} -eq 0 ]]; then
         proof_targets+=(none)
     fi
-    (IFS=,; echo "SCOPED_PROOF: targets=${proof_targets[*]} result=PASS base=${merge_base}")
+    # head= lets the close gate accept this receipt for the exact tip it
+    # proves even when the gate derives a different base (cas-a9a1).
+    (IFS=,; echo "SCOPED_PROOF: targets=${proof_targets[*]} result=PASS base=${merge_base} head=$(git rev-parse HEAD)")
     exit 0
 fi
 

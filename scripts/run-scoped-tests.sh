@@ -310,7 +310,7 @@ if [[ "${proof_mode}" -eq 1 ]]; then
     proof_merge_base="$(git -C "${REPO_ROOT}" merge-base "${proof_base}" HEAD)"
     printf 'SCOPED_PROOF: command=scripts/run-scoped-tests.sh --proof'
     printf ' %q' "$@"
-    printf ' result=PASS base=%s\n' "${proof_merge_base}"
+    printf ' result=PASS base=%s head=%s\n' "${proof_merge_base}" "$(git -C "${REPO_ROOT}" rev-parse HEAD)"
 
     # Keep the receipt intentionally line-oriented and shell-safe. The release
     # train rechecks every field against the current branch and the shared

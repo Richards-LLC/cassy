@@ -349,6 +349,22 @@ run_scenario macos-target-install GATE_FIXTURE_RUSTUP_FAIL macos-check
 run_scenario nextest-run GATE_FIXTURE_NEXTEST_FAIL nextest
 run_scenario doctest-run GATE_FIXTURE_DOCTEST_FAIL doctests
 run_scenario archive-run GATE_FIXTURE_ARCHIVE_FAIL archive-mode
+# A missing archive command must fail the row by name, never become its PATH.
+cat >"$tmp/hide-archive-command.sh" <<'EOF'
+command() {
+    if [[ "$1" == -v && "$2" == cargo-nextest ]]; then return 1; fi
+    builtin command "$@"
+}
+EOF
+repo="$(new_fixture archive-missing-command)"
+output="$(BASH_ENV="$tmp/hide-archive-command.sh" \
+    run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 --only archive-mode 2>&1 || true)"
+if grep -qF 'archive-mode: required archive command is missing: cargo-nextest' <<<"$output" \
+    && grep -qF 'FAIL archive-mode' <<<"$output"; then
+    ok 'archive-mode names a missing command and fails the row'
+else
+    bad "archive-mode swallowed a missing command into PATH: $output"
+fi
 run_scenario snapshot-run GATE_FIXTURE_SNAPSHOT_FAIL snapshot-portability
 run_scenario projection-run GATE_FIXTURE_DRIFT_FAIL builtin-projections
 run_scenario fixture-paths-run GATE_FIXTURE_FIXTURE_PATHS_FAIL fixture-paths

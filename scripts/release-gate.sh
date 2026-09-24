@@ -888,12 +888,16 @@ make_archive_path() {
     for name in cargo rustc cargo-nextest git sh bash jq python3; do
         command="$(command -v "$name" || true)"
         [[ -n "$command" ]] || {
-            printf 'archive-mode: required archive command is missing: %s\n' "$name"
+            printf 'archive-mode: required archive command is missing: %s\n' "$name" >&2
             return 1
         }
         ln -s "$command" "$archive_bin/$name"
     done
-    printf '/usr/bin:/bin'
+    if [[ "$(uname -s)" == Darwin ]]; then
+        printf '/usr/bin:/bin:/usr/sbin:/sbin'
+    else
+        printf '/usr/bin:/bin'
+    fi
 }
 
 check_archive_mode() {
@@ -924,7 +928,12 @@ check_archive_mode() {
         printf 'archive-mode: cannot create remap worktree at %s\n' "$remap"
         return 1
     }
-    archive_path="$(make_archive_path)"
+    archive_path="$(make_archive_path)" || {
+        status=$?
+        git worktree remove --force "$remap" >/dev/null 2>&1 || true
+        rm -rf "$archive_dir"
+        return "$status"
+    }
     if env -u CAS_FACTORY_SESSION -u CAS_AGENT_ROLE -u CAS_AGENT_NAME \
         -u CAS_SUPERVISOR_NAME -u CAS_AGENT_ID \
         "$cargo_bin" nextest archive --workspace --archive-file "$archive"; then

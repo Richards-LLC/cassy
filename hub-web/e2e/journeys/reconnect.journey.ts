@@ -55,6 +55,19 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
     await composer.fill("Are you there?");
     await page.getByRole("button", { name: `Send to ${PELICAN}`, exact: true }).click();
     await expect(page.locator("#message-status")).toHaveText("The hub connection is reconnecting, so this message was not delivered. Try again once the session is live.");
+    // The rail defers to the banner: no second, technical alarm about the same
+    // drop, and whatever it does show counts the same in every place (cas-90d4).
+    const rail = page.locator("#attention-panel");
+    await expect(rail).toBeAttached();
+    await expect(rail).not.toContainText(/transport/i);
+    await expect(rail.getByRole("button", { name: "View pane" })).toHaveCount(0);
+    const railCounts = await rail.evaluate((element) => {
+      const summary = element.querySelector<HTMLElement>(".attention-panel-summary");
+      const stated = summary && !summary.hidden ? Number.parseInt(summary.textContent ?? "0", 10) : 0;
+      const grouped = [...element.querySelectorAll(".attention-group-count")].reduce((total, count) => total + Number(count.textContent), 0);
+      return { stated, grouped };
+    });
+    expect(railCounts.grouped, "the rail's group counts add up to its summary").toBe(railCounts.stated);
     hub.release(PELICAN);
   });
 

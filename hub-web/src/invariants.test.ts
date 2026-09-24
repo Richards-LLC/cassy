@@ -1190,6 +1190,9 @@ describe("binding Cassy Cloud browser invariants", () => {
     // The header status reads "Live", not "· Live": the dot is aria-hidden (cas-17e3).
     expect(source).toContain('const separator = document.createElement("span"); separator.setAttribute("aria-hidden", "true"); separator.textContent = " · ";');
     expect(source).toContain("resolveAttention(`${machine.id}:${session}:session_transport`);");
+    // A retrying drop is the banner's to tell; the rail defers to it (cas-90d4).
+    expect(source).toContain("if (!transportFailureNeedsAttention(attachStates.get(sessionKey(machine.id, session)))) return;");
+    expect(source).not.toContain('headline: "Terminal transport problem"');
     // While the session is known to be down the banner says so; no toast repeats it over the banner (cas-00cc).
     expect(source).toContain('if (!attach || attach.phase === "live" || attach.phase === "idle") toast("Terminal is reconnecting");');
     expect(source).toContain("if (shown) placeToastClearOfBanner(shown);");

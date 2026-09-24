@@ -5501,12 +5501,26 @@ impl CasCore {
                     .clone()
                     .unwrap_or_else(|| close_project_root.clone())
             };
-            match super::qa_evidence_gate::qa_evidence_close_gate(
+            // cas-bde8 (GH #978): judge only this task's own delivery, the
+            // same task-attributed commits the close diff stat reports,
+            // measured against the live (origin) target. A reused factory
+            // branch otherwise charged an earlier, already-merged task's UI
+            // commits to a backend-only task.
+            let attributed_paths = commit_receipt_window.as_ref().and_then(|window| {
+                task_attribution::paths(
+                    &evidence_repo,
+                    &resolved_parent_branch,
+                    window,
+                    req.commit_receipt.as_deref(),
+                )
+            });
+            match super::qa_evidence_gate::qa_evidence_close_gate_for_paths(
                 &self.cas_root,
                 &task,
                 &evidence_repo,
                 &resolved_parent_branch,
                 req.commit_receipt.as_deref(),
+                attributed_paths.as_deref(),
             ) {
                 Ok(notes) => {
                     for note in notes {

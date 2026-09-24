@@ -34,7 +34,7 @@ import { createTerminalSurface, type TerminalSurface } from "./terminal";
 import { absoluteTimestamp, relativeTimestamp } from "./time";
 import { loadPaneLayout, movePane, normalizePaneLayout, orderedPaneIds, promotePane, savePaneLayout, type PaneLayout, type PaneLayoutStorage } from "./pane-layout";
 import { detectSpeechInput, SpeechDictationController, type SpeechInputCapability, type SpeechInputState } from "./speech-input";
-import { backLabel, clearStoredSelection, forgetMachine, goBackSelection, loadStoredSelection, previousSelection, restorableSession, saveStoredSelection, selectSelection, sessionPickerEntries, sessionPickerMeta, workerCountLabel, type SelectionState, type SelectionStorage, type SessionSelection } from "./session-selection";
+import { backLabel, clearStoredSelection, forgetMachine, goBackSelection, loadStoredSelection, previousSelection, restorableSession, saveStoredSelection, selectSelection, sessionPickerEntries, sessionPickerMeta, workerCountLabel, type SelectionState, type SessionPickerEntry, type SelectionStorage, type SessionSelection } from "./session-selection";
 import { composerFocusWinner, planSupervisorSend, sendsOnEnter, supervisorMessage, supervisorTarget } from "./supervisor-message";
 import { hiddenWorkersLabel, saveWorkersRevealed, splitVisiblePanes, workersCommandLabel, workersRevealed, workersRoute } from "./worker-visibility";
 import { dormantCommandLabel, dormantRevealed, dormantRoute, saveDormantRevealed } from "./dormant-visibility";
@@ -2186,7 +2186,9 @@ function render(captureDraft = true): void {
   // Focus anywhere inside the open palette counts as composing too: a rebuild
   // would replace the dialog under a focused row, wipe its filter and leave
   // Enter to run whatever command now leads (cas-9648 QA F02).
-  const inOpenPalette = active instanceof HTMLElement && active.closest("#command-palette[open]") !== null;
+  // The open session picker is the same: a rebuild would replace it under the
+  // entry a keyboard user has arrowed onto (cas-1b86).
+  const inOpenPalette = active instanceof HTMLElement && active.closest("#command-palette[open], #session-picker[open]") !== null;
   const composing = (isEditableElement(active) && app.contains(active)) || inOpenPalette;
   const decision = renderDecision({
     signatureChanged: signature !== lastShellSignature,
@@ -2596,6 +2598,37 @@ function renderSessionPicker(): void {
     selection: selection.current ?? (selectedMachineId ? { machineId: selectedMachineId, session: selectedSession } : undefined),
     summaries: sessionSummaries,
   });
+  // Every render lands here, including the latency tick. Rebuilding unchanged
+  // entries would throw away the entry a keyboard user is on (and the filter's
+  // hidden rows), so only a real change rebuilds the list.
+  const signature = JSON.stringify([machines.size, entries]);
+  if (list.dataset.renderedEntries === signature) return;
+  list.dataset.renderedEntries = signature;
+  const focused = document.activeElement instanceof HTMLElement && list.contains(document.activeElement) ? document.activeElement : undefined;
+  const focusedKey = focused ? { machineId: focused.dataset.pickerMachine, session: focused.dataset.pickerSession } : undefined;
+  try {
+    rebuildSessionPickerList(list, entries);
+  } finally {
+    if (focusedKey) restoreSessionPickerFocus(list, focusedKey);
+  }
+}
+
+/**
+ * Put focus back on the rebuilt entry the keyboard user was on. When that
+ * entry is gone or filtered out, keep focus inside the picker on its filter
+ * rather than letting it fall to <body> behind the modal.
+ */
+function restoreSessionPickerFocus(list: HTMLElement, key: { readonly machineId?: string; readonly session?: string }): void {
+  const query = document.querySelector<HTMLInputElement>("#session-picker-query");
+  // The rebuilt rows come back unfiltered; re-run the live filter first.
+  if (query?.value) query.dispatchEvent(new Event("input"));
+  const entry = [...list.querySelectorAll<HTMLButtonElement>(".session-picker-entry")]
+    .find((candidate) => candidate.dataset.pickerMachine === key.machineId && candidate.dataset.pickerSession === key.session && !candidate.hidden);
+  if (entry) entry.focus();
+  else query?.focus();
+}
+
+function rebuildSessionPickerList(list: HTMLElement, entries: readonly SessionPickerEntry[]): void {
   if (entries.length === 0) {
     const empty = document.createElement("p");
     empty.className = "palette-empty";
@@ -3093,8 +3126,8 @@ app.addEventListener("focusout", () => {
     // Arrowing from the palette filter onto its rows is still one palette
     // interaction: a rebuild here would replace the dialog, wipe the filter
     // and leave Enter to run whatever row now leads (cas-9648). The owed
-    // rebuild runs when focus leaves the palette.
-    if (active instanceof HTMLElement && active.closest("#command-palette[open]")) return;
+    // rebuild runs when focus leaves the palette. Likewise the session picker.
+    if (active instanceof HTMLElement && active.closest("#command-palette[open], #session-picker[open]")) return;
     deferredRender.focusLeft();
   });
 });

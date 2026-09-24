@@ -71,4 +71,45 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
     await expect(picker).toBeHidden();
     await expect(toggle).toHaveAttribute("aria-expanded", "false");
   });
+
+  await journey.stage("Keep my place in the session picker while updates arrive", async () => {
+    const picker = page.locator("#session-picker");
+    const filter = page.getByRole("searchbox", { name: "Filter sessions" });
+    const entry = (session: string) => picker.locator(`.session-picker-entry[data-picker-session="${session}"]`);
+    await page.locator("#session-picker-toggle").click();
+    await expect(picker).toBeVisible();
+    await expect(filter).toBeFocused();
+    // Arrow onto the first session, then wait out several renders (the header
+    // latency tick) while a hub update arrives: focus must stay on that row.
+    await filter.press("ArrowDown");
+    const first = picker.locator(".session-picker-entry").first();
+    const firstSession = await first.getAttribute("data-picker-session");
+    await expect(first).toBeFocused();
+    hub.supervisorSays(OTTER, "Tests are running on the Mac.", { kind: "status" });
+    await page.waitForTimeout(6_000);
+    await expect(entry(firstSession!)).toBeFocused();
+    // Tab to the next session: the same holds there.
+    await page.keyboard.press("Tab");
+    const second = picker.locator(".session-picker-entry").nth(1);
+    await expect(second).toBeFocused();
+    // A summary that changes the rows themselves rebuilds the list; focus
+    // follows the same session onto its rebuilt row.
+    const summary = (title: string, phase: string) => hub.send(OTTER, { SessionSummary: { summary: { title, description: title, phase, generated_at: new Date().toISOString() } } });
+    const secondSession = await second.getAttribute("data-picker-session");
+    summary("Running the Mac tests", "testing");
+    await expect(entry(OTTER)).toContainText("Running the Mac tests");
+    await expect(entry(secondSession!)).toBeFocused();
+    // A filtered list keeps its filter and the row under focus.
+    await filter.fill(OTTER);
+    await filter.press("ArrowDown");
+    await expect(entry(OTTER)).toBeFocused();
+    summary("Queueing the deploy", "building");
+    await expect(entry(OTTER)).toContainText("Queueing the deploy");
+    await expect(entry(OTTER)).toBeFocused();
+    await expect(filter).toHaveValue(OTTER);
+    await expect(picker.locator(".session-picker-entry:visible")).toHaveCount(1);
+    await page.keyboard.press("Enter");
+    await expect(picker).toBeHidden();
+    await expect(page.locator(".session-picker-name")).toHaveText(OTTER);
+  });
 });

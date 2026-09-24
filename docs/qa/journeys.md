@@ -225,6 +225,7 @@ Suite: `hub-web/e2e/journeys/`. Run it with `npm run journeys` in
 2. Switch to the Mac and send there — the other thread starts with an empty composer; the message goes to that machine
 3. Come back to the draft — the first thread's draft is intact
 4. Reopen the session picker after closing it — in Terminal view, one click on the session title reopens the picker after Escape or ×, and it never pops open over the next dialog
+5. Keep my place in the session picker while updates arrive — the row a keyboard user arrowed or tabbed onto keeps focus, and the filter holds, while hub updates re-render the page
 
 **Expected experience**
 

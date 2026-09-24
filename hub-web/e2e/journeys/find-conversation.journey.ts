@@ -76,13 +76,23 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     // The header names the project once; machine and codename sit beneath it.
     await expect(page.locator(".conversation-identity h1")).toHaveText("gabber-studio");
     await expect(page.locator(".conversation-host")).toContainText(`Studio Mac · macOS · ${OTTER}`);
-    // An empty thread's card leads with the project too, machine and codename beneath (cas-1ca1).
-    const card = page.locator(".thread .empty");
-    await expect(card.locator("b")).toHaveText("gabber-studio");
-    await expect(card.locator(".proj2")).toHaveText(`Studio Mac · macOS · ${OTTER}`);
     await search.fill("");
     await search.blur();
     await expect(list.getByRole("button")).toHaveCount(3);
+  });
+
+  // Catalog step titles verbatim (docs/qa/journeys.md HUB-J3, cas-0e5c).
+  await journey.stage("An empty thread's card also leads with the project, with machine and codename beneath it", async () => {
+    // gabber-studio is open with no turns yet: its card is titled by the
+    // project, as the header and the row are, with machine · codename beneath
+    // and the codename as its own identifier (cas-1ca1).
+    const card = page.locator(".thread .empty");
+    await expect(card).toBeVisible();
+    await expect(card.locator("b")).toHaveText("gabber-studio");
+    await expect(card.locator("b")).not.toHaveClass(/codename/);
+    await expect(card.locator(".proj2")).toHaveText(`Studio Mac · macOS · ${OTTER}`);
+    await expect(card.locator(".proj2 > .codename")).toHaveText(OTTER);
+    await expect(card.getByText("Project unavailable")).toHaveCount(0);
   });
 
   await journey.stage("Find the conversation from the keyboard", async () => {
@@ -100,7 +110,7 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     await expect(list.getByRole("button")).toHaveCount(3);
   });
 
-  await journey.stage("A long machine name keeps every time stamp readable", async () => {
+  await journey.stage("A 40-character machine name ellipsises in its row and never runs under the time stamp, on desktop and at 390px", async () => {
     const row = list.getByRole("button", { name: /lighthouse/ });
     const clearOfTime = () => row.evaluate((node) => {
       const name = node.querySelector(".conversation-machine-name")!.getBoundingClientRect();

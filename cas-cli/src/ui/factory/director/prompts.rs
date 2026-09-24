@@ -6231,14 +6231,26 @@ mod tests {
                 "relay must name the WorkTarget branch: {}",
                 prompt.text
             );
+            // cas-6db4: main is the protected default branch, so the relay
+            // names the pull-request path, not a local merge and push. The
+            // PR's base must still come from the WorkTarget (cas-b62d).
             assert!(
-                prompt.text.contains("git merge --no-ff factory/recipe-be` on main"),
-                "main-target relay must derive its merge command from the WorkTarget: {}",
+                prompt
+                    .text
+                    .contains("gh pr create --base main --head factory/recipe-be"),
+                "main-target relay must derive its PR base from the WorkTarget: {}",
                 prompt.text
             );
             assert!(
-                prompt.text.contains("Push main if remote tracking applies"),
-                "main-target relay must derive its push instruction from the WorkTarget: {}",
+                prompt
+                    .text
+                    .contains("Do not merge into or push main locally"),
+                "main-target relay must derive its no-local-push instruction from the WorkTarget: {}",
+                prompt.text
+            );
+            assert!(
+                !prompt.text.contains("git merge --no-ff"),
+                "a protected main target must not be merged locally: {}",
                 prompt.text
             );
             assert!(

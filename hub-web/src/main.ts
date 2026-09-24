@@ -3338,6 +3338,10 @@ function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | und
   };
   document.querySelector<HTMLButtonElement>("#command-palette-close")!.onclick = closePalette;
   palette.oncancel = () => { commandPaletteOpen = false; };
+  // Any other close settles the same flag, so a command that closes the
+  // palette can never leave render() to reopen it (cas-dfc8). A dialog a
+  // shell rebuild replaced is detached and must not reset it.
+  palette.onclose = () => { if (palette.isConnected && !palette.open) commandPaletteOpen = false; };
   const paletteQuery = document.querySelector<HTMLInputElement>("#command-palette-query")!;
   const paletteAdvanced = palette.querySelector<HTMLDetailsElement>(".palette-advanced");
   // Commands in order, grouped Conversations / This session / Machines /
@@ -3664,7 +3668,9 @@ function renderMachineRegister(): void {
   if (!dialog) return;
   const list = dialog.querySelector<HTMLElement>('#paired-machines-list')!;
   renderPairedMachines(list, rows, forgetPairedMachine);
-  const open = () => { document.querySelector<HTMLDialogElement>('#command-palette')?.close(); dialog.showModal(); };
+  // Paired machines replaces the palette: clear its open flag too, or the
+  // next render reopens it over whatever the operator opens next (cas-dfc8).
+  const open = () => { commandPaletteOpen = false; document.querySelector<HTMLDialogElement>('#command-palette')?.close(); dialog.showModal(); };
   for (const id of ['paired-machines-toggle', 'palette-paired-machines']) {
     const button = document.getElementById(id); if (button) button.onclick = open;
   }

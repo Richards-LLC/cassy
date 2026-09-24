@@ -112,6 +112,20 @@ pub(super) fn register_coordination_lease_telemetry_and_missing(registry: &mut C
     });
 
     registry.register(ConfigMeta {
+        key: "factory.merge_sweep_command",
+        section: "factory",
+        name: "Post-Merge Sweep Command",
+        description: "Command the post-merge sweep runs (via sh -c in the merged-tip worktree) instead of the detected cargo nextest or package test script. Empty keeps detection. Its environment comes from the [factory.merge_sweep_env] table in config.toml, whose values are never logged.",
+        value_type: ConfigType::String,
+        default: "",
+        constraint: Constraint::None,
+        advanced: true,
+        requires_feature: None,
+        keywords: &["factory", "merge", "sweep", "command", "test", "env"],
+        use_cases: &["Run the suite the way CI runs it", "Give database-backed suites their setup step"],
+    });
+
+    registry.register(ConfigMeta {
         key: "factory.merge_sweep_timeout_secs",
         section: "factory",
         name: "Post-Merge Sweep Timeout",

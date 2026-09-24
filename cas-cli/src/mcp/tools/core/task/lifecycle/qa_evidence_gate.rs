@@ -296,14 +296,31 @@ mod tests {
         git(&repo, &["init", "-q", "-b", "main"]);
         commit_file(&repo, "README.md", "base\n");
         git(&repo, &["switch", "-q", "-c", "factory/worker"]);
-        commit_file(&repo, "hub-web/dist/app.css", "body { color: red }\n");
+        let task_a = commit_file(&repo, "hub-web/dist/app.css", "body { color: red }\n");
         // Squash merge: the remote main carries A's change as a new commit.
+        // It needs its own message: with commit_file's message (the path), the
+        // same parent, tree and author inside one clock second, git computes
+        // A's own id, A becomes an ancestor of origin/main, and the fixture is
+        // no longer a squash merge (cas-e5ac: red in CI, empty branch diff).
         git(&repo, &["switch", "-q", "--detach", "main"]);
-        commit_file(&repo, "hub-web/dist/app.css", "body { color: red }\n");
+        std::fs::write(repo.join("hub-web/dist/app.css"), "body { color: red }\n").unwrap();
+        git(&repo, &["add", "hub-web/dist/app.css"]);
+        git(&repo, &["commit", "-q", "-m", "Task A (#1) (squashed)"]);
         let squashed = git(&repo, &["rev-parse", "HEAD"]);
+        assert_ne!(squashed, task_a, "the squash commit is a new commit");
         git(
             &repo,
             &["update-ref", "refs/remotes/origin/main", &squashed],
+        );
+        let a_is_ancestor = Command::new("git")
+            .args(["merge-base", "--is-ancestor", &task_a, "origin/main"])
+            .current_dir(&repo)
+            .status()
+            .expect("run git")
+            .success();
+        assert!(
+            !a_is_ancestor,
+            "a squash merge leaves task A's commit outside origin/main's ancestry"
         );
         git(&repo, &["switch", "-q", "factory/worker"]);
         commit_file(&repo, "src/lib.rs", "pub fn backend() {}\n");
@@ -324,11 +341,12 @@ mod tests {
         .expect("only this task's backend change is judged");
         // Without attribution the branch diff still sees A's UI: this is why
         // the close path passes the attributed paths.
-        qa_evidence_close_gate(&cas_root, &task, &repo, "main", None)
+        let refusal = qa_evidence_close_gate(&cas_root, &task, &repo, "main", None)
             .expect_err("the branch-wide diff alone cannot tell A from B");
+        assert!(refusal.contains("app.css"), "{refusal}");
         // Nothing attributed falls back to the branch diff rather than
         // waving the gate through.
-        qa_evidence_close_gate_for_paths(
+        let fallback = qa_evidence_close_gate_for_paths(
             &cas_root,
             &task,
             &repo,
@@ -337,6 +355,7 @@ mod tests {
             Some(Vec::<String>::new().as_slice()),
         )
         .expect_err("an empty attribution is not evidence of a backend-only task");
+        assert!(fallback.contains("app.css"), "{fallback}");
     }
 
     #[test]

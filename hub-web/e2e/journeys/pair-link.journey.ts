@@ -1,4 +1,4 @@
-import { test, expect } from "./journey";
+import { test, expect, expectWholeFocusRing } from "./journey";
 import { ATLAS, PELICAN, STUDIO } from "./world";
 
 // A one-time invitation as `cas hub pair` prints it: 43 base64url characters.
@@ -14,8 +14,9 @@ test("HUB-J2 pair a machine from a cas hub pair link", async ({ page, journey })
     // An earlier link for another machine is already open, the name typed.
     await page.goto(`./#pair=${EARLIER_TOKEN}&hub=studio&hub_url=https%3A%2F%2Fstudio.test&machine=Studio%20Mac&scopes=machine:read,session:read,pane:read`);
     await expect(dialog.getByRole("textbox", { name: /Machine name/ })).toHaveValue("Studio Mac");
-    // A fresh link opens on the operator's name with the dialog at its top (QA F02).
-    await expect(dialog.getByRole("textbox", { name: "Your name (shown on the machine)" })).toBeFocused();
+    // A fresh link opens on the operator's name with the dialog at its top (QA F02),
+    // drawing the standard focus ring whole rather than two bars (cas-b2e4 F03).
+    await expectWholeFocusRing(dialog.getByRole("textbox", { name: "Your name (shown on the machine)" }));
     await expect(dialog.getByRole("heading", { name: "Pair a machine" })).toBeInViewport({ ratio: 1 });
     await dialog.getByRole("textbox", { name: "Your name (shown on the machine)" }).fill("Daniel");
     // The link carries the machine's hub address and name, as `cas hub pair`
@@ -25,7 +26,7 @@ test("HUB-J2 pair a machine from a cas hub pair link", async ({ page, journey })
     expect(new URL(page.url()).hash, "the secret leaves the address bar at once").toBe("");
   });
 
-  await journey.stage("Confirm the machine and pair", async () => {
+  await journey.stage("Confirm the machine", async () => {
     // Address and machine name arrive filled in and editable; only the operator's name is left.
     await expect(dialog.getByRole("textbox", { name: /Machine's hub address/ })).toHaveValue("https://atlas.test");
     await expect(dialog.getByRole("textbox", { name: /Machine's hub address/ })).toBeEditable();
@@ -41,10 +42,25 @@ test("HUB-J2 pair a machine from a cas hub pair link", async ({ page, journey })
     await expect(dialog.getByRole("button", { name: "Use this page's address" })).toBeHidden();
     await dialog.getByText("Where do I find this?").click();
     await expect(dialog.getByRole("button", { name: "Use this page's address" })).toBeVisible();
+    // The stage ends back in the name field, drawing its whole focus ring.
+    await dialog.getByRole("textbox", { name: "Your name (shown on the machine)" }).focus();
+    await expectWholeFocusRing(dialog.getByRole("textbox", { name: "Your name (shown on the machine)" }));
+  });
+
+  await journey.stage("Check the technical details", async () => {
     // The raw scope boxes wait under Technical details.
+    await dialog.getByText("Where do I find this?").click();
     await expect(dialog.getByRole("checkbox", { name: "message:send" })).toBeHidden();
     await dialog.getByText("Technical details").click();
+    // Its terms read in sentence case, not as shouting eyebrows (cas-b2e4 F02).
+    const term = dialog.locator("details.pair-technical dt").first();
+    await expect(term).toHaveText("Cassy Cloud origin");
+    expect(await term.evaluate((el) => getComputedStyle(el).textTransform)).toBe("none");
     await expect(dialog.getByRole("checkbox", { name: "message:send" })).toBeChecked();
+    await dialog.locator("details.pair-technical").scrollIntoViewIfNeeded();
+  });
+
+  await journey.stage("Pair", async () => {
     await dialog.getByRole("button", { name: "Pair", exact: true }).click();
     await expect(dialog).toBeHidden();
     expect(hub.exchanges).toHaveLength(1);

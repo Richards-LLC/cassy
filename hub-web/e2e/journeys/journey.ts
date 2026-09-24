@@ -103,6 +103,29 @@ export const test = base.extend<{ journey: Journey }>({
   },
 });
 
+/**
+ * The focused field draws the standard focus ring whole: its outline (width
+ * plus offset) fits inside the nearest clipping ancestor, so no side is cut
+ * off into stray bars (cas-b2e4 F03).
+ */
+export async function expectWholeFocusRing(field: import("@playwright/test").Locator): Promise<void> {
+  await expect(field).toBeFocused();
+  const ring = await field.evaluate((el) => {
+    const style = getComputedStyle(el);
+    const extent = parseFloat(style.outlineWidth) + parseFloat(style.outlineOffset);
+    const box = el.getBoundingClientRect();
+    let clip = el.parentElement;
+    while (clip && !/auto|scroll|hidden|clip/.test(getComputedStyle(clip).overflowX)) clip = clip.parentElement;
+    if (!clip) return { outline: style.outlineStyle, fits: true };
+    const bounds = clip.getBoundingClientRect();
+    const clipStyle = getComputedStyle(clip);
+    const left = bounds.left + parseFloat(clipStyle.borderLeftWidth);
+    const right = bounds.right - parseFloat(clipStyle.borderRightWidth);
+    return { outline: style.outlineStyle, fits: box.left - extent >= left - 0.5 && box.right + extent <= right + 0.5 };
+  });
+  expect(ring, "the focused field shows its whole focus ring").toEqual({ outline: "solid", fits: true });
+}
+
 /** Two animation frames: let the UI paint before a screenshot. */
 async function settle(page: Page): Promise<void> {
   await page.evaluate(() => new Promise((ok) => requestAnimationFrame(() => requestAnimationFrame(ok))));

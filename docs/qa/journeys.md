@@ -64,8 +64,10 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 **Steps**
 
 1. Open the link the machine printed — the dialog opens by itself and the secret leaves the address bar
-2. Confirm the machine and pair — enter the hub address, the machine label and the operator label; the scopes match the link
-3. Reach the supervisor — the machine's supervisor is listed and opens
+2. Confirm the machine — the hub address and machine name arrive filled in from the link; only your name is left, with the focus ring on it
+3. Check the technical details — the origin and the granted scope boxes, in sentence case
+4. Pair — the exchange goes to the link's machine
+5. Reach the supervisor — the machine's supervisor is listed and opens
 
 **Expected experience**
 

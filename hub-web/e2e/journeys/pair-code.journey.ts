@@ -1,5 +1,5 @@
 import type { Locator } from "@playwright/test";
-import { test, expect } from "./journey";
+import { test, expect, expectWholeFocusRing } from "./journey";
 import { ATLAS, PELICAN } from "./world";
 
 /** Every field in the dialog is visible without scrolling it (F4). */
@@ -32,7 +32,11 @@ test("HUB-J1 first open and pair a machine with a code", async ({ page, journey 
   await journey.stage("Approve on the machine", async () => {
     await expect(dialog.getByRole("heading", { name: "Machine authorized" })).toBeVisible({ timeout: 15_000 });
     await expect(dialog.getByText("Atlas · Linux").first()).toBeVisible();
-    await expect(dialog.getByText("Check this is your machine, then add your name.")).toBeVisible();
+    await expect(dialog.getByText("Check this is your machine.")).toBeVisible();
+    // One heading per step: "Machine authorized" is said once (cas-b2e4 F01).
+    await expect(dialog.getByText("Machine authorized")).toHaveCount(1);
+    await expect(dialog.getByText("Add your name, then press Pair.")).toBeVisible();
+    await expectWholeFocusRing(dialog.getByRole("textbox", { name: "Your name (shown on the machine)" }));
     await expect(dialog.getByText(/device credential/)).toHaveCount(0);
     await everyFieldAboveTheFold(dialog);
   });

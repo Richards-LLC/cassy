@@ -195,7 +195,10 @@ mod tests {
             current_handoff(&entries, "Worker").map(|e| e.id.as_str()),
             Some("worker")
         );
-        assert_eq!(current_handoff(&entries, "director"), None);
+        assert_eq!(
+            current_handoff(&entries, "director").map(|e| e.id.as_str()),
+            None
+        );
     }
 
     #[test]

@@ -155,7 +155,8 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 5. A refused message says why — "Not sent", a plain reason and the next step on the message, said once (the composer only points at it); the list does not preview it as said
 6. Take control from the message, then retry — the refused message carries the Take control its refusal names (the conversation header has none), and Retry then sends it
 7. Edit and resend retires the refused message — it collapses to "Not sent · replaced by your edit" with no Retry
-8. A message the hub never confirms offers Retry — with no receipt, once the supervisor talks on (or after 15 seconds) "Sending…" gives way to "Not confirmed", why, and Retry; the retry goes out and is delivered
+8. A late receipt after the supervisor talks on never offers Retry — the supervisor's turn crosses the send and the receipt comes 3.4 s later; the message goes from "Sending…" to delivered without ever showing "Not confirmed" or Retry, and it is sent once
+9. A message the hub never confirms offers Retry — with no receipt, 5 seconds after the supervisor talks on (or 15 seconds after the send) "Sending…" gives way to "Not confirmed", why, and Retry; the retry goes out and is delivered
 
 **Expected experience**
 
@@ -165,6 +166,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 - A refusal says why in plain words, names the next step, and offers Edit and Retry right on the message; a control refusal also offers Take control there, so the step it names is always on screen.
 - Once its edit is sent, a refused message cannot be retried.
 - A message never says "Sending…" forever: without a receipt it turns "Not confirmed" and offers Retry, without claiming it was not sent.
+- A receipt that is only a few seconds late never flashes "Not confirmed", so there is no Retry that could send the message twice.
 - A screen reader hears who spoke and when for each message group ("You, 12:45"), the status as "Live", and meets no dead attach control.
 
 **Edge paths**

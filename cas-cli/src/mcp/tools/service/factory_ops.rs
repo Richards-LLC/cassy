@@ -2575,6 +2575,7 @@ impl CasService {
                 )
             })
             .unwrap_or_default();
+        let brief_delivery_note = "\nSupervisor brief: none supplied or delivered. To send a brief, use coordination action=message after the worker registers.";
         let request_id_text = request_id.to_string();
         let count_text = count.to_string();
         let worker_names_text = worker_names.join(",");
@@ -2648,11 +2649,11 @@ impl CasService {
 
         let msg = if worker_names.is_empty() {
             format!(
-                "Queued spawn request for {count} worker(s) (request ID: {request_id})\nWorker spec: {spec_summary}{lane_notice}{spec_warning}{codex_fallback_notice}{config_dir_notice}{isolation_warning}{shared_clone_notice}{delivery_mode_notice}{task_id_note}{build_guard_notice}{throttle_notice}{liveness_note}{related_context}"
+                "Queued spawn request for {count} worker(s) (request ID: {request_id})\nWorker spec: {spec_summary}{lane_notice}{spec_warning}{codex_fallback_notice}{config_dir_notice}{isolation_warning}{shared_clone_notice}{delivery_mode_notice}{task_id_note}{brief_delivery_note}{build_guard_notice}{throttle_notice}{liveness_note}{related_context}"
             )
         } else {
             format!(
-                "Queued spawn request for worker(s): {} (request ID: {})\nWorker spec: {spec_summary}{lane_notice}{spec_warning}{codex_fallback_notice}{config_dir_notice}{isolation_warning}{shared_clone_notice}{delivery_mode_notice}{task_id_note}{build_guard_notice}{throttle_notice}{liveness_note}{related_context}",
+                "Queued spawn request for worker(s): {} (request ID: {})\nWorker spec: {spec_summary}{lane_notice}{spec_warning}{codex_fallback_notice}{config_dir_notice}{isolation_warning}{shared_clone_notice}{delivery_mode_notice}{task_id_note}{brief_delivery_note}{build_guard_notice}{throttle_notice}{liveness_note}{related_context}",
                 worker_names.join(", "),
                 request_id
             )

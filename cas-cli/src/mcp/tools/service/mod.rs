@@ -551,6 +551,14 @@ impl CasService {
             let action = canonical_coordination_action(&req.action).to_string();
             req.action.clone_from(&action);
             normalize_coordination_aliases(&mut req, &action);
+            if action == "spawn_workers"
+                && req.prompt.as_deref().is_some_and(|prompt| !prompt.trim().is_empty())
+            {
+                return Err(Self::error(
+                    ErrorCode::INVALID_PARAMS,
+                    "spawn_workers does not deliver `prompt` to the worker; no spawn was queued. `prompt` belongs to coordination action=loop_start. Spawn without `prompt`, then send the brief with coordination action=message target=<worker-name> after registration.",
+                ));
+            }
             let event_target = req.target.clone().unwrap_or_default();
             let event_task_id = req.task_id.clone().unwrap_or_default();
 

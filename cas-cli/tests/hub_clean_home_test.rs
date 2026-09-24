@@ -173,7 +173,7 @@ fn real_legacy_hubs_recover_through_new_post_swap_step() {
                 let receipt: Value = serde_json::from_slice(&fs::read(&receipt_path).unwrap()).unwrap();
                 let expected_state = if iteration != 0 || state == "healthy" { "running" } else if state == "dead_route" { "exited" } else if state == "stuck_starting" { "startup_wedged" } else { state };
                 assert_eq!(receipt["hub_restart"]["prior_state"], expected_state, "{tag}/{state}/{iteration}: {receipt}");
-                let expected_action = if iteration == 0 && (tag != "v3.28.1" || state != "healthy") {
+                let expected_action = if iteration == 0 {
                     "restarted"
                 } else {
                     "verified"
@@ -295,17 +295,21 @@ fn real_launchd_service_update_restarts_stale_then_preserves_current_pid() {
         .unwrap()
         .port();
     let label = format!("dev.cas.update-proof-{}", std::process::id());
+    let app_cli = std::env::var_os("CAS_TEST_TAILSCALE_APP_CLI");
     let command = |args: &[&str]| {
-        ProcessCommand::new(&bin)
+        let mut command = ProcessCommand::new(&bin);
+        command
             .args(args)
             .env_clear()
             .env("HOME", home.path())
-            .env("PATH", "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin")
+            .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
             .env("CAS_SKIP_FACTORY_TOOLING", "1")
             .env("CAS_HUB_LAUNCHD_LABEL", &label)
-            .env("CAS_HUB_SERVICE_PORT", hub_port.to_string())
-            .output()
-            .unwrap()
+            .env("CAS_HUB_SERVICE_PORT", hub_port.to_string());
+        if let Some(app_cli) = &app_cli {
+            command.env("TAILSCALE", app_cli);
+        }
+        command.output().unwrap()
     };
     struct Cleanup<'a>(&'a dyn Fn(&[&str]) -> std::process::Output);
     impl Drop for Cleanup<'_> {
@@ -333,6 +337,13 @@ fn real_launchd_service_update_restarts_stale_then_preserves_current_pid() {
         "service publication: {}",
         String::from_utf8_lossy(&publish.stderr)
     );
+    if let Some(app_cli) = &app_cli {
+        let receipt: Value = serde_json::from_slice(
+            &fs::read(home.path().join(".cas/hub/tailscale-serve.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(receipt["executable"], app_cli.to_string_lossy().as_ref());
+    }
     let paths = cas::hub::HubRuntimePaths::new(home.path().join(".cas/hub"));
     let first_pid = paths.read_process_record().unwrap().pid;
     // The service process is real launchd; only its version metadata is made
@@ -580,6 +591,37 @@ fn start_hub(home: &Path, path: &OsStr, tailscale: bool) -> Value {
         String::from_utf8_lossy(&output.stderr)
     );
     serde_json::from_slice(&output.stdout).expect("start output is JSON")
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn detached_hub_uses_app_bundle_override_with_no_parent_term() {
+    let home = private_home();
+    let app_cli = home.path().join("Applications/Tailscale.app/Contents/MacOS/Tailscale");
+    fs::create_dir_all(app_cli.parent().unwrap()).unwrap();
+    let script = format!(
+        // /bin/sh adds SHLVL=1 even when its parent omitted SHLVL. Treat
+        // that synthetic level as absent from the executable's input.
+        "#!/bin/sh\nif [ -z \"${{TERM+x}}\" ] && [ \"${{SHLVL:-1}}\" -le 1 ]; then echo 'The Tailscale GUI failed to start' >&2; exit 1; fi\n{}",
+        include_str!("fixtures/hub_update_mock_tailscale.sh").trim_start_matches("#!/bin/sh\n")
+    );
+    install_tailscale_mock(home.path(), &app_cli, &script);
+    fs::write(home.path().join("mock-port"), "10034").unwrap();
+    fs::write(home.path().join("mock-dns-name"), "app-cli.tail.example.").unwrap();
+    let command = |args: &[&str]| {
+        cas_command(home.path(), OsStr::new("/usr/bin:/bin"))
+            .env("TAILSCALE", &app_cli)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let start = command(&["--json", "hub", "--tailscale-serve", "--tailscale-serve-port", "10034", "start", "--port", "0"]);
+    assert!(start.status.success(), "{}", String::from_utf8_lossy(&start.stderr));
+    let record: Value = serde_json::from_slice(&start.stdout).unwrap();
+    assert_eq!(record["public_url"], "https://app-cli.tail.example:10034/");
+    assert!(home.path().join("mock-route").exists());
+    let stop = command(&["hub", "stop"]);
+    assert!(stop.status.success(), "{}", String::from_utf8_lossy(&stop.stderr));
 }
 
 #[cfg(unix)]

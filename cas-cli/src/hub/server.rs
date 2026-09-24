@@ -1,6 +1,5 @@
 use std::collections::HashSet;
 use std::convert::Infallible;
-use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -430,7 +429,7 @@ async fn diagnostics<R: SessionReadModel>(
     let tailscale = tokio::time::timeout(
         Duration::from_secs(3),
         tokio::task::spawn_blocking(|| {
-            Command::new("tailscale")
+            super::tailscale::tailscale_command(&super::tailscale::tailscale_executable())
                 .args(["status", "--json"])
                 .output()
         }),

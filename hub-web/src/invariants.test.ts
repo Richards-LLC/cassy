@@ -1425,3 +1425,30 @@ describe("design polish P3/P4/P12/P16 (D3/D4/D12/D17)", () => {
     expect(markup).toContain('<dt>${escapeHtml(term)}</dt><dd${identifier ? \' class="pair-identifier"\' : ""}>');
   });
 });
+
+describe("3.30.0 journey polish (cas-b128)", () => {
+  it("groups palette commands by what they act on and offers Dismiss all info only when there is something to dismiss (F4)", async () => {
+    const main = await readSource("main.ts");
+    const conversations = main.slice(main.indexOf('data-palette-group="conversations"'), main.indexOf('data-palette-group="appearance"'));
+    // The Conversations group holds only the session jumps.
+    const firstGroupEnd = conversations.indexOf("</section>");
+    expect(conversations.slice(0, firstGroupEnd)).not.toContain("data-palette-action");
+    expect(conversations.slice(0, firstGroupEnd)).not.toContain("palette-paired-machines");
+    expect(conversations).toContain('${showSessionControls ? `<section class="palette-group" data-palette-group="session"');
+    expect(conversations).toContain('<h3 id="palette-group-session" class="palette-group-heading">This session</h3>');
+    expect(conversations).toContain('<h3 id="palette-group-machines" class="palette-group-heading">Machines</h3>');
+    expect(conversations).toContain('${infoItems.length > 0 ? `<button type="button" class="palette-command" data-palette-action="dismiss-info">');
+    // A new info item brings the command back: the shell rebuilds on that change.
+    expect(main).toContain("JSON.stringify([hubPresentation, selectedHubSession?.project_dir, infoItems.length > 0])");
+  });
+
+  it("moves a visible toast with the layout and uses the thread's clock and plain words in Paired machines (F8, F10)", async () => {
+    const [main, paired] = await Promise.all([readSource("main.ts"), readSource("paired-machines.ts")]);
+    expect(main).toContain('const visibleToast = document.querySelector<HTMLElement>("#toast.visible");');
+    expect(main).toContain("toastPlacementInThread(");
+    expect(main).toContain("Last seen ${relativeTimestamp(Date.parse(updated))} · ${clockLabel(Date.parse(updated))}");
+    expect(main).not.toContain("toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })");
+    expect(paired).toContain("'Version unknown until it connects'");
+    expect(paired).not.toContain("Runtime not yet received");
+  });
+});

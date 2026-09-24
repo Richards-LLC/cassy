@@ -37,6 +37,8 @@ test("HUB-J9 on a phone: from the list to a reply and back", async ({ page, jour
     expect(coldLoad.join(" | "), "cold-load list and footer text").not.toMatch(/Not paired|No live supervisors|Reconnecting/);
     expect(coldLoad.some((text) => text.includes("Loading")), "the cold load shows it is loading").toBe(true);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), "no sideways scrolling").toBe(true);
+    // A phone has no Ctrl K to press, so the search does not offer one (3.30.0 journey F10).
+    await expect(page.getByRole("searchbox", { name: "Search conversations" })).toHaveAttribute("placeholder", "Search conversations");
     // The compose button says what it does and keeps clear of the status footer (journey F15).
     const compose = page.getByRole("button", { name: "Write to a supervisor" });
     await expect(compose).toHaveText("Write to a supervisor");
@@ -133,6 +135,12 @@ test("HUB-J9 on a phone: from the list to a reply and back", async ({ page, jour
     await expect(dialog.getByText("Shed NAS · Linux")).toBeVisible();
     await expect(dialog).toContainText("Can't reach · retrying");
     await expect(dialog).not.toContainText("Connecting");
+    // One clock, the thread's 24-hour one, and plain words for a version the
+    // machine has not reported yet (3.30.0 journey F10).
+    await expect(dialog.locator(".paired-machine-seen").filter({ hasText: "Last seen" }).first()).toHaveText(/ · \d{2}:\d{2}$/);
+    await expect(dialog).not.toContainText(/\b(AM|PM)\b/);
+    await expect(dialog).not.toContainText("Runtime not yet received");
+    await expect(dialog.locator('[data-machine-id="shed"] .paired-machine-runtime')).toHaveText("Version unknown until it connects");
   });
 
   await journey.stage("Pair another machine and read its header at once", async () => {

@@ -35,7 +35,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 2. Ask for a pairing code — "Pair a machine", then "Create pairing code" shows `cas hub authorize <code>`
 3. Approve on the machine — the dialog follows the machine: waiting, claimed, authorized
 4. Confirm and pair this browser — enter the operator label, then press Pair
-5. See the machine's supervisor ready to talk to — a toast says the machine is connected, and its row opens a conversation
+5. See the machine's supervisor ready to talk to — a toast says the machine is connected without covering the composer or any heading, and its row opens a conversation
 
 **Expected experience**
 
@@ -97,7 +97,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 4. Find the conversation from the keyboard — Ctrl+K lands in the search, type the project, Enter: the conversation is open and the reply box has focus
    - An empty thread's card also leads with the project, with machine and codename beneath it
    - A 40-character machine name ellipsises in its row and never runs under the time stamp, on desktop and at 390px
-5. Jump to a supervisor by name — the command palette (grouped Conversations / Appearance / Advanced, Advanced collapsed) filters by supervisor or project and opens the conversation; each "Jump to" row leads with the project, the codename first on the line beneath
+5. Jump to a supervisor by name — the command palette (grouped Conversations / This session / Machines / Appearance / Advanced, Advanced collapsed; "Dismiss all info" only when something is outstanding) filters by supervisor or project and opens the conversation; each "Jump to" row leads with the project, the codename first on the line beneath
 6. Jump to a supervisor from the keyboard — Ctrl+K twice opens the palette, type the name, Enter: the palette closes, the conversation is open and the reply box has focus
 
 **Expected experience**
@@ -265,13 +265,13 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 **Steps**
 
-1. Open the list on a phone — full-width list, no sideways scrolling
+1. Open the list on a phone — full-width list, no sideways scrolling, and the search offers no keyboard shortcut
 2. Tap a conversation — the thread replaces the list, with a back control
 3. Reply with the phone keyboard — send, then see the answer
 4. Go back to the list — the row shows the latest turn
 5. Scroll back through a long thread — "Jump to latest" takes its own row above the composer, never over a turn, and one tap returns to the newest turn
 6. Jump from the palette with the keyboard's Enter — opened with a tap, the palette's filter takes the phone keyboard; Enter opens the match with the keyboard gone, not in the reply box
-7. See the switched-off machine named plainly — the footer counts it with a warning dot, and Paired machines says "Can't reach · retrying"
+7. See the switched-off machine named plainly — the footer counts it with a warning dot, and Paired machines says "Can't reach · retrying", shows times on the thread's 24-hour clock and "Version unknown until it connects"
 8. Pair another machine and read its header at once — pairing from the phone opens its conversation, and the "connected" toast sits below the thread header, never over the back link, project and host
 
 **Expected experience**

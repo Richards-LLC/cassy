@@ -3124,7 +3124,12 @@ dialog form > *,
 .conversation-identity .id { min-width: 0; }
 .conversation-identity h1 { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); margin: 0; font: var(--weight-semibold) 16px/1.25 var(--font-ui); overflow-wrap: anywhere; }
 .conversation-identity h1 b { font-weight: inherit; }
-.conversation-identity .conversation-host { display: block; margin-top: 1px; font: var(--weight-regular) 13px/1.25 var(--font-mono); color: var(--ink-mid); overflow-wrap: anywhere; }
+/* One line at every width (3.30.0 journey F9): a long codename ellipsises
+   inside "machine · codename" (its title carries it whole) and the connection
+   state after it stays visible, instead of the line wrapping to three. */
+.conversation-identity .conversation-host { display: flex; margin-top: 1px; font: var(--weight-regular) 13px/1.25 var(--font-mono); color: var(--ink-mid); white-space: nowrap; }
+.conversation-identity .host-where { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+#conversation-connection { flex: none; white-space: pre; }
 .conversation-pane-slot { flex: 1; min-height: 0; min-width: 0; overflow: hidden; }
 .conversation-pane-slot .pane-grid { display: block; padding: 0; height: 100%; min-height: 0; background: var(--bg-root); color: var(--text-hi); }
 .conversation-pane-slot .primary-pane-slot { height: 100%; }
@@ -3353,6 +3358,11 @@ button.chip:disabled { cursor: default; }
 .conversation-composer .composer-clip svg { width: 19px; height: 19px; display: block; opacity: 0.55; }
 .conversation-composer textarea { grid-area: field; width: 100%; min-width: 0; min-height: 46px; height: auto; field-sizing: content; max-height: 25dvh; padding: 12px 22px; border: var(--line-width) solid var(--line-strong); border-radius: 23px; resize: none; background: var(--panel); color: var(--ink); box-shadow: var(--lift); font: var(--weight-regular) 14px/1.55 var(--font-ui); }
 .conversation-composer textarea::placeholder { color: var(--ink-mid); opacity: 1; }
+/* field-sizing: content sizes the empty field to its placeholder, so a long
+   supervisor name used to grow it to three lines (3.30.0 journey F9). Until
+   the operator types, the field is one line and the placeholder ellipsises. */
+.conversation-composer textarea:placeholder-shown { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.conversation-composer textarea:placeholder-shown::placeholder { white-space: nowrap; text-overflow: ellipsis; overflow: hidden; }
 .conversation-composer .composer-actions { grid-area: send; display: flex; align-items: center; gap: var(--space-2); min-width: 0; margin: 0; }
 .conversation-composer .composer-actions button { width: auto; }
 .conversation-composer #message-mic { width: 44px; min-width: 44px; height: 44px; min-height: 44px; color: var(--ink-mid); border-color: var(--line-strong); background: var(--panel); }

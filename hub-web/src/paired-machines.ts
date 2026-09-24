@@ -58,7 +58,7 @@ export function renderPairedMachines(container: HTMLElement, rows: readonly Pair
       button.onblur = () => { delete button.dataset.confirm; button.textContent = 'Remove from this browser'; };
       container.append(node);
     }
-    const texts = { h3: row.label, '.paired-machine-address': row.address, '.paired-machine-state': row.connection, '.paired-machine-seen': row.lastSeen, '.paired-machine-runtime': row.runtime ? `Cassy ${row.runtime}` : 'Runtime not yet received' };
+    const texts = { h3: row.label, '.paired-machine-address': row.address, '.paired-machine-state': row.connection, '.paired-machine-seen': row.lastSeen, '.paired-machine-runtime': row.runtime ? `Cassy ${row.runtime}` : 'Version unknown until it connects' };
     for (const [selector, text] of Object.entries(texts)) { const target = node.querySelector(selector)!; if (target.textContent !== text) target.textContent = text; }
   }
 }

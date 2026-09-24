@@ -148,7 +148,14 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     await page.getByRole("button", { name: "Appearance & commands" }).click();
     // Commands are grouped; the debugging switches wait, collapsed, in Advanced.
     const palette = page.locator("#command-palette");
-    await expect(palette.locator(".palette-group-heading")).toHaveText(["Conversations", "Appearance", "Advanced"]);
+    // Commands sit with what they act on: the lease with this session,
+    // Paired machines with the machines, and "Dismiss all info" only when
+    // there is something to dismiss (3.30.0 journey F4).
+    // With no session open there is no "This session" group at all.
+    await expect(palette.locator(".palette-group-heading:visible")).toHaveText(["Conversations", "Machines", "Appearance", "Advanced"]);
+    await expect(palette.locator('[data-palette-group="conversations"] .palette-command:not([data-palette-session])')).toHaveCount(0);
+    await expect(palette.locator('[data-palette-group="machines"]')).toContainText("Paired machines");
+    await expect(palette.getByRole("button", { name: /Dismiss all info/ })).toHaveCount(0);
     await expect(palette.getByRole("button", { name: /Show worker panes/ })).toBeHidden();
     await expect(palette.getByRole("button", { name: /Open the terminal view/ })).toBeHidden();
     await filter.fill("worker");
@@ -178,6 +185,9 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     // this first visit's lease loads, the palette offers "Release control".
     await expect(page.getByRole("textbox", { name: "Your message" })).toBeFocused();
     await expect(page.locator('#command-palette [data-palette-action="control"]')).toContainText("Release control");
+    // The lease command sits in its own group once a session is open.
+    await expect(page.locator('#command-palette [data-palette-group="session"]')).toContainText("This session");
+    await expect(page.locator('#command-palette [data-palette-group="session"] [data-palette-action="control"]')).toHaveCount(1);
     await expect(page.getByRole("textbox", { name: "Your message" })).toBeFocused();
   });
 

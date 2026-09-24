@@ -9,7 +9,8 @@ import { ConversationView } from "./conversation-view";
 import { REFUSED_SEE_ABOVE, refusalSentence } from "./refusal";
 import { installAttentionObjects } from "./attention-objects";
 import { installAttachmentSheet } from "./attachment-sheet";
-import { arrangeConversationShell, bindKeyboardViewport, conversationListState, conversationNoMatchText, conversationSkeletonMarkup } from "./conversation-shell";
+import { arrangeConversationShell, bindKeyboardViewport, conversationListState, conversationNoMatchText, conversationSearchPlaceholder, conversationSkeletonMarkup, KEYBOARD_HINT_MEDIA_QUERY } from "./conversation-shell";
+import { clockLabel } from "./thread-model";
 import { syncContextRail } from "./context-rail";
 import { applyScheme, markAppearanceCommands, setScheme, type SchemePreference } from "./scheme";
 import { applyAttentionEnrichment, attentionCounts, attentionSummary, attentionUrl, createAttentionItem, dismissableInfoItems, groupAttention, machineEventAttention, mergeAttentionItem, type AttentionAction, type AttentionContent, type AttentionEnrichment } from "./attention";
@@ -33,7 +34,7 @@ import { browserSupport, unsupportedBrowserNotice } from "./browser-support";
 import { attentionStore, catalog } from "./storage";
 import { createTerminalSurface, type TerminalSurface } from "./terminal";
 import { machineConnection, sessionConnection } from "./session-connection";
-import { toastTopClearOfBanner } from "./toast-placement";
+import { toastPlacementInThread, toastTopClearOfBanner } from "./toast-placement";
 import { absoluteTimestamp, relativeTimestamp } from "./time";
 import { loadPaneLayout, movePane, normalizePaneLayout, orderedPaneIds, promotePane, savePaneLayout, type PaneLayout, type PaneLayoutStorage } from "./pane-layout";
 import { detectSpeechInput, SpeechDictationController, type SpeechInputCapability, type SpeechInputState } from "./speech-input";
@@ -248,6 +249,7 @@ const browserNotice = unsupportedBrowserNotice(browserSupport());
 // and pane tapping — see viewport.ts. Rotation must not put the CSS and this
 // logic in different modes, which a width-only breakpoint guaranteed it would.
 function phoneLayout(): boolean { return window.matchMedia(PHONE_MEDIA_QUERY).matches; }
+function keyboardHintOffered(): boolean { return window.matchMedia(KEYBOARD_HINT_MEDIA_QUERY).matches; }
 
 
 // The compact breakpoint from DESIGN.md, which is also where a mount stops
@@ -1812,6 +1814,14 @@ let toastTimer: number | undefined;
  */
 function placeToastClearOfBanner(output: HTMLElement): void {
   output.style.removeProperty("top");
+  output.style.removeProperty("right");
+  const visibleBox = (element: HTMLElement | null) => element?.getClientRects().length ? element.getBoundingClientRect() : undefined;
+  const inThread = toastPlacementInThread(
+    visibleBox(document.querySelector<HTMLElement>(".conversation-shell.thread-open .conversation-heading")),
+    visibleBox(document.querySelector<HTMLElement>(".conversation-shell.thread-open .conversation-main")),
+    document.documentElement.clientWidth,
+  );
+  if (inThread) { output.style.top = `${inThread.top}px`; output.style.right = `${inThread.right}px`; }
   const banner = document.querySelector<HTMLElement>(".terminal-disconnected-banner");
   const top = toastTopClearOfBanner(parseFloat(getComputedStyle(output).top), output.getBoundingClientRect(), banner?.getClientRects().length ? banner.getBoundingClientRect() : undefined);
   if (top !== undefined) output.style.top = `${top}px`;
@@ -2467,7 +2477,7 @@ function render(captureDraft = true): void {
     controlDisabled: controlActionDisabled,
     commandPaletteOpen,
     pairingView,
-  }) + JSON.stringify([hubPresentation, selectedHubSession?.project_dir]);
+  }) + JSON.stringify([hubPresentation, selectedHubSession?.project_dir, infoItems.length > 0]);
   const active = document.activeElement;
   // Focus anywhere inside the open palette counts as composing too: a rebuild
   // would replace the dialog under a focused row, wipe its filter and leave
@@ -2559,9 +2569,15 @@ function render(captureDraft = true): void {
           <section class="palette-group" data-palette-group="conversations" aria-labelledby="palette-group-conversations">
             <h3 id="palette-group-conversations" class="palette-group-heading">Conversations</h3>
             ${sessionCommands || '<p class="palette-empty">No live sessions available.</p>'}
-            <button type="button" class="palette-command" data-palette-action="control" ${controlActionDisabled ? "disabled" : ""}><span>${controlActionLabel}</span><small>${controlActionDisabled ? escapeHtml(takeControlReason ?? "Control unavailable") : "Current session"}</small></button>
-            <button type="button" class="palette-command" data-palette-action="dismiss-info" ${infoItems.length === 0 ? "disabled" : ""}><span>Dismiss all info</span><small>${infoItems.length} outstanding</small></button>
+          </section>
+          ${showSessionControls ? `<section class="palette-group" data-palette-group="session" aria-labelledby="palette-group-session">
+            <h3 id="palette-group-session" class="palette-group-heading">This session</h3>
+            <button type="button" class="palette-command" data-palette-action="control" ${controlActionDisabled ? "disabled" : ""}><span>${controlActionLabel}</span><small>${controlActionDisabled ? escapeHtml(takeControlReason ?? "Control unavailable") : escapeHtml(selectedSession ?? "")}</small></button>
+          </section>` : ""}
+          <section class="palette-group" data-palette-group="machines" aria-labelledby="palette-group-machines">
+            <h3 id="palette-group-machines" class="palette-group-heading">Machines</h3>
             <button type="button" class="palette-command" id="palette-paired-machines"><span>Paired machines</span><small>Hosts, connection and last seen</small></button>
+            ${infoItems.length > 0 ? `<button type="button" class="palette-command" data-palette-action="dismiss-info"><span>Dismiss all info</span><small>${infoItems.length} outstanding</small></button>` : ""}
           </section>
           <section class="palette-group" data-palette-group="appearance" aria-labelledby="palette-group-appearance">
             <h3 id="palette-group-appearance" class="palette-group-heading">Appearance</h3>
@@ -2591,7 +2607,7 @@ function render(captureDraft = true): void {
     machineDialog.close(); machineDialog.showModal();
   }
   if (hubPresentation === "conversation") {
-    arrangeConversationShell(app, { selected: Boolean(selectedSession), supervisor, projectDir: selectedHubSession?.project_dir, host: selected?.label, machineId: selectedSession ? selected?.id : undefined, loaded: machineCatalogLoaded, paired: machines.size > 0, searchQuery: conversationSearchQuery });
+    arrangeConversationShell(app, { selected: Boolean(selectedSession), supervisor, projectDir: selectedHubSession?.project_dir, host: selected?.label, machineId: selectedSession ? selected?.id : undefined, loaded: machineCatalogLoaded, paired: machines.size > 0, searchQuery: conversationSearchQuery, keyboardHint: keyboardHintOffered() });
   } else {
     // The way back to the conversation is first in the workspace's Tab order:
     // after the header, the pane controls and the terminal (which keeps Tab)
@@ -2603,6 +2619,10 @@ function render(captureDraft = true): void {
     else app.querySelector(".session-identity")?.insertAdjacentHTML("afterbegin", '<button id="conversation-return" type="button">Conversations</button>');
   }
   if (preservedGrid) document.querySelector<HTMLElement>("#pane-grid")!.replaceWith(preservedGrid);
+  // A toast raised before the shell changed (a conversation opening while
+  // "connected" is up) follows the new layout rather than covering a heading.
+  const visibleToast = document.querySelector<HTMLElement>("#toast.visible");
+  if (visibleToast) placeToastClearOfBanner(visibleToast);
   const focusWinner = composerFocusWinner({ composerWasFocused, terminalWasFocused });
   if (focusWinner === "terminal") queueMicrotask(() => activePaneContext()?.surface.focus());
   restoreMessageDraft();
@@ -3285,7 +3305,9 @@ function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | und
   palette.oncancel = () => { commandPaletteOpen = false; };
   const paletteQuery = document.querySelector<HTMLInputElement>("#command-palette-query")!;
   const paletteAdvanced = palette.querySelector<HTMLDetailsElement>(".palette-advanced");
-  // Commands in order, grouped Conversations / Appearance / Advanced. A row
+  // Commands in order, grouped Conversations / This session / Machines /
+  // Appearance / Advanced (3.30.0 journey F4: lease and machine commands are
+  // not conversations, and an empty "Dismiss all info" is not offered). A row
   // inside the collapsed Advanced group is not on screen, so Enter and
   // ArrowDown never pick it.
   const paletteRowShown = (command: HTMLElement) => !command.hidden && command.closest("details:not([open])") === null;
@@ -3563,6 +3585,12 @@ window.addEventListener("keydown", globalShortcut, true);
 for (const query of [PHONE_MEDIA_QUERY, COMPACT_MEDIA_QUERY]) {
   window.matchMedia(query).addEventListener("change", () => render());
 }
+// The search placeholder's Ctrl K hint follows the device too, without
+// waiting for a shell rebuild (journey F10).
+window.matchMedia(KEYBOARD_HINT_MEDIA_QUERY).addEventListener("change", () => {
+  const search = document.querySelector<HTMLInputElement>("#conversation-search");
+  if (search) search.placeholder = conversationSearchPlaceholder(keyboardHintOffered());
+});
 render(false);
 void boot();
 
@@ -3575,7 +3603,7 @@ function pairedMachineRows(): PairedMachineRow[] {
       connection: state?.phase === "live" && !state.degraded && fresh ? "Connected" : fleetConnectionLabel(state, machine.id) === "Live" ? "Reconnecting" : fleetConnectionLabel(state, machine.id),
       connected: state?.phase === "live" && !state.degraded && fresh,
       everConnected: lastLiveAt.has(machine.id),
-      lastSeen: updated ? `Last seen ${relativeTimestamp(Date.parse(updated))} · ${new Date(updated).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : 'Not yet seen in this visit',
+      lastSeen: updated ? `Last seen ${relativeTimestamp(Date.parse(updated))} · ${clockLabel(Date.parse(updated))}` : 'Not yet seen in this visit',
       runtime: machineInfo.get(machine.id)?.version };
   });
 }

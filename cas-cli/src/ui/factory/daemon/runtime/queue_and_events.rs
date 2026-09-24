@@ -423,6 +423,16 @@ fn append_workspace_contract_brief(
     if !task.demo_statement.trim().is_empty() {
         message.push_str(&format!("\nDemo statement: {}", task.demo_statement.trim()));
     }
+    // cas-ea9c (GH #1005): the daemon holds the operator's GitHub
+    // credentials, the worker does not. Attach the cited issues in the
+    // background and point the worker at where they land.
+    crate::github_issue_attach::spawn_attach_cited_issues(cas_dir, &task);
+    if let Some(section) = crate::github_issue_attach::cited_issue_section(cas_dir, &task) {
+        message.push_str(&format!(
+            "\n\n{section}\nThe files land under `{}/` as they are fetched; `task action=show` lists them.",
+            crate::github_issue_attach::attachment_dir(&artifacts_root, task_id).display()
+        ));
+    }
     let worktree = open_agent_store(cas_dir)
         .ok()
         .and_then(|store| store.list(None).ok())
@@ -8065,6 +8075,65 @@ mod tests {
         assert_eq!(queued.len(), 1);
         assert_eq!(queued[0].id, message_id);
         assert_eq!(queued[0].target, "worker-1");
+    }
+
+    /// cas-ea9c (GH #1005): the spawn brief points the worker at the issues
+    /// its task cites, after the assignment header so the header still
+    /// names the assigned task.
+    #[test]
+    fn spawn_brief_points_at_cited_issue_attachments_cas_ea9c() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set(crate::github_issue_attach::GH_BIN_ENV, "/nonexistent/gh");
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        let artifacts = temp.path().join("artifacts");
+        std::fs::write(
+            cas_dir.join("config.toml"),
+            format!("[factory]\nartifacts_root = {:?}\n", artifacts.display().to_string()),
+        )
+        .unwrap();
+        let mut task = cas_types::Task::new("cas-cite2".into(), "Fix uploads".into());
+        task.description = "See https://github.com/acme/widgets/issues/77.".into();
+        crate::store::open_task_store(&cas_dir).unwrap().add(&task).unwrap();
+
+        deliver_worker_task_brief(
+            &cas_dir,
+            "factory-session",
+            "worker-1",
+            "cas-cite2",
+            "Fix uploads",
+            cas_mux::SupervisorCli::Claude,
+        )
+        .unwrap();
+        let queued = crate::store::open_prompt_queue_store(&cas_dir)
+            .unwrap()
+            .peek_all(10)
+            .unwrap();
+        let prompt = &queued[0].prompt;
+        assert!(prompt.contains("Cited GitHub issues"), "{prompt}");
+        assert!(prompt.contains("acme/widgets#77"), "{prompt}");
+        assert!(
+            prompt.contains(
+                &crate::github_issue_attach::attachment_dir(&artifacts, "cas-cite2")
+                    .display()
+                    .to_string()
+            ),
+            "{prompt}"
+        );
+        assert_eq!(
+            crate::prompt_revalidation::assignment_solicited_task_id(prompt).as_deref(),
+            Some("cas-cite2"),
+            "the header still names the assigned task"
+        );
+        // The background fetch ran with this test's `gh`; let it finish
+        // before the environment is restored.
+        let stated = crate::github_issue_attach::attachment_dir(&artifacts, "cas-cite2")
+            .join("acme__widgets__77.unavailable.md");
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while !stated.is_file() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(stated.is_file(), "a failed fetch leaves a stated boundary");
     }
 
     #[test]

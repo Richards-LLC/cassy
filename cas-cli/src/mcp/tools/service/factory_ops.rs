@@ -2537,6 +2537,17 @@ impl CasService {
                 )
             })?;
 
+        // cas-ea9c (GH #1005): prefetch the issues the pre-assigned task
+        // cites while the worker boots. The supervisor holds the GitHub
+        // credentials the worker is spawned without.
+        if let Some(task) = req
+            .task_id
+            .as_deref()
+            .and_then(|task_id| task_store.get(task_id).ok())
+        {
+            crate::github_issue_attach::spawn_attach_cited_issues(&self.inner.cas_root, &task);
+        }
+
         let task_id_note = req
             .task_id
             .as_ref()

@@ -1896,6 +1896,17 @@ impl CasCore {
             data: None,
         })?;
 
+        // cas-ea9c (GH #1005): an assignment attaches the GitHub issues the
+        // task cites, so a worker without GitHub credentials reads them from
+        // disk. Only a credentialed caller (supervisor or operator) fetches;
+        // the fetch runs in the background and never delays the update.
+        if task.assignee.is_some()
+            && task.assignee != prior_assignee
+            && !crate::harness_policy::is_worker_from_env()
+        {
+            crate::github_issue_attach::spawn_attach_cited_issues(&self.cas_root, &task);
+        }
+
         let qa_withdraw_reason = if demo_statement_cleared {
             Some("demo_statement cleared")
         } else if !was_no_code && crate::qa_pass::is_no_code(&task) {

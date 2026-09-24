@@ -2150,6 +2150,12 @@ impl CasCore {
             ],
         );
 
+        // cas-ea9c (GH #1005): the issues this task cites, read from disk
+        // where the assigning supervisor or daemon attached them.
+        let cited_issues = crate::github_issue_attach::cited_issue_section(&self.cas_root, &task)
+            .map(|section| format!("\n\n📎 {section}"))
+            .unwrap_or_default();
+
         if brief {
             // Bound the complete variable portion of the brief response. The
             // fixed header/claim/warning/push text remains small, while own
@@ -2188,7 +2194,7 @@ impl CasCore {
                 )
             };
             let response = format!(
-                "Started task: {} - {}\nDelivery mode: {}{}{}{}{}{}{}{}{}",
+                "Started task: {} - {}\nDelivery mode: {}{}{}{}{}{}{}{}{}{}",
                 req.id,
                 crate::mcp::tools::truncate_str(&task.title, 509),
                 task.delivery_mode,
@@ -2196,6 +2202,7 @@ impl CasCore {
                 reused_factory_branch_reset.as_deref().unwrap_or_default(),
                 blocker_warning,
                 crate::mcp::tools::truncate_str(&unanchored_warning.unwrap_or_default(), 765,),
+                crate::mcp::tools::truncate_str(&cited_issues, 1_021),
                 execution_state.unwrap_or_default(),
                 own_notes,
                 no_code_external_ref_guidance(&task),
@@ -2209,7 +2216,7 @@ impl CasCore {
         }
 
         Ok(Self::success(format!(
-            "Started task: {} - {}\nDelivery mode: {}{}{}{}{}{}{}{}{}{}{}",
+            "Started task: {} - {}\nDelivery mode: {}{}{}{}{}{}{}{}{}{}{}{}",
             req.id,
             task.title,
             task.delivery_mode,
@@ -2220,6 +2227,7 @@ impl CasCore {
             // warning cannot be pushed out of view by long sibling-note or
             // worktree blocks.
             unanchored_warning.unwrap_or_default(),
+            cited_issues,
             epic_ownership_info.unwrap_or_default(),
             wt_info,
             sibling_notes_info.unwrap_or_default(),

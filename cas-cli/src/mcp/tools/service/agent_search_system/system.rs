@@ -92,7 +92,7 @@ fn command_failure_detail(output: &Output) -> String {
 /// Replace credentials inherited by the worker before any command output or
 /// report body is returned. The value is read only long enough to redact it;
 /// it is never included in a log, MCP response, or staged artifact.
-fn redact_known_credentials(input: &str) -> String {
+pub(crate) fn redact_known_credentials(input: &str) -> String {
     let mut redacted = input.to_string();
     for variable in ["GH_TOKEN", "GITHUB_TOKEN", "GIT_ASKPASS"] {
         let Ok(secret) = std::env::var(variable) else {

@@ -16,6 +16,13 @@ test("HUB-J7 answer a pinned question", async ({ page, journey }) => {
     ask = hub.supervisorSays(PELICAN, "The gate failed on one clippy warning. Fix it in the train, or ship with it allowlisted?", { kind: "ask", options: ["Fix in-train", "Ship with allowlist"] });
     await expect(pinned).toBeVisible();
     await expect(pinned.getByRole("button", { name: "Fix in-train" })).toBeVisible();
+    // The pinned card is the one place to answer (F18): the thread keeps a
+    // one-line reference and the rail does not list this question again.
+    const reference = page.getByRole("log").locator(".obj.t-a.ask-collapsed");
+    await expect(reference.locator(".ask-excerpt")).toHaveText("The gate failed on one clippy warning. Fix it in the train, or ship with it allowlisted?");
+    await expect(reference.getByRole("button")).toHaveCount(0);
+    await expect(page.locator(".conversation-context .context-jump")).toHaveCount(0);
+    await expect(page.locator('.conversation-context [data-section="waiting"]')).toBeHidden();
   });
 
   await journey.stage("Answer with one tap", async () => {

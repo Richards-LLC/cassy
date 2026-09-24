@@ -1,3 +1,4 @@
+import { entryText } from "./context-rail";
 import { registerTurnRenderer, renderBody, type TurnRenderContext } from "./conversation-view";
 import { blockerEvidence } from "./thread-model";
 import type { OperatorReply } from "./types";
@@ -53,8 +54,11 @@ export function renderAskObject(reply: OperatorReply, context: TurnRenderContext
     object.className = "obj t-a ask-collapsed";
     object.dataset.answered = "false";
     object.dataset.collapsed = "true";
+    // A compact reference, not a second copy (journey F18): its first line,
+    // cut at a word, points at the pinned card that carries the full question.
+    const excerpt = document.createElement("p"); excerpt.className = "ask-excerpt"; excerpt.textContent = entryText(reply.message);
     const wait = document.createElement("p"); wait.className = "ask-waiting"; wait.textContent = WAITING_LINE;
-    body.append(wait);
+    body.replaceChildren(excerpt, wait);
     object.append(body);
     return object;
   }

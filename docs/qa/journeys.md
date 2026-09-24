@@ -319,6 +319,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 2. The network drops — "Lost connection to Atlas · Linux. Reconnecting…" appears; the header and the row say Reconnecting, and the footer counts 1 of 2 connected with a warning dot; a send is refused for the connection
 3. It reconnects on its own — the banner and the refusal line clear, everything says Live again, the draft is kept, and no transport alarm is left
 4. Sending works again — a message goes through and is answered
+5. On a phone, the banner stays readable through an outage — no toast sits on the reconnect banner, in light and dark
 
 **Expected experience**
 

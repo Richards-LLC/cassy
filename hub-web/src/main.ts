@@ -33,6 +33,7 @@ import { browserSupport, unsupportedBrowserNotice } from "./browser-support";
 import { attentionStore, catalog } from "./storage";
 import { createTerminalSurface, type TerminalSurface } from "./terminal";
 import { machineConnection, sessionConnection } from "./session-connection";
+import { toastTopClearOfBanner } from "./toast-placement";
 import { absoluteTimestamp, relativeTimestamp } from "./time";
 import { loadPaneLayout, movePane, normalizePaneLayout, orderedPaneIds, promotePane, savePaneLayout, type PaneLayout, type PaneLayoutStorage } from "./pane-layout";
 import { detectSpeechInput, SpeechDictationController, type SpeechInputCapability, type SpeechInputState } from "./speech-input";
@@ -1249,6 +1250,8 @@ function renderTerminalConnecting(machineId: string, session: string): void {
 function clearDisconnectedState(grid: HTMLElement): void {
   grid.classList.remove("terminal-disconnected");
   grid.querySelector(".terminal-disconnected-banner")?.remove();
+  const shown = document.querySelector<HTMLElement>("#toast");
+  if (shown) placeToastClearOfBanner(shown);
 }
 
 function openConnectionLog(machineId: string): void {
@@ -1292,6 +1295,9 @@ function renderConnectionSurface(machineId: string, session: string, snapshot: C
       : `Lost connection to ${where}. Reconnecting…`;
     banner.dataset.attempt = String(view.attempt);
     grid.classList.add("terminal-disconnected");
+    // A toast already up when the banner arrives moves clear of it (cas-00cc).
+    const shown = document.querySelector<HTMLElement>("#toast.visible");
+    if (shown) placeToastClearOfBanner(shown);
     return;
   }
   clearDisconnectedState(grid);
@@ -1743,7 +1749,11 @@ function takeControlDisabledReason(machine: StoredMachine | undefined, session: 
 
 function sendControl(machineId: string, session: string, message: unknown): boolean {
   if (connections.get(machineId)?.send(session, message)) return true;
-  toast("Terminal is reconnecting");
+  // While the session is known to be down, the banner and the header already
+  // say it is reconnecting; a toast repeating it would only cover the banner
+  // (cas-00cc). A send that fails while the state still reads live does warn.
+  const attach = attachStates.get(sessionKey(machineId, session));
+  if (!attach || attach.phase === "live" || attach.phase === "idle") toast("Terminal is reconnecting");
   return false;
 }
 
@@ -1783,6 +1793,19 @@ function invalidateMachineLeases(machineId: string): void {
 let toastTimer: number | undefined;
 
 /**
+ * A toast never sits on the reconnect banner (cas-00cc): when the banner is on
+ * screen where the toast would land (a phone thread, where the toast sits just
+ * below the header), the toast drops below it. Otherwise the stylesheet's own
+ * placement applies.
+ */
+function placeToastClearOfBanner(output: HTMLElement): void {
+  output.style.removeProperty("top");
+  const banner = document.querySelector<HTMLElement>(".terminal-disconnected-banner");
+  const top = toastTopClearOfBanner(parseFloat(getComputedStyle(output).top), output.getBoundingClientRect(), banner?.getClientRects().length ? banner.getBoundingClientRect() : undefined);
+  if (top !== undefined) output.style.top = `${top}px`;
+}
+
+/**
  * The toast lives on document.body, not inside the rendered shell: every render
  * replaces app.innerHTML, and a confirmation that a heartbeat can delete a
  * moment after it appears is not a confirmation.
@@ -1796,6 +1819,7 @@ function toast(message: string): void {
     document.body.append(output);
   }
   output.textContent = message;
+  placeToastClearOfBanner(output);
   output.classList.add("visible");
   if (toastTimer !== undefined) window.clearTimeout(toastTimer);
   toastTimer = window.setTimeout(() => output.classList.remove("visible"), 3200);

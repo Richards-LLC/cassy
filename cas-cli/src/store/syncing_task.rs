@@ -593,6 +593,98 @@ mod tests {
         (temp, store)
     }
 
+    /// cas-d5c8 (GH #921): the MCP task write paths (create, update, note,
+    /// close, cancel) complete while other agents keep committing writes, the
+    /// shape of a 4-6 worker factory session. Before the fix, staging the sync
+    /// intent failed with "database is locked" on the first collision.
+    #[test]
+    fn task_writes_wait_out_a_fleet_of_concurrent_writers() {
+        let (temp, store) = create_test_store();
+        let db = temp.path().join("cas.db");
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let started = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let writers: Vec<_> = (0..5)
+            .map(|agent| {
+                let db = db.clone();
+                let stop = stop.clone();
+                let started = started.clone();
+                std::thread::spawn(move || {
+                    let conn = rusqlite::Connection::open(db).unwrap();
+                    let mut commits = 0usize;
+                    while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                        // A write held for a moment, as a fleet's store writes are.
+                        // (A zero-think-time hammer starves any SQLite waiter,
+                        // because the busy handler polls; that is not a fleet.)
+                        if conn.execute_batch("BEGIN IMMEDIATE").is_err() {
+                            continue;
+                        }
+                        conn.execute(
+                            "INSERT INTO task_mutation_revisions (entity_id, revision, present) VALUES (?1, 1, 1)
+                             ON CONFLICT(entity_id) DO UPDATE SET revision = revision + 1",
+                            rusqlite::params![format!("fleet-agent-{agent}")],
+                        )
+                        .unwrap();
+                        std::thread::sleep(std::time::Duration::from_millis(20));
+                        conn.execute_batch("COMMIT").unwrap();
+                        commits += 1;
+                        started.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        // Then some think time, different per agent so their
+                        // writes interleave: together the five keep the
+                        // database write-locked roughly 60% of the time.
+                        std::thread::sleep(std::time::Duration::from_millis(80 + 40 * agent as u64));
+                    }
+                    commits
+                })
+            })
+            .collect();
+
+        // Every agent is writing before the task writes begin.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while started.load(std::sync::atomic::Ordering::Relaxed) < 5
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let mut failures = Vec::new();
+        for round in 0..6 {
+            let id = format!("cas-fleet-{round}");
+            let mut task = Task::new(id.clone(), format!("fleet round {round}"));
+            // Spread the task writes across the agents' write cycles.
+            std::thread::sleep(std::time::Duration::from_millis(25));
+            if let Err(error) = store.add(&task) {
+                failures.push(format!("create {id}: {error}"));
+                continue;
+            }
+            task.priority = crate::types::Priority::HIGH;
+            if let Err(error) = store.update(&task) {
+                failures.push(format!("update {id}: {error}"));
+            }
+            if let Err(error) = store.append_note(&id, "progress under contention") {
+                failures.push(format!("note {id}: {error}"));
+            }
+            task.status = if round % 2 == 0 {
+                TaskStatus::Closed
+            } else {
+                TaskStatus::Cancelled
+            };
+            if let Err(error) = store.update(&task) {
+                failures.push(format!("close/cancel {id}: {error}"));
+            }
+        }
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        let commits: usize = writers
+            .into_iter()
+            .map(|writer| writer.join().unwrap())
+            .sum();
+        assert!(
+            commits > 0,
+            "the concurrent writers must actually have written"
+        );
+        assert!(
+            failures.is_empty(),
+            "task writes failed under contention: {failures:#?}"
+        );
+    }
     fn reopen_test_store(cas_dir: &Path, with_team: bool) -> SyncingTaskStore {
         let inner = SqliteTaskStore::open(cas_dir).unwrap();
         let queue = SyncQueue::open(cas_dir).unwrap();

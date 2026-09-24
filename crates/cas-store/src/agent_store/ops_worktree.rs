@@ -1,7 +1,6 @@
 use crate::Result;
 use crate::agent_store::SqliteAgentStore;
 use crate::error::StoreError;
-use crate::shared_db::ImmediateTx;
 use cas_types::{LeaseStatus, WorktreeClaimResult, WorktreeLease};
 use chrono::Utc;
 use rusqlite::{OptionalExtension, params};
@@ -14,7 +13,7 @@ impl SqliteAgentStore {
         duration_secs: i64,
     ) -> Result<WorktreeClaimResult> {
         let conn = self.lock_conn()?;
-        let tx = ImmediateTx::new(&conn)?;
+        let tx = crate::shared_db::begin_immediate_with_retry(&conn)?;
         let now = Utc::now();
         let expires_at = now + chrono::Duration::seconds(duration_secs);
 

@@ -295,4 +295,28 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     await expect(commands.visible().first()).toContainText("Jump to gabber-studio");
     await page.keyboard.press("Escape");
   });
+
+  await journey.stage("Open Paired machines from the palette, then a conversation", async () => {
+    // Paired machines replaces the palette; the palette must stay closed
+    // afterwards, not come back over the next conversation opened (cas-dfc8).
+    const palette = page.locator("#command-palette");
+    const paired = page.locator("#paired-machines-dialog");
+    // The last stage's Escape only cleared the filter; close the palette first.
+    if (await palette.isVisible()) await page.getByRole("button", { name: "Close command palette" }).click();
+    await expect(palette).toBeHidden();
+    await page.getByRole("button", { name: "Appearance & commands" }).click();
+    await expect(palette).toBeVisible();
+    await palette.getByRole("button", { name: /Paired machines/ }).click();
+    await expect(paired).toBeVisible();
+    await expect(palette).toBeHidden();
+    await page.locator("#paired-machines-close").click();
+    await expect(paired).toBeHidden();
+    await list.getByRole("button", { name: /gabber-studio/ }).click();
+    await expect(page.getByRole("button", { name: `Send to ${OTTER}`, exact: true })).toBeVisible();
+    await expect(palette).toBeHidden();
+    // And once more from the other conversation: still closed.
+    await list.getByRole("button", { name: /cas-src/ }).click();
+    await expect(page.getByRole("button", { name: `Send to ${PELICAN}`, exact: true })).toBeVisible();
+    await expect(palette).toBeHidden();
+  });
 });

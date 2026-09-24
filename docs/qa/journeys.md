@@ -99,6 +99,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
    - A 40-character machine name ellipsises in its row and never runs under the time stamp, on desktop and at 390px
 5. Jump to a supervisor by name — the command palette (grouped Conversations / This session / Machines / Appearance / Advanced, Advanced collapsed; "Dismiss all info" only when something is outstanding) filters by supervisor or project and opens the conversation; each "Jump to" row leads with the project, the codename first on the line beneath
 6. Jump to a supervisor from the keyboard — Ctrl+K twice opens the palette, type the name, Enter: the palette closes, the conversation is open and the reply box has focus
+   - Open Paired machines from the palette, then a conversation — the palette gives way to Paired machines and stays closed afterwards; it never comes back over the next conversation opened
 
 **Expected experience**
 

@@ -78,6 +78,17 @@ test("HUB-J5 reply by typing", async ({ page, journey }) => {
     await bubble.getByRole("button", { name: "Take control of the session", exact: true }).click();
     await leaseRequest;
     await expect(page.locator("#message-status")).toHaveText("You control this session now. Retry to send the message.");
+    // cas-8e0a: the message itself agrees. Take control leaves it, and it no
+    // longer says this device isn't in control.
+    await expect(bubble.getByRole("button", { name: "Take control of the session", exact: true })).toHaveCount(0);
+    await expect(bubble.getByRole("status")).toHaveText("Not sent · This device controls the session now. Retry to send it.");
+    // On a phone its actions are 44px targets.
+    const desktop = page.viewportSize()!;
+    await page.setViewportSize({ width: 390, height: 844 });
+    for (const name of ["Edit message", "Retry sending"]) {
+      await expect.poll(async () => (await bubble.getByRole("button", { name, exact: true }).boundingBox())?.height ?? 0, { message: `${name} target height at 390px` }).toBeGreaterThanOrEqual(44);
+    }
+    await page.setViewportSize(desktop);
     const retried = hub.nextSend();
     await bubble.getByRole("button", { name: "Retry sending", exact: true }).click();
     expect((await retried).text).toBe("Ship it without the gate.");

@@ -108,6 +108,12 @@ export interface ConversationViewOptions {
    */
   takeControl?: (send: ConversationSend) => void;
   /**
+   * Whether this device controls the session now. Once it does, a control
+   * refusal stops offering Take control and says Retry will go through
+   * (cas-8e0a); if control is lost again, both come back.
+   */
+  controlHeld?: () => boolean;
+  /**
    * Quick replies and composer replies to an ask go through this; the caller
    * sends with in_reply_to = the ask's notification_id and records the send
    * in the history with the same replyTo, which is what marks the ask answered.
@@ -293,7 +299,9 @@ export class ConversationView {
     // The pinned ask's flow copy is collapsed; it expands again when a newer ask takes the pin.
     const pinned = reply?.kind === "ask" ? this.history.pinnedAsk()?.notification_id === reply.notification_id : undefined;
     const delivered = turn.event.kind === "send" ? this.history.delivered() === turn.event.value : undefined;
-    return JSON.stringify([turn.event, answered && [answered.id, answered.state, answered.text], waiting, pinned, delivered]);
+    // A refused send repaints when control changes hands (cas-8e0a).
+    const held = turn.event.kind === "send" && turn.event.value.state === "error" ? this.options.controlHeld?.() === true : undefined;
+    return JSON.stringify([turn.event, answered && [answered.id, answered.state, answered.text], waiting, pinned, delivered, held]);
   }
 
   /**
@@ -520,13 +528,17 @@ export class ConversationView {
       // The separator is for the reader; on screen the reason takes its own line.
       const separator = document.createElement("span"); separator.className = "sr-only"; separator.textContent = " · ";
       const plain = refusal(send.error);
-      const reason = document.createElement("span"); reason.className = "conversation-refused-reason"; reason.textContent = plain.reason;
-      const next = document.createElement("span"); next.className = "conversation-refused-next"; next.textContent = ` ${plain.next}`;
+      // cas-8e0a: once this device holds control, the control refusal is
+      // resolved. The message still was not sent, but Retry now goes through,
+      // so the copy says so and Take control leaves the message.
+      const resolved = plain.action === "take-control" && this.options.controlHeld?.() === true;
+      const reason = document.createElement("span"); reason.className = "conversation-refused-reason"; reason.textContent = resolved ? "This device controls the session now." : plain.reason;
+      const next = document.createElement("span"); next.className = "conversation-refused-next"; next.textContent = resolved ? " Retry to send it." : ` ${plain.next}`;
       reason.append(next);
       state.append(glyph.content.firstElementChild!, label, separator, reason);
       bubble.append(state);
       const actions = document.createElement("div"); actions.className = "conversation-actions";
-      if (plain.action === "take-control" && this.options.takeControl) {
+      if (plain.action === "take-control" && !resolved && this.options.takeControl) {
         const take = document.createElement("button"); take.type = "button"; take.className = "conversation-take-control"; take.textContent = "Take control";
         take.setAttribute("aria-label", "Take control of the session");
         take.onclick = () => this.options.takeControl?.(send);

@@ -250,6 +250,19 @@ describe("ConversationView (Pebble thread)", () => {
       ["conversation-edit", "Edit", "Edit message", "button"], ["conversation-retry", "Retry", "Retry sending", "button"],
     ]);
     withControl[0]!.click(); expect(take).toHaveBeenCalledWith(expect.objectContaining({ id: "x", state: "error" }));
+    // cas-8e0a: once this device holds control, the same message drops Take
+    // control and says Retry will go through; losing control brings it back.
+    let held = false;
+    const leased = new ConversationView(document, history, { supervisor: "sup", editMessage: edit, retryMessage: retry, takeControl: take, controlHeld: () => held }); document.body.replaceChildren(leased.element); leased.update();
+    const leasedBubble = () => leased.element.querySelector<HTMLElement>('.bub[data-state="error"]')!;
+    expect(leasedBubble().querySelector(".conversation-take-control")).not.toBeNull();
+    held = true; leased.update();
+    expect(leasedBubble().querySelector(".conversation-take-control")).toBeNull();
+    expect(leasedBubble().querySelector(".conversation-refused")?.textContent).toBe("Not sent · This device controls the session now. Retry to send it.");
+    expect([...leasedBubble().querySelectorAll(".conversation-actions button")].map((button) => button.textContent)).toEqual(["Edit", "Retry"]);
+    held = false; leased.update();
+    expect(leasedBubble().querySelector(".conversation-take-control")).not.toBeNull();
+    expect(leasedBubble().querySelector(".conversation-refused-next")?.textContent).toBe(" Take control, then retry.");
     // Only a control refusal offers it: taking control fixes nothing else.
     const other = new ConversationHistory();
     other.submit("z", "sup", "Late answer", at(9, 2), 7); other.reject("z", "semantic message enqueue failed: in_reply_to notification 7 does not exist");

@@ -357,6 +357,9 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(source).not.toContain("Take control from the header");
     expect(source).toContain("takeControl: () => { void takeControlForRefused(threadMachineId, threadSession); },");
     expect(source).toContain("await connections.get(machineId)?.requestControl(session, force);");
+    // cas-8e0a: only a control refusal makes the cached lease stale; an
+    // in_reply_to refusal must not bring Take control back on another message.
+    expect(source).toContain('if (refusal(detail).action === "take-control") controlTakenAfterRefusal.delete(key);');
   });
 
   it("collapses one outage into one attention card per machine and session", async () => {

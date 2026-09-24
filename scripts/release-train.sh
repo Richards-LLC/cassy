@@ -1255,7 +1255,7 @@ if [[ -n "${only_rows:-}" ]]; then
     printf 'diagnostic receipt directory: %s\n' "$receipt_dir"
 fi
 
-export CAS_RELEASE_GATE_HOME_DIR="${CAS_RELEASE_GATE_HOME_DIR:-/var/tmp/cas-release-gate}"
+export CAS_RELEASE_GATE_HOME_DIR="${CAS_RELEASE_GATE_HOME_DIR:-$(release_portable_default_scratch_base)}"
 export CAS_RELEASE_GATE_ARCHIVE_SIZE_FILE="$receipt_dir/archive-size-bytes"
 # Keep every attempt's successful row logs and timings, even when gate.log is
 # replaced on the next full run. Only full gates populate/read row PASS cache.

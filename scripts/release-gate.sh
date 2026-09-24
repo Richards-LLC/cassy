@@ -116,7 +116,9 @@ reference_history_script="${RELEASE_GATE_GEN_REFERENCE_HISTORY:-$repo_root/scrip
 # fixed that for the self-test only; cas-c736 fixes the gate itself, so the
 # variable becomes an override rather than a prerequisite. /var/tmp mirrors the
 # merge-queue runner: outside every checkout and outside $HOME.
-readonly scratch_base_default='/var/tmp/cas-release-gate'
+# cas-fed5: /Users/Shared on macOS, where /var/tmp is a Cassy disposable root.
+scratch_base_default="$(release_portable_default_scratch_base)"
+readonly scratch_base_default
 if [[ -n "${CAS_RELEASE_GATE_HOME_DIR:-}" ]]; then
     scratch_base="$CAS_RELEASE_GATE_HOME_DIR"
     scratch_base_origin='CAS_RELEASE_GATE_HOME_DIR'

@@ -716,7 +716,7 @@ else
     bad "complete release-report receipt was not accepted: $status"
 fi
 
-sed -i 's/^PDF_REMOTE_SHA256=.*/PDF_REMOTE_SHA256=0000000000000000000000000000000000000000000000000000000000000000/' \
+perl -pi -e 's/^PDF_REMOTE_SHA256=.*/PDF_REMOTE_SHA256=0000000000000000000000000000000000000000000000000000000000000000/' \
     "$dir_a/release-report.receipt"
 status="$($train 9.99.0 "$wt_a" --status 2>&1 || true)"
 if [[ "$status" == *'release report: unavailable (PDF receipt does not match local or verified remote bytes/pages;'* ]]; then
@@ -882,7 +882,7 @@ cat >"$prep_lock_wt/scripts/bump-release-version.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 [[ "$PWD" == "${PREP_EXPECTED_WORKTREE:?}" ]]
-sed -i 's/version = "0.0.0"/version = "9.99.13"/' Cargo.toml
+perl -pi -e 's/version = "0.0.0"/version = "9.99.13"/' Cargo.toml
 EOF
 chmod +x "$prep_lock_wt/scripts/bump-release-version.sh"
 mkdir -p "$prep_lock_wt/docs/release-notes"
@@ -969,7 +969,7 @@ fi
 
 bad_draft="$tmp/bad-slack.md"
 cp "$stage_wt/docs/release-notes/$stage_date-v9.99.8-slack.md" "$bad_draft"
-sed -i '0,/\\*Release handoff\\*/s//**bad**/' "$bad_draft"
+perl -0pi -e 's/\\*Release handoff\\*/**bad**/' "$bad_draft"
 bad_announce_stub="$tmp/bad-announce-stub.sh"
 cat >"$bad_announce_stub" <<'EOF'
 #!/usr/bin/env bash
@@ -1018,7 +1018,7 @@ fi
 # announcement wording rule, not only point at a saved lint log.
 wording_draft="$tmp/wording-draft.md"
 cp "$stage_wt/docs/release-notes/$stage_date-v9.99.8-slack.md" "$wording_draft"
-sed -i '0,/the release handoff/s//the agent handoff/' "$wording_draft"
+perl -0pi -e 's/the release handoff/the agent handoff/' "$wording_draft"
 wording_wt="$(new_worktree preflight-wording)"
 mkdir -p "$wording_wt/docs/release-notes"
 cp "$wording_draft" "$wording_wt/docs/release-notes/$stage_date-v9.99.8-slack.md"
@@ -2245,7 +2245,7 @@ combined_lint_version=9.99.14
 combined_lint_wt="$(new_combined_cut_fixture combined-lint "$combined_lint_version")"
 combined_bad_draft="$tmp/combined-bad-draft.md"
 cp "$combined_lint_wt/docs/release-notes/2099-01-02-v${combined_lint_version}-slack.md" "$combined_bad_draft"
-sed -i '0,/\*Release\*/s//**bad**/' "$combined_bad_draft"
+perl -0pi -e 's/\*Release\*/**bad**/' "$combined_bad_draft"
 combined_lint_log="$tmp/combined-lint-adapter.log"
 cat >"$tmp/combined-lint-adapter.sh" <<'EOF'
 #!/usr/bin/env bash
@@ -2359,7 +2359,8 @@ else
     bad 'rolling integration assembly fixture suite'
 fi
 
-# cas-fed5: the train and gate run on stock macOS. The fallbacks are forced
+# cas-fed5: the train and gate run on stock macOS. (This file's in-place edits
+# use perl -pi, not GNU-only sed -i / 0,/re/ addresses, for the same reason.) The fallbacks are forced
 # here through the helper's seams, so a Linux run proves the macOS paths.
 portable_dir="$tmp/portable"
 mkdir -p "$portable_dir"
@@ -2497,6 +2498,47 @@ if [[ "$portable_pr" == *'## [3.29.0] - 2026-09-24'* && "$portable_pr" == *'the 
     ok 'cas-fed5: pr-body takes exactly the version section with literal heading matches'
 else
     bad "cas-fed5: pr-body section: $portable_pr"
+fi
+
+# macOS scratch default: /var/tmp is a Cassy disposable root there.
+portable_scratch="$(
+    # shellcheck source=scripts/release-portable.sh
+    source "$repo_root/scripts/release-portable.sh"
+    linux="$(uname() { printf 'Linux\n'; }; release_portable_default_scratch_base)"
+    darwin="$(uname() { printf 'Darwin\n'; }; release_portable_default_scratch_base)"
+    printf '%s %s\n' "$linux" "$darwin"
+)"
+if [[ "$portable_scratch" == '/var/tmp/cas-release-gate /Users/Shared/cas-release-gate' ]]; then
+    ok 'cas-fed5: scratch base stays /var/tmp on Linux and is /Users/Shared on macOS'
+else
+    bad "cas-fed5: scratch base default: $portable_scratch"
+fi
+
+# Announce: a proxy.toml token variable this host does not set is not pinned,
+# so the adapter falls through to this machine's registered token; one that is
+# set is pinned; an operator's explicit choice is never overridden.
+portable_proxy="$portable_dir/proxy.toml"
+printf 'auth = "env:CASSY_PROXY_TOKEN_SOUNDWAVE"\n' >"$portable_proxy"
+portable_announce="$(
+    env -u MECHA_SLACK_TOKEN_ENV -u CAS_RELEASE_TRAIN_MECHA_TOKEN_ENV -u CASSY_PROXY_TOKEN_SOUNDWAVE \
+        CAS_RELEASE_TRAIN_PROXY_TOML="$portable_proxy" python3 - "$repo_root/scripts/release-train-announce.py" <<'PY'
+import importlib.util, os, sys
+spec = importlib.util.spec_from_file_location("announce", sys.argv[1])
+announce = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(announce)
+unset = announce.announce_token_env({})
+from_credentials = announce.announce_token_env({"CASSY_PROXY_TOKEN_SOUNDWAVE": "secret"})
+os.environ["CASSY_PROXY_TOKEN_SOUNDWAVE"] = "secret"
+from_env = announce.announce_token_env({})
+os.environ["MECHA_SLACK_TOKEN_ENV"] = "MECHA_SLACK_TOKEN_PROWL"
+explicit = announce.announce_token_env({})
+print(unset, from_credentials, from_env, explicit)
+PY
+)"
+if [[ "$portable_announce" == 'None CASSY_PROXY_TOKEN_SOUNDWAVE CASSY_PROXY_TOKEN_SOUNDWAVE None' ]]; then
+    ok "cas-fed5: announce pins the proxy token variable only when this host sets it"
+else
+    bad "cas-fed5: announce token env selection: $portable_announce"
 fi
 
 printf '\n%s passed, %s failed\n' "$pass" "$fail"

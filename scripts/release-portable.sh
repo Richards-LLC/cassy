@@ -132,3 +132,18 @@ release_portable_x86_64_linux_cc() {
     fi
     return 1
 }
+
+# Default scratch base for the gate's out-of-checkout rows. Linux keeps
+# /var/tmp/cas-release-gate. macOS uses /Users/Shared/cas-release-gate: /tmp
+# and /var/tmp are Cassy disposable roots there (a cas child whose cwd or
+# TMPDIR sits under them is treated as a throwaway copy), and /Users/Shared is
+# on the same APFS data volume as checkouts under /Users with no .cas
+# ancestor, which the gate's device and ancestry checks require.
+release_portable_default_scratch_base() {
+    if [[ "$(uname -s)" == Darwin ]]; then
+        printf '/Users/Shared/cas-release-gate\n'
+    else
+        printf '/var/tmp/cas-release-gate\n'
+    fi
+}
+

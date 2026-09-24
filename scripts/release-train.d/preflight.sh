@@ -112,7 +112,7 @@ cut_preflight_check_scratch() {
     local probe archive required available previous scratch_parent checkout_device scratch_device
     if [[ -z "$scratch" ]]; then
         configured="$(cut_preflight_env_value CAS_RELEASE_GATE_HOME_DIR 2>/dev/null || true)"
-        scratch="${configured:-/var/tmp/cas-release-gate}"
+        scratch="${configured:-$(release_portable_default_scratch_base)}"
     fi
     probe="$scratch/.release-train-write.$$"
     mkdir -p "$scratch" 2>/dev/null || {

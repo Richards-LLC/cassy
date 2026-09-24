@@ -201,8 +201,6 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
         .map((text) => text.textContent);
     }));
     expect(clipped).toEqual([]);
-    await page.keyboard.press("Escape");
-    await expect(picker).toBeHidden();
-    await page.setViewportSize({ width: 1280, height: 720 });
+    // Left open: this stage's screenshot (J08.png) is the phone receipt.
   });
 });

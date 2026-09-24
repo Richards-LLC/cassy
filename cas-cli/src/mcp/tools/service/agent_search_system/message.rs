@@ -3746,7 +3746,10 @@ mod inbox_poll_identity_tests {
 
 #[cfg(test)]
 mod cas99d2_redelivery_tests {
-    use super::{INBOX_REDELIVERY_MARKER, InboxRedelivery, inbox_redelivery_decision};
+    use super::{
+        INBOX_REDELIVERY_MARKER, INBOX_REPLAY_AFTER_SECS, InboxRedelivery, inbox_redelivery_decision,
+        inbox_row_is_stale_replay,
+    };
     use crate::prompt_revalidation::assignment_solicited_task_id;
 
     /// The literal text of notification 7112 (supervisor hand-written dispatch).

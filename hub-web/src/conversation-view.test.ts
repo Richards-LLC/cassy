@@ -309,6 +309,22 @@ describe("ConversationView (Pebble thread)", () => {
     history.retireRefused("bad");
     expect(history.preview()).toBe("Ready.");
   });
+  it("places a new send after every turn already shown, even when the machine's clock runs ahead (cas-ce17)", () => {
+    const history = new ConversationHistory();
+    const now = Date.now();
+    // Hydrated from a machine whose clock is five minutes ahead of this browser.
+    history.hydrateReply({ notification_id: 51, reply_to: null, message: "The gate went red.", summary: "", device_id: "d", kind: "blocker", attachments: [], at: new Date(now + 300_000).toISOString() });
+    history.reply({ notification_id: 52, reply_to: null, message: "Fix or ship?", summary: "", device_id: "d", kind: "ask", options: ["Fix", "Ship"] }, now);
+    expect(history.waiting().map((reply) => reply.notification_id)).toEqual([52, 51]);
+    history.submit("answer", "sup", "Fix", now, 52);
+    expect(history.events.at(-1)).toMatchObject({ kind: "send", value: { id: "answer" } });
+    // The ask is answered and the blocker acknowledged: nothing waits.
+    expect(history.waiting()).toEqual([]);
+    // A blocker arriving live after the answer waits, and follows the answer in the thread.
+    history.receive({ notification_id: 53, reply_to: null, message: "A second gate went red.", summary: "", device_id: "d", kind: "blocker" }, Date.now());
+    expect(history.waiting().map((reply) => reply.notification_id)).toEqual([53]);
+    expect(history.events.at(-1)).toMatchObject({ kind: "reply", value: { notification_id: 53 } });
+  });
   it("discards only a refused send when a retry replaces it", () => {
     const history = new ConversationHistory();
     history.submit("ok", "sup", "Fine", at(9, 0)); history.submit("bad", "sup", "Ship it", at(9, 1)); history.reject("bad", "no access");

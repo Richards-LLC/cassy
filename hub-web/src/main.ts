@@ -705,7 +705,7 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       updateConversationViews(); renderConversationList();
     },
     onOperatorReply: (session, reply) => {
-      conversationHistory(sessionKey(machine.id, session)).reply(reply, Date.now(), session);
+      conversationHistory(sessionKey(machine.id, session)).receive(reply, Date.now(), session);
       updateConversationViews(); renderConversationList();
       const key = sessionKey(machine.id, session);
       const replies = operatorReplies.get(key) ?? [];

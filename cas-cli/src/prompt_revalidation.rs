@@ -771,8 +771,13 @@ pub(crate) fn select_merge_request_task<'a>(
     }) {
         return None;
     }
+    // GH #986: only a reopened, still-live cycle may own the request. A task
+    // that has since closed or been cancelled keeps its historical anchors as
+    // audit identity, and treating them as ownership stamped a later task's
+    // merge request with the finished task's id after the worker moved on.
     let mut matches = tasks.iter().filter(|task| {
         task.status != TaskStatus::AwaitingMerge
+            && !task.is_terminal()
             && !task.deliverables.historical_factory_branch_anchors.is_empty()
             && task
                 .assignee
@@ -851,15 +856,27 @@ pub(crate) fn resolve_live_branch_tip(
     }
 }
 
+/// Resolve the integration branch tip a merge request is judged against
+/// (GH #986).
+///
+/// The local `refs/heads/<target>` in a shared factory repository is only
+/// moved by whichever checkout has it checked out, so it routinely lags the
+/// supervisor's pushed merges. Reading it alone stamped envelopes with a stale
+/// `target_branch_tip` and judged "already landed" against old history. The
+/// target is resolved exactly like a worker branch: origin's remote-tracking
+/// ref and the local ref, the newer of the two (the one containing the other),
+/// and origin when they have diverged. A repository with no origin keeps using
+/// its local ref, so local-merge delivery is unchanged.
+pub(crate) fn resolve_target_branch_tip(repo_path: &Path, target_branch: &str) -> Option<String> {
+    resolve_live_branch_tip(repo_path, target_branch, None)
+}
+
 pub(crate) fn revalidate_merge_request(
     repo_path: &Path,
     branch_tip: &str,
     target_branch: &str,
 ) -> MergeRequestDecision {
-    let Some(target_tip) = crate::mcp::tools::core::task::lifecycle::close_ops::resolve_branch_sha(
-        repo_path,
-        target_branch,
-    ) else {
+    let Some(target_tip) = resolve_target_branch_tip(repo_path, target_branch) else {
         return MergeRequestDecision::Unverifiable;
     };
     if crate::mcp::tools::core::task::lifecycle::close_ops::git_commit_is_ancestor(
@@ -2426,6 +2443,116 @@ mod tests {
             select_unambiguous_merge_task(&[first], "worker-a", Some("cas-one"))
                 .map(|task| task.id.as_str()),
             Some("cas-one")
+        );
+    }
+
+    /// GH #986: after task A closes, a merge request for the worker's next
+    /// task B must never be stamped with A's id. A closed (or cancelled) task
+    /// keeps its historical anchors as audit identity, not as ownership.
+    #[test]
+    fn a_closed_task_with_historical_anchors_never_owns_a_later_merge_request() {
+        let mut closed_a = cas_types::Task::new("cas-aaaa".to_string(), "A".to_string());
+        closed_a.status = TaskStatus::Closed;
+        closed_a.assignee = Some("worker-a".to_string());
+        closed_a.deliverables.historical_factory_branch_anchors = vec!["a".repeat(40)];
+        let mut cancelled = closed_a.clone();
+        cancelled.id = "cas-cccc".to_string();
+        cancelled.status = TaskStatus::Cancelled;
+        let mut next_b = cas_types::Task::new("cas-bbbb".to_string(), "B".to_string());
+        next_b.status = TaskStatus::Open;
+        next_b.assignee = Some("worker-a".to_string());
+
+        let tasks = [closed_a.clone(), cancelled.clone(), next_b.clone()];
+        assert!(
+            select_merge_request_task(&tasks, "worker-a", None).is_none(),
+            "an implicit request must not fall back to a finished task"
+        );
+        assert!(select_merge_request_task(&tasks, "worker-a", Some("cas-aaaa")).is_none());
+        assert!(select_merge_request_task(&tasks, "worker-a", Some("cas-cccc")).is_none());
+
+        // B parks: the request is B's, whatever A left behind.
+        next_b.status = TaskStatus::AwaitingMerge;
+        let tasks = [closed_a.clone(), cancelled.clone(), next_b.clone()];
+        assert_eq!(
+            select_merge_request_task(&tasks, "worker-a", None).map(|task| task.id.as_str()),
+            Some("cas-bbbb")
+        );
+
+        // A genuinely reopened (live) cycle still owns its request.
+        let mut reopened = closed_a;
+        reopened.status = TaskStatus::Open;
+        assert_eq!(
+            select_merge_request_task(&[reopened, cancelled], "worker-a", None)
+                .map(|task| task.id.as_str()),
+            Some("cas-aaaa")
+        );
+    }
+
+    /// GH #986: the envelope's target tip is origin's, not a stale local ref.
+    /// The shared repository's `refs/heads/main` lags the supervisor's pushed
+    /// merge; revalidation must judge against the newer origin tip, and a
+    /// repository whose local ref is ahead (local-merge delivery) keeps it.
+    #[test]
+    fn merge_request_target_tip_follows_origin_when_the_local_ref_is_stale() {
+        let repo = tempfile::tempdir().expect("temp repo");
+        let path = repo.path();
+        git(path, &["init", "-b", "main"]);
+        git(path, &["config", "user.email", "cas-test@example.invalid"]);
+        git(path, &["config", "user.name", "Cassy Test"]);
+        std::fs::write(path.join("base"), "base\n").expect("base file");
+        git(path, &["add", "base"]);
+        git(path, &["commit", "-m", "base"]);
+        let stale_local = git(path, &["rev-parse", "main"]);
+
+        git(path, &["checkout", "-b", "factory/w"]);
+        std::fs::write(path.join("a"), "a\n").expect("a file");
+        git(path, &["add", "a"]);
+        git(path, &["commit", "-m", "task A"]);
+        let task_a_tip = git(path, &["rev-parse", "HEAD"]);
+
+        // The supervisor merged A on origin; only the remote-tracking ref
+        // moved. Local `main` still sits at the base commit.
+        git(path, &["checkout", "--detach", &stale_local]);
+        git(path, &["merge", "--no-ff", "factory/w", "-m", "merge A"]);
+        let origin_tip = git(path, &["rev-parse", "HEAD"]);
+        git(
+            path,
+            &["update-ref", "refs/remotes/origin/main", &origin_tip],
+        );
+        assert_eq!(git(path, &["rev-parse", "main"]), stale_local);
+
+        assert_eq!(
+            resolve_target_branch_tip(path, "main").as_deref(),
+            Some(origin_tip.as_str())
+        );
+        assert!(
+            matches!(
+                revalidate_merge_request(path, &task_a_tip, "main"),
+                MergeRequestDecision::AlreadyIntegrated { ref target_tip } if *target_tip == origin_tip
+            ),
+            "A landed on origin; the stale local ref must not report it pending"
+        );
+
+        // Task B is pending: its envelope carries origin's tip.
+        git(path, &["checkout", "factory/w"]);
+        std::fs::write(path.join("b"), "b\n").expect("b file");
+        git(path, &["add", "b"]);
+        git(path, &["commit", "-m", "task B"]);
+        let task_b_tip = git(path, &["rev-parse", "HEAD"]);
+        assert!(matches!(
+            revalidate_merge_request(path, &task_b_tip, "main"),
+            MergeRequestDecision::Pending { ref target_tip } if *target_tip == origin_tip
+        ));
+
+        // Local ahead of origin (a local merge not yet pushed): local wins.
+        git(path, &["update-ref", "refs/heads/main", &origin_tip]);
+        git(
+            path,
+            &["update-ref", "refs/remotes/origin/main", &stale_local],
+        );
+        assert_eq!(
+            resolve_target_branch_tip(path, "main").as_deref(),
+            Some(origin_tip.as_str())
         );
     }
 }

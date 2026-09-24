@@ -1531,6 +1531,14 @@ impl CasService {
                     }
                 }
             {
+                // GH #986: the envelope's target tip must describe origin,
+                // not whatever this shared repository last saw. Refresh the
+                // remote-tracking ref first (bounded, best effort; a repo with
+                // no origin just keeps its local ref).
+                crate::mcp::tools::core::task::lifecycle::close_ops::fetch_parent_branch_best_effort(
+                    &repo.repo_root,
+                    &repo.target_branch,
+                );
                 let branch = crate::prompt_revalidation::merge_request_branch(Some(&task));
                 // GH #703: use the live branch tip for a continued unmerged
                 // delivery. A parked task's anchor is immutable once its
@@ -1617,7 +1625,7 @@ impl CasService {
                                 crate::mcp::tools::core::task::lifecycle::close_ops::count_unmerged_factory_commits(
                                     &repo.repo_root,
                                     &branch_tip,
-                                    &repo.target_branch,
+                                    &target_tip,
                                 );
                             if let Some(pr_number) = requested_pr_number {
                                 let mut task_with_pr = task.clone();

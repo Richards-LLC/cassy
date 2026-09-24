@@ -51,6 +51,7 @@ new_fixture() {
         "$repo/.github/workflows" \
         "$repo/.context/zig"
     cp "$gate" "$repo/scripts/release-gate.sh"
+    cp "$script_dir/release-portable.sh" "$repo/scripts/release-portable.sh"
     cp "$script_dir/check-workflow-run-interpolation.py" "$repo/scripts/check-workflow-run-interpolation.py"
     cat > "$repo/.github/workflows/release.yml" <<'EOF'
 jobs:
@@ -560,7 +561,9 @@ run_scenario reference-ledger GATE_FIXTURE_REFERENCE_FAIL builtin-projections
 
 # 9. Changelog/version contract and clean-tree contract are independent.
 repo="$(new_fixture changelog-failure)"
-sed -i '/Fixture release/d' "$repo/CHANGELOG.md"
+# Portable in-place edit: GNU and BSD sed disagree on -i (cas-fed5).
+grep -v 'Fixture release' "$repo/CHANGELOG.md" >"$repo/CHANGELOG.md.tmp" || true
+mv "$repo/CHANGELOG.md.tmp" "$repo/CHANGELOG.md"
 output="$(run_gate "$repo" '' "$repo/scripts/release-gate.sh" 9.99.7 2>&1 || true)"
 assert_named_failure changelog-and-versions "$output"
 

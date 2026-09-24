@@ -140,6 +140,28 @@ def proxy_token_env() -> str | None:
     return match.group(1) if match else None
 
 
+def announce_token_env(credentials: dict[str, str]) -> str | None:
+    """The token variable to pin for the adapter, or None to let it choose.
+
+    cas-fed5: the project proxy.toml names the token variable of the host it
+    was written on. A different host (a Mac cutting a release) may not set
+    that variable; pinning it anyway failed the announce with "unset or
+    empty" although this machine's registered MechaCassy token was present.
+    A proxy-derived name is pinned only when it resolves here; otherwise the
+    adapter picks this machine's registered or only token. An operator's
+    explicit MECHA_SLACK_TOKEN_ENV is never overridden.
+    """
+
+    if os.environ.get("MECHA_SLACK_TOKEN_ENV"):
+        return None
+    token_env = proxy_token_env()
+    if not token_env:
+        return None
+    if os.environ.get(token_env) or credentials.get(token_env):
+        return token_env
+    return None
+
+
 def receipt(path: Path, values: dict[str, str]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.partial")
@@ -160,8 +182,8 @@ def post(version: str, draft_arg: str, receipt_arg: str, body_dir_arg: str) -> N
         if not expected.is_file() or expected.read_text(encoding="utf-8").strip("\n") != body:
             fail(f"validated body is missing or changed: {expected}")
     credentials = adapter.parse_credentials(adapter.credential_file())
-    token_env = proxy_token_env()
-    if token_env and not os.environ.get("MECHA_SLACK_TOKEN_ENV"):
+    token_env = announce_token_env(credentials)
+    if token_env:
         os.environ["MECHA_SLACK_TOKEN_ENV"] = token_env
     token = adapter.resolve_token(credentials)
     bypass = adapter.resolve_secret("MECHA_VERCEL_BYPASS", None, credentials)

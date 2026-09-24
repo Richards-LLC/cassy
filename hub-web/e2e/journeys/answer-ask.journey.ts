@@ -12,6 +12,10 @@ async function lastSend(page: Page): Promise<{ label: string; day: string }> {
     return { label: group.getAttribute("aria-label") ?? "", day };
   });
 }
+/** The thread as painted, top to bottom: day and session lines by text, message groups by their spoken label. */
+async function threadOrder(page: Page): Promise<string[]> {
+  return page.locator(".msgs > *").evaluateAll((nodes) => nodes.filter((node) => node.matches(".day, .session-divider, [role=group]")).map((node) => node.getAttribute("role") === "group" ? node.getAttribute("aria-label") ?? "" : node.textContent ?? ""));
+}
 /** "You, HH:MM" for this browser's clock now, or a minute either side if the clock ticks over. */
 function youNow(): string[] {
   return [-60_000, 0, 60_000].map((offset) => { const d = new Date(Date.now() + offset); return `You, ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`; });
@@ -26,6 +30,8 @@ test("HUB-J7 answer a pinned question", async ({ page, journey }) => {
   const hub = await journey.hub({
     machines: [ATLAS, STUDIO],
     paired: ["atlas", "studio"],
+    // Everything each machine stamps comes from its own clock.
+    clockAheadMs: { [PELICAN]: 300_000, [OTTER]: 86_400_000 },
     history: {
       [PELICAN]: [{ has_earlier: false, messages: [], replies: [{ notification_id: 900, reply_to: null, message: "The release gate went red; the train is held.", summary: "", device_id: "journey-device", kind: "blocker", attachments: [], at: ahead }] }],
       [OTTER]: [{ has_earlier: false, messages: [], replies: [{ notification_id: 901, reply_to: null, message: "Mac build is queued behind the nightly.", summary: "", device_id: "journey-device", kind: "answer", attachments: [], at: dayAhead }] }],
@@ -57,6 +63,19 @@ test("HUB-J7 answer a pinned question", async ({ page, journey }) => {
     await expect(waiting.locator("li")).toHaveCount(1);
     await expect(waiting.locator('.context-jump[data-kind="blocker"]')).toHaveCount(1);
     await expect(waiting.locator('.context-jump[data-kind="ask"]')).toHaveCount(0);
+    // cas-1f13: the blocker the machine stamped five minutes ahead sorts at its
+    // arrival, above the session line and the question that came after it, and
+    // says its machine's clock is ahead instead of showing a time from the future.
+    const order = await threadOrder(page);
+    const blockerAt = order.findIndex((label) => label.startsWith(`${PELICAN}, `) && label.endsWith(", machine clock ahead"));
+    const sessionAt = order.findIndex((label) => label.startsWith(`session ${PELICAN} started`));
+    expect(blockerAt, `blocker marked clock-ahead in ${JSON.stringify(order)}`).toBeGreaterThanOrEqual(0);
+    expect(sessionAt, "the session line follows the earlier blocker").toBeGreaterThan(blockerAt);
+    // The question arrives live from the same machine, so it is marked the
+    // same way a reload would mark it (cas-1f13 review F02).
+    await expect(page.getByRole("log").locator("time .clock-ahead")).toHaveText([" · machine clock ahead", " · machine clock ahead"]);
+    const times = await page.getByRole("log").locator(".turn > time").evaluateAll((nodes) => nodes.map((node) => node.firstChild?.textContent ?? ""));
+    expect(times, "times read in order down the thread").toEqual([...times].sort());
   });
 
   await journey.stage("Answer with one tap", async () => {
@@ -96,9 +115,35 @@ test("HUB-J7 answer a pinned question", async ({ page, journey }) => {
     const sent = hub.nextSend();
     await page.getByRole("button", { name: `Send to ${OTTER}`, exact: true }).click();
     await sent;
-    // The machine's turn sits under its own (tomorrow's) day; the send is under today, at the time it was sent.
+    // cas-1f13: the machine's turn is not filed under tomorrow above Today. It
+    // sits under Today at its arrival, marked "machine clock ahead", and the
+    // send follows it under today at the time it was sent.
     const reply = await lastSend(page);
     expect(youNow()).toContain(reply.label);
     expect(reply.day).toBe("Today");
+    await expect(page.getByRole("log").locator(".day")).toHaveText(["Today"]);
+    const order = await threadOrder(page);
+    const machineTurn = order.findIndex((label) => label.startsWith(`${OTTER}, `) && label.endsWith(", machine clock ahead"));
+    expect(machineTurn, `machine turn marked clock-ahead in ${JSON.stringify(order)}`).toBeGreaterThanOrEqual(0);
+    expect(order.lastIndexOf(reply.label), "the send sits below the machine's turn").toBeGreaterThan(machineTurn);
+  });
+
+  await journey.stage("Reopen the page", async () => {
+    // cas-1f13 review F01: a reload rebuilds the thread from history alone,
+    // with the machine's stamps. Every turn keeps the place the visit gave it,
+    // in the machine's sequence, and no time reads later than a turn below it.
+    const list = page.getByRole("navigation", { name: "Choose a supervisor" });
+    const shape = (labels: string[]) => labels.map((label) => label.replace(/\d{1,2}:\d{2}/g, "HH:MM"));
+    await list.getByRole("button", { name: /cas-src/ }).click();
+    await expect(page.getByRole("log").getByText("A second gate went red; the train is still held.")).toBeVisible();
+    const before = await threadOrder(page);
+    await page.reload();
+    await list.getByRole("button", { name: /cas-src/ }).click();
+    await expect(page.getByRole("log").getByText("A second gate went red; the train is still held.")).toBeVisible();
+    const after = await threadOrder(page);
+    expect(shape(after), JSON.stringify({ before, after })).toEqual(shape(before));
+    await expect(page.getByRole("log").locator(".day")).toHaveText(["Today"]);
+    const times = await page.getByRole("log").locator(".turn > time").evaluateAll((nodes) => nodes.map((node) => node.firstChild?.textContent ?? ""));
+    expect(times, "times read in order down the thread").toEqual([...times].sort());
   });
 });

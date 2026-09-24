@@ -1,6 +1,7 @@
 import { anySignal } from "./abort-signals";
 import { browserSupport, unsupportedBrowserNotice } from "./browser-support";
 import { dpopHeaders } from "./dpop";
+import type { ArtifactView, ArtifactViewResult } from "./artifact-open";
 import {
   backoffDelay,
   connectingAnchor,
@@ -350,6 +351,27 @@ export class HubConnectionSupervisor {
       // a visible compatibility warning and leaves capability-gated controls off.
       this.callbacks.onMachineInfo?.(undefined);
     }
+  }
+
+  /**
+   * A short-lived signed URL for viewing an artifact the session published
+   * (cassy#910). Unlike `request`, a refusal is an answer, not an exception:
+   * the machine's stable error code tells Commander what to say.
+   */
+  async artifactView(session: string, artifactId: string): Promise<ArtifactViewResult> {
+    const path = `/v1/sessions/${encodeURIComponent(session)}/artifacts/${encodeURIComponent(artifactId)}/url`;
+    const headers = await dpopHeaders(this.machine, "GET", path);
+    const response = await fetch(new URL(path, this.machine.baseUrl), { method: "GET", headers, cache: "no-store", credentials: "omit" });
+    const body = await response.json().catch(() => undefined) as Record<string, unknown> | undefined;
+    if (response.ok && body && typeof body.url === "string") {
+      return { ok: true, view: body as unknown as ArtifactView };
+    }
+    return {
+      ok: false,
+      status: response.status,
+      code: typeof body?.error === "string" ? body.error : undefined,
+      detail: typeof body?.status === "string" ? body.status : null,
+    };
   }
 
   async status(session: string): Promise<Record<string, unknown>> {

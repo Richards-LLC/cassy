@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from "vitest";
-import { ConversationHistory } from "./conversation-history";
+import { ConversationHistory, RECEIPT_TIMEOUT_MS } from "./conversation-history";
 import { ConversationView, registerTurnRenderer } from "./conversation-view";
 import type { OperatorReply, OperatorTurnKind } from "./types";
 import ROW_20812 from "./fixtures/hub-row-20812.txt?raw";
@@ -217,7 +217,7 @@ describe("ConversationView (Pebble thread)", () => {
     expect(view.element.querySelector('.conversation-turn[data-state="sending"] .conversation-delivery')?.textContent).toBe("Sending…");
     history.reject("x", "forbidden"); view.update();
     const refused = view.element.querySelector<HTMLElement>('.conversation-turn[data-state="error"]')!;
-    expect(refused.querySelector(".conversation-delivery")?.textContent).toBe("Not sent · This device isn't the one in control of the session. Take control from the header, then retry.");
+    expect(refused.querySelector(".conversation-delivery")?.textContent).toBe("Not sent · This device isn't the one in control of the session. Take control, then retry.");
     refused.querySelector("button")!.click(); expect(edit).toHaveBeenCalledWith("Ship it", expect.objectContaining({ id: "x" }));
   });
   it("marks a refused send as not sent: warning glyph, a Not sent lead, the reason, then Edit and Retry (P8, cas-b1ee)", () => {
@@ -232,7 +232,7 @@ describe("ConversationView (Pebble thread)", () => {
     expect(label.querySelector("b")?.textContent).toBe("Not sent");
     // F6: the hub's code becomes a plain reason and the step that gets it through.
     expect(label.querySelector(".conversation-refused-reason")?.firstChild?.textContent).toBe("This device isn't the one in control of the session.");
-    expect(label.querySelector(".conversation-refused-next")?.textContent).toBe(" Take control from the header, then retry.");
+    expect(label.querySelector(".conversation-refused-next")?.textContent).toBe(" Take control, then retry.");
     expect(label.textContent).not.toContain("forbidden");
     const buttons = [...refused.querySelectorAll<HTMLButtonElement>(".conversation-actions button")];
     expect(buttons.map((button) => [button.className, button.textContent, button.getAttribute("aria-label")])).toEqual([
@@ -240,6 +240,53 @@ describe("ConversationView (Pebble thread)", () => {
     ]);
     buttons[0]!.click(); expect(edit).toHaveBeenCalledWith("Ship it", expect.objectContaining({ id: "x" }));
     buttons[1]!.click(); expect(retry).toHaveBeenCalledWith(expect.objectContaining({ id: "x", text: "Ship it", replyTo: 52, state: "error" }));
+    // cas-3433: the refusal says "Take control, then retry", so with a
+    // takeControl handler the control sits on the message, first in the row.
+    const take = vi.fn();
+    const controlled = new ConversationView(document, history, { supervisor: "sup", editMessage: edit, retryMessage: retry, takeControl: take }); controlled.update();
+    const withControl = [...controlled.element.querySelectorAll<HTMLButtonElement>('.bub[data-state="error"] .conversation-actions button')];
+    expect(withControl.map((button) => [button.className, button.textContent, button.getAttribute("aria-label"), button.type])).toEqual([
+      ["conversation-take-control", "Take control", "Take control of the session", "button"],
+      ["conversation-edit", "Edit", "Edit message", "button"], ["conversation-retry", "Retry", "Retry sending", "button"],
+    ]);
+    withControl[0]!.click(); expect(take).toHaveBeenCalledWith(expect.objectContaining({ id: "x", state: "error" }));
+    // cas-8e0a: once this device holds control, the same message drops Take
+    // control and says Retry will go through; losing control brings it back.
+    let held = false;
+    const leased = new ConversationView(document, history, { supervisor: "sup", editMessage: edit, retryMessage: retry, takeControl: take, controlHeld: () => held }); document.body.replaceChildren(leased.element); leased.update();
+    const leasedBubble = () => leased.element.querySelector<HTMLElement>('.bub[data-state="error"]')!;
+    expect(leasedBubble().querySelector(".conversation-take-control")).not.toBeNull();
+    leasedBubble().querySelector<HTMLButtonElement>(".conversation-take-control")!.focus();
+    held = true; leased.update();
+    // F01: the focused Take control is gone, so Retry, the next step, takes focus, never the body.
+    expect(document.activeElement).toBe(leasedBubble().querySelector(".conversation-retry"));
+    expect(leasedBubble().querySelector(".conversation-take-control")).toBeNull();
+    expect(leasedBubble().querySelector(".conversation-refused")?.textContent).toBe("Not sent · This device controls the session now. Retry to send it.");
+    expect([...leasedBubble().querySelectorAll(".conversation-actions button")].map((button) => button.textContent)).toEqual(["Edit", "Retry"]);
+    held = false; leased.update();
+    expect(leasedBubble().querySelector(".conversation-take-control")).not.toBeNull();
+    // A control that survives the rebuild keeps focus.
+    expect(document.activeElement).toBe(leasedBubble().querySelector(".conversation-retry"));
+    expect(leasedBubble().querySelector(".conversation-refused-next")?.textContent).toBe(" Take control, then retry.");
+    // cas-1730 (cas-008f N01): while another device holds control and this
+    // one cannot take over, the message names it and says to take control
+    // once it is released, as the composer does. Take control stays, and a
+    // focused Take control keeps focus through the repaint.
+    let holder: string | undefined;
+    const contested = new ConversationView(document, history, { supervisor: "sup", editMessage: edit, retryMessage: retry, takeControl: take, controlHolder: () => holder }); document.body.replaceChildren(contested.element); contested.update();
+    const contestedBubble = () => contested.element.querySelector<HTMLElement>('.bub[data-state="error"]')!;
+    contestedBubble().querySelector<HTMLButtonElement>(".conversation-take-control")!.focus();
+    holder = "Studio iPad"; contested.update();
+    expect(contestedBubble().querySelector(".conversation-refused-next")?.textContent).toBe(" Studio iPad is in control. Take control when it's released, then retry.");
+    expect(document.activeElement).toBe(contestedBubble().querySelector(".conversation-take-control"));
+    holder = undefined; contested.update();
+    expect(contestedBubble().querySelector(".conversation-refused-next")?.textContent).toBe(" Take control, then retry.");
+    // Only a control refusal offers it: taking control fixes nothing else.
+    const other = new ConversationHistory();
+    other.submit("z", "sup", "Late answer", at(9, 2), 7); other.reject("z", "semantic message enqueue failed: in_reply_to notification 7 does not exist");
+    const stale = new ConversationView(document, other, { supervisor: "sup", editMessage: edit, retryMessage: retry, takeControl: take }); stale.update();
+    expect(stale.element.querySelector(".conversation-take-control")).toBeNull();
+    expect(stale.element.querySelector(".conversation-retry")).not.toBeNull();
     // Without the callbacks a refused send still says Not sent, with no dead buttons.
     const bare = new ConversationView(document, history, "sup"); bare.update();
     expect(bare.element.querySelector(".conversation-refused b")?.textContent).toBe("Not sent");
@@ -249,6 +296,32 @@ describe("ConversationView (Pebble thread)", () => {
     const sending = view.element.querySelector<HTMLElement>('.bub[data-state="sending"]')!;
     expect(sending.querySelector(".conversation-delivery")?.textContent).toBe("Sending…");
     expect(sending.querySelector(".conversation-refused, .conversation-actions")).toBeNull();
+  });
+  it("turns a send whose receipt never came into Not confirmed with Retry, not Sending… forever (cas-1622)", () => {
+    const history = new ConversationHistory();
+    const retry = vi.fn();
+    const view = new ConversationView(document, history, { supervisor: "sup", editMessage: vi.fn(), retryMessage: retry }); document.body.replaceChildren(view.element);
+    history.submit("x", "sup", "Is the gate green?", at(9, 0), 52);
+    expect(history.unconfirmSilent(at(9, 0) + RECEIPT_TIMEOUT_MS - 1)).toEqual([]);
+    view.update();
+    expect(view.element.querySelector(".conversation-delivery")?.textContent).toBe("Sending…");
+    expect(history.unconfirmSilent(at(9, 0) + RECEIPT_TIMEOUT_MS)).toEqual(["x"]);
+    view.update();
+    const bubble = view.element.querySelector<HTMLElement>('.turn.you .bub[data-state="unconfirmed"]')!;
+    const label = bubble.querySelector<HTMLElement>(".conversation-unconfirmed")!;
+    expect(label.getAttribute("role")).toBe("status");
+    expect(label.querySelector("svg.warn")?.getAttribute("aria-hidden")).toBe("true");
+    expect(label.textContent).toBe("Not confirmed · The hub never confirmed this reached sup. Retry sends it again.");
+    // It may have arrived: no "Not sent", and only Retry (an edit could reach the supervisor twice as easily).
+    expect(label.textContent).not.toContain("Not sent");
+    const buttons = [...bubble.querySelectorAll<HTMLButtonElement>(".conversation-actions button")];
+    expect(buttons.map((button) => [button.textContent, button.getAttribute("aria-label")])).toEqual([["Retry", "Retry sending"]]);
+    buttons[0]!.click(); expect(retry).toHaveBeenCalledWith(expect.objectContaining({ id: "x", text: "Is the gate green?", replyTo: 52, state: "unconfirmed" }));
+    // A late receipt still turns it into Delivered.
+    expect(history.acknowledge({ client_ref: "x", notification_id: 60, target: "sup", stamped: true })).toBe(true);
+    view.update();
+    expect(view.element.querySelector(".conversation-unconfirmed")).toBeNull();
+    expect(view.element.querySelector(".conversation-delivered")?.textContent).toBe("Delivered");
   });
   it("names each message group's speaker and time for assistive tech (cas-17e3)", () => {
     const history = new ConversationHistory();
@@ -313,9 +386,10 @@ describe("ConversationView (Pebble thread)", () => {
     const history = new ConversationHistory();
     const now = Date.now();
     // Hydrated from a machine whose clock is five minutes ahead of this browser.
-    history.hydrateReply({ notification_id: 51, reply_to: null, message: "The gate went red.", summary: "", device_id: "d", kind: "blocker", attachments: [], at: new Date(now + 300_000).toISOString() });
-    history.reply({ notification_id: 52, reply_to: null, message: "Fix or ship?", summary: "", device_id: "d", kind: "ask", options: ["Fix", "Ship"] }, now);
-    expect(history.waiting().map((reply) => reply.notification_id)).toEqual([52, 51]);
+    // Its future stamp is clamped to the arrival (cas-1f13), so the ask that follows sorts after it.
+    history.hydrateReply({ notification_id: 51, reply_to: null, message: "The gate went red.", summary: "", device_id: "d", kind: "blocker", attachments: [], at: new Date(now + 300_000).toISOString() }, now);
+    history.receive({ notification_id: 52, reply_to: null, message: "Fix or ship?", summary: "", device_id: "d", kind: "ask", options: ["Fix", "Ship"] }, now);
+    expect(history.waiting().map((reply) => reply.notification_id)).toEqual([51, 52]);
     history.submit("answer", "sup", "Fix", now, 52);
     expect(history.events.at(-1)).toMatchObject({ kind: "send", value: { id: "answer" } });
     // The ask is answered and the blocker acknowledged: nothing waits.
@@ -324,6 +398,28 @@ describe("ConversationView (Pebble thread)", () => {
     history.receive({ notification_id: 53, reply_to: null, message: "A second gate went red.", summary: "", device_id: "d", kind: "blocker" }, Date.now());
     expect(history.waiting().map((reply) => reply.notification_id)).toEqual([53]);
     expect(history.events.at(-1)).toMatchObject({ kind: "reply", value: { notification_id: 53 } });
+  });
+  it("marks a turn from a machine clock ahead quietly, at its arrival time, with no future day (cas-1f13)", () => {
+    const history = new ConversationHistory();
+    const now = Date.now() - 180_000;
+    history.hydrateReply({ notification_id: 61, reply_to: null, message: "Mac build is queued.", summary: "", device_id: "d", kind: "answer", attachments: [], at: new Date(now + 86_400_000).toISOString() }, now);
+    const view = new ConversationView(document, history, { supervisor: "calm-otter-4" }); document.body.replaceChildren(view.element); view.update();
+    expect([...view.element.querySelectorAll(".day")].map((day) => day.textContent)).toEqual(["Today"]);
+    const group = view.element.querySelector<HTMLElement>('.turn.sup[role="group"]')!;
+    const clock = `${String(new Date(now).getHours()).padStart(2, "0")}:${String(new Date(now).getMinutes()).padStart(2, "0")}`;
+    expect(group.getAttribute("aria-label")).toBe(`calm-otter-4, ${clock}, machine clock ahead`);
+    const time = group.querySelector<HTMLElement>(":scope > time")!;
+    expect(time.textContent).toBe(`${clock} · machine clock ahead`);
+    expect(time.querySelector(".clock-ahead")).not.toBeNull();
+    expect(time.title).toContain("clock is ahead");
+    // My own message carries no hint.
+    history.receive({ notification_id: 62, reply_to: null, message: "Started.", summary: "", device_id: "d", kind: "answer" }, now + 60_000);
+    history.submit("s", "calm-otter-4", "Thanks", now + 61_000); view.update();
+    // A live turn from a machine seen running ahead is marked the same way (review F02).
+    expect(group.querySelector(".clock-ahead")).not.toBeNull();
+    const you = view.element.querySelector<HTMLElement>('.turn.you[role="group"]')!;
+    expect(you.querySelector(".clock-ahead")).toBeNull();
+    expect(you.getAttribute("aria-label")).not.toContain("clock");
   });
   it("discards only a refused send when a retry replaces it", () => {
     const history = new ConversationHistory();

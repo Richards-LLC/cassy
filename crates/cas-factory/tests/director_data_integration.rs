@@ -263,6 +263,104 @@ fn test_director_data_active_lease_resolves_awaiting_merge_via_assignee_after_le
     assert_eq!(lease.task_status, TaskStatus::AwaitingMerge);
 }
 
+/// cas-38d7: a parked delivery with an open independent QA round carries
+/// that round on its `active_lease`, so the director's AwaitingMerge relay
+/// can report the review instead of telling the supervisor to merge. The
+/// round's claim shows up as reviewer state, and a resolved round clears it.
+#[test]
+fn test_director_data_awaiting_merge_lease_carries_the_open_qa_round() {
+    let temp_dir = setup_test_cas_dir();
+    let cas_dir = temp_dir.path();
+    let task_store = init_task_store(cas_dir);
+    let agent_store = init_agent_store(cas_dir);
+    init_event_store(cas_dir);
+    agent_store
+        .register(&create_test_agent(
+            "worker-1",
+            "swift-fox",
+            AgentRole::Worker,
+            AgentStatus::Idle,
+        ))
+        .expect("Failed to add worker");
+    task_store
+        .add(&create_test_task(
+            "cas-0001",
+            "Parked Task",
+            TaskStatus::AwaitingMerge,
+            TaskType::Task,
+            Priority::HIGH,
+            Some("swift-fox"),
+        ))
+        .expect("Failed to add task");
+    let lease_of = |data: &DirectorData| {
+        data.agents
+            .iter()
+            .find(|a| a.name == "swift-fox")
+            .and_then(|a| a.active_lease.clone())
+            .expect("parked task resolves as the worker's active lease")
+    };
+
+    // No QA round yet: nothing pending.
+    let data = DirectorData::load_fast(cas_dir).expect("load");
+    assert_eq!(lease_of(&data).pending_qa, None);
+
+    let now = chrono::Utc::now();
+    let opened = cas_store::open_qa_pass(
+        cas_dir,
+        &cas_store::NewQaPass {
+            task_id: "cas-0001",
+            implementer_agent_id: "worker-1",
+            branch: "factory/swift-fox",
+            bound_head: "0123456789abcdef0123456789abcdef01234567",
+            deadline_at: now + chrono::Duration::minutes(45),
+            max_rounds: 3,
+        },
+        now,
+    )
+    .expect("open QA round");
+    let cas_store::QaPassOpen::Dispatched(pass) = opened else {
+        panic!("a fresh round is dispatched: {opened:?}");
+    };
+    cas_store::set_qa_task(cas_dir, &pass.id, "cas-qa01").expect("link QA task");
+
+    let pending = lease_of(&DirectorData::load_fast(cas_dir).expect("load"))
+        .pending_qa
+        .expect("an open round is carried on the parked lease");
+    assert_eq!(pending.pass_id, pass.id);
+    assert_eq!(pending.round, 1);
+    assert_eq!(pending.qa_task_id.as_deref(), Some("cas-qa01"));
+    assert_eq!(
+        pending.bound_head,
+        "0123456789abcdef0123456789abcdef01234567"
+    );
+    assert!(!pending.claimed);
+    assert_eq!(pending.reviewer_agent_id, None);
+
+    cas_store::claim_qa_pass(cas_dir, "cas-0001", "worker-2", now).expect("claim by another agent");
+    let claimed = lease_of(&DirectorData::load_fast(cas_dir).expect("load"))
+        .pending_qa
+        .expect("a claimed round is still open");
+    assert!(claimed.claimed);
+    assert_eq!(claimed.reviewer_agent_id.as_deref(), Some("worker-2"));
+
+    cas_store::resolve_qa_pass(
+        cas_dir,
+        "cas-0001",
+        "worker-2",
+        cas_types::QaVerdict::Approved,
+        "approved",
+        None,
+        "/tmp/LEDGER.md",
+        now,
+    )
+    .expect("resolve");
+    assert_eq!(
+        lease_of(&DirectorData::load_fast(cas_dir).expect("load")).pending_qa,
+        None,
+        "a passed round no longer holds the merge"
+    );
+}
+
 #[test]
 fn test_director_data_excludes_epics_from_regular_tasks() {
     let temp_dir = setup_test_cas_dir();

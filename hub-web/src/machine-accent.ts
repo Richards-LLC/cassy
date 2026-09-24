@@ -157,3 +157,18 @@ export function machineMonogram(label: string): string {
   const first = label.trim().match(/\p{L}|\p{N}/u)?.[0];
   return first ? first.toLocaleUpperCase() : "?";
 }
+
+/**
+ * The two letters on a machine's rail button and compact header chip. They
+ * come from the machine's own name — the part before " · " in a host label
+ * such as "Atlas · Linux" — and from letters and digits only, so a separator
+ * can never become a letter ("A·" was journey F3 on 3.30.0).
+ */
+export function machineInitials(label: string): string {
+  const name = label.split(/\s+[·•|—–]\s+/u)[0] ?? label;
+  const words = name.match(/[\p{L}\p{N}]+/gu) ?? label.match(/[\p{L}\p{N}]+/gu) ?? [];
+  const [first, second] = words;
+  if (!first) return "?";
+  const letters = second ? `${Array.from(first)[0]}${Array.from(second)[0]}` : Array.from(first).slice(0, 2).join("");
+  return letters.toLocaleUpperCase();
+}

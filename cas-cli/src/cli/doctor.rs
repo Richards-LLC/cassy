@@ -265,7 +265,7 @@ impl CheckGroup {
                 Self::Config
             }
             "issue repositories" => Self::Config,
-            "integrations" | "mecha-cassy" => Self::Integrations,
+            "integrations" | "violet" | "mecha-cassy" => Self::Integrations,
             name if name.starts_with("integration") => Self::Integrations,
             _ => Self::Store,
         }
@@ -1294,10 +1294,10 @@ fn issue_repositories_check(config: &Config) -> Check {
         "issue repositories",
         CheckStatus::Ok,
         format!(
-            "project={} | cassy={} | mecha_cassy={} | cloud={}",
+            "project={} | cassy={} | violet={} | cloud={}",
             repos.project.as_deref().unwrap_or("<unset>"),
             repos.cassy,
-            repos.mecha_cassy,
+            repos.violet,
             repos.cloud,
         ),
     )
@@ -5430,7 +5430,7 @@ mod tests {
         assert!(matches!(check.status, CheckStatus::Ok));
         assert!(check.message.contains("project=<unset>"));
         assert!(check.message.contains("cassy=Richards-LLC/cassy"));
-        assert!(check.message.contains("mecha_cassy=Richards-LLC/mecha-cassy"));
+        assert!(check.message.contains("violet=Richards-LLC/mecha-cassy"));
         assert!(check
             .message
             .contains("cloud=Richards-LLC/petra-stella-cloud"));
@@ -8283,7 +8283,7 @@ mod tests {
             "mecha-cassy",
             CheckStatus::Warning,
             "not registered on this machine (/tmp/config.toml has no mecha-cassy server). \
-             Run `cas integrate mecha-cassy`",
+             Run `cas integrate violet`",
         );
         assert_eq!(check.group(), CheckGroup::Integrations);
         let (message, remediation) = check.parts();
@@ -8293,7 +8293,7 @@ mod tests {
         );
         assert_eq!(
             remediation.as_deref(),
-            Some("Run `cas integrate mecha-cassy`")
+            Some("Run `cas integrate violet`")
         );
     }
 

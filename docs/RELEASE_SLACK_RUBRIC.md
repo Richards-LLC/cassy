@@ -49,11 +49,19 @@ When a release follows an epic, carry the version bump, CHANGELOG section, and r
    `gh pr view "$PR_URL" --json url,number,statusCheckRollup`.
 4. After the required checks are green, merge explicitly:
    `gh pr merge "$PR_URL" --merge`. Do not use `--auto` or an admin bypass.
-5. Fetch the landed commit (`git fetch origin main`), tag that exact
-   `origin/main` commit, then run `./scripts/release.sh --publish-tag`. The
-   explicit flag pushes the tag; the tag-triggered GitHub workflow is the
-   normal release publisher. A bare `release.sh` is audit-only and never
-   touches the remote.
+5. The supervisor/operator fetches the landed commit (`git fetch origin main`)
+   and runs `./scripts/release.sh --publish-tag` from an unguarded release
+   worktree at that exact commit. This creates the annotated tag, runs the
+   audit, then pushes the tag to start the normal GitHub publisher. A bare
+   `release.sh` is audit-only and never touches the remote. A factory worker's
+   pre-push guard forbids tag pushes: if a release chore is assigned to a
+   worker, its deliverable is an annotated local tag at the landed SHA and a
+   handoff naming both. The supervisor/operator owns the tag push and all
+   publication receipts. Use the
+   [release chore task template](release-notes/release-chore-task-template.md)
+   for that assignment. In the assigned guarded worktree, a
+   `release.sh --publish-tag` invocation at the landed commit stops before the
+   audit with the local tag and handoff command; it does not publish.
 
 ### Published assets before announcement
 

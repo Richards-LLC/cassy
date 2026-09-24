@@ -4,6 +4,7 @@ use crate::mcp::tools::types::{
     BlockReason, DimensionBreakdown, MemoryMergeReceipt, MemoryRememberResponse, RecommendedAction,
 };
 
+use cas_core::memory::handoff;
 use cas_core::memory::{
     CandidateFacets, NewMemoryFacets, OverlapDecision, OverlapMatch, OverlapRecommendation,
     check_overlap, extract_facets_from_body,
@@ -445,7 +446,16 @@ impl CasCore {
             })
             .transpose()?;
 
-        let entry_type: EntryType = req.entry_type.parse().unwrap_or(EntryType::Learning);
+        // `entry_type=handoff` (GH #992, cas-0339) stores a session handoff: a
+        // context memory tagged `handoff` and `role:<role>`. Handoffs are never
+        // merged into or blocked by an existing memory; saving one supersedes
+        // the previous current handoff for its role instead (below).
+        let handoff_kind = req.entry_type.trim().eq_ignore_ascii_case("handoff");
+        let entry_type: EntryType = if handoff_kind {
+            EntryType::Context
+        } else {
+            req.entry_type.parse().unwrap_or(EntryType::Learning)
+        };
         let id = store.generate_id().map_err(|e| McpError {
             code: ErrorCode::INTERNAL_ERROR,
             message: Cow::from(format!("Failed to generate ID: {e}")),
@@ -461,6 +471,15 @@ impl CasCore {
                     .collect()
             })
             .unwrap_or_default();
+
+        let handoff_role = (handoff_kind
+            || tags
+                .iter()
+                .any(|tag| tag.trim().eq_ignore_ascii_case(handoff::HANDOFF_TAG)))
+        .then(|| {
+            let session_role = std::env::var("CAS_AGENT_ROLE").ok();
+            handoff::tag_new_handoff(&mut tags, session_role.as_deref())
+        });
 
         // Auto-detect branch for worktree scoping
         let branch = self.current_worktree_branch();
@@ -491,7 +510,7 @@ impl CasCore {
         //                    tags between the new memory and its matches.
         //   - LowOverlap   → proceed normally.
         // ====================================================================
-        let bypass = req.bypass_overlap.unwrap_or(false);
+        let bypass = req.bypass_overlap.unwrap_or(false) || handoff_role.is_some();
         let mut refresh_recommended = false;
         let mut linked_slugs: Vec<String> = Vec::new();
         if !bypass {
@@ -754,7 +773,41 @@ impl CasCore {
             let _ = search.index_entry(&entry);
         }
 
+        // A new handoff supersedes the previous current handoff for its role
+        // in this project: the old one keeps its content as history but is
+        // marked superseded and leaves the active tier (cas-0339).
+        let mut superseded_ids: Vec<String> = Vec::new();
+        if let Some(role) = handoff_role.as_deref()
+            && let Ok(existing) = store.list()
+        {
+            let now = chrono::Utc::now();
+            for previous in handoff::handoffs_superseded_by(&existing, &id, role) {
+                let mut previous = previous.clone();
+                handoff::mark_superseded(&mut previous, &id, now);
+                match store.update(&previous) {
+                    Ok(()) => {
+                        if let Ok(search) = self.open_search_index() {
+                            let _ = search.index_entry(&previous);
+                        }
+                        superseded_ids.push(previous.id);
+                    }
+                    Err(e) => {
+                        tracing::warn!("could not supersede handoff {}: {e}", previous.id)
+                    }
+                }
+            }
+        }
+
         let mut msg = format!("Created entry: {id}");
+        if let Some(role) = handoff_role.as_deref() {
+            msg.push_str(&format!("\nCurrent {role} handoff for this project."));
+            if !superseded_ids.is_empty() {
+                msg.push_str(&format!(
+                    "\nSuperseded (kept as history): {}",
+                    superseded_ids.join(", ")
+                ));
+            }
+        }
         if !linked_slugs.is_empty() {
             msg.push_str(&format!(
                 "\nCross-referenced with: {}",

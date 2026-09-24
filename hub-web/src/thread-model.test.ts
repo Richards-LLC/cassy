@@ -174,30 +174,139 @@ describe("blockerEvidence", () => {
 
 describe("clock-skewed live turns show their own time (cas-ac1f)", () => {
   const blocker = (id: number, at: number) => ({ notification_id: id, reply_to: null, message: "Gate red.", summary: "", device_id: "d", kind: "blocker" as const, attachments: [], at: new Date(at).toISOString() });
-  it("a send after a turn from a clock 5 minutes ahead sorts after it but shows the browser's time", () => {
+  it("a send after a turn from a clock 5 minutes ahead sorts after it and shows the browser's time", () => {
     const now = new Date(2026, 8, 24, 12, 0).getTime();
     const history = new ConversationHistory();
-    history.hydrateReply(blocker(1, now + 300_000));
+    history.hydrateReply(blocker(1, now + 300_000), now);
+    history.submit("s", "sup", "On it", now + 1_000);
+    expect(history.events.map((event) => event.kind)).toEqual(["reply", "send"]);
+    expect(history.events.at(-1)).toMatchObject({ kind: "send", at: now + 300_000, shownAt: now + 1_000 });
+    const groups = threadModel(history.events, { now: now + 1_000 }).filter((item): item is ThreadGroup => item.type === "group");
+    expect(groups.map((group) => [group.side, group.time, group.clockAhead])).toEqual([["supervisor", "12:00", true], ["you", "12:00", false]]);
+  });
+  it("a send stamped before a live turn keyed ahead of it still sorts after and shows its own time", () => {
+    // A browser clock that stepped back: the latest turn's key is ahead of the new send.
+    const now = new Date(2026, 8, 24, 12, 0).getTime();
+    const history = new ConversationHistory();
+    history.receive({ notification_id: 1, reply_to: null, message: "Ack.", summary: "", device_id: "d", kind: "answer" }, now + 300_000);
     history.submit("s", "sup", "On it", now);
-    const send = history.events.at(-1)!;
-    expect(send).toMatchObject({ kind: "send", at: now + 300_000, shownAt: now });
-    const groups = threadModel(history.events, { now }).filter((item) => item.type === "group");
+    expect(history.events.at(-1)).toMatchObject({ kind: "send", at: now + 300_000, shownAt: now });
+    const groups = threadModel(history.events, { now: now + 300_000 }).filter((item) => item.type === "group");
     expect(groups.at(-1)).toMatchObject({ side: "you", time: "12:00" });
   });
-  it("a day-ahead machine does not file today's send under tomorrow", () => {
-    const now = new Date(2026, 8, 24, 12, 0).getTime();
+});
+
+describe("thread order is stable under a machine clock ahead, a reconnect and a reload (cas-1f13)", () => {
+  const now = new Date(2026, 8, 24, 13, 36).getTime();
+  const durable = (id: number, at: number, extra: Partial<OperatorReply> & { session?: string } = {}) => ({ notification_id: id, reply_to: null, message: `m${id}`, summary: "", device_id: "d", kind: "answer" as const, attachments: [], at: new Date(at).toISOString(), ...extra });
+  const message = (id: number, text: string, at: number, extra: { reply_to?: number; session?: string } = {}) => ({ notification_id: id, target: "sup", text, state: "acknowledged" as const, stamped: true, device_id: "d", at: new Date(at).toISOString(), ...extra });
+  const order = (history: ConversationHistory) => history.events.map((event) => event.kind === "send" ? `send:${event.value.notificationId ?? event.value.id}` : `reply:${event.value.notification_id}`);
+  const days = (history: ConversationHistory, clock: number) => threadModel(history.events, { now: clock }).filter((item) => item.type === "day").map((item) => item.type === "day" ? item.label : "");
+  const groups = (history: ConversationHistory, clock: number) => threadModel(history.events, { now: clock }).filter((item): item is ThreadGroup => item.type === "group").map((group) => `${group.side} ${group.time}${group.clockAhead ? " ahead" : ""}`);
+  it("a day-ahead machine never puts a future day header above Today", () => {
     const history = new ConversationHistory();
-    history.hydrateReply(blocker(1, now - 3_600_000));
-    history.hydrateReply(blocker(2, now + 86_400_000));
-    history.submit("s", "sup", "On it", now);
-    history.receive({ notification_id: 3, reply_to: null, message: "Ack.", summary: "", device_id: "d", kind: "answer" }, now + 60_000);
-    const items = threadModel(history.events, { now: now + 60_000 });
-    const days = items.filter((item) => item.type === "day").map((item) => item.type === "day" ? item.label : "");
-    // Today, then the skewed turn's own day, then today again for the live send and reply.
-    expect(days[0]).toBe("Today");
-    expect(days.at(-1)).toBe("Today");
-    expect(new Set(items.map((item) => item.key)).size).toBe(items.length);
-    const lastGroups = items.filter((item) => item.type === "group").slice(-2);
-    expect(lastGroups.map((group) => group.type === "group" ? group.time : undefined)).toEqual(["12:00", "12:01"]);
+    history.hydrateReply(durable(1, now - 3_600_000), now);
+    history.hydrateReply(durable(2, now + 86_400_000), now);
+    history.submit("s", "sup", "On it", now + 1_000);
+    history.receive(reply(3, "answer", "Ack."), now + 60_000);
+    expect(days(history, now + 60_000)).toEqual(["Today"]);
+    // The future stamp shows its arrival and says the clock is ahead; the
+    // live answer from the same machine says so too (F02).
+    expect(groups(history, now + 60_000)).toEqual(["supervisor 13:36 ahead", "you 13:36", "supervisor 13:37 ahead"]);
+  });
+  it("orders a 13:41 blocker from a clock 5 minutes ahead before the 13:36 session start and shows it at 13:36", () => {
+    const history = new ConversationHistory();
+    history.hydrateReply(durable(900, now + 300_000, { kind: "blocker", message: "The release gate went red." }), now);
+    history.receive(reply(901, "ask", "Fix or ship?"), now + 5_000, "patient-pelican-9");
+    const items = threadModel(history.events, { now: now + 5_000 });
+    const shown = items.map((item) => item.type === "group" ? `${item.side} ${item.time}${item.clockAhead ? " ahead" : ""}` : item.type === "session" ? item.label : item.type === "day" ? item.label : item.type);
+    expect(shown).toEqual(["Today", "supervisor 13:36 ahead", "session patient-pelican-9 started 13:36", "supervisor 13:36 ahead"]);
+  });
+  it("places durable turns in the machine's sequence whatever their stamps and the hydration order", () => {
+    const history = new ConversationHistory();
+    history.hydrateReply(durable(3, now + 240_000), now);
+    history.hydrateSend(message(2, "q", now + 120_000), now);
+    history.hydrateReply(durable(1, now + 60_000), now);
+    history.hydrateReply(durable(0, now - 60_000), now);
+    expect(order(history)).toEqual(["reply:0", "reply:1", "send:2", "reply:3"]);
+    // A few seconds of skew changes nothing on screen, so it earns no hint.
+    const slight = new ConversationHistory();
+    slight.hydrateReply(durable(5, now + 2_000), now);
+    expect(groups(slight, now)).toEqual(["supervisor 13:36"]);
+  });
+  it("a reload rebuilds the order the visit saw: a day-ahead turn that came first stays above my message and its answer (review F01)", () => {
+    const session = "patient-pelican-9";
+    // The visit: history, then my message and its answer arrive live.
+    const visit = new ConversationHistory();
+    visit.hydrateReply(durable(800, now - 600_000, { kind: "status", message: "Earlier: tests are green." }), now);
+    visit.hydrateReply(durable(801, now + 86_400_000, { message: "Tomorrow-stamped: the deploy is queued." }), now);
+    visit.submit("c", "sup", "Ship it after the gate.", now + 60_000, undefined, session);
+    visit.acknowledge({ client_ref: "c", notification_id: 1000, target: "sup", stamped: true });
+    visit.receive(reply(1001, "answer", "On it."), now + 90_000, session);
+    // The reload: the same turns, all from history, with the machine's stamps, messages before replies.
+    const later = now + 600_000;
+    const reload = new ConversationHistory();
+    reload.hydrateSend(message(1000, "Ship it after the gate.", now + 60_000, { session }), later);
+    for (const row of [durable(800, now - 600_000, { kind: "status", message: "Earlier: tests are green." }), durable(801, now + 86_400_000, { message: "Tomorrow-stamped: the deploy is queued." }), durable(1001, now + 90_000, { message: "On it.", session })]) reload.hydrateReply(row, later);
+    expect(order(reload)).toEqual(["reply:800", "reply:801", "send:1000", "reply:1001"]);
+    expect(order(visit)).toEqual(["reply:800", "reply:801", "send:1000", "reply:1001"]);
+    expect(reload.preview()).toBe("On it.");
+    expect(days(reload, later)).toEqual(["Today"]);
+    // Times read in order: the day-ahead turn shows no later than my message below it.
+    const times = threadModel(reload.events, { now: later }).flatMap((item) => item.type === "group" || item.type === "coalesce" ? [item.time ?? ""] : []);
+    expect(times).toEqual([...times].sort());
+  });
+  it("my own message keeps its sent time and no hint when the machine's clock runs behind", () => {
+    const history = new ConversationHistory();
+    history.submit("c", "sup", "Status?", now, undefined, "s");
+    history.acknowledge({ client_ref: "c", notification_id: 10, target: "sup", stamped: true });
+    // Missed during an outage: the answer, stamped by a clock 5 minutes behind.
+    history.hydrateReply(durable(11, now - 300_000, { message: "All green." }), now + 60_000);
+    expect(order(history)).toEqual(["send:10", "reply:11"]);
+    expect(groups(history, now + 60_000)).toEqual(["you 13:36", "supervisor 13:31"]);
+  });
+  it("a turn's shown time does not drift with the render clock", () => {
+    const history = new ConversationHistory();
+    history.hydrateReply(durable(1, now + 86_400_000), now);
+    expect(groups(history, now)).toEqual(["supervisor 13:36 ahead"]);
+    expect(groups(history, now + 600_000)).toEqual(["supervisor 13:36 ahead"]);
+  });
+  it("marks a live turn only once the machine has been seen running ahead (review F02)", () => {
+    const history = new ConversationHistory();
+    history.receive(reply(1, "answer", "Hello."), now);
+    expect(history.events[0]).not.toHaveProperty("clockAhead");
+    history.hydrateReply(durable(0, now + 7_200_000), now + 1_000);
+    history.receive(reply(2, "answer", "Still here."), now + 2_000);
+    expect(history.events.at(-1)).toMatchObject({ clockAhead: true });
+    // A stamp within the minute is not evidence of a clock ahead.
+    const close = new ConversationHistory();
+    close.hydrateReply(durable(0, now + 30_000), now);
+    close.receive(reply(1, "answer", "Hi."), now + 1_000);
+    expect(close.events.at(-1)).not.toHaveProperty("clockAhead");
+  });
+  it("a message keeps its place across the session line when a reconnect re-hydrates it", () => {
+    const session = "patient-pelican-9";
+    const history = new ConversationHistory();
+    history.submit("c", "sup", "Are we back?", now, undefined, session);
+    history.acknowledge({ client_ref: "c", notification_id: 40, target: "sup", stamped: true });
+    history.receive(reply(41, "answer", "Back."), now + 1_000, session);
+    const shape = () => threadModel(history.events, { now: now + 2_000 }).map((item) => item.type === "group" ? `${item.side}` : item.type);
+    const before = shape();
+    expect(before).toEqual(["day", "session", "you", "supervisor"]);
+    // The reconnect's history page carries the same turns; a row without a session must not move the message.
+    history.hydrateSend(message(40, "Are we back?", now), now + 2_000);
+    history.hydrateReply(durable(41, now + 1_000, { message: "Back." }), now + 2_000);
+    expect(shape()).toEqual(before);
+    expect(history.events.map((event) => event.session)).toEqual([session, session]);
+  });
+  it("an answered ask stays answered when a reconnect's history row omits in_reply_to", () => {
+    const history = new ConversationHistory();
+    history.receive(reply(50, "ask", "Fix or ship?"), now);
+    history.submit("a", "sup", "Fix", now + 1_000, 50);
+    history.acknowledge({ client_ref: "a", notification_id: 51, target: "sup", stamped: true });
+    expect(history.pinnedAsk()).toBeUndefined();
+    history.hydrateSend(message(51, "Fix", now + 1_000), now + 2_000);
+    expect(history.pinnedAsk()).toBeUndefined();
+    expect(history.answered(50)?.text).toBe("Fix");
   });
 });

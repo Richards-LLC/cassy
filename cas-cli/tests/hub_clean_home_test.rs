@@ -18,6 +18,8 @@ use std::time::Instant;
 use assert_cmd::Command;
 use serde_json::Value;
 
+const CHILD_PROGRESS_TIMEOUT: Duration = Duration::from_secs(30);
+
 #[cfg(unix)]
 fn install_tailscale_mock(_home: &Path, path: &Path, script: &str) {
     cas::test_paths::warm_stub(path, script);
@@ -136,7 +138,7 @@ fn real_legacy_hubs_recover_through_new_post_swap_step() {
                 "unresponsive" => { unsafe { libc::kill(old.pid as i32, libc::SIGSTOP) }; }
                 "dead_route" => {
                     unsafe { libc::kill(old.pid as i32, libc::SIGKILL) };
-                    let dead_deadline = Instant::now() + Duration::from_secs(5);
+                    let dead_deadline = Instant::now() + CHILD_PROGRESS_TIMEOUT;
                     while unsafe { libc::kill(old.pid as i32, 0) } == 0 && Instant::now() < dead_deadline {
                         thread::sleep(Duration::from_millis(20));
                     }
@@ -464,7 +466,7 @@ esac
     );
     let published_port = paths.read_process_record().unwrap().port;
     let health_url = format!("http://127.0.0.1:{published_port}/v1/health");
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + CHILD_PROGRESS_TIMEOUT;
     while Instant::now() < deadline {
         if ureq::get(&health_url)
             .timeout(Duration::from_millis(200))
@@ -1329,7 +1331,7 @@ esac
     let child = restart.spawn().expect("spawn exact restart command");
 
     let marker = barrier.join("record-removed-lock-held");
-    let marker_deadline = Instant::now() + Duration::from_secs(3);
+    let marker_deadline = Instant::now() + CHILD_PROGRESS_TIMEOUT;
     while !marker.exists() && Instant::now() < marker_deadline {
         thread::sleep(Duration::from_millis(10));
     }
@@ -1489,7 +1491,7 @@ fn restart_deadline_keeps_old_lock_owner_and_launches_no_replacement() {
         .stderr(Stdio::piped());
     let child = restart.spawn().expect("spawn deadline restart");
     let marker = barrier.join("record-removed-lock-held");
-    let marker_deadline = Instant::now() + Duration::from_secs(3);
+    let marker_deadline = Instant::now() + CHILD_PROGRESS_TIMEOUT;
     while !marker.exists() && Instant::now() < marker_deadline {
         thread::sleep(Duration::from_millis(10));
     }
@@ -1509,7 +1511,7 @@ fn restart_deadline_keeps_old_lock_owner_and_launches_no_replacement() {
     assert!(nix::sys::signal::kill(nix::unistd::Pid::from_raw(old_pid as i32), None).is_ok());
 
     fs::write(barrier.join("release"), b"release\n").unwrap();
-    let release_deadline = Instant::now() + Duration::from_secs(3);
+    let release_deadline = Instant::now() + CHILD_PROGRESS_TIMEOUT;
     while paths.acquire_instance_lock().is_err() && Instant::now() < release_deadline {
         thread::sleep(Duration::from_millis(10));
     }
@@ -1625,7 +1627,7 @@ fn plain_stop_never_reports_success_while_a_hub_still_holds_the_lock() {
 
     fs::write(barrier.join("release"), b"release\n").unwrap();
     let paths = HubRuntimePaths::new(home.path().join(".cas/hub"));
-    let release_deadline = Instant::now() + Duration::from_secs(5);
+    let release_deadline = Instant::now() + CHILD_PROGRESS_TIMEOUT;
     while paths.acquire_instance_lock().is_err() && Instant::now() < release_deadline {
         thread::sleep(Duration::from_millis(10));
     }

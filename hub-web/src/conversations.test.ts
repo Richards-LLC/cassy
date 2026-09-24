@@ -1,9 +1,9 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from "vitest";
-import { ConversationHistory } from "./conversation-history";
+import { ConversationHistory, RECEIPT_REPLY_GRACE_MS, RECEIPT_TIMEOUT_MS } from "./conversation-history";
 import { ConversationList, conversationRowMarkup, filterConversationRows, truncateConversationPreview, type ConversationRow } from "./conversation-list";
 import { ConversationView } from "./conversation-view";
-import { ATTACH_DISABLED_REASON, ATTACH_SUPPORTED, arrangeConversationShell, conversationNoMatchText, conversationShellMarkup, dressComposer } from "./conversation-shell";
+import { ATTACH_DISABLED_REASON, ATTACH_SUPPORTED, arrangeConversationShell, conversationNoMatchText, conversationShellMarkup, dressComposer, KEYBOARD_HINT_MEDIA_QUERY } from "./conversation-shell";
 import { renderConversationFixture } from "../fixtures/conversations";
 import { projectName, projectBadge } from "./cloud-brand";
 
@@ -22,6 +22,68 @@ describe('conversation evidence', () => {
     expect(history.events[0]).toMatchObject({ value: { state: 'replied' } });
     history.acknowledge({ client_ref: 'own', notification_id: 41, target: 'supervisor', stamped: true });
     expect(history.events[0]).toMatchObject({ value: { state: 'replied' } });
+  });
+  it('gives up on a missing receipt after a bounded wait, sooner once a later reply lands (cas-1622)', () => {
+    const history = new ConversationHistory();
+    const sent = 1_000_000;
+    history.submit('own', 'supervisor', 'Instruction', sent);
+    expect(history.hasPending()).toBe(true);
+    expect(history.nextReceiptCheck(sent)).toBe(RECEIPT_TIMEOUT_MS);
+    // A supervisor turn after it means its receipt should already be here; it gets a short grace.
+    // The grace counts from when that turn arrived, not from the send (cas-1185).
+    history.receive({ notification_id: 9, reply_to: null, message: 'Status', summary: '', device_id: 'd' }, sent + 500);
+    const graceEnds = sent + 500 + RECEIPT_REPLY_GRACE_MS;
+    expect(history.nextReceiptCheck(sent + 500)).toBe(RECEIPT_REPLY_GRACE_MS);
+    expect(history.unconfirmSilent(graceEnds - 1)).toEqual([]);
+    expect(history.unconfirmSilent(graceEnds)).toEqual(['own']);
+    expect(history.events[0]).toMatchObject({ value: { state: 'unconfirmed' } });
+    // Nothing is left to wait for, and the thread is no longer "working" on it.
+    expect(history.nextReceiptCheck(graceEnds)).toBeUndefined();
+    expect(history.hasPending()).toBe(false);
+    expect(history.unconfirmSilent(sent + RECEIPT_TIMEOUT_MS)).toEqual([]);
+    // A retry discards it once the new send is on the wire; a delivered send is never discarded.
+    expect(history.discardRefused('own')).toBe(true);
+    history.submit('ok', 'supervisor', 'Delivered one', sent + 3_000);
+    history.acknowledge({ client_ref: 'ok', notification_id: 12, target: 'supervisor', stamped: true });
+    expect(history.discardRefused('ok')).toBe(false);
+    expect(history.unconfirmSilent(sent + 3_000 + RECEIPT_TIMEOUT_MS)).toEqual([]);
+  });
+  it('a supervisor turn crossing the send never flashes "Not confirmed" before a late receipt (cas-1185)', () => {
+    const history = new ConversationHistory();
+    const sent = 2_000_000;
+    history.submit('own', 'supervisor', 'Ship it', sent);
+    // The turn lands 100 ms after the send; the receipt, measured up to 3.35 s late, comes after it.
+    history.receive({ notification_id: 20, reply_to: null, message: 'Working on the gate', summary: '', device_id: 'd' }, sent + 100);
+    for (const late of [1_920, 3_350, sent + 100 + RECEIPT_REPLY_GRACE_MS - 1 - sent]) {
+      expect(history.unconfirmSilent(sent + late), `still Sending… ${late} ms after the send`).toEqual([]);
+    }
+    expect(history.events[0]).toMatchObject({ value: { state: 'sending' } });
+    // No "Not confirmed", so no Retry could have gone out: the late receipt lands on the one send.
+    expect(history.acknowledge({ client_ref: 'own', notification_id: 21, target: 'supervisor', stamped: true })).toBe(true);
+    expect(history.events.filter((event) => event.kind === 'send')).toHaveLength(1);
+    expect(history.events[0]).toMatchObject({ value: { state: 'acknowledged', notificationId: 21 } });
+    expect(history.nextReceiptCheck(sent + 3_350)).toBeUndefined();
+  });
+  it('a turn that arrives late still leaves the receipt its full grace, capped by the timeout (cas-1185)', () => {
+    const history = new ConversationHistory();
+    const sent = 3_000_000;
+    history.submit('own', 'supervisor', 'Ship it', sent);
+    history.receive({ notification_id: 30, reply_to: null, message: 'Status', summary: '', device_id: 'd' }, sent + 4_000);
+    expect(history.unconfirmSilent(sent + 4_000 + RECEIPT_REPLY_GRACE_MS - 1)).toEqual([]);
+    expect(history.unconfirmSilent(sent + 4_000 + RECEIPT_REPLY_GRACE_MS)).toEqual(['own']);
+    // A turn arriving near the timeout does not extend the wait past it.
+    const capped = new ConversationHistory();
+    capped.submit('own', 'supervisor', 'Ship it', sent);
+    capped.receive({ notification_id: 31, reply_to: null, message: 'Status', summary: '', device_id: 'd' }, sent + RECEIPT_TIMEOUT_MS - 1_000);
+    expect(capped.nextReceiptCheck(sent)).toBe(RECEIPT_TIMEOUT_MS);
+  });
+  it('never times out a hydrated send or a refused one (cas-1622)', () => {
+    const history = new ConversationHistory();
+    history.hydrateSend({ notification_id: 11, target: 'supervisor', text: 'Stored', state: 'sending', stamped: true, device_id: 'phone', operator_label: 'Daniel', at: '2026-09-21T14:01:00Z' });
+    history.submit('refused', 'supervisor', 'No', 5_000);
+    history.reject('refused', 'forbidden');
+    expect(history.nextReceiptCheck(Number.MAX_SAFE_INTEGER)).toBeUndefined();
+    expect(history.unconfirmSilent(Number.MAX_SAFE_INTEGER)).toEqual([]);
   });
   it('hydrates durable sends and replies in order, then dedupes live receipts and replies', () => {
     const history = new ConversationHistory();
@@ -207,6 +269,11 @@ describe('conversation evidence', () => {
     expect(row.querySelector('.conversation-flag')?.getAttribute('aria-label')).toBe('2 waiting for you');
   });
   it('gates the compose FAB on a paired machine and puts Appearance & commands in the header as a named icon button (P13)', () => {
+    // A phone has no Ctrl K to press: the hint is dropped (3.30.0 journey F10).
+    const phone = document.createElement('div');
+    phone.innerHTML = conversationShellMarkup({ selected: false, loaded: true, paired: true, keyboardHint: false });
+    expect(phone.querySelector<HTMLInputElement>('#conversation-search')!.placeholder).toBe('Search conversations');
+    expect(KEYBOARD_HINT_MEDIA_QUERY).toBe('(any-pointer: fine) and (min-width: 500px)');
     const unpaired = document.createElement('div');
     unpaired.innerHTML = conversationShellMarkup({ selected: false, loaded: true, paired: false });
     expect(unpaired.querySelector('#compose-fab')).toBeNull();

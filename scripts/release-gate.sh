@@ -94,6 +94,14 @@ reuse_rows=false
 repo_root="$(git rev-parse --show-toplevel)"
 cd "$repo_root"
 
+# cas-fed5: portable host helpers (stat device, sha256sum, Cargo bin on PATH),
+# so the gate runs on stock macOS without GNU coreutils shims.
+gate_script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/release-portable.sh
+source "$gate_script_dir/release-portable.sh"
+release_portable_path_add_cargo_bin
+release_portable_define_sha256sum
+
 cargo_bin="${CARGO:-cargo}"
 reference_history_script="${RELEASE_GATE_GEN_REFERENCE_HISTORY:-$repo_root/scripts/gen-builtin-reference-history.sh}"
 
@@ -108,7 +116,9 @@ reference_history_script="${RELEASE_GATE_GEN_REFERENCE_HISTORY:-$repo_root/scrip
 # fixed that for the self-test only; cas-c736 fixes the gate itself, so the
 # variable becomes an override rather than a prerequisite. /var/tmp mirrors the
 # merge-queue runner: outside every checkout and outside $HOME.
-readonly scratch_base_default='/var/tmp/cas-release-gate'
+# cas-fed5: /Users/Shared on macOS, where /var/tmp is a Cassy disposable root.
+scratch_base_default="$(release_portable_default_scratch_base)"
+readonly scratch_base_default
 if [[ -n "${CAS_RELEASE_GATE_HOME_DIR:-}" ]]; then
     scratch_base="$CAS_RELEASE_GATE_HOME_DIR"
     scratch_base_origin='CAS_RELEASE_GATE_HOME_DIR'
@@ -413,8 +423,8 @@ check_scratch_base() {
     fi
 
     assert_no_cas_ancestor "$scratch_base" || return 1
-    checkout_device="${CAS_RELEASE_GATE_CHECKOUT_DEVICE:-$(stat -c %d "$repo_root" 2>/dev/null || true)}"
-    scratch_device="${CAS_RELEASE_GATE_SCRATCH_DEVICE:-$(stat -c %d "$parent" 2>/dev/null || true)}"
+    checkout_device="${CAS_RELEASE_GATE_CHECKOUT_DEVICE:-$(release_portable_stat_device "$repo_root" || true)}"
+    scratch_device="${CAS_RELEASE_GATE_SCRATCH_DEVICE:-$(release_portable_stat_device "$parent" || true)}"
     if [[ -z "$checkout_device" || -z "$scratch_device" || "$checkout_device" != "$scratch_device" ]]; then
         printf 'scratch-base: filesystem boundary: checkout device=%s scratch-parent device=%s; use a base on the checkout mount\n' \
             "${checkout_device:-unknown}" "${scratch_device:-unknown}"

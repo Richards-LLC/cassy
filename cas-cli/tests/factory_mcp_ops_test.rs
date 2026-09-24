@@ -1368,6 +1368,31 @@ async fn test_coordination_focus_epic_routes_clear_field() {
 // spawn_workers tests
 // =============================================================================
 
+#[tokio::test]
+async fn spawn_workers_rejects_task_brief_in_prompt_without_queueing() {
+    let env = FactoryTestEnv::new();
+    let mut req = coord_req("spawn_workers");
+    req.task_id = Some("cas-example".into());
+    req.prompt = Some("Send a plan and wait before coding.".into());
+
+    let err = env.service.coordination(Parameters(req)).await.unwrap_err();
+    assert!(err.message.contains("does not deliver `prompt`"), "{err:?}");
+    assert!(err.message.contains("loop_start"), "{err:?}");
+    assert!(err.message.contains("action=message"), "{err:?}");
+    assert!(env.spawn_queue().peek(10).unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn spawn_workers_rejects_unscoped_prompt_without_queueing() {
+    let env = FactoryTestEnv::new();
+    let mut req = coord_req("spawn_workers");
+    req.prompt = Some("A brief must not be lost.".into());
+
+    let err = env.service.coordination(Parameters(req)).await.unwrap_err();
+    assert!(err.message.contains("no spawn was queued"), "{err:?}");
+    assert!(env.spawn_queue().peek(10).unwrap().is_empty());
+}
+
 /// cas-77c1: an isolated integration child must keep spawn_workers usable
 /// when the host's load would make the production guard refuse the request.
 /// The guard's injected-snapshot unit tests cover refusal; this exercises the
@@ -1458,6 +1483,10 @@ async fn test_spawn_workers_enqueues_with_epic_in_isolated_child() {
     assert!(
         text.contains("alpha, beta, gamma"),
         "Should list worker names: {text}"
+    );
+    assert!(
+        text.contains("Supervisor brief: none supplied or delivered"),
+        "no-brief spawn receipt must state delivery status: {text}"
     );
 
     // Verify queue
@@ -9468,6 +9497,121 @@ async fn cas99d2_inbox_poll_marks_redelivered_rows_gh127() {
     assert!(
         !fresh_header.contains("[redelivery]"),
         "a first delivery must not be marked as a repeat: {fresh_header}"
+    );
+}
+
+/// cas-098d (GH #904): a wake names a message the transport just delivered
+/// while older, already-handled deliveries are still unread in the durable
+/// inbox. The poll hands over the named message, and it lists the older ones
+/// by id instead of replaying their bodies as a wake batch. An old delivery
+/// the recipient never demonstrably had (a possible GH #155 drop) is still
+/// handed over in full.
+#[tokio::test]
+async fn cas098d_inbox_poll_returns_the_woken_message_not_old_replays_gh904() {
+    let _guard = EnvGuard::set(&[
+        ("CAS_AGENT_ROLE", "worker"),
+        ("CAS_AGENT_NAME", "watchful-koala-20"),
+    ]);
+    let env = FactoryTestEnv::with_agent_id_and_env("koala-agent-id", None);
+    env.register_worker_with_id("koala-agent-id", "watchful-koala-20", None);
+
+    let dropped = env
+        .prompt_queue()
+        .enqueue_urgent(
+            "supervisor",
+            "watchful-koala-20",
+            "NEVER SURFACED BY THE HARNESS",
+            None,
+            Some("dropped"),
+            None,
+            false,
+        )
+        .expect("enqueue dropped");
+    env.prompt_queue()
+        .mark_transport_delivered(dropped)
+        .expect("transport handoff");
+    let mut handled = Vec::new();
+    for n in 0..8 {
+        let id = env
+            .prompt_queue()
+            .enqueue_urgent(
+                "supervisor",
+                "watchful-koala-20",
+                &format!("HANDLED LONG AGO {n}"),
+                None,
+                Some("old report"),
+                None,
+                false,
+            )
+            .expect("enqueue handled");
+        env.prompt_queue()
+            .mark_transport_delivered(id)
+            .expect("transport handoff");
+        handled.push(id);
+    }
+    let delivered_long_ago = (chrono::Utc::now() - chrono::Duration::minutes(40)).to_rfc3339();
+    let conn = rusqlite::Connection::open(env.cas_root.join("cas.db")).unwrap();
+    // The recipient acted after these deliveries (later activity recorded).
+    for id in &handled {
+        conn.execute(
+            "UPDATE prompt_queue SET processed_at = ?1, transport_delivered_at = ?1, \
+             assumed_seen_at = ?1 WHERE id = ?2",
+            rusqlite::params![delivered_long_ago, id],
+        )
+        .unwrap();
+    }
+    conn.execute(
+        "UPDATE prompt_queue SET processed_at = ?1, transport_delivered_at = ?1 WHERE id = ?2",
+        rusqlite::params![delivered_long_ago, dropped],
+    )
+    .unwrap();
+    let named = env
+        .prompt_queue()
+        .enqueue_urgent(
+            "supervisor",
+            "watchful-koala-20",
+            "THE MESSAGE THE WAKE NAMED",
+            None,
+            Some("new task"),
+            None,
+            false,
+        )
+        .expect("enqueue named");
+    env.prompt_queue()
+        .mark_transport_delivered(named)
+        .expect("transport handoff");
+
+    let text = get_text(
+        &env.service
+            .coordination(Parameters(coord_req("inbox_poll")))
+            .await
+            .expect("inbox_poll"),
+    );
+    assert!(
+        text.contains("THE MESSAGE THE WAKE NAMED"),
+        "the woken message must come back in the first poll: {text}"
+    );
+    assert!(
+        !text.contains("HANDLED LONG AGO"),
+        "old deliveries must not be replayed as a batch: {text}"
+    );
+    assert!(
+        text.contains("Not replayed:"),
+        "the older deliveries must still be named: {text}"
+    );
+    assert!(
+        handled.iter().all(|id| text.contains(&format!("{id} ("))),
+        "every older delivery claimed in this poll is listed by id: {text}"
+    );
+    assert!(
+        text.contains("NEVER SURFACED BY THE HARNESS"),
+        "an old delivery with no evidence the recipient had it is still replayed: {text}"
+    );
+    let named_at = text.find("THE MESSAGE THE WAKE NAMED").unwrap();
+    let dropped_at = text.find("NEVER SURFACED BY THE HARNESS").unwrap();
+    assert!(
+        named_at < dropped_at,
+        "the woken message comes first: {text}"
     );
 }
 

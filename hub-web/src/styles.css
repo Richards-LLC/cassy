@@ -455,9 +455,8 @@ pre { font-family: var(--font-mono); }
   color: var(--text-hi);
 }
 .fleet-hero { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 2fr); gap: var(--space-6); align-items: start; }
-.fleet-board-header { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-2); }
+.fleet-board-header { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-2) var(--space-3); }
 .fleet-eyebrow { margin: 0; color: var(--text-mid); font: var(--weight-semibold) var(--fs-xs)/1.33 var(--font-mono); letter-spacing: var(--tracking-label); text-transform: uppercase; }
-.fleet-catalog-time::before, .fleet-board-summary::before { content: "· "; }
 .fleet-catalog-time { color: var(--text-mid); font: var(--fs-xs)/1.33 var(--font-mono); }
 .fleet-board-summary { margin: 0; color: var(--text-mid); font: var(--fs-xs)/1.33 var(--font-mono); }
 .fleet-verdict { flex-basis: 100%; margin: var(--space-2) 0 0; max-width: 22ch; font: var(--weight-regular) var(--fs-verdict)/1.1 var(--font-display); letter-spacing: -.015em; text-wrap: pretty; }
@@ -638,6 +637,18 @@ main {
   white-space: nowrap;
 }
 
+/* The codename follows the project, secondary: quieter, and the first to
+   yield width so the project and the caret stay readable (3.30.0 F2). */
+.session-picker-codename {
+  flex: 0 100 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-mid);
+  font-size: var(--fs-xs);
+  font-weight: var(--weight-regular);
+  text-overflow: ellipsis;
+}
+
 .session-picker-caret {
   flex: 0 0 auto;
   color: var(--text-mid);
@@ -716,6 +727,8 @@ main {
 }
 
 .mode-badge.observer { color: var(--text-mid); }
+/* No control to claim while the session is reconnecting (cas-edcd, cas-4a93). */
+.mode-badge[hidden] { display: none; }
 
 .session-header .actions {
   display: flex;
@@ -1603,6 +1616,10 @@ main {
   margin: 0 0 var(--space-1);
   color: var(--text-hi);
 }
+
+/* Beside a reconnect banner the empty rail names the outage in the warning
+   ink the footer's partial dot uses, never "All clear" (cas-edcd). */
+.attention-empty.outage p { color: var(--state-warn); }
 
 .attention-last-event {
   font-family: var(--font-ui);
@@ -3112,7 +3129,12 @@ dialog form > *,
 .conversation-identity .id { min-width: 0; }
 .conversation-identity h1 { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); margin: 0; font: var(--weight-semibold) 16px/1.25 var(--font-ui); overflow-wrap: anywhere; }
 .conversation-identity h1 b { font-weight: inherit; }
-.conversation-identity .conversation-host { display: block; margin-top: 1px; font: var(--weight-regular) 13px/1.25 var(--font-mono); color: var(--ink-mid); overflow-wrap: anywhere; }
+/* One line at every width (3.30.0 journey F9): a long codename ellipsises
+   inside "machine · codename" (its title carries it whole) and the connection
+   state after it stays visible, instead of the line wrapping to three. */
+.conversation-identity .conversation-host { display: flex; margin-top: 1px; font: var(--weight-regular) 13px/1.25 var(--font-mono); color: var(--ink-mid); white-space: nowrap; }
+.conversation-identity .host-where { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+#conversation-connection { flex: none; white-space: pre; }
 .conversation-pane-slot { flex: 1; min-height: 0; min-width: 0; overflow: hidden; }
 .conversation-pane-slot .pane-grid { display: block; padding: 0; height: 100%; min-height: 0; background: var(--bg-root); color: var(--text-hi); }
 .conversation-pane-slot .primary-pane-slot { height: 100%; }
@@ -3128,6 +3150,12 @@ dialog form > *,
  * redefined here. Shape system: 22px pebble, 8px spoken corner; grouped
  * turns tighten their adjacent corners so a run reads as one voice. */
 .conversation-reading.thread { display: flex; flex-direction: column; height: 100%; min-width: 0; overflow: auto; overscroll-behavior: contain; padding: 0; position: relative; background: var(--canvas); color: var(--ink); font: var(--weight-regular) 15px/1.5 var(--font-ui); }
+/* cas-0bf5: the thread is a Tab stop (tabindex 0) and where a palette or
+ * keyboard jump lands, so keyboard focus draws the house ring, inset so the
+ * scroll container never clips it; a pointer focus draws nothing. The
+ * browser's default 1px outline never shows. */
+.conversation-reading.thread:focus-visible { outline: var(--focus-ring-width) solid var(--color-focus); outline-offset: calc(-1 * var(--focus-ring-width)); }
+.conversation-reading.thread:focus:not(:focus-visible) { outline: none; }
 .thread .thead { position: sticky; top: 0; z-index: 1; display: flex; align-items: center; gap: 13px; padding: 17px 30px; background: var(--canvas); box-shadow: var(--lift-head); }
 .thread .thead b { display: block; font: var(--weight-semibold) 16px/1.25 var(--font-ui); overflow-wrap: anywhere; }
 .thread .thead .id span { display: block; margin-top: 1px; font: var(--weight-regular) 13px/1.25 var(--font-mono); color: var(--ink-mid); overflow-wrap: anywhere; }
@@ -3148,6 +3176,7 @@ dialog form > *,
 .thread .turn { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; max-width: 70%; min-width: 0; }
 .thread .turn.you { align-self: flex-end; align-items: flex-end; }
 .thread .turn > time { font-size: 12px; color: var(--ink-mid); padding: 2px 6px 0; }
+.thread time .clock-ahead { font-style: italic; }
 /* --lift-sup adds an inset accent hairline (no layout shift): the light
    --sup-bg tints alone sit about 1.1:1 on the cream thread (journey F11). */
 .thread .bub { max-width: 100%; min-width: 0; padding: 12px 19px; background: var(--sup-bg); color: var(--sup-fg); border-radius: 8px 22px 22px 8px; box-shadow: var(--lift-sup); }
@@ -3174,12 +3203,17 @@ dialog form > *,
  * in --ink, a 13px semibold "Not sent" lead with a warning glyph, and Edit /
  * Retry below as outline pills. The review asked for 1.5px; Chrome 153
  * computes a 1.5px border as 1px at DPR 1 and 2 (measured), so it is 2px. */
-.thread .turn.you .bub[data-state="error"] { background: transparent; color: var(--ink); border: 2px dashed var(--crit-bg); box-shadow: none; padding: 10px 17px; }
+.thread .turn.you .bub:is([data-state="error"], [data-state="unconfirmed"]) { background: transparent; color: var(--ink); border: 2px dashed var(--crit-bg); box-shadow: none; padding: 10px 17px; }
 .thread .conversation-refused { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; margin-top: 8px; opacity: 1; color: var(--ink); font: var(--weight-regular) 12px/1.35 var(--font-ui); }
 .thread .conversation-refused b { color: var(--crit-bg); font: var(--weight-semibold) 13px/1.3 var(--font-ui); }
 .thread .conversation-refused .warn { width: 15px; height: 15px; flex: none; color: var(--crit-bg); }
 .thread .conversation-refused-reason { flex-basis: 100%; min-width: 0; color: var(--ink-mid); overflow-wrap: anywhere; }
 .thread .conversation-refused-next { color: var(--ink); }
+/* cas-1622: a send whose receipt never came is unknown, not refused. It
+ * shares the refused outline and layout above, in the caution ink instead of
+ * critical red (--warn-text is text-grade in both schemes), with Retry only. */
+.thread .turn.you .bub[data-state="unconfirmed"] { border-color: var(--warn-text); }
+.thread .conversation-unconfirmed b, .thread .conversation-unconfirmed .warn { color: var(--warn-text); }
 /* F6: once its edited version is sent, a refused send is only a record — a
  * quiet dashed outline in --line-strong, its text clamped to one line, the
  * "Not sent · replaced by your edit" line, and no actions. */
@@ -3194,9 +3228,14 @@ dialog form > *,
 .thread .conversation-delivered { display: flex; align-items: center; justify-content: flex-end; gap: 4px; }
 .thread .conversation-delivered .tick { width: 13px; height: 13px; margin: 0; color: currentColor; }
 .thread .conversation-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 10px; }
-.thread .conversation-edit, .thread .conversation-retry { min-height: 32px; padding: 0 14px; border-radius: 999px; border: 1.5px solid var(--line-strong); background: transparent; color: var(--ink); font: var(--weight-medium) 13px/1.2 var(--font-ui); cursor: pointer; }
-.thread .conversation-edit:hover, .thread .conversation-retry:hover { border-color: var(--ink); }
-.thread .conversation-edit:focus-visible, .thread .conversation-retry:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+.thread .conversation-edit, .thread .conversation-retry, .thread .conversation-take-control { min-height: 32px; padding: 0 14px; border-radius: 999px; border: 1.5px solid var(--line-strong); background: transparent; color: var(--ink); font: var(--weight-medium) 13px/1.2 var(--font-ui); cursor: pointer; }
+.thread .conversation-edit:hover, .thread .conversation-retry:hover, .thread .conversation-take-control:hover { border-color: var(--ink); }
+.thread .conversation-edit:focus-visible, .thread .conversation-retry:focus-visible, .thread .conversation-take-control:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+/* cas-8e0a: on a phone or any touch screen the message's actions are 44px
+ * targets (WCAG 2.5.5); 32px stays for a mouse on a wide screen. */
+@media (max-width: 53rem), (pointer: coarse) {
+  .thread .conversation-edit, .thread .conversation-retry, .thread .conversation-take-control { min-height: 44px; padding: 0 18px; }
+}
 /* coalesced statuses — one quiet box, never a ledger. Long or ask-bearing
  * statuses never land here (thread-model foldsAsStatus); what does is clamped
  * at three lines. The transparent bottom border is the bottom padding: the
@@ -3341,6 +3380,11 @@ button.chip:disabled { cursor: default; }
 .conversation-composer .composer-clip svg { width: 19px; height: 19px; display: block; opacity: 0.55; }
 .conversation-composer textarea { grid-area: field; width: 100%; min-width: 0; min-height: 46px; height: auto; field-sizing: content; max-height: 25dvh; padding: 12px 22px; border: var(--line-width) solid var(--line-strong); border-radius: 23px; resize: none; background: var(--panel); color: var(--ink); box-shadow: var(--lift); font: var(--weight-regular) 14px/1.55 var(--font-ui); }
 .conversation-composer textarea::placeholder { color: var(--ink-mid); opacity: 1; }
+/* field-sizing: content sizes the empty field to its placeholder, so a long
+   supervisor name used to grow it to three lines (3.30.0 journey F9). Until
+   the operator types, the field is one line and the placeholder ellipsises. */
+.conversation-composer textarea:placeholder-shown { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.conversation-composer textarea:placeholder-shown::placeholder { white-space: nowrap; text-overflow: ellipsis; overflow: hidden; }
 .conversation-composer .composer-actions { grid-area: send; display: flex; align-items: center; gap: var(--space-2); min-width: 0; margin: 0; }
 .conversation-composer .composer-actions button { width: auto; }
 .conversation-composer #message-mic { width: 44px; min-width: 44px; height: 44px; min-height: 44px; color: var(--ink-mid); border-color: var(--line-strong); background: var(--panel); }

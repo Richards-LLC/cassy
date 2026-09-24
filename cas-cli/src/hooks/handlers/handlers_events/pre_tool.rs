@@ -203,9 +203,23 @@ pub fn handle_pre_tool_use(
                 .as_ref()
                 .and_then(|ti| ti.get("command").and_then(|v| v.as_str()));
             if let Some(cmd) = command {
+                // cas-6db4: judge the push by the delivery mode of the task
+                // the worker is delivering, the same field the close gate
+                // reads. The session-wide mode (set by any spawn with
+                // delivery_mode) only decides for a worker with no task in
+                // progress; otherwise a push_branch task in a local_merge
+                // session could neither push nor pass its close's merge check.
                 if looks_like_git_push_to_origin(cmd)
-                    && worker_delivery_mode() == cas_types::DeliveryMode::LocalMerge
                     && !local_merge_push_override()
+                    && effective_worker_delivery_mode(
+                        worker_delivery_mode(),
+                        &cas_root
+                            .map(|root| {
+                                let mut stores = ToolHookStores::new(root);
+                                worker_active_task_delivery_modes(&mut stores, input)
+                            })
+                            .unwrap_or_default(),
+                    ) == cas_types::DeliveryMode::LocalMerge
                 {
                     return Ok(HookOutput::with_pre_tool_permission(
                         "deny",
@@ -1317,6 +1331,50 @@ pub(crate) fn worker_delivery_mode() -> cas_types::DeliveryMode {
             .map(|metadata| metadata.delivery_mode)
     })
     .unwrap_or_default()
+}
+
+/// cas-6db4: the delivery mode a factory worker's `git push origin` is judged
+/// by. A worker with a task in progress follows that task's `delivery_mode`,
+/// which is what the close gate enforces: push_branch tasks must reach origin
+/// for their merge check, so the hook may not refuse their push. Only a worker
+/// with no task in progress falls back to the session's mode.
+pub(crate) fn effective_worker_delivery_mode(
+    session_mode: cas_types::DeliveryMode,
+    active_task_modes: &[cas_types::DeliveryMode],
+) -> cas_types::DeliveryMode {
+    if active_task_modes.is_empty() {
+        return session_mode;
+    }
+    if active_task_modes.contains(&cas_types::DeliveryMode::PushBranch) {
+        cas_types::DeliveryMode::PushBranch
+    } else {
+        cas_types::DeliveryMode::LocalMerge
+    }
+}
+
+/// Delivery modes of the in-progress tasks assigned to this worker, by its
+/// registered id or its pane name. Unreadable task state yields none, which
+/// leaves the session's mode in charge (the pre-cas-6db4 behaviour).
+fn worker_active_task_delivery_modes(
+    stores: &mut ToolHookStores<'_>,
+    input: &HookInput,
+) -> Vec<cas_types::DeliveryMode> {
+    let agent_id = current_agent_id(input);
+    let agent_name = std::env::var("CAS_AGENT_NAME")
+        .ok()
+        .filter(|name| !name.trim().is_empty());
+    stores
+        .tasks()
+        .and_then(|store| store.list(Some(cas_types::TaskStatus::InProgress)).ok())
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|task| {
+            task.assignee.as_deref().is_some_and(|assignee| {
+                assignee == agent_id || agent_name.as_deref() == Some(assignee)
+            })
+        })
+        .map(|task| task.delivery_mode)
+        .collect()
 }
 
 fn local_merge_push_override() -> bool {
@@ -4164,6 +4222,31 @@ mod worker_commit_guard_tests {
         assert!(looks_like_git_write_op(
             "git push origin HEAD:refs/heads/factory/fair-pelican-51"
         ));
+    }
+
+    /// cas-6db4: a push_branch task in a local_merge session (for example
+    /// one targeting protected main) may push its factory branch, because its
+    /// close gate requires the branch on origin. A local_merge task still may
+    /// not, and a worker with no task keeps the session's mode.
+    #[test]
+    fn push_guard_follows_the_active_tasks_delivery_mode_cas_6db4() {
+        use cas_types::DeliveryMode::{LocalMerge, PushBranch};
+        assert_eq!(
+            effective_worker_delivery_mode(LocalMerge, &[PushBranch]),
+            PushBranch,
+            "the task's push_branch wins over a local_merge session"
+        );
+        assert_eq!(
+            effective_worker_delivery_mode(PushBranch, &[LocalMerge]),
+            LocalMerge,
+            "a local_merge task is not pushed even in a push_branch session"
+        );
+        assert_eq!(effective_worker_delivery_mode(LocalMerge, &[]), LocalMerge);
+        assert_eq!(effective_worker_delivery_mode(PushBranch, &[]), PushBranch);
+        assert_eq!(
+            effective_worker_delivery_mode(LocalMerge, &[LocalMerge, PushBranch]),
+            PushBranch
+        );
     }
 
     #[test]

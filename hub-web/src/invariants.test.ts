@@ -85,6 +85,17 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(main).toContain('detailRow("Granted scopes", exactScopes(invitationScopes))');
   });
 
+  it("never leaves the command palette flagged open after it closes (cas-dfc8)", async () => {
+    const source = await readSource("main.ts");
+    // Any close of the palette settles the flag render() reopens it from.
+    expect(source).toContain("palette.onclose = () => { if (palette.isConnected && !palette.open) commandPaletteOpen = false; };");
+    // Paired machines replaces the palette and clears the flag itself too.
+    expect(source).toContain("const open = () => { commandPaletteOpen = false; document.querySelector<HTMLDialogElement>('#command-palette')?.close(); dialog.showModal(); };");
+    // No other code closes the palette dialog behind the flag's back.
+    const closes = source.match(/#command-palette['"]\)\?\.close\(\)/g) ?? [];
+    expect(closes).toHaveLength(1);
+  });
+
   it("names the remedy when an observer-only credential disables control", async () => {
     const source = await readSource("main.ts");
     expect(source).toContain("Relay pairing granted read-only scopes for ${location.origin}");
@@ -352,6 +363,16 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(source).toContain("await connections.get(machine.id)?.requestControl(session, false);");
     expect(source).toContain("return leases.get(sessionKey(machine.id, session))?.held_by_me === true;");
     expect(source).toContain("Could not take control of ${session}");
+    // cas-3433: the conversation header has no Take control, so no copy may
+    // send the operator there; a refused message carries the control itself.
+    expect(source).not.toContain("Take control from the header");
+    expect(source).toContain("takeControl: () => { void takeControlForRefused(threadMachineId, threadSession); },");
+    expect(source).toContain("await connections.get(machineId)?.requestControl(session, force);");
+    // cas-8e0a: only a control refusal makes the cached lease stale; an
+    // in_reply_to refusal must not bring Take control back on another message.
+    expect(source).toContain('if (refusal(detail).action === "take-control") controlTakenAfterRefusal.delete(key);');
+    // cas-008f: whatever the take's outcome, focus goes back to the message's control, never the body.
+    expect(source).toContain("if (pressed && stillHere()) landFocus([messageControl(pressed), focusTargets.thread], { keep: true, nextTask: true, waitMs: 1_000, since: pressed });");
   });
 
   it("collapses one outage into one attention card per machine and session", async () => {
@@ -386,11 +407,11 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(terminal).toContain("state.controlMode && state.focused");
   });
 
-  it("keeps palette codenames primary while indexing project names and optional session summaries", async () => {
+  it("keeps palette rows project-led while indexing project names and optional session summaries", async () => {
     // Behaviour is pinned in palette-commands.test.ts (cas-cfcb); this keeps main.ts on that one renderer.
     const [source, palette] = await Promise.all([readSource("main.ts"), readFile(new URL("palette-commands.ts", import.meta.url), "utf8")]);
     expect(source).toContain("sessionJumpCommandMarkup(machine, session, sessionSummaries.get(sessionKey(machine.id, session.name)))");
-    expect(palette).toContain("<span>Jump to ${escapeHtml(session.name)}</span>");
+    expect(palette).toContain("<span>Jump to ${escapeHtml(project ?? session.name)}</span>");
     expect(palette).toContain('data-search-text="${escapeHtml(searchText)}"');
     expect(source).toContain('command.dataset.searchText ?? ""');
   });
@@ -407,7 +428,7 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(main).toContain('empty.className = "empty empty-pane-slot"');
     // Cassy Cloud has no pane drag-and-drop, so the empty slot must not promise one.
     expect(main).not.toContain("drag it here");
-    expect(attentionView).toContain('message.textContent = "All clear"');
+    expect(attentionView).toContain('message.textContent = options.outage ?? "All clear"');
     expect(attentionView).toContain("Last event ${new Date(latest.createdAt).toLocaleString()}");
   });
 
@@ -435,6 +456,8 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(main).toContain('if (paletteToggle) paletteToggle.onclick = openCommandPalette;');
     expect(main).toContain('if (leaseButton) leaseButton.onclick = () =>');
     expect(main).toContain('<span class="commander-mark-label">Machines</span>');
+    // cas-e503: no separator is drawn before the fleet summary or its time.
+    expect(css).not.toMatch(/\.fleet-(?:board-summary|catalog-time)::before/);
     expect(css).toContain(".shell.fleet-empty .machine-navigation,");
     expect(css).toContain(".shell.fleet-empty .context-panel");
     expect(css).toContain(".shell.fleet-empty .session-header");
@@ -615,6 +638,9 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(css).toContain("  position: sticky;\n  bottom: 0;");
 
     expect(css).toContain('.pair-flow[tabindex="-1"]:focus-visible { outline: none; }');
+    // cas-0bf5: the conversation thread takes the house ring from the keyboard, nothing from a pointer.
+    expect(css).toContain(".conversation-reading.thread:focus-visible { outline: var(--focus-ring-width) solid var(--color-focus); outline-offset: calc(-1 * var(--focus-ring-width)); }");
+    expect(css).toContain(".conversation-reading.thread:focus:not(:focus-visible) { outline: none; }");
 
     // D13: a sized card, not a full-viewport dashed rectangle.
     expect(css).toContain(".empty-pane-slot {\n  place-self: center;");
@@ -827,7 +853,8 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(main).toContain('backTarget ? `<button id="session-back" class="session-back"');
     // Every session the hub exposes, with its role and status — a bare animal
     // name does not distinguish one supervisor from another.
-    expect(main).toContain("escapeHtml(sessionPickerMeta(entry))");
+    expect(main).toContain("escapeHtml(sessionPickerHeadline(entry))");
+    expect(main).toContain("escapeHtml(sessionPickerRowMeta(entry))");
     // cas-5d94: the hub derives the roster from the live agent registry, so the
     // count is stated — including a real zero — instead of being suppressed.
     expect(main).not.toContain("const workers = entry.workerCount > 0 ?");
@@ -1184,6 +1211,9 @@ describe("binding Cassy Cloud browser invariants", () => {
     // The header status reads "Live", not "· Live": the dot is aria-hidden (cas-17e3).
     expect(source).toContain('const separator = document.createElement("span"); separator.setAttribute("aria-hidden", "true"); separator.textContent = " · ";');
     expect(source).toContain("resolveAttention(`${machine.id}:${session}:session_transport`);");
+    // A retrying drop is the banner's to tell; the rail defers to it (cas-90d4).
+    expect(source).toContain("if (!transportFailureNeedsAttention(attachStates.get(sessionKey(machine.id, session)))) return;");
+    expect(source).not.toContain('headline: "Terminal transport problem"');
     // While the session is known to be down the banner says so; no toast repeats it over the banner (cas-00cc).
     expect(source).toContain('if (!attach || attach.phase === "live" || attach.phase === "idle") toast("Terminal is reconnecting");');
     expect(source).toContain("if (shown) placeToastClearOfBanner(shown);");
@@ -1417,5 +1447,32 @@ describe("design polish P3/P4/P12/P16 (D3/D4/D12/D17)", () => {
     expect(rule("\n.attention-detail")).toContain("font-family: var(--font-ui);");
     expect(markup).toContain('<strong class="pair-summary">');
     expect(markup).toContain('<dt>${escapeHtml(term)}</dt><dd${identifier ? \' class="pair-identifier"\' : ""}>');
+  });
+});
+
+describe("3.30.0 journey polish (cas-b128)", () => {
+  it("groups palette commands by what they act on and offers Dismiss all info only when there is something to dismiss (F4)", async () => {
+    const main = await readSource("main.ts");
+    const conversations = main.slice(main.indexOf('data-palette-group="conversations"'), main.indexOf('data-palette-group="appearance"'));
+    // The Conversations group holds only the session jumps.
+    const firstGroupEnd = conversations.indexOf("</section>");
+    expect(conversations.slice(0, firstGroupEnd)).not.toContain("data-palette-action");
+    expect(conversations.slice(0, firstGroupEnd)).not.toContain("palette-paired-machines");
+    expect(conversations).toContain('${showSessionControls ? `<section class="palette-group" data-palette-group="session"');
+    expect(conversations).toContain('<h3 id="palette-group-session" class="palette-group-heading">This session</h3>');
+    expect(conversations).toContain('<h3 id="palette-group-machines" class="palette-group-heading">Machines</h3>');
+    expect(conversations).toContain('${infoItems.length > 0 ? `<button type="button" class="palette-command" data-palette-action="dismiss-info">');
+    // A new info item brings the command back: the shell rebuilds on that change.
+    expect(main).toContain("JSON.stringify([hubPresentation, selectedHubSession?.project_dir, infoItems.length > 0])");
+  });
+
+  it("moves a visible toast with the layout and uses the thread's clock and plain words in Paired machines (F8, F10)", async () => {
+    const [main, paired] = await Promise.all([readSource("main.ts"), readSource("paired-machines.ts")]);
+    expect(main).toContain('const visibleToast = document.querySelector<HTMLElement>("#toast.visible");');
+    expect(main).toContain("toastPlacementInThread(");
+    expect(main).toContain("Last seen ${relativeTimestamp(Date.parse(updated))} · ${clockLabel(Date.parse(updated))}");
+    expect(main).not.toContain("toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })");
+    expect(paired).toContain("'Version unknown until it connects'");
+    expect(paired).not.toContain("Runtime not yet received");
   });
 });

@@ -1204,6 +1204,15 @@ struct KeepPayload {
 /// skill file's `neon-ids` keep block (GH #907): the worker SQL write guard
 /// reads them to recognise a production `branchId`. `None` when the file has
 /// no parsable block.
+/// The project id and every `(env label, branch id)` row recorded in a
+/// repository's generated Neon skill file (`neon-ids` keep block). Used by the
+/// supervisor's `db_branch_create` (cas-0033) to find the project and its
+/// dev/staging parent without holding a second copy of the ids.
+pub fn recorded_branches(existing: &str) -> Option<(String, Vec<(String, String)>)> {
+    let payload = parse_keep_payload(existing).ok()?;
+    Some((payload.project_id, payload.branches))
+}
+
 pub fn recorded_production_branches(existing: &str) -> Option<(String, Vec<String>)> {
     let payload = parse_keep_payload(existing).ok()?;
     let production = payload

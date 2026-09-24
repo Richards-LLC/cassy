@@ -799,12 +799,17 @@ impl SemanticRecallRetriever {
 /// LMDB, an embedding provider, or a network client.
 pub(crate) struct SqliteRecallRetriever {
     db_path: PathBuf,
+    as_of: DateTime<Utc>,
 }
 
 impl SqliteRecallRetriever {
     pub(crate) fn existing(cas_root: &Path) -> Option<Self> {
+        Self::existing_at(cas_root, Utc::now())
+    }
+
+    pub(crate) fn existing_at(cas_root: &Path, as_of: DateTime<Utc>) -> Option<Self> {
         let db_path = cas_root.join("cas.db");
-        db_path.is_file().then_some(Self { db_path })
+        db_path.is_file().then_some(Self { db_path, as_of })
     }
 }
 
@@ -876,7 +881,7 @@ impl RecallRetriever for SqliteRecallRetriever {
         }
         let mut candidates: Vec<EvidenceCandidate> = rows
             .into_iter()
-            .map(|row| local_candidate(row, query, &terms))
+            .map(|row| local_candidate(row, query, &terms, self.as_of))
             .collect();
         sort_candidates(&mut candidates);
         candidates.truncate(limit);
@@ -992,7 +997,7 @@ impl RecallRetriever for SemanticRecallRetriever {
             if score <= 0.0 {
                 continue;
             }
-            let mut candidate = local_candidate(semantic.row, query, &terms);
+            let mut candidate = local_candidate(semantic.row, query, &terms, Utc::now());
             candidate.semantic_score = Some(f64::from(score));
             candidate.relevance = candidate.lexical_score * 0.32
                 + f64::from(score) * 0.52
@@ -1591,12 +1596,32 @@ fn query_terms(canonical: &str) -> Vec<String> {
     terms
 }
 
+/// cas-3e41 (GH #993): the content-bearing terms of free text, under the same
+/// stopword, tool-word, envelope and hex-shard floor ambient recall uses, so
+/// task-time recall queries cannot be carried by filler.
+pub(crate) fn content_terms(text: &str) -> Vec<String> {
+    terms_from_text(text)
+}
+
 fn terms_from_text(text: &str) -> Vec<String> {
     let mut terms = Vec::new();
+    let mut previous = String::new();
     for raw in
         text.split(|ch: char| !(ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '/' | '.')))
     {
         let term = raw.trim_matches(['-', '_', '/', '.']).to_ascii_lowercase();
+        if term.is_empty() {
+            continue;
+        }
+        // cas-b62d: the number in a harness envelope's "message 33981" or
+        // "notification 33981" is a delivery id, not content. A plain number
+        // elsewhere (an issue, PR or error code) stays a term.
+        let envelope_id = matches!(previous.as_str(), "message" | "notification")
+            && term.chars().all(|ch| ch.is_ascii_digit());
+        previous.clone_from(&term);
+        if envelope_id {
+            continue;
+        }
         if is_content_bearing_term(&term) && !terms.contains(&term) {
             terms.push(term);
             if terms.len() == QUERY_TERM_CAP {
@@ -1710,12 +1735,82 @@ fn is_high_document_frequency_term(term: &str) -> bool {
         "every",
         "please",
         "implement",
+        // cas-3c98 (GH #991, a regression of #188/#213): function words and
+        // tool words that alone manufactured matches such as "you,cli",
+        // "its,next" and "cas,not".
+        "you",
+        "your",
+        "yours",
+        "our",
+        "its",
+        "not",
+        "any",
+        "all",
+        "each",
+        "other",
+        "here",
+        "there",
+        "they",
+        "their",
+        "these",
+        "those",
+        "than",
+        "but",
+        "now",
+        "yes",
+        "via",
+        "per",
+        "may",
+        "might",
+        "must",
+        "let",
+        "one",
+        "see",
+        "add",
+        "next",
+        "cli",
+        "cas",
+        // Harness envelope words: every CAS wake, teammate message and task
+        // notification carries them, so they say nothing about the request
+        // ("task-notification, status, summary"; "wake, message, inbox, see").
+        "message",
+        "messages",
+        "summary",
+        "status",
+        "notification",
+        "wake",
+        "inbox",
+        "body",
+        "repeated",
+        "teammate",
+        "teammate-message",
+        "teammate_id",
+        "task-notification",
+        "task-id",
+        "tool-use-id",
+        "output-file",
+        "system-reminder",
+        "redelivery",
+        "replay",
+        "supervisor-authored",
+        "agent-authored",
     ];
     STOP.contains(&term)
 }
 
+/// cas-3c98 (GH #213 regression): a short token of mixed hex letters and
+/// digits ("e7e", "4f2", "a94") is an id shard, not a word; it matches
+/// arbitrary hashes in stored text. Plain numbers (issue, PR and error codes)
+/// and seven or more hex characters (a commit-sha prefix) stay searchable.
+fn is_short_hex_fragment(term: &str) -> bool {
+    term.len() < 7
+        && term.chars().all(|ch| ch.is_ascii_hexdigit())
+        && term.chars().any(|ch| ch.is_ascii_digit())
+        && term.chars().any(|ch| ch.is_ascii_alphabetic())
+}
+
 fn is_content_bearing_term(term: &str) -> bool {
-    term.len() >= 3 && !is_high_document_frequency_term(term)
+    term.len() >= 3 && !is_high_document_frequency_term(term) && !is_short_hex_fragment(term)
 }
 
 fn lexical_match_is_eligible(matched: &[&str]) -> bool {
@@ -1839,7 +1934,12 @@ fn is_task_id_char(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_'
 }
 
-fn local_candidate(row: LocalRow, query: &RecallQuery, terms: &[String]) -> EvidenceCandidate {
+fn local_candidate(
+    row: LocalRow,
+    query: &RecallQuery,
+    terms: &[String],
+    as_of: DateTime<Utc>,
+) -> EvidenceCandidate {
     let haystack = row.snippet.to_ascii_lowercase();
     let matched: Vec<&str> = terms
         .iter()
@@ -1849,7 +1949,7 @@ fn local_candidate(row: LocalRow, query: &RecallQuery, terms: &[String]) -> Evid
     let lexical_eligible = lexical_match_is_eligible(&matched);
     let lexical = matched.len() as f64 / terms.len().max(1) as f64;
     let lexical_match_count = matched.len();
-    let recency_score = recency_score(&row.revision);
+    let recency_score = recency_score(&row.revision, as_of);
     let binding = query.task_id.as_deref() == Some(row.id.as_str())
         || names_current_task(query.task_id.as_deref(), &haystack)
         || query.files.iter().any(|file| haystack.contains(file))
@@ -1927,8 +2027,7 @@ fn lexical_depth_bonus(matched_terms: usize) -> f64 {
     matched_terms.saturating_sub(1).min(3) as f64 * 0.08
 }
 
-fn recency_score(revision: &str) -> f64 {
-    let now = Utc::now();
+fn recency_score(revision: &str, now: DateTime<Utc>) -> f64 {
     let parsed = DateTime::parse_from_rfc3339(revision)
         .map(|value| value.with_timezone(&Utc))
         .ok()
@@ -3567,6 +3666,15 @@ mod tests {
         SqliteKnowledgeStore, SqliteSurfacedArtifactStore,
     };
 
+    #[test]
+    fn recency_score_uses_the_supplied_utc_snapshot() {
+        let before_midnight = "2026-09-23T23:59:59Z".parse().expect("UTC instant");
+        let after_midnight = "2026-09-24T00:00:00Z".parse().expect("UTC instant");
+        let revision = "2026-09-23T23:59:00Z";
+        assert_eq!(recency_score(revision, before_midnight), 0.22);
+        assert_eq!(recency_score(revision, after_midnight), 0.08);
+    }
+
     fn identity(role: RecallRole) -> RecallIdentity {
         RecallIdentity {
             session_id: "session-1".into(),
@@ -4458,6 +4566,38 @@ mod tests {
         assert_eq!(closed_task.role_score, 0.08);
     }
 
+    /// cas-3c98 (GH #991): the reported match shapes, and matches built only
+    /// from harness envelope words, are not content and are not injected.
+    #[test]
+    fn stopword_tool_word_and_envelope_matches_are_not_eligible_cas_3c98() {
+        for matched in [
+            &["you", "cli"][..],
+            &["its", "next"][..],
+            &["cas", "not"][..],
+            &["task-notification", "status", "summary"][..],
+            &["wake", "message", "your", "inbox", "see", "not"][..],
+            &["message", "not", "here"][..],
+            &["e7e", "4f2"][..],
+        ] {
+            assert!(!lexical_match_is_eligible(matched), "{matched:?}");
+        }
+        assert!(
+            query_terms(
+                "request=CAS wake: message 33981 from supervisor is in your inbox — see inbox \
+                 (body not repeated here)."
+            )
+            .is_empty(),
+            "a bare wake envelope carries no recall terms"
+        );
+        // Real content still counts, including a commit-sha prefix and a task id.
+        assert!(lexical_match_is_eligible(&["you", "prompt_queue_store"]));
+        assert!(is_content_bearing_term("a944ee56c"));
+        assert!(is_content_bearing_term("cas-098d"));
+        assert!(is_content_bearing_term("deadbeef"));
+        assert!(!is_content_bearing_term("4f2"));
+        assert!(is_content_bearing_term("904"), "an issue number is content");
+    }
+
     #[test]
     fn lexical_quality_floor_rejects_all_stopword_match_sets() {
         assert!(!lexical_match_is_eligible(&["the", "old", "context"]));
@@ -5096,6 +5236,7 @@ mod tests {
             },
             &query,
             &query_terms(&query.canonical),
+            Utc::now(),
         );
         assert!(weak.lexical_weak);
         assert!(weak.why_relevant.starts_with("lexical(weak)"));

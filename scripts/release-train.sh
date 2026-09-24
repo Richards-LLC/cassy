@@ -78,6 +78,12 @@ artifacts_root="${CAS_RELEASE_ARTIFACTS_ROOT:-$HOME/.cas/artifacts/release}"
 # The identity of a run: which version, from which worktree. Two supervisors
 # cutting the same version from different epics get different directories.
 run_dir="$artifacts_root/v$version-$worktree_name"
+# cas-fed5: portable host helpers (setsid, stat device, sha256sum, Cargo bin
+# on PATH) so a cut runs on stock macOS as well as Linux, with no manual shims.
+# shellcheck source=scripts/release-portable.sh
+source "$script_dir/release-portable.sh"
+release_portable_path_add_cargo_bin
+release_portable_define_sha256sum
 stage_dir="$script_dir/release-train.d"
 if [[ -d "$stage_dir" ]]; then
     shopt -s nullglob
@@ -1249,7 +1255,7 @@ if [[ -n "${only_rows:-}" ]]; then
     printf 'diagnostic receipt directory: %s\n' "$receipt_dir"
 fi
 
-export CAS_RELEASE_GATE_HOME_DIR="${CAS_RELEASE_GATE_HOME_DIR:-/var/tmp/cas-release-gate}"
+export CAS_RELEASE_GATE_HOME_DIR="${CAS_RELEASE_GATE_HOME_DIR:-$(release_portable_default_scratch_base)}"
 export CAS_RELEASE_GATE_ARCHIVE_SIZE_FILE="$receipt_dir/archive-size-bytes"
 # Keep every attempt's successful row logs and timings, even when gate.log is
 # replaced on the next full run. Only full gates populate/read row PASS cache.
@@ -1261,7 +1267,15 @@ if [[ -n "${only_rows:-}" ]]; then
 elif "$reuse_rows"; then
     gate_args+=(--reuse)
 fi
-nohup setsid bash -c '
+# The gate runs in its own session so `--stop` can signal its whole process
+# group. util-linux setsid is absent on macOS; the helper falls back to Perl's
+# or Python's setsid (cas-fed5). A host with none of them cannot detach safely:
+# say so here instead of "nohup: failed to run command 'setsid'" in gate.log.
+release_portable_setsid_prefix || {
+    printf 'error: cannot detach the gate into its own session (see above)\n' >&2
+    exit 1
+}
+nohup "${RELEASE_PORTABLE_SETSID[@]}" bash -c '
     worktree=$1; done_file=$2; green_file=$3; sha_file=$4; expected_sha=$5; mode=$6; shift 6
     cd "$worktree" || exit 125
     [[ -x "$PWD/.context/zig/zig" ]] && export ZIG="$PWD/.context/zig/zig"

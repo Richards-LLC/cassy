@@ -40,8 +40,10 @@ the other fields are optional and apply to the actions described here.
 - `id`: entry ID for `get`, `update`, `delete`, `archive`, `unarchive`,
   `helpful`, `harmful`, `mark_reviewed`, `set_tier`, and `opinion_*` actions.
 - `content`: text for `remember` and `update`; evidence for `opinion_*` actions.
-- `entry_type`: one of `learning`, `preference`, `context`, or `observation`
-  for `remember` (default: `learning`).
+- `entry_type`: one of `learning`, `preference`, `context`, `observation`, or
+  `handoff` for `remember` (default: `learning`). A `handoff` is the note for
+  the next session: saving one supersedes your role's previous handoff (kept
+  as history, never overwritten), and session start shows only the newest.
 - `tags`: comma-separated tags for `remember`; for `list`, every supplied tag
   must match case-insensitively.
 - `title`: optional entry title for `remember`.

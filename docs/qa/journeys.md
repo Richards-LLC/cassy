@@ -35,7 +35,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 2. Ask for a pairing code — "Pair a machine", then "Create pairing code" shows `cas hub authorize <code>`
 3. Approve on the machine — the dialog follows the machine: waiting, claimed, authorized
 4. Confirm and pair this browser — enter the operator label, then press Pair
-5. See the machine's supervisor ready to talk to — a toast says the machine is connected, and its row opens a conversation
+5. See the machine's supervisor ready to talk to — a toast says the machine is connected without covering the composer or any heading, and its row opens a conversation
 
 **Expected experience**
 
@@ -85,7 +85,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 - **Entry:** `/commander/` with two paired machines, each running one supervisor
 - **Goal:** I can tell which conversation has something new and get to it quickly
-- **Touches:** `hub-web/src/conversation-list.ts`, `hub-web/src/worker-visibility.ts`, `hub-web/src/dormant-visibility.ts`, `hub-web/src/session-selection.ts`, `hub-web/src/conversation-shell.ts`, `hub-web/src/attention*.ts`, `hub-web/src/time.ts`
+- **Touches:** `hub-web/src/conversation-list.ts`, `hub-web/src/palette-commands.ts`, `hub-web/src/worker-visibility.ts`, `hub-web/src/dormant-visibility.ts`, `hub-web/src/session-selection.ts`, `hub-web/src/conversation-shell.ts`, `hub-web/src/attention*.ts`, `hub-web/src/time.ts`
 - **Suite:** `hub-web/e2e/journeys/find-conversation.journey.ts`
 - **Gaps:** none
 
@@ -97,8 +97,9 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 4. Find the conversation from the keyboard — Ctrl+K lands in the search, type the project, Enter: the conversation is open and the reply box has focus
    - An empty thread's card also leads with the project, with machine and codename beneath it
    - A 40-character machine name ellipsises in its row and never runs under the time stamp, on desktop and at 390px
-5. Jump to a supervisor by name — the command palette (grouped Conversations / Appearance / Advanced, Advanced collapsed) filters by supervisor or project and opens the conversation
+5. Jump to a supervisor by name — the command palette (grouped Conversations / This session / Machines / Appearance / Advanced, Advanced collapsed; "Dismiss all info" only when something is outstanding) filters by supervisor or project and opens the conversation; each "Jump to" row leads with the project, the codename first on the line beneath
 6. Jump to a supervisor from the keyboard — Ctrl+K twice opens the palette, type the name, Enter: the palette closes, the conversation is open and the reply box has focus
+   - Open Paired machines from the palette, then a conversation — the palette gives way to Paired machines and stays closed afterwards; it never comes back over the next conversation opened
 
 **Expected experience**
 
@@ -116,7 +117,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 - **Entry:** a conversation with earlier turns from past days
 - **Goal:** I can read what was said before, back to the start
-- **Touches:** `hub-web/src/conversation-history.ts`, `hub-web/src/conversation-view.ts`, `hub-web/src/thread-model.ts`, `hub-web/src/markdown-renderer.ts`, `hub-web/src/operator-thread.ts`, `hub-web/src/time.ts`
+- **Touches:** `hub-web/src/conversation-history.ts`, `hub-web/src/conversation-view.ts`, `hub-web/src/thread-model.ts`, `hub-web/src/markdown-renderer.ts`, `hub-web/src/operator-thread.ts`, `hub-web/src/time.ts`, `hub-web/src/attachment-sheet.ts`, `hub-web/src/artifact-open.ts`
 - **Suite:** `hub-web/e2e/journeys/read-history.journey.ts`
 - **Gaps:** history pages come from the double; real rows are covered by `hub-web/scripts/conversation-history-qa.mjs`
 
@@ -125,6 +126,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 1. Open the conversation and see the recent turns — the latest exchange is on screen at once
 2. Load earlier turns — "Load earlier" fetches the previous page
 3. Reach the start of the conversation — "No earlier history" appears, with day separators
+4. Open a report the supervisor sent — tapping the file opens the hosted copy in a new tab through a short-lived signed link from the machine; a file that was never uploaded to Cloud says so instead of opening a blank tab; Cloud failing ("wait a minute, then tap it again") and the machine not answering ("check that it's on and connected") each say what to do
 
 **Expected experience**
 
@@ -153,15 +155,21 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 3. See it delivered — the hub's receipt turns "Sending…" into "Delivered" with a check
 4. See it answered — the supervisor's reply arrives under it and "Delivered" steps aside
 5. A refused message says why — "Not sent", a plain reason and the next step on the message, said once (the composer only points at it); the list does not preview it as said
-6. Edit and resend retires the refused message — it collapses to "Not sent · replaced by your edit" with no Retry
+   - A refused Take control keeps focus on the message — when another device holds the session the take is refused, the message keeps Take control, names the device in control and says to take control once it is released (as the composer does), and keyboard focus stays on it, never the page body
+6. Take control from the message, then retry — the refused message carries the Take control its refusal names (the conversation header has none); once control is taken it drops Take control and says Retry will send it, its actions are 44px targets on a phone, and Retry then sends it
+7. Edit and resend retires the refused message — it collapses to "Not sent · replaced by your edit" with no Retry
+8. A late receipt after the supervisor talks on never offers Retry — the supervisor's turn crosses the send and the receipt comes 3.4 s later; the message goes from "Sending…" to delivered without ever showing "Not confirmed" or Retry, and it is sent once
+9. A message the hub never confirms offers Retry — with no receipt, 5 seconds after the supervisor talks on (or 15 seconds after the send) "Sending…" gives way to "Not confirmed", why, and Retry; the retry goes out and is delivered
 
 **Expected experience**
 
 - Enter sends and Shift+Enter adds a new line.
 - The user can tell sent from delivered without reading attributes.
 - The composer status is in plain words, never protocol vocabulary.
-- A refusal says why in plain words, names the next step, and offers Edit and Retry right on the message.
+- A refusal says why in plain words, names the next step, and offers Edit and Retry right on the message; a control refusal also offers Take control there, so the step it names is always on screen.
 - Once its edit is sent, a refused message cannot be retried.
+- A message never says "Sending…" forever: without a receipt it turns "Not confirmed" and offers Retry, without claiming it was not sent.
+- A receipt that is only a few seconds late never flashes "Not confirmed", so there is no Retry that could send the message twice.
 - A screen reader hears who spoke and when for each message group ("You, 12:45"), the status as "Live", and meets no dead attach control.
 
 **Edge paths**
@@ -206,15 +214,17 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 **Steps**
 
 1. Open the conversation — the thread is live
-2. The supervisor asks a question — it is pinned above the composer with its choices, and the thread keeps a one-line reference to it
+2. The supervisor asks a question — it is pinned above the composer with its choices, and the thread keeps a one-line reference to it; the machine's earlier blocker, stamped by a clock that runs ahead, sits above the session line at its arrival time and is marked "machine clock ahead"
 3. Answer with one tap — the pin clears, the thread records the chosen answer, and nothing is left waiting in the context rail, even when the machine's clock runs ahead; the answer shows the time it was sent, under today
 4. See the supervisor act on the answer — the reply follows, and a new blocker after the answer waits
-5. Reply to a machine a day ahead — the reply shows the time it was sent, under today, below the machine's future-dated turn
+5. Reply to a machine a day ahead — no future day header: the machine's turn sits under Today at its arrival time, marked "machine clock ahead", and the reply shows the time it was sent below it
+6. Reopen the page — the thread rebuilt from history keeps every turn where the visit showed it, in the machine's order, under Today, with times reading in order
 
 **Expected experience**
 
 - The question is impossible to miss, and its choices are buttons.
 - After answering, the question stays readable in the thread with the answer shown.
+- Turns read in time order under the right day, even when the machine's clock runs ahead: no future day header, and a quiet "machine clock ahead" instead of a time from the future.
 
 **Edge paths**
 
@@ -226,7 +236,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 - **Entry:** two paired machines, a conversation open on one of them
 - **Goal:** I work on the other machine, and my draft on the first is still there when I return
-- **Touches:** `hub-web/src/session-selection.ts`, `hub-web/src/conversation-shell.ts`, `hub-web/src/machine-accent.ts`, `hub-web/src/paired-machines.ts`, `hub-web/src/composer-markup.ts`
+- **Touches:** `hub-web/src/session-selection.ts`, `hub-web/src/conversation-shell.ts`, `hub-web/src/machine-accent.ts`, `hub-web/src/paired-machines.ts`, `hub-web/src/composer-markup.ts`, `hub-web/src/worker-visibility.ts`
 - **Suite:** `hub-web/e2e/journeys/switch-machines.journey.ts`
 - **Gaps:** none
 
@@ -242,6 +252,8 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 8. Keyboard focus lands somewhere real on every route — entering Terminal view lands in the terminal (or on the way back, which is first in the Tab order though drawn at the foot), choosing a session in the picker lands in it, and opening a conversation from the list by Enter or a click lands in its reply box; none leaves focus on the page body
 9. Read every session's details on a phone — at 390px each picker row, the open one included, shows project, role, workers and status in full
 10. Pair a third machine; the others keep their colours — each machine's accent is stored when it first pairs, so a new pairing (even one whose id sorts first) never re-colours the fleet, the new machine gets its own accent, and the colours survive a reload
+11. Know each session and machine by name in Terminal view — the session title, every picker row and every palette "Jump to" row lead with the project, with the supervisor codename secondary; the machine rail and the compact machine chip read two letters of the machine's own name ("AT" for "Atlas · Linux"), never a separator
+12. A supervisor with no workers yet is listed everywhere — a live supervisor that has not spawned workers is in the conversation list, the palette's Jump rows and the session picker ("no workers · live"), and the "Switch session — N available" count and the Terminal view fleet board match all three; a stale or supervisor-less session is hidden from every one of them
 
 **Expected experience**
 
@@ -263,13 +275,14 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 **Steps**
 
-1. Open the list on a phone — full-width list, no sideways scrolling
+1. Open the list on a phone — full-width list, no sideways scrolling, and the search offers no keyboard shortcut
 2. Tap a conversation — the thread replaces the list, with a back control
 3. Reply with the phone keyboard — send, then see the answer
 4. Go back to the list — the row shows the latest turn
 5. Scroll back through a long thread — "Jump to latest" takes its own row above the composer, never over a turn, and one tap returns to the newest turn
-6. See the switched-off machine named plainly — the footer counts it with a warning dot, and Paired machines says "Can't reach · retrying"
-7. Pair another machine and read its header at once — pairing from the phone opens its conversation, and the "connected" toast sits below the thread header, never over the back link, project and host
+6. Jump from the palette with the keyboard's Enter — opened with a tap, the palette's filter takes the phone keyboard; Enter opens the match with the keyboard gone, not in the reply box
+7. See the switched-off machine named plainly — the footer counts it with a warning dot, and Paired machines says "Can't reach · retrying", shows times on the thread's 24-hour clock and "Version unknown until it connects"
+8. Pair another machine and read its header at once — pairing from the phone opens its conversation, and the "connected" toast sits below the thread header, never over the back link, project and host
 
 **Expected experience**
 
@@ -318,14 +331,16 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 **Steps**
 
 1. Open the conversation — the thread is live
-2. The network drops — "Lost connection to Atlas · Linux. Reconnecting…" appears; the header and the row say Reconnecting, and the footer counts 1 of 2 connected with a warning dot; a send is refused for the connection
+2. The network drops — "Lost connection to Atlas · Linux. Reconnecting…" appears; the header and the row say Reconnecting, and the footer counts 1 of 2 connected with a warning dot; a send is refused for the connection; the attention rail raises no transport alarm of its own, and its counts agree
 3. It reconnects on its own — the banner and the refusal line clear, everything says Live again, the draft is kept, and no transport alarm is left
 4. Sending works again — a message goes through and is answered
-5. On a phone, the banner stays readable through an outage — no toast sits on the reconnect banner, in light and dark
+5. On a phone, the banner stays readable through an outage — no toast sits on the reconnect banner, in light and dark; after it reconnects, every turn keeps its place (the message stays below its session line)
+6. In Terminal view, nothing claims all clear or live during an outage — the Attention rail names the outage instead of "All clear", the machine rail says Reconnecting, the header drops CONTROL and shows Reconnecting in place of a latency, Take/Release control and Interrupt say why they are unavailable, and the machine drawer's session row says Reconnecting, not live; all return when the session is back
 
 **Expected experience**
 
 - The user always knows whether the conversation is live: the header, the row and the footer never disagree.
+- The attention rail defers to the banner while it reconnects; only a failure that will not retry gets a card, in the same plain words.
 - A transport alarm resolves itself when the connection comes back.
 - Nothing typed is lost, and recovery needs no action.
 

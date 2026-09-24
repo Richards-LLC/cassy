@@ -15,6 +15,9 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
   const row = page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ });
   const footer = page.locator("#hub-footer-badges");
   const banner = page.locator(".terminal-disconnected-banner");
+  /** The thread as painted, top to bottom: day and session lines by text, message groups by their spoken label. */
+  const threadOrder = () => page.locator(".msgs > *").evaluateAll((nodes) => nodes.filter((node) => node.matches(".day, .session-divider, [role=group]")).map((node) => node.getAttribute("role") === "group" ? node.getAttribute("aria-label") ?? "" : node.textContent ?? ""));
+  let beforeOutage: string[] = [];
 
   await journey.stage("The network drops", async () => {
     await expect(header).toHaveText(" · Live");
@@ -55,6 +58,19 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
     await composer.fill("Are you there?");
     await page.getByRole("button", { name: `Send to ${PELICAN}`, exact: true }).click();
     await expect(page.locator("#message-status")).toHaveText("The hub connection is reconnecting, so this message was not delivered. Try again once the session is live.");
+    // The rail defers to the banner: no second, technical alarm about the same
+    // drop, and whatever it does show counts the same in every place (cas-90d4).
+    const rail = page.locator("#attention-panel");
+    await expect(rail).toBeAttached();
+    await expect(rail).not.toContainText(/transport/i);
+    await expect(rail.getByRole("button", { name: "View pane" })).toHaveCount(0);
+    const railCounts = await rail.evaluate((element) => {
+      const summary = element.querySelector<HTMLElement>(".attention-panel-summary");
+      const stated = summary && !summary.hidden ? Number.parseInt(summary.textContent ?? "0", 10) : 0;
+      const grouped = [...element.querySelectorAll(".attention-group-count")].reduce((total, count) => total + Number(count.textContent), 0);
+      return { stated, grouped };
+    });
+    expect(railCounts.grouped, "the rail's group counts add up to its summary").toBe(railCounts.stated);
     hub.release(PELICAN);
   });
 
@@ -80,6 +96,9 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
     hub.answerLatest(PELICAN, "Back. Nothing was lost.");
     await expect(page.getByRole("log").getByText("Back. Nothing was lost.")).toBeVisible();
     await expect(page.getByText("Terminal transport problem")).toHaveCount(0);
+    beforeOutage = await threadOrder();
+    // The session line comes first in its session, above the message sent in it.
+    expect(beforeOutage.findIndex((line) => line.startsWith(`session ${PELICAN} started`))).toBeLessThan(beforeOutage.findIndex((line) => line.startsWith("You, ")));
   });
 
   await journey.stage("On a phone, the banner stays readable through an outage", async () => {
@@ -118,5 +137,67 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
     hub.release(PELICAN);
     await expect(banner).toBeHidden({ timeout: 15_000 });
     await page.emulateMedia({ colorScheme: null });
+    // cas-1f13: the reconnect re-hydrates the thread from history, and every
+    // turn keeps its place: "Are we back?" stays below the session line.
+    await expect.poll(() => hub.hasSocket(PELICAN), { timeout: 30_000 }).toBe(true);
+    await expect.poll(threadOrder, { message: "thread order after the reconnect" }).toEqual(beforeOutage);
+  });
+
+  await journey.stage("In Terminal view, nothing claims all clear or live during an outage", async () => {
+    // cas-edcd / cas-4a93: beside "Lost connection … Reconnecting…" the
+    // Attention rail used to say "All clear", the machine rail "live · 8ms",
+    // and the header kept "CONTROL" and a latency chip.
+    await page.setViewportSize({ width: 1280, height: 720 });
+    await page.getByRole("button", { name: "Terminal view" }).click();
+    const atlas = page.locator("#machine-rail-list .machine-icon").filter({ hasText: "Atlas" });
+    const read = () => page.evaluate(() => {
+      const text = (selector: string) => document.querySelector<HTMLElement>(selector)?.innerText.trim() ?? "";
+      const mode = document.querySelector<HTMLElement>(".mode-badge");
+      return {
+        banner: text(".terminal-disconnected-banner"),
+        rail: text("#attention-panel .attention-empty p"),
+        machine: [...document.querySelectorAll<HTMLElement>("#machine-rail-list .machine-icon")].map((button) => button.getAttribute("aria-label") ?? "").find((label) => label.startsWith("Atlas")) ?? "",
+        mode: mode && !mode.hidden && mode.getClientRects().length > 0 ? mode.innerText : "",
+        latency: text("[data-machine-latency]"),
+      };
+    });
+    await expect(atlas).toHaveAttribute("aria-label", /^Atlas · Linux, live/);
+    const before = await read();
+    expect(before.rail).toBe("All clear");
+    expect(before.mode).toBe("CONTROL");
+    hub.hold(PELICAN);
+    hub.drop(PELICAN);
+    const together = await page.waitForFunction(() => {
+      const banner = document.querySelector<HTMLElement>(".terminal-disconnected-banner")?.innerText ?? "";
+      const rail = document.querySelector<HTMLElement>("#attention-panel .attention-empty p")?.innerText ?? "";
+      return banner.includes("Reconnecting") && rail !== "All clear";
+    });
+    expect(await together.jsonValue()).toBe(true);
+    const during = await read();
+    expect(during.banner).toBe("Lost connection to Atlas · Linux. Reconnecting…");
+    expect(during.rail).toBe("Not all clear. Atlas · Linux is reconnecting.");
+    expect(during.machine).toBe("Atlas · Linux, Reconnecting");
+    expect(during.mode, "no control is claimed while the session is down").toBe("");
+    expect(during.latency).toBe("Reconnecting");
+    // cas-1730: controls that need the machine say why instead of acting, and
+    // the drawer's session row does not call the session live.
+    const outage = "Atlas · Linux is reconnecting. Control and interrupts come back when it is live.";
+    await expect(page.locator("#lease")).toHaveAttribute("aria-disabled", "true");
+    await expect(page.locator("#lease")).toHaveAttribute("data-disabled-reason", outage);
+    await expect(page.locator("#interrupt")).toHaveAttribute("data-disabled-reason", outage);
+    await page.getByRole("button", { name: "Open machines and sessions" }).click();
+    const drawerSession = page.locator("#machine-tree .session-meta").first();
+    await expect(drawerSession).toContainText("Reconnecting");
+    await expect(drawerSession).not.toContainText("live");
+    await page.getByRole("button", { name: "Close machines and sessions" }).click();
+    hub.release(PELICAN);
+    await expect(banner).toBeHidden({ timeout: 15_000 });
+    await expect.poll(async () => (await read()).rail, { timeout: 15_000 }).toBe("All clear");
+    const after = await read();
+    expect(after.machine).toMatch(/^Atlas · Linux, live/);
+    expect(after.mode).toBe("CONTROL");
+    expect(after.latency).toMatch(/^\d+ms$/);
+    await expect(page.locator("#lease")).not.toHaveAttribute("aria-disabled", "true");
+    await expect(page.locator("#interrupt")).not.toHaveAttribute("aria-disabled", "true");
   });
 });

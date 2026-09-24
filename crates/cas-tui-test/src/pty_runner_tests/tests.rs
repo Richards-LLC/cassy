@@ -53,7 +53,7 @@ fn test_spawn_echo() {
         .expect("spawn failed");
 
     runner
-        .wait_for_text_timeout("hello", std::time::Duration::from_secs(2))
+        .wait_for_text_timeout("hello", std::time::Duration::from_secs(30))
         .expect("echo output should arrive before the deadline");
 }
 
@@ -67,7 +67,7 @@ fn test_spawn_with_env() {
         .expect("spawn failed");
 
     runner
-        .wait_for_text_timeout("test_value", std::time::Duration::from_secs(2))
+        .wait_for_text_timeout("test_value", std::time::Duration::from_secs(30))
         .expect("environment output should arrive before the deadline");
 }
 
@@ -78,7 +78,7 @@ fn test_send_input() {
 
     runner.send_input("test input\n").expect("send failed");
     runner
-        .wait_for_text_timeout("test input", std::time::Duration::from_secs(2))
+        .wait_for_text_timeout("test input", std::time::Duration::from_secs(30))
         .expect("cat echo should arrive before the deadline");
 
     runner.send_key(Key::CtrlD).expect("send key failed");

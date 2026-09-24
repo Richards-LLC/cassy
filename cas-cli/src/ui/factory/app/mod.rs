@@ -12,11 +12,11 @@ use chrono::{DateTime, Utc};
 use ratatui::layout::Rect;
 
 use super::director::{
-    DiffLine, DirectorData, DirectorEvent, DirectorEventDetector, DirectorStores,
+    DeliveryHold, DiffLine, DirectorData, DirectorEvent, DirectorEventDetector, DirectorStores,
     MergeAlertFreshness, MergedCloseBlockedTask, PanelAreas, Prompt, SidecarFocus, ViewMode,
-    check_merge_alert_freshness, generate_prompt_at, prompt_is_still_deliverable,
-    revalidate_event_for_delivery_with_context, revalidate_event_for_delivery_with_focus,
-    supervisor_actionable_state_with_merge_classifier,
+    blocker_note_after_park, check_merge_alert_freshness, generate_prompt_at,
+    prompt_is_still_deliverable, revalidate_event_for_delivery_with_context,
+    revalidate_event_for_delivery_with_focus, supervisor_actionable_state_with_classifiers,
 };
 use crate::store::open_prompt_queue_store;
 use crate::types::Worktree;
@@ -1471,6 +1471,30 @@ impl FactoryApp {
         })
     }
 
+    /// GH #896 (cas-e4f8): whether a parked delivery is deliberately waiting
+    /// on a decision, so the stall relay leaves it out of "merge now". Reads
+    /// only: the task's notes (a blocker raised after it last parked) and
+    /// the QA pass rows (a pending or claimed pass whose deadline has not
+    /// passed; the QA gate says not to merge until it records a verdict).
+    /// A held worker is handled by the caller's hold set.
+    fn classify_delivery_hold(
+        &self,
+        task: &crate::ui::factory::director::TaskSummary,
+    ) -> Option<DeliveryHold> {
+        if let Some(stores) = self.director_stores.as_ref()
+            && let Ok(parked) = stores.task_store.get(&task.id)
+            && blocker_note_after_park(&parked.notes)
+        {
+            return Some(DeliveryHold::BlockerNote);
+        }
+        let now = Utc::now();
+        cas_store::list_qa_passes(&self.cas_dir, &task.id)
+            .ok()?
+            .into_iter()
+            .any(|pass| pass.state.is_active() && pass.deadline_at > now)
+            .then_some(DeliveryHold::QaPassOpen)
+    }
+
     /// Refresh Cassy data from stores and detect state changes
     ///
     /// Returns the detected events. Prompt generation happens later, at
@@ -1583,7 +1607,7 @@ impl FactoryApp {
         let now = Utc::now();
         let held_workers = worker_holds_from_session_metadata_named(session).unwrap_or_default();
         let repo_root = self.delivery_repo_root();
-        let actionable = supervisor_actionable_state_with_merge_classifier(
+        let actionable = supervisor_actionable_state_with_classifiers(
             &self.unfiltered_director_data,
             self.epic_state.epic_id().or(self.current_epic_id.as_deref()),
             &self.supervisor_name,
@@ -1605,6 +1629,7 @@ impl FactoryApp {
                     &repo_root,
                 )
             },
+            |task, _worker| self.classify_delivery_hold(task),
         );
         let supervisor_ids = self
             .unfiltered_director_data
@@ -1674,7 +1699,7 @@ impl FactoryApp {
         }
         let held_workers = worker_holds_from_session_metadata_named(session).unwrap_or_default();
         let repo_root = self.delivery_repo_root();
-        supervisor_actionable_state_with_merge_classifier(
+        supervisor_actionable_state_with_classifiers(
             data,
             self.epic_state.epic_id().or(self.current_epic_id.as_deref()),
             &self.supervisor_name,
@@ -1696,6 +1721,7 @@ impl FactoryApp {
                     &repo_root,
                 )
             },
+            |task, _worker| self.classify_delivery_hold(task),
         )
         .as_ref()
             == Some(next_step)

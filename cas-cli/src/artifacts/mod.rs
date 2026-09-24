@@ -15,6 +15,9 @@
 //!
 //! The order matters: a publish that cannot reach Cloud must still leave the
 //! operator with something to cite.
+//!
+//! Once an artifact is committed, [`signed_view`] trades its record id for a
+//! short-lived signed view URL, which is how Commander opens a report card.
 
 pub mod cloud;
 pub mod paths;
@@ -26,7 +29,9 @@ use std::fs::File;
 use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 
-use cloud::{ArtifactDigest, ArtifactUploadClient, BeginRequest, UploadFailure};
+use cloud::{
+    ArtifactDigest, ArtifactUploadClient, BeginRequest, UploadFailure, ViewFailure, ViewUrlResponse,
+};
 use paths::{PublishRoots, resolve_publishable_path};
 
 /// 64 KiB: large enough that hashing a 25 MiB file is a handful of syscalls,
@@ -135,6 +140,95 @@ pub struct PublishContext<'a> {
     pub task_id: String,
     /// `None` when this installation has no cloud credentials.
     pub cloud: Option<ArtifactUploadClient>,
+}
+
+/// The artifact client for the project at `cas_root`, or `None` when this
+/// installation has no Cloud credentials (a supported state, not an error).
+/// It names the project's active team and canonical project id, so Cloud can
+/// place an artifact whose task has not been pushed yet.
+pub fn cloud_client(cas_root: &Path) -> Option<ArtifactUploadClient> {
+    let config =
+        crate::cloud::CloudConfig::load_from_cas_dir_inheriting_user_credentials(cas_root).ok()?;
+    if !config.is_logged_in() {
+        return None;
+    }
+    let token = config.token.clone()?;
+    Some(
+        ArtifactUploadClient::new(&config.endpoint, &token).with_scope(
+            config.active_team_id(),
+            crate::cloud::resolve_canonical_id_for_sync(cas_root).ok(),
+        ),
+    )
+}
+
+/// A committed artifact and a short-lived signed URL to view it.
+#[derive(Debug, Clone)]
+pub struct SignedView {
+    pub artifact: PublishedArtifact,
+    pub view: ViewUrlResponse,
+}
+
+/// Why an artifact cannot be viewed through Cloud.
+#[derive(Debug)]
+pub enum ViewError {
+    /// No record by that id in this project.
+    Unknown(String),
+    /// The record exists but never committed to Cloud; its bytes are only on
+    /// the machine that published it.
+    NotInCloud {
+        status: String,
+    },
+    /// This installation has no Cloud credentials.
+    NotLoggedIn,
+    /// Cloud refused or failed.
+    Cloud(ViewFailure),
+    Store(String),
+}
+
+impl std::fmt::Display for ViewError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ViewError::Unknown(id) => write!(f, "no artifact {id} in this project"),
+            ViewError::NotInCloud { status } => write!(
+                f,
+                "this artifact is {status}: it was never stored in Cloud, so only the machine \
+                 that published it has the file"
+            ),
+            ViewError::NotLoggedIn => f.write_str("not logged in to Cassy Cloud"),
+            ViewError::Cloud(failure) => write!(f, "{failure}"),
+            ViewError::Store(detail) => write!(f, "could not read the artifact record: {detail}"),
+        }
+    }
+}
+
+impl std::error::Error for ViewError {}
+
+/// A signed view URL for the committed artifact `id` (a local record id,
+/// `art-…`). Only a record Cloud committed has one; a `local` or `uploaded`
+/// record answers [`ViewError::NotInCloud`] without a network call.
+pub fn signed_view(
+    store: &SqliteArtifactStore,
+    client: Option<&ArtifactUploadClient>,
+    id: &str,
+) -> Result<SignedView, ViewError> {
+    let artifact = store
+        .get(id.trim())
+        .map_err(|error| ViewError::Store(error.to_string()))?
+        .ok_or_else(|| ViewError::Unknown(id.trim().to_string()))?;
+    let cloud_id = match (
+        artifact.status.as_str(),
+        artifact.cloud_artifact_id.as_deref(),
+    ) {
+        ("committed", Some(cloud_id)) if !cloud_id.trim().is_empty() => cloud_id.to_string(),
+        _ => {
+            return Err(ViewError::NotInCloud {
+                status: artifact.status.clone(),
+            });
+        }
+    };
+    let client = client.ok_or(ViewError::NotLoggedIn)?;
+    let view = client.view_url(&cloud_id).map_err(ViewError::Cloud)?;
+    Ok(SignedView { artifact, view })
 }
 
 /// Hash and measure a file without holding it in memory.
@@ -282,6 +376,9 @@ fn upload(
         mime: artifact.mime.clone(),
         size_bytes: artifact.size_bytes,
         sha256: artifact.sha256.clone(),
+        // The client supplies its team and project scope.
+        team_id: None,
+        project_id: None,
     })?;
 
     let file = File::open(source).map_err(|error| UploadFailure::Failed {
@@ -521,5 +618,213 @@ mod tests {
                 matches!(case, PublishDisposition::Committed { .. })
             );
         }
+    }
+}
+
+/// cassy#910: publish end to end against a Cloud double — begin, the PUT to
+/// the object store, complete with the server's own sha256 check — then a
+/// signed view URL for the committed record.
+#[cfg(test)]
+mod cloud_double_tests {
+    use super::*;
+    use std::fs;
+    use tempfile::TempDir;
+    use wiremock::matchers::{body_string_contains, header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// sha256("hello world")
+    const HELLO_SHA256: &str = "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9";
+
+    struct Fixture {
+        _dir: TempDir,
+        store: SqliteArtifactStore,
+        roots: PublishRoots,
+        file: PathBuf,
+    }
+
+    fn fixture() -> Fixture {
+        let dir = TempDir::new().unwrap();
+        let base = dir.path().canonicalize().unwrap();
+        let cas_root = base.join("project").join(".cas");
+        let artifacts_root = base.join("artifacts");
+        let task_dir = artifacts_root.join("cas-29624");
+        fs::create_dir_all(&cas_root).unwrap();
+        fs::create_dir_all(&task_dir).unwrap();
+        let file = task_dir.join("report.pdf");
+        fs::write(&file, b"hello world").unwrap();
+        Fixture {
+            store: SqliteArtifactStore::open(&cas_root).unwrap(),
+            roots: PublishRoots::new(&cas_root, &artifacts_root, "cas-29624"),
+            file,
+            _dir: dir,
+        }
+    }
+
+    /// The double answers exactly as petra-stella-cloud#84 does: 201 from
+    /// begin, and a complete body without a durable URL.
+    async fn cloud_double(complete_status: u16, complete_body: serde_json::Value) -> MockServer {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/artifacts/begin"))
+            .and(header("Authorization", "Bearer test-tok"))
+            .and(body_string_contains("\"task_id\":\"cas-29624\""))
+            .and(body_string_contains(HELLO_SHA256))
+            .and(body_string_contains("\"size_bytes\":11"))
+            .and(body_string_contains("\"team_id\":\"team-7\""))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "artifact_id": "5f0c2b1e-cloud",
+                "upload_url": format!("{}/blob/put?signature=upload-sig", server.uri()),
+                "required_headers": { "x-content-type": "application/pdf" },
+                "expires_at": "2026-09-24T21:00:00.000Z",
+                "max_size_bytes": 26214400
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path("/blob/put"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/artifacts/5f0c2b1e-cloud/complete"))
+            .and(body_string_contains(HELLO_SHA256))
+            .respond_with(ResponseTemplate::new(complete_status).set_body_json(complete_body))
+            .expect(1)
+            .mount(&server)
+            .await;
+        server
+    }
+
+    fn client(server: &MockServer) -> ArtifactUploadClient {
+        ArtifactUploadClient::new(&server.uri(), "test-tok").with_scope(
+            Some("team-7".to_string()),
+            Some("github.com/richards-llc/cassy".to_string()),
+        )
+    }
+
+    #[tokio::test]
+    async fn publish_commits_through_the_cloud_double_and_the_record_opens_a_signed_view_url() {
+        let server = cloud_double(
+            200,
+            serde_json::json!({
+                "artifact_id": "5f0c2b1e-cloud",
+                "status": "committed",
+                "size_bytes": 11,
+                "sha256": HELLO_SHA256
+            }),
+        )
+        .await;
+        Mock::given(method("GET"))
+            .and(path("/api/artifacts/5f0c2b1e-cloud/url"))
+            .and(header("Authorization", "Bearer test-tok"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "artifact_id": "5f0c2b1e-cloud",
+                "url": format!("{}/blob/view?signature=view-sig", server.uri()),
+                "expires_at": "2026-09-24T21:10:00.000Z",
+                "name": "report.pdf",
+                "mime": "application/pdf",
+                "size_bytes": 11
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = client(&server);
+        let (outcome, view) = tokio::task::spawn_blocking(move || {
+            let f = fixture();
+            let context = PublishContext {
+                store: &f.store,
+                roots: f.roots.clone(),
+                task_id: "cas-29624".to_string(),
+                cloud: Some(client.clone()),
+            };
+            let outcome = publish(&context, &f.file).expect("publish");
+            let view = signed_view(&f.store, Some(&client), &outcome.artifact.id);
+            (outcome, view.map(|view| view.view))
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(
+            outcome.disposition,
+            PublishDisposition::Committed { cloud_url: None }
+        );
+        assert_eq!(outcome.artifact.status, "committed");
+        assert_eq!(outcome.artifact.sha256, HELLO_SHA256);
+        assert_eq!(
+            outcome.artifact.cloud_artifact_id.as_deref(),
+            Some("5f0c2b1e-cloud"),
+            "the record keeps Cloud's artifact id"
+        );
+        let view = view.expect("a committed record has a signed view URL");
+        assert!(view.url.ends_with("/blob/view?signature=view-sig"));
+        assert_eq!(view.name.as_deref(), Some("report.pdf"));
+    }
+
+    #[tokio::test]
+    async fn a_digest_the_server_rejects_leaves_the_record_out_of_cloud_and_unviewable() {
+        let server = cloud_double(
+            409,
+            serde_json::json!({
+                "error": "digest_mismatch",
+                "status": "rejected",
+                "declared": { "sha256": HELLO_SHA256, "size_bytes": 11 },
+                "stored": { "sha256": "0".repeat(64), "size_bytes": 11 }
+            }),
+        )
+        .await;
+
+        let client = client(&server);
+        let (outcome, view) = tokio::task::spawn_blocking(move || {
+            let f = fixture();
+            let context = PublishContext {
+                store: &f.store,
+                roots: f.roots.clone(),
+                task_id: "cas-29624".to_string(),
+                cloud: Some(client.clone()),
+            };
+            let outcome = publish(&context, &f.file).expect("publish still records");
+            let view = signed_view(&f.store, Some(&client), &outcome.artifact.id);
+            (outcome, view)
+        })
+        .await
+        .unwrap();
+
+        match &outcome.disposition {
+            PublishDisposition::UploadFailed { reason } => {
+                assert!(reason.contains(&"0".repeat(64)), "{reason}")
+            }
+            other => panic!("expected UploadFailed, got {other:?}"),
+        }
+        assert_eq!(outcome.artifact.status, "uploaded");
+        match view.expect_err("never committed") {
+            ViewError::NotInCloud { status } => assert_eq!(status, "uploaded"),
+            other => panic!("expected NotInCloud, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_local_record_or_an_unknown_id_is_answered_without_the_network() {
+        let f = fixture();
+        let context = PublishContext {
+            store: &f.store,
+            roots: f.roots.clone(),
+            task_id: "cas-29624".to_string(),
+            cloud: None,
+        };
+        let outcome = publish(&context, &f.file).unwrap();
+        // An endpoint nothing listens on: any network call would fail loudly
+        // as a Cloud error rather than the answers asserted here.
+        let offline = ArtifactUploadClient::new("http://127.0.0.1:9", "t");
+        match signed_view(&f.store, Some(&offline), &outcome.artifact.id) {
+            Err(ViewError::NotInCloud { status }) => assert_eq!(status, "local"),
+            other => panic!("expected NotInCloud, got {other:?}"),
+        }
+        assert!(matches!(
+            signed_view(&f.store, Some(&offline), "art-missing"),
+            Err(ViewError::Unknown(_))
+        ));
     }
 }

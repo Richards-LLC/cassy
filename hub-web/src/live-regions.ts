@@ -13,7 +13,8 @@ export interface LiveRegionView {
     readonly title: string;
     readonly latencyText: string;
   };
-  readonly mode?: { readonly badge: string; readonly compact: string };
+  /** hidden: the session is not live, so there is no control to claim (cas-edcd, cas-4a93). */
+  readonly mode?: { readonly badge: string; readonly compact: string; readonly hidden?: boolean };
   readonly controlAction?: { readonly label: string; readonly disabledReason?: string };
   readonly interruptReason?: string;
   /** Full sentence, or undefined when the hub is live. */
@@ -69,6 +70,7 @@ export function applyLiveRegions(root: ParentNode, view: LiveRegionView): void {
     mode.className = `mode-badge ${view.mode.badge.toLowerCase()}`;
     mode.dataset.compactLabel = view.mode.compact;
     mode.textContent = view.mode.badge;
+    mode.hidden = view.mode.hidden === true;
   }
 
   const lease = root.querySelector<HTMLButtonElement>("#lease");

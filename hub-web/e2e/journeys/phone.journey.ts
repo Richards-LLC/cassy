@@ -37,6 +37,8 @@ test("HUB-J9 on a phone: from the list to a reply and back", async ({ page, jour
     expect(coldLoad.join(" | "), "cold-load list and footer text").not.toMatch(/Not paired|No live supervisors|Reconnecting/);
     expect(coldLoad.some((text) => text.includes("Loading")), "the cold load shows it is loading").toBe(true);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), "no sideways scrolling").toBe(true);
+    // A phone has no Ctrl K to press, so the search does not offer one (3.30.0 journey F10).
+    await expect(page.getByRole("searchbox", { name: "Search conversations" })).toHaveAttribute("placeholder", "Search conversations");
     // The compose button says what it does and keeps clear of the status footer (journey F15).
     const compose = page.getByRole("button", { name: "Write to a supervisor" });
     await expect(compose).toHaveText("Write to a supervisor");
@@ -77,8 +79,8 @@ test("HUB-J9 on a phone: from the list to a reply and back", async ({ page, jour
     await expect(page.getByRole("button", { name: /Open the terminal view/ })).toBeVisible();
     const clipped = await titles.evaluateAll((spans) => spans.filter((span) => span.getClientRects().length > 0 && span.scrollWidth > span.clientWidth + 1).map((span) => span.textContent));
     expect(clipped, "command names cut off at 390 px").toEqual([]);
-    await expect(page.locator("#command-palette [data-palette-machine] small").filter({ hasText: "gabber-studio" })).toBeVisible();
-    await page.getByRole("button", { name: new RegExp(`Jump to ${OTTER}`) }).tap();
+    await expect(page.locator("#command-palette [data-palette-machine] small").filter({ hasText: OTTER })).toBeVisible();
+    await page.getByRole("button", { name: /Jump to gabber-studio/ }).tap();
     await expect(page.locator("#command-palette")).toBeHidden();
     await expect(page.getByRole("button", { name: `Send to ${OTTER}`, exact: true })).toBeVisible();
     // Like a tap on a list row: land to read, with no soft keyboard raised
@@ -102,6 +104,38 @@ test("HUB-J9 on a phone: from the list to a reply and back", async ({ page, jour
     await expect(page.getByRole("log").getByText("Build step 14 of 14 finished; moving on to the next one after checking its logs.")).toBeInViewport();
   });
 
+  await journey.stage("Jump from the palette with the keyboard's Enter", async () => {
+    // A tap opens the palette with its filter focused under the soft keyboard.
+    // The keyboard's Enter opens the match with that keyboard gone: no text
+    // field keeps focus, so it cannot stay up over the thread (cas-990d).
+    await page.getByRole("button", { name: "‹ Conversations", exact: true }).tap();
+    await page.getByRole("button", { name: "Appearance & commands" }).tap();
+    const filter = page.getByRole("searchbox", { name: "Filter commands" });
+    await expect(filter).toBeFocused();
+    await filter.pressSequentially(PELICAN);
+    await filter.press("Enter");
+    await expect(page.locator("#command-palette")).toBeHidden();
+    await expect(page.getByRole("button", { name: `Send to ${PELICAN}`, exact: true })).toBeVisible();
+    await expect(composer).not.toBeFocused();
+    await expect.poll(() => page.evaluate(() => {
+      const active = document.activeElement as HTMLElement | null;
+      return Boolean(active && (active.tagName === "INPUT" || active.tagName === "TEXTAREA" || active.isContentEditable));
+    }), { message: "no text field holds focus, so no soft keyboard is up" }).toBe(false);
+    // The thread it lands on draws the house focus ring, never the browser's
+    // default 1px outline (cas-0bf5).
+    const ring = await page.locator(".conversation-reading.thread").evaluate((thread) => {
+      const style = getComputedStyle(thread);
+      const probe = document.createElement("span");
+      probe.style.color = "var(--color-focus)";
+      thread.append(probe);
+      const focus = getComputedStyle(probe).color;
+      probe.remove();
+      return { focused: document.activeElement === thread, style: style.outlineStyle, width: style.outlineWidth, color: style.outlineColor, focus };
+    });
+    expect(ring.focused, "the jump lands on the thread").toBe(true);
+    expect(ring).toMatchObject({ style: "solid", width: "2px", color: ring.focus });
+  });
+
   await journey.stage("See the switched-off machine named plainly", async () => {
     // Never live and failing: "Can't reach · retrying" in the dialog, not
     // "Connecting…" forever; the footer counts it and its dot is not all-clear.
@@ -114,6 +148,12 @@ test("HUB-J9 on a phone: from the list to a reply and back", async ({ page, jour
     await expect(dialog.getByText("Shed NAS · Linux")).toBeVisible();
     await expect(dialog).toContainText("Can't reach · retrying");
     await expect(dialog).not.toContainText("Connecting");
+    // One clock, the thread's 24-hour one, and plain words for a version the
+    // machine has not reported yet (3.30.0 journey F10).
+    await expect(dialog.locator(".paired-machine-seen").filter({ hasText: "Last seen" }).first()).toHaveText(/ · \d{2}:\d{2}$/);
+    await expect(dialog).not.toContainText(/\b(AM|PM)\b/);
+    await expect(dialog).not.toContainText("Runtime not yet received");
+    await expect(dialog.locator('[data-machine-id="shed"] .paired-machine-runtime')).toHaveText("Version unknown until it connects");
   });
 
   await journey.stage("Pair another machine and read its header at once", async () => {

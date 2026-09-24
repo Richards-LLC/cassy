@@ -136,15 +136,17 @@ cas-update --dry-run
 
 The installer copies the canonical helper to `~/.local/bin/cas-update`. Plain
 `cas-update` pulls/builds the current source, installs `cas`, and migrates and
-syncs local Cassy projects. `CAS_SRC` is required here because the helper does
-not use the directory where you happen to run it; without that export it looks
-for `~/Petrastella/cas-src`.
+syncs local Cassy projects. Keep `CAS_SRC` set to your source checkout when
+using the installed copy. Without it, the helper looks for its own Cassy Git
+checkout and then `~/Petrastella/cas-src`; it exits with a clear error if
+neither exists.
 
 > **Mac restart note:** the helper's automatic process-turnover check is built
 > around Linux `/proc`, so it does not verify or restart old Cassy processes on
-> macOS. After a normal `cas-update`, manually quit and restart any running
-> `cas serve` or hub process/service. Use `cas hub service status`, then restart
-> the service if needed; this is a current macOS limitation, not a setup error.
+> macOS. The helper now reports runtime turnover as **unverified** and sends no
+> process signals on macOS. After an update, manually quit and restart running
+> `cas serve` clients, factory daemons, and registered servers with their owners.
+> Check `cas hub service status` and restart the hub service if it is running.
 
 ```zsh
 cas-update --sync-only

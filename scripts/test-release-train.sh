@@ -716,7 +716,7 @@ else
     bad "complete release-report receipt was not accepted: $status"
 fi
 
-sed -i 's/^PDF_REMOTE_SHA256=.*/PDF_REMOTE_SHA256=0000000000000000000000000000000000000000000000000000000000000000/' \
+perl -pi -e 's/^PDF_REMOTE_SHA256=.*/PDF_REMOTE_SHA256=0000000000000000000000000000000000000000000000000000000000000000/' \
     "$dir_a/release-report.receipt"
 status="$($train 9.99.0 "$wt_a" --status 2>&1 || true)"
 if [[ "$status" == *'release report: unavailable (PDF receipt does not match local or verified remote bytes/pages;'* ]]; then
@@ -882,7 +882,7 @@ cat >"$prep_lock_wt/scripts/bump-release-version.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 [[ "$PWD" == "${PREP_EXPECTED_WORKTREE:?}" ]]
-sed -i 's/version = "0.0.0"/version = "9.99.13"/' Cargo.toml
+perl -pi -e 's/version = "0.0.0"/version = "9.99.13"/' Cargo.toml
 EOF
 chmod +x "$prep_lock_wt/scripts/bump-release-version.sh"
 mkdir -p "$prep_lock_wt/docs/release-notes"
@@ -969,7 +969,7 @@ fi
 
 bad_draft="$tmp/bad-slack.md"
 cp "$stage_wt/docs/release-notes/$stage_date-v9.99.8-slack.md" "$bad_draft"
-sed -i '0,/\\*Release handoff\\*/s//**bad**/' "$bad_draft"
+perl -0pi -e 's/\\*Release handoff\\*/**bad**/' "$bad_draft"
 bad_announce_stub="$tmp/bad-announce-stub.sh"
 cat >"$bad_announce_stub" <<'EOF'
 #!/usr/bin/env bash
@@ -1018,7 +1018,7 @@ fi
 # announcement wording rule, not only point at a saved lint log.
 wording_draft="$tmp/wording-draft.md"
 cp "$stage_wt/docs/release-notes/$stage_date-v9.99.8-slack.md" "$wording_draft"
-sed -i '0,/the release handoff/s//the agent handoff/' "$wording_draft"
+perl -0pi -e 's/the release handoff/the agent handoff/' "$wording_draft"
 wording_wt="$(new_worktree preflight-wording)"
 mkdir -p "$wording_wt/docs/release-notes"
 cp "$wording_draft" "$wording_wt/docs/release-notes/$stage_date-v9.99.8-slack.md"
@@ -1979,7 +1979,7 @@ cut_gate="$tmp/cut-gate.sh"
 new_gate_stub "$cut_gate" 0
 cut_run_dir="$("$train" "$cut_version" "$cut_wt" --print-run-dir)"
 out="$(CAS_RELEASE_ENV_FILE="$cut_wt/release.env" \
-    CAS_RELEASE_TRAIN_PREFLIGHT_SKIP_COMPETING=1 \
+    CAS_RELEASE_TRAIN_PREFLIGHT_SKIP_COMPETING=1 CAS_RELEASE_TRAIN_PREFLIGHT_SKIP_TOOLCHAIN=1 \
     CAS_RELEASE_TRAIN_GATE_CMD="$cut_gate" CAS_RELEASE_TRAIN_CUT_STOP_AFTER=gate \
     CAS_RELEASE_TRAIN_ASSEMBLE_CMD="$cut_cmd" CAS_RELEASE_TRAIN_PREP_CMD="$cut_cmd" \
     CAS_RELEASE_TRAIN_LEDGER_CMD="$cut_cmd" CAS_RELEASE_TRAIN_PIPELINE_CMD="$cut_cmd" \
@@ -1995,7 +1995,7 @@ else
 fi
 gate_runs_before="$(grep -c '^gate$' "$cut_log" 2>/dev/null || true)"
 CAS_RELEASE_ENV_FILE="$cut_wt/release.env" \
-    CAS_RELEASE_TRAIN_PREFLIGHT_SKIP_COMPETING=1 \
+    CAS_RELEASE_TRAIN_PREFLIGHT_SKIP_COMPETING=1 CAS_RELEASE_TRAIN_PREFLIGHT_SKIP_TOOLCHAIN=1 \
     CAS_RELEASE_TRAIN_GATE_CMD="$cut_gate" \
     CAS_RELEASE_TRAIN_ASSEMBLE_CMD="$cut_cmd" CAS_RELEASE_TRAIN_PREP_CMD="$cut_cmd" \
     CAS_RELEASE_TRAIN_LEDGER_CMD="$cut_cmd" CAS_RELEASE_TRAIN_PIPELINE_CMD="$cut_cmd" \
@@ -2015,7 +2015,7 @@ fi
 missing_wt="$(new_cut_fixture cut-missing-heading 9.99.11 0)"
 missing_log="$tmp/missing-stage.log"
 missing_out="$(CAS_RELEASE_ENV_FILE="$missing_wt/release.env" \
-    CAS_RELEASE_TRAIN_PREFLIGHT_SKIP_COMPETING=1 \
+    CAS_RELEASE_TRAIN_PREFLIGHT_SKIP_COMPETING=1 CAS_RELEASE_TRAIN_PREFLIGHT_SKIP_TOOLCHAIN=1 \
     CAS_RELEASE_TRAIN_ASSEMBLE_CMD="$cut_cmd" CUT_LOG="$missing_log" \
     "$train" 9.99.11 "$missing_wt" --cut 2>&1 || true)"
 if [[ "$missing_out" == *'BLOCKER changelog-heading'* ]] \
@@ -2039,7 +2039,7 @@ printf '#!/usr/bin/env bash\necho "CHANGELOG.md:3 MD022/blanks-around-headings f
 chmod +x "$lint_stub"
 lint_log="$tmp/lint-stage.log"
 lint_out="$(CAS_RELEASE_ENV_FILE="$lint_wt/release.env" \
-    CAS_RELEASE_TRAIN_PREFLIGHT_SKIP_COMPETING=1 \
+    CAS_RELEASE_TRAIN_PREFLIGHT_SKIP_COMPETING=1 CAS_RELEASE_TRAIN_PREFLIGHT_SKIP_TOOLCHAIN=1 \
     CAS_CHANGELOG_LINT_CMD="$lint_stub" \
     CAS_RELEASE_TRAIN_ASSEMBLE_CMD="$cut_cmd" CUT_LOG="$lint_log" \
     "$train" 9.99.12 "$lint_wt" --cut 2>&1 || true)"
@@ -2144,7 +2144,7 @@ run_combined_cut() {
     CAS_RELEASE_TRAIN_DATE=2099-01-02 \
     CAS_RELEASE_TRAIN_CAS="$combined_worktree/.cas/fake-cas" \
     CAS_RELEASE_TRAIN_GH="$combined_gh" \
-    CAS_RELEASE_TRAIN_PREFLIGHT_SKIP_COMPETING=1 \
+    CAS_RELEASE_TRAIN_PREFLIGHT_SKIP_COMPETING=1 CAS_RELEASE_TRAIN_PREFLIGHT_SKIP_TOOLCHAIN=1 \
     CAS_RELEASE_TRAIN_GATE_CMD="$combined_gate" \
     CAS_RELEASE_TRAIN_PIPELINE_CMD="$combined_cmd" \
     CAS_RELEASE_TRAIN_PUBLISH_CMD="$combined_cmd" \
@@ -2193,7 +2193,7 @@ CAS_RELEASE_TRAIN_INVOCATION_KIND=manual \
 CAS_RELEASE_TRAIN_STAGE=gate \
 CAS_RELEASE_TRAIN_BLOCKER_STAGES=gate \
 CAS_RELEASE_TRAIN_RUN_DIR="$combined_clean_dir" \
-CAS_RELEASE_TRAIN_PREFLIGHT_SKIP_COMPETING=1 \
+CAS_RELEASE_TRAIN_PREFLIGHT_SKIP_COMPETING=1 CAS_RELEASE_TRAIN_PREFLIGHT_SKIP_TOOLCHAIN=1 \
 CAS_RELEASE_GATE_HOME_DIR="$tmp/combined-scratch" \
     "$train" "$combined_clean_version" "$combined_clean_wt" --gate --only scratch-base >/dev/null 2>&1 || true
 manual_status="$($train "$combined_clean_version" "$combined_clean_wt" --status 2>&1)"
@@ -2245,7 +2245,7 @@ combined_lint_version=9.99.14
 combined_lint_wt="$(new_combined_cut_fixture combined-lint "$combined_lint_version")"
 combined_bad_draft="$tmp/combined-bad-draft.md"
 cp "$combined_lint_wt/docs/release-notes/2099-01-02-v${combined_lint_version}-slack.md" "$combined_bad_draft"
-sed -i '0,/\*Release\*/s//**bad**/' "$combined_bad_draft"
+perl -0pi -e 's/\*Release\*/**bad**/' "$combined_bad_draft"
 combined_lint_log="$tmp/combined-lint-adapter.log"
 cat >"$tmp/combined-lint-adapter.sh" <<'EOF'
 #!/usr/bin/env bash
@@ -2357,6 +2357,188 @@ if python3 "$script_dir/test-release-integration.py"; then
     ok 'gap 1: rolling assembly self-heal passes the recorded factory session and supervisor identity; clean, red, dirty and locked fixtures'
 else
     bad 'rolling integration assembly fixture suite'
+fi
+
+# cas-fed5: the train and gate run on stock macOS. (This file's in-place edits
+# use perl -pi, not GNU-only sed -i / 0,/re/ addresses, for the same reason.) The fallbacks are forced
+# here through the helper's seams, so a Linux run proves the macOS paths.
+portable_dir="$tmp/portable"
+mkdir -p "$portable_dir"
+# A BSD-style stat: rejects GNU -c, answers -f %d with the device number.
+cat >"$portable_dir/bsd-stat" <<'EOF'
+#!/usr/bin/env bash
+[[ "$1" == -c ]] && { printf 'stat: illegal option -- c\n' >&2; exit 1; }
+[[ "$1" == -f && "$2" == %d ]] && exec stat -c %d "$3"
+exit 1
+EOF
+chmod +x "$portable_dir/bsd-stat"
+portable_out="$(
+    # shellcheck source=scripts/release-portable.sh
+    source "$repo_root/scripts/release-portable.sh"
+    gnu="$(release_portable_stat_device "$tmp")"
+    bsd="$(CAS_RELEASE_PORTABLE_STAT="$portable_dir/bsd-stat" release_portable_stat_device "$tmp")"
+    none="$(CAS_RELEASE_PORTABLE_STAT=false release_portable_stat_device "$tmp" && printf found || printf none)"
+    printf '%s %s %s %s\n' "$gnu" "$bsd" "$none" "$(stat -c %d "$tmp")"
+)"
+read -r portable_gnu portable_bsd portable_none portable_real <<<"$portable_out"
+if [[ "$portable_gnu" == "$portable_real" && "$portable_bsd" == "$portable_real" && "$portable_none" == none ]]; then
+    ok 'cas-fed5: stat device reads GNU -c, falls back to BSD -f, and reports none when neither works'
+else
+    bad "cas-fed5: stat device fallback: $portable_out"
+fi
+
+# setsid absent (macOS): the Perl fallback still starts a new session whose
+# id is the recorded pid, which is what --stop signals.
+portable_session="$(
+    # shellcheck source=scripts/release-portable.sh
+    source "$repo_root/scripts/release-portable.sh"
+    CAS_RELEASE_PORTABLE_SETSID=/nonexistent/setsid release_portable_setsid_prefix || exit 1
+    printf '%s\n' "${RELEASE_PORTABLE_SETSID[0]}" >"$portable_dir/setsid-kind"
+    # shellcheck disable=SC2016 # expanded by the child bash
+    "${RELEASE_PORTABLE_SETSID[@]}" bash -c 'printf "%s %s\n" "$$" "$(ps -o sid= -p "$$" | tr -d " ")"' </dev/null &
+    wait "$!"
+)"
+read -r portable_pid portable_sid <<<"$portable_session"
+if [[ "$(cat "$portable_dir/setsid-kind" 2>/dev/null)" == perl && -n "$portable_pid" && "$portable_pid" == "$portable_sid" ]]; then
+    ok 'cas-fed5: without setsid the Perl fallback runs the command as the leader of a new session'
+else
+    bad "cas-fed5: setsid fallback did not lead a new session: kind=$(cat "$portable_dir/setsid-kind" 2>/dev/null) pid/sid=$portable_session"
+fi
+
+# sha256sum absent (macOS): shasum -a 256 gives the identical output.
+portable_sha="$(
+    # shellcheck source=scripts/release-portable.sh
+    source "$repo_root/scripts/release-portable.sh"
+    printf 'cas-fed5' | CAS_RELEASE_PORTABLE_SHA256SUM=/nonexistent/sha256sum release_portable_sha256sum
+)"
+if [[ "$portable_sha" == "$(printf 'cas-fed5' | sha256sum)" ]]; then
+    ok 'cas-fed5: sha256 falls back to shasum -a 256 with sha256sum-identical output'
+else
+    bad "cas-fed5: sha256 fallback output differs: $portable_sha"
+fi
+
+# A non-login shell without the Cargo bin directory on PATH gets it appended
+# (never prepended), and only once.
+portable_cargo="$portable_dir/cargo-home"
+mkdir -p "$portable_cargo/bin"
+portable_path="$(
+    # shellcheck source=scripts/release-portable.sh
+    source "$repo_root/scripts/release-portable.sh"
+    export CARGO_HOME="$portable_cargo"
+    PATH=/usr/bin:/bin
+    release_portable_path_add_cargo_bin
+    release_portable_path_add_cargo_bin
+    printf '%s\n' "$PATH"
+)"
+if [[ "$portable_path" == "/usr/bin:/bin:$portable_cargo/bin" ]]; then
+    ok 'cas-fed5: the Cargo bin directory is appended to PATH once'
+else
+    bad "cas-fed5: Cargo bin PATH handling: $portable_path"
+fi
+
+# The preflight names every missing tool in one blocker instead of a later
+# stage failing on the first: a host with git/jq/python3 but no Cargo tools.
+portable_bin="$portable_dir/bin"
+mkdir -p "$portable_bin"
+for portable_tool in bash git jq python3 perl stat sha256sum uname head grep dirname cat tr; do
+    portable_real_tool="$(command -v "$portable_tool" || true)"
+    [[ -n "$portable_real_tool" ]] && ln -sf "$portable_real_tool" "$portable_bin/$portable_tool"
+done
+portable_preflight="$(
+    # shellcheck source=scripts/release-train.d/preflight.sh
+    source "$repo_root/scripts/release-train.d/preflight.sh"
+    version=9.99.20
+    worktree="$repo_root"
+    run_dir="$portable_dir/run"
+    cut_stage_file() { printf '%s/stage.%s.done\n' "$run_dir" "$1"; }
+    unset CC ZIG OBJDUMP
+    export CARGO_HOME="$portable_dir/no-cargo"
+    PATH="$portable_bin"
+    cut_preflight_check_toolchain 2>&1
+)" || true
+if [[ "$portable_preflight" == *'BLOCKER toolchain: missing on this host: cargo; cargo-nextest; cargo-zigbuild'* \
+    && "$portable_preflight" != *'setsid'* && "$portable_preflight" != *'sha256sum or shasum'* ]]; then
+    ok 'cas-fed5: preflight names every missing release tool (cargo, cargo-nextest, cargo-zigbuild) in one blocker'
+else
+    bad "cas-fed5: toolchain preflight did not name the missing tools: $portable_preflight"
+fi
+
+# The PR body is cut from CHANGELOG with literal heading matches: dots are not
+# wildcards, and the next version heading ends the section in every awk.
+portable_changelog_wt="$portable_dir/changelog-wt"
+mkdir -p "$portable_changelog_wt" "$portable_dir/pr-run"
+cat >"$portable_changelog_wt/CHANGELOG.md" <<'EOF'
+# Changelog
+
+## [Unreleased]
+
+## [3.29.1] - 2026-09-25
+
+- later fix
+
+## [3.29.0] - 2026-09-24
+
+- the cut section
+
+## [3.2900] - 2026-01-01
+
+- not this one
+EOF
+portable_pr="$(
+    # shellcheck source=scripts/release-train.d/pr-body.sh
+    source "$repo_root/scripts/release-train.d/pr-body.sh"
+    cut_has_external_stage() { return 1; }
+    version=3.29.0
+    worktree="$portable_changelog_wt"
+    run_dir="$portable_dir/pr-run"
+    cut_stage_pr_body && cat "$run_dir/pr-body.md"
+)"
+if [[ "$portable_pr" == *'## [3.29.0] - 2026-09-24'* && "$portable_pr" == *'the cut section'* \
+    && "$portable_pr" != *'later fix'* && "$portable_pr" != *'not this one'* ]]; then
+    ok 'cas-fed5: pr-body takes exactly the version section with literal heading matches'
+else
+    bad "cas-fed5: pr-body section: $portable_pr"
+fi
+
+# macOS scratch default: /var/tmp is a Cassy disposable root there.
+portable_scratch="$(
+    # shellcheck source=scripts/release-portable.sh
+    source "$repo_root/scripts/release-portable.sh"
+    linux="$(uname() { printf 'Linux\n'; }; release_portable_default_scratch_base)"
+    darwin="$(uname() { printf 'Darwin\n'; }; release_portable_default_scratch_base)"
+    printf '%s %s\n' "$linux" "$darwin"
+)"
+if [[ "$portable_scratch" == '/var/tmp/cas-release-gate /Users/Shared/cas-release-gate' ]]; then
+    ok 'cas-fed5: scratch base stays /var/tmp on Linux and is /Users/Shared on macOS'
+else
+    bad "cas-fed5: scratch base default: $portable_scratch"
+fi
+
+# Announce: a proxy.toml token variable this host does not set is not pinned,
+# so the adapter falls through to this machine's registered token; one that is
+# set is pinned; an operator's explicit choice is never overridden.
+portable_proxy="$portable_dir/proxy.toml"
+printf 'auth = "env:CASSY_PROXY_TOKEN_SOUNDWAVE"\n' >"$portable_proxy"
+portable_announce="$(
+    env -u MECHA_SLACK_TOKEN_ENV -u CAS_RELEASE_TRAIN_MECHA_TOKEN_ENV -u CASSY_PROXY_TOKEN_SOUNDWAVE \
+        CAS_RELEASE_TRAIN_PROXY_TOML="$portable_proxy" python3 - "$repo_root/scripts/release-train-announce.py" <<'PY'
+import importlib.util, os, sys
+spec = importlib.util.spec_from_file_location("announce", sys.argv[1])
+announce = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(announce)
+unset = announce.announce_token_env({})
+from_credentials = announce.announce_token_env({"CASSY_PROXY_TOKEN_SOUNDWAVE": "secret"})
+os.environ["CASSY_PROXY_TOKEN_SOUNDWAVE"] = "secret"
+from_env = announce.announce_token_env({})
+os.environ["MECHA_SLACK_TOKEN_ENV"] = "MECHA_SLACK_TOKEN_PROWL"
+explicit = announce.announce_token_env({})
+print(unset, from_credentials, from_env, explicit)
+PY
+)"
+if [[ "$portable_announce" == 'None CASSY_PROXY_TOKEN_SOUNDWAVE CASSY_PROXY_TOKEN_SOUNDWAVE None' ]]; then
+    ok "cas-fed5: announce pins the proxy token variable only when this host sets it"
+else
+    bad "cas-fed5: announce token env selection: $portable_announce"
 fi
 
 printf '\n%s passed, %s failed\n' "$pass" "$fail"

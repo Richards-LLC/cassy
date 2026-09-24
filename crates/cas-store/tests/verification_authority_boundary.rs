@@ -137,6 +137,36 @@ fn delivery_projection_rejects_an_unrelated_verification_without_mutation() {
         event_count
     );
 
+    // A matching transaction still cannot project the opposite verdict or
+    // let a different actor borrow the supervisor's stored verification.
+    assert!(
+        transition_worker_delivery_verification_with_conn(
+            &conn,
+            "delivery-a",
+            "verification-a",
+            false,
+            "supervisor",
+        )
+        .is_err()
+    );
+    assert!(
+        transition_worker_delivery_verification_with_conn(
+            &conn,
+            "delivery-a",
+            "verification-a",
+            true,
+            "different-agent",
+        )
+        .is_err()
+    );
+    assert_eq!(
+        conn.query_row("SELECT COUNT(*) FROM worker_delivery_events", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .unwrap(),
+        event_count
+    );
+
     assert!(
         transition_worker_delivery_verification_with_conn(
             &conn,
@@ -158,5 +188,47 @@ fn delivery_projection_rejects_an_unrelated_verification_without_mutation() {
         )
         .unwrap()
         .is_none()
+    );
+
+    conn.execute(
+        "INSERT INTO verification_dispatches
+         (id, task_id, receipt_id, delivery_transaction_id, requester_agent_id,
+          owner_agent_id, state, requested_at, deadline_at, resolved_at, recovery_action)
+         VALUES ('dispatch-b', 'task-b', 'receipt-b', 'delivery-b', 'worker',
+                 'supervisor', 'resolved', ?1, ?1, ?1, 'supervisor_redispatch_or_direct')",
+        params![now],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO verifications
+         (id, task_id, agent_id, verification_type, provenance, dispatch_id,
+          issuer_agent_id, status, summary, files_reviewed, created_at)
+         VALUES ('verification-b', 'task-b', 'supervisor', 'task', 'supervisor_direct',
+                 'dispatch-b', 'supervisor', 'rejected', 'rejected', '[]', ?1)",
+        params![now],
+    )
+    .unwrap();
+    let rejected = transition_worker_delivery_verification_with_conn(
+        &conn,
+        "delivery-b",
+        "verification-b",
+        false,
+        "supervisor",
+    )
+    .unwrap()
+    .expect("the exact rejected verdict projects onto its own delivery");
+    assert_eq!(rejected.state.to_string(), "verification_failed");
+    assert_eq!(rejected.verification_id.as_deref(), Some("verification-b"));
+    assert!(
+        transition_worker_delivery_verification_with_conn(
+            &conn,
+            "delivery-b",
+            "verification-b",
+            false,
+            "supervisor",
+        )
+        .unwrap()
+        .is_none(),
+        "a resolved delivery is a projection no-op"
     );
 }

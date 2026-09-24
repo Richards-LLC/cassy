@@ -1226,23 +1226,84 @@ fn resolve_scoped_proof_targets_without_cache(
             if stdin_ok
                 && let Ok(output) = output
                 && output.status.success()
-                && let Some(line) = String::from_utf8_lossy(&output.stdout)
-                    .lines()
-                    .find(|line| line.starts_with("SCOPED_PROOF_TARGET_ARGS:"))
+                && let Some(targets) =
+                    parse_scoped_proof_target_args(&String::from_utf8_lossy(&output.stdout))
             {
-                let mut targets = Vec::new();
-                let mut tokens = line.split_whitespace().skip(1);
-                while let Some(token) = tokens.next() {
-                    if token == "--test" && let Some(target) = tokens.next() {
-                        targets.push(target.to_string());
-                    }
-                }
                 return targets;
             }
         }
     }
 
     legacy_required_scoped_proof_targets(proof_repo, changed_paths)
+}
+
+/// The `--test` targets on the checker's `SCOPED_PROOF_TARGET_ARGS:` line.
+fn parse_scoped_proof_target_args(stdout: &str) -> Option<Vec<String>> {
+    let line = stdout
+        .lines()
+        .find(|line| line.starts_with("SCOPED_PROOF_TARGET_ARGS:"))?;
+    let mut targets = Vec::new();
+    let mut tokens = line.split_whitespace().skip(1);
+    while let Some(token) = tokens.next() {
+        if token == "--test"
+            && let Some(target) = tokens.next()
+        {
+            targets.push(target.to_string());
+        }
+    }
+    Some(targets)
+}
+
+/// cas-0db7: the `--test` targets `run-scoped-tests.sh --proof` will itself
+/// require when run with this base. `--proof` validation hands the committed
+/// surface checker the whole `merge-base(base, HEAD)..HEAD` diff, while the
+/// gate resolves only the task's attributed paths. When a neighbour's commit
+/// sits in that range (a skill or hook edit, say), the proof needs more
+/// targets than the gate's own list, and a refusal that suggested only the
+/// gate's list sent the closer into a full run that then failed as
+/// "SCOPED PROOF INCOMPLETE". Same checker, same arguments as `--proof`.
+fn proof_validation_targets(
+    proof_repo: &std::path::Path,
+    target_repo: &std::path::Path,
+    base: Option<&str>,
+) -> Option<Vec<String>> {
+    let checker = target_repo.join("scripts/check-scoped-test-surface.sh");
+    if !proof_repo_is_git_worktree(proof_repo) || !checker.is_file() {
+        return None;
+    }
+    let mut command = std::process::Command::new("bash");
+    command.arg(&checker).arg("--resolve-targets");
+    if let Some(base) = base {
+        command.args(["--base", base]);
+    }
+    let output = command
+        .arg("--")
+        .current_dir(proof_repo)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_scoped_proof_target_args(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// cas-0db7: the command a scoped-proof refusal suggests. Its `--test` list
+/// is the gate's required targets plus every target `--proof` validation will
+/// require for the same base, so running it exactly as printed passes both.
+fn suggested_scoped_proof_command(
+    required_targets: &[String],
+    proof_repo: &std::path::Path,
+    target_repo: &std::path::Path,
+    base: Option<&str>,
+) -> String {
+    let mut targets = required_targets.to_vec();
+    for target in proof_validation_targets(proof_repo, target_repo, base).unwrap_or_default() {
+        if !targets.contains(&target) {
+            targets.push(target);
+        }
+    }
+    scoped_proof_command(&targets, base)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1768,7 +1829,12 @@ fn validate_risk_close_proofs_with_base_and_target_and_cache(
                     "TASK CLOSE REJECTED: task {} scoped proof receipt has base {:?}, but this delivery must be proven against SCOPED_PROOF_BASE={expected_base} — the first parent of its earliest commit, which is the diff the required targets were derived from. Run `{}` and add the resulting passing receipt to a progress note.",
                     task.id,
                     actual_base.as_deref(),
-                    scoped_proof_command(&required_targets, Some(expected_base)),
+                    suggested_scoped_proof_command(
+                        &required_targets,
+                        proof_repo,
+                        target_repo,
+                        Some(expected_base),
+                    ),
                 ));
             }
         }
@@ -1778,7 +1844,12 @@ fn validate_risk_close_proofs_with_base_and_target_and_cache(
                 "TASK CLOSE REJECTED: task {} changed a module with integration-test proof targets that were not run or recorded as passing; missing targets: {}. Run `{}` and add its `SCOPED_PROOF: targets=<complete target set> result=PASS base=<sha> head=<sha>` line to a progress note before retrying close. If the scoped command cannot run, a registered supervisor may record an equivalent full `cargo nextest run -p cas` receipt with its durable log path in the note; every real required target must be covered.",
                 task.id,
                 missing.join(", "),
-                scoped_proof_command(&required_targets, expected_base),
+                suggested_scoped_proof_command(
+                    &required_targets,
+                    proof_repo,
+                    target_repo,
+                    expected_base,
+                ),
             ));
         }
     }
@@ -2388,6 +2459,124 @@ mod risk_proof_tests {
             String::from_utf8_lossy(&output.stdout).contains("covered committed diff"),
             "surface checker did not emit a passing receipt: {}",
             String::from_utf8_lossy(&output.stdout)
+        );
+    }
+
+    /// cas-0db7: the gate resolves the task's attributed paths, but `--proof`
+    /// validates the whole `merge-base(base)..HEAD` diff. With a neighbour's
+    /// skill edit inside that range, the refusal's suggested command must name
+    /// every target `--proof` will require, so running it exactly as printed
+    /// passes the checker's validation. The gate-only command is what failed.
+    #[test]
+    fn scoped_proof_refusal_suggests_every_target_proof_validation_requires_cas_0db7() {
+        let dir = tempfile::tempdir().unwrap();
+        if !install_scoped_proof_checker(dir.path()) {
+            return;
+        }
+        let p = dir.path();
+        let write = |relative: &str, body: &str| {
+            let path = p.join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, body).unwrap();
+        };
+        let commit = |message: &str| {
+            let status = std::process::Command::new("git")
+                .args([
+                    "-c",
+                    "user.name=scoped-proof-test",
+                    "-c",
+                    "user.email=scoped-proof-test@example.invalid",
+                    "commit",
+                    "-qam",
+                    message,
+                ])
+                .current_dir(p)
+                .status()
+                .unwrap();
+            assert!(status.success());
+        };
+        for target in [
+            "mcp_tools_test",
+            "builtin_archive_portability_test",
+            "builtin_flavor_drift_test",
+            "agent_definition_contract_test",
+            "factory_codex_skill_guardrails",
+            "builtin_doc_hygiene_test",
+        ] {
+            write(
+                &format!("cas-cli/tests/{target}.rs"),
+                &format!("// {target}\n"),
+            );
+        }
+        write("cas-cli/Cargo.toml", "[package]\nname = \"cas\"\n");
+        write("cas-cli/src/builtins/skills/demo/SKILL.md", "# demo\n");
+        initialize_scoped_proof_git_fixture(p);
+        let base = resolve_branch_sha(p, "HEAD").unwrap();
+        // A neighbour's skill edit lands in the range before the delivery.
+        write("cas-cli/src/builtins/skills/demo/SKILL.md", "# demo v2\n");
+        commit("neighbour skill edit");
+        // The delivery itself touches one integration test.
+        write("cas-cli/tests/mcp_tools_test.rs", "// mcp_tools_test v2\n");
+        commit("delivery");
+
+        let attributed = vec!["cas-cli/tests/mcp_tools_test.rs".to_string()];
+        let mut cache = ScopedProofTargetCache::default();
+        let gate_targets = required_scoped_proof_targets(p, p, &attributed, &mut cache);
+        assert!(
+            gate_targets.contains(&"mcp_tools_test".to_string()),
+            "{gate_targets:?}"
+        );
+        let proof_targets =
+            proof_validation_targets(p, p, Some(&base)).expect("the checker resolves the range");
+        assert!(
+            proof_targets.contains(&"builtin_doc_hygiene_test".to_string()),
+            "{proof_targets:?}"
+        );
+        assert!(
+            !gate_targets.contains(&"builtin_doc_hygiene_test".to_string()),
+            "precondition: the gate's own list is narrower than --proof's: {gate_targets:?}"
+        );
+
+        let checker = p.join("scripts/check-scoped-test-surface.sh");
+        let validate = |command: &str| {
+            let args: Vec<&str> = command
+                .split_once("run-scoped-tests.sh --proof ")
+                .unwrap()
+                .1
+                .split_whitespace()
+                .collect();
+            std::process::Command::new("bash")
+                .arg(&checker)
+                .args(["--base", base.as_str(), "--"])
+                .args(&args)
+                .current_dir(p)
+                .output()
+                .unwrap()
+        };
+
+        let suggested = suggested_scoped_proof_command(&gate_targets, p, p, Some(&base));
+        for target in gate_targets.iter().chain(proof_targets.iter()) {
+            assert!(
+                suggested.contains(&format!("--test {target}")),
+                "{target} missing from {suggested}"
+            );
+        }
+        let passed = validate(&suggested);
+        assert!(
+            passed.status.success(),
+            "the suggested command must pass --proof validation: {}",
+            String::from_utf8_lossy(&passed.stderr)
+        );
+
+        let gate_only = validate(&scoped_proof_command(&gate_targets, Some(&base)));
+        assert!(
+            !gate_only.status.success(),
+            "the gate-only command was the defect"
+        );
+        assert!(
+            String::from_utf8_lossy(&gate_only.stderr).contains("SCOPED PROOF INCOMPLETE"),
+            "{}",
+            String::from_utf8_lossy(&gate_only.stderr)
         );
     }
 

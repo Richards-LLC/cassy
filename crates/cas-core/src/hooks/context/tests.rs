@@ -714,3 +714,106 @@ fn cas_4caa_expired_memories_are_excluded_from_session_start_surfacing() {
         "expired memory leaked into SessionStart: {context}"
     );
 }
+
+/// GH #992 (cas-0339): session start injects only the newest handoff for the
+/// session's role, in full, and never ranks a handoff among ordinary
+/// memories, so an older "CURRENT handoff" cannot resurface.
+#[test]
+fn session_start_injects_only_the_newest_handoff_for_the_session_role_cas_0339() {
+    let now = chrono::Utc::now();
+    let entry = |id: &str, minutes_ago: i64, tags: &[&str], content: &str| Entry {
+        id: id.to_string(),
+        content: content.to_string(),
+        entry_type: EntryType::Learning,
+        tags: tags.iter().map(|tag| tag.to_string()).collect(),
+        created: now - chrono::Duration::minutes(minutes_ago),
+        importance: 0.9,
+        ..Default::default()
+    };
+    let (_temp, ks) = knowledge_fixture(&[]);
+    let store = SqliteStore::open(_temp.path()).expect("open entry store");
+    store.init().expect("init entry store");
+    for memory in [
+        entry(
+            "handoff-old",
+            600,
+            &["summary", "handoff"],
+            "CURRENT handoff OLD: stale plan",
+        ),
+        entry(
+            "handoff-new",
+            30,
+            &["handoff", "role:supervisor"],
+            "CURRENT handoff NEW: merge the burn-down epic next",
+        ),
+        entry(
+            "handoff-worker",
+            10,
+            &["handoff", "role:worker"],
+            "Worker handoff: resume cas-0339",
+        ),
+        entry(
+            "plain-learning",
+            60,
+            &["summary"],
+            "Ordinary learning that still ranks",
+        ),
+    ] {
+        store.add(&memory).expect("add memory");
+    }
+
+    let build_as = |role: &str| {
+        let stores = ContextStores {
+            project_store: Some(&store),
+            knowledge_store: Some(&ks),
+            ..ContextStores::empty()
+        };
+        let input = HookInput {
+            agent_role: Some(role.to_string()),
+            ..session_start_input()
+        };
+        build_context_with_stores(
+            &input,
+            &stores,
+            &DefaultHooksConfig::new(),
+            10,
+            None,
+            "mcp__cas__",
+        )
+        .expect("build context")
+        .0
+    };
+
+    let supervisor = build_as("supervisor");
+    assert!(
+        supervisor.contains("## 🔁 Current Handoff (supervisor)"),
+        "{supervisor}"
+    );
+    assert!(
+        supervisor.contains("CURRENT handoff NEW: merge the burn-down epic next"),
+        "{supervisor}"
+    );
+    assert!(
+        !supervisor.contains("handoff-old"),
+        "an older handoff leaked: {supervisor}"
+    );
+    assert!(!supervisor.contains("CURRENT handoff OLD"), "{supervisor}");
+    assert!(!supervisor.contains("Worker handoff"), "{supervisor}");
+    assert!(supervisor.contains("plain-learning"), "{supervisor}");
+    assert_eq!(
+        supervisor.matches("handoff-new").count(),
+        1,
+        "the current handoff appears once, not also under Helpful Memories: {supervisor}"
+    );
+
+    let worker = build_as("worker");
+    assert!(
+        worker.contains("## 🔁 Current Handoff (worker)"),
+        "{worker}"
+    );
+    assert!(
+        worker.contains("Worker handoff: resume cas-0339"),
+        "{worker}"
+    );
+    assert!(!worker.contains("CURRENT handoff NEW"), "{worker}");
+}

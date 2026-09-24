@@ -31,9 +31,9 @@ pub struct MemoryRequest {
     #[serde(default)]
     pub content: Option<String>,
 
-    /// Entry type (for remember): learning, preference, context, observation
+    /// Entry type (for remember): learning, preference, context, observation, handoff
     #[schemars(
-        description = "Entry type for remember: 'learning' (default), 'preference', 'context', 'observation'"
+        description = "Entry type for remember: 'learning' (default), 'preference', 'context', 'observation', 'handoff' (a session handoff: supersedes the previous current handoff for your role and is injected at session start)"
     )]
     #[serde(default)]
     pub entry_type: Option<String>,

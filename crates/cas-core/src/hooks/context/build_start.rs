@@ -7,6 +7,7 @@ use crate::hooks::context::{
     render_normal_coordination, rule_matches_path, token_display,
 };
 use crate::hooks::types::HookInput;
+use crate::memory::handoff;
 use crate::memory::{is_high_importance_preference, session_memory_preview};
 use crate::truncate;
 use cas_store::KnowledgeStore;
@@ -25,6 +26,11 @@ const KNOWLEDGE_SECTION_TOKEN_BUDGET: usize = 600;
 
 /// Longest snippet rendered per page before truncation.
 const KNOWLEDGE_SNIPPET_CHARS: usize = 120;
+
+/// Longest current-handoff body injected at session start (~1,500 tokens).
+/// A longer handoff is cut here and points at `memory action=get` for the
+/// rest, so one verbose handoff cannot crowd out tasks and rules.
+const HANDOFF_BODY_MAX_CHARS: usize = 6_000;
 
 /// Persist one impact sample for a rule that made it into the injected
 /// context. Store failures are intentionally best-effort: a metrics write
@@ -319,9 +325,12 @@ pub fn build_context_with_stores(
     // Add pinned memories (in-context tier - always shown full, ignores budget)
     if let Some(store) = stores.primary_store() {
         if let Ok(pinned_entries) = store.list_pinned() {
+            // Handoffs have their own section below, which shows only the
+            // current one for this role (cas-0339).
             let pinned_entries: Vec<_> = pinned_entries
                 .into_iter()
                 .filter(|entry| !entry.is_expired())
+                .filter(|entry| !handoff::is_handoff(entry))
                 .collect();
             if !pinned_entries.is_empty() {
                 if !context_parts.is_empty() {
@@ -347,7 +356,60 @@ pub fn build_context_with_stores(
         }
     }
 
-    // In minimal_start mode, stop here - only blocked tasks and pinned memories
+    // The current handoff for this project and role (GH #992, cas-0339): only
+    // the newest handoff of the session's role, never an older or superseded
+    // one. Handoffs are left out of Helpful Memories, so a stale "CURRENT
+    // handoff" cannot rank there either. Shown in minimal mode too: it is the
+    // one note a fresh session most needs.
+    let role_hint = input
+        .agent_role
+        .clone()
+        .filter(|role| !role.trim().is_empty())
+        .or_else(|| std::env::var("CAS_AGENT_ROLE").ok());
+    let session_role = handoff::normalize_role(role_hint.as_deref());
+    if let Some(store) = stores.primary_store()
+        && let Ok(project_entries) = store.list()
+        && let Some(current) = handoff::current_handoff(&project_entries, &session_role)
+    {
+        if !context_parts.is_empty() {
+            context_parts.push(String::new());
+        }
+        context_parts.push(format!("## 🔁 Current Handoff ({session_role})"));
+        context_parts.push(String::new());
+        context_parts.push(format!(
+            "### {} — saved {}",
+            current.id,
+            current.created.format("%Y-%m-%d %H:%MZ")
+        ));
+        if let Some(title) = current
+            .title
+            .as_deref()
+            .filter(|title| !title.trim().is_empty())
+        {
+            context_parts.push(format!("**{title}**"));
+        }
+        context_parts.push(String::new());
+        let body = truncate(&current.content, HANDOFF_BODY_MAX_CHARS);
+        let cut = body.len() < current.content.len();
+        total_tokens += estimate_tokens(&body) + 30;
+        context_parts.push(body);
+        context_parts.push(String::new());
+        context_parts.push(if cut {
+            format!(
+                "_Handoff truncated. Read it in full with `mcp__cas__memory` (action: get, id: {}). Older handoffs are superseded and kept as history._",
+                current.id
+            )
+        } else {
+            "_Newest handoff for this role. Older handoffs are superseded and kept as history._"
+                .to_string()
+        });
+        if let Some(callback) = on_surfaced {
+            callback(&current.id, "memory", Some(&current.preview(60)));
+        }
+    }
+
+    // In minimal_start mode, stop here - only blocked tasks, pinned memories
+    // and the current handoff
     if minimal_start {
         context_parts.push(String::new());
         context_parts.push(format!(
@@ -731,6 +793,9 @@ pub fn build_context_with_stores(
             .iter()
             .filter(|e| e.entry_type != EntryType::Observation || e.feedback_score() > 0)
             .filter(|e| e.entry_type != EntryType::Context || e.feedback_score() > 0)
+            // Handoffs never rank here: the current one has its own section and
+            // the rest are history (cas-0339).
+            .filter(|e| !handoff::is_handoff(e))
             .filter(|e| e.memory_tier.is_active())
             .filter(|e| !e.is_expired())
             .cloned()

@@ -13,6 +13,7 @@
 
 use crate::support::*;
 use cas::mcp::tools::*;
+use cas::store::open_store;
 use rmcp::handler::server::wrapper::Parameters;
 
 fn structured_memory(title: &str, module: &str, body: &str) -> String {
@@ -319,4 +320,117 @@ fn recommended_action_surface_for_user_decision_round_trips() {
     assert_eq!(v["recommended_action"], "surface_for_user_decision");
     let back: MemoryRememberResponse = serde_json::from_value(v).unwrap();
     assert_eq!(back, r);
+}
+
+/// GH #992 (cas-0339): a handoff is never merged into, or blocked by, an
+/// existing memory. Saving a new one supersedes the previous current handoff
+/// for the same role: the old entry keeps its content as history, gains the
+/// `superseded` and `superseded-by:<new>` tags, and leaves the active tier.
+/// A handoff of another role is untouched.
+#[tokio::test]
+async fn a_new_handoff_supersedes_the_previous_one_for_its_role_cas_0339() {
+    let (temp, service) = setup_cas();
+    let _env_guard = env_test_lock();
+    // SAFETY: the process-wide env lock is held for the whole test, so no
+    // other test observes this change.
+    unsafe {
+        std::env::remove_var("CAS_AGENT_ROLE");
+    }
+
+    let body = |which: &str| {
+        format!(
+            "CURRENT handoff ({which}). Session cas-src, supervisor noble-heron-32. \
+             Burn-down epic cas-f0c7 is mid-assembly; merge the parked hub-web lanes, \
+             then cut the release with the rebuilt dist and post the Slack pair."
+        )
+    };
+    let remember = |content: String, entry_type: &str, tags: &str| {
+        let mut req = base_request(content, "Session handoff", tags);
+        req.entry_type = entry_type.to_string();
+        req
+    };
+    let slug_of = |result: &rmcp::model::CallToolResult| {
+        assert_eq!(result.is_error, Some(false), "{result:?}");
+        result
+            .structured_content
+            .as_ref()
+            .expect("structured content")["slug"]
+            .as_str()
+            .expect("slug")
+            .to_string()
+    };
+
+    let first = service
+        .cas_remember(Parameters(remember(body("first"), "handoff", "summary")))
+        .await
+        .expect("first handoff");
+    let first_id = slug_of(&first);
+    let worker = service
+        .cas_remember(Parameters(remember(
+            "Worker handoff: resume cas-0339 on factory/crisp-fox-22.".to_string(),
+            "handoff",
+            "role:worker",
+        )))
+        .await
+        .expect("worker handoff");
+    let worker_id = slug_of(&worker);
+    // The legacy spelling, a learning tagged `handoff`, is a handoff too, and
+    // its near-identical text is not blocked as an overlap.
+    let second = service
+        .cas_remember(Parameters(remember(
+            body("second"),
+            "learning",
+            "summary,handoff",
+        )))
+        .await
+        .expect("second handoff");
+    let second_id = slug_of(&second);
+    let second_text = extract_text(second);
+    assert!(
+        second_text.contains(&format!("Superseded (kept as history): {first_id}")),
+        "{second_text}"
+    );
+
+    let store = open_store(&temp.path().join(".cas")).expect("open store");
+    let first = store.get(&first_id).expect("first kept as history");
+    assert_eq!(first.content, body("first"), "content is never overwritten");
+    assert_eq!(first.entry_type, cas::types::EntryType::Context);
+    for tag in [
+        "summary",
+        "handoff",
+        "role:supervisor",
+        "superseded",
+        &format!("superseded-by:{second_id}"),
+    ] {
+        assert!(
+            first.tags.iter().any(|t| t == tag),
+            "missing {tag}: {:?}",
+            first.tags
+        );
+    }
+    assert!(
+        first.valid_until.is_some(),
+        "a superseded handoff stops being valid"
+    );
+    assert_eq!(first.memory_tier, cas::types::MemoryTier::Cold);
+
+    let second = store.get(&second_id).expect("second");
+    assert!(
+        second.tags.iter().any(|t| t == "role:supervisor"),
+        "{:?}",
+        second.tags
+    );
+    assert!(
+        !second.tags.iter().any(|t| t == "superseded"),
+        "{:?}",
+        second.tags
+    );
+    assert_eq!(second.valid_until, None);
+
+    let worker = store.get(&worker_id).expect("worker");
+    assert!(
+        !worker.tags.iter().any(|t| t == "superseded"),
+        "another role's handoff is untouched: {:?}",
+        worker.tags
+    );
 }

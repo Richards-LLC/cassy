@@ -2609,7 +2609,10 @@ function renderSessionPicker(): void {
   try {
     rebuildSessionPickerList(list, entries);
   } finally {
-    if (focusedKey) restoreSessionPickerFocus(list, focusedKey);
+    // The rebuilt rows come back unfiltered; re-run the live filter first.
+    const query = document.querySelector<HTMLInputElement>("#session-picker-query");
+    if (query?.value) query.dispatchEvent(new Event("input"));
+    if (focusedKey) restoreSessionPickerFocus(list, focusedKey, query ?? undefined);
   }
 }
 
@@ -2618,10 +2621,7 @@ function renderSessionPicker(): void {
  * entry is gone or filtered out, keep focus inside the picker on its filter
  * rather than letting it fall to <body> behind the modal.
  */
-function restoreSessionPickerFocus(list: HTMLElement, key: { readonly machineId?: string; readonly session?: string }): void {
-  const query = document.querySelector<HTMLInputElement>("#session-picker-query");
-  // The rebuilt rows come back unfiltered; re-run the live filter first.
-  if (query?.value) query.dispatchEvent(new Event("input"));
+function restoreSessionPickerFocus(list: HTMLElement, key: { readonly machineId?: string; readonly session?: string }, query: HTMLInputElement | undefined): void {
   const entry = [...list.querySelectorAll<HTMLButtonElement>(".session-picker-entry")]
     .find((candidate) => candidate.dataset.pickerMachine === key.machineId && candidate.dataset.pickerSession === key.session && !candidate.hidden);
   if (entry) entry.focus();

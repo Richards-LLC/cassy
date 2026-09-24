@@ -99,6 +99,14 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
     summary("Running the Mac tests", "testing");
     await expect(entry(OTTER)).toContainText("Running the Mac tests");
     await expect(entry(secondSession!)).toBeFocused();
+    // Typing in the filter while the rows are rebuilt: the filter still
+    // applies to the rebuilt rows and the caret stays in it.
+    await filter.fill(PELICAN);
+    summary("Waiting for review", "reviewing");
+    await expect(entry(OTTER)).toContainText("Waiting for review");
+    await expect(filter).toBeFocused();
+    await expect(picker.locator(".session-picker-entry:visible")).toHaveCount(1);
+    await expect(entry(PELICAN)).toBeVisible();
     // A filtered list keeps its filter and the row under focus.
     await filter.fill(OTTER);
     await filter.press("ArrowDown");

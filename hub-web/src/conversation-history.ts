@@ -1,10 +1,27 @@
 import type { ConversationHistoryMessage, ConversationHistoryReply, MessageQueued, OperatorReply } from "./types";
 
+/**
+ * How long a live send waits for the hub's delivery receipt (MessageQueued)
+ * before it stops saying "Sending…" and offers Retry (cas-1622). The hub
+ * answers a send at once, so a receipt this late is not coming.
+ */
+export const RECEIPT_TIMEOUT_MS = 15_000;
+/**
+ * A supervisor turn that lands after a send is later traffic on the same
+ * socket; the send's receipt would have come first. It still gets this long,
+ * so a reply racing the receipt never flashes "Not confirmed" (cas-1622).
+ */
+export const RECEIPT_REPLY_GRACE_MS = 2_000;
+
 export interface ConversationSend {
   id: string;
   target: string;
   text: string;
-  state: "sending" | "acknowledged" | "replied" | "error";
+  /** `unconfirmed`: sent, but the hub's receipt never came (cas-1622). It may
+   * or may not have arrived; the operator can retry it. */
+  state: "sending" | "acknowledged" | "replied" | "error" | "unconfirmed";
+  /** When this browser put the send on the wire (ms epoch); live sends only. */
+  sentAt?: number;
   notificationId?: number;
   stamped?: boolean;
   error?: string;
@@ -49,7 +66,7 @@ export class ConversationHistory {
    */
   submit(id: string, target: string, text: string, at: number = Date.now(), replyTo?: number, session?: string): void {
     const key = Math.max(at, this.latestAt());
-    this.insert({ kind: "send", value: { id, target, text, state: "sending", ...(replyTo === undefined ? {} : { replyTo }) }, at: key, ...(key === at ? {} : { shownAt: at }), session });
+    this.insert({ kind: "send", value: { id, target, text, state: "sending", sentAt: at, ...(replyTo === undefined ? {} : { replyTo }) }, at: key, ...(key === at ? {} : { shownAt: at }), session });
   }
 
   /** The latest stamp already in the thread; live events are placed at or after it. */
@@ -135,9 +152,44 @@ export class ConversationHistory {
     send.value.error = message;
     return true;
   }
-  /** Drop a refused send that a retry replaced. Only a refused send can be discarded. */
+  /**
+   * Live sends still waiting on a receipt past their deadline become
+   * `unconfirmed`: RECEIPT_TIMEOUT_MS after they went out, or
+   * RECEIPT_REPLY_GRACE_MS once a supervisor turn has landed after them
+   * (cas-1622). Returns the ids that changed. A late receipt still turns one
+   * into "Delivered" (acknowledge), and a late refusal into "Not sent".
+   */
+  unconfirmSilent(now: number): string[] {
+    const changed: string[] = [];
+    this.events.forEach((event, index) => {
+      const deadline = this.receiptDeadline(index);
+      if (deadline === undefined || now < deadline || event.kind !== "send") return;
+      event.value.state = "unconfirmed";
+      changed.push(event.value.id);
+    });
+    return changed;
+  }
+  /** Milliseconds until the next send could become unconfirmed, if any is waiting. */
+  nextReceiptCheck(now: number): number | undefined {
+    let next: number | undefined;
+    this.events.forEach((_, index) => {
+      const deadline = this.receiptDeadline(index);
+      if (deadline !== undefined && (next === undefined || deadline < next)) next = deadline;
+    });
+    return next === undefined ? undefined : Math.max(0, next - now);
+  }
+  private receiptDeadline(index: number): number | undefined {
+    const event = this.events[index];
+    if (event?.kind !== "send" || event.value.state !== "sending" || event.value.notificationId !== undefined || event.value.sentAt === undefined) return undefined;
+    const answeredLater = this.events.slice(index + 1).some((later) => later.kind === "reply");
+    return event.value.sentAt + (answeredLater ? RECEIPT_REPLY_GRACE_MS : RECEIPT_TIMEOUT_MS);
+  }
+  /**
+   * Drop a refused or unconfirmed send that a retry replaced. Only those can
+   * be discarded: a delivered send is never taken back.
+   */
   discardRefused(id: string): boolean {
-    const index = this.events.findIndex((event) => event.kind === "send" && event.value.id === id && event.value.state === "error");
+    const index = this.events.findIndex((event) => event.kind === "send" && event.value.id === id && (event.value.state === "error" || event.value.state === "unconfirmed"));
     if (index < 0) return false;
     this.events.splice(index, 1);
     return true;

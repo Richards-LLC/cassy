@@ -472,6 +472,30 @@ export class ConversationView {
       const label = document.createElement("span"); label.textContent = "Delivered";
       state.append(tick.content.firstElementChild!, label);
       bubble.append(state);
+    } else if (send.state === "unconfirmed") {
+      // cas-1622: the hub never sent this send's receipt. It is not refused —
+      // it may well have arrived — so it does not claim "Not sent". It stops
+      // saying "Sending…" forever, says what is unknown, and offers Retry,
+      // warning that a retry may reach the supervisor twice.
+      const state = document.createElement("span");
+      state.className = "conversation-delivery conversation-refused conversation-unconfirmed"; state.setAttribute("role", "status");
+      const glyph = document.createElement("template"); glyph.innerHTML = WARN;
+      const label = document.createElement("b"); label.textContent = "Not confirmed";
+      const separator = document.createElement("span"); separator.className = "sr-only"; separator.textContent = " · ";
+      const reason = document.createElement("span"); reason.className = "conversation-refused-reason";
+      reason.textContent = `The hub never confirmed this reached ${this.options.supervisor}.`;
+      const next = document.createElement("span"); next.className = "conversation-refused-next"; next.textContent = " Retry sends it again.";
+      reason.append(next);
+      state.append(glyph.content.firstElementChild!, label, separator, reason);
+      bubble.append(state);
+      if (this.options.retryMessage) {
+        const actions = document.createElement("div"); actions.className = "conversation-actions";
+        const retry = document.createElement("button"); retry.type = "button"; retry.className = "conversation-retry"; retry.textContent = "Retry";
+        retry.setAttribute("aria-label", "Retry sending");
+        retry.onclick = () => this.options.retryMessage?.(send);
+        actions.append(retry);
+        bubble.append(actions);
+      }
     } else if (send.state === "error" && send.replaced) {
       // F6: the edited version went out, so this one is only a record. It
       // collapses and offers no Retry — one tap would resend the text the

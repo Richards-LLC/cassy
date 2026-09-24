@@ -722,6 +722,8 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
     },
     onOperatorReply: (session, reply) => {
       conversationHistory(sessionKey(machine.id, session)).receive(reply, Date.now(), session);
+      // A later supervisor turn shortens an unreceipted send's wait (cas-1622).
+      scheduleReceiptCheck(sessionKey(machine.id, session));
       updateConversationViews(); renderConversationList();
       const key = sessionKey(machine.id, session);
       const replies = operatorReplies.get(key) ?? [];
@@ -2210,6 +2212,35 @@ async function takeControlForRefused(machineId: string, session: string): Promis
   }
 }
 
+/** One pending receipt check per thread (cas-1622). */
+const receiptChecks = new Map<string, ReturnType<typeof setTimeout>>();
+/**
+ * A send whose delivery receipt never comes stops saying "Sending…": at its
+ * deadline (conversation-history RECEIPT_TIMEOUT_MS, or the shorter grace
+ * once a supervisor turn lands after it) it turns "Not confirmed" with Retry,
+ * and the composer's "Sending to …" line goes away with it.
+ */
+function scheduleReceiptCheck(key: string): void {
+  const pending = receiptChecks.get(key);
+  if (pending !== undefined) clearTimeout(pending);
+  receiptChecks.delete(key);
+  const history = conversationHistories.get(key);
+  const wait = history?.nextReceiptCheck(Date.now());
+  if (!history || wait === undefined) return;
+  receiptChecks.set(key, setTimeout(() => {
+    receiptChecks.delete(key);
+    const changed = history.unconfirmSilent(Date.now());
+    if (changed.length) {
+      if (messageDelivery?.session === key && changed.includes(messageDelivery.clientRef)) {
+        messageDelivery = undefined;
+        document.querySelector<HTMLElement>("#message-delivery")?.setAttribute("hidden", "");
+      }
+      updateConversationViews(); renderConversationList();
+    }
+    scheduleReceiptCheck(key);
+  }, wait));
+}
+
 function deliverSupervisorMessage(machine: StoredMachine, session: string, supervisor: string, text: string, replyTo?: number, retryOf?: string, editOf?: string): void {
   const clientRef = crypto.randomUUID();
   const sent = sendControl(machine.id, session, supervisorMessage(supervisor, text, clientRef, replyTo));
@@ -2225,6 +2256,7 @@ function deliverSupervisorMessage(machine: StoredMachine, session: string, super
   // but can no longer be retried.
   if (editOf) { history.retireRefused(editOf); editingRefused = undefined; }
   history.submit(clientRef, supervisor, text, Date.now(), replyTo, session);
+  scheduleReceiptCheck(sessionKey(machine.id, session));
   updateConversationViews(); renderConversationList();
   const storedDraft = conversationDrafts.get(sessionKey(machine.id, session));
   if (storedDraft?.text.trim() === text) conversationDrafts.delete(sessionKey(machine.id, session));

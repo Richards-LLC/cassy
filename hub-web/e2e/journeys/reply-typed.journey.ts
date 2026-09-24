@@ -102,6 +102,28 @@ test("HUB-J5 reply by typing", async ({ page, journey }) => {
     await expect(list.getByText(/Not sent: /)).toHaveCount(0);
   });
 
+  await journey.stage("A message the hub never confirms offers Retry", async () => {
+    hub.deliverLatest(PELICAN);
+    await expect(page.locator('.conversation-turn[data-state="acknowledged"]')).toHaveCount(1);
+    await composer.fill("Is the gate green yet?");
+    const unreceipted = hub.nextSend();
+    await send.click();
+    expect((await unreceipted).text).toBe("Is the gate green yet?");
+    // No receipt comes; the supervisor talks on, so the receipt is overdue (cas-1622).
+    hub.supervisorSays(PELICAN, "Still running the release gate.");
+    const bubble = page.locator('.conversation-turn[data-state="unconfirmed"]');
+    await expect(bubble.getByRole("status")).toHaveText(`Not confirmed · The hub never confirmed this reached ${PELICAN}. Retry sends it again.`);
+    await expect(page.locator('.conversation-turn[data-state="sending"]')).toHaveCount(0);
+    await expect(page.getByText(`Sending to ${PELICAN}…`)).toBeHidden();
+    const retried = hub.nextSend();
+    await bubble.getByRole("button", { name: "Retry sending" }).click();
+    expect((await retried).text).toBe("Is the gate green yet?");
+    hub.deliverLatest(PELICAN);
+    await expect(page.locator(".conversation-delivered")).toHaveText("Delivered");
+    await expect(page.locator('.conversation-turn[data-state="unconfirmed"]')).toHaveCount(0);
+    await expect(page.getByRole("log").getByText("Is the gate green yet?")).toHaveCount(1);
+  });
+
   await journey.stage("A long supervisor name leaves the message box usable", async () => {
     await list.getByRole("button", { name: /forge-tools/ }).click();
     const longSend = page.getByRole("button", { name: `Send to ${LONG_NAME}`, exact: true });

@@ -106,7 +106,6 @@ impl Fixture {
             ("visual-qa/app-dark-desktop.png", "png"),
             ("visual-qa/app-dark-phone.png", "png"),
             ("visual-qa/visual-qa.md", "# Visual QA — PASS\n"),
-            ("visual-qa/visual-qa.json", "{}"),
             ("visual-qa.stdout", "rendered 4\nPASS\n"),
             (
                 "critique.md",
@@ -119,6 +118,7 @@ impl Fixture {
         for (name, body) in files {
             std::fs::write(dir.join(name), body).unwrap();
         }
+        write_visual_qa_report(&dir, "PASS", chrono::Utc::now(), "http://127.0.0.1:4173/");
         let mut manifest = serde_json::json!({
             "schema": 1,
             "task_id": TASK,
@@ -170,6 +170,27 @@ impl Fixture {
             notes,
         })
     }
+}
+
+/// The report `scripts/visual-qa.mjs --strict` writes for one run.
+fn write_visual_qa_report(
+    bundle_dir: &Path,
+    status: &str,
+    generated: chrono::DateTime<chrono::Utc>,
+    url: &str,
+) {
+    std::fs::write(
+        bundle_dir.join("visual-qa/visual-qa.json"),
+        serde_json::json!({
+            "status": status,
+            "strict": true,
+            "generatedAt": generated.to_rfc3339(),
+            "urls": [url],
+            "findings": []
+        })
+        .to_string(),
+    )
+    .unwrap();
 }
 
 fn set_mtime_secs_ago(path: &Path, secs_ago: u64) {
@@ -857,4 +878,127 @@ fn terminal_qa_receipt_must_pass_and_be_fresh() {
             .any(|note| note.starts_with("terminal-qa receipt accepted")),
         "{pass:?}"
     );
+}
+
+// cas-a6a3 (GH #1007): a claimed visual-QA pass needs the strict run's own
+// report, newer than the delivered commit, of a local build.
+
+#[test]
+fn visual_qa_pass_claim_without_the_run_report_is_refused() {
+    let fx = Fixture::new();
+    fx.write_bundle(|_| {});
+    // The claim and the PASS lines are there, but the run never wrote its report.
+    std::fs::write(fx.bundle_dir().join("visual-qa/visual-qa.json"), "{}").unwrap();
+    let refusal = fx.validate(&fx.notes()).unwrap_err();
+    assert!(
+        refusal.problem.contains("claims a visual-QA pass") && refusal.problem.contains("status"),
+        "{refusal:?}"
+    );
+    assert!(
+        refusal.command.contains("visual-qa.mjs --strict"),
+        "{refusal:?}"
+    );
+    assert!(refusal.command.contains("local URL"), "{refusal:?}");
+}
+
+#[test]
+fn visual_qa_run_against_a_production_origin_does_not_count() {
+    let fx = Fixture::new();
+    fx.write_bundle(|_| {});
+    write_visual_qa_report(
+        &fx.bundle_dir(),
+        "PASS",
+        chrono::Utc::now(),
+        "https://hub.petrastella.io/commander/",
+    );
+    let refusal = fx.validate(&fx.notes()).unwrap_err();
+    assert!(
+        refusal.problem.contains("hub.petrastella.io")
+            && refusal.problem.contains("not a local build"),
+        "{refusal:?}"
+    );
+}
+
+#[test]
+fn visual_qa_run_older_than_the_delivered_commit_is_refused() {
+    let fx = Fixture::new();
+    fx.write_bundle(|_| {});
+    // The delivered commit is 120 s old; this run is from an hour before it.
+    write_visual_qa_report(
+        &fx.bundle_dir(),
+        "PASS",
+        chrono::Utc::now() - chrono::Duration::hours(1),
+        "http://127.0.0.1:4173/",
+    );
+    let refusal = fx.validate(&fx.notes()).unwrap_err();
+    assert!(
+        refusal.problem.contains("before the delivered commit"),
+        "{refusal:?}"
+    );
+}
+
+#[test]
+fn visual_qa_run_that_failed_or_was_not_strict_is_refused() {
+    let fx = Fixture::new();
+    fx.write_bundle(|_| {});
+    write_visual_qa_report(
+        &fx.bundle_dir(),
+        "FAIL",
+        chrono::Utc::now(),
+        "http://127.0.0.1:4173/",
+    );
+    let refusal = fx.validate(&fx.notes()).unwrap_err();
+    assert!(refusal.problem.contains("status \"FAIL\""), "{refusal:?}");
+
+    std::fs::write(
+        fx.bundle_dir().join("visual-qa/visual-qa.json"),
+        serde_json::json!({"status": "PASS", "strict": false, "generatedAt": chrono::Utc::now().to_rfc3339(), "urls": ["http://127.0.0.1:4173/"]}).to_string(),
+    )
+    .unwrap();
+    let refusal = fx.validate(&fx.notes()).unwrap_err();
+    assert!(refusal.problem.contains("without --strict"), "{refusal:?}");
+}
+
+#[test]
+fn visual_qa_local_runs_are_accepted() {
+    for url in [
+        "http://127.0.0.1:26361/commander/",
+        "http://localhost:4173/",
+        "http://app.localhost:4173/",
+        "http://[::1]:4173/",
+        "file:///tmp/dist/index.html",
+    ] {
+        let fx = Fixture::new();
+        fx.write_bundle(|_| {});
+        write_visual_qa_report(&fx.bundle_dir(), "PASS", chrono::Utc::now(), url);
+        fx.validate(&fx.notes())
+            .unwrap_or_else(|refusal| panic!("{url}: {refusal:?}"));
+    }
+}
+
+#[test]
+fn local_origin_predicate() {
+    for local in [
+        "http://127.0.0.1:1/",
+        "http://127.8.9.10/",
+        "https://localhost/",
+        "http://0.0.0.0:3000/",
+        "http://[::1]/",
+        "file:///x.html",
+        // visual-qa.mjs opens a target without a scheme as a local file.
+        "/tmp/dist/index.html",
+    ] {
+        assert!(is_local_origin(local), "{local}");
+    }
+    for remote in [
+        "https://hub.petrastella.io/",
+        "https://cas-hub-static-abc-richards-llc.vercel.app/commander/",
+        "http://192.168.1.20:4173/",
+        "http://localhost.evil.com/",
+        "",
+        "http://",
+        "ftp://127.0.0.1/",
+    ] {
+        assert!(!is_local_origin(remote), "{remote}");
+    }
 }

@@ -112,7 +112,14 @@ that produces it:
 5. **Polish.** The first line of `visual-qa.md` contains `PASS`, the last
    non-empty line of `visual-qa.stdout` is `PASS`, and
    `visual_qa_status == "pass"`. `"unavailable"` rejects unless the
-   supervisor overrides.
+   supervisor overrides. The claimed pass must also be backed by the run's
+   own report (cas-a6a3, GH #1007). `visual-qa.json` must record
+   `"status": "PASS"` and a `generatedAt` no older than the delivered commit.
+   Every entry in `urls` must be local: a loopback host, `*.localhost`, a file
+   URL or a bare path. The report must not record `"strict": false`. A run
+   against a production or other remote origin does not count.
+   `qa_record` applies the same check to an independent round that claims
+   `visual_qa_status: "pass"`, counting from when the round opened.
 6. **Critique.** `critique_score` has the five dimensions, each 0–5. It must
    meet the floor: distinctiveness, fit and hierarchy each ≥ 4, and no
    dimension at 0.

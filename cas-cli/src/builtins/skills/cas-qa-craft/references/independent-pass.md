@@ -66,6 +66,11 @@ before you run the cell. Capture a trace and a screenshot per cell.
 node scripts/visual-qa.mjs --strict --artifact-dir <ledger-dir>/visual-qa <url>...
 ```
 
+Point `<url>` at your local serve of the reviewed tip from step 1, never the
+production site. `qa_record` refuses a `visual_qa_status: "pass"` bundle
+unless `visual-qa/visual-qa.json` records a strict PASS run against local URLs,
+generated after the round opened.
+
 This captures desktop 1280 and phone 390, each in light and dark. Then score
 the `cas-ui-craft` critique rubric: distinctiveness, fit, hierarchy, craft,
 and accessibility. Give one evidence sentence per score. Walk this checklist
@@ -92,7 +97,8 @@ have:
 - `head_sha`: the reviewed tip, in full
 
 `qa_record` refuses a verdict whose bundle is missing or names another
-producer, task, or tip. The files, all listed in `bundle.json`:
+producer, task, or tip. It also refuses a claimed visual-QA pass that has no
+matching local run (see step 4). The files, all listed in `bundle.json`:
 
 - `trace.zip`, recorded with
   `{ mode: 'on', snapshots: { dom: true, aria: true, screen: true }, screenshots: false, sources: true }`

@@ -296,20 +296,21 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 - **Entry:** an open conversation when the network to the machine drops
 - **Goal:** I see what is happening, and it recovers without me doing anything
-- **Touches:** `hub-web/src/connection*.ts`, `hub-web/src/abort-signals.ts`, `hub-web/src/deferred-render.ts`, `hub-web/src/browser-support.ts`
+- **Touches:** `hub-web/src/connection*.ts`, `hub-web/src/session-connection.ts`, `hub-web/src/abort-signals.ts`, `hub-web/src/deferred-render.ts`, `hub-web/src/browser-support.ts`
 - **Suite:** `hub-web/e2e/journeys/reconnect.journey.ts`
 - **Gaps:** a real network loss (heartbeat misses, offline) is simulated by closing the socket
 
 **Steps**
 
 1. Open the conversation — the thread is live
-2. The network drops — "Connection interrupted — reconnecting" appears
-3. It reconnects on its own — the banner clears when the session is back
+2. The network drops — "Lost connection to Atlas · Linux. Reconnecting…" appears, and the header, the row and the footer all say Reconnecting
+3. It reconnects on its own — the banner clears, everything says Live again, and no transport alarm is left
 4. Sending works again — a message goes through and is answered
 
 **Expected experience**
 
-- The user always knows whether the conversation is live.
+- The user always knows whether the conversation is live: the header, the row and the footer never disagree.
+- A transport alarm resolves itself when the connection comes back.
 - Nothing typed is lost, and recovery needs no action.
 
 **Edge paths**

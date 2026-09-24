@@ -31,6 +31,7 @@ import { DEFAULT_PAIRING_SCOPES, PairingRelayError, acknowledgePairing, createPa
 import { browserSupport, unsupportedBrowserNotice } from "./browser-support";
 import { attentionStore, catalog } from "./storage";
 import { createTerminalSurface, type TerminalSurface } from "./terminal";
+import { machineConnection, sessionConnection } from "./session-connection";
 import { absoluteTimestamp, relativeTimestamp } from "./time";
 import { loadPaneLayout, movePane, normalizePaneLayout, orderedPaneIds, promotePane, savePaneLayout, type PaneLayout, type PaneLayoutStorage } from "./pane-layout";
 import { detectSpeechInput, SpeechDictationController, type SpeechInputCapability, type SpeechInputState } from "./speech-input";
@@ -86,6 +87,10 @@ const connections = new Map<string, HubConnectionSupervisor>();
 const connectionStates = new Map<string, ConnectionState>();
 const lastLiveAt = new Map<string, number>();
 const attachStates = new Map<string, AttachSnapshot>();
+/** Sessions whose socket has been live this visit: a later drop is a reconnect, not a first connect. */
+const sessionsEverLive = new Set<string>();
+/** Connection labels a conversation row shows in place of its last turn (cas-a447). */
+const INTERRUPTED_LABELS = new Set(["Reconnecting", "Unreachable", "Needs pairing"]);
 const machineInfo = new Map<string, HubMachineInfo | undefined>();
 const statuses = new Map<string, Record<string, unknown>>();
 const leases = new Map<string, LeaseState>();
@@ -601,6 +606,7 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
           fingerprint: `${machine.id}:auth_loss`,
         });
       }
+      if (state.phase === "live") resolveAttention(`${machine.id}:hub_disconnected`);
       if (state.phase === "backoff") {
         void addAttention(machine, undefined, "hub_disconnected", {
           headline: "Reconnecting to hub",
@@ -613,8 +619,16 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       render();
     },
     onAttachState: (session, state) => {
-      attachStates.set(sessionKey(machine.id, session), state);
+      const key = sessionKey(machine.id, session);
+      attachStates.set(key, state);
+      if (state.phase === "live") {
+        sessionsEverLive.add(key);
+        // The socket is back: its transport alarm is history, not attention.
+        resolveAttention(`${machine.id}:${session}:session_transport`);
+      }
       if (selectedMachineId === machine.id && selectedSession === session) render();
+      // The list row and the footer read the session's connection too.
+      else renderConversationList();
     },
     onAuthFailure: (kind, detail) => {
       if (kind === "expired") return;
@@ -819,6 +833,29 @@ async function addAttention(machine: StoredMachine, session: string | undefined,
   await attentionStore.put(merge.stored);
   render();
   newCriticalAttentionIds.delete(merge.stored.id);
+}
+
+/**
+ * A connection alarm is about a connection; once that connection is live again
+ * the alarm resolves itself instead of waiting for a hand dismissal (cas-a447).
+ */
+function resolveAttention(fingerprint: string): void {
+  const open = attention.filter((item) => !item.acknowledgedAt && item.fingerprint === fingerprint);
+  if (open.length) void acknowledgeAttentionGroup(open);
+}
+
+/** The one connection state a conversation's header, row and footer show (cas-a447). */
+function conversationConnection(machineId: string, session: string | undefined): ConnectionState | undefined {
+  const machine = connectionStates.get(machineId);
+  if (!session) return machine;
+  const key = sessionKey(machineId, session);
+  return sessionConnection(machine, attachStates.get(key), sessionsEverLive.has(key));
+}
+
+function machineFooterConnection(machineId: string): ConnectionState | undefined {
+  const prefix = `${machineId}:`;
+  const attached = [...attachStates].filter(([key]) => key.startsWith(prefix)).map(([key, attach]) => ({ attach, wasLive: sessionsEverLive.has(key) }));
+  return machineConnection(connectionStates.get(machineId), attached);
 }
 
 async function acknowledgeAttentionGroup(items: AttentionItem[]): Promise<void> {
@@ -1240,9 +1277,12 @@ function renderConnectionSurface(machineId: string, session: string, snapshot: C
       grid.prepend(banner);
     }
     // A fatal failure is not reconnecting, so the banner must not claim it is.
+    // Plain words in the body font (cas-a447): who was lost and what happens next.
+    const where = machines.get(machineId)?.label ?? "the machine";
     banner.textContent = snapshot.fatal === true
-      ? "Connection failed — not retrying."
-      : `Connection interrupted — ${view.retryLabel} (attempt ${view.attempt})`;
+      ? `Lost connection to ${where}. Not retrying.`
+      : `Lost connection to ${where}. Reconnecting…`;
+    banner.dataset.attempt = String(view.attempt);
     grid.classList.add("terminal-disconnected");
     return;
   }
@@ -2492,7 +2532,7 @@ function renderConversationList(): void {
     if (selected) readReplies.set(key, replies);
     // Waiting (ochre dot, hot time) is driven by asks and blockers the operator has not answered.
     const waiting = conversationHistories.get(key)?.waiting().length ?? 0;
-    return { key, machineId: machine.id, session: session.name, supervisor: session.supervisor, projectDir: session.project_dir, host: machine.label, freshness: updated ? `Catalog checked ${relativeTimestamp(Date.parse(updated))}` : "Catalog not yet checked", when: updated ? relativeTimestamp(Date.parse(updated)) : undefined, preview: conversationHistories.get(key)?.preview(), unreachable: Boolean(session.unreachable), connection: session.unreachable ? "Unreachable · message pending" : session.dormant ? "Dormant" : session.liveness === "live" ? fleetConnectionLabel(connectionStates.get(machine.id)) : "Session unavailable", attention: waiting, unread: Math.max(0, replies - (readReplies.get(key) ?? 0)), selected };
+    return { key, machineId: machine.id, session: session.name, supervisor: session.supervisor, projectDir: session.project_dir, host: machine.label, freshness: updated ? `Catalog checked ${relativeTimestamp(Date.parse(updated))}` : "Catalog not yet checked", when: updated ? relativeTimestamp(Date.parse(updated)) : undefined, preview: conversationHistories.get(key)?.preview(), unreachable: Boolean(session.unreachable), connection: session.unreachable ? "Unreachable · message pending" : session.dormant ? "Dormant" : session.liveness === "live" ? fleetConnectionLabel(conversationConnection(machine.id, session.name)) : "Session unavailable", interrupted: session.liveness === "live" && INTERRUPTED_LABELS.has(fleetConnectionLabel(conversationConnection(machine.id, session.name))), attention: waiting, unread: Math.max(0, replies - (readReplies.get(key) ?? 0)), selected };
   }));
   conversationRows = rows;
   const shown = filterConversationRows(rows, conversationSearchQuery);
@@ -2503,7 +2543,7 @@ function renderConversationList(): void {
     empty.textContent = rows.length > 0 ? conversationNoMatchText(conversationSearchQuery) : conversationEmptyText(machineCatalogLoaded, machines.size);
   }
   const state = document.querySelector<HTMLElement>("#conversation-connection");
-  if (state && selectedMachineId) state.textContent = ` · ${visibleSessions(selectedMachineId).find(session => session.name === selectedSession)?.unreachable ? "Unreachable · message pending" : fleetConnectionLabel(connectionStates.get(selectedMachineId))}`;
+  if (state && selectedMachineId) state.textContent = ` · ${visibleSessions(selectedMachineId).find(session => session.name === selectedSession)?.unreachable ? "Unreachable · message pending" : fleetConnectionLabel(conversationConnection(selectedMachineId, selectedSession))}`;
 }
 
 function fleetConnectionLabel(state: ConnectionState | undefined): string {
@@ -3263,7 +3303,7 @@ void boot();
 
 function pairedMachineRows(): PairedMachineRow[] {
   return [...machines.values()].map(machine => {
-    const state = connectionStates.get(machine.id);
+    const state = machineFooterConnection(machine.id);
     const updated = fleetCatalogUpdatedAt.get(machine.id);
     const fresh = Date.now() < (catalogExpiresAt.get(machine.id) ?? Infinity);
     return { id: machine.id, label: machine.label, address: new URL(machine.baseUrl).host,

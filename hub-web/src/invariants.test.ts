@@ -1140,7 +1140,15 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(connectionView).toContain('addAction("Diagnose", actions.diagnose)');
     expect(source).toContain("openConnectionLog(machineId)");
     expect(source).toContain("const view = disconnectedView(snapshot, now)");
-    expect(source).toContain("Connection interrupted — ${view.retryLabel} (attempt ${view.attempt})");
+    // Plain words naming the machine (cas-a447), not the protocol retry line.
+    expect(source).toContain("`Lost connection to ${where}. Reconnecting…`");
+    expect(source).not.toContain("Connection interrupted — ${view.retryLabel}");
+    // Header, row and footer read one conversation connection, and the
+    // transport alarm resolves itself once the socket is live again.
+    expect(source).toContain('fleetConnectionLabel(conversationConnection(machine.id, session.name))');
+    expect(source).toContain('fleetConnectionLabel(conversationConnection(selectedMachineId, selectedSession))');
+    expect(source).toContain("const state = machineFooterConnection(machine.id);");
+    expect(source).toContain("resolveAttention(`${machine.id}:${session}:session_transport`);");
     expect(styles).toContain(".terminal-state");
     expect(styles).toContain(".terminal-connecting-step");
     expect(styles).toContain(".terminal-disconnected .terminal-mount { opacity: .4; }");
@@ -1149,7 +1157,7 @@ describe("binding Cassy Cloud browser invariants", () => {
   it("drives pane recovery from the selected session attach lifecycle", async () => {
     const source = await readSource("main.ts");
     expect(source).toContain("onAttachState: (session, state) =>");
-    expect(source).toContain("attachStates.set(sessionKey(machine.id, session), state)");
+    expect(source).toContain("const key = sessionKey(machine.id, session);\n      attachStates.set(key, state);");
     expect(source).toContain("connection.attachSnapshot(selectedSession) ?? connection.snapshot()");
     expect(source).toContain("connection.attachSnapshot(session) ?? connection.snapshot()");
     expect(source).toContain("const connectionSnapshot = terminalAttachSnapshot ?? machineConnectionSnapshot");

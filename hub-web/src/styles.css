@@ -1162,7 +1162,8 @@ main {
   padding: var(--space-2) var(--space-3);
   color: var(--text-hi);
   background: var(--bg-raised);
-  font-family: var(--font-mono);
+  /* Plain words in the body font, not a log line (cas-a447). */
+  font-family: var(--font-ui);
   font-size: var(--fs-meta);
   border-left: var(--rule-verdict) solid var(--state-warn);
 }
@@ -2967,6 +2968,7 @@ dialog form > *,
 .conversation-preview { grid-column: 2; min-width: 0; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; max-height: calc(2 * 1.35em); overflow: hidden; text-overflow: ellipsis; font-size: var(--fs-meta); line-height: 1.35; color: var(--ink-soft); overflow-wrap: anywhere; }
 .conversation-preview.bold { color: var(--ink); font-weight: var(--weight-medium); }
 .conversation-preview.unreachable { color: var(--warn-text); font-weight: var(--weight-medium); }
+.conversation-preview.interrupted { color: var(--warn-text); }
 /* P13: the time keeps the headline end; the unread count and waiting dot sit beneath it. */
 .conversation-marks { grid-column: 3; justify-self: end; display: inline-flex; align-items: center; gap: 6px; }
 /* --warn-text, the hot time's colour: the same brown on paper as before, gold in dark (the old --ask-deep dot was 2.4:1 there). */

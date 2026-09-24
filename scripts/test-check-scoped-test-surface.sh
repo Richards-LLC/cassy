@@ -122,4 +122,14 @@ if (cd "$nested_repo" && bash ./scripts/check-scoped-test-surface.sh --base main
     exit 1
 fi
 printf 'ok   sibling nested test modules preserve paths and accept a shared prefix filter\n'
+
+# cas-e4d2: excluding one known-broken test must not read as a module filter.
+# Both the libtest-style `-- --skip X` and nextest's `-E 'not test(=X)'` keep
+# an unfiltered --lib run covering every changed module.
+for exclusion in "-- --skip cli::other::tests::broken" "-E not(test(=cli::other::tests::broken))"; do
+    # shellcheck disable=SC2086 # the exclusion is deliberately word-split.
+    skip_proof="$(cd "$nested_repo" && bash ./scripts/check-scoped-test-surface.sh --base main -- -p cas --lib $exclusion)"
+    grep -qF 'SCOPED_PROOF: targets=lib:cli::hub::tests,lib:cli::hub_reverse_pairing::tests result=PASS' <<<"$skip_proof"
+done
+printf 'ok   a skipped test is an exclusion, not a module filter\n'
 printf 'PASS: scoped test surface backend and nested-module mapping verified.\n'

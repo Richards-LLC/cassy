@@ -149,6 +149,13 @@ while [[ $# -gt 0 ]]; do
             [[ $# -ge 2 ]] || usage
             shift
             ;;
+        --skip)
+            # A skipped test is an exclusion, not a module filter: reading its
+            # value as a filter made `-- --skip X` narrow the lib run to X and
+            # fail the surface check (cas-e4d2). `--skip=X` is ignored below.
+            [[ $# -ge 2 ]] || usage
+            shift
+            ;;
         --*)
             ;;
         *)

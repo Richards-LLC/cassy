@@ -5,6 +5,7 @@ mod factory_auto_approve;
 mod factory_inbox_surfacing;
 mod formatter_scope_guard;
 mod message_display;
+mod neon_sql_guard;
 mod permission_request_factory;
 mod preferences_context;
 mod reload_skills;

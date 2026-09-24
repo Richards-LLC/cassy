@@ -66,6 +66,29 @@ pub fn handle_pre_tool_use(
     }
 
     // ========================================================================
+    // WORKER NEON PRODUCTION WRITE GUARD (cas-d8fc, GH #907)
+    //
+    // A worker's Neon run_sql / run_sql_transaction that carries a write and
+    // resolves to production (no branchId, or the recorded production branch)
+    // is denied with the branch it resolved to. Reads and writes to other
+    // branches pass. Hoisted with the other root-independent worker guards so
+    // a missing Cassy root cannot skip it.
+    // ========================================================================
+    if is_factory_agent && crate::harness_policy::is_worker(input) {
+        let mut roots = vec![std::path::PathBuf::from(&input.cwd)];
+        if let Some(parent) = cas_root.and_then(Path::parent) {
+            roots.push(parent.to_path_buf());
+        }
+        if let Some(reason) = super::neon_sql_guard::neon_production_write_denial(
+            tool_name,
+            input.tool_input.as_ref(),
+            &roots,
+        ) {
+            return Ok(HookOutput::with_pre_tool_permission("deny", &reason));
+        }
+    }
+
+    // ========================================================================
     // SUPERVISOR DISCIPLINE: Block Agent(isolation="worktree") for supervisors
     //
     // Supervisors must spawn workers via `mcp__cas__coordination spawn_workers`

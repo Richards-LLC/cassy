@@ -13,16 +13,15 @@ test("HUB-J2 pair a machine from a cas hub pair link", async ({ page, journey })
   await journey.stage("Open the link the machine printed", async () => {
     // An earlier link for another machine is already open, the name typed.
     await page.goto(`./#pair=${EARLIER_TOKEN}&hub=studio&hub_url=https%3A%2F%2Fstudio.test&machine=Studio%20Mac&scopes=machine:read,session:read,pane:read`);
-    await expect(dialog.getByRole("textbox", { name: /Machine label/ })).toHaveValue("Studio Mac");
+    await expect(dialog.getByRole("textbox", { name: /Machine name/ })).toHaveValue("Studio Mac");
     // A fresh link opens on the operator's name with the dialog at its top (QA F02).
-    await expect(dialog.getByRole("textbox", { name: /Operator label/ })).toBeFocused();
+    await expect(dialog.getByRole("textbox", { name: "Your name (shown on the machine)" })).toBeFocused();
     await expect(dialog.getByRole("heading", { name: "Pair a machine" })).toBeInViewport({ ratio: 1 });
-    await expect(dialog.getByRole("textbox", { name: /Operator label/ })).toBeInViewport({ ratio: 1 });
-    await dialog.getByRole("textbox", { name: /Operator label/ }).fill("Daniel");
+    await dialog.getByRole("textbox", { name: "Your name (shown on the machine)" }).fill("Daniel");
     // The link carries the machine's hub address and name, as `cas hub pair`
     // prints it, and arrives in the tab that is already open (hashchange).
     await page.evaluate((hash) => { location.hash = hash; }, `pair=${TOKEN}&hub=atlas&hub_url=https%3A%2F%2Fatlas.test&machine=Atlas%20%C2%B7%20Linux&scopes=machine:read,session:read,pane:read,pane:input,message:send,pane:interrupt`);
-    await expect(dialog.getByText("One-time invitation ready. Confirm the target hub.")).toBeVisible();
+    await expect(dialog.getByText("One-time invitation ready. Check the machine, then add your name.")).toBeVisible();
     expect(new URL(page.url()).hash, "the secret leaves the address bar at once").toBe("");
   });
 
@@ -30,17 +29,21 @@ test("HUB-J2 pair a machine from a cas hub pair link", async ({ page, journey })
     // Address and machine name arrive filled in and editable; only the operator's name is left.
     await expect(dialog.getByRole("textbox", { name: /Machine's hub address/ })).toHaveValue("https://atlas.test");
     await expect(dialog.getByRole("textbox", { name: /Machine's hub address/ })).toBeEditable();
-    await expect(dialog.getByRole("textbox", { name: /Machine label/ })).toHaveValue("Atlas · Linux");
+    await expect(dialog.getByRole("textbox", { name: /Machine name/ })).toHaveValue("Atlas · Linux");
     // The name typed for the earlier link is kept; only the machine changed.
-    await expect(dialog.getByRole("textbox", { name: /Operator label/ })).toHaveValue("Daniel");
-    // The dialog opens at its top: heading and address label on screen (QA F02).
+    await expect(dialog.getByRole("textbox", { name: "Your name (shown on the machine)" })).toHaveValue("Daniel");
+    // The dialog opens at its top and every field is visible without scrolling it (QA F02, F4).
     await expect(dialog.getByRole("heading", { name: "Pair a machine" })).toBeInViewport({ ratio: 1 });
-    await expect(dialog.getByText("Machine's hub address")).toBeInViewport({ ratio: 1 });
+    const fields = dialog.locator("input:visible");
+    for (let index = 0; index < await fields.count(); index += 1) await expect(fields.nth(index)).toBeInViewport({ ratio: 1 });
     // The address guidance waits behind a disclosure; its page-origin shortcut is an ordinary button.
     await expect(dialog.getByText("Where do I find this?")).toBeVisible();
     await expect(dialog.getByRole("button", { name: "Use this page's address" })).toBeHidden();
     await dialog.getByText("Where do I find this?").click();
     await expect(dialog.getByRole("button", { name: "Use this page's address" })).toBeVisible();
+    // The raw scope boxes wait under Technical details.
+    await expect(dialog.getByRole("checkbox", { name: "message:send" })).toBeHidden();
+    await dialog.getByText("Technical details").click();
     await expect(dialog.getByRole("checkbox", { name: "message:send" })).toBeChecked();
     await dialog.getByRole("button", { name: "Pair", exact: true }).click();
     await expect(dialog).toBeHidden();

@@ -2,6 +2,8 @@ import type { PairingPrefill } from "./fragment";
 import type { Scope } from "./types";
 import { PAIRING_SCOPES } from "./pairing-scopes";
 
+export type PairingStep = "create" | "code" | "authorized" | "link";
+
 export interface PairingDraft {
   /** The machine's hub address. Seeded only from what the machine itself put
    *  in its `cas hub pair` link, never from the page: a hosted Commander origin
@@ -12,6 +14,10 @@ export interface PairingDraft {
   machineLabel: string;
   /** "Where do I find this?" stays open across the dialog's re-renders once opened. */
   addressHelpOpen: boolean;
+  /** The step whose "Technical details" the operator opened; it stays open
+   *  across that step's re-renders and starts closed on the next step, so an
+   *  opened list never pushes the next step's fields below the fold. */
+  technicalOpen: PairingStep | undefined;
   deviceLabel: string;
   operatorLabel: string;
   scopes: Scope[];
@@ -29,6 +35,7 @@ export function createPairingDraft(controllerOrigin: string, scopes?: readonly S
     pageOrigin: controllerOrigin,
     machineLabel: prefill.suggestedMachineLabel ?? "",
     addressHelpOpen: false,
+    technicalOpen: undefined,
     deviceLabel: "Cassy Cloud browser",
     operatorLabel: "",
     scopes: scopes ? [...scopes] : [...PAIRING_SCOPES],

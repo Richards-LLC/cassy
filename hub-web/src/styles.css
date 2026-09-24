@@ -2308,6 +2308,31 @@ dialog form > *,
 
 .pair-summary { color: var(--text-hi); font-family: var(--font-ui); }
 
+/* F3: what pairing grants leads each step, in plain words. */
+.pair-lead { color: var(--text-mid); text-wrap: pretty; }
+.pair-lead .pair-summary { font-weight: var(--weight-semibold); }
+
+/* F3: the exact origin and raw scope names are there for checking, not in the
+   way: one quiet disclosure, the same shape as "Where do I find this?". */
+.pair-technical {
+  color: var(--text-mid);
+  font-size: var(--fs-xs);
+}
+
+.pair-technical summary {
+  width: fit-content;
+  padding: var(--space-1) 0;
+  cursor: pointer;
+}
+
+.pair-technical summary:focus-visible {
+  outline: var(--focus-ring-width) solid var(--color-focus);
+  outline-offset: var(--focus-ring-width);
+}
+
+.pair-technical[open] { display: grid; gap: var(--space-2); }
+.pair-technical fieldset { margin: 0; }
+
 .pair-alternative {
   color: var(--text-mid);
   font-size: var(--fs-meta);

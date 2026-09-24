@@ -218,6 +218,11 @@ const revealWorkers = workersRevealed(location.search, workerVisibilityStorage()
 const revealDormant = dormantRevealed(location.search, workerVisibilityStorage());
 let activeContextTab: "attention" | "status" = "attention";
 let commandPaletteOpen = false;
+/** Whether the open palette was opened by a touch tap (cas-990d). Its filter
+ * then took focus under a soft keyboard, so the keyboard's Enter in it must
+ * land to read, not in the reply box: that would keep the keyboard up over
+ * the conversation. Ctrl/Cmd+K and mouse opens mean a hardware keyboard. */
+let commandPaletteOpenedByTouch = false;
 let speechCapability: SpeechInputCapability | undefined;
 let speechDetectionStarted = false;
 let speechController: SpeechDictationController | undefined;
@@ -3083,8 +3088,10 @@ async function toggleControl(selected: StoredMachine | undefined, lease: LeaseSt
   await loadLease(selected.id, selectedSession);
 }
 
-function openCommandPalette(): void {
+/** `event` is the toggle's click; Ctrl/Cmd+K passes none (cas-990d). */
+function openCommandPalette(event?: MouseEvent): void {
   const wasOpen = document.querySelector<HTMLDialogElement>("#command-palette")?.open === true;
+  if (!wasOpen) commandPaletteOpenedByTouch = touchActivation(event);
   commandPaletteOpen = true;
   render();
   // Closing a dialog does not rebuild the shell. Reopening can therefore have
@@ -3303,6 +3310,15 @@ function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | und
       // (Enter reaches this handler as a click with detail 0) and fine-pointer
       // clicks land in the reply box.
       if (event.detail > 0 && !finePointerClick(event)) return;
+      // Enter in a filter the operator opened by touch came from a soft
+      // keyboard, which is still up. Land to read, as a tap does, so it goes
+      // away rather than staying over the conversation (cas-990d). A palette
+      // opened by Ctrl/Cmd+K or a mouse has a hardware keyboard: reply box.
+      if (commandPaletteOpenedByTouch) {
+        if (document.activeElement instanceof HTMLElement && isEditableElement(document.activeElement)) document.activeElement.blur();
+        landFocus([focusTargets.thread, focusTargets.sessionTitle], { keep: true, nextTask: true, waitMs: 2_000 });
+        return;
+      }
       focusJumpedComposer(opened);
     };
   }

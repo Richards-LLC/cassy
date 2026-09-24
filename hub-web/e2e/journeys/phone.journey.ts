@@ -102,6 +102,25 @@ test("HUB-J9 on a phone: from the list to a reply and back", async ({ page, jour
     await expect(page.getByRole("log").getByText("Build step 14 of 14 finished; moving on to the next one after checking its logs.")).toBeInViewport();
   });
 
+  await journey.stage("Jump from the palette with the keyboard's Enter", async () => {
+    // A tap opens the palette with its filter focused under the soft keyboard.
+    // The keyboard's Enter opens the match with that keyboard gone: no text
+    // field keeps focus, so it cannot stay up over the thread (cas-990d).
+    await page.getByRole("button", { name: "‹ Conversations", exact: true }).tap();
+    await page.getByRole("button", { name: "Appearance & commands" }).tap();
+    const filter = page.getByRole("searchbox", { name: "Filter commands" });
+    await expect(filter).toBeFocused();
+    await filter.pressSequentially(PELICAN);
+    await filter.press("Enter");
+    await expect(page.locator("#command-palette")).toBeHidden();
+    await expect(page.getByRole("button", { name: `Send to ${PELICAN}`, exact: true })).toBeVisible();
+    await expect(composer).not.toBeFocused();
+    await expect.poll(() => page.evaluate(() => {
+      const active = document.activeElement as HTMLElement | null;
+      return Boolean(active && (active.tagName === "INPUT" || active.tagName === "TEXTAREA" || active.isContentEditable));
+    }), { message: "no text field holds focus, so no soft keyboard is up" }).toBe(false);
+  });
+
   await journey.stage("See the switched-off machine named plainly", async () => {
     // Never live and failing: "Can't reach · retrying" in the dialog, not
     // "Connecting…" forever; the footer counts it and its dot is not all-clear.

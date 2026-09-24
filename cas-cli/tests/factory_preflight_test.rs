@@ -172,6 +172,14 @@ fn human_cli_reports_ready_and_leaves_home_cas_state_unchanged() {
         &bin.path().join("codex"),
         "#!/bin/sh\nprintf 'codex-cli 0.147.0\\n'\n",
     );
+    cas::test_paths::warm_stub(
+        &bin.path().join("grok"),
+        "#!/bin/sh\nprintf 'grok 0.1.0\\n'\n",
+    );
+    cas::test_paths::warm_stub(
+        &bin.path().join("opencode"),
+        "#!/bin/sh\nprintf 'opencode 0.1.0\\n'\n",
+    );
     let path = std::env::join_paths(std::iter::once(bin.path().to_path_buf()).chain(
         std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
     ))
@@ -193,6 +201,13 @@ fn human_cli_reports_ready_and_leaves_home_cas_state_unchanged() {
 
     let output = human_command_at(&nested, &home)
         .env("PATH", path)
+        .env("CAS_ROOT", project.path().join(".cas"))
+        .env("CLAUDE_CONFIG_DIR", home.path().join(".claude"))
+        .env("CODEX_HOME", home.path().join(".codex"))
+        .env("GROK_HOME", home.path().join(".grok"))
+        .env("XDG_CONFIG_HOME", home.path().join(".config"))
+        .env("XDG_DATA_HOME", home.path().join(".local/share"))
+        .env("XDG_CACHE_HOME", home.path().join(".cache"))
         .args(["--cas-root", project.path().join(".cas").to_str().unwrap()])
         .assert()
         .success()

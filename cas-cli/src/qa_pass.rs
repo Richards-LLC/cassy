@@ -565,6 +565,22 @@ pub fn round_dir(artifacts_root: &Path, pass: &QaPass) -> std::path::PathBuf {
         .join(format!("round-{}", pass.round))
 }
 
+/// The decision rule a reviewer applies (cas-6eb1). It lives in the generated
+/// task text, not only in the skill reference, because a reviewer recorded
+/// "approved" twice before a supervisor's stricter brief arrived, and an
+/// installed skill may predate `references/independent-pass.md`.
+pub const QA_REJECTION_BAR: &str = "Rejection bar. Decide by this, not by impression:\n\
+- Reject on any Blocking or High journey finding, or when visual-qa.mjs --strict fails.\n\
+- Reject when any cas-ui-craft critique dimension scores below 3, or distinctiveness, fit or \
+hierarchy scores below 4 on a public surface.\n\
+- Reject any easy-to-spot bug on the touched path. That includes a pre-existing one on the path \
+this delivery claims to fix.\n\
+- Forced colors, reduced motion and more contrast count only when the capture proves the mode \
+with matchMedia (for example matchMedia('(forced-colors: active)').matches is true).\n\
+- Keyboard-only must reach and complete the demo's primary action.\n\
+- A required mode you did not run is NOT EXERCISED, never PASS, and rejects.\n\
+Otherwise approve, and list Normal and Note findings in the summary.";
+
 /// Brief the reviewer reads when it starts the QA work item.
 pub fn qa_task_description(
     delivery: &Task,
@@ -595,9 +611,20 @@ pub fn qa_task_description(
          keyboard-only, reduced motion); run visual-qa.mjs --strict and score the \
          cas-ui-craft rubric with desktop+phone, light+dark screenshots. Every finding \
          cites a trace action and a screenshot.\n\n\
+         {bar}\n\n\
+         Evidence: {ledger}/bundle.json with producer \"independent-qa\", task_id {task} and \
+         head_sha {head}, listing trace.zip, trace-actions.txt, receipt.webm, final.aria.yml/json, \
+         one F0N.png per finding, visual-qa/ and visual-qa.stdout, critique.md, and one \
+         journeys/<ID>/ folder per journey. Run visual-qa.mjs --strict against your own local \
+         serve of {head}, never the production URL: qa_record refuses a claimed visual-QA pass \
+         without that local run.\n\n\
          Record the verdict with: mcp__cas__verification action=qa_record task_id={task} \
          status=approved|rejected summary=\"...\" issues='[...]' ledger_path={ledger}/LEDGER.md \
-         — a rejection sends {task} back to its implementer with your ledger.",
+         — a rejection sends {task} back to its implementer with your ledger. Recording closes \
+         this QA task and cannot be revised. If you change your mind after recording, do not \
+         record again: message the supervisor (blocker=true) asking for request_changes on \
+         {task}, and name the finding.",
+        bar = QA_REJECTION_BAR,
         task = delivery.id,
         round = pass.round,
         implementer = pass.implementer_agent_id,
@@ -840,6 +867,39 @@ mod tests {
         assert!(validate_round_bundle(&ledger, &round).unwrap_err().contains("head_sha"));
         write("independent-qa", "aaaa1111");
         assert!(validate_round_bundle(&ledger, &round).is_ok());
+    }
+
+    /// cas-6eb1: the generated QA task states the rejection bar, the evidence
+    /// contract and how to reopen after recording, so the reviewer needs no
+    /// supervisor brief and no installed skill reference to decide.
+    #[test]
+    fn qa_task_description_states_the_rejection_bar_and_evidence_path() {
+        let round = pass("aaaa1111", cas_types::QaPassState::Pending);
+        let text = qa_task_description(
+            &task(),
+            &round,
+            &["demo_statement".to_string()],
+            Path::new("/artifacts/cas-ui1/independent-qa/round-1"),
+            "epic/x",
+        );
+        assert!(text.contains(QA_REJECTION_BAR), "{text}");
+        for pinned in [
+            "Rejection bar. Decide by this, not by impression",
+            "scores below 3",
+            "below 4 on a public surface",
+            "easy-to-spot bug on the touched path",
+            "pre-existing one on the path this delivery claims to fix",
+            "matchMedia('(forced-colors: active)').matches",
+            "Keyboard-only must reach and complete the demo's primary action",
+            "NOT EXERCISED, never PASS, and rejects",
+            "/artifacts/cas-ui1/independent-qa/round-1/bundle.json with producer \"independent-qa\"",
+            "head_sha aaaa1111",
+            "never the production URL",
+            "Recording closes this QA task and cannot be revised",
+            "asking for request_changes on cas-ui1",
+        ] {
+            assert!(text.contains(pinned), "missing {pinned:?} in:\n{text}");
+        }
     }
 
     /// cas-a6a3 (GH #1007): a round claiming `visual_qa_status: pass` needs

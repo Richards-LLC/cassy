@@ -24,6 +24,7 @@ mod task_intents;
 #[cfg(test)]
 mod tests;
 mod types;
+mod unauthored;
 
 pub(crate) use task_intents::{TaskSyncFulfillResult, TaskSyncIntent, TaskSyncPayload};
 
@@ -33,6 +34,7 @@ pub use dependency_tombstones::{
 pub use quarantine::{
     PULL_ID_COLLISION, QUARANTINE_TASK, QUARANTINED_ROW_STATEMENTS, QuarantinedRow,
 };
+pub use unauthored::UNAUTHORED_PULL_STATEMENTS;
 pub use revisions::{SYNC_REVISION_STATEMENTS, parse_wire_revision, wire_revision};
 pub use types::{
     EntityType, PendingByType, QueueHealth, QueueStats, QueuedSync, SyncConflictRecord,
@@ -90,7 +92,10 @@ impl SyncQueue {
         {
             conn.execute_batch(statement)?;
         }
-        for statement in QUARANTINED_ROW_STATEMENTS {
+        for statement in QUARANTINED_ROW_STATEMENTS
+            .iter()
+            .chain(UNAUTHORED_PULL_STATEMENTS.iter())
+        {
             conn.execute_batch(statement)?;
         }
 

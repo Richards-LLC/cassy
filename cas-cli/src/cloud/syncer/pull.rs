@@ -1399,6 +1399,48 @@ fn append_sync_status_provenance(merged: &mut Task, local: &Task, sync_id: &str,
 }
 
 impl CloudSyncer {
+    /// Settle the authorship ledger for one applied entry, rule or skill
+    /// (cas-3a90, GH #909).
+    ///
+    /// A row carrying this project's `origin_project` is ours: any earlier
+    /// marker is cleared. A row with no origin can only be attributed by the
+    /// project scope field, which echoes the request, so when the pull
+    /// *created* it locally it is recorded as not authored here, and pushes
+    /// never publish it under this project. An update to a row that already
+    /// existed locally changes nothing. A foreign origin never reaches this
+    /// point, because `entity_matches_project` refuses it first.
+    fn note_pulled_authorship(
+        &self,
+        entity_type: EntityType,
+        entity_id: &str,
+        row_origin: Option<&str>,
+        created: bool,
+        current_project_id: &str,
+        result: &mut SyncResult,
+    ) {
+        let outcome = match row_origin {
+            Some(origin) if project_ids_match(origin, current_project_id) => self
+                .queue
+                .forget_unauthored_pull(entity_type.as_str(), entity_id)
+                .map(|_| ()),
+            None if created => self
+                .queue
+                .record_unauthored_pull(
+                    entity_type.as_str(),
+                    entity_id,
+                    "pulled without origin_project; the project scope echoes the request",
+                )
+                .map(|_| ()),
+            _ => Ok(()),
+        };
+        if let Err(error) = outcome {
+            result.errors.push(format!(
+                "Could not record the authorship of pulled {} {entity_id}: {error}",
+                entity_type.as_str()
+            ));
+        }
+    }
+
     /// Park a pulled task row that will not be applied (cas-7a63, GH #1000).
     ///
     /// The quarantine ledger is keyed by bare task id, and short ids collide
@@ -1882,6 +1924,7 @@ impl CloudSyncer {
                 continue;
             }
             let remote_updated_at = pulled_entry_updated_at(&raw_entry);
+            let row_origin = row_origin_project(&raw_entry).map(str::to_owned);
             let entry_revision = crate::cloud::wire_revision(&raw_entry);
             let entry_revision_id = raw_entry
                 .get("id")
@@ -1899,9 +1942,18 @@ impl CloudSyncer {
             };
             let remote_updated_at = remote_updated_at
                 .unwrap_or_else(|| remote_entry.last_accessed.unwrap_or(remote_entry.created));
+            let remote_entry_id = remote_entry.id.clone();
             match self.upsert_entry_lww(store, remote_entry, remote_updated_at) {
-                Ok(UpsertResult::Created) | Ok(UpsertResult::Updated) => {
+                Ok(outcome @ (UpsertResult::Created | UpsertResult::Updated)) => {
                     result.pulled_entries += 1;
+                    self.note_pulled_authorship(
+                        EntityType::Entry,
+                        &remote_entry_id,
+                        row_origin.as_deref(),
+                        matches!(outcome, UpsertResult::Created),
+                        current_project_id,
+                        &mut result,
+                    );
                     if let (Some(id), Some(revision)) = (&entry_revision_id, entry_revision) {
                         let _ = self.queue.record_revision(EntityType::Entry, id, revision);
                     }
@@ -2046,6 +2098,7 @@ impl CloudSyncer {
                 continue;
             }
             let rule_revision = crate::cloud::wire_revision(&raw_rule);
+            let row_origin = row_origin_project(&raw_rule).map(str::to_owned);
             if let Some(id) = raw_rule.get("id").and_then(serde_json::Value::as_str) {
                 self.note_incoming_revision(EntityType::Rule, id, &raw_rule);
             }
@@ -2058,8 +2111,16 @@ impl CloudSyncer {
             };
             let remote_rule_id = remote_rule.id.clone();
             match self.upsert_rule(rule_store, remote_rule) {
-                Ok(UpsertResult::Created) | Ok(UpsertResult::Updated) => {
+                Ok(outcome @ (UpsertResult::Created | UpsertResult::Updated)) => {
                     result.pulled_rules += 1;
+                    self.note_pulled_authorship(
+                        EntityType::Rule,
+                        &remote_rule_id,
+                        row_origin.as_deref(),
+                        matches!(outcome, UpsertResult::Created),
+                        current_project_id,
+                        &mut result,
+                    );
                     if let Some(revision) = rule_revision {
                         let _ =
                             self.queue
@@ -2081,6 +2142,7 @@ impl CloudSyncer {
                 continue;
             }
             let skill_revision = crate::cloud::wire_revision(&raw_skill);
+            let row_origin = row_origin_project(&raw_skill).map(str::to_owned);
             if let Some(id) = raw_skill.get("id").and_then(serde_json::Value::as_str) {
                 self.note_incoming_revision(EntityType::Skill, id, &raw_skill);
             }
@@ -2093,8 +2155,16 @@ impl CloudSyncer {
             };
             let remote_skill_id = remote_skill.id.clone();
             match self.upsert_skill(skill_store, remote_skill) {
-                Ok(UpsertResult::Created) | Ok(UpsertResult::Updated) => {
+                Ok(outcome @ (UpsertResult::Created | UpsertResult::Updated)) => {
                     result.pulled_skills += 1;
+                    self.note_pulled_authorship(
+                        EntityType::Skill,
+                        &remote_skill_id,
+                        row_origin.as_deref(),
+                        matches!(outcome, UpsertResult::Created),
+                        current_project_id,
+                        &mut result,
+                    );
                     if let Some(revision) = skill_revision {
                         let _ = self.queue.record_revision(
                             EntityType::Skill,
@@ -2923,6 +2993,7 @@ impl CloudSyncer {
                 continue;
             }
             let remote_updated_at = pulled_entry_updated_at(&raw_entry);
+            let row_origin = row_origin_project(&raw_entry).map(str::to_owned);
             let entry_revision = crate::cloud::wire_revision(&raw_entry);
             let entry_revision_id = raw_entry
                 .get("id")
@@ -2940,9 +3011,18 @@ impl CloudSyncer {
             };
             let remote_updated_at = remote_updated_at
                 .unwrap_or_else(|| remote_entry.last_accessed.unwrap_or(remote_entry.created));
+            let remote_entry_id = remote_entry.id.clone();
             match self.upsert_entry_lww(store, remote_entry, remote_updated_at) {
-                Ok(UpsertResult::Created) | Ok(UpsertResult::Updated) => {
+                Ok(outcome @ (UpsertResult::Created | UpsertResult::Updated)) => {
                     result.pulled_entries += 1;
+                    self.note_pulled_authorship(
+                        EntityType::Entry,
+                        &remote_entry_id,
+                        row_origin.as_deref(),
+                        matches!(outcome, UpsertResult::Created),
+                        current_project_id,
+                        &mut result,
+                    );
                     if let (Some(id), Some(revision)) = (&entry_revision_id, entry_revision) {
                         let _ = self.queue.record_revision(EntityType::Entry, id, revision);
                     }
@@ -3083,6 +3163,7 @@ impl CloudSyncer {
                 continue;
             }
             let rule_revision = crate::cloud::wire_revision(&raw_rule);
+            let row_origin = row_origin_project(&raw_rule).map(str::to_owned);
             if let Some(id) = raw_rule.get("id").and_then(serde_json::Value::as_str) {
                 self.note_incoming_revision(EntityType::Rule, id, &raw_rule);
             }
@@ -3095,8 +3176,16 @@ impl CloudSyncer {
             };
             let remote_rule_id = remote_rule.id.clone();
             match self.upsert_rule_with_strategy(rule_store, remote_rule, strategy) {
-                Ok(UpsertResult::Created) | Ok(UpsertResult::Updated) => {
+                Ok(outcome @ (UpsertResult::Created | UpsertResult::Updated)) => {
                     result.pulled_rules += 1;
+                    self.note_pulled_authorship(
+                        EntityType::Rule,
+                        &remote_rule_id,
+                        row_origin.as_deref(),
+                        matches!(outcome, UpsertResult::Created),
+                        current_project_id,
+                        &mut result,
+                    );
                     if let Some(revision) = rule_revision {
                         let _ =
                             self.queue
@@ -3118,6 +3207,7 @@ impl CloudSyncer {
                 continue;
             }
             let skill_revision = crate::cloud::wire_revision(&raw_skill);
+            let row_origin = row_origin_project(&raw_skill).map(str::to_owned);
             if let Some(id) = raw_skill.get("id").and_then(serde_json::Value::as_str) {
                 self.note_incoming_revision(EntityType::Skill, id, &raw_skill);
             }
@@ -3130,8 +3220,16 @@ impl CloudSyncer {
             };
             let remote_skill_id = remote_skill.id.clone();
             match self.upsert_skill_with_strategy(skill_store, remote_skill, strategy) {
-                Ok(UpsertResult::Created) | Ok(UpsertResult::Updated) => {
+                Ok(outcome @ (UpsertResult::Created | UpsertResult::Updated)) => {
                     result.pulled_skills += 1;
+                    self.note_pulled_authorship(
+                        EntityType::Skill,
+                        &remote_skill_id,
+                        row_origin.as_deref(),
+                        matches!(outcome, UpsertResult::Created),
+                        current_project_id,
+                        &mut result,
+                    );
                     if let Some(revision) = skill_revision {
                         let _ = self.queue.record_revision(
                             EntityType::Skill,

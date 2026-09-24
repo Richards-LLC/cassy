@@ -270,12 +270,27 @@ impl CloudSyncer {
             .list_pending_page_tombstones()
             .map_err(|e| CasError::Other(format!("Failed to list knowledge tombstones: {e}")))?;
 
+        let push_project_id = self.personal_push_project_id()?;
         let mut records = Vec::new();
+        let mut unauthored = 0usize;
         for page in pages {
             if let Some(since) = since {
                 if page.updated_at <= since {
                     continue;
                 }
+            }
+            // cas-3a90 (GH #909): a page that arrived by pull keeps the project
+            // that published it. Re-pushing it would republish another
+            // project's page under this one, so only pages this project owns
+            // are sent.
+            if page.origin == KnowledgePageOrigin::CloudPull
+                && !page
+                    .origin_project_id
+                    .as_deref()
+                    .is_some_and(|origin| crate::cloud::project_ids_match(origin, &push_project_id))
+            {
+                unauthored += 1;
+                continue;
             }
             let body = match store.read_body(&page.rel_path) {
                 Ok(body) => body,
@@ -291,9 +306,16 @@ impl CloudSyncer {
                     &page,
                     body,
                     share,
-                    Some(self.personal_push_project_id()?),
+                    Some(push_project_id.clone()),
                 ),
             )?);
+        }
+        if unauthored > 0 {
+            warn!(
+                unauthored,
+                "skipped {unauthored} pulled knowledge page(s) this project did not author; \
+                 they are never pushed from here"
+            );
         }
 
         if records.is_empty() && tombstones.is_empty() {
@@ -913,6 +935,72 @@ mod tests {
 
         assert_eq!(first, 1, "the seeded page must be pushed");
         assert_eq!(second, 0, "an unchanged page must not be re-pushed");
+    }
+
+    /// cas-3a90 (GH #909): a page pulled from another project keeps that
+    /// origin and is never re-pushed under this one; a pulled page this
+    /// project owns and a locally written page still go out.
+    #[tokio::test]
+    async fn pulled_pages_from_another_project_are_never_pushed_from_here() {
+        use std::io::Read;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/sync/push"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .mount(&server)
+            .await;
+        let endpoint = server.uri();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        let pushed = tokio::task::spawn_blocking(move || {
+            let store = seeded_store(&root);
+            let syncer = syncer(Some(&endpoint), &root);
+            let own_project = get_project_canonical_id().expect("tests run in a Cassy project");
+            for (id, title, origin) in [
+                ("cas-kn909a", "Foreign Page", "someone-elses-project"),
+                ("cas-kn909b", "Own Pulled Page", own_project.as_str()),
+            ] {
+                let mut page = KnowledgePage::new(id, "architecture", title);
+                page.origin = KnowledgePageOrigin::CloudPull;
+                page.origin_project_id = Some(origin.to_string());
+                store
+                    .commit_ingest(&IngestBatch {
+                        pages: vec![PageWrite {
+                            page,
+                            body: format!("# {title}"),
+                        }],
+                        sources: Vec::new(),
+                        tombstones: Vec::new(),
+                    })
+                    .unwrap();
+            }
+            syncer.push_knowledge_pages(&store).unwrap()
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(
+            pushed, 2,
+            "the local page and the project's own pulled page"
+        );
+        let requests = server.received_requests().await.unwrap();
+        let mut decoded = Vec::new();
+        flate2::read::GzDecoder::new(requests[0].body.as_slice())
+            .read_to_end(&mut decoded)
+            .unwrap();
+        let body = String::from_utf8(decoded).unwrap();
+        assert!(
+            body.contains("cas-kn001") && body.contains("cas-kn909b"),
+            "{body}"
+        );
+        assert!(
+            !body.contains("cas-kn909a"),
+            "a foreign page must not be pushed: {body}"
+        );
     }
 
     #[tokio::test]

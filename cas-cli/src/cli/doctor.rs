@@ -2548,6 +2548,7 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
         checks.push(cloud_queue_check(&cas_root));
         checks.extend(sync_warning_checks(&sync_warnings));
         checks.extend(pull_id_collision_check(&cas_root));
+        checks.extend(unauthored_pull_check(&cas_root));
         // Quarantine is local state, so an unreadable ledger reports zero
         // rather than failing the whole check: the check's job is to describe
         // contamination, not to depend on the remedy's bookkeeping.
@@ -4890,6 +4891,36 @@ fn sync_warning_checks(warnings: &[crate::cloud::SyncWarningSummary]) -> Vec<Che
         .collect()
 }
 
+/// Count pulled entries, rules and skills this project did not author
+/// (cas-3a90, GH #909). They stay readable locally but are never pushed from
+/// here. Silent when there are none, so a clean project's report is unchanged.
+fn unauthored_pull_check(cas_root: &Path) -> Option<Check> {
+    let counts = crate::cloud::SyncQueue::open(cas_root)
+        .and_then(|queue| queue.unauthored_pull_counts())
+        .ok()?;
+    unauthored_pull_check_for(&counts)
+}
+
+fn unauthored_pull_check_for(counts: &BTreeMap<String, usize>) -> Option<Check> {
+    let total: usize = counts.values().sum();
+    if total == 0 {
+        return None;
+    }
+    let breakdown = counts
+        .iter()
+        .map(|(entity_type, count)| format!("{entity_type}: {count}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(Check::new(
+        "pulled rows not authored here",
+        CheckStatus::Info,
+        format!(
+            "{total} pulled row(s) this project didn't author ({breakdown}). They arrived without \
+             an origin project, stay readable here, and are never pushed from this project"
+        ),
+    ))
+}
+
 /// Report pulled task rows that were parked because they shared an id with a
 /// different local task (cas-7a63, GH #1000). Silent when there are none, so a
 /// clean project's report is unchanged.
@@ -5316,6 +5347,31 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
+
+    /// cas-3a90: pulled rows this project didn't author are counted per type;
+    /// an empty ledger adds no row to the report.
+    #[test]
+    fn doctor_counts_pulled_rows_this_project_did_not_author() {
+        let temp = TempDir::new().unwrap();
+        let queue = crate::cloud::SyncQueue::open(temp.path()).unwrap();
+        queue.init().unwrap();
+        assert!(unauthored_pull_check(temp.path()).is_none());
+        for (entity_type, id) in [("entry", "e-1"), ("entry", "e-2"), ("rule", "r-1")] {
+            queue
+                .record_unauthored_pull(entity_type, id, "test")
+                .unwrap();
+        }
+        let check = unauthored_pull_check(temp.path()).expect("counted");
+        assert_eq!(check.name, "pulled rows not authored here");
+        assert!(matches!(check.status, CheckStatus::Info));
+        assert!(
+            check
+                .message
+                .starts_with("3 pulled row(s) this project didn't author (entry: 2, rule: 1)"),
+            "{}",
+            check.message
+        );
+    }
 
     /// cas-7a63: a parked id collision is reported once per id, and a clean
     /// queue adds no row to the report.

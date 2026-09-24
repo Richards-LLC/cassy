@@ -540,9 +540,23 @@ pub(crate) async fn install_proxy_policy(
                 ),
             ]
         });
+    // cas-ff74 (GH #1005 item 2): `worker_access = "read-only"` servers give
+    // workers their read routes only, e.g. vercel.get_runtime_errors.
+    let worker_read_only_servers = config
+        .worker_access
+        .iter()
+        .filter(|(_, access)| **access == cmcp_core::config::WorkerAccess::ReadOnly)
+        .map(|(server, _)| server.clone());
+    let worker_read_routes = cmcp_core::config::DEFAULT_WORKER_READ_ROUTES
+        .iter()
+        .map(|(server, tool)| cmcp_core::ExternalToolRoute::new(*server, *tool))
+        .chain(config.worker_read_routes.iter().map(|route| {
+            cmcp_core::ExternalToolRoute::new(route.server.clone(), route.tool.clone())
+        }));
     let policy = cmcp_core::ExternalToolAllowlistPolicy::new(routes)
         .with_supervisor_routes(supervisor_routes)
-        .with_supervisor_delegation_routes(delegation_routes);
+        .with_supervisor_delegation_routes(delegation_routes)
+        .with_worker_read_only(worker_read_only_servers, worker_read_routes);
     engine.set_policy(std::sync::Arc::new(policy)).await;
 }
 

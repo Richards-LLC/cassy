@@ -148,6 +148,95 @@ auth = "env:NEON_API_KEY_TEST_WORKER"
     );
 }
 
+/// cas-ff74 (GH #1005 item 2): a server defined only in the operator's user
+/// config (VERCEL_TOKEN) reaches a worker when, and only when, the project
+/// proxy.toml marks it `worker_access = "read-only"`. The worker's proxy then
+/// forwards only its read routes.
+#[test]
+fn read_only_worker_access_grants_the_user_level_server_credential() {
+    let _env_lock = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let config_home = tempfile::tempdir().expect("temporary config home");
+    let global_config = config_home.path().join("code-mode-mcp/config.toml");
+    std::fs::create_dir_all(global_config.parent().unwrap()).unwrap();
+    std::fs::write(
+        &global_config,
+        r#"
+[servers.vercel]
+transport = "http"
+url = "https://mcp.vercel.com"
+auth = "env:VERCEL_TOKEN"
+
+[servers.neon]
+transport = "http"
+url = "https://mcp.neon.tech/mcp"
+auth = "env:NEON_API_KEY"
+"#,
+    )
+    .unwrap();
+    let home = tempfile::tempdir().expect("temporary home");
+    let _home = RestoreEnv::set("HOME", home.path());
+    let _config_home = RestoreEnv::set("XDG_CONFIG_HOME", config_home.path());
+    let _credentials_file = RestoreEnv::remove("CAS_CREDENTIALS_FILE");
+    let _vercel = RestoreEnv::set("VERCEL_TOKEN", "vercel-fixture");
+    let _neon = RestoreEnv::set("NEON_API_KEY", "neon-fixture");
+
+    let worker_config_for = |proxy_toml: &str| {
+        let project = tempfile::tempdir().expect("temporary project root");
+        let cas_root = project.path().join(".cas");
+        std::fs::create_dir_all(&cas_root).unwrap();
+        std::fs::write(cas_root.join("proxy.toml"), proxy_toml).unwrap();
+        let config = MuxConfig {
+            cwd: project.path().to_path_buf(),
+            cas_root: Some(cas_root),
+            workers: 1,
+            worker_names: vec!["worker-1".to_string()],
+            include_director: false,
+            ..MuxConfig::default()
+        };
+        let configs = Mux::factory_pane_configs(&config);
+        let (_, worker) = configs
+            .into_iter()
+            .find(|(name, _)| name == "worker-1")
+            .expect("worker config must be present");
+        worker
+    };
+    let stripped = |worker: &crate::pty::PtyConfig, key: &str| {
+        env_value(worker, key).is_none()
+            && worker.env_remove.iter().any(|candidate| candidate == key)
+    };
+
+    // Marked read-only: the user-level VERCEL_TOKEN is granted, NEON is not.
+    let granted = worker_config_for(
+        r#"
+allowlist = ["vercel.get_runtime_errors"]
+
+[worker_access]
+vercel = "read-only"
+"#,
+    );
+    assert_eq!(env_value(&granted, "VERCEL_TOKEN"), Some("vercel-fixture"));
+    assert!(
+        !granted
+            .env_remove
+            .iter()
+            .any(|candidate| candidate == "VERCEL_TOKEN"),
+        "a read-only grant must survive the worker credential policy"
+    );
+    assert!(
+        stripped(&granted, "NEON_API_KEY"),
+        "an unmarked user-level server stays stripped"
+    );
+
+    // Not marked: the same user-level credential stays stripped.
+    let ungranted = worker_config_for(
+        r#"
+allowlist = ["vercel.get_runtime_errors"]
+"#,
+    );
+    assert!(stripped(&ungranted, "VERCEL_TOKEN"));
+    assert!(stripped(&ungranted, "NEON_API_KEY"));
+}
+
 #[test]
 fn factory_worker_configs_isolate_operator_credentials_for_every_harness() {
     let _env_lock = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());

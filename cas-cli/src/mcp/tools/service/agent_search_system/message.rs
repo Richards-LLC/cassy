@@ -629,15 +629,19 @@ impl CasService {
             .inner
             .get_agent_id()
             .unwrap_or_else(|_| "unknown".to_string());
-        crate::mcp::tools::traffic_limits::validate_message_body(
+        let config = self.inner.load_config();
+        // cas-6ee6 (GH #1006 item 1): an over-cap body is refused below unless
+        // a supervisor sends it to a factory agent, in which case it spills
+        // to an artifact. Identity resolution in between is read-only.
+        let over_cap_refusal = crate::mcp::tools::traffic_limits::validate_message_body(
             &source,
             &message,
-            &self.inner.load_config(),
+            &config,
             req.blocker.unwrap_or(false),
             req.merge_request.unwrap_or(false),
             req.task_id.as_deref().unwrap_or("<task-id>"),
         )
-        .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
+        .err();
         // When agent ID lookup fails but CAS_AGENT_NAME is set (factory mode),
         // resolve display_name from the env var so messages show the correct sender.
         let env_agent_name = std::env::var("CAS_AGENT_NAME").ok();
@@ -667,6 +671,31 @@ impl CasService {
             .map(|a| a.role.to_string())
             .or_else(|| std::env::var("CAS_AGENT_ROLE").ok())
             .unwrap_or_else(|| "primary".to_string());
+        if let Some(refusal) = over_cap_refusal {
+            let to_operator = target.eq_ignore_ascii_case("operator") || commander_target;
+            if role != "supervisor" || to_operator {
+                return Err(Self::error(ErrorCode::INVALID_PARAMS, refusal));
+            }
+            let sender = agent_from_store
+                .as_ref()
+                .map(|agent| agent.name.clone())
+                .unwrap_or_else(|| source.clone());
+            message = crate::mcp::tools::traffic_limits::spill_message_to_artifact(
+                crate::mcp::tools::traffic_limits::message_spill_root(&config).as_deref(),
+                req.task_id.as_deref(),
+                &sender,
+                &target,
+                &summary,
+                &message,
+                crate::mcp::tools::traffic_limits::message_body_limit(
+                    &config,
+                    req.blocker.unwrap_or(false),
+                    req.merge_request.unwrap_or(false),
+                ),
+                chrono::Utc::now(),
+            )
+            .map_err(|refusal| Self::error(ErrorCode::INVALID_PARAMS, refusal))?;
+        }
         // A shared clone can have two live supervisors and a worker process
         // whose ambient environment was inherited from the wrong harness.
         // The registered caller row is the authoritative owner; the
@@ -4079,6 +4108,82 @@ mod cas_89e1_post_merge_message_type_tests {
             .poll_all(10)
             .expect("queued messages");
         assert!(rows.is_empty(), "rejected message must not be queued: {rows:?}");
+    }
+
+    /// cas-6ee6 (GH #1006 item 1): a supervisor ruling over the cap is
+    /// delivered to the worker as its head plus the path of the artifact
+    /// holding the full text, instead of being refused.
+    #[tokio::test(flavor = "current_thread")]
+    async fn supervisor_over_cap_message_spills_to_artifact_and_is_delivered_cas_6ee6() {
+        let _env = TestEnvGuard::temp_home();
+        let temp = tempfile::tempdir().expect("temporary Cassy root");
+        let cas_root = temp.path().join(".cas");
+        std::fs::create_dir_all(&cas_root).expect("Cassy root");
+        let artifacts = temp.path().join("artifacts");
+        std::fs::write(
+            cas_root.join("config.toml"),
+            format!(
+                "[factory]\nmessage_max_chars = 300\nartifacts_root = \"{}\"\n",
+                artifacts.display()
+            ),
+        )
+        .expect("write test factory config");
+
+        let agents = crate::store::open_agent_store(&cas_root).expect("agent store");
+        agents.init().expect("agent store init");
+        let mut worker = Agent::new("worker-id".to_string(), "worker-a".to_string());
+        worker.role = AgentRole::Worker;
+        agents.register(&worker).expect("register worker");
+        let mut supervisor = Agent::new("supervisor-id".to_string(), "supervisor".to_string());
+        supervisor.role = AgentRole::Supervisor;
+        agents.register(&supervisor).expect("register supervisor");
+
+        let core = crate::mcp::server::CasCore::with_daemon(cas_root.clone(), None, None);
+        core.set_agent_id_for_testing(supervisor.id);
+        #[cfg(feature = "mcp-proxy")]
+        let service = CasService::new(core, None);
+        #[cfg(not(feature = "mcp-proxy"))]
+        let service = CasService::new(core);
+
+        let ruling = format!("RULING: {}", "keep the contract clause as written. ".repeat(30));
+        assert!(ruling.chars().count() > 300);
+        let request: AgentRequest = serde_json::from_value(serde_json::json!({
+            "action": "message",
+            "target": "worker-a",
+            "task_id": "cas-6ee6",
+            "summary": "ruling",
+            "message": ruling,
+        }))
+        .expect("over-cap supervisor message request");
+        service
+            .message_send(request)
+            .await
+            .expect("an over-cap supervisor message is delivered, not refused");
+
+        let spilled: Vec<_> = std::fs::read_dir(artifacts.join("cas-6ee6"))
+            .expect("spill directory under artifacts_root/<task>")
+            .map(|entry| entry.unwrap().path())
+            .collect();
+        assert_eq!(spilled.len(), 1, "{spilled:?}");
+        assert!(
+            std::fs::read_to_string(&spilled[0]).unwrap().contains(&ruling),
+            "the artifact holds the full text"
+        );
+        let rows = crate::store::open_prompt_queue_store(&cas_root)
+            .expect("prompt queue")
+            .poll_all(10)
+            .expect("queued messages");
+        let row = rows
+            .iter()
+            .find(|row| row.target == "worker-a")
+            .unwrap_or_else(|| panic!("message queued for the worker: {rows:?}"));
+        assert!(row.prompt.contains("RULING: keep the contract"), "{}", row.prompt);
+        assert!(
+            row.prompt.contains(&spilled[0].display().to_string()),
+            "delivered message names the artifact: {}",
+            row.prompt
+        );
+        assert!(!row.prompt.contains(&ruling), "only the head is delivered inline");
     }
 
     #[test]

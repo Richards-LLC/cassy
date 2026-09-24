@@ -118,8 +118,9 @@ pub use delegation_receipt_store::{
 };
 pub use qa_pass_store::{
     NewQaPass, QA_PASS_SCHEMA_STATEMENTS, QaPassOpen, assert_may_review_qa_task, claim_qa_pass,
-    latest_qa_pass, list_qa_passes, open_qa_pass, resolve_qa_pass, satisfying_qa_pass_for_head,
-    satisfying_qa_passes, set_qa_task, waive_qa_pass, withdraw_open_qa_pass,
+    latest_qa_pass, list_qa_passes, open_qa_pass, open_qa_pass_reporting_superseded,
+    resolve_qa_pass, satisfying_qa_pass_for_head, satisfying_qa_passes, set_qa_task,
+    waive_qa_pass, withdraw_open_qa_pass,
 };
 pub use artifact_store::{
     ARTIFACT_SCHEMA, ARTIFACT_SCHEMA_STATEMENTS, NewArtifact, PublishedArtifact,

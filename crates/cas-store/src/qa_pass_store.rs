@@ -209,6 +209,21 @@ fn new_pass_id() -> String {
 /// Idempotent per `bound_head`: re-parking the same tip returns the open or
 /// already-satisfied round. A different tip supersedes any open round.
 pub fn open_qa_pass(cas_dir: &Path, new: &NewQaPass<'_>, now: DateTime<Utc>) -> Result<QaPassOpen> {
+    open_qa_pass_reporting_superseded(cas_dir, new, now).map(|(outcome, _)| outcome)
+}
+
+/// [`open_qa_pass`], also returning the open round a new tip superseded
+/// (cas-ce39), as it reads after the transition (`state == Superseded`).
+///
+/// A re-park at a new tip retires whatever round was pending or claimed for
+/// the old one. The caller owns telling people: cancel the retired round's
+/// QA work item and, when a reviewer had claimed it, message the reviewer
+/// with the new round, so nobody keeps reviewing a dead head.
+pub fn open_qa_pass_reporting_superseded(
+    cas_dir: &Path,
+    new: &NewQaPass<'_>,
+    now: DateTime<Utc>,
+) -> Result<(QaPassOpen, Option<QaPass>)> {
     if new.bound_head.trim().is_empty() || new.implementer_agent_id.trim().is_empty() {
         return Err(StoreError::Parse(
             "a QA pass needs the delivered branch tip and its implementer".to_string(),
@@ -219,19 +234,21 @@ pub fn open_qa_pass(cas_dir: &Path, new: &NewQaPass<'_>, now: DateTime<Utc>) -> 
     let tx = ImmediateTx::new(&conn)?;
     expire_with_conn(&tx, new.task_id, now)?;
 
+    let mut superseded = None;
     if let Some(active) = active_with_conn(&tx, new.task_id)? {
         if active.bound_head == new.bound_head {
             tx.commit()?;
-            return Ok(QaPassOpen::AlreadyOpen(active));
+            return Ok((QaPassOpen::AlreadyOpen(active), None));
         }
         set_state(&tx, &active.id, QaPassState::Superseded, Some(now))?;
+        superseded = Some(by_id_with_conn(&tx, &active.id)?);
     }
     if let Some(latest) = latest_with_conn(&tx, new.task_id)?
         && latest.bound_head == new.bound_head
         && latest.state.satisfies_gate()
     {
         tx.commit()?;
-        return Ok(QaPassOpen::AlreadySatisfied(latest));
+        return Ok((QaPassOpen::AlreadySatisfied(latest), superseded));
     }
 
     let failed = failed_rounds_with_conn(&tx, new.task_id)?;
@@ -239,10 +256,13 @@ pub fn open_qa_pass(cas_dir: &Path, new: &NewQaPass<'_>, now: DateTime<Utc>) -> 
         let latest = latest_with_conn(&tx, new.task_id)?
             .ok_or_else(|| StoreError::Other("failed QA rounds vanished".to_string()))?;
         tx.commit()?;
-        return Ok(QaPassOpen::Escalate {
-            failed_rounds: failed,
-            latest,
-        });
+        return Ok((
+            QaPassOpen::Escalate {
+                failed_rounds: failed,
+                latest,
+            },
+            superseded,
+        ));
     }
 
     let id = new_pass_id();
@@ -263,7 +283,7 @@ pub fn open_qa_pass(cas_dir: &Path, new: &NewQaPass<'_>, now: DateTime<Utc>) -> 
     )?;
     let pass = by_id_with_conn(&tx, &id)?;
     tx.commit()?;
-    Ok(QaPassOpen::Dispatched(pass))
+    Ok((QaPassOpen::Dispatched(pass), superseded))
 }
 
 /// Link the QA work item the reviewer will start.
@@ -612,6 +632,60 @@ mod tests {
             passes.iter().find(|p| p.id == first.id).unwrap().state,
             QaPassState::Superseded
         );
+    }
+
+    /// cas-ce39: a re-park at a new tip reports the round it retired, pending
+    /// or claimed, so the caller can cancel its work item and tell the
+    /// reviewer. The same tip retires nothing.
+    #[test]
+    fn a_new_tip_reports_the_pending_round_it_supersedes_cas_ce39() {
+        let dir = TempDir::new().unwrap();
+        let now = Utc::now();
+        let (first, retired) =
+            open_qa_pass_reporting_superseded(dir.path(), &new("aaaa1111", now), now).unwrap();
+        let first = dispatched(first);
+        assert!(retired.is_none(), "the first round supersedes nothing");
+
+        let (same, retired) =
+            open_qa_pass_reporting_superseded(dir.path(), &new("aaaa1111", now), now).unwrap();
+        assert!(matches!(same, QaPassOpen::AlreadyOpen(ref pass) if pass.id == first.id));
+        assert!(retired.is_none(), "re-parking the same tip retires nothing");
+
+        let (second, retired) =
+            open_qa_pass_reporting_superseded(dir.path(), &new("bbbb2222", now), now).unwrap();
+        let second = dispatched(second);
+        let retired = retired.expect("the pending round is reported");
+        assert_eq!(retired.id, first.id);
+        assert_eq!(retired.state, QaPassState::Superseded);
+        assert_eq!(retired.bound_head, "aaaa1111");
+        assert!(retired.reviewer_agent_id.is_none(), "pending: nobody to tell");
+        assert_eq!(second.bound_head, "bbbb2222");
+    }
+
+    #[test]
+    fn a_new_tip_reports_the_claimed_round_and_its_reviewer_cas_ce39() {
+        let dir = TempDir::new().unwrap();
+        let now = Utc::now();
+        let first = dispatched(open_qa_pass(dir.path(), &new("aaaa1111", now), now).unwrap());
+        let claimed = claim_qa_pass(dir.path(), "cas-ui1", "reviewer-worker", now).unwrap();
+        assert_eq!(claimed.state, QaPassState::Claimed);
+
+        let (second, retired) =
+            open_qa_pass_reporting_superseded(dir.path(), &new("bbbb2222", now), now).unwrap();
+        let second = dispatched(second);
+        let retired = retired.expect("the claimed round is reported");
+        assert_eq!(retired.id, first.id);
+        assert_eq!(retired.state, QaPassState::Superseded);
+        assert_eq!(retired.reviewer_agent_id.as_deref(), Some("reviewer-worker"));
+        assert_ne!(second.id, first.id);
+        // The retired round can no longer take the old reviewer's verdict.
+        let active = list_qa_passes(dir.path(), "cas-ui1")
+            .unwrap()
+            .into_iter()
+            .filter(|pass| pass.state.is_active())
+            .collect::<Vec<_>>();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].id, second.id);
     }
 
     #[test]

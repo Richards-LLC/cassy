@@ -191,7 +191,11 @@ impl CasCore {
             deadline_at: now + chrono::Duration::minutes(i64::from(qa.pass_timeout_mins.max(1))),
             max_rounds: qa.max_rounds,
         };
-        let outcome = match cas_store::open_qa_pass(&self.cas_root, &new, now) {
+        // cas-ce39: a new tip retires the round open for the old one. Report
+        // which, so its work item is cancelled and a reviewer who had claimed
+        // it is told to stop, instead of reviewing a dead head.
+        let opened = cas_store::open_qa_pass_reporting_superseded(&self.cas_root, &new, now);
+        let (outcome, superseded) = match opened {
             Ok(outcome) => outcome,
             Err(error) => {
                 tracing::error!(task_id = %task.id, error = %error, "cas-619f: QA pass could not be opened");
@@ -201,7 +205,11 @@ impl CasCore {
                 ));
             }
         };
-        Some(match outcome {
+        let new_round_id = match &outcome {
+            QaPassOpen::Dispatched(pass) => Some(pass.id.clone()),
+            _ => None,
+        };
+        let mut status = match outcome {
             QaPassOpen::Dispatched(pass) => {
                 self.materialize_qa_round(task, pass, &reasons, parent_branch, &config, merged_into)
             }
@@ -249,7 +257,107 @@ impl CasCore {
                     latest.id
                 )
             }
-        })
+        };
+        if let Some(retired) = superseded {
+            // Read the new round back after materialization so its QA task
+            // id (linked just above) is known.
+            let next = new_round_id.as_deref().and_then(|id| {
+                cas_store::list_qa_passes(&self.cas_root, &task.id)
+                    .ok()?
+                    .into_iter()
+                    .find(|pass| pass.id == id)
+            });
+            status.push_str(&self.retire_superseded_qa_round(&retired, next.as_ref()));
+        }
+        Some(status)
+    }
+
+    /// cas-ce39: a re-park at a new tip superseded `retired`. Cancel its QA
+    /// work item (pointing at the new one) and, when a reviewer had claimed
+    /// it, message that reviewer with the new round, so the old review stops
+    /// instead of producing a verdict for a dead head. Returns the sentence
+    /// appended to the park response.
+    fn retire_superseded_qa_round(&self, retired: &QaPass, next: Option<&QaPass>) -> String {
+        let next_desc = match next {
+            Some(next) => format!(
+                "round {} (pass {}, QA task {}) for {}",
+                next.round,
+                next.id,
+                next.qa_task_id.as_deref().unwrap_or("-"),
+                next.head8()
+            ),
+            None => "no new round was opened (see above)".to_string(),
+        };
+        let reason = format!(
+            "Independent QA round {} for {} @{} superseded: the delivery re-parked at a new tip; \
+             the review continues as {next_desc}.",
+            retired.round,
+            retired.task_id,
+            retired.head8()
+        );
+        let cancelled = self.cancel_qa_task_with_reason(
+            retired,
+            &reason,
+            next.and_then(|next| next.qa_task_id.clone()),
+        );
+        let (held_by, notified) = match retired.reviewer_agent_id.as_deref() {
+            Some(reviewer) => (
+                format!("claimed by {reviewer}"),
+                self.notify_superseded_reviewer(retired, reviewer, &next_desc),
+            ),
+            None => ("pending, unclaimed".to_string(), String::new()),
+        };
+        format!(
+            "\n\nSUPERSEDED: QA round {} (pass {}, {held_by}) for {} no longer binds this delivery; \
+             the review continues as {next_desc}.{cancelled}{notified}",
+            retired.round,
+            retired.id,
+            retired.head8(),
+        )
+    }
+
+    /// Tell the reviewer of a superseded round to stop (cas-ce39).
+    fn notify_superseded_reviewer(&self, retired: &QaPass, reviewer: &str, next_desc: &str) -> String {
+        let queue = match crate::store::open_prompt_queue_store(&self.cas_root) {
+            Ok(queue) => queue,
+            Err(error) => {
+                return format!(
+                    " Reviewer {reviewer} could NOT be told (prompt queue unavailable: {error}); message them."
+                );
+            }
+        };
+        let body = format!(
+            "STOP reviewing {task} @{old}: independent QA round {round} (pass {pass}) is superseded \
+             because the implementer re-parked the delivery at a new tip. Do not record a verdict for \
+             the old tip. Its QA task is cancelled. The review continues as {next_desc}; the \
+             supervisor assigns it.",
+            task = retired.task_id,
+            old = retired.head8(),
+            round = retired.round,
+            pass = retired.id,
+        );
+        let source = format!(
+            "{}superseded:{}",
+            super::supervisor_push::QA_DISPATCH_SOURCE_PREFIX,
+            retired.id
+        );
+        let factory_session = std::env::var("CAS_FACTORY_SESSION").ok();
+        match queue.enqueue_idempotent(
+            &source,
+            reviewer,
+            &body,
+            factory_session.as_deref(),
+            Some(&format!("QA round superseded: {}", retired.task_id)),
+            Some(cas_store::NotificationPriority::High),
+            &source,
+            Some(&cas_store::QueueOrigin::Daemon),
+        ) {
+            Ok(_) => format!(" Reviewer {reviewer} told to stop."),
+            Err(error) => {
+                tracing::warn!(pass_id = %retired.id, error = %error, "cas-ce39: superseded-round notice not queued");
+                format!(" Reviewer {reviewer} could NOT be told ({error}); message them.")
+            }
+        }
     }
 
     /// cas-619f merge gate for `worktree_merge task_id=…`: the refusal text
@@ -601,6 +709,24 @@ impl CasCore {
     /// Cancel the QA work item of a withdrawn round (cas-5c38) so no
     /// reviewer is spawned for a pass that no longer binds the delivery.
     pub(crate) fn cancel_withdrawn_qa_task(&self, pass: &QaPass, reason: &str) -> String {
+        let close_reason = format!(
+            "Independent QA round {} for {} @{} withdrawn: {}",
+            pass.round,
+            pass.task_id,
+            pass.head8(),
+            reason.trim()
+        );
+        self.cancel_qa_task_with_reason(pass, &close_reason, None)
+    }
+
+    /// Cancel a round's QA work item with a full close reason, pointing at
+    /// the work item that replaces it when there is one (cas-ce39).
+    pub(crate) fn cancel_qa_task_with_reason(
+        &self,
+        pass: &QaPass,
+        close_reason: &str,
+        superseded_by: Option<String>,
+    ) -> String {
         let Some(qa_task_id) = pass.qa_task_id.as_deref() else {
             return String::new();
         };
@@ -616,16 +742,9 @@ impl CasCore {
         let now = chrono::Utc::now();
         qa_task.status = TaskStatus::Cancelled;
         qa_task.closed_at = Some(now);
-        qa_task.terminal_outcome = Some(cas_types::TaskTerminalOutcome::Cancelled {
-            superseded_by: None,
-        });
-        qa_task.close_reason = Some(format!(
-            "Independent QA round {} for {} @{} withdrawn: {}",
-            pass.round,
-            pass.task_id,
-            pass.head8(),
-            reason.trim()
-        ));
+        qa_task.terminal_outcome =
+            Some(cas_types::TaskTerminalOutcome::Cancelled { superseded_by });
+        qa_task.close_reason = Some(close_reason.to_string());
         qa_task.pending_verification = false;
         match store.update(&qa_task) {
             Ok(_) => format!(" QA task {qa_task_id} cancelled."),

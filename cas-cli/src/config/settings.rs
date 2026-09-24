@@ -550,6 +550,83 @@ pub struct FactoryConfig {
     /// Maximum wall-clock duration for a post-merge workspace sweep.
     #[serde(default = "default_merge_sweep_timeout_secs")]
     pub merge_sweep_timeout_secs: u64,
+
+    /// Command the post-merge sweep runs instead of the detected runner
+    /// (`cargo nextest run --workspace` or the package manager's `test`
+    /// script), via `sh -c` in the merged-tip worktree (GH #1006). Unset keeps
+    /// detection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge_sweep_command: Option<String>,
+
+    /// Environment for the post-merge sweep's test process (GH #1006), for
+    /// example the database URL a suite needs. Set in `config.toml` as a
+    /// `[factory.merge_sweep_env]` table. Values are never logged or written
+    /// to receipts; only the names are.
+    #[serde(default, skip_serializing_if = "SweepEnv::is_empty")]
+    pub merge_sweep_env: SweepEnv,
+}
+
+/// `factory.merge_sweep_env`: variable name to value (GH #1006).
+///
+/// A newtype so that `Debug`, and so any log line that formats the factory
+/// config, shows only names. The values are commonly credentials.
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct SweepEnv(pub std::collections::BTreeMap<String, String>);
+
+impl SweepEnv {
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&String, &String)> {
+        self.0.iter()
+    }
+
+    /// Only entries whose name is a portable environment variable name
+    /// (`[A-Za-z_][A-Za-z0-9_]*`). Anything else cannot be passed to a child
+    /// process and is dropped with a warning naming it.
+    pub fn valid(&self) -> Self {
+        Self(
+            self.0
+                .iter()
+                .filter(|(name, _)| {
+                    let valid = Self::is_valid_name(name);
+                    if !valid {
+                        tracing::warn!(
+                            name = %name,
+                            "ignoring factory.merge_sweep_env entry: not a valid environment variable name"
+                        );
+                    }
+                    valid
+                })
+                .map(|(name, value)| (name.clone(), value.clone()))
+                .collect(),
+        )
+    }
+
+    pub fn is_valid_name(name: &str) -> bool {
+        let mut chars = name.chars();
+        chars
+            .next()
+            .is_some_and(|first| first == '_' || first.is_ascii_alphabetic())
+            && chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
+    }
+
+    /// `NAME=<redacted>, ...` for logs and receipts.
+    pub fn redacted_listing(&self) -> String {
+        self.0
+            .keys()
+            .map(|name| format!("{name}=<redacted>"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
+impl std::fmt::Debug for SweepEnv {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "SweepEnv({})", self.redacted_listing())
+    }
 }
 
 /// Durable staging configuration for large generated artifacts.
@@ -685,6 +762,8 @@ impl Default for FactoryConfig {
             ai_enrichment: cas_factory::AiEnrichmentConfig::default(),
             merge_sweep: true,
             merge_sweep_timeout_secs: default_merge_sweep_timeout_secs(),
+            merge_sweep_command: None,
+            merge_sweep_env: SweepEnv::default(),
         }
     }
 }
@@ -1569,6 +1648,40 @@ mod tests {
         let fc = parsed.get("factory").expect("section present");
         assert!(!fc.merge_sweep);
         assert_eq!(fc.merge_sweep_timeout_secs, 42);
+    }
+
+    /// GH #1006: the sweep command and env are read from config, and the env
+    /// values never appear in the config's Debug output.
+    #[test]
+    fn factory_merge_sweep_command_and_env_are_configurable_and_redacted() {
+        let toml_str = "[factory]\nmerge_sweep_command = \"pnpm test:ci\"\n\
+                        [factory.merge_sweep_env]\n\
+                        SYNC_PUSH_POSTGRES_URL = \"postgres://user:hunter2@db/test\"\n\
+                        \"bad-name\" = \"x\"\n";
+        let parsed: std::collections::HashMap<String, FactoryConfig> =
+            toml::from_str(toml_str).expect("valid toml");
+        let fc = parsed.get("factory").expect("section present");
+        assert_eq!(fc.merge_sweep_command.as_deref(), Some("pnpm test:ci"));
+        assert_eq!(
+            fc.merge_sweep_env
+                .0
+                .get("SYNC_PUSH_POSTGRES_URL")
+                .map(String::as_str),
+            Some("postgres://user:hunter2@db/test")
+        );
+        let debug = format!("{fc:?}");
+        assert!(!debug.contains("hunter2"), "{debug}");
+        assert!(
+            debug.contains("SYNC_PUSH_POSTGRES_URL=<redacted>"),
+            "{debug}"
+        );
+        let valid = fc.merge_sweep_env.valid();
+        assert_eq!(
+            valid.0.keys().map(String::as_str).collect::<Vec<_>>(),
+            vec!["SYNC_PUSH_POSTGRES_URL"]
+        );
+        assert!(FactoryConfig::default().merge_sweep_command.is_none());
+        assert!(FactoryConfig::default().merge_sweep_env.is_empty());
     }
 
     #[test]

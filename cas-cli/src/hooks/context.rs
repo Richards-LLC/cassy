@@ -485,7 +485,7 @@ pub fn build_context_ai(
     let rules = rule_store.list()?;
     for rule in rules
         .iter()
-        .filter(|r| r.status == RuleStatus::Proven)
+        .filter(|r| r.status == RuleStatus::Proven || r.is_active_operator_hard_rule())
         .filter(|r| rule_matches_path(r, &input.cwd))
         .take(limit * 2)
     {

@@ -38,6 +38,9 @@ class StubState:
         self.read_pdf = pdf
         self.read_since = None
         self.read_messages: list[str] = []
+        # GH #908: how the hub answers the file post ("ok", "http_413",
+        # or "file_too_large").
+        self.file_mode = "ok"
 
 
 def envelope(result: dict) -> bytes:
@@ -165,6 +168,23 @@ def handler_for(state: StubState):
                     return
                 arguments = request["params"]["arguments"]
                 assert tool_name == "mecha_post"
+                if arguments["kind"] == "file" and state.file_mode == "http_413":
+                    self.send_error(413, "Request Entity Too Large")
+                    return
+                if arguments["kind"] == "file" and state.file_mode == "file_too_large":
+                    body = envelope(
+                        {
+                            "_id": request_id,
+                            "isError": True,
+                            "content": [{"type": "text", "text": '{"error":"file_too_large"}'}],
+                        }
+                    )
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
                 if arguments["kind"] == "file":
                     assert arguments["reply_to"] == USER_THREAD
                     assert arguments["file"]["content_encoding"] == "base64"
@@ -427,6 +447,7 @@ def run_adapter(
     remote_pdf: bytes,
     user_thread: str = USER_THREAD,
     dev_thread: str = DEV_THREAD,
+    pdf_path: Path = PDF,
 ):
     state.remote_pdf = remote_pdf
     state.requests.clear()
@@ -457,7 +478,7 @@ def run_adapter(
         environment.pop("MECHA_SLACK_TOKEN_TEST", None)
         environment.pop("MECHA_VERCEL_BYPASS", None)
         result = subprocess.run(
-            [sys.executable, str(ADAPTER), "v9.99.0", str(PDF), str(html), user_thread, dev_thread],
+            [sys.executable, str(ADAPTER), "v9.99.0", str(pdf_path), str(html), user_thread, dev_thread],
             cwd=ROOT,
             env=environment,
             text=True,
@@ -574,9 +595,37 @@ def main() -> int:
             assert fields is None
             assert state.requests == []
             assert state.download_requests == []
+        # GH #908: a PDF over the hub's upload limit is refused before any
+        # network call, and the message names the limit and the file size.
+        with tempfile.TemporaryDirectory(prefix="release-report-oversize-") as directory:
+            oversized = Path(directory) / "v9.99.0.pdf"
+            oversized.write_bytes(pdf + b"\n%" + b"0" * (3_900_000 - len(pdf) - 2))
+            result, fields = run_adapter(server, state, pdf, pdf_path=oversized)
+            assert result.returncode == 1, result
+            assert "3.9 MB (3900000 bytes)" in result.stderr, result.stderr
+            assert "1.0 MB (1048576 bytes)" in result.stderr, result.stderr
+            assert "nothing was posted" in result.stderr, result.stderr
+            assert "Traceback" not in result.stderr, result.stderr
+            assert fields is None
+            assert state.requests == [], "the size check runs before any network call"
+            assert state.download_requests == []
+        # The hub refusing the upload anyway (HTTP 413 or file_too_large) is a
+        # one-line error naming the limit, never a traceback.
+        for mode, expected in (
+            ("http_413", "too large (HTTP 413)"),
+            ("file_too_large", "too large (file_too_large)"),
+        ):
+            state.file_mode = mode
+            result, fields = run_adapter(server, state, pdf)
+            assert result.returncode == 1, (mode, result)
+            assert expected in result.stderr, (mode, result.stderr)
+            assert "1.0 MB (1048576 bytes)" in result.stderr, (mode, result.stderr)
+            assert "Traceback" not in result.stderr, (mode, result.stderr)
+            assert fields is None, mode
+        state.file_mode = "ok"
         print(
             "release-report-post stub: 6 integrity/endpoint + 6 hub-read "
-            "+ 2 timestamp-boundary scenarios passed"
+            "+ 2 timestamp-boundary + 3 upload-size scenarios passed"
         )
     finally:
         server.shutdown()

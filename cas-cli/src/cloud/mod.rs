@@ -98,6 +98,7 @@ pub use sync_queue::{
     EntityType, PULL_ID_COLLISION, QUARANTINE_TASK, QUARANTINED_ROW_STATEMENTS, QueueHealth,
     QueuedSync, QuarantinedRow, SYNC_REVISION_STATEMENTS, SyncOperation, SyncQueue,
     TASK_DEPENDENCY_TOMBSTONE_RETENTION_DAYS, TASK_DEPENDENCY_TOMBSTONE_STATEMENTS,
+    UNAUTHORED_PULL_STATEMENTS,
     parse_wire_revision, wire_revision,
 };
 pub(crate) use sync_queue::{TaskSyncFulfillResult, TaskSyncIntent, TaskSyncPayload};

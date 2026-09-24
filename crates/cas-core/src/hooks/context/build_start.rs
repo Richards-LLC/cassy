@@ -476,9 +476,12 @@ pub fn build_context_with_stores(
             }
         };
 
+        // cas-5372 (GH #990): a live operator hard rule surfaces from the day
+        // it is recorded, draft or not, and always (like a critical rule).
+        let always_active = |rule: &Rule| rule.is_critical() || rule.is_operator_hard_rule();
         let mut all_proven: Vec<_> = merged_rules
             .iter()
-            .filter(|r| r.status == RuleStatus::Proven)
+            .filter(|r| r.status == RuleStatus::Proven || r.is_active_operator_hard_rule())
             .filter(|r| matches_cwd(r))
             .collect();
 
@@ -487,7 +490,7 @@ pub fn build_context_with_stores(
         // Critical rules always shown
         let critical_rules: Vec<_> = all_proven
             .iter()
-            .filter(|r| r.is_critical())
+            .filter(|r| always_active(r))
             .copied()
             .collect();
 
@@ -502,7 +505,9 @@ pub fn build_context_with_stores(
                 let category_badge = format_category_badge(rule.category);
                 context_parts.push(format!(
                     "- [{}] {} {}",
-                    category_badge, item.id, rule.content
+                    category_badge,
+                    item.id,
+                    rule.surfaced_content()
                 ));
                 total_tokens += item.tokens;
                 stats.rules_included += 1;
@@ -515,7 +520,7 @@ pub fn build_context_with_stores(
         if budget_remaining(total_tokens) > 100 {
             let regular_rules: Vec<_> = all_proven
                 .iter()
-                .filter(|r| !r.is_critical())
+                .filter(|r| !always_active(r))
                 .copied()
                 .collect();
 

@@ -2830,6 +2830,7 @@ function sessionButton(machineId: string, session: HubSession): HTMLButtonElemen
 }
 
 function openSessionPicker(): void {
+  const wasOpen = document.querySelector<HTMLDialogElement>("#session-picker")?.open === true;
   sessionPickerOpen = true;
   render();
   // Opening the picker never rebuilds the shell (its open state is not in the
@@ -2837,6 +2838,14 @@ function openSessionPicker(): void {
   // show the existing dialog here.
   const picker = document.querySelector<HTMLDialogElement>("#session-picker");
   if (picker && !picker.open) picker.showModal();
+  // The reused dialog still carries the last filter text while the list may
+  // show every session, so the two disagree (cas-6f39e). A fresh open starts
+  // from an empty filter and the full list, as the command palette does.
+  const query = document.querySelector<HTMLInputElement>("#session-picker-query");
+  if (query && !wasOpen && query.value) {
+    query.value = "";
+    query.dispatchEvent(new Event("input"));
+  }
   syncSessionPickerToggle();
   queueMicrotask(() => {
     // A phone keyboard over a three-row list hides the list. The filter is

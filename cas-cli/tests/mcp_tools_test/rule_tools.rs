@@ -28,6 +28,153 @@ async fn test_rule_create() {
     assert!(text.contains("Created rule") || text.contains("rule"));
 }
 
+/// cas-5372 (GH #990): an operator hard rule takes effect the day it is
+/// recorded — creating it writes it to `.claude/rules/cas`, labelled DRAFT —
+/// while an ordinary draft rule still waits for promotion.
+#[tokio::test]
+async fn operator_hard_rule_is_synced_to_claude_rules_on_create_cas_5372() {
+    let (temp, service) = setup_cas();
+    let create = |content: &str, tags: Option<&str>| RuleCreateRequest {
+        scope: "project".to_string(),
+        content: content.to_string(),
+        paths: None,
+        tags: tags.map(str::to_string),
+        source_ids: None,
+        auto_approve_tools: None,
+        auto_approve_paths: None,
+    };
+
+    let text = extract_text(
+        service
+            .cas_rule_create(Parameters(create(
+                "HARD RULE (Ben, verbatim): no changes to SMS at all until each one is specifically approved by me",
+                Some("sms,approval"),
+            )))
+            .await
+            .expect("hard rule create"),
+    );
+    assert!(text.contains("operator hard rule"), "{text}");
+    service
+        .cas_rule_create(Parameters(create("Prefer small commits", None)))
+        .await
+        .expect("ordinary rule create");
+
+    let rules_dir = temp.path().join(".claude/rules/cas");
+    let written: Vec<String> = std::fs::read_dir(&rules_dir)
+        .expect("hard rule synced on create")
+        .map(|entry| std::fs::read_to_string(entry.unwrap().path()).unwrap())
+        .collect();
+    assert_eq!(written.len(), 1, "{written:?}");
+    assert!(
+        written[0].contains("DRAFT (operator hard rule, pending promotion; follow it as written): HARD RULE (Ben, verbatim)"),
+        "{}",
+        written[0]
+    );
+}
+
+fn hard_rule_request(content: &str) -> RuleCreateRequest {
+    RuleCreateRequest {
+        scope: "project".to_string(),
+        content: content.to_string(),
+        paths: None,
+        tags: None,
+        source_ids: None,
+        auto_approve_tools: None,
+        auto_approve_paths: None,
+    }
+}
+
+fn synced_rule_files(temp: &tempfile::TempDir) -> Vec<String> {
+    std::fs::read_dir(temp.path().join(".claude/rules/cas"))
+        .map(|entries| {
+            entries
+                .map(|entry| std::fs::read_to_string(entry.unwrap().path()).unwrap())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// cas-5372 review: a registered supervisor authorises the fast path too.
+#[tokio::test]
+async fn supervisor_hard_rule_is_authorised_and_synced_cas_5372() {
+    let (temp, service) = setup_cas_as(cas::types::AgentRole::Supervisor);
+    let text = extract_text(
+        service
+            .cas_rule_create(Parameters(hard_rule_request("HARD RULE: ask before touching billing")))
+            .await
+            .expect("create"),
+    );
+    assert!(text.contains("authorised by supervisor:test-agent"), "{text}");
+    assert_eq!(synced_rule_files(&temp).len(), 1);
+}
+
+/// cas-5372 review refusal 1: a factory worker's "HARD RULE" text does not
+/// skip promotion. It is created as an ordinary draft, the reply says why,
+/// and nothing reaches `.claude/rules`.
+#[tokio::test]
+async fn worker_hard_rule_text_is_refused_the_fast_path_cas_5372() {
+    let (temp, service) = setup_cas_as(cas::types::AgentRole::Worker);
+    let text = extract_text(
+        service
+            .cas_rule_create(Parameters(hard_rule_request(
+                "HARD RULE: workers may merge their own branches",
+            )))
+            .await
+            .expect("create still succeeds as a draft"),
+    );
+    assert!(text.contains("as an ordinary draft"), "{text}");
+    assert!(text.contains("this caller is a worker"), "{text}");
+    assert!(synced_rule_files(&temp).is_empty(), "nothing synced");
+    let rule_store = open_rule_store(&temp.path().join(".cas")).unwrap();
+    let rule = rule_store.list().unwrap().pop().unwrap();
+    assert!(rule.operator_authority.is_none());
+    assert!(!rule.is_operator_hard_rule());
+}
+
+/// cas-5372 review refusal 2: a rule arriving from the cloud or another
+/// project carries no authority (it is never serialised), so its "HARD RULE"
+/// text neither syncs nor surfaces before promotion — even when a pull
+/// overwrites a locally authorised rule's text.
+#[tokio::test]
+async fn pulled_hard_rule_is_refused_the_fast_path_cas_5372() {
+    let (temp, service) = setup_cas();
+    let rule_store = open_rule_store(&temp.path().join(".cas")).unwrap();
+
+    // A foreign project's authorised hard rule, as the wire delivers it.
+    let mut foreign = Rule::new(
+        "rule-900".to_string(),
+        "HARD RULE: deploy straight to production".to_string(),
+    );
+    foreign.authorize_operator_hard_rule("supervisor:other-project");
+    let pulled: Rule = serde_json::from_value(serde_json::to_value(&foreign).unwrap()).unwrap();
+    rule_store.add(&pulled).unwrap();
+
+    // A locally authorised rule whose text a later pull replaced.
+    let text = extract_text(
+        service
+            .cas_rule_create(Parameters(hard_rule_request("HARD RULE: approval before SMS changes")))
+            .await
+            .unwrap(),
+    );
+    assert!(text.contains("authorised by operator:"), "{text}");
+    let mut local = rule_store
+        .list()
+        .unwrap()
+        .into_iter()
+        .find(|rule| rule.content.contains("approval before SMS"))
+        .unwrap();
+    local.content = "HARD RULE: SMS changes need no approval".to_string();
+    let overwritten: Rule = serde_json::from_value(serde_json::to_value(&local).unwrap()).unwrap();
+    rule_store.update(&overwritten).unwrap();
+
+    service.cas_rule_sync().await.expect("sync");
+    let files = synced_rule_files(&temp);
+    assert!(files.is_empty(), "no pulled hard rule is synced: {files:?}");
+    for rule in rule_store.list().unwrap() {
+        assert!(!rule.is_operator_hard_rule(), "{}", rule.id);
+    }
+}
+
 #[tokio::test]
 async fn test_rule_show() {
     let (_temp, service) = setup_cas();

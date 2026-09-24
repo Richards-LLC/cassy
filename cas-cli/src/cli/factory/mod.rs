@@ -975,6 +975,41 @@ pub enum FactoryCommands {
         cas_root: Option<std::path::PathBuf>,
     },
 
+    /// Approve a worker's permission request that Claude Code parked for a
+    /// team lead (cas-4143). Answers the oldest unread request from the
+    /// worker, or the one named by `--request`.
+    Approve {
+        /// Worker name
+        worker: String,
+
+        /// Permission request id (perm-…) from the worker_approval_pending wake
+        #[arg(long)]
+        request: Option<String>,
+
+        /// Explicit Cassy root
+        #[arg(long)]
+        cas_root: Option<std::path::PathBuf>,
+    },
+
+    /// Deny a worker's permission request that Claude Code parked for a team
+    /// lead (cas-4143). The reason reaches the worker as the tool error.
+    Deny {
+        /// Worker name
+        worker: String,
+
+        /// Permission request id (perm-…) from the worker_approval_pending wake
+        #[arg(long)]
+        request: Option<String>,
+
+        /// Why the call is denied (shown to the worker)
+        #[arg(long)]
+        reason: Option<String>,
+
+        /// Explicit Cassy root
+        #[arg(long)]
+        cas_root: Option<std::path::PathBuf>,
+    },
+
     /// Print the tail of a worker's Claude Code transcript (cas-4513).
     Debug {
         /// Worker name
@@ -1186,6 +1221,29 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
                 json,
                 cas_root: sub_cas_root,
             } => wedged::execute_is_wedged(sub_cas_root.as_deref().or(cas_root), worker, *json),
+            FactoryCommands::Approve {
+                worker,
+                request,
+                cas_root: sub_cas_root,
+            } => wedged::execute_answer_permission(
+                sub_cas_root.as_deref().or(cas_root),
+                worker,
+                request.as_deref(),
+                true,
+                None,
+            ),
+            FactoryCommands::Deny {
+                worker,
+                request,
+                reason,
+                cas_root: sub_cas_root,
+            } => wedged::execute_answer_permission(
+                sub_cas_root.as_deref().or(cas_root),
+                worker,
+                request.as_deref(),
+                false,
+                reason.as_deref(),
+            ),
             FactoryCommands::Debug {
                 worker,
                 tail,

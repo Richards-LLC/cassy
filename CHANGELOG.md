@@ -7,6 +7,45 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.30.0] - 2026-09-24
+
+### Changed
+
+- Commander (the hub web app) got a full polish pass from the journey
+  evaluation:
+  - Long machine and supervisor names wrap or ellipsise instead of clipping.
+  - On a phone, the "Jump to latest" chip and the "connected" toast no longer
+    cover the thread or its header.
+  - The session picker shows every session's details at 390px and reopens
+    with an empty filter.
+  - Keyboard focus lands somewhere real on every route and survives page
+    rebuilds.
+  - Forced-colours mode keeps opaque focus rings and a highlighted open row.
+  - Each machine keeps the accent colour it got when it first paired.
+  - A refused reply states its reason once.
+  - Live turns show the browser's clock instead of a skewed machine clock.
+  - During an outage only the terminal dims; the conversation stays readable.
+
+### Fixed
+
+- A team pull can no longer overwrite a local task with another project's
+  task that happens to share its ID. Rows that carry no project are set aside
+  instead of being claimed by the puller.
+- A factory worker's Neon SQL write that resolves to the production branch is
+  refused.
+- `worktree_merge` never merges a task that was moved into an epic straight
+  to `main`. The task's delivery target follows it into the epic.
+- After a rejected independent QA round, re-parking always opens the next
+  round.
+- Task writes wait out SQLite contention instead of failing with "database is
+  locked".
+- After a task is handed from a worker to the supervisor, closing it measures
+  the branch that actually holds its commits.
+- The hub web journey suite runs on per-checkout ports and never tests
+  another checkout's server.
+- The systemd hub restart test no longer kills itself on a machine that is
+  running a real hub.
+
 ## [3.29.1] - 2026-09-24
 
 ### Fixed

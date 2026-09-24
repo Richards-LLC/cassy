@@ -57,6 +57,11 @@ pub const PROMPT_QUEUE_STALE_TTL_SECS: i64 = 24 * 60 * 60;
 /// that must not bounce itself.
 const DELIVERY_STALLED_BOUNCE_DEDUPE_PREFIX: &str = "delivery-stalled:";
 
+/// GH #894: idempotency marker for the one operator alert raised about a
+/// supervisor lifecycle relay that never reached the supervisor. The suffix is
+/// the relay's `prompt_queue.id`, so a daemon restart cannot alert twice.
+pub const RELAY_OPERATOR_ESCALATION_DEDUPE_PREFIX: &str = "relay-escalation:";
+
 /// Rows the daemon terminally quarantined are not deliverable content.
 const TERMINAL_NON_DELIVERY_STAGES: &str = "('dropped', 'suppressed', 'abandoned')";
 
@@ -128,6 +133,26 @@ const UNSURFACED_UNLESS_EXPLICIT_ACK_SQL: &str = "AND (q.target = 'all_workers'
 /// also unseen, as before. (cas-5255 / GH #719)
 const UNCLAIMED_RECIPIENT_RECEIPT_SQL: &str =
     "AND (seen.prompt_id IS NULL OR seen.source = 'transport_delivered')";
+
+/// Which transport-delivered rows a drain may surface.
+#[derive(Debug, Clone, Copy)]
+enum TransportEligibility {
+    /// Unread rows, including those holding only a provisional transport
+    /// receipt (inbox poll and turn start).
+    Any,
+    /// Only rows with no transport marker at all (cas-9568).
+    NoneRecorded,
+    /// cas-b5e4 (GH #989): rows with no transport marker, plus rows whose
+    /// transport handoff happened after the current turn began — a message
+    /// that reached a busy worker mid-turn and cannot be that turn's prompt.
+    After(chrono::DateTime<Utc>),
+}
+
+/// Eligibility for [`TransportEligibility::After`]; binds the turn start.
+const DELIVERED_AFTER_TURN_START_RECEIPT_SQL: &str =
+    "AND (seen.prompt_id IS NULL OR seen.source = 'transport_delivered')
+     AND (q.transport_delivered_at IS NULL
+          OR julianday(q.transport_delivered_at) > julianday(?))";
 
 /// Eligibility for a fallback invoked after a tool result. Unlike a new
 /// turn, this path must never replay a row whose transport handoff was
@@ -1617,6 +1642,22 @@ pub trait PromptQueueStore: Send + Sync {
         summary: &str,
     ) -> Result<Option<i64>>;
 
+    /// Supervisor lifecycle relays (`lifecycle-wake:` / `lifecycle:` sources)
+    /// that are at least `older_than_secs` old and never reached the
+    /// supervisor (GH #894). Returned oldest first.
+    ///
+    /// A row counts when it was never transported, never acknowledged or seen,
+    /// and is either still pending or terminated as an undelivered relay.
+    /// Rows withdrawn because their premise expired, and rows that already
+    /// have a [`RELAY_OPERATOR_ESCALATION_DEDUPE_PREFIX`] alert, are excluded.
+    fn undelivered_supervisor_lifecycle_relays(
+        &self,
+        factory_session: &str,
+        supervisor_aliases: &[&str],
+        older_than_secs: i64,
+        limit: usize,
+    ) -> Result<Vec<QueuedPrompt>>;
+
     /// Poll for pending prompts for a specific target (marks as processed)
     fn poll_for_target(&self, target: &str, limit: usize) -> Result<Vec<QueuedPrompt>>;
 
@@ -1686,6 +1727,27 @@ pub trait PromptQueueStore: Send + Sync {
         factory_session: Option<&str>,
         limit: usize,
     ) -> Result<Vec<QueuedPrompt>>;
+
+    /// cas-b5e4 (GH #989): surface unread rows at a tool boundary inside a
+    /// turn that began at `turn_started_at`. Like
+    /// [`Self::surface_unseen_for_recipient_without_transport_delivery`], but a
+    /// row whose transport handoff happened after the turn began is eligible:
+    /// it reached a busy recipient mid-turn and the harness has not shown it.
+    /// Rows handed off before the turn began stay excluded (cas-9568).
+    fn surface_unseen_for_recipient_delivered_after(
+        &self,
+        recipient: &str,
+        factory_session: Option<&str>,
+        limit: usize,
+        turn_started_at: chrono::DateTime<Utc>,
+    ) -> Result<Vec<QueuedPrompt>> {
+        let _ = turn_started_at;
+        self.surface_unseen_for_recipient_without_transport_delivery(
+            recipient,
+            factory_session,
+            limit,
+        )
+    }
 
     /// Atomically surface unread rows from a bounded set of senders.
     ///
@@ -2170,7 +2232,60 @@ pub struct SqlitePromptQueueStore {
     conn: Arc<Mutex<Connection>>,
 }
 
+/// cas-b5e4 (GH #989): directory of per-recipient "new mail" stamps next to
+/// `cas.db`. A hook at every tool boundary compares one small file against
+/// its last check instead of opening the database, so a busy recipient sees a
+/// new row within one tool call while a quiet turn stays store-free.
+pub const INBOX_SIGNAL_DIR: &str = "inbox-signal";
+
+/// File name of a recipient's inbox stamp under [`INBOX_SIGNAL_DIR`].
+pub fn inbox_signal_file_name(recipient: &str) -> String {
+    let name: String = recipient
+        .trim()
+        .to_ascii_lowercase()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .collect();
+    format!("{name}.stamp")
+}
+
+/// Read a recipient's inbox stamp (milliseconds since the epoch of the most
+/// recent enqueue addressed to it). `None` when nothing was ever enqueued.
+pub fn read_inbox_signal(cas_dir: &Path, recipient: &str) -> Option<i64> {
+    std::fs::read_to_string(
+        cas_dir
+            .join(INBOX_SIGNAL_DIR)
+            .join(inbox_signal_file_name(recipient)),
+    )
+    .ok()?
+    .trim()
+    .parse()
+    .ok()
+}
+
 impl SqlitePromptQueueStore {
+    /// Stamp `recipient`'s inbox signal after a committed enqueue.
+    /// Best-effort: a failed stamp only delays surfacing to the next turn.
+    fn signal_inbox(&self, recipient: &str) {
+        let Ok(conn) = crate::shared_db::lock_connection(&self.conn) else {
+            return;
+        };
+        let Some(dir) = conn
+            .path()
+            .filter(|path| !path.is_empty())
+            .and_then(|path| Path::new(path).parent().map(Path::to_path_buf))
+        else {
+            return;
+        };
+        drop(conn);
+        let dir = dir.join(INBOX_SIGNAL_DIR);
+        if std::fs::create_dir_all(&dir).is_err() {
+            return;
+        }
+        let stamp = Utc::now().timestamp_millis().to_string();
+        let _ = std::fs::write(dir.join(inbox_signal_file_name(recipient)), stamp);
+    }
+
     /// Open or create a SQLite prompt queue store
     pub fn open(cas_dir: &Path) -> Result<Self> {
         let db_path = cas_dir.join("cas.db");
@@ -3015,7 +3130,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         urgent: bool,
         origin: Option<&QueueOrigin>,
     ) -> Result<WorkerPeerMessageEnqueue> {
-        crate::shared_db::with_write_retry(|| {
+        let enqueued = crate::shared_db::with_write_retry(|| {
             let conn = crate::shared_db::lock_connection(&self.conn)?;
             let tx = crate::shared_db::ImmediateTx::new(&conn)?;
             let now = Utc::now();
@@ -3060,7 +3175,10 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                 recipient_id,
                 supervisor_copy_id,
             })
-        })
+        })?;
+        self.signal_inbox(recipient);
+        self.signal_inbox(supervisor);
+        Ok(enqueued)
     }
 
     fn enqueue_operator_message(
@@ -3121,7 +3239,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         attribution: Option<&serde_json::Value>,
         origin: Option<&QueueOrigin>,
     ) -> Result<EnqueueOutcome> {
-        crate::shared_db::with_write_retry(|| {
+        let outcome = crate::shared_db::with_write_retry(|| {
             let conn = crate::shared_db::lock_connection(&self.conn)?;
             let tx = crate::shared_db::ImmediateTx::new(&conn)?;
             let now = Utc::now();
@@ -3178,7 +3296,11 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             let _ = capture_message_event(&tx, source, target);
             tx.commit()?;
             Ok(EnqueueOutcome::Created(id))
-        }) // with_write_retry
+        })?; // with_write_retry
+        if matches!(outcome, EnqueueOutcome::Created(_)) {
+            self.signal_inbox(target);
+        }
+        Ok(outcome)
     }
 
     fn enqueue_idempotent(
@@ -3380,6 +3502,72 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         })
     }
 
+    fn undelivered_supervisor_lifecycle_relays(
+        &self,
+        factory_session: &str,
+        supervisor_aliases: &[&str],
+        older_than_secs: i64,
+        limit: usize,
+    ) -> Result<Vec<QueuedPrompt>> {
+        let aliases: Vec<String> = supervisor_aliases
+            .iter()
+            .map(|alias| alias.trim().to_ascii_lowercase())
+            .filter(|alias| !alias.is_empty())
+            .collect();
+        if aliases.is_empty() || limit == 0 {
+            return Ok(Vec::new());
+        }
+        let now = Utc::now();
+        let cutoff = now
+            .checked_sub_signed(chrono::Duration::seconds(older_than_secs.max(0)))
+            .unwrap_or(now)
+            .to_rfc3339();
+        let stale_cutoff =
+            (now - chrono::Duration::seconds(PROMPT_QUEUE_STALE_TTL_SECS)).to_rfc3339();
+        let alias_slots = vec!["?"; aliases.len()].join(", ");
+        let sql = format!(
+            "SELECT id, source, target, prompt, created_at, processed_at, summary, priority, acked_at, urgent, factory_session, origin_agent_id, origin_kind, operator_label, operator_device_id, operator_device_label, operator_scopes, operator_verified
+             FROM prompt_queue q
+             WHERE q.factory_session = ?
+               AND (q.source LIKE 'lifecycle-wake:%' OR q.source LIKE 'lifecycle:%')
+               AND lower(q.target) IN ({alias_slots})
+               AND q.created_at <= ?
+               AND q.created_at >= ?
+               AND q.transport_delivered_at IS NULL
+               AND q.acked_at IS NULL
+               AND (
+                    COALESCE(q.highest_stage, 'enqueued') IN ('enqueued', 'selected', 'gated')
+                    OR (q.highest_stage = 'abandoned'
+                        AND q.last_pending_reason IN ('undelivered_lifecycle_relay', 'undelivered_after_wake_declines'))
+               )
+               AND NOT EXISTS (
+                    SELECT 1 FROM prompt_queue_recipient_seen seen WHERE seen.prompt_id = q.id
+               )
+               AND NOT EXISTS (
+                    SELECT 1 FROM prompt_queue alert
+                     WHERE alert.dedupe_key = '{RELAY_OPERATOR_ESCALATION_DEDUPE_PREFIX}' || q.id
+               )
+             ORDER BY q.id ASC
+             LIMIT ?"
+        );
+        let mut values: Vec<Box<dyn rusqlite::ToSql>> = Vec::with_capacity(aliases.len() + 4);
+        values.push(Box::new(factory_session.to_string()));
+        for alias in aliases {
+            values.push(Box::new(alias));
+        }
+        values.push(Box::new(cutoff));
+        values.push(Box::new(stale_cutoff));
+        values.push(Box::new(limit as i64));
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        let mut stmt = conn.prepare(&sql)?;
+        Ok(stmt
+            .query_map(
+                rusqlite::params_from_iter(values.iter().map(|value| value.as_ref())),
+                Self::prompt_from_row,
+            )?
+            .collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
     fn poll_for_target(&self, target: &str, limit: usize) -> Result<Vec<QueuedPrompt>> {
         self.poll_for_target_with_session(target, None, limit)
     }
@@ -3470,7 +3658,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             limit,
             SurfacingSource::InboxPoll,
             None,
-            false,
+            TransportEligibility::Any,
         )
     }
 
@@ -3489,7 +3677,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             limit,
             SurfacingSource::HookSurfaced,
             None,
-            false,
+            TransportEligibility::Any,
         )
     }
 
@@ -3505,7 +3693,24 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             limit,
             SurfacingSource::HookSurfaced,
             None,
-            true,
+            TransportEligibility::NoneRecorded,
+        )
+    }
+
+    fn surface_unseen_for_recipient_delivered_after(
+        &self,
+        recipient: &str,
+        factory_session: Option<&str>,
+        limit: usize,
+        turn_started_at: chrono::DateTime<Utc>,
+    ) -> Result<Vec<QueuedPrompt>> {
+        self.drain_unseen_for_recipient(
+            recipient,
+            factory_session,
+            limit,
+            SurfacingSource::HookSurfaced,
+            None,
+            TransportEligibility::After(turn_started_at),
         )
     }
 
@@ -3522,7 +3727,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             limit,
             SurfacingSource::HookSurfaced,
             Some(sources),
-            false,
+            TransportEligibility::Any,
         )
     }
 
@@ -5290,7 +5495,7 @@ impl SqlitePromptQueueStore {
         limit: usize,
         source: SurfacingSource,
         source_filter: Option<&[&str]>,
-        exclude_transport_delivery: bool,
+        transport: TransportEligibility,
     ) -> Result<Vec<QueuedPrompt>> {
         if recipient.trim().is_empty() {
             return Err(StoreError::Other(
@@ -5329,10 +5534,16 @@ impl SqlitePromptQueueStore {
                  AND (q.highest_stage IS NULL
                       OR q.highest_stage NOT IN {TERMINAL_NON_DELIVERY_STAGES})"
             );
-            let receipt_sql = if exclude_transport_delivery {
-                UNSEEN_RECIPIENT_RECEIPT_SQL
-            } else {
-                UNCLAIMED_RECIPIENT_RECEIPT_SQL
+            let receipt_sql = match transport {
+                TransportEligibility::Any => UNCLAIMED_RECIPIENT_RECEIPT_SQL,
+                TransportEligibility::NoneRecorded => UNSEEN_RECIPIENT_RECEIPT_SQL,
+                TransportEligibility::After(_) => DELIVERED_AFTER_TURN_START_RECEIPT_SQL,
+            };
+            // The receipt clause precedes every other bound predicate, so its
+            // one parameter follows the join's recipient.
+            let turn_start_param = match transport {
+                TransportEligibility::After(at) => Some(at.to_rfc3339()),
+                _ => None,
             };
             let source_sql = if normalized_sources.is_empty() {
                 String::new()
@@ -5345,11 +5556,15 @@ impl SqlitePromptQueueStore {
 
             let (sql, query_params): (String, Vec<Box<dyn rusqlite::ToSql>>) =
                 if let Some(session) = factory_session {
-                    let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![
-                        Box::new(recipient.to_string()),
-                        Box::new(stale_cutoff.clone()),
-                        Box::new(recipient.to_string()),
-                    ];
+                    let mut params: Vec<Box<dyn rusqlite::ToSql>> =
+                        vec![Box::new(recipient.to_string())];
+                    params.extend(
+                        turn_start_param
+                            .clone()
+                            .map(|at| Box::new(at) as Box<dyn rusqlite::ToSql>),
+                    );
+                    params.push(Box::new(stale_cutoff.clone()));
+                    params.push(Box::new(recipient.to_string()));
                     params.extend(
                         normalized_sources
                             .iter()
@@ -5379,11 +5594,15 @@ impl SqlitePromptQueueStore {
                         params,
                     )
                 } else {
-                    let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![
-                        Box::new(recipient.to_string()),
-                        Box::new(stale_cutoff.clone()),
-                        Box::new(recipient.to_string()),
-                    ];
+                    let mut params: Vec<Box<dyn rusqlite::ToSql>> =
+                        vec![Box::new(recipient.to_string())];
+                    params.extend(
+                        turn_start_param
+                            .clone()
+                            .map(|at| Box::new(at) as Box<dyn rusqlite::ToSql>),
+                    );
+                    params.push(Box::new(stale_cutoff.clone()));
+                    params.push(Box::new(recipient.to_string()));
                     params.extend(
                         normalized_sources
                             .iter()
@@ -5542,6 +5761,155 @@ mod tests {
         let store = SqlitePromptQueueStore::open(temp.path()).unwrap();
         store.init().unwrap();
         (temp, store)
+    }
+
+    /// cas-b5e4 (GH #989): at a tool boundary, a row handed off after the
+    /// turn began is surfaced; one handed off before it (the turn's own
+    /// injection, cas-9568) is not; an untransported row is; each only once.
+    #[test]
+    fn tool_boundary_surfaces_rows_delivered_after_the_turn_began_cas_b5e4() {
+        let (_temp, store) = create_test_store();
+        let session = "factory-b5e4";
+        let before = store
+            .enqueue_with_session("sup", "worker-1", "turn prompt", session)
+            .unwrap();
+        store.mark_transport_delivered(before).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let turn_started_at = Utc::now();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let mid_turn = store
+            .enqueue_with_session("peer", "worker-1", "peer reply mid-turn", session)
+            .unwrap();
+        store.mark_transport_delivered(mid_turn).unwrap();
+        let pending = store
+            .enqueue_with_session("sup", "worker-1", "not yet handed off", session)
+            .unwrap();
+
+        let ids = |rows: Vec<QueuedPrompt>| rows.into_iter().map(|row| row.id).collect::<Vec<_>>();
+        let mut surfaced = ids(store
+            .surface_unseen_for_recipient_delivered_after("worker-1", Some(session), 10, turn_started_at)
+            .unwrap());
+        surfaced.sort();
+        assert_eq!(surfaced, vec![mid_turn, pending]);
+        assert!(
+            store
+                .surface_unseen_for_recipient_delivered_after("worker-1", Some(session), 10, turn_started_at)
+                .unwrap()
+                .is_empty(),
+            "a surfaced row is receipted and never replayed"
+        );
+        assert!(
+            store
+                .surface_unseen_for_recipient_without_transport_delivery("worker-1", Some(session), 10)
+                .unwrap()
+                .is_empty(),
+            "the pre-turn injection stays excluded"
+        );
+    }
+
+    #[test]
+    fn enqueue_stamps_the_recipient_inbox_signal_cas_b5e4() {
+        let (temp, store) = create_test_store();
+        assert_eq!(read_inbox_signal(temp.path(), "worker-1"), None);
+        let before = Utc::now().timestamp_millis();
+        store
+            .enqueue_with_session("sup", "Worker-1", "hello", "factory-b5e4")
+            .unwrap();
+        let stamp = read_inbox_signal(temp.path(), "worker-1").expect("enqueue stamps the signal");
+        assert!(stamp >= before, "{stamp} < {before}");
+        store
+            .enqueue_worker_peer_with_supervisor_copy(
+                "worker-2", "worker-1", "sup", "peer", "copy", "factory-b5e4", None, None, false, None,
+            )
+            .unwrap();
+        assert!(read_inbox_signal(temp.path(), "sup").is_some(), "the supervisor copy is signalled too");
+    }
+
+    /// GH #894: the operator-escalation scan returns exactly the supervisor
+    /// lifecycle relays that never reached the supervisor, and each only
+    /// until its one alert exists.
+    #[test]
+    fn undelivered_supervisor_relay_scan_selects_only_relays_the_supervisor_never_got() {
+        let (_temp, store) = create_test_store();
+        let session = "factory-a";
+        let relay = |source: &str, target: &str, session: &str| {
+            store
+                .enqueue_with_session(source, target, "<task-lifecycle ...>", session)
+                .unwrap()
+        };
+        let pending_wake = relay("lifecycle-wake:1", "supervisor", session);
+        let pending_completion = relay("lifecycle:2", "cosmic-bear-43", session);
+        let abandoned_undelivered = relay("lifecycle-wake:3", "supervisor", session);
+        let transported = relay("lifecycle-wake:4", "supervisor", session);
+        let acked = relay("lifecycle-wake:5", "supervisor", session);
+        let superseded = relay("lifecycle-wake:6", "supervisor", session);
+        let seen = relay("lifecycle-wake:7", "supervisor", session);
+        let fresh = relay("lifecycle-wake:8", "supervisor", session);
+        let worker_bound = relay("lifecycle-wake:9", "swift-fox", session);
+        let other_session = relay("lifecycle-wake:10", "supervisor", "factory-b");
+        let worker_message = relay("swift-fox", "supervisor", session);
+
+        store
+            .mark_undelivered_lifecycle_relay(abandoned_undelivered, Some("budget exhausted"))
+            .unwrap();
+        store.mark_transport_delivered(transported).unwrap();
+        store.ack(acked).unwrap();
+        store.mark_superseded(superseded, "task moved on").unwrap();
+        {
+            let conn = store.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO prompt_queue_recipient_seen (prompt_id, recipient, seen_at) VALUES (?, 'supervisor', ?)",
+                params![seen, Utc::now().to_rfc3339()],
+            )
+            .unwrap();
+            let ten_minutes_ago = (Utc::now() - chrono::Duration::minutes(10)).to_rfc3339();
+            conn.execute(
+                "UPDATE prompt_queue SET created_at = ? WHERE id <> ?",
+                params![ten_minutes_ago, fresh],
+            )
+            .unwrap();
+        }
+
+        let scan = || {
+            store
+                .undelivered_supervisor_lifecycle_relays(
+                    "factory-a",
+                    &["Cosmic-Bear-43", "supervisor"],
+                    9 * 60,
+                    50,
+                )
+                .unwrap()
+                .into_iter()
+                .map(|queued| queued.id)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            scan(),
+            vec![pending_wake, pending_completion, abandoned_undelivered],
+            "only never-delivered supervisor relays past the window are escalation candidates \
+             (transported {transported}, acked {acked}, superseded {superseded}, seen {seen}, \
+             fresh {fresh}, worker-bound {worker_bound}, other session {other_session}, \
+             worker message {worker_message} must be excluded)"
+        );
+
+        let alerted = store
+            .enqueue_idempotent(
+                "relay-watchdog",
+                "operator",
+                "{}",
+                Some(session),
+                None,
+                None,
+                &format!("{RELAY_OPERATOR_ESCALATION_DEDUPE_PREFIX}{pending_wake}"),
+                None,
+            )
+            .unwrap();
+        assert!(matches!(alerted, EnqueueIdempotentResult::Created(_)));
+        assert_eq!(
+            scan(),
+            vec![pending_completion, abandoned_undelivered],
+            "a relay with an operator alert on record is not selected again"
+        );
     }
 
     /// cas-d9a8: the stamped-origin columns exist and default to unattributed.

@@ -1763,10 +1763,34 @@ fn resolve_sync_all_workers_target(
 fn parse_worker_name_filter(filter: Option<&String>) -> std::collections::HashSet<String> {
     filter
         .into_iter()
-        .flat_map(|names| names.split(','))
-        .map(strip_target_wrapping)
-        .filter(|s| !s.is_empty())
+        .flat_map(|names| parse_worker_name_list(names))
         .collect()
+}
+
+/// cas-4691 (GH #976): read a `worker_names` value in either shape a caller
+/// sends. The parameter is a comma-separated string, but its plural name
+/// invites a JSON array, and `shutdown_workers` rejected `["wild-phoenix-59"]`
+/// as unknown while listing that worker as known. A value that parses as a
+/// JSON array of strings is taken element by element; anything else is split
+/// on commas with brackets and quotes stripped. Order is kept and repeats are
+/// dropped.
+fn parse_worker_name_list(raw: &str) -> Vec<String> {
+    let trimmed = raw.trim();
+    let names: Vec<String> = match trimmed
+        .starts_with('[')
+        .then(|| serde_json::from_str::<Vec<String>>(trimmed).ok())
+        .flatten()
+    {
+        Some(array) => array.iter().map(|name| strip_target_wrapping(name)).collect(),
+        None => trimmed.split(',').map(strip_target_wrapping).collect(),
+    };
+    let mut unique = Vec::with_capacity(names.len());
+    for name in names {
+        if !name.is_empty() && !unique.contains(&name) {
+            unique.push(name);
+        }
+    }
+    unique
 }
 
 /// Trim one element of a target list down to the bare identifier.
@@ -2062,14 +2086,8 @@ impl CasService {
         let isolate = req.isolate.unwrap_or(false);
         let mut worker_names: Vec<String> = req
             .worker_names
-            .as_ref()
-            .map(|names| {
-                names
-                    .split(',')
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect()
-            })
+            .as_deref()
+            .map(parse_worker_name_list)
             .unwrap_or_default();
 
         // cas-6913: task_id pre-assigns a task to the (single) spawned
@@ -2537,6 +2555,17 @@ impl CasService {
                 )
             })?;
 
+        // cas-ea9c (GH #1005): prefetch the issues the pre-assigned task
+        // cites while the worker boots. The supervisor holds the GitHub
+        // credentials the worker is spawned without.
+        if let Some(task) = req
+            .task_id
+            .as_deref()
+            .and_then(|task_id| task_store.get(task_id).ok())
+        {
+            crate::github_issue_attach::spawn_attach_cited_issues(&self.inner.cas_root, &task);
+        }
+
         let task_id_note = req
             .task_id
             .as_ref()
@@ -2621,13 +2650,7 @@ impl CasService {
         let requested_names: Vec<String> = req
             .worker_names
             .as_deref()
-            .map(|names| {
-                names
-                    .split(',')
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect()
-            })
+            .map(parse_worker_name_list)
             .unwrap_or_default();
         let requested_id = req.id.as_deref().map(str::trim).filter(|id| !id.is_empty());
         if requested_id.is_some() && (!requested_names.is_empty() || req.count.is_some()) {
@@ -3097,6 +3120,66 @@ impl CasService {
     /// The environment-derived role check is the same workflow guardrail used
     /// by other supervisor-only operations. It is not an adversarial security
     /// boundary; factory process ownership remains the trust boundary.
+    /// Restart the factory daemon's spawn queue without touching the session
+    /// (cas-73b5, GH #970).
+    ///
+    /// Records a reset request the daemon applies on its next loop pass. If
+    /// the loop is wedged, its watchdog first kills hung git/gh/ssh helpers so
+    /// the pass can finish. Returns the current queue health so the caller
+    /// sees what it is recovering from.
+    pub(super) async fn factory_restart_spawn_queue(
+        &self,
+        _req: FactoryRequest,
+    ) -> Result<CallToolResult, McpError> {
+        use crate::harness_policy::is_supervisor_from_env;
+
+        if !is_supervisor_from_env() {
+            return Err(Self::error(
+                ErrorCode::INVALID_PARAMS,
+                "coordination restart_spawn_queue rejected: only the supervisor may restart the \
+                 factory spawn queue",
+            ));
+        }
+        let factory_session = current_factory_session().ok_or_else(|| {
+            Self::error(
+                ErrorCode::INVALID_REQUEST,
+                "restart_spawn_queue requires an active factory session (CAS_FACTORY_SESSION is \
+                 not set)",
+            )
+        })?;
+        let requester = self
+            .inner
+            .get_agent_id()
+            .unwrap_or_else(|_| "supervisor".to_string());
+        crate::factory_daemon_health::request_reset(
+            &self.inner.cas_root,
+            &factory_session,
+            &requester,
+        )
+        .map_err(|error| {
+            Self::error(
+                ErrorCode::INTERNAL_ERROR,
+                format!("Could not record the spawn-queue restart request: {error}"),
+            )
+        })?;
+        let health = crate::factory_daemon_health::worker_status_section(
+            &self.inner.cas_root,
+            &factory_session,
+        );
+        let health = if health.is_empty() {
+            "Spawn queue health: no stall detected.".to_string()
+        } else {
+            health.trim_end().to_string()
+        };
+        Ok(Self::success(format!(
+            "Spawn-queue restart requested for factory session '{factory_session}'. The daemon \
+             applies it on its next loop pass: the in-flight spawn is abandoned and dequeued \
+             actions that have not run are dropped. You will get a message naming what to \
+             re-issue. If the loop is wedged, its watchdog first kills hung git/gh/ssh helper \
+             processes; no pane is touched. Check `worker_status` for the result.\n\n{health}"
+        )))
+    }
+
     pub(super) async fn factory_set_worker_hold(
         &self,
         req: FactoryRequest,
@@ -3255,12 +3338,27 @@ impl CasService {
             worker_status_scope_counts(store.as_ref(), factory_session.as_deref())
                 .map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, e))?;
         if req.summary.unwrap_or(false) {
-            return Ok(Self::success(render_worker_liveness_summary_scoped(
+            let summary = render_worker_liveness_summary_scoped(
                 &liveness_rows,
                 factory_session.as_deref(),
                 scoped_worker_count,
                 outside_scope_worker_count,
-            )));
+            );
+            // cas-73b5: the fast poll surfaces a wedged daemon loop too.
+            let health = factory_session
+                .as_deref()
+                .map(|session| {
+                    crate::factory_daemon_health::worker_status_section(
+                        &self.inner.cas_root,
+                        session,
+                    )
+                })
+                .unwrap_or_default();
+            return Ok(Self::success(if health.is_empty() {
+                summary
+            } else {
+                format!("{}\n{summary}", health.trim_end())
+            }));
         }
 
         // Opportunistically prune stale agents so status output stays actionable.
@@ -3524,6 +3622,14 @@ impl CasService {
         // precisely the case where a failed or unconsumed spawn is the answer,
         // and the old output said only "None active", which reads like an
         // empty fleet rather than a spawn that died.
+        // cas-73b5 (GH #970): a wedged daemon loop or an undrained spawn queue
+        // goes above everything else; the daemon cannot report it itself.
+        let daemon_health_section = factory_session
+            .as_deref()
+            .map(|session| {
+                crate::factory_daemon_health::worker_status_section(&self.inner.cas_root, session)
+            })
+            .unwrap_or_default();
         let spawn_section = factory_session
             .clone()
             .and_then(|session| {
@@ -3592,6 +3698,11 @@ impl CasService {
             for (name, observation) in &liveness_rows {
                 msg.push_str(&format!("\n{} | {name}", observation.detail()));
             }
+            if !daemon_health_section.is_empty() {
+                msg.push_str("\n\n");
+                msg.push_str(daemon_health_section.trim_end());
+                msg.push('\n');
+            }
             if let Some(warning) = shared_clone_warning.as_deref() {
                 msg.push_str("\n\n");
                 msg.push_str(warning);
@@ -3621,6 +3732,7 @@ impl CasService {
                 output.push_str(&format!("{} | {name}\n", observation.detail()));
             }
         }
+        output.push_str(&daemon_health_section);
         output.push_str(&undelivered_section);
         if duplicate_registrations_filtered > 0 {
             output.push_str(&format!(
@@ -4329,11 +4441,13 @@ impl CasService {
                 let background_processes = worker_pid
                     .map(crate::cli::factory::wedged::background_processes_for)
                     .unwrap_or(crate::cli::factory::wedged::BackgroundProcessState::Unavailable);
+                // cas-4143: the parked call is itself the in-flight one;
+                // see wedged::classify_worker_with_pending.
                 let approval_hang = crate::cli::factory::wedged::is_leader_approval_hang(
                     worker_pid_alive,
                     pending_permission.as_ref(),
                     &background_processes,
-                ) && !in_flight_tool_call;
+                );
                 let mut has_active_work = crate::cli::factory::wedged::has_active_work(
                     in_flight_tool_call,
                     &background_processes,
@@ -5462,11 +5576,8 @@ impl CasService {
         }
 
         if let Some(filter) = req.worker_names.as_ref() {
-            let names: std::collections::HashSet<String> = filter
-                .split(',')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect();
+            let names: std::collections::HashSet<String> =
+                parse_worker_name_list(filter).into_iter().collect();
             workers.retain(|w| names.contains(&w.name));
         }
 
@@ -11028,6 +11139,26 @@ mod tests {
         );
         assert!(parse_worker_name_filter(None).is_empty());
         assert!(parse_worker_name_filter(Some(&"[]".to_string())).is_empty());
+    }
+
+    /// cas-4691 (GH #976): the list parser every factory action shares keeps
+    /// order, reads a real JSON array element by element, and still accepts
+    /// the documented comma form.
+    #[test]
+    fn worker_name_list_accepts_json_arrays_and_commas_cas_4691() {
+        assert_eq!(parse_worker_name_list("[\"wild-phoenix-59\"]"), vec!["wild-phoenix-59"]);
+        assert_eq!(parse_worker_name_list("wild-phoenix-59"), vec!["wild-phoenix-59"]);
+        assert_eq!(
+            parse_worker_name_list(" [ \"b-2\" , \"a-1\" , \"b-2\" ] "),
+            vec!["b-2", "a-1"],
+            "array order kept, repeats dropped"
+        );
+        assert_eq!(parse_worker_name_list("b-2, a-1,,b-2"), vec!["b-2", "a-1"]);
+        // A bracketed list that is not valid JSON still falls back to the
+        // stripped comma form.
+        assert_eq!(parse_worker_name_list("[b-2, 'a-1']"), vec!["b-2", "a-1"]);
+        assert!(parse_worker_name_list("[]").is_empty());
+        assert!(parse_worker_name_list("  ").is_empty());
     }
 
     #[test]

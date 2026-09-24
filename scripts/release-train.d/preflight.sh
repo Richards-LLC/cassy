@@ -233,6 +233,28 @@ cut_preflight_check_changelog() {
     return $?
 }
 
+# The release PR is docs-only, so Docs Lint lints CHANGELOG.md in full; debt
+# that entered alongside code would fail it there. Catch it before the PR.
+# A host without Node warns rather than blocks: Docs Lint stays the backstop.
+cut_preflight_check_changelog_lint() {
+    local log="$run_dir/preflight-changelog-lint.log" status=0
+    mkdir -p "$run_dir"
+    "$script_dir/check-changelog-lint.sh" "$worktree" >"$log" 2>&1 || status=$?
+    case "$status" in
+        0) return 0 ;;
+        2)
+            printf 'warning: CHANGELOG.md lint skipped: %s\n' "$(tail -n 1 "$log")" >&2
+            return 0
+            ;;
+        *)
+            cat "$log" >&2
+            cut_preflight_block changelog-lint \
+                "CHANGELOG.md fails the Docs Lint markdownlint policy, so the docs-only release PR would fail Docs Lint; fix the findings in $log, commit, then resume"
+            return $?
+            ;;
+    esac
+}
+
 cut_preflight_check_draft() {
     local date_stamp draft lint_dir lint_output
     date_stamp="$(release_train_date_stamp)"
@@ -304,6 +326,7 @@ cut_stage_preflight() {
     cut_preflight_check_scratch || return 1
     cut_preflight_check_zig || return 1
     cut_preflight_check_changelog || return 1
+    cut_preflight_check_changelog_lint || return 1
     cut_preflight_check_draft || return 1
     cut_preflight_check_integration || return 1
     cut_preflight_check_receipts

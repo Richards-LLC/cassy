@@ -296,6 +296,73 @@ auth = "env:CONTEXT7_API_KEY"
     }
 }
 
+/// cas-ea9c item 1 (GH #1005): an operator-provisioned read-only token
+/// reaches every worker as its only GitHub credential. The operator's own
+/// GH_TOKEN/GITHUB_TOKEN never do, and without the read token nothing
+/// changes.
+#[test]
+fn worker_gets_the_read_only_github_token_and_never_the_operators() {
+    let _env_lock = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let home = tempfile::tempdir().expect("temporary home");
+    let project = tempfile::tempdir().expect("temporary project root");
+    let cas_root = project.path().join(".cas");
+    std::fs::create_dir_all(&cas_root).unwrap();
+    let _home = RestoreEnv::set("HOME", home.path());
+    let _config_home = RestoreEnv::set("XDG_CONFIG_HOME", home.path());
+    let _credentials_file = RestoreEnv::remove("CAS_CREDENTIALS_FILE");
+    let _operator_gh = RestoreEnv::set("GH_TOKEN", "operator-write-token");
+    let _operator_github = RestoreEnv::set("GITHUB_TOKEN", "operator-write-token");
+    let config = MuxConfig {
+        cwd: project.path().to_path_buf(),
+        cas_root: Some(cas_root),
+        workers: 1,
+        include_director: false,
+        worker_cli: SupervisorCli::Claude,
+        ..MuxConfig::default()
+    };
+    let worker = |config: &MuxConfig| {
+        Mux::factory_pane_configs(config)
+            .into_iter()
+            .find(|(name, _)| name == "worker-1")
+            .expect("worker config must be present")
+            .1
+    };
+    let env_value = |pty: &cas_pty::PtyConfig, key: &str| {
+        pty.env
+            .iter()
+            .rev()
+            .find(|(candidate, _)| candidate == key)
+            .map(|(_, value)| value.clone())
+    };
+    let removed = |pty: &cas_pty::PtyConfig, key: &str| pty.env_remove.iter().any(|k| k == key);
+
+    // Without a read token, workers get no GitHub credential at all.
+    let plain = worker(&config);
+    assert_eq!(env_value(&plain, "GH_TOKEN"), None);
+    assert!(removed(&plain, "GH_TOKEN") && removed(&plain, "GITHUB_TOKEN"));
+
+    let _read = RestoreEnv::set(crate::WORKER_GITHUB_READ_TOKEN_ENV, "github_pat_readonly");
+    let granted = worker(&config);
+    assert_eq!(
+        env_value(&granted, "GH_TOKEN").as_deref(),
+        Some("github_pat_readonly"),
+        "the worker's gh authenticates with the read-only token"
+    );
+    assert!(!removed(&granted, "GH_TOKEN"), "the explicit read token survives spawn");
+    assert!(removed(&granted, "GITHUB_TOKEN"), "the operator's GITHUB_TOKEN stays stripped");
+    assert!(
+        removed(&granted, crate::WORKER_GITHUB_READ_TOKEN_ENV),
+        "the provisioning variable itself is not passed on"
+    );
+    assert!(
+        !granted
+            .env
+            .iter()
+            .any(|(_, value)| value == "operator-write-token"),
+        "the operator's token never reaches the worker"
+    );
+}
+
 #[tokio::test]
 async fn machine_global_protected_proxy_credentials_do_not_reach_worker_descendants() {
     let _env_lock = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());

@@ -406,7 +406,12 @@ pub(super) fn execute_status(
 
     let allowed_names = session_agent_name_set(&session);
 
-    let mut data = DirectorData::load_fast(&cas_root)?;
+    let mut data = DirectorData::load_for_project(
+        &cas_root,
+        None,
+        false,
+        crate::cloud::resolve_canonical_id(&cas_root).as_deref(),
+    )?;
     data.agents.retain(|a| allowed_names.contains(&a.name));
     filter_events_for_session_agents(&mut data.activity, &allowed_names);
 

@@ -114,7 +114,9 @@ CREATE TABLE IF NOT EXISTS rules (
     -- Team collaboration
     team_id TEXT,
     -- Team-promotion share override (private | team)
-    share TEXT
+    share TEXT,
+    -- cas-5372: operator hard-rule authorisation, `<author>|<content sha256>`
+    operator_authority TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_rules_created ON rules(created DESC);
@@ -795,7 +797,7 @@ impl SqliteRuleStore {
         let mut stmt = conn.prepare_cached(
             "SELECT id, created, source_ids, helpful_count, harmful_count,
              tags, paths, content, status, last_accessed, review_after,
-             category, priority, surface_count, scope, auto_approve_tools, auto_approve_paths, team_id, share
+             category, priority, surface_count, scope, auto_approve_tools, auto_approve_paths, team_id, share, operator_authority
              FROM rules WHERE status = 'proven' ORDER BY priority ASC, created DESC",
         )?;
 
@@ -835,6 +837,10 @@ impl SqliteRuleStore {
                         .get::<_, Option<String>>(18)?
                         .as_deref()
                         .and_then(|s| s.parse().ok()),
+                    operator_authority: row
+                        .get::<_, Option<String>>(19)?
+                        .as_deref()
+                        .and_then(cas_types::OperatorRuleAuthority::from_stored),
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -848,7 +854,7 @@ impl SqliteRuleStore {
         let mut stmt = conn.prepare_cached(
             "SELECT id, created, source_ids, helpful_count, harmful_count,
              tags, paths, content, status, last_accessed, review_after,
-             category, priority, surface_count, scope, auto_approve_tools, auto_approve_paths, team_id, share
+             category, priority, surface_count, scope, auto_approve_tools, auto_approve_paths, team_id, share, operator_authority
              FROM rules WHERE priority = 0 AND status IN ('proven', 'draft') ORDER BY created DESC",
         )?;
 
@@ -888,6 +894,10 @@ impl SqliteRuleStore {
                         .get::<_, Option<String>>(18)?
                         .as_deref()
                         .and_then(|s| s.parse().ok()),
+                    operator_authority: row
+                        .get::<_, Option<String>>(19)?
+                        .as_deref()
+                        .and_then(cas_types::OperatorRuleAuthority::from_stored),
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;

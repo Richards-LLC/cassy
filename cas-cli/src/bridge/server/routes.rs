@@ -301,7 +301,12 @@ pub(crate) fn handle_session_routes(
             }
             let allowed = allowed_agent_names(&session);
 
-            let data = cas_factory::DirectorData::load_fast(&cas_root)?;
+            let data = cas_factory::DirectorData::load_for_project(
+                &cas_root,
+                None,
+                false,
+                crate::cloud::resolve_canonical_id(&cas_root).as_deref(),
+            )?;
 
             let mut activity = data.activity;
             filter_events_for_session_agents(&mut activity, &allowed);

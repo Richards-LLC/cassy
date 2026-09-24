@@ -103,6 +103,30 @@ fn worker_write_is_auto_approved() {
     assert!(allow_reason(&out).is_some(), "worker Write must auto-approve");
 }
 
+/// cas-4143: the heredoc shape that Claude Code re-escalates to a nonexistent
+/// team lead is allowed by CAS, and the allow is recorded for exactly that
+/// call, so the factory daemon can answer the parked permission request.
+#[test]
+fn worker_heredoc_bash_is_allowed_and_recorded_for_the_permission_relay() {
+    let _g = super::env_lock();
+    let _role = set_role_env(Some("worker"));
+    let mut input = bash_input(
+        "cd /test/hub-web && python3 - <<'EOF'\nfrom pathlib import Path\nPath('e2e/journeys/qa-evidence.journey.ts').write_text('x')\nEOF",
+    );
+    input.tool_use_id = Some("toolu_01HeredocAllow".into());
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let out = handle_pre_tool_use(&input, Some(tmp.path())).expect("handler ok");
+    assert!(allow_reason(&out).is_some(), "worker heredoc must be allowed: {out:?}");
+    assert!(
+        crate::factory_permission_relay::hook_allowed(tmp.path(), "toolu_01HeredocAllow", "Bash"),
+        "the allow must be recorded for the permission relay"
+    );
+    assert!(
+        !crate::factory_permission_relay::hook_allowed(tmp.path(), "toolu_01HeredocAllow", "Write"),
+        "the record binds the tool"
+    );
+}
+
 #[test]
 fn worker_edit_is_auto_approved() {
     let _g = super::env_lock();

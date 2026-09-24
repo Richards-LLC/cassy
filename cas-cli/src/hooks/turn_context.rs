@@ -21,6 +21,9 @@ struct TurnState {
     delivered: Vec<String>,
     silent_prompts: u64,
     updated_at: i64,
+    /// cas-b5e4: epoch milliseconds of the last tool-boundary inbox check.
+    #[serde(default)]
+    mail_checked_at: i64,
 }
 
 struct Receipt {
@@ -92,6 +95,15 @@ pub(crate) fn record_prompt_hook(root: &Path, input: &HookInput) {
 /// Read only real external user messages, never tool results, sidechains or
 /// meta reminders. `promptId` aligns with the normal hook's `prompt_id`.
 fn latest_turn(path: &Path, session: &str) -> Option<(String, String)> {
+    latest_turn_with_start(path, session).map(|(key, prompt, _)| (key, prompt))
+}
+
+/// [`latest_turn`] plus the turn's start time from the transcript entry's
+/// `timestamp`, when present.
+fn latest_turn_with_start(
+    path: &Path,
+    session: &str,
+) -> Option<(String, String, Option<chrono::DateTime<chrono::Utc>>)> {
     let mut file = File::open(path).ok()?;
     let size = file.metadata().ok()?.len();
     let start = size.saturating_sub(TAIL_BYTES);
@@ -124,42 +136,80 @@ fn latest_turn(path: &Path, session: &str) -> Option<(String, String)> {
         else {
             continue;
         };
-        return Some((key.to_string(), prompt.to_string()));
+        let started_at = value["timestamp"]
+            .as_str()
+            .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
+            .map(|at| at.with_timezone(&chrono::Utc));
+        return Some((key.to_string(), prompt.to_string(), started_at));
     }
     None
 }
 
-/// Called by PostToolUse and by successful MCP responses. Inbox receipts are
-/// already atomic and shared with UserPromptSubmit. Recall runs once per turn,
-/// including read tools, independent of observation capture filters.
+/// Called by PostToolUse and by successful MCP responses.
+///
+/// cas-b5e4 (GH #989): mail is checked at every tool boundary, so a message
+/// that reaches a busy agent mid-turn is in its context within one tool call.
+/// The check reads only a small per-recipient stamp until something new was
+/// enqueued; inbox receipts are atomic and shared with UserPromptSubmit, so a
+/// row surfaces once. Recall still runs once per turn, and only when the
+/// normal prompt hook did not serve the turn.
 pub(crate) fn fallback_context(root: &Path, input: &HookInput) -> Option<String> {
     if crate::internal_llm::is_internal_invocation()
         || !crate::harness_policy::is_factory_agent(input)
     {
         return None;
     }
-    let (key, prompt) = latest_turn(
-        Path::new(input.transcript_path.as_deref()?),
-        &input.session_id,
-    )?;
-    let mut receipt = Receipt::open(root, &input.session_id)?;
-    if receipt.state.delivered.contains(&key) {
+    use super::handlers::handlers_middle::factory_inbox::{
+        CurrentTurn, inbox_signal_stamp, surface_factory_inbox_after_tool_result,
+    };
+    let turn = input
+        .transcript_path
+        .as_deref()
+        .and_then(|path| latest_turn_with_start(Path::new(path), &input.session_id));
+    let signal = inbox_signal_stamp(root, input);
+    let turn_unserved = turn.as_ref().is_some_and(|(key, _, _)| {
+        Receipt::open(root, &input.session_id)
+            .is_some_and(|receipt| !receipt.state.delivered.contains(key))
+    });
+    if signal.is_none() && !turn_unserved {
         return None;
     }
-    // Both recovery channels share this claim before any inbox/store work.
-    receipt.remember(&key);
-    receipt.state.silent_prompts = receipt.state.silent_prompts.saturating_add(1);
-    receipt.save()?;
+    let mut receipt = Receipt::open(root, &input.session_id)?;
     let mut parts = Vec::new();
-    use super::handlers::handlers_middle::factory_inbox::surface_factory_inbox_after_tool_result;
-    let mail = surface_factory_inbox_after_tool_result(Some(root), input);
-    if let Some(mail) = mail {
-        parts.push(mail);
-    }
-    if let Some(packet) =
-        crate::ambient_recall::build_local_ambient_recall_context(input, root, &prompt)
+    let mut changed = false;
+
+    if let Some(signal) = signal
+        && signal > receipt.state.mail_checked_at
     {
-        parts.push(packet.full);
+        // Taken before the query: a row committed after it stamps a newer
+        // signal, so the next boundary checks again.
+        receipt.state.mail_checked_at = chrono::Utc::now().timestamp_millis();
+        changed = true;
+        let current = turn.as_ref().and_then(|(_, prompt, started_at)| {
+            started_at.map(|started_at| CurrentTurn {
+                started_at,
+                prompt: prompt.as_str(),
+            })
+        });
+        if let Some(mail) = surface_factory_inbox_after_tool_result(Some(root), input, current) {
+            parts.push(mail);
+        }
+    }
+
+    if let Some((key, prompt, _)) = &turn
+        && !receipt.state.delivered.contains(key)
+    {
+        receipt.remember(key);
+        receipt.state.silent_prompts = receipt.state.silent_prompts.saturating_add(1);
+        changed = true;
+        if let Some(packet) =
+            crate::ambient_recall::build_local_ambient_recall_context(input, root, prompt)
+        {
+            parts.push(packet.full);
+        }
+    }
+    if changed {
+        receipt.save()?;
     }
     (!parts.is_empty()).then(|| parts.join("\n\n"))
 }

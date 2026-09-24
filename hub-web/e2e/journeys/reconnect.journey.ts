@@ -41,6 +41,16 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
     // Two machines, one of them down: the footer counts it and its dot is not all-clear (cas-b789).
     expect(seen.footer).toContain("1 connected");
     await expect(footer.locator(".pairing-dot")).toHaveClass("pairing-dot partial");
+    // Only the terminal dims: the conversation stays readable while it
+    // reconnects (cas-3446 measured 2.2-3.3:1 when the whole mount faded).
+    const readingOpacity = await page.locator(".conversation-reading").evaluate((element) => {
+      let product = 1;
+      for (let node: Element | null = element; node; node = node.parentElement) {
+        product *= Number(getComputedStyle(node).opacity);
+      }
+      return product;
+    });
+    expect(readingOpacity, "the conversation reading view is not faded during an outage").toBe(1);
     // A send during the outage is refused for the connection, and says so.
     await composer.fill("Are you there?");
     await page.getByRole("button", { name: `Send to ${PELICAN}`, exact: true }).click();

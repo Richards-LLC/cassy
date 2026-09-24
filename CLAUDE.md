@@ -34,13 +34,14 @@ Release notes: when a merge reaches `staging` or `main`, use the `release-notes`
 ## Build & Test
 
 ```bash
+# Supervisor/operator only — factory workers never run these (see below)
 cargo build                          # Dev build
 cargo build --release                # Release build (LTO, strip)
 cargo build --profile release-fast   # Fast release (thin LTO, 16 codegen units)
-cargo check -p cas --lib --tests     # Worker iteration: compile feedback, no test linking/runs
+cargo check -p cas --lib --tests     # Compile feedback, no test linking/runs
 scripts/run-scoped-tests.sh -p cas --lib module_name
 scripts/run-scoped-tests.sh -p cas --test cli_test
-cargo nextest run -p cas             # Full suite: supervisor integration/release gates only
+cargo nextest run -p cas             # Full suite: epic assembly and release gates
 cargo test -p cas --doc              # Doctests (nextest does not support them)
 cargo bench --bench code_indexing    # Benchmarks
 make test-release-panic              # Verify A2/A3/B3 panic isolation under release profiles
@@ -48,10 +49,17 @@ make test-release-panic              # Verify A2/A3/B3 panic isolation under rel
 
 Install the standard local runner once with `cargo install cargo-nextest` (or
 `make -C cas-cli install-tools`). `scripts/run-scoped-tests.sh` defaults to
-nextest and rejects a silent zero-test success. Factory workers should iterate
-with `cargo check`, then run only the affected `--lib` or `--test` target; the
-PreToolUse guard rejects an unscoped worker test run. Full suites are owned by
-the supervisor integration merge and release gate.
+nextest and rejects a silent zero-test success.
+
+**Factory workers never run Rust builds.** Workers edit and commit code, then
+park it without building or testing Rust; a PreToolUse guard denies them any
+`cargo` build/check/test/nextest/clippy/run, `rustc`,
+`scripts/run-scoped-tests.sh`, and `make test*`. Only the supervisor builds:
+once per epic at assembly it runs one full build + test of the epic tip and
+records `ASSEMBLY_PROOF: head=<epic tip sha> result=PASS command=<cmd>
+log=<path>` on the epic. Child task closes reference that proof instead of
+carrying a scoped `--proof` receipt or `loaded_proof` note. Non-Rust work (for
+example hub-web npm/vitest/playwright) is unaffected.
 
 Gate evidence: PR #655/run 33430464567; PR #657/run 33435093275.
 

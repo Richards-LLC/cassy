@@ -63,6 +63,15 @@ and the "all subtasks closed -> verify and close the epic" flow, so this is the 
    ```
    Omit `isolate` for shared mode.
 
+   **Worker GitHub access (GH #1005).** Workers never inherit your GitHub
+   credentials. When a task cites an issue (a github.com issue URL,
+   `owner/repo#N`, or `GH #N`), Cassy attaches its body and comments at
+   assignment under `<artifacts_root>/<task>/github-issues/`, and task show and
+   task start list the files. Do not relay issue text by hand. For `gh issue
+   view`, `gh pr checks` and `gh run view` inside workers, export a read-only
+   fine-grained token as `CAS_WORKER_GITHUB_READ_TOKEN` before starting the
+   factory; each worker gets it as its own `GH_TOKEN`.
+
    **Hard rule:** every `spawn_workers` call MUST include explicit `cli=`,
    `model=`, and `effort=`. The active registry matrix is Codex GPT-6 Luna/xhigh for light (Claude Opus 5.5/low fallback), Codex GPT-6 Sol/medium for standard (GPT-6 Luna/xhigh fallback), Claude Opus 5.5/high for taste (Claude Opus 5/high fallback), Claude Opus 5.5/high for supervisor (Claude Fable 5.1/high fallback), and Claude Opus 5.5/high for heavy (Codex GPT-6 Astra/high fallback). Use taste for judgment and public decisions and heavy for implementation risk; Terra is a standing suspension.
    Omitted fields fall back through the factory config cascade and stock floor;
@@ -158,6 +167,12 @@ detached merged-tip worktree. The sweep is asynchronous and capped by
 `<cas-root>/merge-sweeps/` log before accepting another merge when it reports
 `FAILED`, `TIMED OUT`, or `SETUP FAILED`. Set `[factory].merge_sweep = false`
 only when the host cannot absorb this additional validation load.
+A project whose suites need their own script or environment sets
+`[factory].merge_sweep_command` (run via `sh -c` instead of the detected
+runner) and a `[factory.merge_sweep_env]` table in `config.toml`; the sweep
+log shows only the variable names. A sweep the build guard defers is noted on
+the epic without a relay; the run that finally goes ahead sends one relay
+naming its result and integration tip.
 
 `id` accepts the worker name or `factory/<worker>`. Target resolution: an explicit
 `task_id` first, then the assignee's current task binding. A `focus_epic` pin is a
@@ -166,13 +181,15 @@ only when the host cannot absorb this additional validation load.
 
 ### Required merge-review discipline
 
-Before accepting a scoped worker receipt and landing its lane, do these two checks:
+Before landing a worker lane, do these two checks. Workers never build or test
+Rust, so a lane carries no build proof; do not ask for a scoped receipt. The
+Rust build happens once, at Phase 4 assembly.
 
 1. **Contract changes first.** If the diff changes a public contract (API shape,
    persisted field, CLI/MCP response, or behavior callers rely on), search for sibling
-   tests that still pin the old contract before accepting the scoped receipt. For example:
+   tests that still pin the old contract before landing the lane. For example:
    `git grep -n '<old contract token>' -- '*test*'` (narrow the path/spec as needed).
-   Update or reject the receipt when those tests prove an unreviewed caller contract.
+   Update or reject the lane when those tests prove an unreviewed caller contract.
 2. **Read the lane CI signal.** Inspect `gh run list --branch factory/<worker>` at
    review time. `worktree_merge` also reports its best-effort CI workflow verdict, but
    this explicit review check catches a new run or a result that arrived after the
@@ -211,6 +228,10 @@ end-of-lane, once the worker is done with that worktree.
    task back to its implementer automatically. To skip the pass, waive it with a logged reason:
    `cas__verification action=qa_waive task_id=<task-id> summary="..."`. Check a task's rounds
    with `cas__verification action=qa_status task_id=<task-id>`.
+   Already merged before anyone closed it (it never parked)? Cassy opens no round for code
+   that is already on trunk. Close it yourself with `supervisor_override=true reason="…"
+   commit_receipt=<merged sha>`; the waiver is recorded against that commit. A no-code task is
+   never gated by independent QA.
 3. Merge into the epic branch:
    ```
    cas__coordination action=worktree_merge id=<worker> task_id=<task-id>
@@ -266,19 +287,25 @@ When workers share the main directory, there's no branch merging — workers com
 
 1. Verify all tasks closed: `cas__task action=list status=open epic=<epic-id>`
 2. Hold the main merge. The epic branch is not ready for base until the assembled diff has passed review and the final gate.
-3. Run the final assembled-tree gate. Phase 3 review receipts cover each
-   worker merge; this gate checks cross-task integration on the final tree:
+3. Run the final assembled-tree gate. This is the epic's single Rust build:
+   workers never build, so one full build + test of the epic tip proves every
+   child and checks cross-task integration (add `cargo test -p cas --doc` when
+   the epic touches doctests):
    ```bash
    cargo nextest run -p cas
    ```
+   On exit 0, record a progress note on the epic:
+   `ASSEMBLY_PROOF: head=<epic tip sha> result=PASS command=<cmd> log=<path>`,
+   with the log under `[factory] artifacts_root/<epic-id>/`. Child task closes
+   reference this proof; worker closes carry no scoped or loaded build proof.
 4. Turn any final-gate failure or review gap that needs worker action into a
    bounded epic-child fix-round task before messaging a worker. Put the finding,
    required fix, acceptance criteria, and proof command in the task description;
    the coordination message only points at the task ID.
-5. After the fix lands, rerun the final assembled-tree gate yourself and capture
-   the real exit code:
+5. After the fix lands, rerun the final assembled-tree gate yourself on the new
+   tip, capture the real exit code, and record a fresh `ASSEMBLY_PROOF` for it:
    ```bash
-   cargo nextest run -p cas > /tmp/<epic-id>-cargo-nextest.log 2>&1; echo $?
+   cargo nextest run -p cas > <artifacts_root>/<epic-id>/assembly-nextest.log 2>&1; echo $?
    ```
    Never pipe the test run to `tail`; that captures the pipe status, not the
    nextest status.

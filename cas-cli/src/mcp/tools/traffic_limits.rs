@@ -70,6 +70,92 @@ pub(crate) fn validate_message_body(
     Ok(())
 }
 
+/// Where an over-cap supervisor message is spilled: the configured
+/// `[factory] artifacts_root`, else the documented real-disk fallback
+/// `~/.cas/artifacts`. `None` when neither is available.
+pub(crate) fn message_spill_root(config: &Config) -> Option<std::path::PathBuf> {
+    let configured = config
+        .factory()
+        .artifacts_root
+        .filter(|root| !root.trim().is_empty());
+    if configured.is_none() && std::env::var_os("HOME").is_none_or(|home| home.is_empty()) {
+        return None;
+    }
+    Some(crate::config::resolved_factory_artifacts_root(
+        configured.as_deref(),
+    ))
+}
+
+/// A task id is used as a directory name only when it cannot escape the
+/// artifacts root; anything else spills under `_messages`.
+fn spill_directory_name(task_id: Option<&str>) -> &str {
+    task_id
+        .map(str::trim)
+        .filter(|id| {
+            !id.is_empty()
+                && !id.starts_with('.')
+                && id
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        })
+        .unwrap_or("_messages")
+}
+
+/// cas-6ee6 (GH #1006 item 1): deliver an over-cap supervisor message
+/// instead of refusing it. The full text is written to
+/// `<artifacts_root>/<task-id or _messages>/message-<utc>-<hash>.md`, and the
+/// returned body — the head of the message plus that path — fits `limit`
+/// whenever the pointer itself does; the path is never dropped to make room.
+///
+/// Errors name why nothing could be spilled: no artifacts root is available,
+/// or the file could not be written.
+pub(crate) fn spill_message_to_artifact(
+    root: Option<&std::path::Path>,
+    task_id: Option<&str>,
+    sender: &str,
+    target: &str,
+    summary: &str,
+    body: &str,
+    limit: usize,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<String, String> {
+    use sha2::{Digest, Sha256};
+
+    let actual = body.chars().count();
+    let root = root.ok_or_else(|| {
+        format!(
+            "Message body rejected: limit is {limit} characters, actual length is {actual}, and it could not be spilled to an artifact because no `[factory] artifacts_root` is configured and HOME is unset. Configure artifacts_root, or write the text to a file and send its path plus a one-paragraph summary."
+        )
+    })?;
+    let directory = root.join(spill_directory_name(task_id));
+    let digest = Sha256::digest(body.as_bytes());
+    let short_hash: String = digest.iter().take(4).map(|byte| format!("{byte:02x}")).collect();
+    let path = directory.join(format!(
+        "message-{}-{short_hash}.md",
+        now.format("%Y%m%dT%H%M%SZ")
+    ));
+    let document = format!(
+        "# Message from {sender} to {target}\n\nSent: {}\nSummary: {summary}\nLength: {actual} characters\n\n---\n\n{body}\n",
+        now.to_rfc3339()
+    );
+    std::fs::create_dir_all(&directory)
+        .and_then(|()| std::fs::write(&path, document))
+        .map_err(|error| {
+            format!(
+                "Message body rejected: limit is {limit} characters, actual length is {actual}, and spilling it to {} failed: {error}. Write the text to a file and send its path plus a one-paragraph summary.",
+                path.display()
+            )
+        })?;
+
+    let pointer = format!(
+        "\n\n[Message continues: the full {actual}-character text is at {}]",
+        path.display()
+    );
+    let head_budget = limit.saturating_sub(pointer.chars().count() + 1);
+    let head: String = body.chars().take(head_budget).collect();
+    Ok(format!("{}…{pointer}", head.trim_end()))
+}
+
 /// Validate an appended task note and authorize the only supported override.
 ///
 /// The return value records whether a supervisor override was accepted so the
@@ -119,8 +205,8 @@ mod tests {
     use crate::config::{Config, FactoryConfig};
 
     use super::{
-        message_body_limit, note_body_limit, source_is_exempt, validate_message_body,
-        validate_note_body,
+        message_body_limit, note_body_limit, source_is_exempt, spill_message_to_artifact,
+        validate_message_body, validate_note_body,
     };
 
     fn config_with_limits(message: usize, escalation: usize, note: usize) -> Config {
@@ -241,6 +327,85 @@ mod tests {
         )
         .expect_err("only a registered supervisor may override");
         assert!(error.contains("registered supervisor"), "{error}");
+    }
+
+    /// cas-6ee6 (GH #1006 item 1): a 1,503-character supervisor ruling was
+    /// refused at the 1,200 cap. It is now delivered as its head plus the
+    /// path of an artifact holding the full text.
+    #[test]
+    fn over_cap_message_spills_full_text_and_delivers_head_with_path_cas_6ee6() {
+        let root = tempfile::tempdir().unwrap();
+        let body = format!("RULING: {}", "contract excerpt and decision. ".repeat(50));
+        assert!(body.chars().count() > 1_200);
+        let now = chrono::DateTime::parse_from_rfc3339("2026-09-24T15:29:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+
+        let delivered = spill_message_to_artifact(
+            Some(root.path()),
+            Some("cas-6ee6"),
+            "noble-heron-32",
+            "sturdy-crane-8",
+            "ruling",
+            &body,
+            1_200,
+            now,
+        )
+        .expect("an over-cap supervisor message is delivered, not refused");
+
+        assert!(delivered.chars().count() <= 1_200, "{}", delivered.chars().count());
+        assert!(delivered.starts_with("RULING: contract excerpt"), "{delivered}");
+        let dir = root.path().join("cas-6ee6");
+        let files: Vec<_> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().path()).collect();
+        assert_eq!(files.len(), 1);
+        let path = &files[0];
+        assert!(
+            path.file_name().unwrap().to_str().unwrap().starts_with("message-20260924T152900Z-"),
+            "{}",
+            path.display()
+        );
+        assert!(delivered.contains(&path.display().to_string()), "{delivered}");
+        let stored = std::fs::read_to_string(path).unwrap();
+        assert!(stored.contains(&body), "the artifact carries the full text");
+        assert!(stored.contains("noble-heron-32") && stored.contains("sturdy-crane-8"));
+    }
+
+    #[test]
+    fn spill_without_a_task_or_with_an_unsafe_id_uses_messages_directory_cas_6ee6() {
+        let root = tempfile::tempdir().unwrap();
+        let body = "x".repeat(50);
+        for task_id in [None, Some("../escape"), Some("")] {
+            spill_message_to_artifact(
+                Some(root.path()),
+                task_id,
+                "sup",
+                "worker",
+                "s",
+                &body,
+                10,
+                chrono::Utc::now(),
+            )
+            .unwrap();
+        }
+        assert!(root.path().join("_messages").is_dir());
+        assert!(!root.path().parent().unwrap().join("escape").exists());
+    }
+
+    #[test]
+    fn spill_refusal_names_the_missing_artifacts_root_cas_6ee6() {
+        let error = spill_message_to_artifact(
+            None,
+            Some("cas-6ee6"),
+            "sup",
+            "worker",
+            "s",
+            &"x".repeat(20),
+            10,
+            chrono::Utc::now(),
+        )
+        .expect_err("no root means the refusal remains");
+        assert!(error.contains("limit is 10 characters"), "{error}");
+        assert!(error.contains("no `[factory] artifacts_root` is configured"), "{error}");
     }
 
     #[test]

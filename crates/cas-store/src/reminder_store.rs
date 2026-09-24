@@ -117,7 +117,9 @@ pub struct Reminder {
     pub trigger_filter: Option<serde_json::Value>,
     /// Current status
     pub status: ReminderStatus,
-    /// Time-to-live in seconds before auto-expiry
+    /// Time-to-live in seconds before auto-expiry (0 = never). A time
+    /// reminder's TTL counts from its due time; an event reminder's from
+    /// creation.
     pub ttl_secs: i64,
     /// When the reminder was created
     pub created_at: DateTime<Utc>,
@@ -322,6 +324,11 @@ pub trait ReminderStore: Send + Sync {
     /// List reminders fired within the last N seconds (across all agents)
     fn list_recently_fired(&self, within_secs: i64) -> Result<Vec<Reminder>>;
 
+    /// Expired or cancelled reminders owned by or targeting an agent, touched
+    /// within the last N seconds (newest first), so `remind_list` can show
+    /// reminders that will no longer fire.
+    fn list_recently_ended(&self, agent_id: &str, within_secs: i64) -> Result<Vec<Reminder>>;
+
     /// Get pending time-based reminders that are due (trigger_at <= now)
     fn get_due_time_reminders(&self) -> Result<Vec<Reminder>>;
 
@@ -511,8 +518,15 @@ impl SqliteReminderStore {
 }
 
 fn expire_stale_with_conn(conn: &Connection) -> Result<usize> {
-    // Expire pending reminders where created_at + ttl_secs < now. A zero TTL
-    // is the durable, non-expiring form used by external-condition wakes.
+    // Expire pending reminders whose TTL has run out. A zero TTL is the
+    // durable, non-expiring form used by external-condition wakes.
+    //
+    // For a time reminder the TTL counts from its due time (trigger_at): it is
+    // the grace window an overdue reminder may wait for delivery. Counting from
+    // creation expired every reminder whose delay exceeded its TTL before it
+    // could fire. A 24,900s delay under the default 3,600s TTL never fired
+    // and left a time-critical task stalled for 11h (cas-57c1, GH #984).
+    // Event reminders keep counting from creation.
     // Use datetime('now') on the RHS so both sides of the comparison use
     // SQLite's canonical 'YYYY-MM-DD HH:MM:SS' format. Previously the RHS
     // was RFC 3339, whose 'T' separator made every reminder compare stale.
@@ -520,7 +534,11 @@ fn expire_stale_with_conn(conn: &Connection) -> Result<usize> {
         "UPDATE reminders SET status = 'expired'
          WHERE status = 'pending'
          AND ttl_secs > 0
-         AND datetime(created_at, '+' || ttl_secs || ' seconds') < datetime('now')",
+         AND datetime(
+             CASE WHEN trigger_type = 'time' AND trigger_at IS NOT NULL
+                  THEN trigger_at ELSE created_at END,
+             '+' || ttl_secs || ' seconds'
+         ) < datetime('now')",
         [],
     )?;
 
@@ -705,6 +723,26 @@ impl ReminderStore for SqliteReminderStore {
         let mut stmt = conn.prepare_cached(&sql)?;
         let reminders = stmt
             .query_map(params![cutoff], Self::reminder_from_row)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        Ok(reminders)
+    }
+
+    fn list_recently_ended(&self, agent_id: &str, within_secs: i64) -> Result<Vec<Reminder>> {
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        let cutoff = (Utc::now() - chrono::Duration::seconds(within_secs)).to_rfc3339();
+        let sql = format!(
+            "SELECT {} FROM reminders
+             WHERE status IN ('expired', 'cancelled')
+               AND (supervisor_id = ?1 OR target_id = ?1)
+               AND MAX(created_at, COALESCE(cancelled_at, ''), COALESCE(trigger_at, '')) >= ?2
+             ORDER BY id DESC",
+            Self::SELECT_COLUMNS
+        );
+
+        let mut stmt = conn.prepare_cached(&sql)?;
+        let reminders = stmt
+            .query_map(params![agent_id, cutoff], Self::reminder_from_row)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
 
         Ok(reminders)
@@ -1240,15 +1278,17 @@ mod tests {
     fn test_expire_stale() {
         let (_temp, store) = create_test_store();
 
-        // Create with very short TTL (1 second)
+        // Overdue with a very short TTL (1 second): the grace window after
+        // its due time runs out without delivery.
         let future = Utc::now() + chrono::Duration::seconds(9999);
+        let overdue = Utc::now() - chrono::Duration::seconds(10);
         store
             .create(
                 "supervisor-1",
                 None,
                 "Will expire",
                 ReminderTriggerType::Time,
-                Some(future),
+                Some(overdue),
                 None,
                 None,
                 1,    // 1 second TTL
@@ -1280,6 +1320,135 @@ mod tests {
         let pending = store.list_pending("supervisor-1").unwrap();
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].message, "Will not expire");
+    }
+
+    /// cas-57c1 (GH #984): a delay longer than the TTL still fires. The TTL
+    /// is the grace window after the due time, not a lifetime from creation.
+    #[test]
+    fn time_reminder_with_delay_beyond_its_ttl_stays_pending_until_due() {
+        let (_temp, store) = create_test_store();
+        let due = Utc::now() + chrono::Duration::seconds(24_900);
+        let id = store
+            .create(
+                "supervisor-1",
+                None,
+                "overnight checkpoint",
+                ReminderTriggerType::Time,
+                Some(due),
+                None,
+                None,
+                3600,
+                None,
+            )
+            .unwrap();
+        // Created 11h ago, due 1s ago: long past created_at + TTL, but not
+        // past due + TTL, so it must still be pending and due.
+        {
+            let conn = store.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE reminders SET created_at = ?, trigger_at = ? WHERE id = ?",
+                params![
+                    (Utc::now() - chrono::Duration::hours(11)).to_rfc3339(),
+                    (Utc::now() - chrono::Duration::seconds(1)).to_rfc3339(),
+                    id
+                ],
+            )
+            .unwrap();
+        }
+
+        assert_eq!(store.expire_stale().unwrap(), 0);
+        let due_now = store.get_due_time_reminders().unwrap();
+        assert_eq!(due_now.len(), 1);
+        assert_eq!(due_now[0].id, id);
+    }
+
+    /// An event reminder's TTL still counts from creation.
+    #[test]
+    fn event_reminder_ttl_counts_from_creation() {
+        let (_temp, store) = create_test_store();
+        let id = store
+            .create(
+                "supervisor-1",
+                None,
+                "wait for completion",
+                ReminderTriggerType::Event,
+                None,
+                Some("task_completed"),
+                None,
+                60,
+                None,
+            )
+            .unwrap();
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE reminders SET created_at = ? WHERE id = ?",
+                params![(Utc::now() - chrono::Duration::hours(1)).to_rfc3339(), id],
+            )
+            .unwrap();
+        assert_eq!(store.expire_stale().unwrap(), 1);
+    }
+
+    #[test]
+    fn recently_ended_lists_expired_and_cancelled_for_owner_or_target() {
+        let (_temp, store) = create_test_store();
+        let overdue = Utc::now() - chrono::Duration::seconds(10);
+        let expired = store
+            .create(
+                "supervisor-1",
+                None,
+                "stale",
+                ReminderTriggerType::Time,
+                Some(overdue),
+                None,
+                None,
+                1,
+                None,
+            )
+            .unwrap();
+        let cancelled = store
+            .create(
+                "supervisor-1",
+                Some("worker-1"),
+                "for the worker",
+                ReminderTriggerType::Time,
+                Some(Utc::now() + chrono::Duration::hours(1)),
+                None,
+                None,
+                3600,
+                None,
+            )
+            .unwrap();
+        let pending = store
+            .create(
+                "supervisor-1",
+                None,
+                "still pending",
+                ReminderTriggerType::Time,
+                Some(Utc::now() + chrono::Duration::hours(1)),
+                None,
+                None,
+                3600,
+                None,
+            )
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        assert_eq!(store.expire_stale().unwrap(), 1);
+        store.cancel(cancelled, "supervisor-1").unwrap();
+
+        let ids = |agent: &str| -> Vec<i64> {
+            store
+                .list_recently_ended(agent, 86_400)
+                .unwrap()
+                .into_iter()
+                .map(|reminder| reminder.id)
+                .collect()
+        };
+        assert_eq!(ids("supervisor-1"), vec![cancelled, expired]);
+        assert_eq!(ids("worker-1"), vec![cancelled]);
+        assert!(!ids("supervisor-1").contains(&pending));
     }
 
     #[test]

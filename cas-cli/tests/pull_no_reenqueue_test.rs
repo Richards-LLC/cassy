@@ -68,6 +68,10 @@ fn entry_payload(id: &str, project_id: &str) -> serde_json::Value {
     let mut v = serde_json::to_value(&entry).unwrap();
     v["project_id"] = serde_json::json!(project_id);
     v["project_canonical_id"] = serde_json::json!(project_id);
+    // A current client stamps the authoring project on every pushed entry. A
+    // row without it is recorded as not authored here and its queue row is
+    // dropped (cas-3a90), which would mask what these tests measure.
+    v["origin_project"] = serde_json::json!(project_id);
     v
 }
 

@@ -144,6 +144,10 @@ impl CloudSyncer {
             return Ok(result);
         }
 
+        // cas-3a90: a pulled row this project did not author is never
+        // published under it, whatever local write enqueued it.
+        self.drop_unauthored_queued_pushes()?;
+
         let batch_limit = self.config.batch_size.max(1);
         let token = self
             .cloud_config
@@ -208,6 +212,20 @@ impl CloudSyncer {
         result.remaining_backlog = self.remaining_backlog(scope)?;
         result.duration_ms = start.elapsed().as_millis() as u64;
         Ok(result)
+    }
+
+    /// Drop queued writes for pulled rows this project did not author
+    /// (cas-3a90, GH #909). Fails closed: if the ledger cannot be read, the
+    /// push stops rather than risk publishing another project's rows.
+    pub(super) fn drop_unauthored_queued_pushes(&self) -> Result<usize, CasError> {
+        let dropped = self.queue.drop_queued_pushes_for_unauthored_pulls()?;
+        if dropped > 0 {
+            warn!(
+                "[Cassy sync] dropped {dropped} queued write(s) for pulled rows this project did \
+                 not author; they are never pushed from here"
+            );
+        }
+        Ok(dropped)
     }
 
     fn push_pending_batch(&self, pending: &PendingByType, token: &str) -> SyncResult {
@@ -533,10 +551,21 @@ impl CloudSyncer {
         // `pending` entirely, advancing `oldest_item` past them (defect B /
         // cas-8dd8 poison-head fix).
         let mut upsert_entries: Vec<(&QueuedSync, serde_json::Value)> = Vec::new();
+        // cas-3a90: entries, rules and skills carry their authoring project.
+        let origin_project = if matches!(entity_type, "entries" | "rules" | "skills") {
+            Some(self.personal_push_project_id()?)
+        } else {
+            None
+        };
         for item in &upsert_items {
             match item.payload.as_deref() {
                 Some(payload) => match serde_json::from_str::<serde_json::Value>(payload) {
-                    Ok(v) => upsert_entries.push((*item, self.with_base_revision(item, v))),
+                    Ok(mut v) => {
+                        if let Some(origin_project) = origin_project.as_deref() {
+                            super::team_push::stamp_row_origin_project(&mut v, origin_project);
+                        }
+                        upsert_entries.push((*item, self.with_base_revision(item, v)))
+                    }
                     Err(_) => {
                         let _ = self
                             .queue

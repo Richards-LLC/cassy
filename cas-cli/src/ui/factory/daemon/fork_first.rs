@@ -575,6 +575,7 @@ impl DaemonInitPhase {
             teams,
             notify_rx,
             dead_workers: std::collections::HashSet::new(),
+            recent_worker_exits: Vec::new(),
             reported_unavailable_workers: std::collections::HashMap::new(),
             last_usage_limit_scan: None,
             last_permission_request_scan: None,

@@ -65,6 +65,21 @@ pub fn recover_worker_vanished(
     held_task_ids: &[String],
     reason: &str,
 ) -> OrphanRecoverySummary {
+    recover_worker_vanished_with_exit(cas_root, agent_store, agent, held_task_ids, reason, None)
+}
+
+/// [`recover_worker_vanished`] carrying the harness exit cause the daemon
+/// observed (cas-2ffe, GH #915): exit code, signal and a bounded, redacted
+/// output tail. They reach the supervisor as structured relay fields and
+/// the WorkerDied event metadata.
+pub(crate) fn recover_worker_vanished_with_exit(
+    cas_root: &Path,
+    agent_store: &dyn AgentStore,
+    agent: &Agent,
+    held_task_ids: &[String],
+    reason: &str,
+    exit: Option<&crate::prompt_revalidation::WorkerExitCause>,
+) -> OrphanRecoverySummary {
     let mut summary = OrphanRecoverySummary {
         held_task_ids: held_task_ids.to_vec(),
         ..Default::default()
@@ -73,7 +88,7 @@ pub fn recover_worker_vanished(
     let task_store = match open_task_store(cas_root) {
         Ok(s) => s,
         Err(_) => {
-            emit_worker_died_signals(cas_root, agent_store, agent, &summary, reason);
+            emit_worker_died_signals_with_exit(cas_root, agent_store, agent, &summary, reason, exit);
             return summary;
         }
     };
@@ -111,7 +126,7 @@ pub fn recover_worker_vanished(
         }
     }
 
-    emit_worker_died_signals(cas_root, agent_store, agent, &summary, reason);
+    emit_worker_died_signals_with_exit(cas_root, agent_store, agent, &summary, reason, exit);
     summary
 }
 
@@ -278,12 +293,24 @@ fn park_orphaned_task(
     task_store.update(&task).is_ok()
 }
 
+#[cfg(test)]
 fn emit_worker_died_signals(
     cas_root: &Path,
     agent_store: &dyn AgentStore,
     agent: &Agent,
     summary: &OrphanRecoverySummary,
     reason: &str,
+) {
+    emit_worker_died_signals_with_exit(cas_root, agent_store, agent, summary, reason, None);
+}
+
+fn emit_worker_died_signals_with_exit(
+    cas_root: &Path,
+    agent_store: &dyn AgentStore,
+    agent: &Agent,
+    summary: &OrphanRecoverySummary,
+    reason: &str,
+    exit: Option<&crate::prompt_revalidation::WorkerExitCause>,
 ) {
     // The maintenance callers operate on the generic agent registry.  A
     // supervisor row expiring after a restart is not a worker death and must
@@ -302,6 +329,10 @@ fn emit_worker_died_signals(
         "reason": reason,
         "last_heartbeat": agent.last_heartbeat.to_rfc3339(),
         "factory_session": agent.factory_session,
+        // cas-2ffe (GH #915): why the harness process ended, when observed.
+        "exit_code": exit.and_then(|exit| exit.exit_code),
+        "exit_signal": exit.and_then(|exit| exit.exit_signal.clone()),
+        "exit_tail": exit.and_then(|exit| exit.output_tail.clone()),
     });
 
     // Activity feed event.
@@ -361,6 +392,7 @@ fn emit_worker_died_signals(
                 reason,
                 &incident,
                 &payload_str,
+                exit,
             );
         }
     }
@@ -403,6 +435,7 @@ fn deliver_worker_died_notice(
     reason: &str,
     incident: &str,
     payload_str: &str,
+    exit: Option<&crate::prompt_revalidation::WorkerExitCause>,
 ) {
     let transition_key = format!("{incident}:{recipient}");
     let (notification_id, prompt_already_delivered) = match queue.notify_idempotent(
@@ -447,7 +480,7 @@ fn deliver_worker_died_notice(
         return;
     };
 
-    let body = crate::prompt_revalidation::format_worker_died_relay(
+    let body = crate::prompt_revalidation::format_worker_died_relay_with_exit(
         &agent.id,
         &agent.name,
         incident,
@@ -455,6 +488,7 @@ fn deliver_worker_died_notice(
         &summary.held_task_ids,
         &summary.recovered_task_ids,
         notification_id,
+        exit,
     );
     // `lifecycle-wake:` is what makes the daemon corroborate, wake an idle
     // supervisor pane, bound re-nudges, and surface the row in
@@ -898,6 +932,39 @@ mod cas_3dcb_death_relay_tests {
         assert!(relays[0].prompt.contains("retired-worker"));
         assert!(relays[0].prompt.contains("cas-active"));
         assert!(relays[0].prompt.contains("shutdown request"));
+        assert_eq!(fixture.durable_notices(), 1);
+    }
+
+    /// cas-2ffe (GH #915): the daemon's observed exit cause reaches the
+    /// supervisor as structured relay fields and a quoted tail.
+    #[test]
+    fn the_harness_exit_cause_reaches_the_supervisor_cas_2ffe() {
+        let fixture = Fixture::new();
+        let worker = fixture.dead_worker("codex-a", 0);
+        let cause = crate::prompt_revalidation::WorkerExitCause {
+            exit_code: Some(0),
+            exit_signal: None,
+            output_tail: Some("model turn interrupted".to_string()),
+        };
+
+        recover_worker_vanished_with_exit(
+            &fixture.cas_root,
+            fixture.agent_store.as_ref(),
+            &worker,
+            &[],
+            &cause.status(),
+            Some(&cause),
+        );
+
+        let relays = fixture.prompt_relays();
+        assert_eq!(relays.len(), 1, "{relays:?}");
+        let prompt = &relays[0].prompt;
+        assert!(prompt.contains("died — exited with code 0."), "{prompt}");
+        assert!(prompt.contains("Exit cause: exited with code 0"), "{prompt}");
+        assert!(prompt.contains("| model turn interrupted"), "{prompt}");
+        let envelope = crate::prompt_revalidation::parse_worker_died_envelope(prompt)
+            .expect("the daemon must classify it");
+        assert_eq!(envelope.exit_code, Some(0));
         assert_eq!(fixture.durable_notices(), 1);
     }
 

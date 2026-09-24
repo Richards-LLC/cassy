@@ -245,6 +245,9 @@ pub struct FactoryDaemon {
     notify_rx: Option<cas_factory::DaemonNotifier>,
     /// Workers that have been shut down or crashed — their queued messages are dropped.
     dead_workers: std::collections::HashSet<String>,
+    /// cas-2ffe (GH #915): harness exits from the last few seconds, oldest
+    /// first, kept to flag simultaneous deaths as one incident.
+    recent_worker_exits: Vec<crate::ui::factory::daemon::runtime::ObservedWorkerExit>,
     /// Workers whose harness has reported a terminal unavailable state in the
     /// current session. One supervisor relay per episode; removal permits a
     /// later recovered-and-exhausted worker to surface again.

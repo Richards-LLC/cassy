@@ -41,6 +41,7 @@ pub(crate) fn acknowledge_linked_lifecycle_notification(
         | "worker_delivery_stalled"
         | "worker_unavailable"
         | "worker_approval_pending"
+        | "workers_died_together"
         | "supervisor_unread" => {
             format!("worker-attention-outbox:{notification_id}")
         }

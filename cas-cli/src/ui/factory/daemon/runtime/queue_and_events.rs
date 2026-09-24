@@ -102,6 +102,70 @@ fn worker_exit_info(
     format!("{status}{tail}")
 }
 
+/// cas-2ffe (GH #915): the structured exit cause carried by the worker-died
+/// relay. The tail is redacted (credential patterns and key=value secrets)
+/// before it leaves the daemon, and bounded like the timeout tail.
+fn worker_exit_cause(
+    exit_code: Option<i32>,
+    exit_signal: Option<&str>,
+    pane_tail: Option<&str>,
+) -> crate::prompt_revalidation::WorkerExitCause {
+    let output_tail = pane_tail
+        .map(str::trim)
+        .filter(|tail| !tail.is_empty())
+        .map(|tail| {
+            let (redacted, _) =
+                crate::hooks::handlers::handlers_events::message_display::redact_secrets(
+                    tail.to_string(),
+                );
+            bounded_tail_text(crate::ai_enrichment::redact_string(&redacted).trim())
+        });
+    crate::prompt_revalidation::WorkerExitCause {
+        exit_code,
+        exit_signal: exit_signal
+            .map(str::trim)
+            .filter(|signal| !signal.is_empty())
+            .map(str::to_string),
+        output_tail,
+    }
+}
+
+/// Deaths closer together than this are one incident (cas-2ffe, GH #915):
+/// three Codex workers exited with code 0 within 1.2 s of each other.
+pub(super) const WORKER_DEATH_CORRELATION_WINDOW: std::time::Duration =
+    std::time::Duration::from_secs(5);
+
+/// One observed harness exit, kept briefly to detect correlated deaths.
+#[derive(Debug, Clone)]
+pub(crate) struct ObservedWorkerExit {
+    pub at: chrono::DateTime<chrono::Utc>,
+    pub worker: String,
+    pub status: String,
+}
+
+/// The first group of at least two exits that fall within `window` of the
+/// group's first exit, once that window has closed at `now`. Returns the
+/// group and how many leading entries it spans. A lone exit whose window has
+/// closed is reported as a group of one so the caller can drop it.
+pub(crate) fn closed_death_group(
+    exits: &[ObservedWorkerExit],
+    now: chrono::DateTime<chrono::Utc>,
+    window: std::time::Duration,
+) -> Option<Vec<ObservedWorkerExit>> {
+    let first = exits.first()?;
+    let window = chrono::Duration::from_std(window).ok()?;
+    if now - first.at < window {
+        return None;
+    }
+    Some(
+        exits
+            .iter()
+            .take_while(|exit| exit.at - first.at <= window)
+            .cloned()
+            .collect(),
+    )
+}
+
 /// Return a bounded pane excerpt when a harness reports a model rejection
 /// during boot. Claude Code emits these messages before a rejected worker
 /// necessarily exits, so polling this signal closes the gap between pane
@@ -2900,12 +2964,20 @@ impl FactoryDaemon {
         let pane_tail = timeout_pane_tail(self.pane_buffers.get(worker_name));
 
         let exit_info = worker_exit_info(exit_code, exit_signal.as_deref(), pane_tail.as_deref());
+        // cas-2ffe (GH #915): the relay carries the cause as structured
+        // fields plus a redacted tail, not spliced into its own lines.
+        let exit_cause = worker_exit_cause(exit_code, exit_signal.as_deref(), pane_tail.as_deref());
+        self.recent_worker_exits.push(ObservedWorkerExit {
+            at: chrono::Utc::now(),
+            worker: worker_name.to_string(),
+            status: exit_cause.status(),
+        });
 
         // A registered worker can still be a dead harness whose MCP child
         // answered first. Mark the durable agent stale before removing the
         // pane so task leases are parked and worker_status cannot retain the
         // transcript-backed active row.
-        self.mark_registered_worker_stale(worker_name, &exit_info);
+        self.mark_registered_worker_stale(worker_name, &exit_cause.status(), Some(&exit_cause));
         self.app.mark_worker_crashed(worker_name).await;
         self.dead_workers.insert(worker_name.to_string());
 
@@ -2957,23 +3029,50 @@ impl FactoryDaemon {
     /// Mark the current worker registration stale and park any leases before
     /// the pane is removed. The daemon-side heartbeat gate normally handles
     /// this, but boot failures can arrive before its next tick.
-    fn mark_registered_worker_stale(&self, worker_name: &str, reason: &str) {
-        let agent_id = self
+    fn mark_registered_worker_stale(
+        &self,
+        worker_name: &str,
+        reason: &str,
+        exit: Option<&crate::prompt_revalidation::WorkerExitCause>,
+    ) {
+        let Ok(agent_store) = open_agent_store(self.app.cas_dir()) else {
+            return;
+        };
+        let cached = self
             .app
             .director_data()
             .agents
             .iter()
             .find(|agent| is_exact_agent_name_match(agent, worker_name))
-            .map(|agent| agent.id.clone());
-        let Some(agent_id) = agent_id else {
-            return;
-        };
-        let Ok(agent_store) = open_agent_store(self.app.cas_dir()) else {
-            return;
-        };
-        let Ok(agent) = agent_store.get(&agent_id) else {
-            return;
-        };
+            .and_then(|agent| agent_store.get(&agent.id).ok());
+        // cas-2ffe (GH #915): the harness can take its `cas serve` child down
+        // first, and that child unregisters the row. A missed lookup used to
+        // return silently, so the death reached nobody. Fall back to any
+        // registration of this worker in this session, then to a stand-in
+        // row carrying the name and session, so an exit is never silent.
+        let agent = cached
+            .or_else(|| {
+                agent_store.list(None).ok().and_then(|agents| {
+                    agents
+                        .into_iter()
+                        .filter(|agent| {
+                            agent.name == worker_name
+                                && agent.factory_session.as_deref()
+                                    == Some(self.session_name.as_str())
+                        })
+                        .max_by_key(|agent| agent.last_heartbeat)
+                })
+            })
+            .unwrap_or_else(|| {
+                let mut stand_in = cas_types::Agent::new(
+                    format!("{worker_name}-exited-{}", chrono::Utc::now().timestamp_millis()),
+                    worker_name.to_string(),
+                );
+                stand_in.role = cas_types::AgentRole::Worker;
+                stand_in.agent_type = cas_types::AgentType::Worker;
+                stand_in.factory_session = Some(self.session_name.clone());
+                stand_in
+            });
         let held = agent_store
             .list_agent_leases(&agent.id)
             .unwrap_or_default()
@@ -2981,13 +3080,53 @@ impl FactoryDaemon {
             .map(|lease| lease.task_id)
             .collect::<Vec<_>>();
         let _ = agent_store.mark_stale(&agent.id);
-        crate::mcp::tools::service::orphan_recovery::recover_worker_vanished(
+        crate::mcp::tools::service::orphan_recovery::recover_worker_vanished_with_exit(
             self.app.cas_dir(),
             agent_store.as_ref(),
             &agent,
             &held,
             reason,
+            exit,
         );
+    }
+
+    /// cas-2ffe (GH #915): several harnesses exiting within
+    /// [`WORKER_DEATH_CORRELATION_WINDOW`] are one incident, not unrelated
+    /// deaths. Each worker's own relay still parks its tasks; once the window
+    /// closes, the group is flagged to the supervisor as ONE event naming
+    /// every worker and exit status, so the common cause (the host, the
+    /// harness, the account) is investigated instead of three separate
+    /// respawns.
+    pub(super) fn relay_correlated_worker_deaths(&mut self) {
+        let now = chrono::Utc::now();
+        while let Some(group) =
+            closed_death_group(&self.recent_worker_exits, now, WORKER_DEATH_CORRELATION_WINDOW)
+        {
+            let span = group.len();
+            if span >= 2 {
+                let outcome = super::lifecycle::enqueue_correlated_worker_deaths_relay(
+                    self.app.cas_dir(),
+                    &group,
+                );
+                if !matches!(
+                    outcome,
+                    super::lifecycle::WorkerAttentionRelayOutcome::Persisted { .. }
+                ) && now - group[0].at < chrono::Duration::minutes(10)
+                {
+                    // Keep the group for the next tick; the relay key makes
+                    // the retry idempotent. A group that still cannot be
+                    // relayed after ten minutes is dropped, not retried forever.
+                    return;
+                }
+                tracing::warn!(
+                    target: "cas::coordination",
+                    stage = "worker_deaths_correlated",
+                    workers = %group.iter().map(|exit| exit.worker.as_str()).collect::<Vec<_>>().join(","),
+                    "correlated worker deaths relayed to the supervisor as one incident"
+                );
+            }
+            self.recent_worker_exits.drain(..span);
+        }
     }
 
     pub(super) async fn reconcile_spawn_verifications(&mut self) {
@@ -3117,7 +3256,7 @@ impl FactoryDaemon {
                 if let Err(error) = self.app.mux.kill_worker(&worker, true).await {
                     tracing::warn!(worker = %worker, error = %error, "failed to reap boot-failed worker PTY");
                 }
-                self.mark_registered_worker_stale(&worker, "worker harness failed during boot");
+                self.mark_registered_worker_stale(&worker, "worker harness failed during boot", None);
                 self.app.mark_worker_crashed(&worker).await;
                 self.dead_workers.insert(worker.clone());
                 self.pane_buffers.remove(&worker);
@@ -8176,6 +8315,61 @@ mod tests {
         assert_eq!(tail.chars().count(), 2_000, "tail must remain bounded");
         assert!(tail.ends_with("tail from Claude"), "tail: {tail}");
         assert!(!tail.contains("\x1b["), "ANSI must be stripped: {tail}");
+    }
+
+    /// cas-2ffe (GH #915): the relay's exit cause keeps code and signal
+    /// apart, and redacts secrets from the harness tail before it leaves the
+    /// daemon.
+    #[test]
+    fn worker_exit_cause_is_structured_and_redacted_cas_2ffe() {
+        let cause = worker_exit_cause(
+            Some(0),
+            Some("  "),
+            Some("turn aborted\nOPENAI_API_KEY=sk-abcdef1234567890abcdef1234567890\nbye"),
+        );
+        assert_eq!(cause.exit_code, Some(0));
+        assert_eq!(cause.exit_signal, None, "a blank signal is no signal");
+        assert_eq!(cause.status(), "exited with code 0");
+        let tail = cause.output_tail.expect("tail");
+        assert!(tail.contains("turn aborted") && tail.contains("bye"), "{tail}");
+        assert!(!tail.contains("sk-abcdef1234567890abcdef1234567890"), "{tail}");
+
+        let signalled = worker_exit_cause(Some(1), Some("Killed"), None);
+        assert_eq!(signalled.status(), "terminated by signal Killed");
+        assert_eq!(signalled.output_tail, None);
+    }
+
+    /// cas-2ffe (GH #915): the reported shape. Three exits within 1.2 s are
+    /// one group once the window closes. A later exit starts its own group.
+    #[test]
+    fn simultaneous_exits_group_once_the_window_closes_cas_2ffe() {
+        let t0 = chrono::Utc::now() - chrono::Duration::seconds(30);
+        let exit = |worker: &str, offset_ms: i64| ObservedWorkerExit {
+            at: t0 + chrono::Duration::milliseconds(offset_ms),
+            worker: worker.to_string(),
+            status: "exited with code 0".to_string(),
+        };
+        let exits = vec![
+            exit("codex-a", 0),
+            exit("codex-b", 700),
+            exit("codex-c", 1_200),
+            exit("codex-d", 20_000),
+        ];
+        let window = WORKER_DEATH_CORRELATION_WINDOW;
+
+        assert!(
+            closed_death_group(&exits, t0 + chrono::Duration::seconds(2), window).is_none(),
+            "the window is still open"
+        );
+        let group = closed_death_group(&exits, chrono::Utc::now(), window).expect("closed");
+        assert_eq!(
+            group.iter().map(|exit| exit.worker.as_str()).collect::<Vec<_>>(),
+            ["codex-a", "codex-b", "codex-c"]
+        );
+        let rest = &exits[group.len()..];
+        let lone = closed_death_group(rest, chrono::Utc::now(), window).expect("closed");
+        assert_eq!(lone.len(), 1, "a lone exit is dropped, not flagged");
+        assert!(closed_death_group(&[], chrono::Utc::now(), window).is_none());
     }
 
     #[test]

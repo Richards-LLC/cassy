@@ -936,12 +936,15 @@ where
         .filter(|_| pid_alive)
         .map(background_processes_for)
         .unwrap_or(BackgroundProcessState::Unavailable);
+    // cas-4143: Claude writes the `tool_use` to the transcript before it
+    // parks the call for leader approval, so a pending approval normally
+    // looks like an in-flight call. The unread request plus an empty process
+    // tree is the stronger evidence; an in-flight call must not hide it.
     let state = if is_leader_approval_hang(
         pid_alive,
         pending_permission.as_ref(),
         &background_processes,
-    ) && !in_flight
-    {
+    ) {
         WorkerLivenessState::ApprovalHang
     } else if background_processes.is_active() {
         classify_from_evidence_with_background(
@@ -1133,6 +1136,61 @@ pub(crate) struct ResolvedWorker {
 // ---------------------------------------------------------------------------
 
 /// `cas factory is-wedged <worker>`: classify + print evidence + exit.
+/// `cas factory approve|deny <worker>` (cas-4143): answer a teammate
+/// permission request that Claude Code parked for a team lead nobody plays.
+/// The answer is written to the worker's inbox as the lead, the only sender
+/// its poller accepts. Without `--request`, the oldest unread request from
+/// that worker is answered.
+pub(crate) fn execute_answer_permission(
+    cas_root: Option<&Path>,
+    worker: &str,
+    request_id: Option<&str>,
+    approve: bool,
+    reason: Option<&str>,
+) -> Result<()> {
+    use crate::factory_permission_relay as relay;
+    let cas_root =
+        cas_root.ok_or_else(|| anyhow!("--cas-root required or run from a Cassy project"))?;
+    let w = resolve_worker(cas_root, worker)?;
+    let env_factory_session = std::env::var("CAS_FACTORY_SESSION")
+        .ok()
+        .filter(|session| !session.trim().is_empty());
+    let session = w
+        .factory_session
+        .clone()
+        .or(env_factory_session)
+        .ok_or_else(|| anyhow!("{} has no factory session; nothing to answer", w.name))?;
+    let config_root = claude_config_root(w.account_dir.as_deref())
+        .ok_or_else(|| anyhow!("cannot resolve the Claude config dir for {}", w.name))?;
+    let request = relay::pending_requests(&config_root, &session)
+        .into_iter()
+        .filter(|request| request.worker == w.name)
+        .find(|request| request_id.is_none_or(|id| request.request_id == id))
+        .ok_or_else(|| {
+            anyhow!(
+                "no unread permission request from {}{} in {}",
+                w.name,
+                request_id.map(|id| format!(" with id {id}")).unwrap_or_default(),
+                relay::inbox_path(&config_root, &session, relay::TEAM_LEAD).display()
+            )
+        })?;
+    let reason = reason
+        .map(str::trim)
+        .filter(|reason| !reason.is_empty())
+        .unwrap_or("Denied by the factory supervisor");
+    relay::answer_request(&config_root, &session, &request, approve, reason)?;
+    println!(
+        "{} {} request {} from {} ({}s old): {}",
+        if approve { "Approved" } else { "Denied" },
+        request.tool_name,
+        request.request_id,
+        request.worker,
+        request.age_secs,
+        request.command_excerpt
+    );
+    Ok(())
+}
+
 pub(crate) fn execute_is_wedged(cas_root: Option<&Path>, worker: &str, json: bool) -> Result<()> {
     let cas_root =
         cas_root.ok_or_else(|| anyhow!("--cas-root required or run from a Cassy project"))?;
@@ -2820,6 +2878,46 @@ mod tests {
                 .as_str()
                 .is_some_and(|command| command.contains("rewrite.html"))
         );
+    }
+
+    /// cas-4143: the observed shape. The transcript shows the Bash call in
+    /// flight (Claude records it before asking the lead), and the unread
+    /// request is five minutes old. That is an approval hang, not a busy
+    /// worker.
+    #[test]
+    fn an_in_flight_call_does_not_hide_a_pending_leader_approval_cas_4143() {
+        let tmp = tempfile::tempdir().unwrap();
+        let transcript = tmp.path().join("transcript.jsonl");
+        std::fs::write(
+            &transcript,
+            concat!(
+                r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_heredoc","name":"Bash","input":{"command":"cd hub-web && python3 - <<'EOF'"}}]}}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        let pending = PendingPermission {
+            request_id: Some("perm-1790189281659-ph1zl7g".to_string()),
+            tool_name: "Bash".to_string(),
+            command_excerpt: "cd hub-web && python3 - <<'EOF'".to_string(),
+            age_secs: LEADER_APPROVAL_PENDING_THRESHOLD_SECS,
+        };
+        let (state, evidence) = classify_worker_with_pending(
+            Some(std::process::id()),
+            Some(transcript.as_path()),
+            None,
+            "session",
+            cas_mux::SupervisorCli::Claude,
+            |_| true,
+            |_| None,
+            |_| false,
+            Some(pending),
+        );
+        assert!(evidence.in_flight_tool_call, "the fixture is an in-flight call");
+        #[cfg(target_os = "linux")]
+        assert_eq!(state, WorkerLivenessState::ApprovalHang);
+        #[cfg(not(target_os = "linux"))]
+        let _ = state;
     }
 
     #[test]

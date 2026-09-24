@@ -472,6 +472,7 @@ impl MarkdownRuleStore {
             auto_approve_paths: fm.auto_approve_paths,
             team_id: None,
             share: None,
+            operator_authority: None,
         })
     }
 

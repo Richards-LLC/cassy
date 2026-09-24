@@ -245,6 +245,9 @@ pub struct FactoryDaemon {
     notify_rx: Option<cas_factory::DaemonNotifier>,
     /// Workers that have been shut down or crashed — their queued messages are dropped.
     dead_workers: std::collections::HashSet<String>,
+    /// cas-2ffe (GH #915): harness exits from the last few seconds, oldest
+    /// first, kept to flag simultaneous deaths as one incident.
+    recent_worker_exits: Vec<crate::ui::factory::daemon::runtime::ObservedWorkerExit>,
     /// Workers whose harness has reported a terminal unavailable state in the
     /// current session. One supervisor relay per episode; removal permits a
     /// later recovered-and-exhausted worker to surface again.
@@ -254,6 +257,11 @@ pub struct FactoryDaemon {
     reported_unavailable_workers: std::collections::HashMap<String, String>,
     /// Last bounded rollout scan for terminal harness availability evidence.
     last_usage_limit_scan: Option<Instant>,
+    /// cas-4143: last scan of Claude's team-lead mailbox for teammate
+    /// permission requests parked for a lead nobody plays.
+    last_permission_request_scan: Option<Instant>,
+    /// cas-4143: permission request ids already relayed to the supervisor.
+    reported_permission_requests: std::collections::HashSet<String>,
     /// Bounded supervisor transcript scan for Commander mirroring.
     last_commander_mirror_scan: Option<Instant>,
     /// cas-8a55: workers whose harness refused a turn for an account reason

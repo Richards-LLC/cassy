@@ -15,7 +15,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use crate::Result;
 use crate::error::StoreError;
 use crate::shared_db::ImmediateTx;
-use cas_types::{QaPass, QaPassState, QaVerdict};
+use cas_types::{QA_PASS_WITHDRAWN_PREFIX, QaPass, QaPassState, QaVerdict};
 
 /// DDL shared by store-open repair and the numbered migration.
 pub const QA_PASS_SCHEMA_STATEMENTS: &[&str] = &[
@@ -466,6 +466,48 @@ pub fn waive_qa_pass(
     Ok(pass)
 }
 
+/// Withdraw the open round for `task_id` because the delivery no longer needs
+/// independent QA (cas-5c38). Only an unclaimed (pending) round is withdrawn
+/// unless `include_claimed`; a reviewer already at work keeps its round. The
+/// row is kept as `superseded` with a [`QA_PASS_WITHDRAWN_PREFIX`] summary so
+/// the audit trail survives while the gates stop counting it.
+pub fn withdraw_open_qa_pass(
+    cas_dir: &Path,
+    task_id: &str,
+    reason: &str,
+    include_claimed: bool,
+    now: DateTime<Utc>,
+) -> Result<Option<QaPass>> {
+    if reason.trim().is_empty() {
+        return Err(StoreError::Parse(
+            "withdrawing a QA round needs a reason".to_string(),
+        ));
+    }
+    let conn = open_conn(cas_dir)?;
+    let conn = conn.lock().map_err(lock_err)?;
+    let tx = ImmediateTx::new(&conn)?;
+    expire_with_conn(&tx, task_id, now)?;
+    let Some(active) = active_with_conn(&tx, task_id)? else {
+        tx.commit()?;
+        return Ok(None);
+    };
+    if active.state == QaPassState::Claimed && !include_claimed {
+        tx.commit()?;
+        return Ok(None);
+    }
+    tx.execute(
+        "UPDATE qa_passes SET state = 'superseded', summary = ?2, resolved_at = ?3 WHERE id = ?1",
+        params![
+            active.id,
+            format!("{QA_PASS_WITHDRAWN_PREFIX}{}", reason.trim()),
+            now.to_rfc3339(),
+        ],
+    )?;
+    let pass = by_id_with_conn(&tx, &active.id)?;
+    tx.commit()?;
+    Ok(Some(pass))
+}
+
 /// Latest round for a task, after lazily timing out an expired one.
 pub fn latest_qa_pass(cas_dir: &Path, task_id: &str, now: DateTime<Utc>) -> Result<Option<QaPass>> {
     let conn = open_conn(cas_dir)?;
@@ -570,6 +612,36 @@ mod tests {
             passes.iter().find(|p| p.id == first.id).unwrap().state,
             QaPassState::Superseded
         );
+    }
+
+    #[test]
+    fn withdrawal_takes_only_an_unclaimed_round_unless_asked_cas_5c38() {
+        let dir = TempDir::new().unwrap();
+        let now = Utc::now();
+        assert!(withdraw_open_qa_pass(dir.path(), "cas-ui1", "cleared", false, now)
+            .unwrap()
+            .is_none());
+        assert!(withdraw_open_qa_pass(dir.path(), "cas-ui1", "  ", false, now).is_err());
+
+        let first = dispatched(open_qa_pass(dir.path(), &new("aaaa1111", now), now).unwrap());
+        let withdrawn = withdraw_open_qa_pass(dir.path(), "cas-ui1", "demo cleared", false, now)
+            .unwrap()
+            .expect("a pending round is withdrawn");
+        assert_eq!(withdrawn.id, first.id);
+        assert!(withdrawn.is_withdrawn());
+        assert_eq!(withdrawn.summary.as_deref(), Some("withdrawn: demo cleared"));
+
+        // A reviewer already at work keeps its round unless asked.
+        let second = dispatched(open_qa_pass(dir.path(), &new("aaaa1111", now), now).unwrap());
+        claim_qa_pass(dir.path(), "cas-ui1", "qa-worker", now).unwrap();
+        assert!(withdraw_open_qa_pass(dir.path(), "cas-ui1", "demo cleared", false, now)
+            .unwrap()
+            .is_none());
+        let taken = withdraw_open_qa_pass(dir.path(), "cas-ui1", "no-code", true, now)
+            .unwrap()
+            .expect("an explicit withdrawal takes a claimed round too");
+        assert_eq!(taken.id, second.id);
+        assert!(taken.is_withdrawn());
     }
 
     #[test]

@@ -974,3 +974,87 @@ async fn casb123_proof_scope_fix_rejects_immutable_merged_delivery() {
         "rejected correction must preserve the immutable merge fact"
     );
 }
+
+/// GH #1006 item 3: a worker whose branch sits on a delivery parked for merge
+/// on another target starts a new task: the parked tip is kept as local
+/// branch `parked/<task>` and never pushed over, and the worker branch moves
+/// onto the new task's declared target. Before, start refused with "carries
+/// commits not on target base … git rebase", and the rebase would have
+/// rewritten the tip under independent QA.
+#[tokio::test]
+async fn start_moves_a_branch_parked_for_another_target_and_keeps_its_tip_gh_1006() {
+    let (temp, core) = setup_cas();
+    let _env_lock = env_test_lock();
+    let cas_dir = temp.path().join(".cas");
+    let repo = temp.path();
+    let git = |args: &[&str]| -> String {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .env("GIT_AUTHOR_NAME", "test")
+            .env("GIT_AUTHOR_EMAIL", "test@test")
+            .env("GIT_COMMITTER_NAME", "test")
+            .env("GIT_COMMITTER_EMAIL", "test@test")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    git(&["init", "-q", "-b", "main"]);
+    git(&["remote", "add", "origin", "https://github.com/example/gh1006-fixture.git"]);
+    std::fs::write(repo.join("seed.txt"), "seed\n").unwrap();
+    git(&["add", "seed.txt"]);
+    git(&["commit", "-q", "-m", "seed"]);
+    // The new task's target has moved on without the parked delivery.
+    git(&["checkout", "-q", "-b", "epic/burn-down"]);
+    std::fs::write(repo.join("burn.txt"), "burn-down work\n").unwrap();
+    git(&["add", "burn.txt"]);
+    git(&["commit", "-q", "-m", "burn-down work"]);
+    // The worker's branch holds a delivery parked for merge elsewhere.
+    git(&["checkout", "-q", "-b", "factory/test-agent", "main"]);
+    std::fs::write(repo.join("hub.css"), ".row{gap:8px}\n").unwrap();
+    git(&["add", "hub.css"]);
+    git(&["commit", "-q", "-m", "parked hub delivery"]);
+    let parked_tip = git(&["rev-parse", "HEAD"]);
+    cas::store::known_repos::ensure_host_schema().unwrap();
+    set_test_agent_role(&cas_dir, AgentRole::Worker);
+
+    let store = open_task_store(&cas_dir).unwrap();
+    let mut parked = cas::types::Task::new("cas-pk06".to_string(), "Parked hub delivery".to_string());
+    parked.status = TaskStatus::AwaitingMerge;
+    parked.assignee = Some("test-agent".to_string());
+    parked.deliverables.factory_branch_anchor = Some(parked_tip.clone());
+    store.add(&parked).unwrap();
+
+    let service = CasService::new(core.clone(), None);
+    let created = unified_task(
+        &service,
+        serde_json::json!({
+            "action": "create",
+            "risk": "none",
+            "title": "Burn-down fix",
+            "target_repo": repo.to_str().unwrap(),
+            "target_branch": "epic/burn-down",
+            "assignee": "test-agent"
+        }),
+    )
+    .await;
+    let task_id = extract_task_id(&created).unwrap().to_string();
+
+    let started = core
+        .cas_task_start(Parameters(IdRequest { id: task_id.clone() }))
+        .await
+        .map(extract_text)
+        .unwrap_or_else(|error| panic!("start must move the parked branch: {}", error.message));
+    assert!(started.contains("PARKED BRANCH MOVED"), "{started}");
+    assert!(started.contains("cas-pk06"), "{started}");
+    assert_eq!(git(&["rev-parse", "HEAD"]), git(&["rev-parse", "epic/burn-down"]));
+    assert_eq!(git(&["rev-parse", "parked/cas-pk06"]), parked_tip);
+    assert_eq!(
+        git(&["rev-parse", "--abbrev-ref", "HEAD"]),
+        "factory/test-agent",
+        "the worker stays on its own branch"
+    );
+}

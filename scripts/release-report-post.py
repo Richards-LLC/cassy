@@ -36,6 +36,11 @@ DEFAULT_REPO = "Richards-LLC/cassy"
 MCP_PROTOCOL_VERSION = "2025-06-18"
 MAX_REMOTE_PDF_BYTES = 32 * 1024 * 1024
 MAX_HUB_FILE_BYTES = 4 * 1024 * 1024
+# The largest file MechaCassy accepts through `mecha_post kind=file` (GH #908).
+# Larger uploads fail at the hub with HTTP 413 or `file_too_large`, so a
+# report over this is refused before any network call. Raise it with
+# CAS_RELEASE_TRAIN_REPORT_MAX_UPLOAD_BYTES only if the hub's limit changes.
+MAX_HUB_UPLOAD_BYTES = 1024 * 1024
 SLACK_TIMESTAMP = re.compile(r"^(\d+)(?:\.(\d{1,6}))?$")
 
 
@@ -45,6 +50,44 @@ class AdapterError(RuntimeError):
 
 def fail(message: str) -> NoReturn:
     raise AdapterError(message)
+
+
+def human_size(size: int) -> str:
+    """A byte count as the operator reads it, e.g. `3.9 MB (4089446 bytes)`."""
+
+    if size >= 1000 * 1000:
+        return f"{size / (1000 * 1000):.1f} MB ({size} bytes)"
+    if size >= 1000:
+        return f"{size / 1000:.1f} kB ({size} bytes)"
+    return f"{size} bytes"
+
+
+def hub_upload_limit() -> int:
+    raw = os.environ.get("CAS_RELEASE_TRAIN_REPORT_MAX_UPLOAD_BYTES")
+    if raw is None or not raw.strip():
+        return MAX_HUB_UPLOAD_BYTES
+    try:
+        limit = int(raw)
+    except ValueError:
+        fail("CAS_RELEASE_TRAIN_REPORT_MAX_UPLOAD_BYTES must be a whole number of bytes")
+    if limit <= 0:
+        fail("CAS_RELEASE_TRAIN_REPORT_MAX_UPLOAD_BYTES must be positive")
+    return limit
+
+
+def upload_limit_message(label: str, size: int | None, limit: int) -> str:
+    size_text = f" is {human_size(size)}," if size is not None else " is"
+    return (
+        f"{label}{size_text} over MechaCassy's file upload limit of {human_size(limit)}; "
+        "nothing was posted. Shrink or split the file and post again."
+    )
+
+
+def check_upload_size(label: str, size: int, limit: int) -> None:
+    """Refuse a file the hub would reject, before any network call (GH #908)."""
+
+    if size > limit:
+        fail(upload_limit_message(label, size, limit))
 
 
 def parsed_http_url(url: str, label: str) -> urllib.parse.SplitResult:
@@ -225,6 +268,11 @@ def request_json(
             response_headers = {key.lower(): value for key, value in response.headers.items()}
     except urllib.error.HTTPError as exc:
         detail = exc.read(512).decode("utf-8", "replace").replace("\n", " ")
+        if exc.code == 413:
+            fail(
+                "MechaCassy rejected the request as too large (HTTP 413); its file upload "
+                f"limit is {human_size(hub_upload_limit())}. Nothing was posted."
+            )
         fail(f"MechaCassy HTTP {exc.code}: {detail[:240]}")
     except urllib.error.URLError as exc:
         fail(f"MechaCassy request failed: {exc.reason}")
@@ -397,6 +445,16 @@ class McpClient:
     def tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         result = self.call("tools/call", {"name": name, "arguments": arguments})
         if result.get("isError"):
+            detail = " ".join(
+                str(item.get("text", ""))
+                for item in result.get("content", [])
+                if isinstance(item, dict) and item.get("type") == "text"
+            )
+            if "file_too_large" in detail or "too large" in detail.lower():
+                fail(
+                    f"MechaCassy tool {name} refused the file as too large (file_too_large); "
+                    f"its file upload limit is {human_size(hub_upload_limit())}."
+                )
             fail(f"MechaCassy tool {name} returned an error")
         structured = result.get("structuredContent")
         if isinstance(structured, dict):
@@ -620,6 +678,7 @@ def main(argv: list[str]) -> int:
     try:
         read_since = slack_timestamp_since(user_thread)
         pdf_bytes = pdf_path.read_bytes()
+        check_upload_size(f"PDF {pdf_path.name}", len(pdf_bytes), hub_upload_limit())
         html_bytes = html_path.read_bytes()
         pdf_sha = sha256(pdf_bytes)
         html_sha = sha256(html_bytes)
@@ -701,6 +760,9 @@ def main(argv: list[str]) -> int:
         return 0
     except (AdapterError, OSError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
+        return 1
+    except Exception as exc:  # noqa: BLE001 - an operator sees a line, never a traceback
+        print(f"error: unexpected {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
 
 

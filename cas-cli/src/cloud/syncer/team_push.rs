@@ -54,6 +54,32 @@ fn stamp_task_origin_project(value: &mut serde_json::Value, project_id: &str) {
     }
 }
 
+/// cas-3a90 (GH #909): entries, rules and skills carry the project that
+/// authored them, so a pull elsewhere can refuse a row that is not its own
+/// instead of trusting the echoed project scope. An explicit origin is kept.
+/// Global-scope rows are personal and stay unstamped, as global tasks do.
+pub(super) fn stamp_row_origin_project(value: &mut serde_json::Value, project_id: &str) {
+    let Some(row) = value.as_object_mut() else {
+        return;
+    };
+    if row.get("scope").and_then(serde_json::Value::as_str) == Some("global") {
+        return;
+    }
+    let has_origin = row
+        .get("origin_project")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|origin| !origin.trim().is_empty());
+    if !has_origin {
+        row.insert(
+            "origin_project".to_string(),
+            serde_json::Value::String(
+                canonical_project_id_with_pin(project_id, Some(project_id))
+                    .unwrap_or_else(|| project_id.to_string()),
+            ),
+        );
+    }
+}
+
 fn stamp_task_dependency_origin_project(value: &mut serde_json::Value, project_id: &str) {
     let Some(object) = value.as_object_mut() else {
         return;
@@ -119,6 +145,10 @@ impl CloudSyncer {
             tracing::warn!("[Cassy sync] {refusal}");
             return Ok(result);
         }
+
+        // cas-3a90: a pulled row this project did not author is never
+        // published under it, whatever local write enqueued it.
+        self.drop_unauthored_queued_pushes()?;
 
         // Fetch (but do NOT delete) pending team items so we can
         // mark_failed / mark_synced per item after the HTTP call completes.
@@ -320,6 +350,12 @@ impl CloudSyncer {
                         }
                         if entity_type == EntityType::TaskDependency {
                             stamp_task_dependency_origin_project(&mut value, target_project);
+                        }
+                        if matches!(
+                            entity_type,
+                            EntityType::Entry | EntityType::Rule | EntityType::Skill
+                        ) {
+                            stamp_row_origin_project(&mut value, target_project);
                         }
                         upserts_by_project
                             .entry(target_project.to_string())

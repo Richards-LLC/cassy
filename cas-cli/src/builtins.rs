@@ -2800,29 +2800,34 @@ pub fn sync_all_builtins_for_project(
                 &project_root.join(".claude"),
                 BUILTIN_AGENTS,
                 &skills,
-                BUILTIN_WORKFLOWS,
+                Some(BUILTIN_WORKFLOWS),
             )
         }
         SupervisorCli::Codex => {
             let skills = filtered_project_skills(CODEX_BUILTIN_SKILLS, project_root);
-            sync_project_catalog(&project_root.join(".codex"), CODEX_BUILTIN_AGENTS, &skills, &[])
+            sync_project_catalog(&project_root.join(".codex"), CODEX_BUILTIN_AGENTS, &skills, None)
         }
         SupervisorCli::Grok => {
             let skills = filtered_project_skills(GROK_BUILTIN_SKILLS, project_root);
-            sync_project_catalog(&project_root.join(".grok"), GROK_BUILTIN_AGENTS, &skills, &[])
+            sync_project_catalog(&project_root.join(".grok"), GROK_BUILTIN_AGENTS, &skills, None)
         }
         SupervisorCli::OpenCode => Ok(SyncResult::default()),
     }
 }
 
+/// `workflows` is `Some` for a harness that carries a workflow catalog (Claude),
+/// even when that catalog is empty: cas-c4e4 (GH #967, #971). Every builtin
+/// workflow is retired today, so `BUILTIN_WORKFLOWS` is empty, and gating the
+/// prune on a non-empty catalog left the retired `cas-code-review.js` in about
+/// 20 projects after every sync.
 fn sync_project_catalog(
     target_dir: &Path,
     agents: &[BuiltinFile],
     skills: &[BuiltinFile],
-    workflows: &[BuiltinFile],
+    workflows: Option<&[BuiltinFile]>,
 ) -> std::io::Result<SyncResult> {
     let mut result = sync_all_builtins_inner(target_dir, agents, skills)?;
-    if !workflows.is_empty() {
+    if let Some(workflows) = workflows {
         sync_workflows(target_dir, workflows, &mut result)?;
         let keep = builtin_workflow_names(workflows);
         prune_stale_cas_workflow_files(&target_dir.join("workflows"), &keep)?;
@@ -4524,15 +4529,26 @@ This is the body content."#;
                     "{label} discipline.md duplicates spawn-contract marker: {forbidden:?}"
                 );
             }
+            // cas-4cbb: workers never run Rust builds; the supervisor builds
+            // once at epic assembly.
             for required in [
-                "Scoped tests",
-                "cargo check -p <crate> --lib --tests",
-                "scripts/run-scoped-tests.sh --proof",
+                "Workers never run Rust builds",
+                "ASSEMBLY_PROOF",
+                "Non-Rust work is unaffected",
                 "Clean-CI environment",
             ] {
                 assert!(
                     ref_content.contains(required),
                     "{label} discipline.md missing unique test guidance marker: {required:?}"
+                );
+            }
+            for forbidden in [
+                "cargo check -p <crate> --lib --tests",
+                "scripts/run-scoped-tests.sh --proof",
+            ] {
+                assert!(
+                    !ref_content.contains(forbidden),
+                    "{label} discipline.md still tells workers to build: {forbidden:?}"
                 );
             }
         }
@@ -4626,21 +4642,13 @@ This is the body content."#;
         }
     }
 
-    /// cas-3627 (GH #159): the worker builtin must teach the difference
-    /// between the INNER test loop and the FINAL proof.
-    ///
-    /// Observed live before this rule existed: a worker fixing several test
-    /// entry points ran the full ~3,700-test lib sweep (~5 min) after each
-    /// individual micro-fix, foreground-`sleep`ing between checks — 47+
-    /// minutes of wall-clock for a few minutes of edits. cas-b4921 already
-    /// mandated backgrounding, so the gap was not "don't block"; it was that
-    /// nothing distinguished the seconds-long targeted loop you iterate in
-    /// from the minutes-long full sweep you are allowed to run twice.
-    ///
-    /// The test-loop recipe is on demand in references/discipline.md; all three
-    /// flavors must carry the same unique guidance.
+    /// cas-4cbb (operator directive 2026-09-24) supersedes cas-3627's worker
+    /// test loop: five workers each compiling in their own target dir drove
+    /// the host to load 190. Workers now never run Rust builds; the supervisor
+    /// builds and tests the epic tip once at assembly. The rule's detail is on
+    /// demand in references/discipline.md; all three flavors carry it.
     #[test]
-    fn test_worker_skills_teach_test_loop_discipline_cas_3627() {
+    fn test_worker_skills_teach_no_rust_build_rule_cas_4cbb() {
         for (label, skill_content, ref_content) in [
             (
                 "claude",
@@ -4658,38 +4666,32 @@ This is the body content."#;
                 include_str!("builtins/grok/skills/cas-worker/references/discipline.md"),
             ),
         ] {
-            // The hot body keeps only the pointer; the detailed test loop is
-            // on demand so it does not consume SessionStart budget.
-            for required in [
-                "discipline.md",
-                "scoped test-loop",
-            ] {
+            // The hot body keeps only the pointer; the rule's detail is on
+            // demand so it does not consume SessionStart budget.
+            for required in ["discipline.md", "no-Rust-build rule"] {
                 assert!(
                     skill_content.contains(required),
                     "{label} cas-worker SKILL.md missing discipline pointer: {required:?}"
                 );
             }
-            // The recipe: both loops named, batching, banked receipts, and the
-            // guarded nextest target.
+            // The rule: workers edit, commit and park unbuilt; the supervisor
+            // builds once at assembly and records ASSEMBLY_PROOF; worker closes
+            // carry no scoped or loaded proof.
             for required in [
-                "Batch before you verify",
-                "inner loop",
-                "Final proof",
-                "banked receipt",
-                "cargo nextest run",
+                "Workers never run Rust builds",
+                "park the\nwork without building",
+                "ASSEMBLY_PROOF",
+                "loaded_proof",
             ] {
                 assert!(
                     ref_content.contains(required),
-                    "{label} cas-worker discipline.md missing test-loop recipe: {required:?}"
+                    "{label} cas-worker discipline.md missing no-build rule: {required:?}"
                 );
             }
-            // The targeted-filter forms are the whole point of the inner loop:
-            // a rule that says "be targeted" without naming the flags is not
-            // actionable at 2am.
-            for required in ["--lib <module>", "--test <name>"] {
+            for forbidden in ["Batch before you verify", "banked receipt", "--lib <module>"] {
                 assert!(
-                    ref_content.contains(required),
-                    "{label} cas-worker discipline.md missing targeted-filter form: {required:?}"
+                    !ref_content.contains(forbidden),
+                    "{label} cas-worker discipline.md still teaches a worker test loop: {forbidden:?}"
                 );
             }
         }
@@ -7647,6 +7649,52 @@ This is the body content."#;
             unmanaged.exists(),
             "unmanaged workflow should never be touched by pruning"
         );
+    }
+
+    /// cas-c4e4 (GH #967, #971): a project sync removes the retired review
+    /// workflow and skill even though the builtin workflow catalog is now
+    /// empty. About 20 projects kept an Aug-11 `cas-code-review` copy because
+    /// the project path only pruned workflows when some were still shipped.
+    #[test]
+    fn project_sync_prunes_retired_review_workflow_and_skill_with_empty_catalog_cas_c4e4() {
+        use tempfile::tempdir;
+
+        assert!(
+            builtin_workflow_names(BUILTIN_WORKFLOWS).is_empty(),
+            "precondition: every builtin workflow is retired, the case that skipped the prune"
+        );
+        let project = tempdir().unwrap();
+        let claude_dir = project.path().join(".claude");
+        let workflows_dir = claude_dir.join("workflows");
+        std::fs::create_dir_all(&workflows_dir).unwrap();
+        // The Aug-11 copy predates the JS managed marker.
+        let retired_workflow = workflows_dir.join("cas-code-review.js");
+        std::fs::write(&retired_workflow, "export const meta = { name: 'cas-code-review' };
+").unwrap();
+        let retired_constants = workflows_dir.join("cas-code-review-constants.js");
+        std::fs::write(&retired_constants, "export const X = 1;
+").unwrap();
+        let user_workflow = workflows_dir.join("my-release.js");
+        std::fs::write(&user_workflow, "export const meta = {};
+").unwrap();
+        let retired_skill = claude_dir.join("skills/cas-code-review");
+        std::fs::create_dir_all(&retired_skill).unwrap();
+        std::fs::write(
+            retired_skill.join("SKILL.md"),
+            "---\nname: cas-code-review\nmanaged_by: cas\n---\n# retired\n",
+        )
+        .unwrap();
+
+        sync_all_builtins_for_project(SupervisorCli::Claude, project.path()).unwrap();
+
+        assert!(!retired_workflow.exists(), "retired workflow pruned by the project sync");
+        assert!(!retired_constants.exists(), "retired workflow helper pruned too");
+        assert!(!retired_skill.exists(), "retired managed skill pruned by the project sync");
+        assert!(user_workflow.exists(), "an unmanaged project workflow is never touched");
+
+        // A second sync is a no-op and leaves the user's file alone.
+        sync_all_builtins_for_project(SupervisorCli::Claude, project.path()).unwrap();
+        assert!(user_workflow.exists());
     }
 
     // cas-e0d1: builtin_skill_dir_names extracts `<dir>` from `skills/<dir>/...`

@@ -201,6 +201,72 @@ pub(super) fn enqueue_worker_unavailable_relay(
     )
 }
 
+/// cas-2ffe (GH #915): several workers' harnesses exited within the
+/// correlation window. One wake names every worker and its exit status, keyed
+/// on the first exit so a retry or daemon restart cannot repeat it.
+pub(super) fn enqueue_correlated_worker_deaths_relay(
+    cas_dir: &std::path::Path,
+    group: &[super::queue_and_events::ObservedWorkerExit],
+) -> WorkerAttentionRelayOutcome {
+    let Some(first) = group.first() else {
+        return WorkerAttentionRelayOutcome::NotApplicable;
+    };
+    let last = group.last().unwrap_or(first);
+    let spread_ms = (last.at - first.at).num_milliseconds().max(0);
+    let workers = group
+        .iter()
+        .map(|exit| format!("{} ({})", exit.worker, exit.status))
+        .collect::<Vec<_>>()
+        .join("; ");
+    let detail = format!(
+        "{count} worker harnesses exited within {spread_ms} ms of each other, starting {start}: \
+         {workers}. Treat this as one incident with a shared cause (host, harness binary, \
+         account or network) before respawning; each worker's own worker-died relay lists \
+         the tasks it parked.",
+        count = group.len(),
+        start = first.at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+    );
+    let occurrence = format!("{}:{}", first.worker, first.at.timestamp_millis());
+    enqueue_worker_attention_relay_detail(
+        cas_dir,
+        "workers_died_together",
+        &first.worker,
+        None,
+        None,
+        &detail,
+        &occurrence,
+    )
+}
+
+/// cas-4143: a teammate permission request CAS did not pre-approve has waited
+/// past the threshold. Name the worker, tool, command and age, and give the
+/// supervisor the approve/deny commands. One wake per request id.
+pub(super) fn enqueue_worker_approval_pending_relay(
+    cas_dir: &std::path::Path,
+    request: &crate::factory_permission_relay::WorkerPermissionRequest,
+) -> WorkerAttentionRelayOutcome {
+    let worker = request.worker.as_str();
+    let id = request.request_id.as_str();
+    let detail = format!(
+        "Worker {worker} has waited {age}s for a {tool} permission that Claude Code parked for a \
+         team lead nobody plays (request {id}): `{command}`. CAS did not pre-approve this call. \
+         Approve with `cas factory approve {worker} --request {id}` or deny with \
+         `cas factory deny {worker} --request {id} --reason \"...\"`.",
+        age = request.age_secs,
+        tool = request.tool_name,
+        command = request.command_excerpt,
+    );
+    enqueue_worker_attention_relay_detail(
+        cas_dir,
+        "worker_approval_pending",
+        worker,
+        None,
+        Some(request.age_secs),
+        &detail,
+        id,
+    )
+}
+
 /// A parked delivery whose PR was ejected must wake the supervisor *and* put
 /// a durable instruction in the delivering worker's inbox. The occurrence is
 /// a failed merge-group run ID when available, so a requeue naturally arms a
@@ -925,6 +991,92 @@ mod worker_attention_tests {
         }));
     }
 
+    /// cas-2ffe (GH #915): three simultaneous harness exits reach the
+    /// supervisor as ONE incident naming every worker and exit status, and a
+    /// replay of the same group stays one wake.
+    #[test]
+    fn simultaneous_worker_deaths_wake_the_supervisor_once_cas_2ffe() {
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[(
+            "CAS_FACTORY_SESSION",
+            "correlated-deaths-test",
+        )]);
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        register_supervisor(&cas_dir, "correlated-deaths-test");
+        let t0 = chrono::Utc::now();
+        let group = ["codex-a", "codex-b", "codex-c"]
+            .iter()
+            .enumerate()
+            .map(|(index, worker)| super::super::queue_and_events::ObservedWorkerExit {
+                at: t0 + chrono::Duration::milliseconds(600 * index as i64),
+                worker: (*worker).to_string(),
+                status: "exited with code 0".to_string(),
+            })
+            .collect::<Vec<_>>();
+
+        let first = enqueue_correlated_worker_deaths_relay(&cas_dir, &group);
+        let replay = enqueue_correlated_worker_deaths_relay(&cas_dir, &group);
+        assert!(matches!(first, WorkerAttentionRelayOutcome::Persisted { .. }));
+        assert_eq!(first, replay);
+
+        let rows = crate::store::open_prompt_queue_store(&cas_dir)
+            .unwrap()
+            .peek_all(10)
+            .unwrap();
+        assert_eq!(rows.len(), 1, "one incident, one wake");
+        let prompt = &rows[0].prompt;
+        assert!(crate::prompt_revalidation::is_supervisor_wake_envelope(prompt), "{prompt}");
+        assert!(prompt.contains("kind=\"workers_died_together\""), "{prompt}");
+        assert!(prompt.contains("3 worker harnesses exited within 1200 ms"), "{prompt}");
+        for worker in ["codex-a", "codex-b", "codex-c"] {
+            assert!(prompt.contains(&format!("{worker} (exited with code 0)")), "{prompt}");
+        }
+    }
+
+    /// cas-4143: a parked teammate permission request becomes one durable
+    /// supervisor wake that names the worker, command and age and carries the
+    /// approve/deny commands. Repeat scans replay it idempotently.
+    #[test]
+    fn a_pending_leader_approval_wakes_the_supervisor_once_cas_4143() {
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[(
+            "CAS_FACTORY_SESSION",
+            "approval-pending-test",
+        )]);
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        register_supervisor(&cas_dir, "approval-pending-test");
+        let request = crate::factory_permission_relay::WorkerPermissionRequest {
+            request_id: "perm-1790189281659-ph1zl7g".to_string(),
+            worker: "solid-falcon-70".to_string(),
+            tool_name: "Bash".to_string(),
+            tool_use_id: Some("toolu_01Heredoc".to_string()),
+            command_excerpt: "cd hub-web && python3 - <<'EOF'".to_string(),
+            age_secs: 1680,
+        };
+
+        let first = enqueue_worker_approval_pending_relay(&cas_dir, &request);
+        let replay = enqueue_worker_approval_pending_relay(&cas_dir, &request);
+        assert!(matches!(first, WorkerAttentionRelayOutcome::Persisted { .. }));
+        assert_eq!(first, replay, "one wake per request id");
+
+        let rows = crate::store::open_prompt_queue_store(&cas_dir)
+            .unwrap()
+            .peek_all(10)
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        let prompt = &rows[0].prompt;
+        assert_eq!(rows[0].target, "supervisor");
+        assert!(crate::prompt_revalidation::is_supervisor_wake_envelope(prompt), "{prompt}");
+        assert!(prompt.contains("kind=\"worker_approval_pending\""), "{prompt}");
+        assert!(prompt.contains("solid-falcon-70") && prompt.contains("1680s"), "{prompt}");
+        assert!(prompt.contains("cd hub-web && python3 - <<'EOF'"), "{prompt}");
+        assert!(
+            prompt.contains("cas factory approve solid-falcon-70 --request perm-1790189281659-ph1zl7g")
+                && prompt.contains("cas factory deny solid-falcon-70"),
+            "{prompt}"
+        );
+    }
+
     #[test]
     fn lifecycle_recovery_stalled_close_uses_registered_recipient_harness() {
         let _env = crate::test_support::TestEnvGuard::with_vars(&[
@@ -1578,8 +1730,11 @@ impl FactoryDaemon {
             teams,
             notify_rx,
             dead_workers: std::collections::HashSet::new(),
+            recent_worker_exits: Vec::new(),
             reported_unavailable_workers: std::collections::HashMap::new(),
             last_usage_limit_scan: None,
+            last_permission_request_scan: None,
+            reported_permission_requests: std::collections::HashSet::new(),
             last_commander_mirror_scan: None,
         reported_auth_failed_workers: std::collections::HashMap::new(),
             last_auth_failure_scan: None,
@@ -1709,7 +1864,19 @@ impl FactoryDaemon {
 
         let mut prompt_notified = false;
 
+        // cas-73b5 (GH #970): the loop records its progress; an OS thread
+        // publishes it for `worker_status`, so a blocked pass is still seen.
+        let loop_progress = super::loop_watchdog::LoopProgress::new();
+        let _loop_watchdog = super::loop_watchdog::spawn_watchdog(
+            std::sync::Arc::clone(&loop_progress),
+            self.app.cas_dir().to_path_buf(),
+            self.session_name.clone(),
+            std::sync::Arc::clone(&self.shutdown),
+        );
+        let mut last_reset_check = std::time::Instant::now();
+
         while !self.shutdown.load(Ordering::Relaxed) {
+            loop_progress.enter(super::loop_watchdog::LoopPhase::ClientInput);
             // Error timeout must run in daemon mode too (not only local event loop path).
             let had_error = self.app.error_message.is_some();
             self.app.check_error_timeout();
@@ -1739,6 +1906,7 @@ impl FactoryDaemon {
             let ws_activity = self.process_ws_client_input().await;
 
             // Poll PTYs for output using coalesced batch drain (efficient for 6 Claudes generating)
+            loop_progress.enter(super::loop_watchdog::LoopPhase::PtyOutput);
             let (bytes_processed, events) = self.app.mux.poll_batch();
             let had_output = bytes_processed > 0;
             for event in events {
@@ -1761,6 +1929,7 @@ impl FactoryDaemon {
             }
 
             // Process relay events from cloud (remote terminal attach/input/detach)
+            loop_progress.enter(super::loop_watchdog::LoopPhase::Relay);
             self.process_relay_events().await;
 
             // cas-1a4d: retry non-urgent PTY injects only after every attached
@@ -1770,6 +1939,7 @@ impl FactoryDaemon {
             self.app.mux.flush_deferred_injections().await;
 
             // Poll prompt queue (on notification or timer)
+            loop_progress.enter(super::loop_watchdog::LoopPhase::PromptQueue);
             if prompt_notified || last_prompt_poll.elapsed() >= poll_interval {
                 if prompt_notified {
                     if let Some(ref mut notify) = self.notify_rx {
@@ -1806,6 +1976,19 @@ impl FactoryDaemon {
                 prompt_notified = false;
             }
 
+            // cas-73b5: a supervisor's `restart_spawn_queue` request is applied
+            // here, at most once a second.
+            loop_progress.enter(super::loop_watchdog::LoopPhase::SpawnQueue);
+            if last_reset_check.elapsed() >= Duration::from_secs(1) {
+                last_reset_check = std::time::Instant::now();
+                if let Some(request) =
+                    crate::factory_daemon_health::take_reset(self.app.cas_dir(), &self.session_name)
+                {
+                    let outcome = self.apply_spawn_queue_reset(&request);
+                    loop_progress.record_reset(outcome);
+                }
+            }
+
             // Poll spawn queue (enqueues requests, doesn't execute them)
             if last_spawn_poll.elapsed() >= poll_interval {
                 let _ = self.enqueue_spawn_requests();
@@ -1813,6 +1996,7 @@ impl FactoryDaemon {
             }
 
             // Process pending spawns (non-blocking: git ops run on background thread)
+            loop_progress.enter(super::loop_watchdog::LoopPhase::PendingSpawns);
             if self.spawn_task.is_some() || !self.pending_spawns.is_empty() {
                 self.process_pending_spawns().await;
             }
@@ -1821,9 +2005,11 @@ impl FactoryDaemon {
             // workspace sweep is owned by this daemon so merge MCP latency is
             // independent of nextest and failures are reported before the
             // next merge is allowed to go unnoticed.
+            loop_progress.enter(super::loop_watchdog::LoopPhase::MergeSweep);
             self.poll_merge_sweep().await;
 
             // Periodic Cassy data refresh
+            loop_progress.enter(super::loop_watchdog::LoopPhase::Refresh);
             let mut refreshed = false;
             if last_refresh.elapsed() >= refresh_interval {
                 // Collect a completed GitHub Actions snapshot in the background.
@@ -2075,6 +2261,11 @@ impl FactoryDaemon {
                     // be read from the transcript on the same tick that reads
                     // availability rather than waiting for a stall threshold.
                     self.relay_auth_failed_workers();
+                    // cas-4143: answer (or surface) teammate permission
+                    // requests Claude parked for a lead nobody plays.
+                    self.relay_worker_permission_requests();
+                    // cas-2ffe: simultaneous harness exits are one incident.
+                    self.relay_correlated_worker_deaths();
 
                     // cas-d4ae: the detector has already emitted exactly one
                     // event for this idle/stall episode and the app just
@@ -2382,6 +2573,7 @@ impl FactoryDaemon {
             }
 
             // Apply debounced resize after 100ms of no new resize events
+            loop_progress.enter(super::loop_watchdog::LoopPhase::Render);
             let mut resize_applied = false;
             if let Some((cols, rows)) = self.pending_resize {
                 if self.pending_resize_at.elapsed() >= Duration::from_millis(100) {
@@ -2581,6 +2773,22 @@ impl FactoryDaemon {
             if !self.ws_clients.is_empty() {
                 self.flush_ws_client_output().await;
             }
+
+            loop_progress.set_spawn_snapshot(
+                self.pending_spawns.len(),
+                self.spawn_task.as_ref().map(|(name, ..)| {
+                    let started = self
+                        .spawn_started_at
+                        .map(|started| {
+                            chrono::Utc::now()
+                                - chrono::Duration::from_std(started.elapsed()).unwrap_or_default()
+                        })
+                        .unwrap_or_else(chrono::Utc::now);
+                    (name.clone(), started)
+                }),
+            );
+            loop_progress.complete_pass();
+            loop_progress.enter(super::loop_watchdog::LoopPhase::Idle);
 
             // Adaptive sleep: ~120fps when active, ~60fps idle with clients,
             // ~2fps headless (no clients, no GUI) to minimize CPU usage.

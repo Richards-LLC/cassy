@@ -377,7 +377,7 @@ impl CasCore {
             }
         }
 
-        let rule = Rule {
+        let mut rule = Rule {
             id: id.clone(),
             scope: Scope::default(),
             content: req.content,
@@ -406,7 +406,18 @@ impl CasCore {
             auto_approve_paths: req.auto_approve_paths,
             team_id: None,
             share: None,
+            operator_authority: None,
         };
+
+        // cas-5372 (GH #990): only the operator or a registered supervisor
+        // can make a hard rule take effect before promotion. Anyone else's
+        // "HARD RULE" text is an ordinary draft.
+        let hard_rule_author = rule
+            .looks_like_hard_rule()
+            .then(|| self.operator_hard_rule_author());
+        if let Some(Ok(author)) = &hard_rule_author {
+            rule.authorize_operator_hard_rule(author);
+        }
 
         rule_store.add(&rule).map_err(|e| McpError {
             code: ErrorCode::INTERNAL_ERROR,
@@ -414,7 +425,45 @@ impl CasCore {
             data: None,
         })?;
 
-        Ok(Self::success(format!("Created rule: {id}")))
+        match hard_rule_author {
+            Some(Ok(author)) => {
+                let _ = self.sync_rules();
+                Ok(Self::success(format!(
+                    "Created rule: {id} (operator hard rule authorised by {author}: synced to Claude Code and surfaced at session start, labelled DRAFT until promoted)"
+                )))
+            }
+            Some(Err(refusal)) => Ok(Self::success(format!(
+                "Created rule: {id} as an ordinary draft. It reads like a hard rule, but {refusal}, so it waits for promotion like any other draft."
+            ))),
+            None => Ok(Self::success(format!("Created rule: {id}"))),
+        }
+    }
+
+    /// cas-5372: who may authorise an operator hard rule — a registered
+    /// supervisor, or the operator's own registered session outside a
+    /// factory. Returns the author label, or why this caller may not.
+    fn operator_hard_rule_author(&self) -> Result<String, String> {
+        let unregistered =
+            || "the operator hard-rule fast path is only for the operator or a registered supervisor, and this caller is not registered".to_string();
+        let id = self.get_registered_agent_id_read_only().map_err(|_| unregistered())?;
+        let agent = self
+            .open_agent_store()
+            .ok()
+            .and_then(|store| store.get(&id).ok())
+            .ok_or_else(unregistered)?;
+        match agent.role {
+            crate::types::AgentRole::Supervisor => Ok(format!("supervisor:{}", agent.name)),
+            crate::types::AgentRole::Standard
+                if agent.factory_session.is_none()
+                    && std::env::var_os("CAS_FACTORY_MODE").is_none() =>
+            {
+                Ok(format!("operator:{}", agent.name))
+            }
+            role => Err(format!(
+                "the operator hard-rule fast path is only for the operator or a registered supervisor, and this caller is a {role} ({})",
+                agent.name
+            )),
+        }
     }
 
     /// Mark rule as harmful
@@ -565,6 +614,17 @@ impl CasCore {
             return Ok(Self::success("No changes specified"));
         }
 
+        // cas-5372: an authorised caller's edit re-authorises the hard rule
+        // for its new text. Anyone else's content edit leaves the old
+        // authorisation bound to the old text, which no longer matches.
+        let was_hard_rule = rule.is_operator_hard_rule();
+        if rule.looks_like_hard_rule()
+            && (changes.contains(&"content") || changes.contains(&"tags"))
+            && let Ok(author) = self.operator_hard_rule_author()
+        {
+            rule.authorize_operator_hard_rule(&author);
+        }
+
         rule_store
             .update_with_metadata(&rule, req.changed_by.as_deref(), req.change_note.as_deref())
             .map_err(|e| McpError {
@@ -573,8 +633,8 @@ impl CasCore {
                 data: None,
             })?;
 
-        // Re-sync if proven
-        if rule.status == RuleStatus::Proven {
+        // Re-sync if proven, or if the rule is or was an operator hard rule.
+        if rule.status == RuleStatus::Proven || was_hard_rule || rule.is_operator_hard_rule() {
             let _ = self.sync_rules();
         }
 

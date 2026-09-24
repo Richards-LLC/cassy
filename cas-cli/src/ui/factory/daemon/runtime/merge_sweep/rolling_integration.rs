@@ -35,6 +35,30 @@ struct IntegrationReceipt {
     pub(super) test_process_env_scrubbed: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     base_failure: Option<BaseFailure>,
+    /// GH #1006: consecutive deferrals not yet followed by a completed run.
+    /// Kept across a RUNNING receipt, so an interrupted run still reports.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    deferrals: u32,
+}
+
+fn is_zero(value: &u32) -> bool {
+    *value == 0
+}
+
+/// GH #1006: deferrals outstanding before this run, read from the previous
+/// receipt. A legacy `DEFERRED` receipt without a count is one deferral.
+fn outstanding_deferrals(receipt_path: &Path) -> u32 {
+    let Some(previous) = fs::read_to_string(receipt_path)
+        .ok()
+        .and_then(|contents| serde_json::from_str::<IntegrationReceipt>(&contents).ok())
+    else {
+        return 0;
+    };
+    match previous.status.as_str() {
+        "DEFERRED" => previous.deferrals.max(1),
+        "RUNNING" => previous.deferrals,
+        _ => 0,
+    }
 }
 
 const ROW_CACHE_FORMAT: &str = "row-cache-v2";
@@ -272,6 +296,7 @@ pub(super) fn execute(
             summary: format!("Rolling integration setup failed: {error}"),
             failures: Vec::new(),
             base_failure: None,
+            after_deferrals: 0,
         },
     }
 }
@@ -310,6 +335,7 @@ fn integrate(
                 failures: Vec::new(),
                 integration_epics: vec![request.epic_id.clone()],
                 base_failure: None,
+                after_deferrals: 0,
             });
         }
         if let Some(lock) =
@@ -330,6 +356,7 @@ fn integrate(
         validate_recovery_target_under_lock(project_root, request)?;
     }
     let receipt_path = shared_cas.join(LOG_DIR).join("integration.json");
+    let prior_deferrals = outstanding_deferrals(&receipt_path);
     // Invalidate an old green receipt before any fallible setup, so a failed
     // fetch or missing epic can never leave release assembly looking green.
     let mut receipt = IntegrationReceipt {
@@ -347,6 +374,7 @@ fn integrate(
         affected: vec![request.epic_id.clone()],
         test_process_env_scrubbed: super::scrubbed_test_process_identity_names(),
         base_failure: None,
+        deferrals: prior_deferrals,
     };
     write_receipt(&receipt_path, &receipt)?;
     // Invalidate an old failed sweep report at the same boundary. A fetch,
@@ -406,6 +434,7 @@ fn integrate(
             receipt.status = "CONFLICT".to_owned();
             receipt.detail = detail.clone();
             receipt.affected = affected.clone();
+            receipt.deferrals = 0;
             write_receipt(&receipt_path, &receipt)?;
             return Ok(SweepResult {
                 request: request.clone(),
@@ -415,6 +444,7 @@ fn integrate(
                 failures: Vec::new(),
                 integration_epics: affected,
                 base_failure: None,
+                after_deferrals: prior_deferrals,
             });
         }
         Assembly::Clean { tip, prefixes } => (tip, prefixes),
@@ -428,6 +458,7 @@ fn integrate(
             failures: Vec::new(),
             integration_epics: vec![request.epic_id.clone()],
             base_failure: None,
+            after_deferrals: 0,
         });
     }
     // The detached checkout can move freely; publication alone changes the
@@ -447,6 +478,7 @@ fn integrate(
     if !guard.violations().is_empty() {
         receipt.status = "DEFERRED".to_owned();
         receipt.detail = guard.violations().join("; ");
+        receipt.deferrals = prior_deferrals.saturating_add(1);
         write_receipt(&receipt_path, &receipt)?;
         return Ok(SweepResult {
             request: request.clone(),
@@ -456,6 +488,7 @@ fn integrate(
             failures: Vec::new(),
             integration_epics: vec![request.epic_id.clone()],
             base_failure: None,
+            after_deferrals: 0,
         });
     }
     let mut result = execute_sweep(
@@ -468,7 +501,9 @@ fn integrate(
         settings.clone(),
         Arc::clone(cancel),
     );
-    if result.status == SweepStatus::Passed {
+    // GH #1006: a configured sweep command is not the release gate's nextest
+    // row, so its pass must not certify that row.
+    if result.status == SweepStatus::Passed && settings.command.is_none() {
         if let Err(error) =
             write_sweep_row_receipt(project_root, &shared_cas, &result.request, NEXTTEST_ROW)
         {
@@ -559,6 +594,8 @@ fn integrate(
     );
     receipt.affected = affected;
     receipt.base_failure = base_failure;
+    receipt.deferrals = 0;
+    result.after_deferrals = prior_deferrals;
     // Keep the raw sweep log and the machine-readable fix queue together. A
     // passing sweep clears a prior report so a supervisor can never accept
     // stale proposals after a later green integration tip.
@@ -1069,7 +1106,11 @@ pub(super) fn record_result(cas_dir: &Path, result: &SweepResult) {
             owners.insert(owner);
         }
     }
-    if result.status == SweepStatus::Passed {
+    // GH #1006: a deferral is recorded on the epic but relays nothing; the
+    // run that eventually goes ahead reports once, pass or fail.
+    if result.status == SweepStatus::Deferred
+        || (result.status == SweepStatus::Passed && result.after_deferrals == 0)
+    {
         return;
     }
     for owner in owners {
@@ -1088,13 +1129,23 @@ fn notify_owner(cas_dir: &Path, owner: &str, result: &SweepResult) -> Result<(),
     }
     let queue =
         crate::store::open_supervisor_queue_store(cas_dir).map_err(|error| error.to_string())?;
+    let after_deferrals = match result.after_deferrals {
+        0 => String::new(),
+        1 => " after 1 deferral".to_owned(),
+        count => format!(" after {count} deferrals"),
+    };
     let detail = format!(
-        "Rolling integration {}. Epics: {}. {}. Log: {}",
+        "Rolling integration {}{after_deferrals}. Epics: {}. {}. Log: {}",
         status_text(result.status),
         result.integration_epics.join(", "),
         sweep_detail(result),
         result.log_path.display()
     );
+    let kind = if result.status == SweepStatus::Passed {
+        "sweep_passed"
+    } else {
+        "sweep_failed"
+    };
     let key = format!(
         "integration:{owner}:{}",
         result
@@ -1114,17 +1165,11 @@ fn notify_owner(cas_dir: &Path, owner: &str, result: &SweepResult) -> Result<(),
                 )
             })
     );
-    let payload = serde_json::json!({ "kind": "sweep_failed", "detail": detail,
+    let payload = serde_json::json!({ "kind": kind, "detail": detail,
         "epics": result.integration_epics, "factory_session": agent.factory_session })
     .to_string();
     let notification = queue
-        .notify_idempotent(
-            owner,
-            "sweep_failed",
-            &payload,
-            NotificationPriority::High,
-            &key,
-        )
+        .notify_idempotent(owner, kind, &payload, NotificationPriority::High, &key)
         .map_err(|error| error.to_string())?;
     let id = match notification {
         NotifyIdempotentResult::Created(id) => id,
@@ -1139,7 +1184,7 @@ fn notify_owner(cas_dir: &Path, owner: &str, result: &SweepResult) -> Result<(),
         .as_deref()
         .ok_or("epic supervisor has no factory session")?;
     let body = format!(
-        "<worker-attention kind=\"sweep_failed\" worker=\"supervisor\" notification_id=\"{id}\">\n{detail}\n</worker-attention>"
+        "<worker-attention kind=\"{kind}\" worker=\"supervisor\" notification_id=\"{id}\">\n{detail}\n</worker-attention>"
     );
     let prompts =
         crate::store::open_prompt_queue_store(cas_dir).map_err(|error| error.to_string())?;
@@ -1149,7 +1194,11 @@ fn notify_owner(cas_dir: &Path, owner: &str, result: &SweepResult) -> Result<(),
             "supervisor",
             &body,
             Some(session),
-            Some("Rolling integration requires attention"),
+            Some(if kind == "sweep_passed" {
+                "Rolling integration ran after deferral"
+            } else {
+                "Rolling integration requires attention"
+            }),
             Some(NotificationPriority::High),
             &format!("integration-outbox:{id}"),
             Some(&QueueOrigin::Daemon),
@@ -1338,6 +1387,7 @@ mod tests {
             failures: Vec::new(),
             integration_epics: vec!["a".to_owned(), "b".to_owned()],
             base_failure: None,
+            after_deferrals: 0,
         };
         record_result(&cas_dir, &result);
         record_result(&cas_dir, &result);
@@ -1515,6 +1565,7 @@ mod tests {
                 base: "base-1".to_owned(),
                 failing: vec!["cas::fixture test_base".to_owned()],
             }),
+            after_deferrals: 0,
         };
         assert_eq!(
             normalized_failures(&result.failures),
@@ -1672,6 +1723,154 @@ echo 'Summary: 1 passed'
                 &["merge-base", "--is-ancestor", &receipt.base, tip],
             );
         }
+    }
+
+    /// GH #1006: a deferred rolling integration relays nothing when it
+    /// defers. The run that finally goes ahead sends exactly one relay naming
+    /// its result and tip, and a later ordinary pass sends none.
+    #[test]
+    fn deferred_integration_reports_once_when_it_finally_runs() {
+        let repo = fixture();
+        let only = epic(repo.path(), "cas-45de", "a", "one");
+        git(repo.path(), &["checkout", "--detach", "main"]);
+        git(
+            repo.path(),
+            &["remote", "add", "origin", repo.path().to_str().unwrap()],
+        );
+        let stub = repo.path().join("cargo-stub.sh");
+        crate::test_paths::warm_stub(&stub, "#!/bin/sh\necho 'Summary: 1 passed'\n");
+        let cas_dir = crate::store::init_cas_dir(repo.path()).unwrap();
+        let agents = crate::store::open_agent_store(&cas_dir).unwrap();
+        let mut owner = cas_types::Agent::new("owner-45de".to_owned(), "lead".to_owned());
+        owner.role = cas_types::AgentRole::Supervisor;
+        owner.factory_session = Some("session-45de".to_owned());
+        agents.register(&owner).unwrap();
+        let tasks = crate::store::open_task_store(&cas_dir).unwrap();
+        let mut task = Task::new(only.id.clone(), only.id.clone());
+        task.task_type = TaskType::Epic;
+        task.branch = Some(only.branch.clone());
+        task.epic_verification_owner = Some(owner.id.clone());
+        task.deliverables.work_target = Some(cas_types::WorkTarget {
+            repo_selector: "project:fixture".to_owned(),
+            target_branch: "main".to_owned(),
+        });
+        tasks.add(&task).unwrap();
+        let request = SweepRequest {
+            epic_id: only.id.clone(),
+            target_branch: only.branch.clone(),
+            commit: only.tip.clone(),
+        };
+        let receipt = || -> IntegrationReceipt {
+            serde_json::from_slice(
+                &fs::read(cas_dir.join(LOG_DIR).join("integration.json")).unwrap(),
+            )
+            .unwrap()
+        };
+        let relays = || {
+            crate::store::open_prompt_queue_store(&cas_dir)
+                .unwrap()
+                .peek_all(20)
+                .unwrap()
+        };
+        let run = |settings: &SweepSettings| {
+            let result = execute(
+                repo.path(),
+                &cas_dir,
+                request.clone(),
+                settings.clone(),
+                Arc::new(AtomicBool::new(false)),
+                false,
+            );
+            record_result(&cas_dir, &result);
+            result
+        };
+
+        // Two deferrals: the build guard is live and refuses every builder.
+        {
+            let _env = crate::test_support::TestEnvGuard::with_optional_vars(&[
+                ("CARGO", Some(stub.to_str().unwrap())),
+                ("CAS_FACTORY_BUILD_GUARD", None),
+            ]);
+            let mut refused = SweepSettings::from(&FactoryConfig::default());
+            refused.nice_cargo = false;
+            refused.max_concurrent_builders = 0;
+            for expected in [1, 2] {
+                let result = run(&refused);
+                assert_eq!(result.status, SweepStatus::Deferred, "{}", result.summary);
+                assert_eq!(receipt().deferrals, expected);
+            }
+        }
+        assert!(
+            relays().is_empty(),
+            "a deferral must not relay: {:?}",
+            relays()
+        );
+
+        // The run that finally goes ahead reports once.
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[
+            ("CARGO", stub.to_str().unwrap()),
+            ("CAS_FACTORY_BUILD_GUARD", "off"),
+        ]);
+        let mut settings = SweepSettings::from(&FactoryConfig::default());
+        settings.nice_cargo = false;
+        let result = run(&settings);
+        assert_eq!(result.status, SweepStatus::Passed, "{}", result.summary);
+        assert_eq!(result.after_deferrals, 2);
+        let finished = receipt();
+        assert_eq!(finished.deferrals, 0);
+        let tip = finished.tip.clone().expect("published tip");
+        let rows = relays();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].target, "supervisor");
+        assert_eq!(rows[0].factory_session.as_deref(), Some("session-45de"));
+        assert!(
+            rows[0]
+                .prompt
+                .contains("Rolling integration PASSED after 2 deferrals")
+                && rows[0].prompt.contains(&tip),
+            "{}",
+            rows[0].prompt
+        );
+        assert!(crate::prompt_revalidation::is_supervisor_wake_envelope(
+            &rows[0].prompt
+        ));
+
+        // An ordinary green run afterwards stays quiet.
+        let again = run(&settings);
+        assert_eq!(again.status, SweepStatus::Passed, "{}", again.summary);
+        assert_eq!(again.after_deferrals, 0);
+        assert_eq!(relays().len(), 1);
+    }
+
+    /// GH #1006: the deferral count survives the daemon (it lives in the
+    /// receipt), and a legacy DEFERRED receipt without a count is one.
+    #[test]
+    fn outstanding_deferrals_read_from_the_previous_receipt() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("integration.json");
+        let write = |status: &str, deferrals: Option<u32>| {
+            let mut value = serde_json::json!({
+                "base": "b", "epics": [], "tip": null, "status": status,
+                "detail": "", "affected": []
+            });
+            if let Some(count) = deferrals {
+                value["deferrals"] = count.into();
+            }
+            fs::write(&path, value.to_string()).unwrap();
+        };
+        assert_eq!(outstanding_deferrals(&path), 0, "no receipt yet");
+        write("DEFERRED", None);
+        assert_eq!(outstanding_deferrals(&path), 1);
+        write("DEFERRED", Some(3));
+        assert_eq!(outstanding_deferrals(&path), 3);
+        write("RUNNING", Some(3));
+        assert_eq!(
+            outstanding_deferrals(&path),
+            3,
+            "an interrupted run still owes a report"
+        );
+        write("PASSED", Some(3));
+        assert_eq!(outstanding_deferrals(&path), 0);
     }
 
     #[test]

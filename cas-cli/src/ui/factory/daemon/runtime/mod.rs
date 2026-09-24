@@ -7,6 +7,7 @@ pub(crate) mod delivery;
 mod delivery_matrix_tests;
 mod gui_client;
 mod lifecycle;
+pub(crate) mod loop_watchdog;
 pub(super) mod merge_sweep;
 mod output;
 pub(super) mod pane_size;
@@ -18,4 +19,6 @@ mod ws_client;
 
 /// cas-ac7e (GH #130): the daemon struct holds outstanding urgent wake probes,
 /// so their type has to be nameable one level up.
-pub(crate) use queue_and_events::{InboxDeferredWrite, NormalDeliveryProbe, UrgentWakeProbe};
+pub(crate) use queue_and_events::{
+    InboxDeferredWrite, NormalDeliveryProbe, ObservedWorkerExit, UrgentWakeProbe,
+};

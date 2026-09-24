@@ -81,7 +81,7 @@ impl SqliteRuleStore {
                 "UPDATE rules SET source_ids = ?1, helpful_count = ?2, harmful_count = ?3,
                  tags = ?4, paths = ?5, content = ?6, status = ?7, last_accessed = ?8,
                  review_after = ?9, category = ?10, priority = ?11,
-                 surface_count = ?12, scope = ?13, auto_approve_tools = ?14, auto_approve_paths = ?15, team_id = ?16, share = ?17
+                 surface_count = ?12, scope = ?13, auto_approve_tools = ?14, auto_approve_paths = ?15, team_id = ?16, share = ?17, operator_authority = ?19
                  WHERE id = ?18",
                 params![
                     Self::source_ids_to_string(&rule.source_ids),
@@ -102,6 +102,7 @@ impl SqliteRuleStore {
                     rule.team_id.as_ref(),
                     rule.share.as_ref().map(|s| s.to_string()),
                     rule.id,
+                    rule.operator_authority.as_ref().map(|a| a.to_stored()),
                 ],
             )?;
             if rows == 0 {
@@ -290,8 +291,8 @@ impl RuleStore for SqliteRuleStore {
             tx.execute(
                 "INSERT INTO rules (id, created, source_ids, helpful_count, harmful_count,
                  tags, paths, content, status, last_accessed, review_after,
-                 category, priority, surface_count, scope, auto_approve_tools, auto_approve_paths, team_id, share)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+                 category, priority, surface_count, scope, auto_approve_tools, auto_approve_paths, team_id, share, operator_authority)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
                 params![
                     rule.id,
                     rule.created.to_rfc3339(),
@@ -312,6 +313,7 @@ impl RuleStore for SqliteRuleStore {
                     rule.auto_approve_paths.as_ref(),
                     rule.team_id.as_ref(),
                     rule.share.as_ref().map(|s| s.to_string()),
+                    rule.operator_authority.as_ref().map(|a| a.to_stored()),
                 ],
             )?;
             Self::insert_version(
@@ -356,7 +358,7 @@ impl RuleStore for SqliteRuleStore {
             .query_row(
                 "SELECT id, created, source_ids, helpful_count, harmful_count,
                  tags, paths, content, status, last_accessed, review_after,
-                 category, priority, surface_count, scope, auto_approve_tools, auto_approve_paths, team_id, share
+                 category, priority, surface_count, scope, auto_approve_tools, auto_approve_paths, team_id, share, operator_authority
                  FROM rules WHERE id = ?",
                 params![id],
                 |row| {
@@ -394,6 +396,10 @@ impl RuleStore for SqliteRuleStore {
                             .get::<_, Option<String>>(18)?
                             .as_deref()
                             .and_then(|s| s.parse().ok()),
+                        operator_authority: row
+                            .get::<_, Option<String>>(19)?
+                            .as_deref()
+                            .and_then(cas_types::OperatorRuleAuthority::from_stored),
                     })
                 },
             )
@@ -503,7 +509,7 @@ impl RuleStore for SqliteRuleStore {
         let mut stmt = conn.prepare_cached(
             "SELECT id, created, source_ids, helpful_count, harmful_count,
              tags, paths, content, status, last_accessed, review_after,
-             category, priority, surface_count, scope, auto_approve_tools, auto_approve_paths, team_id, share
+             category, priority, surface_count, scope, auto_approve_tools, auto_approve_paths, team_id, share, operator_authority
              FROM rules ORDER BY priority ASC, created DESC",
         )?;
 
@@ -543,6 +549,10 @@ impl RuleStore for SqliteRuleStore {
                         .get::<_, Option<String>>(18)?
                         .as_deref()
                         .and_then(|s| s.parse().ok()),
+                    operator_authority: row
+                        .get::<_, Option<String>>(19)?
+                        .as_deref()
+                        .and_then(cas_types::OperatorRuleAuthority::from_stored),
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;

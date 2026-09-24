@@ -70,25 +70,17 @@ The 6 checks below apply to every task type. These gates sit on top of them:
   - **Docs, test and CI-only diffs** are never gated.
   - **Skip markers, on every delivery:** added `test.fixme`/`.skip`/`.only` markers are refused unless the marker or the line above it carries `cas-allow-skip: <reason>`.
 - **Epic** — closing an epic additionally walks its children and blocks on any child whose recorded work is not merged into the parent branch, not just on child status.
-- **Risk declaration** — read `Risk:` and `Proof Targets:` from `task show` before
-  the final proof. For `risk=blast-radius`, `proof_targets` must cover every
-  changed Rust source module; run the guarded proof with `--proof` and record
-  `SCOPED_PROOF: targets=<complete target set> result=PASS` in a progress note.
-  Close rejects a target list narrower than the attributed delivery diff and
-  names the uncovered modules. For `risk=platform`, add a
+- **Risk declaration** — read `Risk:` and `Proof Targets:` from `task show`.
+  Rust build proofs are not a worker close duty: workers never run Rust builds
+  or tests, so do not record a scoped `--proof` receipt, a `SCOPED_PROOF:` note,
+  or a `loaded_proof` note. The supervisor's single build + test of the epic
+  tip at assembly covers `risk=blast-radius` and `risk=concurrency` and is
+  recorded on the epic as
+  `ASSEMBLY_PROOF: head=<epic tip sha> result=PASS command=<cmd> log=<path>`;
+  your close references it. For `risk=platform` on non-Rust work, add a
   `note_type=platform_proof` note containing an explicit macOS marker, the
-  command that ran (such as `cargo`, `xcodebuild`, or an executable after
-  `command:`), and a passing result. For `risk=concurrency`, add a
-  `note_type=loaded_proof` note proving the whole, entire, or full target (or an
-  explicit non-Rust target) under `-j16`/`--jobs 16` for at least three loops or
-  runs with a passing result.
-  Combined declarations require both typed receipts; `risk=none` adds no
-  receipt gate.
-
-  If a scoped command cannot run because the repository has no runnable target,
-  a registered supervisor may record an equivalent full `cargo nextest run -p
-  cas` receipt instead. Include the durable log path in the progress note and
-  name every real required target in `SCOPED_PROOF: targets=<set> result=PASS`.
+  non-Rust command that ran (such as `xcodebuild` or an executable after
+  `command:`), and a passing result. `risk=none` adds no receipt gate.
 
 ## Pre-Close Self-Verification
 
@@ -127,12 +119,14 @@ Registration checklist (varies by framework):
 rg 'changed_function' src/
 ```
 
-**Rust public-type additions:** adding a field to a `pub struct` is a silent breaking change for downstream crates that construct the struct by listing every field (no `..Default::default()`). Those crates compile fine in isolation but fail with `E0063` at workspace scope. Always verify with check 4 scope rules when touching public types.
+**Rust public-type additions:** adding a field to a `pub struct` is a silent breaking change for downstream crates that construct the struct by listing every field (no `..Default::default()`). Those crates compile fine in isolation but fail with `E0063` at workspace scope. You cannot compile to catch this: `rg` every construction site across the workspace and update it; the supervisor's workspace build at assembly is the backstop.
 
-### 4. Tests pass
+### 4. Tests pass — non-Rust only
+
+**Never run Rust builds or tests** (`cargo`, `nextest`, `rustc`, `scripts/run-scoped-tests.sh`, `make test*`); a PreToolUse guard denies them. For Rust changes, write or update the tests the change needs, commit, and park without building: the supervisor runs them in the one full build + test of the epic tip at assembly and records `ASSEMBLY_PROOF` on the epic. For non-Rust work, run the project's suite:
+
 ```bash
-# Run the project's test suite
-# Examples: cargo test, pnpm test, pytest, npm test
+# Examples: pnpm test, npx vitest run, npx playwright test, pytest, npm test
 ```
 
 If tests fail in code you didn't modify:
@@ -140,16 +134,15 @@ If tests fail in code you didn't modify:
 2. If consistent, report as blocker with the specific test name and error output.
 3. Do NOT try to fix other people's tests — that's out of scope.
 
-#### Rust: per-crate vs workspace-wide test scope
+#### Rust: blast radius without building
 
-| What you changed | Minimum test run |
+| What you changed | What to trace by reading and `rg` |
 |---|---|
-| Internal logic, private functions only | `cargo test -p <crate>` |
-| Public type in `crates/*/src/lib.rs` — new/removed field, changed signature | **`cargo test --workspace`** |
-| Anything in `crates/cas-mux`, `crates/cas-factory`, `crates/cas-types` | **`cargo test --workspace`** (consumed by `cas-cli`) |
-| Test files only (`tests/**/*.rs`) with no API change | `cargo build --workspace --tests` at minimum |
+| Internal logic, private functions only | Callers inside the crate |
+| Public type in `crates/*/src/lib.rs` — new/removed field, changed signature | **Every consumer across the workspace** |
+| Anything in `crates/cas-mux`, `crates/cas-factory`, `crates/cas-types` | **Every consumer in `cas-cli`** |
 
-**Why per-crate isn't enough:** when you add a field to a `pub struct` in a shared crate, that crate's own tests pass (the new field has a `Default`). But downstream crates that name every field in a struct literal fail with `E0063`. `cargo test -p <crate>` never sees this — only `cargo test --workspace` or `cargo build --workspace --tests` catches it.
+**Why per-crate isn't enough:** when you add a field to a `pub struct` in a shared crate, that crate's own tests pass (the new field has a `Default`). But downstream crates that name every field in a struct literal fail with `E0063`. Name the touched shared crates in your close note so the supervisor's workspace build at assembly is read with them in mind.
 
 **JS/TS monorepos (pnpm/turbo):** same blast-radius logic. Changed a shared package or exported type → run the *consuming* apps' typecheck and tests (`pnpm -r typecheck`, `pnpm --filter <app> test`), not just the package's own suite. A changed interface compiles fine in its own package and breaks only where it's consumed.
 
@@ -166,7 +159,7 @@ Check for language-specific dead code markers on your new code:
 For every non-trivial change, trace **2 levels out** from the edited code — callers of the edited symbols, observers/middleware, hook subscribers, anything that imports the edited module. For each touched boundary:
 
 - Confirm integration tests exist for that boundary, with **real objects** (not mocks) at the crossing point.
-- **Run those integration tests** — not just the file you edited. `cargo test <crate>::<integration-test>` or equivalent. Presence of a test file is weak signal; an executed test is evidence.
+- **Run those integration tests** when they are non-Rust — not just the file you edited. Rust integration tests run at the supervisor's epic assembly; name the boundaries you traced in your close note. Presence of a test file is weak signal; an executed test is evidence.
 
 "2 levels out" is LLM-judgment — do not over-engineer this into a call-graph analysis. Read the code, identify the obvious boundaries, test them.
 

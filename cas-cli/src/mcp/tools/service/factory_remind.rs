@@ -493,7 +493,18 @@ impl CasService {
             }
         }
 
-        if reminders.is_empty() {
+        // cas-57c1 (GH #984): reminders that will no longer fire are shown too,
+        // so an expired or cancelled wake is visible instead of silently gone.
+        let ended = store
+            .list_recently_ended(&my_id, RECENTLY_ENDED_WINDOW_SECS)
+            .map_err(|e| {
+                Self::error(
+                    ErrorCode::INTERNAL_ERROR,
+                    format!("Failed to list expired or cancelled reminders: {e}"),
+                )
+            })?;
+
+        if reminders.is_empty() && ended.is_empty() {
             return Ok(Self::success("No pending reminders.".to_string()));
         }
 
@@ -533,7 +544,11 @@ impl CasService {
                 .unwrap_or_else(|| id.to_string())
         };
 
-        let mut lines = vec![format!("Pending reminders ({}):", reminders.len())];
+        let mut lines = vec![if reminders.is_empty() {
+            "No pending reminders.".to_string()
+        } else {
+            format!("Pending reminders ({}):", reminders.len())
+        }];
 
         for r in &reminders {
             let trigger_desc = match r.trigger_type {
@@ -603,6 +618,21 @@ impl CasService {
             ));
         }
 
+        if !ended.is_empty() {
+            lines.push(format!(
+                "Expired or cancelled in the last 24h ({}); these will not fire:",
+                ended.len()
+            ));
+            for r in &ended {
+                lines.push(format!(
+                    "  #{}: [{}] {}",
+                    r.id,
+                    ended_reminder_desc(r),
+                    r.message
+                ));
+            }
+        }
+
         Ok(Self::success(lines.join("\n")))
     }
 
@@ -645,9 +675,70 @@ impl CasService {
     }
 }
 
+/// How far back `remind_list` shows reminders that expired or were cancelled.
+const RECENTLY_ENDED_WINDOW_SECS: i64 = 24 * 60 * 60;
+
+/// Why an ended reminder will not fire, in the operator's terms.
+fn ended_reminder_desc(reminder: &cas_store::Reminder) -> String {
+    use cas_store::{ReminderStatus, ReminderTriggerType};
+    match reminder.status {
+        ReminderStatus::Cancelled => match reminder.cancelled_at {
+            Some(at) => format!("cancelled {}", at.to_rfc3339()),
+            None => "cancelled".to_string(),
+        },
+        ReminderStatus::Expired => match (reminder.trigger_type, reminder.trigger_at) {
+            (ReminderTriggerType::Time, Some(due)) => format!(
+                "expired: due {} but not delivered within its {}s TTL",
+                due.to_rfc3339(),
+                reminder.ttl_secs
+            ),
+            _ => format!(
+                "expired: {}s TTL from creation {} ran out",
+                reminder.ttl_secs,
+                reminder.created_at.to_rfc3339()
+            ),
+        },
+        ReminderStatus::Pending | ReminderStatus::Fired => reminder.status.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::validate_external_reminder;
+
+    #[test]
+    fn ended_reminders_say_why_they_will_not_fire() {
+        use cas_store::{Reminder, ReminderStatus, ReminderTriggerType};
+        let due = chrono::Utc::now();
+        let mut reminder = Reminder {
+            id: 7,
+            owner_id: "sup".into(),
+            target_id: "sup".into(),
+            message: "overnight checkpoint".into(),
+            trigger_type: ReminderTriggerType::Time,
+            trigger_at: Some(due),
+            trigger_event: None,
+            trigger_filter: None,
+            status: ReminderStatus::Expired,
+            ttl_secs: 3600,
+            created_at: due,
+            fired_at: None,
+            cancelled_at: None,
+            fired_event: None,
+            session_id: None,
+            origin_session_id: None,
+            cross_session: false,
+            task_id: None,
+        };
+        let desc = super::ended_reminder_desc(&reminder);
+        assert!(
+            desc.starts_with("expired: due ") && desc.ends_with("within its 3600s TTL"),
+            "{desc}"
+        );
+        reminder.status = ReminderStatus::Cancelled;
+        reminder.cancelled_at = Some(due);
+        assert!(super::ended_reminder_desc(&reminder).starts_with("cancelled "));
+    }
 
     #[test]
     fn external_reminder_validation_requires_restart_safe_scope_and_filter() {

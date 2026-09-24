@@ -514,6 +514,7 @@ impl EmbeddedDaemon {
                         eprintln!(
                             "[Cassy] Proxy reloaded ({server_count} server(s), {tool_count} tools)"
                         );
+                        eprintln!("[Cassy] {}", proxy.callable_tools_banner().await);
                         match crate::mcp::server::write_proxy_snapshot_cache_for_config(
                             &self.config.cas_root,
                             &proxy,

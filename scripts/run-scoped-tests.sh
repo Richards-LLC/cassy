@@ -44,6 +44,12 @@
 #   scripts/run-scoped-tests.sh --proof -p cas --lib my_module
 #   scripts/run-scoped-tests.sh --proof -p cas --test cli_test
 #   scripts/run-scoped-tests.sh --lib -- --nocapture
+#
+# To leave out one known-broken test from a --proof run, use nextest's filter
+# expression (or the libtest-style `-- --skip`; the surface check reads both as
+# exclusions, not module filters):
+#
+#   scripts/run-scoped-tests.sh --proof -p cas --lib -E 'not test(=path::to::broken_test)'
 #   make -C cas-cli test-scoped SCOPED_ARGS='-p cas --lib my_module'
 #
 # Scope it, as always: a full `cargo test` here links ~64 test binaries.
@@ -304,7 +310,7 @@ if [[ "${proof_mode}" -eq 1 ]]; then
     proof_merge_base="$(git -C "${REPO_ROOT}" merge-base "${proof_base}" HEAD)"
     printf 'SCOPED_PROOF: command=scripts/run-scoped-tests.sh --proof'
     printf ' %q' "$@"
-    printf ' result=PASS base=%s\n' "${proof_merge_base}"
+    printf ' result=PASS base=%s head=%s\n' "${proof_merge_base}" "$(git -C "${REPO_ROOT}" rev-parse HEAD)"
 
     # Keep the receipt intentionally line-oriented and shell-safe. The release
     # train rechecks every field against the current branch and the shared

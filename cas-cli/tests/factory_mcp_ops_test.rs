@@ -727,6 +727,172 @@ async fn remind_external_condition_defaults_to_non_expiring_cross_session_row() 
     );
 }
 
+/// GH #984 (cas-57c1): a 24,900s delay under the default 3,600s TTL used to
+/// expire unseen before it was due. It now stays pending until due, and
+/// `remind_list` shows reminders that ended without firing.
+#[tokio::test]
+async fn remind_delay_beyond_ttl_stays_pending_and_list_shows_ended_reminders() {
+    let env = FactoryTestEnv::new();
+    let mut remind = factory_req("remind");
+    remind.remind_message = Some("overnight checkpoint".to_string());
+    remind.remind_delay_secs = Some(24_900);
+    env.service
+        .factory(Parameters(remind))
+        .await
+        .expect("a delay longer than the TTL is accepted");
+
+    let reminders = open_reminder_store(&env.cas_root).unwrap();
+    let pending = reminders.list_pending("test-agent-id").unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].ttl_secs, 3600);
+    // Created 11h ago and due in a moment: long past created_at + TTL, which
+    // the old rule expired; not past due + TTL, so it stays pending now.
+    rusqlite::Connection::open(env.cas_root.join("cas.db"))
+        .unwrap()
+        .execute(
+            "UPDATE reminders SET created_at = ?1 WHERE id = ?2",
+            rusqlite::params![
+                (chrono::Utc::now() - chrono::Duration::hours(11)).to_rfc3339(),
+                pending[0].id
+            ],
+        )
+        .unwrap();
+    assert_eq!(reminders.expire_stale().unwrap(), 0);
+    assert_eq!(reminders.list_pending("test-agent-id").unwrap().len(), 1);
+
+    let mut cancelled = factory_req("remind");
+    cancelled.remind_message = Some("superseded wake".to_string());
+    cancelled.remind_delay_secs = Some(60);
+    env.service
+        .factory(Parameters(cancelled))
+        .await
+        .expect("second reminder");
+    let superseded = reminders
+        .list_pending("test-agent-id")
+        .unwrap()
+        .into_iter()
+        .find(|reminder| reminder.message == "superseded wake")
+        .expect("second reminder is pending");
+    reminders.cancel(superseded.id, "test-agent-id").unwrap();
+
+    let listed = get_text(
+        &env.service
+            .factory(Parameters(factory_req("remind_list")))
+            .await
+            .expect("remind_list"),
+    );
+    assert!(listed.contains("Pending reminders (1):"), "{listed}");
+    assert!(listed.contains("overnight checkpoint"), "{listed}");
+    assert!(
+        listed.contains("Expired or cancelled in the last 24h (1); these will not fire:")
+            && listed.contains(&format!("#{}: [cancelled ", superseded.id))
+            && listed.contains("superseded wake"),
+        "{listed}"
+    );
+}
+
+/// GH #970 (cas-73b5): a wedged daemon loop and an undrained spawn queue are
+/// visible in worker_status, and the supervisor can restart the spawn queue
+/// without touching the session.
+#[tokio::test]
+async fn worker_status_surfaces_a_wedged_daemon_loop_and_restart_spawn_queue_requests_a_reset() {
+    let _guard = EnvGuard::set(&[
+        ("CAS_FACTORY_SESSION", "session-wedged-loop"),
+        ("CAS_AGENT_ROLE", "supervisor"),
+    ]);
+    let env = FactoryTestEnv::new();
+    let conn = rusqlite::Connection::open(env.cas_root.join("cas.db")).unwrap();
+    conn.execute(
+        "INSERT INTO spawn_queue (action, count, worker_names, force, isolate, created_at, factory_session)
+         VALUES ('shutdown', NULL, 'calm-otter-4', 0, 0, ?1, 'session-wedged-loop')",
+        rusqlite::params![(chrono::Utc::now() - chrono::Duration::minutes(31)).to_rfc3339()],
+    )
+    .unwrap();
+    let request_id = conn.last_insert_rowid();
+    let now = chrono::Utc::now();
+    cas::factory_daemon_health::write_status(
+        &env.cas_root,
+        &cas::factory_daemon_health::DaemonLoopStatus {
+            pid: 4242,
+            session: "session-wedged-loop".to_string(),
+            written_at: now,
+            last_pass_at: now - chrono::Duration::minutes(31),
+            phase: "refresh".to_string(),
+            passes: 900,
+            pending_spawns: 1,
+            in_flight_spawn: None,
+            in_flight_started_at: None,
+            loop_thread_wait: Some("pipe_read".to_string()),
+            helpers_killed: Vec::new(),
+            last_reset: None,
+        },
+    )
+    .unwrap();
+
+    for summary in [false, true] {
+        let mut status = factory_req("worker_status");
+        status.summary = Some(summary);
+        let text = get_text(
+            &env.service
+                .factory(Parameters(status))
+                .await
+                .expect("worker_status"),
+        );
+        assert!(
+            text.contains("FACTORY DAEMON LOOP WEDGED")
+                && text
+                    .contains("stuck in phase 'refresh' (pid 4242, thread waiting in pipe_read)"),
+            "summary={summary}: {text}"
+        );
+        assert!(
+            text.contains(&format!("oldest #{request_id} (shutdown) queued")),
+            "summary={summary}: {text}"
+        );
+        assert!(
+            text.contains("restart_spawn_queue"),
+            "summary={summary}: {text}"
+        );
+    }
+
+    let restart = get_text(
+        &env.service
+            .factory(Parameters(factory_req("restart_spawn_queue")))
+            .await
+            .expect("the supervisor may restart the spawn queue"),
+    );
+    assert!(
+        restart.contains("Spawn-queue restart requested for factory session 'session-wedged-loop'"),
+        "{restart}"
+    );
+    assert!(restart.contains("LOOP WEDGED"), "{restart}");
+    let request = cas::factory_daemon_health::pending_reset(&env.cas_root, "session-wedged-loop")
+        .expect("reset request recorded for the daemon");
+    assert_eq!(request.requester, "test-agent-id");
+}
+
+#[tokio::test]
+async fn restart_spawn_queue_is_supervisor_only() {
+    let _guard = EnvGuard::set(&[
+        ("CAS_FACTORY_SESSION", "session-worker-restart"),
+        ("CAS_AGENT_ROLE", "worker"),
+    ]);
+    let env = FactoryTestEnv::new();
+    let error = env
+        .service
+        .factory(Parameters(factory_req("restart_spawn_queue")))
+        .await
+        .expect_err("a worker may not restart the spawn queue");
+    assert!(
+        error.message.contains("only the supervisor"),
+        "{}",
+        error.message
+    );
+    assert!(
+        cas::factory_daemon_health::pending_reset(&env.cas_root, "session-worker-restart")
+            .is_none()
+    );
+}
+
 fn get_text(result: &rmcp::model::CallToolResult) -> String {
     result
         .content
@@ -2348,6 +2514,41 @@ async fn test_shutdown_workers_enqueues() {
     assert_eq!(entries[0].action, cas_store::SpawnAction::Shutdown);
     assert!(entries[0].worker_names.contains(&"alice".to_string()));
     assert!(entries[0].worker_names.contains(&"bob".to_string()));
+}
+
+/// cas-4691 (GH #976): `worker_names='["x"]'` and `worker_names="x"` both
+/// retire worker x. The JSON-array form used to be rejected as unknown while
+/// the same message listed the worker as known.
+#[tokio::test]
+async fn test_shutdown_workers_accepts_json_array_worker_names_cas_4691() {
+    for names in ["[\"wild-phoenix-59\"]", "wild-phoenix-59", "[\"wild-phoenix-59\", \"calm-otter-2\"]"] {
+        let _guard = EnvGuard::set(&[]);
+        let env = FactoryTestEnv::new();
+        env.register_worker("wild-phoenix-59");
+        env.register_worker("calm-otter-2");
+
+        let mut req = factory_req("shutdown_workers");
+        req.worker_names = Some(names.to_string());
+        let result = env.service.factory(Parameters(req)).await;
+        let text = get_text(&result.unwrap_or_else(|error| {
+            panic!("worker_names={names} must retire the worker: {}", error.message)
+        }));
+        assert!(text.contains("wild-phoenix-59"), "{names}: {text}");
+
+        let entries = env.spawn_queue().peek(10).expect("peek");
+        assert_eq!(entries.len(), 1, "{names}");
+        assert_eq!(entries[0].action, cas_store::SpawnAction::Shutdown);
+        assert!(
+            entries[0].worker_names.contains(&"wild-phoenix-59".to_string()),
+            "{names}: {:?}",
+            entries[0].worker_names
+        );
+        assert!(
+            entries[0].worker_names.iter().all(|name| !name.contains('[') && !name.contains('"')),
+            "queued names are bare identifiers: {:?}",
+            entries[0].worker_names
+        );
+    }
 }
 
 #[tokio::test]
@@ -8402,6 +8603,80 @@ async fn test_assignment_still_refuses_a_genuinely_stale_worker_cas_f8bc() {
     assert!(
         error.contains("commits behind") && error.contains("epic/requested"),
         "the genuine staleness guard must survive the exemption: {error}"
+    );
+}
+
+/// GH #1006 item 3: a worker whose branch is frozen at a delivery parked for
+/// merge (under independent QA on another epic) reads as behind any other
+/// epic. Rebasing it would destroy the tip under review, so assignment must
+/// proceed and say so instead of refusing.
+#[tokio::test]
+async fn test_assignment_allows_a_worker_parked_for_another_epic_gh_1006() {
+    let home = TempDir::new().expect("home tempdir");
+    let _guard = EnvGuard::set_optional(&[
+        ("CAS_FACTORY_MODE", Some("1")),
+        ("CAS_FACTORY_SESSION", Some("session-1006-parked")),
+        ("HOME", Some(home.path().to_str().unwrap())),
+    ]);
+    let env = FactoryTestEnv::new();
+    let worker = "gh1006-parked-worker";
+    // epic/requested is one real commit ahead of the worker's branch, as for
+    // the genuinely stale worker above; the difference is the parked delivery.
+    let worker_path = init_sync_repo(&env, worker);
+    std::fs::write(worker_path.join("parked.txt"), "parked delivery").unwrap();
+    for args in [&["add", "."][..], &["commit", "-q", "-m", "parked delivery"][..]] {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(&worker_path)
+            .env("GIT_AUTHOR_NAME", "CAS Test")
+            .env("GIT_AUTHOR_EMAIL", "test@cas")
+            .env("GIT_COMMITTER_NAME", "CAS Test")
+            .env("GIT_COMMITTER_EMAIL", "test@cas")
+            .output()
+            .expect("git");
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    }
+    let parked_tip = String::from_utf8_lossy(
+        &std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&worker_path)
+            .output()
+            .expect("rev-parse")
+            .stdout,
+    )
+    .trim()
+    .to_string();
+    add_epic_with_id(&env, "cas-3b7c", TaskStatus::Open, "epic/requested");
+
+    {
+        let store = env.agent_store();
+        let mut agent = Agent::new(Agent::generate_fallback_id(), worker.to_string());
+        agent.role = AgentRole::Worker;
+        agent.factory_session = Some("session-1006-parked".to_string());
+        agent.metadata.insert(
+            "clone_path".to_string(),
+            worker_path.to_str().unwrap().to_string(),
+        );
+        store.register(&agent).expect("register worker");
+    }
+    // The delivery parked for merge (on another epic), anchored at the tip.
+    {
+        let store = env.task_store();
+        let mut parked = Task::new("cas-pk01".to_string(), "Parked hub delivery".to_string());
+        parked.status = TaskStatus::AwaitingMerge;
+        parked.assignee = Some(worker.to_string());
+        parked.deliverables.factory_branch_anchor = Some(parked_tip.clone());
+        store.add(&parked).expect("add parked delivery");
+    }
+
+    let task_b = child_task_of_epic(&env, "cas-3b7c", "burn-down fix");
+    let text = assign(&env, &task_b, worker).await.unwrap_or_else(|error| {
+        panic!("a worker parked for another epic must be assignable: {error}")
+    });
+    assert!(text.contains("parked at") && text.contains("cas-pk01"), "{text}");
+    assert_eq!(
+        env.task_store().get(&task_b).expect("task").assignee.as_deref(),
+        Some(worker)
     );
 }
 

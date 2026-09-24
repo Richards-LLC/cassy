@@ -79,7 +79,7 @@ pub use lease::{ClaimResult, LeaseStatus, TaskLease, WorktreeClaimResult, Worktr
 pub use loop_state::{Loop, LoopStatus};
 pub use prompt::{AgentInfo, Message, MessageRole, Prompt};
 pub use provenance::merge_source_ids;
-pub use qa_pass::{QaPass, QaPassState, QaVerdict};
+pub use qa_pass::{QA_PASS_WITHDRAWN_PREFIX, QaPass, QaPassState, QaVerdict};
 pub use public_identifier::{
     PublicUpstreamIdResolution, is_generated_public_upstream_id, public_tool_id, public_tool_ids,
     public_upstream_id, public_upstream_ids, resolve_public_upstream_id,
@@ -87,7 +87,7 @@ pub use public_identifier::{
 pub use recording::{
     Recording, RecordingAgent, RecordingEvent, RecordingEventType, RecordingQuery,
 };
-pub use rule::{Rule, RuleCategory, RuleStatus};
+pub use rule::{OperatorRuleAuthority, Rule, RuleCategory, RuleStatus};
 pub use scope::{Scope, ScopeFilter, ShareScope};
 pub use search_manifest::{
     SearchManifest, SearchManifestEntry, parse_search_manifest, search_manifest_shape_hint,

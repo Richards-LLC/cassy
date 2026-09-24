@@ -526,7 +526,7 @@ impl CasService {
     // ========================================================================
 
     #[tool(
-        description = "Coordination operations combining agent, factory, and worktree management. Agent actions: register, unregister, whoami, heartbeat, agent_list, agent_cleanup, session_start, session_end, loop_start, loop_cancel, loop_status, lease_history, queue_notify, queue_poll, queue_peek, queue_ack, inbox_poll (also accepted as inbox), message, message_ack, message_status. Factory actions: spawn_workers, shutdown_workers, recycle_worker, hold_worker, release_worker, worker_status, worker_activity, sweep_tasks (preview or accept one fix task per integration failure class), clear_context (real harness context reset: types the recipient harness's own reset command into its pane and confirms it against the new session transcript — a reset Cassy cannot prove is returned as an error, never as success), my_context, sync_all_workers, gc_report, gc_cleanup, epic_status (per-child branch merge state for an epic), focus_epic, remind, remind_list, remind_cancel, server_start (run a long-lived server under Cassy instead of a raw `npm run dev &` — registered servers are the only ones that survive worker teardown), server_stop, server_list (what is listening and who started it). Aliases: shutdown_workers accepts target for worker_names and reason; hold_worker/release_worker accept worker_names for target. spawn_workers normally requires an open EPIC so workers are never summoned without stated work; passing task_id for a single open task satisfies that on its own, so post-epic follow-ups need no ceremonial epic. spawn_workers accepts config_dir for an account directory: explicit config_dir wins, otherwise the requesting supervisor's own account directory is captured at enqueue time (CLAUDE_CONFIG_DIR for Claude workers, CODEX_HOME for Codex workers — never crossed between providers); Grok has no account plumbing and reports that instead of silently dropping the value. Worktree actions: worktree_create, worktree_list, worktree_show, worktree_cleanup, worktree_merge, worktree_status. Only available in factory mode. For shutdown_workers, supervisor should verify worktree cleanliness/policy before issuing shutdown. sync_all_workers skips dirty or mid-task worktrees unless force=true, but always skips a supervision-live worker-owned worktree and refuses one already mid-rebase."
+        description = "Coordination operations combining agent, factory, and worktree management. Agent actions: register, unregister, whoami, heartbeat, agent_list, agent_cleanup, session_start, session_end, loop_start, loop_cancel, loop_status, lease_history, queue_notify, queue_poll, queue_peek, queue_ack, inbox_poll (also accepted as inbox), message, message_ack, message_status. Factory actions: spawn_workers, shutdown_workers, recycle_worker, hold_worker, release_worker, worker_status, worker_activity, sweep_tasks (preview or accept one fix task per integration failure class), clear_context (real harness context reset: types the recipient harness's own reset command into its pane and confirms it against the new session transcript — a reset Cassy cannot prove is returned as an error, never as success), my_context, sync_all_workers, gc_report, gc_cleanup, epic_status (per-child branch merge state for an epic), focus_epic, remind, remind_list, remind_cancel, server_start (run a long-lived server under Cassy instead of a raw `npm run dev &` — registered servers are the only ones that survive worker teardown), server_stop, server_list (what is listening and who started it), restart_spawn_queue (supervisor-only: recover a stalled spawn queue without restarting the session; the daemon drops its in-flight spawn and un-run dequeued actions and names them to re-issue). Aliases: shutdown_workers accepts target for worker_names and reason; hold_worker/release_worker accept worker_names for target. spawn_workers normally requires an open EPIC so workers are never summoned without stated work; passing task_id for a single open task satisfies that on its own, so post-epic follow-ups need no ceremonial epic. spawn_workers accepts config_dir for an account directory: explicit config_dir wins, otherwise the requesting supervisor's own account directory is captured at enqueue time (CLAUDE_CONFIG_DIR for Claude workers, CODEX_HOME for Codex workers — never crossed between providers); Grok has no account plumbing and reports that instead of silently dropping the value. Worktree actions: worktree_create, worktree_list, worktree_show, worktree_cleanup, worktree_merge, worktree_status. Only available in factory mode. For shutdown_workers, supervisor should verify worktree cleanliness/policy before issuing shutdown. sync_all_workers skips dirty or mid-task worktrees unless force=true, but always skips a supervision-live worker-owned worktree and refuses one already mid-rebase."
     )]
     pub async fn coordination(
         &self,
@@ -658,7 +658,8 @@ impl CasService {
                 | "worker_status" | "worker_activity" | "sweep_tasks"
                 | "clear_context" | "my_context" | "sync_all_workers" | "gc_report"
                 | "gc_cleanup" | "epic_status" | "focus_epic" | "remind" | "remind_list"
-                | "remind_cancel" | "server_start" | "server_stop" | "server_list" => {
+                | "remind_cancel" | "server_start" | "server_stop" | "server_list"
+                | "restart_spawn_queue" => {
                     let factory_req = req.to_factory_request();
                     match action.as_str() {
                         "spawn_workers" => this.factory_spawn_workers(factory_req).await,
@@ -687,6 +688,10 @@ impl CasService {
                         "server_start" => this.factory_server_start(factory_req).await,
                         "server_stop" => this.factory_server_stop(factory_req).await,
                         "server_list" => this.factory_server_list(factory_req).await,
+                        // cas-73b5 (GH #970): unwedge the spawn queue in place.
+                        "restart_spawn_queue" => {
+                            this.factory_restart_spawn_queue(factory_req).await
+                        }
                         _ => unreachable!(),
                     }
                 }
@@ -791,7 +796,7 @@ impl CasService {
                     format!(
                         "Unknown coordination action: '{action}'. Valid actions:\n\
                          Agent: register, unregister, whoami, heartbeat, agent_list, agent_cleanup, session_start, session_end, loop_start, loop_cancel, loop_status, lease_history, queue_notify, queue_poll, queue_peek, queue_ack, inbox_poll, message, message_ack, message_status\n\
-                         Factory: spawn_workers, shutdown_workers, recycle_worker, hold_worker, release_worker, worker_status, worker_activity, clear_context, my_context, sync_all_workers, gc_report, gc_cleanup, epic_status, focus_epic, remind, remind_list, remind_cancel\n\
+                         Factory: spawn_workers, shutdown_workers, recycle_worker, hold_worker, release_worker, worker_status, worker_activity, clear_context, my_context, sync_all_workers, gc_report, gc_cleanup, epic_status, focus_epic, remind, remind_list, remind_cancel, restart_spawn_queue\n\
                          Factory extra: sweep_tasks (preview or accept one fix task per integration failure class)
                          Worktree: worktree_create, worktree_list, worktree_show, worktree_cleanup, worktree_merge, worktree_status"
                     ),
@@ -838,6 +843,7 @@ impl CasService {
                     | "server_start"
                     | "server_stop"
                     | "server_list"
+                    | "restart_spawn_queue"
             ) {
                 "factory"
             } else {
@@ -1318,7 +1324,10 @@ impl CasService {
                     crate::telemetry::track_mcp_tool("mcp_proxy", "execute", false);
                     Err(McpError {
                         code: ErrorCode::INTERNAL_ERROR,
-                        message: Cow::Owned(format!("MCP execute failed: {e}")),
+                        message: Cow::Owned(format!(
+                            "MCP execute failed: {}",
+                            cmcp_core::describe_upstream_call_error(&e)
+                        )),
                         data: cmcp_core::upstream_mcp_error_data(&e),
                     })
                 }
@@ -1422,6 +1431,7 @@ impl CasService {
             "focus_epic" => self.factory_focus_epic(req).await,
             "remind" => self.factory_remind(req).await,
             "remind_list" => self.factory_remind_list(req).await,
+            "restart_spawn_queue" => self.factory_restart_spawn_queue(req).await,
             "remind_cancel" => self.factory_remind_cancel(req).await,
             "server_start" => self.factory_server_start(req).await,
             "server_stop" => self.factory_server_stop(req).await,
@@ -1498,6 +1508,93 @@ mod tests {
             Some("factory-proxy-test")
         );
         assert_eq!(caller.active_task_ids, ["cas-8750"]);
+    }
+
+    /// GH #988, end to end through `mcp_execute`, the production policy
+    /// installer and a real stdio upstream. A `supervisor:neon.*` entry is
+    /// callable by a supervisor (and a plain session) and refused for a
+    /// worker. The upstream's schema error reaches the caller verbatim, and
+    /// the banner names the callable tools.
+    #[cfg(feature = "mcp-proxy")]
+    #[tokio::test]
+    async fn mcp_execute_scopes_supervisor_entries_and_returns_the_upstream_error_verbatim() {
+        use cmcp_core::config::{Config as ProxyConfig, ServerConfig};
+        let dir = TempDir::new().unwrap();
+        let core = CasCore::with_daemon(dir.path().to_path_buf(), None, None);
+        core.register_agent("proxy-caller".to_string(), "proxy caller".to_string(), None)
+            .unwrap();
+        let agent_store = core.open_agent_store().unwrap();
+        let set_role = |role| {
+            let mut agent = agent_store.get("proxy-caller").unwrap();
+            agent.role = role;
+            agent_store.update(&agent).unwrap();
+        };
+        let fixture =
+            crate::test_paths::crate_root().join("tests/fixtures/mock_mcp_neon_server.py");
+        let upstream = ServerConfig::Stdio {
+            command: "python3".to_string(),
+            args: vec![fixture.to_string_lossy().into_owned()],
+            env: std::collections::HashMap::new(),
+        };
+        let config: ProxyConfig = toml::from_str("allowlist = [\"supervisor:neon.*\"]").unwrap();
+        let engine = cmcp_core::ProxyEngine::from_configs(std::collections::HashMap::from([(
+            "neon".to_string(),
+            upstream,
+        )]))
+        .await
+        .unwrap();
+        crate::mcp::server::install_proxy_policy(&engine, &config).await;
+        assert_eq!(
+            engine.callable_tools_banner().await,
+            "callable tools: [neon.list_projects (supervisors only), neon.run_sql (supervisors only)]; 0 denied by the allowlist"
+        );
+        let service = CasService::new(core, Some(std::sync::Arc::new(engine)));
+        let execute = |tool: &str| {
+            let req: ExecuteRequest = serde_json::from_value(serde_json::json!({
+                "code": format!("{{\"server\":\"neon\",\"tool\":\"{tool}\",\"args\":{{}}}}")
+            }))
+            .unwrap();
+            service.mcp_execute(Parameters(req))
+        };
+
+        set_role(crate::types::AgentRole::Supervisor);
+        let listed = execute("list_projects")
+            .await
+            .expect("supervisor may call neon.*");
+        assert!(
+            serde_json::to_string(&listed)
+                .unwrap()
+                .contains("fixture-project"),
+            "{listed:?}"
+        );
+        let schema = execute("run_sql")
+            .await
+            .expect_err("the upstream refused the SQL");
+        assert!(
+            schema
+                .message
+                .contains(r#"column "nme" of relation "users" does not exist"#)
+                && schema.message.contains("42703"),
+            "the upstream error must reach the caller verbatim: {}",
+            schema.message
+        );
+
+        set_role(crate::types::AgentRole::Standard);
+        execute("list_projects")
+            .await
+            .expect("a plain non-factory session is the operator's own");
+
+        set_role(crate::types::AgentRole::Worker);
+        let refused = execute("list_projects")
+            .await
+            .expect_err("a worker must not call a supervisor-only route");
+        assert!(
+            refused
+                .message
+                .contains("\"neon.list_projects\" is allowlisted for supervisors only; a worker cannot call it"),
+            "{}",
+            refused.message
+        );
     }
 
     /// Guards `cas serve`'s startup banner and empty-registry guard against

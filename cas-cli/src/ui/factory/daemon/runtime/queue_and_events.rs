@@ -102,6 +102,70 @@ fn worker_exit_info(
     format!("{status}{tail}")
 }
 
+/// cas-2ffe (GH #915): the structured exit cause carried by the worker-died
+/// relay. The tail is redacted (credential patterns and key=value secrets)
+/// before it leaves the daemon, and bounded like the timeout tail.
+fn worker_exit_cause(
+    exit_code: Option<i32>,
+    exit_signal: Option<&str>,
+    pane_tail: Option<&str>,
+) -> crate::prompt_revalidation::WorkerExitCause {
+    let output_tail = pane_tail
+        .map(str::trim)
+        .filter(|tail| !tail.is_empty())
+        .map(|tail| {
+            let (redacted, _) =
+                crate::hooks::handlers::handlers_events::message_display::redact_secrets(
+                    tail.to_string(),
+                );
+            bounded_tail_text(crate::ai_enrichment::redact_string(&redacted).trim())
+        });
+    crate::prompt_revalidation::WorkerExitCause {
+        exit_code,
+        exit_signal: exit_signal
+            .map(str::trim)
+            .filter(|signal| !signal.is_empty())
+            .map(str::to_string),
+        output_tail,
+    }
+}
+
+/// Deaths closer together than this are one incident (cas-2ffe, GH #915):
+/// three Codex workers exited with code 0 within 1.2 s of each other.
+pub(super) const WORKER_DEATH_CORRELATION_WINDOW: std::time::Duration =
+    std::time::Duration::from_secs(5);
+
+/// One observed harness exit, kept briefly to detect correlated deaths.
+#[derive(Debug, Clone)]
+pub(crate) struct ObservedWorkerExit {
+    pub at: chrono::DateTime<chrono::Utc>,
+    pub worker: String,
+    pub status: String,
+}
+
+/// The first group of at least two exits that fall within `window` of the
+/// group's first exit, once that window has closed at `now`. Returns the
+/// group and how many leading entries it spans. A lone exit whose window has
+/// closed is reported as a group of one so the caller can drop it.
+pub(crate) fn closed_death_group(
+    exits: &[ObservedWorkerExit],
+    now: chrono::DateTime<chrono::Utc>,
+    window: std::time::Duration,
+) -> Option<Vec<ObservedWorkerExit>> {
+    let first = exits.first()?;
+    let window = chrono::Duration::from_std(window).ok()?;
+    if now - first.at < window {
+        return None;
+    }
+    Some(
+        exits
+            .iter()
+            .take_while(|exit| exit.at - first.at <= window)
+            .cloned()
+            .collect(),
+    )
+}
+
 /// Return a bounded pane excerpt when a harness reports a model rejection
 /// during boot. Claude Code emits these messages before a rejected worker
 /// necessarily exits, so polling this signal closes the gap between pane
@@ -280,6 +344,76 @@ fn spawn_provisioning_timed_out(started_at: Instant, now: Instant, timeout: Dura
     now.saturating_duration_since(started_at) >= timeout
 }
 
+/// cas-73b5: how a dequeued-but-unrun action reads when a spawn-queue restart
+/// drops it: (description, originating queue request, whether it holds one
+/// of the `spawning_count` slots taken at dequeue).
+fn describe_pending_spawn(pending: &PendingSpawn) -> (String, Option<i64>, bool) {
+    match pending {
+        PendingSpawn::Anonymous { request_id, .. } => {
+            ("queued spawn of one worker".to_string(), *request_id, true)
+        }
+        PendingSpawn::Named {
+            request_id, name, ..
+        } => (format!("queued spawn of '{name}'"), *request_id, true),
+        PendingSpawn::Shutdown {
+            request_id,
+            count,
+            names,
+            ..
+        } => {
+            let target = if names.is_empty() {
+                format!("count={}", count.unwrap_or(0))
+            } else {
+                names.join(", ")
+            };
+            (format!("queued shutdown of {target}"), *request_id, false)
+        }
+        PendingSpawn::Respawn(name) => (format!("queued respawn of '{name}'"), None, false),
+        PendingSpawn::Recycle {
+            request_id, name, ..
+        } => (
+            format!("queued recycle of '{name}'"),
+            Some(*request_id),
+            false,
+        ),
+        PendingSpawn::Shell { name, .. } => (format!("queued shell pane '{name}'"), None, false),
+        PendingSpawn::KillShell { name } => (
+            format!("queued removal of shell pane '{name}'"),
+            None,
+            false,
+        ),
+    }
+}
+
+/// cas-73b5: the loop-status outcome and the supervisor message for a
+/// spawn-queue restart that dropped `dropped`.
+fn spawn_queue_reset_report(
+    at: chrono::DateTime<chrono::Utc>,
+    requester: &str,
+    dropped: &[String],
+) -> (String, String) {
+    let at = at.to_rfc3339();
+    if dropped.is_empty() {
+        (
+            format!(
+                "{at} (requested by {requester}): nothing was in flight; the queue keeps draining"
+            ),
+            "Spawn queue restarted. Nothing was in flight inside the daemon; requests still in \
+             spawn_queue keep draining."
+                .to_string(),
+        )
+    } else {
+        let list = dropped.join("; ");
+        (
+            format!("{at} (requested by {requester}): dropped {list}"),
+            format!(
+                "Spawn queue restarted. These dequeued actions were dropped and did not run; \
+                 re-issue the ones you still want: {list}."
+            ),
+        )
+    }
+}
+
 /// cas-2702 (GH #58): pending queue rows this daemon has not drained. A healthy
 /// row lives for at most one poll interval, so anything older than `min_age` is
 /// an anomaly worth reporting — most often a request enqueued against a
@@ -422,6 +556,16 @@ fn append_workspace_contract_brief(
     };
     if !task.demo_statement.trim().is_empty() {
         message.push_str(&format!("\nDemo statement: {}", task.demo_statement.trim()));
+    }
+    // cas-ea9c (GH #1005): the daemon holds the operator's GitHub
+    // credentials, the worker does not. Attach the cited issues in the
+    // background and point the worker at where they land.
+    crate::github_issue_attach::spawn_attach_cited_issues(cas_dir, &task);
+    if let Some(section) = crate::github_issue_attach::cited_issue_section(cas_dir, &task) {
+        message.push_str(&format!(
+            "\n\n{section}\nThe files land under `{}/` as they are fetched; `task action=show` lists them.",
+            crate::github_issue_attach::attachment_dir(&artifacts_root, task_id).display()
+        ));
     }
     let worktree = open_agent_store(cas_dir)
         .ok()
@@ -1622,6 +1766,167 @@ pub(super) fn deferred_inbox_reaction_consumes(
 /// wrongly-silent pane loses at most one cadence tick.
 const INBOX_DRAIN_TURN_WINDOW: std::time::Duration = std::time::Duration::from_secs(15);
 
+/// GH #894: a supervisor lifecycle relay (awaiting merge, blocked, close
+/// rejected, completion, worker death) that has not reached the supervisor
+/// after this long is escalated to the operator. The check rides the 60s
+/// prompt sweep, so the operator hears within 10 minutes of the relay.
+pub(super) const RELAY_OPERATOR_ESCALATION_AFTER_SECS: i64 = 9 * 60;
+
+/// Operator-facing summary and message for one relay the supervisor never
+/// received (GH #894). Plain language: the operator reads this in Commander
+/// or a desktop notification, not in a log.
+pub(super) fn undelivered_relay_operator_alert(
+    queued: &cas_store::QueuedPrompt,
+    envelope: Option<&crate::prompt_revalidation::LifecycleEnvelope>,
+    supervisor_name: &str,
+    supervisor_harness: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> (String, String) {
+    let age_minutes = (now - queued.created_at).num_minutes().max(0);
+    let subject = match envelope {
+        Some(envelope) => format!(
+            "{} is {}",
+            envelope.task_id,
+            envelope.new_status.to_string().replace('_', " ")
+        ),
+        None => queued
+            .summary
+            .clone()
+            .filter(|summary| !summary.trim().is_empty())
+            .unwrap_or_else(|| "a factory event".to_string()),
+    };
+    let retry_state = if queued.processed_at.is_some() {
+        "Cassy has stopped retrying it."
+    } else {
+        "Cassy is still retrying, but the supervisor has not taken it."
+    };
+    let summary = format!("Supervisor hasn't seen: {subject} ({age_minutes}m)");
+    let message = format!(
+        "The supervisor ({supervisor_name}, {supervisor_harness}) was told {age_minutes} minutes ago that {subject}, \
+         and the message never reached it. {retry_state} Nothing waiting on that update moves until the supervisor \
+         picks it up: check the supervisor pane, or handle it yourself."
+    );
+    (summary, message)
+}
+
+/// One operator alert raised by [`escalate_undelivered_supervisor_relays`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct RelayOperatorAlert {
+    pub relay_id: i64,
+    pub alert_id: i64,
+    pub summary: String,
+}
+
+/// GH #894: raise one Commander alert (`target = "operator"`, kind
+/// `blocker`) for each supervisor lifecycle relay that has not reached the
+/// supervisor after [`RELAY_OPERATOR_ESCALATION_AFTER_SECS`].
+///
+/// Waking the pane is the delivery loop's job. This covers the case where
+/// that fails for any reason (busy or wedged pane, stuck submit, a harness
+/// with no inbox escalation) and nobody would otherwise hear about it. Alerts
+/// are durable and deduped by relay id, so a restart cannot repeat one. A
+/// relay whose task has already moved on is left alone. Returns only alerts
+/// created by this call.
+pub(super) fn escalate_undelivered_supervisor_relays(
+    cas_dir: &std::path::Path,
+    queue: &dyn cas_store::PromptQueueStore,
+    factory_session: &str,
+    supervisor_name: &str,
+    supervisor_harness: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Vec<RelayOperatorAlert> {
+    let candidates = match queue.undelivered_supervisor_lifecycle_relays(
+        factory_session,
+        &[supervisor_name, "supervisor"],
+        RELAY_OPERATOR_ESCALATION_AFTER_SECS,
+        20,
+    ) {
+        Ok(candidates) => candidates,
+        Err(error) => {
+            tracing::warn!(%error, "GH #894: failed to scan undelivered supervisor relays");
+            return Vec::new();
+        }
+    };
+    if candidates.is_empty() {
+        return Vec::new();
+    }
+    let task_store = crate::store::open_task_store_local(cas_dir).ok();
+    let mut alerts = Vec::new();
+    for queued in candidates {
+        let envelope = crate::prompt_revalidation::parse_lifecycle_envelope(&queued.prompt);
+        if let (Some(envelope), Some(store)) = (envelope.as_ref(), task_store.as_ref()) {
+            match store.get(&envelope.task_id) {
+                Ok(task) => {
+                    if !matches!(
+                        crate::prompt_revalidation::revalidate_lifecycle_prompt_against_task(
+                            &queued.prompt,
+                            &task,
+                        ),
+                        crate::prompt_revalidation::LifecyclePromptDecision::Deliver
+                    ) {
+                        continue;
+                    }
+                }
+                Err(cas_store::StoreError::TaskNotFound(_)) => continue,
+                // An unreadable task must not hide a lost relay.
+                Err(_) => {}
+            }
+        }
+        let (summary, message) = undelivered_relay_operator_alert(
+            &queued,
+            envelope.as_ref(),
+            supervisor_name,
+            supervisor_harness,
+            now,
+        );
+        let payload = match serde_json::to_string(&crate::ui::factory::OperatorReplyPayload {
+            schema_version: 2,
+            reply_to: None,
+            message,
+            summary: summary.clone(),
+            device_id: "*".to_string(),
+            operator_label: None,
+            kind: crate::ui::factory::OperatorTurnKind::Blocker,
+            attachments: Vec::new(),
+        }) {
+            Ok(payload) => payload,
+            Err(error) => {
+                tracing::warn!(prompt_id = queued.id, %error, "GH #894: failed to encode operator alert");
+                continue;
+            }
+        };
+        match queue.enqueue_idempotent(
+            "relay-watchdog",
+            "operator",
+            &payload,
+            Some(factory_session),
+            Some(summary.as_str()),
+            Some(cas_store::NotificationPriority::High),
+            &format!(
+                "{}{}",
+                cas_store::RELAY_OPERATOR_ESCALATION_DEDUPE_PREFIX,
+                queued.id
+            ),
+            Some(&cas_store::QueueOrigin::Daemon),
+        ) {
+            Ok(cas_store::EnqueueIdempotentResult::Created(alert_id)) => {
+                alerts.push(RelayOperatorAlert {
+                    relay_id: queued.id,
+                    alert_id,
+                    summary,
+                });
+            }
+            Ok(_) => {}
+            Err(error) => tracing::warn!(
+                prompt_id = queued.id,
+                %error,
+                "GH #894: failed to queue operator alert for an undelivered supervisor relay"
+            ),
+        }
+    }
+    alerts
+}
+
 fn delivery_stalled_threshold_i64(configured_secs: u64) -> i64 {
     i64::try_from(configured_secs).unwrap_or(i64::MAX)
 }
@@ -1713,6 +2018,121 @@ impl FactoryDaemon {
                     worker = %agent.name,
                     "terminal harness availability record relayed to supervisor"
                 );
+            }
+        }
+    }
+
+    /// cas-4143: Claude Code re-checks a PreToolUse `allow` against its own
+    /// safety rules and, for shapes such as a heredoc, parks the call as a
+    /// teammate permission request in `team-lead.json`, a mailbox nobody
+    /// reads. Answer a request CAS already allowed for that exact call with
+    /// the approval the worker is waiting for. Surface anything else still
+    /// pending after [`crate::factory_permission_relay::APPROVAL_WAKE_AFTER_SECS`]
+    /// as one supervisor wake per request. The in-flight tool call that hides
+    /// this wait from the stall detectors does not suppress it here.
+    pub(super) fn relay_worker_permission_requests(&mut self) {
+        use crate::factory_permission_relay as relay;
+        const SCAN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+        let now = std::time::Instant::now();
+        if self
+            .last_permission_request_scan
+            .is_some_and(|last| now.saturating_duration_since(last) < SCAN_INTERVAL)
+        {
+            return;
+        }
+        let first_scan = self.last_permission_request_scan.is_none();
+        self.last_permission_request_scan = Some(now);
+        let cas_dir = self.app.cas_dir().to_path_buf();
+        if first_scan {
+            relay::prune_hook_allows(&cas_dir);
+        }
+
+        // The daemon's own Claude tree, plus each worker's account tree: a
+        // worker spawned with `config_dir` writes its request there.
+        let mut roots: Vec<std::path::PathBuf> = Vec::new();
+        if let Some(root) = super::teams::teams_root_dir().parent() {
+            roots.push(root.to_path_buf());
+        }
+        let workers: std::collections::HashSet<String> =
+            self.app.worker_names().iter().cloned().collect();
+        let mut members = workers.clone();
+        members.insert("supervisor".to_string());
+        if let Ok(agents) = crate::store::open_agent_store(&cas_dir)
+            && let Ok(active) = agents.list(Some(cas_types::AgentStatus::Active))
+        {
+            for agent in active.iter().filter(|agent| {
+                agent.factory_session.as_deref() == Some(self.session_name.as_str())
+            }) {
+                if let Some(dir) = agent
+                    .metadata
+                    .get("worker_account_dir")
+                    .map(|dir| dir.trim())
+                    .filter(|dir| !dir.is_empty())
+                {
+                    let dir = match dir.strip_prefix("~/") {
+                        Some(suffix) => dirs::home_dir()
+                            .map(|home| home.join(suffix))
+                            .unwrap_or_else(|| std::path::PathBuf::from(dir)),
+                        None => std::path::PathBuf::from(dir),
+                    };
+                    if !roots.contains(&dir) {
+                        roots.push(dir);
+                    }
+                }
+            }
+        }
+
+        for root in &roots {
+            for request in relay::pending_requests(root, &self.session_name) {
+                if !members.contains(&request.worker) {
+                    continue;
+                }
+                let pre_approved = request.tool_use_id.as_deref().is_some_and(|tool_use_id| {
+                    relay::hook_allowed(&cas_dir, tool_use_id, &request.tool_name)
+                });
+                if pre_approved {
+                    match relay::answer_request(root, &self.session_name, &request, true, "") {
+                        Ok(()) => tracing::info!(
+                            target: "cas::coordination",
+                            stage = "permission_request_auto_approved",
+                            worker = %request.worker,
+                            request_id = %request.request_id,
+                            tool = %request.tool_name,
+                            age_secs = request.age_secs,
+                            "answered a teammate permission request with CAS's recorded allow"
+                        ),
+                        Err(error) => tracing::warn!(
+                            worker = %request.worker,
+                            request_id = %request.request_id,
+                            %error,
+                            "cas-4143: could not answer a pre-approved permission request"
+                        ),
+                    }
+                    continue;
+                }
+                // The supervisor's own parked request cannot wake itself;
+                // only workers go through the attention lane.
+                if request.age_secs < relay::APPROVAL_WAKE_AFTER_SECS
+                    || !workers.contains(&request.worker)
+                    || self.reported_permission_requests.contains(&request.request_id)
+                {
+                    continue;
+                }
+                if matches!(
+                    super::lifecycle::enqueue_worker_approval_pending_relay(&cas_dir, &request),
+                    super::lifecycle::WorkerAttentionRelayOutcome::Persisted { .. }
+                ) {
+                    self.reported_permission_requests
+                        .insert(request.request_id.clone());
+                    tracing::warn!(
+                        target: "cas::coordination",
+                        stage = "worker_approval_pending",
+                        worker = %request.worker,
+                        request_id = %request.request_id,
+                        age_secs = request.age_secs,
+                        "teammate permission request relayed to the supervisor"
+                    );
+                }
             }
         }
     }
@@ -1950,6 +2370,34 @@ impl FactoryDaemon {
                     "failed to queue sender-side delivery-stalled bounce"
                 ),
             }
+        }
+    }
+
+    /// GH #894: tell the operator about supervisor lifecycle relays that have
+    /// not reached the supervisor after [`RELAY_OPERATOR_ESCALATION_AFTER_SECS`].
+    /// See [`escalate_undelivered_supervisor_relays`]; this adds the desktop
+    /// notification (when enabled) and the coordination log line.
+    fn escalate_undelivered_supervisor_relays(&mut self, queue: &dyn cas_store::PromptQueueStore) {
+        let supervisor_name = self.app.supervisor_name().to_string();
+        let harness = format!("{:?}", self.app.harness_for(&supervisor_name));
+        for alert in escalate_undelivered_supervisor_relays(
+            self.app.cas_dir(),
+            queue,
+            &self.session_name,
+            &supervisor_name,
+            &harness,
+            chrono::Utc::now(),
+        ) {
+            self.app
+                .notifier()
+                .notify("Supervisor missed an update", &alert.summary);
+            tracing::error!(
+                target: "cas::coordination",
+                stage = "relay_escalated_to_operator",
+                message_id = alert.relay_id,
+                alert_id = alert.alert_id,
+                "GH #894: a supervisor relay went undelivered past the escalation window; operator alerted"
+            );
         }
     }
 
@@ -2516,12 +2964,20 @@ impl FactoryDaemon {
         let pane_tail = timeout_pane_tail(self.pane_buffers.get(worker_name));
 
         let exit_info = worker_exit_info(exit_code, exit_signal.as_deref(), pane_tail.as_deref());
+        // cas-2ffe (GH #915): the relay carries the cause as structured
+        // fields plus a redacted tail, not spliced into its own lines.
+        let exit_cause = worker_exit_cause(exit_code, exit_signal.as_deref(), pane_tail.as_deref());
+        self.recent_worker_exits.push(ObservedWorkerExit {
+            at: chrono::Utc::now(),
+            worker: worker_name.to_string(),
+            status: exit_cause.status(),
+        });
 
         // A registered worker can still be a dead harness whose MCP child
         // answered first. Mark the durable agent stale before removing the
         // pane so task leases are parked and worker_status cannot retain the
         // transcript-backed active row.
-        self.mark_registered_worker_stale(worker_name, &exit_info);
+        self.mark_registered_worker_stale(worker_name, &exit_cause.status(), Some(&exit_cause));
         self.app.mark_worker_crashed(worker_name).await;
         self.dead_workers.insert(worker_name.to_string());
 
@@ -2573,23 +3029,50 @@ impl FactoryDaemon {
     /// Mark the current worker registration stale and park any leases before
     /// the pane is removed. The daemon-side heartbeat gate normally handles
     /// this, but boot failures can arrive before its next tick.
-    fn mark_registered_worker_stale(&self, worker_name: &str, reason: &str) {
-        let agent_id = self
+    fn mark_registered_worker_stale(
+        &self,
+        worker_name: &str,
+        reason: &str,
+        exit: Option<&crate::prompt_revalidation::WorkerExitCause>,
+    ) {
+        let Ok(agent_store) = open_agent_store(self.app.cas_dir()) else {
+            return;
+        };
+        let cached = self
             .app
             .director_data()
             .agents
             .iter()
             .find(|agent| is_exact_agent_name_match(agent, worker_name))
-            .map(|agent| agent.id.clone());
-        let Some(agent_id) = agent_id else {
-            return;
-        };
-        let Ok(agent_store) = open_agent_store(self.app.cas_dir()) else {
-            return;
-        };
-        let Ok(agent) = agent_store.get(&agent_id) else {
-            return;
-        };
+            .and_then(|agent| agent_store.get(&agent.id).ok());
+        // cas-2ffe (GH #915): the harness can take its `cas serve` child down
+        // first, and that child unregisters the row. A missed lookup used to
+        // return silently, so the death reached nobody. Fall back to any
+        // registration of this worker in this session, then to a stand-in
+        // row carrying the name and session, so an exit is never silent.
+        let agent = cached
+            .or_else(|| {
+                agent_store.list(None).ok().and_then(|agents| {
+                    agents
+                        .into_iter()
+                        .filter(|agent| {
+                            agent.name == worker_name
+                                && agent.factory_session.as_deref()
+                                    == Some(self.session_name.as_str())
+                        })
+                        .max_by_key(|agent| agent.last_heartbeat)
+                })
+            })
+            .unwrap_or_else(|| {
+                let mut stand_in = cas_types::Agent::new(
+                    format!("{worker_name}-exited-{}", chrono::Utc::now().timestamp_millis()),
+                    worker_name.to_string(),
+                );
+                stand_in.role = cas_types::AgentRole::Worker;
+                stand_in.agent_type = cas_types::AgentType::Worker;
+                stand_in.factory_session = Some(self.session_name.clone());
+                stand_in
+            });
         let held = agent_store
             .list_agent_leases(&agent.id)
             .unwrap_or_default()
@@ -2597,13 +3080,53 @@ impl FactoryDaemon {
             .map(|lease| lease.task_id)
             .collect::<Vec<_>>();
         let _ = agent_store.mark_stale(&agent.id);
-        crate::mcp::tools::service::orphan_recovery::recover_worker_vanished(
+        crate::mcp::tools::service::orphan_recovery::recover_worker_vanished_with_exit(
             self.app.cas_dir(),
             agent_store.as_ref(),
             &agent,
             &held,
             reason,
+            exit,
         );
+    }
+
+    /// cas-2ffe (GH #915): several harnesses exiting within
+    /// [`WORKER_DEATH_CORRELATION_WINDOW`] are one incident, not unrelated
+    /// deaths. Each worker's own relay still parks its tasks; once the window
+    /// closes, the group is flagged to the supervisor as ONE event naming
+    /// every worker and exit status, so the common cause (the host, the
+    /// harness, the account) is investigated instead of three separate
+    /// respawns.
+    pub(super) fn relay_correlated_worker_deaths(&mut self) {
+        let now = chrono::Utc::now();
+        while let Some(group) =
+            closed_death_group(&self.recent_worker_exits, now, WORKER_DEATH_CORRELATION_WINDOW)
+        {
+            let span = group.len();
+            if span >= 2 {
+                let outcome = super::lifecycle::enqueue_correlated_worker_deaths_relay(
+                    self.app.cas_dir(),
+                    &group,
+                );
+                if !matches!(
+                    outcome,
+                    super::lifecycle::WorkerAttentionRelayOutcome::Persisted { .. }
+                ) && now - group[0].at < chrono::Duration::minutes(10)
+                {
+                    // Keep the group for the next tick; the relay key makes
+                    // the retry idempotent. A group that still cannot be
+                    // relayed after ten minutes is dropped, not retried forever.
+                    return;
+                }
+                tracing::warn!(
+                    target: "cas::coordination",
+                    stage = "worker_deaths_correlated",
+                    workers = %group.iter().map(|exit| exit.worker.as_str()).collect::<Vec<_>>().join(","),
+                    "correlated worker deaths relayed to the supervisor as one incident"
+                );
+            }
+            self.recent_worker_exits.drain(..span);
+        }
     }
 
     pub(super) async fn reconcile_spawn_verifications(&mut self) {
@@ -2733,7 +3256,7 @@ impl FactoryDaemon {
                 if let Err(error) = self.app.mux.kill_worker(&worker, true).await {
                     tracing::warn!(worker = %worker, error = %error, "failed to reap boot-failed worker PTY");
                 }
-                self.mark_registered_worker_stale(&worker, "worker harness failed during boot");
+                self.mark_registered_worker_stale(&worker, "worker harness failed during boot", None);
                 self.app.mark_worker_crashed(&worker).await;
                 self.dead_workers.insert(worker.clone());
                 self.pane_buffers.remove(&worker);
@@ -3898,6 +4421,7 @@ impl FactoryDaemon {
         if prompt_poison_sweep_due(self.last_prompt_poison_sweep, now) {
             self.last_prompt_poison_sweep = Some(now);
             self.enqueue_delivery_stalled_bounces(queue.as_ref());
+            self.escalate_undelivered_supervisor_relays(queue.as_ref());
             if let Ok(expired) = queue.abandon_ineligible_session_targets(
                 &valid_targets,
                 &self.session_name,
@@ -5854,6 +6378,102 @@ impl FactoryDaemon {
         }
     }
 
+    /// Apply a supervisor's `restart_spawn_queue` request (cas-73b5, GH #970).
+    ///
+    /// Restarts the daemon's spawn pipeline in place, without touching any
+    /// pane. The in-flight provisioning is abandoned, and actions already
+    /// dequeued but not yet run are dropped and named to the supervisor to
+    /// re-issue. Rows still in `spawn_queue` keep draining on the next poll,
+    /// and every stalled row may be reported again. Returns the outcome
+    /// recorded in the daemon's loop status.
+    pub(super) fn apply_spawn_queue_reset(
+        &mut self,
+        request: &crate::factory_daemon_health::SpawnQueueResetRequest,
+    ) -> String {
+        let mut dropped: Vec<String> = Vec::new();
+        let request_label =
+            |id: Option<i64>| id.map(|id| format!(" (request {id})")).unwrap_or_default();
+
+        if let Some((pending_name, request_id, _, pending_task_id, handle)) = self.spawn_task.take()
+        {
+            self.spawn_started_at = None;
+            handle.abort();
+            self.app.remove_pending_worker(&pending_name);
+            take_spawn_cancellation(&mut self.cancelled_spawns, &pending_name);
+            if let Some(ref task_id) = pending_task_id {
+                crate::ui::factory::app::render_and_ops::epic_workers::release_preassign_if_bound(
+                    self.app.cas_dir(),
+                    task_id,
+                    &pending_name,
+                );
+            }
+            crate::ui::factory::app::render_and_ops::epic_workers::release_worker_task_bindings(
+                self.app.cas_dir(),
+                &pending_name,
+            );
+            self.app.spawning_count = self.app.spawning_count.saturating_sub(1);
+            append_spawn_audit(
+                self.app.cas_dir(),
+                &self.session_name,
+                request_id,
+                Some(&pending_name),
+                "provision",
+                "cancelled",
+                "Abandoned by a supervisor spawn-queue restart; remove any partial worktree/branch for this worker before re-issuing.",
+            );
+            dropped.push(format!(
+                "in-flight spawn of '{pending_name}'{}",
+                request_label(request_id)
+            ));
+        }
+
+        for pending in std::mem::take(&mut self.pending_spawns) {
+            let (description, request_id, holds_spawn_slot) = describe_pending_spawn(&pending);
+            if holds_spawn_slot {
+                self.app.spawning_count = self.app.spawning_count.saturating_sub(1);
+            }
+            append_spawn_audit(
+                self.app.cas_dir(),
+                &self.session_name,
+                request_id,
+                None,
+                "dequeue",
+                "cancelled",
+                &format!("{description}: dropped by a supervisor spawn-queue restart"),
+            );
+            dropped.push(format!("{description}{}", request_label(request_id)));
+        }
+
+        self.reported_stalled_spawn_requests.clear();
+        self.last_spawn_queue_stall_scan = None;
+
+        let (outcome, message) =
+            spawn_queue_reset_report(chrono::Utc::now(), &request.requester, &dropped);
+        tracing::warn!(outcome = %outcome, "cas-73b5: spawn queue restarted by supervisor");
+
+        let delivered = open_prompt_queue_store(self.app.cas_dir())
+            .map_err(|error| error.to_string())
+            .and_then(|queue| {
+                queue
+                    .enqueue_with_summary(
+                        "director",
+                        self.app.supervisor_name(),
+                        &message,
+                        Some(&self.session_name),
+                        Some("Spawn queue restarted"),
+                    )
+                    .map_err(|error| error.to_string())
+            });
+        match delivered {
+            Ok(_) => super::delivery::wake_daemon_after_enqueue(self.app.cas_dir()),
+            Err(error) => tracing::warn!(
+                %error,
+                "cas-73b5: could not tell the supervisor what the spawn-queue restart dropped"
+            ),
+        }
+        outcome
+    }
+
     /// Poll the spawn queue and enqueue individual actions (non-blocking).
     ///
     /// Instead of spawning workers synchronously (which blocks the TUI for seconds),
@@ -7493,14 +8113,18 @@ mod tests {
     use super::{
         LIFECYCLE_MAX_RENUDGE_ATTEMPTS, append_spawn_audit, append_spawn_audit_line,
         boot_model_error_detail, cancel_targeted_in_flight_spawn, deliver_worker_task_brief,
-        enqueue_preassign_failure_lifecycle_relay, enqueue_spawn_cancelled_notice,
-        enqueue_spawn_outcome_notice, ensure_worker_preassignment, is_exact_agent_name_match,
-        matches_event_filter, preassign_failure_reason, prompt_poison_sweep_due,
-        prompt_poison_sweep_targets, registered_prompt_sweep_agents, registration_timeout_detail,
-        reminder_matches_factory_session, report_stale_reminder_expiry, shutdown_targets,
-        spawn_predates_shutdown, spawn_provisioning_timed_out, stalled_spawn_requests,
+        describe_pending_spawn, enqueue_preassign_failure_lifecycle_relay,
+        enqueue_spawn_cancelled_notice, enqueue_spawn_outcome_notice, ensure_worker_preassignment,
+        is_exact_agent_name_match, matches_event_filter, preassign_failure_reason,
+        prompt_poison_sweep_due, prompt_poison_sweep_targets, registered_prompt_sweep_agents,
+        registration_timeout_detail, reminder_matches_factory_session,
+        report_stale_reminder_expiry, shutdown_targets, spawn_predates_shutdown,
+        spawn_provisioning_timed_out, spawn_queue_reset_report, stalled_spawn_requests,
         take_next_pending_spawn, take_spawn_cancellation, take_unverified_spawn_on_exit,
         timeout_pane_tail, worker_exit_info,
+        // cas-2ffe (GH #915): exit cause and death correlation.
+        ObservedWorkerExit, WORKER_DEATH_CORRELATION_WINDOW, closed_death_group,
+        worker_exit_cause,
     };
     use crate::ui::factory::app::render_and_ops::epic_workers::release_preassign_if_bound;
     use crate::ui::factory::daemon::{FactoryDaemon, PendingSpawn, SpawnVerification};
@@ -7696,6 +8320,61 @@ mod tests {
         assert!(!tail.contains("\x1b["), "ANSI must be stripped: {tail}");
     }
 
+    /// cas-2ffe (GH #915): the relay's exit cause keeps code and signal
+    /// apart, and redacts secrets from the harness tail before it leaves the
+    /// daemon.
+    #[test]
+    fn worker_exit_cause_is_structured_and_redacted_cas_2ffe() {
+        let cause = worker_exit_cause(
+            Some(0),
+            Some("  "),
+            Some("turn aborted\nOPENAI_API_KEY=sk-abcdef1234567890abcdef1234567890\nbye"),
+        );
+        assert_eq!(cause.exit_code, Some(0));
+        assert_eq!(cause.exit_signal, None, "a blank signal is no signal");
+        assert_eq!(cause.status(), "exited with code 0");
+        let tail = cause.output_tail.expect("tail");
+        assert!(tail.contains("turn aborted") && tail.contains("bye"), "{tail}");
+        assert!(!tail.contains("sk-abcdef1234567890abcdef1234567890"), "{tail}");
+
+        let signalled = worker_exit_cause(Some(1), Some("Killed"), None);
+        assert_eq!(signalled.status(), "terminated by signal Killed");
+        assert_eq!(signalled.output_tail, None);
+    }
+
+    /// cas-2ffe (GH #915): the reported shape. Three exits within 1.2 s are
+    /// one group once the window closes. A later exit starts its own group.
+    #[test]
+    fn simultaneous_exits_group_once_the_window_closes_cas_2ffe() {
+        let t0 = chrono::Utc::now() - chrono::Duration::seconds(30);
+        let exit = |worker: &str, offset_ms: i64| ObservedWorkerExit {
+            at: t0 + chrono::Duration::milliseconds(offset_ms),
+            worker: worker.to_string(),
+            status: "exited with code 0".to_string(),
+        };
+        let exits = vec![
+            exit("codex-a", 0),
+            exit("codex-b", 700),
+            exit("codex-c", 1_200),
+            exit("codex-d", 20_000),
+        ];
+        let window = WORKER_DEATH_CORRELATION_WINDOW;
+
+        assert!(
+            closed_death_group(&exits, t0 + chrono::Duration::seconds(2), window).is_none(),
+            "the window is still open"
+        );
+        let group = closed_death_group(&exits, chrono::Utc::now(), window).expect("closed");
+        assert_eq!(
+            group.iter().map(|exit| exit.worker.as_str()).collect::<Vec<_>>(),
+            ["codex-a", "codex-b", "codex-c"]
+        );
+        let rest = &exits[group.len()..];
+        let lone = closed_death_group(rest, chrono::Utc::now(), window).expect("closed");
+        assert_eq!(lone.len(), 1, "a lone exit is dropped, not flagged");
+        assert!(closed_death_group(&[], chrono::Utc::now(), window).is_none());
+    }
+
     #[test]
     fn worker_exit_info_reports_status_and_bounded_tail_without_guessing() {
         let code = worker_exit_info(Some(23), None, Some("last worker line"));
@@ -7731,6 +8410,119 @@ mod tests {
         );
     }
 
+    /// GH #894: a supervisor relay that never reached the supervisor raises
+    /// one Commander blocker for the operator within the 10-minute window.
+    /// A relay whose task moved on, or one still inside the window, stays
+    /// quiet, and a later sweep never repeats an alert.
+    #[test]
+    fn an_undelivered_supervisor_relay_alerts_the_operator_once_within_ten_minutes() {
+        use cas_store::{EnqueueIdempotentResult, PromptQueueStore, TaskStore};
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        let tasks = crate::store::open_task_store(&cas_dir).unwrap();
+        for (id, status) in [
+            ("cas-a894", TaskStatus::AwaitingMerge),
+            ("cas-b894", TaskStatus::InProgress),
+            ("cas-c894", TaskStatus::AwaitingMerge),
+        ] {
+            let mut task = Task::new(id.to_string(), format!("relay {id}"));
+            task.status = status;
+            tasks.add(&task).unwrap();
+        }
+        let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+        let relay = |n: i64, task_id: &str| match queue
+            .enqueue_idempotent(
+                &format!("lifecycle-wake:{n}"),
+                "supervisor",
+                &awaiting_merge_payload(task_id),
+                Some("factory-session"),
+                Some(task_id),
+                Some(cas_store::NotificationPriority::High),
+                &format!("gh894-relay:{n}"),
+                Some(&cas_store::QueueOrigin::Daemon),
+            )
+            .unwrap()
+        {
+            EnqueueIdempotentResult::Created(id) | EnqueueIdempotentResult::AlreadyExists(id) => id,
+        };
+        let stuck = relay(1, "cas-a894");
+        let moved_on = relay(2, "cas-b894");
+        let fresh = relay(3, "cas-c894");
+        let conn = rusqlite::Connection::open(cas_dir.join("cas.db")).unwrap();
+        let age = |id: i64, secs: i64| {
+            conn.execute(
+                "UPDATE prompt_queue SET created_at = ? WHERE id = ?",
+                rusqlite::params![
+                    (chrono::Utc::now() - chrono::Duration::seconds(secs)).to_rfc3339(),
+                    id
+                ],
+            )
+            .unwrap();
+        };
+        age(stuck, 10 * 60);
+        age(moved_on, 10 * 60);
+        age(fresh, 2 * 60);
+
+        let sweep = || {
+            super::escalate_undelivered_supervisor_relays(
+                &cas_dir,
+                queue.as_ref(),
+                "factory-session",
+                "cosmic-bear-43",
+                "Codex",
+                chrono::Utc::now(),
+            )
+        };
+        let first = sweep();
+        assert_eq!(
+            first.iter().map(|alert| alert.relay_id).collect::<Vec<_>>(),
+            vec![stuck],
+            "only the relay whose task still waits on the supervisor escalates"
+        );
+
+        let operator_rows = queue.peek_operator_replies("factory-session", 10).unwrap();
+        assert_eq!(
+            operator_rows.len(),
+            1,
+            "the Commander lane carries the alert"
+        );
+        let payload: crate::ui::factory::OperatorReplyPayload =
+            serde_json::from_str(&operator_rows[0].prompt).unwrap();
+        assert_eq!(payload.kind, crate::ui::factory::OperatorTurnKind::Blocker);
+        assert_eq!(payload.device_id, "*");
+        assert_eq!(
+            payload.summary,
+            "Supervisor hasn't seen: cas-a894 is awaiting merge (10m)"
+        );
+        assert!(
+            payload.message.contains("cosmic-bear-43, Codex")
+                && payload.message.contains("never reached it"),
+            "{}",
+            payload.message
+        );
+
+        assert!(
+            sweep().is_empty(),
+            "a later sweep must not repeat the alert"
+        );
+
+        age(fresh, super::RELAY_OPERATOR_ESCALATION_AFTER_SECS + 30);
+        assert_eq!(
+            sweep()
+                .iter()
+                .map(|alert| alert.relay_id)
+                .collect::<Vec<_>>(),
+            vec![fresh],
+            "a relay crossing the window escalates on the next sweep"
+        );
+        assert!(
+            super::RELAY_OPERATOR_ESCALATION_AFTER_SECS
+                + super::PROMPT_POISON_SWEEP_INTERVAL.as_secs() as i64
+                <= 10 * 60,
+            "window plus sweep cadence must stay within the 10-minute promise"
+        );
+    }
+
     /// GH #589: the registration-time assignment brief must wake the daemon
     /// in the same enqueue transaction boundary as an MCP message. A queued
     /// row without this signal is only picked up by the fallback timer and,
@@ -7762,6 +8554,65 @@ mod tests {
         assert_eq!(queued.len(), 1);
         assert_eq!(queued[0].id, message_id);
         assert_eq!(queued[0].target, "worker-1");
+    }
+
+    /// cas-ea9c (GH #1005): the spawn brief points the worker at the issues
+    /// its task cites, after the assignment header so the header still
+    /// names the assigned task.
+    #[test]
+    fn spawn_brief_points_at_cited_issue_attachments_cas_ea9c() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set(crate::github_issue_attach::GH_BIN_ENV, "/nonexistent/gh");
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        let artifacts = temp.path().join("artifacts");
+        std::fs::write(
+            cas_dir.join("config.toml"),
+            format!("[factory]\nartifacts_root = {:?}\n", artifacts.display().to_string()),
+        )
+        .unwrap();
+        let mut task = cas_types::Task::new("cas-cite2".into(), "Fix uploads".into());
+        task.description = "See https://github.com/acme/widgets/issues/77.".into();
+        crate::store::open_task_store(&cas_dir).unwrap().add(&task).unwrap();
+
+        deliver_worker_task_brief(
+            &cas_dir,
+            "factory-session",
+            "worker-1",
+            "cas-cite2",
+            "Fix uploads",
+            cas_mux::SupervisorCli::Claude,
+        )
+        .unwrap();
+        let queued = crate::store::open_prompt_queue_store(&cas_dir)
+            .unwrap()
+            .peek_all(10)
+            .unwrap();
+        let prompt = &queued[0].prompt;
+        assert!(prompt.contains("Cited GitHub issues"), "{prompt}");
+        assert!(prompt.contains("acme/widgets#77"), "{prompt}");
+        assert!(
+            prompt.contains(
+                &crate::github_issue_attach::attachment_dir(&artifacts, "cas-cite2")
+                    .display()
+                    .to_string()
+            ),
+            "{prompt}"
+        );
+        assert_eq!(
+            crate::prompt_revalidation::assignment_solicited_task_id(prompt).as_deref(),
+            Some("cas-cite2"),
+            "the header still names the assigned task"
+        );
+        // The background fetch ran with this test's `gh`; let it finish
+        // before the environment is restored.
+        let stated = crate::github_issue_attach::attachment_dir(&artifacts, "cas-cite2")
+            .join("acme__widgets__77.unavailable.md");
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while !stated.is_file() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(stated.is_file(), "a failed fetch leaves a stated boundary");
     }
 
     #[test]
@@ -8498,6 +9349,7 @@ mod tests {
             "2026-09-23T18:00:00+00:00",
             "swift-fox",
             "demo_statement",
+            None,
         );
         let source = "qa-dispatch:qapass-1";
         let decision = FactoryDaemon::supervisor_wake_decision(
@@ -11043,6 +11895,77 @@ mod tests {
     /// GH #58: requests that reach the queue but are never dequeued are the
     /// worst outcome — the supervisor believes workers are booting. Rows older
     /// than the stall budget must be reported (once each).
+    /// cas-73b5 (GH #970): a spawn-queue restart names every dequeued action
+    /// it drops, with its originating request, and releases exactly the
+    /// spawn slots those actions held.
+    #[test]
+    fn spawn_queue_restart_names_what_it_drops() {
+        use crate::ui::factory::daemon::PendingSpawn;
+        let dropped = [
+            PendingSpawn::Anonymous {
+                request_id: Some(2204),
+                isolate: true,
+                spec: None,
+                task_id: None,
+            },
+            PendingSpawn::Named {
+                request_id: Some(2205),
+                name: "vivid-finch-91".to_string(),
+                isolate: true,
+                spec: None,
+                task_id: Some("cas-73b5".to_string()),
+            },
+            PendingSpawn::Shutdown {
+                request_id: Some(2206),
+                count: None,
+                names: vec!["calm-otter-4".to_string()],
+                force: false,
+            },
+            PendingSpawn::Respawn("steady-wren-3".to_string()),
+        ];
+        let described: Vec<_> = dropped.iter().map(describe_pending_spawn).collect();
+        assert_eq!(
+            described,
+            vec![
+                ("queued spawn of one worker".to_string(), Some(2204), true),
+                (
+                    "queued spawn of 'vivid-finch-91'".to_string(),
+                    Some(2205),
+                    true
+                ),
+                (
+                    "queued shutdown of calm-otter-4".to_string(),
+                    Some(2206),
+                    false
+                ),
+                ("queued respawn of 'steady-wren-3'".to_string(), None, false),
+            ]
+        );
+
+        let at = chrono::Utc::now();
+        let (outcome, message) = spawn_queue_reset_report(
+            at,
+            "sup-1",
+            &["queued shutdown of calm-otter-4 (request 2206)".to_string()],
+        );
+        assert!(
+            outcome.contains("(requested by sup-1): dropped queued shutdown"),
+            "{outcome}"
+        );
+        assert!(
+            message.contains(
+                "re-issue the ones you still want: queued shutdown of calm-otter-4 (request 2206)."
+            ),
+            "{message}"
+        );
+        let (outcome, message) = spawn_queue_reset_report(at, "sup-1", &[]);
+        assert!(
+            outcome.ends_with("nothing was in flight; the queue keeps draining"),
+            "{outcome}"
+        );
+        assert!(message.contains("Nothing was in flight"), "{message}");
+    }
+
     #[test]
     fn stalled_queue_rows_are_reported_once() {
         let now = chrono::Utc::now();

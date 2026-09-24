@@ -59,6 +59,25 @@ impl Backend for Codex {
             "mcp_servers.cs.env.CAS_FACTORY_SUPERVISOR_CLI=\"{}\"",
             launch.supervisor_cli.backend().name()
         ));
+        // cas-8ec53 (GH #985): Codex starts its MCP servers with a restricted
+        // environment, so the account dir finish_worker_config put in the pane
+        // env never reached `cas serve`. Registration then recorded no
+        // worker_account_dir, and worker_status printed "default/inherited"
+        // for a worker pinned to another account. Forward the same value
+        // explicitly, as for the other factory identity fields. A JSON string
+        // literal is a valid TOML basic string for any path.
+        if let Some(config_dir) = launch
+            .config_dir
+            .map(str::trim)
+            .filter(|dir| !dir.is_empty())
+        {
+            let value =
+                serde_json::to_string(config_dir).expect("serializing a string cannot fail");
+            config.args.push("-c".to_string());
+            config.args.push(format!(
+                "mcp_servers.cs.env.CAS_FACTORY_WORKER_ACCOUNT_DIR={value}"
+            ));
+        }
         config
     }
 
@@ -128,6 +147,51 @@ impl Backend for Codex {
 #[cfg(test)]
 mod tests {
     use super::{Backend, CODEX};
+
+    fn launch(config_dir: Option<&str>) -> crate::pty::PtyConfig {
+        CODEX.build_worker_config(super::WorkerLaunchConfig {
+            name: "codex-alt-worker",
+            cwd: std::env::temp_dir(),
+            cas_root: None,
+            supervisor_name: "supervisor",
+            supervisor_cli: crate::harness::SupervisorCli::Claude,
+            model: None,
+            effort: None,
+            config_dir,
+            config_dir_source: config_dir.map(|_| "explicit"),
+            secure_storage_dir: None,
+            teams: None,
+            active_workers: None,
+        })
+    }
+
+    /// cas-8ec53 (GH #985): a Codex worker spawned with `config_dir` must
+    /// carry that account into its `cs` MCP server, which does not inherit
+    /// the pane env, so registration records it and worker_status shows it.
+    #[test]
+    fn codex_worker_forwards_its_account_dir_to_the_cas_mcp_server_cas_8ec53() {
+        let config = launch(Some("~/.codex-alt"));
+        let all_args = config.args.join(" ");
+        assert!(
+            all_args.contains("mcp_servers.cs.env.CAS_FACTORY_WORKER_ACCOUNT_DIR=\"~/.codex-alt\""),
+            "{all_args}"
+        );
+        assert!(
+            config
+                .env
+                .iter()
+                .any(|(key, value)| key == "CAS_FACTORY_WORKER_ACCOUNT_DIR"
+                    && value == "~/.codex-alt"),
+            "the pane env keeps the same value: {:?}",
+            config.env
+        );
+
+        let inherited = launch(None).args.join(" ");
+        assert!(
+            !inherited.contains("CAS_FACTORY_WORKER_ACCOUNT_DIR"),
+            "an inherited account stays unset: {inherited}"
+        );
+    }
 
     #[test]
     fn alternate_codex_home_trusts_project_and_home_hook_paths() {

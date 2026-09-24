@@ -267,7 +267,12 @@ impl DaemonInitPhase {
 
         // Step 3: Loading Cassy data
         self.send_progress("Loading Cassy data", 3, 6, false)?;
-        let director_data = DirectorData::load(&cas_dir, Some(&worktree_root))?;
+        let director_data = DirectorData::load_for_project(
+            &cas_dir,
+            Some(&worktree_root),
+            true,
+            crate::cloud::resolve_canonical_id(&cas_dir).as_deref(),
+        )?;
         let preferred_epic_focus = preferred_epic_focus_from_session_metadata();
         let epic_state = resolve_epic_state_for_focus(&director_data, &preferred_epic_focus);
         let git_ops = GitOperations::new(self.factory_config.cwd.clone());
@@ -570,8 +575,11 @@ impl DaemonInitPhase {
             teams,
             notify_rx,
             dead_workers: std::collections::HashSet::new(),
+            recent_worker_exits: Vec::new(),
             reported_unavailable_workers: std::collections::HashMap::new(),
             last_usage_limit_scan: None,
+            last_permission_request_scan: None,
+            reported_permission_requests: std::collections::HashSet::new(),
             last_commander_mirror_scan: None,
         reported_auth_failed_workers: std::collections::HashMap::new(),
         last_auth_failure_scan: None,

@@ -27,10 +27,15 @@ use super::close_ops::resolve_branch_sha;
 
 /// The delivered commit this close answers for.
 ///
-/// For a factory worker: the `factory/<assignee>` tip while it still carries
-/// unmerged work; once that tip is contained in the target, the anchor the
-/// park recorded (the tip may since have moved on to the worker's next
-/// task). Otherwise the commit receipt, then the repository HEAD.
+/// An explicit `commit_receipt` wins: the close names the commit it delivers,
+/// and the worker's branch may already hold later, unrelated work. Judging the
+/// live tip instead refused a Rust-only close as "user-facing hub-web" because
+/// the branch had moved on to another task's hub-web commit (cas-e4d2).
+///
+/// Without a receipt, for a factory worker: the `factory/<assignee>` tip while
+/// it still carries unmerged work; once that tip is contained in the target,
+/// the anchor the park recorded (the tip may since have moved on to the
+/// worker's next task). Otherwise the repository HEAD.
 pub(crate) fn delivered_head(
     task: &Task,
     repo: &Path,
@@ -38,6 +43,13 @@ pub(crate) fn delivered_head(
     commit_receipt: Option<&str>,
 ) -> Option<String> {
     let rev = |spec: &str| resolve_branch_sha(repo, &format!("{spec}^{{commit}}"));
+    if let Some(receipt) = commit_receipt
+        .map(str::trim)
+        .filter(|receipt| !receipt.is_empty())
+        .and_then(rev)
+    {
+        return Some(receipt);
+    }
     if let Some(assignee) = task.assignee.as_deref()
         && let Some(tip) = resolve_branch_sha(repo, &format!("factory/{assignee}"))
     {
@@ -57,7 +69,7 @@ pub(crate) fn delivered_head(
             .and_then(rev)
             .or(Some(tip));
     }
-    commit_receipt.and_then(rev).or_else(|| rev("HEAD"))
+    rev("HEAD")
 }
 
 /// Which evidence the shared user-facing reasons demand. `terminal_render`
@@ -146,6 +158,62 @@ pub(crate) fn qa_evidence_close_gate(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn git(repo: &Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .args(["-c", "user.name=QA", "-c", "user.email=qa@example.invalid"])
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .expect("run git");
+        assert!(output.status.success(), "git {args:?}: {output:?}");
+        String::from_utf8(output.stdout).unwrap().trim().to_string()
+    }
+
+    fn commit_file(repo: &Path, path: &str, body: &str) -> String {
+        let file = repo.join(path);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(file, body).unwrap();
+        git(repo, &["add", path]);
+        git(repo, &["commit", "-q", "-m", path]);
+        git(repo, &["rev-parse", "HEAD"])
+    }
+
+    /// cas-e4d2: the worker's branch holds a later hub-web commit from its
+    /// next task. A close that names its Rust-only commit is judged on that
+    /// commit, not refused as user-facing because of the branch tip.
+    #[test]
+    fn commit_receipt_is_judged_instead_of_the_live_factory_tip() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        commit_file(&repo, "README.md", "base\n");
+        git(&repo, &["switch", "-q", "-c", "factory/worker"]);
+        let rust_only = commit_file(&repo, "src/lib.rs", "pub fn fixed() {}\n");
+        let hub_web = commit_file(&repo, "hub-web/dist/app.css", "body { color: red }\n");
+        let cas_root = temp.path().join(".cas");
+        std::fs::create_dir_all(&cas_root).unwrap();
+
+        let mut task = Task::new("cas-e4d2-regression".to_string(), "Rust fix".to_string());
+        task.assignee = Some("worker".to_string());
+
+        assert_eq!(
+            delivered_head(&task, &repo, "main", Some(&rust_only)).as_deref(),
+            Some(rust_only.as_str())
+        );
+        assert_eq!(
+            delivered_head(&task, &repo, "main", None).as_deref(),
+            Some(hub_web.as_str()),
+            "without a receipt the unmerged branch tip is still the delivery"
+        );
+
+        qa_evidence_close_gate(&cas_root, &task, &repo, "main", Some(&rust_only))
+            .expect("a Rust-only receipt needs no QA evidence");
+        let refusal = qa_evidence_close_gate(&cas_root, &task, &repo, "main", None)
+            .expect_err("the live tip carries a web surface");
+        assert!(refusal.contains("app.css"), "{refusal}");
+    }
 
     #[test]
     fn web_surface_reasons_need_the_bundle_and_demo_only_needs_the_ledger() {

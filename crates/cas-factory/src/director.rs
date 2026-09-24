@@ -50,9 +50,19 @@ pub struct DirectorStores {
     /// idle detector to suppress `WorkerIdle` while a worker has unread
     /// messages in the prompt queue (spawn-race fix, cas-afb7).
     pub prompt_queue_store: Option<SqlitePromptQueueStore>,
+    /// Canonical id of the factory session's project. When set, every load
+    /// through these stores drops tasks whose recorded origin is another
+    /// project (cas-0c98, GH #995), matching what `task list` shows.
+    pub project_id: Option<String>,
 }
 
 impl DirectorStores {
+    /// Scope loads through these stores to one project's tasks.
+    pub fn with_project_id(mut self, project_id: Option<String>) -> Self {
+        self.project_id = project_id;
+        self
+    }
+
     /// Open all stores for a CAS directory. Worktree, reminder, and
     /// prompt-queue stores are best-effort (None on failure) since they are
     /// not critical.
@@ -64,6 +74,7 @@ impl DirectorStores {
             worktree_store: SqliteWorktreeStore::open(cas_dir).ok(),
             reminder_store: SqliteReminderStore::open(cas_dir).ok(),
             prompt_queue_store: SqlitePromptQueueStore::open(cas_dir).ok(),
+            project_id: None,
         })
     }
 }
@@ -239,14 +250,41 @@ impl DirectorData {
         Ok(())
     }
 
+    /// Load data scoped to one project: tasks whose recorded origin is a
+    /// different project are left out, so no director surface (stall and
+    /// idle nudges, epic focus, the TASKS panel) offers another project's
+    /// work to this factory session (cas-0c98, GH #995). Tasks without an
+    /// origin stay, as they do in `task list`. `None` loads every task.
+    pub fn load_for_project(
+        cas_dir: &Path,
+        worktree_root: Option<&Path>,
+        load_git: bool,
+        project_id: Option<&str>,
+    ) -> anyhow::Result<Self> {
+        Self::load_with_stores_for_project(cas_dir, worktree_root, load_git, None, project_id)
+    }
+
     /// Load data with configurable options and optional cached stores.
     ///
-    /// When `stores` is provided, uses the cached handles instead of re-opening.
+    /// When `stores` is provided, uses the cached handles instead of re-opening,
+    /// and scopes tasks to the stores' `project_id` when one is set.
     pub fn load_with_stores(
         cas_dir: &Path,
         worktree_root: Option<&Path>,
         load_git: bool,
         stores: Option<&DirectorStores>,
+    ) -> anyhow::Result<Self> {
+        let project_id = stores.and_then(|stores| stores.project_id.as_deref());
+        Self::load_with_stores_for_project(cas_dir, worktree_root, load_git, stores, project_id)
+    }
+
+    /// [`Self::load_with_stores`] with an explicit project scope.
+    pub fn load_with_stores_for_project(
+        cas_dir: &Path,
+        worktree_root: Option<&Path>,
+        load_git: bool,
+        stores: Option<&DirectorStores>,
+        project_id: Option<&str>,
     ) -> anyhow::Result<Self> {
         // Use cached stores or open fresh ones
         let owned_task;
@@ -258,8 +296,11 @@ impl DirectorData {
         };
         // Atomically load tasks + parent-child deps in a single lock hold to prevent
         // read skew where a task exists but its epic link is invisible (causes panel flicker)
-        let (tasks, parent_child_deps, start_gated_task_ids) =
+        let (mut tasks, parent_child_deps, start_gated_task_ids) =
             task_store.list_with_parent_deps_and_start_gates()?;
+        if let Some(project_id) = project_id {
+            tasks.retain(|task| task_in_project(task, project_id));
+        }
 
         // Build assignee to task map for looking up current tasks
         let mut assignee_tasks: HashMap<String, String> = HashMap::new();
@@ -765,6 +806,15 @@ fn group_recency(group: &EpicGroup) -> Option<chrono::DateTime<chrono::Utc>> {
 }
 
 /// Load pending + recently fired reminders from a reminder store.
+/// cas-0c98 (GH #995): a task belongs to the session's project unless its
+/// recorded origin names a different one — the same rule `task list` uses to
+/// hide foreign-origin rows.
+pub fn task_in_project(task: &Task, project_id: &str) -> bool {
+    task.origin_project
+        .as_deref()
+        .is_none_or(|origin| origin == project_id)
+}
+
 fn load_reminders(store: &SqliteReminderStore) -> Vec<Reminder> {
     let init_result = store.init();
     if init_result.is_err() {
@@ -1088,6 +1138,79 @@ mod tests {
             activity_age < crate::config::DEFAULT_STALL_THRESHOLD_SECS as i64,
             "recent task-note activity must keep the stall predicate below threshold"
         );
+    }
+
+    /// cas-0c98 (GH #995): a pulse-card factory session was nudged to assign
+    /// gabber-studio tasks. A scoped load must never carry a foreign-origin
+    /// task or epic into any director bucket, while local and legacy
+    /// (origin-less) rows stay.
+    #[test]
+    fn project_scoped_load_leaves_out_foreign_origin_tasks_cas_0c98() {
+        use cas_types::{Dependency, DependencyType};
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let stores = DirectorStores::open(temp_dir.path())
+            .unwrap()
+            .with_project_id(Some("pulse-card".to_string()));
+        stores.task_store.init().unwrap();
+        stores.agent_store.init().unwrap();
+        stores.event_store.init().unwrap();
+
+        let add = |id: &str, task_type: TaskType, origin: Option<&str>| {
+            let mut task = Task::new(id.to_string(), format!("{id} title"));
+            task.task_type = task_type;
+            task.origin_project = origin.map(str::to_string);
+            stores.task_store.add(&task).unwrap();
+        };
+        add("cas-local-epic", TaskType::Epic, Some("pulse-card"));
+        add("cas-local-child", TaskType::Task, Some("pulse-card"));
+        add("cas-legacy", TaskType::Task, None);
+        add("cas-1aec", TaskType::Task, Some("gabber-studio"));
+        add("cas-foreign-epic", TaskType::Epic, Some("gabber-studio"));
+        add("cas-foreign-child", TaskType::Task, Some("gabber-studio"));
+        for (child, epic) in [
+            ("cas-local-child", "cas-local-epic"),
+            ("cas-foreign-child", "cas-foreign-epic"),
+        ] {
+            stores
+                .task_store
+                .add_dependency(&Dependency::new(
+                    child.to_string(),
+                    epic.to_string(),
+                    DependencyType::ParentChild,
+                ))
+                .unwrap();
+        }
+
+        let ids = |data: &DirectorData| {
+            let mut ids = data
+                .ready_tasks
+                .iter()
+                .chain(data.in_progress_tasks.iter())
+                .chain(data.epic_tasks.iter())
+                .map(|task| task.id.clone())
+                .collect::<Vec<_>>();
+            ids.sort();
+            ids
+        };
+
+        let scoped =
+            DirectorData::load_with_stores(temp_dir.path(), None, false, Some(&stores)).unwrap();
+        assert_eq!(
+            ids(&scoped),
+            vec!["cas-legacy", "cas-local-child", "cas-local-epic"],
+            "foreign-origin tasks and epics must never reach the director"
+        );
+        assert_eq!(
+            ids(&DirectorData::load_for_project(temp_dir.path(), None, false, Some("pulse-card"))
+                .unwrap()),
+            ids(&scoped),
+            "the store-less loader applies the same scope"
+        );
+
+        let unscoped =
+            DirectorData::load_for_project(temp_dir.path(), None, false, None).unwrap();
+        assert_eq!(ids(&unscoped).len(), 6, "no project scope keeps every task");
     }
 
     #[test]

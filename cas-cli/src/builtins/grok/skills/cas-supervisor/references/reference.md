@@ -10,10 +10,13 @@ Code tasks (`task`, `bug`, and `feature`) must carry `risk=blast-radius`,
 `platform`, `concurrency`, or `none` at creation. A `blast-radius` declaration
 also requires non-empty comma-separated `proof_targets`, which must cover every
 source module in the attributed delivery diff. Supervisor overrides require a
-non-empty audit reason and are recorded as a decision note; they do not waive
-the close-time proof gate. Before merging, inspect `task show` and reject a
-narrow proof, a missing `platform_proof` receipt, or a missing `loaded_proof`
-receipt with the exact uncovered module or receipt type.
+non-empty audit reason and are recorded as a decision note. Workers never run
+Rust builds or tests, so do not demand a scoped `--proof` receipt or a
+`loaded_proof` note from them: the declared risk and `proof_targets` tell you
+what your one assembly build + test of the epic tip must cover, and its
+`ASSEMBLY_PROOF: head=<epic tip sha> result=PASS command=<cmd> log=<path>`
+note on the epic is the proof child closes reference. A non-Rust
+`risk=platform` task still carries its worker `platform_proof` receipt.
 
 Two of those are supervisor-specific and easy to confuse:
 
@@ -149,7 +152,7 @@ cas__coordination action=message target=worker-1 \
 
 Missing either field is a rejection. `summary` is the one-line UI preview; `message` is the full body.
 
-Factory traffic is hard-capped: ordinary message bodies default to 1,200 characters, blocker/merge-request bodies to 2,500, and appended task notes to 1,500; put longer evidence in `[factory] artifacts_root/<task-id>/<name>.md` and send its path with a one-paragraph summary.
+Factory traffic is hard-capped: ordinary message bodies default to 1,200 characters, blocker/merge-request bodies to 2,500, and appended task notes to 1,500; put longer evidence in `[factory] artifacts_root/<task-id>/<name>.md` and send its path with a one-paragraph summary. Your own over-cap message to a worker is not refused: Cassy writes the full text to `artifacts_root/<task-id or _messages>/message-<time>-<hash>.md` and delivers its head with that path.
 
 **Urgent / interrupt delivery — course-correct a worker mid-turn (cas-c931):**
 

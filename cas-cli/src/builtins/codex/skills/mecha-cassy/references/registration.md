@@ -71,6 +71,14 @@ Dispatch through the proxy:
 mcp__cs__mcp_execute server=mecha-cassy tool=mecha_read args={"channel":"<name>","since":"<RFC3339>","max_messages":50}
 ```
 
+A project `allowlist` replaces the machine allowlist entirely, so list every
+route the project needs (for example `"neon.*"`) alongside the MechaCassy
+routes. Prefix an entry with `supervisor:` (for example
+`"supervisor:neon.*"`) to admit it for supervisors and plain sessions only;
+factory workers are refused with a named reason. `cas serve` logs one
+`callable tools: [...]` line at startup and after each reload, and
+`mcp_search` marks such tools "supervisors only".
+
 The proxy resolves its bearer when `cas serve` starts, so a variable exported
 after startup stays invisible until the next restart. `mcp__cs__system
 action=proxy_health` is credential-free: the healthy record for `mecha-cassy`

@@ -65,7 +65,7 @@ pub fn delivery_eligibility(
     changed_paths: Option<&[String]>,
     journeys: &[String],
 ) -> QaEligibility {
-    if !qa.independent_pass {
+    if !qa.independent_pass || no_code_without_surface(task, changed_paths) {
         return QaEligibility::default();
     }
     user_facing_reasons(task, qa, changed_paths, journeys)
@@ -144,11 +144,36 @@ pub fn catalog_journeys_for(repo: &Path, paths: &[String]) -> Vec<String> {
 /// delivery diff) found it user-facing and opened a round. Deciding from the
 /// recorded round keeps docs/test/CI-only deliveries ungated even when they
 /// carry a demo_statement.
+///
+/// cas-5c38: a withdrawn round (its demo_statement was cleared, or a no-code
+/// task delivered no user-facing code) no longer binds the delivery.
+/// cas-2387: a no-code declaration alone never unbinds a recorded round. A
+/// task that kept `execution_note=no-code` while its branch carries
+/// user-facing code must still wait for its review.
 pub fn gate_applies(task: &Task, qa: &QaConfig, passes: &[QaPass]) -> bool {
     qa.independent_pass
         && task.task_type != TaskType::Epic
         && !task.labels.iter().any(|label| label == QA_PASS_LABEL)
-        && !passes.is_empty()
+        && passes.iter().any(|pass| !pass.is_withdrawn())
+}
+
+/// cas-5c38 (GH #999): an operations/artifact task (`execution_note=no-code`)
+/// carries no commits, so there is no build or diff an independent reviewer
+/// could walk. Its proof is the `external_ref` the no-code close requires.
+pub fn is_no_code(task: &Task) -> bool {
+    task.execution_note
+        .as_deref()
+        .is_some_and(|note| note.trim().eq_ignore_ascii_case("no-code"))
+}
+
+/// cas-2387: the independent QA exemption for a no-code task. It holds only
+/// while the delivery diff has no user-facing surface path. `None` (no diff
+/// could be computed, e.g. no commits at all) is no evidence of code. A
+/// no-code declaration on a branch that carries UI code is reviewed like any
+/// other delivery.
+pub fn no_code_without_surface(task: &Task, changed_paths: Option<&[String]>) -> bool {
+    is_no_code(task)
+        && changed_paths.is_none_or(|paths| paths.iter().all(|path| is_non_surface_path(path)))
 }
 
 /// Merge gate for one exact tip: a passed or waived round must cover `head`.
@@ -164,7 +189,7 @@ pub fn merge_gate(task: &Task, qa: &QaConfig, passes: &[QaPass], head: &str) -> 
         return Ok(());
     }
     let head8 = &head[..head.len().min(8)];
-    let status = match passes.first() {
+    let status = match passes.iter().find(|pass| !pass.is_withdrawn()) {
         Some(latest) => format!(
             "latest round {} ({}) is {} for @{}{}",
             latest.round,
@@ -691,6 +716,32 @@ mod tests {
         // A pass for an older tip does not cover new commits.
         assert!(merge_gate(&demo, &qa, &[pass("aaaa1111bbbb", Passed)], "cccc2222").is_err());
         assert!(merge_gate(&demo, &qa, &[pass("aaaa1111bbbb", Failed)], "aaaa1111bbbb").is_err());
+    }
+
+    #[test]
+    fn no_code_tasks_and_withdrawn_rounds_never_bind_the_gate_cas_5c38() {
+        use cas_types::QaPassState::*;
+        let qa = QaConfig::default();
+        let mut no_code = task();
+        no_code.demo_statement = "The dashboard shows the tenant".to_string();
+        no_code.execution_note = Some("no-code".to_string());
+        // Nothing user-facing in the diff (none at all, or docs/tests only).
+        assert!(!delivery_eligibility(&no_code, &qa, None, &[]).is_eligible());
+        assert!(!delivery_eligibility(&no_code, &qa, Some(&[]), &[]).is_eligible());
+        let docs = vec!["docs/runbook.md".to_string()];
+        assert!(!delivery_eligibility(&no_code, &qa, Some(&docs), &[]).is_eligible());
+        // cas-2387: a no-code declaration never hides user-facing code.
+        let css = vec!["web/app.css".to_string()];
+        assert!(delivery_eligibility(&no_code, &qa, Some(&css), &[]).is_eligible());
+        assert!(merge_gate(&no_code, &qa, &[pass("aaaa1111", Pending)], "aaaa1111").is_err());
+
+        let mut withdrawn = pass("aaaa1111", Superseded);
+        withdrawn.summary = Some(format!("{}demo_statement cleared", cas_types::QA_PASS_WITHDRAWN_PREFIX));
+        assert!(withdrawn.is_withdrawn());
+        assert!(!gate_applies(&task(), &qa, &[withdrawn.clone()]));
+        // A tip that merely moved still binds: superseded is not withdrawn.
+        assert!(gate_applies(&task(), &qa, &[pass("aaaa1111", Superseded)]));
+        assert!(gate_applies(&task(), &qa, &[withdrawn, pass("bbbb2222", Failed)]));
     }
 
     #[test]

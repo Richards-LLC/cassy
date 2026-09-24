@@ -101,6 +101,10 @@ const MIN_SHARED_DISTINCTIVE_IDENTIFIERS: usize = 2;
 enum ReusedFactoryBranchStart {
     Unchanged,
     Reset,
+    /// GH #1006 item 3: the branch sat on a delivery parked for merge. Its tip
+    /// is kept as local branch `parked/<task>` (origin is never touched) and
+    /// the worker branch was reset onto the new target.
+    MovedFromParked { task_id: String, tip: String },
 }
 
 /// Keep a reused worker branch from silently carrying a prior task into a new
@@ -110,6 +114,7 @@ fn reconcile_reused_factory_branch(
     worktree_path: &std::path::Path,
     expected_branch: &str,
     target_branch: &str,
+    parked_task_for_tip: impl Fn(&str) -> Option<String>,
 ) -> Result<ReusedFactoryBranchStart, String> {
     if crate::factory_isolation::branch_at(worktree_path).as_deref() != Some(expected_branch) {
         return Ok(ReusedFactoryBranchStart::Unchanged);
@@ -162,6 +167,34 @@ fn reconcile_reused_factory_branch(
         return Ok(ReusedFactoryBranchStart::Reset);
     }
 
+    // A tip parked for merge is someone else's review, not stray work: keep
+    // it under a local name and start the new task from its own target.
+    // Nothing is pushed, so origin keeps the parked tip for its reviewer.
+    if let Some(task_id) = parked_task_for_tip(&factory_tip) {
+        let keep = format!("parked/{task_id}");
+        let kept = std::process::Command::new("git")
+            .args(["branch", "-f", &keep, &factory_tip])
+            .current_dir(worktree_path)
+            .output()
+            .map_err(|error| format!("Cannot keep parked tip as {keep}: {error}"))?;
+        if !kept.status.success() {
+            return Err(format!(
+                "Cannot start task: keeping parked tip {factory_tip} as {keep} failed: {}",
+                String::from_utf8_lossy(&kept.stderr).trim()
+            ));
+        }
+        git.reset_hard_in_dir(worktree_path, target_branch)
+            .map_err(|error| {
+                format!(
+                    "Cannot move parked factory branch {expected_branch} to `{target_branch}`: {error}"
+                )
+            })?;
+        return Ok(ReusedFactoryBranchStart::MovedFromParked {
+            task_id,
+            tip: factory_tip,
+        });
+    }
+
     Err(format!(
         "Cannot start task: {expected_branch} carries commits not on target base `{target_branch}`. Rebase it before starting with `git rebase {target_branch}`."
     ))
@@ -209,7 +242,7 @@ mod reused_factory_branch_tests {
         git(repo.path(), &["merge", "--no-ff", "factory/test-worker", "-m", "merge prior delivery"]);
         git(repo.path(), &["checkout", "factory/test-worker"]);
 
-        let result = reconcile_reused_factory_branch(repo.path(), "factory/test-worker", "main")
+        let result = reconcile_reused_factory_branch(repo.path(), "factory/test-worker", "main", |_| None)
             .expect("merged prior delivery can be reset");
 
         assert_eq!(result, ReusedFactoryBranchStart::Reset);
@@ -233,7 +266,7 @@ mod reused_factory_branch_tests {
         git(repo.path(), &["commit", "-m", "target work"]);
         git(repo.path(), &["checkout", "factory/test-worker"]);
 
-        let error = reconcile_reused_factory_branch(repo.path(), "factory/test-worker", "main")
+        let error = reconcile_reused_factory_branch(repo.path(), "factory/test-worker", "main", |_| None)
             .expect_err("unrelated prior delivery must refuse");
 
         assert!(error.contains("git rebase main"), "{error}");
@@ -246,7 +279,7 @@ mod reused_factory_branch_tests {
         git(repo.path(), &["checkout", "-b", "factory/test-worker"]);
         let before = git(repo.path(), &["rev-parse", "HEAD"]);
 
-        let result = reconcile_reused_factory_branch(repo.path(), "factory/test-worker", "main")
+        let result = reconcile_reused_factory_branch(repo.path(), "factory/test-worker", "main", |_| None)
             .expect("matching base needs no reset");
 
         assert_eq!(result, ReusedFactoryBranchStart::Unchanged);
@@ -265,10 +298,42 @@ mod reused_factory_branch_tests {
         git(repo.path(), &["checkout", "factory/test-worker"]);
         std::fs::write(repo.path().join("base"), "modified\n").expect("tracked change");
 
-        let error = reconcile_reused_factory_branch(repo.path(), "factory/test-worker", "main")
+        let error = reconcile_reused_factory_branch(repo.path(), "factory/test-worker", "main", |_| None)
             .expect_err("tracked changes must block reset");
 
         assert!(error.contains("uncommitted changes"), "{error}");
+    }
+
+    /// GH #1006 item 3: a branch parked for merge on another target is kept
+    /// as `parked/<task>` and the worker branch moves onto the new target.
+    #[test]
+    fn parked_tip_on_another_target_is_kept_and_the_branch_moves() {
+        let repo = repo();
+        git(repo.path(), &["checkout", "-b", "factory/test-worker"]);
+        std::fs::write(repo.path().join("parked"), "parked\n").expect("parked file");
+        git(repo.path(), &["add", "parked"]);
+        git(repo.path(), &["commit", "-m", "parked delivery"]);
+        let parked_tip = git(repo.path(), &["rev-parse", "HEAD"]);
+        git(repo.path(), &["checkout", "main"]);
+        std::fs::write(repo.path().join("target"), "target\n").expect("target file");
+        git(repo.path(), &["add", "target"]);
+        git(repo.path(), &["commit", "-m", "target work"]);
+        git(repo.path(), &["checkout", "factory/test-worker"]);
+
+        let result = reconcile_reused_factory_branch(repo.path(), "factory/test-worker", "main", |tip| {
+            (tip == parked_tip).then(|| "cas-park".to_string())
+        })
+        .expect("a parked tip moves instead of refusing");
+
+        assert_eq!(
+            result,
+            ReusedFactoryBranchStart::MovedFromParked {
+                task_id: "cas-park".to_string(),
+                tip: parked_tip.clone(),
+            }
+        );
+        assert_eq!(git(repo.path(), &["rev-parse", "HEAD"]), git(repo.path(), &["rev-parse", "main"]));
+        assert_eq!(git(repo.path(), &["rev-parse", "parked/cas-park"]), parked_tip);
     }
 }
 
@@ -480,22 +545,79 @@ fn task_similarity(
     None
 }
 
+/// One open task that overlaps a task being created.
+type SimilarTask = (String, String, f64, Vec<String>);
+
+/// The overlap checks for a new task, split by whether they may block it.
+#[derive(Debug, Default)]
+struct OpenTaskOverlap {
+    /// The best-scoring overlap with any open task other than the new task's
+    /// own parent epic and its siblings. This one requires confirmation.
+    blocking: Option<SimilarTask>,
+    /// The best-scoring overlap with a sibling under the same epic. Children
+    /// of one epic naturally share its identifiers, so this only warns.
+    sibling: Option<SimilarTask>,
+}
+
+/// Compare a new task with every open task (cas-60e3, GH #1006 item 2).
+///
+/// A child created with `epic=X` naturally repeats X's identifiers, so X is
+/// never a duplicate candidate for its own child. X's other children are still
+/// compared, but a match among them only warns.
 fn open_task_similarity(
     task_store: &dyn cas_store::TaskStore,
     title: &str,
     description: &str,
-) -> Result<Option<(String, String, f64, Vec<String>)>, String> {
-    let best = task_store
-        .list(None)
-        .map_err(|error| error.to_string())?
-        .into_iter()
-        .filter(|task| !matches!(task.status, TaskStatus::Closed | TaskStatus::Cancelled))
-        .filter_map(|task| {
+    epic_id: Option<&str>,
+) -> Result<OpenTaskOverlap, String> {
+    let siblings: std::collections::HashSet<String> = match epic_id {
+        Some(epic) => task_store
+            .get_dependents(epic)
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .filter(|dependency| dependency.dep_type == crate::types::DependencyType::ParentChild)
+            .map(|dependency| dependency.from_id)
+            .collect(),
+        None => std::collections::HashSet::new(),
+    };
+    let mut overlap = OpenTaskOverlap::default();
+    for task in task_store.list(None).map_err(|error| error.to_string())? {
+        if matches!(task.status, TaskStatus::Closed | TaskStatus::Cancelled)
+            || epic_id == Some(task.id.as_str())
+        {
+            continue;
+        }
+        let Some((score, identifiers)) =
             task_similarity(title, description, &task.title, &task.description)
-                .map(|(score, identifiers)| (task.id, task.title, score, identifiers))
-        })
-        .max_by(|left, right| left.2.total_cmp(&right.2));
-    Ok(best)
+        else {
+            continue;
+        };
+        let slot = if siblings.contains(&task.id) {
+            &mut overlap.sibling
+        } else {
+            &mut overlap.blocking
+        };
+        if slot.as_ref().is_none_or(|best| score > best.2) {
+            *slot = Some((task.id, task.title, score, identifiers));
+        }
+    }
+    Ok(overlap)
+}
+
+/// Describe an overlap in the shared warning format.
+fn overlap_description(existing: &SimilarTask) -> (String, &'static str) {
+    let (_, _, _, identifiers) = existing;
+    let identifier_note = if identifiers.is_empty() {
+        String::new()
+    } else {
+        format!("; overlapping identifiers: {}", identifiers.join(", "))
+    };
+    let overlap_subject = if identifiers.is_empty() {
+        "title"
+    } else {
+        "task"
+    };
+    (identifier_note, overlap_subject)
 }
 
 fn recent_other_epic_planner(
@@ -686,6 +808,10 @@ impl CasCore {
             .map(ToString::to_string);
         let created_by = self.get_agent_id().ok();
 
+        // Set when the new task overlaps a sibling under its own epic; shown
+        // in the create receipt, never a reason to refuse the write.
+        let mut sibling_warning = String::new();
+
         // A recent sibling plan is a strong signal that another supervisor is
         // decomposing the same epic. Refuse the write until the caller makes a
         // conscious override; no task row or dependency is created on this path.
@@ -713,26 +839,30 @@ impl CasCore {
                 }
             }
 
-            if let Some((existing_id, existing_title, score, identifiers)) = open_task_similarity(
+            let overlap = open_task_similarity(
                 task_store.as_ref(),
                 &req.title,
                 req.description.as_deref().unwrap_or_default(),
+                epic_id.as_deref(),
             )
             .map_err(|error| McpError {
                 code: ErrorCode::INTERNAL_ERROR,
                 message: Cow::from(format!("Failed to inspect open task overlap: {error}")),
                 data: None,
-            })? {
-                let identifier_note = if identifiers.is_empty() {
-                    String::new()
-                } else {
-                    format!("; overlapping identifiers: {}", identifiers.join(", "))
-                };
-                let overlap_subject = if identifiers.is_empty() {
-                    "title"
-                } else {
-                    "task"
-                };
+            })?;
+            if let Some(existing) = &overlap.sibling {
+                let (existing_id, existing_title, score, _) = existing;
+                let (identifier_note, overlap_subject) = overlap_description(existing);
+                sibling_warning = format!(
+                    "\n\n⚠️ SIBLING OVERLAP: {existing_id} ({existing_title:?}), under the same epic, \
+                     overlaps this {overlap_subject} at {:.0}%{identifier_note}. Created anyway; check \
+                     the two do not duplicate each other's scope.",
+                    score * 100.0,
+                );
+            }
+            if let Some(existing) = &overlap.blocking {
+                let (existing_id, existing_title, score, _) = existing;
+                let (identifier_note, overlap_subject) = overlap_description(existing);
                 return Err(McpError {
                     code: ErrorCode::INVALID_PARAMS,
                     message: Cow::from(format!(
@@ -982,10 +1112,11 @@ impl CasCore {
 
         // Recall before indexing this task so an epic cannot surface itself as
         // "prior context" and turn an otherwise clean create receipt noisy.
-        let related_context = (task.task_type == crate::types::TaskType::Epic)
-            .then(|| self.related_recall(&format!("{} {}", task.title, task.description)))
-            .flatten()
-            .unwrap_or_default();
+        let related_context = sibling_warning
+            + &(task.task_type == crate::types::TaskType::Epic)
+                .then(|| self.related_recall(&format!("{} {}", task.title, task.description)))
+                .flatten()
+                .unwrap_or_default();
 
         if let Ok(search) = self.open_search_index() {
             let _ = search.index_task(&task);
@@ -1455,14 +1586,30 @@ impl CasCore {
                 if let Some(context) = declared_repo_context.as_ref() {
                     let target_repo_root = &context.repo_root;
                     let target_branch = &context.target_branch;
+                    let worker_branch =
+                        crate::factory_isolation::expected_worker_branch(&worker.name);
                     match reconcile_reused_factory_branch(
                         target_repo_root,
-                        &crate::factory_isolation::expected_worker_branch(&worker.name),
+                        &worker_branch,
                         &target_branch,
+                        |tip| {
+                            crate::mcp::tools::parked_delivery_at_tip(
+                                task_store.as_ref(),
+                                &worker.name,
+                                tip,
+                            )
+                            .filter(|parked| parked.task_id != task.id)
+                            .map(|parked| parked.task_id)
+                        },
                     ) {
                         Ok(ReusedFactoryBranchStart::Reset) => Some(format!(
-                            "\n\n🔄 REUSED FACTORY BRANCH RESET: {} was already merged into `{target_branch}` and was reset to that target before starting.",
-                            crate::factory_isolation::expected_worker_branch(&worker.name)
+                            "\n\n🔄 REUSED FACTORY BRANCH RESET: {worker_branch} was already merged into `{target_branch}` and was reset to that target before starting."
+                        )),
+                        Ok(ReusedFactoryBranchStart::MovedFromParked { task_id, tip }) => Some(format!(
+                            "\n\n🔀 PARKED BRANCH MOVED: {worker_branch} sat at {tip8} for {task_id}, which is parked for merge. \
+                             That tip is kept on origin and as local branch parked/{task_id}; {worker_branch} was reset to `{target_branch}` \
+                             for this task. Do not push {worker_branch} until {task_id} merges: the push would replace the tip under review.",
+                            tip8 = &tip[..tip.len().min(8)],
                         )),
                         Ok(ReusedFactoryBranchStart::Unchanged) => None,
                         Err(message) => {
@@ -2003,6 +2150,12 @@ impl CasCore {
             ],
         );
 
+        // cas-ea9c (GH #1005): the issues this task cites, read from disk
+        // where the assigning supervisor or daemon attached them.
+        let cited_issues = crate::github_issue_attach::cited_issue_section(&self.cas_root, &task)
+            .map(|section| format!("\n\n📎 {section}"))
+            .unwrap_or_default();
+
         if brief {
             // Bound the complete variable portion of the brief response. The
             // fixed header/claim/warning/push text remains small, while own
@@ -2041,7 +2194,7 @@ impl CasCore {
                 )
             };
             let response = format!(
-                "Started task: {} - {}\nDelivery mode: {}{}{}{}{}{}{}{}{}",
+                "Started task: {} - {}\nDelivery mode: {}{}{}{}{}{}{}{}{}{}",
                 req.id,
                 crate::mcp::tools::truncate_str(&task.title, 509),
                 task.delivery_mode,
@@ -2049,6 +2202,7 @@ impl CasCore {
                 reused_factory_branch_reset.as_deref().unwrap_or_default(),
                 blocker_warning,
                 crate::mcp::tools::truncate_str(&unanchored_warning.unwrap_or_default(), 765,),
+                crate::mcp::tools::truncate_str(&cited_issues, 1_021),
                 execution_state.unwrap_or_default(),
                 own_notes,
                 no_code_external_ref_guidance(&task),
@@ -2062,7 +2216,7 @@ impl CasCore {
         }
 
         Ok(Self::success(format!(
-            "Started task: {} - {}\nDelivery mode: {}{}{}{}{}{}{}{}{}{}{}",
+            "Started task: {} - {}\nDelivery mode: {}{}{}{}{}{}{}{}{}{}{}{}",
             req.id,
             task.title,
             task.delivery_mode,
@@ -2073,6 +2227,7 @@ impl CasCore {
             // warning cannot be pushed out of view by long sibling-note or
             // worktree blocks.
             unanchored_warning.unwrap_or_default(),
+            cited_issues,
             epic_ownership_info.unwrap_or_default(),
             wt_info,
             sibling_notes_info.unwrap_or_default(),
@@ -2282,6 +2437,85 @@ mod related_recall_response_tests {
                 "Task B — no-dep-found error regression",
             ),
             0.0
+        );
+    }
+
+    /// cas-60e3 (GH #1006 item 2): a child created under an epic repeats the
+    /// epic's identifiers; the epic is not its duplicate. A near-identical
+    /// sibling still shows up, but only as a warning on the receipt. A
+    /// matching task outside the epic still requires confirmation.
+    #[tokio::test]
+    async fn duplicate_check_skips_the_parent_epic_and_only_warns_on_siblings() {
+        let temp = TempDir::new().expect("temporary project");
+        let core = CasCore::with_daemon(temp.path().to_path_buf(), None, None);
+        let identifiers = "Migrate refund readers in payments.service.ts:412 and \
+                           refunds.controller.ts:88 to read paymentIntentId from the payments table";
+
+        // Seed the epic straight into the store: a factory epic create needs
+        // a resolvable agent identity for epic_verification_owner, and this
+        // test is about the child's duplicate check, not epic creation.
+        let store = core.open_task_store().expect("task store");
+        store.init().expect("initialize task store");
+        let mut epic = Task::new(
+            "cas-60e3-epic".into(),
+            "Payments SOW: refund readers read the payments table".into(),
+        );
+        epic.task_type = TaskType::Epic;
+        epic.description = identifiers.to_string();
+        store.add(&epic).expect("add epic");
+        let epic_id = epic.id.clone();
+
+        let mut first = child_request(
+            "E1.8 refund readers read the payments table",
+            epic_id.clone(),
+        );
+        first.description = Some(identifiers.to_string());
+        let created = core
+            .cas_task_create(Parameters(first))
+            .await
+            .expect("a child that repeats its epic's identifiers is not a duplicate of the epic");
+        let text = format!("{:?}", created.content);
+        assert!(!text.contains("SIBLING OVERLAP"), "{text}");
+        let first_id = core
+            .open_task_store()
+            .expect("task store")
+            .list(None)
+            .expect("list tasks")
+            .into_iter()
+            .find(|task| task.title.starts_with("E1.8"))
+            .expect("first child")
+            .id;
+
+        let mut second = child_request(
+            "E1.9 refund readers read the payments table",
+            epic_id.clone(),
+        );
+        second.description = Some(identifiers.to_string());
+        let created = core
+            .cas_task_create(Parameters(second))
+            .await
+            .expect("a sibling overlap never blocks creation");
+        let text = format!("{:?}", created.content);
+        assert!(
+            text.contains("SIBLING OVERLAP") && text.contains(&first_id),
+            "the sibling overlap is reported on the receipt: {text}"
+        );
+        assert!(
+            !text.contains(&epic_id),
+            "the parent epic is never named: {text}"
+        );
+
+        let outside = core
+            .cas_task_create(Parameters(described_task_request(
+                "E1.10 refund readers read the payments table",
+                identifiers,
+            )))
+            .await
+            .expect_err("a matching task outside the epic still needs confirmation");
+        assert!(
+            outside.message.contains("DUPLICATE TASK WARNING"),
+            "unexpected: {}",
+            outside.message
         );
     }
 

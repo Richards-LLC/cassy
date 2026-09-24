@@ -2025,6 +2025,32 @@ else
     bad "missing CHANGELOG heading was not a named preflight blocker: $missing_out"
 fi
 
+# cas-dd3a: the release PR is docs-only, so Docs Lint lints CHANGELOG.md in
+# full. A CHANGELOG that fails that policy must stop the cut in preflight,
+# with the findings shown, before any build stage.
+lint_wt="$(new_cut_fixture cut-changelog-lint 9.99.12)"
+printf '{ "config": { "default": true } }\n' > "$lint_wt/.markdownlint-cli2.jsonc"
+( cd "$lint_wt"
+  git add .markdownlint-cli2.jsonc
+  git -c commit.gpgsign=false commit -q -m 'lint policy'
+  git push -q origin "HEAD:refs/heads/release/9.99.12" )
+lint_stub="$tmp/failing-markdownlint.sh"
+printf '#!/usr/bin/env bash\necho "CHANGELOG.md:3 MD022/blanks-around-headings fixture finding"\nexit 1\n' > "$lint_stub"
+chmod +x "$lint_stub"
+lint_log="$tmp/lint-stage.log"
+lint_out="$(CAS_RELEASE_ENV_FILE="$lint_wt/release.env" \
+    CAS_RELEASE_TRAIN_PREFLIGHT_SKIP_COMPETING=1 \
+    CAS_CHANGELOG_LINT_CMD="$lint_stub" \
+    CAS_RELEASE_TRAIN_ASSEMBLE_CMD="$cut_cmd" CUT_LOG="$lint_log" \
+    "$train" 9.99.12 "$lint_wt" --cut 2>&1 || true)"
+if [[ "$lint_out" == *'BLOCKER changelog-lint'* ]] \
+    && [[ "$lint_out" == *'MD022/blanks-around-headings fixture finding'* ]] \
+    && [[ ! -e "$lint_log" ]]; then
+    ok 'a CHANGELOG failing the Docs Lint policy blocks the cut before any build stage'
+else
+    bad "CHANGELOG lint failure was not a named preflight blocker: $lint_out"
+fi
+
 # The assembled train must use the real prep/announce/receipts bodies while
 # only the external gate, pipeline, publisher, report, host, and adapters are
 # stubbed. This is deliberately separate from the seam tests above: it catches

@@ -126,16 +126,40 @@ impl CasService {
             .parked_branch
             .clone()
             .unwrap_or_else(|| format!("factory/{implementer}"));
+        // cas-5c38 (GH #999): a no-code task delivers no tip; any round an
+        // earlier close opened for it is withdrawn rather than waived.
+        if crate::qa_pass::is_no_code(&task) && task.deliverables.factory_branch_anchor.is_none() {
+            return self.withdraw_no_code_qa(task_id, &supervisor, reason);
+        }
+        // cas-5c38 (GH #999): a delivery that never parked has no anchor.
+        // Waive the tip the open (or latest) round was bound to, then any
+        // commit Cassy recorded for the delivery.
+        let passes = cas_store::list_qa_passes(&self.inner.cas_root, task_id).unwrap_or_default();
         let head = task
             .deliverables
             .factory_branch_anchor
             .clone()
-            .ok_or_else(|| {
-                Self::error(
-                    ErrorCode::INVALID_PARAMS,
-                    format!("qa_waive: {task_id} has no parked branch tip to waive; it must park for merge first"),
-                )
-            })?;
+            .or_else(|| {
+                passes
+                    .iter()
+                    .find(|pass| !pass.is_withdrawn())
+                    .map(|pass| pass.bound_head.clone())
+            })
+            .or_else(|| task.deliverables.delivery_pr_merge_commit.clone())
+            .or_else(|| task.deliverables.merge_commit.clone())
+            .or_else(|| task.deliverables.commit_hash.clone())
+            .filter(|head| !head.trim().is_empty());
+        let Some(head) = head else {
+            return Err(Self::error(
+                ErrorCode::INVALID_PARAMS,
+                format!(
+                    "qa_waive: {task_id} has no delivered commit on record to bind a waiver to: it never \
+                     parked, no QA round was opened, and no merge commit is recorded. If it was merged \
+                     before close, close it with supervisor_override=true, a reason and \
+                     commit_receipt=<merged sha>; the QA gate records the waiver against that commit."
+                ),
+            ));
+        };
         let pass = cas_store::waive_qa_pass(
             &self.inner.cas_root,
             task_id,
@@ -167,6 +191,54 @@ impl CasService {
             pass.head8(),
             pass.id
         )))
+    }
+
+    /// cas-5c38: a no-code task has no tip to bind a waiver to, and the QA
+    /// gate no longer applies to it. Withdraw any round a previous close
+    /// opened, so nothing is left pending, and log the decision.
+    fn withdraw_no_code_qa(
+        &self,
+        task_id: &str,
+        supervisor: &str,
+        reason: &str,
+    ) -> Result<CallToolResult, McpError> {
+        let withdrawn = cas_store::withdraw_open_qa_pass(
+            &self.inner.cas_root,
+            task_id,
+            &format!("no-code task, waived by supervisor {supervisor}: {}", reason.trim()),
+            true,
+            chrono::Utc::now(),
+        )
+        .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, format!("qa_waive rejected: {error}")))?;
+        let closed = withdrawn
+            .as_ref()
+            .map(|pass| self.close_withdrawn_qa_task(pass, reason))
+            .unwrap_or_default();
+        let note = format!(
+            "[{}] ✅ DECISION Independent QA waived by supervisor {supervisor} for no-code task{}. Reason: {}",
+            chrono::Utc::now().format("%Y-%m-%d %H:%M"),
+            withdrawn
+                .as_ref()
+                .map(|pass| format!(" (withdrew round {} pass {})", pass.round, pass.id))
+                .unwrap_or_default(),
+            reason.trim(),
+        );
+        self.inner
+            .open_task_store()?
+            .append_note(task_id, &note)
+            .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, format!("qa_waive note failed: {error}")))?;
+        Ok(Self::success(format!(
+            "Independent QA waived for no-code task {task_id}: it has no delivery tip, and the QA gate does \
+             not apply to no-code tasks.{}{closed}",
+            withdrawn
+                .map(|pass| format!(" Open round {} (pass {}) withdrawn.", pass.round, pass.id))
+                .unwrap_or_default(),
+        )))
+    }
+
+    /// Close the QA work item of a withdrawn round so no reviewer picks it up.
+    pub(crate) fn close_withdrawn_qa_task(&self, pass: &QaPass, reason: &str) -> String {
+        self.inner.cancel_withdrawn_qa_task(pass, reason)
     }
 
     pub(super) async fn verification_qa_status(
@@ -329,3 +401,4 @@ fn required<'a>(value: Option<&'a str>, name: &str) -> Result<&'a str, McpError>
         .filter(|value| !value.is_empty())
         .ok_or_else(|| CasService::error(ErrorCode::INVALID_PARAMS, format!("{name} is required")))
 }
+

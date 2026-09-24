@@ -88,6 +88,10 @@ impl CasCore {
             origin,
             target
         );
+        // cas-ea9c (GH #1005): cited issues attached at assignment.
+        if let Some(section) = crate::github_issue_attach::cited_issue_section(&self.cas_root, &task) {
+            output.push_str(&format!("\n{section}\n"));
+        }
 
         // Structured execution state is the compact machine resume surface.
         // Prose notes remain below for human/audit history, but are not needed

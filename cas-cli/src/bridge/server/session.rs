@@ -73,7 +73,12 @@ pub(crate) fn build_status_json(
     activity_limit: usize,
 ) -> Result<StatusJson> {
     let allowed = allowed_agent_names(session);
-    let data = DirectorData::load_fast(cas_root)?;
+    let data = DirectorData::load_for_project(
+        cas_root,
+        None,
+        false,
+        crate::cloud::resolve_canonical_id(cas_root).as_deref(),
+    )?;
 
     let mut activity = data.activity;
     filter_events_for_session_agents(&mut activity, &allowed);

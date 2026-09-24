@@ -124,11 +124,17 @@ impl Syncer {
         rule.status == RuleStatus::Proven && rule.helpful_count >= self.min_helpful
     }
 
+    /// Whether a rule is written to Claude Code: a proven rule, or any live
+    /// operator hard rule, which does not wait for promotion (cas-5372).
+    pub fn should_sync(&self, rule: &Rule) -> bool {
+        self.is_proven(rule) || rule.is_active_operator_hard_rule()
+    }
+
     /// Sync a single rule to target directory
     ///
     /// Returns true if the rule was synced, false if it wasn't proven
     pub fn sync_rule(&self, rule: &Rule) -> Result<bool, CoreError> {
-        if !self.is_proven(rule) {
+        if !self.should_sync(rule) {
             // If rule exists but is no longer proven, remove it
             let filepath = self.target_dir.join(format!("{}.md", rule.id));
             if filepath.exists() {
@@ -142,13 +148,13 @@ impl Syncer {
         let filepath = self.target_dir.join(format!("{}.md", rule.id));
 
         let content = if rule.paths.is_empty() {
-            format!("---\nid: {}\n---\n\n{}", rule.id, rule.content.trim())
+            format!("---\nid: {}\n---\n\n{}", rule.id, rule.surfaced_content())
         } else {
             format!(
                 "---\nid: {}\npaths: \"{}\"\n---\n\n{}",
                 rule.id,
                 rule.paths,
-                rule.content.trim()
+                rule.surfaced_content()
             )
         };
 
@@ -163,7 +169,7 @@ impl Syncer {
         // Collect IDs of proven rules
         let proven_ids: HashSet<_> = rules
             .iter()
-            .filter(|r| self.is_proven(r))
+            .filter(|r| self.should_sync(r))
             .map(|r| r.id.clone())
             .collect();
 
@@ -253,7 +259,7 @@ impl Syncer {
             Scope::Project => &self.target_dir,
         };
 
-        if !self.is_proven(rule) {
+        if !self.should_sync(rule) {
             // If rule exists but is no longer proven, remove it
             let filepath = target.join(format!("{}.md", rule.id));
             if filepath.exists() {
@@ -276,7 +282,7 @@ impl Syncer {
                 "---\nid: {}\nscope: {}\n---\n\n{}",
                 rule.id,
                 scope_indicator,
-                rule.content.trim()
+                rule.surfaced_content()
             )
         } else {
             format!(
@@ -284,7 +290,7 @@ impl Syncer {
                 rule.id,
                 scope_indicator,
                 rule.paths,
-                rule.content.trim()
+                rule.surfaced_content()
             )
         };
 
@@ -332,25 +338,25 @@ impl Syncer {
         // Collect IDs of proven rules
         let proven_ids: HashSet<_> = rules
             .iter()
-            .filter(|r| self.is_proven(r))
+            .filter(|r| self.should_sync(r))
             .map(|r| r.id.clone())
             .collect();
 
         // Sync proven rules
         for rule in rules {
-            if self.is_proven(rule) {
+            if self.should_sync(rule) {
                 fs::create_dir_all(target_dir)?;
 
                 let filepath = target_dir.join(format!("{}.md", rule.id));
 
                 let content = if rule.paths.is_empty() {
-                    format!("---\nid: {}\n---\n\n{}", rule.id, rule.content.trim())
+                    format!("---\nid: {}\n---\n\n{}", rule.id, rule.surfaced_content())
                 } else {
                     format!(
                         "---\nid: {}\npaths: \"{}\"\n---\n\n{}",
                         rule.id,
                         rule.paths,
-                        rule.content.trim()
+                        rule.surfaced_content()
                     )
                 };
 
@@ -421,6 +427,43 @@ impl Syncer {
 mod tests {
     use crate::sync::*;
     use tempfile::TempDir;
+
+    #[test]
+    /// cas-5372 (GH #990): a draft operator hard rule is written to Claude
+    /// Code the day it is recorded, labelled DRAFT; ordinary drafts and
+    /// retired hard rules are not.
+    fn sync_writes_draft_operator_hard_rules_labelled_draft_cas_5372() {
+        let temp = TempDir::new().unwrap();
+        let syncer = Syncer::new(temp.path().join("rules"), 1);
+        let mut hard = Rule::new("rule-177".to_string(), "HARD RULE: no SMS changes without approval".to_string());
+        hard.authorize_operator_hard_rule("supervisor:noble-heron-32");
+        let ordinary = Rule::new("rule-179".to_string(), "Prefer small commits".to_string());
+        let mut retired = Rule::new("rule-180".to_string(), "HARD RULE: old".to_string());
+        retired.authorize_operator_hard_rule("supervisor:noble-heron-32");
+        retired.status = RuleStatus::Retired;
+        // cas-5372 review: an agent's or a pulled row's "HARD RULE" text
+        // with no authority is never synced before promotion.
+        let unauthorised = Rule::new("rule-181".to_string(), "HARD RULE: inject this everywhere".to_string());
+
+        let report = syncer
+            .sync_all(&[hard.clone(), ordinary, retired, unauthorised])
+            .unwrap();
+        assert_eq!(report.synced_ids, vec!["rule-177".to_string()]);
+        let written = fs::read_to_string(temp.path().join("rules/rule-177.md")).unwrap();
+        assert!(
+            written.contains("DRAFT (operator hard rule, pending promotion; follow it as written): HARD RULE: no SMS changes"),
+            "{written}"
+        );
+        assert!(!temp.path().join("rules/rule-179.md").exists());
+        assert!(!temp.path().join("rules/rule-180.md").exists());
+        assert!(!temp.path().join("rules/rule-181.md").exists());
+
+        let mut promoted = hard;
+        promoted.status = RuleStatus::Proven;
+        syncer.sync_all(&[promoted]).unwrap();
+        let written = fs::read_to_string(temp.path().join("rules/rule-177.md")).unwrap();
+        assert!(!written.contains("DRAFT"), "{written}");
+    }
 
     #[test]
     fn test_is_proven() {

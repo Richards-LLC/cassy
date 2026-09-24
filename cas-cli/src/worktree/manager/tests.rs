@@ -726,6 +726,35 @@ fn test_attempt_remove_worker_dirty_modified_defers() {
     );
 }
 
+/// cas-2ffe (GH #915): a crashed worker can leave its checkout unreadable to
+/// `git status`. That must never read as clean: the tree, its branch and the
+/// tracking entry all survive, and the caller gets the error.
+#[test]
+fn test_attempt_remove_worker_keeps_a_tree_git_cannot_read_cas_2ffe() {
+    let (_temp, repo_path) = create_test_repo();
+    let config = WorktreeConfig::default();
+
+    let mut manager = WorktreeManager::new(&repo_path, config).unwrap();
+
+    let worktree = manager.ensure_worker_worktree("crashed-otter").unwrap();
+    let path = worktree.path.clone();
+    let branch = worktree.branch.clone();
+    std::fs::write(path.join("work-in-progress.rs"), "fn unsaved() {}").unwrap();
+    // The linked worktree's `.git` pointer is left unreadable mid-crash.
+    std::fs::write(path.join(".git"), "not a gitdir pointer").unwrap();
+
+    let outcome = manager.attempt_remove_worker("crashed-otter");
+
+    assert!(outcome.is_err(), "an unreadable tree is not clean: {outcome:?}");
+    assert!(path.exists(), "the tree must survive");
+    assert!(path.join("work-in-progress.rs").exists(), "uncommitted work must survive");
+    assert!(manager.git.branch_exists(&branch).unwrap());
+    assert!(
+        manager.get_worker("crashed-otter").is_some(),
+        "the manager keeps tracking it so a later pass can salvage it"
+    );
+}
+
 #[test]
 fn test_attempt_remove_worker_untracked_files_defer() {
     let (_temp, repo_path) = create_test_repo();

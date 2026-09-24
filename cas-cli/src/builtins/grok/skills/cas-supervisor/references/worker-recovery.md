@@ -104,6 +104,17 @@ Workers fail in production. These are recurring observed failure modes and their
    ```
 3. Do not kill or respawn. There is no evidence of a dead process or dirty worktree; the fix is a durable task plus a short wake.
 
+### Stalled Spawn Queue (cas-73b5)
+
+If `worker_status` shows `SPAWN QUEUE STALLED`, `FACTORY DAEMON LOOP WEDGED`,
+or `SPAWN IN FLIGHT FOR`, the factory daemon has stopped processing spawn and
+shutdown requests. Run `cas__coordination action=restart_spawn_queue`. It
+keeps the session and every pane. The daemon abandons its in-flight spawn,
+drops dequeued actions that have not run, and messages you what to re-issue.
+If the loop itself is wedged, its watchdog first kills hung git, gh or ssh
+helper processes. Check `worker_status` again. If the loop is still wedged,
+file a CAS bug quoting the phase and wait channel that `worker_status` names.
+
 ### Pre-compaction Triage via worker_status context indicator (cas-573c)
 
 `cas__coordination action=worker_status` now includes a `context:` line per worker:

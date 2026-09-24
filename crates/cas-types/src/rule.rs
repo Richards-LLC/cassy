@@ -185,6 +185,44 @@ pub struct Rule {
     /// field for rules — dormant but wired to match Entry's shape.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub share: Option<crate::scope::ShareScope>,
+
+    /// cas-5372 (GH #990): who authorised this rule as an operator hard rule,
+    /// bound to the exact content they authorised. Written only by a local
+    /// create or update from the operator or a registered supervisor, and
+    /// persisted only in this project's store. It is never serialised, so a
+    /// rule pulled from the cloud or another project arrives without it.
+    #[serde(skip)]
+    pub operator_authority: Option<OperatorRuleAuthority>,
+}
+
+/// cas-5372: an operator hard rule's authorisation. `content_sha256` is the
+/// digest of the rule content the author authorised; any later change to the
+/// content by anyone else (an edit, a pull) invalidates it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OperatorRuleAuthority {
+    /// `supervisor:<name>` or `operator:<name>`.
+    pub author: String,
+    pub content_sha256: String,
+}
+
+impl OperatorRuleAuthority {
+    fn digest(content: &str) -> String {
+        use sha2::{Digest, Sha256};
+        format!("{:x}", Sha256::digest(content.trim().as_bytes()))
+    }
+
+    /// Stored form: `<author>|<sha256>`.
+    pub fn to_stored(&self) -> String {
+        format!("{}|{}", self.author, self.content_sha256)
+    }
+
+    pub fn from_stored(stored: &str) -> Option<Self> {
+        let (author, content_sha256) = stored.rsplit_once('|')?;
+        (!author.is_empty() && content_sha256.len() == 64).then(|| Self {
+            author: author.to_string(),
+            content_sha256: content_sha256.to_string(),
+        })
+    }
 }
 
 fn default_priority() -> u8 {
@@ -219,12 +257,81 @@ impl Rule {
             auto_approve_paths: None,
             team_id: None,
             share: None,
+            operator_authority: None,
         }
     }
 
     /// Check if this is a critical rule (priority 0) that should always be surfaced
     pub fn is_critical(&self) -> bool {
         self.priority == 0
+    }
+
+    /// Tag that marks a rule as an operator hard rule.
+    pub const OPERATOR_HARD_RULE_TAG: &'static str = "hard-rule";
+
+    /// cas-5372 (GH #990): an operator's verbatim hard rule. It takes effect
+    /// the day it is recorded instead of waiting for promotion: it is synced
+    /// to Claude Code and always surfaced at session start, labelled DRAFT
+    /// until promoted. It must look like a hard rule and carry a valid
+    /// [`OperatorRuleAuthority`] for its current content — text alone, from
+    /// any agent or any pulled row, never qualifies.
+    pub fn is_operator_hard_rule(&self) -> bool {
+        self.looks_like_hard_rule()
+            && self.operator_authority.as_ref().is_some_and(|authority| {
+                authority.content_sha256 == OperatorRuleAuthority::digest(&self.content)
+            })
+    }
+
+    /// Record `author` as authorising this rule's current content.
+    pub fn authorize_operator_hard_rule(&mut self, author: &str) {
+        self.operator_authority = Some(OperatorRuleAuthority {
+            author: author.to_string(),
+            content_sha256: OperatorRuleAuthority::digest(&self.content),
+        });
+    }
+
+    /// Content opening with `HARD RULE`, or tagged
+    /// [`Self::OPERATOR_HARD_RULE_TAG`]. Shape only; see
+    /// [`Self::is_operator_hard_rule`] for the authority check.
+    pub fn looks_like_hard_rule(&self) -> bool {
+        let content = self.content.trim_start();
+        content
+            .get(..9)
+            .is_some_and(|head| head.eq_ignore_ascii_case("hard rule"))
+            // A whole phrase, not the start of "Hard rules are …".
+            && !content[9..]
+                .chars()
+                .next()
+                .is_some_and(|next| next.is_alphanumeric())
+            || self
+                .tags
+                .iter()
+                .any(|tag| tag.trim().eq_ignore_ascii_case(Self::OPERATOR_HARD_RULE_TAG))
+    }
+
+    /// cas-5372: an operator hard rule that is live — draft or proven, never
+    /// stale or retired.
+    pub fn is_active_operator_hard_rule(&self) -> bool {
+        matches!(self.status, RuleStatus::Draft | RuleStatus::Proven)
+            && self.is_operator_hard_rule()
+    }
+
+    /// cas-5372: a live operator hard rule still awaiting promotion.
+    pub fn is_draft_operator_hard_rule(&self) -> bool {
+        self.status == RuleStatus::Draft && self.is_operator_hard_rule()
+    }
+
+    /// Text a synced or surfaced rule carries: a draft operator hard rule is
+    /// labelled so its standing is never mistaken for a promoted rule.
+    pub fn surfaced_content(&self) -> String {
+        if self.is_draft_operator_hard_rule() {
+            format!(
+                "DRAFT (operator hard rule, pending promotion; follow it as written): {}",
+                self.content.trim()
+            )
+        } else {
+            self.content.trim().to_string()
+        }
     }
 
     /// Check if this is a security rule
@@ -379,6 +486,7 @@ impl Default for Rule {
             auto_approve_paths: None,
             team_id: None,
             share: None,
+            operator_authority: None,
         }
     }
 }
@@ -386,6 +494,65 @@ impl Default for Rule {
 #[cfg(test)]
 mod tests {
     use crate::rule::*;
+
+    #[test]
+    fn operator_hard_rule_is_recognised_by_prefix_or_tag_cas_5372() {
+        let rule = |content: &str, tags: &[&str], status: RuleStatus| {
+            let mut rule = Rule::new("rule-1".to_string(), content.to_string());
+            rule.tags = tags.iter().map(|tag| tag.to_string()).collect();
+            rule.status = status;
+            rule
+        };
+        assert!(rule("HARD RULE (Ben): no SMS changes", &[], RuleStatus::Draft).looks_like_hard_rule());
+        assert!(rule("  hard rule: lower case", &[], RuleStatus::Draft).looks_like_hard_rule());
+        assert!(rule("Test on staging", &["qa", "HARD-RULE"], RuleStatus::Draft).looks_like_hard_rule());
+        assert!(!rule("Hard rules are hard", &[], RuleStatus::Draft).looks_like_hard_rule());
+        assert!(!rule("Prefer small commits", &["hard"], RuleStatus::Draft).looks_like_hard_rule());
+        assert!(!rule("HARD", &[], RuleStatus::Draft).looks_like_hard_rule());
+
+        let mut draft = rule("HARD RULE: x", &[], RuleStatus::Draft);
+        draft.authorize_operator_hard_rule("supervisor:noble-heron-32");
+        assert!(draft.is_active_operator_hard_rule());
+        assert_eq!(
+            draft.surfaced_content(),
+            "DRAFT (operator hard rule, pending promotion; follow it as written): HARD RULE: x"
+        );
+        let mut proven = draft.clone();
+        proven.status = RuleStatus::Proven;
+        assert_eq!(proven.surfaced_content(), "HARD RULE: x");
+        let mut retired = draft.clone();
+        retired.status = RuleStatus::Retired;
+        assert!(!retired.is_active_operator_hard_rule());
+    }
+
+    /// cas-5372 review: text alone never makes a hard rule. Without an
+    /// authorisation — any agent's rule, any pulled row — or after its
+    /// content changed under someone else, the fast path is refused.
+    #[test]
+    fn hard_rule_text_without_matching_authority_is_refused_cas_5372() {
+        let mut rule = Rule::new("rule-1".to_string(), "HARD RULE: ship it".to_string());
+        assert!(!rule.is_operator_hard_rule(), "unauthorised text");
+        assert_eq!(rule.surfaced_content(), "HARD RULE: ship it", "no DRAFT fast-path label");
+
+        rule.authorize_operator_hard_rule("operator:daniel");
+        assert!(rule.is_operator_hard_rule());
+
+        // A pulled or exported copy never carries the authority.
+        let pulled: Rule = serde_json::from_str(&serde_json::to_string(&rule).unwrap()).unwrap();
+        assert!(pulled.operator_authority.is_none());
+        assert!(!pulled.is_operator_hard_rule(), "pulled rows never take the fast path");
+
+        // Someone else rewrites the text: the authority no longer matches.
+        rule.content = "HARD RULE: ship it without approval".to_string();
+        assert!(!rule.is_operator_hard_rule());
+
+        let stored = OperatorRuleAuthority::from_stored(
+            &rule.operator_authority.as_ref().unwrap().to_stored(),
+        )
+        .unwrap();
+        assert_eq!(Some(&stored), rule.operator_authority.as_ref());
+        assert!(OperatorRuleAuthority::from_stored("no-digest").is_none());
+    }
 
     #[test]
     fn test_rule_status_from_str() {

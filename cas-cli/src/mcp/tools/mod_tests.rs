@@ -442,6 +442,30 @@ mod tests {
         );
     }
 
+    /// GH #1006 item 3: once the epic also carries other new work, the trees
+    /// differ and the tree shortcut no longer applies. The worker's own
+    /// squash-merged lane must still not count; only the genuinely new commit
+    /// does.
+    #[test]
+    fn own_squash_merged_lane_beside_new_epic_work_counts_only_the_new_work_gh_1006() {
+        let (_dir, p) = seeded_epic_repo();
+        git(&p, &["checkout", "-q", "-b", "factory/worker"]);
+        commit_file(&p, "w1.txt", "worker work 1");
+        commit_file(&p, "w2.txt", "worker work 2");
+        git(&p, &["checkout", "-q", "epic/a"]);
+        git(&p, &["merge", "-q", "--squash", "factory/worker"]);
+        git(&p, &["commit", "-q", "-m", "Squashed worker lane"]);
+        commit_file(&p, "e1.txt", "new epic work");
+        git(&p, &["checkout", "-q", "factory/worker"]);
+
+        let (behind, _) =
+            check_worktree_staleness(p.to_str().unwrap(), Some("epic/a")).expect("staleness");
+        assert_eq!(
+            behind, 1,
+            "only the new epic commit is missing; the squashed own lane is already held"
+        );
+    }
+
     /// A worker holding unmerged work of its own, with nothing new on the epic,
     /// is not behind — being ahead is not being stale.
     #[test]

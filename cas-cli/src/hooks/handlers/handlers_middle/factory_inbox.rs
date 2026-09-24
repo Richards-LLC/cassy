@@ -88,6 +88,21 @@ fn recipient_aliases(input: &HookInput) -> Vec<String> {
     )
 }
 
+/// cas-b5e4 (GH #989): the newest inbox stamp (epoch milliseconds) across
+/// every recipient name this agent answers to, read without opening a store.
+/// `None` when nothing was ever enqueued for it.
+pub(crate) fn inbox_signal_stamp(cas_root: &Path, input: &HookInput) -> Option<i64> {
+    if !crate::harness_policy::is_factory_agent(input) {
+        return None;
+    }
+    let mut names = recipient_aliases(input);
+    names.push("all_workers".to_string());
+    names
+        .iter()
+        .filter_map(|name| cas_store::read_inbox_signal(cas_root, name))
+        .max()
+}
+
 fn factory_session() -> Option<String> {
     std::env::var("CAS_FACTORY_SESSION")
         .ok()
@@ -103,24 +118,40 @@ fn factory_session() -> Option<String> {
 /// prompt capture to a queue problem would be a worse bug than the one this
 /// fixes.
 pub fn surface_factory_inbox(cas_root: Option<&Path>, input: &HookInput) -> Option<String> {
-    surface_factory_inbox_with_transport_delivery(cas_root, input, true)
+    surface_factory_inbox_with_transport_delivery(cas_root, input, Surfacing::TurnStart)
 }
 
-/// Fallback surfacing after a tool result. The transport path may already
-/// have injected the current queue row into the turn, so rows carrying either
-/// transport receipt marker are excluded here. Unmarked unread rows still
-/// recover normally.
+/// The turn a tool-boundary surfacing runs inside, read from the transcript.
+pub(crate) struct CurrentTurn<'a> {
+    pub started_at: chrono::DateTime<chrono::Utc>,
+    pub prompt: &'a str,
+}
+
+/// Surfacing at a tool boundary, inside a turn (cas-b5e4, GH #989).
+///
+/// The transport path may already have injected a queue row as the prompt
+/// that started this turn, so rows handed off before the turn began are
+/// excluded (cas-9568). A row handed off after the turn began reached a busy
+/// recipient mid-turn and is surfaced now, within one tool call, unless its
+/// body is the turn's own prompt. Without a known turn only unmarked rows are
+/// eligible.
 pub(crate) fn surface_factory_inbox_after_tool_result(
     cas_root: Option<&Path>,
     input: &HookInput,
+    turn: Option<CurrentTurn<'_>>,
 ) -> Option<String> {
-    surface_factory_inbox_with_transport_delivery(cas_root, input, false)
+    surface_factory_inbox_with_transport_delivery(cas_root, input, Surfacing::ToolBoundary(turn))
+}
+
+enum Surfacing<'a> {
+    TurnStart,
+    ToolBoundary(Option<CurrentTurn<'a>>),
 }
 
 fn surface_factory_inbox_with_transport_delivery(
     cas_root: Option<&Path>,
     input: &HookInput,
-    allow_transport_delivery: bool,
+    surfacing: Surfacing<'_>,
 ) -> Option<String> {
     if !crate::harness_policy::is_factory_agent(input) {
         return None;
@@ -140,14 +171,23 @@ fn surface_factory_inbox_with_transport_delivery(
         if remaining == 0 {
             break;
         }
-        let found = if allow_transport_delivery {
-            queue.surface_unseen_for_recipient(alias, session.as_deref(), remaining)
-        } else {
-            queue.surface_unseen_for_recipient_without_transport_delivery(
-                alias,
-                session.as_deref(),
-                remaining,
-            )
+        let found = match &surfacing {
+            Surfacing::TurnStart => {
+                queue.surface_unseen_for_recipient(alias, session.as_deref(), remaining)
+            }
+            Surfacing::ToolBoundary(Some(turn)) => queue
+                .surface_unseen_for_recipient_delivered_after(
+                    alias,
+                    session.as_deref(),
+                    remaining,
+                    turn.started_at,
+                ),
+            Surfacing::ToolBoundary(None) => queue
+                .surface_unseen_for_recipient_without_transport_delivery(
+                    alias,
+                    session.as_deref(),
+                    remaining,
+                ),
         };
         match found {
             Ok(found) => {
@@ -173,6 +213,15 @@ fn surface_factory_inbox_with_transport_delivery(
                     // back from both. Injecting it twice into one turn is the
                     // duplicate this task must not create.
                     if rows.iter().any(|existing| existing.id == row.id) {
+                        continue;
+                    }
+                    // A row injected as this turn's own prompt is already in
+                    // front of the model; its receipt is now correct, and
+                    // rendering it again would duplicate it.
+                    if let Surfacing::ToolBoundary(Some(turn)) = &surfacing
+                        && !row.prompt.trim().is_empty()
+                        && turn.prompt.contains(row.prompt.trim())
+                    {
                         continue;
                     }
                     rows.push(row);
@@ -203,7 +252,14 @@ fn surface_factory_inbox_with_transport_delivery(
         &aliases,
         cas_store::SurfacingSource::HookSurfaced,
     );
-    Some(render_surfaced(&rows))
+    Some(match surfacing {
+        Surfacing::TurnStart => render_surfaced(&rows),
+        Surfacing::ToolBoundary(_) => render_surfaced_with_header(
+            &rows,
+            "The following message(s) arrived while you were working. \
+             They are delivered here once — read them before your next step.",
+        ),
+    })
 }
 
 /// Render surfaced rows for injection into the turn.
@@ -212,10 +268,15 @@ fn surface_factory_inbox_with_transport_delivery(
 /// sender and the message id for every row, because the recipient's only way
 /// to acknowledge or reply is to name that id back.
 pub(crate) fn render_surfaced(rows: &[QueuedPrompt]) -> String {
-    let mut out = String::from(
-        "[incoming messages]\nThe following message(s) arrived while you were not in a turn. \
-         They are delivered here once — act on them now.\n",
-    );
+    render_surfaced_with_header(
+        rows,
+        "The following message(s) arrived while you were not in a turn. \
+         They are delivered here once — act on them now.",
+    )
+}
+
+fn render_surfaced_with_header(rows: &[QueuedPrompt], header: &str) -> String {
+    let mut out = format!("[incoming messages]\n{header}\n");
     for row in rows {
         let reply_hint = crate::mcp::tools::service::agent_search_system::message::commander_reply_command(row)
             .map(|command| format!("Reply with: `{command}`\n"))

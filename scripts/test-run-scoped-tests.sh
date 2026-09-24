@@ -436,6 +436,12 @@ cp "${GUARD}" "${work_target_repo}/scripts/run-scoped-tests.sh"
 expect pass "SCOPED_PROOF: targets=lib:worker result=PASS base=${work_target_base}" \
     "proof runner: WorkTarget baseline is carried by the passing receipt" \
     bash -c "cd '${work_target_repo}' && CARGO='${work_target_runner_stub}' SCOPED_PROOF_TARGET_BRANCH=epic '${work_target_repo}/scripts/run-scoped-tests.sh' --proof -p cas --lib worker"
+# cas-a9a1: with no SCOPED_PROOF_BASE the passing receipt still names the tip
+# it proved, which lets the close gate accept it for exactly that delivery.
+work_target_head="$(git -C "${work_target_repo}" rev-parse HEAD)"
+expect pass "result=PASS base=${work_target_base} head=${work_target_head}" \
+    "proof runner: the passing receipt names the proved tip (cas-a9a1)" \
+    bash -c "cd '${work_target_repo}' && CARGO='${work_target_runner_stub}' SCOPED_PROOF_TARGET_BRANCH=epic '${work_target_repo}/scripts/run-scoped-tests.sh' --proof -p cas --lib worker"
 
 # Builtin skill/reference changes must include the cross-flavor, agent-contract,
 # and path-specific guardrail binaries. The latter is discovered from the

@@ -610,3 +610,82 @@ fn post_tool_second_prompt_recovers_recall_and_skips_repeated_tools() {
         0
     );
 }
+
+/// cas-b5e4 (GH #989): a peer reply reached a busy worker mid-turn and sat
+/// delivered while the worker reported "no answer" — turn-start surfacing had
+/// already run and the after-tool path ran at most once per turn. The next
+/// tool boundary must now put it in the worker's context, exactly once, and
+/// never replay the message that started the turn.
+#[test]
+fn busy_worker_sees_a_mid_turn_message_at_the_next_tool_boundary_cas_b5e4() {
+    let _lock = super::env_lock();
+    let _env = worker_env();
+    let project = TempDir::new().unwrap();
+    let cas_root = crate::store::init_cas_dir(project.path()).unwrap();
+    let store = store_at_root(&cas_root);
+
+    // The turn was started by an injected supervisor message, before which
+    // its row was handed off.
+    let turn_prompt = "please coordinate with gold-fox on the schema";
+    let injected = store
+        .enqueue_with_session("supervisor", WORKER, turn_prompt, SESSION)
+        .unwrap();
+    store.mark_transport_delivered(injected).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let turn_started = chrono::Utc::now();
+    let transcript = project.path().join("session.jsonl");
+    let mut hook = input("worker");
+    hook.cwd = project.path().to_string_lossy().into_owned();
+    hook.transcript_path = Some(transcript.to_string_lossy().into_owned());
+    hook.prompt_id = Some("turn-1".into());
+    std::fs::write(
+        &transcript,
+        format!(
+            "{{\"type\":\"user\",\"sessionId\":\"{}\",\"promptId\":\"turn-1\",\"timestamp\":\"{}\",\"message\":{{\"content\":\"{turn_prompt}\"}}}}\n",
+            hook.session_id,
+            turn_started.to_rfc3339(),
+        ),
+    )
+    .unwrap();
+    // The normal prompt hook served this turn.
+    crate::hooks::turn_context::record_prompt_hook(&cas_root, &hook);
+    hook.hook_event_name = "PostToolUse".into();
+    hook.tool_name = Some("Read".into());
+
+    let quiet = crate::hooks::handle_post_tool_use(&hook, Some(&cas_root)).unwrap();
+    assert!(
+        quiet.hook_specific_output.is_none(),
+        "the turn's own injected prompt is never replayed: {:?}",
+        quiet.hook_specific_output
+    );
+
+    // Mid-turn, the peer's reply is enqueued and handed off to the worker.
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let reply = store
+        .enqueue_with_session("gold-fox", WORKER, "schema agreed: use v2 columns", SESSION)
+        .unwrap();
+    store.mark_transport_delivered(reply).unwrap();
+
+    let output = crate::hooks::handle_post_tool_use(&hook, Some(&cas_root)).unwrap();
+    let Some(HookSpecificOutput::PostToolUse {
+        additional_context: Some(context),
+    }) = output.hook_specific_output
+    else {
+        panic!("the mid-turn reply must surface at the next tool boundary");
+    };
+    assert!(context.contains("schema agreed: use v2 columns"), "{context}");
+    assert!(context.contains("arrived while you were working"), "{context}");
+    assert!(!context.contains(turn_prompt), "{context}");
+
+    let again = crate::hooks::handle_post_tool_use(&hook, Some(&cas_root)).unwrap();
+    assert!(
+        again.hook_specific_output.is_none(),
+        "a surfaced message is delivered once"
+    );
+}
+
+fn store_at_root(cas_root: &std::path::Path) -> SqlitePromptQueueStore {
+    let store = SqlitePromptQueueStore::open(cas_root).unwrap();
+    store.init().unwrap();
+    store
+}

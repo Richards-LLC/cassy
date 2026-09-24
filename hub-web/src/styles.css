@@ -1184,7 +1184,10 @@ main {
   border-left: var(--rule-verdict) solid var(--state-warn);
 }
 
-.terminal-disconnected .terminal-mount { opacity: .4; }
+/* Dims the terminal only. The conversation reading view lives inside the
+   same mount; fading it put its text at 2.2-3.3:1 during an outage (cas-3446).
+   The banner and the header already mark the session as not live. */
+.terminal-disconnected .terminal-mount:not(.conversation-active) { opacity: .4; }
 .context-panel {
   min-width: 0;
   display: grid;

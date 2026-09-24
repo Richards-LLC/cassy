@@ -2413,7 +2413,6 @@ function render(captureDraft = true): void {
     leaseController: lease?.controller_label,
     controlDisabled: controlActionDisabled,
     commandPaletteOpen,
-    sessionPickerOpen,
     pairingView,
   }) + JSON.stringify([hubPresentation, selectedHubSession?.project_dir]);
   const active = document.activeElement;
@@ -2833,9 +2832,9 @@ function sessionButton(machineId: string, session: HubSession): HTMLButtonElemen
 function openSessionPicker(): void {
   sessionPickerOpen = true;
   render();
-  // Closing the picker does not rebuild the shell, so the last shell signature
-  // can still read "picker open" and render() skips the rebuild that would
-  // show it. Show the existing dialog in that case too (as the palette does).
+  // Opening the picker never rebuilds the shell (its open state is not in the
+  // shell signature, cas-00ad), so render() only refreshes the list region;
+  // show the existing dialog here.
   const picker = document.querySelector<HTMLDialogElement>("#session-picker");
   if (picker && !picker.open) picker.showModal();
   syncSessionPickerToggle();

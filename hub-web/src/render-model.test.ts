@@ -18,7 +18,6 @@ const base: ShellSignatureParts = {
   leaseController: "Daniel",
   controlDisabled: false,
   commandPaletteOpen: false,
-  sessionPickerOpen: false,
   pairingView: "",
 };
 
@@ -44,7 +43,6 @@ describe("shell signature", () => {
     ["a different controller", { leaseController: "someone-else" }],
     ["control becoming unavailable", { controlDisabled: true }],
     ["the command palette opening", { commandPaletteOpen: true }],
-    ["the session picker opening", { sessionPickerOpen: true }],
     ["a pairing invitation arriving", { pairingView: "relay-request|ABCD-1234||Waiting for a machine to claim the code…|" }],
     ["cancellation cleanup becoming outstanding", { pairingView: "|||cleanup-failed" }],
   ] as [string, Partial<ShellSignatureParts>][]) {
@@ -52,6 +50,14 @@ describe("shell signature", () => {
       expect(shellSignature({ ...base, ...change })).not.toBe(shellSignature(base));
     });
   }
+
+  it("does not change when the session picker opens or closes (cas-00ad)", () => {
+    // Opening or closing the picker must not rebuild the shell: the rebuild
+    // replaced the focused session title, losing an Enter pressed on it.
+    const parts = { ...base } as ShellSignatureParts & Record<string, unknown>;
+    parts.sessionPickerOpen = true;
+    expect(shellSignature(parts)).toBe(shellSignature(base));
+  });
 
   it("does not change when only heartbeat data moved", () => {
     // Latency, attention counts, the status payload and the message status are

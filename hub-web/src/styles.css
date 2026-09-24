@@ -660,6 +660,12 @@ main {
 .session-picker-entry .session-summary-title { grid-column: 1 / -1; color: var(--text-mid); font-size: var(--fs-meta); }
 .session-picker-entry .phase-chip { grid-column: 1; justify-self: start; }
 .session-picker-entry[aria-current="true"] { background: var(--bg-active); }
+/* The global button:hover (0,3,1) would swap the open session's tint for the
+   plain hover surface, leaving only the small "Open" label to mark it. Hover
+   and press keep the tint and answer the pointer with the Pebble lift, as a
+   hovered chip does: a deeper tint would take the small meta line below
+   4.5:1 (cas-a756 QA). */
+.palette-commands .session-picker-entry[aria-current="true"]:is(:hover, :active) { background: var(--bg-active); box-shadow: var(--lift); }
 
 .session-picker-current {
   grid-column: 2;

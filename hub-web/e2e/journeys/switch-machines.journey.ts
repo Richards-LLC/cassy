@@ -122,4 +122,35 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
     await expect(picker).toBeHidden();
     await expect(page.locator(".session-picker-name")).toHaveText(OTTER);
   });
+
+  await journey.stage("See which session is open while pointing at it", async () => {
+    const picker = page.locator("#session-picker");
+    const open = picker.locator('.session-picker-entry[aria-current="true"]');
+    const other = picker.locator('.session-picker-entry:not([aria-current="true"])').first();
+    const background = (entry: typeof open) => entry.evaluate((element) => getComputedStyle(element).backgroundColor);
+    for (const scheme of ["light", "dark"] as const) {
+      await page.emulateMedia({ colorScheme: scheme });
+      await page.locator("#session-picker-toggle").click();
+      await expect(picker).toBeVisible();
+      await expect(open).toContainText(OTTER);
+      // Resting: the open session is tinted, the others are not.
+      await page.mouse.move(0, 0);
+      const openRest = await background(open);
+      const otherRest = await background(other);
+      expect(openRest, `${scheme}: open session tinted at rest`).not.toBe(otherRest);
+      // Pointing at the open session keeps it distinct from an ordinary hover.
+      await other.hover();
+      await expect.poll(() => background(other)).not.toBe(otherRest);
+      const otherHover = await background(other);
+      // It keeps its own tint (not the plain hover surface) and lifts under the
+      // pointer, as a hovered chip does.
+      await open.hover();
+      await expect.poll(() => open.evaluate((element) => getComputedStyle(element).boxShadow)).not.toBe("none");
+      expect(await background(open), `${scheme}: hovered open session keeps its tint`).toBe(openRest);
+      expect(await background(open), `${scheme}: hovered open session still marked`).not.toBe(otherHover);
+      await page.keyboard.press("Escape");
+      await expect(picker).toBeHidden();
+    }
+    await page.emulateMedia({ colorScheme: "light" });
+  });
 });

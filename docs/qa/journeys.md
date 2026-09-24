@@ -231,6 +231,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 3. Come back to the draft — the first thread's draft is intact
 4. Reopen the session picker after closing it — in Terminal view, one click on the session title reopens the picker after Escape or ×, and it never pops open over the next dialog
 5. Keep my place in the session picker while updates arrive — the row a keyboard user arrowed or tabbed onto keeps focus, and the filter holds, while hub updates re-render the page
+6. See which session is open while pointing at it — in light and dark, the open session keeps its tint under the pointer (lifting as feedback) and still differs from an ordinary hovered row
 
 **Expected experience**
 

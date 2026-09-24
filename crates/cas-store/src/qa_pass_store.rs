@@ -350,6 +350,22 @@ pub fn claim_qa_pass(
     Ok(pass)
 }
 
+/// Return a claimed round to the reviewer queue when its QA work item is
+/// reset. The same round and deadline remain in place for the next reviewer.
+/// Other task IDs and resolved rounds are left untouched.
+pub fn release_qa_claim_for_task(cas_dir: &Path, qa_task_id: &str) -> Result<bool> {
+    let conn = open_conn(cas_dir)?;
+    let conn = conn.lock().map_err(lock_err)?;
+    let tx = ImmediateTx::new(&conn)?;
+    let changed = tx.execute(
+        "UPDATE qa_passes SET reviewer_agent_id = NULL, state = 'pending'
+         WHERE qa_task_id = ?1 AND state = 'claimed'",
+        params![qa_task_id],
+    )?;
+    tx.commit()?;
+    Ok(changed > 0)
+}
+
 /// Guard used by task start/claim of a QA work item: the implementer of the
 /// delivery under review may never take it.
 pub fn assert_may_review_qa_task(
@@ -686,6 +702,31 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(active.len(), 1);
         assert_eq!(active[0].id, second.id);
+    }
+
+    #[test]
+    fn reset_qa_task_releases_claim_for_a_replacement_reviewer_cas_1aef3() {
+        let dir = TempDir::new().unwrap();
+        let now = Utc::now();
+        let opened = dispatched(open_qa_pass(dir.path(), &new("aaaa1111", now), now).unwrap());
+        set_qa_task(dir.path(), &opened.id, "cas-qa1").unwrap();
+        claim_qa_pass(dir.path(), "cas-ui1", "dead-reviewer", now).unwrap();
+
+        let second = claim_qa_pass(dir.path(), "cas-ui1", "replacement", now).unwrap_err();
+        assert!(second.to_string().contains("already claimed"), "{second}");
+
+        let released = release_qa_claim_for_task(dir.path(), "cas-qa1").unwrap();
+        assert!(released, "reset releases the QA work item's active claim");
+        let pending = latest_qa_pass(dir.path(), "cas-ui1", now).unwrap().unwrap();
+        assert_eq!(pending.id, opened.id, "reset keeps the same round");
+        assert_eq!(pending.state, QaPassState::Pending);
+        assert!(pending.reviewer_agent_id.is_none());
+        assert_eq!(pending.deadline_at, opened.deadline_at);
+
+        let reclaimed = claim_qa_pass(dir.path(), "cas-ui1", "replacement", now).unwrap();
+        assert_eq!(reclaimed.id, opened.id);
+        assert_eq!(reclaimed.state, QaPassState::Claimed);
+        assert_eq!(reclaimed.reviewer_agent_id.as_deref(), Some("replacement"));
     }
 
     #[test]

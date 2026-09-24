@@ -121,6 +121,7 @@ fn test_sqlite_spec_store_list_approved() {
         status: SpecStatus::Draft,
         ..Default::default()
     };
+    store.add(&draft).expect("Failed to add draft");
     let approved = Spec {
         id: store.generate_id().unwrap(),
         title: "Approved Spec".to_string(),
@@ -129,6 +130,7 @@ fn test_sqlite_spec_store_list_approved() {
         approved_by: Some("reviewer-001".to_string()),
         ..Default::default()
     };
+    store.add(&approved).expect("Failed to add approved");
     let rejected = Spec {
         id: store.generate_id().unwrap(),
         title: "Rejected Spec".to_string(),
@@ -136,8 +138,6 @@ fn test_sqlite_spec_store_list_approved() {
         ..Default::default()
     };
 
-    store.add(&draft).expect("Failed to add draft");
-    store.add(&approved).expect("Failed to add approved");
     store.add(&rejected).expect("Failed to add rejected");
 
     // List approved only
@@ -168,12 +168,14 @@ fn test_sqlite_spec_store_get_for_task() {
         task_id: Some("cas-1234".to_string()),
         ..Default::default()
     };
+    store.add(&spec1).unwrap();
     let spec2 = Spec {
         id: store.generate_id().unwrap(),
         title: "Epic Spec 2".to_string(),
         task_id: Some("cas-1234".to_string()),
         ..Default::default()
     };
+    store.add(&spec2).unwrap();
     let spec3 = Spec {
         id: store.generate_id().unwrap(),
         title: "Unrelated Spec".to_string(),
@@ -181,8 +183,6 @@ fn test_sqlite_spec_store_get_for_task() {
         ..Default::default()
     };
 
-    store.add(&spec1).unwrap();
-    store.add(&spec2).unwrap();
     store.add(&spec3).unwrap();
 
     // Get specs for task cas-1234
@@ -218,8 +218,6 @@ fn test_sqlite_spec_store_version_chain() {
 
     // Create version chain: v1 -> v2 -> v3
     let id1 = store.generate_id().unwrap();
-    let id2 = store.generate_id().unwrap();
-    let id3 = store.generate_id().unwrap();
 
     let spec_v1 = Spec {
         id: id1.clone(),
@@ -229,6 +227,8 @@ fn test_sqlite_spec_store_version_chain() {
         status: SpecStatus::Superseded,
         ..Default::default()
     };
+    store.add(&spec_v1).unwrap();
+    let id2 = store.generate_id().unwrap();
     let spec_v2 = Spec {
         id: id2.clone(),
         title: "API Design v2".to_string(),
@@ -237,6 +237,8 @@ fn test_sqlite_spec_store_version_chain() {
         status: SpecStatus::Superseded,
         ..Default::default()
     };
+    store.add(&spec_v2).unwrap();
+    let id3 = store.generate_id().unwrap();
     let spec_v3 = Spec {
         id: id3.clone(),
         title: "API Design v3".to_string(),
@@ -246,8 +248,6 @@ fn test_sqlite_spec_store_version_chain() {
         ..Default::default()
     };
 
-    store.add(&spec_v1).unwrap();
-    store.add(&spec_v2).unwrap();
     store.add(&spec_v3).unwrap();
 
     // Get versions from any point in chain
@@ -287,6 +287,7 @@ fn test_sqlite_spec_store_search() {
         design_notes: "Use JSON:API format".to_string(),
         ..Default::default()
     };
+    store.add(&spec1).unwrap();
     let spec2 = Spec {
         id: store.generate_id().unwrap(),
         title: "Database Migration Plan".to_string(),
@@ -294,6 +295,7 @@ fn test_sqlite_spec_store_search() {
         tags: vec!["database".to_string(), "migration".to_string()],
         ..Default::default()
     };
+    store.add(&spec2).unwrap();
     let spec3 = Spec {
         id: store.generate_id().unwrap(),
         title: "Mobile App Architecture".to_string(),
@@ -302,8 +304,6 @@ fn test_sqlite_spec_store_search() {
         ..Default::default()
     };
 
-    store.add(&spec1).unwrap();
-    store.add(&spec2).unwrap();
     store.add(&spec3).unwrap();
 
     // Search by title

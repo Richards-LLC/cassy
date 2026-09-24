@@ -703,6 +703,7 @@ mod tests {
             tags: vec!["files".to_string(), "search".to_string()],
             ..Default::default()
         };
+        store.add(&skill1).unwrap();
         let skill2 = Skill {
             id: store.generate_id().unwrap(),
             name: "Git Status".to_string(),
@@ -710,7 +711,6 @@ mod tests {
             tags: vec!["git".to_string()],
             ..Default::default()
         };
-        store.add(&skill1).unwrap();
         store.add(&skill2).unwrap();
 
         // Search by name

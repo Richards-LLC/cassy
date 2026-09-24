@@ -247,7 +247,7 @@ pub use surfaced_artifact_store::{
 pub use prompt_queue_store::{
     ConfirmationSource, DeliveryStage, EnqueueIdempotentResult, EnqueueOutcome,
     MessageDeliveryReport, MessageStatus, ObservationStatus, PROMPT_QUEUE_STALE_TTL_SECS,
-    PROMPT_RETRY_MAX_AGE_SECS, PendingReason, PromptQueueStore, PromptRetryDisposition,
+    PROMPT_RETRY_MAX_AGE_SECS, PendingReason, RELAY_OPERATOR_ESCALATION_DEDUPE_PREFIX, PromptQueueStore, PromptRetryDisposition,
     OperatorStamp, QueueOrigin, QueuedPrompt, RetriedPrompt, SqlitePromptQueueStore, SurfacingSource,
     UndeliveredLifecycleRelay, WORKER_PEER_MESSAGE_BURST_LIMIT, WakeAttempt,
     WorkerPeerMessageEnqueue, reply_confirms_delivered_message,

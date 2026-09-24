@@ -1055,6 +1055,17 @@ fn resolve_merge_target_for_task(
     (epic_id, epic_branch, false)
 }
 
+/// cas-6db4: a merge target that is the repository's protected default branch
+/// (`main` or `master`, with or without an `origin/` prefix). Factory repos
+/// protect it: it accepts only pull requests through the merge queue, so the
+/// MERGE REQUIRED relay must not tell the supervisor to merge and push it.
+fn target_is_protected_default(target: &str) -> bool {
+    matches!(
+        target.trim().trim_start_matches("origin/"),
+        "main" | "master"
+    )
+}
+
 /// Actionable merge-queue prompt for MERGE REQUIRED / AwaitingMerge idle
 /// signals (cas-c145). Carries task, source factory branch, merge target,
 /// and next action. Explicitly push-based (no polling loop).
@@ -1131,6 +1142,29 @@ fn merge_required_idle_prompt_text(
         }
         None => String::new(),
     };
+    // cas-6db4: a protected default branch only takes pull requests through
+    // the merge queue; merging into it locally and pushing is refused. The
+    // worker's push hook already lets a push_branch delivery publish its
+    // factory branch, so the relay names the PR path instead.
+    if target_is_protected_default(target) {
+        return format!(
+            "⚠️ MERGE REQUIRED — supervisor action needed (not a task completion).\n\
+             Worker {worker} is idle while task {} ({}) is {} (close rejected: {rejection}).\n\
+             {evidence_line}\
+             Source branch: {factory_branch}\n\
+             Merge target: {target} (protected: pull requests through the merge queue only)\n\
+             Next action — drain the merge queue before free-form user chat:\n\
+             1. Confirm: {epic_status} and/or {list_awaiting}, and that {factory_branch} is on origin\n\
+             2. Open a pull request: `gh pr create --base {target} --head {factory_branch} --fill`, \
+             then queue it with `gh pr merge <number> --auto`. Do not merge into or push {target} locally.\n\
+             3. When the merge queue lands it, tell {worker} to re-close with {reclose} (or use the \
+             supervisor escape-hatch close with commit_receipt=<merged sha> if the worker is unresponsive)\n\
+             4. Then clear context / hand the worker their next task if more work is ready\n\
+             Live task state: {show}\n\
+             This is a push-based WorkerIdle close-rejected signal — do not poll or sleep.",
+            task.task_id, task.task_title, task.task_status
+        );
+    }
     let merge_step = if evidence.is_some_and(|e| e.push_required) {
         format!(
             "2. Push required: the local {target} already contains {factory_branch}, \
@@ -3142,6 +3176,60 @@ mod tests {
              alert header (cas-6883): {}",
             prompt.text
         );
+    }
+
+    /// cas-6db4: a delivery whose declared target is protected main gets the
+    /// pull-request + merge-queue path, never "merge and push main locally".
+    /// An epic target keeps the local merge steps.
+    #[test]
+    fn merge_required_for_protected_main_names_the_pr_path_cas_6db4() {
+        let task = ActiveLeaseSummary {
+            task_id: "cas-8d38".to_string(),
+            task_title: "Ship to main".to_string(),
+            task_status: TaskStatus::AwaitingMerge,
+            close_rejected_reason: Some("MERGE REQUIRED".to_string()),
+        };
+        let summary = |branch: &str| TaskSummary {
+            id: "cas-8d38".to_string(),
+            title: "Ship to main".to_string(),
+            status: TaskStatus::AwaitingMerge,
+            priority: Priority::MEDIUM,
+            assignee: Some("wise-badger-5".to_string()),
+            task_type: TaskType::Task,
+            epic: None,
+            branch: Some(branch.to_string()),
+            updated_at: None,
+            epic_verification_owner: None,
+        };
+        let mut data = make_data(0);
+        data.in_progress_tasks = vec![summary("main")];
+        let text = merge_required_idle_prompt_text("wise-badger-5", &task, &data, "", "", None);
+        assert!(
+            text.contains("protected: pull requests through the merge queue only"),
+            "{text}"
+        );
+        assert!(
+            text.contains("gh pr create --base main --head factory/wise-badger-5"),
+            "{text}"
+        );
+        assert!(text.contains("gh pr merge <number> --auto"), "{text}");
+        assert!(
+            !text.contains("git merge --no-ff") && !text.contains("Push main if remote"),
+            "no local merge or push of protected main: {text}"
+        );
+
+        data.in_progress_tasks = vec![summary("epic/some-epic-cas-1234")];
+        let epic = merge_required_idle_prompt_text("wise-badger-5", &task, &data, "", "", None);
+        assert!(
+            epic.contains("git merge --no-ff factory/wise-badger-5"),
+            "{epic}"
+        );
+        assert!(!epic.contains("gh pr create"), "{epic}");
+
+        assert!(target_is_protected_default("origin/main"));
+        assert!(target_is_protected_default("master"));
+        assert!(!target_is_protected_default("staging"));
+        assert!(!target_is_protected_default("epic/main-cleanup-cas-1"));
     }
 
     /// cas-c145: AwaitingMerge idle must be an actionable merge-queue event

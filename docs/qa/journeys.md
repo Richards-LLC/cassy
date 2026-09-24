@@ -133,7 +133,7 @@ Suite: `hub-web/e2e/journeys/`. Run it with `npm run journeys` in
 
 - **Entry:** an open conversation with a live supervisor
 - **Goal:** my message reaches the supervisor and I see its answer
-- **Touches:** `hub-web/src/composer-markup.ts`, `hub-web/src/supervisor-message.ts`, `hub-web/src/conversation-view.ts`, `hub-web/src/live-regions.ts`, `hub-web/src/operator-thread.ts`, `hub-web/src/thread-model.ts`
+- **Touches:** `hub-web/src/composer-markup.ts`, `hub-web/src/supervisor-message.ts`, `hub-web/src/conversation-view.ts`, `hub-web/src/live-regions.ts`, `hub-web/src/operator-thread.ts`, `hub-web/src/thread-model.ts`, `hub-web/src/conversation-history.ts`, `hub-web/src/refusal.ts`
 - **Suite:** `hub-web/e2e/journeys/reply-typed.journey.ts`
 - **Gaps:** delivery by a running daemon and operator stamping are doubled
 
@@ -141,14 +141,18 @@ Suite: `hub-web/e2e/journeys/`. Run it with `npm run journeys` in
 
 1. Open the conversation — the composer names the supervisor
 2. Write and send — the message appears at once as "Sending…" and the composer clears
-3. See it delivered and answered — the supervisor's reply arrives under it
-4. A refused message can be edited and resent — "Not sent" with the reason, then Edit and send again
+3. See it delivered — the hub's receipt turns "Sending…" into "Delivered" with a check
+4. See it answered — the supervisor's reply arrives under it and "Delivered" steps aside
+5. A refused message says why — "Not sent", a plain reason and the next step; the list does not preview it as said
+6. Edit and resend retires the refused message — it collapses to "Not sent · replaced by your edit" with no Retry
 
 **Expected experience**
 
 - Enter sends and Shift+Enter adds a new line.
 - The user can tell sent from delivered without reading attributes.
-- A refusal says why and offers Edit and Retry right on the message.
+- The composer status is in plain words, never protocol vocabulary.
+- A refusal says why in plain words, names the next step, and offers Edit and Retry right on the message.
+- Once its edit is sent, a refused message cannot be retried.
 
 **Edge paths**
 

@@ -103,7 +103,15 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(source).toContain("installAttentionObjects();");
     expect(source).toContain("respond: (ask, text) => { void submitSupervisorMessage({ text, replyTo: ask.notification_id }); },");
     expect(source).toContain("const replyTo = quick ? quick.replyTo : (selectedThread ? conversationHistory(selectedThread).pinnedAsk()?.notification_id : undefined);");
-    expect(source).toContain("deliverSupervisorMessage(machine, session, supervisor, text, replyTo, quick?.retryOf);");
+    expect(source).toContain("deliverSupervisorMessage(machine, session, supervisor, text, replyTo, quick?.retryOf, editOf);");
+    // An edited resend of a refused message retires the original (F6): no Retry left to resend corrected text.
+    expect(source).toContain("if (editOf) { history.retireRefused(editOf); editingRefused = undefined; }");
+    expect(source).toContain("const editOf = !quick && editingRefused?.threadKey === selectedThread");
+    // The composer speaks plain words, never protocol vocabulary (F5).
+    expect(source).not.toContain("awaiting receipt");
+    expect(source).toContain("showComposerStatus(refusalSentence(detail), \"error\");");
+    // The list preview never shows unsent text as said (F6).
+    expect(source).toContain("preview: conversationHistories.get(key)?.preview(),");
     // Retry of a refused send (cas-b1ee): same leased path, the refused send's own in_reply_to.
     expect(source).toContain("retryMessage: (send) => { void submitSupervisorMessage({ text: send.text, replyTo: send.replyTo, retryOf: send.id }); },");
     expect(source).toContain("if (retryOf) history.discardRefused(retryOf);");

@@ -5,6 +5,7 @@ import "./styles.css";
 import { ConversationList, type ConversationRow } from "./conversation-list";
 import { ConversationHistory } from "./conversation-history";
 import { ConversationView } from "./conversation-view";
+import { refusalSentence } from "./refusal";
 import { installAttentionObjects } from "./attention-objects";
 import { installAttachmentSheet } from "./attachment-sheet";
 import { arrangeConversationShell, bindKeyboardViewport, conversationEmptyText } from "./conversation-shell";
@@ -211,6 +212,9 @@ let speechController: SpeechDictationController | undefined;
 let speechInputState: SpeechInputState = "idle";
 let speechInputDetail = "";
 let messageDelivery: { session: string; target: string; clientRef: string } | undefined;
+/** The refused send whose text Edit put back in the composer (F6): the next
+ * composer send in that thread is its edited version and retires it. */
+let editingRefused: { threadKey: string; id: string } | undefined;
 const operatorReplies = new Map<string, OperatorReply[]>();
 // Why a send did not happen has to survive the render that follows it, and has
 // to sit beside the composer: a toast is gone before a phone operator has
@@ -289,11 +293,12 @@ function applyPaneView(key: string, mount: HTMLElement, surface: TerminalSurface
         // The supervisor is executing while a send awaits its reply or the
         // pane produced output in the last half minute.
         working: () => history.hasPending() || [...paneLastActivity].some(([paneId, at]) => paneId.startsWith(`${threadKey}:`) && Date.now() - at < WORKING_WINDOW_MS),
-        editMessage: (text) => {
+        editMessage: (text, send) => {
           const composer = document.querySelector<HTMLTextAreaElement>("#message-text");
           if (!composer || composer.dataset.threadKey !== threadKey) return;
           if (composer.value.trim()) { showComposerStatus("Your draft already has text. Clear it before editing the refused message.", "info"); composer.focus(); return; }
           composer.value = text; composer.dispatchEvent(new Event("input")); composer.focus();
+          editingRefused = { threadKey, id: send.id };
         },
         // A quick-reply chip answers the ask through the same leased path as
         // the composer, with in_reply_to = the ask's notification id.
@@ -646,7 +651,7 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
         messageDelivery = undefined;
         document.querySelector<HTMLElement>("#message-delivery")?.setAttribute("hidden", "");
         if (selectedMachineId === machine.id && selectedSession === session) {
-          showComposerStatus(`Message rejected by the hub: ${detail}`, "error");
+          showComposerStatus(refusalSentence(detail), "error");
         }
       }
       updateConversationViews(); renderConversationList();
@@ -1838,6 +1843,8 @@ function bindSpeechComposer(): void {
   if (!composer || !keyboard || !mic) return;
   composer.oninput = () => {
     messageDraft = composer.value;
+    // Clearing the composer abandons the edit: the next send is a new message.
+    if (!composer.value.trim()) editingRefused = undefined;
     messageDraftSelection = composer.selectionStart ?? composer.value.length;
     messageDelivery = undefined;
     const delivery = document.querySelector<HTMLElement>("#message-delivery");
@@ -1939,7 +1946,7 @@ async function takeControlForMessage(machine: StoredMachine, session: string): P
   return leases.get(sessionKey(machine.id, session))?.held_by_me === true;
 }
 
-function deliverSupervisorMessage(machine: StoredMachine, session: string, supervisor: string, text: string, replyTo?: number, retryOf?: string): void {
+function deliverSupervisorMessage(machine: StoredMachine, session: string, supervisor: string, text: string, replyTo?: number, retryOf?: string, editOf?: string): void {
   const clientRef = crypto.randomUUID();
   const sent = sendControl(machine.id, session, supervisorMessage(supervisor, text, clientRef, replyTo));
   // Without an outcome the operator cannot tell a sent message from a lost
@@ -1950,6 +1957,9 @@ function deliverSupervisorMessage(machine: StoredMachine, session: string, super
   }
   const history = conversationHistory(sessionKey(machine.id, session));
   if (retryOf) history.discardRefused(retryOf);
+  // The edited version is on the wire: the refused original stays as a record
+  // but can no longer be retried.
+  if (editOf) { history.retireRefused(editOf); editingRefused = undefined; }
   history.submit(clientRef, supervisor, text, Date.now(), replyTo, session);
   updateConversationViews(); renderConversationList();
   const storedDraft = conversationDrafts.get(sessionKey(machine.id, session));
@@ -1965,7 +1975,7 @@ function deliverSupervisorMessage(machine: StoredMachine, session: string, super
   const delivery = document.querySelector<HTMLElement>("#message-delivery");
   if (delivery) {
     delivery.hidden = false;
-    delivery.textContent = `Sending to ${supervisor} · awaiting receipt`;
+    delivery.textContent = `Sending to ${supervisor}…`;
   }
   if (hubPresentation === "terminal") toast(`Sending to ${supervisor}`);
   // A phone operator usually has a second sentence; keep the caret where they
@@ -1991,6 +2001,9 @@ async function submitSupervisorMessage(quick?: { text: string; replyTo?: number;
   }
   const text = quick?.text ?? composer.value.trim();
   const replyTo = quick ? quick.replyTo : (selectedThread ? conversationHistory(selectedThread).pinnedAsk()?.notification_id : undefined);
+  // A composer send in the thread whose refused message Edit reopened is that
+  // message's edited version; a chip or a Retry is not.
+  const editOf = !quick && editingRefused?.threadKey === selectedThread ? editingRefused?.id : undefined;
   const plan = planSupervisorSend(supervisorSendContext(text));
   if (plan.kind === "blocked") {
     showComposerStatus(plan.reason, "error");
@@ -2012,7 +2025,7 @@ async function submitSupervisorMessage(quick?: { text: string; replyTo?: number;
       return;
     }
   }
-  deliverSupervisorMessage(machine, session, supervisor, text, replyTo, quick?.retryOf);
+  deliverSupervisorMessage(machine, session, supervisor, text, replyTo, quick?.retryOf, editOf);
   } finally {
     pendingSubmissions.delete(submissionKey);
   }
@@ -2131,7 +2144,7 @@ function render(captureDraft = true): void {
     ...(controlReason ? { controlReason } : {}),
     ...(sendReason ? { sendReason } : {}),
     ...(composerStatus ? { messageStatus: { text: composerStatus.text, error: composerStatus.tone === "error" } } : {}),
-    ...(delivery ? { delivery: `Sending to ${delivery.target} · awaiting receipt` } : {}),
+    ...(delivery ? { delivery: `Sending to ${delivery.target}…` } : {}),
     pairing: {
       ...(pairingStatus ? { status: pairingStatus } : {}),
       exchangeInFlight: pairingExchangeInFlight,
@@ -2415,12 +2428,11 @@ function renderConversationList(): void {
     // Preview is the last turn this page has seen; unread counts supervisor
     // turns that arrived while the thread was not open. Opening it reads them.
     const events = conversationHistories.get(key)?.events ?? [];
-    const last = events.at(-1);
     const replies = events.filter((event) => event.kind === "reply").length;
     if (selected) readReplies.set(key, replies);
     // Waiting (ochre dot, hot time) is driven by asks and blockers the operator has not answered.
     const waiting = conversationHistories.get(key)?.waiting().length ?? 0;
-    return { key, machineId: machine.id, session: session.name, supervisor: session.supervisor, projectDir: session.project_dir, host: machine.label, freshness: updated ? `Catalog checked ${relativeTimestamp(Date.parse(updated))}` : "Catalog not yet checked", when: updated ? relativeTimestamp(Date.parse(updated)) : undefined, preview: last ? (last.kind === "send" ? `You: ${last.value.text}` : last.value.message) : undefined, unreachable: Boolean(session.unreachable), connection: session.unreachable ? "Unreachable · message pending" : session.dormant ? "Dormant" : session.liveness === "live" ? fleetConnectionLabel(connectionStates.get(machine.id)) : "Session unavailable", attention: waiting, unread: Math.max(0, replies - (readReplies.get(key) ?? 0)), selected };
+    return { key, machineId: machine.id, session: session.name, supervisor: session.supervisor, projectDir: session.project_dir, host: machine.label, freshness: updated ? `Catalog checked ${relativeTimestamp(Date.parse(updated))}` : "Catalog not yet checked", when: updated ? relativeTimestamp(Date.parse(updated)) : undefined, preview: conversationHistories.get(key)?.preview(), unreachable: Boolean(session.unreachable), connection: session.unreachable ? "Unreachable · message pending" : session.dormant ? "Dormant" : session.liveness === "live" ? fleetConnectionLabel(connectionStates.get(machine.id)) : "Session unavailable", attention: waiting, unread: Math.max(0, replies - (readReplies.get(key) ?? 0)), selected };
   }));
   conversationRows = rows;
   conversationList.render(container, rows, (row) => { void openSession(row.machineId, row.session); });

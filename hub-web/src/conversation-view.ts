@@ -1,5 +1,6 @@
 import { machineMonogram } from "./machine-accent";
 import { renderMarkdown } from "./markdown-renderer";
+import { refusal } from "./refusal";
 import { shouldFollowTail } from "./transcript";
 import type { ConversationEvent, ConversationHistory, ConversationSend } from "./conversation-history";
 import type { ArtifactRef, OperatorReply, OperatorTurnKind } from "./types";
@@ -93,8 +94,11 @@ export interface ConversationViewOptions {
    * nothing-waiting line when the thread has no turns to show (Pebble 4).
    */
   echo?: () => string | undefined;
-  /** Refused sends offer to put their text back into the composer. */
-  editMessage?: (text: string) => void;
+  /**
+   * Refused sends offer to put their text back into the composer. The send is
+   * passed too, so the caller can retire it once the edited version goes out.
+   */
+  editMessage?: (text: string, send: ConversationSend) => void;
   /** Refused sends offer to go out again unchanged (same text, same in_reply_to). */
   retryMessage?: (send: ConversationSend) => void;
   /**
@@ -270,7 +274,8 @@ export class ConversationView {
     const waiting = reply?.kind === "blocker" ? this.history.waiting().some((item) => item.notification_id === reply.notification_id) : undefined;
     // The pinned ask's flow copy is collapsed; it expands again when a newer ask takes the pin.
     const pinned = reply?.kind === "ask" ? this.history.pinnedAsk()?.notification_id === reply.notification_id : undefined;
-    return JSON.stringify([turn.event, answered && [answered.id, answered.state, answered.text], waiting, pinned]);
+    const delivered = turn.event.kind === "send" ? this.history.delivered() === turn.event.value : undefined;
+    return JSON.stringify([turn.event, answered && [answered.id, answered.state, answered.text], waiting, pinned, delivered]);
   }
 
   /**
@@ -412,24 +417,50 @@ export class ConversationView {
       state.className = "conversation-delivery"; state.setAttribute("role", "status");
       state.textContent = "Sending…";
       bubble.append(state);
+    } else if (send.state === "acknowledged" && this.history.delivered() === send) {
+      // F5: the hub's receipt is the difference between a delivered message
+      // and a lost one, so the latest delivered send says so until the reply
+      // lands (then the answer itself is the evidence).
+      const state = document.createElement("span");
+      state.className = "conversation-delivery conversation-delivered"; state.setAttribute("role", "status");
+      const tick = document.createElement("template"); tick.innerHTML = TICK;
+      const label = document.createElement("span"); label.textContent = "Delivered";
+      state.append(tick.content.firstElementChild!, label);
+      bubble.append(state);
+    } else if (send.state === "error" && send.replaced) {
+      // F6: the edited version went out, so this one is only a record. It
+      // collapses and offers no Retry — one tap would resend the text the
+      // operator just corrected.
+      bubble.dataset.replaced = "true";
+      const state = document.createElement("span");
+      state.className = "conversation-delivery conversation-refused conversation-replaced"; state.setAttribute("role", "status");
+      const label = document.createElement("b"); label.textContent = "Not sent";
+      const separator = document.createElement("span"); separator.textContent = " · ";
+      const reason = document.createElement("span"); reason.className = "conversation-refused-reason"; reason.textContent = "replaced by your edit";
+      state.append(label, separator, reason);
+      bubble.append(state);
     } else if (send.state === "error") {
       // P8 (cas-b1ee): a refused send must not read as delivered. The bubble
       // drops its fill for a dashed critical outline; the label leads with a
-      // warning glyph and "Not sent", the refusal reason follows quietly.
+      // warning glyph and "Not sent", then the refusal in plain words (F6):
+      // why it did not go and the step that gets it through.
       const state = document.createElement("span");
       state.className = "conversation-delivery conversation-refused"; state.setAttribute("role", "status");
       const glyph = document.createElement("template"); glyph.innerHTML = WARN;
       const label = document.createElement("b"); label.textContent = "Not sent";
       // The separator is for the reader; on screen the reason takes its own line.
       const separator = document.createElement("span"); separator.className = "sr-only"; separator.textContent = " · ";
-      const reason = document.createElement("span"); reason.className = "conversation-refused-reason"; reason.textContent = send.error ?? "refused";
+      const plain = refusal(send.error);
+      const reason = document.createElement("span"); reason.className = "conversation-refused-reason"; reason.textContent = plain.reason;
+      const next = document.createElement("span"); next.className = "conversation-refused-next"; next.textContent = ` ${plain.next}`;
+      reason.append(next);
       state.append(glyph.content.firstElementChild!, label, separator, reason);
       bubble.append(state);
       const actions = document.createElement("div"); actions.className = "conversation-actions";
       if (this.options.editMessage) {
         const edit = document.createElement("button"); edit.type = "button"; edit.className = "conversation-edit"; edit.textContent = "Edit";
         edit.setAttribute("aria-label", "Edit message");
-        edit.onclick = () => this.options.editMessage?.(send.text);
+        edit.onclick = () => this.options.editMessage?.(send.text, send);
         actions.append(edit);
       }
       if (this.options.retryMessage) {

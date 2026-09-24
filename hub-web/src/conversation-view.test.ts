@@ -194,28 +194,30 @@ describe("ConversationView (Pebble thread)", () => {
     const view = new ConversationView(document, history, { supervisor: "sup", editMessage: edit }); document.body.replaceChildren(view.element);
     history.submit("x", "sup", "Ship it", at(9, 0)); view.update();
     expect(view.element.querySelector('.conversation-turn[data-state="sending"] .conversation-delivery')?.textContent).toBe("Sending…");
-    history.reject("x", "no access"); view.update();
+    history.reject("x", "forbidden"); view.update();
     const refused = view.element.querySelector<HTMLElement>('.conversation-turn[data-state="error"]')!;
-    expect(refused.querySelector(".conversation-delivery")?.textContent).toBe("Not sent · no access");
-    refused.querySelector("button")!.click(); expect(edit).toHaveBeenCalledWith("Ship it");
+    expect(refused.querySelector(".conversation-delivery")?.textContent).toBe("Not sent · This device isn't the one in control of the session. Take control from the header, then retry.");
+    refused.querySelector("button")!.click(); expect(edit).toHaveBeenCalledWith("Ship it", expect.objectContaining({ id: "x" }));
   });
   it("marks a refused send as not sent: warning glyph, a Not sent lead, the reason, then Edit and Retry (P8, cas-b1ee)", () => {
     const history = new ConversationHistory();
     const edit = vi.fn(); const retry = vi.fn();
     const view = new ConversationView(document, history, { supervisor: "sup", editMessage: edit, retryMessage: retry }); document.body.replaceChildren(view.element);
-    history.submit("x", "sup", "Ship it", at(9, 0), 52); history.reject("x", "no access"); view.update();
+    history.submit("x", "sup", "Ship it", at(9, 0), 52); history.reject("x", "forbidden"); view.update();
     const refused = view.element.querySelector<HTMLElement>('.turn.you .bub[data-state="error"]')!;
     const label = refused.querySelector<HTMLElement>(".conversation-refused")!;
     expect(label.getAttribute("role")).toBe("status");
     expect(label.querySelector("svg.warn")?.getAttribute("aria-hidden")).toBe("true");
     expect(label.querySelector("b")?.textContent).toBe("Not sent");
-    expect(label.querySelector(".conversation-refused-reason")?.textContent).toBe("no access");
-    expect(label.textContent).toBe("Not sent · no access");
+    // F6: the hub's code becomes a plain reason and the step that gets it through.
+    expect(label.querySelector(".conversation-refused-reason")?.firstChild?.textContent).toBe("This device isn't the one in control of the session.");
+    expect(label.querySelector(".conversation-refused-next")?.textContent).toBe(" Take control from the header, then retry.");
+    expect(label.textContent).not.toContain("forbidden");
     const buttons = [...refused.querySelectorAll<HTMLButtonElement>(".conversation-actions button")];
     expect(buttons.map((button) => [button.className, button.textContent, button.getAttribute("aria-label")])).toEqual([
       ["conversation-edit", "Edit", "Edit message"], ["conversation-retry", "Retry", "Retry sending"],
     ]);
-    buttons[0]!.click(); expect(edit).toHaveBeenCalledWith("Ship it");
+    buttons[0]!.click(); expect(edit).toHaveBeenCalledWith("Ship it", expect.objectContaining({ id: "x" }));
     buttons[1]!.click(); expect(retry).toHaveBeenCalledWith(expect.objectContaining({ id: "x", text: "Ship it", replyTo: 52, state: "error" }));
     // Without the callbacks a refused send still says Not sent, with no dead buttons.
     const bare = new ConversationView(document, history, "sup"); bare.update();
@@ -226,6 +228,53 @@ describe("ConversationView (Pebble thread)", () => {
     const sending = view.element.querySelector<HTMLElement>('.bub[data-state="sending"]')!;
     expect(sending.querySelector(".conversation-delivery")?.textContent).toBe("Sending…");
     expect(sending.querySelector(".conversation-refused, .conversation-actions")).toBeNull();
+  });
+  it("says Delivered on the latest delivered send until the reply lands (F5)", () => {
+    const history = new ConversationHistory();
+    const view = new ConversationView(document, history, { supervisor: "sup" }); document.body.replaceChildren(view.element);
+    history.submit("a", "sup", "First", at(9, 0)); view.update();
+    expect(view.element.querySelector(".conversation-delivered")).toBeNull();
+    history.acknowledge({ client_ref: "a", notification_id: 10, target: "sup", stamped: true }); view.update();
+    const delivered = view.element.querySelector<HTMLElement>('.bub[data-state="acknowledged"] .conversation-delivered')!;
+    expect(delivered.textContent).toBe("Delivered");
+    expect(delivered.getAttribute("role")).toBe("status");
+    expect(delivered.querySelector("svg.tick")?.getAttribute("aria-hidden")).toBe("true");
+    // A second send still in flight leaves the first as the latest delivered one.
+    history.submit("b", "sup", "Second", at(9, 1)); view.update();
+    expect(view.element.querySelectorAll(".conversation-delivered")).toHaveLength(1);
+    expect(view.element.querySelector('.bub[data-state="sending"] .conversation-delivery')?.textContent).toBe("Sending…");
+    // Once it is delivered too, only the latest says so.
+    history.acknowledge({ client_ref: "b", notification_id: 11, target: "sup", stamped: true }); view.update();
+    expect([...view.element.querySelectorAll(".conversation-delivered")].map((node) => node.closest(".bub")?.textContent)).toEqual(["SecondDelivered"]);
+    // Any supervisor turn after it is the evidence now; Delivered steps aside.
+    history.reply({ notification_id: 12, reply_to: null, message: "On it.", summary: "", device_id: "d" }, at(9, 2)); view.update();
+    expect(view.element.querySelector(".conversation-delivered")).toBeNull();
+    expect(history.delivered()).toBeUndefined();
+  });
+  it("retires a refused send once its edited version is sent: collapsed, no Retry (F6)", () => {
+    const history = new ConversationHistory();
+    const view = new ConversationView(document, history, { supervisor: "sup", editMessage: vi.fn(), retryMessage: vi.fn() }); document.body.replaceChildren(view.element);
+    history.submit("bad", "sup", "Ship it without the gate.", at(9, 0)); history.reject("bad", "forbidden"); view.update();
+    expect(history.preview()).toBe("Not sent: Ship it without the gate.");
+    expect(history.retireRefused("missing")).toBe(false);
+    expect(history.retireRefused("bad")).toBe(true);
+    history.submit("good", "sup", "Ship it after the gate passes.", at(9, 1)); view.update();
+    const retired = view.element.querySelector<HTMLElement>('.bub[data-state="error"]')!;
+    expect(retired.dataset.replaced).toBe("true");
+    expect(retired.querySelector(".conversation-replaced")?.textContent).toBe("Not sent · replaced by your edit");
+    expect(retired.querySelector(".conversation-actions, .conversation-retry, .conversation-edit")).toBeNull();
+    expect(history.preview()).toBe("You: Ship it after the gate passes.");
+    // Only a refused send can be retired.
+    expect(history.retireRefused("good")).toBe(false);
+  });
+  it("never previews unsent text as said, and skips a retired refusal (F6)", () => {
+    const history = new ConversationHistory();
+    expect(history.preview()).toBeUndefined();
+    history.reply({ notification_id: 1, reply_to: null, message: "Ready.", summary: "", device_id: "d" }, at(9, 0));
+    history.submit("bad", "sup", "Wrong", at(9, 1)); history.reject("bad", "forbidden");
+    expect(history.preview()).toBe("Not sent: Wrong");
+    history.retireRefused("bad");
+    expect(history.preview()).toBe("Ready.");
   });
   it("discards only a refused send when a retry replaces it", () => {
     const history = new ConversationHistory();

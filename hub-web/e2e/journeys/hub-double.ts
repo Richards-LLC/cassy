@@ -138,6 +138,24 @@ export class HubDouble {
     return { queued, reply };
   }
 
+  /** Acknowledge the latest send (MessageQueued) without answering it yet. */
+  deliverLatest(session: string): number {
+    const sent = this.sends.at(-1);
+    if (!sent) throw new Error("hub double: nothing was sent");
+    const queued = this.nextId++;
+    this.send(session, { MessageQueued: { client_ref: sent.client_ref, notification_id: queued, target: sent.target, stamped: true } });
+    this.remember(session).messages.push({ notification_id: queued, target: sent.target, text: sent.text, state: "acknowledged", stamped: true, device_id: "journey-device", at: new Date().toISOString() });
+    return queued;
+  }
+
+  /** Answer an already-acknowledged send as the supervisor. */
+  answerQueued(session: string, queued: number, message: string, extra: Record<string, unknown> = {}): number {
+    const reply = this.nextId++;
+    this.send(session, { OperatorReply: { notification_id: reply, reply_to: queued, message, summary: "", device_id: "journey-device", ...extra } });
+    this.remember(session).replies.push({ notification_id: reply, reply_to: queued, message, summary: "", device_id: "journey-device", attachments: [], at: new Date().toISOString(), ...extra });
+    return reply;
+  }
+
   /** A supervisor message that is not a reply to anything (status, ask, blocker). */
   supervisorSays(session: string, message: string, extra: Record<string, unknown> = {}): number {
     const id = this.nextId++;

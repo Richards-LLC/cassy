@@ -10,6 +10,9 @@ export interface ConversationSend {
   error?: string;
   /** notification_id of the supervisor ask this send answers (in_reply_to on the wire). */
   replyTo?: number;
+  /** A refused send whose edited version has since gone out: it stays in the
+   * thread as a record, but offers nothing to retry. */
+  replaced?: boolean;
 }
 /** `at` is when this client saw the event (ms epoch); it stamps the thread's
  * day separators and group timestamps and is never a delivery receipt. */
@@ -122,6 +125,46 @@ export class ConversationHistory {
     if (index < 0) return false;
     this.events.splice(index, 1);
     return true;
+  }
+  /**
+   * Retire a refused send whose edited version is now on the wire. It stays in
+   * the thread, collapsed, so the log still shows what was refused; it can no
+   * longer be retried, which would resend the text the operator just corrected.
+   */
+  retireRefused(id: string): boolean {
+    const send = this.events.find((event) => event.kind === "send" && event.value.id === id && event.value.state === "error");
+    if (!send || send.kind !== "send") return false;
+    send.value.replaced = true;
+    return true;
+  }
+  /**
+   * The operator's latest delivered send while its answer is still to come:
+   * the hub queued it (a MessageQueued receipt, or a durable history row) and
+   * no supervisor turn has landed since. Sends still in flight or refused after
+   * it do not hide it — it is still the latest message known to have arrived.
+   */
+  delivered(): ConversationSend | undefined {
+    for (let index = this.events.length - 1; index >= 0; index -= 1) {
+      const event = this.events[index]!;
+      if (event.kind === "reply") return undefined;
+      if (event.value.state === "replied") return undefined;
+      if (event.value.state === "acknowledged") return event.value;
+    }
+    return undefined;
+  }
+  /**
+   * The conversation list's one-line preview of the last turn. A refused send
+   * was never said, so it reads as not sent rather than "You: …"; a refused
+   * send an edit replaced is skipped, since its edit is what was said.
+   */
+  preview(): string | undefined {
+    for (let index = this.events.length - 1; index >= 0; index -= 1) {
+      const event = this.events[index]!;
+      if (event.kind === "reply") return event.value.message;
+      if (event.value.state !== "error") return `You: ${event.value.text}`;
+      if (!event.value.replaced) return `Not sent: ${event.value.text}`;
+    }
+    return undefined;
   }
   reply(reply: OperatorReply, at: number | undefined = Date.now(), session?: string): void {
     if (this.events.some((event) => event.kind === "reply" && event.value.notification_id === reply.notification_id)) return;

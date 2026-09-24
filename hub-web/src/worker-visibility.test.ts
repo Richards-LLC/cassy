@@ -77,8 +77,9 @@ describe("worker visibility", () => {
     expect(hiddenWorkersLabel(0)).toBe("");
     expect(hiddenWorkersLabel(1)).toBe("1 worker hidden");
     expect(hiddenWorkersLabel(4)).toBe("4 workers hidden");
-    expect(workersCommandLabel(false).title).toBe("Workers · Hidden");
-    expect(workersCommandLabel(true).title).toBe("Workers · Shown");
+    // Plain names in the palette's Advanced group (journey F8): the title says what the command does.
+    expect(workersCommandLabel(false).title).toBe("Show worker panes");
+    expect(workersCommandLabel(true).title).toBe("Hide worker panes");
   });
 });
 

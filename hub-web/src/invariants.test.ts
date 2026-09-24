@@ -69,16 +69,20 @@ describe("binding Cassy Cloud browser invariants", () => {
 
   it("asks for the machine's hub address instead of seeding the page origin (cas-8051 F5)", async () => {
     const [main, draft] = await Promise.all(["main.ts", "pairing-draft.ts"].map((path) => readSource(path)));
-    expect(draft).toContain('hubUrl: "",');
+    // Only the machine's own link may seed the address, never this page (HUB-J2).
+    expect(draft).toContain('hubUrl: prefill.suggestedHubUrl ?? "",');
+    expect(draft).not.toContain("hubUrl: controllerOrigin");
     expect(draft).toContain("pageOrigin: controllerOrigin,");
-    expect(main).toContain("<label>Machine's hub address<input name=\"url\" type=\"url\" required autofocus placeholder=");
+    expect(main).toContain("<label>Machine's hub address<input name=\"url\" type=\"url\" required${focus(\"url\")} placeholder=");
     expect(main).toContain("It is not this page's address unless this page is served by that machine.");
-    expect(main).toContain('id="pair-use-page-origin"');
-    expect(main).toContain("<dt>Machine's hub address</dt>");
-    // Consent keeps the exact origin and the exact scope list beside the summary.
-    expect(main).toContain("<dt>This browser will be able to</dt>");
-    expect(main).toContain("<dt>Exact scopes</dt>");
-    expect(main).toContain("<dt>Granted scopes</dt>");
+    expect(main).toContain('<summary>Where do I find this?</summary>');
+    expect(main).toContain('id="pair-use-page-origin" type="button" class="secondary"');
+    expect(main).toContain('detailRow("Machine\'s hub address", hubUrl)');
+    // Consent leads with the plain summary; the exact origin and scope list stay one tap away (F3).
+    expect(main).toContain('<p class="pair-lead">This browser will be able to: <strong class="pair-summary">');
+    expect(main).toContain('<summary>Technical details</summary>');
+    expect(main).toContain('detailRow("Exact scopes", exactScopes(');
+    expect(main).toContain('detailRow("Granted scopes", exactScopes(invitationScopes))');
   });
 
   it("names the remedy when an observer-only credential disables control", async () => {
@@ -86,7 +90,7 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(source).toContain("Relay pairing granted read-only scopes for ${location.origin}");
     expect(source).toContain("cas hub pair --origin ${location.origin}");
     expect(source).toContain("Pairings are specific to each Cassy Cloud origin.");
-    expect(source).toContain("<dt>Cassy Cloud origin</dt>");
+    expect(source).toContain('detailRow("Cassy Cloud origin", ');
     expect(source).toContain('class="control-action" title="${escapeAttr(takeControlReason');
     expect(source).toContain('class="control-disabled-reason"');
     // A phone cannot hover, so an unavailable control keeps its reason in the DOM
@@ -103,7 +107,16 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(source).toContain("installAttentionObjects();");
     expect(source).toContain("respond: (ask, text) => { void submitSupervisorMessage({ text, replyTo: ask.notification_id }); },");
     expect(source).toContain("const replyTo = quick ? quick.replyTo : (selectedThread ? conversationHistory(selectedThread).pinnedAsk()?.notification_id : undefined);");
-    expect(source).toContain("deliverSupervisorMessage(machine, session, supervisor, text, replyTo, quick?.retryOf);");
+    expect(source).toContain("deliverSupervisorMessage(machine, session, supervisor, text, replyTo, quick?.retryOf, editOf);");
+    // An edited resend of a refused message retires the original (F6): no Retry left to resend corrected text.
+    expect(source).toContain("if (editOf) { history.retireRefused(editOf); editingRefused = undefined; }");
+    expect(source).toContain("const editOf = !quick && editingRefused?.threadKey === selectedThread");
+    // The composer speaks plain words, never protocol vocabulary (F5).
+    expect(source).not.toContain("awaiting receipt");
+    // The reason is said once, on the refused bubble; the composer points at it (cas-4d92).
+    expect(source).toContain("showComposerStatus(onBubble ? REFUSED_SEE_ABOVE : refusalSentence(detail), \"error\");");
+    // The list preview never shows unsent text as said (F6).
+    expect(source).toContain("preview: conversationHistories.get(key)?.preview(),");
     // Retry of a refused send (cas-b1ee): same leased path, the refused send's own in_reply_to.
     expect(source).toContain("retryMessage: (send) => { void submitSupervisorMessage({ text: send.text, replyTo: send.replyTo, retryOf: send.id }); },");
     expect(source).toContain("if (retryOf) history.discardRefused(retryOf);");
@@ -321,7 +334,10 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(regions).toContain('element.setAttribute("aria-disabled", "true");');
     expect(regions).not.toMatch(/\.disabled\s*=\s*true/);
     expect(main).toContain('<p id="message-status" class="message-status');
-    expect(main).toContain('function showComposerStatus(text: string, tone: "info" | "error"): void {');
+    expect(main).toContain('function showComposerStatus(text: string, tone: "info" | "error", transport = false): void {');
+    // A reconnecting refusal clears when the session is live again (cas-b789).
+    expect(main).toContain('"The hub connection is reconnecting, so this message was not delivered. Try again once the session is live.", "error", true);');
+    expect(main).toContain("sessionsEverLive.add(key);\n        clearTransportStatus(key);");
     expect(css).toContain(".message-status {");
     expect(css).toContain(".message-status.error {");
   });
@@ -370,12 +386,12 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(terminal).toContain("state.controlMode && state.focused");
   });
 
-  it("keeps palette codenames primary while indexing optional session summaries", async () => {
-    const source = await readSource("main.ts");
-    expect(source).toContain("<span>Jump to ${escapeHtml(session.name)}</span>");
-    expect(source).toContain("summary ? `${summary.title} ${summary.description} ${summary.phase}` : \"\"");
-    expect(source).toContain('data-search-text="${escapeAttr(searchMetadata)}"');
-    expect(source).toContain('const secondary = summary ? `${machine.label} · ${summary.title} · ${summary.phase}` : machine.label');
+  it("keeps palette codenames primary while indexing project names and optional session summaries", async () => {
+    // Behaviour is pinned in palette-commands.test.ts (cas-cfcb); this keeps main.ts on that one renderer.
+    const [source, palette] = await Promise.all([readSource("main.ts"), readFile(new URL("palette-commands.ts", import.meta.url), "utf8")]);
+    expect(source).toContain("sessionJumpCommandMarkup(machine, session, sessionSummaries.get(sessionKey(machine.id, session.name)))");
+    expect(palette).toContain("<span>Jump to ${escapeHtml(session.name)}</span>");
+    expect(palette).toContain('data-search-text="${escapeHtml(searchText)}"');
     expect(source).toContain('command.dataset.searchText ?? ""');
   });
 
@@ -583,8 +599,14 @@ describe("binding Cassy Cloud browser invariants", () => {
     // an optional email on open pops it and scrolls the title off the screen.
     expect(main).toContain('<section class="pair-flow" tabindex="-1" autofocus>');
     expect(main).not.toContain('<input id="pair-email" type="email" autofocus');
-    expect(main).toContain('<input name="url" type="url" required autofocus');
-    expect(main).toContain('<input name="device" required autofocus');
+    // A focused field scrolls clear of the sticky action row, hint included (QA F03).
+    expect(css).toContain("scroll-padding-bottom: calc(var(--button-height) + var(--space-4));");
+    expect(css).toContain("dialog label:has(> .field-hint) > input { scroll-margin-bottom: 3em; }");
+    // Focus goes to the first field still empty, so a prefilled link opens on the operator's name.
+    expect(main).toContain("const autofocus = firstEmptyField(pairingDraft, ");
+    expect(main).toContain('<input name="url" type="url" required${focus("url")}');
+    expect(main).toContain('<input name="operator" required${focus("operator")}');
+    expect(main).toContain('<input name="device" required${focus("device")}');
 
     // With the keyboard up the dialog can be 300px tall: the fields scroll and
     // the action row does not, so Pair stays reachable.
@@ -759,7 +781,7 @@ describe("binding Cassy Cloud browser invariants", () => {
     const shadows = [...css.matchAll(/box-shadow:\s*([^;]+);/g)].map((match) => match[1].trim());
     expect(shadows.filter((value) => value === "var(--shadow-overlay)")).toHaveLength(2);
     expect(shadows.filter((value) => value === "none")).toHaveLength(2);
-    for (const value of shadows) expect(value).toMatch(/^(?:none|var\(--(?:shadow-overlay|lift(?:-strong|-edge|-head)?)\))$/);
+    for (const value of shadows) expect(value).toMatch(/^(?:none|var\(--(?:shadow-overlay|lift(?:-strong|-edge|-head|-sup)?)\))$/);
     expect(renderer).not.toContain('"700"');
     expect(surface).not.toContain('"normal 700"');
     expect(surface).not.toContain('"italic 700"');
@@ -817,6 +839,33 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(css).toContain(".session-back {");
     expect(css).toContain('.session-picker-entry[aria-current="true"]');
     expect(css).toContain(".session-back { width: var(--button-height); }");
+  });
+
+  it("keeps palette and picker states readable and distinct in every colour mode (cas-78c81)", async () => {
+    const css = await readSource("styles.css");
+    const forced = css.slice(css.indexOf("@media (forced-colors: active) {\n  dialog {"));
+    // Unavailable rows are not faded below a readable contrast in either mode.
+    expect(css).toContain(".palette-command:disabled { opacity: 1; color: var(--text-mid); background: transparent; }");
+    expect(forced).toContain(".palette-command:disabled { border-color: GrayText; opacity: 1; }");
+    // The system Highlight can carry alpha (0.8 in Chromium's emulation); the
+    // focus ring and the open session's fill restate it at full strength.
+    expect(forced).toContain("outline-color: color(from Highlight srgb r g b / 1);");
+    expect(forced).toContain('.session-picker-entry[aria-current="true"] { forced-color-adjust: none; color: HighlightText; background: Highlight; background: color(from Highlight srgb r g b / 1);');
+    // Relative colour is newer than the support floor (Chrome/Edge 110,
+    // Firefox 115): every restatement is preceded by the plain system colour
+    // on the same property, which older engines keep (QA round 1, F1).
+    const relative = [...forced.matchAll(/([a-z-]+): color\(from Highlight srgb r g b \/ 1\);/g)];
+    expect(relative.length).toBeGreaterThanOrEqual(4);
+    for (const match of relative) {
+      const before = forced.slice(0, match.index);
+      expect(before.endsWith(`${match[1]}: Highlight; `), `${match[1]} has a plain Highlight fallback`).toBe(true);
+    }
+    // Only the open session opts out of the opaque ring; the current
+    // Appearance row (aria-current since cas-479a) keeps it.
+    expect(forced).toContain('.palette-commands .palette-command:not(.session-picker-entry[aria-current="true"]):focus-visible {');
+    // Hover is a pointer cue distinct from the focus ring and the open fill.
+    expect(forced).toContain(".palette-command:hover:not(:disabled) > :first-child { text-decoration: underline; }");
+    expect(css).toContain('.palette-commands .session-picker-entry[aria-current="true"]:is(:hover, :active) > .session-name { text-decoration: underline; }');
   });
 
   it("routes every navigation through one recorded selection and restores the last session on reopen", async () => {
@@ -1124,7 +1173,20 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(connectionView).toContain('addAction("Diagnose", actions.diagnose)');
     expect(source).toContain("openConnectionLog(machineId)");
     expect(source).toContain("const view = disconnectedView(snapshot, now)");
-    expect(source).toContain("Connection interrupted — ${view.retryLabel} (attempt ${view.attempt})");
+    // Plain words naming the machine (cas-a447), not the protocol retry line.
+    expect(source).toContain("`Lost connection to ${where}. Reconnecting…`");
+    expect(source).not.toContain("Connection interrupted — ${view.retryLabel}");
+    // Header, row and footer read one conversation connection, and the
+    // transport alarm resolves itself once the socket is live again.
+    expect(source).toContain('fleetConnectionLabel(conversationConnection(machine.id, session.name), machine.id)');
+    expect(source).toContain('fleetConnectionLabel(conversationConnection(selectedMachineId, selectedSession), selectedMachineId)');
+    expect(source).toContain("const state = machineFooterConnection(machine.id);");
+    // The header status reads "Live", not "· Live": the dot is aria-hidden (cas-17e3).
+    expect(source).toContain('const separator = document.createElement("span"); separator.setAttribute("aria-hidden", "true"); separator.textContent = " · ";');
+    expect(source).toContain("resolveAttention(`${machine.id}:${session}:session_transport`);");
+    // While the session is known to be down the banner says so; no toast repeats it over the banner (cas-00cc).
+    expect(source).toContain('if (!attach || attach.phase === "live" || attach.phase === "idle") toast("Terminal is reconnecting");');
+    expect(source).toContain("if (shown) placeToastClearOfBanner(shown);");
     expect(styles).toContain(".terminal-state");
     expect(styles).toContain(".terminal-connecting-step");
     expect(styles).toContain(".terminal-disconnected .terminal-mount { opacity: .4; }");
@@ -1133,7 +1195,7 @@ describe("binding Cassy Cloud browser invariants", () => {
   it("drives pane recovery from the selected session attach lifecycle", async () => {
     const source = await readSource("main.ts");
     expect(source).toContain("onAttachState: (session, state) =>");
-    expect(source).toContain("attachStates.set(sessionKey(machine.id, session), state)");
+    expect(source).toContain("const key = sessionKey(machine.id, session);\n      attachStates.set(key, state);");
     expect(source).toContain("connection.attachSnapshot(selectedSession) ?? connection.snapshot()");
     expect(source).toContain("connection.attachSnapshot(session) ?? connection.snapshot()");
     expect(source).toContain("const connectionSnapshot = terminalAttachSnapshot ?? machineConnectionSnapshot");
@@ -1142,7 +1204,19 @@ describe("binding Cassy Cloud browser invariants", () => {
 
   it("removes the connecting instruction when the terminal state arrives", async () => {
     const source = await readSource("main.ts");
-    expect(source).toContain('grid.querySelector(".empty")?.remove();');
+    // Scoped to the grid's own child: the conversation thread's empty state is
+    // also ".empty" and must survive a re-open (cas-04ee).
+    expect(source).toContain('grid.querySelector(":scope > .empty")?.remove();');
+    expect(source).not.toMatch(/grid\.querySelector(<HTMLElement>)?\("\.empty"\)/);
+  });
+
+  it("puts the conversation over the pane before its terminal surface loads (cas-04ee)", async () => {
+    const [main, surface] = await Promise.all(["main.ts", "terminal/ghostty/surface.ts"].map((path) => readSource(path)));
+    const premount = main.indexOf('if (hubPresentation === "conversation" && !surfaces.has(key)) mountConversation(key, mount);');
+    expect(premount).toBeGreaterThan(-1);
+    expect(premount).toBeLessThan(main.indexOf("const surface = await createTerminalSurface(mount, {"));
+    // The surface keeps a reading overlay in place instead of wiping the mount.
+    expect(surface).toContain("mount.replaceChildren(canvas, input, scrollbar, ...overlays);");
   });
 
   it("requests an authoritative supervisor keyframe before lazily mounted workers", async () => {
@@ -1320,10 +1394,11 @@ describe("design polish P3/P4/P12/P16 (D3/D4/D12/D17)", () => {
     const [css, tokens, markup] = await Promise.all(["styles.css", "tokens.css", "pair-dialog-markup.ts"].map((path) => readSource(path)));
     const rule = (selector: string) => css.slice(css.indexOf(`${selector} {`), css.indexOf("}", css.indexOf(`${selector} {`)) + 1);
     // P3: you-bg fill, you-fg label, semibold; hover brightens instead of falling to --bg-hover.
-    expect(rule("\n.primary")).toContain("color: var(--you-fg);");
-    expect(rule("\n.primary")).toContain("background: var(--you-bg);");
-    expect(rule("\n.primary")).toContain("font-weight: var(--weight-semibold);");
-    expect(css).toContain('.primary:hover:not(:disabled):not([aria-disabled="true"]) { background: var(--you-bg); filter: brightness(1.08); }');
+    // Scoped to controls with :where() (journey F11): the primary terminal pane also carries .primary.
+    expect(rule("\n:where(button, a).primary")).toContain("color: var(--you-fg);");
+    expect(rule("\n:where(button, a).primary")).toContain("background: var(--you-bg);");
+    expect(rule("\n:where(button, a).primary")).toContain("font-weight: var(--weight-semibold);");
+    expect(css).toContain(':where(button, a).primary:hover:not(:disabled):not([aria-disabled="true"]) { background: var(--you-bg); filter: brightness(1.08); }');
     expect(css).not.toContain(".primary:hover:not(:disabled) { background: var(--bg-hover); }");
     expect(css).toContain(".welcome-pairs #pair-toggle { display: none; }");
     expect(css).toContain(".conversation-shell.welcome-pairs .compose-fab { display: none; }");
@@ -1336,9 +1411,9 @@ describe("design polish P3/P4/P12/P16 (D3/D4/D12/D17)", () => {
     expect(css).toContain("border: var(--line-width) solid var(--line-strong); border-radius: 23px; resize: none; background: var(--panel); color: var(--ink); box-shadow: var(--lift);");
     // P16: pairing and attention prose in the UI face; mono only on identifiers.
     expect(css).toContain(".pair-details dd { margin: 0; overflow-wrap: anywhere; font-family: var(--font-ui); }");
-    expect(css).toContain(".pair-details dd.pair-identifier {\n  font-family: var(--font-mono);");
+    expect(css).toContain(".pair-details dd.pair-identifier,\n.pair-address-actions .pair-identifier {\n  font-family: var(--font-mono);");
     expect(rule("\n.attention-detail")).toContain("font-family: var(--font-ui);");
-    expect(markup).toContain('<dd class="pair-summary">');
-    expect(markup).toContain('<dt>Exact scopes</dt><dd class="pair-identifier">');
+    expect(markup).toContain('<strong class="pair-summary">');
+    expect(markup).toContain('<dt>${escapeHtml(term)}</dt><dd${identifier ? \' class="pair-identifier"\' : ""}>');
   });
 });

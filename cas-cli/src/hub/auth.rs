@@ -237,6 +237,19 @@ pub struct PairingInvitation {
     controller_origin: String,
     #[serde(skip_serializing)]
     hub_id: String,
+    #[serde(skip_serializing)]
+    prefill: PairingPrefill,
+}
+
+/// Where the browser can reach this machine and what to call it. Both are
+/// suggestions the pairing form prefills as editable values, never trusted
+/// state: the exchange still goes to whatever address the operator confirms.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PairingPrefill {
+    /// The machine's reachable hub origin (usually its Tailscale Serve URL).
+    pub hub_url: Option<String>,
+    /// The machine's display name.
+    pub machine_label: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -253,7 +266,18 @@ impl PairingInvitation {
             &self.token,
             &self.hub_id,
             &self.scopes,
+            &self.prefill,
         )
+    }
+
+    /// Carry the machine's hub address and display name in the printed link so
+    /// the pairing form opens with both filled in. Older Commander builds ignore
+    /// the extra fragment parameters; the hosted-relay URL never carries them
+    /// because the relay delivers both through its own completion record.
+    pub fn with_prefill(mut self, prefill: PairingPrefill) -> Self {
+        self.prefill = prefill;
+        self.url = self.url_for(PairingInvitationTarget::LocalCommander);
+        self
     }
 }
 
@@ -263,9 +287,22 @@ fn pairing_invitation_url(
     token: &str,
     hub_id: &str,
     scopes: &BTreeSet<Scope>,
+    prefill: &PairingPrefill,
 ) -> String {
     let mut url = format!("{controller_origin}/#pair={token}&hub={hub_id}");
     if target == PairingInvitationTarget::LocalCommander {
+        // Before `scopes`, which stays last so its value can be read to the end.
+        for (key, value) in [
+            ("hub_url", prefill.hub_url.as_deref()),
+            ("machine", prefill.machine_label.as_deref()),
+        ] {
+            if let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) {
+                url.push('&');
+                url.push_str(key);
+                url.push('=');
+                url.push_str(&urlencoding::encode(value));
+            }
+        }
         let declared_scopes = scopes
             .iter()
             .map(|scope| scope.as_wire())
@@ -312,6 +349,7 @@ impl fmt::Debug for PairingInvitation {
             .field("scopes", &self.scopes)
             .field("controller_origin", &self.controller_origin)
             .field("hub_id", &self.hub_id)
+            .field("prefill", &self.prefill)
             .finish()
     }
 }
@@ -577,12 +615,14 @@ impl AuthStore {
                 &token,
                 &self.0.machine_id,
                 &max_scopes,
+                &PairingPrefill::default(),
             ),
             token,
             expires_at,
             scopes: max_scopes,
             controller_origin: controller_origin.to_owned(),
             hub_id: self.0.machine_id.clone(),
+            prefill: PairingPrefill::default(),
         })
     }
 
@@ -1339,6 +1379,7 @@ mod credential_redaction_tests {
             scopes: Default::default(),
             controller_origin: "https://hub.example".to_string(),
             hub_id: "hub-1".to_string(),
+            prefill: PairingPrefill::default(),
         };
         let rendered = format!("{invitation:?}");
         assert!(

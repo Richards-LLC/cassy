@@ -1,4 +1,4 @@
-import { escapeHtml, projectBadge } from "./cloud-brand";
+import { escapeHtml, projectTitle } from "./cloud-brand";
 import { machineAccentClass, machineMonogram } from "./machine-accent";
 import { plainTextMarkdown } from "./markdown-renderer";
 
@@ -20,6 +20,10 @@ export interface ConversationRow {
   /** The session left the catalog with an instruction still pending: the
    * preview line names that state instead of the last turn (cas-7294). */
   unreachable?: boolean;
+  /** The conversation's connection is down (reconnecting, unreachable, needs
+   * pairing): the preview line names that state instead of the last turn, so
+   * the row agrees with the header and the footer (cas-a447). */
+  interrupted?: boolean;
   /** Asks and blockers waiting on the operator: ochre dot + hot timestamp. */
   attention: number;
   /** Supervisor turns the operator has not opened: filled count pill in the machine accent. */
@@ -42,36 +46,52 @@ export function machineName(host: string): string {
   return name || host.trim();
 }
 
-/** One Pebble row: `avatar · name · project · preview · time`, with two distinct
- * affordances — waiting (ochre dot, hot time) and unread (accent count pill). */
+/** The words a list search matches: project, machine and supervisor codename. */
+export function conversationSearchText(row: Pick<ConversationRow, "projectDir" | "host" | "supervisor">): string {
+  return `${projectTitle(row.projectDir) ?? ""} ${row.host} ${row.supervisor}`.toLocaleLowerCase();
+}
+
+/** Rows whose project, machine or supervisor contains every word of the query (case-insensitive). */
+export function filterConversationRows<T extends Pick<ConversationRow, "projectDir" | "host" | "supervisor">>(rows: readonly T[], query: string): T[] {
+  const words = query.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
+  if (words.length === 0) return [...rows];
+  return rows.filter((row) => { const text = conversationSearchText(row); return words.every((word) => text.includes(word)); });
+}
+
+/** One Pebble row: `avatar · project machine · codename · preview · time`, with
+ * two distinct affordances — waiting (ochre dot, hot time) and unread (accent
+ * count pill). Users think in projects (journey F7): the project is the title,
+ * the machine follows it, and the generated codename is tertiary text. */
 export function conversationRowMarkup(row: ConversationRow): string {
   const waiting = row.attention > 0;
   const unread = row.unread ?? 0;
-  const preview = truncateConversationPreview(plainTextMarkdown(row.unreachable ? row.connection : row.preview || row.connection));
+  const preview = truncateConversationPreview(plainTextMarkdown(row.unreachable || row.interrupted ? row.connection : row.preview || row.connection));
   // The time always holds the headline end; an unread count sits beneath it
   // with the waiting dot, so the most active row never loses its time (P13).
   const time = row.when ? `<span class="conversation-when${waiting ? " hot" : ""}" title="${escapeHtml(row.freshness)}">${escapeHtml(row.when)}</span>` : "";
   const count = unread > 0 ? `<span class="conversation-unread" aria-label="${unread} unread">${unread}</span>` : "";
   const flag = waiting ? `<span class="conversation-flag" role="img" aria-label="${row.attention === 1 ? "Waiting for you" : `${row.attention} waiting for you`}"></span>` : "";
   const marks = count || flag ? `<span class="conversation-marks">${count}${flag}</span>` : "";
-  // Project and machine travel together as one meta unit: when the who-line
-  // is too narrow the whole "project · machine" drops to the next line, and
-  // only an over-long project name splits the machine off after it. The meta
-  // leads with the project, never a dot (P13); the one separator rides with
-  // the machine, so a dot never dangles at a line end.
-  // The machine is legible as text on every row (operator direction): the
-  // monogram and accent alone do not name it.
+  // No project named: the codename is the title (cas-1ca1 F03), not a status phrase.
+  const project = projectTitle(row.projectDir);
+  // The title is "project · machine": the project leads, never a dot (P13);
+  // the one separator rides with the machine, so a dot never dangles at a
+  // line end when a long project pushes the machine to the next line. The
+  // machine is legible as text on every row (operator direction): the
+  // monogram and accent alone do not name it. A long machine name ellipsises
+  // inside the title column (its title attribute carries it whole) instead of
+  // running under the time stamp (cas-1ca1). The codename sits beneath.
   return `<span class="conversation-avatar" aria-hidden="true">${escapeHtml(machineMonogram(row.host))}</span>`
-    + `<span class="conversation-who"><strong class="conversation-supervisor codename">${escapeHtml(row.supervisor)}</strong><span class="conversation-meta"><span class="conversation-project">${projectBadge(row.projectDir)}</span><span class="conversation-machine"><span class="conversation-sep" aria-hidden="true"></span>${escapeHtml(machineName(row.host))}</span></span></span>`
+    + `<span class="conversation-who"><span class="conversation-title"><strong class="conversation-project${project ? "" : " codename"}">${escapeHtml(project ?? row.supervisor)}</strong><span class="conversation-machine" title="${escapeHtml(machineName(row.host))}"><span class="conversation-sep" aria-hidden="true"></span><span class="conversation-machine-name">${escapeHtml(machineName(row.host))}</span></span></span>${project ? `<span class="conversation-supervisor codename">${escapeHtml(row.supervisor)}</span>` : ""}</span>`
     + time
-    + `<span class="conversation-preview${row.unreachable ? " unreachable" : waiting || unread > 0 ? " bold" : ""}">${escapeHtml(preview)}</span>`
+    + `<span class="conversation-preview${row.unreachable ? " unreachable" : row.interrupted ? " interrupted" : waiting || unread > 0 ? " bold" : ""}">${escapeHtml(preview)}</span>`
     + marks;
 }
 
 /** Keyed buttons: a catalog heartbeat must never steal keyboard focus. */
 export class ConversationList {
   private nodes = new Map<string, HTMLButtonElement>();
-  render(container: HTMLElement, rows: readonly ConversationRow[], open: (row: ConversationRow) => void): void {
+  render(container: HTMLElement, rows: readonly ConversationRow[], open: (row: ConversationRow, event?: MouseEvent) => void): void {
     const current = new Set(rows.map((row) => row.key));
     for (const [key, node] of this.nodes) {
       if (!current.has(key) || node.parentElement !== container) { node.remove(); this.nodes.delete(key); }
@@ -91,7 +111,7 @@ export class ConversationList {
       node.dataset.waiting = String(row.attention > 0);
       node.dataset.unread = String(row.unread ?? 0);
       node.setAttribute("aria-current", String(row.selected));
-      node.onclick = () => open(row);
+      node.onclick = (event) => open(row, event);
       const markup = conversationRowMarkup(row);
       if (node.innerHTML !== markup) node.innerHTML = markup;
       if (container.children[index] !== node) container.insertBefore(node, container.children[index] ?? null);

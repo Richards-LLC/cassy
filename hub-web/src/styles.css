@@ -381,7 +381,11 @@ pre { font-family: var(--font-mono); }
 }
 
 /* == End Unit 3: machine rail and drawer == */
-.primary {
+/* The main-action button. :where() keeps the old specificity, and scopes it to
+   controls: the primary terminal pane also carries .primary (pane-layout), and
+   the hover rule's brightness(1.08) used to wash the whole thread under the
+   pointer from cream to white (journey F11). */
+:where(button, a).primary {
   width: 100%;
   color: var(--you-fg);
   background: var(--you-bg);
@@ -390,7 +394,7 @@ pre { font-family: var(--font-mono); }
 
 /* The main action keeps its fill under the pointer and brightens; the generic
    button hover (--bg-hover) would make it the weakest control on screen. */
-.primary:hover:not(:disabled):not([aria-disabled="true"]) { background: var(--you-bg); filter: brightness(1.08); }
+:where(button, a).primary:hover:not(:disabled):not([aria-disabled="true"]) { background: var(--you-bg); filter: brightness(1.08); }
 
 .nav-item {
   display: grid;
@@ -530,7 +534,8 @@ pre { font-family: var(--font-mono); }
 .attention-ticket,
 .status-identifier,
 .pair-code,
-.pair-details dd.pair-identifier {
+.pair-details dd.pair-identifier,
+.pair-address-actions .pair-identifier {
   font-family: var(--font-mono);
 }
 
@@ -655,10 +660,22 @@ main {
 }
 
 .session-picker-entry .session-name { grid-column: 1; font-size: var(--fs-base); }
-.session-picker-entry .session-meta { grid-column: 1 / -1; color: var(--text-mid); font-size: var(--fs-xs); }
+/* The details wrap rather than clip: on a phone the one-line ellipsis hid the
+   status of a long row, the open session's included (cas-56e6). */
+.session-picker-entry .session-meta { grid-column: 1 / -1; color: var(--text-mid); font-size: var(--fs-xs); white-space: normal; overflow: visible; overflow-wrap: anywhere; }
+.session-picker-entry :is(.session-name, .session-summary-title) { white-space: normal; overflow: visible; overflow-wrap: anywhere; }
 .session-picker-entry .session-summary-title { grid-column: 1 / -1; color: var(--text-mid); font-size: var(--fs-meta); }
 .session-picker-entry .phase-chip { grid-column: 1; justify-self: start; }
 .session-picker-entry[aria-current="true"] { background: var(--bg-active); }
+/* The global button:hover (0,3,1) would swap the open session's tint for the
+   plain hover surface, leaving only the small "Open" label to mark it. Hover
+   and press keep the tint and answer the pointer with the Pebble lift, as a
+   hovered chip does: a deeper tint would take the small meta line below
+   4.5:1 (cas-a756 QA). */
+.palette-commands .session-picker-entry[aria-current="true"]:is(:hover, :active) { background: var(--bg-active); box-shadow: var(--lift); }
+/* The lift's blur falls mostly outside the row, where the scrolling list clips
+   it; underline the name too, the same pointer cue forced colours use. */
+.palette-commands .session-picker-entry[aria-current="true"]:is(:hover, :active) > .session-name { text-decoration: underline; }
 
 .session-picker-current {
   grid-column: 2;
@@ -1161,7 +1178,8 @@ main {
   padding: var(--space-2) var(--space-3);
   color: var(--text-hi);
   background: var(--bg-raised);
-  font-family: var(--font-mono);
+  /* Plain words in the body font, not a log line (cas-a447). */
+  font-family: var(--font-ui);
   font-size: var(--fs-meta);
   border-left: var(--rule-verdict) solid var(--state-warn);
 }
@@ -1612,7 +1630,7 @@ main {
   .attention-item--reclassified { animation: none; }
   .machine-drawer { transition-property: opacity; }
   button { transition: none; }
-  #toast { transform: translate(-50%, 0); transition-property: opacity; }
+  #toast { transform: none; transition-property: opacity; }
 }
 
 @media (hover: none) {
@@ -1734,6 +1752,9 @@ main {
 /* The composer is on screen, so the one-tap way to it is a second copy of the
    same control. It returns the moment the panel or the tab changes. */
 .shell:has(.context-panel:not(.collapsed) [data-context-content="status"]:not([hidden])) .talk-supervisor { display: none; }
+/* The return control leads <main> in the DOM (first in the Tab order) and is
+   drawn at the foot of the workspace, where it has always been (cas-7eaf). */
+main > #conversation-return { order: 1; }
 
 .talk-supervisor small {
   color: var(--text-mid);
@@ -2010,27 +2031,73 @@ dialog::backdrop { background: var(--overlay-backdrop); }
    focus ring inside the row: an outset ring loses its sides (and the first
    row's top), and the underline that survives reads as the next row. */
 .palette-commands .palette-command:focus-visible { outline-offset: calc(-2 * var(--focus-ring-width)); }
-.palette-command { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: var(--space-3); min-height: 44px; padding: var(--space-2) var(--space-3); background: var(--bg-raised); text-align: left; }
+/* The command name outranks its description (cas-cfcb, cas-5478): the title
+   track grows to its full width first and the description takes what is left,
+   ellipsised at the row's end, so a long "project · machine" line can never
+   squeeze "Jump to <supervisor>" away. */
+.palette-command { display: grid; grid-template-columns: minmax(0, max-content) minmax(0, 1fr); align-items: baseline; gap: var(--space-3); min-height: 44px; padding: var(--space-2) var(--space-3); background: var(--bg-raised); text-align: left; }
 /* `display: grid` above outranks the user-agent [hidden] rule; the filter relies on [hidden]. */
 .palette-command[hidden] { display: none; }
+/* An unavailable command drops its raised surface instead of fading to an
+   unreadable ghost; its text stays at the secondary contrast. */
+.palette-command:disabled { opacity: 1; color: var(--text-mid); background: transparent; }
 .palette-command span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .palette-command small, .palette-empty { color: var(--text-mid); }
-.palette-command small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Journey F20: the Appearance row in effect carries a check and "Current". */
+.palette-check { margin-inline-end: var(--space-2); color: var(--accent, var(--you-bg)); font-weight: var(--weight-semibold); }
+.palette-command small { justify-self: end; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* A phone row is too narrow for both on one line: the description drops under
+   the title, both at full row width, so each reads in full or ellipsises alone. */
+@media (max-width: 40rem) {
+  .palette-command { grid-template-columns: minmax(0, 1fr); row-gap: 2px; align-content: center; }
+  .palette-command small { justify-self: start; }
+}
+/* Journey F8: commands grouped Conversations / Appearance / Advanced; the
+   debugging switches sit in Advanced, collapsed until asked for. */
+.palette-group { display: grid; gap: var(--space-1); }
+.palette-group[hidden] { display: none; }
+.palette-group + .palette-group { margin-top: var(--space-2); }
+.palette-group-heading { margin: 0; padding: var(--space-1) var(--space-3) 0; color: var(--text-mid); font: var(--weight-semibold) var(--fs-xs)/1.4 var(--font-ui); letter-spacing: var(--tracking-label); text-transform: uppercase; }
+.palette-advanced > summary { display: flex; align-items: center; gap: var(--space-2); min-height: 44px; padding-top: 0; cursor: pointer; list-style: none; }
+.palette-advanced > summary::-webkit-details-marker { display: none; }
+.palette-advanced > summary::before { content: "▸"; font-size: 0.9em; }
+.palette-advanced[open] > summary::before { content: "▾"; }
+.palette-advanced > summary:focus-visible { outline-offset: calc(-2 * var(--focus-ring-width)); }
+/* <details> lays its content out in an anonymous slot box, so the group's
+   grid does not reach these rows: stretch and space them explicitly. */
+.palette-advanced > .palette-command { width: 100%; margin-top: var(--space-1); }
 /* Forced colors drops the surfaces and shadows that separate rows and lift the
    dialog, so each needs a real edge: rows read as buttons, the dialog stands
    off the page behind it, and the open session keeps its mark. */
 @media (forced-colors: active) {
   dialog { border: 1px solid CanvasText; }
-  .palette-command { border: 1px solid ButtonBorder; }
-  .palette-command:disabled { border-color: GrayText; }
+  button.secondary { border-color: ButtonBorder; }
+  /* No surface fade: a row opted out of forcing (focus, open session) would
+     otherwise animate from its author surface and flash on every move. */
+  .palette-command { border: 1px solid ButtonBorder; transition: none; }
+  /* GrayText already says "unavailable"; fading it as well would drop it
+     below a readable contrast. */
+  .palette-command:disabled { border-color: GrayText; opacity: 1; }
+  /* Hover is a pointer cue, so it must not look like a frame (the focus ring)
+     or a fill (the open session): underline the command's name instead. */
+  .palette-command:hover:not(:disabled) > :first-child { text-decoration: underline; }
   /* The focus ring is Highlight, so the open session cannot also be a
      Highlight frame: it is filled instead, and its own ring flips to
-     HighlightText so focus still shows on the fill. */
-  .palette-commands .palette-command:focus-visible { outline-color: Highlight; }
-  .session-picker-entry[aria-current="true"] { forced-color-adjust: none; color: HighlightText; background: Highlight; border-color: Highlight; }
+     HighlightText so focus still shows on the fill. Both are drawn at full
+     strength (a system colour can carry alpha). */
+  /* Each opaque restatement follows the plain system colour: engines without
+     relative colour (Chrome/Edge < 119, Firefox < 128, below the hub's floor
+     of 110/115) drop the second declaration and keep Highlight instead of
+     falling back to the author surface (cas-78c81 QA round 1, F1). */
+  /* Forced colors would repaint an author ring in the system Highlight,
+     which can carry alpha; opting the focused row out (with every colour
+     restated as a system colour) keeps the ring at full strength. */
+  .palette-commands .palette-command:not(.session-picker-entry[aria-current="true"]):focus-visible { forced-color-adjust: none; color: CanvasText; background: Canvas; border-color: ButtonBorder; outline-color: Highlight; outline-color: color(from Highlight srgb r g b / 1); }
+  .palette-commands .palette-command:not(.session-picker-entry[aria-current="true"]):focus-visible * { color: CanvasText; background: transparent; }
+  .session-picker-entry[aria-current="true"] { forced-color-adjust: none; color: HighlightText; background: Highlight; background: color(from Highlight srgb r g b / 1); border-color: Highlight; border-color: color(from Highlight srgb r g b / 1); }
   /* forced-color-adjust: none lets author surfaces through, so the global
      button:hover background would replace the fill under HighlightText. */
-  .palette-commands .session-picker-entry[aria-current="true"]:is(:hover, :active, :focus-visible) { background: Highlight; }
+  .palette-commands .session-picker-entry[aria-current="true"]:is(:hover, :active, :focus-visible) { background: Highlight; background: color(from Highlight srgb r g b / 1); }
   .session-picker-entry[aria-current="true"] * { color: HighlightText; background: transparent; border-color: HighlightText; }
   .palette-commands .session-picker-entry[aria-current="true"]:focus-visible { outline-color: HighlightText; }
 }
@@ -2050,7 +2117,20 @@ dialog form,
   overflow-y: auto;
   overscroll-behavior: contain;
   align-content: start;
+  /* A focused field (a prefilled link opens on Operator label) scrolls clear
+     of the sticky action row instead of sliding under it. */
+  scroll-padding-bottom: calc(var(--button-height) + var(--space-4));
+  /* The scroller clips at its padding box, so a full-width field's focus
+     ring (width plus offset) needs room at the sides; without it only the
+     top and bottom edges survived, as two stray bars (cas-b2e4 F03). The
+     negative margin keeps the fields aligned with the dialog content. */
+  padding-inline: calc(2 * var(--focus-ring-width));
+  margin-inline: calc(-2 * var(--focus-ring-width));
 }
+
+/* A focused field brings its hint with it, so a hint never ends up under the
+   sticky action row on a short phone screen (QA F03). */
+dialog label:has(> .field-hint) > input { scroll-margin-bottom: 3em; }
 
 dialog h2,
 dialog p { margin: 0; }
@@ -2225,21 +2305,52 @@ fieldset {
 
 .field-hint code { font-size: var(--fs-xs); }
 
-.pair-address-actions { justify-content: flex-start; }
-
-/* The page origin can be long; the control wraps inside the dialog instead
-   of forcing the form wider than a phone. */
-.pair-address-actions button {
-  min-width: 0;
-  max-width: 100%;
-  min-height: var(--space-8);
-  padding: var(--space-1) var(--space-3);
-  font-family: var(--font-mono);
-  font-size: var(--fs-xs);
-  overflow-wrap: anywhere;
-  text-align: left;
-  white-space: normal;
+/* A secondary action: outlined in the UI face, so it reads as a button and
+   never as a code sample. The edge is --ink-mid for the 3:1 a control
+   boundary needs on the warm dialog surface (P15). */
+button.secondary {
+  color: var(--text-hi);
+  background: var(--color-transparent);
+  border: var(--line-width) solid var(--ink-mid);
+  font-family: var(--font-ui);
 }
+
+/* Address guidance sits behind one quiet disclosure under the field. */
+.pair-address-help {
+  margin-top: calc(-1 * var(--space-2));
+  color: var(--text-mid);
+  font-size: var(--fs-xs);
+}
+
+.pair-address-help summary {
+  width: fit-content;
+  padding: var(--space-1) 0;
+  cursor: pointer;
+}
+
+.pair-address-help summary:focus-visible {
+  outline: var(--focus-ring-width) solid var(--color-focus);
+  outline-offset: var(--focus-ring-width);
+}
+
+.pair-address-help p { margin: var(--space-1) 0 var(--space-2); }
+
+.pair-address-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.pair-address-actions button {
+  flex: none;
+  min-height: var(--space-8);
+  font-size: var(--fs-meta);
+}
+
+/* The page origin can be long; it wraps inside the dialog instead of forcing
+   the form wider than a phone. */
+.pair-address-actions .field-hint { min-width: 0; overflow-wrap: anywhere; }
 
 /* Every grid child in the dialog may shrink; a nowrap child otherwise sets
    the form's minimum width and scrolls the whole dialog sideways. */
@@ -2247,6 +2358,33 @@ dialog form > *,
 .pair-flow > * { min-width: 0; }
 
 .pair-summary { color: var(--text-hi); font-family: var(--font-ui); }
+
+/* F3: what pairing grants leads each step, in plain words. */
+.pair-lead { color: var(--text-mid); text-wrap: pretty; }
+.pair-lead .pair-summary { font-weight: var(--weight-semibold); }
+
+/* F3: the exact origin and raw scope names are there for checking, not in the
+   way: one quiet disclosure, the same shape as "Where do I find this?". */
+.pair-technical {
+  color: var(--text-mid);
+  font-size: var(--fs-xs);
+}
+
+.pair-technical summary {
+  width: fit-content;
+  padding: var(--space-1) 0;
+  cursor: pointer;
+}
+
+.pair-technical summary:focus-visible {
+  outline: var(--focus-ring-width) solid var(--color-focus);
+  outline-offset: var(--focus-ring-width);
+}
+
+.pair-technical[open] { display: grid; gap: var(--space-2); }
+/* Behind the disclosure the terms read as sentences, not eyebrows (cas-b2e4 F02). */
+.pair-technical .pair-details dt { text-transform: none; letter-spacing: normal; font-size: var(--fs-meta); }
+.pair-technical fieldset { margin: 0; }
 
 .pair-alternative {
   color: var(--text-mid);
@@ -2262,12 +2400,15 @@ dialog form > *,
   border-bottom: var(--line-width) solid var(--line-subtle);
 }
 
+/* Journey F12: toasts anchor at the top, never over the composer or the
+   bottom rails where the operator is typing. */
 #toast {
   position: fixed;
-  left: 50%;
-  bottom: var(--space-6);
+  top: calc(var(--space-4) + env(safe-area-inset-top));
+  right: var(--space-4);
   z-index: 10;
-  transform: translate(-50%, var(--space-6));
+  max-width: min(28rem, calc(100vw - 2 * var(--space-4)));
+  transform: translate(0, calc(-1 * var(--space-6)));
   opacity: 0;
   pointer-events: none;
   padding: var(--space-3) var(--space-4);
@@ -2279,7 +2420,7 @@ dialog form > *,
   transition: opacity .2s, transform .2s;
 }
 
-#toast.visible { opacity: 1; transform: translate(-50%, 0); }
+#toast.visible { opacity: 1; transform: none; }
 
 /* == Unit 3: drawer visibility follows its explicit open control == */
 
@@ -2570,8 +2711,12 @@ dialog form > *,
     font-size: var(--fs-lg);
   }
 
-  /* Toasts clear the bottom rail and the gesture bar instead of landing under them. */
-  #toast { bottom: calc(var(--machine-rail-width) + var(--space-3) + env(safe-area-inset-bottom)); }
+  /* Toasts span the top of a narrow screen, under the status bar. */
+  #toast { left: var(--space-3); right: var(--space-3); top: calc(var(--space-3) + env(safe-area-inset-top)); max-width: none; }
+  /* With a conversation open, the toast drops below the one-row thread header
+     (56 px: 44 px targets + 6 px padding) so the back link, project and host
+     stay readable (cas-002e). */
+  body:has(.conversation-shell.thread-open) #toast { top: calc(env(safe-area-inset-top) + 56px + var(--space-2)); }
   .context-body { min-height: 0; }
   /* == Unit 4: Phone attention and composer == */
   .attention-group-label { max-width: 100%; }
@@ -2804,9 +2949,8 @@ dialog form > *,
   .session-header .actions { gap: var(--space-1); }
   .session-header .actions button { min-width: 0; padding: 0 var(--space-2); }
 
-  /* Nothing is stacked above a bottom rail here, so the toast and the composer
-     stop reserving room for one. */
-  #toast { bottom: calc(var(--space-3) + env(safe-area-inset-bottom)); }
+  /* Nothing is stacked above a bottom rail here, so the composer stops
+     reserving room for one. */
   .message { padding-bottom: 0; }
 
   /* A worker strip that keeps 40dvh of a 412px screen leaves the supervisor
@@ -2885,42 +3029,79 @@ dialog form > *,
 /* First run on a wide screen: the welcome's Pair a machine is the one primary action. */
 .welcome-pairs #pair-toggle { display: none; }
 .conversation-list-heading p { color: var(--ink-mid); margin: var(--space-3) 6px 0; }
+/* Journey F8: a visible name search at the top of the list; Ctrl/Cmd+K lands here. */
+.conversation-search { position: relative; display: flex; align-items: center; margin: var(--space-4) 0 0; }
+.conversation-search svg { position: absolute; left: 14px; width: 16px; height: 16px; color: var(--ink-mid); pointer-events: none; }
+.conversation-search input { width: 100%; min-height: var(--rail-item-min); padding: 0 var(--space-3) 0 38px; border: var(--line-width) solid var(--line-strong); border-radius: var(--radius-pill); background: var(--canvas); color: var(--ink); font: var(--weight-regular) var(--fs-md)/1.3 var(--font-ui); }
+.conversation-search input::placeholder { color: var(--ink-mid); opacity: 1; }
 #conversation-list { overflow-y: auto; min-height: 0; display: flex; flex-direction: column; gap: var(--space-1); padding: 0 14px var(--space-4) 18px; }
 .conversation-sidebar footer { padding: var(--space-4) 18px; margin-top: auto; }
 .conversation-sidebar footer button { width: 100%; font-size: var(--fs-meta); }
 .conversation-row { position: relative; display: grid; grid-template-columns: 42px minmax(0, 1fr) auto; column-gap: 13px; row-gap: 3px; align-items: center; text-align: left; width: 100%; flex: none; padding: var(--space-3) 14px; border: 0; border-radius: 20px; background: var(--color-transparent); color: var(--ink); }
 .conversation-row:hover { background: var(--bg-hover); color: var(--ink); }
 .conversation-row[aria-current="true"] { background: var(--accent-soft); color: var(--ink); box-shadow: var(--lift); }
+/* One selection colour: the generic button:hover must not turn the open row grey under the pointer (journey F11). */
+.conversation-row[aria-current="true"]:is(:hover, :focus-visible):not(:disabled) { background: var(--accent-soft); }
 /* --accent-soft is 1.3:1 light / 1.16:1 dark against the sidebar, so the
    selected row also carries a >= 3:1 accent edge bar (WCAG 1.4.11). */
 .conversation-row[aria-current="true"]::before { content: ""; position: absolute; top: var(--space-4); bottom: var(--space-4); left: 5px; width: 3px; border-radius: var(--radius-pill); background: var(--accent); }
 .conversation-avatar { grid-row: span 2; display: flex; align-items: center; justify-content: center; width: 42px; height: 42px; border-radius: var(--radius-pill); background: var(--accent); color: var(--accent-fg); font: var(--weight-semibold) 17px/1 var(--font-ui); }
 .conversation-who { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; min-width: 0; }
-.conversation-supervisor { font: var(--weight-semibold) var(--fs-md)/1.35 var(--font-ui); }
-/* The meta is always its own line under the codename (P13), so no row needs a leading dot. */
-.conversation-meta { display: inline-flex; flex-wrap: wrap; flex-basis: 100%; align-items: center; gap: 7px; min-width: 0; max-width: 100%; }
-.conversation-project { display: inline-flex; align-items: center; gap: 7px; min-width: 0; max-width: 100%; }
+/* Journey F7: users think in projects. The title is the project, then the
+   machine; the generated codename is tertiary text on its own line beneath. */
+/* cas-1ca1 F02: the separator rides with the machine but must never lead a
+   line. The machine is pulled back over the project's trailing space by the
+   separator's width plus its gap (10px); on a shared line the project's 17px
+   end margin leaves the usual 7px before the dot, and when the machine wraps
+   to its own line the dot lands left of the title and is clipped (x only). */
+.conversation-title { display: inline-flex; flex-wrap: wrap; align-items: center; column-gap: 0; min-width: 0; max-width: 100%; overflow-x: clip; }
+.conversation-project { min-width: 0; max-width: 100%; margin-inline-end: 17px; font: var(--weight-semibold) var(--fs-md)/1.35 var(--font-ui); overflow-wrap: anywhere; }
 .conversation-sep { width: 3px; height: 3px; border-radius: var(--radius-pill); background: var(--ink-soft); flex: none; }
-.conversation-row .project-badge { padding: 0; border-radius: 0; background: var(--color-transparent); color: var(--ink-soft); font: var(--weight-medium) var(--fs-xs)/1.35 var(--font-mono); }
-.conversation-machine { display: inline-flex; align-items: center; gap: 7px; color: var(--ink-soft); font: var(--weight-medium) var(--fs-xs)/1.35 var(--font-mono); white-space: nowrap; }
+.conversation-machine { display: inline-flex; align-items: center; gap: 7px; min-width: 0; max-width: calc(100% + 10px); margin-inline-start: -10px; color: var(--ink-mid); font: var(--weight-medium) var(--fs-meta)/1.35 var(--font-ui); white-space: nowrap; }
+/* cas-1ca1: a long machine name ellipsises inside the title column, clear of the time stamp. */
+/* cas-1ca1 F01: the glyph box of a 13px/1.35 line sits about 1px taller than
+   the line, so the clipping span gets 2px of block padding (given back by the
+   margin) to hold whole glyphs; the CI visual gate flagged the shaved tops. */
+.conversation-machine-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; padding-block: 2px; margin-block: -2px; }
+.conversation-supervisor { flex-basis: 100%; color: var(--ink-soft); font: var(--weight-regular) var(--fs-xs)/1.35 var(--font-mono); }
 .conversation-when { justify-self: end; font-size: var(--fs-xs); color: var(--ink-soft); white-space: nowrap; }
 .conversation-when.hot { color: var(--warn-text); font-weight: var(--weight-semibold); }
 .conversation-preview { grid-column: 2; min-width: 0; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; max-height: calc(2 * 1.35em); overflow: hidden; text-overflow: ellipsis; font-size: var(--fs-meta); line-height: 1.35; color: var(--ink-soft); overflow-wrap: anywhere; }
 .conversation-preview.bold { color: var(--ink); font-weight: var(--weight-medium); }
 .conversation-preview.unreachable { color: var(--warn-text); font-weight: var(--weight-medium); }
+.conversation-preview.interrupted { color: var(--warn-text); }
 /* P13: the time keeps the headline end; the unread count and waiting dot sit beneath it. */
 .conversation-marks { grid-column: 3; justify-self: end; display: inline-flex; align-items: center; gap: 6px; }
 /* --warn-text, the hot time's colour: the same brown on paper as before, gold in dark (the old --ask-deep dot was 2.4:1 there). */
 .conversation-flag { width: 10px; height: 10px; border-radius: var(--radius-pill); background: var(--warn-text); }
 .conversation-unread { min-width: 21px; padding: 2px 7px; border-radius: var(--radius-pill); text-align: center; background: var(--accent); color: var(--accent-fg); font: var(--weight-semibold) var(--fs-xs)/1.4 var(--font-ui); }
 .conversation-empty { margin: var(--space-6) 18px; color: var(--ink-mid); }
-.compose-fab { display: none; position: fixed; right: 18px; bottom: calc(18px + env(safe-area-inset-bottom)); z-index: 2; width: 56px; height: 56px; padding: 0; border: 0; border-radius: var(--radius-pill); background: var(--you-bg); color: var(--you-fg); box-shadow: var(--lift-strong); align-items: center; justify-content: center; }
+/* F14: until storage and the first catalog answer arrive, the list shows its
+ * own shape, not a claim ("Not paired", "No live supervisors") it cannot make yet. */
+.conversation-empty[data-state="loading"] { margin: 0; }
+.conversation-skeleton { display: grid; gap: var(--space-1); padding: 0 var(--space-2); }
+.conversation-skeleton-row { display: grid; grid-template-columns: 42px minmax(0, 1fr); column-gap: 13px; align-items: center; padding: var(--space-3) 14px; }
+.conversation-skeleton-avatar { width: 42px; height: 42px; border-radius: 50%; background: var(--bg-raised); }
+.conversation-skeleton-lines { display: grid; gap: var(--space-2); }
+.conversation-skeleton-lines span { height: 12px; border-radius: var(--radius-pill); background: var(--bg-raised); }
+.conversation-skeleton-lines span:first-child { width: 62%; }
+.conversation-skeleton-lines span:last-child { width: 84%; }
+.conversation-skeleton-row { animation: conversation-skeleton-pulse 1.4s ease-in-out infinite; }
+@keyframes conversation-skeleton-pulse { 50% { opacity: .55; } }
+@media (prefers-reduced-motion: reduce) { .conversation-skeleton-row { animation: none; } }
+/* Journey F15: a labelled bar in the list's own flow, above the status footer,
+   so it reserves its space instead of floating over "2 paired machines". */
+.compose-fab { display: none; flex-shrink: 0; align-items: center; justify-content: center; gap: var(--space-2); min-height: var(--space-12); margin: auto 12px var(--space-2); padding: 0 var(--space-4); border: 0; border-radius: var(--radius-pill); background: var(--you-bg); color: var(--you-fg); box-shadow: var(--lift); font: var(--weight-semibold) var(--fs-md)/1.2 var(--font-ui); }
 .compose-fab:hover { background: var(--you-bg); color: var(--you-fg); }
-.compose-fab svg { width: 24px; height: 24px; display: block; }
+.compose-fab svg { width: 20px; height: 20px; display: block; flex: none; }
 .conversation-main { display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; }
 /* The single header above the thread (cas-5b2d): Pebble thead shape, cas-11b01 controls on the row above. */
 .conversation-heading { display: flex; flex-direction: column; gap: var(--space-3); padding: var(--space-3) 30px 17px; background: var(--canvas); color: var(--ink); box-shadow: var(--lift-head); position: relative; z-index: 1; }
 .conversation-topline { display: flex; justify-content: space-between; align-items: center; gap: var(--space-2); }
+/* Journey F17: where the list is on screen beside the thread, "‹ Conversations"
+   is a step that goes nowhere; the phone layout below shows it again. */
+#conversation-back { display: none; }
+#conversation-terminal { margin-inline-start: auto; }
 .conversation-topline .cloud-brand { display: none; }
 .conversation-topline button { font-size: var(--fs-meta); color: var(--ink); background: var(--color-transparent); }
 .conversation-identity { display: flex; align-items: center; gap: 13px; min-width: 0; }
@@ -2964,7 +3145,9 @@ dialog form > *,
 .thread .turn { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; max-width: 70%; min-width: 0; }
 .thread .turn.you { align-self: flex-end; align-items: flex-end; }
 .thread .turn > time { font-size: 12px; color: var(--ink-mid); padding: 2px 6px 0; }
-.thread .bub { max-width: 100%; min-width: 0; padding: 12px 19px; background: var(--sup-bg); color: var(--sup-fg); border-radius: 8px 22px 22px 8px; box-shadow: var(--lift); }
+/* --lift-sup adds an inset accent hairline (no layout shift): the light
+   --sup-bg tints alone sit about 1.1:1 on the cream thread (journey F11). */
+.thread .bub { max-width: 100%; min-width: 0; padding: 12px 19px; background: var(--sup-bg); color: var(--sup-fg); border-radius: 8px 22px 22px 8px; box-shadow: var(--lift-sup); }
 .thread .bub.group-first { border-top-left-radius: 22px; }
 .thread .turn.you .bub { background: var(--you-bubble-bg); color: var(--you-bubble-fg); border-radius: 22px 8px 8px 22px; }
 .thread .turn.you .bub.group-first { border-top-right-radius: 22px; }
@@ -2993,6 +3176,20 @@ dialog form > *,
 .thread .conversation-refused b { color: var(--crit-bg); font: var(--weight-semibold) 13px/1.3 var(--font-ui); }
 .thread .conversation-refused .warn { width: 15px; height: 15px; flex: none; color: var(--crit-bg); }
 .thread .conversation-refused-reason { flex-basis: 100%; min-width: 0; color: var(--ink-mid); overflow-wrap: anywhere; }
+.thread .conversation-refused-next { color: var(--ink); }
+/* F6: once its edited version is sent, a refused send is only a record — a
+ * quiet dashed outline in --line-strong, its text clamped to one line, the
+ * "Not sent · replaced by your edit" line, and no actions. */
+.thread .turn.you .bub[data-state="error"][data-replaced="true"] { border-color: var(--line-strong); color: var(--ink-mid); padding: 6px 14px; }
+.thread .bub[data-replaced="true"] > p { display: -webkit-box; -webkit-line-clamp: 1; -webkit-box-orient: vertical; overflow: hidden; margin: 0; }
+.thread .bub[data-replaced="true"] > p + p { display: none; }
+.thread .conversation-replaced { margin-top: 4px; display: block; }
+.thread .conversation-replaced b { color: var(--ink-mid); font: var(--weight-semibold) 12px/1.3 var(--font-ui); }
+.thread .conversation-replaced .conversation-refused-reason { flex-basis: auto; }
+/* F5: the latest delivered send says so until the reply lands. The tick takes
+ * the bubble's own ink so it reads on the operator fill in both schemes. */
+.thread .conversation-delivered { display: flex; align-items: center; justify-content: flex-end; gap: 4px; }
+.thread .conversation-delivered .tick { width: 13px; height: 13px; margin: 0; color: currentColor; }
 .thread .conversation-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 10px; }
 .thread .conversation-edit, .thread .conversation-retry { min-height: 32px; padding: 0 14px; border-radius: 999px; border: 1.5px solid var(--line-strong); background: transparent; color: var(--ink); font: var(--weight-medium) 13px/1.2 var(--font-ui); cursor: pointer; }
 .thread .conversation-edit:hover, .thread .conversation-retry:hover { border-color: var(--ink); }
@@ -3065,6 +3262,9 @@ dialog form > *,
  * equals --ask-bg in dark. */
 .obj.t-a.ask-collapsed { border-radius: 18px 18px 18px 6px; box-shadow: var(--lift); }
 .obj.t-a.ask-collapsed .obj-body { padding: 12px 19px; border-left: 4px solid var(--warn-text); border-radius: 18px 18px 18px 6px; background: var(--sup-bg); color: var(--sup-fg); }
+/* The flow copy of a pinned ask is a one-line reference (cas-97ea): the
+   pinned card below carries the whole question. */
+.obj.t-a.ask-collapsed .ask-excerpt { margin: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: 1.4; }
 .obj.t-a.ask-collapsed .ask-waiting { margin-top: 6px; font: var(--weight-semibold) 12px/1.3 var(--font-ui); color: var(--warn-text); }
 .chip { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-width: 0; margin: 0; padding: 8px 17px; border: 0; border-radius: var(--radius-pill); background: var(--panel); color: var(--ink); font: var(--weight-medium) 13px/1.2 var(--font-ui); text-align: center; overflow-wrap: anywhere; }
 button.chip { cursor: pointer; }
@@ -3080,6 +3280,9 @@ button.chip:disabled { cursor: default; }
 .pinned-label { padding: 0 6px; font: var(--weight-medium) 12px/1.3 var(--font-ui); color: var(--warn-text); letter-spacing: 0.02em; }
 .conversation-jump { position: sticky; bottom: var(--space-2); display: block; margin: var(--space-4) auto 0; background: var(--bg-panel); color: var(--color-action); }
 .conversation-jump[hidden] { display: none; }
+/* Mounted above the composer (cas-97ea): an in-flow row that takes space from
+   the thread while it shows, instead of a sticky chip over a turn. */
+#conversation-composer-slot > .conversation-jump { position: static; margin: var(--space-2) auto 0; }
 /* ---- Pebble 4 (cas-3800): sheet, composer, nothing waiting ---------------
  * Attachment: treatment A from round-3/pebble.css — a sheet laid on the
  * thread, no bubble around it, dog-eared at the top right. The ear is two
@@ -3105,35 +3308,78 @@ button.chip:disabled { cursor: default; }
 .thread .empty { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; min-width: 0; padding: 60px 40px; text-align: center; color: var(--ink); }
 .thread .empty[hidden], .thread .msgs[hidden] { display: none; }
 .thread .empty .mono { display: flex; align-items: center; justify-content: center; flex: none; width: 76px; height: 76px; border-radius: var(--radius-pill); background: var(--accent, var(--you-bg)); color: var(--accent-fg); font: var(--weight-semibold) 30px/1 var(--font-ui); box-shadow: var(--lift-strong); }
-.thread .empty b { max-width: 100%; font: var(--weight-semibold) 21px/1.2 var(--font-ui); letter-spacing: -0.015em; }
+.thread .empty b { max-width: 100%; font: var(--weight-semibold) 21px/1.2 var(--font-ui); letter-spacing: -0.015em; white-space: normal; overflow-wrap: anywhere; } /* b.codename: wrap, not the codename's nowrap (cas-1334 QA F2) */
 .thread .empty .proj2 { font: var(--weight-regular) 13px/1.3 var(--font-mono); color: var(--ink-mid); overflow-wrap: anywhere; }
+/* The project-led card puts the codename in .proj2; it wraps like the rest of
+   the line, not with the codename's nowrap (cas-1334 QA round 2). */
+.thread .empty .proj2 .codename { white-space: normal; overflow-wrap: anywhere; }
 .thread .empty .proj2:empty { display: none; }
-.thread .empty .said { margin: 0; max-width: 34ch; color: var(--ink-mid); font-size: 15px; }
-.thread .empty .said .codename { font: var(--weight-medium) 0.93em/1 var(--font-mono); color: var(--ink); }
+.thread .empty .said { margin: 0; max-width: 34ch; color: var(--ink-mid); font-size: 15px; overflow-wrap: anywhere; }
+.thread .empty .said .codename { font: var(--weight-medium) 0.93em/1 var(--font-mono); color: var(--ink); white-space: normal; overflow-wrap: anywhere; }
 .thread .empty .quiet { max-width: min(100%, 56ch); background: var(--sup-bg); color: var(--sup-fg); border-radius: 22px; padding: 12px 22px; box-shadow: var(--lift); overflow-wrap: anywhere; }
+.thread .empty .conversation-loading { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 10px; }
 
 /* Composer: the field is a pill on --panel with --lift; the send button takes
    the machine accent from the shell root and names the supervisor; the attach
    clip is present beside the field but disabled — there is no operator
    attachment transport yet and its title says so. The ids inside are the
    send handler's and the live-region updater's; only the dress changes. */
-.conversation-composer { position: relative; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; grid-template-areas: "clip field send" "status status status"; align-items: center; column-gap: 11px; row-gap: var(--space-2); padding: 14px 30px 22px; padding-bottom: max(22px, env(safe-area-inset-bottom)); margin: 0; border-top: 0; background: var(--canvas); color: var(--ink); }
+/* The field has a floor, min(16rem, 45%), and the send column is `auto` over
+   shrinkable content (cas-1334): a normal "Send to <name>" takes its full
+   width, and only a name too long for the row ellipsises in the button
+   instead of crushing the message field to a sliver. The aria-label keeps
+   the whole name. */
+.conversation-composer { position: relative; display: grid; grid-template-columns: auto minmax(min(16rem, 45%), 1fr) auto; grid-template-areas: "clip field send" "status status status"; align-items: center; column-gap: 11px; row-gap: var(--space-2); padding: 14px 30px 22px; padding-bottom: max(22px, env(safe-area-inset-bottom)); margin: 0; border-top: 0; background: var(--canvas); color: var(--ink); }
 .conversation-composer h2 { margin: 0; } /* .sr-only from dressComposer: the label is for the reader */
+/* Without the attach clip (cas-17e3) the field takes the first column. */
+.conversation-composer:not(:has(.composer-clip)) { grid-template-columns: minmax(min(16rem, 45%), 1fr) auto; grid-template-areas: "field send" "status status"; }
 .conversation-composer .composer-clip { grid-area: clip; display: flex; align-items: center; justify-content: center; width: 44px; height: 44px; min-height: 44px; padding: 0; border: 0; border-radius: var(--radius-pill); background: var(--panel); color: var(--ink-mid); box-shadow: var(--lift); }
 .conversation-composer .composer-clip:disabled { opacity: 1; color: var(--ink-mid); }
 .conversation-composer .composer-clip svg { width: 19px; height: 19px; display: block; opacity: 0.55; }
 .conversation-composer textarea { grid-area: field; width: 100%; min-width: 0; min-height: 46px; height: auto; field-sizing: content; max-height: 25dvh; padding: 12px 22px; border: var(--line-width) solid var(--line-strong); border-radius: 23px; resize: none; background: var(--panel); color: var(--ink); box-shadow: var(--lift); font: var(--weight-regular) 14px/1.55 var(--font-ui); }
 .conversation-composer textarea::placeholder { color: var(--ink-mid); opacity: 1; }
-.conversation-composer .composer-actions { grid-area: send; display: flex; align-items: center; gap: var(--space-2); margin: 0; }
+.conversation-composer .composer-actions { grid-area: send; display: flex; align-items: center; gap: var(--space-2); min-width: 0; margin: 0; }
 .conversation-composer .composer-actions button { width: auto; }
 .conversation-composer #message-mic { width: 44px; min-width: 44px; height: 44px; min-height: 44px; color: var(--ink-mid); border-color: var(--line-strong); background: var(--panel); }
 .conversation-composer #message-mic:not(:disabled) { box-shadow: var(--lift); }
 .conversation-composer #message-mic.listening { color: var(--crit-fg); border-color: var(--crit-bg); background: var(--crit-bg); box-shadow: var(--lift-strong); }
 .conversation-composer #message-mic:disabled { color: var(--ink-mid); border-style: dashed; border-color: var(--line-strong); background: var(--color-transparent); }
 .conversation-composer #message-keyboard { display: none; }
-.conversation-composer #message-send.send { display: inline-flex; align-items: center; gap: 8px; margin: 0; min-height: 46px; padding: 0 20px 0 16px; border: 0; border-radius: var(--radius-pill); background: var(--accent, var(--you-bg)); color: var(--accent-fg); box-shadow: var(--lift-strong); font: var(--weight-semibold) 14px/1.2 var(--font-ui); white-space: nowrap; }
+.conversation-composer #message-send.send { display: inline-flex; flex: 0 1 auto; align-items: center; gap: 8px; min-width: 0; max-width: 100%; margin: 0; min-height: 46px; padding: 0 20px 0 16px; border: 0; border-radius: var(--radius-pill); background: var(--accent, var(--you-bg)); color: var(--accent-fg); box-shadow: var(--lift-strong); font: var(--weight-semibold) 14px/1.2 var(--font-ui); white-space: nowrap; }
 .conversation-composer #message-send.send:hover:not([aria-disabled="true"]) { background: var(--accent, var(--you-bg)); color: var(--accent-fg); filter: brightness(1.08); }
 .conversation-composer .send-glyph { width: 19px; height: 19px; display: block; flex: none; }
+/* Forced colours (cas-ac7d) drop the accent tint that marks the open
+   conversation and the fill that makes the main actions read as buttons.
+   Same approach as the session picker's open entry (cas-8b41, cas-78c81):
+   the open row is filled with opaque Highlight (a system colour can carry
+   alpha; every relative colour has a plain system-colour fallback first for
+   browsers below Chrome 119 / Firefox 128) with every colour inside it restated; hover and focus keep the fill.
+   The main actions become
+   filled ButtonText buttons, so the primary action still leads Cancel and the
+   other bordered controls. */
+@media (forced-colors: active) {
+  .conversation-row[aria-current="true"],
+  .conversation-row[aria-current="true"]:is(:hover, :active, :focus-visible):not(:disabled) { forced-color-adjust: none; color: HighlightText; background: Highlight; background: color(from Highlight srgb r g b / 1); }
+  .conversation-row[aria-current="true"] * { color: HighlightText; background: transparent; border-color: HighlightText; }
+  .conversation-row[aria-current="true"] .conversation-avatar { outline: 1px solid HighlightText; outline-offset: -1px; }
+  .conversation-row[aria-current="true"] .conversation-sep { background: HighlightText; }
+  .conversation-row[aria-current="true"]::before { background: HighlightText; }
+  /* The row's ring sits outside it, past a Canvas gap, so it stays Highlight
+     (opaque) rather than flipping like the picker's inset ring. */
+  .conversation-row[aria-current="true"]:focus-visible { outline-color: Highlight; outline-color: color(from Highlight srgb r g b / 1); }
+  .conversation-row:not([aria-current="true"]):hover .conversation-project { text-decoration: underline; }
+  button.primary:not(:disabled):not([aria-disabled="true"]),
+  .conversation-composer #message-send.send:not([aria-disabled="true"]) { forced-color-adjust: none; color: ButtonFace; background: ButtonText; border: 1px solid ButtonText; filter: none; }
+  button.primary:not(:disabled):not([aria-disabled="true"]) *,
+  .conversation-composer #message-send.send:not([aria-disabled="true"]) * { color: ButtonFace; }
+  button.primary:is(:disabled, [aria-disabled="true"]),
+  .conversation-composer #message-send.send[aria-disabled="true"] { border: 1px solid GrayText; color: GrayText; }
+  button.primary:focus-visible,
+  .conversation-composer #message-send.send:focus-visible { outline: var(--focus-ring-width) solid Highlight; outline: var(--focus-ring-width) solid color(from Highlight srgb r g b / 1); outline-offset: var(--focus-ring-width); }
+}
+/* line-height 1.4 keeps the glyphs' own box inside the clipping box, so a
+   name that fits is never counted as clipped (cas-1334 QA F1). */
+.conversation-composer .send-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; line-height: 1.4; }
 .conversation-composer .control-disabled-reason { display: none; }
 .conversation-composer .composer-status, .conversation-composer .message-status, .conversation-composer .message-delivery { grid-area: status; font-size: var(--fs-meta); margin: 0; }
 .conversation-composer .composer-status[hidden], .conversation-composer .message-status[hidden], .conversation-composer .message-delivery[hidden] { display: none; }
@@ -3163,11 +3409,11 @@ button.chip:disabled { cursor: default; }
 @media (max-width: 53rem), (max-height: 30rem) and (pointer: coarse) {
   .conversation-shell { display: block; height: var(--keyboard-viewport-height, 100dvh); }
   /* Phone: the list is the page — full width, no rail edge, and the compose
-     FAB floats bottom right above the footer while the list is showing. */
+     bar sits between the list and the footer while the list is showing. */
   .conversation-sidebar { height: 100%; box-shadow: none; }
   .conversation-list-heading { padding: 20px 12px 14px; }
   #conversation-list { padding: 0 12px var(--space-4); }
-  .conversation-sidebar footer { padding: var(--space-3) 12px; padding-inline-end: calc(56px + 30px); }
+  .conversation-sidebar footer { padding: var(--space-3) 12px; }
   /* P13: the phone footer folds to one 32px line — the paired-machines toggle
      and its state. The conversation count and hub build stay on desktop (the
      list is the count here). The toggle's hit area still reaches 40px. */
@@ -3179,6 +3425,8 @@ button.chip:disabled { cursor: default; }
   .conversation-sidebar #paired-machines-toggle > span:nth-child(2) { overflow-wrap: normal; white-space: nowrap; }
   .conversation-sidebar .hub-footer-meta { display: none; }
   .conversation-shell:not(.thread-open) .compose-fab { display: flex; }
+  /* The compose bar already takes the free space above the footer. */
+  .conversation-shell:not(.thread-open) .compose-fab + footer { margin-top: 0; }
   /* The welcome is hidden on a phone, so the header chip is the first-run
      action; the compose FAB (which would only open pairing, under the label
      "Write to a supervisor") steps aside so there is one Pair a machine. */
@@ -3204,7 +3452,6 @@ button.chip:disabled { cursor: default; }
   #conversation-back:hover:not(:disabled), #conversation-terminal:hover:not(:disabled) { background: var(--bg-hover); }
   .conversation-identity h1 { flex-wrap: nowrap; }
   .conversation-identity h1 b { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 22px; }
-  .conversation-identity .project-badge { flex: none; font-size: 13px; padding: 2px 6px; }
   .conversation-identity .conversation-host { display: flex; font-size: 12px; white-space: nowrap; }
   .conversation-identity .host-where { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
   #conversation-connection { flex: none; white-space: pre; }
@@ -3250,6 +3497,8 @@ button.chip:disabled { cursor: default; }
 .machine-badge-state { color: var(--text-mid); font-size: var(--fs-xs); }
 .pairing-dot { width: var(--space-2); height: var(--space-2); border-radius: var(--radius-pill); background: var(--color-series-neutral); flex: none; }
 .pairing-dot.connected { background: var(--state-ok); }
+/* cas-b789: some machines connected, some down — not all-clear. */
+.pairing-dot.partial { background: var(--state-warn); }
 .hub-footer-meta { display: flex; flex-wrap: wrap; justify-content: space-between; gap: var(--space-2); font-size: var(--fs-xs); color: var(--text-mid); }
 .machines-dialog-heading { display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); }
 .machines-dialog-heading button { min-width: var(--rail-item-min); min-height: var(--rail-item-min); }

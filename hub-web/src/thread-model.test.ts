@@ -171,3 +171,33 @@ describe("blockerEvidence", () => {
     expect(blockerEvidence("attention.rs:212 · needless_borrow")).toEqual({ text: "attention.rs:212 · needless_borrow", evidence: undefined });
   });
 });
+
+describe("clock-skewed live turns show their own time (cas-ac1f)", () => {
+  const blocker = (id: number, at: number) => ({ notification_id: id, reply_to: null, message: "Gate red.", summary: "", device_id: "d", kind: "blocker" as const, attachments: [], at: new Date(at).toISOString() });
+  it("a send after a turn from a clock 5 minutes ahead sorts after it but shows the browser's time", () => {
+    const now = new Date(2026, 8, 24, 12, 0).getTime();
+    const history = new ConversationHistory();
+    history.hydrateReply(blocker(1, now + 300_000));
+    history.submit("s", "sup", "On it", now);
+    const send = history.events.at(-1)!;
+    expect(send).toMatchObject({ kind: "send", at: now + 300_000, shownAt: now });
+    const groups = threadModel(history.events, { now }).filter((item) => item.type === "group");
+    expect(groups.at(-1)).toMatchObject({ side: "you", time: "12:00" });
+  });
+  it("a day-ahead machine does not file today's send under tomorrow", () => {
+    const now = new Date(2026, 8, 24, 12, 0).getTime();
+    const history = new ConversationHistory();
+    history.hydrateReply(blocker(1, now - 3_600_000));
+    history.hydrateReply(blocker(2, now + 86_400_000));
+    history.submit("s", "sup", "On it", now);
+    history.receive({ notification_id: 3, reply_to: null, message: "Ack.", summary: "", device_id: "d", kind: "answer" }, now + 60_000);
+    const items = threadModel(history.events, { now: now + 60_000 });
+    const days = items.filter((item) => item.type === "day").map((item) => item.type === "day" ? item.label : "");
+    // Today, then the skewed turn's own day, then today again for the live send and reply.
+    expect(days[0]).toBe("Today");
+    expect(days.at(-1)).toBe("Today");
+    expect(new Set(items.map((item) => item.key)).size).toBe(items.length);
+    const lastGroups = items.filter((item) => item.type === "group").slice(-2);
+    expect(lastGroups.map((group) => group.type === "group" ? group.time : undefined)).toEqual(["12:00", "12:01"]);
+  });
+});

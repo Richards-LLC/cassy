@@ -30,7 +30,15 @@ Projects that keep a catalog describe the contract in
 Run the project's journey suite, for example
 `scripts/journey-eval.sh <artifacts_root>/<task-id> --grep <ID>`. Each
 journey leaves an evidence bundle in `<task-id>/journeys/<ID>/`, with the
-`producer` field of its `bundle.json` set to `journey`. Its files are:
+`producer` field of its `bundle.json` set to `journey`.
+
+For hub-web, the Playwright config never reuses a running server. Each
+checkout gets its own default port pair in 20000–32767, and a port that is
+already held fails the run loudly. Set `HUB_E2E_PORT`/`HUB_JOURNEY_PORT` to a
+distinct pair in that range for runs in parallel from one checkout, and name
+the ports in the evidence.
+
+The files are:
 
 | File | What it holds |
 |---|---|

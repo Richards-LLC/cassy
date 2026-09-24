@@ -15,6 +15,9 @@ In **Steps**, the text before ` — ` must match the suite's stage
 Cassy Commander, the browser app that `cas hub` serves at `/commander/`.
 Suite: `hub-web/e2e/journeys/`. Run it with `npm run journeys` in
 `hub-web/`, or with `scripts/journey-eval.sh <dir>` to collect receipts.
+Every journey also watches each animation frame and fails if an open
+conversation shows the terminal canvas or sits on a bare panel for more than
+250 ms (`frame_defects` in `result.json`).
 
 - **Surface-wide:** `hub-web/src/main.ts`, `hub-web/src/styles.css`, `hub-web/src/types.ts`, `hub-web/src/terminal*`, `hub-web/src/terminal/*`, `hub-web/index.html`, `hub-web/package-lock.json`, `hub-web/vite.config.ts`, `hub-web/dist/*`, `hub-web/e2e/journeys/hub-double.ts`, `hub-web/e2e/journeys/journey.ts`, `hub-web/e2e/journeys/world.ts`, `hub-web/playwright.config.ts`
 
@@ -61,8 +64,10 @@ Suite: `hub-web/e2e/journeys/`. Run it with `npm run journeys` in
 **Steps**
 
 1. Open the link the machine printed — the dialog opens by itself and the secret leaves the address bar
-2. Confirm the machine and pair — enter the hub address, the machine label and the operator label; the scopes match the link
-3. Reach the supervisor — the machine's supervisor is listed and opens
+2. Confirm the machine — the hub address and machine name arrive filled in from the link; only your name is left, with the focus ring on it
+3. Check the technical details — the origin and the granted scope boxes, in sentence case
+4. Pair — the exchange goes to the link's machine
+5. Reach the supervisor — the machine's supervisor is listed and opens
 
 **Expected experience**
 
@@ -86,16 +91,20 @@ Suite: `hub-web/e2e/journeys/`. Run it with `npm run journeys` in
 
 **Steps**
 
-1. See every machine's supervisors in one list — every row names its project and machine
+1. See every machine's supervisors in one list — every row is titled by its project, then its machine, with the supervisor codename beneath
 2. Notice a new reply while away — the row shows an unread count
-3. Jump to a supervisor by name — the command palette filters and opens the conversation
-4. Jump to a supervisor from the keyboard — Ctrl+K, type the name, Enter: the palette closes, the conversation is open and the reply box has focus
+3. Find the conversation through the list search — "Search conversations (Ctrl K)" at the top of the list filters rows by project, machine or supervisor; the header names the project once
+4. Find the conversation from the keyboard — Ctrl+K lands in the search, type the project, Enter: the conversation is open and the reply box has focus
+   - An empty thread's card also leads with the project, with machine and codename beneath it
+   - A 40-character machine name ellipsises in its row and never runs under the time stamp, on desktop and at 390px
+5. Jump to a supervisor by name — the command palette (grouped Conversations / Appearance / Advanced, Advanced collapsed) filters by supervisor or project and opens the conversation
+6. Jump to a supervisor from the keyboard — Ctrl+K twice opens the palette, type the name, Enter: the palette closes, the conversation is open and the reply box has focus
 
 **Expected experience**
 
-- Rows read project first, then machine, so two machines never look alike.
+- Rows read project first, then machine, so two machines never look alike; the generated codename is tertiary.
 - New replies and questions waiting for me are visible on the row without opening it.
-- The palette finds a supervisor by name from anywhere.
+- A visible search field finds a conversation by project, machine or supervisor; the palette does too, from anywhere.
 
 **Edge paths**
 
@@ -133,7 +142,7 @@ Suite: `hub-web/e2e/journeys/`. Run it with `npm run journeys` in
 
 - **Entry:** an open conversation with a live supervisor
 - **Goal:** my message reaches the supervisor and I see its answer
-- **Touches:** `hub-web/src/composer-markup.ts`, `hub-web/src/supervisor-message.ts`, `hub-web/src/conversation-view.ts`, `hub-web/src/live-regions.ts`, `hub-web/src/operator-thread.ts`, `hub-web/src/thread-model.ts`
+- **Touches:** `hub-web/src/composer-markup.ts`, `hub-web/src/supervisor-message.ts`, `hub-web/src/conversation-view.ts`, `hub-web/src/live-regions.ts`, `hub-web/src/operator-thread.ts`, `hub-web/src/thread-model.ts`, `hub-web/src/conversation-history.ts`, `hub-web/src/refusal.ts`
 - **Suite:** `hub-web/e2e/journeys/reply-typed.journey.ts`
 - **Gaps:** delivery by a running daemon and operator stamping are doubled
 
@@ -141,14 +150,19 @@ Suite: `hub-web/e2e/journeys/`. Run it with `npm run journeys` in
 
 1. Open the conversation — the composer names the supervisor
 2. Write and send — the message appears at once as "Sending…" and the composer clears
-3. See it delivered and answered — the supervisor's reply arrives under it
-4. A refused message can be edited and resent — "Not sent" with the reason, then Edit and send again
+3. See it delivered — the hub's receipt turns "Sending…" into "Delivered" with a check
+4. See it answered — the supervisor's reply arrives under it and "Delivered" steps aside
+5. A refused message says why — "Not sent", a plain reason and the next step on the message, said once (the composer only points at it); the list does not preview it as said
+6. Edit and resend retires the refused message — it collapses to "Not sent · replaced by your edit" with no Retry
 
 **Expected experience**
 
 - Enter sends and Shift+Enter adds a new line.
 - The user can tell sent from delivered without reading attributes.
-- A refusal says why and offers Edit and Retry right on the message.
+- The composer status is in plain words, never protocol vocabulary.
+- A refusal says why in plain words, names the next step, and offers Edit and Retry right on the message.
+- Once its edit is sent, a refused message cannot be retried.
+- A screen reader hears who spoke and when for each message group ("You, 12:45"), the status as "Live", and meets no dead attach control.
 
 **Edge paths**
 
@@ -192,9 +206,10 @@ Suite: `hub-web/e2e/journeys/`. Run it with `npm run journeys` in
 **Steps**
 
 1. Open the conversation — the thread is live
-2. The supervisor asks a question — it is pinned above the composer with its choices
-3. Answer with one tap — the pin clears and the thread records the chosen answer
-4. See the supervisor act on the answer — the reply follows
+2. The supervisor asks a question — it is pinned above the composer with its choices, and the thread keeps a one-line reference to it
+3. Answer with one tap — the pin clears, the thread records the chosen answer, and nothing is left waiting in the context rail, even when the machine's clock runs ahead; the answer shows the time it was sent, under today
+4. See the supervisor act on the answer — the reply follows, and a new blocker after the answer waits
+5. Reply to a machine a day ahead — the reply shows the time it was sent, under today, below the machine's future-dated turn
 
 **Expected experience**
 
@@ -220,6 +235,13 @@ Suite: `hub-web/e2e/journeys/`. Run it with `npm run journeys` in
 1. Start a draft on the Linux machine — the header names the project and the machine
 2. Switch to the Mac and send there — the other thread starts with an empty composer; the message goes to that machine
 3. Come back to the draft — the first thread's draft is intact
+4. Reopen the session picker after closing it — in Terminal view, one click on the session title reopens the picker after Escape or ×, and it never pops open over the next dialog; Escape and × leave focus on the session title, from the first open on
+5. Keep my place in the session picker while updates arrive — the row a keyboard user arrowed or tabbed onto keeps focus, and the filter holds, while hub updates re-render the page
+6. See which session is open while pointing at it — in light and dark, the open session keeps its tint under the pointer (lifting as feedback) and still differs from an ordinary hovered row
+7. Come back from the terminal to the reply box — returning from Terminal view by keyboard or mouse puts focus in the reply box, never on the page body
+8. Keyboard focus lands somewhere real on every route — entering Terminal view lands in the terminal (or on the way back, which is first in the Tab order though drawn at the foot), choosing a session in the picker lands in it, and opening a conversation from the list by Enter or a click lands in its reply box; none leaves focus on the page body
+9. Read every session's details on a phone — at 390px each picker row, the open one included, shows project, role, workers and status in full
+10. Pair a third machine; the others keep their colours — each machine's accent is stored when it first pairs, so a new pairing (even one whose id sorts first) never re-colours the fleet, the new machine gets its own accent, and the colours survive a reload
 
 **Expected experience**
 
@@ -233,7 +255,7 @@ Suite: `hub-web/e2e/journeys/`. Run it with `npm run journeys` in
 
 ### HUB-J9 · On a phone: from the list to a reply and back
 
-- **Entry:** `/commander/` on a 390 px wide phone with two paired machines
+- **Entry:** `/commander/` on a 390 px wide phone with two paired machines, plus one that is switched off
 - **Goal:** I reply to a supervisor from my phone and get back to the list
 - **Touches:** `hub-web/src/viewport.ts`, `hub-web/src/pane-layout.ts`, `hub-web/src/conversation-shell.ts`, `hub-web/src/composer-markup.ts`
 - **Suite:** `hub-web/e2e/journeys/phone.journey.ts`
@@ -245,6 +267,9 @@ Suite: `hub-web/e2e/journeys/`. Run it with `npm run journeys` in
 2. Tap a conversation — the thread replaces the list, with a back control
 3. Reply with the phone keyboard — send, then see the answer
 4. Go back to the list — the row shows the latest turn
+5. Scroll back through a long thread — "Jump to latest" takes its own row above the composer, never over a turn, and one tap returns to the newest turn
+6. See the switched-off machine named plainly — the footer counts it with a warning dot, and Paired machines says "Can't reach · retrying"
+7. Pair another machine and read its header at once — pairing from the phone opens its conversation, and the "connected" toast sits below the thread header, never over the back link, project and host
 
 **Expected experience**
 
@@ -270,6 +295,7 @@ Suite: `hub-web/e2e/journeys/`. Run it with `npm run journeys` in
 2. Choose the dark appearance — from "Appearance & commands" (Ctrl/Cmd+K)
 3. Keep reading in dark — the thread and composer stay readable
 4. The choice survives a reload — dark is still applied
+5. High contrast keeps the open conversation and Send marked — with forced colours on, in dark and light, the open row is filled with Highlight (under the pointer and with focus too) and Send is a filled button with an edge
 
 **Expected experience**
 
@@ -285,20 +311,22 @@ Suite: `hub-web/e2e/journeys/`. Run it with `npm run journeys` in
 
 - **Entry:** an open conversation when the network to the machine drops
 - **Goal:** I see what is happening, and it recovers without me doing anything
-- **Touches:** `hub-web/src/connection*.ts`, `hub-web/src/abort-signals.ts`, `hub-web/src/deferred-render.ts`, `hub-web/src/browser-support.ts`
+- **Touches:** `hub-web/src/connection*.ts`, `hub-web/src/session-connection.ts`, `hub-web/src/abort-signals.ts`, `hub-web/src/deferred-render.ts`, `hub-web/src/browser-support.ts`
 - **Suite:** `hub-web/e2e/journeys/reconnect.journey.ts`
 - **Gaps:** a real network loss (heartbeat misses, offline) is simulated by closing the socket
 
 **Steps**
 
 1. Open the conversation — the thread is live
-2. The network drops — "Connection interrupted — reconnecting" appears
-3. It reconnects on its own — the banner clears when the session is back
+2. The network drops — "Lost connection to Atlas · Linux. Reconnecting…" appears; the header and the row say Reconnecting, and the footer counts 1 of 2 connected with a warning dot; a send is refused for the connection
+3. It reconnects on its own — the banner and the refusal line clear, everything says Live again, the draft is kept, and no transport alarm is left
 4. Sending works again — a message goes through and is answered
+5. On a phone, the banner stays readable through an outage — no toast sits on the reconnect banner, in light and dark
 
 **Expected experience**
 
-- The user always knows whether the conversation is live.
+- The user always knows whether the conversation is live: the header, the row and the footer never disagree.
+- A transport alarm resolves itself when the connection comes back.
 - Nothing typed is lost, and recovery needs no action.
 
 **Edge paths**

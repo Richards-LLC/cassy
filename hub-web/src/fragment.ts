@@ -1,11 +1,55 @@
 import { parseGrantedScopes } from "./pairing-scopes";
 import type { Scope } from "./types";
 
-export interface PairingFragment {
+/**
+ * What `cas hub pair` knows about the machine it ran on. These only prefill the
+ * form as editable values; the exchange goes to whatever address the operator
+ * confirms, exactly as when the fields were typed by hand.
+ */
+export interface PairingPrefill {
+  /** The machine's reachable hub origin, usually its Tailscale Serve URL. */
+  suggestedHubUrl?: string;
+  /** The machine's display name. */
+  suggestedMachineLabel?: string;
+}
+
+export interface PairingFragment extends PairingPrefill {
   token: string;
   hubId: string;
   /** Scope ceiling declared by `cas hub pair`; absent on links minted before it. */
   scopes?: readonly Scope[];
+}
+
+const MAX_PREFILL_LENGTH = 256;
+
+/** One optional value; repeated, blank, or oversized values are dropped, never guessed at. */
+function singleParam(params: URLSearchParams, name: string): string | undefined {
+  const values = params.getAll(name);
+  if (values.length !== 1) return undefined;
+  const value = values[0].trim();
+  return value && value.length <= MAX_PREFILL_LENGTH ? value : undefined;
+}
+
+/** An http(s) origin, or nothing: a prefill is never allowed to carry a path, credentials, or another scheme. */
+function prefillOrigin(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  try {
+    const url = new URL(value);
+    if ((url.protocol !== "https:" && url.protocol !== "http:") || url.username || url.password) return undefined;
+    return url.origin;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Read the optional `hub_url` and `machine` parameters. Links minted before them carry neither. */
+export function readPairingPrefill(params: URLSearchParams): PairingPrefill {
+  const suggestedHubUrl = prefillOrigin(singleParam(params, "hub_url"));
+  const suggestedMachineLabel = singleParam(params, "machine");
+  return {
+    ...(suggestedHubUrl ? { suggestedHubUrl } : {}),
+    ...(suggestedMachineLabel ? { suggestedMachineLabel } : {}),
+  };
 }
 
 const BASE64URL_32_BYTES = /^[A-Za-z0-9_-]{43}$/;
@@ -21,7 +65,7 @@ export interface FragmentWatchTarget {
 }
 
 interface LegacyPairingStore<T extends PairingFragment> {
-  saveLegacy(token: string, hubId: string, scopes?: readonly Scope[]): T;
+  saveLegacy(token: string, hubId: string, scopes?: readonly Scope[], prefill?: PairingPrefill): T;
 }
 
 /**
@@ -48,7 +92,10 @@ export function readPairingFragment<T extends PairingFragment>(location: Locatio
     // An unreadable scope list leaves the ceiling unknown rather than voiding a
     // usable invitation; the form then falls back to read-only preselection.
     const scopes: readonly Scope[] | undefined = params.getAll("scopes").length === 1 ? parseGrantedScopes(params.get("scopes")) : undefined;
-    const fragment = store?.saveLegacy(token, hubId, scopes) ?? { token, hubId, ...(scopes ? { scopes } : {}) };
+    // Like the scope list, an unreadable prefill leaves that field for the
+    // operator to type rather than voiding the invitation.
+    const prefill = readPairingPrefill(params);
+    const fragment = store?.saveLegacy(token, hubId, scopes, prefill) ?? { token, hubId, ...(scopes ? { scopes } : {}), ...prefill };
     return { kind: "fragment", fragment } as PairingFragmentOutcome<T>;
   } finally {
     history.replaceState(null, "", `${location.pathname}${location.search}`);

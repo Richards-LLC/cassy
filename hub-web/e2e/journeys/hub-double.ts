@@ -52,9 +52,12 @@ const PANE_TEXT = "The supervisor is ready.\r\n";
 export class HubDouble {
   readonly sends: SentMessage[] = [];
   readonly exchanges: Array<Record<string, unknown>> = [];
+  /** The hub origin each pairing exchange was posted to, in order. */
+  readonly exchangeOrigins: string[] = [];
   readonly historyRequests: Array<Record<string, unknown>> = [];
   private readonly sockets = new Map<string, WebSocketRoute>();
   private readonly waiters: Array<() => void> = [];
+  private readonly held = new Set<string>();
   private polls = 0;
   private requestedScopes: string[] = [];
   private nextId = 1000;
@@ -96,11 +99,26 @@ export class HubDouble {
       localStorage.clear();
       const pair = await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, false, ["sign", "verify"]);
       const publicKey = await crypto.subtle.exportKey("jwk", pair.publicKey);
+      // Wait for the app to create its database (cas-00ad). Opening it first
+      // created an empty version-1 database with no object stores; the app's
+      // own open at version 1 then had no upgrade to run, so every later
+      // transaction failed with "object store not found". On a loaded machine
+      // the app boots late enough for this seed to win the race.
+      const deadline = Date.now() + 15_000;
+      while (!(await indexedDB.databases()).some((db) => db.name === "cas-commander-v1")) {
+        if (Date.now() > deadline) throw new Error("hub double: the app never opened cas-commander-v1; call seedPaired after the page has booted");
+        await new Promise((ok) => setTimeout(ok, 50));
+      }
+      // No version: join the app's database as it is, after any upgrade it runs.
       const db: IDBDatabase = await new Promise((ok, fail) => {
-        const req = indexedDB.open("cas-commander-v1", 1);
+        const req = indexedDB.open("cas-commander-v1");
         req.onsuccess = () => ok(req.result);
         req.onerror = () => fail(req.error);
       });
+      if (!db.objectStoreNames.contains("machines")) {
+        db.close();
+        throw new Error("hub double: cas-commander-v1 has no machines store; the app's schema did not run");
+      }
       await new Promise<void>((ok, fail) => {
         const tx = db.transaction("machines", "readwrite");
         for (const m of machines) {
@@ -138,6 +156,24 @@ export class HubDouble {
     return { queued, reply };
   }
 
+  /** Acknowledge the latest send (MessageQueued) without answering it yet. */
+  deliverLatest(session: string): number {
+    const sent = this.sends.at(-1);
+    if (!sent) throw new Error("hub double: nothing was sent");
+    const queued = this.nextId++;
+    this.send(session, { MessageQueued: { client_ref: sent.client_ref, notification_id: queued, target: sent.target, stamped: true } });
+    this.remember(session).messages.push({ notification_id: queued, target: sent.target, text: sent.text, state: "acknowledged", stamped: true, device_id: "journey-device", at: new Date().toISOString() });
+    return queued;
+  }
+
+  /** Answer an already-acknowledged send as the supervisor. */
+  answerQueued(session: string, queued: number, message: string, extra: Record<string, unknown> = {}): number {
+    const reply = this.nextId++;
+    this.send(session, { OperatorReply: { notification_id: reply, reply_to: queued, message, summary: "", device_id: "journey-device", ...extra } });
+    this.remember(session).replies.push({ notification_id: reply, reply_to: queued, message, summary: "", device_id: "journey-device", attachments: [], at: new Date().toISOString(), ...extra });
+    return reply;
+  }
+
   /** A supervisor message that is not a reply to anything (status, ask, blocker). */
   supervisorSays(session: string, message: string, extra: Record<string, unknown> = {}): number {
     const id = this.nextId++;
@@ -158,6 +194,15 @@ export class HubDouble {
     if (!ws) throw new Error(`hub double: no socket open for ${session}`);
     this.sockets.delete(session);
     void ws.close({ code: 1011, reason: "journey: network dropped" });
+  }
+
+  /** Refuse reconnects for a session until `release`: an outage that lasts. */
+  hold(session: string): void {
+    this.held.add(session);
+  }
+
+  release(session: string): void {
+    this.held.delete(session);
   }
 
   hasSocket(session: string): boolean {
@@ -190,6 +235,7 @@ export class HubDouble {
     if (path === "/v1/auth/pairing/exchange" && method === "POST") {
       const body = route.request().postDataJSON() as Record<string, unknown>;
       this.exchanges.push(body);
+      this.exchangeOrigins.push(url.origin);
       const requested = (body.requested_scopes as string[]) ?? [];
       return route.fulfill({
         status: 201,
@@ -244,6 +290,7 @@ export class HubDouble {
 
   private socket(ws: WebSocketRoute): void {
     const session = decodeURIComponent(new URL(ws.url()).pathname.split("/")[3] ?? "");
+    if (this.held.has(session)) { void ws.close({ code: 1011, reason: "journey: still offline" }); return; }
     const machineId = new URL(ws.url()).hostname.replace(/\.test$/, "");
     this.sockets.set(session, ws);
     const pages = [...(this.options.history?.[session] ?? [])];

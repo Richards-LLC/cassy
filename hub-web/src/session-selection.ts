@@ -125,6 +125,8 @@ export interface SessionPickerEntry {
   readonly machineId: string;
   readonly machineLabel: string;
   readonly session: string;
+  /** Project folder name, when the hub reports one. */
+  readonly project?: string;
   readonly role: "supervisor" | "session";
   readonly supervisor?: string;
   readonly workerCount: number;
@@ -156,7 +158,9 @@ export function workerCountLabel(count: number): string {
 /** The one-line summary under a session name: who runs it, how many, how it is. */
 export function sessionPickerMeta(entry: SessionPickerEntry): string {
   const role = entry.supervisor ? `${entry.role} ${entry.supervisor}` : entry.role;
-  return [role, workerCountLabel(entry.workerCount), entry.status].join(" · ");
+  // Project first, as the conversation list reads (cas-7260); the machine is
+  // the group heading above the row.
+  return [entry.project, role, workerCountLabel(entry.workerCount), entry.status].filter(Boolean).join(" · ");
 }
 
 export function sessionPickerEntries(input: SessionPickerInput): SessionPickerEntry[] {
@@ -171,6 +175,7 @@ export function sessionPickerEntries(input: SessionPickerInput): SessionPickerEn
         machineId: machine.id,
         machineLabel: machine.label,
         session: session.name,
+        project: session.project_dir?.trim().split(/[\\/]+/).filter(Boolean).at(-1) || undefined,
         role: session.supervisor ? "supervisor" as const : "session" as const,
         supervisor: session.supervisor || undefined,
         workerCount: session.workers.length,

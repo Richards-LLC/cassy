@@ -26,6 +26,13 @@ scripts/journeys-for-diff.py <base> <bound_head>   # JSON: id, title, suite, rea
 scripts/journey-eval.sh <ledger-dir> --grep <ID>   # receipts in <ledger-dir>/journeys/<ID>/
 ```
 
+Ports: hub-web's Playwright config never reuses a running server. Each
+checkout gets its own default port pair in 20000–32767, derived from its
+path. A port that is already taken fails the run instead of testing another
+checkout's build. For runs in parallel from one checkout, set
+`HUB_E2E_PORT`/`HUB_JOURNEY_PORT` to a distinct pair in 20000–32767 (below
+Linux's ephemeral range), and name the ports in the ledger header.
+
 Add any journey whose Goal the demo statement names. Walk each journey from
 its real entry point to the user's goal, across feature boundaries. When a
 journey has no suite, drive it by hand with `npx playwright cli` and keep a

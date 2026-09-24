@@ -1,5 +1,6 @@
 import { machineMonogram } from "./machine-accent";
 import { renderMarkdown } from "./markdown-renderer";
+import { refusal } from "./refusal";
 import { shouldFollowTail } from "./transcript";
 import type { ConversationEvent, ConversationHistory, ConversationSend } from "./conversation-history";
 import type { ArtifactRef, OperatorReply, OperatorTurnKind } from "./types";
@@ -93,8 +94,11 @@ export interface ConversationViewOptions {
    * nothing-waiting line when the thread has no turns to show (Pebble 4).
    */
   echo?: () => string | undefined;
-  /** Refused sends offer to put their text back into the composer. */
-  editMessage?: (text: string) => void;
+  /**
+   * Refused sends offer to put their text back into the composer. The send is
+   * passed too, so the caller can retire it once the edited version goes out.
+   */
+  editMessage?: (text: string, send: ConversationSend) => void;
   /** Refused sends offer to go out again unchanged (same text, same in_reply_to). */
   retryMessage?: (send: ConversationSend) => void;
   /**
@@ -109,6 +113,11 @@ export interface ConversationViewOptions {
   hasEarlier?: () => boolean;
   /** Keeps the paging control honest while a request is in flight. */
   loadingEarlier?: () => boolean;
+  /**
+   * The first history page is on its way: an empty thread shows a loading
+   * line rather than claiming nothing is waiting (cas-04ee).
+   */
+  loadingHistory?: () => boolean;
   /** The loaded page reaches the beginning of the project history. */
   historyEnd?: () => boolean;
 }
@@ -129,7 +138,12 @@ export class ConversationView {
   private readonly loadEarlier: HTMLButtonElement;
   private readonly msgs: HTMLElement;
   private readonly empty: HTMLElement;
-  private readonly jump: HTMLButtonElement;
+  /**
+   * "Jump to latest", shown while the reader is scrolled away from the tail.
+   * Mount it above the composer (as main.ts does), outside the scrolling
+   * thread, so it takes its own row instead of floating over a turn (cas-97ea).
+   */
+  readonly jump: HTMLButtonElement;
   private readonly options: ConversationViewOptions;
   private nodes = new Map<string, HTMLElement>();
   /** Coalesced status lines the operator opened with "Show full update"; survives repaints. */
@@ -144,6 +158,8 @@ export class ConversationView {
     const { supervisor } = this.options;
     this.element = document.createElement("div");
     this.element.className = "conversation-reading thread";
+    // Kept in place when a terminal surface mounts beneath it (cas-04ee).
+    this.element.dataset.mountOverlay = "";
     if (this.options.accentClass) this.element.classList.add(this.options.accentClass);
     this.element.tabIndex = 0;
     this.element.setAttribute("aria-label", `Conversation with ${supervisor}`);
@@ -210,7 +226,7 @@ export class ConversationView {
     const same = this.msgs.children.length === children.length && children.every((node, index) => this.msgs.children[index] === node);
     if (!same) this.msgs.replaceChildren(...children);
     this.renderPinned(document);
-    this.renderEmpty(model.length === 0);
+    this.renderEmpty(model.length === 0, this.options.loadingHistory?.() === true);
     if (this.following && document.getSelection()?.isCollapsed !== false) this.pin();
   }
 
@@ -270,19 +286,36 @@ export class ConversationView {
     const waiting = reply?.kind === "blocker" ? this.history.waiting().some((item) => item.notification_id === reply.notification_id) : undefined;
     // The pinned ask's flow copy is collapsed; it expands again when a newer ask takes the pin.
     const pinned = reply?.kind === "ask" ? this.history.pinnedAsk()?.notification_id === reply.notification_id : undefined;
-    return JSON.stringify([turn.event, answered && [answered.id, answered.state, answered.text], waiting, pinned]);
+    const delivered = turn.event.kind === "send" ? this.history.delivered() === turn.event.value : undefined;
+    return JSON.stringify([turn.event, answered && [answered.id, answered.state, answered.text], waiting, pinned, delivered]);
   }
 
   /**
    * Nothing waiting (empty.html): the machine's monogram in its accent, the
-   * supervisor's name, a quiet centred line, and the last message as a faint
+   * project (then machine · codename), a quiet centred line, and the last message as a faint
    * echo. Lives beside `.msgs`, never inside it, so the log stays a log.
    */
-  private renderEmpty(show: boolean): void {
+  private renderEmpty(show: boolean, loading = false): void {
     this.empty.hidden = !show;
     this.msgs.hidden = show;
-    if (!show) { this.empty.replaceChildren(); delete this.empty.dataset.signature; return; }
+    if (!show) { this.empty.replaceChildren(); delete this.empty.dataset.signature; delete this.empty.dataset.state; return; }
     const { supervisor, machine, project } = this.options;
+    if (loading) {
+      // Until the first page lands, "Nothing waiting" would be a guess.
+      if (this.empty.dataset.state === "loading") return;
+      this.empty.dataset.state = "loading";
+      delete this.empty.dataset.signature;
+      const document = this.element.ownerDocument;
+      const line = document.createElement("p"); line.className = "said conversation-loading"; line.setAttribute("role", "status");
+      const dots = document.createElement("span"); dots.className = "dots"; dots.setAttribute("aria-hidden", "true");
+      dots.append(document.createElement("i"), document.createElement("i"), document.createElement("i"));
+      const codename = document.createElement("span"); codename.className = "codename"; codename.textContent = supervisor;
+      const text = document.createElement("span"); text.append("Loading your conversation with ", codename, "…");
+      line.append(dots, text);
+      this.empty.replaceChildren(line);
+      return;
+    }
+    delete this.empty.dataset.state;
     const echo = this.options.echo?.()?.trim() || "";
     const signature = JSON.stringify([supervisor, machine, project, echo]);
     if (this.empty.dataset.signature === signature) return;
@@ -290,10 +323,17 @@ export class ConversationView {
     const document = this.element.ownerDocument;
     const mono = document.createElement("span"); mono.className = "mono"; mono.setAttribute("aria-hidden", "true");
     mono.textContent = machineMonogram(machine || supervisor);
-    const name = document.createElement("b"); name.className = "codename"; name.textContent = supervisor;
-    // project · machine, the order of the header and every list row (P14).
+    // The project titles the card, as it titles the header and every list row
+    // (journey F7); machine and codename sit beneath it. Without a project the
+    // codename is the only name there is, and it keeps the title.
+    const name = document.createElement("b"); name.textContent = project || supervisor;
+    if (!project) name.className = "codename";
     const where = document.createElement("span"); where.className = "proj2";
-    where.textContent = [project, machine].filter(Boolean).join(" · ");
+    if (machine) where.append(machine);
+    if (project) {
+      const secondary = document.createElement("span"); secondary.className = "codename"; secondary.textContent = supervisor;
+      where.append(...(machine ? [" · "] : []), secondary);
+    }
     const said = document.createElement("p"); said.className = "said"; said.setAttribute("role", "status");
     // The codename is an identifier: mono and never broken at its hyphen, even inside prose.
     const codename = document.createElement("span"); codename.className = "codename"; codename.textContent = supervisor;
@@ -344,6 +384,7 @@ export class ConversationView {
     const document = node.ownerDocument;
     const expanded = this.expanded.has(item.key);
     node.className = "turn coalesce-turn";
+    speaker(node, `${this.options.supervisor}, status`, item.time);
     const line = document.createElement("div"); line.className = "coalesce";
     line.id = `coalesce-${item.key.replace(/[^\w-]/g, "-")}`;
     line.dataset.count = String(item.count);
@@ -365,7 +406,7 @@ export class ConversationView {
       node.querySelector<HTMLButtonElement>(".coalesce-expand")?.focus();
     };
     node.replaceChildren(line, more);
-    if (item.time) { const time = document.createElement("time"); time.textContent = item.time; node.append(time); }
+    if (item.time) { const time = document.createElement("time"); time.textContent = item.time; time.setAttribute("aria-hidden", "true"); node.append(time); }
     // A single status can still overflow three lines at a narrow width; offer
     // the way in once layout says the clamp hid something.
     if (more.hidden && typeof requestAnimationFrame !== "undefined") requestAnimationFrame(() => syncClampPill(node));
@@ -374,6 +415,9 @@ export class ConversationView {
   private renderGroup(node: HTMLElement, group: ThreadGroup): void {
     const document = node.ownerDocument;
     node.className = `turn ${group.side === "you" ? "you" : "sup"}`;
+    // F19 (cas-17e3): a screen reader hears who spoke and when, not bare
+    // paragraphs and times. The visible time stays for sighted readers.
+    speaker(node, group.side === "you" ? "You" : this.options.supervisor, group.time);
     // Bubbles are keyed too: a later turn re-derives the earlier one's corner
     // classes without replacing its node, so a selection or focus inside it
     // survives the update.
@@ -398,7 +442,7 @@ export class ConversationView {
       bubble.classList.toggle("group-last", turn.last);
       children.push(bubble, ...sheets);
     }
-    if (group.time) { const time = document.createElement("time"); time.textContent = group.time; children.push(time as unknown as HTMLElement); }
+    if (group.time) { const time = document.createElement("time"); time.textContent = group.time; time.setAttribute("aria-hidden", "true"); children.push(time as unknown as HTMLElement); }
     node.replaceChildren(...children);
   }
 
@@ -412,24 +456,50 @@ export class ConversationView {
       state.className = "conversation-delivery"; state.setAttribute("role", "status");
       state.textContent = "Sending…";
       bubble.append(state);
+    } else if (send.state === "acknowledged" && this.history.delivered() === send) {
+      // F5: the hub's receipt is the difference between a delivered message
+      // and a lost one, so the latest delivered send says so until the reply
+      // lands (then the answer itself is the evidence).
+      const state = document.createElement("span");
+      state.className = "conversation-delivery conversation-delivered"; state.setAttribute("role", "status");
+      const tick = document.createElement("template"); tick.innerHTML = TICK;
+      const label = document.createElement("span"); label.textContent = "Delivered";
+      state.append(tick.content.firstElementChild!, label);
+      bubble.append(state);
+    } else if (send.state === "error" && send.replaced) {
+      // F6: the edited version went out, so this one is only a record. It
+      // collapses and offers no Retry — one tap would resend the text the
+      // operator just corrected.
+      bubble.dataset.replaced = "true";
+      const state = document.createElement("span");
+      state.className = "conversation-delivery conversation-refused conversation-replaced"; state.setAttribute("role", "status");
+      const label = document.createElement("b"); label.textContent = "Not sent";
+      const separator = document.createElement("span"); separator.textContent = " · ";
+      const reason = document.createElement("span"); reason.className = "conversation-refused-reason"; reason.textContent = "replaced by your edit";
+      state.append(label, separator, reason);
+      bubble.append(state);
     } else if (send.state === "error") {
       // P8 (cas-b1ee): a refused send must not read as delivered. The bubble
       // drops its fill for a dashed critical outline; the label leads with a
-      // warning glyph and "Not sent", the refusal reason follows quietly.
+      // warning glyph and "Not sent", then the refusal in plain words (F6):
+      // why it did not go and the step that gets it through.
       const state = document.createElement("span");
       state.className = "conversation-delivery conversation-refused"; state.setAttribute("role", "status");
       const glyph = document.createElement("template"); glyph.innerHTML = WARN;
       const label = document.createElement("b"); label.textContent = "Not sent";
       // The separator is for the reader; on screen the reason takes its own line.
       const separator = document.createElement("span"); separator.className = "sr-only"; separator.textContent = " · ";
-      const reason = document.createElement("span"); reason.className = "conversation-refused-reason"; reason.textContent = send.error ?? "refused";
+      const plain = refusal(send.error);
+      const reason = document.createElement("span"); reason.className = "conversation-refused-reason"; reason.textContent = plain.reason;
+      const next = document.createElement("span"); next.className = "conversation-refused-next"; next.textContent = ` ${plain.next}`;
+      reason.append(next);
       state.append(glyph.content.firstElementChild!, label, separator, reason);
       bubble.append(state);
       const actions = document.createElement("div"); actions.className = "conversation-actions";
       if (this.options.editMessage) {
         const edit = document.createElement("button"); edit.type = "button"; edit.className = "conversation-edit"; edit.textContent = "Edit";
         edit.setAttribute("aria-label", "Edit message");
-        edit.onclick = () => this.options.editMessage?.(send.text);
+        edit.onclick = () => this.options.editMessage?.(send.text, send);
         actions.append(edit);
       }
       if (this.options.retryMessage) {
@@ -519,6 +589,12 @@ function signatureOf(item: ThreadItem, turnSignature: (turn: ThreadTurn) => stri
     case "coalesce": return JSON.stringify([item.count, item.latest, item.time, item.replies.map((reply) => reply.notification_id)]);
     case "group": return JSON.stringify([item.side, item.time, item.turns.map((turn) => [turn.key, turn.first, turn.last, turnSignature(turn)])]);
   }
+}
+
+/** Names a message group for assistive tech: "You, 12:45" or "<supervisor>, 12:45". */
+function speaker(node: HTMLElement, who: string, time: string | undefined): void {
+  node.setAttribute("role", "group");
+  node.setAttribute("aria-label", time ? `${who}, ${time}` : who);
 }
 
 function paragraphs(document: Document, text: string): HTMLElement[] {

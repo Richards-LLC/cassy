@@ -92,7 +92,9 @@ describe("hub-web fixture visual QA", () => {
     expect(conversationSource).toContain("import LONG_STATUS from './hub-row-20812.txt?raw';");
     expect(conversationSource).toContain("reply(20812, null, LONG_STATUS.trim(), 'status', at(13, 25));");
     expect(conversationSource).toContain("hasEarlier: () => loadingEarlier, loadingEarlier: () => loadingEarlier,");
-    expect(conversationSource).toContain("empty.textContent = conversationEmptyText(!loading, machines.length);");
+    // The list's loading state is the production skeleton, chosen by the same state function main.ts uses.
+    expect(conversationSource).toContain("const listState = conversationListState(!loading, machines.map(() => ({ catalogReceived: true, phase: 'live' })));");
+    expect(conversationSource).toContain("if (listState.kind === 'loading') empty.innerHTML = conversationSkeletonMarkup();");
   });
 
   it("wires a deliberately broken fixture through the strict gate", async () => {

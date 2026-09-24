@@ -1,25 +1,41 @@
+import type { PairingPrefill } from "./fragment";
 import type { Scope } from "./types";
 import { PAIRING_SCOPES } from "./pairing-scopes";
 
+export type PairingStep = "create" | "code" | "authorized" | "link";
+
 export interface PairingDraft {
-  /** The machine's hub address. Never seeded from the page: a hosted Commander
-   *  origin is a plausible-looking wrong answer for a remote machine (F5). */
+  /** The machine's hub address. Seeded only from what the machine itself put
+   *  in its `cas hub pair` link, never from the page: a hosted Commander origin
+   *  is a plausible-looking wrong answer for a remote machine (F5). */
   hubUrl: string;
   /** Where this page is served from, offered as one tap for the page-served-by-hub case. */
   pageOrigin: string;
   machineLabel: string;
+  /** "Where do I find this?" stays open across the dialog's re-renders once opened. */
+  addressHelpOpen: boolean;
+  /** The step whose "Technical details" the operator opened; it stays open
+   *  across that step's re-renders and starts closed on the next step, so an
+   *  opened list never pushes the next step's fields below the fold. */
+  technicalOpen: PairingStep | undefined;
   deviceLabel: string;
   operatorLabel: string;
   scopes: Scope[];
   email: string;
 }
 
-/** `scopes` is the invitation's ceiling when one is known, never a wider guess. */
-export function createPairingDraft(controllerOrigin: string, scopes?: readonly Scope[]): PairingDraft {
+/**
+ * `scopes` is the invitation's ceiling when one is known, never a wider guess.
+ * `prefill` is what the machine's own link said about itself; both values stay
+ * editable in the form.
+ */
+export function createPairingDraft(controllerOrigin: string, scopes?: readonly Scope[], prefill: PairingPrefill = {}): PairingDraft {
   return {
-    hubUrl: "",
+    hubUrl: prefill.suggestedHubUrl ?? "",
     pageOrigin: controllerOrigin,
-    machineLabel: "",
+    machineLabel: prefill.suggestedMachineLabel ?? "",
+    addressHelpOpen: false,
+    technicalOpen: undefined,
     deviceLabel: "Cassy Cloud browser",
     operatorLabel: "",
     scopes: scopes ? [...scopes] : [...PAIRING_SCOPES],

@@ -422,6 +422,15 @@ function visibleSessions(machineId: string): HubSession[] {
     Date.now() < (catalogExpiresAt.get(machineId) ?? Infinity), revealDormant);
 }
 
+/**
+ * The sessions every surface lists, per machine: the conversation list, the
+ * palette's Jump rows, the session picker and its "N available" count all
+ * read this, so they cannot disagree on which sessions exist (cas-645e).
+ */
+function visibleSessionMap(): Map<string, HubSession[]> {
+  return new Map([...machines.keys()].map((machineId) => [machineId, visibleSessions(machineId)]));
+}
+
 function selectionStorage(): SelectionStorage | undefined {
   try { return window.localStorage; } catch { return undefined; }
 }
@@ -3025,7 +3034,8 @@ function renderSessionPicker(): void {
   if (!list) return;
   const entries = sessionPickerEntries({
     machines: [...machines.values()].map((machine) => ({ id: machine.id, label: machine.label })),
-    sessions,
+    // The same rule as the list, the palette and the count (cas-645e).
+    sessions: visibleSessionMap(),
     includeDormant: revealDormant,
     selection: selection.current ?? (selectedMachineId ? { machineId: selectedMachineId, session: selectedSession } : undefined),
     summaries: sessionSummaries,

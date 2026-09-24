@@ -7,7 +7,11 @@ import type { Machine } from "./hub-double";
 const ALPHA: Machine = {
   id: "alpha",
   label: "Alpha · Linux",
-  sessions: [{ name: "keen-lynx-1", supervisor: "keen-lynx-1", project_dir: "/projects/orion", workers: ["quick-wren-2"], liveness: "live" }],
+  sessions: [
+    { name: "keen-lynx-1", supervisor: "keen-lynx-1", project_dir: "/projects/orion", workers: ["quick-wren-2"], liveness: "live" },
+    // A live supervisor that has not spawned workers yet (cas-645e).
+    { name: "lone-heron-2", supervisor: "lone-heron-2", project_dir: "/projects/lighthouse", workers: [], liveness: "live" },
+  ],
 };
 
 test("HUB-J8 switch between machines without losing my place", async ({ page, journey }) => {
@@ -342,7 +346,7 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
     await page.locator("#session-picker-toggle").click();
     await expect(picker).toBeVisible();
     const names = picker.locator(".session-picker-entry .session-name");
-    expect((await names.allTextContents()).sort()).toEqual(["cas-src", "gabber-studio", "orion"]);
+    expect((await names.allTextContents()).sort()).toEqual(["cas-src", "gabber-studio", "lighthouse", "orion"]);
     await expect(picker.locator(`.session-picker-entry[data-picker-session="${OTTER}"] .session-meta`)).toHaveText(`supervisor ${OTTER} · 1 worker · live`);
     await expect(picker.locator('.session-picker-entry[data-picker-session="keen-lynx-1"] .session-meta')).toHaveText("supervisor keen-lynx-1 · 1 worker · live");
     await page.keyboard.press("Escape");
@@ -359,5 +363,35 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
     await expect(jump("orion").locator("small")).toHaveText(/^keen-lynx-1 · Alpha · Linux/);
     await page.keyboard.press("Escape");
     await expect(palette).toBeHidden();
+  });
+
+  await journey.stage("A supervisor with no workers yet is listed everywhere", async () => {
+    // cas-645e: the list, the palette, the picker and its count agree. A live
+    // supervisor that has not spawned workers is one the operator can talk to.
+    await page.locator("#conversation-return").click();
+    await expect(list.getByRole("button", { name: /lighthouse/ })).toBeVisible();
+    const listRows = await list.locator(".conversation-row").count();
+    // Ctrl+K lands in the list search here; the palette sits behind the list's button.
+    await page.getByRole("button", { name: "Appearance & commands" }).click();
+    const palette = page.locator("#command-palette");
+    await expect(palette).toBeVisible();
+    const jumps = palette.locator(".palette-command[data-palette-session]");
+    await expect(jumps.filter({ hasText: "Jump to lighthouse" })).toHaveCount(1);
+    const jumpCount = await jumps.count();
+    await page.keyboard.press("Escape");
+    await expect(palette).toBeHidden();
+    await page.getByRole("button", { name: "Terminal view" }).click();
+    const toggle = page.locator("#session-picker-toggle");
+    await toggle.click();
+    const picker = page.locator("#session-picker");
+    await expect(picker).toBeVisible();
+    await expect(picker.locator('.session-picker-entry[data-picker-session="lone-heron-2"] .session-meta')).toHaveText("supervisor lone-heron-2 · no workers · live");
+    const pickerRows = await picker.locator(".session-picker-entry").count();
+    expect(pickerRows).toBe(4);
+    expect(jumpCount, "palette Jump rows").toBe(pickerRows);
+    await expect(toggle).toHaveAttribute("aria-label", `Switch session — ${pickerRows} available`);
+    expect(listRows, "conversation list rows").toBe(pickerRows);
+    await page.keyboard.press("Escape");
+    await expect(picker).toBeHidden();
   });
 });

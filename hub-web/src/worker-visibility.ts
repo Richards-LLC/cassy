@@ -87,10 +87,16 @@ export function workersCommandLabel(revealed: boolean): { title: string; hint: s
     : { title: "Show worker panes", hint: "Each worker's own terminal, for debugging" };
 }
 
-/** Require a fresh staffed supervisor; recovery is explicit and pending work stays visible. */
+/**
+ * Require a fresh, live supervisor; recovery is explicit and pending work
+ * stays visible. A supervisor that has not spawned workers yet is still one
+ * the operator can talk to: the hub lists it (cas-7103), so every surface
+ * does (cas-645e). This is the one rule for the list, the palette, the
+ * session picker and its "N available" count.
+ */
 export function sessionReachable(session: HubSession, catalogFresh = true): boolean {
   return catalogFresh && !session.unreachable && session.dormant !== true
-    && session.liveness === "live" && Boolean(session.supervisor.trim()) && session.workers.length > 0;
+    && session.liveness === "live" && Boolean(session.supervisor.trim());
 }
 
 export function visibleCatalog(sessions: readonly HubSession[], pending: (name: string) => boolean, catalogFresh = true, recovery = false): HubSession[] {

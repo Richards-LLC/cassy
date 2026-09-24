@@ -88,9 +88,9 @@ import type { HubSession } from './types';
 
 const liveSession: HubSession = { name: 'live', supervisor: 'supervisor', workers: ['worker'], liveness: 'live' };
 describe('staffed session catalog', () => {
-  it('hides dead, empty, worker-only and unreachable rows; keeps staffed live rows', () => {
+  it('hides dead, worker-only and unreachable rows; keeps live supervisors, with or without workers (cas-7103, cas-645e)', () => {
     const rows = [liveSession, { ...liveSession, name: 'dead', dormant: true }, { ...liveSession, name: 'empty', workers: [] }, { ...liveSession, name: 'worker', supervisor: '' }, { ...liveSession, name: 'missing', liveness: 'missing_endpoint' as const }];
-    expect(visibleCatalog(rows, () => false).map(row => row.name)).toEqual(['live']);
+    expect(visibleCatalog(rows, () => false).map(row => row.name)).toEqual(['live', 'empty']);
     expect(visibleCatalog(rows, () => false, true, true)).toHaveLength(5);
   });
   it('retains missing in-flight destinations as unreachable through sending and acknowledgment', () => {

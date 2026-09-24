@@ -2016,6 +2016,18 @@ dialog::backdrop { background: var(--overlay-backdrop); }
 .palette-command span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .palette-command small, .palette-empty { color: var(--text-mid); }
 .palette-command small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Journey F8: commands grouped Conversations / Appearance / Advanced; the
+   debugging switches sit in Advanced, collapsed until asked for. */
+.palette-group { display: grid; gap: var(--space-1); }
+.palette-group[hidden] { display: none; }
+.palette-group + .palette-group { margin-top: var(--space-2); }
+.palette-group-heading { margin: 0; padding: var(--space-1) var(--space-3) 0; color: var(--text-mid); font: var(--weight-semibold) var(--fs-xs)/1.4 var(--font-ui); letter-spacing: var(--tracking-label); text-transform: uppercase; }
+.palette-advanced > summary { display: flex; align-items: center; gap: var(--space-2); min-height: 44px; padding-top: 0; cursor: pointer; list-style: none; }
+.palette-advanced > summary::-webkit-details-marker { display: none; }
+.palette-advanced > summary::before { content: "▸"; font-size: 0.9em; }
+.palette-advanced[open] > summary::before { content: "▾"; }
+.palette-advanced > summary:focus-visible { outline-offset: calc(-2 * var(--focus-ring-width)); }
+.palette-advanced[open] { gap: var(--space-1); }
 /* Forced colors drops the surfaces and shadows that separate rows and lift the
    dialog, so each needs a real edge: rows read as buttons, the dialog stands
    off the page behind it, and the open session keeps its mark. */
@@ -2885,6 +2897,11 @@ dialog form > *,
 /* First run on a wide screen: the welcome's Pair a machine is the one primary action. */
 .welcome-pairs #pair-toggle { display: none; }
 .conversation-list-heading p { color: var(--ink-mid); margin: var(--space-3) 6px 0; }
+/* Journey F8: a visible name search at the top of the list; Ctrl/Cmd+K lands here. */
+.conversation-search { position: relative; display: flex; align-items: center; margin: var(--space-4) 0 0; }
+.conversation-search svg { position: absolute; left: 14px; width: 16px; height: 16px; color: var(--ink-mid); pointer-events: none; }
+.conversation-search input { width: 100%; min-height: var(--rail-item-min); padding: 0 var(--space-3) 0 38px; border: var(--line-width) solid var(--line-strong); border-radius: var(--radius-pill); background: var(--canvas); color: var(--ink); font: var(--weight-regular) var(--fs-md)/1.3 var(--font-ui); }
+.conversation-search input::placeholder { color: var(--ink-mid); opacity: 1; }
 #conversation-list { overflow-y: auto; min-height: 0; display: flex; flex-direction: column; gap: var(--space-1); padding: 0 14px var(--space-4) 18px; }
 .conversation-sidebar footer { padding: var(--space-4) 18px; margin-top: auto; }
 .conversation-sidebar footer button { width: 100%; font-size: var(--fs-meta); }
@@ -2896,13 +2913,13 @@ dialog form > *,
 .conversation-row[aria-current="true"]::before { content: ""; position: absolute; top: var(--space-4); bottom: var(--space-4); left: 5px; width: 3px; border-radius: var(--radius-pill); background: var(--accent); }
 .conversation-avatar { grid-row: span 2; display: flex; align-items: center; justify-content: center; width: 42px; height: 42px; border-radius: var(--radius-pill); background: var(--accent); color: var(--accent-fg); font: var(--weight-semibold) 17px/1 var(--font-ui); }
 .conversation-who { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; min-width: 0; }
-.conversation-supervisor { font: var(--weight-semibold) var(--fs-md)/1.35 var(--font-ui); }
-/* The meta is always its own line under the codename (P13), so no row needs a leading dot. */
-.conversation-meta { display: inline-flex; flex-wrap: wrap; flex-basis: 100%; align-items: center; gap: 7px; min-width: 0; max-width: 100%; }
-.conversation-project { display: inline-flex; align-items: center; gap: 7px; min-width: 0; max-width: 100%; }
+/* Journey F7: users think in projects. The title is the project, then the
+   machine; the generated codename is tertiary text on its own line beneath. */
+.conversation-title { display: inline-flex; flex-wrap: wrap; align-items: center; column-gap: 7px; min-width: 0; max-width: 100%; }
+.conversation-project { min-width: 0; max-width: 100%; font: var(--weight-semibold) var(--fs-md)/1.35 var(--font-ui); overflow-wrap: anywhere; }
 .conversation-sep { width: 3px; height: 3px; border-radius: var(--radius-pill); background: var(--ink-soft); flex: none; }
-.conversation-row .project-badge { padding: 0; border-radius: 0; background: var(--color-transparent); color: var(--ink-soft); font: var(--weight-medium) var(--fs-xs)/1.35 var(--font-mono); }
-.conversation-machine { display: inline-flex; align-items: center; gap: 7px; color: var(--ink-soft); font: var(--weight-medium) var(--fs-xs)/1.35 var(--font-mono); white-space: nowrap; }
+.conversation-machine { display: inline-flex; align-items: center; gap: 7px; color: var(--ink-mid); font: var(--weight-medium) var(--fs-meta)/1.35 var(--font-ui); white-space: nowrap; }
+.conversation-supervisor { flex-basis: 100%; color: var(--ink-soft); font: var(--weight-regular) var(--fs-xs)/1.35 var(--font-mono); }
 .conversation-when { justify-self: end; font-size: var(--fs-xs); color: var(--ink-soft); white-space: nowrap; }
 .conversation-when.hot { color: var(--warn-text); font-weight: var(--weight-semibold); }
 .conversation-preview { grid-column: 2; min-width: 0; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; max-height: calc(2 * 1.35em); overflow: hidden; text-overflow: ellipsis; font-size: var(--fs-meta); line-height: 1.35; color: var(--ink-soft); overflow-wrap: anywhere; }
@@ -3204,7 +3221,6 @@ button.chip:disabled { cursor: default; }
   #conversation-back:hover:not(:disabled), #conversation-terminal:hover:not(:disabled) { background: var(--bg-hover); }
   .conversation-identity h1 { flex-wrap: nowrap; }
   .conversation-identity h1 b { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 22px; }
-  .conversation-identity .project-badge { flex: none; font-size: 13px; padding: 2px 6px; }
   .conversation-identity .conversation-host { display: flex; font-size: 12px; white-space: nowrap; }
   .conversation-identity .host-where { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
   #conversation-connection { flex: none; white-space: pre; }

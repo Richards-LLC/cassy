@@ -1,4 +1,4 @@
-import { escapeHtml, projectBadge } from "./cloud-brand";
+import { escapeHtml, projectName } from "./cloud-brand";
 import { machineAccentClass, machineMonogram } from "./machine-accent";
 import { plainTextMarkdown } from "./markdown-renderer";
 
@@ -42,8 +42,22 @@ export function machineName(host: string): string {
   return name || host.trim();
 }
 
-/** One Pebble row: `avatar · name · project · preview · time`, with two distinct
- * affordances — waiting (ochre dot, hot time) and unread (accent count pill). */
+/** The words a list search matches: project, machine and supervisor codename. */
+export function conversationSearchText(row: Pick<ConversationRow, "projectDir" | "host" | "supervisor">): string {
+  return `${projectName(row.projectDir)} ${row.host} ${row.supervisor}`.toLocaleLowerCase();
+}
+
+/** Rows whose project, machine or supervisor contains every word of the query (case-insensitive). */
+export function filterConversationRows<T extends Pick<ConversationRow, "projectDir" | "host" | "supervisor">>(rows: readonly T[], query: string): T[] {
+  const words = query.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
+  if (words.length === 0) return [...rows];
+  return rows.filter((row) => { const text = conversationSearchText(row); return words.every((word) => text.includes(word)); });
+}
+
+/** One Pebble row: `avatar · project machine · codename · preview · time`, with
+ * two distinct affordances — waiting (ochre dot, hot time) and unread (accent
+ * count pill). Users think in projects (journey F7): the project is the title,
+ * the machine follows it, and the generated codename is tertiary text. */
 export function conversationRowMarkup(row: ConversationRow): string {
   const waiting = row.attention > 0;
   const unread = row.unread ?? 0;
@@ -54,15 +68,13 @@ export function conversationRowMarkup(row: ConversationRow): string {
   const count = unread > 0 ? `<span class="conversation-unread" aria-label="${unread} unread">${unread}</span>` : "";
   const flag = waiting ? `<span class="conversation-flag" role="img" aria-label="${row.attention === 1 ? "Waiting for you" : `${row.attention} waiting for you`}"></span>` : "";
   const marks = count || flag ? `<span class="conversation-marks">${count}${flag}</span>` : "";
-  // Project and machine travel together as one meta unit: when the who-line
-  // is too narrow the whole "project · machine" drops to the next line, and
-  // only an over-long project name splits the machine off after it. The meta
-  // leads with the project, never a dot (P13); the one separator rides with
-  // the machine, so a dot never dangles at a line end.
-  // The machine is legible as text on every row (operator direction): the
-  // monogram and accent alone do not name it.
+  // The title is "project · machine": the project leads, never a dot (P13);
+  // the one separator rides with the machine, so a dot never dangles at a
+  // line end when a long project pushes the machine to the next line. The
+  // machine is legible as text on every row (operator direction): the
+  // monogram and accent alone do not name it. The codename sits beneath.
   return `<span class="conversation-avatar" aria-hidden="true">${escapeHtml(machineMonogram(row.host))}</span>`
-    + `<span class="conversation-who"><strong class="conversation-supervisor codename">${escapeHtml(row.supervisor)}</strong><span class="conversation-meta"><span class="conversation-project">${projectBadge(row.projectDir)}</span><span class="conversation-machine"><span class="conversation-sep" aria-hidden="true"></span>${escapeHtml(machineName(row.host))}</span></span></span>`
+    + `<span class="conversation-who"><span class="conversation-title"><strong class="conversation-project">${escapeHtml(projectName(row.projectDir))}</strong><span class="conversation-machine"><span class="conversation-sep" aria-hidden="true"></span>${escapeHtml(machineName(row.host))}</span></span><span class="conversation-supervisor codename">${escapeHtml(row.supervisor)}</span></span>`
     + time
     + `<span class="conversation-preview${row.unreachable ? " unreachable" : waiting || unread > 0 ? " bold" : ""}">${escapeHtml(preview)}</span>`
     + marks;

@@ -1439,6 +1439,9 @@ printf '%s\n' "$*" >> "$CAS_SYSTEMCTL_LOG"
 if [ "$1" = "--user" ] && [ "$2" = "--version" ]; then
   exit 0
 fi
+if [ "$1" = "--user" ] && [ "$2" = "is-active" ]; then
+  exit 0
+fi
 if [ "$1" = "--user" ] && [ "$2" = "restart" ] && [ "$3" = "cas-hub.service" ]; then
   cp "$CAS_NEW_RECORD" "$CAS_HUB_ROOT/process.json"
   cp "$CAS_NEW_LOCK" "$CAS_HUB_ROOT/hub.lock"
@@ -1463,8 +1466,24 @@ exit 1
 
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let port = listener.local_addr().unwrap().port();
+        // Accept with a deadline: when restart fails before probing health,
+        // the test must fail, not hang on join.
+        listener.set_nonblocking(true).unwrap();
         let health = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        if std::time::Instant::now() >= deadline {
+                            return;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(20));
+                    }
+                    Err(error) => panic!("health listener failed: {error}"),
+                }
+            };
+            stream.set_nonblocking(false).unwrap();
             let mut request = [0; 1024];
             let _ = stream.read(&mut request);
             let body = br#"{"schema_version":1,"ready":true}"#;
@@ -1511,12 +1530,31 @@ exit 1
         env.set("CAS_NEW_RECORD", &new_record_path);
         env.set("CAS_NEW_LOCK", &new_lock_path);
 
+        // cas-24bd: this test was SIGTERMed on any host running a real hub.
+        // The stub reported the unit inactive, so restart took the detached-
+        // hub takeover path; the old record (this test's own PID, on
+        // DEFAULT_HUB_PORT) read as live because the real hub answered its
+        // health probe, and the takeover signalled the test. The stubbed unit
+        // is now active, and the old hub is a disposable child…
+        let old_hub = Command::new("sleep").arg("30").spawn().unwrap();
+        let old_hub_pid = old_hub.id();
+        let old_hub_reaper = std::thread::spawn(move || {
+            let mut old_hub = old_hub;
+            let _ = old_hub.wait();
+        });
+        // …on a port nothing answers: DEFAULT_HUB_PORT is the real hub on a
+        // factory host, whose health reply made this record read as live.
+        let dead_port = TcpListener::bind(("127.0.0.1", 0))
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
         let old_record = HubProcessRecord {
-            pid: std::process::id(),
+            pid: old_hub_pid,
             sid: None,
             pgid: None,
             bind: "127.0.0.1".into(),
-            port: DEFAULT_HUB_PORT,
+            port: dead_port,
             version: "3.26.0".into(),
             started_at: "2026-09-21T15:29:00Z".into(),
             cgroup: None,
@@ -1543,6 +1581,9 @@ exit 1
         let handled = restart_supervised(&cli, false, DEFAULT_HUB_PORT);
         service_process.kill().unwrap();
         let _ = service_process.wait();
+        // Whether or not restart stopped it, the old hub must not outlive the test.
+        let _ = Command::new("kill").arg(old_hub_pid.to_string()).status();
+        old_hub_reaper.join().unwrap();
         health.join().unwrap();
 
         assert!(handled.unwrap(), "installed service must handle restart");

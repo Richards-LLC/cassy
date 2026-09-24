@@ -152,7 +152,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 2. Write and send — the message appears at once as "Sending…" and the composer clears
 3. See it delivered — the hub's receipt turns "Sending…" into "Delivered" with a check
 4. See it answered — the supervisor's reply arrives under it and "Delivered" steps aside
-5. A refused message says why — "Not sent", a plain reason and the next step; the list does not preview it as said
+5. A refused message says why — "Not sent", a plain reason and the next step on the message, said once (the composer only points at it); the list does not preview it as said
 6. Edit and resend retires the refused message — it collapses to "Not sent · replaced by your edit" with no Retry
 
 **Expected experience**

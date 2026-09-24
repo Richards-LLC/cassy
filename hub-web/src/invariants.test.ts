@@ -113,7 +113,8 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(source).toContain("const editOf = !quick && editingRefused?.threadKey === selectedThread");
     // The composer speaks plain words, never protocol vocabulary (F5).
     expect(source).not.toContain("awaiting receipt");
-    expect(source).toContain("showComposerStatus(refusalSentence(detail), \"error\");");
+    // The reason is said once, on the refused bubble; the composer points at it (cas-4d92).
+    expect(source).toContain("showComposerStatus(onBubble ? REFUSED_SEE_ABOVE : refusalSentence(detail), \"error\");");
     // The list preview never shows unsent text as said (F6).
     expect(source).toContain("preview: conversationHistories.get(key)?.preview(),");
     // Retry of a refused send (cas-b1ee): same leased path, the refused send's own in_reply_to.

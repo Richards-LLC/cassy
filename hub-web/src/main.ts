@@ -6,7 +6,7 @@ import { ConversationList, filterConversationRows, type ConversationRow } from "
 import { sessionJumpCommandMarkup } from "./palette-commands";
 import { ConversationHistory } from "./conversation-history";
 import { ConversationView } from "./conversation-view";
-import { refusalSentence } from "./refusal";
+import { REFUSED_SEE_ABOVE, refusalSentence } from "./refusal";
 import { installAttentionObjects } from "./attention-objects";
 import { installAttachmentSheet } from "./attachment-sheet";
 import { arrangeConversationShell, bindKeyboardViewport, conversationListState, conversationNoMatchText, conversationSkeletonMarkup } from "./conversation-shell";
@@ -694,12 +694,15 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
     },
     onMessageRejected: (session, clientRef, detail) => {
       const key = sessionKey(machine.id, session);
-      conversationHistory(key).reject(clientRef, detail);
+      const onBubble = conversationHistory(key).reject(clientRef, detail);
       if (messageDelivery?.session === key && messageDelivery.clientRef === clientRef) {
         messageDelivery = undefined;
         document.querySelector<HTMLElement>("#message-delivery")?.setAttribute("hidden", "");
         if (selectedMachineId === machine.id && selectedSession === session) {
-          showComposerStatus(refusalSentence(detail), "error");
+          // The refused bubble carries the reason and the next step; the
+          // composer only points at it, so the reason is said once (cas-4d92).
+          // Without a bubble to point at, the composer gives the whole sentence.
+          showComposerStatus(onBubble ? REFUSED_SEE_ABOVE : refusalSentence(detail), "error");
         }
       }
       updateConversationViews(); renderConversationList();

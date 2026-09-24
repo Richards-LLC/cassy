@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { refusal, refusalSentence } from "./refusal";
+import { REFUSED_SEE_ABOVE, refusal, refusalSentence } from "./refusal";
 
 describe("refusal (F6: plain reasons with a next step)", () => {
   it.each([
@@ -19,5 +19,9 @@ describe("refusal (F6: plain reasons with a next step)", () => {
   it("never repeats the protocol code to the operator", () => {
     expect(refusalSentence("forbidden")).toBe("Not sent. This device isn't the one in control of the session. Take control from the header, then retry.");
     expect(refusalSentence(undefined)).not.toMatch(/undefined|forbidden/);
+  });
+  it("points at the bubble instead of repeating its reason (cas-4d92)", () => {
+    expect(REFUSED_SEE_ABOVE).toBe("Not sent — see the message above.");
+    expect(REFUSED_SEE_ABOVE).not.toContain(refusal("forbidden").reason);
   });
 });

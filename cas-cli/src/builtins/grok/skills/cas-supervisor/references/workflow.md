@@ -181,13 +181,15 @@ naming its result and integration tip.
 
 ### Required merge-review discipline
 
-Before accepting a scoped worker receipt and landing its lane, do these two checks:
+Before landing a worker lane, do these two checks. Workers never build or test
+Rust, so a lane carries no build proof; do not ask for a scoped receipt. The
+Rust build happens once, at Phase 4 assembly.
 
 1. **Contract changes first.** If the diff changes a public contract (API shape,
    persisted field, CLI/MCP response, or behavior callers rely on), search for sibling
-   tests that still pin the old contract before accepting the scoped receipt. For example:
+   tests that still pin the old contract before landing the lane. For example:
    `git grep -n '<old contract token>' -- '*test*'` (narrow the path/spec as needed).
-   Update or reject the receipt when those tests prove an unreviewed caller contract.
+   Update or reject the lane when those tests prove an unreviewed caller contract.
 2. **Read the lane CI signal.** Inspect `gh run list --branch factory/<worker>` at
    review time. `worktree_merge` also reports its best-effort CI workflow verdict, but
    this explicit review check catches a new run or a result that arrived after the
@@ -285,19 +287,25 @@ When workers share the main directory, there's no branch merging — workers com
 
 1. Verify all tasks closed: `cas__task action=list status=open epic=<epic-id>`
 2. Hold the main merge. The epic branch is not ready for base until the assembled diff has passed review and the final gate.
-3. Run the final assembled-tree gate. Phase 3 review receipts cover each
-   worker merge; this gate checks cross-task integration on the final tree:
+3. Run the final assembled-tree gate. This is the epic's single Rust build:
+   workers never build, so one full build + test of the epic tip proves every
+   child and checks cross-task integration (add `cargo test -p cas --doc` when
+   the epic touches doctests):
    ```bash
    cargo nextest run -p cas
    ```
+   On exit 0, record a progress note on the epic:
+   `ASSEMBLY_PROOF: head=<epic tip sha> result=PASS command=<cmd> log=<path>`,
+   with the log under `[factory] artifacts_root/<epic-id>/`. Child task closes
+   reference this proof; worker closes carry no scoped or loaded build proof.
 4. Turn any final-gate failure or review gap that needs worker action into a
    bounded epic-child fix-round task before messaging a worker. Put the finding,
    required fix, acceptance criteria, and proof command in the task description;
    the coordination message only points at the task ID.
-5. After the fix lands, rerun the final assembled-tree gate yourself and capture
-   the real exit code:
+5. After the fix lands, rerun the final assembled-tree gate yourself on the new
+   tip, capture the real exit code, and record a fresh `ASSEMBLY_PROOF` for it:
    ```bash
-   cargo nextest run -p cas > /tmp/<epic-id>-cargo-nextest.log 2>&1; echo $?
+   cargo nextest run -p cas > <artifacts_root>/<epic-id>/assembly-nextest.log 2>&1; echo $?
    ```
    Never pipe the test run to `tail`; that captures the pipe status, not the
    nextest status.

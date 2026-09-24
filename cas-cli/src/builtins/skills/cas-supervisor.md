@@ -25,7 +25,8 @@ Coordinate workers to complete EPICs; plan, do not implement.
 - **Worker liveness:** use `coordination action=worker_status summary_mode=true` for a fast fleet poll. Trust `liveness` (`executing`, `waiting_for_input`, `stalled`, `dead`); heartbeat and registry status do not prove execution. Read full `worker_status` for event age, PID state and last write evidence before recovery — see [worker-recovery.md](cas-supervisor/references/worker-recovery.md).
 - **Workspace contract:** source/build stays in the worktree; durable proof goes in `[factory] artifacts_root/<task-id>/`, never `/tmp`.
 - **User-facing task gate:** labels in `qa.user_facing_labels` (defaults `ui,hub,cli-ux,commander,frontend`) require `demo_statement` shaped `As a <user>, I <do X> and see <Y>`; epics, internal/unlabeled tasks and deliberate `supervisor_override=true` exceptions are exempt; briefs include it.
-- **Risk gate:** declare `risk` and `proof_targets` at creation; require complete scoped proof and receipts ([reference](cas-supervisor/references/reference.md#task-risk-declarations)).
+- **Risk gate:** declare `risk` and `proof_targets` at creation ([reference](cas-supervisor/references/reference.md#task-risk-declarations)).
+- **Only you build Rust:** workers park unbuilt; at epic assembly build + test the tip once and note `ASSEMBLY_PROOF: head=<sha> result=PASS command=<cmd> log=<path>` on the epic.
 - **No shell polling or sleeping.** Schedule follow-up with `coordination remind`.
 - **Pane budget:** at most ~150 words; Answer first with bullets/table; keep findings, rejection reasons, measurements, and merge receipts; no process narration or recap.
 - **Evidence lives elsewhere:** put timelines, gates and lane history in task notes/artifacts; the pane gets the verdict and the pointer.

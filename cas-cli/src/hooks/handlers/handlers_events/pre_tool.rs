@@ -28,10 +28,9 @@ pub fn handle_pre_tool_use(
     // A mutating `cargo fmt` selects Cargo targets rather than source paths,
     // and direct rustfmt follows child modules unless skip_children is set.
     // In a workspace that is not fmt-clean, either shape spills unrelated
-    // changes. A full test invocation similarly links dozens of binaries.
-    // Workers use non-mutating/scoped format commands, iterate with cargo check,
-    // and run a test target through the receipt wrapper; the supervisor
-    // integration merge and release gate own full-suite runs.
+    // changes. Workers use non-mutating/scoped format commands and never run a
+    // Rust build at all (cas-4cbb): the supervisor builds and tests the epic
+    // tip once, at assembly.
     // Hoist this before the cas_root early return and factory Bash auto-allow so
     // an unscoped run always gets the loud, actionable refusal.
     // ========================================================================
@@ -53,14 +52,19 @@ pub fn handle_pre_tool_use(
                  A workspace normalization requires separate operator approval and must not be run from a worker.",
             ));
         }
-        if command.is_some_and(worker_command_runs_unguarded_tests) {
+        // cas-4cbb (operator directive 2026-09-24): factory workers never run
+        // Rust builds. Five workers each compiling in their own target dir,
+        // plus CI, drove the 32-core host to load 190; one build per epic at
+        // assembly, run by the supervisor, replaces them.
+        if let Some(what) = command.and_then(worker_command_rust_build) {
             return Ok(HookOutput::with_pre_tool_permission(
                 "deny",
-                "🚫 UNVERIFIED WORKER TEST RUN: Cargo can exit 0 when a filter selected zero tests, so direct Cargo test output is not a verification receipt.\n\n\
-                 Iterate with `cargo check -p cas --lib --tests`, then run the affected target through the guarded recipe:\n  \
-                 `scripts/run-scoped-tests.sh -p cas --lib <module>`\n  \
-                 `scripts/run-scoped-tests.sh -p cas --test <name>`\n\n\
-                 The wrapper requires a nonzero passed count. Full-suite runs are reserved for the supervisor integration merge and the release gate.",
+                &format!(
+                    "🚫 NO WORKER RUST BUILDS: `{what}` compiles Rust, and factory workers never build (operator rule, cas-4cbb). \
+                     Edit and commit, then park without building: the supervisor runs one build and test of the epic tip at assembly \
+                     and records an ASSEMBLY_PROOF on the epic. Your close needs no scoped or loaded proof receipt.\n\n\
+                     Read-only checks stay available: `cargo fmt --all -- --check`, `rustfmt --edition 2024 --check --config skip_children=true <files>`, `cargo metadata`, `cargo tree`."
+                ),
             ));
         }
     }
@@ -973,10 +977,180 @@ pub fn handle_pre_tool_use(
 /// Detect a worker shell command that executes Cargo tests without the
 /// zero-executed receipt wrapper.  A target scope controls cost but does not
 /// prove the filter matched anything, because Cargo exits zero for zero tests.
-fn worker_command_runs_unguarded_tests(command: &str) -> bool {
-    super::attribution::split_shell_statements(command)
-        .iter()
-        .any(|words| direct_test_invocation_without_receipt(words))
+/// The Rust build a worker command would start, if any (cas-4cbb): a cargo
+/// subcommand that compiles, `cargo-nextest`, `rustc`/`rustdoc`, the scoped
+/// test wrapper, or a `make test*` target. Read-only cargo (fmt checks,
+/// metadata, tree, version) is not a build. Commands passed to `sh -c` /
+/// `bash -c` are inspected too; quoted text in other commands (a commit
+/// message, an echo) is not.
+fn worker_command_rust_build(command: &str) -> Option<String> {
+    worker_command_rust_build_at_depth(command, 0)
+}
+
+fn worker_command_rust_build_at_depth(command: &str, depth: usize) -> Option<String> {
+    for words in shell_statement_words(command) {
+        if let Some(found) = rust_build_invocation(&words) {
+            return Some(found);
+        }
+        if depth < 2 {
+            // `sh -c '<script>'`, `bash -lc "<script>"`
+            for (index, word) in words.iter().enumerate() {
+                let shell = matches!(shell_word_basename(word), "sh" | "bash" | "zsh" | "dash");
+                if !shell {
+                    continue;
+                }
+                let script = words[index + 1..]
+                    .iter()
+                    .position(|arg| {
+                        arg.starts_with('-') && !arg.starts_with("--") && arg.contains('c')
+                    })
+                    .and_then(|flag| words.get(index + 1 + flag + 1));
+                if let Some(found) =
+                    script.and_then(|script| worker_command_rust_build_at_depth(script, depth + 1))
+                {
+                    return Some(found);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Cargo subcommands that compile the workspace or run compiled tests.
+const CARGO_BUILD_SUBCOMMANDS: &[&str] = &[
+    "build",
+    "b",
+    "check",
+    "c",
+    "test",
+    "t",
+    "nextest",
+    "run",
+    "r",
+    "clippy",
+    "bench",
+    "doc",
+    "d",
+    "install",
+    "rustc",
+    "rustdoc",
+    "fix",
+    "miri",
+    "llvm-cov",
+    "tarpaulin",
+    "udeps",
+    "expand",
+    "insta",
+    "mutants",
+    "hack",
+];
+
+fn rust_build_invocation(words: &[String]) -> Option<String> {
+    let mut index = executable_word_index(words)?;
+    // Wrappers that run their argument as a command.
+    loop {
+        let word = shell_word_basename(&words[index]);
+        let skip = match word {
+            "timeout" => {
+                // timeout [opts] DURATION cmd…; `-s SIG` / `-k DUR` take a value.
+                let mut next = index + 1;
+                while next < words.len() && words[next].starts_with('-') {
+                    if matches!(
+                        words[next].as_str(),
+                        "-s" | "-k" | "--signal" | "--kill-after"
+                    ) {
+                        next += 1;
+                    }
+                    next += 1;
+                }
+                next + 1
+            }
+            "nice" | "ionice" | "stdbuf" | "chrt" | "taskset" => {
+                let mut next = index + 1;
+                while next < words.len() && words[next].starts_with('-') {
+                    next += 1;
+                    // `-n 10`, `-c 2` style values
+                    if next < words.len()
+                        && !words[next].starts_with('-')
+                        && words[next].parse::<i64>().is_ok()
+                    {
+                        next += 1;
+                    }
+                }
+                next
+            }
+            "nohup" | "setsid" | "time" | "exec" | "xargs" => index + 1,
+            // `bash scripts/run-scoped-tests.sh …` runs the script itself;
+            // `bash -c '…'` is inspected by the caller instead.
+            "sh" | "bash" | "zsh" | "dash"
+                if words
+                    .get(index + 1)
+                    .is_some_and(|arg| !arg.starts_with('-')) =>
+            {
+                index + 1
+            }
+            _ => break,
+        };
+        if skip >= words.len() {
+            return None;
+        }
+        index = skip;
+        index += executable_word_index(&words[index..])?;
+    }
+    let command = shell_word_basename(&words[index]);
+    let args = &words[index + 1..];
+    match command {
+        "cargo" => {
+            // Skip `+toolchain` and global options, including those that take
+            // a value (`-C dir`, `--config k=v`, `-Z flag`, `--color always`).
+            let mut rest = args.iter();
+            let subcommand = loop {
+                let arg = rest.next()?;
+                if matches!(
+                    arg.as_str(),
+                    "-C" | "--config" | "-Z" | "--color" | "--manifest-path" | "--target-dir"
+                ) {
+                    rest.next();
+                    continue;
+                }
+                if arg.starts_with('-') || arg.starts_with('+') {
+                    continue;
+                }
+                break arg;
+            };
+            CARGO_BUILD_SUBCOMMANDS
+                .contains(&subcommand.as_str())
+                .then(|| format!("cargo {subcommand}"))
+        }
+        "cargo-nextest" => Some("cargo-nextest".to_string()),
+        "rustc" | "rustdoc" => {
+            let informational = args.iter().any(|arg| {
+                matches!(arg.as_str(), "--version" | "-V" | "--help" | "-h" | "-vV")
+                    || arg.starts_with("--print")
+            });
+            (!informational).then(|| command.to_string())
+        }
+        "run-scoped-tests.sh" | "run-verified-tests.sh" | "refresh-worker-build-cache.sh" => {
+            Some(command.to_string())
+        }
+        "make" | "gmake" => {
+            let mut rest = args.iter();
+            while let Some(arg) = rest.next() {
+                if arg == "-C" || arg == "-f" || arg == "-j" {
+                    rest.next();
+                    continue;
+                }
+                if arg.starts_with('-') || arg.contains('=') {
+                    continue;
+                }
+                if arg.starts_with("test") || arg == "build" || arg == "check" {
+                    return Some(format!("make {arg}"));
+                }
+            }
+            None
+        }
+        _ => None,
+    }
 }
 
 /// Detect formatter invocations that can mutate files outside a worker's scope.
@@ -1031,26 +1205,6 @@ fn formatter_invocation_can_spill(words: &[String]) -> bool {
         .iter()
         .any(|arg| arg == "--config=skip_children=true" || arg.contains("skip_children=true"));
     !skips_children
-}
-
-fn direct_test_invocation_without_receipt(words: &[String]) -> bool {
-    let Some(cargo_index) = words
-        .iter()
-        .position(|word| word == "cargo" || word.ends_with("/cargo"))
-    else {
-        return false;
-    };
-    let cargo_args = &words[cargo_index + 1..];
-    let is_test = cargo_args.first().is_some_and(|arg| arg == "test")
-        || (cargo_args.first().is_some_and(|arg| arg == "nextest")
-            && cargo_args.get(1).is_some_and(|arg| arg == "run"));
-    if !is_test {
-        return false;
-    }
-
-    // `--no-run` intentionally compiles test targets without claiming tests
-    // passed. It is not a test-execution receipt and remains available.
-    !cargo_args.iter().any(|arg| arg == "--no-run")
 }
 
 // ── Worker commit guard helpers (cas-bea2, LAYER 1) ───────────────────────

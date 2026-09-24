@@ -21,7 +21,7 @@ Write agent-facing documents as instructions for a repeated process, not prose f
 4. **Add a reference file only for a branch that earns it.** A branch earns one when it needs independent model invocation, or when a real invocation boundary protects a sequence from premature completion. Anything under ~15 lines belongs inline: a pointer to a short file costs more than the file saves.
 5. **Update the codex and grok mirrors.** `cas-cli/src/builtins/skills/<name>/` is canonical; `codex/skills/<name>/` and `grok/skills/<name>/` are byte-identical to it apart from each harness's own CAS tool prefix, which is a pure substitution — never write another harness's prefix into a mirror. Register every new file in `BUILTIN_SKILLS`, `CODEX_BUILTIN_SKILLS` and `GROK_BUILTIN_SKILLS` in `builtins.rs` — an unregistered file is never installed — then regenerate `builtins/reference-history.json` with `scripts/gen-builtin-reference-history.sh`.
 
-**Done when** the file is under ~80 lines, every line is live, `scripts/run-scoped-tests.sh -p cas --test builtin_flavor_drift_test` passes, and no sentence restates one that appears elsewhere in the same file.
+**Done when** the file is under ~80 lines, every line is live, `builtin_flavor_drift_test` passes (supervisors run it; factory workers never build Rust — it runs at epic assembly), and no sentence restates one that appears elsewhere in the same file.
 
 ## Frontmatter
 

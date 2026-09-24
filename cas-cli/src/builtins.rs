@@ -4524,15 +4524,26 @@ This is the body content."#;
                     "{label} discipline.md duplicates spawn-contract marker: {forbidden:?}"
                 );
             }
+            // cas-4cbb: workers never run Rust builds; the supervisor builds
+            // once at epic assembly.
             for required in [
-                "Scoped tests",
-                "cargo check -p <crate> --lib --tests",
-                "scripts/run-scoped-tests.sh --proof",
+                "Workers never run Rust builds",
+                "ASSEMBLY_PROOF",
+                "Non-Rust work is unaffected",
                 "Clean-CI environment",
             ] {
                 assert!(
                     ref_content.contains(required),
                     "{label} discipline.md missing unique test guidance marker: {required:?}"
+                );
+            }
+            for forbidden in [
+                "cargo check -p <crate> --lib --tests",
+                "scripts/run-scoped-tests.sh --proof",
+            ] {
+                assert!(
+                    !ref_content.contains(forbidden),
+                    "{label} discipline.md still tells workers to build: {forbidden:?}"
                 );
             }
         }
@@ -4626,21 +4637,13 @@ This is the body content."#;
         }
     }
 
-    /// cas-3627 (GH #159): the worker builtin must teach the difference
-    /// between the INNER test loop and the FINAL proof.
-    ///
-    /// Observed live before this rule existed: a worker fixing several test
-    /// entry points ran the full ~3,700-test lib sweep (~5 min) after each
-    /// individual micro-fix, foreground-`sleep`ing between checks — 47+
-    /// minutes of wall-clock for a few minutes of edits. cas-b4921 already
-    /// mandated backgrounding, so the gap was not "don't block"; it was that
-    /// nothing distinguished the seconds-long targeted loop you iterate in
-    /// from the minutes-long full sweep you are allowed to run twice.
-    ///
-    /// The test-loop recipe is on demand in references/discipline.md; all three
-    /// flavors must carry the same unique guidance.
+    /// cas-4cbb (operator directive 2026-09-24) supersedes cas-3627's worker
+    /// test loop: five workers each compiling in their own target dir drove
+    /// the host to load 190. Workers now never run Rust builds; the supervisor
+    /// builds and tests the epic tip once at assembly. The rule's detail is on
+    /// demand in references/discipline.md; all three flavors carry it.
     #[test]
-    fn test_worker_skills_teach_test_loop_discipline_cas_3627() {
+    fn test_worker_skills_teach_no_rust_build_rule_cas_4cbb() {
         for (label, skill_content, ref_content) in [
             (
                 "claude",
@@ -4658,38 +4661,32 @@ This is the body content."#;
                 include_str!("builtins/grok/skills/cas-worker/references/discipline.md"),
             ),
         ] {
-            // The hot body keeps only the pointer; the detailed test loop is
-            // on demand so it does not consume SessionStart budget.
-            for required in [
-                "discipline.md",
-                "scoped test-loop",
-            ] {
+            // The hot body keeps only the pointer; the rule's detail is on
+            // demand so it does not consume SessionStart budget.
+            for required in ["discipline.md", "no-Rust-build rule"] {
                 assert!(
                     skill_content.contains(required),
                     "{label} cas-worker SKILL.md missing discipline pointer: {required:?}"
                 );
             }
-            // The recipe: both loops named, batching, banked receipts, and the
-            // guarded nextest target.
+            // The rule: workers edit, commit and park unbuilt; the supervisor
+            // builds once at assembly and records ASSEMBLY_PROOF; worker closes
+            // carry no scoped or loaded proof.
             for required in [
-                "Batch before you verify",
-                "inner loop",
-                "Final proof",
-                "banked receipt",
-                "cargo nextest run",
+                "Workers never run Rust builds",
+                "park the\nwork without building",
+                "ASSEMBLY_PROOF",
+                "loaded_proof",
             ] {
                 assert!(
                     ref_content.contains(required),
-                    "{label} cas-worker discipline.md missing test-loop recipe: {required:?}"
+                    "{label} cas-worker discipline.md missing no-build rule: {required:?}"
                 );
             }
-            // The targeted-filter forms are the whole point of the inner loop:
-            // a rule that says "be targeted" without naming the flags is not
-            // actionable at 2am.
-            for required in ["--lib <module>", "--test <name>"] {
+            for forbidden in ["Batch before you verify", "banked receipt", "--lib <module>"] {
                 assert!(
-                    ref_content.contains(required),
-                    "{label} cas-worker discipline.md missing targeted-filter form: {required:?}"
+                    !ref_content.contains(forbidden),
+                    "{label} cas-worker discipline.md still teaches a worker test loop: {forbidden:?}"
                 );
             }
         }

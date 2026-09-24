@@ -353,8 +353,8 @@ pub(crate) fn parse_external_wake_condition(
 }
 
 /// Evaluate one external condition using bounded git reads. Branch containment
-/// refreshes the named origin branch before resolving it, so a local branch or
-/// stale remote-tracking ref can never satisfy a reminder for another target.
+/// refreshes the named origin branch, and tag existence queries origin directly,
+/// so local refs cannot satisfy a reminder for unpublished state.
 /// A normal non-zero git status means the condition is false (for example the
 /// target branch or tag is not present yet); process failures/timeouts are
 /// surfaced so the daemon can retain the pending row and retry on a later
@@ -368,8 +368,8 @@ pub(crate) fn external_wake_condition_satisfied(
 
 /// Evaluate an external condition and return the exact ref/SHA that was
 /// compared when it is satisfied. For branch conditions, the fetch is forced
-/// into `refs/remotes/origin/<target>` and failures return false without
-/// consulting any stale copy of that ref.
+/// into `refs/remotes/origin/<target>`; for tags, the remote is queried without
+/// updating local refs. Failures return false without consulting local state.
 pub(crate) fn external_wake_condition_observation(
     project: &Path,
     condition: &ExternalWakeCondition,
@@ -433,7 +433,26 @@ pub(crate) fn external_wake_condition_observation(
         }
         ExternalWakeCondition::TagExists { tag } => {
             let tag_ref = format!("refs/tags/{tag}");
-            let Some(tag_sha) = resolve_external_git_commit(project, &tag_ref)? else {
+            let args = vec![
+                "ls-remote".to_string(),
+                "--tags".to_string(),
+                "--refs".to_string(),
+                "origin".to_string(),
+                tag_ref.clone(),
+            ];
+            let output = run_external_git_command(project, &args)?;
+            if !output.status.success() {
+                return Ok(None);
+            }
+            // ls-remote patterns can match suffixes and globs. Accept only
+            // the exact ref requested, including for annotated tags.
+            let tag_sha = String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .filter_map(|line| line.split_once('\t'))
+                .find_map(|(sha, remote_ref)| {
+                    (remote_ref == tag_ref && !sha.is_empty()).then(|| sha.to_string())
+                });
+            let Some(tag_sha) = tag_sha else {
                 return Ok(None);
             };
             Ok(Some(ExternalWakeObservation {
@@ -1862,7 +1881,8 @@ mod tests {
         git(&repo, &["add", "file"]);
         git(&repo, &["commit", "-qm", "first"]);
         let first = git_output(&repo, &["rev-parse", "HEAD"]);
-        git(&repo, &["tag", "v1"]);
+        // release.sh creates an annotated tag before the build and push.
+        git(&repo, &["tag", "-a", "v1", "-m", "release v1"]);
         git(&repo, &["branch", "-M", "factory/crisp-crane-67"]);
         git(&repo, &["checkout", "--orphan", "main"]);
         git(&repo, &["rm", "-rf", "."]);
@@ -1893,6 +1913,12 @@ mod tests {
             commit: first.clone(),
             target_branch: "main".to_string(),
         };
+        let tag_condition = ExternalWakeCondition::TagExists {
+            tag: "v1".to_string(),
+        };
+        assert!(external_wake_condition_observation(&repo, &tag_condition)
+            .unwrap()
+            .is_none());
         assert!(!external_wake_condition_satisfied(&repo, &condition).unwrap());
         assert!(external_wake_condition_observation(&repo, &condition)
             .unwrap()
@@ -1905,6 +1931,21 @@ mod tests {
             &repo,
             &["remote", "set-url", "origin", origin.to_str().unwrap()],
         );
+        // The tag only becomes observable once it is published to origin.
+        git(&repo, &["push", "-q", "origin", "refs/tags/v1"]);
+        let tag_observation = external_wake_condition_observation(&repo, &tag_condition)
+            .unwrap()
+            .unwrap();
+        assert_eq!(tag_observation.compared_ref, "refs/tags/v1");
+        assert_eq!(
+            tag_observation.compared_sha,
+            git_output(&repo, &["rev-parse", "refs/tags/v1"])
+        );
+        assert!(tag_condition
+            .description_with_observation(&tag_observation)
+            .contains(&format!("refs/tags/v1@{}", tag_observation.compared_sha)));
+        git(&repo, &["tag", "-d", "v1"]);
+        assert!(external_wake_condition_satisfied(&repo, &tag_condition).unwrap());
         git(
             &repo,
             &[
@@ -1930,13 +1971,16 @@ mod tests {
             }
         )
         .unwrap());
-        assert!(external_wake_condition_satisfied(
+        // A failed remote probe must ignore even an existing local tag.
+        git(&repo, &["tag", "-a", "v1", "-m", "local replacement"]);
+        git(
             &repo,
-            &ExternalWakeCondition::TagExists {
-                tag: "v1".to_string(),
-            }
-        )
-        .unwrap());
+            &["remote", "set-url", "origin", missing_origin.to_str().unwrap()],
+        );
+        assert!(external_wake_condition_observation(&repo, &tag_condition)
+            .unwrap()
+            .is_none());
+        assert!(!external_wake_condition_satisfied(&repo, &tag_condition).unwrap());
         assert!(!external_wake_condition_satisfied(
             &repo,
             &ExternalWakeCondition::TagExists {

@@ -71,9 +71,11 @@ mcp__cs__coordination action=remind remind_event=tag_exists \
   cross_session=true remind_message="Release tag exists; inspect the authoritative receipt"
 ```
 
-The daemon checks these local git conditions on a bounded one-minute cadence
-and marks the reminder fired once the condition becomes true, delivering the
-existing supervisor notification and prompt-queue wake.
+The daemon checks origin on a bounded one-minute cadence. A local-only tag
+cannot satisfy `tag_exists`; the tag must be published to origin. A failed
+remote check leaves the reminder pending. The fired description includes the
+remote ref and SHA, and the reminder fires once when the condition becomes
+true, delivering the existing supervisor notification and prompt-queue wake.
 
 ## Role patterns
 

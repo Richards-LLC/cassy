@@ -1940,6 +1940,11 @@ fn executable_word_index(words: &[String]) -> Option<usize> {
 enum ScriptToken {
     Identifier(String),
     String(String),
+    /// cas-becd (GH #922): a JavaScript template literal with `${...}`
+    /// interpolation, raw. Its value is JavaScript-computed, never a shell
+    /// word, so it is resolved by [`script_template_target`], not by the
+    /// shell variable expander.
+    Template(String),
     Punctuation(char),
 }
 
@@ -2002,8 +2007,12 @@ fn script_tokens(script: &str) -> Vec<ScriptToken> {
                 }
                 index += 1;
             }
-            let value = chars[start..index].iter().collect();
-            tokens.push(ScriptToken::String(value));
+            let value: String = chars[start..index].iter().collect();
+            if quote == '`' && value.contains("${") {
+                tokens.push(ScriptToken::Template(value));
+            } else {
+                tokens.push(ScriptToken::String(value));
+            }
             index = (index + prefix).min(chars.len());
             continue;
         }
@@ -2062,8 +2071,60 @@ fn script_target_value(
     match tokens.get(index)? {
         ScriptToken::String(value) => Some(value.clone()),
         ScriptToken::Identifier(name) => assignments.get(name).cloned(),
+        ScriptToken::Template(raw) => script_template_target(raw, assignments),
         _ => None,
     }
+}
+
+/// cas-becd (GH #922): the containment-checkable form of a template-literal
+/// write target such as `${file}.${process.pid}.tmp`.
+///
+/// Interpolations naming a string the script assigned are substituted. A
+/// target whose location is decided by an unknown value (it starts with an
+/// unresolved interpolation) is as opaque as a bare unknown identifier and
+/// yields `None`, exactly like `writeFileSync(file)`. Otherwise the static
+/// prefix fixes the location (`/tmp/${name}` stays under /tmp, `out/${name}`
+/// under the worktree), and each unresolved interpolation after it becomes a
+/// neutral path segment so the shell expander never sees JavaScript `${}`.
+fn script_template_target(
+    raw: &str,
+    assignments: &std::collections::HashMap<String, String>,
+) -> Option<String> {
+    let chars: Vec<char> = raw.chars().collect();
+    let mut resolved = String::new();
+    let mut index = 0;
+    while index < chars.len() {
+        if chars[index] == '$' && chars.get(index + 1) == Some(&'{') {
+            let mut depth = 0usize;
+            let mut end = None;
+            for (offset, ch) in chars[index + 1..].iter().enumerate() {
+                match ch {
+                    '{' => depth += 1,
+                    '}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            end = Some(index + 1 + offset);
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            // An unterminated interpolation is not a path we can reason about.
+            let end = end?;
+            let expression: String = chars[index + 2..end].iter().collect();
+            match assignments.get(expression.trim()) {
+                Some(value) => resolved.push_str(value),
+                None if resolved.is_empty() => return None,
+                None => resolved.push('_'),
+            }
+            index = end + 1;
+            continue;
+        }
+        resolved.push(chars[index]);
+        index += 1;
+    }
+    Some(resolved)
 }
 
 fn script_call_end(tokens: &[ScriptToken], open: usize) -> Option<usize> {
@@ -3282,6 +3343,54 @@ mod workspace_contract_tests {
                 "outside script/install targets must remain denied: {command}"
             );
         }
+    }
+
+    /// cas-becd (GH #922): the factory hook refused a heredoc'd Node script
+    /// that wrote a temp file named `${file}.${process.pid}.tmp`: the JS
+    /// template literal reached the shell expander and read as an unresolved
+    /// shell variable outside the worktree. Replays that shape (heredoc and
+    /// `-e`) and keeps literal-prefix escapes denied.
+    #[test]
+    fn template_literal_script_targets_resolve_as_javascript_cas_becd() {
+        let cwd = tempfile::tempdir().expect("worktree");
+        for command in [
+            "node - <<'EOF'\nconst fs = require('fs');\nfor (const file of process.argv.slice(2)) {\n  const tmp = `${file}.${process.pid}.tmp`;\n  fs.writeFileSync(`${file}.${process.pid}.tmp`, fs.readFileSync(file));\n  fs.renameSync(tmp, file);\n}\nEOF",
+            "node -e 'require(\"fs\").writeFileSync(`${file}.tmp`, \"x\")'",
+            "node - <<'EOF'\nconst fs = require('fs');\nfs.writeFileSync(`out/${name}.json`, '{}');\nEOF",
+            "node - <<'EOF'\nconst dir = \"generated\";\nrequire('fs').writeFileSync(`${dir}/${name}.ts`, '');\nEOF",
+        ] {
+            let input = bash_input(command, cwd.path());
+            assert_eq!(
+                factory_write_violation(&input, &None, None, false, Some(cwd.path())),
+                None,
+                "an in-worktree template-literal write must be allowed: {command}"
+            );
+        }
+
+        for (command, expected) in [
+            (
+                "node - <<'EOF'\nrequire('fs').writeFileSync(`/tmp/cas-template-escape-${name}`, 'x');\nEOF",
+                "/tmp/cas-template-escape-_",
+            ),
+            (
+                "node - <<'EOF'\nconst dir = \"/tmp\";\nrequire('fs').writeFileSync(`${dir}/cas-template-escape`, 'x');\nEOF",
+                "/tmp/cas-template-escape",
+            ),
+        ] {
+            let input = bash_input(command, cwd.path());
+            let violation = factory_write_violation(&input, &None, None, false, Some(cwd.path()))
+                .unwrap_or_else(|| panic!("an outside template-literal write must stay denied: {command}"));
+            assert_eq!(violation.evaluated_path, expected, "{command}");
+            assert_eq!(violation.matched_rule, "none", "resolved as a path, not a shell variable");
+        }
+
+        let no_assignments = std::collections::HashMap::new();
+        assert_eq!(script_template_target("${file}.${process.pid}.tmp", &no_assignments), None);
+        assert_eq!(
+            script_template_target("out/${a}-${b}.json", &no_assignments).as_deref(),
+            Some("out/_-_.json")
+        );
+        assert_eq!(script_template_target("out/${unterminated", &no_assignments), None);
     }
 
     #[test]

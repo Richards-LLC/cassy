@@ -159,4 +159,21 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
     }
     await page.emulateMedia({ colorScheme: "light" });
   });
+
+  await journey.stage("Come back from the terminal to the reply box", async () => {
+    const back = page.locator("#conversation-return");
+    // From the keyboard: Enter on the return control lands in the reply box,
+    // so the next keystrokes are the reply.
+    await back.focus();
+    await page.keyboard.press("Enter");
+    await expect(composer).toBeFocused();
+    await page.keyboard.type("Back from the terminal");
+    await expect(composer).toHaveValue("Back from the terminal");
+    await composer.fill("");
+    // With the mouse: the same.
+    await page.getByRole("button", { name: "Terminal view" }).click();
+    await expect(back).toBeVisible();
+    await back.click();
+    await expect(composer).toBeFocused();
+  });
 });

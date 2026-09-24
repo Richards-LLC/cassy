@@ -1081,7 +1081,8 @@ async function pollRelay(request: PendingRelayRequest): Promise<void> {
             signal: AbortSignal.timeout(3_000),
           });
           if (!pairingOperations.isCurrent(operation) || pendingPairing?.kind !== "invitation") return;
-          pairingStatus = "Machine authorized. Add your name, then press Pair.";
+          // The heading already says "Machine authorized"; the status only names the next step (cas-b2e4 F01).
+          pairingStatus = "Add your name, then press Pair.";
         } catch {
           if (!pairingOperations.isCurrent(operation) || pendingPairing?.kind !== "invitation") return;
           const machine = result.invitation.machineLabel ?? result.invitation.hubId;

@@ -2090,6 +2090,12 @@ dialog form,
   /* A focused field (a prefilled link opens on Operator label) scrolls clear
      of the sticky action row instead of sliding under it. */
   scroll-padding-bottom: calc(var(--button-height) + var(--space-4));
+  /* The scroller clips at its padding box, so a full-width field's focus
+     ring (width plus offset) needs room at the sides; without it only the
+     top and bottom edges survived, as two stray bars (cas-b2e4 F03). The
+     negative margin keeps the fields aligned with the dialog content. */
+  padding-inline: calc(2 * var(--focus-ring-width));
+  margin-inline: calc(-2 * var(--focus-ring-width));
 }
 
 /* A focused field brings its hint with it, so a hint never ends up under the
@@ -2346,6 +2352,8 @@ dialog form > *,
 }
 
 .pair-technical[open] { display: grid; gap: var(--space-2); }
+/* Behind the disclosure the terms read as sentences, not eyebrows (cas-b2e4 F02). */
+.pair-technical .pair-details dt { text-transform: none; letter-spacing: normal; font-size: var(--fs-meta); }
 .pair-technical fieldset { margin: 0; }
 
 .pair-alternative {

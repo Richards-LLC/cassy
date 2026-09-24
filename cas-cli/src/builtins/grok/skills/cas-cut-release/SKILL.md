@@ -25,8 +25,12 @@ version and worktree, never a version-keyed path.
    the preflight prerequisites: no competing release (open PRs, the
    merge-queue GraphQL query, and remote tags); a writable `scratch-base` with
    space for twice the last archive; readable `CAS_RELEASE_ENV_FILE` (names
-   only); resolvable Zig; a dated CHANGELOG heading and draft; and a passing
-   integration receipt. Pin the cut date in `run.env` from `started_at` and
+   only); resolvable Zig; a complete host `toolchain` (cargo, cargo-nextest,
+   cargo-zigbuild, jq, python3, GNU objdump, an x86_64 Linux C compiler or
+   Zig, the `x86_64-unknown-linux-gnu` Rust target); a dated CHANGELOG heading
+   and draft; and a passing integration receipt. A macOS host needs only
+   Homebrew `jq binutils`, those Cargo tools and that target: the train
+   supplies the `stat`, `sha256sum`, `setsid` and Cargo-PATH fallbacks itself. Pin the cut date in `run.env` from `started_at` and
    use that date for every draft path, including after midnight. Run the same
    announcement lint during preflight that `announce` will run. User thread
    wording must avoid `agent`, `worker`, `supervisor`, `daemon`, and `factory`

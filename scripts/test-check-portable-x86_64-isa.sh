@@ -7,7 +7,16 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 guard="$script_dir/check-portable-x86_64-isa.sh"
 dependency_guard="$script_dir/check-portable-x86_64-dependencies.sh"
 blake3_build_guard="$script_dir/check-blake3-no-avx512-build.sh"
-compiler="${CC:-cc}"
+# The fixtures are x86_64 Linux ELF objects. On a macOS or arm64 release
+# host, `cc` builds for the host instead; use CC, the native cc on x86_64
+# Linux, or zig's x86_64-linux-gnu target (cas-fed5).
+# shellcheck source=scripts/release-portable.sh
+source "$script_dir/release-portable.sh"
+if ! release_portable_x86_64_linux_cc; then
+  echo "error: no compiler for x86_64 Linux ELF fixtures: set CC, or install zig (ZIG or zig on PATH)" >&2
+  exit 2
+fi
+compiler=("${RELEASE_PORTABLE_X86_64_CC[@]}")
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
 
@@ -36,8 +45,8 @@ main:
   ret
 EOF
 
-"$compiler" "$tmpdir/baseline.S" -o "$tmpdir/baseline"
-"$compiler" "$tmpdir/seeded-avx512.S" -o "$tmpdir/seeded-avx512"
+"${compiler[@]}" "$tmpdir/baseline.S" -o "$tmpdir/baseline"
+"${compiler[@]}" "$tmpdir/seeded-avx512.S" -o "$tmpdir/seeded-avx512"
 
 baseline_output="$($guard "$tmpdir/baseline")"
 grep -qF 'evex_avx512=absent' <<<"$baseline_output"

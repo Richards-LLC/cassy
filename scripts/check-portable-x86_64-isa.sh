@@ -22,15 +22,23 @@ if [[ ! -f "$artifact" ]]; then
   exit 2
 fi
 
-for tool in file objdump awk grep; do
+for tool in file awk grep; do
   if ! command -v "$tool" >/dev/null 2>&1; then
     echo "error: required ISA audit tool is unavailable: $tool" >&2
     exit 2
   fi
 done
+# The audit parses GNU objdump's output. macOS's objdump is LLVM's, so find a
+# GNU one (Homebrew binutils: gobjdump or opt/binutils) instead (cas-fed5).
+# shellcheck source=scripts/release-portable.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/release-portable.sh"
+if ! objdump="$(release_portable_gnu_objdump)"; then
+  echo "error: required ISA audit tool is unavailable: GNU objdump (on macOS: brew install binutils)" >&2
+  exit 2
+fi
 
 file_description="$(file -Lb -- "$artifact")"
-if ! objdump -f -- "$artifact" 2>/dev/null | grep -qF 'architecture: i386:x86-64'; then
+if ! "$objdump" -f -- "$artifact" 2>/dev/null | grep -qF 'architecture: i386:x86-64'; then
   echo "error: ISA audit requires an x86_64 ELF object or archive; got: $file_description" >&2
   exit 2
 fi
@@ -39,7 +47,7 @@ disassembly="$(mktemp)"
 offenders="$(mktemp)"
 trap 'rm -f "$disassembly" "$offenders"' EXIT
 
-if ! LC_ALL=C objdump -d --insn-width=15 -- "$artifact" >"$disassembly"; then
+if ! LC_ALL=C "$objdump" -d --insn-width=15 -- "$artifact" >"$disassembly"; then
   echo "error: objdump could not disassemble ISA audit input: $artifact" >&2
   exit 2
 fi

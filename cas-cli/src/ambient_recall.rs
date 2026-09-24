@@ -1600,10 +1600,23 @@ pub(crate) fn content_terms(text: &str) -> Vec<String> {
 
 fn terms_from_text(text: &str) -> Vec<String> {
     let mut terms = Vec::new();
+    let mut previous = String::new();
     for raw in
         text.split(|ch: char| !(ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '/' | '.')))
     {
         let term = raw.trim_matches(['-', '_', '/', '.']).to_ascii_lowercase();
+        if term.is_empty() {
+            continue;
+        }
+        // cas-b62d: the number in a harness envelope's "message 33981" or
+        // "notification 33981" is a delivery id, not content. A plain number
+        // elsewhere (an issue, PR or error code) stays a term.
+        let envelope_id = matches!(previous.as_str(), "message" | "notification")
+            && term.chars().all(|ch| ch.is_ascii_digit());
+        previous.clone_from(&term);
+        if envelope_id {
+            continue;
+        }
         if is_content_bearing_term(&term) && !terms.contains(&term) {
             terms.push(term);
             if terms.len() == QUERY_TERM_CAP {

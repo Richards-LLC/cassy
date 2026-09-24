@@ -21293,12 +21293,72 @@ mod merge_state_gate_tests {
     /// GH #62 symptom 4: the delivery lives on a clean task-local branch that
     /// was merged into the parent BEFORE close. The guard must resolve merge
     /// state from the receipt's ancestry, not the registered lane name.
+    ///
+    /// cas-b62d: the task-local branch must not be named
+    /// `factory/<assignee>-<task-id>`. Since cas-73b8 that is the worker's own
+    /// per-task branch, which the close gate measures directly (see
+    /// `merged_per_task_branch_is_measured_and_proceeds_cas_73b8`). The old
+    /// fixture name took that path and never reached the receipt-ancestry
+    /// logic this test exists for.
     #[test]
     fn clean_task_local_branch_merged_before_close_proceeds() {
         let dir = init_factory_repo("worker");
         let p = dir.path();
         commit_file_at(p, "unrelated.rs", "// other task\n", "2020-03-01T00:00:00Z");
         // Task work on its own branch, cut from main and merged into main.
+        git(p, &["checkout", "-q", "main"]);
+        git(p, &["checkout", "-q", "-b", "task-local/cas-test1"]);
+        commit_file_at(p, "scoped.rs", "// scoped\n", "2026-08-04T12:00:00Z");
+        let receipt = head_sha(p);
+        git(p, &["checkout", "-q", "main"]);
+        git(
+            p,
+            &[
+                "merge",
+                "-q",
+                "--no-ff",
+                "task-local/cas-test1",
+                "-m",
+                "merge",
+            ],
+        );
+        git(p, &["checkout", "-q", "factory/worker"]);
+
+        let task = worker_task("worker");
+        assert_eq!(
+            close_measured_factory_branch(p, &task, "worker"),
+            "factory/worker",
+            "the fixture must measure the lane, not a cas-73b8 per-task branch"
+        );
+        let mut req = base_req(&task.id);
+        req.commit_receipt = Some(receipt.clone());
+        let window = window_at(1_000_000_000, "latest task lease claim/transfer");
+
+        let out = run_factory_branch_merge_gate_with_attribution(
+            &task,
+            &req,
+            "main",
+            p,
+            TaskCommitAttribution {
+                receipt: Some(&receipt),
+                window: Some(&window),
+            },
+        );
+        assert!(
+            matches!(out, MergeStateGateOutcome::ProceedWithNote(_)),
+            "receipt merged into parent before close must clear the guard, got {out:?}"
+        );
+    }
+
+    /// cas-73b8: a worker whose factory branch was frozen committed this task
+    /// on `factory/<assignee>-<task-id>`. The close gate measures that branch
+    /// itself, and once it is merged into the parent the guard proceeds with
+    /// nothing stranded, even though the lane carries another task's commit.
+    #[test]
+    fn merged_per_task_branch_is_measured_and_proceeds_cas_73b8() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        commit_file_at(p, "unrelated.rs", "// other task\n", "2020-03-01T00:00:00Z");
         git(p, &["checkout", "-q", "main"]);
         git(p, &["checkout", "-q", "-b", "factory/worker-cas-test1"]);
         commit_file_at(p, "scoped.rs", "// scoped\n", "2026-08-04T12:00:00Z");
@@ -21318,6 +21378,10 @@ mod merge_state_gate_tests {
         git(p, &["checkout", "-q", "factory/worker"]);
 
         let task = worker_task("worker");
+        assert_eq!(
+            close_measured_factory_branch(p, &task, "worker"),
+            "factory/worker-cas-test1"
+        );
         let mut req = base_req(&task.id);
         req.commit_receipt = Some(receipt.clone());
         let window = window_at(1_000_000_000, "latest task lease claim/transfer");
@@ -21333,8 +21397,8 @@ mod merge_state_gate_tests {
             },
         );
         assert!(
-            matches!(out, MergeStateGateOutcome::ProceedWithNote(_)),
-            "receipt merged into parent before close must clear the guard, got {out:?}"
+            matches!(out, MergeStateGateOutcome::Proceed),
+            "a merged per-task branch strands nothing, got {out:?}"
         );
     }
 

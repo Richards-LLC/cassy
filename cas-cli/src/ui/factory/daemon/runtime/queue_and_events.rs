@@ -1622,6 +1622,167 @@ pub(super) fn deferred_inbox_reaction_consumes(
 /// wrongly-silent pane loses at most one cadence tick.
 const INBOX_DRAIN_TURN_WINDOW: std::time::Duration = std::time::Duration::from_secs(15);
 
+/// GH #894: a supervisor lifecycle relay (awaiting merge, blocked, close
+/// rejected, completion, worker death) that has not reached the supervisor
+/// after this long is escalated to the operator. The check rides the 60s
+/// prompt sweep, so the operator hears within 10 minutes of the relay.
+pub(super) const RELAY_OPERATOR_ESCALATION_AFTER_SECS: i64 = 9 * 60;
+
+/// Operator-facing summary and message for one relay the supervisor never
+/// received (GH #894). Plain language: the operator reads this in Commander
+/// or a desktop notification, not in a log.
+pub(super) fn undelivered_relay_operator_alert(
+    queued: &cas_store::QueuedPrompt,
+    envelope: Option<&crate::prompt_revalidation::LifecycleEnvelope>,
+    supervisor_name: &str,
+    supervisor_harness: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> (String, String) {
+    let age_minutes = (now - queued.created_at).num_minutes().max(0);
+    let subject = match envelope {
+        Some(envelope) => format!(
+            "{} is {}",
+            envelope.task_id,
+            envelope.new_status.to_string().replace('_', " ")
+        ),
+        None => queued
+            .summary
+            .clone()
+            .filter(|summary| !summary.trim().is_empty())
+            .unwrap_or_else(|| "a factory event".to_string()),
+    };
+    let retry_state = if queued.processed_at.is_some() {
+        "Cassy has stopped retrying it."
+    } else {
+        "Cassy is still retrying, but the supervisor has not taken it."
+    };
+    let summary = format!("Supervisor hasn't seen: {subject} ({age_minutes}m)");
+    let message = format!(
+        "The supervisor ({supervisor_name}, {supervisor_harness}) was told {age_minutes} minutes ago that {subject}, \
+         and the message never reached it. {retry_state} Nothing waiting on that update moves until the supervisor \
+         picks it up: check the supervisor pane, or handle it yourself."
+    );
+    (summary, message)
+}
+
+/// One operator alert raised by [`escalate_undelivered_supervisor_relays`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct RelayOperatorAlert {
+    pub relay_id: i64,
+    pub alert_id: i64,
+    pub summary: String,
+}
+
+/// GH #894: raise one Commander alert (`target = "operator"`, kind
+/// `blocker`) for each supervisor lifecycle relay that has not reached the
+/// supervisor after [`RELAY_OPERATOR_ESCALATION_AFTER_SECS`].
+///
+/// Waking the pane is the delivery loop's job. This covers the case where
+/// that fails for any reason (busy or wedged pane, stuck submit, a harness
+/// with no inbox escalation) and nobody would otherwise hear about it. Alerts
+/// are durable and deduped by relay id, so a restart cannot repeat one. A
+/// relay whose task has already moved on is left alone. Returns only alerts
+/// created by this call.
+pub(super) fn escalate_undelivered_supervisor_relays(
+    cas_dir: &std::path::Path,
+    queue: &dyn cas_store::PromptQueueStore,
+    factory_session: &str,
+    supervisor_name: &str,
+    supervisor_harness: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Vec<RelayOperatorAlert> {
+    let candidates = match queue.undelivered_supervisor_lifecycle_relays(
+        factory_session,
+        &[supervisor_name, "supervisor"],
+        RELAY_OPERATOR_ESCALATION_AFTER_SECS,
+        20,
+    ) {
+        Ok(candidates) => candidates,
+        Err(error) => {
+            tracing::warn!(%error, "GH #894: failed to scan undelivered supervisor relays");
+            return Vec::new();
+        }
+    };
+    if candidates.is_empty() {
+        return Vec::new();
+    }
+    let task_store = crate::store::open_task_store_local(cas_dir).ok();
+    let mut alerts = Vec::new();
+    for queued in candidates {
+        let envelope = crate::prompt_revalidation::parse_lifecycle_envelope(&queued.prompt);
+        if let (Some(envelope), Some(store)) = (envelope.as_ref(), task_store.as_ref()) {
+            match store.get(&envelope.task_id) {
+                Ok(task) => {
+                    if !matches!(
+                        crate::prompt_revalidation::revalidate_lifecycle_prompt_against_task(
+                            &queued.prompt,
+                            &task,
+                        ),
+                        crate::prompt_revalidation::LifecyclePromptDecision::Deliver
+                    ) {
+                        continue;
+                    }
+                }
+                Err(cas_store::StoreError::TaskNotFound(_)) => continue,
+                // An unreadable task must not hide a lost relay.
+                Err(_) => {}
+            }
+        }
+        let (summary, message) = undelivered_relay_operator_alert(
+            &queued,
+            envelope.as_ref(),
+            supervisor_name,
+            supervisor_harness,
+            now,
+        );
+        let payload = match serde_json::to_string(&crate::ui::factory::OperatorReplyPayload {
+            schema_version: 2,
+            reply_to: None,
+            message,
+            summary: summary.clone(),
+            device_id: "*".to_string(),
+            operator_label: None,
+            kind: crate::ui::factory::OperatorTurnKind::Blocker,
+            attachments: Vec::new(),
+        }) {
+            Ok(payload) => payload,
+            Err(error) => {
+                tracing::warn!(prompt_id = queued.id, %error, "GH #894: failed to encode operator alert");
+                continue;
+            }
+        };
+        match queue.enqueue_idempotent(
+            "relay-watchdog",
+            "operator",
+            &payload,
+            Some(factory_session),
+            Some(summary.as_str()),
+            Some(cas_store::NotificationPriority::High),
+            &format!(
+                "{}{}",
+                cas_store::RELAY_OPERATOR_ESCALATION_DEDUPE_PREFIX,
+                queued.id
+            ),
+            Some(&cas_store::QueueOrigin::Daemon),
+        ) {
+            Ok(cas_store::EnqueueIdempotentResult::Created(alert_id)) => {
+                alerts.push(RelayOperatorAlert {
+                    relay_id: queued.id,
+                    alert_id,
+                    summary,
+                });
+            }
+            Ok(_) => {}
+            Err(error) => tracing::warn!(
+                prompt_id = queued.id,
+                %error,
+                "GH #894: failed to queue operator alert for an undelivered supervisor relay"
+            ),
+        }
+    }
+    alerts
+}
+
 fn delivery_stalled_threshold_i64(configured_secs: u64) -> i64 {
     i64::try_from(configured_secs).unwrap_or(i64::MAX)
 }
@@ -1950,6 +2111,34 @@ impl FactoryDaemon {
                     "failed to queue sender-side delivery-stalled bounce"
                 ),
             }
+        }
+    }
+
+    /// GH #894: tell the operator about supervisor lifecycle relays that have
+    /// not reached the supervisor after [`RELAY_OPERATOR_ESCALATION_AFTER_SECS`].
+    /// See [`escalate_undelivered_supervisor_relays`]; this adds the desktop
+    /// notification (when enabled) and the coordination log line.
+    fn escalate_undelivered_supervisor_relays(&mut self, queue: &dyn cas_store::PromptQueueStore) {
+        let supervisor_name = self.app.supervisor_name().to_string();
+        let harness = format!("{:?}", self.app.harness_for(&supervisor_name));
+        for alert in escalate_undelivered_supervisor_relays(
+            self.app.cas_dir(),
+            queue,
+            &self.session_name,
+            &supervisor_name,
+            &harness,
+            chrono::Utc::now(),
+        ) {
+            self.app
+                .notifier()
+                .notify("Supervisor missed an update", &alert.summary);
+            tracing::error!(
+                target: "cas::coordination",
+                stage = "relay_escalated_to_operator",
+                message_id = alert.relay_id,
+                alert_id = alert.alert_id,
+                "GH #894: a supervisor relay went undelivered past the escalation window; operator alerted"
+            );
         }
     }
 
@@ -3898,6 +4087,7 @@ impl FactoryDaemon {
         if prompt_poison_sweep_due(self.last_prompt_poison_sweep, now) {
             self.last_prompt_poison_sweep = Some(now);
             self.enqueue_delivery_stalled_bounces(queue.as_ref());
+            self.escalate_undelivered_supervisor_relays(queue.as_ref());
             if let Ok(expired) = queue.abandon_ineligible_session_targets(
                 &valid_targets,
                 &self.session_name,
@@ -7728,6 +7918,119 @@ mod tests {
             !unavailable.contains("exited with code")
                 && !unavailable.contains("terminated by signal"),
             "missing child wait status must not be invented: {unavailable}"
+        );
+    }
+
+    /// GH #894: a supervisor relay that never reached the supervisor raises
+    /// one Commander blocker for the operator within the 10-minute window.
+    /// A relay whose task moved on, or one still inside the window, stays
+    /// quiet, and a later sweep never repeats an alert.
+    #[test]
+    fn an_undelivered_supervisor_relay_alerts_the_operator_once_within_ten_minutes() {
+        use cas_store::{EnqueueIdempotentResult, PromptQueueStore, TaskStore};
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        let tasks = crate::store::open_task_store(&cas_dir).unwrap();
+        for (id, status) in [
+            ("cas-a894", TaskStatus::AwaitingMerge),
+            ("cas-b894", TaskStatus::InProgress),
+            ("cas-c894", TaskStatus::AwaitingMerge),
+        ] {
+            let mut task = Task::new(id.to_string(), format!("relay {id}"));
+            task.status = status;
+            tasks.add(&task).unwrap();
+        }
+        let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+        let relay = |n: i64, task_id: &str| match queue
+            .enqueue_idempotent(
+                &format!("lifecycle-wake:{n}"),
+                "supervisor",
+                &awaiting_merge_payload(task_id),
+                Some("factory-session"),
+                Some(task_id),
+                Some(cas_store::NotificationPriority::High),
+                &format!("gh894-relay:{n}"),
+                Some(&cas_store::QueueOrigin::Daemon),
+            )
+            .unwrap()
+        {
+            EnqueueIdempotentResult::Created(id) | EnqueueIdempotentResult::AlreadyExists(id) => id,
+        };
+        let stuck = relay(1, "cas-a894");
+        let moved_on = relay(2, "cas-b894");
+        let fresh = relay(3, "cas-c894");
+        let conn = rusqlite::Connection::open(cas_dir.join("cas.db")).unwrap();
+        let age = |id: i64, secs: i64| {
+            conn.execute(
+                "UPDATE prompt_queue SET created_at = ? WHERE id = ?",
+                rusqlite::params![
+                    (chrono::Utc::now() - chrono::Duration::seconds(secs)).to_rfc3339(),
+                    id
+                ],
+            )
+            .unwrap();
+        };
+        age(stuck, 10 * 60);
+        age(moved_on, 10 * 60);
+        age(fresh, 2 * 60);
+
+        let sweep = || {
+            super::escalate_undelivered_supervisor_relays(
+                &cas_dir,
+                queue.as_ref(),
+                "factory-session",
+                "cosmic-bear-43",
+                "Codex",
+                chrono::Utc::now(),
+            )
+        };
+        let first = sweep();
+        assert_eq!(
+            first.iter().map(|alert| alert.relay_id).collect::<Vec<_>>(),
+            vec![stuck],
+            "only the relay whose task still waits on the supervisor escalates"
+        );
+
+        let operator_rows = queue.peek_operator_replies("factory-session", 10).unwrap();
+        assert_eq!(
+            operator_rows.len(),
+            1,
+            "the Commander lane carries the alert"
+        );
+        let payload: crate::ui::factory::OperatorReplyPayload =
+            serde_json::from_str(&operator_rows[0].prompt).unwrap();
+        assert_eq!(payload.kind, crate::ui::factory::OperatorTurnKind::Blocker);
+        assert_eq!(payload.device_id, "*");
+        assert_eq!(
+            payload.summary,
+            "Supervisor hasn't seen: cas-a894 is awaiting merge (10m)"
+        );
+        assert!(
+            payload.message.contains("cosmic-bear-43, Codex")
+                && payload.message.contains("never reached it"),
+            "{}",
+            payload.message
+        );
+
+        assert!(
+            sweep().is_empty(),
+            "a later sweep must not repeat the alert"
+        );
+
+        age(fresh, super::RELAY_OPERATOR_ESCALATION_AFTER_SECS + 30);
+        assert_eq!(
+            sweep()
+                .iter()
+                .map(|alert| alert.relay_id)
+                .collect::<Vec<_>>(),
+            vec![fresh],
+            "a relay crossing the window escalates on the next sweep"
+        );
+        assert!(
+            super::RELAY_OPERATOR_ESCALATION_AFTER_SECS
+                + super::PROMPT_POISON_SWEEP_INTERVAL.as_secs() as i64
+                <= 10 * 60,
+            "window plus sweep cadence must stay within the 10-minute promise"
         );
     }
 

@@ -1,8 +1,19 @@
 import { test, expect } from "./journey";
 import { ATLAS, STUDIO, PELICAN, OTTER } from "./world";
+import type { Machine } from "./hub-double";
+
+// A third machine, paired mid-journey. Its id sorts before both others and
+// hashes to Atlas's accent, which is exactly what used to re-colour the fleet.
+const ALPHA: Machine = {
+  id: "alpha",
+  label: "Alpha · Linux",
+  sessions: [{ name: "keen-lynx-1", supervisor: "keen-lynx-1", project_dir: "/projects/orion", workers: ["quick-wren-2"], liveness: "live" }],
+};
 
 test("HUB-J8 switch between machines without losing my place", async ({ page, journey }) => {
-  const hub = await journey.hub({ machines: [ATLAS, STUDIO], paired: ["atlas", "studio"] });
+  // Twelve stages including a pairing: past the 60 s default under load.
+  test.setTimeout(120_000);
+  const hub = await journey.hub({ machines: [ATLAS, STUDIO, ALPHA], paired: ["atlas", "studio"] });
   const list = page.getByRole("navigation", { name: "Choose a supervisor" });
   const composer = page.getByRole("textbox", { name: "Your message" });
   // The list stays beside the thread on desktop, so a switch is one click on a row (F17).
@@ -175,5 +186,31 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
     await expect(back).toBeVisible();
     await back.click();
     await expect(composer).toBeFocused();
+  });
+
+  await journey.stage("Pair a third machine; the others keep their colours", async () => {
+    // cas-50a7: each machine's accent is stored when it first pairs, so a new
+    // pairing never re-colours the fleet, and a third machine gets its own.
+    const avatar = (project: RegExp) => list.getByRole("button", { name: project }).locator(".conversation-avatar");
+    const colour = (project: RegExp) => avatar(project).evaluate((element) => getComputedStyle(element).backgroundColor);
+    const atlas = await colour(/cas-src/);
+    const studio = await colour(/gabber-studio/);
+    await page.goto("about:blank");
+    await page.goto(`./#pair=A1pha0xZt1nA4wLr9cYp2KdJ6sHf0uEiMgTxBvNyRaQ&hub=alpha&hub_url=${encodeURIComponent("https://alpha.test")}&machine=${encodeURIComponent("Alpha · Linux")}&scopes=machine:read,session:read,pane:read,pane:input,message:send,pane:interrupt`);
+    const dialog = page.locator("#pair-dialog");
+    await dialog.getByRole("textbox", { name: /Your name/ }).fill("Daniel");
+    await dialog.getByRole("button", { name: "Pair", exact: true }).click();
+    await expect(dialog).toBeHidden();
+    const back = page.getByRole("button", { name: "‹ Conversations", exact: true });
+    if (await back.isVisible().catch(() => false)) await back.click();
+    await expect(list.getByRole("button", { name: /orion/ })).toBeVisible({ timeout: 15_000 });
+    expect(await colour(/cas-src/), "Atlas keeps its accent").toBe(atlas);
+    expect(await colour(/gabber-studio/), "Studio keeps its accent").toBe(studio);
+    expect(await colour(/orion/), "the new machine gets its own accent").not.toBe(atlas);
+    expect(await colour(/orion/)).not.toBe(studio);
+    // And after a reload, from storage.
+    await page.reload();
+    await expect(list.getByRole("button", { name: /orion/ })).toBeVisible();
+    expect([await colour(/cas-src/), await colour(/gabber-studio/)]).toEqual([atlas, studio]);
   });
 });

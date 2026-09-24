@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { MACHINE_ACCENT_COUNT, assignMachineAccents, fnv1a32, jumpConsistentHash, machineAccentClass, machineAccentIndex, machineMonogram, setMachineAccentFleet } from "./machine-accent";
+import { MACHINE_ACCENT_BASE, MACHINE_ACCENT_COUNT, MACHINE_ACCENT_STORAGE_KEY, assignMachineAccents, fnv1a32, jumpConsistentHash, machineAccentClass, machineAccentIndex, machineMonogram, setMachineAccentFleet, storageAccentStore } from "./machine-accent";
 
 const tokens = readFileSync(fileURLToPath(new URL("./tokens.css", import.meta.url)), "utf8");
 
@@ -114,6 +114,66 @@ describe("machine accent assignment", () => {
     try {
       expect(machineAccentClass("atlas")).not.toBe(machineAccentClass("studio"));
       expect(machineAccentClass("elsewhere")).toBe(`machine-accent-${machineAccentIndex("elsewhere")}`);
+    } finally {
+      setMachineAccentFleet([]);
+    }
+  });
+
+  it("keeps a machine's stored accent when another machine pairs or leaves (cas-50a7)", () => {
+    // Without storage, pairing "alpha" (sorts first, hashes to atlas's accent) re-colours both.
+    const before = assignMachineAccents(["atlas", "studio"]);
+    const naive = assignMachineAccents(["alpha", "atlas", "studio"]);
+    expect([naive.get("atlas"), naive.get("studio")]).not.toEqual([before.get("atlas"), before.get("studio")]);
+    // With the accents stored when atlas and studio paired, they keep them.
+    const kept = assignMachineAccents(["alpha", "atlas", "studio"], MACHINE_ACCENT_COUNT, before);
+    expect(kept.get("atlas")).toBe(before.get("atlas"));
+    expect(kept.get("studio")).toBe(before.get("studio"));
+    expect(new Set(kept.values()).size).toBe(3);
+    // Removing one leaves the other alone.
+    const after = assignMachineAccents(["studio"], MACHINE_ACCENT_COUNT, kept);
+    expect(after.get("studio")).toBe(before.get("studio"));
+    // A stored accent another member now holds (removed, colour reused, re-paired) is reassigned, not duplicated.
+    const clash = assignMachineAccents(["atlas", "zed"], MACHINE_ACCENT_COUNT, new Map([["atlas", 1], ["zed", 1]]));
+    expect(clash.get("atlas")).toBe(1);
+    expect(clash.get("zed")).not.toBe(1);
+    // Out-of-range or non-integer entries are ignored.
+    expect(assignMachineAccents(["bench-1"], MACHINE_ACCENT_COUNT, new Map([["bench-1", 99]])).get("bench-1")).toBe(machineAccentIndex("bench-1"));
+  });
+
+  it("gives a fleet of up to three exactly the colours it had, and a fourth and fifth machine the appended accents", () => {
+    // The pre-cas-50a7 rule over the base set, reproduced for comparison.
+    const legacy = (ids: string[]) => {
+      const uses = new Array<number>(MACHINE_ACCENT_BASE).fill(0); const out = new Map<string, number>();
+      for (const id of [...new Set(ids)].sort()) { const least = Math.min(...uses); let index = machineAccentIndex(id); while (uses[index] !== least) index = (index + 1) % MACHINE_ACCENT_BASE; uses[index] += 1; out.set(id, index); }
+      return out;
+    };
+    for (let trial = 0; trial < 200; trial += 1) {
+      const ids = Array.from({ length: 1 + (trial % MACHINE_ACCENT_BASE) }, (_, index) => `m-${trial}-${index}`);
+      expect(assignMachineAccents(ids)).toEqual(legacy(ids));
+    }
+    const five = assignMachineAccents(["atlas-linux", "studio-mac", "bench-1", "forge", "vega"]);
+    expect(new Set(five.values()).size).toBe(5);
+    expect([...five.values()].filter((index) => index >= MACHINE_ACCENT_BASE).sort()).toEqual([3, 4]);
+  });
+
+  it("records each machine's accent in storage the first time it is seen", () => {
+    const data = new Map<string, string>();
+    const storage = { getItem: (key: string) => data.get(key) ?? null, setItem: (key: string, value: string) => { data.set(key, value); } };
+    try {
+      setMachineAccentFleet(["atlas", "studio"], storageAccentStore(storage));
+      const first = JSON.parse(data.get(MACHINE_ACCENT_STORAGE_KEY)!);
+      const atlas = machineAccentClass("atlas"); const studio = machineAccentClass("studio");
+      // A fresh page (new store over the same storage) pairs "alpha": the others keep their colours.
+      setMachineAccentFleet(["alpha", "atlas", "studio"], storageAccentStore(storage));
+      expect(machineAccentClass("atlas")).toBe(atlas);
+      expect(machineAccentClass("studio")).toBe(studio);
+      expect(machineAccentClass("alpha")).not.toBe(atlas);
+      expect(machineAccentClass("alpha")).not.toBe(studio);
+      expect(JSON.parse(data.get(MACHINE_ACCENT_STORAGE_KEY)!)).toMatchObject(first);
+      // Unreadable storage degrades to hashing, never throws.
+      data.set(MACHINE_ACCENT_STORAGE_KEY, "not json");
+      expect(() => setMachineAccentFleet(["atlas"], storageAccentStore(storage))).not.toThrow();
+      expect(() => setMachineAccentFleet(["atlas"], storageAccentStore({ getItem: () => { throw new Error("denied"); }, setItem: () => { throw new Error("denied"); } }))).not.toThrow();
     } finally {
       setMachineAccentFleet([]);
     }

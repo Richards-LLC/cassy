@@ -8122,6 +8122,9 @@ mod tests {
         spawn_provisioning_timed_out, spawn_queue_reset_report, stalled_spawn_requests,
         take_next_pending_spawn, take_spawn_cancellation, take_unverified_spawn_on_exit,
         timeout_pane_tail, worker_exit_info,
+        // cas-2ffe (GH #915): exit cause and death correlation.
+        ObservedWorkerExit, WORKER_DEATH_CORRELATION_WINDOW, closed_death_group,
+        worker_exit_cause,
     };
     use crate::ui::factory::app::render_and_ops::epic_workers::release_preassign_if_bound;
     use crate::ui::factory::daemon::{FactoryDaemon, PendingSpawn, SpawnVerification};

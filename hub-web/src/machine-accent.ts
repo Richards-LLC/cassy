@@ -45,9 +45,38 @@ export function machineAccentIndex(machineId: string, count = MACHINE_ACCENT_COU
   return jumpConsistentHash(fnv1a32(machineId), count);
 }
 
+/**
+ * Accents for a paired fleet, so two machines never share a colour while a
+ * free one is left (journey F16: "atlas" and "studio" both hash to accent 2).
+ * Machines are taken in id order, so the same fleet gets the same colours on
+ * every device. Each keeps its hashed accent unless an earlier machine holds
+ * it; then it takes the next least-used accent after it. Only a fleet larger
+ * than the accent set repeats a colour.
+ */
+export function assignMachineAccents(machineIds: Iterable<string>, count = MACHINE_ACCENT_COUNT): Map<string, number> {
+  const uses = new Array<number>(count).fill(0);
+  const assigned = new Map<string, number>();
+  for (const id of [...new Set(machineIds)].sort()) {
+    const preferred = machineAccentIndex(id, count);
+    const least = Math.min(...uses);
+    let index = preferred;
+    while (uses[index] !== least) index = (index + 1) % count;
+    uses[index] += 1;
+    assigned.set(id, index);
+  }
+  return assigned;
+}
+
+let fleetAccents = new Map<string, number>();
+
+/** Set the paired fleet that machineAccentClass assigns colours within. */
+export function setMachineAccentFleet(machineIds: Iterable<string>): void {
+  fleetAccents = assignMachineAccents(machineIds);
+}
+
 /** The class carried by a rail row and by the thread root so descendants inherit the accent. */
 export function machineAccentClass(machineId: string): string {
-  return `machine-accent-${machineAccentIndex(machineId)}`;
+  return `machine-accent-${fleetAccents.get(machineId) ?? machineAccentIndex(machineId)}`;
 }
 
 /** The single letter inside the machine avatar. */

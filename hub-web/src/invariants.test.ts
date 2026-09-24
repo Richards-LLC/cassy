@@ -775,7 +775,7 @@ describe("binding Cassy Cloud browser invariants", () => {
     const shadows = [...css.matchAll(/box-shadow:\s*([^;]+);/g)].map((match) => match[1].trim());
     expect(shadows.filter((value) => value === "var(--shadow-overlay)")).toHaveLength(2);
     expect(shadows.filter((value) => value === "none")).toHaveLength(2);
-    for (const value of shadows) expect(value).toMatch(/^(?:none|var\(--(?:shadow-overlay|lift(?:-strong|-edge|-head)?)\))$/);
+    for (const value of shadows) expect(value).toMatch(/^(?:none|var\(--(?:shadow-overlay|lift(?:-strong|-edge|-head|-sup)?)\))$/);
     expect(renderer).not.toContain('"700"');
     expect(surface).not.toContain('"normal 700"');
     expect(surface).not.toContain('"italic 700"');
@@ -1348,10 +1348,11 @@ describe("design polish P3/P4/P12/P16 (D3/D4/D12/D17)", () => {
     const [css, tokens, markup] = await Promise.all(["styles.css", "tokens.css", "pair-dialog-markup.ts"].map((path) => readSource(path)));
     const rule = (selector: string) => css.slice(css.indexOf(`${selector} {`), css.indexOf("}", css.indexOf(`${selector} {`)) + 1);
     // P3: you-bg fill, you-fg label, semibold; hover brightens instead of falling to --bg-hover.
-    expect(rule("\n.primary")).toContain("color: var(--you-fg);");
-    expect(rule("\n.primary")).toContain("background: var(--you-bg);");
-    expect(rule("\n.primary")).toContain("font-weight: var(--weight-semibold);");
-    expect(css).toContain('.primary:hover:not(:disabled):not([aria-disabled="true"]) { background: var(--you-bg); filter: brightness(1.08); }');
+    // Scoped to controls with :where() (journey F11): the primary terminal pane also carries .primary.
+    expect(rule("\n:where(button, a).primary")).toContain("color: var(--you-fg);");
+    expect(rule("\n:where(button, a).primary")).toContain("background: var(--you-bg);");
+    expect(rule("\n:where(button, a).primary")).toContain("font-weight: var(--weight-semibold);");
+    expect(css).toContain(':where(button, a).primary:hover:not(:disabled):not([aria-disabled="true"]) { background: var(--you-bg); filter: brightness(1.08); }');
     expect(css).not.toContain(".primary:hover:not(:disabled) { background: var(--bg-hover); }");
     expect(css).toContain(".welcome-pairs #pair-toggle { display: none; }");
     expect(css).toContain(".conversation-shell.welcome-pairs .compose-fab { display: none; }");

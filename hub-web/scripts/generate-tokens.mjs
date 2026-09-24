@@ -173,6 +173,9 @@ try {
     "--accent-soft": machineAccents[index][scheme].soft,
     "--sup-bg": machineAccents[index][scheme].sup,
     "--sup-fg": token(`color.${scheme}.ink`),
+    // The light --sup-bg tints sit about 1.1:1 on the cream thread, so a
+    // supervisor bubble carries an accent hairline in its lift (journey F11).
+    "--lift-sup": `${pebbleLiterals[scheme]["--lift"]}, inset 0 0 0 1px color-mix(in srgb, ${machineAccents[index][scheme].accent} 30%, transparent)`,
   });
   function pebble(scheme) {
     return {

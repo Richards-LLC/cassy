@@ -28,6 +28,10 @@ test("HUB-J4 read the conversation history", async ({ page, journey }) => {
   await journey.stage("Load earlier turns", async () => {
     await page.getByRole("button", { name: "Load earlier" }).click();
     await expect(log.getByText("Scheduled for 09:00 with three workers.")).toBeVisible();
+    // The pointer now rests on the thread: its surface stays the cream canvas,
+    // not brightened to white by the main-action button hover (journey F11).
+    await log.hover();
+    await expect(page.locator("#pane-grid .pane.primary")).toHaveCSS("filter", "none");
     expect(hub.historyRequests.at(-1)).toMatchObject({ before: 20 });
   });
 

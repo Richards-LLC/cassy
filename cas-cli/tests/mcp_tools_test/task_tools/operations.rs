@@ -4887,7 +4887,9 @@ async fn a_blocked_task_without_a_lease_transfers_from_its_assignee() {
     assert_eq!(task.assignee.as_deref(), Some("steady-wren-3"));
     assert_eq!(task.status, cas::types::TaskStatus::Blocked, "no reset");
     assert!(
-        task.notes.contains("TRANSFER WITHOUT LEASE") && task.notes.contains("Blocked"),
+        // The note prints TaskStatus's Display, which is lowercase.
+        task.notes.contains("TRANSFER WITHOUT LEASE")
+            && task.notes.contains("(task status: blocked)"),
         "{}",
         task.notes
     );

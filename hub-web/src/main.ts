@@ -8,7 +8,7 @@ import { ConversationView } from "./conversation-view";
 import { refusalSentence } from "./refusal";
 import { installAttentionObjects } from "./attention-objects";
 import { installAttachmentSheet } from "./attachment-sheet";
-import { arrangeConversationShell, bindKeyboardViewport, conversationEmptyText, conversationNoMatchText } from "./conversation-shell";
+import { arrangeConversationShell, bindKeyboardViewport, conversationListState, conversationNoMatchText, conversationSkeletonMarkup } from "./conversation-shell";
 import { syncContextRail } from "./context-rail";
 import { applyScheme, setScheme, type SchemePreference } from "./scheme";
 import { applyAttentionEnrichment, attentionCounts, attentionSummary, attentionUrl, createAttentionItem, dismissableInfoItems, groupAttention, machineEventAttention, mergeAttentionItem, type AttentionAction, type AttentionContent, type AttentionEnrichment } from "./attention";
@@ -2494,7 +2494,7 @@ function renderConversationList(): void {
     if (selected) readReplies.set(key, replies);
     // Waiting (ochre dot, hot time) is driven by asks and blockers the operator has not answered.
     const waiting = conversationHistories.get(key)?.waiting().length ?? 0;
-    return { key, machineId: machine.id, session: session.name, supervisor: session.supervisor, projectDir: session.project_dir, host: machine.label, freshness: updated ? `Catalog checked ${relativeTimestamp(Date.parse(updated))}` : "Catalog not yet checked", when: updated ? relativeTimestamp(Date.parse(updated)) : undefined, preview: conversationHistories.get(key)?.preview(), unreachable: Boolean(session.unreachable), connection: session.unreachable ? "Unreachable · message pending" : session.dormant ? "Dormant" : session.liveness === "live" ? fleetConnectionLabel(connectionStates.get(machine.id)) : "Session unavailable", attention: waiting, unread: Math.max(0, replies - (readReplies.get(key) ?? 0)), selected };
+    return { key, machineId: machine.id, session: session.name, supervisor: session.supervisor, projectDir: session.project_dir, host: machine.label, freshness: updated ? `Catalog checked ${relativeTimestamp(Date.parse(updated))}` : "Catalog not yet checked", when: updated ? relativeTimestamp(Date.parse(updated)) : undefined, preview: conversationHistories.get(key)?.preview(), unreachable: Boolean(session.unreachable), connection: session.unreachable ? "Unreachable · message pending" : session.dormant ? "Dormant" : session.liveness === "live" ? fleetConnectionLabel(connectionStates.get(machine.id), machine.id) : "Session unavailable", attention: waiting, unread: Math.max(0, replies - (readReplies.get(key) ?? 0)), selected };
   }));
   conversationRows = rows;
   const shown = filterConversationRows(rows, conversationSearchQuery);
@@ -2502,16 +2502,25 @@ function renderConversationList(): void {
   const empty = document.querySelector<HTMLElement>("#conversation-empty");
   if (empty) {
     empty.hidden = shown.length > 0;
-    empty.textContent = rows.length > 0 ? conversationNoMatchText(conversationSearchQuery) : conversationEmptyText(machineCatalogLoaded, machines.size);
+    const listState = rows.length > 0 ? { kind: "text" as const, text: conversationNoMatchText(conversationSearchQuery) } : conversationListState(machineCatalogLoaded, [...machines.keys()].map((id) => ({ catalogReceived: fleetCatalogUpdatedAt.has(id), phase: connectionStates.get(id)?.phase })));
+    const markup = listState.kind === "loading" ? conversationSkeletonMarkup() : "";
+    if (listState.kind === "loading") { if (empty.dataset.state !== "loading") empty.innerHTML = markup; }
+    else empty.textContent = listState.text;
+    empty.dataset.state = listState.kind;
   }
   const state = document.querySelector<HTMLElement>("#conversation-connection");
-  if (state && selectedMachineId) state.textContent = ` · ${visibleSessions(selectedMachineId).find(session => session.name === selectedSession)?.unreachable ? "Unreachable · message pending" : fleetConnectionLabel(connectionStates.get(selectedMachineId))}`;
+  if (state && selectedMachineId) state.textContent = ` · ${visibleSessions(selectedMachineId).find(session => session.name === selectedSession)?.unreachable ? "Unreachable · message pending" : fleetConnectionLabel(connectionStates.get(selectedMachineId), selectedMachineId)}`;
 }
 
-function fleetConnectionLabel(state: ConnectionState | undefined): string {
+/**
+ * A machine that has not been live in this visit is still on its first
+ * connection, retries included: that is "Connecting", never "Reconnecting"
+ * (journey F14).
+ */
+function fleetConnectionLabel(state: ConnectionState | undefined, machineId?: string): string {
   if (!state) return "Idle";
   if (state.phase === "live") return state.degraded ? "Degraded" : "Live";
-  if (state.phase === "backoff") return "Reconnecting";
+  if (state.phase === "backoff") return machineId && !lastLiveAt.has(machineId) ? "Connecting" : "Reconnecting";
   if (state.phase === "failed") return state.authFailure ? "Needs pairing" : "Unreachable";
   return "Connecting";
 }
@@ -2532,7 +2541,7 @@ function renderFleetBoard(): void {
       id: machine.id,
       label: machine.label,
       state: connectionClass(connectionStates.get(machine.id)),
-      phase: fleetConnectionLabel(connectionStates.get(machine.id)),
+      phase: fleetConnectionLabel(connectionStates.get(machine.id), machine.id),
       selected: machine.id === selectedMachineId,
       hubVersion: machineInfo.get(machine.id)?.version,
       catalogUpdatedAt: fleetCatalogUpdatedAt.get(machine.id),
@@ -3269,8 +3278,9 @@ function pairedMachineRows(): PairedMachineRow[] {
     const updated = fleetCatalogUpdatedAt.get(machine.id);
     const fresh = Date.now() < (catalogExpiresAt.get(machine.id) ?? Infinity);
     return { id: machine.id, label: machine.label, address: new URL(machine.baseUrl).host,
-      connection: state?.phase === "live" && !state.degraded && fresh ? "Connected" : fleetConnectionLabel(state) === "Live" ? "Reconnecting" : fleetConnectionLabel(state),
+      connection: state?.phase === "live" && !state.degraded && fresh ? "Connected" : fleetConnectionLabel(state, machine.id) === "Live" ? "Reconnecting" : fleetConnectionLabel(state, machine.id),
       connected: state?.phase === "live" && !state.degraded && fresh,
+      everConnected: lastLiveAt.has(machine.id),
       lastSeen: updated ? `Last seen ${relativeTimestamp(Date.parse(updated))} · ${new Date(updated).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : 'Not yet seen in this visit',
       runtime: machineInfo.get(machine.id)?.version };
   });
@@ -3280,7 +3290,7 @@ function renderMachineRegister(): void {
   const rows = pairedMachineRows();
   const footer = document.querySelector<HTMLElement>('#hub-footer-badges');
   if (footer) {
-    const markup = machineFooterMarkup(rows, [...machines.keys()].reduce((sum, id) => sum + visibleSessions(id).filter(session => supervisorTarget(session)).length, 0), __HUB_BUILD__);
+    const markup = machineFooterMarkup(rows, [...machines.keys()].reduce((sum, id) => sum + visibleSessions(id).filter(session => supervisorTarget(session)).length, 0), __HUB_BUILD__, !machineCatalogLoaded);
     // Preserve the opener itself: dialog Escape must return focus after a catalog tick.
     const button = footer.querySelector<HTMLButtonElement>('#paired-machines-toggle');
     if (!button) footer.innerHTML = markup;

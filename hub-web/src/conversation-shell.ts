@@ -95,6 +95,38 @@ export function conversationEmptyText(catalogLoaded: boolean, machineCount: numb
   return !catalogLoaded ? "Loading paired machines…" : machineCount === 0 ? "Pair a machine to start your first conversation." : "No live supervisors listed. Use Appearance & commands to show dormant sessions for recovery.";
 }
 
+/** What the list knows about one paired machine's session catalog. */
+export interface MachineCatalogProgress {
+  /** The hub has answered with a session catalog at least once in this visit. */
+  catalogReceived: boolean;
+  phase: string | undefined;
+}
+
+export type ConversationListState = { readonly kind: "loading" } | { readonly kind: "text"; readonly text: string };
+
+/**
+ * What an empty conversation list shows (journey F14). Until browser storage
+ * and the machines' first catalog responses arrive it is a loading skeleton,
+ * never "Not paired" or "No live supervisors". The empty copy needs an actual
+ * empty catalog; a machine that could not be reached on its first attempt is
+ * named as unreachable instead of being read as "nothing live".
+ */
+export function conversationListState(storageLoaded: boolean, machines: readonly MachineCatalogProgress[]): ConversationListState {
+  if (!storageLoaded) return { kind: "loading" };
+  if (machines.length === 0) return { kind: "text", text: conversationEmptyText(true, 0) };
+  const unanswered = machines.filter((machine) => !machine.catalogReceived);
+  // Still on a first attempt: no answer yet, and no failure either.
+  if (unanswered.some((machine) => machine.phase !== "failed" && machine.phase !== "backoff")) return { kind: "loading" };
+  if (unanswered.length === machines.length) return { kind: "text", text: "Can't reach your paired machines yet. Cassy keeps retrying; check that the machines are awake and on your network." };
+  return { kind: "text", text: conversationEmptyText(true, machines.length) };
+}
+
+/** Three placeholder rows in the list's own geometry, announced once as loading. */
+export function conversationSkeletonMarkup(): string {
+  const row = '<span class="conversation-skeleton-row" aria-hidden="true"><span class="conversation-skeleton-avatar"></span><span class="conversation-skeleton-lines"><span></span><span></span></span></span>';
+  return `<div class="conversation-skeleton" role="status"><span class="sr-only">Loading your conversations…</span>${row}${row}${row}</div>`;
+}
+
 /**
  * The desktop context rail (P10). It holds only what the thread header does
  * not: open asks and blockers, task progress, the thread's attachments and

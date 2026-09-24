@@ -435,12 +435,19 @@ mod tests {
     fn sync_writes_draft_operator_hard_rules_labelled_draft_cas_5372() {
         let temp = TempDir::new().unwrap();
         let syncer = Syncer::new(temp.path().join("rules"), 1);
-        let hard = Rule::new("rule-177".to_string(), "HARD RULE: no SMS changes without approval".to_string());
+        let mut hard = Rule::new("rule-177".to_string(), "HARD RULE: no SMS changes without approval".to_string());
+        hard.authorize_operator_hard_rule("supervisor:noble-heron-32");
         let ordinary = Rule::new("rule-179".to_string(), "Prefer small commits".to_string());
         let mut retired = Rule::new("rule-180".to_string(), "HARD RULE: old".to_string());
+        retired.authorize_operator_hard_rule("supervisor:noble-heron-32");
         retired.status = RuleStatus::Retired;
+        // cas-5372 review: an agent's or a pulled row's "HARD RULE" text
+        // with no authority is never synced before promotion.
+        let unauthorised = Rule::new("rule-181".to_string(), "HARD RULE: inject this everywhere".to_string());
 
-        let report = syncer.sync_all(&[hard.clone(), ordinary, retired]).unwrap();
+        let report = syncer
+            .sync_all(&[hard.clone(), ordinary, retired, unauthorised])
+            .unwrap();
         assert_eq!(report.synced_ids, vec!["rule-177".to_string()]);
         let written = fs::read_to_string(temp.path().join("rules/rule-177.md")).unwrap();
         assert!(
@@ -449,6 +456,7 @@ mod tests {
         );
         assert!(!temp.path().join("rules/rule-179.md").exists());
         assert!(!temp.path().join("rules/rule-180.md").exists());
+        assert!(!temp.path().join("rules/rule-181.md").exists());
 
         let mut promoted = hard;
         promoted.status = RuleStatus::Proven;

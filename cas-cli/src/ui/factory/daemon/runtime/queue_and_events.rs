@@ -579,15 +579,31 @@ fn append_workspace_contract_brief(
         task.acceptance_criteria,
         task.notes,
     ];
-    let stale = texts
-        .iter()
-        .flat_map(|text| text.split_whitespace())
-        .map(|word| {
-            word.trim_matches(|c: char| matches!(c, '`' | '"' | '\'' | '(' | ')' | ',' | '.' | ':'))
+    let stale = texts.iter().find_map(|text| {
+        let words: Vec<_> = text.split_whitespace().collect();
+        words.iter().enumerate().find_map(|(index, word)| {
+            let path = word.trim_matches(|c: char| {
+                matches!(c, '`' | '"' | '\'' | '(' | ')' | ',' | '.' | ':')
+            });
+            // A path cited in background context is not an output instruction.
+            let directive = words[index.saturating_sub(6)..index].iter().any(|prior| {
+                matches!(
+                    prior.to_ascii_lowercase().trim_matches(|c: char| !c.is_alphabetic()),
+                    "write" | "save" | "store" | "put" | "emit" | "output" | "create" | "place"
+                )
+            });
+            let target_preposition = words.get(index.wrapping_sub(1)).is_some_and(|prior| {
+                matches!(
+                    prior.to_ascii_lowercase().trim_matches(|c: char| !c.is_alphabetic()),
+                    "to" | "under" | "in" | "into" | "at" | "write" | "save" | "store" | "put" | "emit"
+                )
+            });
+            (directive
+                && target_preposition
+                && prescribed_path_is_outside_contract(path, worktree.as_deref(), &artifacts_root))
+            .then_some(path)
         })
-        .find(|word| {
-            prescribed_path_is_outside_contract(word, worktree.as_deref(), &artifacts_root)
-        });
+    });
     if let Some(path) = stale {
         message.push_str(&format!(
             "\n\n⚠️ Workspace-contract warning: this task brief prescribes `{path}`, outside the worker worktree and durable artifacts root. Do not use it for output; use `{}/` instead (or the harness scratchpad only for ephemeral notes).",
@@ -601,6 +617,9 @@ fn prescribed_path_is_outside_contract(
     worktree: Option<&std::path::Path>,
     artifacts_root: &std::path::Path,
 ) -> bool {
+    if raw == "/" {
+        return false;
+    }
     let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
     let path = if let Some(suffix) = raw.strip_prefix("~/") {
         home.map(|home| home.join(suffix))
@@ -12421,6 +12440,9 @@ mod tests {
         let mut clean = Task::new("cas-clean-path".into(), "clean artifact path".into());
         clean.description = format!("Write build output to {}/proof.json", worktree.display());
         task_store.add(&clean).unwrap();
+        let mut mentioned = Task::new("cas-mentioned-path".into(), "path mentioned only".into());
+        mentioned.description = "The database is at /var/lib/cas/cas.db. A / character may appear in prose; write output in the worktree.".into();
+        task_store.add(&mentioned).unwrap();
 
         deliver_worker_task_brief(
             &cas_dir,
@@ -12440,6 +12462,15 @@ mod tests {
             cas_mux::SupervisorCli::Claude,
         )
         .unwrap();
+        deliver_worker_task_brief(
+            &cas_dir,
+            "factory-session",
+            "path-worker",
+            "cas-mentioned-path",
+            "path mentioned only",
+            cas_mux::SupervisorCli::Claude,
+        )
+        .unwrap();
 
         let prompts = crate::store::open_prompt_queue_store(&cas_dir)
             .unwrap()
@@ -12453,6 +12484,10 @@ mod tests {
             .iter()
             .find(|prompt| prompt.prompt.contains("cas-clean-path"))
             .expect("clean task brief");
+        let mentioned_prompt = prompts
+            .iter()
+            .find(|prompt| prompt.prompt.contains("cas-mentioned-path"))
+            .expect("mentioned-path task brief");
         let resolved_stale_root = crate::config::resolved_factory_artifacts_root(
             Some(artifacts_root.to_str().expect("artifacts root utf8")),
         )
@@ -12473,6 +12508,11 @@ mod tests {
             !clean_prompt.prompt.contains("Workspace-contract warning"),
             "in-worktree paths must not produce a stale-path warning: {}",
             clean_prompt.prompt
+        );
+        assert!(
+            !mentioned_prompt.prompt.contains("Workspace-contract warning"),
+            "paths mentioned as context must not become output warnings: {}",
+            mentioned_prompt.prompt
         );
     }
 

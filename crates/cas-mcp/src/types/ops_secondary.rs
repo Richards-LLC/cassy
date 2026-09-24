@@ -999,8 +999,9 @@ pub struct CoordinationRequest {
     #[serde(default)]
     pub session_id: Option<String>,
 
-    /// Loop prompt (for loop_start)
-    #[schemars(description = "The prompt to repeat each iteration")]
+    /// Loop prompt (for loop_start). spawn_workers rejects a non-empty value;
+    /// worker briefs must be sent with coordination message after registration.
+    #[schemars(description = "loop_start only: prompt to repeat each iteration. spawn_workers rejects this field; send a worker brief using coordination action=message after registration.")]
     #[serde(default)]
     pub prompt: Option<String>,
 

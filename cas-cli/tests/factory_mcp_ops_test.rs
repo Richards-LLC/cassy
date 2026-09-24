@@ -1368,6 +1368,31 @@ async fn test_coordination_focus_epic_routes_clear_field() {
 // spawn_workers tests
 // =============================================================================
 
+#[tokio::test]
+async fn spawn_workers_rejects_task_brief_in_prompt_without_queueing() {
+    let env = FactoryTestEnv::new();
+    let mut req = coord_req("spawn_workers");
+    req.task_id = Some("cas-example".into());
+    req.prompt = Some("Send a plan and wait before coding.".into());
+
+    let err = env.service.coordination(Parameters(req)).await.unwrap_err();
+    assert!(err.message.contains("does not deliver `prompt`"), "{err:?}");
+    assert!(err.message.contains("loop_start"), "{err:?}");
+    assert!(err.message.contains("action=message"), "{err:?}");
+    assert!(env.spawn_queue().peek(10).unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn spawn_workers_rejects_unscoped_prompt_without_queueing() {
+    let env = FactoryTestEnv::new();
+    let mut req = coord_req("spawn_workers");
+    req.prompt = Some("A brief must not be lost.".into());
+
+    let err = env.service.coordination(Parameters(req)).await.unwrap_err();
+    assert!(err.message.contains("no spawn was queued"), "{err:?}");
+    assert!(env.spawn_queue().peek(10).unwrap().is_empty());
+}
+
 /// cas-77c1: an isolated integration child must keep spawn_workers usable
 /// when the host's load would make the production guard refuse the request.
 /// The guard's injected-snapshot unit tests cover refusal; this exercises the
@@ -1458,6 +1483,10 @@ async fn test_spawn_workers_enqueues_with_epic_in_isolated_child() {
     assert!(
         text.contains("alpha, beta, gamma"),
         "Should list worker names: {text}"
+    );
+    assert!(
+        text.contains("Supervisor brief: none supplied or delivered"),
+        "no-brief spawn receipt must state delivery status: {text}"
     );
 
     // Verify queue

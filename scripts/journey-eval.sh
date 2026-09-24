@@ -13,7 +13,7 @@
 # Exit status is the suite's. See docs/qa/journey-evaluation.md.
 #
 # Ports: the servers start on this checkout's own pair in 20000–32767
-# (hub-web/e2e/checkout-ports.ts) and are never reused, so the run always
+# (hub-web/e2e/checkout-ports.mjs) and are never reused, so the run always
 # evaluates this checkout's dist. Set HUB_E2E_PORT/HUB_JOURNEY_PORT to a
 # distinct pair for parallel runs from one checkout.
 set -euo pipefail

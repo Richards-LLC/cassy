@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 const dist = resolve(fileURLToPath(new URL('.', import.meta.url)), '../../dist');
 const port = Number(process.argv[2] ?? process.env.HUB_JOURNEY_PORT);
 if (!Number.isInteger(port) || port <= 0) {
-  console.error('serve-dist: pass the port (playwright.config.ts picks this checkout\'s own; see e2e/checkout-ports.ts)');
+  console.error('serve-dist: pass the port (playwright.config.ts picks this checkout\'s own; see e2e/checkout-ports.mjs)');
   process.exit(2);
 }
 const types = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.wasm': 'application/wasm', '.woff2': 'font/woff2' };

@@ -150,10 +150,19 @@ else bad "playwright config may reuse another checkout's server"; fi
 if grep -qE '\?\? *479[12]' "$config" "$repo/hub-web/e2e/journeys/serve-dist.mjs"; then
     bad "a fixed shared default port (4791/4792) is back"
 else ok "no fixed shared default port"; fi
-if ports="$(cd "$repo/hub-web" && node --experimental-strip-types -e 'import("./e2e/checkout-ports.ts").then(({ checkoutPorts }) => { const p = checkoutPorts("."); console.log(p.fixtures, p.journeys); })' 2>/dev/null)"; then
+# Plain .mjs on purpose (cas-6942): the CI runner's Node predates
+# --experimental-strip-types, and a swallowed stderr hid why this failed.
+ports_err="$tmp/checkout-ports.err"
+if ports="$(cd "$repo/hub-web" && node e2e/checkout-ports.mjs . 2>"$ports_err")"; then
     read -r fixtures journeys <<<"$ports"
-    if (( fixtures >= 20000 && journeys <= 32767 && journeys == fixtures + 1 )); then ok "checkout ports $fixtures/$journeys sit in 20000–32767"; else bad "checkout ports out of range: $ports"; fi
-else bad "could not compute checkout ports"; fi
+    if [[ "$fixtures" =~ ^[0-9]+$ && "$journeys" =~ ^[0-9]+$ ]] \
+        && (( fixtures >= 20000 && journeys <= 32767 && journeys == fixtures + 1 )); then
+        ok "checkout ports $fixtures/$journeys sit in 20000–32767"
+    else bad "checkout ports out of range: $ports"; fi
+else bad "could not compute checkout ports with $(node --version 2>&1): $(cat "$ports_err")"; fi
+strip_users="$(grep -rlE 'node +--experimental-strip-types' "$repo/scripts" "$repo/hub-web/package.json" "$repo/hub-web/e2e" "$repo/.github" 2>/dev/null | grep -v '/scripts/test-journeys\.sh$' || true)"
+if [[ -n "$strip_users" ]]; then bad "journey tooling depends on --experimental-strip-types again: $strip_users"
+else ok "journey tooling runs on Node without --experimental-strip-types"; fi
 
 if [[ $fails -gt 0 ]]; then printf '%d failure(s)\n' "$fails"; exit 1; fi
 printf 'all journey tooling checks passed\n'

@@ -2,7 +2,7 @@
 
 ## Application Overview
 
-Base URL: the fixture server playwright.config.ts starts on this checkout's own port (e2e/checkout-ports.ts; override with HUB_E2E_PORT). Every scenario starts from a fresh browser page, selects its fixture with /?fixture=<name>, uses Seed e2e/seed.spec.ts, and can run in any order. The plan covers the six requested fixture states with happy paths, invalid input, and failure-state affordances. Commander shell fixtures render production UI with placeholder callbacks for backend actions; assertions stop at observable fixture behavior. A scenario fails whenever any listed expectation is unmet.
+Base URL: the fixture server playwright.config.ts starts on this checkout's own port (e2e/checkout-ports.mjs; override with HUB_E2E_PORT). Every scenario starts from a fresh browser page, selects its fixture with /?fixture=<name>, uses Seed e2e/seed.spec.ts, and can run in any order. The plan covers the six requested fixture states with happy paths, invalid input, and failure-state affordances. Commander shell fixtures render production UI with placeholder callbacks for backend actions; assertions stop at observable fixture behavior. A scenario fails whenever any listed expectation is unmet.
 
 ## Test Scenarios
 

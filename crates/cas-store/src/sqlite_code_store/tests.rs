@@ -201,6 +201,7 @@ fn test_relationship_operations() {
         content_hash: "h1".to_string(),
         ..Default::default()
     };
+    store.add_symbol(&caller).unwrap();
     let callee = CodeSymbol {
         id: store.generate_symbol_id().unwrap(),
         qualified_name: "my_crate::callee".to_string(),
@@ -211,7 +212,6 @@ fn test_relationship_operations() {
         content_hash: "h2".to_string(),
         ..Default::default()
     };
-    store.add_symbol(&caller).unwrap();
     store.add_symbol(&callee).unwrap();
 
     // Add relationship

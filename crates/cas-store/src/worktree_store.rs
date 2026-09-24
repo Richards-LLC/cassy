@@ -443,6 +443,7 @@ mod tests {
             std::path::PathBuf::from("/tmp/wt1"),
             None,
         );
+        store.add(&wt1).unwrap();
         let mut wt2 = Worktree::for_epic(
             Worktree::generate_id(),
             "cas-epic-2".to_string(),
@@ -453,7 +454,6 @@ mod tests {
         );
         wt2.status = WorktreeStatus::Merged;
 
-        store.add(&wt1).unwrap();
         store.add(&wt2).unwrap();
 
         let active = store.list_active().unwrap();

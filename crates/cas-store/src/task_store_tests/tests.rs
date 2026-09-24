@@ -444,8 +444,8 @@ fn test_dependencies() {
 
     // Create two tasks
     let task1 = Task::new(store.generate_id().unwrap(), "Task 1".to_string());
-    let task2 = Task::new(store.generate_id().unwrap(), "Task 2".to_string());
     store.add(&task1).unwrap();
+    let task2 = Task::new(store.generate_id().unwrap(), "Task 2".to_string());
     store.add(&task2).unwrap();
 
     // Add dependency: task2 blocks task1
@@ -479,10 +479,10 @@ fn test_ready_tasks() {
 
     // Create tasks
     let task1 = Task::new(store.generate_id().unwrap(), "Task 1".to_string());
-    let task2 = Task::new(store.generate_id().unwrap(), "Task 2".to_string());
-    let task3 = Task::new(store.generate_id().unwrap(), "Task 3".to_string());
     store.add(&task1).unwrap();
+    let task2 = Task::new(store.generate_id().unwrap(), "Task 2".to_string());
     store.add(&task2).unwrap();
+    let task3 = Task::new(store.generate_id().unwrap(), "Task 3".to_string());
     store.add(&task3).unwrap();
 
     // All should be ready initially
@@ -513,8 +513,8 @@ fn test_requires_start_tasks_are_not_ready_until_prerequisite_closes() {
     let (_temp, store) = create_test_store();
 
     let prerequisite = Task::new(store.generate_id().unwrap(), "Prerequisite".to_string());
-    let dependent = Task::new(store.generate_id().unwrap(), "Dependent".to_string());
     store.add(&prerequisite).unwrap();
+    let dependent = Task::new(store.generate_id().unwrap(), "Dependent".to_string());
     store.add(&dependent).unwrap();
 
     store
@@ -544,10 +544,10 @@ fn test_cycle_detection() {
 
     // Create tasks
     let task1 = Task::new(store.generate_id().unwrap(), "Task 1".to_string());
-    let task2 = Task::new(store.generate_id().unwrap(), "Task 2".to_string());
-    let task3 = Task::new(store.generate_id().unwrap(), "Task 3".to_string());
     store.add(&task1).unwrap();
+    let task2 = Task::new(store.generate_id().unwrap(), "Task 2".to_string());
     store.add(&task2).unwrap();
+    let task3 = Task::new(store.generate_id().unwrap(), "Task 3".to_string());
     store.add(&task3).unwrap();
 
     // Create chain: task1 -> task2 -> task3
@@ -630,8 +630,8 @@ fn test_delete_rolls_back_on_missing_task() {
 
     // Create a task and add a dependency to it
     let task1 = Task::new(store.generate_id().unwrap(), "Task 1".to_string());
-    let task2 = Task::new(store.generate_id().unwrap(), "Task 2".to_string());
     store.add(&task1).unwrap();
+    let task2 = Task::new(store.generate_id().unwrap(), "Task 2".to_string());
     store.add(&task2).unwrap();
 
     let dep = Dependency::new(task1.id.clone(), task2.id.clone(), DependencyType::Blocks);

@@ -1,7 +1,9 @@
 use super::data::{AgentSummary, DirectorData, TaskSummary};
 use super::events::{
-    MergedCloseBlockedTask, SupervisorActionableState, SupervisorStallTracker,
-    supervisor_actionable_state, supervisor_actionable_state_with_merge_classifier,
+    DeliveryHold, MergedCloseBlockedTask, SupervisorActionableState, SupervisorStallTracker,
+    blocker_note_after_park, supervisor_actionable_state,
+    supervisor_actionable_state_with_classifiers,
+    supervisor_actionable_state_with_merge_classifier,
 };
 use cas_types::{AgentStatus, Priority, TaskStatus, TaskType};
 use chrono::{Duration, TimeZone, Utc};
@@ -557,3 +559,176 @@ fn stall_nudge_never_suggests_foreign_origin_tasks_cas_0c98() {
     };
     assert!(task_ids.contains(&"cas-1aec".to_string()), "{task_ids:?}");
 }
+
+/// GH #896 (cas-e4f8): a parked delivery the supervisor deliberately holds —
+/// a held worker, a blocker note after the park, or an open independent QA
+/// pass — is not "merge now", so it never produces a supervisor_stalled wake.
+fn held_delivery_snapshot() -> DirectorData {
+    let mut snapshot = data();
+    snapshot.in_progress_tasks.push(task(
+        "cas-held",
+        TaskStatus::AwaitingMerge,
+        Some("gold-fox"),
+        Some("cas-epic"),
+    ));
+    snapshot
+}
+
+fn wake_for(state: Option<SupervisorActionableState>, now: chrono::DateTime<Utc>) -> bool {
+    let mut tracker = SupervisorStallTracker::default();
+    // Silent well past the threshold, twice ten minutes apart.
+    let first = tracker.observe(state.clone(), Some(now - Duration::seconds(3600)), false, now, 600);
+    let again = tracker.observe(
+        state,
+        Some(now - Duration::seconds(3600)),
+        false,
+        now + Duration::seconds(600),
+        600,
+    );
+    first.wake.is_some() || again.wake.is_some()
+}
+
+#[test]
+fn held_worker_delivery_produces_no_stall_wake_gh896() {
+    let now = Utc.with_ymd_and_hms(2026, 9, 24, 20, 0, 0).unwrap();
+    let snapshot = held_delivery_snapshot();
+    let held = HashSet::from(["gold-fox".to_string()]);
+
+    let state = supervisor_actionable_state(
+        &snapshot,
+        Some("cas-epic"),
+        "supervisor",
+        &held,
+        now,
+        600,
+        |_| Some("tip".to_string()),
+    );
+    assert_eq!(state, None, "a held worker's delivery is not merge-now");
+    assert!(!wake_for(state, now));
+
+    // The same delivery without the hold is merge-now and does wake.
+    let unheld = supervisor_actionable_state(
+        &snapshot,
+        Some("cas-epic"),
+        "supervisor",
+        &HashSet::new(),
+        now,
+        600,
+        |_| Some("tip".to_string()),
+    );
+    assert!(matches!(unheld, Some(SupervisorActionableState::MergeBranches { .. })));
+    assert!(wake_for(unheld, now));
+}
+
+#[test]
+fn blocker_note_and_open_qa_pass_hold_a_delivery_but_not_its_siblings_gh896() {
+    let now = Utc.with_ymd_and_hms(2026, 9, 24, 20, 0, 0).unwrap();
+    let mut snapshot = held_delivery_snapshot();
+    snapshot.in_progress_tasks.push(task(
+        "cas-qa",
+        TaskStatus::AwaitingMerge,
+        Some("blue-owl"),
+        Some("cas-epic"),
+    ));
+    snapshot.in_progress_tasks.push(task(
+        "cas-ready",
+        TaskStatus::AwaitingMerge,
+        Some("red-kite"),
+        Some("cas-epic"),
+    ));
+
+    let state = supervisor_actionable_state_with_classifiers(
+        &snapshot,
+        Some("cas-epic"),
+        "supervisor",
+        &HashSet::new(),
+        now,
+        600,
+        |branch| Some(format!("{branch}-tip")),
+        |_, _, _, _| None,
+        |task, worker| match (task.id.as_str(), worker) {
+            ("cas-held", "gold-fox") => Some(DeliveryHold::BlockerNote),
+            ("cas-qa", "blue-owl") => Some(DeliveryHold::QaPassOpen),
+            _ => None,
+        },
+    );
+    assert_eq!(
+        state,
+        Some(SupervisorActionableState::MergeBranches {
+            branches: vec![(
+                "cas-ready".into(),
+                "factory/red-kite".into(),
+                "factory/red-kite-tip".into(),
+            )],
+        }),
+        "only the unheld delivery is named"
+    );
+
+    // With every delivery held, nothing is merge-now and no wake fires.
+    let all_held = supervisor_actionable_state_with_classifiers(
+        &snapshot,
+        Some("cas-epic"),
+        "supervisor",
+        &HashSet::new(),
+        now,
+        600,
+        |branch| Some(format!("{branch}-tip")),
+        |_, _, _, _| None,
+        |_, _| Some(DeliveryHold::QaPassOpen),
+    );
+    assert_eq!(all_held, None);
+    assert!(!wake_for(all_held, now));
+}
+
+#[test]
+fn held_delivery_is_not_reclassified_as_merged_close_blocked_gh896() {
+    // The hold wins before the merged/close-blocked classifier runs, so a
+    // held delivery cannot resurface as a close demand either.
+    let now = Utc.with_ymd_and_hms(2026, 9, 24, 20, 0, 0).unwrap();
+    let snapshot = held_delivery_snapshot();
+    let state = supervisor_actionable_state_with_classifiers(
+        &snapshot,
+        Some("cas-epic"),
+        "supervisor",
+        &HashSet::new(),
+        now,
+        600,
+        |_| Some("tip".to_string()),
+        |_, _, _, _| panic!("a held delivery must not be classified"),
+        |_, _| Some(DeliveryHold::BlockerNote),
+    );
+    assert_eq!(state, None);
+}
+
+#[test]
+fn blocker_note_counts_only_after_the_latest_park_gh896() {
+    let park = "[2026-09-24 19:00] Close rejected: MERGE REQUIRED. Task parked as awaiting_merge; worker lease released until supervisor merge completes.";
+    let blocker = "[2026-09-24 19:05] 🚫 BLOCKER waiting on the operator to pick the rollout window";
+    let progress = "[2026-09-24 19:06] 📝 PROGRESS noted";
+    assert!(!blocker_note_after_park(""));
+    assert!(!blocker_note_after_park(park));
+    assert!(blocker_note_after_park(&format!("{park}\n{blocker}")));
+    assert!(blocker_note_after_park(&format!("{park}\n{blocker}\n{progress}")));
+    // Re-parked after the blocker: the delivery came back for merge.
+    assert!(!blocker_note_after_park(&format!("{park}\n{blocker}\n{park}")));
+    // A blocker with no park line at all is the latest word on the task.
+    assert!(blocker_note_after_park(blocker));
+}
+
+#[test]
+fn legacy_merge_classifier_entry_point_still_names_unheld_deliveries() {
+    let now = Utc.with_ymd_and_hms(2026, 9, 24, 20, 0, 0).unwrap();
+    let snapshot = held_delivery_snapshot();
+    let state = supervisor_actionable_state_with_merge_classifier(
+        &snapshot,
+        Some("cas-epic"),
+        "supervisor",
+        &HashSet::new(),
+        now,
+        600,
+        |_| Some("tip".to_string()),
+        |_, _, _, _| None,
+    );
+    assert!(matches!(state, Some(SupervisorActionableState::MergeBranches { .. })));
+}
+

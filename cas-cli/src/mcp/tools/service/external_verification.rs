@@ -456,10 +456,12 @@ mod tests {
             ExternalToolConfig {
                 server: "viktor".to_string(),
                 tool: "ask_viktor".to_string(),
+                supervisor_only: false,
             },
             ExternalToolConfig {
                 server: "viktor".to_string(),
                 tool: "wait_for_run".to_string(),
+                supervisor_only: false,
             },
         ];
         config.delegation.external_production_verification =
@@ -551,10 +553,12 @@ mod tests {
             ExternalToolConfig {
                 server: "viktor".to_string(),
                 tool: "ask_viktor".to_string(),
+                supervisor_only: false,
             },
             ExternalToolConfig {
                 server: "viktor".to_string(),
                 tool: "wait_for_run".to_string(),
+                supervisor_only: false,
             },
         ];
         config.delegation.external_production_verification =

@@ -187,6 +187,26 @@ pub trait ProxyPolicy: Send + Sync {
     fn catalog_decision(&self, _server: &str, _tool: &str) -> ProxyPolicyDecision {
         ProxyPolicyDecision::Allow
     }
+
+    /// Who may call a catalog tool, for discovery and the startup banner
+    /// (GH #988). Defaults to the caller-free [`Self::catalog_decision`].
+    fn catalog_access(&self, server: &str, tool: &str) -> CatalogAccess {
+        match self.catalog_decision(server, tool) {
+            ProxyPolicyDecision::Allow => CatalogAccess::Callable,
+            ProxyPolicyDecision::Deny { .. } => CatalogAccess::Denied,
+        }
+    }
+}
+
+/// Catalog-level access to one upstream tool (GH #988).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CatalogAccess {
+    /// Any caller may call it.
+    Callable,
+    /// Only supervisors (and a plain non-factory session) may call it.
+    SupervisorOnly,
+    /// No caller may call it.
+    Denied,
 }
 
 /// Default policy for installations that have not opted into protected tools.
@@ -209,6 +229,26 @@ impl ProxyPolicy for AllowAllProxyPolicy {
 pub struct ExternalToolAllowlistPolicy {
     allowed_routes: BTreeSet<ExternalToolRoute>,
     supervisor_delegation_routes: BTreeSet<ExternalToolRoute>,
+    /// GH #988: `supervisor:` allowlist entries.
+    supervisor_routes: BTreeSet<ExternalToolRoute>,
+}
+
+/// Whether `routes` admits `server.tool` exactly or through a `server.*` or
+/// `*.tool` wildcard.
+fn route_set_matches(routes: &BTreeSet<ExternalToolRoute>, server: &str, tool: &str) -> bool {
+    routes.contains(&ExternalToolRoute::new(server, tool))
+        || routes.contains(&ExternalToolRoute::new(server, "*"))
+        || routes.contains(&ExternalToolRoute::new("*", tool))
+}
+
+/// Roles a `supervisor:` allowlist entry admits (GH #988): the factory
+/// supervisor, and a plain non-factory session, which is the operator's own.
+/// Factory workers and the director are refused.
+fn role_may_call_supervisor_routes(role: cas_types::AgentRole) -> bool {
+    matches!(
+        role,
+        cas_types::AgentRole::Supervisor | cas_types::AgentRole::Standard
+    )
 }
 
 impl ExternalToolAllowlistPolicy {
@@ -217,7 +257,19 @@ impl ExternalToolAllowlistPolicy {
         Self {
             allowed_routes: routes.into_iter().collect(),
             supervisor_delegation_routes: BTreeSet::new(),
+            supervisor_routes: BTreeSet::new(),
         }
+    }
+
+    /// Routes callable only by supervisors (`supervisor:` allowlist entries,
+    /// GH #988). A route that is also in the general allowlist stays open to
+    /// every caller.
+    pub fn with_supervisor_routes(
+        mut self,
+        routes: impl IntoIterator<Item = ExternalToolRoute>,
+    ) -> Self {
+        self.supervisor_routes = routes.into_iter().collect();
+        self
     }
 
     /// Require selected allowlisted routes to enter through the registered
@@ -232,14 +284,15 @@ impl ExternalToolAllowlistPolicy {
 
     /// Whether an upstream route is in this exact allowlist.
     pub fn allows(&self, server: &str, tool: &str) -> bool {
-        self.allowed_routes
-            .contains(&ExternalToolRoute::new(server, tool))
-            || self
-                .allowed_routes
-                .contains(&ExternalToolRoute::new(server, "*"))
-            || self
-                .allowed_routes
-                .contains(&ExternalToolRoute::new("*", tool))
+        route_set_matches(&self.allowed_routes, server, tool)
+    }
+
+    /// Whether a route is callable by a caller with `role`, counting
+    /// `supervisor:` entries (GH #988).
+    pub fn allows_role(&self, role: cas_types::AgentRole, server: &str, tool: &str) -> bool {
+        self.allows(server, tool)
+            || (role_may_call_supervisor_routes(role)
+                && route_set_matches(&self.supervisor_routes, server, tool))
     }
 
     fn denial_reason(server: &str, tool: &str) -> String {
@@ -253,7 +306,17 @@ impl ExternalToolAllowlistPolicy {
 
 impl ProxyPolicy for ExternalToolAllowlistPolicy {
     fn decide(&self, request: &ProxyPolicyRequest<'_>) -> ProxyPolicyDecision {
-        if !self.allows(request.server, request.tool) {
+        if !self.allows_role(request.caller.role, request.server, request.tool) {
+            if route_set_matches(&self.supervisor_routes, request.server, request.tool) {
+                return ProxyPolicyDecision::Deny {
+                    reason: format!(
+                        "external tool \"{}.{}\" is allowlisted for supervisors only; a {} cannot call it",
+                        public_upstream_id(request.server),
+                        public_tool_id(request.tool),
+                        request.caller.role
+                    ),
+                };
+            }
             return ProxyPolicyDecision::Deny {
                 reason: Self::denial_reason(request.server, request.tool),
             };
@@ -272,12 +335,22 @@ impl ProxyPolicy for ExternalToolAllowlistPolicy {
     }
 
     fn catalog_decision(&self, server: &str, tool: &str) -> ProxyPolicyDecision {
-        if self.allows(server, tool) {
+        if self.allows(server, tool) || route_set_matches(&self.supervisor_routes, server, tool) {
             ProxyPolicyDecision::Allow
         } else {
             ProxyPolicyDecision::Deny {
                 reason: Self::denial_reason(server, tool),
             }
+        }
+    }
+
+    fn catalog_access(&self, server: &str, tool: &str) -> CatalogAccess {
+        if self.allows(server, tool) {
+            CatalogAccess::Callable
+        } else if route_set_matches(&self.supervisor_routes, server, tool) {
+            CatalogAccess::SupervisorOnly
+        } else {
+            CatalogAccess::Denied
         }
     }
 }
@@ -686,9 +759,10 @@ impl ProxyEngine {
             let policy = self.policy.read().await.clone();
             for tool in &connected.tools {
                 if matches_keywords(tool, &keywords) {
-                    let policy = match policy.catalog_decision(server_name, tool.name.as_ref()) {
-                        ProxyPolicyDecision::Allow => None,
-                        ProxyPolicyDecision::Deny { .. } => Some("denied by policy".to_string()),
+                    let policy = match policy.catalog_access(server_name, tool.name.as_ref()) {
+                        CatalogAccess::Callable => None,
+                        CatalogAccess::SupervisorOnly => Some("supervisors only".to_string()),
+                        CatalogAccess::Denied => Some("denied by policy".to_string()),
                     };
                     results.push(SearchResult {
                         server: public_server.clone(),
@@ -785,9 +859,10 @@ impl ProxyEngine {
                     }
                     Err(e) => {
                         text_parts.push(format!(
-                            "[{}.{} error]: {e}",
+                            "[{}.{} error]: {}",
                             public_upstream_id(&calls[i].server),
-                            public_tool_id(&calls[i].tool)
+                            public_tool_id(&calls[i].tool),
+                            describe_upstream_call_error(&e)
                         ));
                     }
                 }
@@ -812,6 +887,51 @@ impl ProxyEngine {
     pub async fn tool_count(&self) -> usize {
         let servers = self.servers.read().await;
         servers.values().map(|s| s.tools.len()).sum()
+    }
+
+    /// One line naming every upstream tool the policy lets someone call
+    /// (GH #988). A project allowlist replaces the machine one, so the tools
+    /// it silently shut off would otherwise be discovered one refusal at a
+    /// time. Supervisor-only tools are marked, and denied tools are counted.
+    pub async fn callable_tools_banner(&self) -> String {
+        let servers = self.servers.read().await;
+        let configs = self.configs.read().await;
+        let public_servers = public_upstream_ids(configs.keys().map(String::as_str));
+        let policy = self.policy.read().await.clone();
+        let mut callable = Vec::new();
+        let mut denied = 0usize;
+        for (server_name, connected) in servers.iter() {
+            let public_server = public_servers
+                .get(server_name)
+                .cloned()
+                .unwrap_or_else(|| public_upstream_id(server_name));
+            let public_tools =
+                public_tool_ids(connected.tools.iter().map(|tool| tool.name.as_ref()));
+            for tool in &connected.tools {
+                let public_tool = public_tools
+                    .get(tool.name.as_ref())
+                    .cloned()
+                    .unwrap_or_else(|| public_tool_id(tool.name.as_ref()));
+                match policy.catalog_access(server_name, tool.name.as_ref()) {
+                    CatalogAccess::Callable => {
+                        callable.push(format!("{public_server}.{public_tool}"))
+                    }
+                    CatalogAccess::SupervisorOnly => {
+                        callable.push(format!("{public_server}.{public_tool} (supervisors only)"))
+                    }
+                    CatalogAccess::Denied => denied += 1,
+                }
+            }
+        }
+        callable.sort();
+        format!(
+            "callable tools: [{}]; {denied} denied by the allowlist",
+            if callable.is_empty() {
+                "none".to_string()
+            } else {
+                callable.join(", ")
+            }
+        )
     }
 
     /// Whether a configured upstream has an active connection in this proxy
@@ -1392,6 +1512,33 @@ fn classify_live_failure(error: &rmcp::service::ServiceError) -> Option<&'static
 /// display string. The returned value is safe to attach to Cassy's MCP error:
 /// it contains only the upstream protocol envelope, never proxy credentials or
 /// request arguments.
+/// Text for a failed upstream call that keeps the upstream's own error
+/// (GH #988). anyhow's `{}` shows only the outer "tool call ... failed"
+/// context, which dropped e.g. a Neon schema error. The upstream's JSON-RPC
+/// error (code, message and data) is appended verbatim. A transport send
+/// error is named without its inner detail, which can embed upstream URLs.
+pub fn describe_upstream_call_error(error: &anyhow::Error) -> String {
+    let outer = error.to_string();
+    let detail = error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<rmcp::service::ServiceError>())
+        .map(|service_error| match service_error {
+            rmcp::service::ServiceError::McpError(data) => {
+                let mut detail = format!("upstream error {}: {}", data.code.0, data.message);
+                if let Some(extra) = &data.data {
+                    detail.push_str(&format!(" {extra}"));
+                }
+                detail
+            }
+            rmcp::service::ServiceError::TransportSend(_) => "transport send error".to_string(),
+            other => other.to_string(),
+        });
+    match detail {
+        Some(detail) if !outer.contains(&detail) => format!("{outer}: {detail}"),
+        _ => outer,
+    }
+}
+
 pub fn upstream_mcp_error_data(error: &anyhow::Error) -> Option<Value> {
     let service_error = error.chain().find_map(|cause| {
         cause.downcast_ref::<rmcp::service::ServiceError>()
@@ -1963,6 +2110,42 @@ mod cas_346b_regression_tests {
         );
     }
 
+    /// GH #988: the upstream's JSON-RPC error survives the outer
+    /// "tool call ... failed" context, while a transport send error is named
+    /// without inner detail.
+    #[test]
+    fn upstream_call_error_text_keeps_the_upstream_error_verbatim() {
+        let schema = anyhow::Error::new(rmcp::service::ServiceError::McpError(
+            rmcp::ErrorData::invalid_params(
+                r#"column "nme" of relation "users" does not exist"#,
+                Some(serde_json::json!({"sqlstate": "42703"})),
+            ),
+        ))
+        .context("tool call 'run_sql' on 'neon' failed");
+        assert_eq!(schema.to_string(), "tool call 'run_sql' on 'neon' failed");
+        assert_eq!(
+            describe_upstream_call_error(&schema),
+            r#"tool call 'run_sql' on 'neon' failed: upstream error -32602: column "nme" of relation "users" does not exist {"sqlstate":"42703"}"#
+        );
+
+        let timeout = anyhow::Error::new(rmcp::service::ServiceError::Timeout {
+            timeout: std::time::Duration::from_secs(5),
+        })
+        .context("tool call 'run_sql' on 'neon' failed");
+        assert!(
+            describe_upstream_call_error(&timeout)
+                .starts_with("tool call 'run_sql' on 'neon' failed: request timeout after"),
+            "{}",
+            describe_upstream_call_error(&timeout)
+        );
+
+        let plain = anyhow::anyhow!("proxy policy denied tool 'x' on 'y': reason");
+        assert_eq!(
+            describe_upstream_call_error(&plain),
+            "proxy policy denied tool 'x' on 'y': reason"
+        );
+    }
+
     #[test]
     fn upstream_mcp_error_data_preserves_hub_error_envelope() {
         let error = anyhow::Error::new(rmcp::service::ServiceError::McpError(
@@ -2057,6 +2240,72 @@ mod tests {
             factory_session: Some("factory-1".to_string()),
             active_task_ids: vec!["cas-8750".to_string()],
         }
+    }
+
+    /// GH #988: `supervisor:` routes admit supervisors and plain sessions,
+    /// refuse workers and the director with a named reason, and stay visible
+    /// in the catalog as supervisor-only.
+    #[test]
+    fn supervisor_scoped_routes_admit_supervisors_and_refuse_workers() {
+        let policy =
+            ExternalToolAllowlistPolicy::new([ExternalToolRoute::new("viktor", "ask_viktor")])
+                .with_supervisor_routes([
+                    ExternalToolRoute::parse_allowlist_entry("neon.*").unwrap()
+                ]);
+        let arguments = None;
+        let decide = |role, server, tool| {
+            let mut caller = registered_worker_caller();
+            caller.role = role;
+            policy.decide(&ProxyPolicyRequest {
+                caller: &caller,
+                server,
+                tool,
+                arguments: &arguments,
+                dispatch_kind: ProxyDispatchKind::Direct,
+            })
+        };
+        use cas_types::AgentRole::{Director, Standard, Supervisor, Worker};
+        for role in [Supervisor, Standard] {
+            assert_eq!(decide(role, "neon", "run_sql"), ProxyPolicyDecision::Allow);
+        }
+        for role in [Worker, Director] {
+            assert_eq!(
+                decide(role, "neon", "run_sql"),
+                ProxyPolicyDecision::Deny {
+                    reason: format!(
+                        "external tool \"neon.run_sql\" is allowlisted for supervisors only; a {role} cannot call it"
+                    ),
+                }
+            );
+        }
+        // General routes stay open to everyone; unlisted routes keep the old
+        // "add it to the allowlist" reason.
+        assert_eq!(
+            decide(Worker, "viktor", "ask_viktor"),
+            ProxyPolicyDecision::Allow
+        );
+        assert_eq!(
+            decide(Supervisor, "github", "list_issues"),
+            ProxyPolicyDecision::Deny {
+                reason: ExternalToolAllowlistPolicy::denial_reason("github", "list_issues"),
+            }
+        );
+        assert_eq!(
+            policy.catalog_access("neon", "run_sql"),
+            CatalogAccess::SupervisorOnly
+        );
+        assert_eq!(
+            policy.catalog_access("viktor", "ask_viktor"),
+            CatalogAccess::Callable
+        );
+        assert_eq!(
+            policy.catalog_access("github", "list_issues"),
+            CatalogAccess::Denied
+        );
+        assert_eq!(
+            policy.catalog_decision("neon", "run_sql"),
+            ProxyPolicyDecision::Allow
+        );
     }
 
     #[test]

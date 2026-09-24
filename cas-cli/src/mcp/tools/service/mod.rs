@@ -1318,7 +1318,10 @@ impl CasService {
                     crate::telemetry::track_mcp_tool("mcp_proxy", "execute", false);
                     Err(McpError {
                         code: ErrorCode::INTERNAL_ERROR,
-                        message: Cow::Owned(format!("MCP execute failed: {e}")),
+                        message: Cow::Owned(format!(
+                            "MCP execute failed: {}",
+                            cmcp_core::describe_upstream_call_error(&e)
+                        )),
                         data: cmcp_core::upstream_mcp_error_data(&e),
                     })
                 }
@@ -1498,6 +1501,93 @@ mod tests {
             Some("factory-proxy-test")
         );
         assert_eq!(caller.active_task_ids, ["cas-8750"]);
+    }
+
+    /// GH #988, end to end through `mcp_execute`, the production policy
+    /// installer and a real stdio upstream. A `supervisor:neon.*` entry is
+    /// callable by a supervisor (and a plain session) and refused for a
+    /// worker. The upstream's schema error reaches the caller verbatim, and
+    /// the banner names the callable tools.
+    #[cfg(feature = "mcp-proxy")]
+    #[tokio::test]
+    async fn mcp_execute_scopes_supervisor_entries_and_returns_the_upstream_error_verbatim() {
+        use cmcp_core::config::{Config as ProxyConfig, ServerConfig};
+        let dir = TempDir::new().unwrap();
+        let core = CasCore::with_daemon(dir.path().to_path_buf(), None, None);
+        core.register_agent("proxy-caller".to_string(), "proxy caller".to_string(), None)
+            .unwrap();
+        let agent_store = core.open_agent_store().unwrap();
+        let set_role = |role| {
+            let mut agent = agent_store.get("proxy-caller").unwrap();
+            agent.role = role;
+            agent_store.update(&agent).unwrap();
+        };
+        let fixture =
+            crate::test_paths::crate_root().join("tests/fixtures/mock_mcp_neon_server.py");
+        let upstream = ServerConfig::Stdio {
+            command: "python3".to_string(),
+            args: vec![fixture.to_string_lossy().into_owned()],
+            env: std::collections::HashMap::new(),
+        };
+        let config: ProxyConfig = toml::from_str("allowlist = [\"supervisor:neon.*\"]").unwrap();
+        let engine = cmcp_core::ProxyEngine::from_configs(std::collections::HashMap::from([(
+            "neon".to_string(),
+            upstream,
+        )]))
+        .await
+        .unwrap();
+        crate::mcp::server::install_proxy_policy(&engine, &config).await;
+        assert_eq!(
+            engine.callable_tools_banner().await,
+            "callable tools: [neon.list_projects (supervisors only), neon.run_sql (supervisors only)]; 0 denied by the allowlist"
+        );
+        let service = CasService::new(core, Some(std::sync::Arc::new(engine)));
+        let execute = |tool: &str| {
+            let req: ExecuteRequest = serde_json::from_value(serde_json::json!({
+                "code": format!("{{\"server\":\"neon\",\"tool\":\"{tool}\",\"args\":{{}}}}")
+            }))
+            .unwrap();
+            service.mcp_execute(Parameters(req))
+        };
+
+        set_role(crate::types::AgentRole::Supervisor);
+        let listed = execute("list_projects")
+            .await
+            .expect("supervisor may call neon.*");
+        assert!(
+            serde_json::to_string(&listed)
+                .unwrap()
+                .contains("fixture-project"),
+            "{listed:?}"
+        );
+        let schema = execute("run_sql")
+            .await
+            .expect_err("the upstream refused the SQL");
+        assert!(
+            schema
+                .message
+                .contains(r#"column "nme" of relation "users" does not exist"#)
+                && schema.message.contains("42703"),
+            "the upstream error must reach the caller verbatim: {}",
+            schema.message
+        );
+
+        set_role(crate::types::AgentRole::Standard);
+        execute("list_projects")
+            .await
+            .expect("a plain non-factory session is the operator's own");
+
+        set_role(crate::types::AgentRole::Worker);
+        let refused = execute("list_projects")
+            .await
+            .expect_err("a worker must not call a supervisor-only route");
+        assert!(
+            refused
+                .message
+                .contains("\"neon.list_projects\" is allowlisted for supervisors only; a worker cannot call it"),
+            "{}",
+            refused.message
+        );
     }
 
     /// Guards `cas serve`'s startup banner and empty-registry guard against

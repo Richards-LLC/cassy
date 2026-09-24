@@ -406,7 +406,6 @@ pub(crate) fn count_unheld_behind(path: &std::path::Path, sync_ref: &str) -> Opt
     let output = Command::new("git")
         .args([
             "rev-list",
-            "--count",
             "--no-merges",
             "--cherry-pick",
             "--right-only",
@@ -420,12 +419,119 @@ pub(crate) fn count_unheld_behind(path: &std::path::Path, sync_ref: &str) -> Opt
         return None;
     }
 
-    Some(
-        String::from_utf8_lossy(&output.stdout)
-            .trim()
-            .parse::<u32>()
-            .unwrap_or(0),
-    )
+    let commits: Vec<String> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect();
+    // GH #1006 item 3: a lane landed as one new commit (a squash, or a
+    // rebase that resolved a conflict) matches none of the worker's patch-ids,
+    // and the rest of the target keeps the trees apart, so the worker read as
+    // behind its own delivery seconds after the supervisor merged it. A commit
+    // whose every touched path already reads the same on HEAD brings the
+    // worker nothing, so it is not counted. Only checked for a short list: a
+    // worktree that far behind is stale whichever commits it holds.
+    if commits.len() > CONTENT_HELD_CHECK_LIMIT {
+        return u32::try_from(commits.len()).ok();
+    }
+    let unheld = commits
+        .iter()
+        .filter(|commit| !commit_content_held_by_head(path, commit))
+        .count();
+    u32::try_from(unheld).ok()
+}
+
+/// Most commits `count_unheld_behind` inspects path by path.
+const CONTENT_HELD_CHECK_LIMIT: usize = 32;
+
+/// Whether every path `commit` changes already has, on HEAD, the content the
+/// commit gives it. Any git failure answers "not held" so staleness is never
+/// understated.
+fn commit_content_held_by_head(path: &std::path::Path, commit: &str) -> bool {
+    use std::process::Command;
+    let Ok(changed) = Command::new("git")
+        .args(["diff-tree", "--no-commit-id", "--name-only", "-r", "--root", commit])
+        .current_dir(path)
+        .output()
+    else {
+        return false;
+    };
+    if !changed.status.success() {
+        return false;
+    }
+    let paths: Vec<String> = String::from_utf8_lossy(&changed.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect();
+    if paths.is_empty() {
+        return false;
+    }
+    Command::new("git")
+        .args(["diff", "--quiet", "HEAD", commit, "--"])
+        .args(&paths)
+        .current_dir(path)
+        .status()
+        .is_ok_and(|status| status.code() == Some(0))
+}
+
+/// A worker's branch frozen at a delivery parked for merge (GH #1006 item 3):
+/// the `AwaitingMerge` task assigned to `worker` whose recorded branch anchor
+/// is `tip`. That branch is not stale against another epic; it is waiting on
+/// its own review and merge, and must not be rebased under it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ParkedDelivery {
+    pub task_id: String,
+    pub tip: String,
+}
+
+pub(crate) fn parked_delivery_at_tip(
+    task_store: &dyn cas_store::TaskStore,
+    worker: &str,
+    tip: &str,
+) -> Option<ParkedDelivery> {
+    let tip = tip.trim();
+    if tip.len() < 7 || worker.trim().is_empty() {
+        return None;
+    }
+    let same = |anchor: &str| {
+        let anchor = anchor.trim();
+        anchor.len() >= 7 && (anchor.starts_with(tip) || tip.starts_with(anchor))
+    };
+    task_store
+        .list(Some(crate::types::TaskStatus::AwaitingMerge))
+        .ok()?
+        .into_iter()
+        .find(|task| {
+            task.assignee
+                .as_deref()
+                .is_some_and(|assignee| assignee.eq_ignore_ascii_case(worker))
+                && task
+                    .deliverables
+                    .factory_branch_anchor
+                    .as_deref()
+                    .is_some_and(same)
+        })
+        .map(|task| ParkedDelivery {
+            task_id: task.id,
+            tip: tip.to_string(),
+        })
+}
+
+/// HEAD of a worker checkout, if git can answer.
+pub(crate) fn worktree_head(path: &std::path::Path) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(path)
+        .output()
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
+        .filter(|head| !head.is_empty())
 }
 
 fn list_git_branches(path: Option<&std::path::Path>, args: &[&str]) -> Vec<String> {

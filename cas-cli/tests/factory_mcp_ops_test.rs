@@ -8405,6 +8405,80 @@ async fn test_assignment_still_refuses_a_genuinely_stale_worker_cas_f8bc() {
     );
 }
 
+/// GH #1006 item 3: a worker whose branch is frozen at a delivery parked for
+/// merge (under independent QA on another epic) reads as behind any other
+/// epic. Rebasing it would destroy the tip under review, so assignment must
+/// proceed and say so instead of refusing.
+#[tokio::test]
+async fn test_assignment_allows_a_worker_parked_for_another_epic_gh_1006() {
+    let home = TempDir::new().expect("home tempdir");
+    let _guard = EnvGuard::set_optional(&[
+        ("CAS_FACTORY_MODE", Some("1")),
+        ("CAS_FACTORY_SESSION", Some("session-1006-parked")),
+        ("HOME", Some(home.path().to_str().unwrap())),
+    ]);
+    let env = FactoryTestEnv::new();
+    let worker = "gh1006-parked-worker";
+    // epic/requested is one real commit ahead of the worker's branch, as for
+    // the genuinely stale worker above; the difference is the parked delivery.
+    let worker_path = init_sync_repo(&env, worker);
+    std::fs::write(worker_path.join("parked.txt"), "parked delivery").unwrap();
+    for args in [&["add", "."][..], &["commit", "-q", "-m", "parked delivery"][..]] {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(&worker_path)
+            .env("GIT_AUTHOR_NAME", "CAS Test")
+            .env("GIT_AUTHOR_EMAIL", "test@cas")
+            .env("GIT_COMMITTER_NAME", "CAS Test")
+            .env("GIT_COMMITTER_EMAIL", "test@cas")
+            .output()
+            .expect("git");
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    }
+    let parked_tip = String::from_utf8_lossy(
+        &std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&worker_path)
+            .output()
+            .expect("rev-parse")
+            .stdout,
+    )
+    .trim()
+    .to_string();
+    add_epic_with_id(&env, "cas-3b7c", TaskStatus::Open, "epic/requested");
+
+    {
+        let store = env.agent_store();
+        let mut agent = Agent::new(Agent::generate_fallback_id(), worker.to_string());
+        agent.role = AgentRole::Worker;
+        agent.factory_session = Some("session-1006-parked".to_string());
+        agent.metadata.insert(
+            "clone_path".to_string(),
+            worker_path.to_str().unwrap().to_string(),
+        );
+        store.register(&agent).expect("register worker");
+    }
+    // The delivery parked for merge (on another epic), anchored at the tip.
+    {
+        let store = env.task_store();
+        let mut parked = Task::new("cas-pk01".to_string(), "Parked hub delivery".to_string());
+        parked.status = TaskStatus::AwaitingMerge;
+        parked.assignee = Some(worker.to_string());
+        parked.deliverables.factory_branch_anchor = Some(parked_tip.clone());
+        store.add(&parked).expect("add parked delivery");
+    }
+
+    let task_b = child_task_of_epic(&env, "cas-3b7c", "burn-down fix");
+    let text = assign(&env, &task_b, worker).await.unwrap_or_else(|error| {
+        panic!("a worker parked for another epic must be assignable: {error}")
+    });
+    assert!(text.contains("parked at") && text.contains("cas-pk01"), "{text}");
+    assert_eq!(
+        env.task_store().get(&task_b).expect("task").assignee.as_deref(),
+        Some(worker)
+    );
+}
+
 // ===========================================================================
 // cas-aae6 (GH #110): epic_status must show the chain for a stacked epic.
 // The renderer is unit-tested with a hand-built chain; this drives the real

@@ -101,6 +101,10 @@ const MIN_SHARED_DISTINCTIVE_IDENTIFIERS: usize = 2;
 enum ReusedFactoryBranchStart {
     Unchanged,
     Reset,
+    /// GH #1006 item 3: the branch sat on a delivery parked for merge. Its tip
+    /// is kept as local branch `parked/<task>` (origin is never touched) and
+    /// the worker branch was reset onto the new target.
+    MovedFromParked { task_id: String, tip: String },
 }
 
 /// Keep a reused worker branch from silently carrying a prior task into a new
@@ -110,6 +114,7 @@ fn reconcile_reused_factory_branch(
     worktree_path: &std::path::Path,
     expected_branch: &str,
     target_branch: &str,
+    parked_task_for_tip: impl Fn(&str) -> Option<String>,
 ) -> Result<ReusedFactoryBranchStart, String> {
     if crate::factory_isolation::branch_at(worktree_path).as_deref() != Some(expected_branch) {
         return Ok(ReusedFactoryBranchStart::Unchanged);
@@ -162,6 +167,34 @@ fn reconcile_reused_factory_branch(
         return Ok(ReusedFactoryBranchStart::Reset);
     }
 
+    // A tip parked for merge is someone else's review, not stray work: keep
+    // it under a local name and start the new task from its own target.
+    // Nothing is pushed, so origin keeps the parked tip for its reviewer.
+    if let Some(task_id) = parked_task_for_tip(&factory_tip) {
+        let keep = format!("parked/{task_id}");
+        let kept = std::process::Command::new("git")
+            .args(["branch", "-f", &keep, &factory_tip])
+            .current_dir(worktree_path)
+            .output()
+            .map_err(|error| format!("Cannot keep parked tip as {keep}: {error}"))?;
+        if !kept.status.success() {
+            return Err(format!(
+                "Cannot start task: keeping parked tip {factory_tip} as {keep} failed: {}",
+                String::from_utf8_lossy(&kept.stderr).trim()
+            ));
+        }
+        git.reset_hard_in_dir(worktree_path, target_branch)
+            .map_err(|error| {
+                format!(
+                    "Cannot move parked factory branch {expected_branch} to `{target_branch}`: {error}"
+                )
+            })?;
+        return Ok(ReusedFactoryBranchStart::MovedFromParked {
+            task_id,
+            tip: factory_tip,
+        });
+    }
+
     Err(format!(
         "Cannot start task: {expected_branch} carries commits not on target base `{target_branch}`. Rebase it before starting with `git rebase {target_branch}`."
     ))
@@ -209,7 +242,7 @@ mod reused_factory_branch_tests {
         git(repo.path(), &["merge", "--no-ff", "factory/test-worker", "-m", "merge prior delivery"]);
         git(repo.path(), &["checkout", "factory/test-worker"]);
 
-        let result = reconcile_reused_factory_branch(repo.path(), "factory/test-worker", "main")
+        let result = reconcile_reused_factory_branch(repo.path(), "factory/test-worker", "main", |_| None)
             .expect("merged prior delivery can be reset");
 
         assert_eq!(result, ReusedFactoryBranchStart::Reset);
@@ -233,7 +266,7 @@ mod reused_factory_branch_tests {
         git(repo.path(), &["commit", "-m", "target work"]);
         git(repo.path(), &["checkout", "factory/test-worker"]);
 
-        let error = reconcile_reused_factory_branch(repo.path(), "factory/test-worker", "main")
+        let error = reconcile_reused_factory_branch(repo.path(), "factory/test-worker", "main", |_| None)
             .expect_err("unrelated prior delivery must refuse");
 
         assert!(error.contains("git rebase main"), "{error}");
@@ -246,7 +279,7 @@ mod reused_factory_branch_tests {
         git(repo.path(), &["checkout", "-b", "factory/test-worker"]);
         let before = git(repo.path(), &["rev-parse", "HEAD"]);
 
-        let result = reconcile_reused_factory_branch(repo.path(), "factory/test-worker", "main")
+        let result = reconcile_reused_factory_branch(repo.path(), "factory/test-worker", "main", |_| None)
             .expect("matching base needs no reset");
 
         assert_eq!(result, ReusedFactoryBranchStart::Unchanged);
@@ -265,10 +298,42 @@ mod reused_factory_branch_tests {
         git(repo.path(), &["checkout", "factory/test-worker"]);
         std::fs::write(repo.path().join("base"), "modified\n").expect("tracked change");
 
-        let error = reconcile_reused_factory_branch(repo.path(), "factory/test-worker", "main")
+        let error = reconcile_reused_factory_branch(repo.path(), "factory/test-worker", "main", |_| None)
             .expect_err("tracked changes must block reset");
 
         assert!(error.contains("uncommitted changes"), "{error}");
+    }
+
+    /// GH #1006 item 3: a branch parked for merge on another target is kept
+    /// as `parked/<task>` and the worker branch moves onto the new target.
+    #[test]
+    fn parked_tip_on_another_target_is_kept_and_the_branch_moves() {
+        let repo = repo();
+        git(repo.path(), &["checkout", "-b", "factory/test-worker"]);
+        std::fs::write(repo.path().join("parked"), "parked\n").expect("parked file");
+        git(repo.path(), &["add", "parked"]);
+        git(repo.path(), &["commit", "-m", "parked delivery"]);
+        let parked_tip = git(repo.path(), &["rev-parse", "HEAD"]);
+        git(repo.path(), &["checkout", "main"]);
+        std::fs::write(repo.path().join("target"), "target\n").expect("target file");
+        git(repo.path(), &["add", "target"]);
+        git(repo.path(), &["commit", "-m", "target work"]);
+        git(repo.path(), &["checkout", "factory/test-worker"]);
+
+        let result = reconcile_reused_factory_branch(repo.path(), "factory/test-worker", "main", |tip| {
+            (tip == parked_tip).then(|| "cas-park".to_string())
+        })
+        .expect("a parked tip moves instead of refusing");
+
+        assert_eq!(
+            result,
+            ReusedFactoryBranchStart::MovedFromParked {
+                task_id: "cas-park".to_string(),
+                tip: parked_tip.clone(),
+            }
+        );
+        assert_eq!(git(repo.path(), &["rev-parse", "HEAD"]), git(repo.path(), &["rev-parse", "main"]));
+        assert_eq!(git(repo.path(), &["rev-parse", "parked/cas-park"]), parked_tip);
     }
 }
 
@@ -1455,14 +1520,30 @@ impl CasCore {
                 if let Some(context) = declared_repo_context.as_ref() {
                     let target_repo_root = &context.repo_root;
                     let target_branch = &context.target_branch;
+                    let worker_branch =
+                        crate::factory_isolation::expected_worker_branch(&worker.name);
                     match reconcile_reused_factory_branch(
                         target_repo_root,
-                        &crate::factory_isolation::expected_worker_branch(&worker.name),
+                        &worker_branch,
                         &target_branch,
+                        |tip| {
+                            crate::mcp::tools::parked_delivery_at_tip(
+                                task_store.as_ref(),
+                                &worker.name,
+                                tip,
+                            )
+                            .filter(|parked| parked.task_id != task.id)
+                            .map(|parked| parked.task_id)
+                        },
                     ) {
                         Ok(ReusedFactoryBranchStart::Reset) => Some(format!(
-                            "\n\n🔄 REUSED FACTORY BRANCH RESET: {} was already merged into `{target_branch}` and was reset to that target before starting.",
-                            crate::factory_isolation::expected_worker_branch(&worker.name)
+                            "\n\n🔄 REUSED FACTORY BRANCH RESET: {worker_branch} was already merged into `{target_branch}` and was reset to that target before starting."
+                        )),
+                        Ok(ReusedFactoryBranchStart::MovedFromParked { task_id, tip }) => Some(format!(
+                            "\n\n🔀 PARKED BRANCH MOVED: {worker_branch} sat at {tip8} for {task_id}, which is parked for merge. \
+                             That tip is kept on origin and as local branch parked/{task_id}; {worker_branch} was reset to `{target_branch}` \
+                             for this task. Do not push {worker_branch} until {task_id} merges: the push would replace the tip under review.",
+                            tip8 = &tip[..tip.len().min(8)],
                         )),
                         Ok(ReusedFactoryBranchStart::Unchanged) => None,
                         Err(message) => {

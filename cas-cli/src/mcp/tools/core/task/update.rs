@@ -331,6 +331,28 @@ pub(crate) fn resolve_assignment_freshness_branch(
     None
 }
 
+/// GH #1006 item 3: a worker whose checkout sits on a delivery parked for
+/// merge reads as far behind any other epic, but rebasing it would destroy
+/// the tip under review. Assignment proceeds with this note instead; `task
+/// start` keeps the parked tip and moves the branch onto the new target.
+fn parked_assignment_note(
+    task_store: &dyn cas_store::TaskStore,
+    worker: &cas_types::Agent,
+) -> Option<String> {
+    let clone_path = worker.metadata.get("clone_path")?;
+    let head = crate::mcp::tools::worktree_head(std::path::Path::new(clone_path))?;
+    let parked = crate::mcp::tools::parked_delivery_at_tip(task_store, &worker.name, &head)?;
+    Some(format!(
+        "ℹ️ Worker '{name}' is parked at {tip8} for {task} (awaiting merge), so it is not \
+         checked for staleness. `task start` keeps that tip on origin and as local branch \
+         parked/{task}, then moves {branch} onto this task's target.",
+        name = worker.name,
+        tip8 = &parked.tip[..parked.tip.len().min(8)],
+        task = parked.task_id,
+        branch = crate::factory_isolation::expected_worker_branch(&worker.name),
+    ))
+}
+
 impl CasCore {
     pub async fn cas_task_update(
         &self,
@@ -1121,8 +1143,13 @@ impl CasCore {
 
                                 if let Some(worker) = by_name {
                                     // Canonical — no normalization needed.
-                                    // Worktree staleness check.
-                                    if factory_config.warn_stale_assignment
+                                    // Worktree staleness check, except for a
+                                    // branch parked for merge (GH #1006 item 3).
+                                    if let Some(note) =
+                                        parked_assignment_note(task_store.as_ref(), worker)
+                                    {
+                                        warnings.push(note);
+                                    } else if factory_config.warn_stale_assignment
                                         || factory_config.block_stale_assignment
                                     {
                                         if let Some(clone_path) = worker.metadata.get("clone_path")
@@ -1180,7 +1207,11 @@ impl CasCore {
                                     // branch. The original code skipped this after
                                     // normalization, leaving stale-worktree blocking disabled
                                     // for UUID assignees.
-                                    if factory_config.warn_stale_assignment
+                                    if let Some(note) =
+                                        parked_assignment_note(task_store.as_ref(), worker)
+                                    {
+                                        warnings.push(note);
+                                    } else if factory_config.warn_stale_assignment
                                         || factory_config.block_stale_assignment
                                     {
                                         if let Some(clone_path) = worker.metadata.get("clone_path")

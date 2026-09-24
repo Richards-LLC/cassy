@@ -142,10 +142,29 @@ fn server_stop_reaps_script_wrapped_cas_factory_descendants() {
         record.pid, workload_pid,
         "the fixture must include a wrapper"
     );
-    assert_eq!(
-        unsafe { libc::getpgid(workload_pid as libc::pid_t) },
-        workload_pid as libc::pid_t,
-        "precondition: util-linux script must put the workload in a new session/group"
+    // cas-c62f: `script -c` runs the command through a shell that leads the
+    // new session. Whether that shell execs `cas` or forks it varies by shell
+    // and host, so the workload's group is its own pid only sometimes; the
+    // assembly build saw the shell's group (309931 for workload 309933). The
+    // property this test depends on is that the workload has left the
+    // registry's session and group, so a group-wide signal cannot reach it
+    // and `stop` must reap the escaped descendant.
+    let (workload_group, workload_session, registry_group, registry_session) = unsafe {
+        (
+            libc::getpgid(workload_pid as libc::pid_t),
+            libc::getsid(workload_pid as libc::pid_t),
+            libc::getpgid(record.pid as libc::pid_t),
+            libc::getsid(record.pid as libc::pid_t),
+        )
+    };
+    assert!(
+        workload_group > 0
+            && workload_session > 0
+            && workload_group != registry_group
+            && workload_session != registry_session,
+        "precondition: util-linux script must move the workload out of the registry's \
+         session/group (workload pgid {workload_group} sid {workload_session}; \
+         registry pgid {registry_group} sid {registry_session})"
     );
     assert!(crate::mcp::daemon::pid_alive(record.pid));
     assert!(crate::mcp::daemon::pid_alive(workload_pid));

@@ -414,6 +414,15 @@ impl CasCore {
             data: None,
         })?;
 
+        // cas-5372 (GH #990): an operator hard rule takes effect today, not
+        // after promotion — write it to Claude Code's rules now.
+        if rule.is_operator_hard_rule() {
+            let _ = self.sync_rules();
+            return Ok(Self::success(format!(
+                "Created rule: {id} (operator hard rule: synced to Claude Code and surfaced at session start, labelled DRAFT until promoted)"
+            )));
+        }
+
         Ok(Self::success(format!("Created rule: {id}")))
     }
 

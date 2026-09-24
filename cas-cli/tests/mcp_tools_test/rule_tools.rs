@@ -28,6 +28,50 @@ async fn test_rule_create() {
     assert!(text.contains("Created rule") || text.contains("rule"));
 }
 
+/// cas-5372 (GH #990): an operator hard rule takes effect the day it is
+/// recorded — creating it writes it to `.claude/rules/cas`, labelled DRAFT —
+/// while an ordinary draft rule still waits for promotion.
+#[tokio::test]
+async fn operator_hard_rule_is_synced_to_claude_rules_on_create_cas_5372() {
+    let (temp, service) = setup_cas();
+    let create = |content: &str, tags: Option<&str>| RuleCreateRequest {
+        scope: "project".to_string(),
+        content: content.to_string(),
+        paths: None,
+        tags: tags.map(str::to_string),
+        source_ids: None,
+        auto_approve_tools: None,
+        auto_approve_paths: None,
+    };
+
+    let text = extract_text(
+        service
+            .cas_rule_create(Parameters(create(
+                "HARD RULE (Ben, verbatim): no changes to SMS at all until each one is specifically approved by me",
+                Some("sms,approval"),
+            )))
+            .await
+            .expect("hard rule create"),
+    );
+    assert!(text.contains("operator hard rule"), "{text}");
+    service
+        .cas_rule_create(Parameters(create("Prefer small commits", None)))
+        .await
+        .expect("ordinary rule create");
+
+    let rules_dir = temp.path().join(".claude/rules/cas");
+    let written: Vec<String> = std::fs::read_dir(&rules_dir)
+        .expect("hard rule synced on create")
+        .map(|entry| std::fs::read_to_string(entry.unwrap().path()).unwrap())
+        .collect();
+    assert_eq!(written.len(), 1, "{written:?}");
+    assert!(
+        written[0].contains("DRAFT (operator hard rule, pending promotion; follow it as written): HARD RULE (Ben, verbatim)"),
+        "{}",
+        written[0]
+    );
+}
+
 #[tokio::test]
 async fn test_rule_show() {
     let (_temp, service) = setup_cas();

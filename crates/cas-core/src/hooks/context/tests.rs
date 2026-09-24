@@ -433,6 +433,65 @@ fn session_start_increments_surface_count_for_each_injected_rule() {
     assert_eq!(store.get("rule-surface").unwrap().surface_count, 1);
 }
 
+/// cas-5372 (GH #990): an operator HARD RULE left in draft for 12 days
+/// surfaced once, and an SMS change nearly shipped without the approval it
+/// required. A draft operator hard rule is now in every session-start
+/// context, in the always-active section, labelled DRAFT; a promoted one
+/// loses the label; an ordinary draft rule stays out.
+#[test]
+fn session_start_surfaces_a_draft_operator_hard_rule_labelled_draft_cas_5372() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = SqliteRuleStore::open(temp.path()).expect("open rule store");
+    store.init().expect("init rule store");
+    let hard = Rule::new(
+        "rule-177".to_string(),
+        "HARD RULE (Ben, verbatim): no changes to SMS at all until each one is specifically approved by me".to_string(),
+    );
+    let mut tagged = Rule::new("rule-178".to_string(), "Test once on staging like a real user".to_string());
+    tagged.tags = vec!["qa".to_string(), "Hard-Rule".to_string()];
+    let ordinary = Rule::new("rule-179".to_string(), "Prefer small commits".to_string());
+    let mut retired = Rule::new("rule-180".to_string(), "HARD RULE: retired wording".to_string());
+    retired.status = RuleStatus::Retired;
+    for rule in [&hard, &tagged, &ordinary, &retired] {
+        store.add(rule).expect("add rule");
+    }
+    let stores = ContextStores {
+        project_rule_store: Some(&store),
+        ..ContextStores::empty()
+    };
+    let build = || {
+        build_context_with_stores(
+            &session_start_input(),
+            &stores,
+            &DefaultHooksConfig::new(),
+            10,
+            None,
+            "mcp__cas__",
+        )
+        .expect("build context")
+        .0
+    };
+
+    let context = build();
+    let critical = context
+        .split("## ⚠️ Critical Rules (Always Active)")
+        .nth(1)
+        .expect("hard rules are in the always-active section");
+    assert!(
+        critical.contains("rule-177 DRAFT (operator hard rule, pending promotion; follow it as written): HARD RULE (Ben, verbatim): no changes to SMS"),
+        "{context}"
+    );
+    assert!(critical.contains("rule-178 DRAFT"), "{context}");
+    assert!(!context.contains("Prefer small commits"), "ordinary drafts still wait: {context}");
+    assert!(!context.contains("retired wording"), "{context}");
+
+    let mut promoted = store.get("rule-177").unwrap();
+    promoted.status = RuleStatus::Proven;
+    store.update(&promoted).unwrap();
+    let context = build();
+    assert!(context.contains("rule-177 HARD RULE (Ben, verbatim)"), "{context}");
+}
+
 fn build_with_knowledge(ks: &dyn KnowledgeStore, store: Option<&dyn Store>) -> String {
     let stores = ContextStores {
         project_store: store,

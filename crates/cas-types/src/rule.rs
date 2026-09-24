@@ -227,6 +227,55 @@ impl Rule {
         self.priority == 0
     }
 
+    /// Tag that marks a rule as an operator hard rule.
+    pub const OPERATOR_HARD_RULE_TAG: &'static str = "hard-rule";
+
+    /// cas-5372 (GH #990): an operator's verbatim hard rule — content opening
+    /// with `HARD RULE`, or tagged [`Self::OPERATOR_HARD_RULE_TAG`]. It takes
+    /// effect the day it is recorded instead of waiting for promotion: it is
+    /// synced to Claude Code and always surfaced at session start, labelled
+    /// DRAFT until promoted.
+    pub fn is_operator_hard_rule(&self) -> bool {
+        let content = self.content.trim_start();
+        content
+            .get(..9)
+            .is_some_and(|head| head.eq_ignore_ascii_case("hard rule"))
+            // A whole phrase, not the start of "Hard rules are …".
+            && !content[9..]
+                .chars()
+                .next()
+                .is_some_and(|next| next.is_alphanumeric())
+            || self
+                .tags
+                .iter()
+                .any(|tag| tag.trim().eq_ignore_ascii_case(Self::OPERATOR_HARD_RULE_TAG))
+    }
+
+    /// cas-5372: an operator hard rule that is live — draft or proven, never
+    /// stale or retired.
+    pub fn is_active_operator_hard_rule(&self) -> bool {
+        matches!(self.status, RuleStatus::Draft | RuleStatus::Proven)
+            && self.is_operator_hard_rule()
+    }
+
+    /// cas-5372: a live operator hard rule still awaiting promotion.
+    pub fn is_draft_operator_hard_rule(&self) -> bool {
+        self.status == RuleStatus::Draft && self.is_operator_hard_rule()
+    }
+
+    /// Text a synced or surfaced rule carries: a draft operator hard rule is
+    /// labelled so its standing is never mistaken for a promoted rule.
+    pub fn surfaced_content(&self) -> String {
+        if self.is_draft_operator_hard_rule() {
+            format!(
+                "DRAFT (operator hard rule, pending promotion; follow it as written): {}",
+                self.content.trim()
+            )
+        } else {
+            self.content.trim().to_string()
+        }
+    }
+
     /// Check if this is a security rule
     pub fn is_security(&self) -> bool {
         self.category == RuleCategory::Security
@@ -386,6 +435,33 @@ impl Default for Rule {
 #[cfg(test)]
 mod tests {
     use crate::rule::*;
+
+    #[test]
+    fn operator_hard_rule_is_recognised_by_prefix_or_tag_cas_5372() {
+        let rule = |content: &str, tags: &[&str], status: RuleStatus| {
+            let mut rule = Rule::new("rule-1".to_string(), content.to_string());
+            rule.tags = tags.iter().map(|tag| tag.to_string()).collect();
+            rule.status = status;
+            rule
+        };
+        assert!(rule("HARD RULE (Ben): no SMS changes", &[], RuleStatus::Draft).is_operator_hard_rule());
+        assert!(rule("  hard rule: lower case", &[], RuleStatus::Draft).is_operator_hard_rule());
+        assert!(rule("Test on staging", &["qa", "HARD-RULE"], RuleStatus::Draft).is_operator_hard_rule());
+        assert!(!rule("Hard rules are hard", &[], RuleStatus::Draft).is_operator_hard_rule());
+        assert!(!rule("Prefer small commits", &["hard"], RuleStatus::Draft).is_operator_hard_rule());
+        assert!(!rule("HARD", &[], RuleStatus::Draft).is_operator_hard_rule());
+
+        let draft = rule("HARD RULE: x", &[], RuleStatus::Draft);
+        assert!(draft.is_active_operator_hard_rule());
+        assert_eq!(
+            draft.surfaced_content(),
+            "DRAFT (operator hard rule, pending promotion; follow it as written): HARD RULE: x"
+        );
+        let proven = rule("HARD RULE: x", &[], RuleStatus::Proven);
+        assert_eq!(proven.surfaced_content(), "HARD RULE: x");
+        assert!(!rule("HARD RULE: x", &[], RuleStatus::Retired).is_active_operator_hard_rule());
+        assert!(!rule("HARD RULE: x", &[], RuleStatus::Stale).is_active_operator_hard_rule());
+    }
 
     #[test]
     fn test_rule_status_from_str() {

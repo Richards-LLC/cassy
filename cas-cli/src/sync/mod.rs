@@ -119,11 +119,17 @@ impl Syncer {
         rule.status == RuleStatus::Proven && rule.helpful_count >= self.min_helpful
     }
 
+    /// Whether a rule is written to Claude Code: a proven rule, or any live
+    /// operator hard rule, which does not wait for promotion (cas-5372).
+    pub fn should_sync(&self, rule: &Rule) -> bool {
+        self.is_proven(rule) || rule.is_active_operator_hard_rule()
+    }
+
     /// Sync a single rule to target directory
     ///
     /// Returns true if the rule was synced, false if it wasn't proven
     pub fn sync_rule(&self, rule: &Rule) -> Result<bool, CasError> {
-        if !self.is_proven(rule) {
+        if !self.should_sync(rule) {
             // If rule exists but is no longer proven, remove it
             let filepath = self.target_dir.join(format!("{}.md", rule.id));
             if filepath.exists() {
@@ -137,13 +143,13 @@ impl Syncer {
         let filepath = self.target_dir.join(format!("{}.md", rule.id));
 
         let content = if rule.paths.is_empty() {
-            format!("---\nid: {}\n---\n\n{}", rule.id, rule.content.trim())
+            format!("---\nid: {}\n---\n\n{}", rule.id, rule.surfaced_content())
         } else {
             format!(
                 "---\nid: {}\npaths: \"{}\"\n---\n\n{}",
                 rule.id,
                 rule.paths,
-                rule.content.trim()
+                rule.surfaced_content()
             )
         };
 
@@ -158,7 +164,7 @@ impl Syncer {
         // Collect IDs of proven rules
         let proven_ids: HashSet<_> = rules
             .iter()
-            .filter(|r| self.is_proven(r))
+            .filter(|r| self.should_sync(r))
             .map(|r| r.id.clone())
             .collect();
 
@@ -248,7 +254,7 @@ impl Syncer {
             Scope::Project => &self.target_dir,
         };
 
-        if !self.is_proven(rule) {
+        if !self.should_sync(rule) {
             // If rule exists but is no longer proven, remove it
             let filepath = target.join(format!("{}.md", rule.id));
             if filepath.exists() {
@@ -271,7 +277,7 @@ impl Syncer {
                 "---\nid: {}\nscope: {}\n---\n\n{}",
                 rule.id,
                 scope_indicator,
-                rule.content.trim()
+                rule.surfaced_content()
             )
         } else {
             format!(
@@ -279,7 +285,7 @@ impl Syncer {
                 rule.id,
                 scope_indicator,
                 rule.paths,
-                rule.content.trim()
+                rule.surfaced_content()
             )
         };
 
@@ -323,25 +329,25 @@ impl Syncer {
         // Collect IDs of proven rules
         let proven_ids: HashSet<_> = rules
             .iter()
-            .filter(|r| self.is_proven(r))
+            .filter(|r| self.should_sync(r))
             .map(|r| r.id.clone())
             .collect();
 
         // Sync proven rules
         for rule in rules {
-            if self.is_proven(rule) {
+            if self.should_sync(rule) {
                 fs::create_dir_all(target_dir)?;
 
                 let filepath = target_dir.join(format!("{}.md", rule.id));
 
                 let content = if rule.paths.is_empty() {
-                    format!("---\nid: {}\n---\n\n{}", rule.id, rule.content.trim())
+                    format!("---\nid: {}\n---\n\n{}", rule.id, rule.surfaced_content())
                 } else {
                     format!(
                         "---\nid: {}\npaths: \"{}\"\n---\n\n{}",
                         rule.id,
                         rule.paths,
-                        rule.content.trim()
+                        rule.surfaced_content()
                     )
                 };
 

@@ -71,4 +71,42 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
     await expect(page.getByRole("log").getByText("Back. Nothing was lost.")).toBeVisible();
     await expect(page.getByText("Terminal transport problem")).toHaveCount(0);
   });
+
+  await journey.stage("On a phone, the banner stays readable through an outage", async () => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await expect(page.getByRole("button", { name: `Send to ${PELICAN}` })).toBeVisible();
+    // Watch every frame of the outage: no toast may sit on the reconnect banner (cas-00cc).
+    await page.evaluate(() => {
+      const w = window as unknown as { __covered: string[] };
+      w.__covered = [];
+      const tick = () => {
+        const banner = document.querySelector<HTMLElement>(".terminal-disconnected-banner");
+        const toast = document.querySelector<HTMLElement>("#toast.visible");
+        if (banner && toast) {
+          const b = banner.getBoundingClientRect(), t = toast.getBoundingClientRect();
+          if (t.left < b.right && t.right > b.left && t.top < b.bottom && t.bottom > b.top) w.__covered.push(toast.innerText);
+        }
+        if (w.__covered !== undefined) requestAnimationFrame(tick);
+      };
+      requestAnimationFrame(tick);
+    });
+    hub.hold(PELICAN);
+    hub.drop(PELICAN);
+    await expect(banner).toHaveText("Lost connection to Atlas · Linux. Reconnecting…");
+    // Turning the phone resizes the terminal, which tries to tell the hub: that
+    // send fails while the connection is down, which used to raise a toast.
+    await page.setViewportSize({ width: 390, height: 760 });
+    await page.setViewportSize({ width: 390, height: 844 });
+    // The banner's own text is what sits on top at its centre, in light and in dark.
+    for (const scheme of ["light", "dark"] as const) {
+      await page.emulateMedia({ colorScheme: scheme });
+      await page.waitForTimeout(1_600);
+      const onTop = await banner.evaluate((el) => { const r = el.getBoundingClientRect(); const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2); return !!hit && (hit === el || el.contains(hit)); });
+      expect(onTop, `banner unobscured (${scheme})`).toBe(true);
+    }
+    expect(await page.evaluate(() => (window as unknown as { __covered: string[] }).__covered), "a toast covered the banner").toEqual([]);
+    hub.release(PELICAN);
+    await expect(banner).toBeHidden({ timeout: 15_000 });
+    await page.emulateMedia({ colorScheme: null });
+  });
 });

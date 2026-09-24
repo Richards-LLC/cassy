@@ -29,10 +29,11 @@ export function conversationNoMatchText(query: string): string {
   return `No conversation matches “${query.trim()}”. Search looks at project, machine and supervisor names.`;
 }
 
-/** Compose is a YOU action: the FAB takes the operator's constant colour
+/** Compose is a YOU action: the button takes the operator's constant colour
  * (--you-bg at :root), never a machine accent, so it stays visible whatever
- * machine scope the shell root carries. */
-export const composeFabMarkup = '<button id="compose-fab" class="compose-fab" type="button" aria-label="Write to a supervisor"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true" focusable="false"><path d="M12 5v14M5 12h14"/></svg></button>';
+ * machine scope the shell root carries. On a phone it is a labelled bar in the
+ * list's own flow, above the status footer, not a floating icon (journey F15). */
+export const composeFabMarkup = '<button id="compose-fab" class="compose-fab" type="button" aria-label="Write to a supervisor"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true" focusable="false"><path d="M12 5v14M5 12h14"/></svg><span class="compose-fab-label">Write to a supervisor</span></button>';
 
 /**
  * The one header above the thread (cas-5b2d): the Pebble thead — machine
@@ -127,8 +128,8 @@ export function conversationShellMarkup(model: ConversationShellModel): string {
       <header class="conversation-list-heading"><div class="conversation-list-top">${cloudBrand()}${appearanceButtonMarkup}</div><div class="conversation-list-title"><h1>Conversations</h1><button id="pair-toggle"${welcomePairs ? ' class="primary"' : ""} type="button">Pair a machine</button></div><p>Your projects. Your supervisors.</p>${model.paired ? conversationSearchMarkup(model.searchQuery) : ""}</header>
       <nav id="conversation-list" aria-label="Choose a supervisor"></nav>
       <div id="conversation-empty" class="conversation-empty" hidden></div>
-      <footer><div id="hub-footer-badges" class="hub-footer-badges" aria-label="Hub status"></div></footer>
       ${model.paired ? composeFabMarkup : ""}
+      <footer><div id="hub-footer-badges" class="hub-footer-badges" aria-label="Hub status"></div></footer>
     </aside>
     <main class="conversation-main">
       ${model.selected ? `${conversationHeaderMarkup(model)}<section id="conversation-pane-slot" class="conversation-pane-slot"></section><div id="conversation-composer-slot"></div>` : `<div class="conversation-welcome"><span class="conversation-eyebrow">SUPERVISOR CONVERSATIONS</span><h2>Stay close to the work.</h2><p>${!model.loaded ? "Loading your paired machines…" : !model.paired ? "Pair a machine to read your supervisors’ words and talk to them here." : "Choose a project to read its supervisor’s words and send an instruction."}</p>${!model.paired && model.loaded ? '<button id="empty-pair" class="primary" type="button">Pair a machine</button>' : ""}</div>`}

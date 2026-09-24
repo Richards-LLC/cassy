@@ -1624,7 +1624,7 @@ main {
   .attention-item--reclassified { animation: none; }
   .machine-drawer { transition-property: opacity; }
   button { transition: none; }
-  #toast { transform: translate(-50%, 0); transition-property: opacity; }
+  #toast { transform: none; transition-property: opacity; }
 }
 
 @media (hover: none) {
@@ -2362,12 +2362,15 @@ dialog form > *,
   border-bottom: var(--line-width) solid var(--line-subtle);
 }
 
+/* Journey F12: toasts anchor at the top, never over the composer or the
+   bottom rails where the operator is typing. */
 #toast {
   position: fixed;
-  left: 50%;
-  bottom: var(--space-6);
+  top: calc(var(--space-4) + env(safe-area-inset-top));
+  right: var(--space-4);
   z-index: 10;
-  transform: translate(-50%, var(--space-6));
+  max-width: min(28rem, calc(100vw - 2 * var(--space-4)));
+  transform: translate(0, calc(-1 * var(--space-6)));
   opacity: 0;
   pointer-events: none;
   padding: var(--space-3) var(--space-4);
@@ -2379,7 +2382,7 @@ dialog form > *,
   transition: opacity .2s, transform .2s;
 }
 
-#toast.visible { opacity: 1; transform: translate(-50%, 0); }
+#toast.visible { opacity: 1; transform: none; }
 
 /* == Unit 3: drawer visibility follows its explicit open control == */
 
@@ -2670,8 +2673,8 @@ dialog form > *,
     font-size: var(--fs-lg);
   }
 
-  /* Toasts clear the bottom rail and the gesture bar instead of landing under them. */
-  #toast { bottom: calc(var(--machine-rail-width) + var(--space-3) + env(safe-area-inset-bottom)); }
+  /* Toasts span the top of a narrow screen, under the status bar. */
+  #toast { left: var(--space-3); right: var(--space-3); top: calc(var(--space-3) + env(safe-area-inset-top)); max-width: none; }
   .context-body { min-height: 0; }
   /* == Unit 4: Phone attention and composer == */
   .attention-group-label { max-width: 100%; }
@@ -2904,9 +2907,8 @@ dialog form > *,
   .session-header .actions { gap: var(--space-1); }
   .session-header .actions button { min-width: 0; padding: 0 var(--space-2); }
 
-  /* Nothing is stacked above a bottom rail here, so the toast and the composer
-     stop reserving room for one. */
-  #toast { bottom: calc(var(--space-3) + env(safe-area-inset-bottom)); }
+  /* Nothing is stacked above a bottom rail here, so the composer stops
+     reserving room for one. */
   .message { padding-bottom: 0; }
 
   /* A worker strip that keeps 40dvh of a 412px screen leaves the supervisor
@@ -3022,9 +3024,11 @@ dialog form > *,
 .conversation-flag { width: 10px; height: 10px; border-radius: var(--radius-pill); background: var(--warn-text); }
 .conversation-unread { min-width: 21px; padding: 2px 7px; border-radius: var(--radius-pill); text-align: center; background: var(--accent); color: var(--accent-fg); font: var(--weight-semibold) var(--fs-xs)/1.4 var(--font-ui); }
 .conversation-empty { margin: var(--space-6) 18px; color: var(--ink-mid); }
-.compose-fab { display: none; position: fixed; right: 18px; bottom: calc(18px + env(safe-area-inset-bottom)); z-index: 2; width: 56px; height: 56px; padding: 0; border: 0; border-radius: var(--radius-pill); background: var(--you-bg); color: var(--you-fg); box-shadow: var(--lift-strong); align-items: center; justify-content: center; }
+/* Journey F15: a labelled bar in the list's own flow, above the status footer,
+   so it reserves its space instead of floating over "2 paired machines". */
+.compose-fab { display: none; flex-shrink: 0; align-items: center; justify-content: center; gap: var(--space-2); min-height: var(--space-12); margin: auto 12px var(--space-2); padding: 0 var(--space-4); border: 0; border-radius: var(--radius-pill); background: var(--you-bg); color: var(--you-fg); box-shadow: var(--lift); font: var(--weight-semibold) var(--fs-md)/1.2 var(--font-ui); }
 .compose-fab:hover { background: var(--you-bg); color: var(--you-fg); }
-.compose-fab svg { width: 24px; height: 24px; display: block; }
+.compose-fab svg { width: 20px; height: 20px; display: block; flex: none; }
 .conversation-main { display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; }
 /* The single header above the thread (cas-5b2d): Pebble thead shape, cas-11b01 controls on the row above. */
 .conversation-heading { display: flex; flex-direction: column; gap: var(--space-3); padding: var(--space-3) 30px 17px; background: var(--canvas); color: var(--ink); box-shadow: var(--lift-head); position: relative; z-index: 1; }
@@ -3288,11 +3292,11 @@ button.chip:disabled { cursor: default; }
 @media (max-width: 53rem), (max-height: 30rem) and (pointer: coarse) {
   .conversation-shell { display: block; height: var(--keyboard-viewport-height, 100dvh); }
   /* Phone: the list is the page — full width, no rail edge, and the compose
-     FAB floats bottom right above the footer while the list is showing. */
+     bar sits between the list and the footer while the list is showing. */
   .conversation-sidebar { height: 100%; box-shadow: none; }
   .conversation-list-heading { padding: 20px 12px 14px; }
   #conversation-list { padding: 0 12px var(--space-4); }
-  .conversation-sidebar footer { padding: var(--space-3) 12px; padding-inline-end: calc(56px + 30px); }
+  .conversation-sidebar footer { padding: var(--space-3) 12px; }
   /* P13: the phone footer folds to one 32px line — the paired-machines toggle
      and its state. The conversation count and hub build stay on desktop (the
      list is the count here). The toggle's hit area still reaches 40px. */
@@ -3304,6 +3308,8 @@ button.chip:disabled { cursor: default; }
   .conversation-sidebar #paired-machines-toggle > span:nth-child(2) { overflow-wrap: normal; white-space: nowrap; }
   .conversation-sidebar .hub-footer-meta { display: none; }
   .conversation-shell:not(.thread-open) .compose-fab { display: flex; }
+  /* The compose bar already takes the free space above the footer. */
+  .conversation-shell:not(.thread-open) .compose-fab + footer { margin-top: 0; }
   /* The welcome is hidden on a phone, so the header chip is the first-run
      action; the compose FAB (which would only open pairing, under the label
      "Write to a supervisor") steps aside so there is one Pair a machine. */

@@ -51,5 +51,12 @@ test("HUB-J1 first open and pair a machine with a code", async ({ page, journey 
     await expect(row).toBeVisible();
     await row.click();
     await expect(page.getByRole("button", { name: `Send to ${PELICAN}`, exact: true })).toBeVisible();
+    // The "connected" toast sits at the top, clear of the message box (journey F12).
+    // Measure #toast itself: it keeps its box after it fades, so a slow run
+    // that outlasts the 3.2 s display cannot hang on the .visible class.
+    const toast = page.locator("#toast");
+    await expect(toast).toHaveText("Atlas · Linux connected");
+    const [notice, composer] = await Promise.all([toast.boundingBox(), page.locator(".conversation-composer").boundingBox()]);
+    expect(notice!.y + notice!.height, "toast above the composer").toBeLessThan(composer!.y);
   });
 });

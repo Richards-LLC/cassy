@@ -1066,6 +1066,76 @@ fn target_is_protected_default(target: &str) -> bool {
     )
 }
 
+/// The AwaitingMerge idle relay while an independent QA round is still open
+/// for the delivery (cas-38d7). Parking dispatched the round, and the merge
+/// guards refuse the branch until it passes or is waived, so this names the
+/// QA task, its round and reviewer state, and the tip under review. It
+/// carries no merge, push or re-close steps: telling the supervisor to merge
+/// here would ask for exactly what the QA pass forbids. The verdict itself
+/// notifies the supervisor (`verification action=qa_record`).
+///
+/// Wording constraint shared with `merge_required_idle_prompt_text`: must
+/// not contain "assign" (cas-09d0 / cas-728b).
+fn pending_qa_idle_prompt_text(
+    worker: &str,
+    task: &ActiveLeaseSummary,
+    qa: &cas_factory::PendingQaSummary,
+    data: &DirectorData,
+    factory_branch: &str,
+    target: &str,
+    supervisor_prefix: &str,
+) -> String {
+    let head: String = qa.bound_head.chars().take(9).collect();
+    let qa_task = qa
+        .qa_task_id
+        .as_deref()
+        .unwrap_or("(QA task not created yet)");
+    let reviewer = if qa.claimed {
+        let name = qa
+            .reviewer_agent_id
+            .as_deref()
+            .map(|id| {
+                data.agent_id_to_name
+                    .get(id)
+                    .map(String::as_str)
+                    .unwrap_or(id)
+            })
+            .unwrap_or("a reviewer");
+        format!("claimed by {name}, review in progress")
+    } else {
+        format!("not yet claimed; it needs a reviewer other than {worker}")
+    };
+    let check = match qa.qa_task_id.as_deref() {
+        Some(id) => format!("`{supervisor_prefix}task action=show id={id}`"),
+        None => format!(
+            "`{supervisor_prefix}verification action=qa_status task_id={}`",
+            task.task_id
+        ),
+    };
+    let rejection = task
+        .close_rejected_reason
+        .as_deref()
+        .unwrap_or("MERGE REQUIRED");
+    format!(
+        "⏳ WAITING ON INDEPENDENT QA — do not merge yet (not a task completion).\n\
+         Worker {worker} is idle while task {} ({}) is {} (close rejected: {rejection}).\n\
+         Independent QA round {} ({}) is open for {factory_branch} at {head}: QA task {qa_task} is {reviewer}; verdict due {}.\n\
+         The merge into {target} waits for that verdict: the merge guards refuse this delivery until the round passes or is waived.\n\
+         Next action:\n\
+         1. Check the review: {check}\n\
+         2. Approved: the verdict tells you this exact tip may merge. Rejected: the task returns to {worker} with the QA ledger.\n\
+         Live task state: `{supervisor_prefix}task action=show id={}`\n\
+         This is a push-based WorkerIdle close-rejected signal — do not poll or sleep.",
+        task.task_id,
+        task.task_title,
+        task.task_status,
+        qa.round,
+        qa.pass_id,
+        qa.deadline_at.format("%Y-%m-%d %H:%MZ"),
+        task.task_id,
+    )
+}
+
 /// Actionable merge-queue prompt for MERGE REQUIRED / AwaitingMerge idle
 /// signals (cas-c145). Carries task, source factory branch, merge target,
 /// and next action. Explicitly push-based (no polling loop).
@@ -1099,6 +1169,19 @@ fn merge_required_idle_prompt_text(
     let target = epic_branch
         .as_deref()
         .unwrap_or("the task's resolved merge target");
+    // cas-38d7: an independent QA round still open for this delivery forbids
+    // the merge, so the relay reports the review, never merge steps.
+    if let Some(qa) = task.pending_qa.as_ref() {
+        return pending_qa_idle_prompt_text(
+            worker,
+            task,
+            qa,
+            data,
+            &factory_branch,
+            target,
+            supervisor_prefix,
+        );
+    }
     let epic_status = if declared_target {
         format!("`{supervisor_prefix}task action=show id={}`", task.task_id)
     } else {
@@ -2379,6 +2462,7 @@ mod tests {
             task_title: "Merge gated task".to_string(),
             task_status: TaskStatus::AwaitingMerge,
             close_rejected_reason: Some("MERGE REQUIRED: commit not on epic".to_string()),
+            pending_qa: None,
         });
 
         assert!(
@@ -3128,6 +3212,7 @@ mod tests {
                 task_title: "Fix close gate".to_string(),
                 task_status: TaskStatus::InProgress,
                 close_rejected_reason: Some("MERGE REQUIRED".to_string()),
+                pending_qa: None,
             }),
         };
         let data = make_data(0);
@@ -3188,6 +3273,7 @@ mod tests {
             task_title: "Ship to main".to_string(),
             task_status: TaskStatus::AwaitingMerge,
             close_rejected_reason: Some("MERGE REQUIRED".to_string()),
+            pending_qa: None,
         };
         let summary = |branch: &str| TaskSummary {
             id: "cas-8d38".to_string(),
@@ -3232,6 +3318,148 @@ mod tests {
         assert!(!target_is_protected_default("epic/main-cleanup-cas-1"));
     }
 
+    /// cas-38d7: the AwaitingMerge data the cas-c145 relay test uses, for a
+    /// parked delivery whose independent QA round is `pending_qa`.
+    fn awaiting_merge_with_qa(
+        pending_qa: Option<cas_factory::PendingQaSummary>,
+    ) -> (DirectorEvent, DirectorData) {
+        let event = DirectorEvent::WorkerIdle {
+            worker: "recipe-be".to_string(),
+            active_task: Some(ActiveLeaseSummary {
+                task_id: "cas-8eff".to_string(),
+                task_title: "Backend recipes API".to_string(),
+                task_status: TaskStatus::AwaitingMerge,
+                close_rejected_reason: Some("MERGE REQUIRED".to_string()),
+                pending_qa,
+            }),
+        };
+        let mut data = make_data(0);
+        data.agents[0].name = "recipe-be".to_string();
+        data.agent_id_to_name
+            .insert("sess-id-abc123".to_string(), "recipe-be".to_string());
+        data.agent_id_to_name
+            .insert("sess-reviewer-9".to_string(), "keen-owl-7".to_string());
+        data.in_progress_tasks = vec![TaskSummary {
+            id: "cas-8eff".to_string(),
+            title: "Backend recipes API".to_string(),
+            status: TaskStatus::AwaitingMerge,
+            priority: Priority::MEDIUM,
+            assignee: Some("recipe-be".to_string()),
+            task_type: TaskType::Task,
+            epic: Some("cas-4c77".to_string()),
+            branch: None,
+            updated_at: None,
+            epic_verification_owner: None,
+        }];
+        data.epic_tasks = vec![TaskSummary {
+            id: "cas-4c77".to_string(),
+            title: "Dosha recipes epic".to_string(),
+            status: TaskStatus::InProgress,
+            priority: Priority::HIGH,
+            assignee: None,
+            task_type: TaskType::Epic,
+            epic: None,
+            branch: Some("epic/dosha-recipes-cas-4c77".to_string()),
+            updated_at: None,
+            epic_verification_owner: None,
+        }];
+        (event, data)
+    }
+
+    fn open_qa_round(claimed: bool) -> cas_factory::PendingQaSummary {
+        cas_factory::PendingQaSummary {
+            pass_id: "qapass-dffea443d59c98dd".to_string(),
+            round: 1,
+            qa_task_id: Some("cas-2fde".to_string()),
+            bound_head: "de2250eb89d424c79e9f9451515f33a3e5409f63".to_string(),
+            reviewer_agent_id: claimed.then(|| "sess-reviewer-9".to_string()),
+            claimed,
+            deadline_at: chrono::DateTime::parse_from_rfc3339("2026-09-23T19:31:00Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+        }
+    }
+
+    fn relay_text(event: &DirectorEvent, data: &DirectorData) -> String {
+        generate_prompt(
+            event,
+            data,
+            data,
+            "supervisor",
+            &default_config(),
+            SupervisorCli::Claude,
+            SupervisorCli::Claude,
+            &HashSet::new(),
+            None,
+        )
+        .expect("AwaitingMerge idle must produce a supervisor prompt")
+        .text
+    }
+
+    /// cas-38d7 (reported on cas-b8a5): while an independent QA round is open
+    /// for the parked delivery, the relay says it is waiting on QA, names the
+    /// QA task, its round and reviewer state, and gives no merge steps.
+    #[test]
+    fn test_38d7_awaiting_merge_with_pending_qa_names_the_review_not_merge_steps() {
+        let (event, data) = awaiting_merge_with_qa(Some(open_qa_round(false)));
+        let text = relay_text(&event, &data);
+        for expected in [
+            "WAITING ON INDEPENDENT QA",
+            "do not merge yet",
+            "cas-8eff",
+            "QA task cas-2fde",
+            "round 1 (qapass-dffea443d59c98dd)",
+            "factory/recipe-be at de2250eb8",
+            "not yet claimed; it needs a reviewer other than recipe-be",
+            "verdict due 2026-09-23 19:31Z",
+            "epic/dosha-recipes-cas-4c77 waits for that verdict",
+            "task action=show id=cas-2fde",
+        ] {
+            assert!(text.contains(expected), "missing {expected:?} in:\n{text}");
+        }
+        for forbidden in [
+            "MERGE REQUIRED — supervisor action needed",
+            "git merge",
+            "Merge factory/",
+            "action=close",
+            "if remote tracking applies",
+            "assign",
+        ] {
+            assert!(
+                !text.contains(forbidden),
+                "must not contain {forbidden:?}:\n{text}"
+            );
+        }
+    }
+
+    /// cas-38d7: a claimed round names its reviewer by agent name.
+    #[test]
+    fn test_38d7_claimed_qa_round_names_its_reviewer() {
+        let (event, data) = awaiting_merge_with_qa(Some(open_qa_round(true)));
+        let text = relay_text(&event, &data);
+        assert!(
+            text.contains("QA task cas-2fde is claimed by keen-owl-7, review in progress"),
+            "{text}"
+        );
+        assert!(!text.contains("git merge"), "{text}");
+    }
+
+    /// cas-38d7: with no open round the relay keeps its merge steps.
+    #[test]
+    fn test_38d7_awaiting_merge_without_qa_keeps_merge_steps() {
+        let (event, data) = awaiting_merge_with_qa(None);
+        let text = relay_text(&event, &data);
+        assert!(
+            text.contains("MERGE REQUIRED — supervisor action needed"),
+            "{text}"
+        );
+        assert!(
+            text.contains("git merge --no-ff factory/recipe-be` on epic/dosha-recipes-cas-4c77"),
+            "{text}"
+        );
+        assert!(!text.contains("WAITING ON INDEPENDENT QA"), "{text}");
+    }
+
     /// cas-c145: AwaitingMerge idle must be an actionable merge-queue event
     /// (task + factory branch + epic target + next action), not a vague
     /// "resolve the rejection" hint. Push-based — no polling loop wording.
@@ -3244,6 +3472,7 @@ mod tests {
                 task_title: "Backend recipes API".to_string(),
                 task_status: TaskStatus::AwaitingMerge,
                 close_rejected_reason: Some("MERGE REQUIRED".to_string()),
+                pending_qa: None,
             }),
         };
         let mut data = make_data(0);
@@ -3387,6 +3616,7 @@ mod tests {
                 task_title: "Mixed factory merge park".to_string(),
                 task_status: TaskStatus::AwaitingMerge,
                 close_rejected_reason: Some("MERGE REQUIRED".to_string()),
+                pending_qa: None,
             }),
         };
         let mut data = make_data(0);
@@ -3490,6 +3720,7 @@ mod tests {
                 task_title: "Grok worker merge park".to_string(),
                 task_status: TaskStatus::AwaitingMerge,
                 close_rejected_reason: Some("MERGE REQUIRED".to_string()),
+                pending_qa: None,
             }),
         };
         let mut grok_data = make_data(0);
@@ -3573,6 +3804,7 @@ mod tests {
                 task_title: "Lint gate".to_string(),
                 task_status: TaskStatus::InProgress,
                 close_rejected_reason: Some("CODE REVIEW REQUIRED".to_string()),
+                pending_qa: None,
             }),
         };
         let data = make_data(0);
@@ -3624,6 +3856,7 @@ mod tests {
                 task_title: "Fix close gate".to_string(),
                 task_status: TaskStatus::AwaitingMerge,
                 close_rejected_reason: Some("MERGE REQUIRED".to_string()),
+                pending_qa: None,
             }),
         };
         let mut data = make_data(0);
@@ -3644,6 +3877,7 @@ mod tests {
             task_title: "Fix close gate".to_string(),
             task_status: TaskStatus::AwaitingMerge,
             close_rejected_reason: Some("MERGE REQUIRED".to_string()),
+            pending_qa: None,
         });
         let config = default_config();
 
@@ -5370,6 +5604,7 @@ mod tests {
                 task_title: "Fix close gate".to_string(),
                 task_status: TaskStatus::AwaitingMerge,
                 close_rejected_reason: None,
+                pending_qa: None,
             }),
         };
         // Ready tasks ALSO exist in the snapshot — proves the informational
@@ -5957,6 +6192,7 @@ mod tests {
                     task_title: "Freshness test task".to_string(),
                     task_status,
                     close_rejected_reason: Some("MERGE REQUIRED".to_string()),
+                    pending_qa: None,
                 }),
             }
         }

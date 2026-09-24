@@ -300,6 +300,46 @@ impl SupervisorStallTracker {
     }
 }
 
+/// Why a parked delivery is deliberately not "merge now" (GH #896, cas-e4f8).
+///
+/// Each reason is a decision someone other than the stall detector owns: a
+/// blocker note was raised after the delivery parked, or an independent QA
+/// pass is still open for it (the QA gate itself says not to merge until the
+/// pass records a verdict). A supervisor-held worker is the third case and is
+/// read straight from the hold set. A held delivery is left out of the
+/// supervisor's merge queue, so it cannot keep the stall relay firing every
+/// ten minutes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeliveryHold {
+    /// A blocker note was added after the delivery last parked.
+    BlockerNote,
+    /// An independent QA pass is pending or claimed for the delivery.
+    QaPassOpen,
+}
+
+/// Marker the close gate writes each time a delivery parks for merge.
+const PARKED_FOR_MERGE_MARKER: &str = "Task parked as awaiting_merge";
+/// Prefix the notes tool writes for a blocker note.
+const BLOCKER_NOTE_MARKER: &str = "🚫 BLOCKER";
+
+/// Whether the task's notes carry a blocker raised after its latest park.
+///
+/// A blocker from an earlier cycle does not hold a delivery that has since
+/// been re-parked: a newer park line means the delivery came back for merge.
+/// Notes with a blocker and no park line at all count as held (the blocker is
+/// the latest word on the delivery).
+pub(crate) fn blocker_note_after_park(notes: &str) -> bool {
+    let mut held = false;
+    for line in notes.lines() {
+        if line.contains(PARKED_FOR_MERGE_MARKER) {
+            held = false;
+        } else if line.contains(BLOCKER_NOTE_MARKER) {
+            held = true;
+        }
+    }
+    held
+}
+
 /// Compute the highest-priority concrete next step for the focused epic.
 ///
 /// Branch tips are resolved by the caller so tests stay pure and production
@@ -329,7 +369,42 @@ pub(crate) fn supervisor_actionable_state(
 /// a parked delivery against live Git and task-store evidence. The plain
 /// [`supervisor_actionable_state`] wrapper preserves the pure legacy behavior
 /// used by display/unit callers that do not have a repository-backed checker.
+/// Production now calls [`supervisor_actionable_state_with_classifiers`].
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn supervisor_actionable_state_with_merge_classifier(
+    data: &DirectorData,
+    focused_epic_id: Option<&str>,
+    supervisor_name: &str,
+    held_workers: &HashSet<String>,
+    now: DateTime<Utc>,
+    idle_after_secs: u64,
+    resolve_branch_tip: impl FnMut(&str) -> Option<String>,
+    classify_merged_close_blocked: impl FnMut(
+        &TaskSummary,
+        &str,
+        &str,
+        Option<&str>,
+    ) -> Option<MergedCloseBlockedTask>,
+) -> Option<SupervisorActionableState> {
+    supervisor_actionable_state_with_classifiers(
+        data,
+        focused_epic_id,
+        supervisor_name,
+        held_workers,
+        now,
+        idle_after_secs,
+        resolve_branch_tip,
+        classify_merged_close_blocked,
+        |_, _| None,
+    )
+}
+
+/// [`supervisor_actionable_state_with_merge_classifier`] plus a hold
+/// classifier: production consults the task notes and the QA pass store to
+/// say whether a parked delivery is deliberately waiting on a decision
+/// (GH #896). A held worker is always a hold, with or without the classifier.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn supervisor_actionable_state_with_classifiers(
     data: &DirectorData,
     focused_epic_id: Option<&str>,
     supervisor_name: &str,
@@ -343,6 +418,7 @@ pub(crate) fn supervisor_actionable_state_with_merge_classifier(
         &str,
         Option<&str>,
     ) -> Option<MergedCloseBlockedTask>,
+    mut classify_delivery_hold: impl FnMut(&TaskSummary, &str) -> Option<DeliveryHold>,
 ) -> Option<SupervisorActionableState> {
     let epic_id = focused_epic_id?;
     let epic_is_open = data.epic_tasks.iter().any(|epic| {
@@ -369,6 +445,11 @@ pub(crate) fn supervisor_actionable_state_with_merge_classifier(
             .get(assignee)
             .map(String::as_str)
             .unwrap_or(assignee);
+        // GH #896: a delivery held for a decision is not "merge now". It
+        // stays parked without keeping the stall relay firing.
+        if held_workers.contains(worker) || classify_delivery_hold(task, worker).is_some() {
+            continue;
+        }
         let branch = format!("factory/{worker}");
         let tip = resolve_branch_tip(&branch);
         if let Some(target) = merge_target_for_task(data, task)

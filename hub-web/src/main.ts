@@ -40,7 +40,7 @@ import { backLabel, clearStoredSelection, forgetMachine, goBackSelection, loadSt
 import { composerFocusWinner, planSupervisorSend, sendsOnEnter, supervisorMessage, supervisorTarget } from "./supervisor-message";
 import { hiddenWorkersLabel, saveWorkersRevealed, splitVisiblePanes, workersCommandLabel, workersRevealed, workersRoute } from "./worker-visibility";
 import { dormantCommandLabel, dormantRevealed, dormantRoute, saveDormantRevealed } from "./dormant-visibility";
-import { machineAccentClass, setMachineAccentFleet } from "./machine-accent";
+import { machineAccentClass, setMachineAccentFleet, storageAccentStore } from "./machine-accent";
 import { COMPACT_MEDIA_QUERY, PHONE_MEDIA_QUERY } from "./viewport";
 import { defaultTranscriptView, loadTranscriptView, saveTranscriptView, type TranscriptViewMode } from "./transcript";
 import { TranscriptView } from "./transcript-view";
@@ -2161,9 +2161,12 @@ function capturePairingDraft(): void {
   if (form) pairingDraft = updatePairingDraft(pairingDraft, new FormData(form).entries(), pendingPairing?.kind === "invitation" && !pendingPairing.hubUrl);
 }
 
+/** Each machine's accent, recorded when it first pairs so later pairings never re-colour it (cas-50a7). */
+const machineAccentStore = storageAccentStore((() => { try { return window.localStorage; } catch { return undefined; } })());
+
 function render(captureDraft = true): void {
   // Every row, header and rail icon below reads its colour from this fleet.
-  setMachineAccentFleet(machines.keys());
+  setMachineAccentFleet(machines.keys(), machineAccentStore);
   if (captureDraft) capturePairingDraft();
   captureMessageDraft();
   const composerWasFocused = document.activeElement?.id === "message-text";

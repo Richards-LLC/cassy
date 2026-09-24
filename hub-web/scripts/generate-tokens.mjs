@@ -159,14 +159,20 @@ try {
     },
   };
   // Per-machine accent set. Index N is the class `machine-accent-N` chosen by
-  // hub-web/src/machine-accent.ts (FNV-1a → jump consistent hash), so a fourth
-  // accent is APPENDED here and MACHINE_ACCENT_COUNT bumped; never reorder the
-  // first three or every paired machine changes colour. Every pair rendered on
+  // hub-web/src/machine-accent.ts (FNV-1a → jump consistent hash over the first
+  // three, then a stored assignment), so a new accent is APPENDED here and
+  // MACHINE_ACCENT_COUNT bumped; never reorder or every paired machine changes
+  // colour. Every pair rendered on
   // these values is measured at >= 4.5:1 by machine-accent.test.ts.
   const machineAccents = [
     { name: "indigo", light: { accent: "#2E3A9F", soft: "#DDE1F7", sup: "#E7EAF7" }, dark: { accent: "#A9B3FF", soft: "#232838", sup: "#262B38" } },
     { name: "green", light: { accent: "#226845", soft: "#D7E8DE", sup: "#E3EFE8" }, dark: { accent: "#5FC492", soft: "#1C2A23", sup: "#1F2E27" } },
     { name: "violet", light: { accent: "#5B3E8C", soft: "#E2DAF1", sup: "#EBE6F4" }, dark: { accent: "#C0A3F0", soft: "#262034", sup: "#282334" } },
+    // Appended for fleets of four and five machines (cas-50a7): the first
+    // three stay each machine's preferred accent; these are only handed out
+    // once all three are in use, so no existing fleet changes colour.
+    { name: "teal", light: { accent: "#1C6570", soft: "#D5E9EB", sup: "#E1EFF0" }, dark: { accent: "#5EC6CC", soft: "#1B2A2C", sup: "#1E2E30" } },
+    { name: "rose", light: { accent: "#9A2F6B", soft: "#F2DCE7", sup: "#F6E7EE" }, dark: { accent: "#F29CC8", soft: "#2E1F28", sup: "#31222B" } },
   ];
   const accent = (scheme, index) => ({
     "--accent": machineAccents[index][scheme].accent,

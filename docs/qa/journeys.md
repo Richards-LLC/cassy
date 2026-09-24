@@ -238,6 +238,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 5. Keep my place in the session picker while updates arrive — the row a keyboard user arrowed or tabbed onto keeps focus, and the filter holds, while hub updates re-render the page
 6. See which session is open while pointing at it — in light and dark, the open session keeps its tint under the pointer (lifting as feedback) and still differs from an ordinary hovered row
 7. Come back from the terminal to the reply box — returning from Terminal view by keyboard or mouse puts focus in the reply box, never on the page body
+8. Read every session's details on a phone — at 390px each picker row, the open one included, shows project, role, workers and status in full
 
 **Expected experience**
 

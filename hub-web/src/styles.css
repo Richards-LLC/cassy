@@ -660,7 +660,10 @@ main {
 }
 
 .session-picker-entry .session-name { grid-column: 1; font-size: var(--fs-base); }
-.session-picker-entry .session-meta { grid-column: 1 / -1; color: var(--text-mid); font-size: var(--fs-xs); }
+/* The details wrap rather than clip: on a phone the one-line ellipsis hid the
+   status of a long row, the open session's included (cas-56e6). */
+.session-picker-entry .session-meta { grid-column: 1 / -1; color: var(--text-mid); font-size: var(--fs-xs); white-space: normal; overflow: visible; overflow-wrap: anywhere; }
+.session-picker-entry :is(.session-name, .session-summary-title) { white-space: normal; overflow: visible; overflow-wrap: anywhere; }
 .session-picker-entry .session-summary-title { grid-column: 1 / -1; color: var(--text-mid); font-size: var(--fs-meta); }
 .session-picker-entry .phase-chip { grid-column: 1; justify-self: start; }
 .session-picker-entry[aria-current="true"] { background: var(--bg-active); }

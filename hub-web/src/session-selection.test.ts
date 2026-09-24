@@ -205,6 +205,13 @@ describe("session picker entries", () => {
     expect(sessionPickerMeta(entry!)).toBe("supervisor fast-kestrel-6 · 5 workers · live");
   });
 
+  it("leads with the project when the hub reports one (cas-56e6)", () => {
+    const withProject = new Map([["m1", [{ ...sessions.get("m1")![0]!, project_dir: "/home/op/projects/cas-src/" }]]]);
+    const [entry] = sessionPickerEntries({ machines, sessions: withProject, selection: { machineId: "m1" } });
+    expect(entry!.project).toBe("cas-src");
+    expect(sessionPickerMeta(entry!)).toMatch(/^cas-src · supervisor /);
+  });
+
   it("says a worker-less session has none instead of omitting the fact", () => {
     const entries = sessionPickerEntries({ machines, sessions, selection: { machineId: "m1" } });
     const idle = entries.find((entry) => entry.session === "gabber-studio-witty-panda-98")!;

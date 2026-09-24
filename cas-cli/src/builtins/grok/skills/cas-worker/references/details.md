@@ -66,6 +66,8 @@ cas__task action=update id=cas-abc1 status=blocked
 cas__task action=notes id=cas-abc1 notes="Blocked: <reason>" note_type=blocker
 ```
 
+**Need a database?** You cannot create a Neon branch or hold a Neon credential. Ask the supervisor: `cas__coordination action=message target=supervisor blocker=true message="db branch for <task-id>: <why>"`. Its `db_branch_create` writes `DATABASE_URL` to `.env.cas-db` in your worktree. Source that file; never commit it or print it. The branch is deleted when your task closes.
+
 **Priority** accepts numeric (0–4) OR named alias: `critical`/`high`/`medium`/`low`/`backlog`. `priority="high"` is the same as `priority=1`.
 
 **Booleans** on `with_deps`, etc. accept `true`/`false`, `"true"`/`"false"`, or `1`/`0`.

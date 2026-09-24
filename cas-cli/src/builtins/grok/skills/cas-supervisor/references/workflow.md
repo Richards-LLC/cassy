@@ -211,6 +211,10 @@ end-of-lane, once the worker is done with that worktree.
    task back to its implementer automatically. To skip the pass, waive it with a logged reason:
    `cas__verification action=qa_waive task_id=<task-id> summary="..."`. Check a task's rounds
    with `cas__verification action=qa_status task_id=<task-id>`.
+   Already merged before anyone closed it (it never parked)? Cassy opens no round for code
+   that is already on trunk. Close it yourself with `supervisor_override=true reason="…"
+   commit_receipt=<merged sha>`; the waiver is recorded against that commit. A no-code task is
+   never gated by independent QA.
 3. Merge into the epic branch:
    ```
    cas__coordination action=worktree_merge id=<worker> task_id=<task-id>

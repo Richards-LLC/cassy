@@ -1171,6 +1171,10 @@ struct ResolvedSystemBMergeTarget {
     branch: String,
     reason: String,
     trunk_fallback: bool,
+    /// True only when `branch` is the parent epic's own delivery lane (its
+    /// recorded branch or WorkTarget), never a task-declared target. Receipts
+    /// may say "epic branch" only for these (cas-c85e).
+    epic_lane: bool,
 }
 
 /// Resolve the declared delivery authority shared by worker spawn and
@@ -1207,6 +1211,7 @@ fn declared_system_b_merge_target(
                 target.repo_selector, target.target_branch
             ),
             trunk_fallback: false,
+            epic_lane: false,
         });
     }
 
@@ -1224,6 +1229,7 @@ fn declared_system_b_merge_target(
                 epic.id
             ),
             trunk_fallback: false,
+            epic_lane: true,
         });
     }
     let target = epic
@@ -1238,7 +1244,57 @@ fn declared_system_b_merge_target(
             epic.id, target.repo_selector, target.target_branch
         ),
         trunk_fallback: false,
+        epic_lane: true,
     })
+}
+
+/// cas-c85e (GH #997): the live delivery lane of `epic` when a declared task
+/// target resolved to `trunk` instead of it, in the same repository.
+///
+/// A child that sits under an epic with its own lane but still declares trunk
+/// is almost always a stale target (the task was created standalone and later
+/// moved into the epic). Merging it would bypass the epic's PR/CI gate and
+/// push straight to production, so callers must refuse unless `allow_trunk`
+/// explicitly authorizes that exact destination. A declared non-trunk lane
+/// (release, staging, another epic) stays authoritative, and a child bound to
+/// a different repository is exempt because the epic lane does not exist there.
+fn epic_lane_bypassed_by_trunk_target(
+    task: &cas_types::Task,
+    epic: &cas_types::Task,
+    resolved_branch: &str,
+    trunk: &str,
+) -> Option<String> {
+    if task.id == epic.id || resolved_branch != trunk {
+        return None;
+    }
+    let task_repo = task
+        .deliverables
+        .work_target
+        .as_ref()
+        .map(|target| target.repo_selector.as_str());
+    let epic_repo = epic
+        .deliverables
+        .work_target
+        .as_ref()
+        .map(|target| target.repo_selector.as_str());
+    if let (Some(task_repo), Some(epic_repo)) = (task_repo, epic_repo) {
+        if task_repo != epic_repo {
+            return None;
+        }
+    }
+    let lane = epic
+        .branch
+        .as_deref()
+        .map(str::trim)
+        .filter(|branch| !branch.is_empty())
+        .or_else(|| {
+            epic.deliverables
+                .work_target
+                .as_ref()
+                .map(|target| target.target_branch.trim())
+                .filter(|branch| !branch.is_empty())
+        })?;
+    (lane != resolved_branch).then(|| lane.to_string())
 }
 
 fn resolve_system_b_merge_target(
@@ -1285,6 +1341,39 @@ fn resolve_system_b_merge_target(
             }
         }
         if let Some(mut target) = declared_system_b_merge_target(&task, epic.as_ref(), task_id) {
+            if let Some(epic) = epic.as_ref() {
+                let trunk = trunk();
+                if let Some(lane) =
+                    epic_lane_bypassed_by_trunk_target(&task, epic, &target.branch, &trunk)
+                {
+                    if !allow_trunk {
+                        return Err(McpError {
+                            code: ErrorCode::INVALID_PARAMS,
+                            message: Cow::from(format!(
+                                "task {task_id} belongs to epic {} (delivery lane {lane}) but its \
+                                 WorkTarget resolves to trunk {trunk} — refusing to bypass the \
+                                 epic lane (would merge to: {trunk}). Re-target the task to the \
+                                 epic (task update target_branch={lane}), or pass \
+                                 allow_trunk=true only if {trunk} is truly intended.\n\n{}",
+                                epic.id,
+                                merge_target_remediation(assignee)
+                            )),
+                            data: None,
+                        });
+                    }
+                    return Ok(ResolvedSystemBMergeTarget {
+                        branch: trunk.clone(),
+                        reason: format!(
+                            "trunk {trunk} (explicit allow_trunk=true; task {task_id} WorkTarget \
+                             pins trunk although parent epic {} delivers on {lane}; authorized \
+                             for worker {assignee})",
+                            epic.id
+                        ),
+                        trunk_fallback: true,
+                        epic_lane: false,
+                    });
+                }
+            }
             // The resolver has already performed the cas-bd5f ownership
             // check above. Preserve that fact in the successful receipt even
             // when cas-0f97 selects a task WorkTarget instead of the legacy
@@ -1309,6 +1398,7 @@ fn resolve_system_b_merge_target(
                      authorized for worker {assignee})"
                 ),
                 trunk_fallback: true,
+                epic_lane: false,
             });
         }
         return Err(McpError {
@@ -1331,7 +1421,14 @@ fn resolve_system_b_merge_target(
         data: None,
     })?;
 
+    let trunk = trunk();
     let mut assignee_epic_branches: Vec<(String, String, String)> = Vec::new(); // epic, branch, task
+    // cas-c85e: epic children whose declared target is trunk, not the epic lane.
+    let mut trunk_pinned_children: Vec<(String, String, String)> = Vec::new(); // task, epic, lane
+    // Branches reached through an epic's own lane; only these may be receipted
+    // as "epic branch" (cas-c85e).
+    let mut epic_lane_branches: std::collections::BTreeSet<String> =
+        std::collections::BTreeSet::new();
     let mut standalone_tasks: Vec<String> = Vec::new();
     let mut branchless_parent_epics: Vec<String> = Vec::new();
     let mut closed_parent_epics: Vec<(String, String)> = Vec::new(); // task, epic
@@ -1359,6 +1456,14 @@ fn resolve_system_b_merge_target(
                 }
                 if let Some(target) = declared_system_b_merge_target(task, Some(&epic), &task.id) {
                     let branch = target.branch;
+                    if let Some(lane) =
+                        epic_lane_bypassed_by_trunk_target(task, &epic, &branch, &trunk)
+                    {
+                        trunk_pinned_children.push((task.id.clone(), epic.id.clone(), lane));
+                    }
+                    if target.epic_lane {
+                        epic_lane_branches.insert(branch.clone());
+                    }
                     if !assignee_epic_branches.iter().any(|(id, b, task_id)| {
                         id == &epic.id && b == &branch && task_id == &task.id
                     }) {
@@ -1442,6 +1547,27 @@ fn resolve_system_b_merge_target(
         });
     }
 
+    // cas-c85e (GH #997): an epic child that still declares trunk would
+    // bypass its epic's lane (and its PR/CI gate). Never take that silently.
+    if !trunk_pinned_children.is_empty() && !allow_trunk {
+        let list = trunk_pinned_children
+            .iter()
+            .map(|(task, epic, lane)| format!("task {task}→epic {epic} lane {lane}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(McpError {
+            code: ErrorCode::INVALID_PARAMS,
+            message: Cow::from(format!(
+                "assignee {assignee} has epic task(s) whose WorkTarget resolves to trunk \
+                 {trunk} instead of the epic lane ({list}) — refusing to bypass the epic \
+                 lane (would merge to: {trunk}). Re-target the task to its epic lane, or \
+                 pass task_id= with allow_trunk=true only if {trunk} is truly intended.\n\n{}",
+                merge_target_remediation(assignee)
+            )),
+            data: None,
+        });
+    }
+
     // Dedup by branch name for uniqueness checks.
     let unique_branches: Vec<String> = {
         let mut seen = std::collections::BTreeSet::new();
@@ -1464,13 +1590,53 @@ fn resolve_system_b_merge_target(
             .map(|(_, _, task)| task.as_str())
             .collect::<Vec<_>>()
             .join(", ");
+        // cas-c85e: name the destination for what it is. Trunk is never an
+        // "epic branch", and a task-declared lane is a task WorkTarget.
+        let pinned = trunk_pinned_children
+            .iter()
+            .filter(|(task, _, _)| task_ids.split(", ").any(|id| id == task))
+            .map(|(task, epic, lane)| format!("task {task}→epic {epic} lane {lane}"))
+            .collect::<Vec<_>>();
+        let (reason, trunk_fallback) = if branch == trunk && !pinned.is_empty() {
+            (
+                format!(
+                    "trunk {trunk} (explicit allow_trunk=true; assignee {assignee}'s current \
+                     task(s) [{task_ids}] pin trunk although their parent epic delivers on its \
+                     own lane ({}); no task_id given)",
+                    pinned.join(", ")
+                ),
+                true,
+            )
+        } else if branch == trunk {
+            (
+                format!(
+                    "trunk {trunk} (declared target of assignee {assignee}'s current task(s) \
+                     [{task_ids}] via {epic_id}; no task_id given)"
+                ),
+                false,
+            )
+        } else if epic_lane_branches.contains(&branch) {
+            (
+                format!(
+                    "epic branch {branch} (assignee {assignee}'s current task(s) [{task_ids}] \
+                     resolve through parent epic {epic_id}; no task_id given)"
+                ),
+                false,
+            )
+        } else {
+            (
+                format!(
+                    "task WorkTarget branch {branch} (assignee {assignee}'s current task(s) \
+                     [{task_ids}] declare it; no task_id given)"
+                ),
+                false,
+            )
+        };
         return Ok(ResolvedSystemBMergeTarget {
             branch: branch.clone(),
-            reason: format!(
-                "epic branch {branch} (assignee {assignee}'s current task(s) [{task_ids}] \
-                 resolve through parent epic {epic_id}; no task_id given)"
-            ),
-            trunk_fallback: false,
+            reason,
+            trunk_fallback,
+            epic_lane: false,
         });
     }
 
@@ -1499,7 +1665,6 @@ fn resolve_system_b_merge_target(
         });
     }
 
-    let trunk = trunk();
     if allow_trunk {
         let task_context = standalone_tasks
             .first()
@@ -1512,6 +1677,7 @@ fn resolve_system_b_merge_target(
                  no assignee epic binding; session focus is not merge authority)"
             ),
             trunk_fallback: true,
+            epic_lane: false,
         });
     }
 
@@ -2432,17 +2598,13 @@ impl CasCore {
                                 .unwrap_or_else(|| manager.git().detect_default_branch())
                         },
                     )?;
-                    let mut target_reason = resolved_target.reason;
-                    let parent_branch = match declared_repo_context.as_ref() {
-                        Some(context) => {
-                            target_reason = format!(
-                                "task WorkTarget {} branch {}",
-                                context.repo_selector, context.target_branch
-                            );
-                            context.target_branch.clone()
-                        }
-                        None => resolved_target.branch,
-                    };
+                    // cas-c85e (GH #997): the resolver is the sole merge
+                    // authority. The declared WorkTarget binds the repository
+                    // (cwd above), but it must not override the branch: a
+                    // stale trunk target on a task moved into an epic used to
+                    // replace the epic lane here and push straight to trunk.
+                    let target_reason = resolved_target.reason;
+                    let parent_branch = resolved_target.branch;
                     (
                         crate::types::Worktree::new(
                             format!("system-b-{assignee}"),

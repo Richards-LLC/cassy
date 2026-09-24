@@ -47,3 +47,47 @@ describe("phone keyboard viewport (cas-edc9)", () => {
     dispose();
   });
 });
+
+describe("cold-load list states (journey F14)", () => {
+  it("shows a skeleton until storage and every machine's first catalog attempt settle", async () => {
+    const { conversationListState, conversationSkeletonMarkup } = await import("./conversation-shell");
+    expect(conversationListState(false, [])).toEqual({ kind: "loading" });
+    expect(conversationListState(true, [{ catalogReceived: false, phase: "dialing" }, { catalogReceived: false, phase: undefined }])).toEqual({ kind: "loading" });
+    // One machine answered empty, the other is still on its first attempt: not "No live supervisors" yet.
+    expect(conversationListState(true, [{ catalogReceived: true, phase: "live" }, { catalogReceived: false, phase: "auth" }])).toEqual({ kind: "loading" });
+    expect(conversationListState(true, [])).toEqual({ kind: "text", text: "Pair a machine to start your first conversation." });
+    const empty = conversationListState(true, [{ catalogReceived: true, phase: "live" }, { catalogReceived: false, phase: "failed" }]);
+    expect(empty.kind === "text" && empty.text).toMatch(/^No live supervisors listed/);
+    const unreachable = conversationListState(true, [{ catalogReceived: false, phase: "backoff" }]);
+    expect(unreachable.kind === "text" && unreachable.text).toMatch(/^Can't reach your paired machines yet/);
+    const skeleton = document.createElement("div");
+    skeleton.innerHTML = conversationSkeletonMarkup();
+    expect(skeleton.querySelector('[role="status"]')?.textContent).toBe("Loading your conversations…");
+    expect(skeleton.querySelectorAll(".conversation-skeleton-row")).toHaveLength(3);
+  });
+
+  it("footer says Loading… before storage and Connecting… before any machine was live", async () => {
+    const { machineFooterMarkup } = await import("./paired-machines");
+    const row = { id: "a", label: "Atlas", address: "atlas.test", connection: "Connecting", connected: false, lastSeen: "" };
+    const text = (markup: string) => { const node = document.createElement("div"); node.innerHTML = markup; return node.querySelector("#paired-machines-toggle")?.textContent; };
+    expect(text(machineFooterMarkup([], 0, "b", true))).toBe("Paired machinesLoading…");
+    expect(text(machineFooterMarkup([], 0, "b"))).toBe("0 paired machinesNot paired");
+    expect(text(machineFooterMarkup([row, { ...row, id: "b" }], 0, "b"))).toBe("2 paired machinesConnecting…");
+    expect(text(machineFooterMarkup([row, { ...row, id: "b", everConnected: true }], 0, "b"))).toBe("2 paired machinesReconnecting");
+  });
+
+  it("footer names never-live machines that failed as unreachable, and its dot shows the worst machine (cas-b789)", async () => {
+    const { CANT_REACH_RETRYING, machineFooterMarkup } = await import("./paired-machines");
+    const row = { id: "a", label: "Atlas", address: "atlas.test", connection: CANT_REACH_RETRYING, connected: false, lastSeen: "" };
+    const live = { ...row, id: "b", connection: "Connected", connected: true };
+    const node = (markup: string) => { const div = document.createElement("div"); div.innerHTML = markup; return div.querySelector("#paired-machines-toggle")!; };
+    // Every machine failed without ever being live: the words the list uses.
+    expect(node(machineFooterMarkup([row, { ...row, id: "c" }], 0, "b")).textContent).toBe("2 paired machinesCan't reach · retrying");
+    // One still on its first attempt: still connecting.
+    expect(node(machineFooterMarkup([row, { ...row, id: "c", connection: "Connecting" }], 0, "b")).textContent).toBe("2 paired machinesConnecting…");
+    // Dot: green only when all are connected; warning when some are down; neutral when none.
+    expect(node(machineFooterMarkup([live, { ...live, id: "c" }], 0, "b")).querySelector(".pairing-dot")?.className).toBe("pairing-dot connected");
+    expect(node(machineFooterMarkup([live, row], 0, "b")).querySelector(".pairing-dot")?.className).toBe("pairing-dot partial");
+    expect(node(machineFooterMarkup([row], 0, "b")).querySelector(".pairing-dot")?.className).toBe("pairing-dot");
+  });
+});

@@ -249,6 +249,43 @@ describe("wire-v1 reverse pairing", () => {
     expect(new PendingPairingStore(storage).load()).toMatchObject({ token, hubId: "machine-uuid" });
   });
 
+  it("reads the hub address and machine name a `cas hub pair` link carries (HUB-J2)", () => {
+    // The exact shape `cas hub pair` prints: percent-encoded, before `scopes`.
+    const token = "A".repeat(43);
+    const storage = new MemoryStorage();
+    const store = new PendingPairingStore(storage);
+    const location = { hash: `#pair=${token}&hub=machine-uuid&hub_url=https%3A%2F%2Fstudio.tail.ts.net&machine=Studio%20Mac%20%26%20co&scopes=machine-read,session-read,pane-read`, pathname: "/", search: "" } as Location;
+    const history = { replaceState: () => {} } as unknown as History;
+    const fragment = consumePairingFragment(location, history, store);
+    expect(fragment).toMatchObject({ kind: "invitation", token, hubId: "machine-uuid", suggestedHubUrl: "https://studio.tail.ts.net", suggestedMachineLabel: "Studio Mac & co", scopes: ["machine-read", "session-read", "pane-read"] });
+    // A suggestion is never the trusted relay address the exchange would skip the form for.
+    expect(fragment).not.toHaveProperty("hubUrl");
+    expect(fragment).not.toHaveProperty("machineLabel");
+    // It survives a reload with the invitation.
+    expect(new PendingPairingStore(storage).load()).toMatchObject({ suggestedHubUrl: "https://studio.tail.ts.net", suggestedMachineLabel: "Studio Mac & co" });
+
+    const draft = createPairingDraft("https://commander.example", undefined, fragment!);
+    expect(draft).toMatchObject({ hubUrl: "https://studio.tail.ts.net", machineLabel: "Studio Mac & co", pageOrigin: "https://commander.example" });
+  });
+
+  it("still parses a link minted before the prefill, and drops a prefill that is not an origin", () => {
+    const token = "A".repeat(43);
+    const history = { replaceState: () => {} } as unknown as History;
+    const legacy = consumePairingFragment({ hash: `#pair=${token}&hub=machine-uuid`, pathname: "/", search: "" } as Location, history, new PendingPairingStore(new MemoryStorage()));
+    expect(legacy).toEqual({ kind: "invitation", token, hubId: "machine-uuid" });
+    expect(createPairingDraft("https://commander.example", undefined, legacy!)).toMatchObject({ hubUrl: "", machineLabel: "" });
+
+    for (const hubUrl of ["javascript%3Aalert(1)", "https%3A%2F%2Fuser%3Apw%40studio.example", "not a url", ""]) {
+      const fragment = consumePairingFragment({ hash: `#pair=${token}&hub=machine-uuid&hub_url=${hubUrl}&machine=Studio`, pathname: "/", search: "" } as Location, history);
+      expect(fragment, hubUrl).toEqual({ token, hubId: "machine-uuid", suggestedMachineLabel: "Studio" });
+    }
+    // A path is trimmed to the origin; a repeated or oversized value is dropped.
+    expect(consumePairingFragment({ hash: `#pair=${token}&hub=m&hub_url=https%3A%2F%2Fstudio.example%2Fcommander%2F&machine=a&machine=b`, pathname: "/", search: "" } as Location, history))
+      .toEqual({ token, hubId: "m", suggestedHubUrl: "https://studio.example" });
+    expect(consumePairingFragment({ hash: `#pair=${token}&hub=m&machine=${"x".repeat(257)}`, pathname: "/", search: "" } as Location, history))
+      .toEqual({ token, hubId: "m" });
+  });
+
   it("consumes a pairing fragment delivered to an already-open tab", () => {
     // Android sends a VIEW intent for a URL that differs only by #fragment to
     // the tab that is already open. Nothing navigates, the SPA never re-inits,

@@ -359,11 +359,7 @@ where
     }
     let machine = MachineIdentityStore::new(paths.root()).load_or_create()?;
     let auth = AuthStore::open(paths.root(), machine.id)?;
-    let machine_label = hostname::get()
-        .ok()
-        .and_then(|hostname| hostname.into_string().ok())
-        .filter(|label| !label.is_empty())
-        .unwrap_or_else(|| "Cassy machine".to_owned());
+    let machine_label = machine_display_label();
     let attempt = AuthorizationAttempt::load_or_create(paths.root(), &code)?;
     let claim = relay.claim(&code, &attempt.nonce)?;
     anyhow::ensure!(
@@ -530,6 +526,45 @@ fn resolve_hub_url(
         })?;
     let parsed = validate_hub_url(url)?;
     Ok(parsed.origin().ascii_serialization())
+}
+
+/// The name a paired browser lists this machine under.
+pub(super) fn machine_display_label() -> String {
+    hostname::get()
+        .ok()
+        .and_then(|hostname| hostname.into_string().ok())
+        .map(|label| label.trim().to_owned())
+        .filter(|label| !label.is_empty())
+        .unwrap_or_else(|| "Cassy machine".to_owned())
+}
+
+/// Best-effort hub origin for a `cas hub pair` link to prefill.
+///
+/// Only an explicit `--hub-url` that is not a valid hub origin is an error.
+/// Otherwise this never fails: the link stays usable without an address and
+/// the form falls back to asking. The order matches authorization — the
+/// explicit flag, the running hub's Tailscale Serve URL, the project's
+/// configured public URL, then the last URL a pairing used — and a discovered
+/// value that is not an HTTPS (or IP-loopback HTTP) origin is skipped.
+pub(super) fn pairing_prefill_hub_url(
+    paths: &HubRuntimePaths,
+    explicit: Option<&str>,
+    configured_hub_url: Option<&str>,
+) -> Result<Option<String>> {
+    if let Some(explicit) = explicit {
+        let parsed = validate_hub_url(explicit)?;
+        return Ok(Some(parsed.origin().ascii_serialization()));
+    }
+    let recorded = paths
+        .read_process_record()
+        .ok()
+        .and_then(|record| record.public_url);
+    let remembered = read_last_hub_url(paths).ok().flatten();
+    Ok([recorded.as_deref(), configured_hub_url, remembered.as_deref()]
+        .into_iter()
+        .flatten()
+        .find_map(|url| validate_hub_url(url).ok())
+        .map(|parsed| parsed.origin().ascii_serialization()))
 }
 
 fn verify_public_hub_ready(hub_url: &str) -> Result<()> {
@@ -1123,6 +1158,43 @@ mod tests {
             "https://remembered.example"
         );
         health.join().unwrap();
+    }
+
+    #[test]
+    fn pair_link_prefill_prefers_explicit_then_record_config_remembered_and_never_fails() {
+        let temp = crate::test_support::private_hub_tempdir();
+        let paths = HubRuntimePaths::new(temp.path().join("hub"));
+
+        // No hub record, no config, nothing remembered: the link simply omits it.
+        assert_eq!(pairing_prefill_hub_url(&paths, None, None).unwrap(), None);
+        // An explicit flag must be a hub origin; a bad one is refused, not dropped.
+        assert!(pairing_prefill_hub_url(&paths, Some("http://studio.example"), None).is_err());
+        assert_eq!(
+            pairing_prefill_hub_url(&paths, Some("studio.tail.ts.net"), None).unwrap(),
+            Some("https://studio.tail.ts.net".to_owned())
+        );
+
+        write_live_record(&paths, 0, Some("https://record.example/"));
+        assert_eq!(
+            pairing_prefill_hub_url(&paths, None, Some("config.example")).unwrap(),
+            Some("https://record.example".to_owned())
+        );
+        write_live_record(&paths, 0, None);
+        // A discovered value that is not a hub origin is skipped, not printed.
+        assert_eq!(
+            pairing_prefill_hub_url(&paths, None, Some("http://config.example")).unwrap(),
+            None
+        );
+        assert_eq!(
+            pairing_prefill_hub_url(&paths, None, Some("config.example")).unwrap(),
+            Some("https://config.example".to_owned())
+        );
+        fs::create_dir_all(paths.root()).unwrap();
+        fs::write(paths.root().join(LAST_HUB_URL_FILE), "remembered.example\n").unwrap();
+        assert_eq!(
+            pairing_prefill_hub_url(&paths, None, None).unwrap(),
+            Some("https://remembered.example".to_owned())
+        );
     }
 
     #[test]

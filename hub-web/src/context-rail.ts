@@ -8,7 +8,9 @@ import type { ArtifactRef, OperatorReply } from "./types";
  * Cassy Cloud lockup — in 240px. It now carries only what the thread header
  * and the flow do not already show at a glance:
  *
- *   - Waiting on you: open asks and blockers, each a jump to its turn
+ *   - Waiting on you: open asks and blockers, each a jump to its turn. The
+ *     ask pinned above the composer is left out: the pinned card is where it
+ *     is answered, so the rail does not show it a third time (journey F18).
  *   - Tasks & progress: the session summary, agents and tasks from status
  *   - Attachments: every artifact the supervisor sent in this thread
  *   - Attention: open attention events for this thread
@@ -51,10 +53,17 @@ export function threadAttachments(history: ConversationHistory | undefined): Thr
   return out;
 }
 
+/** Open asks and blockers the rail lists: everything waiting except the pinned ask. */
+export function railWaiting(history: ConversationHistory | undefined): OperatorReply[] {
+  if (!history) return [];
+  const pinned = history.pinnedAsk()?.notification_id;
+  return history.waiting().filter((reply) => reply.notification_id !== pinned);
+}
+
 /** Which sections have something unique to show. */
 export function contextSections(input: ContextRailInput): ContextSection[] {
   const sections: ContextSection[] = [];
-  if (input.history && input.history.waiting().length > 0) sections.push("waiting");
+  if (railWaiting(input.history).length > 0) sections.push("waiting");
   if (input.progress) sections.push("progress");
   if (threadAttachments(input.history).length > 0) sections.push("attachments");
   if (input.attention > 0) sections.push("attention");
@@ -127,7 +136,7 @@ export function syncContextRail(root: ParentNode, input: ContextRailInput): bool
   if (!rail) return false;
   const document = rail.ownerDocument;
   const sections = contextSections(input);
-  const waiting = input.history?.waiting() ?? [];
+  const waiting = railWaiting(input.history);
   const attachments = threadAttachments(input.history);
   const waitingList = rail.querySelector<HTMLElement>(".context-waiting");
   const waitingSignature = JSON.stringify(waiting.map((reply) => [reply.notification_id, reply.kind, reply.message]));

@@ -114,9 +114,22 @@ impl CasCore {
             .as_deref()
             .map(|paths| crate::qa_pass::catalog_journeys_for(repo, paths))
             .unwrap_or_default();
-        let eligibility = delivery_eligibility(task, &qa, changed.as_deref(), &journeys);
+        let mut eligibility = delivery_eligibility(task, &qa, changed.as_deref(), &journeys);
         if !eligibility.is_eligible() {
-            return None;
+            // GH #1001 (cas-627c): once a round is on record the delivery is
+            // gated (`gate_applies`), so a re-park must open the next round
+            // even when this park's diff alone looks non-user-facing: a
+            // test-only fix for a rejection, or a target that moved to a
+            // branch already holding the reviewed change. Deciding afresh
+            // left the merge refused with no round a reviewer could record.
+            let prior = cas_store::list_qa_passes(&self.cas_root, &task.id).unwrap_or_default();
+            if !crate::qa_pass::gate_applies(task, &qa, &prior) {
+                return None;
+            }
+            let latest = &prior[0];
+            eligibility
+                .reasons
+                .push(format!("re-review after round {} ({})", latest.round, latest.state));
         }
         let reasons = eligibility.reasons.join(", ");
         let Some(head) = head else {

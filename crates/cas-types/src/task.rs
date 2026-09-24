@@ -491,6 +491,15 @@ pub struct TaskDeliverables {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parked_branch: Option<String>,
 
+    /// cas-e33f (GH #1004): `factory/<assignee>` branches of the agents that
+    /// held this task before a transfer or reassignment, oldest first. The
+    /// close gate measures the current assignee's own branch; after a
+    /// handoff to a supervisor that branch usually does not exist, and the
+    /// task's commits live on one of these instead. Identity evidence only —
+    /// never delivery authority on its own.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub handoff_branches: Vec<String>,
+
     /// cas-a844: set when a supervisor `worktree_merge` attempt against this
     /// task's parked branch fails with an actual git merge conflict (as
     /// opposed to simply "not merged yet"). Distinguishes a clean
@@ -535,6 +544,8 @@ struct TaskDeliverablesObject {
     #[serde(default)]
     parked_branch: Option<String>,
     #[serde(default)]
+    handoff_branches: Vec<String>,
+    #[serde(default)]
     merge_conflicted: bool,
 }
 
@@ -554,6 +565,7 @@ impl From<TaskDeliverablesObject> for TaskDeliverables {
             factory_branch_anchor: value.factory_branch_anchor,
             historical_factory_branch_anchors: value.historical_factory_branch_anchors,
             parked_branch: value.parked_branch,
+            handoff_branches: value.handoff_branches,
             merge_conflicted: value.merge_conflicted,
         }
     }
@@ -740,6 +752,16 @@ fn validate_state_string_array(field: &str, value: &Value) -> Result<(), String>
 }
 
 impl TaskDeliverables {
+    /// cas-e33f: remember the branch of an agent handing this task off.
+    /// Blank names and repeats are ignored so repeated transfers between the
+    /// same agents do not grow the list.
+    pub fn record_handoff_branch(&mut self, branch: &str) {
+        let branch = branch.trim();
+        if !branch.is_empty() && !self.handoff_branches.iter().any(|known| known == branch) {
+            self.handoff_branches.push(branch.to_string());
+        }
+    }
+
     /// Move the active factory anchor out of close authority while retaining
     /// it as task-owned commit identity for later merge-gate attribution.
     ///
@@ -1165,6 +1187,25 @@ mod tests {
         deliverables.factory_branch_anchor = Some("  ".to_string());
         deliverables.retain_factory_branch_anchor_as_history();
         assert_eq!(deliverables.historical_factory_branch_anchors.len(), 1);
+    }
+
+    #[test]
+    fn handoff_branches_record_once_and_round_trip_cas_e33f() {
+        let mut deliverables = TaskDeliverables::default();
+        deliverables.record_handoff_branch(" factory/worker ");
+        deliverables.record_handoff_branch("factory/worker");
+        deliverables.record_handoff_branch("  ");
+        assert_eq!(deliverables.handoff_branches, vec!["factory/worker"]);
+
+        let encoded = serde_json::to_value(&deliverables).unwrap();
+        let decoded: TaskDeliverables = serde_json::from_value(encoded).unwrap();
+        assert_eq!(decoded.handoff_branches, vec!["factory/worker"]);
+        let legacy: TaskDeliverables = serde_json::from_str("{}").unwrap();
+        assert!(legacy.handoff_branches.is_empty());
+        assert!(
+            !serde_json::to_string(&legacy).unwrap().contains("handoff_branches"),
+            "empty list stays out of stored JSON"
+        );
     }
 
     #[test]

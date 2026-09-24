@@ -66,7 +66,8 @@ export function eventKey(event: ConversationEvent): string {
   return event.kind === "send" ? `send:${event.value.id}` : `reply:${event.value.notification_id}`;
 }
 
-function eventAt(event: ConversationEvent): number | undefined { return event.at; }
+/** The time a turn shows: its own time, not the sort key a live event was clamped to (cas-ac1f). */
+function eventAt(event: ConversationEvent): number | undefined { return event.shownAt ?? event.at; }
 
 export function clockLabel(at: number | undefined): string | undefined {
   if (at === undefined) return undefined;
@@ -140,7 +141,10 @@ export function threadModel(events: readonly ConversationEvent[], options: Threa
       if (day !== lastDay) {
         closeGroup(); coalesce = undefined;
         lastDay = day;
-        items.push({ type: "day", key: `day:${day}`, label: dayLabel(at, now) });
+        // A clock-skewed turn can bring a day back (tomorrow's stamp, then
+        // today again): keep every separator's key unique (cas-ac1f).
+        const dayKeyed = items.some((item) => item.key === `day:${day}`) ? `day:${day}:${items.length}` : `day:${day}`;
+        items.push({ type: "day", key: dayKeyed, label: dayLabel(at, now) });
       }
     } else if (lastDay === undefined && items.length === 0) {
       // Undated history still reads as a conversation, not a bare list.

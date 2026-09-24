@@ -1,28 +1,170 @@
-import { test, expect } from "./journey";
+import { join } from "node:path";
+import { test, expect, RECEIPTS } from "./journey";
 import { ATLAS, STUDIO, PELICAN, OTTER } from "./world";
+import type { Machine } from "./hub-double";
+
+// A third machine with a 40-character name (cas-1ca1): its row must ellipsise
+// the name and keep the time stamp readable.
+const FORGE: Machine = {
+  id: "forge",
+  label: "Forge build box with an unusual hostname · Linux",
+  sessions: [{ name: "quiet-heron-7", supervisor: "quiet-heron-7", project_dir: "/projects/lighthouse", workers: ["swift-lark-3"], liveness: "live" }],
+};
 
 test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => {
-  const hub = await journey.hub({ machines: [ATLAS, STUDIO], paired: ["atlas", "studio"] });
+  // Eight stages, two searches and the palette: under a loaded factory host it
+  // ran at the project's 60 s budget (QA N01/N3), so it gets its own headroom.
+  test.setTimeout(120_000);
+  const hub = await journey.hub({ machines: [ATLAS, STUDIO, FORGE], paired: ["atlas", "studio", "forge"] });
   const list = page.getByRole("navigation", { name: "Choose a supervisor" });
+  const search = page.getByRole("searchbox", { name: "Search conversations" });
+  const filter = page.getByRole("searchbox", { name: "Filter commands" });
+  // Ctrl/Cmd+K lands in the list search; pressed again from there, it opens
+  // the command palette.
+  const openPaletteFromKeyboard = async () => {
+    await page.keyboard.press("ControlOrMeta+k");
+    await expect(search).toBeFocused();
+    await page.keyboard.press("ControlOrMeta+k");
+    await expect(filter).toBeFocused();
+  };
 
   await journey.stage("See every machine's supervisors in one list", async () => {
     await journey.open();
-    await expect(list.getByRole("button")).toHaveCount(2);
-    await expect(list.locator(".conversation-machine")).toHaveText(["Atlas", "Studio Mac"]);
-    await expect(list.locator(".project-badge")).toHaveText(["cas-src", "gabber-studio"]);
+    await expect(list.getByRole("button")).toHaveCount(3);
+    // Machines list in id order (atlas, forge, studio). Rows are titled by project, then machine; the codename is tertiary.
+    await expect(list.locator(".conversation-project")).toHaveText(["cas-src", "lighthouse", "gabber-studio"]);
+    await expect(list.locator(".conversation-machine")).toHaveText(["Atlas", "Forge build box with an unusual hostname", "Studio Mac"]);
+    await expect(list.locator(".conversation-supervisor")).toHaveText([PELICAN, "quiet-heron-7", OTTER]);
+    await expect(search).toBeVisible();
+    await expect(search).toHaveAttribute("placeholder", "Search conversations (Ctrl K)");
   });
 
   await journey.stage("Notice a new reply while away", async () => {
     await list.getByRole("button", { name: /cas-src/ }).click();
     await expect(page.getByRole("button", { name: `Send to ${PELICAN}`, exact: true })).toBeVisible();
-    await page.getByRole("button", { name: "‹ Conversations", exact: true }).click();
+    // The list is on screen beside the thread, so there is no back step (F17):
+    // moving to another conversation is one click on its row.
+    await expect(page.getByRole("button", { name: "‹ Conversations", exact: true })).toBeHidden();
+    await list.getByRole("button", { name: /gabber-studio/ }).click();
+    await expect(page.getByRole("button", { name: `Send to ${OTTER}`, exact: true })).toBeVisible();
     hub.supervisorSays(PELICAN, "The staging deploy finished; nothing needs you yet.", { kind: "status" });
     await expect(list.getByRole("button", { name: /cas-src/ }).getByLabel("1 unread")).toBeVisible();
   });
 
+  await journey.stage("Find the conversation through the list search", async () => {
+    // A project name leaves its conversation as the only row.
+    await search.fill("gabber");
+    await expect(list.getByRole("button")).toHaveCount(1);
+    await expect(list.getByRole("button").first()).toContainText("gabber-studio");
+    // The machine and the supervisor codename find it too.
+    await search.fill("atlas");
+    await expect(list.getByRole("button")).toHaveCount(1);
+    await expect(list.getByRole("button").first()).toContainText("cas-src");
+    await search.fill(OTTER);
+    await expect(list.getByRole("button")).toHaveCount(1);
+    await expect(list.getByRole("button").first()).toContainText("gabber-studio");
+    await search.fill("no-such-project");
+    await expect(list.getByRole("button")).toHaveCount(0);
+    await expect(page.locator("#conversation-empty")).toContainText("No conversation matches “no-such-project”.");
+    // Escape brings the whole list back.
+    await search.press("Escape");
+    await expect(search).toHaveValue("");
+    await expect(list.getByRole("button")).toHaveCount(3);
+    await search.fill("gabber-studio");
+    await list.getByRole("button", { name: /gabber-studio/ }).click();
+    await expect(page.getByRole("button", { name: `Send to ${OTTER}`, exact: true })).toBeVisible();
+    // The header names the project once; machine and codename sit beneath it.
+    await expect(page.locator(".conversation-identity h1")).toHaveText("gabber-studio");
+    await expect(page.locator(".conversation-host")).toContainText(`Studio Mac · macOS · ${OTTER}`);
+    await search.fill("");
+    await search.blur();
+    await expect(list.getByRole("button")).toHaveCount(3);
+  });
+
+  // Catalog step titles verbatim (docs/qa/journeys.md HUB-J3, cas-0e5c).
+  await journey.stage("An empty thread's card also leads with the project, with machine and codename beneath it", async () => {
+    // gabber-studio is open with no turns yet: its card is titled by the
+    // project, as the header and the row are, with machine · codename beneath
+    // and the codename as its own identifier (cas-1ca1).
+    const card = page.locator(".thread .empty");
+    await expect(card).toBeVisible();
+    await expect(card.locator("b")).toHaveText("gabber-studio");
+    await expect(card.locator("b")).not.toHaveClass(/codename/);
+    await expect(card.locator(".proj2")).toHaveText(`Studio Mac · macOS · ${OTTER}`);
+    await expect(card.locator(".proj2 > .codename")).toHaveText(OTTER);
+    await expect(card.getByText("Project unavailable")).toHaveCount(0);
+  });
+
+  await journey.stage("Find the conversation from the keyboard", async () => {
+    // Ctrl+K from anywhere lands in the search; Enter opens the leading match
+    // with the reply box focused, and the list is whole again.
+    await page.keyboard.press("ControlOrMeta+k");
+    await expect(search).toBeFocused();
+    await page.keyboard.type("cas-src");
+    await expect(list.getByRole("button")).toHaveCount(1);
+    await page.keyboard.press("Enter");
+    await expect(page.getByRole("button", { name: `Send to ${PELICAN}`, exact: true })).toBeVisible();
+    await expect(page.locator(".conversation-identity h1")).toHaveText("cas-src");
+    await expect(page.getByRole("textbox", { name: "Your message" })).toBeFocused();
+    await expect(search).toHaveValue("");
+    await expect(list.getByRole("button")).toHaveCount(3);
+  });
+
+  await journey.stage("A 40-character machine name ellipsises in its row and never runs under the time stamp, on desktop and at 390px", async () => {
+    const row = list.getByRole("button", { name: /lighthouse/ });
+    const clearOfTime = () => row.evaluate((node) => {
+      const name = node.querySelector(".conversation-machine-name")!.getBoundingClientRect();
+      const time = node.querySelector(".conversation-when")?.getBoundingClientRect();
+      const label = node.querySelector<HTMLElement>(".conversation-machine-name")!;
+      return { ellipsised: label.scrollWidth > label.clientWidth, clear: !time || name.right <= time.left + 0.5 };
+    });
+    // A machine that wraps to its own line never starts it with the separator
+    // dot: the dot sits past the title's left edge, clipped (cas-1ca1 F02).
+    const noLeadingDot = () => list.locator(".conversation-row").evaluateAll((rows) => rows.every((node) => {
+      const title = node.querySelector(".conversation-title")!.getBoundingClientRect();
+      const project = node.querySelector(".conversation-project")!.getBoundingClientRect();
+      const machine = node.querySelector(".conversation-machine-name")!.getBoundingClientRect();
+      const dot = node.querySelector(".conversation-sep")!.getBoundingClientRect();
+      const wrapped = machine.top > project.top + 4;
+      return wrapped ? dot.right <= title.left + 0.5 : dot.left >= project.right;
+    }));
+    expect(await noLeadingDot()).toBe(true);
+    // Desktop: the 40-character name ellipsises before the time stamp.
+    await expect(row.locator(".conversation-when")).toBeVisible();
+    expect(await clearOfTime()).toEqual({ ellipsised: true, clear: true });
+    await expect(row.locator(".conversation-machine")).toHaveAttribute("title", "Forge build box with an unusual hostname");
+    // Phone width: the same, with the list as the whole page.
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.getByRole("button", { name: "‹ Conversations", exact: true }).click();
+    await expect(row).toBeVisible();
+    expect(await clearOfTime()).toEqual({ ellipsised: true, clear: true });
+    expect(await noLeadingDot()).toBe(true);
+    // Receipt beside the stage screenshots: the 390 px list with the long name.
+    await page.screenshot({ path: join(RECEIPTS, journey.id, "long-machine-phone.png") });
+    await page.setViewportSize({ width: 1280, height: 720 });
+  });
+
   await journey.stage("Jump to a supervisor by name", async () => {
     await page.getByRole("button", { name: "Appearance & commands" }).click();
-    await page.getByRole("searchbox", { name: "Filter commands" }).fill(OTTER);
+    // Commands are grouped; the debugging switches wait, collapsed, in Advanced.
+    const palette = page.locator("#command-palette");
+    await expect(palette.locator(".palette-group-heading")).toHaveText(["Conversations", "Appearance", "Advanced"]);
+    await expect(palette.getByRole("button", { name: /Show worker panes/ })).toBeHidden();
+    await expect(palette.getByRole("button", { name: /Open the terminal view/ })).toBeHidden();
+    await filter.fill("worker");
+    await expect(palette.getByRole("button", { name: /Show worker panes/ })).toBeVisible();
+    // A project name finds its session too, and the row names that project.
+    const rows = palette.locator(".palette-command");
+    await filter.fill("gabber");
+    await expect(rows.visible()).toHaveCount(1);
+    await expect(rows.visible().first()).toContainText(`Jump to ${OTTER}`);
+    await expect(rows.visible().first()).toContainText("gabber-studio · Studio Mac");
+    // Every word must match, not the whole phrase, as in the list search.
+    await filter.fill("gabber studio");
+    await expect(rows.visible()).toHaveCount(1);
+    await expect(rows.visible().first()).toContainText(`Jump to ${OTTER}`);
+    await filter.fill(OTTER);
+    await expect(palette.getByRole("button", { name: /Show worker panes/ })).toBeHidden();
     const commands = page.locator("#command-palette .palette-command");
     await expect(commands.visible()).toHaveCount(1);
     await expect(commands.visible().first()).toContainText(`Jump to ${OTTER}`);
@@ -30,7 +172,7 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     await page.getByRole("button", { name: new RegExp(`Jump to ${OTTER}`) }).click();
     await expect(page.locator("#command-palette")).toBeHidden();
     await expect(page.getByRole("button", { name: `Send to ${OTTER}`, exact: true })).toBeVisible();
-    await expect(page.locator(".conversation-host")).toContainText("gabber-studio · Studio Mac");
+    await expect(page.locator(".conversation-identity h1")).toHaveText("gabber-studio");
     // A mouse jump lands in the opened conversation's composer too, and
     // landing there must not freeze the shell at its pre-load state: once
     // this first visit's lease loads, the palette offers "Release control".
@@ -43,16 +185,14 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     // Mid-draft in the composer: closing the palette hands focus back to it,
     // which must not hold the switch back either.
     await page.getByRole("textbox", { name: "Your message" }).fill("Half a thought");
-    await page.keyboard.press("ControlOrMeta+k");
-    const filter = page.getByRole("searchbox", { name: "Filter commands" });
-    await expect(filter).toBeFocused();
+    await openPaletteFromKeyboard();
     await filter.fill(PELICAN);
     await filter.press("Enter");
     // Enter in the filter picks the leading "Jump to" row; the palette must
     // close with it rather than keep the modal up over the opened session.
     await expect(page.locator("#command-palette")).toBeHidden();
     await expect(page.getByRole("button", { name: `Send to ${PELICAN}`, exact: true })).toBeVisible();
-    await expect(page.locator(".conversation-host")).toContainText("cas-src · Atlas");
+    await expect(page.locator(".conversation-identity h1")).toHaveText("cas-src");
     // Focus lands in the opened conversation's composer, so the next keystroke
     // is part of the reply; the other conversation's draft stays its own.
     const composer = page.getByRole("textbox", { name: "Your message" });
@@ -62,11 +202,11 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     await expect(composer).toHaveValue("On it");
     // From the focused composer, arrowing onto the row must keep the filter:
     // opening the palette mid-draft owes a rebuild that must not land here.
-    await page.keyboard.press("ControlOrMeta+k");
-    await page.getByRole("searchbox", { name: "Filter commands" }).fill(OTTER);
-    await page.getByRole("searchbox", { name: "Filter commands" }).press("ArrowDown");
+    await openPaletteFromKeyboard();
+    await filter.fill(OTTER);
+    await filter.press("ArrowDown");
     await expect(page.getByRole("button", { name: new RegExp(`Jump to ${OTTER}`) })).toBeFocused();
-    await expect(page.getByRole("searchbox", { name: "Filter commands" })).toHaveValue(OTTER);
+    await expect(filter).toHaveValue(OTTER);
     await page.keyboard.press("Enter");
     await expect(page.locator("#command-palette")).toBeHidden();
     await expect(page.getByRole("button", { name: `Send to ${OTTER}`, exact: true })).toBeVisible();
@@ -78,15 +218,14 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     // Land on a first visit and type straight away, so the conversation's
     // status and lease load while the reply box is busy and a rebuild is owed.
     const composer = page.getByRole("textbox", { name: "Your message" });
-    const filter = page.getByRole("searchbox", { name: "Filter commands" });
     await page.goto("./");
     await expect(page.locator("#command-palette")).toHaveCount(1);
-    await page.keyboard.press("ControlOrMeta+k");
+    await openPaletteFromKeyboard();
     await filter.fill(OTTER);
     await filter.press("Enter");
     await expect(composer).toBeFocused();
     await page.keyboard.type("hi");
-    await page.keyboard.press("ControlOrMeta+k");
+    await openPaletteFromKeyboard();
     await filter.fill(PELICAN);
     await filter.press("ArrowDown");
     const row = page.getByRole("button", { name: new RegExp(`Jump to ${PELICAN}`) });
@@ -105,13 +244,11 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
 
   await journey.stage("Reopen the palette to the full list", async () => {
     const palette = page.locator("#command-palette");
-    const filter = page.getByRole("searchbox", { name: "Filter commands" });
     const commands = page.locator("#command-palette .palette-command");
     const noMatch = page.locator("#palette-no-match");
-    const all = await commands.count();
+    let all = 0;
     const reopen = async () => {
-      await page.keyboard.press("ControlOrMeta+k");
-      await expect(filter).toBeFocused();
+      await openPaletteFromKeyboard();
       await expect(filter).toHaveValue("");
       await expect(commands.visible()).toHaveCount(all);
       await expect(noMatch).toBeHidden();
@@ -122,7 +259,10 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     await expect(palette).toHaveCount(1);
     await expect(page.getByRole("button", { name: `Send to ${PELICAN}`, exact: true })).toBeVisible();
     // Close with ×, which does not rebuild the shell: the dialog comes back.
-    await page.keyboard.press("ControlOrMeta+k");
+    await openPaletteFromKeyboard();
+    // The full list is every command on screen, Advanced still collapsed.
+    all = await commands.visible().count();
+    expect(all).toBeGreaterThan(0);
     await filter.fill("zzzz");
     await expect(noMatch).toHaveText("No commands or sessions match “zzzz”.");
     await page.getByRole("button", { name: "Close command palette" }).click();

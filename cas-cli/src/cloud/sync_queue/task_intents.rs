@@ -2,7 +2,7 @@ use std::fs::{File, OpenOptions};
 
 use chrono::Utc;
 use fs2::FileExt;
-use rusqlite::{OptionalExtension, TransactionBehavior, params};
+use rusqlite::{OptionalExtension, params};
 
 use crate::cloud::sync_queue::queue_ops::{remove_legacy_team_upsert_row, upsert_queue_row};
 use crate::cloud::sync_queue::{EntityType, SyncOperation, SyncQueue};
@@ -72,8 +72,8 @@ impl SyncQueue {
         fallback_previous_project_id: Option<&str>,
         global_scope: bool,
     ) -> Result<TaskSyncIntent, CasError> {
-        let mut conn = self.conn.lock().unwrap();
-        let tx = conn.transaction()?;
+        let conn = self.conn.lock().unwrap();
+        let tx = begin_write(&conn)?;
         let mutation_id = uuid::Uuid::new_v4().to_string();
         let previous_revision = tx
             .query_row(
@@ -139,8 +139,8 @@ impl SyncQueue {
     }
 
     pub(crate) fn cancel_task_sync_intent(&self, intent_id: i64) -> Result<(), CasError> {
-        let mut conn = self.conn.lock().unwrap();
-        let tx = conn.transaction()?;
+        let conn = self.conn.lock().unwrap();
+        let tx = begin_write(&conn)?;
         tx.execute(
             "DELETE FROM task_mutation_receipts WHERE receipt_id IN
              (SELECT mutation_id FROM task_sync_intents WHERE id = ?1)",
@@ -196,12 +196,13 @@ impl SyncQueue {
         F: FnOnce() -> Result<TaskSyncPayload, CasError>,
         H: FnOnce(),
     {
-        let mut conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap();
         // BEGIN IMMEDIATE is load-bearing: after revision validation, the
         // read-only callback loads canonical state through the task store's
         // separate connection while this transaction excludes every bypass
-        // writer until the outbox rows commit.
-        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        // writer until the outbox rows commit. Acquiring it retries with
+        // bounded backoff past one busy_timeout window (cas-d5c8).
+        let tx = begin_write(&conn)?;
         let current_revision = tx
             .query_row(
                 "SELECT revision, present FROM task_mutation_revisions WHERE entity_id = ?1",
@@ -310,6 +311,20 @@ impl SyncQueue {
     }
 }
 
+/// Open the write transaction every task sync-intent write runs in (cas-d5c8,
+/// GH #921): BEGIN IMMEDIATE, so the write lock is taken before the first read
+/// and SQLite's busy handler applies, with the bounded jittered retry of
+/// `cas_store::shared_db::begin_immediate_with_retry` covering a holder that
+/// outlives one busy_timeout window. A DEFERRED transaction that reads first
+/// fails the moment it upgrades after another connection committed, which is
+/// how fleet task notes/update/create/cancel hit "database is locked" within
+/// seconds.
+fn begin_write(
+    conn: &rusqlite::Connection,
+) -> Result<cas_store::shared_db::ImmediateTx<'_>, CasError> {
+    cas_store::shared_db::begin_immediate_with_retry(conn).map_err(CasError::from)
+}
+
 fn retire_one_task_sync_intent(
     conn: &rusqlite::Connection,
     intent: &TaskSyncIntent,
@@ -405,6 +420,55 @@ mod tests {
         assert_eq!(queue.pending_task_sync_intents().unwrap().len(), 2);
         queue.cancel_task_sync_intent(first.id).unwrap();
         assert_eq!(queue.pending_task_sync_intents().unwrap(), vec![second]);
+    }
+
+    /// cas-d5c8 (GH #921): every MCP task write stages a sync intent first.
+    /// Staging read revision state and then wrote in one DEFERRED transaction,
+    /// and SQLite answers that read-to-write upgrade with SQLITE_BUSY as soon
+    /// as another connection has committed since the read, without calling
+    /// the busy handler. With a fleet writing, task notes/update/create/cancel
+    /// failed within seconds with "database is locked". Staging (and the other
+    /// intent writes) must wait out a concurrent writer instead.
+    #[test]
+    fn staging_a_task_mutation_waits_out_a_concurrent_writer() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let tasks = SqliteTaskStore::open(temp.path()).unwrap();
+        tasks.init().unwrap();
+        let queue = SyncQueue::open(temp.path()).unwrap();
+        queue.init().unwrap();
+        let db = temp.path().join("cas.db");
+        for round in 0..3 {
+            let (held_tx, held_rx) = std::sync::mpsc::channel();
+            let writer_db = db.clone();
+            let writer = std::thread::spawn(move || {
+                let conn = rusqlite::Connection::open(writer_db).unwrap();
+                conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+                conn.execute(
+                    "INSERT INTO task_mutation_revisions (entity_id, revision, present) VALUES (?1, 1, 1)
+                     ON CONFLICT(entity_id) DO UPDATE SET revision = revision + 1",
+                    params![format!("other-task-{round}")],
+                )
+                .unwrap();
+                held_tx.send(()).unwrap();
+                std::thread::sleep(std::time::Duration::from_millis(300));
+                conn.execute_batch("COMMIT").unwrap();
+            });
+            held_rx.recv().unwrap();
+            let staged = queue.stage_task_sync_intent(
+                &format!("cas-contended-{round}"),
+                "update",
+                None,
+                None,
+                None,
+                None,
+                false,
+            );
+            writer.join().unwrap();
+            let intent = staged.unwrap_or_else(|error| {
+                panic!("round {round}: staging must wait out the writer: {error}")
+            });
+            queue.cancel_task_sync_intent(intent.id).unwrap();
+        }
     }
 
     #[test]

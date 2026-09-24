@@ -130,6 +130,7 @@
   --accent-soft: #DDE1F7;
   --sup-bg: #E7EAF7;
   --sup-fg: #1B1D24;
+  --lift-sup: 0 1px 2px rgba(18,20,26,0.05), 0 6px 18px rgba(18,20,26,0.06), inset 0 0 0 1px color-mix(in srgb, #2E3A9F 30%, transparent);
 }
 
 @media (prefers-color-scheme: dark) {
@@ -261,6 +262,7 @@
     --accent-soft: #232838;
     --sup-bg: #262B38;
     --sup-fg: #E9E6E0;
+    --lift-sup: 0 1px 2px rgba(0,0,0,0.32), 0 6px 18px rgba(0,0,0,0.34), inset 0 0 0 1px color-mix(in srgb, #A9B3FF 30%, transparent);
   }
 }
 
@@ -392,6 +394,7 @@ html[data-scheme="light"] {
   --accent-soft: #DDE1F7;
   --sup-bg: #E7EAF7;
   --sup-fg: #1B1D24;
+  --lift-sup: 0 1px 2px rgba(18,20,26,0.05), 0 6px 18px rgba(18,20,26,0.06), inset 0 0 0 1px color-mix(in srgb, #2E3A9F 30%, transparent);
 }
 
 html[data-scheme="dark"] {
@@ -522,6 +525,7 @@ html[data-scheme="dark"] {
   --accent-soft: #232838;
   --sup-bg: #262B38;
   --sup-fg: #E9E6E0;
+  --lift-sup: 0 1px 2px rgba(0,0,0,0.32), 0 6px 18px rgba(0,0,0,0.34), inset 0 0 0 1px color-mix(in srgb, #A9B3FF 30%, transparent);
 }
 
 /* Pebble machine accents (hub-web/src/machine-accent.ts): append a set, never reorder. */
@@ -531,6 +535,7 @@ html[data-scheme="dark"] {
   --accent-soft: #DDE1F7;
   --sup-bg: #E7EAF7;
   --sup-fg: #1B1D24;
+  --lift-sup: 0 1px 2px rgba(18,20,26,0.05), 0 6px 18px rgba(18,20,26,0.06), inset 0 0 0 1px color-mix(in srgb, #2E3A9F 30%, transparent);
 }
 @media (prefers-color-scheme: dark) {
   .machine-accent-0 {
@@ -538,6 +543,7 @@ html[data-scheme="dark"] {
     --accent-soft: #232838;
     --sup-bg: #262B38;
     --sup-fg: #E9E6E0;
+    --lift-sup: 0 1px 2px rgba(0,0,0,0.32), 0 6px 18px rgba(0,0,0,0.34), inset 0 0 0 1px color-mix(in srgb, #A9B3FF 30%, transparent);
   }
 }
 html[data-scheme="light"] .machine-accent-0 {
@@ -545,12 +551,14 @@ html[data-scheme="light"] .machine-accent-0 {
   --accent-soft: #DDE1F7;
   --sup-bg: #E7EAF7;
   --sup-fg: #1B1D24;
+  --lift-sup: 0 1px 2px rgba(18,20,26,0.05), 0 6px 18px rgba(18,20,26,0.06), inset 0 0 0 1px color-mix(in srgb, #2E3A9F 30%, transparent);
 }
 html[data-scheme="dark"] .machine-accent-0 {
   --accent: #A9B3FF;
   --accent-soft: #232838;
   --sup-bg: #262B38;
   --sup-fg: #E9E6E0;
+  --lift-sup: 0 1px 2px rgba(0,0,0,0.32), 0 6px 18px rgba(0,0,0,0.34), inset 0 0 0 1px color-mix(in srgb, #A9B3FF 30%, transparent);
 }
 
 /* 1: green */
@@ -559,6 +567,7 @@ html[data-scheme="dark"] .machine-accent-0 {
   --accent-soft: #D7E8DE;
   --sup-bg: #E3EFE8;
   --sup-fg: #1B1D24;
+  --lift-sup: 0 1px 2px rgba(18,20,26,0.05), 0 6px 18px rgba(18,20,26,0.06), inset 0 0 0 1px color-mix(in srgb, #226845 30%, transparent);
 }
 @media (prefers-color-scheme: dark) {
   .machine-accent-1 {
@@ -566,6 +575,7 @@ html[data-scheme="dark"] .machine-accent-0 {
     --accent-soft: #1C2A23;
     --sup-bg: #1F2E27;
     --sup-fg: #E9E6E0;
+    --lift-sup: 0 1px 2px rgba(0,0,0,0.32), 0 6px 18px rgba(0,0,0,0.34), inset 0 0 0 1px color-mix(in srgb, #5FC492 30%, transparent);
   }
 }
 html[data-scheme="light"] .machine-accent-1 {
@@ -573,12 +583,14 @@ html[data-scheme="light"] .machine-accent-1 {
   --accent-soft: #D7E8DE;
   --sup-bg: #E3EFE8;
   --sup-fg: #1B1D24;
+  --lift-sup: 0 1px 2px rgba(18,20,26,0.05), 0 6px 18px rgba(18,20,26,0.06), inset 0 0 0 1px color-mix(in srgb, #226845 30%, transparent);
 }
 html[data-scheme="dark"] .machine-accent-1 {
   --accent: #5FC492;
   --accent-soft: #1C2A23;
   --sup-bg: #1F2E27;
   --sup-fg: #E9E6E0;
+  --lift-sup: 0 1px 2px rgba(0,0,0,0.32), 0 6px 18px rgba(0,0,0,0.34), inset 0 0 0 1px color-mix(in srgb, #5FC492 30%, transparent);
 }
 
 /* 2: violet */
@@ -587,6 +599,7 @@ html[data-scheme="dark"] .machine-accent-1 {
   --accent-soft: #E2DAF1;
   --sup-bg: #EBE6F4;
   --sup-fg: #1B1D24;
+  --lift-sup: 0 1px 2px rgba(18,20,26,0.05), 0 6px 18px rgba(18,20,26,0.06), inset 0 0 0 1px color-mix(in srgb, #5B3E8C 30%, transparent);
 }
 @media (prefers-color-scheme: dark) {
   .machine-accent-2 {
@@ -594,6 +607,7 @@ html[data-scheme="dark"] .machine-accent-1 {
     --accent-soft: #262034;
     --sup-bg: #282334;
     --sup-fg: #E9E6E0;
+    --lift-sup: 0 1px 2px rgba(0,0,0,0.32), 0 6px 18px rgba(0,0,0,0.34), inset 0 0 0 1px color-mix(in srgb, #C0A3F0 30%, transparent);
   }
 }
 html[data-scheme="light"] .machine-accent-2 {
@@ -601,12 +615,78 @@ html[data-scheme="light"] .machine-accent-2 {
   --accent-soft: #E2DAF1;
   --sup-bg: #EBE6F4;
   --sup-fg: #1B1D24;
+  --lift-sup: 0 1px 2px rgba(18,20,26,0.05), 0 6px 18px rgba(18,20,26,0.06), inset 0 0 0 1px color-mix(in srgb, #5B3E8C 30%, transparent);
 }
 html[data-scheme="dark"] .machine-accent-2 {
   --accent: #C0A3F0;
   --accent-soft: #262034;
   --sup-bg: #282334;
   --sup-fg: #E9E6E0;
+  --lift-sup: 0 1px 2px rgba(0,0,0,0.32), 0 6px 18px rgba(0,0,0,0.34), inset 0 0 0 1px color-mix(in srgb, #C0A3F0 30%, transparent);
+}
+
+/* 3: teal */
+.machine-accent-3 {
+  --accent: #1C6570;
+  --accent-soft: #D5E9EB;
+  --sup-bg: #E1EFF0;
+  --sup-fg: #1B1D24;
+  --lift-sup: 0 1px 2px rgba(18,20,26,0.05), 0 6px 18px rgba(18,20,26,0.06), inset 0 0 0 1px color-mix(in srgb, #1C6570 30%, transparent);
+}
+@media (prefers-color-scheme: dark) {
+  .machine-accent-3 {
+    --accent: #5EC6CC;
+    --accent-soft: #1B2A2C;
+    --sup-bg: #1E2E30;
+    --sup-fg: #E9E6E0;
+    --lift-sup: 0 1px 2px rgba(0,0,0,0.32), 0 6px 18px rgba(0,0,0,0.34), inset 0 0 0 1px color-mix(in srgb, #5EC6CC 30%, transparent);
+  }
+}
+html[data-scheme="light"] .machine-accent-3 {
+  --accent: #1C6570;
+  --accent-soft: #D5E9EB;
+  --sup-bg: #E1EFF0;
+  --sup-fg: #1B1D24;
+  --lift-sup: 0 1px 2px rgba(18,20,26,0.05), 0 6px 18px rgba(18,20,26,0.06), inset 0 0 0 1px color-mix(in srgb, #1C6570 30%, transparent);
+}
+html[data-scheme="dark"] .machine-accent-3 {
+  --accent: #5EC6CC;
+  --accent-soft: #1B2A2C;
+  --sup-bg: #1E2E30;
+  --sup-fg: #E9E6E0;
+  --lift-sup: 0 1px 2px rgba(0,0,0,0.32), 0 6px 18px rgba(0,0,0,0.34), inset 0 0 0 1px color-mix(in srgb, #5EC6CC 30%, transparent);
+}
+
+/* 4: rose */
+.machine-accent-4 {
+  --accent: #9A2F6B;
+  --accent-soft: #F2DCE7;
+  --sup-bg: #F6E7EE;
+  --sup-fg: #1B1D24;
+  --lift-sup: 0 1px 2px rgba(18,20,26,0.05), 0 6px 18px rgba(18,20,26,0.06), inset 0 0 0 1px color-mix(in srgb, #9A2F6B 30%, transparent);
+}
+@media (prefers-color-scheme: dark) {
+  .machine-accent-4 {
+    --accent: #F29CC8;
+    --accent-soft: #2E1F28;
+    --sup-bg: #31222B;
+    --sup-fg: #E9E6E0;
+    --lift-sup: 0 1px 2px rgba(0,0,0,0.32), 0 6px 18px rgba(0,0,0,0.34), inset 0 0 0 1px color-mix(in srgb, #F29CC8 30%, transparent);
+  }
+}
+html[data-scheme="light"] .machine-accent-4 {
+  --accent: #9A2F6B;
+  --accent-soft: #F2DCE7;
+  --sup-bg: #F6E7EE;
+  --sup-fg: #1B1D24;
+  --lift-sup: 0 1px 2px rgba(18,20,26,0.05), 0 6px 18px rgba(18,20,26,0.06), inset 0 0 0 1px color-mix(in srgb, #9A2F6B 30%, transparent);
+}
+html[data-scheme="dark"] .machine-accent-4 {
+  --accent: #F29CC8;
+  --accent-soft: #2E1F28;
+  --sup-bg: #31222B;
+  --sup-fg: #E9E6E0;
+  --lift-sup: 0 1px 2px rgba(0,0,0,0.32), 0 6px 18px rgba(0,0,0,0.34), inset 0 0 0 1px color-mix(in srgb, #F29CC8 30%, transparent);
 }
 
 /* Dark wells: color.dark.* + color.series-neutral.dark; derived surfaces use those roles. */

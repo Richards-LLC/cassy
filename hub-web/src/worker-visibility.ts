@@ -83,8 +83,8 @@ export function hiddenWorkersLabel(count: number): string {
 
 export function workersCommandLabel(revealed: boolean): { title: string; hint: string } {
   return revealed
-    ? { title: "Workers · Shown", hint: "Hide worker panes; supervisors only" }
-    : { title: "Workers · Hidden", hint: "Show worker panes for debugging" };
+    ? { title: "Hide worker panes", hint: "Show supervisors only" }
+    : { title: "Show worker panes", hint: "Each worker's own terminal, for debugging" };
 }
 
 /** Require a fresh staffed supervisor; recovery is explicit and pending work stays visible. */

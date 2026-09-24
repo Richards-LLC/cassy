@@ -16,7 +16,8 @@ use crate::config::Config;
 use crate::hub::{
     AuthStore, DEFAULT_HUB_PORT, DEFAULT_VIEWER_QUEUE_CAPACITY, DaemonConnector, HubProcessRecord,
     HubLockHolder, HubRuntimePaths, HubState, LocalSessionReadModel, MachineEventBus,
-    MachineIdentityStore, MachineMetadata, MachineTransport, PreAuthAuthorizer, Scope, SessionCatalog,
+    MachineIdentityStore, MachineMetadata, MachineTransport, PairingPrefill, PreAuthAuthorizer, Scope,
+    SessionCatalog,
     SessionMultiplexer, TailscaleServeManager, TailscaleServeReceipt, TransportSecurity,
     load_cloud_device_suggestions, router, spawn_attention_enricher, validate_control_bind,
 };
@@ -140,6 +141,10 @@ pub struct HubPairArgs {
         default_value = "machine:read,session:read,pane:read"
     )]
     pub scopes: Vec<String>,
+    /// Hub address the link prefills in the pairing form (defaults to the
+    /// running hub's Tailscale Serve URL, then `hub.public_url`)
+    #[arg(long)]
+    pub hub_url: Option<String>,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -1794,7 +1799,22 @@ fn pair_device(args: &HubPairArgs, cli: &Cli) -> Result<()> {
         .iter()
         .map(|scope| Scope::parse(scope))
         .collect::<Result<_>>()?;
-    let invitation = auth_store()?.mint_pairing(&args.origin, scopes, chrono::Utc::now())?;
+    let paths = HubRuntimePaths::default_for_user()?;
+    let configured_hub_url = crate::store::find_cas_root()
+        .ok()
+        .and_then(|cas_root| Config::load(&cas_root).ok())
+        .and_then(|config| config.hub.and_then(|hub| hub.public_url));
+    let prefill = PairingPrefill {
+        hub_url: super::hub_reverse_pairing::pairing_prefill_hub_url(
+            &paths,
+            args.hub_url.as_deref(),
+            configured_hub_url.as_deref(),
+        )?,
+        machine_label: Some(super::hub_reverse_pairing::machine_display_label()),
+    };
+    let invitation = auth_store()?
+        .mint_pairing(&args.origin, scopes, chrono::Utc::now())?
+        .with_prefill(prefill);
     if cli.json {
         println!(
             "{}",

@@ -60,6 +60,8 @@ export interface HubCallbacks {
   onMessageRejected?(session: string, clientRef: string, detail: string): void;
   onOperatorReply?(session: string, reply: OperatorReply): void;
   onConversationHistory?(session: string, page: ConversationHistoryPage): void;
+  /** The first history page was requested on attach; its answer is onConversationHistory. */
+  onConversationHistoryRequested?(session: string): void;
   onSessionSummary?(session: string, summary: SessionCardSummary): void;
   onPaneKeyframe(session: string, paneId: string, data: Uint8Array): void;
   onPaneSize?(session: string, paneId: string, cols: number, rows: number, authority: string): void;
@@ -976,7 +978,7 @@ export class HubConnectionSupervisor {
       // conversation disappear on reopen.
       const protocolVersion = Number(welcome.protocol_version ?? 1);
       if (protocolVersion >= 3 || (Array.isArray(welcome.capabilities) && welcome.capabilities.includes("conversation_history"))) {
-        this.requestConversationHistory(session);
+        if (this.requestConversationHistory(session)) this.callbacks.onConversationHistoryRequested?.(session);
       }
       for (const key of this.keyframeRequests) {
         if (key.startsWith(`${session}:`)) this.keyframeRequests.delete(key);

@@ -877,6 +877,9 @@ impl CasCore {
         // changes its branch. Unrelated task fields (notably the first
         // external_ref proof on a parked no-code task) must not be rejected
         // merely because a stale code anchor is no longer resolvable.
+        // cas-c85e: an explicit target in this same call outranks the
+        // WorkTarget an epic move would otherwise inherit.
+        let work_target_supplied = target_repo.is_some() || target_branch.is_some();
         let existing_repo_context = if target_repo.is_none() && target_branch.is_some() {
             match task.deliverables.work_target.as_ref() {
                 Some(target) => Some(
@@ -1233,6 +1236,16 @@ impl CasCore {
                         }
                     }
 
+                    // cas-e33f (GH #1004): a reassignment leaves the prior
+                    // assignee's commits on their factory branch.
+                    if let Some(prior) = task
+                        .assignee
+                        .clone()
+                        .filter(|prior| *prior != canonical_assignee)
+                    {
+                        task.deliverables
+                            .record_handoff_branch(&format!("factory/{prior}"));
+                    }
                     task.assignee = Some(canonical_assignee);
                     changes.push("assignee");
 
@@ -1538,6 +1551,10 @@ impl CasCore {
                 .into_iter()
                 .filter(|dep| dep.dep_type == DependencyType::ParentChild)
                 .collect();
+            let previous_parent_ids: Vec<String> = existing_parent_deps
+                .iter()
+                .map(|dep| dep.to_id.clone())
+                .collect();
 
             // Validate requested epic first so we don't drop existing relationships on failure.
             if !epic_id.is_empty() {
@@ -1601,6 +1618,35 @@ impl CasCore {
                     })?;
                 }
                 changes.push("epic");
+            }
+
+            // cas-c85e (GH #997): moving a task into an epic must move its
+            // delivery target too, exactly as dep_add parent-linking and
+            // create under an epic do. Otherwise a task created on trunk keeps
+            // its trunk WorkTarget and worktree_merge publishes straight to
+            // trunk, bypassing the epic's PR/CI gate. Runs even when the edge
+            // already exists so a task moved before this fix can be repaired
+            // by repeating `epic=`. A distinct explicit target is kept.
+            if !epic_id.is_empty() && !work_target_supplied {
+                let epic_task = task_store.get(epic_id).map_err(|e| McpError {
+                    code: ErrorCode::INTERNAL_ERROR,
+                    message: Cow::from(format!("Failed to reload epic {epic_id}: {e}")),
+                    data: None,
+                })?;
+                let previous_parents: Vec<Task> = previous_parent_ids
+                    .iter()
+                    .filter(|id| id.as_str() != epic_id)
+                    .filter_map(|id| task_store.get(id).ok())
+                    .collect();
+                if let Some(target) = super::repo_context::work_target_for_task_moved_into_epic(
+                    &task,
+                    &epic_task,
+                    &previous_parents,
+                ) && task.deliverables.work_target.as_ref() != Some(&target)
+                {
+                    task.deliverables.work_target = Some(target);
+                    changes.push("work_target");
+                }
             }
         }
 
@@ -2380,5 +2426,118 @@ mod assignment_freshness_branch_tests {
             Some("main"),
             "the declared WorkTarget is the delivery contract; neither parent nor focus may override it"
         );
+    }
+}
+
+#[cfg(test)]
+mod epic_move_work_target_tests {
+    //! cas-c85e (GH #997): `task update epic=` moves the delivery target with
+    //! the task, so worktree_merge never inherits a stale trunk target.
+    use super::*;
+    use cas_types::{Dependency, DependencyType, Task, TaskType, WorkTarget};
+    use tempfile::TempDir;
+
+    const REPO: &str = "project:cas-c85e";
+
+    fn target(branch: &str) -> WorkTarget {
+        WorkTarget {
+            repo_selector: REPO.into(),
+            target_branch: branch.into(),
+        }
+    }
+
+    fn epic(id: &str, lane: &str) -> Task {
+        let mut epic = Task::new(id.into(), format!("epic {lane}"));
+        epic.task_type = TaskType::Epic;
+        epic.branch = Some(lane.into());
+        epic.deliverables.work_target = Some(target("main"));
+        epic
+    }
+
+    async fn move_into(core: &CasCore, task_id: &str, epic_id: &str) {
+        let req: TaskUpdateRequest = serde_json::from_value(serde_json::json!({
+            "id": task_id,
+            "epic": epic_id,
+        }))
+        .unwrap();
+        core.cas_task_update(Parameters(req))
+            .await
+            .unwrap_or_else(|error| panic!("move {task_id} into {epic_id}: {}", error.message));
+    }
+
+    fn branch_of(store: &std::sync::Arc<dyn cas_store::TaskStore>, id: &str) -> String {
+        store
+            .get(id)
+            .unwrap()
+            .deliverables
+            .work_target
+            .expect("task keeps a WorkTarget")
+            .target_branch
+    }
+
+    #[tokio::test]
+    async fn update_epic_moves_work_target_to_epic_lane_but_keeps_explicit_pin_cas_c85e() {
+        let root = TempDir::new().unwrap();
+        let core = CasCore::with_daemon(root.path().to_path_buf(), None, None);
+        let store = core.open_task_store().unwrap();
+        store.init().unwrap();
+        store.add(&epic("cas-c85e-epica", "epic/a")).unwrap();
+        store.add(&epic("cas-c85e-epicb", "epic/b")).unwrap();
+
+        // The GH #997 shape: created standalone on trunk, then moved.
+        let mut trunk_task = Task::new("cas-c85e-trunk".into(), "created on main".into());
+        trunk_task.deliverables.work_target = Some(target("main"));
+        store.add(&trunk_task).unwrap();
+        move_into(&core, &trunk_task.id, "cas-c85e-epica").await;
+        assert_eq!(
+            branch_of(&store, &trunk_task.id),
+            "epic/a",
+            "a task moved into an epic must deliver on the epic lane, not main"
+        );
+
+        // Moving between epics carries the inherited lane along.
+        move_into(&core, &trunk_task.id, "cas-c85e-epicb").await;
+        assert_eq!(branch_of(&store, &trunk_task.id), "epic/b");
+
+        // A task with no target at all inherits too.
+        let bare = Task::new("cas-c85e-bare".into(), "no target".into());
+        store.add(&bare).unwrap();
+        move_into(&core, &bare.id, "cas-c85e-epica").await;
+        assert_eq!(branch_of(&store, &bare.id), "epic/a");
+
+        // An explicit distinct lane is operator authority and stays.
+        let mut pinned = Task::new("cas-c85e-pinned".into(), "release pin".into());
+        pinned.deliverables.work_target = Some(target("release/operator-selected"));
+        store.add(&pinned).unwrap();
+        move_into(&core, &pinned.id, "cas-c85e-epica").await;
+        assert_eq!(
+            branch_of(&store, &pinned.id),
+            "release/operator-selected",
+            "an explicit non-default target must not be overwritten"
+        );
+    }
+
+    #[tokio::test]
+    async fn repeating_update_epic_repairs_a_task_moved_before_the_fix_cas_c85e() {
+        let root = TempDir::new().unwrap();
+        let core = CasCore::with_daemon(root.path().to_path_buf(), None, None);
+        let store = core.open_task_store().unwrap();
+        store.init().unwrap();
+        store.add(&epic("cas-c85e-epic", "epic/live")).unwrap();
+
+        // Pre-fix state: the parent edge exists but the target is still main.
+        let mut stale = Task::new("cas-c85e-stale".into(), "stale".into());
+        stale.deliverables.work_target = Some(target("main"));
+        store.add(&stale).unwrap();
+        store
+            .add_dependency(&Dependency::new(
+                stale.id.clone(),
+                "cas-c85e-epic".into(),
+                DependencyType::ParentChild,
+            ))
+            .unwrap();
+
+        move_into(&core, &stale.id, "cas-c85e-epic").await;
+        assert_eq!(branch_of(&store, &stale.id), "epic/live");
     }
 }

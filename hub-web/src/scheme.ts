@@ -33,3 +33,28 @@ export function setScheme(next: SchemePreference): Scheme {
   try { localStorage.setItem(STORAGE_KEY, next); } catch { /* Preference lasts for this page. */ }
   return renderScheme();
 }
+
+/** The stored Appearance choice (not the resolved scheme): "system" stays "system". */
+export function schemePreference(): SchemePreference {
+  return preference;
+}
+
+const APPEARANCE_HINT: Record<SchemePreference, string> = { system: "Follow this device", light: "Use this scheme", dark: "Use this scheme" };
+
+/**
+ * Mark the Appearance row that is in effect (journey F20): a check before its
+ * name, "Current" as its description, and aria-current for assistive tech.
+ * Rows are updated in place, so the mark follows a choice without a rebuild.
+ */
+export function markAppearanceCommands(root: ParentNode, current: SchemePreference = preference): void {
+  for (const row of root.querySelectorAll<HTMLElement>("[data-palette-scheme]")) {
+    const scheme = row.dataset.paletteScheme as SchemePreference;
+    const active = scheme === current;
+    row.toggleAttribute("aria-current", active);
+    if (active) row.setAttribute("aria-current", "true");
+    const check = row.querySelector<HTMLElement>(".palette-check");
+    if (check) check.hidden = !active;
+    const hint = row.querySelector<HTMLElement>("small");
+    if (hint) hint.textContent = active ? (scheme === "system" ? "Current · follows this device" : "Current") : APPEARANCE_HINT[scheme];
+  }
+}

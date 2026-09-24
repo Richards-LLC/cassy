@@ -68,6 +68,27 @@ describe("ConversationView (Pebble thread)", () => {
     expect(view.element.querySelector(".history-end")).toBeNull();
     expect(view.element.querySelector(".working")).toBeNull();
   });
+  it("shows a loading line, not the empty state, until the first history page lands (cas-04ee)", () => {
+    const history = new ConversationHistory();
+    let loading = true;
+    const view = new ConversationView(document, history, { supervisor: "sup", loadingHistory: () => loading });
+    document.body.replaceChildren(view.element);
+    expect(view.element.dataset.mountOverlay).toBe("");
+    view.update();
+    const empty = view.element.querySelector<HTMLElement>(".empty")!;
+    expect(empty.hidden).toBe(false);
+    expect(empty.dataset.state).toBe("loading");
+    expect(empty.querySelector('[role="status"]')?.textContent).toBe("Loading your conversation with sup…");
+    expect(empty.textContent).not.toContain("Nothing waiting");
+    // The page lands empty: now the empty state is the truth.
+    loading = false; view.update();
+    expect(empty.dataset.state).toBeUndefined();
+    expect(empty.querySelector(".said")?.textContent).toBe("Nothing waiting on you. sup will write here when it needs a decision.");
+    // A page with turns shows the turns, whatever the flag says.
+    loading = true; history.reply(reply(1, "answer", "Ready."), at(9, 0)); view.update();
+    expect(empty.hidden).toBe(true);
+    expect(view.element.querySelector(".msgs")?.textContent).toContain("Ready.");
+  });
   it("coalesces status runs into one quiet line and shows the working indicator while executing", () => {
     const history = new ConversationHistory();
     let working = false;
@@ -194,28 +215,30 @@ describe("ConversationView (Pebble thread)", () => {
     const view = new ConversationView(document, history, { supervisor: "sup", editMessage: edit }); document.body.replaceChildren(view.element);
     history.submit("x", "sup", "Ship it", at(9, 0)); view.update();
     expect(view.element.querySelector('.conversation-turn[data-state="sending"] .conversation-delivery')?.textContent).toBe("Sending…");
-    history.reject("x", "no access"); view.update();
+    history.reject("x", "forbidden"); view.update();
     const refused = view.element.querySelector<HTMLElement>('.conversation-turn[data-state="error"]')!;
-    expect(refused.querySelector(".conversation-delivery")?.textContent).toBe("Not sent · no access");
-    refused.querySelector("button")!.click(); expect(edit).toHaveBeenCalledWith("Ship it");
+    expect(refused.querySelector(".conversation-delivery")?.textContent).toBe("Not sent · This device isn't the one in control of the session. Take control from the header, then retry.");
+    refused.querySelector("button")!.click(); expect(edit).toHaveBeenCalledWith("Ship it", expect.objectContaining({ id: "x" }));
   });
   it("marks a refused send as not sent: warning glyph, a Not sent lead, the reason, then Edit and Retry (P8, cas-b1ee)", () => {
     const history = new ConversationHistory();
     const edit = vi.fn(); const retry = vi.fn();
     const view = new ConversationView(document, history, { supervisor: "sup", editMessage: edit, retryMessage: retry }); document.body.replaceChildren(view.element);
-    history.submit("x", "sup", "Ship it", at(9, 0), 52); history.reject("x", "no access"); view.update();
+    history.submit("x", "sup", "Ship it", at(9, 0), 52); history.reject("x", "forbidden"); view.update();
     const refused = view.element.querySelector<HTMLElement>('.turn.you .bub[data-state="error"]')!;
     const label = refused.querySelector<HTMLElement>(".conversation-refused")!;
     expect(label.getAttribute("role")).toBe("status");
     expect(label.querySelector("svg.warn")?.getAttribute("aria-hidden")).toBe("true");
     expect(label.querySelector("b")?.textContent).toBe("Not sent");
-    expect(label.querySelector(".conversation-refused-reason")?.textContent).toBe("no access");
-    expect(label.textContent).toBe("Not sent · no access");
+    // F6: the hub's code becomes a plain reason and the step that gets it through.
+    expect(label.querySelector(".conversation-refused-reason")?.firstChild?.textContent).toBe("This device isn't the one in control of the session.");
+    expect(label.querySelector(".conversation-refused-next")?.textContent).toBe(" Take control from the header, then retry.");
+    expect(label.textContent).not.toContain("forbidden");
     const buttons = [...refused.querySelectorAll<HTMLButtonElement>(".conversation-actions button")];
     expect(buttons.map((button) => [button.className, button.textContent, button.getAttribute("aria-label")])).toEqual([
       ["conversation-edit", "Edit", "Edit message"], ["conversation-retry", "Retry", "Retry sending"],
     ]);
-    buttons[0]!.click(); expect(edit).toHaveBeenCalledWith("Ship it");
+    buttons[0]!.click(); expect(edit).toHaveBeenCalledWith("Ship it", expect.objectContaining({ id: "x" }));
     buttons[1]!.click(); expect(retry).toHaveBeenCalledWith(expect.objectContaining({ id: "x", text: "Ship it", replyTo: 52, state: "error" }));
     // Without the callbacks a refused send still says Not sent, with no dead buttons.
     const bare = new ConversationView(document, history, "sup"); bare.update();
@@ -226,6 +249,81 @@ describe("ConversationView (Pebble thread)", () => {
     const sending = view.element.querySelector<HTMLElement>('.bub[data-state="sending"]')!;
     expect(sending.querySelector(".conversation-delivery")?.textContent).toBe("Sending…");
     expect(sending.querySelector(".conversation-refused, .conversation-actions")).toBeNull();
+  });
+  it("names each message group's speaker and time for assistive tech (cas-17e3)", () => {
+    const history = new ConversationHistory();
+    const view = new ConversationView(document, history, { supervisor: "sup" }); document.body.replaceChildren(view.element);
+    history.submit("a", "sup", "Are we back?", at(12, 45));
+    history.reply(reply(2, "answer", "Back. Nothing was lost."), at(12, 45));
+    history.reply(reply(3, "status", "gate 1 of 3"), at(12, 46)); history.reply(reply(4, "status", "gate 2 of 3"), at(12, 46));
+    view.update();
+    const groups = [...view.element.querySelectorAll<HTMLElement>('.msgs [role="group"]')];
+    expect(groups.map((group) => group.getAttribute("aria-label")?.replace(/\d{1,2}:\d{2}/, "<t>"))).toEqual(["You, <t>", "sup, <t>", "sup, status, <t>"]);
+    // The visible time is not read twice: the group label carries it.
+    for (const time of view.element.querySelectorAll(".msgs time")) expect(time.getAttribute("aria-hidden")).toBe("true");
+  });
+  it("says Delivered on the latest delivered send until the reply lands (F5)", () => {
+    const history = new ConversationHistory();
+    const view = new ConversationView(document, history, { supervisor: "sup" }); document.body.replaceChildren(view.element);
+    history.submit("a", "sup", "First", at(9, 0)); view.update();
+    expect(view.element.querySelector(".conversation-delivered")).toBeNull();
+    history.acknowledge({ client_ref: "a", notification_id: 10, target: "sup", stamped: true }); view.update();
+    const delivered = view.element.querySelector<HTMLElement>('.bub[data-state="acknowledged"] .conversation-delivered')!;
+    expect(delivered.textContent).toBe("Delivered");
+    expect(delivered.getAttribute("role")).toBe("status");
+    expect(delivered.querySelector("svg.tick")?.getAttribute("aria-hidden")).toBe("true");
+    // A second send still in flight leaves the first as the latest delivered one.
+    history.submit("b", "sup", "Second", at(9, 1)); view.update();
+    expect(view.element.querySelectorAll(".conversation-delivered")).toHaveLength(1);
+    expect(view.element.querySelector('.bub[data-state="sending"] .conversation-delivery')?.textContent).toBe("Sending…");
+    // Once it is delivered too, only the latest says so.
+    history.acknowledge({ client_ref: "b", notification_id: 11, target: "sup", stamped: true }); view.update();
+    expect([...view.element.querySelectorAll(".conversation-delivered")].map((node) => node.closest(".bub")?.textContent)).toEqual(["SecondDelivered"]);
+    // Any supervisor turn after it is the evidence now; Delivered steps aside.
+    history.reply({ notification_id: 12, reply_to: null, message: "On it.", summary: "", device_id: "d" }, at(9, 2)); view.update();
+    expect(view.element.querySelector(".conversation-delivered")).toBeNull();
+    expect(history.delivered()).toBeUndefined();
+  });
+  it("retires a refused send once its edited version is sent: collapsed, no Retry (F6)", () => {
+    const history = new ConversationHistory();
+    const view = new ConversationView(document, history, { supervisor: "sup", editMessage: vi.fn(), retryMessage: vi.fn() }); document.body.replaceChildren(view.element);
+    history.submit("bad", "sup", "Ship it without the gate.", at(9, 0)); history.reject("bad", "forbidden"); view.update();
+    expect(history.preview()).toBe("Not sent: Ship it without the gate.");
+    expect(history.retireRefused("missing")).toBe(false);
+    expect(history.retireRefused("bad")).toBe(true);
+    history.submit("good", "sup", "Ship it after the gate passes.", at(9, 1)); view.update();
+    const retired = view.element.querySelector<HTMLElement>('.bub[data-state="error"]')!;
+    expect(retired.dataset.replaced).toBe("true");
+    expect(retired.querySelector(".conversation-replaced")?.textContent).toBe("Not sent · replaced by your edit");
+    expect(retired.querySelector(".conversation-actions, .conversation-retry, .conversation-edit")).toBeNull();
+    expect(history.preview()).toBe("You: Ship it after the gate passes.");
+    // Only a refused send can be retired.
+    expect(history.retireRefused("good")).toBe(false);
+  });
+  it("never previews unsent text as said, and skips a retired refusal (F6)", () => {
+    const history = new ConversationHistory();
+    expect(history.preview()).toBeUndefined();
+    history.reply({ notification_id: 1, reply_to: null, message: "Ready.", summary: "", device_id: "d" }, at(9, 0));
+    history.submit("bad", "sup", "Wrong", at(9, 1)); history.reject("bad", "forbidden");
+    expect(history.preview()).toBe("Not sent: Wrong");
+    history.retireRefused("bad");
+    expect(history.preview()).toBe("Ready.");
+  });
+  it("places a new send after every turn already shown, even when the machine's clock runs ahead (cas-ce17)", () => {
+    const history = new ConversationHistory();
+    const now = Date.now();
+    // Hydrated from a machine whose clock is five minutes ahead of this browser.
+    history.hydrateReply({ notification_id: 51, reply_to: null, message: "The gate went red.", summary: "", device_id: "d", kind: "blocker", attachments: [], at: new Date(now + 300_000).toISOString() });
+    history.reply({ notification_id: 52, reply_to: null, message: "Fix or ship?", summary: "", device_id: "d", kind: "ask", options: ["Fix", "Ship"] }, now);
+    expect(history.waiting().map((reply) => reply.notification_id)).toEqual([52, 51]);
+    history.submit("answer", "sup", "Fix", now, 52);
+    expect(history.events.at(-1)).toMatchObject({ kind: "send", value: { id: "answer" } });
+    // The ask is answered and the blocker acknowledged: nothing waits.
+    expect(history.waiting()).toEqual([]);
+    // A blocker arriving live after the answer waits, and follows the answer in the thread.
+    history.receive({ notification_id: 53, reply_to: null, message: "A second gate went red.", summary: "", device_id: "d", kind: "blocker" }, Date.now());
+    expect(history.waiting().map((reply) => reply.notification_id)).toEqual([53]);
+    expect(history.events.at(-1)).toMatchObject({ kind: "reply", value: { notification_id: 53 } });
   });
   it("discards only a refused send when a retry replaces it", () => {
     const history = new ConversationHistory();
@@ -244,16 +342,23 @@ describe("ConversationView (Pebble thread)", () => {
     expect(empty.hidden).toBe(false); expect(view.element.querySelector<HTMLElement>(".msgs")?.hidden).toBe(true);
     expect(view.element.querySelector(".msgs")?.children).toHaveLength(0);
     expect(empty.querySelector(".mono")?.textContent).toBe("B");
-    expect(empty.querySelector("b")?.textContent).toBe("calm-heron-5");
-    // P14: project · machine, as in the header and the list.
-    expect(empty.querySelector(".proj2")?.textContent).toBe("cas-hub-static · Bench");
+    // Journey F7: the project titles the card as it titles the header and the list; machine · codename beneath.
+    expect(empty.querySelector("b")?.textContent).toBe("cas-hub-static");
+    expect(empty.querySelector(".proj2")?.textContent).toBe("Bench · calm-heron-5");
+    expect(empty.querySelector(".proj2 > .codename")?.textContent).toBe("calm-heron-5");
     expect(empty.querySelector(".said")?.textContent).toBe("Nothing waiting on you. calm-heron-5 will write here when it needs a decision.");
     // The codename in the sentence is an identifier span that never breaks at its hyphen.
     expect(empty.querySelector(".said .codename")?.textContent).toBe("calm-heron-5");
-    expect(empty.querySelector("b")?.classList.contains("codename")).toBe(true);
+    expect(empty.querySelector("b")?.classList.contains("codename")).toBe(false);
     expect(empty.querySelector(".quiet")?.textContent).toBe("Promoted the hub to production on Monday.");
     echo = undefined; view.update();
     expect(empty.querySelector(".quiet")).toBeNull();
+    // No project: the codename is the only name and keeps the title.
+    const bare = new ConversationView(document, new ConversationHistory(), { supervisor: "calm-heron-5", machine: "Bench" });
+    bare.update();
+    const bareEmpty = bare.element.querySelector<HTMLElement>(".empty")!;
+    expect(bareEmpty.querySelector("b.codename")?.textContent).toBe("calm-heron-5");
+    expect(bareEmpty.querySelector(".proj2")?.textContent).toBe("Bench");
     history.reply(reply(1, "answer", "Back on it."), at(10, 0)); view.update();
     expect(empty.hidden).toBe(true); expect(view.element.querySelector<HTMLElement>(".msgs")?.hidden).toBe(false);
     expect(empty.children).toHaveLength(0);

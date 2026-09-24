@@ -1200,6 +1200,21 @@ struct KeepPayload {
     branches: Vec<(String, String)>,
 }
 
+/// The project and its production branch ids recorded in a generated Neon
+/// skill file's `neon-ids` keep block (GH #907): the worker SQL write guard
+/// reads them to recognise a production `branchId`. `None` when the file has
+/// no parsable block.
+pub fn recorded_production_branches(existing: &str) -> Option<(String, Vec<String>)> {
+    let payload = parse_keep_payload(existing).ok()?;
+    let production = payload
+        .branches
+        .into_iter()
+        .filter(|(label, _)| label == "production")
+        .map(|(_, id)| id)
+        .collect();
+    Some((payload.project_id, production))
+}
+
 fn parse_keep_payload(existing: &str) -> Result<KeepPayload> {
     let blocks = keep_block::extract(existing)
         .with_context(|| "parsing keep blocks in existing skill file")?;

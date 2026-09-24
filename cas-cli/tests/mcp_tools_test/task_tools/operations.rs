@@ -4695,6 +4695,13 @@ async fn test_supervisor_force_transfer_live_worker_task() {
         Some("target-worker-id"),
         "task assignee must be updated to target worker"
     );
+    // cas-e33f (GH #1004): the prior holder's branch is recorded so the new
+    // assignee's close measures where the task's commits actually live.
+    assert_eq!(
+        task_after.deliverables.handoff_branches,
+        vec!["factory/test-session-placeholder".to_string()],
+        "transfer must record the prior assignee's factory branch"
+    );
 }
 
 /// Negative: non-supervisor callers cannot use supervisor_override=true.

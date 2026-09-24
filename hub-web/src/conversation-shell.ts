@@ -1,4 +1,4 @@
-import { cloudBrand, escapeHtml, projectBadge, projectName } from "./cloud-brand";
+import { cloudBrand, escapeHtml, projectTitle } from "./cloud-brand";
 import { machineAccentClass, machineMonogram } from "./machine-accent";
 
 export interface ConversationShellModel {
@@ -10,33 +10,58 @@ export interface ConversationShellModel {
   selected: boolean;
   loaded: boolean;
   paired: boolean;
+  /** The list search's text, kept across shell rebuilds. */
+  searchQuery?: string;
 }
 
-/** Compose is a YOU action: the FAB takes the operator's constant colour
+export const CONVERSATION_SEARCH_LABEL = "Search conversations";
+export const CONVERSATION_SEARCH_PLACEHOLDER = "Search conversations (Ctrl K)";
+
+/** The list's visible name search (journey F8): filters rows by project,
+ * machine or supervisor. Ctrl/Cmd+K focuses it; pressed again from the field,
+ * it opens the command palette. */
+export function conversationSearchMarkup(query = ""): string {
+  return `<div class="conversation-search" role="search"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true" focusable="false"><circle cx="8.5" cy="8.5" r="5.5"/><path d="M13 13l4 4"/></svg><input id="conversation-search" type="search" aria-label="${CONVERSATION_SEARCH_LABEL}" aria-controls="conversation-list" aria-keyshortcuts="Control+K Meta+K" placeholder="${CONVERSATION_SEARCH_PLACEHOLDER}" autocomplete="off" spellcheck="false" enterkeyhint="go" value="${escapeHtml(query)}"></div>`;
+}
+
+/** The list's empty line while a search hides every row. */
+export function conversationNoMatchText(query: string): string {
+  return `No conversation matches “${query.trim()}”. Search looks at project, machine and supervisor names.`;
+}
+
+/** Compose is a YOU action: the button takes the operator's constant colour
  * (--you-bg at :root), never a machine accent, so it stays visible whatever
- * machine scope the shell root carries. */
-export const composeFabMarkup = '<button id="compose-fab" class="compose-fab" type="button" aria-label="Write to a supervisor"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true" focusable="false"><path d="M12 5v14M5 12h14"/></svg></button>';
+ * machine scope the shell root carries. On a phone it is a labelled bar in the
+ * list's own flow, above the status footer, not a floating icon (journey F15). */
+export const composeFabMarkup = '<button id="compose-fab" class="compose-fab" type="button" aria-label="Write to a supervisor"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true" focusable="false"><path d="M12 5v14M5 12h14"/></svg><span class="compose-fab-label">Write to a supervisor</span></button>';
 
 /**
  * The one header above the thread (cas-5b2d): the Pebble thead — machine
- * monogram in the accent, supervisor bold with the project badge beside it,
- * project · machine · connection in mono beneath (same order as a list row) — with the cas-11b01 back link and
+ * monogram in the accent, the project bold as the title (once: journey F7),
+ * machine · supervisor codename · connection in mono beneath (same order as a
+ * list row) — with the cas-11b01 back link and
  * Terminal view control on the row above it. Elevated with --lift-head; the
  * thread view itself renders no header inside this shell.
  *
  * On phone the two rows fold into one (cas-1776): the back link shows only its
  * "‹" glyph and the Terminal control only "Terminal"; each button's aria-label
  * keeps its accessible name ("‹ Conversations", "Terminal view") the same at
- * every width. The codename ellipsises (its title carries it whole) and the
- * host line ellipsises its project · machine part while the connection state
+ * every width. The project ellipsises (its title carries it whole) and the
+ * host line ellipsises its machine · codename part while the connection state
  * after it stays visible.
  */
 export function conversationHeaderMarkup(model: ConversationShellModel): string {
   const host = model.host || "";
-  return `<header class="conversation-heading thead"><div class="conversation-topline"><button id="conversation-back" type="button" aria-label="‹ Conversations"><span class="back-glyph">‹</span><span class="back-label"> Conversations</span></button>${cloudBrand()}<button id="conversation-terminal" type="button" aria-label="Terminal view">Terminal<span class="terminal-suffix"> view</span></button></div><div class="conversation-identity"><span class="conversation-avatar" aria-hidden="true">${escapeHtml(machineMonogram(host || model.supervisor || "?"))}</span><div class="id"><h1><b title="${escapeHtml(model.supervisor || "Supervisor unavailable")}">${escapeHtml(model.supervisor || "Supervisor unavailable")}</b>${projectBadge(model.projectDir)}</h1><span class="conversation-host"><span class="host-where">${escapeHtml([projectName(model.projectDir), host].filter(Boolean).join(" · "))}</span><span id="conversation-connection" role="status"></span></span></div></div></header>`;
+  // No project named: the codename is the title and the host line names only the machine (cas-1ca1 F03).
+  const project = projectTitle(model.projectDir);
+  const supervisor = model.supervisor || "Supervisor unavailable";
+  const title = project ?? supervisor;
+  return `<header class="conversation-heading thead"><div class="conversation-topline"><button id="conversation-back" type="button" aria-label="‹ Conversations"><span class="back-glyph">‹</span><span class="back-label"> Conversations</span></button>${cloudBrand()}<button id="conversation-terminal" type="button" aria-label="Terminal view">Terminal<span class="terminal-suffix"> view</span></button></div><div class="conversation-identity"><span class="conversation-avatar" aria-hidden="true">${escapeHtml(machineMonogram(host || model.supervisor || "?"))}</span><div class="id"><h1><b title="${escapeHtml(title)}"${project ? "" : ' class="codename"'}>${escapeHtml(title)}</b></h1><span class="conversation-host"><span class="host-where">${project ? `${host ? `${escapeHtml(host)} · ` : ""}<span class="codename">${escapeHtml(supervisor)}</span>` : escapeHtml(host)}</span><span id="conversation-connection" role="status"></span></span></div></div></header>`;
 }
 
-/** Attach is a real affordance beside the field but has no transport yet, so it is disabled and says so. */
+/** Attaching files from this browser has no transport yet; the clip stays out of the composer until it does. */
+export const ATTACH_SUPPORTED = false;
+/** The clip's reason, for when it comes back disabled-with-a-reason or enabled. */
 export const ATTACH_DISABLED_REASON = "Attaching files from this device is not supported yet. Supervisors send reports to you; sending files to a supervisor is coming.";
 export const composerClipMarkup = `<button type="button" class="composer-clip" disabled aria-disabled="true" title="${ATTACH_DISABLED_REASON}" aria-label="Attach a file (not yet supported)"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M14.8 9.1l-5 5a3.2 3.2 0 01-4.6-4.6l6-6a2.1 2.1 0 013 3l-6 6a1 1 0 01-1.4-1.4l5.3-5.3"/></svg></button>`;
 const SEND_GLYPH = '<svg class="send-glyph" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true" focusable="false"><path d="M2.4 9.1l14.3-6.4c.7-.3 1.4.4 1.1 1.1l-6.4 14.3c-.3.7-1.4.6-1.5-.2l-.8-5.3-5.3-.8c-.8-.1-.9-1.2-.2-1.5z"/></svg>';
@@ -58,7 +83,10 @@ export function dressComposer(composer: HTMLElement, supervisor?: string): void 
   if (input) {
     input.placeholder = `Message ${name}`;
     input.rows = 1;
-    if (!composer.querySelector(".composer-clip")) input.insertAdjacentHTML("beforebegin", composerClipMarkup);
+    // Hidden until attaching works (cas-17e3): a control that can never be
+    // used is noise for every reader, and a dead stop for keyboard users.
+    if (ATTACH_SUPPORTED && !composer.querySelector(".composer-clip")) input.insertAdjacentHTML("beforebegin", composerClipMarkup);
+    if (!ATTACH_SUPPORTED) composer.querySelector(".composer-clip")?.remove();
   }
   const button = composer.querySelector<HTMLElement>("#message-send");
   if (button) {
@@ -74,6 +102,38 @@ export function dressComposer(composer: HTMLElement, supervisor?: string): void 
 /** The list's empty line: loading, unpaired, or paired with nothing live. */
 export function conversationEmptyText(catalogLoaded: boolean, machineCount: number): string {
   return !catalogLoaded ? "Loading paired machines…" : machineCount === 0 ? "Pair a machine to start your first conversation." : "No live supervisors listed. Use Appearance & commands to show dormant sessions for recovery.";
+}
+
+/** What the list knows about one paired machine's session catalog. */
+export interface MachineCatalogProgress {
+  /** The hub has answered with a session catalog at least once in this visit. */
+  catalogReceived: boolean;
+  phase: string | undefined;
+}
+
+export type ConversationListState = { readonly kind: "loading" } | { readonly kind: "text"; readonly text: string };
+
+/**
+ * What an empty conversation list shows (journey F14). Until browser storage
+ * and the machines' first catalog responses arrive it is a loading skeleton,
+ * never "Not paired" or "No live supervisors". The empty copy needs an actual
+ * empty catalog; a machine that could not be reached on its first attempt is
+ * named as unreachable instead of being read as "nothing live".
+ */
+export function conversationListState(storageLoaded: boolean, machines: readonly MachineCatalogProgress[]): ConversationListState {
+  if (!storageLoaded) return { kind: "loading" };
+  if (machines.length === 0) return { kind: "text", text: conversationEmptyText(true, 0) };
+  const unanswered = machines.filter((machine) => !machine.catalogReceived);
+  // Still on a first attempt: no answer yet, and no failure either.
+  if (unanswered.some((machine) => machine.phase !== "failed" && machine.phase !== "backoff")) return { kind: "loading" };
+  if (unanswered.length === machines.length) return { kind: "text", text: "Can't reach your paired machines yet. Cassy keeps retrying; check that the machines are awake and on your network." };
+  return { kind: "text", text: conversationEmptyText(true, machines.length) };
+}
+
+/** Three placeholder rows in the list's own geometry, announced once as loading. */
+export function conversationSkeletonMarkup(): string {
+  const row = '<span class="conversation-skeleton-row" aria-hidden="true"><span class="conversation-skeleton-avatar"></span><span class="conversation-skeleton-lines"><span></span><span></span></span></span>';
+  return `<div class="conversation-skeleton" role="status"><span class="sr-only">Loading your conversations…</span>${row}${row}${row}</div>`;
 }
 
 /**
@@ -95,7 +155,7 @@ function contextRailMarkup(selected: boolean): string {
 }
 
 /** Appearance & commands as a header icon button (P13): out of the phone thumb zone, named for assistive tech. */
-export const appearanceButtonMarkup = '<button id="command-palette-toggle" class="icon-button" type="button" aria-label="Appearance &amp; commands" title="Appearance &amp; commands"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" aria-hidden="true" focusable="false"><path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="17" r="2"/></svg></button>';
+export const appearanceButtonMarkup = '<button id="command-palette-toggle" class="icon-button" type="button" aria-label="Appearance &amp; commands" title="Appearance &amp; commands (Ctrl K twice)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" aria-hidden="true" focusable="false"><path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="17" r="2"/></svg></button>';
 
 export function conversationShellMarkup(model: ConversationShellModel): string {
   // First run: the welcome carries the one primary "Pair a machine". The list
@@ -105,11 +165,11 @@ export function conversationShellMarkup(model: ConversationShellModel): string {
   const welcomePairs = !model.selected && model.loaded && !model.paired;
   return `<div class="conversation-shell${model.selected ? " thread-open" : ""}${welcomePairs ? " welcome-pairs" : ""}${model.machineId ? ` ${machineAccentClass(model.machineId)}` : ""}">
     <aside class="conversation-sidebar" aria-label="Supervisor conversations">
-      <header class="conversation-list-heading"><div class="conversation-list-top">${cloudBrand()}${appearanceButtonMarkup}</div><div class="conversation-list-title"><h1>Conversations</h1><button id="pair-toggle"${welcomePairs ? ' class="primary"' : ""} type="button">Pair a machine</button></div><p>Your projects. Your supervisors.</p></header>
+      <header class="conversation-list-heading"><div class="conversation-list-top">${cloudBrand()}${appearanceButtonMarkup}</div><div class="conversation-list-title"><h1>Conversations</h1><button id="pair-toggle"${welcomePairs ? ' class="primary"' : ""} type="button">Pair a machine</button></div><p>Your projects. Your supervisors.</p>${model.paired ? conversationSearchMarkup(model.searchQuery) : ""}</header>
       <nav id="conversation-list" aria-label="Choose a supervisor"></nav>
       <div id="conversation-empty" class="conversation-empty" hidden></div>
-      <footer><div id="hub-footer-badges" class="hub-footer-badges" aria-label="Hub status"></div></footer>
       ${model.paired ? composeFabMarkup : ""}
+      <footer><div id="hub-footer-badges" class="hub-footer-badges" aria-label="Hub status"></div></footer>
     </aside>
     <main class="conversation-main">
       ${model.selected ? `${conversationHeaderMarkup(model)}<section id="conversation-pane-slot" class="conversation-pane-slot"></section><div id="conversation-composer-slot"></div>` : `<div class="conversation-welcome"><span class="conversation-eyebrow">SUPERVISOR CONVERSATIONS</span><h2>Stay close to the work.</h2><p>${!model.loaded ? "Loading your paired machines…" : !model.paired ? "Pair a machine to read your supervisors’ words and talk to them here." : "Choose a project to read its supervisor’s words and send an instruction."}</p>${!model.paired && model.loaded ? '<button id="empty-pair" class="primary" type="button">Pair a machine</button>' : ""}</div>`}

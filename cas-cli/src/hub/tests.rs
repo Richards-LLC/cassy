@@ -1613,6 +1613,69 @@ fn h2_pair_03_invitation_url_declares_the_scope_ceiling_it_minted() {
     assert_eq!(parsed, control.scopes);
 }
 
+#[test]
+fn h2_pair_04_invitation_url_prefills_hub_address_and_machine_name() {
+    use chrono::Utc;
+
+    let temp = private_tempdir();
+    let auth = AuthStore::open(temp.path().join("hub"), "machine-test").unwrap();
+    let invitation = auth
+        .mint_pairing(
+            "https://controller.example",
+            Scope::default_read_only(),
+            Utc::now(),
+        )
+        .unwrap()
+        .with_prefill(PairingPrefill {
+            hub_url: Some("https://studio.tail.ts.net".into()),
+            machine_label: Some("Studio Mac & co".into()),
+        });
+    let (_, fragment) = invitation.url.split_once('#').unwrap();
+    assert!(
+        fragment.starts_with(&format!("pair={}&hub=machine-test&", invitation.token)),
+        "{}",
+        invitation.url
+    );
+    assert!(
+        fragment
+            .contains("&hub_url=https%3A%2F%2Fstudio.tail.ts.net&machine=Studio%20Mac%20%26%20co&"),
+        "prefill must be percent-encoded so it cannot inject parameters: {}",
+        invitation.url
+    );
+    // `scopes` stays last, so a reader that takes everything after it still works.
+    assert!(
+        invitation
+            .url
+            .ends_with("&scopes=machine-read,session-read,pane-read"),
+        "{}",
+        invitation.url
+    );
+    // The hosted relay delivers the address and name itself; its URL is unchanged.
+    let relay = invitation.url_for(PairingInvitationTarget::HostedRelay);
+    assert_eq!(
+        relay,
+        format!(
+            "https://controller.example/#pair={}&hub=machine-test",
+            invitation.token
+        )
+    );
+
+    // Blank values are omitted rather than printed as empty parameters.
+    let blank = auth
+        .mint_pairing(
+            "https://controller.example",
+            Scope::default_read_only(),
+            Utc::now(),
+        )
+        .unwrap()
+        .with_prefill(PairingPrefill {
+            hub_url: None,
+            machine_label: Some("  ".into()),
+        });
+    assert!(!blank.url.contains("hub_url="), "{}", blank.url);
+    assert!(!blank.url.contains("machine="), "{}", blank.url);
+}
+
 #[tokio::test]
 async fn h2_ws_04_ticket_is_five_minute_bound_single_use_under_race() {
     use chrono::{Duration, Utc};

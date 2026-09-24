@@ -65,6 +65,18 @@ describe("ask object (Pebble 3, treatment A)", () => {
 });
 
 describe("ask shown once (P1, cas-b1ee)", () => {
+  it("keeps the flow copy of a pinned ask to a one-line reference (F18)", () => {
+    const history = new ConversationHistory();
+    const long = "Gate run 33512 failed on that one warning. Fix it in-train — one worker, about ten minutes — or ship 3.26.0 with it allowlisted?\nDetails follow.";
+    const ask = reply(70, "ask", long);
+    history.reply(ask, at(9, 58));
+    const flow = renderAskObject(ask, context(ask, history, () => {}));
+    expect([...flow.querySelectorAll(".obj-body > p")].map((p) => p.className)).toEqual(["ask-excerpt", "ask-waiting"]);
+    expect(flow.querySelector(".ask-excerpt")?.textContent).toBe("Gate run 33512 failed on that one warning. Fix it in-train — one worker, about ten…");
+    // The pinned card still carries the whole question.
+    expect(renderAskObject(ask, context(ask, history, () => {}, true)).textContent).toContain("or ship 3.26.0 with it allowlisted?");
+  });
+
   it("collapses the pinned ask's flow copy to a waiting pebble with no chips, while the pinned copy keeps them", () => {
     const history = new ConversationHistory();
     const ask = reply(50, "ask", "Fix or ship?", { options: ["Fix in-train", "Ship with allowlist"] });

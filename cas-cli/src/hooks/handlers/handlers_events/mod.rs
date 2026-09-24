@@ -1,6 +1,7 @@
 mod attribution;
 pub(crate) mod codemap;
 pub(crate) mod message_display;
+mod neon_sql_guard;
 mod notifications;
 mod pre_tool;
 pub(crate) mod project_overview;

@@ -1,6 +1,5 @@
 use crate::Result;
 use crate::agent_store::SqliteAgentStore;
-use crate::shared_db::ImmediateTx;
 use cas_types::Agent;
 use chrono::Utc;
 use rusqlite::params;
@@ -23,7 +22,7 @@ impl SqliteAgentStore {
     }
     pub(crate) fn coord_graceful_shutdown(&self, agent_id: &str) -> Result<Vec<String>> {
         let conn = self.lock_conn()?;
-        let tx = ImmediateTx::new(&conn)?;
+        let tx = crate::shared_db::begin_immediate_with_retry(&conn)?;
 
         // Get all active task leases for this agent
         let mut stmt = tx.prepare_cached(

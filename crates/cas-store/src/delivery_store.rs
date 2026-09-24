@@ -284,8 +284,11 @@ pub fn create_worker_delivery(
     state: WorkerDeliveryState,
     actor_agent_id: &str,
 ) -> Result<WorkerDeliveryTransaction> {
-    let mut conn = open(root)?;
-    let tx = conn.transaction()?;
+    let conn = open(root)?;
+    // BEGIN IMMEDIATE with bounded retry, not a DEFERRED transaction: a
+    // deferred read-then-write fails on upgrade under fleet contention
+    // (cas-d5c8, GH #921).
+    let tx = crate::shared_db::begin_immediate_with_retry(&conn)?;
     let transaction = create_worker_delivery_with_conn(&tx, receipt, state, actor_agent_id)?;
     tx.commit()?;
     Ok(transaction)
@@ -569,8 +572,10 @@ pub fn transition_worker_delivery(
     merge_commit_sha: Option<&str>,
     error: Option<(&str, &str)>,
 ) -> Result<WorkerDeliveryTransaction> {
-    let mut conn = open(root)?;
-    let tx = conn.transaction()?;
+    let conn = open(root)?;
+    // Reads the current state, then writes: take the write lock first so the
+    // upgrade cannot fail under contention (cas-d5c8, GH #921).
+    let tx = crate::shared_db::begin_immediate_with_retry(&conn)?;
     let current = tx.query_row(
         "SELECT id, receipt_id, task_id, state, supervisor_agent_id, verification_id,
                 merge_commit_sha, last_error_code, last_error_detail, created_at, updated_at

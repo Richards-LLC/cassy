@@ -20,7 +20,6 @@ use crate::event_store::record_event_with_conn;
 use std::fmt;
 
 use crate::recording_store::capture_task_event;
-use crate::shared_db::ImmediateTx;
 use crate::supervisor_queue_store::{
     NotificationPriority, SqliteSupervisorQueueStore, SupervisorQueueStore,
 };
@@ -1015,7 +1014,7 @@ pub fn create_verification_dispatch_bound_with_conn(
     supervisor_recovery: bool,
 ) -> Result<VerificationDispatch> {
     if conn.is_autocommit() {
-        let tx = ImmediateTx::new(conn)?;
+        let tx = crate::shared_db::begin_immediate_with_retry(conn)?;
         let dispatch = create_verification_dispatch_bound_in_transaction(
             &tx,
             task_id,
@@ -1255,7 +1254,7 @@ pub fn timeout_verification_dispatch(
 ) -> Result<Option<VerificationDispatch>> {
     let store = SqliteVerificationStore::open(cas_dir)?;
     let conn = store.conn.lock().map_err(lock_err)?;
-    let tx = ImmediateTx::new(&conn)?;
+    let tx = crate::shared_db::begin_immediate_with_retry(&conn)?;
     let dispatch_id: Option<String> = tx
         .query_row(
             "SELECT id FROM verification_dispatches
@@ -1295,7 +1294,7 @@ pub fn invalidate_verification_dispatch_for_new_cycle(
 ) -> Result<Option<VerificationDispatch>> {
     let store = SqliteVerificationStore::open(cas_dir)?;
     let conn = store.conn.lock().map_err(lock_err)?;
-    let tx = ImmediateTx::new(&conn)?;
+    let tx = crate::shared_db::begin_immediate_with_retry(&conn)?;
     let Some(dispatch) = get_latest_verification_dispatch_with_conn(&tx, task_id)? else {
         tx.commit()?;
         return Ok(None);
@@ -1315,7 +1314,7 @@ pub fn invalidate_verification_dispatch_for_repository_drift(
 ) -> Result<VerificationDispatch> {
     let store = SqliteVerificationStore::open(cas_dir)?;
     let conn = store.conn.lock().map_err(lock_err)?;
-    let tx = ImmediateTx::new(&conn)?;
+    let tx = crate::shared_db::begin_immediate_with_retry(&conn)?;
     let dispatch = get_verification_dispatch_with_conn(&tx, dispatch_id)?;
     let latest = get_latest_verification_dispatch_with_conn(&tx, &dispatch.task_id)?
         .ok_or_else(|| StoreError::NotFound("latest verification dispatch".to_string()))?;
@@ -1446,7 +1445,7 @@ pub fn reopen_terminal_task_atomic(
     }
     let store = SqliteVerificationStore::open(cas_dir)?;
     let conn = store.conn.lock().map_err(lock_err)?;
-    let tx = ImmediateTx::new(&conn)?;
+    let tx = crate::shared_db::begin_immediate_with_retry(&conn)?;
 
     let dispatch = match get_latest_verification_dispatch_with_conn(&tx, &task.id)? {
         Some(dispatch)
@@ -1560,7 +1559,7 @@ pub fn invalidate_verification_dispatch_and_reopen_task_exact(
 ) -> Result<VerificationDispatch> {
     let store = SqliteVerificationStore::open(cas_dir)?;
     let conn = store.conn.lock().map_err(lock_err)?;
-    let tx = ImmediateTx::new(&conn)?;
+    let tx = crate::shared_db::begin_immediate_with_retry(&conn)?;
     let selected = get_verification_dispatch_with_conn(&tx, dispatch_id)?;
     if selected.task_id != task.id
         || selected.receipt_id.is_some()
@@ -1733,7 +1732,7 @@ fn correct_parked_delivery_proof_scope_inner(
     let store = SqliteVerificationStore::open(cas_dir)?;
     let conn = store.conn.lock().map_err(lock_err)?;
     conn.execute_batch(crate::delivery_store::DELIVERY_SCHEMA)?;
-    let tx = ImmediateTx::new(&conn)?;
+    let tx = crate::shared_db::begin_immediate_with_retry(&conn)?;
 
     let dispatch = get_latest_verification_dispatch_with_conn(&tx, &corrected_task.id)?
         .filter(|dispatch| dispatch.task_id == corrected_task.id);
@@ -1956,7 +1955,7 @@ pub fn request_changes_for_parked_delivery(
     let store = SqliteVerificationStore::open(cas_dir)?;
     let conn = store.conn.lock().map_err(lock_err)?;
     conn.execute_batch(crate::delivery_store::DELIVERY_SCHEMA)?;
-    let tx = ImmediateTx::new(&conn)?;
+    let tx = crate::shared_db::begin_immediate_with_retry(&conn)?;
 
     let dispatch = get_latest_verification_dispatch_with_conn(&tx, task_id)?
         .filter(|dispatch| dispatch.task_id == task_id);

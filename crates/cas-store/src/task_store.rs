@@ -1395,18 +1395,25 @@ impl TaskStore for SqliteTaskStore {
 
     // Dependency operations
 
+    // Dependency writes retry a busy database like every other task write
+    // (cas-d5c8, GH #921): one busy_timeout window is not enough under a
+    // fleet plus build load.
     fn add_dependency(&self, dep: &Dependency) -> Result<()> {
-        let conn = crate::shared_db::lock_connection(&self.conn)?;
-        Self::add_dependency_with_conn(&conn, dep, true)
+        crate::shared_db::with_write_retry(|| {
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
+            Self::add_dependency_with_conn(&conn, dep, true)
+        })
     }
 
     fn remove_dependency(&self, from_id: &str, to_id: &str) -> Result<()> {
-        let conn = crate::shared_db::lock_connection(&self.conn)?;
-        conn.execute(
-            "DELETE FROM dependencies WHERE from_id = ? AND to_id = ?",
-            params![from_id, to_id],
-        )?;
-        Ok(())
+        crate::shared_db::with_write_retry(|| {
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
+            conn.execute(
+                "DELETE FROM dependencies WHERE from_id = ? AND to_id = ?",
+                params![from_id, to_id],
+            )?;
+            Ok(())
+        })
     }
 
     fn remove_dependency_of_type(
@@ -1416,12 +1423,14 @@ impl TaskStore for SqliteTaskStore {
         dep_type: DependencyType,
     ) -> Result<bool> {
         let dep_type_str = dep_type.to_string();
-        let conn = crate::shared_db::lock_connection(&self.conn)?;
-        let rows_deleted = conn.execute(
-            "DELETE FROM dependencies WHERE from_id = ? AND to_id = ? AND dep_type = ?",
-            params![from_id, to_id, dep_type_str],
-        )?;
-        Ok(rows_deleted > 0)
+        crate::shared_db::with_write_retry(|| {
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
+            let rows_deleted = conn.execute(
+                "DELETE FROM dependencies WHERE from_id = ? AND to_id = ? AND dep_type = ?",
+                params![from_id, to_id, dep_type_str],
+            )?;
+            Ok(rows_deleted > 0)
+        })
     }
 
     fn get_dependencies(&self, task_id: &str) -> Result<Vec<Dependency>> {

@@ -330,11 +330,15 @@ impl CasCore {
             .parked_branch
             .clone()
             .unwrap_or_else(|| format!("factory/{implementer}"));
-        let head = task
+        // A commit the task itself stands behind: the parked anchor or the
+        // close's receipt.
+        let recorded_head = task
             .deliverables
             .factory_branch_anchor
             .clone()
-            .or_else(|| commit_receipt.and_then(|receipt| resolve_commit(repo, receipt)))
+            .or_else(|| commit_receipt.and_then(|receipt| resolve_commit(repo, receipt)));
+        let head = recorded_head
+            .clone()
             .or_else(|| {
                 // The live branch tip is the delivery only while it is itself
                 // merged: months later it carries unrelated work.
@@ -347,6 +351,26 @@ impl CasCore {
         let changed = head
             .as_deref()
             .and_then(|head| crate::qa_pass::integrated_paths(repo, head, target_branch));
+        // cas-2387: a no-code task owes no review only while it delivered no
+        // user-facing code. Then any round an earlier close opened for it is
+        // withdrawn, so it cannot hold the close.
+        // Only a recorded delivery commit is evidence of the task's own code.
+        // A no-code task's branch tip usually sits on its base, and the
+        // first merge above that base is someone else's change.
+        let own_changed = recorded_head.as_ref().and(changed.as_deref());
+        if crate::qa_pass::no_code_without_surface(task, own_changed) {
+            let reason = "no-code task delivered no user-facing code";
+            if let Ok(Some(pass)) = cas_store::withdraw_open_qa_pass(
+                &self.cas_root,
+                &task.id,
+                reason,
+                true,
+                chrono::Utc::now(),
+            ) {
+                self.cancel_withdrawn_qa_task(&pass, reason);
+            }
+            return QaCloseGate::Clear;
+        }
         if passes.iter().all(|pass| pass.is_withdrawn()) {
             let journeys = changed
                 .as_deref()

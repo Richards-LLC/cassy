@@ -640,26 +640,39 @@ async fn clearing_the_demo_statement_withdraws_a_pending_round_cas_5c38() {
     );
 }
 
-/// cas-5c38: a no-code task has no delivery for a reviewer to walk, so the
-/// independent QA gate never binds it, even with a demo_statement.
+/// cas-5c38: a no-code task with no code has no delivery for a reviewer to
+/// walk, so the independent QA gate never binds it, even with a demo
+/// statement. The domdms shape: the branch tip sits on its base, and the
+/// branch is not rebuilt.
 #[tokio::test]
-async fn no_code_tasks_are_never_gated_by_independent_qa_cas_5c38() {
+async fn no_code_tasks_without_code_are_never_gated_by_independent_qa_cas_5c38() {
     let (temp, core, repo, task_id) = fixture();
     let _env = env_test_lock();
     let cas_dir = repo.join(".cas");
     let _keep = &temp;
+    // No commits: the worker's branch is its base.
+    git(&repo, &["checkout", "-q", "main"]);
+    git(&repo, &["branch", "-f", "factory/test-agent", "main"]);
+    // Someone else's user-facing merge lands on the target afterwards; it
+    // must not be mistaken for this task's delivery.
+    git(&repo, &["checkout", "-q", "-b", "factory/other"]);
+    commit_file(&repo, "web/other.css", ".other{}\n", "other worker's UI");
+    git(&repo, &["checkout", "-q", "main"]);
+    git(&repo, &["merge", "-q", "--no-ff", "-m", "merge other", "factory/other"]);
     let tasks = open_task_store(&cas_dir).unwrap();
     let mut task = tasks.get(&task_id).unwrap();
     task.demo_statement = "The ops dashboard shows the new tenant".to_string();
     task.execution_note = Some("no-code".to_string());
+    task.external_ref = Some("https://example.test/ops-receipt".to_string());
     tasks.update(&task).unwrap();
 
     let text = close_text(&core, &task_id).await;
     assert!(!text.contains("INDEPENDENT QA"), "{text}");
+    assert!(!text.contains("MERGE REQUIRED"), "{text}");
     assert!(cas_store::list_qa_passes(&cas_dir, &task_id).unwrap().is_empty(), "{text}");
 
-    // A round an older Cassy opened for it no longer binds the merge, and a
-    // supervisor's qa_waive withdraws it although there is no delivery tip.
+    // A round an older Cassy opened for it: a supervisor's qa_waive
+    // withdraws it although there is no delivery tip.
     let now = chrono::Utc::now();
     cas_store::open_qa_pass(
         &cas_dir,
@@ -674,11 +687,6 @@ async fn no_code_tasks_are_never_gated_by_independent_qa_cas_5c38() {
         now,
     )
     .unwrap();
-    assert!(
-        cas::qa_pass::supervisor_merge_refusal(&cas_dir, &repo, "git merge factory/test-agent")
-            .is_none(),
-        "no-code tasks are never gated"
-    );
     let supervisor = supervisor_core(&cas_dir);
     let _role = SupervisorRole::enter();
     let waived = extract_text(
@@ -694,6 +702,38 @@ async fn no_code_tasks_are_never_gated_by_independent_qa_cas_5c38() {
     assert!(waived.contains("no-code"), "{waived}");
     let passes = cas_store::list_qa_passes(&cas_dir, &task_id).unwrap();
     assert!(passes[0].is_withdrawn(), "{waived}");
+}
+
+/// cas-2387: declaring a task no-code never hides user-facing code. A task
+/// that kept `execution_note=no-code` (with its external_ref proof) while its
+/// branch carries a UI change is sent for independent review at the park,
+/// and a raw merge stays blocked until the verdict.
+#[tokio::test]
+async fn no_code_task_carrying_user_facing_code_is_still_reviewed_cas_2387() {
+    let (temp, core, repo, task_id) = fixture();
+    let _env = env_test_lock();
+    let cas_dir = repo.join(".cas");
+    let _keep = &temp;
+    let tasks = open_task_store(&cas_dir).unwrap();
+    let mut task = tasks.get(&task_id).unwrap();
+    task.execution_note = Some("no-code".to_string());
+    task.external_ref = Some("https://example.test/ops-receipt".to_string());
+    tasks.update(&task).unwrap();
+
+    let parked = close_text(&core, &task_id).await;
+    assert!(parked.contains("MERGE REQUIRED"), "{parked}");
+    assert!(parked.contains("INDEPENDENT QA DISPATCHED"), "{parked}");
+    assert!(parked.contains("path:web/composer.css"), "{parked}");
+    let passes = cas_store::list_qa_passes(&cas_dir, &task_id).unwrap();
+    assert_eq!(passes.len(), 1);
+    assert!(passes[0].state.is_active());
+    let guard = cas::qa_pass::supervisor_merge_refusal(
+        &cas_dir,
+        &repo,
+        "git merge --no-ff factory/test-agent",
+    )
+    .expect("the no-code declaration must not unblock an unreviewed UI merge");
+    assert!(guard.contains(&qa_task_id(&cas_dir, &task_id)), "{guard}");
 }
 
 #[tokio::test]

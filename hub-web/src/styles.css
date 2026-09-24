@@ -2066,6 +2066,9 @@ dialog form,
   overflow-y: auto;
   overscroll-behavior: contain;
   align-content: start;
+  /* A focused field (a prefilled link opens on Operator label) scrolls clear
+     of the sticky action row instead of sliding under it. */
+  scroll-padding-bottom: calc(var(--button-height) + var(--space-4));
 }
 
 dialog h2,

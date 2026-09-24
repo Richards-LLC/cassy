@@ -58,6 +58,8 @@ export class HubDouble {
   /** The hub origin each pairing exchange was posted to, in order. */
   readonly exchangeOrigins: string[] = [];
   readonly historyRequests: Array<Record<string, unknown>> = [];
+  /** Artifact ids Commander asked a signed view URL for (cassy#910). */
+  readonly artifactRequests: string[] = [];
   private readonly sockets = new Map<string, WebSocketRoute>();
   private readonly waiters: Array<() => void> = [];
   private readonly held = new Set<string>();
@@ -252,6 +254,15 @@ export class HubDouble {
       });
     }
     if (path === "/v1/auth/websocket-ticket") return route.fulfill({ json: { ticket: "journey-ticket" } });
+    // cassy#910: a signed view URL for an artifact the session published. An
+    // id starting `art-local` was never uploaded to Cloud.
+    const artifactView = /^\/v1\/sessions\/[^/]+\/artifacts\/([^/]+)\/url$/.exec(path);
+    if (artifactView) {
+      const id = decodeURIComponent(artifactView[1]!);
+      this.artifactRequests.push(id);
+      if (id.startsWith("art-local")) return route.fulfill({ status: 409, json: { error: "artifact_not_in_cloud", status: "local" } });
+      return route.fulfill({ json: { artifact_id: id, cloud_artifact_id: `cloud-${id}`, url: `https://store.test/view/${encodeURIComponent(id)}?sig=journey`, expires_at: new Date(Date.now() + 600_000).toISOString(), name: `${id}.pdf`, mime: "application/pdf", size_bytes: 1024 } });
+    }
     if (path.endsWith("/lease")) return route.fulfill({ json: { held_by_me: true, controller_label: "Journey browser" } });
     if (path.endsWith("/status")) {
       return route.fulfill({ json: { tasks_in_progress: [{ id: "task-journey", title: "Journey suite", status: "in_progress" }], tasks_ready: [], agents: [] } });

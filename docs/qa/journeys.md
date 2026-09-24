@@ -117,7 +117,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 - **Entry:** a conversation with earlier turns from past days
 - **Goal:** I can read what was said before, back to the start
-- **Touches:** `hub-web/src/conversation-history.ts`, `hub-web/src/conversation-view.ts`, `hub-web/src/thread-model.ts`, `hub-web/src/markdown-renderer.ts`, `hub-web/src/operator-thread.ts`, `hub-web/src/time.ts`
+- **Touches:** `hub-web/src/conversation-history.ts`, `hub-web/src/conversation-view.ts`, `hub-web/src/thread-model.ts`, `hub-web/src/markdown-renderer.ts`, `hub-web/src/operator-thread.ts`, `hub-web/src/time.ts`, `hub-web/src/attachment-sheet.ts`, `hub-web/src/artifact-open.ts`
 - **Suite:** `hub-web/e2e/journeys/read-history.journey.ts`
 - **Gaps:** history pages come from the double; real rows are covered by `hub-web/scripts/conversation-history-qa.mjs`
 
@@ -126,6 +126,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 1. Open the conversation and see the recent turns — the latest exchange is on screen at once
 2. Load earlier turns — "Load earlier" fetches the previous page
 3. Reach the start of the conversation — "No earlier history" appears, with day separators
+4. Open a report the supervisor sent — tapping the file opens the hosted copy in a new tab through a short-lived signed link from the machine; a file that was never uploaded to Cloud says so instead of opening a blank tab
 
 **Expected experience**
 

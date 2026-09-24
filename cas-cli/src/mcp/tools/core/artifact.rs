@@ -114,15 +114,7 @@ fn internal(error: impl std::fmt::Display) -> McpError {
 /// credentials — a supported state, reported in the response rather than
 /// failing the call.
 fn upload_client(cas_root: &std::path::Path) -> Option<ArtifactUploadClient> {
-    let config =
-        crate::cloud::CloudConfig::load_from_cas_dir_inheriting_user_credentials(cas_root).ok()?;
-    if !config.is_logged_in() {
-        return None;
-    }
-    Some(ArtifactUploadClient::new(
-        &config.endpoint,
-        &config.token.clone()?,
-    ))
+    crate::artifacts::cloud_client(cas_root)
 }
 
 fn render_publish(outcome: &PublishOutcome) -> String {

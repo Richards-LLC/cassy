@@ -13,7 +13,6 @@ use crate::artifacts::{
     PublishContext, PublishDisposition, PublishOutcome, cloud::ArtifactUploadClient,
     paths::PublishRoots, publish,
 };
-use crate::cloud::CloudConfig;
 use crate::config::Config;
 use cas_store::{PublishedArtifact, SqliteArtifactStore};
 
@@ -64,12 +63,7 @@ pub fn execute(
 /// Build the upload client, or `None` when this installation has no
 /// credentials. Absence is a supported state, not an error.
 fn upload_client(cas_root: &Path) -> Option<ArtifactUploadClient> {
-    let config = CloudConfig::load_from_cas_dir_inheriting_user_credentials(cas_root).ok()?;
-    if !config.is_logged_in() {
-        return None;
-    }
-    let token = config.token.clone()?;
-    Some(ArtifactUploadClient::new(&config.endpoint, &token))
+    crate::artifacts::cloud_client(cas_root)
 }
 
 fn execute_publish(args: &PublishArgs, cas_root: &Path, json: bool) -> anyhow::Result<()> {

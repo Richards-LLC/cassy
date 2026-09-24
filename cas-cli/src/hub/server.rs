@@ -132,6 +132,10 @@ pub fn router<R: SessionReadModel>(state: HubState<R>) -> Router {
                 .options(preflight::<R>),
         )
         .route("/v1/sessions/{session}/attach", get(attach::<R>))
+        .route(
+            "/v1/sessions/{session}/artifacts/{artifact}/url",
+            get(artifact_view_url::<R>).options(preflight::<R>),
+        )
         .route("/{*path}", options(preflight::<R>))
         .with_state(state)
         .layer(middleware::from_fn_with_state(
@@ -590,6 +594,111 @@ async fn status<R: SessionReadModel>(
         Ok(Err(_)) => generic_not_found(),
         Err(error) => internal_error(error.into()),
     }
+}
+
+/// A short-lived signed URL for viewing an artifact the session published
+/// (cassy#910), so a Commander report card can open the hosted copy. The
+/// machine asks Cloud with its own credentials: the browser never holds a
+/// Cloud token, and the URL it gets points at the blob store's own origin.
+/// Only a record Cloud committed has one; the reply says why otherwise.
+async fn artifact_view_url<R: SessionReadModel>(
+    State(state): State<HubState<R>>,
+    Path((session, artifact)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    let uri = format!("/v1/sessions/{session}/artifacts/{artifact}/url");
+    if authorize(
+        &state,
+        HubAction::SessionRead,
+        Scope::SessionRead,
+        &headers,
+        "GET",
+        &uri,
+    )
+    .is_err()
+    {
+        return unauthorized();
+    }
+    let outcome = tokio::task::spawn_blocking(move || {
+        let session = crate::bridge::server::session::resolve_session_by_name(&session)?;
+        let root =
+            crate::bridge::server::session::cas_root_for_session_with_fallback(&session, None)?;
+        let store = cas_store::SqliteArtifactStore::open(&root)?;
+        let client = crate::artifacts::cloud_client(&root);
+        Ok::<_, anyhow::Error>(crate::artifacts::signed_view(
+            &store,
+            client.as_ref(),
+            &artifact,
+        ))
+    })
+    .await;
+    let response = match outcome {
+        Err(error) => return internal_error(error.into()),
+        Ok(Err(_)) => return generic_not_found(),
+        Ok(Ok(Ok(signed))) => Json(serde_json::json!({
+            "artifact_id": signed.artifact.id,
+            "cloud_artifact_id": signed.view.artifact_id,
+            "url": signed.view.url,
+            "expires_at": signed.view.expires_at,
+            "name": signed.view.name.unwrap_or(signed.artifact.name),
+            "mime": signed.view.mime.unwrap_or(signed.artifact.mime),
+            "size_bytes": signed.view.size_bytes.unwrap_or(signed.artifact.size_bytes),
+        }))
+        .into_response(),
+        Ok(Ok(Err(error))) => artifact_view_error(error),
+    };
+    let mut response = with_cors(response, &headers);
+    // The URL is a short-lived capability: never cache the answer.
+    response
+        .headers_mut()
+        .insert("cache-control", HeaderValue::from_static("no-store"));
+    response
+}
+
+/// The reply for an artifact that has no view URL, with a stable `error`
+/// code Commander turns into plain words.
+fn artifact_view_error(error: crate::artifacts::ViewError) -> Response {
+    use crate::artifacts::ViewError;
+    use crate::artifacts::cloud::ViewFailure;
+    let (status, code, detail) = match &error {
+        ViewError::Unknown(_) => return generic_not_found(),
+        ViewError::NotInCloud { status } => (
+            StatusCode::CONFLICT,
+            "artifact_not_in_cloud",
+            Some(status.clone()),
+        ),
+        ViewError::NotLoggedIn => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "cloud_not_configured",
+            None,
+        ),
+        ViewError::Cloud(ViewFailure::NotCommitted { status, .. }) => (
+            StatusCode::CONFLICT,
+            "artifact_not_committed",
+            status.clone(),
+        ),
+        ViewError::Cloud(ViewFailure::NotFound { .. }) => {
+            (StatusCode::NOT_FOUND, "cloud_artifact_not_found", None)
+        }
+        ViewError::Cloud(ViewFailure::NotLive { .. }) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "cloud_storage_not_live",
+            None,
+        ),
+        ViewError::Cloud(ViewFailure::Failed { .. }) => {
+            (StatusCode::BAD_GATEWAY, "cloud_failed", None)
+        }
+        ViewError::Store(_) => {
+            return internal_error(anyhow::anyhow!("{error}"));
+        }
+    };
+    // The failing interaction goes to the machine's log, not to the browser.
+    tracing::warn!(%error, code, "artifact view URL unavailable");
+    (
+        status,
+        Json(serde_json::json!({ "error": code, "status": detail })),
+    )
+        .into_response()
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1846,6 +1955,66 @@ fn internal_error(error: anyhow::Error) -> Response {
         Json(serde_json::json!({"error":"internal_error"})),
     )
         .into_response()
+}
+
+/// cassy#910: an artifact without a view URL answers with a status and a
+/// stable code Commander can put into words; nothing internal leaks.
+#[cfg(test)]
+mod artifact_view_tests {
+    use super::*;
+    use crate::artifacts::ViewError;
+    use crate::artifacts::cloud::ViewFailure;
+
+    #[test]
+    fn each_reason_an_artifact_cannot_be_viewed_has_its_own_status() {
+        let cases = [
+            (
+                ViewError::NotInCloud {
+                    status: "local".to_string(),
+                },
+                StatusCode::CONFLICT,
+            ),
+            (ViewError::NotLoggedIn, StatusCode::SERVICE_UNAVAILABLE),
+            (
+                ViewError::Cloud(ViewFailure::NotCommitted {
+                    status: Some("pending".to_string()),
+                    interaction: "GET …".to_string(),
+                }),
+                StatusCode::CONFLICT,
+            ),
+            (
+                ViewError::Cloud(ViewFailure::NotFound {
+                    interaction: "GET …".to_string(),
+                }),
+                StatusCode::NOT_FOUND,
+            ),
+            (
+                ViewError::Cloud(ViewFailure::NotLive {
+                    reason: "501".to_string(),
+                }),
+                StatusCode::SERVICE_UNAVAILABLE,
+            ),
+            (
+                ViewError::Cloud(ViewFailure::Failed {
+                    reason: "boom".to_string(),
+                    interaction: "GET …".to_string(),
+                }),
+                StatusCode::BAD_GATEWAY,
+            ),
+            (
+                ViewError::Unknown("art-x".to_string()),
+                StatusCode::NOT_FOUND,
+            ),
+            (
+                ViewError::Store("disk".to_string()),
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ),
+        ];
+        for (error, expected) in cases {
+            let label = format!("{error:?}");
+            assert_eq!(artifact_view_error(error).status(), expected, "{label}");
+        }
+    }
 }
 
 #[cfg(test)]

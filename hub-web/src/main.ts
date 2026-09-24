@@ -9,6 +9,7 @@ import { ConversationView } from "./conversation-view";
 import { REFUSED_SEE_ABOVE, refusalSentence, refusal } from "./refusal";
 import { installAttentionObjects } from "./attention-objects";
 import { installAttachmentSheet } from "./attachment-sheet";
+import { artifactIdFromHref, artifactLinkFor, openArtifact } from "./artifact-open";
 import { arrangeConversationShell, bindKeyboardViewport, conversationListState, conversationNoMatchText, conversationSearchPlaceholder, conversationSkeletonMarkup, KEYBOARD_HINT_MEDIA_QUERY } from "./conversation-shell";
 import { clockLabel } from "./thread-model";
 import { syncContextRail } from "./context-rail";
@@ -3706,6 +3707,28 @@ app.addEventListener("focusout", () => {
     // rebuild runs when focus leaves the palette. Likewise the session picker.
     if (active instanceof HTMLElement && active.closest("#command-palette[open], #session-picker[open]")) return;
     deferredRender.focusLeft();
+  });
+});
+
+// A tap on any artifact (the thread's sheet, the context rail, the operator
+// thread) opens the hosted copy through a signed view URL (cassy issue 910).
+app.addEventListener("click", (event) => {
+  const link = artifactLinkFor(event.target);
+  const artifactId = artifactIdFromHref(link?.getAttribute("href"));
+  if (!link || !artifactId || event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+  event.preventDefault();
+  const machineId = selectedMachineId;
+  const session = selectedSession;
+  const connection = machineId ? connections.get(machineId) : undefined;
+  if (!machineId || !session || !connection) {
+    toast("Open the conversation this file came from to view it.");
+    return;
+  }
+  void openArtifact({
+    fetchView: () => connection.artifactView(session, artifactId),
+    openWindow: () => window.open("about:blank", "_blank"),
+    notify: toast,
+    machineLabel: machines.get(machineId)?.label ?? "that machine",
   });
 });
 

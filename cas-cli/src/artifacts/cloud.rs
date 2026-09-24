@@ -1,6 +1,8 @@
 //! Cloud client for the three-step artifact upload (petra-stella-cloud#84).
 //!
-//! `begin` → streaming `PUT` to the returned upload URL → `complete`.
+//! `begin` → streaming `PUT` to the returned upload URL → `complete`, and
+//! `GET /api/artifacts/{id}/url` for a short-lived signed view URL once the
+//! artifact is committed (cassy#910).
 //!
 //! Two properties this module exists to hold:
 //!
@@ -139,6 +141,15 @@ pub struct BeginRequest {
     pub mime: String,
     pub size_bytes: u64,
     pub sha256: String,
+    /// The team the task belongs to. With `project_id` it also lets a task
+    /// that has not been pushed to Cloud yet name its scope; without them
+    /// `begin` answers 422 for an unsynced task. Filled from the client's
+    /// scope when the caller leaves it unset.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub team_id: Option<String>,
+    /// The task's canonical project id, sent together with `team_id`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
 }
 
 /// What `begin` answers.
@@ -162,6 +173,83 @@ pub struct CompleteResponse {
     pub url: Option<String>,
 }
 
+/// What `GET /api/artifacts/{id}/url` answers: a short-lived signed URL on
+/// the blob store's own origin, for viewing a committed artifact.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ViewUrlResponse {
+    pub artifact_id: String,
+    /// Signed and short-lived: hand it to the viewer, never persist or log it.
+    pub url: String,
+    #[serde(default)]
+    pub expires_at: Option<String>,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub mime: Option<String>,
+    #[serde(default)]
+    pub size_bytes: Option<u64>,
+}
+
+// The signed URL is a capability; keep it out of any Debug output.
+impl fmt::Debug for ViewUrlResponse {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ViewUrlResponse")
+            .field("artifact_id", &self.artifact_id)
+            .field("url", &"[redacted]")
+            .field("expires_at", &self.expires_at)
+            .field("name", &self.name)
+            .field("mime", &self.mime)
+            .field("size_bytes", &self.size_bytes)
+            .finish()
+    }
+}
+
+/// Why a signed view URL could not be had.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ViewFailure {
+    /// The endpoint answered 404/501: no artifact storage here.
+    NotLive { reason: String },
+    /// 404 for the artifact: unknown, or in a team this account is not in.
+    NotFound { interaction: String },
+    /// 409: the artifact exists but is not committed (pending or rejected).
+    NotCommitted {
+        status: Option<String>,
+        interaction: String,
+    },
+    /// Anything else.
+    Failed { reason: String, interaction: String },
+}
+
+impl fmt::Display for ViewFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ViewFailure::NotLive { reason } => write!(f, "{reason}"),
+            ViewFailure::NotFound { interaction } => write!(
+                f,
+                "Cloud has no artifact by that id for this account.\n  Failing interaction: {interaction}"
+            ),
+            ViewFailure::NotCommitted {
+                status,
+                interaction,
+            } => write!(
+                f,
+                "the artifact is not committed in Cloud yet ({}), so it has no view URL.\n  \
+                 Failing interaction: {interaction}",
+                status.as_deref().unwrap_or("status not stated")
+            ),
+            ViewFailure::Failed {
+                reason,
+                interaction,
+            } => write!(
+                f,
+                "could not get a view URL: {reason}\n  Failing interaction: {interaction}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ViewFailure {}
+
 /// Blocking client for the artifact endpoints, matching the rest of `cloud/`.
 #[derive(Clone)]
 pub struct ArtifactUploadClient {
@@ -169,6 +257,8 @@ pub struct ArtifactUploadClient {
     token: String,
     timeout: Duration,
     upload_timeout: Duration,
+    team_id: Option<String>,
+    project_id: Option<String>,
 }
 
 // The derived Debug would print the bearer token; every other cloud client in
@@ -192,7 +282,21 @@ impl ArtifactUploadClient {
             token: token.to_string(),
             timeout: DEFAULT_TIMEOUT,
             upload_timeout: UPLOAD_TIMEOUT,
+            team_id: None,
+            project_id: None,
         }
+    }
+
+    /// The team and project `begin` names when the request leaves them unset.
+    /// The project is only sent alongside a team, which is how Cloud accepts
+    /// it.
+    pub fn with_scope(mut self, team_id: Option<String>, project_id: Option<String>) -> Self {
+        let team_id = team_id.filter(|id| !id.trim().is_empty());
+        self.project_id = project_id
+            .filter(|id| !id.trim().is_empty())
+            .filter(|_| team_id.is_some());
+        self.team_id = team_id;
+        self
     }
 
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
@@ -204,11 +308,16 @@ impl ArtifactUploadClient {
     /// Reserve an artifact id and get a place to put the bytes.
     pub fn begin(&self, request: &BeginRequest) -> Result<BeginResponse, UploadFailure> {
         let url = format!("{}/api/artifacts/begin", self.endpoint);
+        let mut body = request.clone();
+        if body.team_id.is_none() {
+            body.team_id = self.team_id.clone();
+            body.project_id = body.project_id.or_else(|| self.project_id.clone());
+        }
         let response = ureq::post(&url)
             .set("Authorization", &format!("Bearer {}", self.token))
             .set("Content-Type", "application/json")
             .timeout(self.timeout)
-            .send_json(request);
+            .send_json(&body);
 
         let (status, body) = match classify(response) {
             Ok(ok) => ok,
@@ -345,6 +454,91 @@ impl ArtifactUploadClient {
         // treat the missing URL as "private", not as a failure.
         Ok(serde_json::from_str(&body).unwrap_or_default())
     }
+
+    /// A short-lived signed URL for viewing a committed artifact
+    /// (`GET /api/artifacts/{id}/url`). `artifact_id` is Cloud's id, the one
+    /// `begin` returned.
+    pub fn view_url(&self, artifact_id: &str) -> Result<ViewUrlResponse, ViewFailure> {
+        let id = artifact_id.trim();
+        if id.is_empty()
+            || !id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
+            return Err(ViewFailure::Failed {
+                reason: "the Cloud artifact id is not a plain id".to_string(),
+                interaction: format!("artifact id {id:?}"),
+            });
+        }
+        let url = format!("{}/api/artifacts/{id}/url", self.endpoint);
+        let response = ureq::get(&url)
+            .set("Authorization", &format!("Bearer {}", self.token))
+            .timeout(self.timeout)
+            .call();
+        let (status, body) = match classify(response) {
+            Ok(ok) => ok,
+            Err(transport) => {
+                return Err(ViewFailure::Failed {
+                    reason: transport,
+                    interaction: format!("GET {url}"),
+                });
+            }
+        };
+        let interaction = format!("GET {url} -> {status}: {}", body_excerpt(&body));
+        match status {
+            501 => {
+                return Err(ViewFailure::NotLive {
+                    reason: format!(
+                        "Cloud artifact storage is not live on this endpoint yet (GET /api/artifacts/{{id}}/url answered {status})"
+                    ),
+                });
+            }
+            404 => return Err(ViewFailure::NotFound { interaction }),
+            409 => {
+                let status = serde_json::from_str::<serde_json::Value>(&body)
+                    .ok()
+                    .and_then(|value| {
+                        value
+                            .get("status")
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_string)
+                    });
+                return Err(ViewFailure::NotCommitted {
+                    status,
+                    interaction,
+                });
+            }
+            status if !(200..300).contains(&status) => {
+                return Err(ViewFailure::Failed {
+                    reason: format!("the server answered {status}"),
+                    interaction,
+                });
+            }
+            _ => {}
+        }
+        let view: ViewUrlResponse =
+            serde_json::from_str(&body).map_err(|error| ViewFailure::Failed {
+                reason: format!("could not read the server's response: {error}"),
+                interaction: format!("GET {url} -> {status}"),
+            })?;
+        if !is_https_or_loopback(&view.url) {
+            return Err(ViewFailure::Failed {
+                reason: "the server returned a view location that is not https".to_string(),
+                // Deliberately not the URL: it carries a signature.
+                interaction: format!("GET {url} -> {status}"),
+            });
+        }
+        Ok(view)
+    }
+}
+
+/// `https`, or loopback `http` so a mock server can stand in.
+fn is_https_or_loopback(url: &str) -> bool {
+    let lowered = url.trim().to_ascii_lowercase();
+    lowered.starts_with("https://")
+        || lowered.starts_with("http://127.0.0.1")
+        || lowered.starts_with("http://localhost")
+        || lowered.starts_with("http://0.0.0.0")
 }
 
 /// Normalise ureq's split of non-2xx between `Ok` and `Err(Status)` into one
@@ -396,11 +590,7 @@ fn stored_digest(body: &str) -> ArtifactDigest {
 /// permitted so a mock server can stand in, matching `is_acceptable_endpoint`.
 fn check_upload_url(url: &str) -> Result<(), UploadFailure> {
     let lowered = url.trim().to_ascii_lowercase();
-    let acceptable = lowered.starts_with("https://")
-        || lowered.starts_with("http://127.0.0.1")
-        || lowered.starts_with("http://localhost")
-        || lowered.starts_with("http://0.0.0.0");
-    if acceptable {
+    if is_https_or_loopback(url) {
         return Ok(());
     }
     Err(UploadFailure::failed(
@@ -443,6 +633,8 @@ mod tests {
             mime: "application/pdf".to_string(),
             size_bytes: 11,
             sha256: "c".repeat(64),
+            team_id: None,
+            project_id: None,
         }
     }
 
@@ -787,6 +979,160 @@ mod credential_redaction_tests {
         assert!(
             rendered.contains("cloud-42"),
             "non-secret fields stay useful: {rendered}"
+        );
+    }
+}
+
+/// cassy#910: the signed view URL and the begin scope.
+#[cfg(test)]
+mod view_url_tests {
+    use super::*;
+    use wiremock::matchers::{body_string_contains, header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[tokio::test]
+    async fn a_committed_artifact_yields_its_signed_view_url() {
+        let server = MockServer::start().await;
+        let signed = format!("{}/blob/brief.pdf?token=signed-view-9", server.uri());
+        Mock::given(method("GET"))
+            .and(path("/api/artifacts/cloud-42/url"))
+            .and(header("Authorization", "Bearer test-tok"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "artifact_id": "cloud-42",
+                "url": signed,
+                "expires_at": "2026-09-24T21:10:00.000Z",
+                "name": "brief.pdf",
+                "mime": "application/pdf",
+                "size_bytes": 11
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let endpoint = server.uri();
+        let view = tokio::task::spawn_blocking(move || {
+            ArtifactUploadClient::new(&endpoint, "test-tok").view_url("cloud-42")
+        })
+        .await
+        .unwrap()
+        .expect("a committed artifact has a view URL");
+        assert_eq!(view.artifact_id, "cloud-42");
+        assert!(view.url.ends_with("token=signed-view-9"));
+        assert_eq!(view.mime.as_deref(), Some("application/pdf"));
+        assert_eq!(view.size_bytes, Some(11));
+        assert!(
+            !format!("{view:?}").contains("signed-view-9"),
+            "Debug never prints the signed URL"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_pending_artifact_has_no_view_url_and_says_why() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/artifacts/cloud-43/url"))
+            .respond_with(ResponseTemplate::new(409).set_body_json(serde_json::json!({
+                "error": "artifact_not_committed",
+                "message": "only verified artifacts can be viewed",
+                "status": "pending"
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/artifacts/cloud-44/url"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+                "error": "Artifact not found"
+            })))
+            .mount(&server)
+            .await;
+
+        let endpoint = server.uri();
+        let (pending, unknown, odd) = tokio::task::spawn_blocking(move || {
+            let client = ArtifactUploadClient::new(&endpoint, "test-tok");
+            (
+                client.view_url("cloud-43"),
+                client.view_url("cloud-44"),
+                client.view_url("../begin"),
+            )
+        })
+        .await
+        .unwrap();
+        match pending.expect_err("pending is not viewable") {
+            ViewFailure::NotCommitted { status, .. } => {
+                assert_eq!(status.as_deref(), Some("pending"))
+            }
+            other => panic!("expected NotCommitted, got {other:?}"),
+        }
+        assert!(matches!(
+            unknown.expect_err("unknown"),
+            ViewFailure::NotFound { .. }
+        ));
+        assert!(
+            matches!(odd.expect_err("path-like id"), ViewFailure::Failed { .. }),
+            "an id that is not a plain id never reaches the network"
+        );
+    }
+
+    #[tokio::test]
+    async fn begin_names_the_clients_team_and_project_scope() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/artifacts/begin"))
+            .and(body_string_contains("\"team_id\":\"team-7\""))
+            .and(body_string_contains(
+                "\"project_id\":\"github.com/richards-llc/cassy\"",
+            ))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "artifact_id": "cloud-45",
+                "upload_url": format!("{}/object/put", server.uri()),
+                "required_headers": {}
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let endpoint = server.uri();
+        let begun = tokio::task::spawn_blocking(move || {
+            ArtifactUploadClient::new(&endpoint, "test-tok")
+                .with_scope(
+                    Some("team-7".to_string()),
+                    Some("github.com/richards-llc/cassy".to_string()),
+                )
+                .begin(&BeginRequest {
+                    task_id: "cas-29624".to_string(),
+                    name: "brief.pdf".to_string(),
+                    mime: "application/pdf".to_string(),
+                    size_bytes: 11,
+                    sha256: "c".repeat(64),
+                    team_id: None,
+                    project_id: None,
+                })
+        })
+        .await
+        .unwrap()
+        .expect("scoped begin");
+        assert_eq!(begun.artifact_id, "cloud-45");
+    }
+
+    #[test]
+    fn a_project_is_only_sent_with_a_team() {
+        let client = ArtifactUploadClient::new("https://cloud.example", "t")
+            .with_scope(None, Some("github.com/richards-llc/cassy".to_string()));
+        assert_eq!(client.team_id, None);
+        assert_eq!(client.project_id, None);
+        let body = serde_json::to_string(&BeginRequest {
+            task_id: "cas-1".to_string(),
+            name: "a.txt".to_string(),
+            mime: "text/plain".to_string(),
+            size_bytes: 1,
+            sha256: "c".repeat(64),
+            team_id: None,
+            project_id: None,
+        })
+        .unwrap();
+        assert!(
+            !body.contains("team_id") && !body.contains("project_id"),
+            "{body}"
         );
     }
 }

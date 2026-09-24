@@ -2,6 +2,11 @@ import { test, expect } from "./journey";
 import { ATLAS, STUDIO, PELICAN, OTTER } from "./world";
 
 test("HUB-J8 switch between machines without losing my place", async ({ page, journey }) => {
+  // Eight stages, two of them waiting out renders (6 s each) and a phone
+  // viewport: alone it takes about 45 s, and in an 11-way parallel run on a
+  // loaded factory host it passed the project's 60 s budget (3 of 55), so it
+  // gets the same headroom as HUB-J3.
+  test.setTimeout(120_000);
   const hub = await journey.hub({ machines: [ATLAS, STUDIO], paired: ["atlas", "studio"] });
   const list = page.getByRole("navigation", { name: "Choose a supervisor" });
   const composer = page.getByRole("textbox", { name: "Your message" });

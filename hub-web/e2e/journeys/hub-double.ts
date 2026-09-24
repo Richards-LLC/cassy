@@ -52,6 +52,8 @@ const PANE_TEXT = "The supervisor is ready.\r\n";
 export class HubDouble {
   readonly sends: SentMessage[] = [];
   readonly exchanges: Array<Record<string, unknown>> = [];
+  /** The hub origin each pairing exchange was posted to, in order. */
+  readonly exchangeOrigins: string[] = [];
   readonly historyRequests: Array<Record<string, unknown>> = [];
   private readonly sockets = new Map<string, WebSocketRoute>();
   private readonly waiters: Array<() => void> = [];
@@ -208,6 +210,7 @@ export class HubDouble {
     if (path === "/v1/auth/pairing/exchange" && method === "POST") {
       const body = route.request().postDataJSON() as Record<string, unknown>;
       this.exchanges.push(body);
+      this.exchangeOrigins.push(url.origin);
       const requested = (body.requested_scopes as string[]) ?? [];
       return route.fulfill({
         status: 201,

@@ -31,6 +31,31 @@ function pairingDetails(origin: string, scopes: readonly Scope[]): string {
   return `<dl class="pair-details">${scopeSummaryMarkup(scopes)}<div><dt>Cassy Cloud origin</dt><dd class="pair-identifier">${escapeHtml(origin)}</dd></div><div><dt>Exact scopes</dt><dd class="pair-identifier">${scopes.map(scopeLabel).map(escapeHtml).join(", ")}</dd></div></dl>`;
 }
 
+type InvitationField = "url" | "label" | "device" | "operator";
+
+/**
+ * Focus lands on the first field still to fill. A `cas hub pair` link prefills
+ * the address and machine name, so on a fresh link that is the operator's own
+ * name; an older link still starts at the address.
+ */
+export function firstEmptyField(draft: PairingDraft, relayVerified: boolean): InvitationField {
+  const fields: [InvitationField, string][] = [
+    ...(relayVerified ? [] : [["url", draft.hubUrl], ["label", draft.machineLabel]] as [InvitationField, string][]),
+    ["operator", draft.operatorLabel],
+    ["device", draft.deviceLabel],
+  ];
+  return fields.find(([, value]) => !value.trim())?.[0] ?? "operator";
+}
+
+/**
+ * Where the address comes from, one tap away instead of three lines under the
+ * field. Using this page's origin is an ordinary secondary action, not a code
+ * sample: it is right only when this page is served by the machine itself.
+ */
+function addressHelp(pageOrigin: string, open: boolean): string {
+  return `<details class="pair-address-help"${open ? " open" : ""}><summary>Where do I find this?</summary><p class="field-hint">The link <code>cas hub pair</code> printed fills this in. Otherwise it is the address of the machine you are pairing (usually its Tailscale name). It is not this page's address unless this page is served by that machine.</p><div class="pair-address-actions"><button id="pair-use-page-origin" type="button" class="secondary" data-page-origin="${escapeAttr(pageOrigin)}">Use this page's address</button><small class="field-hint">This page is <span class="pair-identifier">${escapeHtml(pageOrigin)}</span></small></div></details>`;
+}
+
 function pairStatusMarkup(pairingStatus: string): string {
   return `<p class="pair-status" role="status"${pairingStatus ? "" : " hidden"}>${escapeHtml(pairingStatus)}</p>`;
 }
@@ -67,7 +92,13 @@ export function pairDialogMarkup(state: PairDialogState): string {
     const hubUrl = pendingPairing.hubUrl;
     const origin = pendingPairing.controllerOrigin;
     const invitationScopes = pendingPairing.scopes;
-    return `<dialog id="pair-dialog">${cloudBrand()}<form id="pair-form"><h2>${relay ? "Machine authorized" : "Pair a machine"}</h2><p>${relay ? "Verify the machine details, then create this browser's device credential." : "One-time invitation ready. Confirm the target hub."}</p>${relay && hubUrl && origin && invitationScopes ? `<dl class="pair-details"><div><dt>Machine</dt><dd>${escapeHtml(pendingPairing.machineLabel ?? pendingPairing.hubId)}</dd></div><div><dt>Machine's hub address</dt><dd class="pair-identifier">${escapeHtml(hubUrl)}</dd></div>${scopeSummaryMarkup(invitationScopes)}<div><dt>Cassy Cloud origin</dt><dd class="pair-identifier">${escapeHtml(origin)}</dd></div><div><dt>Granted scopes</dt><dd class="pair-identifier">${invitationScopes.map(scopeLabel).map(escapeHtml).join(", ")}</dd></div></dl><p>Invitation expires in <strong id="pair-countdown">10:00</strong></p>` : `<label>Machine's hub address<input name="url" type="url" required autofocus placeholder="https://studio.tailnet.ts.net" value="${escapeAttr(pairingDraft.hubUrl)}"><small class="field-hint">The address of the machine you are pairing, as printed by <code>cas hub pair</code> (usually its Tailscale name). It is not this page's address unless this page is served by that machine.</small></label><div class="pair-code-actions pair-address-actions"><button id="pair-use-page-origin" type="button" data-page-origin="${escapeAttr(pairingDraft.pageOrigin)}">Use this page's address (${escapeHtml(pairingDraft.pageOrigin)})</button></div><label>Machine label<input name="label" required placeholder="Studio Mac" value="${escapeAttr(pairingDraft.machineLabel)}"><small class="field-hint">How this machine is listed in Cassy Cloud.</small></label><fieldset><legend>Scopes requested</legend>${scopeChecks(pairingDraft.scopes, invitationScopes)}</fieldset>${scopeCeilingHint(pageOrigin, invitationScopes)}`}<label>Device label<input name="device" required autofocus value="${escapeAttr(pairingDraft.deviceLabel)}"><small class="field-hint">How this browser is listed on the machine.</small></label><label>Operator label<input name="operator" required placeholder="Your name" value="${escapeAttr(pairingDraft.operatorLabel)}"><small class="field-hint">Who is pairing this browser; the machine records it.</small></label>${pairStatusMarkup(pairingStatus)}<div class="dialog-actions"><button id="pair-cancel" type="button">Cancel</button><button type="submit" class="primary" ${pairingExchangeInFlight ? "disabled" : ""}>${pairingExchangeInFlight ? "Pairing…" : "Pair"}</button></div></form></dialog>`;
+    const autofocus = firstEmptyField(pairingDraft, relay && Boolean(hubUrl && origin && invitationScopes));
+    // Your name comes straight after the machine: it is the one field a fresh
+    // link leaves empty, so it has to be on screen when the dialog opens,
+    // above the scope list (QA F02/F03).
+    const operatorField = `<label>Operator label<input name="operator" required${autofocus === "operator" ? " autofocus" : ""} placeholder="Your name" value="${escapeAttr(pairingDraft.operatorLabel)}"><small class="field-hint">Who is pairing this browser; the machine records it.</small></label>`;
+    const deviceField = `<label>Device label<input name="device" required${autofocus === "device" ? " autofocus" : ""} value="${escapeAttr(pairingDraft.deviceLabel)}"><small class="field-hint">How this browser is listed on the machine.</small></label>`;
+    return `<dialog id="pair-dialog">${cloudBrand()}<form id="pair-form"><h2>${relay ? "Machine authorized" : "Pair a machine"}</h2><p>${relay ? "Verify the machine details, then create this browser's device credential." : "One-time invitation ready. Confirm the target hub."}</p>${relay && hubUrl && origin && invitationScopes ? `<dl class="pair-details"><div><dt>Machine</dt><dd>${escapeHtml(pendingPairing.machineLabel ?? pendingPairing.hubId)}</dd></div><div><dt>Machine's hub address</dt><dd class="pair-identifier">${escapeHtml(hubUrl)}</dd></div>${scopeSummaryMarkup(invitationScopes)}<div><dt>Cassy Cloud origin</dt><dd class="pair-identifier">${escapeHtml(origin)}</dd></div><div><dt>Granted scopes</dt><dd class="pair-identifier">${invitationScopes.map(scopeLabel).map(escapeHtml).join(", ")}</dd></div></dl><p>Invitation expires in <strong id="pair-countdown">10:00</strong></p>${operatorField}` : `<label>Machine's hub address<input name="url" type="url" required${autofocus === "url" ? " autofocus" : ""} placeholder="https://studio.tailnet.ts.net" value="${escapeAttr(pairingDraft.hubUrl)}"></label>${addressHelp(pairingDraft.pageOrigin, pairingDraft.addressHelpOpen)}<label>Machine label<input name="label" required${autofocus === "label" ? " autofocus" : ""} placeholder="Studio Mac" value="${escapeAttr(pairingDraft.machineLabel)}"><small class="field-hint">How this machine is listed in Cassy Cloud.</small></label>${operatorField}<fieldset><legend>Scopes requested</legend>${scopeChecks(pairingDraft.scopes, invitationScopes)}</fieldset>${scopeCeilingHint(pageOrigin, invitationScopes)}`}${deviceField}${pairStatusMarkup(pairingStatus)}<div class="dialog-actions"><button id="pair-cancel" type="button">Cancel</button><button type="submit" class="primary" ${pairingExchangeInFlight ? "disabled" : ""}>${pairingExchangeInFlight ? "Pairing…" : "Pair"}</button></div></form></dialog>`;
   }
   const relayAction = relayOrigin
     ? `<button id="pair-create" type="button" class="primary" ${pairingCreateInFlight ? "disabled" : ""}>${pairingCreateInFlight ? "Creating…" : "Create pairing code"}</button>`

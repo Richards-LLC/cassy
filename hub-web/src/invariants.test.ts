@@ -69,11 +69,14 @@ describe("binding Cassy Cloud browser invariants", () => {
 
   it("asks for the machine's hub address instead of seeding the page origin (cas-8051 F5)", async () => {
     const [main, draft] = await Promise.all(["main.ts", "pairing-draft.ts"].map((path) => readSource(path)));
-    expect(draft).toContain('hubUrl: "",');
+    // Only the machine's own link may seed the address, never this page (HUB-J2).
+    expect(draft).toContain('hubUrl: prefill.suggestedHubUrl ?? "",');
+    expect(draft).not.toContain("hubUrl: controllerOrigin");
     expect(draft).toContain("pageOrigin: controllerOrigin,");
-    expect(main).toContain("<label>Machine's hub address<input name=\"url\" type=\"url\" required autofocus placeholder=");
+    expect(main).toContain("<label>Machine's hub address<input name=\"url\" type=\"url\" required${autofocus === \"url\" ? \" autofocus\" : \"\"} placeholder=");
     expect(main).toContain("It is not this page's address unless this page is served by that machine.");
-    expect(main).toContain('id="pair-use-page-origin"');
+    expect(main).toContain('<summary>Where do I find this?</summary>');
+    expect(main).toContain('id="pair-use-page-origin" type="button" class="secondary"');
     expect(main).toContain("<dt>Machine's hub address</dt>");
     // Consent keeps the exact origin and the exact scope list beside the summary.
     expect(main).toContain("<dt>This browser will be able to</dt>");
@@ -591,8 +594,13 @@ describe("binding Cassy Cloud browser invariants", () => {
     // an optional email on open pops it and scrolls the title off the screen.
     expect(main).toContain('<section class="pair-flow" tabindex="-1" autofocus>');
     expect(main).not.toContain('<input id="pair-email" type="email" autofocus');
-    expect(main).toContain('<input name="url" type="url" required autofocus');
-    expect(main).toContain('<input name="device" required autofocus');
+    // A focused field scrolls clear of the sticky action row, hint included (QA F03).
+    expect(css).toContain("scroll-padding-bottom: calc(var(--button-height) + var(--space-4));");
+    expect(css).toContain("dialog label:has(> .field-hint) > input { scroll-margin-bottom: 3em; }");
+    // Focus goes to the first field still empty, so a prefilled link opens on the operator's name.
+    expect(main).toContain("const autofocus = firstEmptyField(pairingDraft, ");
+    expect(main).toContain('<input name="url" type="url" required${autofocus === "url" ? " autofocus" : ""}');
+    expect(main).toContain('<input name="device" required${autofocus === "device" ? " autofocus" : ""}');
 
     // With the keyboard up the dialog can be 300px tall: the fields scroll and
     // the action row does not, so Pair stays reachable.
@@ -1356,7 +1364,7 @@ describe("design polish P3/P4/P12/P16 (D3/D4/D12/D17)", () => {
     expect(css).toContain("border: var(--line-width) solid var(--line-strong); border-radius: 23px; resize: none; background: var(--panel); color: var(--ink); box-shadow: var(--lift);");
     // P16: pairing and attention prose in the UI face; mono only on identifiers.
     expect(css).toContain(".pair-details dd { margin: 0; overflow-wrap: anywhere; font-family: var(--font-ui); }");
-    expect(css).toContain(".pair-details dd.pair-identifier {\n  font-family: var(--font-mono);");
+    expect(css).toContain(".pair-details dd.pair-identifier,\n.pair-address-actions .pair-identifier {\n  font-family: var(--font-mono);");
     expect(rule("\n.attention-detail")).toContain("font-family: var(--font-ui);");
     expect(markup).toContain('<dd class="pair-summary">');
     expect(markup).toContain('<dt>Exact scopes</dt><dd class="pair-identifier">');

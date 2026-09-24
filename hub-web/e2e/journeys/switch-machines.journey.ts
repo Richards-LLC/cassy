@@ -2,6 +2,8 @@ import { test, expect } from "./journey";
 import { ATLAS, STUDIO, PELICAN, OTTER } from "./world";
 
 test("HUB-J8 switch between machines without losing my place", async ({ page, journey }) => {
+  // Eleven stages, three of them palette/picker sweeps: past the 60s default.
+  test.setTimeout(120_000);
   const hub = await journey.hub({ machines: [ATLAS, STUDIO], paired: ["atlas", "studio"] });
   const list = page.getByRole("navigation", { name: "Choose a supervisor" });
   const composer = page.getByRole("textbox", { name: "Your message" });
@@ -64,9 +66,14 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
     await open();
     await page.keyboard.press("Escape");
     await closed();
-    await open();
+    // The first open rebuilt the shell; Escape still lands on the session
+    // title, and Enter there reopens the picker (cas-7eaf).
+    await expect(toggle).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect(picker).toBeVisible(soon);
     await page.getByRole("button", { name: "Close session picker" }).click();
     await closed();
+    await expect(toggle).toBeFocused();
     await open();
     // A closed picker must not pop back open over the next dialog either.
     await page.keyboard.press("Escape");
@@ -164,8 +171,9 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
     const back = page.locator("#conversation-return");
     // From the keyboard: Enter on the return control lands in the reply box,
     // so the next keystrokes are the reply.
-    await back.focus();
-    await page.keyboard.press("Enter");
+    // locator.press focuses and presses in one step, so a periodic header
+    // re-render cannot slip between the two.
+    await back.press("Enter");
     await expect(composer).toBeFocused();
     await page.keyboard.type("Back from the terminal");
     await expect(composer).toHaveValue("Back from the terminal");
@@ -174,6 +182,42 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
     await page.getByRole("button", { name: "Terminal view" }).click();
     await expect(back).toBeVisible();
     await back.click();
+    await expect(composer).toBeFocused();
+  });
+
+  await journey.stage("Keyboard focus lands somewhere real on every route", async () => {
+    // cas-7eaf: none of these routes leaves focus on <body>.
+    const offBody = () => page.evaluate(() => document.activeElement !== document.body && document.activeElement !== null);
+    const terminal = page.getByRole("button", { name: "Terminal view" });
+    const back = page.locator("#conversation-return");
+    // Entering Terminal view from the keyboard lands in the terminal (or, before
+    // a pane attaches, on the way back), never on <body>.
+    await terminal.focus();
+    await page.keyboard.press("Enter");
+    await expect(back).toBeVisible();
+    await expect.poll(offBody).toBe(true);
+    await expect.poll(() => page.evaluate(() => (document.activeElement as HTMLElement).matches(".t3-ghostty-input, #conversation-return"))).toBe(true);
+    // The way back is the workspace's first control in the Tab order, though
+    // it is still drawn at the foot.
+    expect(await page.evaluate(() => document.querySelector(".shell main button, main button")?.id)).toBe("conversation-return");
+    // Enter on a session in the picker lands where the next keystroke belongs.
+    await page.locator("#session-picker-toggle").click();
+    await page.locator("#session-picker").getByRole("button", { name: new RegExp(OTTER) }).focus();
+    await page.keyboard.press("Enter");
+    await expect(page.locator("#session-picker")).toBeHidden();
+    await expect(page.locator(".session-picker-name")).toHaveText(OTTER);
+    await expect.poll(offBody).toBe(true);
+    // Back in the conversation list: Enter on a row, and a mouse click on a
+    // row, land in its reply box.
+    await back.click();
+    await expect(composer).toBeFocused();
+    // The list stays beside the thread on a desktop (cas-479a).
+    await list.getByRole("button", { name: /cas-src/ }).focus();
+    await page.keyboard.press("Enter");
+    await expect(page.getByRole("button", { name: `Send to ${PELICAN}`, exact: true })).toBeVisible();
+    await expect(composer).toBeFocused();
+    await list.getByRole("button", { name: /gabber-studio/ }).click();
+    await expect(page.getByRole("button", { name: `Send to ${OTTER}`, exact: true })).toBeVisible();
     await expect(composer).toBeFocused();
   });
 });

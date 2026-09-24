@@ -1746,6 +1746,9 @@ main {
 /* The composer is on screen, so the one-tap way to it is a second copy of the
    same control. It returns the moment the panel or the tab changes. */
 .shell:has(.context-panel:not(.collapsed) [data-context-content="status"]:not([hidden])) .talk-supervisor { display: none; }
+/* The return control leads <main> in the DOM (first in the Tab order) and is
+   drawn at the foot of the workspace, where it has always been (cas-7eaf). */
+main > #conversation-return { order: 1; }
 
 .talk-supervisor small {
   color: var(--text-mid);

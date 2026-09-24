@@ -234,10 +234,11 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 1. Start a draft on the Linux machine — the header names the project and the machine
 2. Switch to the Mac and send there — the other thread starts with an empty composer; the message goes to that machine
 3. Come back to the draft — the first thread's draft is intact
-4. Reopen the session picker after closing it — in Terminal view, one click on the session title reopens the picker after Escape or ×, and it never pops open over the next dialog
+4. Reopen the session picker after closing it — in Terminal view, one click on the session title reopens the picker after Escape or ×, and it never pops open over the next dialog; Escape and × leave focus on the session title, from the first open on
 5. Keep my place in the session picker while updates arrive — the row a keyboard user arrowed or tabbed onto keeps focus, and the filter holds, while hub updates re-render the page
 6. See which session is open while pointing at it — in light and dark, the open session keeps its tint under the pointer (lifting as feedback) and still differs from an ordinary hovered row
 7. Come back from the terminal to the reply box — returning from Terminal view by keyboard or mouse puts focus in the reply box, never on the page body
+8. Keyboard focus lands somewhere real on every route — entering Terminal view lands in the terminal (or on the way back, which is first in the Tab order though drawn at the foot), choosing a session in the picker lands in it, and opening a conversation from the list by Enter or a click lands in its reply box; none leaves focus on the page body
 
 **Expected experience**
 

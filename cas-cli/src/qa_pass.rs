@@ -65,7 +65,7 @@ pub fn delivery_eligibility(
     changed_paths: Option<&[String]>,
     journeys: &[String],
 ) -> QaEligibility {
-    if !qa.independent_pass || is_no_code(task) {
+    if !qa.independent_pass || no_code_without_surface(task, changed_paths) {
         return QaEligibility::default();
     }
     user_facing_reasons(task, qa, changed_paths, journeys)
@@ -145,13 +145,15 @@ pub fn catalog_journeys_for(repo: &Path, paths: &[String]) -> Vec<String> {
 /// recorded round keeps docs/test/CI-only deliveries ungated even when they
 /// carry a demo_statement.
 ///
-/// cas-5c38: a no-code task has no delivery to review, and a withdrawn round
-/// (its demo_statement was cleared) no longer binds the delivery.
+/// cas-5c38: a withdrawn round (its demo_statement was cleared, or a no-code
+/// task delivered no user-facing code) no longer binds the delivery.
+/// cas-2387: a no-code declaration alone never unbinds a recorded round. A
+/// task that kept `execution_note=no-code` while its branch carries
+/// user-facing code must still wait for its review.
 pub fn gate_applies(task: &Task, qa: &QaConfig, passes: &[QaPass]) -> bool {
     qa.independent_pass
         && task.task_type != TaskType::Epic
         && !task.labels.iter().any(|label| label == QA_PASS_LABEL)
-        && !is_no_code(task)
         && passes.iter().any(|pass| !pass.is_withdrawn())
 }
 
@@ -162,6 +164,16 @@ pub fn is_no_code(task: &Task) -> bool {
     task.execution_note
         .as_deref()
         .is_some_and(|note| note.trim().eq_ignore_ascii_case("no-code"))
+}
+
+/// cas-2387: the independent QA exemption for a no-code task. It holds only
+/// while the delivery diff has no user-facing surface path. `None` (no diff
+/// could be computed, e.g. no commits at all) is no evidence of code. A
+/// no-code declaration on a branch that carries UI code is reviewed like any
+/// other delivery.
+pub fn no_code_without_surface(task: &Task, changed_paths: Option<&[String]>) -> bool {
+    is_no_code(task)
+        && changed_paths.is_none_or(|paths| paths.iter().all(|path| is_non_surface_path(path)))
 }
 
 /// Merge gate for one exact tip: a passed or waived round must cover `head`.
@@ -713,9 +725,15 @@ mod tests {
         let mut no_code = task();
         no_code.demo_statement = "The dashboard shows the tenant".to_string();
         no_code.execution_note = Some("no-code".to_string());
+        // Nothing user-facing in the diff (none at all, or docs/tests only).
+        assert!(!delivery_eligibility(&no_code, &qa, None, &[]).is_eligible());
+        assert!(!delivery_eligibility(&no_code, &qa, Some(&[]), &[]).is_eligible());
+        let docs = vec!["docs/runbook.md".to_string()];
+        assert!(!delivery_eligibility(&no_code, &qa, Some(&docs), &[]).is_eligible());
+        // cas-2387: a no-code declaration never hides user-facing code.
         let css = vec!["web/app.css".to_string()];
-        assert!(!delivery_eligibility(&no_code, &qa, Some(&css), &[]).is_eligible());
-        assert!(merge_gate(&no_code, &qa, &[pass("aaaa1111", Pending)], "aaaa1111").is_ok());
+        assert!(delivery_eligibility(&no_code, &qa, Some(&css), &[]).is_eligible());
+        assert!(merge_gate(&no_code, &qa, &[pass("aaaa1111", Pending)], "aaaa1111").is_err());
 
         let mut withdrawn = pass("aaaa1111", Superseded);
         withdrawn.summary = Some(format!("{}demo_statement cleared", cas_types::QA_PASS_WITHDRAWN_PREFIX));

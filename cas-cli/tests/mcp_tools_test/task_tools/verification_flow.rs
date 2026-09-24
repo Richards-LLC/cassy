@@ -362,7 +362,9 @@ async fn public_verdicts_project_only_their_receipt_bound_delivery() {
 
     for (status, use_child) in [("approved", false), ("rejected", true)] {
         let created = service
-            .cas_task_create(Parameters(simple_task_req("Receipt-bound verdict")))
+            .cas_task_create(Parameters(simple_task_req(&format!(
+                "Receipt-bound {status} verdict"
+            ))))
             .await
             .unwrap();
         let task_id = extract_task_id(&extract_text(created)).unwrap().to_string();

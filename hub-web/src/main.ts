@@ -335,6 +335,16 @@ function mountConversation(key: string, mount: HTMLElement): void {
       // refused message because the conversation header has none (cas-3433).
       takeControl: () => { void takeControlForRefused(threadMachineId, threadSession); },
       controlHeld: () => controlTakenAfterRefusal.has(threadKey) && leases.get(threadKey)?.held_by_me === true,
+      // cas-1730 (cas-008f N01): while another device holds control and this
+      // one cannot force a takeover, the refused message names that device
+      // and says to take control once it is released, as the composer does.
+      controlHolder: () => {
+        const lease = leases.get(threadKey);
+        const machine = machines.get(threadMachineId);
+        return lease && !lease.held_by_me && lease.controller_label && !machine?.scopes.includes("hub-admin")
+          ? lease.controller_label
+          : undefined;
+      },
       hasEarlier: () => conversationHistoryPage(threadKey).hasEarlier,
       loadingEarlier: () => conversationHistoryPage(threadKey).loading,
       loadingHistory: () => {
@@ -2450,8 +2460,23 @@ function render(captureDraft = true): void {
   const machineConnectionSnapshot = selected ? connectionStates.get(selected.id) : undefined;
   const terminalAttachSnapshot = selected && selectedSession ? attachStates.get(sessionKey(selected.id, selectedSession)) : undefined;
   const connectionSnapshot = terminalAttachSnapshot ?? machineConnectionSnapshot;
+  // The header reads the same one connection state as the banner, the row and
+  // the footer (cas-a447). While the session is down it names that state
+  // instead of the machine's live latency, and it claims no control
+  // (cas-edcd, cas-4a93): the lease cannot be exercised until it is back.
+  const headerConnection = selected && selectedSession ? conversationConnection(selected.id, selectedSession) : machineConnectionSnapshot;
+  const sessionDown = Boolean(selected && selectedSession) && headerConnection !== undefined && headerConnection.phase !== "live";
+  // cas-1730: a session that was live and dropped cannot take or release
+  // control or be interrupted until it is back, so those controls say why
+  // instead of offering an action that cannot reach the machine. A first
+  // connection is not an outage.
+  const outageReason = sessionDown && selected && selectedSession
+    && (sessionsEverLive.has(sessionKey(selected.id, selectedSession))
+      || (machineConnectionSnapshot !== undefined && machineConnectionSnapshot.phase !== "live" && lastLiveAt.has(selected.id)))
+    ? `${selected.label} is reconnecting. Control and interrupts come back when it is live.`
+    : undefined;
   const controlReason = controlDisabledReason(selected, selectedSession, lease);
-  const takeControlReason = takeControlDisabledReason(selected, selectedSession, lease);
+  const takeControlReason = outageReason ?? takeControlDisabledReason(selected, selectedSession, lease);
   const selectedHubSession = selected && selectedSession
     ? sessions.get(selected.id)?.find((item) => item.name === selectedSession)
     : undefined;
@@ -2467,9 +2492,9 @@ function render(captureDraft = true): void {
   const composerStatus = messageStatus?.session === (selected && selectedSession ? sessionKey(selected.id, selectedSession) : undefined) ? messageStatus : undefined;
   // A phone has no hover, so a title attribute is an explanation nobody can
   // reach. Unavailable controls stay focusable and say why when tapped.
-  const interruptReason = !selected || !selectedSession || !canControl(selected.id, selectedSession, "pane-interrupt")
+  const interruptReason = outageReason ?? (!selected || !selectedSession || !canControl(selected.id, selectedSession, "pane-interrupt")
     ? controlReason ?? "Interrupt is unavailable for this session."
-    : undefined;
+    : undefined);
   // Workers and tasks keep rendering the last snapshot while a hub is
   // unreachable. Presented unlabelled, that reads as current truth.
   const statusIsStale = Boolean(selected) && machineConnectionSnapshot !== undefined
@@ -2483,12 +2508,6 @@ function render(captureDraft = true): void {
   // heartbeat can fill or empty it without rebuilding the status section.
   const staleStatusText = statusIsStale ? `Not live — reconnecting.${staleStatusTail}` : undefined;
   const terminalSessionKey = selected && selectedSession ? sessionKey(selected.id, selectedSession) : undefined;
-  // The header reads the same one connection state as the banner, the row and
-  // the footer (cas-a447). While the session is down it names that state
-  // instead of the machine's live latency, and it claims no control
-  // (cas-edcd, cas-4a93): the lease cannot be exercised until it is back.
-  const headerConnection = selected && selectedSession ? conversationConnection(selected.id, selectedSession) : machineConnectionSnapshot;
-  const sessionDown = Boolean(selected && selectedSession) && headerConnection !== undefined && headerConnection.phase !== "live";
   const connectionState = connectionClass(sessionDown ? headerConnection : connectionSnapshot);
   const connectionText = selected ? connectionLabel(sessionDown ? headerConnection : connectionSnapshot) : "idle";
   const latency = machineConnectionSnapshot?.latencyMs;
@@ -2993,13 +3012,25 @@ function machineTreeGroup(machine: StoredMachine): HTMLElement {
   return group;
 }
 
+/**
+ * A session's status word while its machine is down names the outage
+ * ("Reconnecting"), not the hub index's last liveness ("live"), as the rail,
+ * header and banner already do (cas-1730). A machine that has not been live in
+ * this visit is still connecting, and keeps the index's word.
+ */
+function sessionStatusLabel(machineId: string, status: string): string {
+  const snapshot = machineFooterConnection(machineId);
+  if (!snapshot || snapshot.phase === "live" || snapshot.phase === "idle" || !lastLiveAt.has(machineId)) return status;
+  return fleetConnectionLabel(snapshot, machineId);
+}
+
 function sessionButton(machineId: string, session: HubSession): HTMLButtonElement {
   const button = document.createElement("button"); button.className = `nav-item ${session.name === selectedSession ? "active" : ""}`;
   const summary = sessionSummaries.get(sessionKey(machineId, session.name));
   const stale = summary && summary.phase !== "idle" && Date.now() - Date.parse(summary.generated_at) > 10 * 60 * 1000;
   button.innerHTML = summary
     ? `<small class="session-name session-eyebrow">${escapeHtml(session.name)}</small><span class="session-summary-title">${escapeHtml(summary.title)}</span><span class="phase-chip phase-${escapeAttr(summary.phase)}">${escapeHtml(summary.phase)}</span><small class="session-summary-description${stale ? " stale" : ""}">${escapeHtml(summary.description)}</small>`
-    : `<span class="session-name">${escapeHtml(session.name)}</span><small class="session-meta">${escapeHtml(session.supervisor)} · ${escapeHtml(workerCountLabel(session.workers.length))} · ${escapeHtml(session.liveness.replaceAll("_", " "))}</small>`;
+    : `<span class="session-name">${escapeHtml(session.name)}</span><small class="session-meta">${escapeHtml(session.supervisor)} · ${escapeHtml(workerCountLabel(session.workers.length))} · ${escapeHtml(sessionStatusLabel(machineId, session.liveness.replaceAll("_", " ")))}</small>`;
   button.onclick = () => { machineDrawerOpen = false; void openSession(machineId, session.name); };
   return button;
 }
@@ -3066,7 +3097,7 @@ function renderSessionPicker(): void {
     includeDormant: revealDormant,
     selection: selection.current ?? (selectedMachineId ? { machineId: selectedMachineId, session: selectedSession } : undefined),
     summaries: sessionSummaries,
-  });
+  }).map((entry) => entry.status === "dormant" ? entry : { ...entry, status: sessionStatusLabel(entry.machineId, entry.status) });
   // Every render lands here, including the latency tick. Rebuilding unchanged
   // entries would throw away the entry a keyboard user is on (and the filter's
   // hidden rows), so only a real change rebuilds the list.

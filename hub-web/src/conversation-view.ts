@@ -114,6 +114,13 @@ export interface ConversationViewOptions {
    */
   controlHeld?: () => boolean;
   /**
+   * The device holding control when this one cannot take it over. A control
+   * refusal then names it and says to take control once it is released, as
+   * the composer does (cas-1730, cas-008f N01). Take control stays on the
+   * message so the reader keeps their place (cas-008f).
+   */
+  controlHolder?: () => string | undefined;
+  /**
    * Quick replies and composer replies to an ask go through this; the caller
    * sends with in_reply_to = the ask's notification_id and records the send
    * in the history with the same replyTo, which is what marks the ask answered.
@@ -315,7 +322,8 @@ export class ConversationView {
     const delivered = turn.event.kind === "send" ? this.history.delivered() === turn.event.value : undefined;
     // A refused send repaints when control changes hands (cas-8e0a).
     const held = turn.event.kind === "send" && turn.event.value.state === "error" ? this.options.controlHeld?.() === true : undefined;
-    return JSON.stringify([turn.event, answered && [answered.id, answered.state, answered.text], waiting, pinned, delivered, held]);
+    const holder = turn.event.kind === "send" && turn.event.value.state === "error" ? this.options.controlHolder?.() : undefined;
+    return JSON.stringify([turn.event, answered && [answered.id, answered.state, answered.text], waiting, pinned, delivered, held, holder]);
   }
 
   /**
@@ -555,8 +563,12 @@ export class ConversationView {
       // resolved. The message still was not sent, but Retry now goes through,
       // so the copy says so and Take control leaves the message.
       const resolved = plain.action === "take-control" && this.options.controlHeld?.() === true;
+      // cas-1730: another device holds control and this one cannot take it
+      // over, so the next step is to wait for its release, as the composer says.
+      const holder = plain.action === "take-control" && !resolved ? this.options.controlHolder?.() : undefined;
       const reason = document.createElement("span"); reason.className = "conversation-refused-reason"; reason.textContent = resolved ? "This device controls the session now." : plain.reason;
-      const next = document.createElement("span"); next.className = "conversation-refused-next"; next.textContent = resolved ? " Retry to send it." : ` ${plain.next}`;
+      const next = document.createElement("span"); next.className = "conversation-refused-next";
+      next.textContent = resolved ? " Retry to send it." : holder ? ` ${holder} is in control. Take control when it's released, then retry.` : ` ${plain.next}`;
       reason.append(next);
       state.append(glyph.content.firstElementChild!, label, separator, reason);
       bubble.append(state);

@@ -445,7 +445,17 @@ impl WorktreeManager {
                 return Ok(RemoveOutcome::ExternalSymlinksBlocked(warning));
             }
 
-            let file_count = git.uncommitted_file_count(&worktree.path).unwrap_or(0);
+            // cas-2ffe (GH #915): a worker that just died can leave the tree
+            // mid-write (an index.lock, a half-written .git file). A failed
+            // `git status` is no evidence of a clean tree, so the tree is kept
+            // and tracked, and the caller reports the failure.
+            let file_count = match git.uncommitted_file_count(&worktree.path) {
+                Ok(count) => count,
+                Err(error) => {
+                    self.workers.insert(worker_name.to_string(), worktree);
+                    return Err(error.into());
+                }
+            };
             if file_count > 0 {
                 let warning = DirtyWorktreeWarning {
                     worker_name: worker_name.to_string(),

@@ -201,6 +201,43 @@ pub(super) fn enqueue_worker_unavailable_relay(
     )
 }
 
+/// cas-2ffe (GH #915): several workers' harnesses exited within the
+/// correlation window. One wake names every worker and its exit status, keyed
+/// on the first exit so a retry or daemon restart cannot repeat it.
+pub(super) fn enqueue_correlated_worker_deaths_relay(
+    cas_dir: &std::path::Path,
+    group: &[super::queue_and_events::ObservedWorkerExit],
+) -> WorkerAttentionRelayOutcome {
+    let Some(first) = group.first() else {
+        return WorkerAttentionRelayOutcome::NotApplicable;
+    };
+    let last = group.last().unwrap_or(first);
+    let spread_ms = (last.at - first.at).num_milliseconds().max(0);
+    let workers = group
+        .iter()
+        .map(|exit| format!("{} ({})", exit.worker, exit.status))
+        .collect::<Vec<_>>()
+        .join("; ");
+    let detail = format!(
+        "{count} worker harnesses exited within {spread_ms} ms of each other, starting {start}: \
+         {workers}. Treat this as one incident with a shared cause (host, harness binary, \
+         account or network) before respawning; each worker's own worker-died relay lists \
+         the tasks it parked.",
+        count = group.len(),
+        start = first.at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+    );
+    let occurrence = format!("{}:{}", first.worker, first.at.timestamp_millis());
+    enqueue_worker_attention_relay_detail(
+        cas_dir,
+        "workers_died_together",
+        &first.worker,
+        None,
+        None,
+        &detail,
+        &occurrence,
+    )
+}
+
 /// cas-4143: a teammate permission request CAS did not pre-approve has waited
 /// past the threshold. Name the worker, tool, command and age, and give the
 /// supervisor the approve/deny commands. One wake per request id.
@@ -954,6 +991,48 @@ mod worker_attention_tests {
         }));
     }
 
+    /// cas-2ffe (GH #915): three simultaneous harness exits reach the
+    /// supervisor as ONE incident naming every worker and exit status, and a
+    /// replay of the same group stays one wake.
+    #[test]
+    fn simultaneous_worker_deaths_wake_the_supervisor_once_cas_2ffe() {
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[(
+            "CAS_FACTORY_SESSION",
+            "correlated-deaths-test",
+        )]);
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        register_supervisor(&cas_dir, "correlated-deaths-test");
+        let t0 = chrono::Utc::now();
+        let group = ["codex-a", "codex-b", "codex-c"]
+            .iter()
+            .enumerate()
+            .map(|(index, worker)| super::super::queue_and_events::ObservedWorkerExit {
+                at: t0 + chrono::Duration::milliseconds(600 * index as i64),
+                worker: (*worker).to_string(),
+                status: "exited with code 0".to_string(),
+            })
+            .collect::<Vec<_>>();
+
+        let first = enqueue_correlated_worker_deaths_relay(&cas_dir, &group);
+        let replay = enqueue_correlated_worker_deaths_relay(&cas_dir, &group);
+        assert!(matches!(first, WorkerAttentionRelayOutcome::Persisted { .. }));
+        assert_eq!(first, replay);
+
+        let rows = crate::store::open_prompt_queue_store(&cas_dir)
+            .unwrap()
+            .peek_all(10)
+            .unwrap();
+        assert_eq!(rows.len(), 1, "one incident, one wake");
+        let prompt = &rows[0].prompt;
+        assert!(crate::prompt_revalidation::is_supervisor_wake_envelope(prompt), "{prompt}");
+        assert!(prompt.contains("kind=\"workers_died_together\""), "{prompt}");
+        assert!(prompt.contains("3 worker harnesses exited within 1200 ms"), "{prompt}");
+        for worker in ["codex-a", "codex-b", "codex-c"] {
+            assert!(prompt.contains(&format!("{worker} (exited with code 0)")), "{prompt}");
+        }
+    }
+
     /// cas-4143: a parked teammate permission request becomes one durable
     /// supervisor wake that names the worker, command and age and carries the
     /// approve/deny commands. Repeat scans replay it idempotently.
@@ -1651,6 +1730,7 @@ impl FactoryDaemon {
             teams,
             notify_rx,
             dead_workers: std::collections::HashSet::new(),
+            recent_worker_exits: Vec::new(),
             reported_unavailable_workers: std::collections::HashMap::new(),
             last_usage_limit_scan: None,
             last_permission_request_scan: None,
@@ -2184,6 +2264,8 @@ impl FactoryDaemon {
                     // cas-4143: answer (or surface) teammate permission
                     // requests Claude parked for a lead nobody plays.
                     self.relay_worker_permission_requests();
+                    // cas-2ffe: simultaneous harness exits are one incident.
+                    self.relay_correlated_worker_deaths();
 
                     // cas-d4ae: the detector has already emitted exactly one
                     // event for this idle/stall episode and the app just

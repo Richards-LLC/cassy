@@ -105,7 +105,7 @@ contrib/shell-helpers/install.sh
 grep -qxF 'export CAS_SRC=$HOME/code/cassy' ~/.zprofile 2>/dev/null || echo 'export CAS_SRC=$HOME/code/cassy' >> ~/.zprofile
 export CAS_SRC="$HOME/code/cassy"
 cas-update --dry-run</code></pre>
-    <p>The installer copies the canonical helper to <code>~/.local/bin/cas-update</code>. Plain <code>cas-update</code> pulls/builds the current source, installs <code>cas</code>, and migrates and syncs local Cassy projects. Set <code>CAS_SRC</code> to your source checkout before a build; the helper exits with a clear error if it is missing.</p>
+    <p>The installer copies the canonical helper to <code>~/.local/bin/cas-update</code>. Plain <code>cas-update</code> pulls/builds the current source, installs <code>cas</code>, and migrates and syncs local Cassy projects. Keep <code>CAS_SRC</code> set to your source checkout when using the installed copy. Without it, the helper looks for its own Cassy Git checkout and then <code>~/Petrastella/cas-src</code>; it exits with a clear error if neither exists.</p>
     <div class="notice"><strong>Mac restart note.</strong> The helper reports runtime turnover as <strong>unverified</strong> and sends no process signals on macOS because its identity checks use Linux <code>/proc</code>. After an update, manually quit and restart running <code>cas serve</code> clients, factory daemons, and registered servers with their owners. Check <code>cas hub service status</code> and restart the hub service if it is running.</div>
     <pre><code>cas-update --sync-only     # migrate/sync only; no build or process change
 cas-update --no-restart    # build/install/migrate/sync; leave runtimes alone</code></pre>

@@ -32,7 +32,8 @@
 #   never signals processes or claims that the runtime epoch was verified.
 #
 # Environment:
-#   CAS_SRC                   Source checkout (required for build/install)
+#   CAS_SRC                   Source checkout (default: this script's checkout,
+#                            then ~/Petrastella/cas-src if present)
 #   CAS_INSTALL               Binary destination (default: ~/.local/bin/cas)
 #   CAS_PROJECT_ROOTS         Default project scan roots (default: $HOME)
 #   CAS_UPDATE_WORKTREE_ROOT  Persistent detached build worktree parent
@@ -161,6 +162,19 @@ report_unverified_turnover() {
   RUNTIME_STATUS="unverified: process inspection unavailable on $(uname -s)"
   warn "Cannot verify or restart old CAS processes: Linux /proc process identity checks are unavailable on $(uname -s)."
   warn "Manually restart running cas serve clients, the CAS hub service (check cas hub service status), and factory daemons/registered servers with their owners."
+}
+
+resolve_cas_src() {
+  [ -z "$CAS_SRC" ] || return 0
+  local script_root=""
+  script_root="$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel 2>/dev/null || true)"
+  if [ -f "$script_root/cas-cli/Cargo.toml" ] \
+    && [ -f "$script_root/contrib/shell-helpers/cas-update" ]; then
+    CAS_SRC="$script_root"
+  elif [ -f "$HOME/Petrastella/cas-src/cas-cli/Cargo.toml" ] \
+    && [ -f "$HOME/Petrastella/cas-src/contrib/shell-helpers/cas-update" ]; then
+    CAS_SRC="$HOME/Petrastella/cas-src"
+  fi
 }
 
 proc_starttime() {
@@ -523,7 +537,8 @@ run_cmd() {
 
 build_and_install() {
   step "Build CAS from source"
-  [ -n "$CAS_SRC" ] || { error "CAS_SRC is required for builds; set it to your Cassy source checkout (for example: export CAS_SRC=\"\$HOME/code/cassy\")"; return 1; }
+  resolve_cas_src
+  [ -n "$CAS_SRC" ] || { error "CAS_SRC could not be found; set it to your Cassy source checkout (for example: export CAS_SRC=\"\$HOME/code/cassy\")"; return 1; }
   [ -d "$CAS_SRC" ] || { error "CAS_SRC source checkout not found at $CAS_SRC"; return 1; }
   info "src: $CAS_SRC"; info "branch: $BRANCH"; info "target: $CAS_INSTALL"; info "profile: $PROFILE"
   if ! command -v cargo >/dev/null 2>&1 && [ -f "$HOME/.cargo/env" ]; then . "$HOME/.cargo/env"; fi

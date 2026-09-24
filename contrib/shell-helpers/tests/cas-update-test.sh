@@ -401,20 +401,46 @@ test_darwin_turnover_is_explicitly_unverified() {
   rm -rf "$tmp"
 }
 
-test_missing_source_is_actionable() {
-  local tmp out
+test_source_resolution() {
+  local tmp out checkout_root
   tmp="$(new_fixture)"; out="$tmp/out"
+  checkout_root="$(git -C "$test_dir" rev-parse --show-toplevel)"
   if (
     export HOME="$tmp/home" CAS_UPDATE_SOURCE_ONLY=1
     unset CAS_SRC
     source "$helper"
+    resolve_cas_src
+    [ "$CAS_SRC" = "$checkout_root" ]
+  ); then
+    pass 'unset CAS_SRC resolves the script own Cassy checkout'
+  else fail 'unset CAS_SRC resolves the script own Cassy checkout'; fi
+
+  cp "$helper" "$tmp/bin/cas-update"
+  mkdir -p "$tmp/home/Petrastella/cas-src/cas-cli" "$tmp/home/Petrastella/cas-src/contrib/shell-helpers"
+  : >"$tmp/home/Petrastella/cas-src/cas-cli/Cargo.toml"
+  : >"$tmp/home/Petrastella/cas-src/contrib/shell-helpers/cas-update"
+  if (
+    export HOME="$tmp/home" CAS_UPDATE_SOURCE_ONLY=1
+    unset CAS_SRC
+    source "$tmp/bin/cas-update"
+    resolve_cas_src
+    [ "$CAS_SRC" = "$tmp/home/Petrastella/cas-src" ]
+  ); then
+    pass 'installed helper falls back to the existing legacy checkout'
+  else fail 'installed helper falls back to the existing legacy checkout'; fi
+
+  rm -rf "$tmp/home/Petrastella/cas-src"
+  if (
+    export HOME="$tmp/home" CAS_UPDATE_SOURCE_ONLY=1
+    unset CAS_SRC
+    source "$tmp/bin/cas-update"
     build_and_install
   ) >"$out" 2>&1; then
-    fail 'build without CAS_SRC fails with an actionable error'
-  elif assert_contains "$out" 'CAS_SRC is required for builds' \
+    fail 'build without a source checkout fails with an actionable error'
+  elif assert_contains "$out" 'CAS_SRC could not be found' \
     && assert_contains "$out" 'export CAS_SRC='; then
-    pass 'build without CAS_SRC fails with an actionable error'
-  else fail 'build without CAS_SRC fails with an actionable error'; fi
+    pass 'build without a source checkout fails with an actionable error'
+  else fail 'build without a source checkout fails with an actionable error'; fi
   rm -rf "$tmp"
 }
 
@@ -547,7 +573,7 @@ test_dry_run_and_opt_out
 test_stale_survivor_is_nonzero
 test_no_process_and_flag_semantics
 test_darwin_turnover_is_explicitly_unverified
-test_missing_source_is_actionable
+test_source_resolution
 test_native_project_refresh_delegation
 test_turnover_precedes_native_project_refresh
 test_stale_turnover_is_reported_before_project_refresh

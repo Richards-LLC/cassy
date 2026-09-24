@@ -136,8 +136,10 @@ cas-update --dry-run
 
 The installer copies the canonical helper to `~/.local/bin/cas-update`. Plain
 `cas-update` pulls/builds the current source, installs `cas`, and migrates and
-syncs local Cassy projects. Set `CAS_SRC` to your source checkout before a
-build; the helper exits with a clear error if it is missing.
+syncs local Cassy projects. Keep `CAS_SRC` set to your source checkout when
+using the installed copy. Without it, the helper looks for its own Cassy Git
+checkout and then `~/Petrastella/cas-src`; it exits with a clear error if
+neither exists.
 
 > **Mac restart note:** the helper's automatic process-turnover check is built
 > around Linux `/proc`, so it does not verify or restart old Cassy processes on

@@ -2516,6 +2516,41 @@ async fn test_shutdown_workers_enqueues() {
     assert!(entries[0].worker_names.contains(&"bob".to_string()));
 }
 
+/// cas-4691 (GH #976): `worker_names='["x"]'` and `worker_names="x"` both
+/// retire worker x. The JSON-array form used to be rejected as unknown while
+/// the same message listed the worker as known.
+#[tokio::test]
+async fn test_shutdown_workers_accepts_json_array_worker_names_cas_4691() {
+    for names in ["[\"wild-phoenix-59\"]", "wild-phoenix-59", "[\"wild-phoenix-59\", \"calm-otter-2\"]"] {
+        let _guard = EnvGuard::set(&[]);
+        let env = FactoryTestEnv::new();
+        env.register_worker("wild-phoenix-59");
+        env.register_worker("calm-otter-2");
+
+        let mut req = factory_req("shutdown_workers");
+        req.worker_names = Some(names.to_string());
+        let result = env.service.factory(Parameters(req)).await;
+        let text = get_text(&result.unwrap_or_else(|error| {
+            panic!("worker_names={names} must retire the worker: {}", error.message)
+        }));
+        assert!(text.contains("wild-phoenix-59"), "{names}: {text}");
+
+        let entries = env.spawn_queue().peek(10).expect("peek");
+        assert_eq!(entries.len(), 1, "{names}");
+        assert_eq!(entries[0].action, cas_store::SpawnAction::Shutdown);
+        assert!(
+            entries[0].worker_names.contains(&"wild-phoenix-59".to_string()),
+            "{names}: {:?}",
+            entries[0].worker_names
+        );
+        assert!(
+            entries[0].worker_names.iter().all(|name| !name.contains('[') && !name.contains('"')),
+            "queued names are bare identifiers: {:?}",
+            entries[0].worker_names
+        );
+    }
+}
+
 #[tokio::test]
 async fn test_shutdown_workers_all() {
     let _guard = EnvGuard::set(&[]);

@@ -617,7 +617,9 @@ async fn artifact_view_url<R: SessionReadModel>(
     )
     .is_err()
     {
-        return unauthorized();
+        // With CORS, so Commander reads a refused pairing as a refusal, not as
+        // an unreachable machine (cas-e503).
+        return with_cors(unauthorized(), &headers);
     }
     let outcome = tokio::task::spawn_blocking(move || {
         let session = crate::bridge::server::session::resolve_session_by_name(&session)?;
@@ -632,9 +634,12 @@ async fn artifact_view_url<R: SessionReadModel>(
         ))
     })
     .await;
+    // Every answer carries CORS, so Commander reads a missing session or an
+    // internal error as an answer rather than as an unreachable machine
+    // (cas-e503).
     let response = match outcome {
-        Err(error) => return internal_error(error.into()),
-        Ok(Err(_)) => return generic_not_found(),
+        Err(error) => internal_error(error.into()),
+        Ok(Err(_)) => generic_not_found(),
         Ok(Ok(Ok(signed))) => Json(serde_json::json!({
             "artifact_id": signed.artifact.id,
             "cloud_artifact_id": signed.view.artifact_id,

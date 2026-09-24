@@ -63,9 +63,17 @@ export function artifactOpenFailure(result: Extract<ArtifactViewResult, { ok: fa
     case "not_found":
     case "cloud_artifact_not_found":
       return "This file isn't available any more.";
+    case "cloud_failed":
+      // The machine answered; Cloud did not (cas-e503).
+      return "Cassy Cloud couldn't open the file right now. Wait a minute, then tap it again.";
     default:
       if (result.status === 401 || result.status === 403) {
         return "This device isn't allowed to open files on this machine. Pair it again.";
+      }
+      // No answer at all: the machine is off, asleep or off the network
+      // (cas-e503), so the fix is on the machine, not in Cloud.
+      if (result.status === 0) {
+        return `Couldn't reach ${machineLabel}. Check that it's on and connected, then tap the file again.`;
       }
       return "The file didn't open. Try again.";
   }

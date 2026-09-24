@@ -60,7 +60,9 @@ describe("opening an artifact from Commander (cassy#910)", () => {
       [{ ok: false, status: 503, code: "cloud_storage_not_live" }, "storage isn't available yet"],
       [{ ok: false, status: 404, code: "not_found" }, "isn't available any more"],
       [{ ok: false, status: 403 }, "Pair it again"],
-      [{ ok: false, status: 502, code: "cloud_failed" }, "didn't open. Try again"],
+      [{ ok: false, status: 502, code: "cloud_failed" }, "Cassy Cloud couldn't open the file right now. Wait a minute"],
+      [{ ok: false, status: 0 }, "Couldn't reach Atlas · Linux. Check that it's on and connected"],
+      [{ ok: false, status: 500 }, "didn't open. Try again"],
     ] as const) {
       const tab = fakeTab();
       const notify = vi.fn();
@@ -69,16 +71,16 @@ describe("opening an artifact from Commander (cassy#910)", () => {
       expect(tab.closed).toBe(true);
       expect(notify).toHaveBeenCalledTimes(1);
       expect(notify.mock.calls[0]?.[0]).toContain(words);
-      expect(artifactOpenFailure(result, "Atlas · Linux")).not.toMatch(/cloud_|artifact_|409|503/);
+      expect(artifactOpenFailure(result, "Atlas · Linux")).not.toMatch(/cloud_|artifact_|409|502|503/);
     }
   });
 
-  it("treats a failed request like any other refusal and names a blocked tab", async () => {
+  it("reads a request that never reached the machine as an unreachable machine, and names a blocked tab", async () => {
     const tab = fakeTab();
     const notify = vi.fn();
     await openArtifact({ fetchView: async () => { throw new Error("network"); }, openWindow: () => tab as unknown as Window, notify, machineLabel: "Atlas" });
     expect(tab.closed).toBe(true);
-    expect(notify).toHaveBeenLastCalledWith("The file didn't open. Try again.");
+    expect(notify).toHaveBeenLastCalledWith("Couldn't reach Atlas. Check that it's on and connected, then tap the file again.");
 
     await openArtifact({ fetchView: async () => ({ ok: true, view: { artifact_id: "a", url: "https://x.example/" } }), openWindow: () => null, notify, machineLabel: "Atlas" });
     expect(notify).toHaveBeenLastCalledWith(expect.stringContaining("blocked the new tab"));

@@ -154,7 +154,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 3. See it delivered — the hub's receipt turns "Sending…" into "Delivered" with a check
 4. See it answered — the supervisor's reply arrives under it and "Delivered" steps aside
 5. A refused message says why — "Not sent", a plain reason and the next step on the message, said once (the composer only points at it); the list does not preview it as said
-6. Take control from the message, then retry — the refused message carries the Take control its refusal names (the conversation header has none), and Retry then sends it
+6. Take control from the message, then retry — the refused message carries the Take control its refusal names (the conversation header has none); once control is taken it drops Take control and says Retry will send it, its actions are 44px targets on a phone, and Retry then sends it
 7. Edit and resend retires the refused message — it collapses to "Not sent · replaced by your edit" with no Retry
 8. A late receipt after the supervisor talks on never offers Retry — the supervisor's turn crosses the send and the receipt comes 3.4 s later; the message goes from "Sending…" to delivered without ever showing "Not confirmed" or Retry, and it is sent once
 9. A message the hub never confirms offers Retry — with no receipt, 5 seconds after the supervisor talks on (or 15 seconds after the send) "Sending…" gives way to "Not confirmed", why, and Retry; the retry goes out and is delivered

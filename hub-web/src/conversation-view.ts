@@ -108,6 +108,12 @@ export interface ConversationViewOptions {
    */
   takeControl?: (send: ConversationSend) => void;
   /**
+   * Whether this device controls the session now. Once it does, a control
+   * refusal stops offering Take control and says Retry will go through
+   * (cas-8e0a); if control is lost again, both come back.
+   */
+  controlHeld?: () => boolean;
+  /**
    * Quick replies and composer replies to an ask go through this; the caller
    * sends with in_reply_to = the ask's notification_id and records the send
    * in the history with the same replyTo, which is what marks the ask answered.
@@ -131,6 +137,20 @@ export interface ConversationViewOptions {
 const TICK = '<svg class="tick" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.6 8.6l3.3 3.3L13.4 4.4"/></svg>';
 /** Warning triangle for a refused send; decorative — the "Not sent" text carries the meaning. */
 const WARN = '<svg class="warn" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 1.9 14.6 13.6H1.4Z"/><path d="M8 6.2v3.4"/><path d="M8 11.7v.1"/></svg>';
+
+/**
+ * Give focus back inside a rebuilt bubble (cas-8e0a F01). The same control
+ * keeps it when it survived the rebuild. Otherwise Retry takes it (after
+ * Take control, Retry is the next step), then any action, then the message
+ * itself. Never the page body.
+ */
+function landFocusIn(bubble: HTMLElement, className: string): void {
+  const same = className ? [...bubble.querySelectorAll<HTMLElement>("button")].find((button) => button.className === className) : undefined;
+  const target = same ?? bubble.querySelector<HTMLElement>(".conversation-retry") ?? bubble.querySelector<HTMLElement>("button");
+  if (target) { target.focus({ preventScroll: true }); return; }
+  bubble.tabIndex = -1;
+  bubble.focus({ preventScroll: true });
+}
 
 export class ConversationView {
   readonly element: HTMLElement;
@@ -293,7 +313,9 @@ export class ConversationView {
     // The pinned ask's flow copy is collapsed; it expands again when a newer ask takes the pin.
     const pinned = reply?.kind === "ask" ? this.history.pinnedAsk()?.notification_id === reply.notification_id : undefined;
     const delivered = turn.event.kind === "send" ? this.history.delivered() === turn.event.value : undefined;
-    return JSON.stringify([turn.event, answered && [answered.id, answered.state, answered.text], waiting, pinned, delivered]);
+    // A refused send repaints when control changes hands (cas-8e0a).
+    const held = turn.event.kind === "send" && turn.event.value.state === "error" ? this.options.controlHeld?.() === true : undefined;
+    return JSON.stringify([turn.event, answered && [answered.id, answered.state, answered.text], waiting, pinned, delivered, held]);
   }
 
   /**
@@ -430,6 +452,11 @@ export class ConversationView {
     const existing = new Map<string, HTMLElement>();
     for (const child of node.querySelectorAll<HTMLElement>(":scope > [data-key]")) existing.set(child.dataset.key!, child);
     const children: HTMLElement[] = [];
+    // cas-8e0a F01: a bubble rebuilt while focus is inside it (Take control
+    // leaves a refused message once it succeeds) hands focus to its
+    // replacement instead of dropping it to the page body.
+    const active = document.activeElement;
+    let refocus: { bubble: HTMLElement; className: string } | undefined;
     for (const turn of group.turns) {
       const signature = this.turnSignature(turn);
       let bubble = existing.get(turn.key);
@@ -437,12 +464,15 @@ export class ConversationView {
       if (bubble && bubble.dataset.signature === signature) {
         for (let index = 0; ; index += 1) { const sheet = existing.get(`${turn.key}#${index}`); if (!sheet) break; sheets.push(sheet); }
       } else {
+        const previous = bubble;
+        const focusedClass = previous && active instanceof HTMLElement && previous.contains(active) ? active.className : undefined;
         if (turn.event.kind === "send") bubble = this.renderSend(document, turn, turn.event.value);
         else ({ bubble, sheets } = this.renderReply(document, turn, turn.event.value));
         bubble.classList.add("conversation-turn");
         bubble.dataset.key = turn.key;
         bubble.dataset.signature = signature;
         sheets.forEach((sheet, index) => { sheet.classList.add("conversation-sheet"); sheet.dataset.key = `${turn.key}#${index}`; });
+        if (focusedClass !== undefined) refocus = { bubble, className: focusedClass };
       }
       bubble.classList.toggle("group-first", turn.first);
       bubble.classList.toggle("group-last", turn.last);
@@ -450,6 +480,7 @@ export class ConversationView {
     }
     if (group.time) children.push(timeElement(document, group.time, group.clockAhead));
     node.replaceChildren(...children);
+    if (refocus) landFocusIn(refocus.bubble, refocus.className);
   }
 
   private renderSend(document: Document, turn: ThreadTurn, send: ConversationSend): HTMLElement {
@@ -520,13 +551,17 @@ export class ConversationView {
       // The separator is for the reader; on screen the reason takes its own line.
       const separator = document.createElement("span"); separator.className = "sr-only"; separator.textContent = " · ";
       const plain = refusal(send.error);
-      const reason = document.createElement("span"); reason.className = "conversation-refused-reason"; reason.textContent = plain.reason;
-      const next = document.createElement("span"); next.className = "conversation-refused-next"; next.textContent = ` ${plain.next}`;
+      // cas-8e0a: once this device holds control, the control refusal is
+      // resolved. The message still was not sent, but Retry now goes through,
+      // so the copy says so and Take control leaves the message.
+      const resolved = plain.action === "take-control" && this.options.controlHeld?.() === true;
+      const reason = document.createElement("span"); reason.className = "conversation-refused-reason"; reason.textContent = resolved ? "This device controls the session now." : plain.reason;
+      const next = document.createElement("span"); next.className = "conversation-refused-next"; next.textContent = resolved ? " Retry to send it." : ` ${plain.next}`;
       reason.append(next);
       state.append(glyph.content.firstElementChild!, label, separator, reason);
       bubble.append(state);
       const actions = document.createElement("div"); actions.className = "conversation-actions";
-      if (plain.action === "take-control" && this.options.takeControl) {
+      if (plain.action === "take-control" && !resolved && this.options.takeControl) {
         const take = document.createElement("button"); take.type = "button"; take.className = "conversation-take-control"; take.textContent = "Take control";
         take.setAttribute("aria-label", "Take control of the session");
         take.onclick = () => this.options.takeControl?.(send);

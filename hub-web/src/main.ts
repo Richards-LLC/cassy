@@ -6,7 +6,7 @@ import { ConversationList, filterConversationRows, type ConversationRow } from "
 import { sessionJumpCommandMarkup } from "./palette-commands";
 import { ConversationHistory } from "./conversation-history";
 import { ConversationView } from "./conversation-view";
-import { REFUSED_SEE_ABOVE, refusalSentence } from "./refusal";
+import { REFUSED_SEE_ABOVE, refusalSentence, refusal } from "./refusal";
 import { installAttentionObjects } from "./attention-objects";
 import { installAttachmentSheet } from "./attachment-sheet";
 import { arrangeConversationShell, bindKeyboardViewport, conversationListState, conversationNoMatchText, conversationSearchPlaceholder, conversationSkeletonMarkup, KEYBOARD_HINT_MEDIA_QUERY } from "./conversation-shell";
@@ -333,6 +333,7 @@ function mountConversation(key: string, mount: HTMLElement): void {
       // The refusal says "Take control, then retry"; the control is on the
       // refused message because the conversation header has none (cas-3433).
       takeControl: () => { void takeControlForRefused(threadMachineId, threadSession); },
+      controlHeld: () => controlTakenAfterRefusal.has(threadKey) && leases.get(threadKey)?.held_by_me === true,
       hasEarlier: () => conversationHistoryPage(threadKey).hasEarlier,
       loadingEarlier: () => conversationHistoryPage(threadKey).loading,
       loadingHistory: () => {
@@ -709,6 +710,10 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
     },
     onMessageRejected: (session, clientRef, detail) => {
       const key = sessionKey(machine.id, session);
+      // A control refusal proves the cached lease is stale: control counts as
+      // held again only after a take succeeds (cas-8e0a). Other refusals say
+      // nothing about the lease and leave it alone.
+      if (refusal(detail).action === "take-control") controlTakenAfterRefusal.delete(key);
       const onBubble = conversationHistory(key).reject(clientRef, detail);
       if (messageDelivery?.session === key && messageDelivery.clientRef === clientRef) {
         messageDelivery = undefined;
@@ -2177,6 +2182,18 @@ function supervisorSendContext(text: string): Parameters<typeof planSupervisorSe
  * with a dead button; taking the lease is the step they would otherwise perform
  * by hand, and it succeeds only when no one else controls the session.
  */
+/**
+ * Threads where this device took control after the hub last refused one of
+ * its messages (cas-8e0a). The cached lease can say held while the hub
+ * refuses (the refusal is the fresher evidence), so a refused message says
+ * Retry will go through only once a take has actually succeeded since.
+ */
+const controlTakenAfterRefusal = new Set<string>();
+function noteControlTaken(machineId: string, session: string): void {
+  const key = sessionKey(machineId, session);
+  if (leases.get(key)?.held_by_me) controlTakenAfterRefusal.add(key); else controlTakenAfterRefusal.delete(key);
+}
+
 async function takeControlForMessage(machine: StoredMachine, session: string): Promise<boolean> {
   try {
     await connections.get(machine.id)?.requestControl(session, false);
@@ -2184,6 +2201,7 @@ async function takeControlForMessage(machine: StoredMachine, session: string): P
     return false;
   }
   await loadLease(machine.id, session);
+  noteControlTaken(machine.id, session);
   return leases.get(sessionKey(machine.id, session))?.held_by_me === true;
 }
 
@@ -2211,6 +2229,10 @@ async function takeControlForRefused(machineId: string, session: string): Promis
       requested = false;
     }
     await loadLease(machineId, session);
+    if (requested) noteControlTaken(machineId, session);
+    // The refused message repaints: once control is held, Take control leaves
+    // it and it says Retry will go through (cas-8e0a).
+    updateConversationViews();
     if (!stillHere()) return;
     const after = leases.get(key);
     if (requested && after?.held_by_me) {
@@ -3186,6 +3208,8 @@ async function toggleControl(selected: StoredMachine | undefined, lease: LeaseSt
     await connections.get(selected.id)?.requestControl(selectedSession, Boolean(lease?.controller_label && selected.scopes.includes("hub-admin")));
   }
   await loadLease(selected.id, selectedSession);
+  noteControlTaken(selected.id, selectedSession);
+  updateConversationViews();
 }
 
 /** `event` is the toggle's click; Ctrl/Cmd+K passes none (cas-990d). */

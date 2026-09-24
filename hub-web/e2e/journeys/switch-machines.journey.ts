@@ -86,6 +86,30 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
     await closed();
     await expect(toggle).toBeFocused();
     await open();
+    // A filter left behind by × or Escape is gone on the next open, and every
+    // session is listed again: the filter and the list never disagree
+    // (cas-6f39e).
+    const filter = page.getByRole("searchbox", { name: "Filter sessions" });
+    const rows = picker.locator(".session-picker-entry");
+    const everySession = await rows.count();
+    const closeButton = page.getByRole("button", { name: "Close session picker" });
+    for (const close of [
+      () => closeButton.click(),
+      // Escape inside a search field clears the text first, so close from
+      // outside it: the filter text survives the close, which is the case.
+      async () => {
+        await closeButton.focus();
+        await page.keyboard.press("Escape");
+      },
+    ]) {
+      await filter.fill("zz");
+      await expect(picker.locator(".session-picker-entry:visible")).toHaveCount(0);
+      await close();
+      await closed();
+      await open();
+      await expect(filter).toHaveValue("");
+      await expect(picker.locator(".session-picker-entry:visible")).toHaveCount(everySession);
+    }
     // A closed picker must not pop back open over the next dialog either.
     await page.keyboard.press("Escape");
     await closed();

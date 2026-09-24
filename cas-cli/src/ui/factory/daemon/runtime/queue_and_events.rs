@@ -3841,6 +3841,15 @@ impl FactoryDaemon {
         // proves it took the turn — and never before.
         self.resolve_urgent_wake_probes(queue.as_ref());
         self.resolve_normal_delivery_probes(queue.as_ref()).await;
+        if self.last_commander_mirror_scan.is_none_or(|last| last.elapsed() >= Duration::from_secs(5)) {
+            self.last_commander_mirror_scan = Some(std::time::Instant::now());
+            super::commander_mirror::mirror_supervisor_replies(
+                self.app.cas_dir(),
+                self.app.project_path(),
+                &self.session_name,
+                queue.as_ref(),
+            );
+        }
         self.process_operator_replies(queue.as_ref())?;
 
         // Native-extension agents consume their own queue rows. Excluding them

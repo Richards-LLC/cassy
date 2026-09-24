@@ -841,6 +841,22 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(css).toContain(".session-back { width: var(--button-height); }");
   });
 
+  it("keeps palette and picker states readable and distinct in every colour mode (cas-78c81)", async () => {
+    const css = await readSource("styles.css");
+    const forced = css.slice(css.indexOf("@media (forced-colors: active) {\n  dialog {"));
+    // Unavailable rows are not faded below a readable contrast in either mode.
+    expect(css).toContain(".palette-command:disabled { opacity: 1; color: var(--text-mid); background: transparent; }");
+    expect(forced).toContain(".palette-command:disabled { border-color: GrayText; opacity: 1; }");
+    // The system Highlight can carry alpha (0.8 in Chromium's emulation); the
+    // focus ring and the open session's fill restate it at full strength.
+    expect(forced).toContain("outline-color: color(from Highlight srgb r g b / 1);");
+    expect(forced).toContain('.session-picker-entry[aria-current="true"] { forced-color-adjust: none; color: HighlightText; background: color(from Highlight srgb r g b / 1);');
+    expect(forced).not.toMatch(/background: Highlight;|outline-color: Highlight;/);
+    // Hover is a pointer cue distinct from the focus ring and the open fill.
+    expect(forced).toContain(".palette-command:hover:not(:disabled) > :first-child { text-decoration: underline; }");
+    expect(css).toContain('.palette-commands .session-picker-entry[aria-current="true"]:is(:hover, :active) > .session-name { text-decoration: underline; }');
+  });
+
   it("routes every navigation through one recorded selection and restores the last session on reopen", async () => {
     const main = await readSource("main.ts");
     // One trail: a machine pick, a session open, an attention jump, and a

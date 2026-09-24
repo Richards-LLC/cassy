@@ -16,7 +16,10 @@ export interface ConversationSend {
 }
 /** `at` is when this client saw the event (ms epoch); it stamps the thread's
  * day separators and group timestamps and is never a delivery receipt. */
-export type ConversationEvent = { kind: "send"; value: ConversationSend; at?: number; session?: string } | { kind: "reply"; value: OperatorReply; at?: number; session?: string };
+/** `at` is the sort key. `shownAt`, when set, is the time to display: a live
+ * event sorted after a turn stamped by a clock that runs ahead keeps its own
+ * time on screen (cas-ac1f). */
+export type ConversationEvent = { kind: "send"; value: ConversationSend; at?: number; shownAt?: number; session?: string } | { kind: "reply"; value: OperatorReply; at?: number; shownAt?: number; session?: string };
 
 /** In-memory per-thread evidence. A submitted socket frame is never a receipt. */
 export class ConversationHistory {
@@ -45,7 +48,8 @@ export class ConversationHistory {
    * "waiting". The send is placed at or after the latest turn instead.
    */
   submit(id: string, target: string, text: string, at: number = Date.now(), replyTo?: number, session?: string): void {
-    this.insert({ kind: "send", value: { id, target, text, state: "sending", ...(replyTo === undefined ? {} : { replyTo }) }, at: Math.max(at, this.latestAt()), session });
+    const key = Math.max(at, this.latestAt());
+    this.insert({ kind: "send", value: { id, target, text, state: "sending", ...(replyTo === undefined ? {} : { replyTo }) }, at: key, ...(key === at ? {} : { shownAt: at }), session });
   }
 
   /** The latest stamp already in the thread; live events are placed at or after it. */
@@ -178,7 +182,7 @@ export class ConversationHistory {
     }
     return undefined;
   }
-  reply(reply: OperatorReply, at: number | undefined = Date.now(), session?: string): void {
+  reply(reply: OperatorReply, at: number | undefined = Date.now(), session?: string, shownAt?: number): void {
     if (this.events.some((event) => event.kind === "reply" && event.value.notification_id === reply.notification_id)) return;
     const normalized: OperatorReply = {
       ...reply,
@@ -186,7 +190,7 @@ export class ConversationHistory {
       kind: reply.kind ?? "answer",
       attachments: reply.attachments ?? [],
     };
-    this.insert({ kind: "reply", value: normalized, at, session });
+    this.insert({ kind: "reply", value: normalized, at, ...(shownAt === undefined ? {} : { shownAt }), session });
     for (const event of this.events) {
       if (event.kind === "send" && normalized.reply_to !== null && event.value.notificationId === normalized.reply_to) event.value.state = "replied";
     }
@@ -199,7 +203,8 @@ export class ConversationHistory {
    * answer and read as already acknowledged.
    */
   receive(reply: OperatorReply, at: number = Date.now(), session?: string): void {
-    this.reply(reply, Math.max(at, this.latestAt()), session);
+    const key = Math.max(at, this.latestAt());
+    this.reply(reply, key, session, key === at ? undefined : at);
   }
 
   /** Merge a durable supervisor turn using its original queue timestamp. */

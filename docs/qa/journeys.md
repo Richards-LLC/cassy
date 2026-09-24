@@ -207,8 +207,9 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 1. Open the conversation — the thread is live
 2. The supervisor asks a question — it is pinned above the composer with its choices
-3. Answer with one tap — the pin clears, the thread records the chosen answer, and nothing is left waiting in the context rail, even when the machine's clock runs ahead
+3. Answer with one tap — the pin clears, the thread records the chosen answer, and nothing is left waiting in the context rail, even when the machine's clock runs ahead; the answer shows the time it was sent, under today
 4. See the supervisor act on the answer — the reply follows, and a new blocker after the answer waits
+5. Reply to a machine a day ahead — the reply shows the time it was sent, under today, below the machine's future-dated turn
 
 **Expected experience**
 

@@ -375,6 +375,7 @@ async fn run_server_impl() -> anyhow::Result<()> {
                             "[Cassy] MCP proxy ready ({count} upstream tools; {})",
                             proxy_boot_reachability_receipt(&engine).await
                         );
+                        eprintln!("[Cassy] {}", engine.callable_tools_banner().await);
                         if let Err(error) = write_proxy_snapshot_cache_for_config(
                             &cas_root,
                             &engine,
@@ -515,6 +516,13 @@ pub(crate) async fn install_proxy_policy(
     let routes = config
         .allowlist
         .iter()
+        .filter(|route| !route.supervisor_only)
+        .map(|route| cmcp_core::ExternalToolRoute::new(route.server.clone(), route.tool.clone()));
+    // GH #988: `supervisor:` entries are callable by supervisors only.
+    let supervisor_routes = config
+        .allowlist
+        .iter()
+        .filter(|route| route.supervisor_only)
         .map(|route| cmcp_core::ExternalToolRoute::new(route.server.clone(), route.tool.clone()));
     let delegation_routes = config
         .delegation
@@ -533,6 +541,7 @@ pub(crate) async fn install_proxy_policy(
             ]
         });
     let policy = cmcp_core::ExternalToolAllowlistPolicy::new(routes)
+        .with_supervisor_routes(supervisor_routes)
         .with_supervisor_delegation_routes(delegation_routes);
     engine.set_policy(std::sync::Arc::new(policy)).await;
 }
@@ -1403,14 +1412,17 @@ mod tests {
             ExternalToolConfig {
                 server: "github".to_string(),
                 tool: "list_issues".to_string(),
+                supervisor_only: false,
             },
             ExternalToolConfig {
                 server: "viktor".to_string(),
                 tool: "ask_viktor".to_string(),
+                supervisor_only: false,
             },
             ExternalToolConfig {
                 server: "viktor".to_string(),
                 tool: "wait_for_run".to_string(),
+                supervisor_only: false,
             },
         ];
         config.delegation.external_production_verification =
@@ -1847,6 +1859,7 @@ mod tests {
             .push(cmcp_core::config::ExternalToolConfig {
                 server: "github".to_string(),
                 tool: "list_issues".to_string(),
+                supervisor_only: false,
             });
         assert_ne!(
             first_fingerprint,

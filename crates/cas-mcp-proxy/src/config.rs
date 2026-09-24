@@ -59,7 +59,14 @@ pub struct Config {
 pub struct ExternalToolConfig {
     pub server: String,
     pub tool: String,
+    /// GH #988: a `supervisor:<server>.<tool>` entry. The route is callable
+    /// by supervisors (and a plain non-factory session) and refused for
+    /// factory workers.
+    pub supervisor_only: bool,
 }
+
+/// Prefix of a role-scoped allowlist entry (GH #988).
+pub const SUPERVISOR_ALLOWLIST_PREFIX: &str = "supervisor:";
 
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
@@ -77,6 +84,22 @@ impl ExternalToolConfig {
         let entry = entry.trim();
         if entry.is_empty() {
             return Err("allowlist entry must not be empty".to_string());
+        }
+
+        // GH #988: `supervisor:<route>` scopes a route to supervisors. It is
+        // unambiguous: tool names cannot contain a separator, so a legacy
+        // `supervisor:tool` (server "supervisor") has no second separator and
+        // keeps its old meaning.
+        if let Some(route) = entry.strip_prefix(SUPERVISOR_ALLOWLIST_PREFIX) {
+            if route.contains(['.', ':', '/']) || route.starts_with("mcp__") {
+                let mut parsed = Self::parse_allowlist_entry(route)
+                    .map_err(|_| format!("invalid allowlist entry {entry:?}"))?;
+                if parsed.supervisor_only {
+                    return Err(format!("invalid allowlist entry {entry:?}"));
+                }
+                parsed.supervisor_only = true;
+                return Ok(parsed);
+            }
         }
 
         if let Some(encoded) = entry.strip_prefix("mcp__") {
@@ -110,11 +133,17 @@ impl ExternalToolConfig {
         Ok(Self {
             server: server.to_string(),
             tool: tool.to_string(),
+            supervisor_only: false,
         })
     }
 
     pub fn canonical_entry(&self) -> String {
-        format!("{}.{}", self.server, self.tool)
+        let scope = if self.supervisor_only {
+            SUPERVISOR_ALLOWLIST_PREFIX
+        } else {
+            ""
+        };
+        format!("{scope}{}.{}", self.server, self.tool)
     }
 }
 
@@ -384,6 +413,7 @@ impl Config {
             .map(|tool| ExternalToolConfig {
                 server: VIKTOR_SERVER.to_string(),
                 tool: (*tool).to_string(),
+                supervisor_only: false,
             })
             .collect::<Vec<_>>();
         if self
@@ -438,6 +468,7 @@ impl Config {
             .map(|tool| ExternalToolConfig {
                 server: MECHA_CASSY_SERVER.to_string(),
                 tool: (*tool).to_string(),
+                supervisor_only: false,
             })
             .collect::<Vec<_>>();
         if self
@@ -506,6 +537,7 @@ mod tests {
         config.allowlist.push(ExternalToolConfig {
             server: "test-http".to_string(),
             tool: "inspect".to_string(),
+            supervisor_only: false,
         });
         config.delegation.external_production_verification =
             Some(ExternalProductionVerificationConfig {
@@ -668,6 +700,7 @@ tool = "ask_viktor"
             vec![ExternalToolConfig {
                 server: "viktor".to_string(),
                 tool: "ask_viktor".to_string(),
+                supervisor_only: false,
             }]
         );
         assert!(merged.delegation.external_production_verification.is_none());
@@ -688,22 +721,27 @@ allowlist = ["neon.run_sql", "neon:write", "neon/read", "run_sql", "neon.*"]
                 ExternalToolConfig {
                     server: "neon".to_string(),
                     tool: "run_sql".to_string(),
+                    supervisor_only: false,
                 },
                 ExternalToolConfig {
                     server: "neon".to_string(),
                     tool: "write".to_string(),
+                    supervisor_only: false,
                 },
                 ExternalToolConfig {
                     server: "neon".to_string(),
                     tool: "read".to_string(),
+                    supervisor_only: false,
                 },
                 ExternalToolConfig {
                     server: "*".to_string(),
                     tool: "run_sql".to_string(),
+                    supervisor_only: false,
                 },
                 ExternalToolConfig {
                     server: "neon".to_string(),
                     tool: "*".to_string(),
+                    supervisor_only: false,
                 },
             ]
         );
@@ -711,6 +749,53 @@ allowlist = ["neon.run_sql", "neon:write", "neon/read", "run_sql", "neon.*"]
         let serialized = toml::to_string(&config).unwrap();
         assert!(serialized.contains("allowlist = ["));
         assert!(serialized.contains("neon.run_sql"));
+    }
+
+    /// GH #988: `supervisor:<route>` is a role-scoped entry that round-trips,
+    /// while a legacy `supervisor:tool` (server "supervisor") keeps its
+    /// meaning.
+    #[test]
+    fn allowlist_parses_supervisor_scoped_entries() {
+        let config: Config = toml::from_str(
+            r#"allowlist = ["supervisor:neon.*", "supervisor:neon:run_sql", "supervisor:mcp__neon__list_projects", "supervisor:ask", "viktor.ask_viktor"]"#,
+        )
+        .unwrap();
+        let parsed = config
+            .allowlist
+            .iter()
+            .map(|route| {
+                (
+                    route.server.as_str(),
+                    route.tool.as_str(),
+                    route.supervisor_only,
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            parsed,
+            vec![
+                ("neon", "*", true),
+                ("neon", "run_sql", true),
+                ("neon", "list_projects", true),
+                ("supervisor", "ask", false),
+                ("viktor", "ask_viktor", false),
+            ]
+        );
+        let serialized = toml::to_string(&config).unwrap();
+        assert!(serialized.contains("\"supervisor:neon.*\""), "{serialized}");
+        let reparsed: Config = toml::from_str(&serialized).unwrap();
+        assert_eq!(reparsed.allowlist, config.allowlist);
+        for bad in [
+            "supervisor:neon.",
+            "supervisor:supervisor:neon.*",
+            "supervisor:neon:*:x",
+        ] {
+            let source = format!("allowlist = [\"{bad}\"]");
+            assert!(
+                toml::from_str::<Config>(&source).is_err(),
+                "{bad} must be rejected"
+            );
+        }
     }
 
     #[test]

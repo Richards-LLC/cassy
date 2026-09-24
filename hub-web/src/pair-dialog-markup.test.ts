@@ -72,3 +72,15 @@ describe("pairing dialog in plain words (F3)", () => {
     expect(create.querySelector("label:has(#pair-email)")?.firstChild?.textContent).toBe("Email me the code too (optional)");
   });
 });
+
+describe("Technical details open state", () => {
+  it("stays open on the step where it was opened and starts closed on the next", () => {
+    const origin = "https://commander.example";
+    const base = { cleanupFailed: false, cleanupContext: { cause: "cancel" as const, storeOpen: false, rollbackPending: false }, status: "", createInFlight: false, exchangeInFlight: false, relayOrigin: origin, pageOrigin: origin };
+    const draft = { ...createPairingDraft(origin), technicalOpen: "create" as const };
+    const create = new DOMParser().parseFromString(pairDialogMarkup({ ...base, pendingPairing: null, draft }), "text/html");
+    expect(create.querySelector("details.pair-technical")?.hasAttribute("open")).toBe(true);
+    const code = new DOMParser().parseFromString(pairDialogMarkup({ ...base, pendingPairing: { kind: "relay-request", pairingRequestId: "r", userCode: "KQ7M-4XTR", pollSecret: "p", controllerOrigin: origin, requestedScopes: ["machine-read"], expiresAt: new Date(Date.now() + 600_000).toISOString(), interval: 3 }, draft }), "text/html");
+    expect(code.querySelector("details.pair-technical")?.hasAttribute("open")).toBe(false);
+  });
+});

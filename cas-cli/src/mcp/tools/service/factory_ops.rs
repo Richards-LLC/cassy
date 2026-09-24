@@ -3108,6 +3108,66 @@ impl CasService {
     /// The environment-derived role check is the same workflow guardrail used
     /// by other supervisor-only operations. It is not an adversarial security
     /// boundary; factory process ownership remains the trust boundary.
+    /// Restart the factory daemon's spawn queue without touching the session
+    /// (cas-73b5, GH #970).
+    ///
+    /// Records a reset request the daemon applies on its next loop pass. If
+    /// the loop is wedged, its watchdog first kills hung git/gh/ssh helpers so
+    /// the pass can finish. Returns the current queue health so the caller
+    /// sees what it is recovering from.
+    pub(super) async fn factory_restart_spawn_queue(
+        &self,
+        _req: FactoryRequest,
+    ) -> Result<CallToolResult, McpError> {
+        use crate::harness_policy::is_supervisor_from_env;
+
+        if !is_supervisor_from_env() {
+            return Err(Self::error(
+                ErrorCode::INVALID_PARAMS,
+                "coordination restart_spawn_queue rejected: only the supervisor may restart the \
+                 factory spawn queue",
+            ));
+        }
+        let factory_session = current_factory_session().ok_or_else(|| {
+            Self::error(
+                ErrorCode::INVALID_REQUEST,
+                "restart_spawn_queue requires an active factory session (CAS_FACTORY_SESSION is \
+                 not set)",
+            )
+        })?;
+        let requester = self
+            .inner
+            .get_agent_id()
+            .unwrap_or_else(|_| "supervisor".to_string());
+        crate::factory_daemon_health::request_reset(
+            &self.inner.cas_root,
+            &factory_session,
+            &requester,
+        )
+        .map_err(|error| {
+            Self::error(
+                ErrorCode::INTERNAL_ERROR,
+                format!("Could not record the spawn-queue restart request: {error}"),
+            )
+        })?;
+        let health = crate::factory_daemon_health::worker_status_section(
+            &self.inner.cas_root,
+            &factory_session,
+        );
+        let health = if health.is_empty() {
+            "Spawn queue health: no stall detected.".to_string()
+        } else {
+            health.trim_end().to_string()
+        };
+        Ok(Self::success(format!(
+            "Spawn-queue restart requested for factory session '{factory_session}'. The daemon \
+             applies it on its next loop pass: the in-flight spawn is abandoned and dequeued \
+             actions that have not run are dropped. You will get a message naming what to \
+             re-issue. If the loop is wedged, its watchdog first kills hung git/gh/ssh helper \
+             processes; no pane is touched. Check `worker_status` for the result.\n\n{health}"
+        )))
+    }
+
     pub(super) async fn factory_set_worker_hold(
         &self,
         req: FactoryRequest,
@@ -3266,12 +3326,27 @@ impl CasService {
             worker_status_scope_counts(store.as_ref(), factory_session.as_deref())
                 .map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, e))?;
         if req.summary.unwrap_or(false) {
-            return Ok(Self::success(render_worker_liveness_summary_scoped(
+            let summary = render_worker_liveness_summary_scoped(
                 &liveness_rows,
                 factory_session.as_deref(),
                 scoped_worker_count,
                 outside_scope_worker_count,
-            )));
+            );
+            // cas-73b5: the fast poll surfaces a wedged daemon loop too.
+            let health = factory_session
+                .as_deref()
+                .map(|session| {
+                    crate::factory_daemon_health::worker_status_section(
+                        &self.inner.cas_root,
+                        session,
+                    )
+                })
+                .unwrap_or_default();
+            return Ok(Self::success(if health.is_empty() {
+                summary
+            } else {
+                format!("{}\n{summary}", health.trim_end())
+            }));
         }
 
         // Opportunistically prune stale agents so status output stays actionable.
@@ -3535,6 +3610,14 @@ impl CasService {
         // precisely the case where a failed or unconsumed spawn is the answer,
         // and the old output said only "None active", which reads like an
         // empty fleet rather than a spawn that died.
+        // cas-73b5 (GH #970): a wedged daemon loop or an undrained spawn queue
+        // goes above everything else; the daemon cannot report it itself.
+        let daemon_health_section = factory_session
+            .as_deref()
+            .map(|session| {
+                crate::factory_daemon_health::worker_status_section(&self.inner.cas_root, session)
+            })
+            .unwrap_or_default();
         let spawn_section = factory_session
             .clone()
             .and_then(|session| {
@@ -3603,6 +3686,11 @@ impl CasService {
             for (name, observation) in &liveness_rows {
                 msg.push_str(&format!("\n{} | {name}", observation.detail()));
             }
+            if !daemon_health_section.is_empty() {
+                msg.push_str("\n\n");
+                msg.push_str(daemon_health_section.trim_end());
+                msg.push('\n');
+            }
             if let Some(warning) = shared_clone_warning.as_deref() {
                 msg.push_str("\n\n");
                 msg.push_str(warning);
@@ -3632,6 +3720,7 @@ impl CasService {
                 output.push_str(&format!("{} | {name}\n", observation.detail()));
             }
         }
+        output.push_str(&daemon_health_section);
         output.push_str(&undelivered_section);
         if duplicate_registrations_filtered > 0 {
             output.push_str(&format!(

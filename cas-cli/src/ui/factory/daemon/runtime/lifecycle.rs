@@ -1709,7 +1709,19 @@ impl FactoryDaemon {
 
         let mut prompt_notified = false;
 
+        // cas-73b5 (GH #970): the loop records its progress; an OS thread
+        // publishes it for `worker_status`, so a blocked pass is still seen.
+        let loop_progress = super::loop_watchdog::LoopProgress::new();
+        let _loop_watchdog = super::loop_watchdog::spawn_watchdog(
+            std::sync::Arc::clone(&loop_progress),
+            self.app.cas_dir().to_path_buf(),
+            self.session_name.clone(),
+            std::sync::Arc::clone(&self.shutdown),
+        );
+        let mut last_reset_check = std::time::Instant::now();
+
         while !self.shutdown.load(Ordering::Relaxed) {
+            loop_progress.enter(super::loop_watchdog::LoopPhase::ClientInput);
             // Error timeout must run in daemon mode too (not only local event loop path).
             let had_error = self.app.error_message.is_some();
             self.app.check_error_timeout();
@@ -1739,6 +1751,7 @@ impl FactoryDaemon {
             let ws_activity = self.process_ws_client_input().await;
 
             // Poll PTYs for output using coalesced batch drain (efficient for 6 Claudes generating)
+            loop_progress.enter(super::loop_watchdog::LoopPhase::PtyOutput);
             let (bytes_processed, events) = self.app.mux.poll_batch();
             let had_output = bytes_processed > 0;
             for event in events {
@@ -1761,6 +1774,7 @@ impl FactoryDaemon {
             }
 
             // Process relay events from cloud (remote terminal attach/input/detach)
+            loop_progress.enter(super::loop_watchdog::LoopPhase::Relay);
             self.process_relay_events().await;
 
             // cas-1a4d: retry non-urgent PTY injects only after every attached
@@ -1770,6 +1784,7 @@ impl FactoryDaemon {
             self.app.mux.flush_deferred_injections().await;
 
             // Poll prompt queue (on notification or timer)
+            loop_progress.enter(super::loop_watchdog::LoopPhase::PromptQueue);
             if prompt_notified || last_prompt_poll.elapsed() >= poll_interval {
                 if prompt_notified {
                     if let Some(ref mut notify) = self.notify_rx {
@@ -1806,6 +1821,19 @@ impl FactoryDaemon {
                 prompt_notified = false;
             }
 
+            // cas-73b5: a supervisor's `restart_spawn_queue` request is applied
+            // here, at most once a second.
+            loop_progress.enter(super::loop_watchdog::LoopPhase::SpawnQueue);
+            if last_reset_check.elapsed() >= Duration::from_secs(1) {
+                last_reset_check = std::time::Instant::now();
+                if let Some(request) =
+                    crate::factory_daemon_health::take_reset(self.app.cas_dir(), &self.session_name)
+                {
+                    let outcome = self.apply_spawn_queue_reset(&request);
+                    loop_progress.record_reset(outcome);
+                }
+            }
+
             // Poll spawn queue (enqueues requests, doesn't execute them)
             if last_spawn_poll.elapsed() >= poll_interval {
                 let _ = self.enqueue_spawn_requests();
@@ -1813,6 +1841,7 @@ impl FactoryDaemon {
             }
 
             // Process pending spawns (non-blocking: git ops run on background thread)
+            loop_progress.enter(super::loop_watchdog::LoopPhase::PendingSpawns);
             if self.spawn_task.is_some() || !self.pending_spawns.is_empty() {
                 self.process_pending_spawns().await;
             }
@@ -1821,9 +1850,11 @@ impl FactoryDaemon {
             // workspace sweep is owned by this daemon so merge MCP latency is
             // independent of nextest and failures are reported before the
             // next merge is allowed to go unnoticed.
+            loop_progress.enter(super::loop_watchdog::LoopPhase::MergeSweep);
             self.poll_merge_sweep().await;
 
             // Periodic Cassy data refresh
+            loop_progress.enter(super::loop_watchdog::LoopPhase::Refresh);
             let mut refreshed = false;
             if last_refresh.elapsed() >= refresh_interval {
                 // Collect a completed GitHub Actions snapshot in the background.
@@ -2382,6 +2413,7 @@ impl FactoryDaemon {
             }
 
             // Apply debounced resize after 100ms of no new resize events
+            loop_progress.enter(super::loop_watchdog::LoopPhase::Render);
             let mut resize_applied = false;
             if let Some((cols, rows)) = self.pending_resize {
                 if self.pending_resize_at.elapsed() >= Duration::from_millis(100) {
@@ -2581,6 +2613,22 @@ impl FactoryDaemon {
             if !self.ws_clients.is_empty() {
                 self.flush_ws_client_output().await;
             }
+
+            loop_progress.set_spawn_snapshot(
+                self.pending_spawns.len(),
+                self.spawn_task.as_ref().map(|(name, ..)| {
+                    let started = self
+                        .spawn_started_at
+                        .map(|started| {
+                            chrono::Utc::now()
+                                - chrono::Duration::from_std(started.elapsed()).unwrap_or_default()
+                        })
+                        .unwrap_or_else(chrono::Utc::now);
+                    (name.clone(), started)
+                }),
+            );
+            loop_progress.complete_pass();
+            loop_progress.enter(super::loop_watchdog::LoopPhase::Idle);
 
             // Adaptive sleep: ~120fps when active, ~60fps idle with clients,
             // ~2fps headless (no clients, no GUI) to minimize CPU usage.

@@ -7,6 +7,7 @@ pub(crate) mod delivery;
 mod delivery_matrix_tests;
 mod gui_client;
 mod lifecycle;
+pub(crate) mod loop_watchdog;
 pub(super) mod merge_sweep;
 mod output;
 pub(super) mod pane_size;

@@ -280,6 +280,76 @@ fn spawn_provisioning_timed_out(started_at: Instant, now: Instant, timeout: Dura
     now.saturating_duration_since(started_at) >= timeout
 }
 
+/// cas-73b5: how a dequeued-but-unrun action reads when a spawn-queue restart
+/// drops it: (description, originating queue request, whether it holds one
+/// of the `spawning_count` slots taken at dequeue).
+fn describe_pending_spawn(pending: &PendingSpawn) -> (String, Option<i64>, bool) {
+    match pending {
+        PendingSpawn::Anonymous { request_id, .. } => {
+            ("queued spawn of one worker".to_string(), *request_id, true)
+        }
+        PendingSpawn::Named {
+            request_id, name, ..
+        } => (format!("queued spawn of '{name}'"), *request_id, true),
+        PendingSpawn::Shutdown {
+            request_id,
+            count,
+            names,
+            ..
+        } => {
+            let target = if names.is_empty() {
+                format!("count={}", count.unwrap_or(0))
+            } else {
+                names.join(", ")
+            };
+            (format!("queued shutdown of {target}"), *request_id, false)
+        }
+        PendingSpawn::Respawn(name) => (format!("queued respawn of '{name}'"), None, false),
+        PendingSpawn::Recycle {
+            request_id, name, ..
+        } => (
+            format!("queued recycle of '{name}'"),
+            Some(*request_id),
+            false,
+        ),
+        PendingSpawn::Shell { name, .. } => (format!("queued shell pane '{name}'"), None, false),
+        PendingSpawn::KillShell { name } => (
+            format!("queued removal of shell pane '{name}'"),
+            None,
+            false,
+        ),
+    }
+}
+
+/// cas-73b5: the loop-status outcome and the supervisor message for a
+/// spawn-queue restart that dropped `dropped`.
+fn spawn_queue_reset_report(
+    at: chrono::DateTime<chrono::Utc>,
+    requester: &str,
+    dropped: &[String],
+) -> (String, String) {
+    let at = at.to_rfc3339();
+    if dropped.is_empty() {
+        (
+            format!(
+                "{at} (requested by {requester}): nothing was in flight; the queue keeps draining"
+            ),
+            "Spawn queue restarted. Nothing was in flight inside the daemon; requests still in \
+             spawn_queue keep draining."
+                .to_string(),
+        )
+    } else {
+        let list = dropped.join("; ");
+        (
+            format!("{at} (requested by {requester}): dropped {list}"),
+            format!(
+                "Spawn queue restarted. These dequeued actions were dropped and did not run; \
+                 re-issue the ones you still want: {list}."
+            ),
+        )
+    }
+}
+
 /// cas-2702 (GH #58): pending queue rows this daemon has not drained. A healthy
 /// row lives for at most one poll interval, so anything older than `min_age` is
 /// an anomaly worth reporting — most often a request enqueued against a
@@ -6054,6 +6124,102 @@ impl FactoryDaemon {
         }
     }
 
+    /// Apply a supervisor's `restart_spawn_queue` request (cas-73b5, GH #970).
+    ///
+    /// Restarts the daemon's spawn pipeline in place, without touching any
+    /// pane. The in-flight provisioning is abandoned, and actions already
+    /// dequeued but not yet run are dropped and named to the supervisor to
+    /// re-issue. Rows still in `spawn_queue` keep draining on the next poll,
+    /// and every stalled row may be reported again. Returns the outcome
+    /// recorded in the daemon's loop status.
+    pub(super) fn apply_spawn_queue_reset(
+        &mut self,
+        request: &crate::factory_daemon_health::SpawnQueueResetRequest,
+    ) -> String {
+        let mut dropped: Vec<String> = Vec::new();
+        let request_label =
+            |id: Option<i64>| id.map(|id| format!(" (request {id})")).unwrap_or_default();
+
+        if let Some((pending_name, request_id, _, pending_task_id, handle)) = self.spawn_task.take()
+        {
+            self.spawn_started_at = None;
+            handle.abort();
+            self.app.remove_pending_worker(&pending_name);
+            take_spawn_cancellation(&mut self.cancelled_spawns, &pending_name);
+            if let Some(ref task_id) = pending_task_id {
+                crate::ui::factory::app::render_and_ops::epic_workers::release_preassign_if_bound(
+                    self.app.cas_dir(),
+                    task_id,
+                    &pending_name,
+                );
+            }
+            crate::ui::factory::app::render_and_ops::epic_workers::release_worker_task_bindings(
+                self.app.cas_dir(),
+                &pending_name,
+            );
+            self.app.spawning_count = self.app.spawning_count.saturating_sub(1);
+            append_spawn_audit(
+                self.app.cas_dir(),
+                &self.session_name,
+                request_id,
+                Some(&pending_name),
+                "provision",
+                "cancelled",
+                "Abandoned by a supervisor spawn-queue restart; remove any partial worktree/branch for this worker before re-issuing.",
+            );
+            dropped.push(format!(
+                "in-flight spawn of '{pending_name}'{}",
+                request_label(request_id)
+            ));
+        }
+
+        for pending in std::mem::take(&mut self.pending_spawns) {
+            let (description, request_id, holds_spawn_slot) = describe_pending_spawn(&pending);
+            if holds_spawn_slot {
+                self.app.spawning_count = self.app.spawning_count.saturating_sub(1);
+            }
+            append_spawn_audit(
+                self.app.cas_dir(),
+                &self.session_name,
+                request_id,
+                None,
+                "dequeue",
+                "cancelled",
+                &format!("{description}: dropped by a supervisor spawn-queue restart"),
+            );
+            dropped.push(format!("{description}{}", request_label(request_id)));
+        }
+
+        self.reported_stalled_spawn_requests.clear();
+        self.last_spawn_queue_stall_scan = None;
+
+        let (outcome, message) =
+            spawn_queue_reset_report(chrono::Utc::now(), &request.requester, &dropped);
+        tracing::warn!(outcome = %outcome, "cas-73b5: spawn queue restarted by supervisor");
+
+        let delivered = open_prompt_queue_store(self.app.cas_dir())
+            .map_err(|error| error.to_string())
+            .and_then(|queue| {
+                queue
+                    .enqueue_with_summary(
+                        "director",
+                        self.app.supervisor_name(),
+                        &message,
+                        Some(&self.session_name),
+                        Some("Spawn queue restarted"),
+                    )
+                    .map_err(|error| error.to_string())
+            });
+        match delivered {
+            Ok(_) => super::delivery::wake_daemon_after_enqueue(self.app.cas_dir()),
+            Err(error) => tracing::warn!(
+                %error,
+                "cas-73b5: could not tell the supervisor what the spawn-queue restart dropped"
+            ),
+        }
+        outcome
+    }
+
     /// Poll the spawn queue and enqueue individual actions (non-blocking).
     ///
     /// Instead of spawning workers synchronously (which blocks the TUI for seconds),
@@ -7693,12 +7859,13 @@ mod tests {
     use super::{
         LIFECYCLE_MAX_RENUDGE_ATTEMPTS, append_spawn_audit, append_spawn_audit_line,
         boot_model_error_detail, cancel_targeted_in_flight_spawn, deliver_worker_task_brief,
-        enqueue_preassign_failure_lifecycle_relay, enqueue_spawn_cancelled_notice,
-        enqueue_spawn_outcome_notice, ensure_worker_preassignment, is_exact_agent_name_match,
-        matches_event_filter, preassign_failure_reason, prompt_poison_sweep_due,
-        prompt_poison_sweep_targets, registered_prompt_sweep_agents, registration_timeout_detail,
-        reminder_matches_factory_session, report_stale_reminder_expiry, shutdown_targets,
-        spawn_predates_shutdown, spawn_provisioning_timed_out, stalled_spawn_requests,
+        describe_pending_spawn, enqueue_preassign_failure_lifecycle_relay,
+        enqueue_spawn_cancelled_notice, enqueue_spawn_outcome_notice, ensure_worker_preassignment,
+        is_exact_agent_name_match, matches_event_filter, preassign_failure_reason,
+        prompt_poison_sweep_due, prompt_poison_sweep_targets, registered_prompt_sweep_agents,
+        registration_timeout_detail, reminder_matches_factory_session,
+        report_stale_reminder_expiry, shutdown_targets, spawn_predates_shutdown,
+        spawn_provisioning_timed_out, spawn_queue_reset_report, stalled_spawn_requests,
         take_next_pending_spawn, take_spawn_cancellation, take_unverified_spawn_on_exit,
         timeout_pane_tail, worker_exit_info,
     };
@@ -11416,6 +11583,77 @@ mod tests {
     /// GH #58: requests that reach the queue but are never dequeued are the
     /// worst outcome — the supervisor believes workers are booting. Rows older
     /// than the stall budget must be reported (once each).
+    /// cas-73b5 (GH #970): a spawn-queue restart names every dequeued action
+    /// it drops, with its originating request, and releases exactly the
+    /// spawn slots those actions held.
+    #[test]
+    fn spawn_queue_restart_names_what_it_drops() {
+        use crate::ui::factory::daemon::PendingSpawn;
+        let dropped = [
+            PendingSpawn::Anonymous {
+                request_id: Some(2204),
+                isolate: true,
+                spec: None,
+                task_id: None,
+            },
+            PendingSpawn::Named {
+                request_id: Some(2205),
+                name: "vivid-finch-91".to_string(),
+                isolate: true,
+                spec: None,
+                task_id: Some("cas-73b5".to_string()),
+            },
+            PendingSpawn::Shutdown {
+                request_id: Some(2206),
+                count: None,
+                names: vec!["calm-otter-4".to_string()],
+                force: false,
+            },
+            PendingSpawn::Respawn("steady-wren-3".to_string()),
+        ];
+        let described: Vec<_> = dropped.iter().map(describe_pending_spawn).collect();
+        assert_eq!(
+            described,
+            vec![
+                ("queued spawn of one worker".to_string(), Some(2204), true),
+                (
+                    "queued spawn of 'vivid-finch-91'".to_string(),
+                    Some(2205),
+                    true
+                ),
+                (
+                    "queued shutdown of calm-otter-4".to_string(),
+                    Some(2206),
+                    false
+                ),
+                ("queued respawn of 'steady-wren-3'".to_string(), None, false),
+            ]
+        );
+
+        let at = chrono::Utc::now();
+        let (outcome, message) = spawn_queue_reset_report(
+            at,
+            "sup-1",
+            &["queued shutdown of calm-otter-4 (request 2206)".to_string()],
+        );
+        assert!(
+            outcome.contains("(requested by sup-1): dropped queued shutdown"),
+            "{outcome}"
+        );
+        assert!(
+            message.contains(
+                "re-issue the ones you still want: queued shutdown of calm-otter-4 (request 2206)."
+            ),
+            "{message}"
+        );
+        let (outcome, message) = spawn_queue_reset_report(at, "sup-1", &[]);
+        assert!(
+            outcome.ends_with("nothing was in flight; the queue keeps draining"),
+            "{outcome}"
+        );
+        assert!(message.contains("Nothing was in flight"), "{message}");
+    }
+
     #[test]
     fn stalled_queue_rows_are_reported_once() {
         let now = chrono::Utc::now();

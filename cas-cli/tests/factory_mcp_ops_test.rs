@@ -791,6 +791,108 @@ async fn remind_delay_beyond_ttl_stays_pending_and_list_shows_ended_reminders() 
     );
 }
 
+/// GH #970 (cas-73b5): a wedged daemon loop and an undrained spawn queue are
+/// visible in worker_status, and the supervisor can restart the spawn queue
+/// without touching the session.
+#[tokio::test]
+async fn worker_status_surfaces_a_wedged_daemon_loop_and_restart_spawn_queue_requests_a_reset() {
+    let _guard = EnvGuard::set(&[
+        ("CAS_FACTORY_SESSION", "session-wedged-loop"),
+        ("CAS_AGENT_ROLE", "supervisor"),
+    ]);
+    let env = FactoryTestEnv::new();
+    let conn = rusqlite::Connection::open(env.cas_root.join("cas.db")).unwrap();
+    conn.execute(
+        "INSERT INTO spawn_queue (action, count, worker_names, force, isolate, created_at, factory_session)
+         VALUES ('shutdown', NULL, 'calm-otter-4', 0, 0, ?1, 'session-wedged-loop')",
+        rusqlite::params![(chrono::Utc::now() - chrono::Duration::minutes(31)).to_rfc3339()],
+    )
+    .unwrap();
+    let request_id = conn.last_insert_rowid();
+    let now = chrono::Utc::now();
+    cas::factory_daemon_health::write_status(
+        &env.cas_root,
+        &cas::factory_daemon_health::DaemonLoopStatus {
+            pid: 4242,
+            session: "session-wedged-loop".to_string(),
+            written_at: now,
+            last_pass_at: now - chrono::Duration::minutes(31),
+            phase: "refresh".to_string(),
+            passes: 900,
+            pending_spawns: 1,
+            in_flight_spawn: None,
+            in_flight_started_at: None,
+            loop_thread_wait: Some("pipe_read".to_string()),
+            helpers_killed: Vec::new(),
+            last_reset: None,
+        },
+    )
+    .unwrap();
+
+    for summary in [false, true] {
+        let mut status = factory_req("worker_status");
+        status.summary = Some(summary);
+        let text = get_text(
+            &env.service
+                .factory(Parameters(status))
+                .await
+                .expect("worker_status"),
+        );
+        assert!(
+            text.contains("FACTORY DAEMON LOOP WEDGED")
+                && text
+                    .contains("stuck in phase 'refresh' (pid 4242, thread waiting in pipe_read)"),
+            "summary={summary}: {text}"
+        );
+        assert!(
+            text.contains(&format!("oldest #{request_id} (shutdown) queued")),
+            "summary={summary}: {text}"
+        );
+        assert!(
+            text.contains("restart_spawn_queue"),
+            "summary={summary}: {text}"
+        );
+    }
+
+    let restart = get_text(
+        &env.service
+            .factory(Parameters(factory_req("restart_spawn_queue")))
+            .await
+            .expect("the supervisor may restart the spawn queue"),
+    );
+    assert!(
+        restart.contains("Spawn-queue restart requested for factory session 'session-wedged-loop'"),
+        "{restart}"
+    );
+    assert!(restart.contains("LOOP WEDGED"), "{restart}");
+    let request = cas::factory_daemon_health::pending_reset(&env.cas_root, "session-wedged-loop")
+        .expect("reset request recorded for the daemon");
+    assert_eq!(request.requester, "test-agent-id");
+}
+
+#[tokio::test]
+async fn restart_spawn_queue_is_supervisor_only() {
+    let _guard = EnvGuard::set(&[
+        ("CAS_FACTORY_SESSION", "session-worker-restart"),
+        ("CAS_AGENT_ROLE", "worker"),
+    ]);
+    let env = FactoryTestEnv::new();
+    let error = env
+        .service
+        .factory(Parameters(factory_req("restart_spawn_queue")))
+        .await
+        .expect_err("a worker may not restart the spawn queue");
+    assert!(
+        error.message.contains("only the supervisor"),
+        "{}",
+        error.message
+    );
+    assert!(
+        cas::factory_daemon_health::pending_reset(&env.cas_root, "session-worker-restart")
+            .is_none()
+    );
+}
+
 fn get_text(result: &rmcp::model::CallToolResult) -> String {
     result
         .content

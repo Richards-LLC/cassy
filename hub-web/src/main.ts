@@ -38,6 +38,7 @@ import { backLabel, clearStoredSelection, forgetMachine, goBackSelection, loadSt
 import { composerFocusWinner, planSupervisorSend, sendsOnEnter, supervisorMessage, supervisorTarget } from "./supervisor-message";
 import { hiddenWorkersLabel, saveWorkersRevealed, splitVisiblePanes, workersCommandLabel, workersRevealed, workersRoute } from "./worker-visibility";
 import { dormantCommandLabel, dormantRevealed, dormantRoute, saveDormantRevealed } from "./dormant-visibility";
+import { machineAccentClass, setMachineAccentFleet } from "./machine-accent";
 import { COMPACT_MEDIA_QUERY, PHONE_MEDIA_QUERY } from "./viewport";
 import { defaultTranscriptView, loadTranscriptView, saveTranscriptView, type TranscriptViewMode } from "./transcript";
 import { TranscriptView } from "./transcript-view";
@@ -2105,6 +2106,8 @@ function capturePairingDraft(): void {
 }
 
 function render(captureDraft = true): void {
+  // Every row, header and rail icon below reads its colour from this fleet.
+  setMachineAccentFleet(machines.keys());
   if (captureDraft) capturePairingDraft();
   captureMessageDraft();
   const composerWasFocused = document.activeElement?.id === "message-text";
@@ -2571,7 +2574,7 @@ function machineRailButton(machine: StoredMachine): HTMLButtonElement {
   const snapshot = connectionStates.get(machine.id);
   const state = connectionClass(snapshot);
   const button = document.createElement("button");
-  button.className = `machine-icon ${machine.id === selectedMachineId ? "active" : ""}`;
+  button.className = `machine-icon ${machineAccentClass(machine.id)} ${machine.id === selectedMachineId ? "active" : ""}`;
   button.type = "button";
   // The dot leads so it can never be clipped by the chip's corner radius, and
   // the phone shows the machine's actual name instead of two initials.

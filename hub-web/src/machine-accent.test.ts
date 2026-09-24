@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { MACHINE_ACCENT_COUNT, fnv1a32, jumpConsistentHash, machineAccentClass, machineAccentIndex, machineMonogram } from "./machine-accent";
+import { MACHINE_ACCENT_COUNT, assignMachineAccents, fnv1a32, jumpConsistentHash, machineAccentClass, machineAccentIndex, machineMonogram, setMachineAccentFleet } from "./machine-accent";
 
 const tokens = readFileSync(fileURLToPath(new URL("./tokens.css", import.meta.url)), "utf8");
 
@@ -90,6 +90,35 @@ describe("machine accent assignment", () => {
     expect(() => jumpConsistentHash(1, 0)).toThrow(RangeError);
   });
 
+  it("gives a paired fleet distinct accents while any is free (journey F16)", () => {
+    // The journey world's two machines hash to the same accent on their own.
+    expect(machineAccentIndex("atlas")).toBe(machineAccentIndex("studio"));
+    const pair = assignMachineAccents(["studio", "atlas"]);
+    expect(pair.get("atlas")).toBe(machineAccentIndex("atlas"));
+    expect(pair.get("studio")).not.toBe(pair.get("atlas"));
+    // Order-independent: the same fleet gets the same colours on every device.
+    expect(assignMachineAccents(["atlas", "studio"])).toEqual(pair);
+    // A fleet no larger than the set never repeats; a larger one spreads evenly.
+    for (let size = 1; size <= 3 * MACHINE_ACCENT_COUNT; size += 1) {
+      const fleet = assignMachineAccents(Array.from({ length: size }, (_, index) => `machine-${index}`));
+      const counts = new Array<number>(MACHINE_ACCENT_COUNT).fill(0);
+      for (const index of fleet.values()) counts[index] += 1;
+      expect(Math.max(...counts) - Math.min(...counts), `fleet of ${size}: ${counts}`).toBeLessThanOrEqual(1);
+    }
+    // A single machine keeps its hashed accent.
+    expect(assignMachineAccents(["bench-1"]).get("bench-1")).toBe(machineAccentIndex("bench-1"));
+  });
+
+  it("colours rows from the registered fleet, falling back to the hash for strangers", () => {
+    setMachineAccentFleet(["atlas", "studio"]);
+    try {
+      expect(machineAccentClass("atlas")).not.toBe(machineAccentClass("studio"));
+      expect(machineAccentClass("elsewhere")).toBe(`machine-accent-${machineAccentIndex("elsewhere")}`);
+    } finally {
+      setMachineAccentFleet([]);
+    }
+  });
+
   it("takes the monogram from the first letter or digit", () => {
     expect(machineMonogram("Atlas · Linux")).toBe("A");
     expect(machineMonogram("  studio mac")).toBe("S");
@@ -103,7 +132,7 @@ describe("Pebble accent contrast", () => {
     for (const scheme of ["light", "dark"]) {
       const sets = scopes().filter((block) => block.selector.startsWith(`html[data-scheme="${scheme}"] .machine-accent-`));
       expect(sets.map((block) => block.selector)).toEqual(Array.from({ length: MACHINE_ACCENT_COUNT }, (_, index) => `html[data-scheme="${scheme}"] .machine-accent-${index}`));
-      for (const set of sets) expect(Object.keys(set.properties).sort()).toEqual(["--accent", "--accent-soft", "--sup-bg", "--sup-fg"]);
+      for (const set of sets) expect(Object.keys(set.properties).sort()).toEqual(["--accent", "--accent-soft", "--lift-sup", "--sup-bg", "--sup-fg"]);
     }
     // The unscoped default is the first set, so a surface outside any machine still resolves.
     for (const scheme of ["light", "dark"]) {
@@ -232,6 +261,32 @@ describe("dark tints instead of floods (P9, cas-9616)", () => {
       expect(s["--bg-raised"]).toBe("color-mix(in srgb, var(--bg-root) 92%, var(--text-hi))");
       expect(s["--bg-hover"]).toBe("color-mix(in srgb, var(--bg-root) 88%, var(--text-hi))");
       expect(s["--bg-root"]).toBe(s["--canvas"]);
+    }
+  });
+});
+
+describe("one thread surface and one selection colour (journey F11)", () => {
+  const css = readFileSync(fileURLToPath(new URL("./styles.css", import.meta.url)), "utf8");
+
+  it("keeps the main-action button styles off the primary terminal pane", () => {
+    // pane-layout marks the primary pane .primary; an unscoped .primary:hover
+    // brightened the whole thread from cream to white under the pointer.
+    expect(css).not.toMatch(/^\.primary[\s:{,]/m);
+    expect(css).toContain(":where(button, a).primary {");
+    expect(css).toMatch(/:where\(button, a\)\.primary:hover:not\(:disabled\)[^{]*\{[^}]*filter: brightness\(1\.08\)/);
+  });
+
+  it("keeps the open row's accent tint under the pointer", () => {
+    expect(css).toMatch(/\.conversation-row\[aria-current="true"\]:is\(:hover, :focus-visible\):not\(:disabled\) \{ background: var\(--accent-soft\); \}/);
+  });
+
+  it("outlines supervisor bubbles with an accent hairline in every accent and scheme", () => {
+    expect(css).toMatch(/\.thread \.bub \{[^}]*box-shadow: var\(--lift-sup\);/);
+    for (const scheme of ["light", "dark"]) {
+      for (let index = 0; index < MACHINE_ACCENT_COUNT; index += 1) {
+        const machine = scope(`html[data-scheme="${scheme}"] .machine-accent-${index}`);
+        expect(machine["--lift-sup"], `${scheme} · accent ${index}`).toBe(`${scope(`html[data-scheme="${scheme}"]`)["--lift"]}, inset 0 0 0 1px color-mix(in srgb, ${machine["--accent"]} 30%, transparent)`);
+      }
     }
   });
 });

@@ -9,8 +9,14 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
 
   await journey.stage("Start a draft on the Linux machine", async () => {
     await journey.open();
+    // Each machine wears its own accent: the row avatars differ, and the
+    // header avatar matches the row that was opened (journey F16).
+    const avatar = (project: RegExp) => list.getByRole("button", { name: project }).locator(".conversation-avatar");
+    const colour = (locator: ReturnType<typeof avatar>) => locator.evaluate((element) => getComputedStyle(element).backgroundColor);
+    expect(await colour(avatar(/cas-src/))).not.toBe(await colour(avatar(/gabber-studio/)));
     await list.getByRole("button", { name: /cas-src/ }).click();
     await expect(page.locator(".conversation-identity h1")).toHaveText("cas-src");
+    expect(await page.locator(".conversation-identity .conversation-avatar").evaluate((element) => getComputedStyle(element).backgroundColor)).toBe(await colour(avatar(/cas-src/)));
     await expect(page.locator(".conversation-host")).toContainText(`Atlas · Linux · ${PELICAN}`);
     await composer.fill("Draft: ask about the flaky pairing test");
   });

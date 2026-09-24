@@ -289,6 +289,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 2. Choose the dark appearance — from "Appearance & commands" (Ctrl/Cmd+K)
 3. Keep reading in dark — the thread and composer stay readable
 4. The choice survives a reload — dark is still applied
+5. High contrast keeps the open conversation and Send marked — with forced colours on, in dark and light, the open row is filled with Highlight (under the pointer and with focus too) and Send is a filled button with an edge
 
 **Expected experience**
 

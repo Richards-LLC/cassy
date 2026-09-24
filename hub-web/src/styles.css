@@ -3302,6 +3302,35 @@ button.chip:disabled { cursor: default; }
 .conversation-composer #message-send.send { display: inline-flex; align-items: center; gap: 8px; margin: 0; min-height: 46px; padding: 0 20px 0 16px; border: 0; border-radius: var(--radius-pill); background: var(--accent, var(--you-bg)); color: var(--accent-fg); box-shadow: var(--lift-strong); font: var(--weight-semibold) 14px/1.2 var(--font-ui); white-space: nowrap; }
 .conversation-composer #message-send.send:hover:not([aria-disabled="true"]) { background: var(--accent, var(--you-bg)); color: var(--accent-fg); filter: brightness(1.08); }
 .conversation-composer .send-glyph { width: 19px; height: 19px; display: block; flex: none; }
+/* Forced colours (cas-ac7d) drop the accent tint that marks the open
+   conversation and the fill that makes the main actions read as buttons.
+   Same approach as the session picker's open entry (cas-8b41, cas-78c81):
+   the open row is filled with opaque Highlight (a system colour can carry
+   alpha; every relative colour has a plain system-colour fallback first for
+   browsers below Chrome 119 / Firefox 128) with every colour inside it restated; hover and focus keep the fill.
+   The main actions become
+   filled ButtonText buttons, so the primary action still leads Cancel and the
+   other bordered controls. */
+@media (forced-colors: active) {
+  .conversation-row[aria-current="true"],
+  .conversation-row[aria-current="true"]:is(:hover, :active, :focus-visible):not(:disabled) { forced-color-adjust: none; color: HighlightText; background: Highlight; background: color(from Highlight srgb r g b / 1); }
+  .conversation-row[aria-current="true"] * { color: HighlightText; background: transparent; border-color: HighlightText; }
+  .conversation-row[aria-current="true"] .conversation-avatar { outline: 1px solid HighlightText; outline-offset: -1px; }
+  .conversation-row[aria-current="true"] .conversation-sep { background: HighlightText; }
+  .conversation-row[aria-current="true"]::before { background: HighlightText; }
+  /* The row's ring sits outside it, past a Canvas gap, so it stays Highlight
+     (opaque) rather than flipping like the picker's inset ring. */
+  .conversation-row[aria-current="true"]:focus-visible { outline-color: Highlight; outline-color: color(from Highlight srgb r g b / 1); }
+  .conversation-row:not([aria-current="true"]):hover .conversation-project { text-decoration: underline; }
+  button.primary:not(:disabled):not([aria-disabled="true"]),
+  .conversation-composer #message-send.send:not([aria-disabled="true"]) { forced-color-adjust: none; color: ButtonFace; background: ButtonText; border: 1px solid ButtonText; filter: none; }
+  button.primary:not(:disabled):not([aria-disabled="true"]) *,
+  .conversation-composer #message-send.send:not([aria-disabled="true"]) * { color: ButtonFace; }
+  button.primary:is(:disabled, [aria-disabled="true"]),
+  .conversation-composer #message-send.send[aria-disabled="true"] { border: 1px solid GrayText; color: GrayText; }
+  button.primary:focus-visible,
+  .conversation-composer #message-send.send:focus-visible { outline: var(--focus-ring-width) solid Highlight; outline: var(--focus-ring-width) solid color(from Highlight srgb r g b / 1); outline-offset: var(--focus-ring-width); }
+}
 .conversation-composer .control-disabled-reason { display: none; }
 .conversation-composer .composer-status, .conversation-composer .message-status, .conversation-composer .message-delivery { grid-area: status; font-size: var(--fs-meta); margin: 0; }
 .conversation-composer .composer-status[hidden], .conversation-composer .message-status[hidden], .conversation-composer .message-delivery[hidden] { display: none; }

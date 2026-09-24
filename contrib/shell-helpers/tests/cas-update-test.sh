@@ -52,6 +52,12 @@ run_case() {
     export CAS_UPDATE_WAIT_STEPS=1
     export CAS_UPDATE_WAIT_SLEEP=0
     export CAS_UPDATE_SOURCE_ONLY=1
+    if [ "$mode" = darwin ]; then
+      mkdir -p "$tmp/tools"
+      printf '#!/usr/bin/env bash\nprintf "Darwin\\n"\n' >"$tmp/tools/uname"
+      chmod +x "$tmp/tools/uname"
+      export PATH="$tmp/tools:$PATH"
+    fi
     # shellcheck source=../cas-update
     source "$helper"
     SCAN_ROOTS="$tmp/home"
@@ -78,6 +84,10 @@ run_case() {
       no-restart)
         DO_TURNOVER=0
         turnover_old_processes
+        ;;
+      darwin)
+        turnover_old_processes
+        verify_runtime_epoch
         ;;
     esac
     MIGRATION_STATUS="complete"; SYNC_STATUS="complete"
@@ -376,6 +386,38 @@ test_no_process_and_flag_semantics() {
   else fail 'build-only, sync-only, and no-restart have explicit non-overlapping semantics'; fi
 }
 
+test_darwin_turnover_is_explicitly_unverified() {
+  local tmp out
+  tmp="$(new_fixture)"; out="$tmp/out"
+  make_proc "$tmp/proc" 501 "$tmp/old-running" survivor 'cas\0serve\0' ''
+  if run_case darwin "$out" "$tmp" \
+    && [ ! -s "$tmp/signals" ] \
+    && assert_contains "$out" 'Runtime turnover:   unverified: process inspection unavailable on Darwin' \
+    && assert_contains "$out" 'Manually restart running cas serve clients, the CAS hub service' \
+    && assert_not_contains "$out" 'verified current' \
+    && assert_not_contains "$out" 'no running process uses the old installed CAS bytes'; then
+    pass 'Darwin never signals or claims process verification from an empty procfs snapshot'
+  else fail 'Darwin never signals or claims process verification from an empty procfs snapshot'; fi
+  rm -rf "$tmp"
+}
+
+test_missing_source_is_actionable() {
+  local tmp out
+  tmp="$(new_fixture)"; out="$tmp/out"
+  if (
+    export HOME="$tmp/home" CAS_UPDATE_SOURCE_ONLY=1
+    unset CAS_SRC
+    source "$helper"
+    build_and_install
+  ) >"$out" 2>&1; then
+    fail 'build without CAS_SRC fails with an actionable error'
+  elif assert_contains "$out" 'CAS_SRC is required for builds' \
+    && assert_contains "$out" 'export CAS_SRC='; then
+    pass 'build without CAS_SRC fails with an actionable error'
+  else fail 'build without CAS_SRC fails with an actionable error'; fi
+  rm -rf "$tmp"
+}
+
 test_native_project_refresh_delegation() {
   local tmp out args
   tmp="$(new_fixture)"; out="$tmp/out"; args="$tmp/cas-args"
@@ -504,6 +546,8 @@ test_ownership_classification
 test_dry_run_and_opt_out
 test_stale_survivor_is_nonzero
 test_no_process_and_flag_semantics
+test_darwin_turnover_is_explicitly_unverified
+test_missing_source_is_actionable
 test_native_project_refresh_delegation
 test_turnover_precedes_native_project_refresh
 test_stale_turnover_is_reported_before_project_refresh

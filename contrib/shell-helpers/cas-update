@@ -28,9 +28,11 @@
 #   servers are stopped but not guessed back into existence; their durable
 #   owner/session is printed with the exact reconnect/restart action. An MCP
 #   client's `cas serve` is allowed to reconnect through its owning client.
+#   Process identity checks require Linux procfs. On other systems the helper
+#   never signals processes or claims that the runtime epoch was verified.
 #
 # Environment:
-#   CAS_SRC                   Source checkout (default: ~/Petrastella/cas-src)
+#   CAS_SRC                   Source checkout (required for build/install)
 #   CAS_INSTALL               Binary destination (default: ~/.local/bin/cas)
 #   CAS_PROJECT_ROOTS         Default project scan roots (default: $HOME)
 #   CAS_UPDATE_WORKTREE_ROOT  Persistent detached build worktree parent
@@ -44,7 +46,7 @@
 
 set -euo pipefail
 
-CAS_SRC="${CAS_SRC:-$HOME/Petrastella/cas-src}"
+CAS_SRC="${CAS_SRC:-}"
 CAS_INSTALL="${CAS_INSTALL:-$HOME/.local/bin/cas}"
 SCAN_ROOTS_DEFAULT="${CAS_PROJECT_ROOTS:-$HOME}"
 PROC_ROOT="${CAS_UPDATE_PROC_ROOT:-/proc}"
@@ -149,6 +151,16 @@ ensure_state_files() {
   : >"$OLD_PROCESS_FILE"
   : >"$TURNOVER_RESULTS_FILE"
   : >"$SERVER_RECORD_FILE"
+}
+
+turnover_supported() {
+  [ "$(uname -s)" = "Linux" ] && [ -d "$PROC_ROOT" ]
+}
+
+report_unverified_turnover() {
+  RUNTIME_STATUS="unverified: process inspection unavailable on $(uname -s)"
+  warn "Cannot verify or restart old CAS processes: Linux /proc process identity checks are unavailable on $(uname -s)."
+  warn "Manually restart running cas serve clients, the CAS hub service (check cas hub service status), and factory daemons/registered servers with their owners."
 }
 
 proc_starttime() {
@@ -285,6 +297,10 @@ classify_process() {
 
 snapshot_old_processes() {
   step "Snapshot old CAS runtime epoch"
+  if ! turnover_supported; then
+    warn "Process snapshot unavailable: Linux /proc process identity checks are unavailable on $(uname -s)."
+    return 0
+  fi
   if [ "$OLD_INSTALLED_HASH" = "none" ]; then
     dim "  no previously installed CAS binary — no old runtime epoch"
     return
@@ -344,6 +360,10 @@ turnover_old_processes() {
     done <"$OLD_PROCESS_FILE"
     RUNTIME_STATUS="skipped by explicit opt-out"
     dim "  runtime turnover disabled explicitly; no signals sent"
+    return 0
+  fi
+  if ! turnover_supported; then
+    report_unverified_turnover
     return 0
   fi
   if [ ! -s "$OLD_PROCESS_FILE" ]; then
@@ -451,6 +471,7 @@ find_mcp_replacement() {
 verify_runtime_epoch() {
   [ "$DRY_RUN" = "1" ] && return 0
   [ "$DO_TURNOVER" = "1" ] || return 0
+  turnover_supported || return 0
   [ "$OLD_INSTALLED_HASH" != "$NEW_INSTALLED_HASH" ] || return 0
   local dir pid hash stale=0 cmd start target
   for dir in "$PROC_ROOT"/[0-9]*; do
@@ -502,7 +523,8 @@ run_cmd() {
 
 build_and_install() {
   step "Build CAS from source"
-  [ -d "$CAS_SRC" ] || { error "cas-src not found at $CAS_SRC"; return 1; }
+  [ -n "$CAS_SRC" ] || { error "CAS_SRC is required for builds; set it to your Cassy source checkout (for example: export CAS_SRC=\"\$HOME/code/cassy\")"; return 1; }
+  [ -d "$CAS_SRC" ] || { error "CAS_SRC source checkout not found at $CAS_SRC"; return 1; }
   info "src: $CAS_SRC"; info "branch: $BRANCH"; info "target: $CAS_INSTALL"; info "profile: $PROFILE"
   if ! command -v cargo >/dev/null 2>&1 && [ -f "$HOME/.cargo/env" ]; then . "$HOME/.cargo/env"; fi
   command -v cargo >/dev/null 2>&1 || { error "cargo not on PATH"; return 1; }

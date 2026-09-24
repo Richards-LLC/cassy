@@ -2027,7 +2027,9 @@ dialog::backdrop { background: var(--overlay-backdrop); }
 .palette-advanced > summary::before { content: "▸"; font-size: 0.9em; }
 .palette-advanced[open] > summary::before { content: "▾"; }
 .palette-advanced > summary:focus-visible { outline-offset: calc(-2 * var(--focus-ring-width)); }
-.palette-advanced[open] { gap: var(--space-1); }
+/* <details> lays its content out in an anonymous slot box, so the group's
+   grid does not reach these rows: stretch and space them explicitly. */
+.palette-advanced > .palette-command { width: 100%; margin-top: var(--space-1); }
 /* Forced colors drops the surfaces and shadows that separate rows and lift the
    dialog, so each needs a real edge: rows read as buttons, the dialog stands
    off the page behind it, and the open session keeps its mark. */

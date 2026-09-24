@@ -386,11 +386,11 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(terminal).toContain("state.controlMode && state.focused");
   });
 
-  it("keeps palette codenames primary while indexing project names and optional session summaries", async () => {
+  it("keeps palette rows project-led while indexing project names and optional session summaries", async () => {
     // Behaviour is pinned in palette-commands.test.ts (cas-cfcb); this keeps main.ts on that one renderer.
     const [source, palette] = await Promise.all([readSource("main.ts"), readFile(new URL("palette-commands.ts", import.meta.url), "utf8")]);
     expect(source).toContain("sessionJumpCommandMarkup(machine, session, sessionSummaries.get(sessionKey(machine.id, session.name)))");
-    expect(palette).toContain("<span>Jump to ${escapeHtml(session.name)}</span>");
+    expect(palette).toContain("<span>Jump to ${escapeHtml(project ?? session.name)}</span>");
     expect(palette).toContain('data-search-text="${escapeHtml(searchText)}"');
     expect(source).toContain('command.dataset.searchText ?? ""');
   });
@@ -827,7 +827,8 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(main).toContain('backTarget ? `<button id="session-back" class="session-back"');
     // Every session the hub exposes, with its role and status — a bare animal
     // name does not distinguish one supervisor from another.
-    expect(main).toContain("escapeHtml(sessionPickerMeta(entry))");
+    expect(main).toContain("escapeHtml(sessionPickerHeadline(entry))");
+    expect(main).toContain("escapeHtml(sessionPickerRowMeta(entry))");
     // cas-5d94: the hub derives the roster from the live agent registry, so the
     // count is stated — including a real zero — instead of being suppressed.
     expect(main).not.toContain("const workers = entry.workerCount > 0 ?");

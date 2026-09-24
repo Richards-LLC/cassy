@@ -638,6 +638,18 @@ main {
   white-space: nowrap;
 }
 
+/* The codename follows the project, secondary: quieter, and the first to
+   yield width so the project and the caret stay readable (3.30.0 F2). */
+.session-picker-codename {
+  flex: 0 100 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-mid);
+  font-size: var(--fs-xs);
+  font-weight: var(--weight-regular);
+  text-overflow: ellipsis;
+}
+
 .session-picker-caret {
   flex: 0 0 auto;
   color: var(--text-mid);

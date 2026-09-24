@@ -163,6 +163,27 @@ export function sessionPickerMeta(entry: SessionPickerEntry): string {
   return [entry.project, role, workerCountLabel(entry.workerCount), entry.status].filter(Boolean).join(" · ");
 }
 
+/**
+ * What a session picker row leads with: the project, as the conversation list
+ * and the palette do, or the session name when the hub names no project
+ * (3.30.0 journey F2).
+ */
+export function sessionPickerHeadline(entry: Pick<SessionPickerEntry, "project" | "session">): string {
+  return entry.project ?? entry.session;
+}
+
+/**
+ * The picker row's second line under a project headline: the generated
+ * codename is secondary, with the role, roster and status after it. The
+ * machine is the group heading above the row. With no project the session
+ * name is already the headline, so the line does not repeat it.
+ */
+export function sessionPickerRowMeta(entry: SessionPickerEntry): string {
+  const codename = entry.supervisor ?? (entry.project ? entry.session : undefined);
+  const role = codename ? `${entry.role} ${codename}` : entry.role;
+  return [role, workerCountLabel(entry.workerCount), entry.status].join(" · ");
+}
+
 export function sessionPickerEntries(input: SessionPickerInput): SessionPickerEntry[] {
   const selectedMachineId = input.selection?.machineId;
   const ordered = [...input.machines].sort((a, b) =>

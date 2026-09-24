@@ -753,6 +753,17 @@ impl CasCore {
 
         let supervisor_override_requested = req.supervisor_override.unwrap_or(false);
 
+        let mut task = task_store.get(&req.task_id).map_err(|e| McpError {
+            code: ErrorCode::INVALID_PARAMS,
+            message: Cow::from(format!("Task not found: {e}")),
+            data: None,
+        })?;
+
+        // Set when the task had no active lease at all (e.g. a Blocked task
+        // whose lease lapsed). The assignee, or a supervisor with
+        // supervisor_override, may still hand it on (cas-6cfe7, GH #987).
+        let mut transferred_without_lease = false;
+
         // Verify current agent owns the lease — with supervisor force-transfer escape hatch.
         let lease = agent_store.get_lease(&req.task_id).map_err(|e| McpError {
             code: ErrorCode::INTERNAL_ERROR,
@@ -813,20 +824,52 @@ impl CasCore {
                 }
             }
             _ => {
-                return Err(McpError {
-                    code: ErrorCode::INVALID_PARAMS,
-                    message: Cow::from(format!("No active lease found for task {}", req.task_id)),
-                    data: None,
+                let caller_is_assignee = agent_store.get(&agent_id).is_ok_and(|caller| {
+                    super::super::task::task_assignee_matches_agent(
+                        agent_store.as_ref(),
+                        task.assignee.as_deref(),
+                        &caller,
+                    )
                 });
+                let supervisor_forced = supervisor_override_requested && is_supervisor_from_env();
+                if supervisor_override_requested && !is_supervisor_from_env() {
+                    return Err(McpError {
+                        code: ErrorCode::INVALID_PARAMS,
+                        message: Cow::from(
+                            "supervisor_override=true is only honored when the caller is a \
+                             supervisor (CAS_AGENT_ROLE=supervisor).",
+                        ),
+                        data: None,
+                    });
+                }
+                if !caller_is_assignee && !supervisor_forced {
+                    return Err(McpError {
+                        code: ErrorCode::INVALID_PARAMS,
+                        message: Cow::from(format!(
+                            "No active lease found for task {} (status: {}). Its assignee, or a \
+                             supervisor with supervisor_override=true, can still transfer it.",
+                            req.task_id, task.status
+                        )),
+                        data: None,
+                    });
+                }
+                transferred_without_lease = true;
+                None
             }
         };
 
-        // Verify target agent exists and is active
-        let target_agent = agent_store.get(&req.to_agent).map_err(|_| McpError {
-            code: ErrorCode::INVALID_PARAMS,
-            message: Cow::from(format!("Target agent not found: {}", req.to_agent)),
-            data: None,
-        })?;
+        // Verify the target agent exists and is active. `to_agent` may be an
+        // agent id or a worker name (cas-6cfe7, GH #987): a name resolves to
+        // the live registration carrying it, the newest if there are several.
+        let target_agent = resolve_transfer_target(agent_store.as_ref(), &req.to_agent)
+            .ok_or_else(|| McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from(format!(
+                    "Target agent not found: {} (no registered agent has that id or name)",
+                    req.to_agent
+                )),
+                data: None,
+            })?;
 
         if !target_agent.is_alive() {
             return Err(McpError {
@@ -840,12 +883,6 @@ impl CasCore {
         }
 
         // Add handoff note (plus supervisor-override audit entry when applicable) to task
-        let mut task = task_store.get(&req.task_id).map_err(|e| McpError {
-            code: ErrorCode::INVALID_PARAMS,
-            message: Cow::from(format!("Task not found: {e}")),
-            data: None,
-        })?;
-
         let timestamp = chrono::Utc::now().format("%Y-%m-%d %H:%M");
         let handoff_note = if let Some(prior_holder) = &prior_lease_holder {
             // Supervisor force-transfer: include audit information.
@@ -858,6 +895,17 @@ impl CasCore {
                 "[{timestamp}] SUPERVISOR FORCE-TRANSFER by {agent_id}: \
                  released live lease from '{prior_holder}', reassigned to '{}'{}",
                 req.to_agent, note_suffix
+            )
+        } else if transferred_without_lease {
+            let note_suffix = req
+                .note
+                .as_deref()
+                .map(|n| format!(": {n}"))
+                .unwrap_or_default();
+            format!(
+                "[{timestamp}] TRANSFER WITHOUT LEASE by {agent_id} (task status: {}), \
+                 reassigned to '{}'{}",
+                task.status, req.to_agent, note_suffix
             )
         } else if let Some(note) = &req.note {
             format!(
@@ -891,8 +939,9 @@ impl CasCore {
         })?;
 
         // Release our lease (only needed for the normal transfer path; the
-        // supervisor force-transfer path already released the live lease above).
-        if prior_lease_holder.is_none() {
+        // supervisor force-transfer path already released the live lease above,
+        // and a transfer without a lease has none to release).
+        if prior_lease_holder.is_none() && !transferred_without_lease {
             agent_store
                 .release_lease(&req.task_id, &agent_id)
                 .map_err(|e| McpError {
@@ -905,7 +954,7 @@ impl CasCore {
         // Try to claim for target agent (best effort - they may need to claim themselves)
         let claim_result = agent_store.try_claim(
             &req.task_id,
-            &req.to_agent,
+            &target_agent.id,
             DEFAULT_LEASE_DURATION_SECS,
             Some(&format!("Transferred from {agent_id}")),
         );
@@ -1084,4 +1133,27 @@ impl CasCore {
 
         Ok(Self::success(output))
     }
+}
+
+/// Resolve a transfer target given as an agent id or a worker name
+/// (cas-6cfe7, GH #987). An exact id wins. A name resolves among the agents
+/// carrying it: a live registration first, then the newest heartbeat, so a
+/// stale row left by an earlier session with the same name is not chosen.
+fn resolve_transfer_target(
+    agent_store: &dyn cas_store::AgentStore,
+    to_agent: &str,
+) -> Option<cas_types::Agent> {
+    let token = to_agent.trim();
+    if token.is_empty() {
+        return None;
+    }
+    if let Ok(agent) = agent_store.get(token) {
+        return Some(agent);
+    }
+    agent_store
+        .list(None)
+        .ok()?
+        .into_iter()
+        .filter(|agent| agent.name.eq_ignore_ascii_case(token))
+        .max_by_key(|agent| (agent.is_alive(), agent.last_heartbeat, agent.registered_at))
 }

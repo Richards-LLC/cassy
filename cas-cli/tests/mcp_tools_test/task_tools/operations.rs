@@ -4779,6 +4779,169 @@ async fn test_non_supervisor_cannot_force_transfer() {
 }
 
 // =============================================================================
+// cas-6cfe7 (GH #987): transfer by worker name, and a Blocked task transfers
+// without a lease reset
+// =============================================================================
+
+fn register_live_worker(
+    agent_store: &std::sync::Arc<dyn cas::store::AgentStore>,
+    id: &str,
+    name: &str,
+) {
+    let mut agent = cas::types::Agent::new(id.to_string(), name.to_string());
+    agent.role = cas::types::AgentRole::Worker;
+    agent.heartbeat();
+    agent_store.register(&agent).expect("register worker");
+}
+
+async fn create_task_for_transfer(core: &CasCore, title: &str) -> String {
+    let created = core
+        .cas_task_create(Parameters(make_task_create_req(title)))
+        .await
+        .expect("task create should succeed");
+    extract_task_id(&extract_text(created))
+        .expect("should have task id")
+        .to_string()
+}
+
+#[tokio::test]
+async fn transfer_accepts_a_worker_name_and_picks_its_live_registration() {
+    let (temp, worker_core) = setup_cas();
+    let _env_lock = env_test_lock();
+    let cas_dir = temp.path().join(".cas");
+    let agent_store = open_agent_store(&cas_dir).expect("open agent store");
+    // A stale row from an earlier session with the same name must not win.
+    register_live_worker(&agent_store, "calm-otter-old", "calm-otter-4");
+    agent_store
+        .mark_stale("calm-otter-old")
+        .expect("mark old row stale");
+    register_live_worker(&agent_store, "calm-otter-live", "calm-otter-4");
+
+    let task_id = create_task_for_transfer(&worker_core, "Transfer by worker name").await;
+    let worker_session_id = format!("test-session-{}", std::process::id());
+    let task_store = cas::store::open_task_store(&cas_dir).expect("open task store");
+    let mut task = task_store.get(&task_id).expect("task");
+    task.status = cas::types::TaskStatus::InProgress;
+    task.assignee = Some(worker_session_id.clone());
+    task_store.update(&task).expect("assign task");
+    agent_store
+        .try_claim(&task_id, &worker_session_id, 600, Some("worker lease"))
+        .expect("worker claim");
+
+    let result = worker_core
+        .cas_task_transfer(Parameters(TaskTransferRequest {
+            task_id: task_id.clone(),
+            to_agent: "calm-otter-4".to_string(),
+            note: Some("handing over".to_string()),
+            supervisor_override: None,
+        }))
+        .await
+        .expect("a worker name is a valid transfer target");
+    assert!(extract_text(result).contains("Transferred task"));
+
+    let task = task_store.get(&task_id).expect("task after transfer");
+    assert_eq!(task.assignee.as_deref(), Some("calm-otter-4"));
+    let lease = agent_store
+        .get_lease(&task_id)
+        .expect("read lease")
+        .expect("the target holds the lease");
+    assert_eq!(
+        lease.agent_id, "calm-otter-live",
+        "the live registration is claimed"
+    );
+}
+
+#[tokio::test]
+async fn a_blocked_task_without_a_lease_transfers_from_its_assignee() {
+    let (temp, worker_core) = setup_cas();
+    let _env_lock = env_test_lock();
+    let cas_dir = temp.path().join(".cas");
+    let agent_store = open_agent_store(&cas_dir).expect("open agent store");
+    register_live_worker(&agent_store, "steady-wren-id", "steady-wren-3");
+
+    let task_id = create_task_for_transfer(&worker_core, "Blocked task to hand on").await;
+    let worker_session_id = format!("test-session-{}", std::process::id());
+    let task_store = cas::store::open_task_store(&cas_dir).expect("open task store");
+    let mut task = task_store.get(&task_id).expect("task");
+    task.status = cas::types::TaskStatus::Blocked;
+    task.assignee = Some(worker_session_id);
+    task_store.update(&task).expect("block task");
+    assert!(
+        agent_store
+            .get_lease(&task_id)
+            .expect("read lease")
+            .is_none()
+    );
+
+    worker_core
+        .cas_task_transfer(Parameters(TaskTransferRequest {
+            task_id: task_id.clone(),
+            to_agent: "steady-wren-3".to_string(),
+            note: None,
+            supervisor_override: None,
+        }))
+        .await
+        .expect("the assignee can hand on a Blocked task with no lease");
+
+    let task = task_store.get(&task_id).expect("task after transfer");
+    assert_eq!(task.assignee.as_deref(), Some("steady-wren-3"));
+    assert_eq!(task.status, cas::types::TaskStatus::Blocked, "no reset");
+    assert!(
+        task.notes.contains("TRANSFER WITHOUT LEASE") && task.notes.contains("Blocked"),
+        "{}",
+        task.notes
+    );
+}
+
+#[tokio::test]
+async fn a_task_without_a_lease_needs_its_assignee_or_a_supervisor_override() {
+    let (temp, worker_core) = setup_cas();
+    let _env_lock = env_test_lock();
+    let cas_dir = temp.path().join(".cas");
+    let agent_store = open_agent_store(&cas_dir).expect("open agent store");
+    register_live_worker(&agent_store, "steady-wren-id", "steady-wren-3");
+    register_live_worker(&agent_store, "someone-else-id", "someone-else");
+
+    let task_id = create_task_for_transfer(&worker_core, "Blocked task owned elsewhere").await;
+    let task_store = cas::store::open_task_store(&cas_dir).expect("open task store");
+    let mut task = task_store.get(&task_id).expect("task");
+    task.status = cas::types::TaskStatus::Blocked;
+    task.assignee = Some("someone-else".to_string());
+    task_store.update(&task).expect("block task");
+
+    let request = || TaskTransferRequest {
+        task_id: task_id.clone(),
+        to_agent: "steady-wren-3".to_string(),
+        note: None,
+        supervisor_override: None,
+    };
+    let refused = worker_core
+        .cas_task_transfer(Parameters(request()))
+        .await
+        .expect_err("neither the assignee nor a supervisor");
+    assert!(
+        refused.message.contains("No active lease")
+            && refused.message.contains("supervisor_override=true"),
+        "{}",
+        refused.message
+    );
+
+    let supervisor_core = CasCore::with_daemon(cas_dir.clone(), None, None);
+    supervisor_core.set_agent_id_for_testing("supervisor-session-id".to_string());
+    let _role_guard = ScopedSupervisorRole::enter();
+    supervisor_core
+        .cas_task_transfer(Parameters(TaskTransferRequest {
+            supervisor_override: Some(true),
+            ..request()
+        }))
+        .await
+        .expect("a supervisor override transfers a Blocked task with no lease");
+    let task = task_store.get(&task_id).expect("task after transfer");
+    assert_eq!(task.assignee.as_deref(), Some("steady-wren-3"));
+    assert_eq!(task.status, cas::types::TaskStatus::Blocked);
+}
+
+// =============================================================================
 // cas-6009: dep_remove honors dep_type — does not silently remove the wrong dep
 // =============================================================================
 

@@ -350,6 +350,22 @@ pub fn claim_qa_pass(
     Ok(pass)
 }
 
+/// Return a claimed round to the reviewer queue when its QA work item is
+/// reset. The same round and deadline remain in place for the next reviewer.
+/// Other task IDs and resolved rounds are left untouched.
+pub fn release_qa_claim_for_task(cas_dir: &Path, qa_task_id: &str) -> Result<bool> {
+    let conn = open_conn(cas_dir)?;
+    let conn = conn.lock().map_err(lock_err)?;
+    let tx = ImmediateTx::new(&conn)?;
+    let changed = tx.execute(
+        "UPDATE qa_passes SET reviewer_agent_id = NULL, state = 'pending'
+         WHERE qa_task_id = ?1 AND state = 'claimed'",
+        params![qa_task_id],
+    )?;
+    tx.commit()?;
+    Ok(changed > 0)
+}
+
 /// Guard used by task start/claim of a QA work item: the implementer of the
 /// delivery under review may never take it.
 pub fn assert_may_review_qa_task(

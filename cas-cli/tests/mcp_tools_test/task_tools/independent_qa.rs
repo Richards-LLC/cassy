@@ -221,6 +221,54 @@ async fn user_facing_park_dispatches_an_independent_round_and_refuses_self_revie
 }
 
 #[tokio::test]
+async fn resetting_a_qa_work_item_lets_a_replacement_start_the_same_round_cas_1aef3() {
+    let (temp, core, repo, task_id) = fixture();
+    let _env = env_test_lock();
+    let cas_dir = repo.join(".cas");
+    let _keep = &temp;
+
+    let parked = close_text(&core, &task_id).await;
+    assert!(parked.contains("INDEPENDENT QA DISPATCHED"), "{parked}");
+    let qa_task = qa_task_id(&cas_dir, &task_id);
+    let original = reviewer_core(&cas_dir, "dead-reviewer");
+    original
+        .cas_task_start(Parameters(IdRequest { id: qa_task.clone() }))
+        .await
+        .expect("first reviewer claims the round");
+    let before = cas_store::latest_qa_pass(&cas_dir, &task_id, chrono::Utc::now())
+        .unwrap()
+        .unwrap();
+
+    core.cas_task_reset(Parameters(TaskReleaseRequest {
+        task_id: qa_task.clone(),
+        force: Some(true),
+    }))
+    .await
+    .expect("supervisor reset clears the dead reviewer's task and pass claim");
+    let pending = cas_store::latest_qa_pass(&cas_dir, &task_id, chrono::Utc::now())
+        .unwrap()
+        .unwrap();
+    assert_eq!(pending.id, before.id);
+    assert_eq!(pending.deadline_at, before.deadline_at);
+    assert_eq!(pending.state, cas::types::QaPassState::Pending);
+    assert!(pending.reviewer_agent_id.is_none());
+
+    let replacement = reviewer_core(&cas_dir, "replacement-reviewer");
+    let started = extract_text(
+        replacement
+            .cas_task_start(Parameters(IdRequest { id: qa_task }))
+            .await
+            .expect("replacement reviewer starts the reset QA task"),
+    );
+    assert!(started.contains("claimed"), "{started}");
+    let reclaimed = cas_store::latest_qa_pass(&cas_dir, &task_id, chrono::Utc::now())
+        .unwrap()
+        .unwrap();
+    assert_eq!(reclaimed.id, before.id);
+    assert_eq!(reclaimed.reviewer_agent_id.as_deref(), Some("replacement-reviewer"));
+}
+
+#[tokio::test]
 async fn rejection_returns_the_delivery_and_approval_unlocks_merge_and_close() {
     let (temp, core, repo, task_id) = fixture();
     let _env = env_test_lock();

@@ -599,6 +599,15 @@ impl CasCore {
             data: None,
         })?;
 
+        // A QA work item carries a separate claim on its delivery's pass.
+        // Clearing only the task lease leaves a dead reviewer's claim there,
+        // so the replacement worker cannot start the reset task (cas-1aef3).
+        cas_store::release_qa_claim_for_task(&self.cas_root, &req.task_id).map_err(|e| McpError {
+            code: ErrorCode::INTERNAL_ERROR,
+            message: Cow::from(format!("reset: failed to release QA pass claim: {e}")),
+            data: None,
+        })?;
+
         let _ = crate::hooks::handlers::session_hygiene::append_factory_session_event(
             &self.cas_root,
             "task_reset",

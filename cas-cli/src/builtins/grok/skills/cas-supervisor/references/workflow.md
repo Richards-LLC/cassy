@@ -63,6 +63,15 @@ and the "all subtasks closed -> verify and close the epic" flow, so this is the 
    ```
    Omit `isolate` for shared mode.
 
+   **Worker GitHub access (GH #1005).** Workers never inherit your GitHub
+   credentials. When a task cites an issue (a github.com issue URL,
+   `owner/repo#N`, or `GH #N`), Cassy attaches its body and comments at
+   assignment under `<artifacts_root>/<task>/github-issues/`, and task show and
+   task start list the files. Do not relay issue text by hand. For `gh issue
+   view`, `gh pr checks` and `gh run view` inside workers, export a read-only
+   fine-grained token as `CAS_WORKER_GITHUB_READ_TOKEN` before starting the
+   factory; each worker gets it as its own `GH_TOKEN`.
+
    **Hard rule:** every `spawn_workers` call MUST include explicit `cli=`,
    `model=`, and `effort=`. The active registry matrix is Codex GPT-6 Luna/xhigh for light (Claude Opus 5.5/low fallback), Codex GPT-6 Sol/medium for standard (GPT-6 Luna/xhigh fallback), Claude Opus 5.5/high for taste (Claude Opus 5/high fallback), Claude Opus 5.5/high for supervisor (Claude Fable 5.1/high fallback), and Claude Opus 5.5/high for heavy (Codex GPT-6 Astra/high fallback). Use taste for judgment and public decisions and heavy for implementation risk; Terra is a standing suspension.
    Omitted fields fall back through the factory config cascade and stock floor;

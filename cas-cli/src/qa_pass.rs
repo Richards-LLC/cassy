@@ -506,6 +506,36 @@ pub fn validate_round_bundle(ledger_path: &Path, pass: &QaPass) -> Result<std::p
             field("head_sha")
         ));
     }
+    // cas-a6a3 (GH #1007): a round that claims a visual-QA pass backs it with
+    // the strict run's own report, generated after the round opened, against
+    // a local build of the reviewed tip, never the production URL.
+    if field("visual_qa_status") == "pass" {
+        let relative = value
+            .pointer("/files/visual_qa_json")
+            .and_then(|v| v.as_str())
+            .unwrap_or("visual-qa/visual-qa.json");
+        if std::path::Path::new(relative).components().any(|part| {
+            !matches!(
+                part,
+                std::path::Component::Normal(_) | std::path::Component::CurDir
+            )
+        }) {
+            return Err(format!(
+                "{}: files.visual_qa_json {relative:?} must stay inside the round directory",
+                bundle.display()
+            ));
+        }
+        crate::qa_evidence::check_visual_qa_run(
+            &dir.join(relative),
+            pass.requested_at.timestamp(),
+            &format!(
+                "round {} opened at {}",
+                pass.round,
+                pass.requested_at.to_rfc3339()
+            ),
+        )
+        .map_err(|problem| format!("{}: {problem}", bundle.display()))?;
+    }
     Ok(bundle)
 }
 
@@ -809,6 +839,59 @@ mod tests {
         write("independent-qa", "bbbb2222");
         assert!(validate_round_bundle(&ledger, &round).unwrap_err().contains("head_sha"));
         write("independent-qa", "aaaa1111");
+        assert!(validate_round_bundle(&ledger, &round).is_ok());
+    }
+
+    /// cas-a6a3 (GH #1007): a round claiming `visual_qa_status: pass` needs
+    /// the strict run's own report, from after the round opened, of a local
+    /// build. A claim with no run, or a run against production, is refused.
+    #[test]
+    fn round_bundle_visual_qa_pass_claim_needs_a_local_run_after_the_round_opened() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let ledger = dir.path().join("LEDGER.md");
+        std::fs::write(&ledger, "# ledger").unwrap();
+        let round = pass("aaaa1111", cas_types::QaPassState::Claimed);
+        std::fs::write(
+            dir.path().join("bundle.json"),
+            serde_json::json!({
+                "schema": 1, "task_id": "cas-ui1", "producer": "independent-qa",
+                "head_sha": "aaaa1111", "visual_qa_status": "pass",
+                "files": {"visual_qa_json": "visual-qa/visual-qa.json"}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::create_dir_all(dir.path().join("visual-qa")).unwrap();
+        let report = |status: &str, generated: chrono::DateTime<chrono::Utc>, url: &str| {
+            std::fs::write(
+                dir.path().join("visual-qa/visual-qa.json"),
+                serde_json::json!({
+                    "status": status, "strict": true,
+                    "generatedAt": generated.to_rfc3339(), "urls": [url]
+                })
+                .to_string(),
+            )
+            .unwrap();
+        };
+        // Claimed, never run.
+        let refused = validate_round_bundle(&ledger, &round).unwrap_err();
+        assert!(refused.contains("missing or unreadable"), "{refused}");
+        let later = round.requested_at + chrono::Duration::seconds(60);
+        // Run against the production origin.
+        report("PASS", later, "https://hub.petrastella.io/commander/");
+        let refused = validate_round_bundle(&ledger, &round).unwrap_err();
+        assert!(refused.contains("not a local build"), "{refused}");
+        // A local run from before the round opened.
+        let earlier = round.requested_at - chrono::Duration::hours(1);
+        report("PASS", earlier, "http://127.0.0.1:28511/commander/");
+        let refused = validate_round_bundle(&ledger, &round).unwrap_err();
+        assert!(refused.contains("before round 1 opened"), "{refused}");
+        // A failed local run.
+        report("FAIL", later, "http://127.0.0.1:28511/commander/");
+        let refused = validate_round_bundle(&ledger, &round).unwrap_err();
+        assert!(refused.contains("status \"FAIL\""), "{refused}");
+        // A passing local run after the round opened backs the claim.
+        report("PASS", later, "http://127.0.0.1:28511/commander/");
         assert!(validate_round_bundle(&ledger, &round).is_ok());
     }
 

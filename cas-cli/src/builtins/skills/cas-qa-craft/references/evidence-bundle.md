@@ -37,7 +37,14 @@ journey evaluation scores polish for it.
 - `schema: 1`, `task_id`, and `producer` (`cas-qa-craft`, `independent-qa`, or `journey`)
 - `head_sha`: the full SHA of the build under test
 - `build_url`, `playwright_version`, `created_at` (RFC 3339)
-- `visual_change` (boolean) and `visual_qa_status` (`pass`, `fail`, or `unavailable`)
+- `visual_change` (boolean) and `visual_qa_status` (`pass`, `fail`, or `unavailable`).
+  `pass` is a claim that close checks against the run's own report,
+  `visual-qa/visual-qa.json`. The report must say `"status": "PASS"`, and
+  its `generatedAt` must be later than the delivered commit. Every URL in
+  `urls` must be a local build: loopback, `*.localhost`, or a file. The run
+  must not record `"strict": false`. A run against a production or other
+  remote origin never counts, because it checks what is deployed there,
+  not this commit. With no run, write `unavailable`; never `pass`.
 - `files`: the keys above, with paths relative to the bundle
 - `critique_score`: `distinctiveness`, `fit`, `hierarchy`, `craft`, and `accessibility`, each 0–5, matching `critique.md`
 
@@ -149,7 +156,8 @@ The floor is distinctiveness, fit, and hierarchy each ≥ 4, and no dimension at
 0. A score below the floor is a defect task, not a note. If the project has no
 `scripts/visual-qa.mjs`, take the four renders at 1280×800 and 390×800 in light
 and dark with `page.screenshot`. Set `visual_qa_status: "unavailable"` and say
-so in the ledger's Honesty section.
+so in the ledger's Honesty section. Point `BASE_URL` at your own local serve of
+the delivered commit's build, never the deployed site.
 
 Cite the bundle in the ledger rows: the evidence path is `qa/M01.png`. Also
 cite it in one typed note,

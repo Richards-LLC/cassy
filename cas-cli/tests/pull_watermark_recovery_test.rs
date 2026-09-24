@@ -180,6 +180,9 @@ async fn unattributed_terminal_reopen_is_journaled_once_and_not_retried_next_pul
     let mut remote_json = serde_json::to_value(remote).unwrap();
     remote_json["project_id"] = serde_json::json!(project_id);
     remote_json["project_canonical_id"] = serde_json::json!(project_id);
+    // Current clients always write an origin; an originless row is parked
+    // before the terminal guard is reached (cas-7a63).
+    remote_json["origin_project"] = serde_json::json!(project_id);
 
     Mock::given(method("GET"))
         .and(path("/api/sync/pull"))

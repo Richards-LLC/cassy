@@ -200,6 +200,27 @@ impl SyncQueue {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
+    /// Distinct task ids whose pulled row was parked as a
+    /// [`PULL_ID_COLLISION`](crate::cloud::PULL_ID_COLLISION), most recent
+    /// first. `cas doctor` reports these because each one is a foreign row
+    /// that the pull refused to write over a local task with the same id.
+    pub fn pull_id_collision_ids(&self) -> Result<Vec<String>, CasError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT entity_id FROM sync_conflicts
+             WHERE entity_type = ?1 AND strategy = ?2
+             GROUP BY entity_id ORDER BY MAX(id) DESC",
+        )?;
+        let rows = stmt.query_map(
+            params![
+                EntityType::Task.as_str(),
+                crate::cloud::sync_queue::PULL_ID_COLLISION
+            ],
+            |row| row.get::<_, String>(0),
+        )?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
     pub fn unreviewed_conflict_count(&self) -> Result<usize, CasError> {
         let conn = self.conn.lock().unwrap();
         Ok(

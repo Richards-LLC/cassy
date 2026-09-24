@@ -2547,6 +2547,7 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
         }
         checks.push(cloud_queue_check(&cas_root));
         checks.extend(sync_warning_checks(&sync_warnings));
+        checks.extend(pull_id_collision_check(&cas_root));
         // Quarantine is local state, so an unreadable ledger reports zero
         // rather than failing the whole check: the check's job is to describe
         // contamination, not to depend on the remedy's bookkeeping.
@@ -4889,6 +4890,42 @@ fn sync_warning_checks(warnings: &[crate::cloud::SyncWarningSummary]) -> Vec<Che
         .collect()
 }
 
+/// Report pulled task rows that were parked because they shared an id with a
+/// different local task (cas-7a63, GH #1000). Silent when there are none, so a
+/// clean project's report is unchanged.
+fn pull_id_collision_check(cas_root: &Path) -> Option<Check> {
+    let ids = crate::cloud::SyncQueue::open(cas_root)
+        .and_then(|queue| queue.pull_id_collision_ids())
+        .ok()?;
+    pull_id_collision_check_for(&ids)
+}
+
+fn pull_id_collision_check_for(ids: &[String]) -> Option<Check> {
+    const SHOWN: usize = 5;
+    if ids.is_empty() {
+        return None;
+    }
+    let mut listed = ids
+        .iter()
+        .take(SHOWN)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
+    if ids.len() > SHOWN {
+        listed.push_str(&format!(", +{} more", ids.len() - SHOWN));
+    }
+    Some(Check::new(
+        "pulled id collisions",
+        CheckStatus::Warning,
+        format!(
+            "{} local task id(s) were also used by a different pulled task ({listed}). The pull \
+             parked those rows and left the local tasks unchanged. Inspect the parked rows with \
+             `cas cloud conflicts`",
+            ids.len()
+        ),
+    ))
+}
+
 /// Surface the exact content queue rows that keep `purge-foreign` fail-closed.
 /// The remediation is intentionally executable in order: reset terminal rows,
 /// push them, then preview the purge again. A count from the generic queue
@@ -5279,6 +5316,56 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
+
+    /// cas-7a63: a parked id collision is reported once per id, and a clean
+    /// queue adds no row to the report.
+    #[test]
+    fn doctor_reports_pulled_id_collisions_once_per_id() {
+        let temp = TempDir::new().unwrap();
+        let queue = crate::cloud::SyncQueue::open(temp.path()).unwrap();
+        queue.init().unwrap();
+        assert!(pull_id_collision_check(temp.path()).is_none());
+
+        for id in ["cas-f539", "cas-d852", "cas-f539"] {
+            queue
+                .record_conflict(
+                    "task",
+                    id,
+                    "{}",
+                    "local",
+                    crate::cloud::PULL_ID_COLLISION,
+                    None,
+                    None,
+                )
+                .unwrap();
+        }
+        queue
+            .record_conflict(
+                "task",
+                "cas-other",
+                "{}",
+                "parked",
+                "pull_deserialize",
+                None,
+                None,
+            )
+            .unwrap();
+
+        let check = pull_id_collision_check(temp.path()).expect("collisions are reported");
+        assert_eq!(check.name, "pulled id collisions");
+        assert!(matches!(check.status, CheckStatus::Warning));
+        assert!(
+            check.message.starts_with("2 local task id(s)"),
+            "{}",
+            check.message
+        );
+        assert!(
+            check.message.contains("cas-f539, cas-d852"),
+            "{}",
+            check.message
+        );
+        assert!(!check.message.contains("cas-other"), "{}", check.message);
+    }
 
     #[test]
     fn issue_repository_doctor_row_resolves_defaults_without_warning() {

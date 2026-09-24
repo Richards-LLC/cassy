@@ -1649,17 +1649,19 @@ async fn team_pull_parks_malformed_task_and_continues_to_valid_neighbor() {
     }));
 }
 
+/// cas-7a63: the cloud stamps `project_id` with the requested scope, so a
+/// row without its own origin must not inherit the puller's project.
 #[tokio::test]
-async fn team_pull_null_origin_uses_server_attested_project_identity() {
+async fn team_pull_null_origin_row_is_parked_not_stamped_with_the_puller_project() {
     let mut task = serde_json::to_value(Task::new(
         "cas-a1cf-null-origin".to_string(),
-        "server-owned task".to_string(),
+        "legacy row with only a scope stamp".to_string(),
     ))
     .unwrap();
     task["origin_project"] = serde_json::Value::Null;
     task["project_id"] = serde_json::json!("server-project");
 
-    let (_temp, result, task_store, _queue) =
+    let (_temp, result, task_store, queue) =
         pull_team_task_fixtures("server-project", vec![task], None).await;
 
     assert!(
@@ -1667,14 +1669,167 @@ async fn team_pull_null_origin_uses_server_attested_project_identity() {
         "unexpected pull errors: {:?}",
         result.errors
     );
-    assert_eq!(
-        task_store
-            .get("cas-a1cf-null-origin")
-            .unwrap()
-            .origin_project
-            .as_deref(),
-        Some("server-project")
+    assert_eq!(result.pulled_tasks, 0);
+    assert!(
+        task_store.get("cas-a1cf-null-origin").is_err(),
+        "an originless row must be parked, never stamped with the requested scope"
     );
+    let conflicts = queue.list_conflicts(10).unwrap();
+    assert!(conflicts.iter().any(|conflict| {
+        conflict.entity_id == "cas-a1cf-null-origin" && conflict.strategy == "pull_missing_origin"
+    }));
+}
+
+/// A foreign project's closed task that shares a short id with a live local
+/// task, arriving without `origin_project` and carrying the scope echo
+/// `project_id = <puller>`. This is the 2026-09-24 team pull (GH #1000) that
+/// replaced cas-f539 and cas-d852.
+fn foreign_legacy_row_with_scope_echo(id: &str, scope: &str) -> serde_json::Value {
+    let mut foreign = Task::new(
+        id.to_string(),
+        "E1.8 — Migrate refund readers to read from payments".to_string(),
+    );
+    foreign.status = TaskStatus::Closed;
+    foreign.close_reason = Some("payments refund readers migrated".to_string());
+    foreign.closed_at = Some(chrono::Utc::now());
+    foreign.updated_at = chrono::Utc::now();
+    let mut raw = serde_json::to_value(foreign).unwrap();
+    raw["origin_project"] = serde_json::Value::Null;
+    raw["project_id"] = serde_json::json!(scope);
+    raw
+}
+
+fn local_owned_task(id: &str, origin: &str) -> Task {
+    let mut local = Task::new(
+        id.to_string(),
+        "hub-web: reconnecting status stays in the composer".to_string(),
+    );
+    local.origin_project = Some(origin.to_string());
+    local.description = "local work in flight".to_string();
+    local.updated_at = chrono::Utc::now() - chrono::Duration::hours(1);
+    local
+}
+
+fn assert_local_task_untouched(task_store: &Arc<dyn TaskStore>, expected: &Task) {
+    let stored = task_store.get(&expected.id).unwrap();
+    assert_eq!(stored.title, expected.title);
+    assert_eq!(stored.description, expected.description);
+    assert_eq!(stored.status, TaskStatus::Open);
+    assert_eq!(stored.close_reason, None);
+    assert_eq!(stored.origin_project, expected.origin_project);
+    assert!(
+        !stored.notes.contains("CAS_SYNC_STATUS"),
+        "no sync status provenance may be appended to the local task: {}",
+        stored.notes
+    );
+}
+
+#[tokio::test]
+async fn team_pull_never_overwrites_a_local_task_with_a_colliding_unattributed_row() {
+    let local = local_owned_task("cas-f539", "p");
+    let (_temp, result, task_store, queue) = pull_team_task_fixtures(
+        "p",
+        vec![foreign_legacy_row_with_scope_echo("cas-f539", "p")],
+        Some(local.clone()),
+    )
+    .await;
+
+    assert!(
+        result.errors.is_empty(),
+        "unexpected pull errors: {:?}",
+        result.errors
+    );
+    assert_eq!(result.pulled_tasks, 0);
+    assert!(result.task_status_transitions.is_empty());
+    assert_local_task_untouched(&task_store, &local);
+    assert!(
+        queue.quarantined_ids("task").unwrap().is_empty(),
+        "quarantining the bare id would hide the local task from the board"
+    );
+    assert_eq!(
+        queue.pull_id_collision_ids().unwrap(),
+        vec!["cas-f539".to_string()]
+    );
+    let conflict = queue
+        .list_conflicts(10)
+        .unwrap()
+        .into_iter()
+        .find(|conflict| conflict.strategy == crate::cloud::PULL_ID_COLLISION)
+        .expect("the foreign row is kept in the conflict journal");
+    assert_eq!(conflict.winner_side, "local");
+    assert!(
+        conflict
+            .discarded_row_json
+            .contains("payments refund readers")
+    );
+}
+
+#[tokio::test]
+async fn team_pull_foreign_origin_collision_keeps_the_local_task_on_the_board() {
+    let local = local_owned_task("cas-20a3", "p");
+    let foreign = team_task_fixture(
+        "cas-20a3",
+        TaskStatus::Closed,
+        "p",
+        "gabber-studio",
+        chrono::Utc::now(),
+    );
+    let (_temp, result, task_store, queue) =
+        pull_team_task_fixtures("p", vec![foreign], Some(local.clone())).await;
+
+    assert!(
+        result.errors.is_empty(),
+        "unexpected pull errors: {:?}",
+        result.errors
+    );
+    assert_local_task_untouched(&task_store, &local);
+    assert!(queue.quarantined_ids("task").unwrap().is_empty());
+    assert_eq!(
+        queue.pull_id_collision_ids().unwrap(),
+        vec!["cas-20a3".to_string()]
+    );
+}
+
+#[tokio::test]
+async fn team_pull_stale_legacy_copy_of_the_same_task_is_not_reported_as_a_collision() {
+    let local = local_owned_task("cas-9d1e", "p");
+    let mut legacy = serde_json::to_value(local.clone()).unwrap();
+    legacy["origin_project"] = serde_json::Value::Null;
+    legacy["project_id"] = serde_json::json!("p");
+    legacy["status"] = serde_json::json!("closed");
+    let (_temp, result, task_store, queue) =
+        pull_team_task_fixtures("p", vec![legacy], Some(local.clone())).await;
+
+    assert!(
+        result.errors.is_empty(),
+        "unexpected pull errors: {:?}",
+        result.errors
+    );
+    assert_local_task_untouched(&task_store, &local);
+    assert!(queue.quarantined_ids("task").unwrap().is_empty());
+    assert!(queue.pull_id_collision_ids().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn team_pull_unattributed_row_without_a_local_task_stays_quarantined() {
+    let (_temp, result, task_store, queue) = pull_team_task_fixtures(
+        "p",
+        vec![foreign_legacy_row_with_scope_echo("cas-9cfa", "p")],
+        None,
+    )
+    .await;
+
+    assert!(
+        result.errors.is_empty(),
+        "unexpected pull errors: {:?}",
+        result.errors
+    );
+    assert!(
+        task_store.get("cas-9cfa").is_err(),
+        "a foreign legacy row must not be materialized under the puller's project"
+    );
+    assert!(queue.quarantined_ids("task").unwrap().contains("cas-9cfa"));
+    assert!(queue.pull_id_collision_ids().unwrap().is_empty());
 }
 
 #[tokio::test]

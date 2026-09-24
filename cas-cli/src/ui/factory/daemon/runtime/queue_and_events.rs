@@ -1958,6 +1958,121 @@ impl FactoryDaemon {
         }
     }
 
+    /// cas-4143: Claude Code re-checks a PreToolUse `allow` against its own
+    /// safety rules and, for shapes such as a heredoc, parks the call as a
+    /// teammate permission request in `team-lead.json`, a mailbox nobody
+    /// reads. Answer a request CAS already allowed for that exact call with
+    /// the approval the worker is waiting for. Surface anything else still
+    /// pending after [`crate::factory_permission_relay::APPROVAL_WAKE_AFTER_SECS`]
+    /// as one supervisor wake per request. The in-flight tool call that hides
+    /// this wait from the stall detectors does not suppress it here.
+    pub(super) fn relay_worker_permission_requests(&mut self) {
+        use crate::factory_permission_relay as relay;
+        const SCAN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+        let now = std::time::Instant::now();
+        if self
+            .last_permission_request_scan
+            .is_some_and(|last| now.saturating_duration_since(last) < SCAN_INTERVAL)
+        {
+            return;
+        }
+        let first_scan = self.last_permission_request_scan.is_none();
+        self.last_permission_request_scan = Some(now);
+        let cas_dir = self.app.cas_dir().to_path_buf();
+        if first_scan {
+            relay::prune_hook_allows(&cas_dir);
+        }
+
+        // The daemon's own Claude tree, plus each worker's account tree: a
+        // worker spawned with `config_dir` writes its request there.
+        let mut roots: Vec<std::path::PathBuf> = Vec::new();
+        if let Some(root) = super::teams::teams_root_dir().parent() {
+            roots.push(root.to_path_buf());
+        }
+        let workers: std::collections::HashSet<String> =
+            self.app.worker_names().iter().cloned().collect();
+        let mut members = workers.clone();
+        members.insert("supervisor".to_string());
+        if let Ok(agents) = crate::store::open_agent_store(&cas_dir)
+            && let Ok(active) = agents.list(Some(cas_types::AgentStatus::Active))
+        {
+            for agent in active.iter().filter(|agent| {
+                agent.factory_session.as_deref() == Some(self.session_name.as_str())
+            }) {
+                if let Some(dir) = agent
+                    .metadata
+                    .get("worker_account_dir")
+                    .map(|dir| dir.trim())
+                    .filter(|dir| !dir.is_empty())
+                {
+                    let dir = match dir.strip_prefix("~/") {
+                        Some(suffix) => dirs::home_dir()
+                            .map(|home| home.join(suffix))
+                            .unwrap_or_else(|| std::path::PathBuf::from(dir)),
+                        None => std::path::PathBuf::from(dir),
+                    };
+                    if !roots.contains(&dir) {
+                        roots.push(dir);
+                    }
+                }
+            }
+        }
+
+        for root in &roots {
+            for request in relay::pending_requests(root, &self.session_name) {
+                if !members.contains(&request.worker) {
+                    continue;
+                }
+                let pre_approved = request.tool_use_id.as_deref().is_some_and(|tool_use_id| {
+                    relay::hook_allowed(&cas_dir, tool_use_id, &request.tool_name)
+                });
+                if pre_approved {
+                    match relay::answer_request(root, &self.session_name, &request, true, "") {
+                        Ok(()) => tracing::info!(
+                            target: "cas::coordination",
+                            stage = "permission_request_auto_approved",
+                            worker = %request.worker,
+                            request_id = %request.request_id,
+                            tool = %request.tool_name,
+                            age_secs = request.age_secs,
+                            "answered a teammate permission request with CAS's recorded allow"
+                        ),
+                        Err(error) => tracing::warn!(
+                            worker = %request.worker,
+                            request_id = %request.request_id,
+                            %error,
+                            "cas-4143: could not answer a pre-approved permission request"
+                        ),
+                    }
+                    continue;
+                }
+                // The supervisor's own parked request cannot wake itself;
+                // only workers go through the attention lane.
+                if request.age_secs < relay::APPROVAL_WAKE_AFTER_SECS
+                    || !workers.contains(&request.worker)
+                    || self.reported_permission_requests.contains(&request.request_id)
+                {
+                    continue;
+                }
+                if matches!(
+                    super::lifecycle::enqueue_worker_approval_pending_relay(&cas_dir, &request),
+                    super::lifecycle::WorkerAttentionRelayOutcome::Persisted { .. }
+                ) {
+                    self.reported_permission_requests
+                        .insert(request.request_id.clone());
+                    tracing::warn!(
+                        target: "cas::coordination",
+                        stage = "worker_approval_pending",
+                        worker = %request.worker,
+                        request_id = %request.request_id,
+                        age_secs = request.age_secs,
+                        "teammate permission request relayed to the supervisor"
+                    );
+                }
+            }
+        }
+    }
+
     /// Report a worker whose harness refused a turn because of its account,
     /// and give its task back (cas-8a55).
     ///

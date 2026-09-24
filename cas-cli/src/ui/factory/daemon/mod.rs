@@ -254,6 +254,11 @@ pub struct FactoryDaemon {
     reported_unavailable_workers: std::collections::HashMap<String, String>,
     /// Last bounded rollout scan for terminal harness availability evidence.
     last_usage_limit_scan: Option<Instant>,
+    /// cas-4143: last scan of Claude's team-lead mailbox for teammate
+    /// permission requests parked for a lead nobody plays.
+    last_permission_request_scan: Option<Instant>,
+    /// cas-4143: permission request ids already relayed to the supervisor.
+    reported_permission_requests: std::collections::HashSet<String>,
     /// Bounded supervisor transcript scan for Commander mirroring.
     last_commander_mirror_scan: Option<Instant>,
     /// cas-8a55: workers whose harness refused a turn for an account reason

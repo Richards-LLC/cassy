@@ -950,6 +950,14 @@ pub fn handle_pre_tool_use(
     // full disassembly that identified the upstream root cause.
     // ========================================================================
     if is_factory_agent && FACTORY_AUTO_APPROVE_TOOLS.contains(&tool_name) {
+        // cas-4143: Claude Code can still re-check this allow against its
+        // own safety rules (e.g. a heredoc) and park the call as a teammate
+        // permission request for a lead nobody plays. Record CAS's verdict
+        // for exactly this call so the factory daemon can answer that
+        // request with it (crate::factory_permission_relay).
+        if let Some(tool_use_id) = input.tool_use_id.as_deref() {
+            crate::factory_permission_relay::record_hook_allow(cas_root, tool_use_id, tool_name);
+        }
         return Ok(HookOutput::with_pre_tool_permission(
             "allow",
             &format!(

@@ -676,6 +676,9 @@ pub(crate) fn parse_worker_attention_envelope(prompt: &str) -> bool {
                     | "worker_stalled"
                     | "worker_delivery_stalled"
                     | "worker_unavailable"
+                    // cas-4143: a teammate permission parked for a lead
+                    // nobody plays, past the wake threshold.
+                    | "worker_approval_pending"
                     | "supervisor_stalled"
                     | "merged_close_blocked"
                     | "pr_lane_failed"
@@ -2483,6 +2486,10 @@ mod cas_3dcb_worker_died_relay_tests {
         ));
         assert!(is_supervisor_wake_envelope(
             "<worker-attention kind=\"worker_unavailable\" worker=\"calm-owl\" notification_id=\"42\">\nbody</worker-attention>"
+        ));
+        // cas-4143: a teammate permission parked for a lead nobody plays.
+        assert!(is_supervisor_wake_envelope(
+            "<worker-attention kind=\"worker_approval_pending\" worker=\"calm-owl\" notification_id=\"42\">\nbody</worker-attention>"
         ));
         // cas-d9a8: the unread-backlog fail-safe. Blockers and verification
         // handoffs stay inbox-only by design, so this summary is the only

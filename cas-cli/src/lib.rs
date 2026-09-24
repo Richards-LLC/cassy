@@ -45,6 +45,7 @@ pub mod factory_auth_health;
 pub(crate) mod factory_build_guard;
 pub mod factory_context_reset;
 pub mod factory_isolation;
+pub mod factory_permission_relay;
 pub mod factory_preflight;
 pub(crate) mod factory_sweep_tasks;
 pub mod factory_daemon_health;

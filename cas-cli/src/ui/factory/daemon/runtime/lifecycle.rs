@@ -201,6 +201,35 @@ pub(super) fn enqueue_worker_unavailable_relay(
     )
 }
 
+/// cas-4143: a teammate permission request CAS did not pre-approve has waited
+/// past the threshold. Name the worker, tool, command and age, and give the
+/// supervisor the approve/deny commands. One wake per request id.
+pub(super) fn enqueue_worker_approval_pending_relay(
+    cas_dir: &std::path::Path,
+    request: &crate::factory_permission_relay::WorkerPermissionRequest,
+) -> WorkerAttentionRelayOutcome {
+    let worker = request.worker.as_str();
+    let id = request.request_id.as_str();
+    let detail = format!(
+        "Worker {worker} has waited {age}s for a {tool} permission that Claude Code parked for a \
+         team lead nobody plays (request {id}): `{command}`. CAS did not pre-approve this call. \
+         Approve with `cas factory approve {worker} --request {id}` or deny with \
+         `cas factory deny {worker} --request {id} --reason \"...\"`.",
+        age = request.age_secs,
+        tool = request.tool_name,
+        command = request.command_excerpt,
+    );
+    enqueue_worker_attention_relay_detail(
+        cas_dir,
+        "worker_approval_pending",
+        worker,
+        None,
+        Some(request.age_secs),
+        &detail,
+        id,
+    )
+}
+
 /// A parked delivery whose PR was ejected must wake the supervisor *and* put
 /// a durable instruction in the delivering worker's inbox. The occurrence is
 /// a failed merge-group run ID when available, so a requeue naturally arms a
@@ -925,6 +954,50 @@ mod worker_attention_tests {
         }));
     }
 
+    /// cas-4143: a parked teammate permission request becomes one durable
+    /// supervisor wake that names the worker, command and age and carries the
+    /// approve/deny commands. Repeat scans replay it idempotently.
+    #[test]
+    fn a_pending_leader_approval_wakes_the_supervisor_once_cas_4143() {
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[(
+            "CAS_FACTORY_SESSION",
+            "approval-pending-test",
+        )]);
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        register_supervisor(&cas_dir, "approval-pending-test");
+        let request = crate::factory_permission_relay::WorkerPermissionRequest {
+            request_id: "perm-1790189281659-ph1zl7g".to_string(),
+            worker: "solid-falcon-70".to_string(),
+            tool_name: "Bash".to_string(),
+            tool_use_id: Some("toolu_01Heredoc".to_string()),
+            command_excerpt: "cd hub-web && python3 - <<'EOF'".to_string(),
+            age_secs: 1680,
+        };
+
+        let first = enqueue_worker_approval_pending_relay(&cas_dir, &request);
+        let replay = enqueue_worker_approval_pending_relay(&cas_dir, &request);
+        assert!(matches!(first, WorkerAttentionRelayOutcome::Persisted { .. }));
+        assert_eq!(first, replay, "one wake per request id");
+
+        let rows = crate::store::open_prompt_queue_store(&cas_dir)
+            .unwrap()
+            .peek_all(10)
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        let prompt = &rows[0].prompt;
+        assert_eq!(rows[0].target, "supervisor");
+        assert!(crate::prompt_revalidation::is_supervisor_wake_envelope(prompt), "{prompt}");
+        assert!(prompt.contains("kind=\"worker_approval_pending\""), "{prompt}");
+        assert!(prompt.contains("solid-falcon-70") && prompt.contains("1680s"), "{prompt}");
+        assert!(prompt.contains("cd hub-web && python3 - <<'EOF'"), "{prompt}");
+        assert!(
+            prompt.contains("cas factory approve solid-falcon-70 --request perm-1790189281659-ph1zl7g")
+                && prompt.contains("cas factory deny solid-falcon-70"),
+            "{prompt}"
+        );
+    }
+
     #[test]
     fn lifecycle_recovery_stalled_close_uses_registered_recipient_harness() {
         let _env = crate::test_support::TestEnvGuard::with_vars(&[
@@ -1580,6 +1653,8 @@ impl FactoryDaemon {
             dead_workers: std::collections::HashSet::new(),
             reported_unavailable_workers: std::collections::HashMap::new(),
             last_usage_limit_scan: None,
+            last_permission_request_scan: None,
+            reported_permission_requests: std::collections::HashSet::new(),
             last_commander_mirror_scan: None,
         reported_auth_failed_workers: std::collections::HashMap::new(),
             last_auth_failure_scan: None,
@@ -2106,6 +2181,9 @@ impl FactoryDaemon {
                     // be read from the transcript on the same tick that reads
                     // availability rather than waiting for a stall threshold.
                     self.relay_auth_failed_workers();
+                    // cas-4143: answer (or surface) teammate permission
+                    // requests Claude parked for a lead nobody plays.
+                    self.relay_worker_permission_requests();
 
                     // cas-d4ae: the detector has already emitted exactly one
                     // event for this idle/stall episode and the app just

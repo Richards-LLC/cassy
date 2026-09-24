@@ -4429,11 +4429,13 @@ impl CasService {
                 let background_processes = worker_pid
                     .map(crate::cli::factory::wedged::background_processes_for)
                     .unwrap_or(crate::cli::factory::wedged::BackgroundProcessState::Unavailable);
+                // cas-4143: the parked call is itself the in-flight one;
+                // see wedged::classify_worker_with_pending.
                 let approval_hang = crate::cli::factory::wedged::is_leader_approval_hang(
                     worker_pid_alive,
                     pending_permission.as_ref(),
                     &background_processes,
-                ) && !in_flight_tool_call;
+                );
                 let mut has_active_work = crate::cli::factory::wedged::has_active_work(
                     in_flight_tool_call,
                     &background_processes,

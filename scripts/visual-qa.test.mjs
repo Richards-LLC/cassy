@@ -144,6 +144,11 @@ test('strict mode exposes a non-zero exit code for any finding', async () => {
 
   assert.equal(result.status, 'FAIL');
   assert.equal(result.exitCode, 1);
+  // The report records the strict run, which is what the close gate counts (cas-a6a3).
+  const report = JSON.parse(await readFile(join(artifactDir, 'visual-qa.json'), 'utf8'));
+  assert.equal(report.strict, true);
+  assert.ok(Date.parse(report.generatedAt) > 0);
+  assert.deepEqual(report.urls, [fixture('defects.html')]);
 });
 
 test('reports content lost when JavaScript is disabled or print media applies', async () => {

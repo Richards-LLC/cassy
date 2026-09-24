@@ -508,6 +508,23 @@ pub fn validate_bundle(ctx: &EvidenceContext<'_>) -> Result<BundleReceipt, Evide
         ));
     }
 
+    // The claim is backed by the run itself, of a local build, after the
+    // delivered commit (cas-a6a3).
+    check_visual_qa_run(
+        &path_of("visual_qa_json").unwrap_or_default(),
+        delivered_time,
+        &format!("the delivered commit {}", short(ctx.delivered_head)),
+    )
+    .map_err(|problem| {
+        EvidenceRefusal::new(
+            problem,
+            producing_command("visual_qa_json", &bundle_dir).replace(
+                "<url>",
+                "<a local URL serving a build of the delivered commit>",
+            ),
+        )
+    })?;
+
     // 6. Critique floor.
     for dimension in RUBRIC {
         match manifest.critique_score.get(dimension) {
@@ -544,6 +561,118 @@ pub fn validate_bundle(ctx: &EvidenceContext<'_>) -> Result<BundleReceipt, Evide
         head_sha: manifest.head_sha,
         passed_expects: summary.passed,
     })
+}
+
+/// The report `scripts/visual-qa.mjs` writes itself (`visual-qa.json`). A
+/// bundle's `visual_qa_status` is only a claim; this is the run's own record.
+#[derive(Debug, Deserialize)]
+struct VisualQaRun {
+    #[serde(default)]
+    status: String,
+    #[serde(default, rename = "generatedAt")]
+    generated_at: String,
+    #[serde(default)]
+    urls: Vec<String>,
+    /// Written by visual-qa.mjs since cas-a6a3. Older copies of the script
+    /// omit it, so only an explicit `false` is refused.
+    #[serde(default)]
+    strict: Option<bool>,
+}
+
+/// Whether a visual-QA target is a local build: loopback or unspecified
+/// hosts, `*.localhost`, a `file:` page, or a bare path (visual-qa.mjs opens
+/// a target without `scheme://` as a local file). A production or other
+/// remote origin serves whatever is deployed there, not the delivered commit.
+pub fn is_local_origin(target: &str) -> bool {
+    let target = target.trim();
+    if !target.contains("://") {
+        return !target.is_empty();
+    }
+    let Ok(parsed) = url::Url::parse(target) else {
+        return false;
+    };
+    match parsed.scheme() {
+        "file" => true,
+        "http" | "https" => match parsed.host() {
+            Some(url::Host::Domain(domain)) => {
+                let domain = domain.trim_end_matches('.').to_ascii_lowercase();
+                domain == "localhost" || domain.ends_with(".localhost")
+            }
+            Some(url::Host::Ipv4(ip)) => ip.is_loopback() || ip.is_unspecified(),
+            Some(url::Host::Ipv6(ip)) => ip.is_loopback() || ip.is_unspecified(),
+            None => false,
+        },
+        _ => false,
+    }
+}
+
+/// cas-a6a3 (GH #1007): a claimed visual-QA pass counts only when the strict
+/// run's own report exists, says PASS, was generated no earlier than
+/// `not_before` (unix seconds; the delivered commit, or the QA round's
+/// opening), and ran against local builds only. The field report behind this:
+/// a bundle claimed `visual_qa_status: pass` while its ledger said the script
+/// was unavailable, and a later strict run pointed at the production URL.
+/// Returns the reason the claim is refused.
+pub fn check_visual_qa_run(
+    report: &Path,
+    not_before: i64,
+    not_before_label: &str,
+) -> Result<(), String> {
+    let claim = "claims a visual-QA pass, but";
+    let raw = std::fs::read_to_string(report).map_err(|_| {
+        format!(
+            "{claim} the strict run's own report {} is missing or unreadable",
+            report.display()
+        )
+    })?;
+    let run: VisualQaRun = serde_json::from_str(&raw).map_err(|error| {
+        format!(
+            "{claim} {} is not the JSON report visual-qa.mjs writes ({error})",
+            report.display()
+        )
+    })?;
+    if run.status != "PASS" {
+        return Err(format!(
+            "{claim} {} records status {:?}, not \"PASS\"",
+            report.display(),
+            run.status
+        ));
+    }
+    if run.strict == Some(false) {
+        return Err(format!(
+            "{claim} {} records a run without --strict",
+            report.display()
+        ));
+    }
+    let generated = chrono::DateTime::parse_from_rfc3339(run.generated_at.trim())
+        .map(|time| time.timestamp())
+        .map_err(|_| {
+            format!(
+                "{claim} {} records no valid generatedAt ({:?}), so nothing shows when the run happened",
+                report.display(),
+                run.generated_at
+            )
+        })?;
+    if generated < not_before {
+        return Err(format!(
+            "{claim} {} was generated at {}, before {not_before_label}: that run did not check this build",
+            report.display(),
+            run.generated_at.trim()
+        ));
+    }
+    if run.urls.is_empty() {
+        return Err(format!(
+            "{claim} {} names no URL it checked",
+            report.display()
+        ));
+    }
+    if let Some(remote) = run.urls.iter().find(|target| !is_local_origin(target)) {
+        return Err(format!(
+            "{claim} {} ran against {remote}, which is not a local build of the delivered commit (a production or remote origin shows what is deployed there, not this commit)",
+            report.display()
+        ));
+    }
+    Ok(())
 }
 
 fn missing_key(key: &str) -> EvidenceRefusal {

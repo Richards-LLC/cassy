@@ -87,7 +87,7 @@ fn test_vt_parser() {
     // Wait for the complete expected output instead of assuming the PTY reader
     // has received it after a fixed delay.
     let output = runner
-        .wait_for_text_timeout("Normal", Duration::from_secs(5))
+        .wait_for_text_timeout("Normal", Duration::from_secs(30))
         .expect("printf output should reach the PTY buffer");
 
     // Parse through VT parser

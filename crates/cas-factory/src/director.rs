@@ -115,6 +115,49 @@ pub struct ActiveLeaseSummary {
     pub task_title: String,
     pub task_status: TaskStatus,
     pub close_rejected_reason: Option<String>,
+    /// The independent QA round still open for this parked delivery, if any
+    /// (cas-38d7). While it is open the delivery must not merge, so the
+    /// director's AwaitingMerge relay reports the review instead of merge steps.
+    pub pending_qa: Option<PendingQaSummary>,
+}
+
+/// An independent QA round that is still waiting for a verdict (pending or
+/// claimed, deadline not yet passed) on a parked delivery (cas-38d7).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingQaSummary {
+    pub pass_id: String,
+    pub round: u32,
+    /// The QA work item the reviewer starts.
+    pub qa_task_id: Option<String>,
+    /// The exact branch tip under review.
+    pub bound_head: String,
+    /// Set once a reviewer has started the QA task.
+    pub reviewer_agent_id: Option<String>,
+    pub claimed: bool,
+    pub deadline_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// The open QA round for `task_id`, read without side effects: the newest
+/// round that is pending or claimed and still inside its deadline. A lapsed
+/// round is timed out by the store's own readers, never by the director.
+fn pending_qa_round(
+    cas_dir: &Path,
+    task_id: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<PendingQaSummary> {
+    cas_store::list_qa_passes(cas_dir, task_id)
+        .ok()?
+        .into_iter()
+        .find(|pass| pass.state.is_active() && pass.deadline_at > now)
+        .map(|pass| PendingQaSummary {
+            claimed: pass.state == cas_types::QaPassState::Claimed,
+            pass_id: pass.id,
+            round: pass.round,
+            qa_task_id: pass.qa_task_id,
+            bound_head: pass.bound_head,
+            reviewer_agent_id: pass.reviewer_agent_id,
+            deadline_at: pass.deadline_at,
+        })
 }
 
 /// A summary of an agent for display
@@ -598,6 +641,9 @@ impl DirectorData {
                         close_rejected_reason: close_rejections
                             .get(&(a.id.clone(), task.id.clone()))
                             .cloned(),
+                        pending_qa: (task.status == TaskStatus::AwaitingMerge)
+                            .then(|| pending_qa_round(cas_dir, &task.id, chrono::Utc::now()))
+                            .flatten(),
                     });
                 // Surface process-alive Stale rows as Active so icons/counts
                 // match worker_status dual-signal (cas-e98e).

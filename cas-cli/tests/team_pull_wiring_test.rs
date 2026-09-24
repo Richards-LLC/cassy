@@ -17,13 +17,12 @@
 //! - Behavioral: clearing `last_team_pull_at_<team_id>` from the sync queue
 //!   (the `--full` watermark reset for team pulls).
 //! - Behavioral end-to-end (`execute_sync_hits_each_pull_endpoint_exactly_once_when_team_configured`):
-//!   `execute_sync` fires the personal `GET /api/sync/pull` AND the team
-//!   `GET /api/teams/{uuid}/sync/pull` endpoints — each exactly once — and
-//!   team rows land in the local store. The `.expect(1)` on the team endpoint
-//!   doubles as the regression guard against the previous "double-call" fix
-//!   (rejected in code review): if a future change wires `execute_team_pull`
-//!   into `execute_sync` directly in addition to its placement at the tail
-//!   of `execute_pull`, this test fails with `expected 1, got 2`.
+//!   in a team-linked project `execute_sync` fires the team
+//!   `GET /api/teams/{uuid}/sync/pull` exactly once and team rows land in the
+//!   local store. Since cas-421e (GH #865) it makes NO personal
+//!   `POST /api/sync/push` or personal `GET /api/sync/pull` request
+//!   (`.expect(0)` on both). The `.expect(1)` on the team endpoint is still
+//!   the regression guard against a double team pull.
 //! - Behavioral end-to-end (`execute_sync_does_not_hit_team_pull_when_no_team_configured`):
 //!   when no team is configured, the team endpoint is never hit (`.expect(0)`).
 //! - Source-grep: `execute_pull` (standalone command) invokes `execute_team_pull`
@@ -44,7 +43,7 @@ mod common;
 use common::{TEST_TEAM, make_cli_json, make_cloud_config};
 
 use cas::cli::cloud::{CloudSyncArgs, execute_sync, execute_team_pull};
-use cas::cloud::{CloudConfig, SyncQueue};
+use cas::cloud::{CloudConfig, EntityType, SyncOperation, SyncQueue};
 use cas::store::{
     open_commit_link_store, open_event_store, open_file_change_store, open_prompt_store,
     open_rule_store, open_skill_store, open_spec_store, open_store, open_task_store,
@@ -477,14 +476,17 @@ async fn mount_full_sync_mocks(server: &MockServer, team_entry_id: &str) {
         .mount(server)
         .await;
 
-    // Personal push: any payload, success. Empty stores still produce 1 batch.
+    // Personal push: a team-linked project syncs in team scope only
+    // (cas-421e, GH #865), so any personal push is a failure.
     Mock::given(method("POST"))
         .and(path("/api/sync/push"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+        .expect(0)
         .mount(server)
         .await;
 
-    // Personal pull: empty body. `.expect(1)` locks in exactly-one call.
+    // Personal pull: likewise never called for a team-linked project
+    // (cas-421e). `.expect(0)` fails the test on any personal pull.
     //
     // `query_param_is_missing("types")` is load-bearing, not decoration: the
     // knowledge tail (T5) issues a SECOND, different request to this same
@@ -501,7 +503,7 @@ async fn mount_full_sync_mocks(server: &MockServer, team_entry_id: &str) {
             "file_changes": [], "commit_links": [],
             "pulled_at": chrono::Utc::now().to_rfc3339(),
         })))
-        .expect(1)
+        .expect(0)
         .mount(server)
         .await;
 
@@ -554,9 +556,11 @@ async fn mount_full_sync_mocks(server: &MockServer, team_entry_id: &str) {
         .await;
 }
 
-/// Core AC: `execute_sync` MUST hit BOTH `/api/sync/pull` AND
-/// `/api/teams/{uuid}/sync/pull` — each EXACTLY ONCE — when a team is
-/// configured, AND the team row must land in the local SQLite store.
+/// Core AC: when a team is configured, `execute_sync` MUST hit
+/// `/api/teams/{uuid}/sync/pull` EXACTLY ONCE and the team row must land in
+/// the local SQLite store. Since cas-421e (GH #865) it must also make no
+/// personal push or personal pull: `mount_full_sync_mocks` sets `.expect(0)`
+/// on both, so a team-linked sync that still touches personal scope fails.
 ///
 /// This replaces the earlier source-grep ordering test (which only proved
 /// the symbol appeared in `execute_sync`, not that the endpoint actually
@@ -577,7 +581,18 @@ async fn execute_sync_hits_each_pull_endpoint_exactly_once_when_team_configured(
     std::fs::write(tmp.path().join("config.toml"), "[project]\ncanonical_id = \"p\"\n").unwrap();
     let cas_root = tmp.path().to_path_buf();
     init_all_stores_at(&cas_root);
-    SyncQueue::open(&cas_root).unwrap().init().unwrap();
+    let queue = SyncQueue::open(&cas_root).unwrap();
+    queue.init().unwrap();
+    // cas-421e: a personal-scope row already in the queue is left queued, not
+    // pushed and not discarded; it pushes only if the project goes personal.
+    queue
+        .enqueue(
+            EntityType::Entry,
+            "personal-only-entry",
+            SyncOperation::Upsert,
+            Some(r#"{"id":"personal-only-entry","scope":"project","content":"private"}"#),
+        )
+        .unwrap();
     // Seed cloud.json on disk so `CloudConfig::load()` (called inside
     // `execute_sync` → `execute_push` / `execute_pull`) finds a valid
     // config with TEST_TEAM configured.
@@ -614,9 +629,19 @@ async fn execute_sync_hits_each_pull_endpoint_exactly_once_when_team_configured(
     assert_eq!(pulled.content, "alice's shared learning");
     assert_eq!(pulled.entry_type, EntryType::Context);
 
-    // wiremock's `.expect(1)` on personal pull AND team pull (mounted in
-    // `mount_full_sync_mocks`) fires on MockServer drop — guarantees:
-    //   - personal `/api/sync/pull` hit exactly once
+    let personal = queue.pending(10, 5).unwrap();
+    assert_eq!(
+        personal
+            .iter()
+            .map(|row| row.entity_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["personal-only-entry"],
+        "the personal row stays queued in a team-linked sync (cas-421e)"
+    );
+
+    // wiremock's expectations (mounted in `mount_full_sync_mocks`) fire on
+    // MockServer drop — they guarantee:
+    //   - personal `/api/sync/push` and `/api/sync/pull` never hit (cas-421e)
     //   - team `/api/teams/{uuid}/sync/pull` hit exactly once
     // Drop happens when `server` falls out of scope at function end.
 }
@@ -769,7 +794,16 @@ async fn execute_sync_full_ignores_personal_team_and_knowledge_watermarks() {
                 && (request.url.path() == "/api/sync/pull" || request.url.path() == team_pull_path)
         })
         .collect();
-    assert_eq!(pull_requests.len(), 3, "personal, team, and knowledge pull");
+    // cas-421e: a team-linked project makes no personal pull, so the team
+    // pull and the knowledge pull are the only two.
+    assert_eq!(pull_requests.len(), 2, "team and knowledge pull only");
+    assert!(
+        pull_requests
+            .iter()
+            .all(|request| request.url.path() == team_pull_path
+                || request.url.query_pairs().any(|(key, _)| key == "types")),
+        "no personal pull in a team-linked sync"
+    );
     for request in pull_requests {
         assert!(
             request.url.query_pairs().all(|(key, _)| key != "since"),

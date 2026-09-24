@@ -42,7 +42,8 @@ pub use config::{
 };
 pub use core::{FactoryCore, FactoryError, FactoryEvent, PaneId, PaneInfo, Result};
 pub use director::{
-    ActiveLeaseSummary, AgentSummary, DirectorData, DirectorStores, EpicGroup, TaskSummary,
+    ActiveLeaseSummary, AgentSummary, DirectorData, DirectorStores, EpicGroup, PendingQaSummary,
+    TaskSummary,
 };
 pub use notify::{DaemonNotifier, notify_daemon, notify_socket_path};
 pub use recording::RecordingManager;

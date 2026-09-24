@@ -572,6 +572,30 @@ fn cas_mcp_registration(project_root: &Path, _cas_root: Option<&Path>) -> bool {
 }
 
 fn print_human(report: &FactoryDoctorReport) {
+    let width = usize::from(crate::ui::components::formatter::terminal_width());
+    for line in render_human(report, width) {
+        println!("{line}");
+    }
+}
+
+/// Where a row's text starts: `{name:<9} {status:<7} ` is 18 cells.
+const ROW_TEXT_COLUMN: usize = 18;
+/// Where a hint's text starts: eleven spaces plus `hint: `.
+const HINT_PREFIX: &str = "           hint: ";
+
+/// cas-8667: the human doctor report, fitted to `width` columns.
+///
+/// Each row keeps its one-line shape when it fits. A longer detail wraps at
+/// word boundaries onto continuation lines indented under the text column, so
+/// no line is wider than the terminal and no word is split. A single value too
+/// long for its column (usually an absolute path) is shortened in the middle,
+/// and one closing line points at `--json`, which always carries full values.
+fn render_human(report: &FactoryDoctorReport, width: usize) -> Vec<String> {
+    // Leave the last column free: a line that fills it exactly auto-wraps on
+    // some terminals, and terminal-qa reads it as a split at the edge.
+    let width = width.max(40) - 1;
+    let mut lines = Vec::new();
+    let mut shortened = false;
     for row in &report.rows {
         let status = match row.state {
             DoctorState::Ok => "ok",
@@ -579,30 +603,91 @@ fn print_human(report: &FactoryDoctorReport) {
             DoctorState::Missing => "missing",
             DoctorState::Stale => "stale",
         };
-        if row.state == DoctorState::Warn {
-            println!(
-                "{:<9} {:<7} {}",
-                format!("{}:", row.name),
-                status,
+        let head = format!("{:<9} {:<7} ", format!("{}:", row.name), status);
+        let text = if row.state == DoctorState::Warn {
+            row.detail.clone()
+        } else {
+            format!(
+                "capability={:?}{} {}",
+                row.capability,
+                if row.capability_stale { " (stale)" } else { "" },
                 row.detail
-            );
-            if let Some(remediation) = &row.remediation {
-                println!("           hint: {remediation}");
-            }
-            continue;
-        }
-        println!(
-            "{:<9} {:<7} capability={:?}{} {}",
-            format!("{}:", row.name),
-            status,
-            row.capability,
-            if row.capability_stale { " (stale)" } else { "" },
-            row.detail
-        );
+            )
+        };
+        shortened |= wrap_into(&mut lines, &head, &text, ROW_TEXT_COLUMN, width);
         if let Some(remediation) = &row.remediation {
-            println!("           hint: {remediation}");
+            shortened |= wrap_into(
+                &mut lines,
+                HINT_PREFIX,
+                remediation,
+                HINT_PREFIX.len(),
+                width,
+            );
         }
     }
+    if shortened {
+        wrap_into(
+            &mut lines,
+            "",
+            "Values marked ... are shortened; `cas factory doctor --json` shows them in full.",
+            0,
+            width,
+        );
+    }
+    lines
+}
+
+/// Word-wrap `text` after `prefix`, continuation lines indented by `indent`
+/// spaces, every line at most `width` cells. Returns whether a word had to be
+/// shortened to fit.
+fn wrap_into(
+    lines: &mut Vec<String>,
+    prefix: &str,
+    text: &str,
+    indent: usize,
+    width: usize,
+) -> bool {
+    let available = width.saturating_sub(indent).max(12);
+    let mut shortened = false;
+    let mut current = prefix.to_string();
+    let mut current_has_word = false;
+    for word in text.split_whitespace() {
+        let word = if word.chars().count() > available {
+            shortened = true;
+            shorten_middle(word, available)
+        } else {
+            word.to_string()
+        };
+        let needed = word.chars().count() + usize::from(current_has_word);
+        if current_has_word && current.chars().count() + needed > width {
+            lines.push(std::mem::take(&mut current));
+            current = " ".repeat(indent);
+            current_has_word = false;
+        }
+        if current_has_word {
+            current.push(' ');
+        }
+        current.push_str(&word);
+        current_has_word = true;
+    }
+    lines.push(current.trim_end().to_string());
+    shortened
+}
+
+/// Keep a value's start and (longer) end around an ASCII `...`, so a path
+/// still shows its root and the file it names.
+fn shorten_middle(word: &str, max: usize) -> String {
+    let chars: Vec<char> = word.chars().collect();
+    if chars.len() <= max || max < 5 {
+        return chars.into_iter().take(max).collect();
+    }
+    let keep = max - 3;
+    let head = keep / 3;
+    let tail = keep - head;
+    let mut out: String = chars[..head].iter().collect();
+    out.push_str("...");
+    out.extend(&chars[chars.len() - tail..]);
+    out
 }
 
 #[cfg(test)]
@@ -701,6 +786,137 @@ mod tests {
             &capabilities(CapabilityAvailability::Available),
             false,
         )
+    }
+
+    fn qa_row(
+        name: &'static str,
+        state: DoctorState,
+        capability: CapabilityAvailability,
+        detail: &str,
+        remediation: Option<&str>,
+    ) -> DoctorRow {
+        DoctorRow {
+            name,
+            state,
+            required: false,
+            capability,
+            capability_stale: false,
+            capability_observed_at_ms: None,
+            capability_expires_at_ms: None,
+            detail: detail.to_string(),
+            remediation: remediation.map(str::to_string),
+        }
+    }
+
+    /// cas-8667: the rows the cas-25eb terminal QA captured (36 overflow
+    /// findings at 80 and 120 columns). Rendered at either width, no line is
+    /// wider than the terminal, every word of the details and hints appears
+    /// whole or visibly shortened, and the --json document is unaffected.
+    #[test]
+    fn human_rows_fit_80_and_120_columns_without_splitting_words_cas_8667() {
+        let report = FactoryDoctorReport {
+            rows: vec![
+                qa_row(
+                    "Claude",
+                    DoctorState::Warn,
+                    CapabilityAvailability::Available,
+                    "installed Claude Code 2.1.279; validated 2.1.280",
+                    Some("Run `claude update`."),
+                ),
+                qa_row(
+                    "Codex",
+                    DoctorState::Ok,
+                    CapabilityAvailability::Available,
+                    "/home/pippenz/.nvm/versions/node/v24.19.0/bin/codex (codex-cli 0.156.0)",
+                    None,
+                ),
+                qa_row(
+                    "Grok",
+                    DoctorState::Missing,
+                    CapabilityAvailability::Unavailable,
+                    "Grok capability Unavailable: Grok binary grok 1.0.41 (4220f3b224a6) [stable] differs from validated pin 1.0.40",
+                    Some("Use validated Grok 1.0.40 or rerun the conformance matrix."),
+                ),
+                qa_row(
+                    "OpenCode",
+                    DoctorState::Missing,
+                    CapabilityAvailability::Unavailable,
+                    "OpenCode capability Unavailable: QWENCLOUD_TOKEN_PLAN_API_KEY and the configured credentials file are absent",
+                    Some(
+                        "Set QWENCLOUD_TOKEN_PLAN_API_KEY or generate a Token Plan key, then rerun doctor.",
+                    ),
+                ),
+                qa_row(
+                    "CAS MCP",
+                    DoctorState::Ok,
+                    CapabilityAvailability::Available,
+                    "/home/pippenz/Petrastella/cas-src/.cas/worktrees/calm-gazelle-96/.codex/config.toml registered (server=cs)",
+                    None,
+                ),
+            ],
+        };
+        let json_before = serde_json::to_string(&report).unwrap();
+        for width in [80usize, 120] {
+            let lines = render_human(&report, width);
+            for line in &lines {
+                assert!(
+                    line.chars().count() <= width,
+                    "{width}: {} cells: {line}",
+                    line.chars().count()
+                );
+            }
+            let rendered = lines.join("\n");
+            for row in &report.rows {
+                assert!(rendered.contains(&format!("{}:", row.name)), "{rendered}");
+                for word in row.detail.split_whitespace().chain(
+                    row.remediation
+                        .iter()
+                        .flat_map(|hint| hint.split_whitespace()),
+                ) {
+                    assert!(
+                        rendered.split_whitespace().any(|token| token == word)
+                            || rendered.contains("..."),
+                        "{width}: word {word:?} is split or lost:\n{rendered}"
+                    );
+                }
+            }
+            // Row heads keep their columns; continuation lines sit under the text.
+            assert!(
+                lines
+                    .iter()
+                    .any(|line| line.starts_with("Grok:     missing capability=Unavailable"))
+            );
+            assert!(
+                lines
+                    .iter()
+                    .any(|line| line
+                        .starts_with("           hint: Set QWENCLOUD_TOKEN_PLAN_API_KEY"))
+            );
+        }
+        // The 83-cell CAS MCP path fits its 62-cell column only shortened at
+        // 80 columns, which names the escape; at 120 it fits whole.
+        let at_80 = render_human(&report, 80).join("\n");
+        assert!(at_80.contains("..."), "{at_80}");
+        assert!(at_80.contains("`cas factory doctor --json`"), "{at_80}");
+        let at_120 = render_human(&report, 120).join("\n");
+        assert!(
+            at_120.contains("/home/pippenz/Petrastella/cas-src/.cas/worktrees/calm-gazelle-96/.codex/config.toml"),
+            "{at_120}"
+        );
+        assert!(!at_120.contains("--json"), "{at_120}");
+        assert_eq!(serde_json::to_string(&report).unwrap(), json_before);
+    }
+
+    #[test]
+    fn shorten_middle_keeps_both_ends_within_the_budget() {
+        let shortened = shorten_middle("/home/user/a/very/long/path/to/config.toml", 20);
+        assert_eq!(shortened.chars().count(), 20);
+        assert!(
+            shortened.starts_with("/home") && shortened.ends_with("config.toml"),
+            "{shortened}"
+        );
+        assert!(shortened.contains("..."));
+        assert_eq!(shorten_middle("short", 20), "short");
     }
 
     #[test]

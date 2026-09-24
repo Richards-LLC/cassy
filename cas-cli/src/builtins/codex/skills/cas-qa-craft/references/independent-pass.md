@@ -66,6 +66,11 @@ before you run the cell. Capture a trace and a screenshot per cell.
 node scripts/visual-qa.mjs --strict --artifact-dir <ledger-dir>/visual-qa <url>...
 ```
 
+Point `<url>` at your local serve of the reviewed tip from step 1, never the
+production site. `qa_record` refuses a `visual_qa_status: "pass"` bundle
+unless `visual-qa/visual-qa.json` records a strict PASS run against local URLs,
+generated after the round opened.
+
 This captures desktop 1280 and phone 390, each in light and dark. Then score
 the `cas-ui-craft` critique rubric: distinctiveness, fit, hierarchy, craft,
 and accessibility. Give one evidence sentence per score. Walk this checklist
@@ -92,7 +97,8 @@ have:
 - `head_sha`: the reviewed tip, in full
 
 `qa_record` refuses a verdict whose bundle is missing or names another
-producer, task, or tip. The files, all listed in `bundle.json`:
+producer, task, or tip. It also refuses a claimed visual-QA pass that has no
+matching local run (see step 4). The files, all listed in `bundle.json`:
 
 - `trace.zip`, recorded with
   `{ mode: 'on', snapshots: { dom: true, aria: true, screen: true }, screenshots: false, sources: true }`
@@ -125,13 +131,20 @@ delivery as a `platform_proof` note (`qa-bundle: <abs>/bundle.json`).
 
 ## 6. Verdict
 
-Reject when any of these hold:
+Reject when any of these hold. The generated QA task states the same bar, so
+decide by it, not by impression:
 
 - a Blocking or High finding
-- `visual-qa.mjs --strict` fails
-- any rubric score of 0
+- `visual-qa.mjs --strict` fails, or ran against anything but your local
+  serve of the reviewed tip
+- any rubric dimension below 3
 - distinctiveness, fit, or hierarchy below 4 on a public surface
-- craft or accessibility below 3
+- an easy-to-spot bug on the touched path, including a pre-existing one on
+  the path the delivery claims to fix
+- a required mode that was not proven: forced colors, reduced motion and more
+  contrast count only when the capture shows `matchMedia(...)` matching, and
+  keyboard-only must reach and complete the demo's primary action. An unrun
+  mode is `NOT EXERCISED`, never PASS.
 
 Otherwise approve. List Normal and Note findings in the summary so the
 supervisor can turn them into follow-ups.
@@ -144,5 +157,8 @@ verification action=qa_record task_id=<delivery> status=approved|rejected \
 ```
 
 A rejection sends the delivery back to its implementer with your ledger. The
-next park opens a new round. Recording the verdict also closes your QA task.
+next park opens a new round. Recording the verdict also closes your QA task,
+and it cannot be revised. If you change your mind after recording, do not
+record again. Message the supervisor with `blocker=true`, ask for
+`request_changes` on the delivery, and name the finding.
 Stop your registered servers, then report the verdict line to the supervisor.

@@ -408,6 +408,40 @@ pub(crate) fn inbox_redelivery_decision(
     InboxRedelivery::MarkRedelivery
 }
 
+/// cas-098d (GH #904): how long after its transport handoff a row still reads
+/// as the delivery a wake is pointing at. A wake follows the handoff within
+/// seconds; a row handed over longer ago than this, still unread in the
+/// durable inbox, is a replay of mail the recipient's harness already received.
+pub(crate) const INBOX_REPLAY_AFTER_SECS: i64 = MESSAGE_PROVENANCE_STALE_AFTER_SECS;
+
+/// cas-098d (GH #904): a transport-delivered row that an inbox poll lists by
+/// id instead of replaying its body: it was handed over longer ago than the
+/// replay window, and the recipient has demonstrably had it since (a turn
+/// observed carrying it, or the recipient acted after the delivery).
+///
+/// Replaying those bodies is what buried the message a wake named under a
+/// limit's worth of already-handled mail, and made hour-old merge requests,
+/// reminders and acks read as live instructions. The row is still claimed and
+/// named in the poll's output. A delivery with no such evidence may be one a
+/// harness dropped (GH #155), so its body is still handed over in full.
+pub(crate) fn inbox_row_is_stale_replay(
+    transport_delivered_at: Option<chrono::DateTime<chrono::Utc>>,
+    recipient_had_it: bool,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    recipient_had_it
+        && transport_delivered_at
+            .is_some_and(|at| (now - at).num_seconds() > INBOX_REPLAY_AFTER_SECS)
+}
+
+/// The delivery evidence [`inbox_row_is_stale_replay`] asks for: a wake
+/// observed carrying the row, or later recipient activity recorded against it.
+fn recipient_had_delivery(report: Option<&cas_store::MessageDeliveryReport>) -> bool {
+    report.is_some_and(|report| {
+        report.wake == cas_store::ObservationStatus::Observed || report.assumed_seen_at.is_some()
+    })
+}
+
 /// Inbox polling is a delivery surface, not an authority to discard a relay.
 /// A failed task read is uncertainty, so only a freshly-read task whose
 /// lifecycle occurrence is positively stale may be withheld.
@@ -2457,6 +2491,10 @@ impl CasService {
         // operator-readable reason; no suppression may disappear silently.
         let mut withheld: Vec<(i64, String)> = Vec::new();
         let mut redelivered = 0usize;
+        // cas-098d (GH #904): older transport deliveries are claimed and named,
+        // not replayed.
+        let mut replays: Vec<(i64, String)> = Vec::new();
+        let now = chrono::Utc::now();
         let mut body = String::new();
         for message in &messages {
             // A supervisor can claim a queue row directly through inbox_poll,
@@ -2616,6 +2654,33 @@ impl CasService {
                     ));
                     continue;
                 }
+                InboxRedelivery::MarkRedelivery
+                    if inbox_row_is_stale_replay(
+                        message.processed_at,
+                        recipient_had_delivery(
+                            queue
+                                .message_delivery_report(message.id)
+                                .ok()
+                                .flatten()
+                                .as_ref(),
+                        ),
+                        now,
+                    ) =>
+                {
+                    let age_mins = message
+                        .processed_at
+                        .map(|at| (now - at).num_minutes())
+                        .unwrap_or_default();
+                    replays.push((
+                        message.id,
+                        format!(
+                            "{} from {}, delivered {age_mins} min ago",
+                            message.summary.as_deref().unwrap_or("no summary"),
+                            message.source
+                        ),
+                    ));
+                    continue;
+                }
                 InboxRedelivery::MarkRedelivery => {
                     redelivered += 1;
                     body.push_str(&format!(
@@ -2648,6 +2713,27 @@ impl CasService {
             rendered += 1;
         }
 
+        let replay_note = (!replays.is_empty()).then(|| {
+            format!(
+                "Not replayed: {} older message(s) your transport delivered more than {} min ago \
+                 and you have had since: {}",
+                replays.len(),
+                INBOX_REPLAY_AFTER_SECS / 60,
+                replays
+                    .iter()
+                    .map(|(id, what)| format!("{id} ({what})"))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            )
+        });
+        if rendered == 0
+            && withheld.is_empty()
+            && let Some(note) = replay_note.as_deref()
+        {
+            return Ok(Self::success(format!(
+                "No new messages for {recipient}. {note}."
+            )));
+        }
         if rendered == 0 {
             let ids = withheld
                 .iter()
@@ -2656,8 +2742,12 @@ impl CasService {
                 .join(", ");
             return Ok(Self::success(format!(
                 "No unread messages for {recipient} — withheld {} message(s) already \
-                 done: {ids}",
-                withheld.len()
+                 done: {ids}{}",
+                withheld.len(),
+                replay_note
+                    .as_deref()
+                    .map(|note| format!(". {note}"))
+                    .unwrap_or_default()
             )));
         }
 
@@ -2682,6 +2772,9 @@ impl CasService {
                     .collect::<Vec<_>>()
                     .join(", ")
             ));
+        }
+        if let Some(note) = replay_note {
+            output.push_str(&format!(". {note}"));
         }
         output.push_str(":\n\n");
         output.push_str(&body);
@@ -3653,7 +3746,10 @@ mod inbox_poll_identity_tests {
 
 #[cfg(test)]
 mod cas99d2_redelivery_tests {
-    use super::{INBOX_REDELIVERY_MARKER, InboxRedelivery, inbox_redelivery_decision};
+    use super::{
+        INBOX_REDELIVERY_MARKER, INBOX_REPLAY_AFTER_SECS, InboxRedelivery, inbox_redelivery_decision,
+        inbox_row_is_stale_replay,
+    };
     use crate::prompt_revalidation::assignment_solicited_task_id;
 
     /// The literal text of notification 7112 (supervisor hand-written dispatch).
@@ -3730,6 +3826,33 @@ mod cas99d2_redelivery_tests {
             InboxRedelivery::FirstDelivery,
             "a row never handed to a transport must be delivered even if the task \
              happens to have moved — the recipient has provably not seen this text"
+        );
+    }
+
+    #[test]
+    fn a_delivery_older_than_the_replay_window_is_listed_not_replayed_cas_098d() {
+        let now = chrono::Utc::now();
+        let long_ago = Some(now - chrono::Duration::minutes(40));
+        assert!(
+            !inbox_row_is_stale_replay(None, true, now),
+            "never delivered is new mail"
+        );
+        assert!(
+            !inbox_row_is_stale_replay(Some(now - chrono::Duration::seconds(4)), true, now),
+            "the delivery a wake just named is handed over in full"
+        );
+        assert!(
+            !inbox_row_is_stale_replay(
+                Some(now - chrono::Duration::seconds(INBOX_REPLAY_AFTER_SECS)),
+                true,
+                now
+            ),
+            "the window's edge still counts as recent"
+        );
+        assert!(inbox_row_is_stale_replay(long_ago, true, now));
+        assert!(
+            !inbox_row_is_stale_replay(long_ago, false, now),
+            "an old delivery the recipient never demonstrably had may be a dropped one (GH #155): replay it"
         );
     }
 

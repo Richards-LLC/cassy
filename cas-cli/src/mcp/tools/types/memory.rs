@@ -59,7 +59,7 @@ pub struct RememberRequest {
 
     /// Entry type
     #[schemars(
-        description = "Type of memory: 'learning' (default), 'preference', 'context', or 'observation'"
+        description = "Type of memory: 'learning' (default), 'preference', 'context', 'observation', or 'handoff' (a session handoff: supersedes the previous current handoff for your role and is injected at session start)"
     )]
     #[serde(default = "default_entry_type")]
     pub entry_type: String,

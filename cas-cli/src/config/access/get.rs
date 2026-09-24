@@ -126,7 +126,11 @@ impl Config {
             // Issues section
             "issues.repo" => Some(issues.repo.unwrap_or_default()),
             "issues.components.cassy" => Some(issue_repos.cassy),
-            "issues.components.mecha_cassy" => Some(issue_repos.mecha_cassy),
+            "issues.components.violet" => Some(issue_repos.violet),
+            "issues.components.mecha_cassy" => {
+                super::warn_deprecated_issue_key();
+                Some(issue_repos.violet)
+            }
             "issues.components.cloud" => Some(issue_repos.cloud),
             // History section
             "history.github_repo" => Some(history.github_repo.unwrap_or_default()),

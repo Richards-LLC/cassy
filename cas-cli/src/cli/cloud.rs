@@ -3748,6 +3748,15 @@ pub(crate) fn print_backfill_notice(cli: &Cli, outcome: &BackfillOutcome) {
 /// Orchestrates `cas cloud sync` — personal push, team push, then personal pull
 /// (which transitively does team pull when a team is configured).
 ///
+/// A team-linked project (an active team: `team_id` set, or
+/// `team_auto_promote` adopted) syncs in team scope only (cas-421e, GH #865,
+/// operator direction from #870). It skips the personal push and the personal
+/// pull, and makes no `/api/sync/push` or personal `/api/sync/pull` request.
+/// The server keys a team project's rows by team, so personal-scope copies
+/// were refused (409 `project_registration_conflict`, 404) or left as
+/// squatters. Personal queue rows stay queued and untouched: they push again
+/// only if the project goes back to personal scope.
+///
 /// `pub` so `cas-cli/tests/team_pull_wiring_test.rs` can exercise the
 /// end-to-end wire-up against a wiremock server. Production callers go
 /// through the CLI dispatcher; this is not intended for external public-API
@@ -3885,18 +3894,28 @@ fn execute_sync_with_output(
     }
 
     let operation_output = emit_output && (cli.json || args.dry_run);
-    summaries.push(execute_push_with_output(
-        &CloudPushArgs {
-            entries_only: false,
-            tasks_only: false,
-            dry_run: args.dry_run,
-            max_batches: None,
-            rehome: args.rehome,
-        },
-        cli,
-        cas_root,
-        operation_output,
-    )?);
+    // cas-421e: decided after the team-scope adoption above, which can turn a
+    // personal project into a team-linked one within this same sync.
+    let team_linked = CloudConfig::load_from_cas_dir_inheriting_user_credentials(cas_root)
+        .ok()
+        .and_then(|config| config.active_team_id())
+        .is_some();
+    if team_linked {
+        summaries.push(team_only_push_summary());
+    } else {
+        summaries.push(execute_push_with_output(
+            &CloudPushArgs {
+                entries_only: false,
+                tasks_only: false,
+                dry_run: args.dry_run,
+                max_batches: None,
+                rehome: args.rehome,
+            },
+            cli,
+            cas_root,
+            operation_output,
+        )?);
+    }
 
     if !args.dry_run {
         // Drain the team queue before pulling — when a team is configured,
@@ -3923,16 +3942,22 @@ fn execute_sync_with_output(
         // behavioral wiremock test in `team_pull_wiring_test.rs`
         // (`execute_sync_hits_each_pull_endpoint_exactly_once_when_team_configured`)
         // locks this invariant in with `.expect(1)` on both endpoints.
-        let pull_summary = execute_pull_with_output(
-            &CloudPullArgs {
-                entries_only: false,
-                tasks_only: false,
-                full: args.full,
-            },
-            cli,
-            cas_root,
-            operation_output,
-        )?;
+        //
+        // cas-421e: a team-linked project pulls in team scope only.
+        let pull_summary = if team_linked {
+            execute_team_only_pull_with_output(args.full, cli, cas_root, operation_output)?
+        } else {
+            execute_pull_with_output(
+                &CloudPullArgs {
+                    entries_only: false,
+                    tasks_only: false,
+                    full: args.full,
+                },
+                cli,
+                cas_root,
+                operation_output,
+            )?
+        };
 
         // T5: distilled knowledge rides the same sync. Kept last and
         // non-fatal — entries and tasks have already landed by here, and a
@@ -3957,6 +3982,58 @@ fn execute_sync_with_output(
     }
 
     Ok(summaries)
+}
+
+/// The push receipt of a team-linked sync before the team drain is merged in
+/// (cas-421e): no personal push ran, so it carries no personal counts.
+fn team_only_push_summary() -> SyncSummary {
+    let mut summary = SyncSummary::push(
+        &crate::cloud::SyncResult::default(),
+        crate::cloud::PushScope::All,
+        None,
+    );
+    summary.team_configured = true;
+    summary
+}
+
+/// The pull half of a team-linked sync (cas-421e): the team pull alone, with
+/// no personal `/api/sync/pull` request. `--full` clears the same team and
+/// knowledge watermarks [`execute_pull_with_output`] clears; the personal
+/// `last_pull_at` is left alone because no personal pull runs.
+fn execute_team_only_pull_with_output(
+    full: bool,
+    cli: &Cli,
+    cas_root: &Path,
+    emit_output: bool,
+) -> anyhow::Result<SyncSummary> {
+    let config = CloudConfig::load_from_cas_dir_inheriting_user_credentials(cas_root)?;
+    if config.token.is_none() {
+        anyhow::bail!("Not logged in. Run 'cas login' first");
+    }
+    if full {
+        let queue = crate::cloud::SyncQueue::open(cas_root)?;
+        queue.init()?;
+        queue.delete_metadata("last_knowledge_pull_at")?;
+        queue.delete_metadata("knowledge_empty_pull_streak")?;
+        if let Some(team_id) = config.active_team_id() {
+            let project_id = crate::cloud::resolve_canonical_id_for_sync(cas_root)
+                .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+            queue.delete_metadata(&format!("last_team_pull_at_{team_id}_{project_id}"))?;
+        }
+    }
+
+    let mut summary = SyncSummary::pull(&crate::cloud::SyncResult::default(), true);
+    if let Some(team_summary) =
+        execute_team_pull_with_output(&config, cas_root, cli, emit_output && cli.json)?
+    {
+        summary.merge_team_summary(&team_summary);
+    }
+    if emit_output && !cli.json {
+        let mut out = io::stdout();
+        let mut fmt = Formatter::stdout(&mut out, ActiveTheme::default());
+        render_sync_summary(&mut fmt, &summary, cli.verbose)?;
+    }
+    Ok(summary)
 }
 
 /// Metadata key recording a confirmed project↔team registration, so the

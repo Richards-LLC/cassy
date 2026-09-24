@@ -158,12 +158,22 @@ impl Fx {
             ("visual-qa/app-dark-desktop.png", "png"),
             ("visual-qa/app-dark-phone.png", "png"),
             ("visual-qa/visual-qa.md", "# Visual QA — PASS\n"),
-            ("visual-qa/visual-qa.json", "{}"),
             ("visual-qa.stdout", "PASS\n"),
             ("critique.md", "Scored by test-agent\n"),
         ] {
             std::fs::write(dir.join(name), body).unwrap();
         }
+        // The strict run's own report, of a local build (cas-a6a3).
+        std::fs::write(
+            dir.join("visual-qa/visual-qa.json"),
+            serde_json::json!({
+                "status": "PASS", "strict": true,
+                "generatedAt": chrono::Utc::now().to_rfc3339(),
+                "urls": ["http://127.0.0.1:4173/"]
+            })
+            .to_string(),
+        )
+        .unwrap();
         let manifest = serde_json::json!({
             "schema": 1, "task_id": TASK, "producer": "cas-qa-craft", "head_sha": head,
             "created_at": chrono::Utc::now().to_rfc3339(), "visual_change": false,

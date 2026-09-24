@@ -838,7 +838,7 @@ pub struct FactoryRequest {
 pub struct CoordinationRequest {
     /// Action to perform
     #[schemars(
-        description = "Action: agent ops (register, unregister, whoami, heartbeat, agent_list, agent_cleanup, session_start, session_end, loop_start, loop_cancel, loop_status, lease_history, queue_notify, queue_poll, queue_peek, queue_ack, inbox_poll (also accepted as inbox), message, interrupt, message_ack, message_status), factory ops (spawn_workers, shutdown_workers, recycle_worker, hold_worker, release_worker, worker_status, worker_activity, sweep_tasks, clear_context, my_context, sync_all_workers, gc_report, gc_cleanup, focus_epic, remind, remind_list, remind_cancel, restart_spawn_queue), worktree ops (worktree_create, worktree_list, worktree_show, worktree_cleanup, worktree_merge, worktree_status). Only available in factory mode. 'interrupt' is shorthand for 'message' with urgent=true (breaks the target's in-flight turn, then injects). shutdown_workers accepts target as an alias for worker_names and requires force=true for mid-task or dirty/unpushed workers. hold_worker/release_worker accept worker_names as an alias for target. sync_all_workers skips worktrees that are dirty or whose assignee is mid-task unless force=true, and always refuses one already mid-rebase."
+        description = "Action: agent ops (register, unregister, whoami, heartbeat, agent_list, agent_cleanup, session_start, session_end, loop_start, loop_cancel, loop_status, lease_history, queue_notify, queue_poll, queue_peek, queue_ack, inbox_poll (also accepted as inbox), message, interrupt, message_ack, message_status), factory ops (spawn_workers, shutdown_workers, recycle_worker, hold_worker, release_worker, worker_status, worker_activity, sweep_tasks, clear_context, my_context, sync_all_workers, gc_report, gc_cleanup, focus_epic, remind, remind_list, remind_cancel, restart_spawn_queue), database branch ops (supervisor only: db_branch_create, db_branch_show, db_branch_delete), worktree ops (worktree_create, worktree_list, worktree_show, worktree_cleanup, worktree_merge, worktree_status). Only available in factory mode. 'interrupt' is shorthand for 'message' with urgent=true (breaks the target's in-flight turn, then injects). shutdown_workers accepts target as an alias for worker_names and requires force=true for mid-task or dirty/unpushed workers. hold_worker/release_worker accept worker_names as an alias for target. sync_all_workers skips worktrees that are dirty or whose assignee is mid-task unless force=true, and always refuses one already mid-rebase."
     )]
     pub action: String,
 
@@ -999,8 +999,9 @@ pub struct CoordinationRequest {
     #[serde(default)]
     pub session_id: Option<String>,
 
-    /// Loop prompt (for loop_start)
-    #[schemars(description = "The prompt to repeat each iteration")]
+    /// Loop prompt (for loop_start). spawn_workers rejects a non-empty value;
+    /// worker briefs must be sent with coordination message after registration.
+    #[schemars(description = "loop_start only: prompt to repeat each iteration. spawn_workers rejects this field; send a worker brief using coordination action=message after registration.")]
     #[serde(default)]
     pub prompt: Option<String>,
 
@@ -1079,7 +1080,7 @@ pub struct CoordinationRequest {
     pub worker_names: Option<String>,
 
     /// Target branch/ref for sync actions
-    #[schemars(description = "Target branch/ref for sync actions (e.g., 'epic/my-epic')")]
+    #[schemars(description = "Target branch/ref for sync actions (e.g., 'epic/my-epic'); for db_branch_create, the non-production Neon parent (a recorded label such as dev or staging, a branch id, or a name)")]
     #[serde(default)]
     pub branch: Option<String>,
 

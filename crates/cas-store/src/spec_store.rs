@@ -519,6 +519,7 @@ mod tests {
             tags: vec!["security".to_string(), "auth".to_string()],
             ..Default::default()
         };
+        store.add(&spec1).unwrap();
         let spec2 = Spec {
             id: store.generate_id().unwrap(),
             title: "Database Migration".to_string(),
@@ -526,7 +527,6 @@ mod tests {
             tags: vec!["database".to_string()],
             ..Default::default()
         };
-        store.add(&spec1).unwrap();
         store.add(&spec2).unwrap();
 
         // Search by title
@@ -555,20 +555,20 @@ mod tests {
             task_id: Some("task-001".to_string()),
             ..Default::default()
         };
+        store.add(&spec1).unwrap();
         let spec2 = Spec {
             id: store.generate_id().unwrap(),
             title: "Another Spec".to_string(),
             task_id: Some("task-001".to_string()),
             ..Default::default()
         };
+        store.add(&spec2).unwrap();
         let spec3 = Spec {
             id: store.generate_id().unwrap(),
             title: "Unrelated Spec".to_string(),
             task_id: Some("task-002".to_string()),
             ..Default::default()
         };
-        store.add(&spec1).unwrap();
-        store.add(&spec2).unwrap();
         store.add(&spec3).unwrap();
 
         // Get specs for task
@@ -586,8 +586,6 @@ mod tests {
 
         // Create version chain: v1 -> v2 -> v3
         let id1 = store.generate_id().unwrap();
-        let id2 = store.generate_id().unwrap();
-        let id3 = store.generate_id().unwrap();
 
         let spec1 = Spec {
             id: id1.clone(),
@@ -596,6 +594,8 @@ mod tests {
             previous_version_id: None,
             ..Default::default()
         };
+        store.add(&spec1).unwrap();
+        let id2 = store.generate_id().unwrap();
         let spec2 = Spec {
             id: id2.clone(),
             title: "Spec v2".to_string(),
@@ -603,6 +603,8 @@ mod tests {
             previous_version_id: Some(id1.clone()),
             ..Default::default()
         };
+        store.add(&spec2).unwrap();
+        let id3 = store.generate_id().unwrap();
         let spec3 = Spec {
             id: id3.clone(),
             title: "Spec v3".to_string(),
@@ -610,8 +612,6 @@ mod tests {
             previous_version_id: Some(id2.clone()),
             ..Default::default()
         };
-        store.add(&spec1).unwrap();
-        store.add(&spec2).unwrap();
         store.add(&spec3).unwrap();
 
         // Get versions from any point in chain
@@ -635,6 +635,7 @@ mod tests {
             status: SpecStatus::Draft,
             ..Default::default()
         };
+        store.add(&spec1).unwrap();
         let spec2 = Spec {
             id: store.generate_id().unwrap(),
             title: "Approved Spec".to_string(),
@@ -643,7 +644,6 @@ mod tests {
             approved_by: Some("user-123".to_string()),
             ..Default::default()
         };
-        store.add(&spec1).unwrap();
         store.add(&spec2).unwrap();
 
         // List approved only

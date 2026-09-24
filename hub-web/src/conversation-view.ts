@@ -102,6 +102,25 @@ export interface ConversationViewOptions {
   /** Refused sends offer to go out again unchanged (same text, same in_reply_to). */
   retryMessage?: (send: ConversationSend) => void;
   /**
+   * A send refused because this device does not control the session offers
+   * Take control on the message itself, beside Retry (cas-3433): the refusal
+   * tells the operator to take control, so the control sits where they read it.
+   */
+  takeControl?: (send: ConversationSend) => void;
+  /**
+   * Whether this device controls the session now. Once it does, a control
+   * refusal stops offering Take control and says Retry will go through
+   * (cas-8e0a); if control is lost again, both come back.
+   */
+  controlHeld?: () => boolean;
+  /**
+   * The device holding control when this one cannot take it over. A control
+   * refusal then names it and says to take control once it is released, as
+   * the composer does (cas-1730, cas-008f N01). Take control stays on the
+   * message so the reader keeps their place (cas-008f).
+   */
+  controlHolder?: () => string | undefined;
+  /**
    * Quick replies and composer replies to an ask go through this; the caller
    * sends with in_reply_to = the ask's notification_id and records the send
    * in the history with the same replyTo, which is what marks the ask answered.
@@ -125,6 +144,20 @@ export interface ConversationViewOptions {
 const TICK = '<svg class="tick" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.6 8.6l3.3 3.3L13.4 4.4"/></svg>';
 /** Warning triangle for a refused send; decorative — the "Not sent" text carries the meaning. */
 const WARN = '<svg class="warn" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 1.9 14.6 13.6H1.4Z"/><path d="M8 6.2v3.4"/><path d="M8 11.7v.1"/></svg>';
+
+/**
+ * Give focus back inside a rebuilt bubble (cas-8e0a F01). The same control
+ * keeps it when it survived the rebuild. Otherwise Retry takes it (after
+ * Take control, Retry is the next step), then any action, then the message
+ * itself. Never the page body.
+ */
+function landFocusIn(bubble: HTMLElement, className: string): void {
+  const same = className ? [...bubble.querySelectorAll<HTMLElement>("button")].find((button) => button.className === className) : undefined;
+  const target = same ?? bubble.querySelector<HTMLElement>(".conversation-retry") ?? bubble.querySelector<HTMLElement>("button");
+  if (target) { target.focus({ preventScroll: true }); return; }
+  bubble.tabIndex = -1;
+  bubble.focus({ preventScroll: true });
+}
 
 export class ConversationView {
   readonly element: HTMLElement;
@@ -287,7 +320,10 @@ export class ConversationView {
     // The pinned ask's flow copy is collapsed; it expands again when a newer ask takes the pin.
     const pinned = reply?.kind === "ask" ? this.history.pinnedAsk()?.notification_id === reply.notification_id : undefined;
     const delivered = turn.event.kind === "send" ? this.history.delivered() === turn.event.value : undefined;
-    return JSON.stringify([turn.event, answered && [answered.id, answered.state, answered.text], waiting, pinned, delivered]);
+    // A refused send repaints when control changes hands (cas-8e0a).
+    const held = turn.event.kind === "send" && turn.event.value.state === "error" ? this.options.controlHeld?.() === true : undefined;
+    const holder = turn.event.kind === "send" && turn.event.value.state === "error" ? this.options.controlHolder?.() : undefined;
+    return JSON.stringify([turn.event, answered && [answered.id, answered.state, answered.text], waiting, pinned, delivered, held, holder]);
   }
 
   /**
@@ -384,7 +420,7 @@ export class ConversationView {
     const document = node.ownerDocument;
     const expanded = this.expanded.has(item.key);
     node.className = "turn coalesce-turn";
-    speaker(node, `${this.options.supervisor}, status`, item.time);
+    speaker(node, `${this.options.supervisor}, status`, item.time, item.clockAhead);
     const line = document.createElement("div"); line.className = "coalesce";
     line.id = `coalesce-${item.key.replace(/[^\w-]/g, "-")}`;
     line.dataset.count = String(item.count);
@@ -406,7 +442,7 @@ export class ConversationView {
       node.querySelector<HTMLButtonElement>(".coalesce-expand")?.focus();
     };
     node.replaceChildren(line, more);
-    if (item.time) { const time = document.createElement("time"); time.textContent = item.time; time.setAttribute("aria-hidden", "true"); node.append(time); }
+    if (item.time) node.append(timeElement(document, item.time, item.clockAhead));
     // A single status can still overflow three lines at a narrow width; offer
     // the way in once layout says the clamp hid something.
     if (more.hidden && typeof requestAnimationFrame !== "undefined") requestAnimationFrame(() => syncClampPill(node));
@@ -417,13 +453,18 @@ export class ConversationView {
     node.className = `turn ${group.side === "you" ? "you" : "sup"}`;
     // F19 (cas-17e3): a screen reader hears who spoke and when, not bare
     // paragraphs and times. The visible time stays for sighted readers.
-    speaker(node, group.side === "you" ? "You" : this.options.supervisor, group.time);
+    speaker(node, group.side === "you" ? "You" : this.options.supervisor, group.time, group.clockAhead);
     // Bubbles are keyed too: a later turn re-derives the earlier one's corner
     // classes without replacing its node, so a selection or focus inside it
     // survives the update.
     const existing = new Map<string, HTMLElement>();
     for (const child of node.querySelectorAll<HTMLElement>(":scope > [data-key]")) existing.set(child.dataset.key!, child);
     const children: HTMLElement[] = [];
+    // cas-8e0a F01: a bubble rebuilt while focus is inside it (Take control
+    // leaves a refused message once it succeeds) hands focus to its
+    // replacement instead of dropping it to the page body.
+    const active = document.activeElement;
+    let refocus: { bubble: HTMLElement; className: string } | undefined;
     for (const turn of group.turns) {
       const signature = this.turnSignature(turn);
       let bubble = existing.get(turn.key);
@@ -431,19 +472,23 @@ export class ConversationView {
       if (bubble && bubble.dataset.signature === signature) {
         for (let index = 0; ; index += 1) { const sheet = existing.get(`${turn.key}#${index}`); if (!sheet) break; sheets.push(sheet); }
       } else {
+        const previous = bubble;
+        const focusedClass = previous && active instanceof HTMLElement && previous.contains(active) ? active.className : undefined;
         if (turn.event.kind === "send") bubble = this.renderSend(document, turn, turn.event.value);
         else ({ bubble, sheets } = this.renderReply(document, turn, turn.event.value));
         bubble.classList.add("conversation-turn");
         bubble.dataset.key = turn.key;
         bubble.dataset.signature = signature;
         sheets.forEach((sheet, index) => { sheet.classList.add("conversation-sheet"); sheet.dataset.key = `${turn.key}#${index}`; });
+        if (focusedClass !== undefined) refocus = { bubble, className: focusedClass };
       }
       bubble.classList.toggle("group-first", turn.first);
       bubble.classList.toggle("group-last", turn.last);
       children.push(bubble, ...sheets);
     }
-    if (group.time) { const time = document.createElement("time"); time.textContent = group.time; time.setAttribute("aria-hidden", "true"); children.push(time as unknown as HTMLElement); }
+    if (group.time) children.push(timeElement(document, group.time, group.clockAhead));
     node.replaceChildren(...children);
+    if (refocus) landFocusIn(refocus.bubble, refocus.className);
   }
 
   private renderSend(document: Document, turn: ThreadTurn, send: ConversationSend): HTMLElement {
@@ -466,6 +511,30 @@ export class ConversationView {
       const label = document.createElement("span"); label.textContent = "Delivered";
       state.append(tick.content.firstElementChild!, label);
       bubble.append(state);
+    } else if (send.state === "unconfirmed") {
+      // cas-1622: the hub never sent this send's receipt. It is not refused —
+      // it may well have arrived — so it does not claim "Not sent". It stops
+      // saying "Sending…" forever, says what is unknown, and offers Retry,
+      // warning that a retry may reach the supervisor twice.
+      const state = document.createElement("span");
+      state.className = "conversation-delivery conversation-refused conversation-unconfirmed"; state.setAttribute("role", "status");
+      const glyph = document.createElement("template"); glyph.innerHTML = WARN;
+      const label = document.createElement("b"); label.textContent = "Not confirmed";
+      const separator = document.createElement("span"); separator.className = "sr-only"; separator.textContent = " · ";
+      const reason = document.createElement("span"); reason.className = "conversation-refused-reason";
+      reason.textContent = `The hub never confirmed this reached ${this.options.supervisor}.`;
+      const next = document.createElement("span"); next.className = "conversation-refused-next"; next.textContent = " Retry sends it again.";
+      reason.append(next);
+      state.append(glyph.content.firstElementChild!, label, separator, reason);
+      bubble.append(state);
+      if (this.options.retryMessage) {
+        const actions = document.createElement("div"); actions.className = "conversation-actions";
+        const retry = document.createElement("button"); retry.type = "button"; retry.className = "conversation-retry"; retry.textContent = "Retry";
+        retry.setAttribute("aria-label", "Retry sending");
+        retry.onclick = () => this.options.retryMessage?.(send);
+        actions.append(retry);
+        bubble.append(actions);
+      }
     } else if (send.state === "error" && send.replaced) {
       // F6: the edited version went out, so this one is only a record. It
       // collapses and offers no Retry — one tap would resend the text the
@@ -490,12 +559,26 @@ export class ConversationView {
       // The separator is for the reader; on screen the reason takes its own line.
       const separator = document.createElement("span"); separator.className = "sr-only"; separator.textContent = " · ";
       const plain = refusal(send.error);
-      const reason = document.createElement("span"); reason.className = "conversation-refused-reason"; reason.textContent = plain.reason;
-      const next = document.createElement("span"); next.className = "conversation-refused-next"; next.textContent = ` ${plain.next}`;
+      // cas-8e0a: once this device holds control, the control refusal is
+      // resolved. The message still was not sent, but Retry now goes through,
+      // so the copy says so and Take control leaves the message.
+      const resolved = plain.action === "take-control" && this.options.controlHeld?.() === true;
+      // cas-1730: another device holds control and this one cannot take it
+      // over, so the next step is to wait for its release, as the composer says.
+      const holder = plain.action === "take-control" && !resolved ? this.options.controlHolder?.() : undefined;
+      const reason = document.createElement("span"); reason.className = "conversation-refused-reason"; reason.textContent = resolved ? "This device controls the session now." : plain.reason;
+      const next = document.createElement("span"); next.className = "conversation-refused-next";
+      next.textContent = resolved ? " Retry to send it." : holder ? ` ${holder} is in control. Take control when it's released, then retry.` : ` ${plain.next}`;
       reason.append(next);
       state.append(glyph.content.firstElementChild!, label, separator, reason);
       bubble.append(state);
       const actions = document.createElement("div"); actions.className = "conversation-actions";
+      if (plain.action === "take-control" && !resolved && this.options.takeControl) {
+        const take = document.createElement("button"); take.type = "button"; take.className = "conversation-take-control"; take.textContent = "Take control";
+        take.setAttribute("aria-label", "Take control of the session");
+        take.onclick = () => this.options.takeControl?.(send);
+        actions.append(take);
+      }
       if (this.options.editMessage) {
         const edit = document.createElement("button"); edit.type = "button"; edit.className = "conversation-edit"; edit.textContent = "Edit";
         edit.setAttribute("aria-label", "Edit message");
@@ -586,15 +669,30 @@ function signatureOf(item: ThreadItem, turnSignature: (turn: ThreadTurn) => stri
     case "session": return `session:${item.label}`;
     case "history-end": return "history-end";
     case "working": return "working";
-    case "coalesce": return JSON.stringify([item.count, item.latest, item.time, item.replies.map((reply) => reply.notification_id)]);
-    case "group": return JSON.stringify([item.side, item.time, item.turns.map((turn) => [turn.key, turn.first, turn.last, turnSignature(turn)])]);
+    case "coalesce": return JSON.stringify([item.count, item.latest, item.time, item.clockAhead === true, item.replies.map((reply) => reply.notification_id)]);
+    case "group": return JSON.stringify([item.side, item.time, item.clockAhead === true, item.turns.map((turn) => [turn.key, turn.first, turn.last, turnSignature(turn)])]);
   }
 }
 
 /** Names a message group for assistive tech: "You, 12:45" or "<supervisor>, 12:45". */
-function speaker(node: HTMLElement, who: string, time: string | undefined): void {
+function speaker(node: HTMLElement, who: string, time: string | undefined, clockAhead = false): void {
   node.setAttribute("role", "group");
-  node.setAttribute("aria-label", time ? `${who}, ${time}` : who);
+  node.setAttribute("aria-label", time ? `${who}, ${time}${clockAhead ? `, ${CLOCK_AHEAD}` : ""}` : who);
+}
+
+/** The quiet hint beside a time that is the arrival time, not the machine's own stamp (cas-1f13). */
+export const CLOCK_AHEAD = "machine clock ahead";
+const CLOCK_AHEAD_TITLE = "This machine's clock is ahead of yours, so this shows when the message arrived.";
+
+/** A group's one visible time, with the clock-ahead hint when it applies. */
+function timeElement(document: Document, time: string, clockAhead: boolean | undefined): HTMLElement {
+  const element = document.createElement("time"); element.textContent = time; element.setAttribute("aria-hidden", "true");
+  if (clockAhead) {
+    element.title = CLOCK_AHEAD_TITLE;
+    const hint = document.createElement("span"); hint.className = "clock-ahead"; hint.textContent = ` · ${CLOCK_AHEAD}`;
+    element.append(hint);
+  }
+  return element;
 }
 
 function paragraphs(document: Document, text: string): HTMLElement[] {

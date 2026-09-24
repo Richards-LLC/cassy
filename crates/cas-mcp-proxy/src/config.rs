@@ -37,6 +37,13 @@ pub const MECHA_CASSY_BYPASS_HEADER: &str = "x-vercel-protection-bypass";
 /// `tools/list` on 2026-09-03. The retired `slack_*` quartet is deliberately
 /// absent: an allowlist naming it produces "denied by policy" on every call.
 pub const MECHA_CASSY_TOOLS: [&str; 2] = ["mecha_read", "mecha_post"];
+/// Violet is the hub's new name (GH #963). The same hub is registered under
+/// this server name too, and its `violet_*` tools are allowlisted ahead of the
+/// hub serving them. Until it does they are simply absent upstream, while the
+/// `mecha-cassy` routes keep working for one release.
+pub const VIOLET_SERVER: &str = "violet";
+/// The hub's tool contract under its new name.
+pub const VIOLET_TOOLS: [&str; 2] = ["violet_read", "violet_post"];
 
 /// MCP proxy configuration containing upstream server definitions.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -53,6 +60,65 @@ pub struct Config {
     /// Optional supervisor-owned delegation gateways.
     #[serde(default)]
     pub delegation: DelegationConfig,
+    /// Per-server access for factory workers (cas-ff74, GH #1005 item 2).
+    ///
+    /// Written per server as `[servers.vercel] worker_access = "read-only"`
+    /// (or as a top-level `[worker_access]` table). A read-only server
+    /// forwards a worker's call only when the route is allowlisted *and*
+    /// read-only: its MCP annotations say `readOnlyHint = true` and not
+    /// `destructiveHint = true`, or it is a known read route
+    /// ([`DEFAULT_WORKER_READ_ROUTES`] or `worker_read_routes`). Supervisors
+    /// and plain sessions keep the full allowlist.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub worker_access: HashMap<String, WorkerAccess>,
+    /// Extra routes a worker may call on a read-only server even when the
+    /// upstream does not annotate them as read-only (cas-ff74).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub worker_read_routes: Vec<ExternalToolConfig>,
+}
+
+/// How a factory worker may use one upstream server (cas-ff74).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum WorkerAccess {
+    /// Only read-only routes: observability without write access.
+    ReadOnly,
+}
+
+/// Observability routes a worker may call on a `worker_access = "read-only"`
+/// server even when the upstream omits read-only annotations (cas-ff74).
+pub const DEFAULT_WORKER_READ_ROUTES: [(&str, &str); 7] = [
+    ("vercel", "get_runtime_errors"),
+    ("vercel", "get_runtime_logs"),
+    ("vercel", "list_deployments"),
+    ("vercel", "get_deployment"),
+    ("neon", "describe_branch"),
+    ("neon", "list_branches"),
+    ("neon", "query_logs"),
+];
+
+/// Lift `worker_access` written inside a `[servers.<name>]` table into
+/// [`Config::worker_access`]. Server definitions are an internally tagged
+/// enum that ignores unknown keys, so the per-server spelling is read from the
+/// raw document. A per-server value wins over a top-level entry.
+fn lift_server_worker_access(content: &str, config: &mut Config) -> Result<()> {
+    let document: toml::Table = toml::from_str(content).context("failed to parse proxy config")?;
+    let Some(servers) = document.get("servers").and_then(toml::Value::as_table) else {
+        return Ok(());
+    };
+    for (name, server) in servers {
+        let Some(access) = server.get("worker_access") else {
+            continue;
+        };
+        let access = match access.as_str() {
+            Some("read-only") => WorkerAccess::ReadOnly,
+            _ => anyhow::bail!(
+                "servers.{name}.worker_access must be \"read-only\" (the only supported mode)"
+            ),
+        };
+        config.worker_access.insert(name.clone(), access);
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -301,7 +367,9 @@ impl Config {
             return Ok(Config::default());
         }
 
-        let config: Config = toml::from_str(&content)
+        let mut config: Config = toml::from_str(&content)
+            .with_context(|| format!("failed to parse {}", path.display()))?;
+        lift_server_worker_access(&content, &mut config)
             .with_context(|| format!("failed to parse {}", path.display()))?;
         Ok(config)
     }
@@ -356,6 +424,10 @@ impl Config {
             // a broader user config must not silently widen project dispatch.
             merged.allowlist = project.allowlist;
             merged.delegation = project.delegation;
+            // Worker access narrows the allowlist, so it follows the same
+            // rule: the project file is authoritative (cas-ff74).
+            merged.worker_access = project.worker_access;
+            merged.worker_read_routes = project.worker_read_routes;
         }
 
         Ok((merged, sources))
@@ -457,30 +529,36 @@ impl Config {
             oauth: false,
         };
         let mut changed = false;
-        if self.servers.get(MECHA_CASSY_SERVER) != Some(&desired_server) {
-            self.servers
-                .insert(MECHA_CASSY_SERVER.to_string(), desired_server);
-            changed = true;
-        }
+        // GH #963: the same hub under its canonical Violet name, with the
+        // same env-referenced credentials.
+        for (server, tools) in [
+            (MECHA_CASSY_SERVER, MECHA_CASSY_TOOLS),
+            (VIOLET_SERVER, VIOLET_TOOLS),
+        ] {
+            if self.servers.get(server) != Some(&desired_server) {
+                self.servers
+                    .insert(server.to_string(), desired_server.clone());
+                changed = true;
+            }
 
-        let desired_routes = MECHA_CASSY_TOOLS
-            .iter()
-            .map(|tool| ExternalToolConfig {
-                server: MECHA_CASSY_SERVER.to_string(),
-                tool: (*tool).to_string(),
-                supervisor_only: false,
-            })
-            .collect::<Vec<_>>();
-        if self
-            .allowlist
-            .iter()
-            .filter(|route| route.server == MECHA_CASSY_SERVER)
-            .ne(desired_routes.iter())
-        {
-            self.allowlist
-                .retain(|route| route.server != MECHA_CASSY_SERVER);
-            self.allowlist.extend(desired_routes);
-            changed = true;
+            let desired_routes = tools
+                .iter()
+                .map(|tool| ExternalToolConfig {
+                    server: server.to_string(),
+                    tool: (*tool).to_string(),
+                    supervisor_only: false,
+                })
+                .collect::<Vec<_>>();
+            if self
+                .allowlist
+                .iter()
+                .filter(|route| route.server == server)
+                .ne(desired_routes.iter())
+            {
+                self.allowlist.retain(|route| route.server != server);
+                self.allowlist.extend(desired_routes);
+                changed = true;
+            }
         }
         changed
     }
@@ -664,6 +742,99 @@ mod tests {
         assert_eq!(sources.get("user-only"), Some(&user));
         assert_eq!(sources.get("shared"), Some(&project));
         assert_eq!(sources.get("project-only"), Some(&project));
+    }
+
+    /// cas-ff74: `worker_access = "read-only"` written inside a server table
+    /// is read into `Config::worker_access`, extra read routes parse like
+    /// allowlist entries, and the project file is authoritative on merge.
+    #[test]
+    fn per_server_worker_access_is_read_and_project_authoritative() {
+        let dir = tempfile::tempdir().unwrap();
+        let user = dir.path().join("user.toml");
+        let project = dir.path().join("project.toml");
+        std::fs::write(
+            &user,
+            r#"
+[servers.neon]
+transport = "http"
+url = "https://mcp.neon.tech/mcp"
+auth = "env:NEON_API_KEY"
+worker_access = "read-only"
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            &project,
+            r#"
+allowlist = ["vercel.*"]
+worker_read_routes = ["vercel.get_project"]
+
+[servers.vercel]
+transport = "http"
+url = "https://mcp.vercel.com"
+auth = "env:VERCEL_TOKEN"
+worker_access = "read-only"
+"#,
+        )
+        .unwrap();
+
+        let project_only = Config::load_from(&project).unwrap();
+        assert_eq!(
+            project_only.worker_access.get("vercel"),
+            Some(&WorkerAccess::ReadOnly)
+        );
+        assert_eq!(
+            project_only
+                .worker_read_routes
+                .iter()
+                .map(ExternalToolConfig::canonical_entry)
+                .collect::<Vec<_>>(),
+            vec!["vercel.get_project".to_string()]
+        );
+        // The server definition itself still parses as before.
+        assert!(matches!(
+            project_only.servers.get("vercel"),
+            Some(ServerConfig::Http { url, .. }) if url == "https://mcp.vercel.com"
+        ));
+
+        let (merged, _) =
+            Config::load_merged_with_sources_from(Some(&user), Some(&project)).unwrap();
+        assert_eq!(
+            merged.worker_access,
+            HashMap::from([("vercel".to_string(), WorkerAccess::ReadOnly)]),
+            "the project file replaces the user's worker access, like the allowlist"
+        );
+
+        let user_only = Config::load_merged_with_sources_from(Some(&user), None)
+            .unwrap()
+            .0;
+        assert_eq!(
+            user_only.worker_access.get("neon"),
+            Some(&WorkerAccess::ReadOnly)
+        );
+
+        // A saved config keeps it (top-level table) and loads it back.
+        let saved = dir.path().join("saved.toml");
+        project_only.save_to(&saved).unwrap();
+        assert_eq!(Config::load_from(&saved).unwrap(), project_only);
+    }
+
+    #[test]
+    fn unknown_worker_access_mode_is_a_parse_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("proxy.toml");
+        std::fs::write(
+            &path,
+            r#"
+[servers.vercel]
+transport = "http"
+url = "https://mcp.vercel.com"
+worker_access = "write"
+"#,
+        )
+        .unwrap();
+        let error = format!("{:#}", Config::load_from(&path).unwrap_err());
+        assert!(error.contains("worker_access"), "{error}");
     }
 
     #[test]
@@ -923,6 +1094,43 @@ tool = "get_file_download_url"
         assert!(serialized.contains("env:MECHA_SLACK_TOKEN_LAPTOP"));
         assert!(serialized.contains("mecha-cassy.mecha_read"));
         assert!(!serialized.contains("xoxb-"));
+    }
+
+    /// GH #963: the registration also names the hub `violet` and allowlists
+    /// its `violet_*` tools, with the same env-referenced credentials, and
+    /// stays idempotent. The `mecha-cassy` contract is untouched.
+    #[test]
+    fn mecha_cassy_registration_also_registers_the_violet_name() {
+        let mut config = Config::default();
+        assert!(config.ensure_mecha_cassy_registration(
+            MECHA_CASSY_MCP_URL,
+            MECHA_CASSY_DEFAULT_TOKEN_ENV,
+            MECHA_CASSY_DEFAULT_BYPASS_ENV,
+        ));
+        assert_eq!(
+            config.servers.get(VIOLET_SERVER),
+            config.servers.get(MECHA_CASSY_SERVER)
+        );
+        assert!(config.servers.contains_key(VIOLET_SERVER));
+        let violet_tools: Vec<&str> = config
+            .allowlist
+            .iter()
+            .filter(|route| route.server == VIOLET_SERVER)
+            .map(|route| route.tool.as_str())
+            .collect();
+        assert_eq!(violet_tools, VIOLET_TOOLS);
+        assert_eq!(config.mecha_cassy_allowlisted_tools(), MECHA_CASSY_TOOLS);
+        assert!(!config.ensure_mecha_cassy_registration(
+            MECHA_CASSY_MCP_URL,
+            MECHA_CASSY_DEFAULT_TOKEN_ENV,
+            MECHA_CASSY_DEFAULT_BYPASS_ENV,
+        ));
+        let serialized = toml::to_string(&config).unwrap();
+        assert!(serialized.contains("violet.violet_read"), "{serialized}");
+        assert!(
+            serialized.contains("mecha-cassy.mecha_read"),
+            "{serialized}"
+        );
     }
 
     #[test]

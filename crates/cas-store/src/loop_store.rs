@@ -406,6 +406,14 @@ mod tests {
         let (store, _dir) = create_test_store();
 
         let id1 = store.generate_id().unwrap();
+        store
+            .add(&Loop::new(
+                id1.clone(),
+                "session-123".to_string(),
+                "Build something".to_string(),
+                "/project".to_string(),
+            ))
+            .unwrap();
         let id2 = store.generate_id().unwrap();
 
         assert!(id1.starts_with("loop-"));

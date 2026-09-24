@@ -1226,23 +1226,84 @@ fn resolve_scoped_proof_targets_without_cache(
             if stdin_ok
                 && let Ok(output) = output
                 && output.status.success()
-                && let Some(line) = String::from_utf8_lossy(&output.stdout)
-                    .lines()
-                    .find(|line| line.starts_with("SCOPED_PROOF_TARGET_ARGS:"))
+                && let Some(targets) =
+                    parse_scoped_proof_target_args(&String::from_utf8_lossy(&output.stdout))
             {
-                let mut targets = Vec::new();
-                let mut tokens = line.split_whitespace().skip(1);
-                while let Some(token) = tokens.next() {
-                    if token == "--test" && let Some(target) = tokens.next() {
-                        targets.push(target.to_string());
-                    }
-                }
                 return targets;
             }
         }
     }
 
     legacy_required_scoped_proof_targets(proof_repo, changed_paths)
+}
+
+/// The `--test` targets on the checker's `SCOPED_PROOF_TARGET_ARGS:` line.
+fn parse_scoped_proof_target_args(stdout: &str) -> Option<Vec<String>> {
+    let line = stdout
+        .lines()
+        .find(|line| line.starts_with("SCOPED_PROOF_TARGET_ARGS:"))?;
+    let mut targets = Vec::new();
+    let mut tokens = line.split_whitespace().skip(1);
+    while let Some(token) = tokens.next() {
+        if token == "--test"
+            && let Some(target) = tokens.next()
+        {
+            targets.push(target.to_string());
+        }
+    }
+    Some(targets)
+}
+
+/// cas-0db7: the `--test` targets `run-scoped-tests.sh --proof` will itself
+/// require when run with this base. `--proof` validation hands the committed
+/// surface checker the whole `merge-base(base, HEAD)..HEAD` diff, while the
+/// gate resolves only the task's attributed paths. When a neighbour's commit
+/// sits in that range (a skill or hook edit, say), the proof needs more
+/// targets than the gate's own list, and a refusal that suggested only the
+/// gate's list sent the closer into a full run that then failed as
+/// "SCOPED PROOF INCOMPLETE". Same checker, same arguments as `--proof`.
+fn proof_validation_targets(
+    proof_repo: &std::path::Path,
+    target_repo: &std::path::Path,
+    base: Option<&str>,
+) -> Option<Vec<String>> {
+    let checker = target_repo.join("scripts/check-scoped-test-surface.sh");
+    if !proof_repo_is_git_worktree(proof_repo) || !checker.is_file() {
+        return None;
+    }
+    let mut command = std::process::Command::new("bash");
+    command.arg(&checker).arg("--resolve-targets");
+    if let Some(base) = base {
+        command.args(["--base", base]);
+    }
+    let output = command
+        .arg("--")
+        .current_dir(proof_repo)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_scoped_proof_target_args(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// cas-0db7: the command a scoped-proof refusal suggests. Its `--test` list
+/// is the gate's required targets plus every target `--proof` validation will
+/// require for the same base, so running it exactly as printed passes both.
+fn suggested_scoped_proof_command(
+    required_targets: &[String],
+    proof_repo: &std::path::Path,
+    target_repo: &std::path::Path,
+    base: Option<&str>,
+) -> String {
+    let mut targets = required_targets.to_vec();
+    for target in proof_validation_targets(proof_repo, target_repo, base).unwrap_or_default() {
+        if !targets.contains(&target) {
+            targets.push(target);
+        }
+    }
+    scoped_proof_command(&targets, base)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1768,7 +1829,12 @@ fn validate_risk_close_proofs_with_base_and_target_and_cache(
                     "TASK CLOSE REJECTED: task {} scoped proof receipt has base {:?}, but this delivery must be proven against SCOPED_PROOF_BASE={expected_base} — the first parent of its earliest commit, which is the diff the required targets were derived from. Run `{}` and add the resulting passing receipt to a progress note.",
                     task.id,
                     actual_base.as_deref(),
-                    scoped_proof_command(&required_targets, Some(expected_base)),
+                    suggested_scoped_proof_command(
+                        &required_targets,
+                        proof_repo,
+                        target_repo,
+                        Some(expected_base),
+                    ),
                 ));
             }
         }
@@ -1778,7 +1844,12 @@ fn validate_risk_close_proofs_with_base_and_target_and_cache(
                 "TASK CLOSE REJECTED: task {} changed a module with integration-test proof targets that were not run or recorded as passing; missing targets: {}. Run `{}` and add its `SCOPED_PROOF: targets=<complete target set> result=PASS base=<sha> head=<sha>` line to a progress note before retrying close. If the scoped command cannot run, a registered supervisor may record an equivalent full `cargo nextest run -p cas` receipt with its durable log path in the note; every real required target must be covered.",
                 task.id,
                 missing.join(", "),
-                scoped_proof_command(&required_targets, expected_base),
+                suggested_scoped_proof_command(
+                    &required_targets,
+                    proof_repo,
+                    target_repo,
+                    expected_base,
+                ),
             ));
         }
     }
@@ -2388,6 +2459,124 @@ mod risk_proof_tests {
             String::from_utf8_lossy(&output.stdout).contains("covered committed diff"),
             "surface checker did not emit a passing receipt: {}",
             String::from_utf8_lossy(&output.stdout)
+        );
+    }
+
+    /// cas-0db7: the gate resolves the task's attributed paths, but `--proof`
+    /// validates the whole `merge-base(base)..HEAD` diff. With a neighbour's
+    /// skill edit inside that range, the refusal's suggested command must name
+    /// every target `--proof` will require, so running it exactly as printed
+    /// passes the checker's validation. The gate-only command is what failed.
+    #[test]
+    fn scoped_proof_refusal_suggests_every_target_proof_validation_requires_cas_0db7() {
+        let dir = tempfile::tempdir().unwrap();
+        if !install_scoped_proof_checker(dir.path()) {
+            return;
+        }
+        let p = dir.path();
+        let write = |relative: &str, body: &str| {
+            let path = p.join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, body).unwrap();
+        };
+        let commit = |message: &str| {
+            let status = std::process::Command::new("git")
+                .args([
+                    "-c",
+                    "user.name=scoped-proof-test",
+                    "-c",
+                    "user.email=scoped-proof-test@example.invalid",
+                    "commit",
+                    "-qam",
+                    message,
+                ])
+                .current_dir(p)
+                .status()
+                .unwrap();
+            assert!(status.success());
+        };
+        for target in [
+            "mcp_tools_test",
+            "builtin_archive_portability_test",
+            "builtin_flavor_drift_test",
+            "agent_definition_contract_test",
+            "factory_codex_skill_guardrails",
+            "builtin_doc_hygiene_test",
+        ] {
+            write(
+                &format!("cas-cli/tests/{target}.rs"),
+                &format!("// {target}\n"),
+            );
+        }
+        write("cas-cli/Cargo.toml", "[package]\nname = \"cas\"\n");
+        write("cas-cli/src/builtins/skills/demo/SKILL.md", "# demo\n");
+        initialize_scoped_proof_git_fixture(p);
+        let base = resolve_branch_sha(p, "HEAD").unwrap();
+        // A neighbour's skill edit lands in the range before the delivery.
+        write("cas-cli/src/builtins/skills/demo/SKILL.md", "# demo v2\n");
+        commit("neighbour skill edit");
+        // The delivery itself touches one integration test.
+        write("cas-cli/tests/mcp_tools_test.rs", "// mcp_tools_test v2\n");
+        commit("delivery");
+
+        let attributed = vec!["cas-cli/tests/mcp_tools_test.rs".to_string()];
+        let mut cache = ScopedProofTargetCache::default();
+        let gate_targets = required_scoped_proof_targets(p, p, &attributed, &mut cache);
+        assert!(
+            gate_targets.contains(&"mcp_tools_test".to_string()),
+            "{gate_targets:?}"
+        );
+        let proof_targets =
+            proof_validation_targets(p, p, Some(&base)).expect("the checker resolves the range");
+        assert!(
+            proof_targets.contains(&"builtin_doc_hygiene_test".to_string()),
+            "{proof_targets:?}"
+        );
+        assert!(
+            !gate_targets.contains(&"builtin_doc_hygiene_test".to_string()),
+            "precondition: the gate's own list is narrower than --proof's: {gate_targets:?}"
+        );
+
+        let checker = p.join("scripts/check-scoped-test-surface.sh");
+        let validate = |command: &str| {
+            let args: Vec<&str> = command
+                .split_once("run-scoped-tests.sh --proof ")
+                .unwrap()
+                .1
+                .split_whitespace()
+                .collect();
+            std::process::Command::new("bash")
+                .arg(&checker)
+                .args(["--base", base.as_str(), "--"])
+                .args(&args)
+                .current_dir(p)
+                .output()
+                .unwrap()
+        };
+
+        let suggested = suggested_scoped_proof_command(&gate_targets, p, p, Some(&base));
+        for target in gate_targets.iter().chain(proof_targets.iter()) {
+            assert!(
+                suggested.contains(&format!("--test {target}")),
+                "{target} missing from {suggested}"
+            );
+        }
+        let passed = validate(&suggested);
+        assert!(
+            passed.status.success(),
+            "the suggested command must pass --proof validation: {}",
+            String::from_utf8_lossy(&passed.stderr)
+        );
+
+        let gate_only = validate(&scoped_proof_command(&gate_targets, Some(&base)));
+        assert!(
+            !gate_only.status.success(),
+            "the gate-only command was the defect"
+        );
+        assert!(
+            String::from_utf8_lossy(&gate_only.stderr).contains("SCOPED PROOF INCOMPLETE"),
+            "{}",
+            String::from_utf8_lossy(&gate_only.stderr)
         );
     }
 
@@ -3844,9 +4033,11 @@ impl CasCore {
             ));
         }
         let expected_source = format!("factory/{}", caller.name);
-        if input.source_branch != expected_source {
+        // cas-73b8: or the worker's own per-task branch for this task.
+        let task_source = crate::factory_isolation::worker_task_branch(&caller.name, &task.id);
+        if input.source_branch != expected_source && input.source_branch != task_source {
             return Ok(Self::tool_error(format!(
-                "DELIVERY RECEIPT REJECTED: source branch must be the registered worker branch `{expected_source}`."
+                "DELIVERY RECEIPT REJECTED: source branch must be the registered worker branch `{expected_source}` or its per-task branch `{task_source}`."
             )));
         }
         let receipt =
@@ -4193,6 +4384,7 @@ impl CasCore {
         message: &str,
         factory_branch_anchor: Option<String>,
         merge_conflicted: bool,
+        measured_branch: Option<String>,
     ) {
         let mut parked = task.clone();
         let now = chrono::Utc::now();
@@ -4216,10 +4408,20 @@ impl CasCore {
         // field is reassigned or cleared. Never overwrite an existing value —
         // this only fires once per task, same as the anchor above.
         if parked.deliverables.parked_branch.is_none() {
-            parked.deliverables.parked_branch = task
-                .assignee
-                .as_deref()
-                .map(|assignee| format!("factory/{assignee}"));
+            // cas-73b8: the branch the merge gate measured (a per-task branch
+            // when the worker used one), so merge requests name it too.
+            parked.deliverables.parked_branch = measured_branch
+                .map(|branch| {
+                    branch
+                        .strip_prefix("origin/")
+                        .map(str::to_string)
+                        .unwrap_or(branch)
+                })
+                .or_else(|| {
+                    task.assignee
+                        .as_deref()
+                        .map(|assignee| format!("factory/{assignee}"))
+                });
         }
         // Parking precedes verification dispatch. Clear only this task's
         // pending flag so the next close attempt can create a fresh typed
@@ -5501,12 +5703,26 @@ impl CasCore {
                     .clone()
                     .unwrap_or_else(|| close_project_root.clone())
             };
-            match super::qa_evidence_gate::qa_evidence_close_gate(
+            // cas-bde8 (GH #978): judge only this task's own delivery, the
+            // same task-attributed commits the close diff stat reports,
+            // measured against the live (origin) target. A reused factory
+            // branch otherwise charged an earlier, already-merged task's UI
+            // commits to a backend-only task.
+            let attributed_paths = commit_receipt_window.as_ref().and_then(|window| {
+                task_attribution::paths(
+                    &evidence_repo,
+                    &resolved_parent_branch,
+                    window,
+                    req.commit_receipt.as_deref(),
+                )
+            });
+            match super::qa_evidence_gate::qa_evidence_close_gate_for_paths(
                 &self.cas_root,
                 &task,
                 &evidence_repo,
                 &resolved_parent_branch,
                 req.commit_receipt.as_deref(),
+                attributed_paths.as_deref(),
             ) {
                 Ok(notes) => {
                     for note in notes {
@@ -5629,6 +5845,9 @@ impl CasCore {
                             &msg,
                             anchor.clone(),
                             merge_conflicted,
+                            task.assignee.as_deref().map(|assignee| {
+                                close_measured_factory_branch(&close_project_root, &task, assignee)
+                            }),
                         );
                     } else {
                         // GH #744 / #743: a worker may push again after the
@@ -8007,7 +8226,16 @@ impl CasCore {
                 .assignee
                 .as_deref()
                 .expect("System B requires assignee");
-            let expected_branch = format!("factory/{assignee}");
+            // cas-73b8: a worktree on the worker's per-task branch for this
+            // task is the task's worktree too.
+            let task_branch = crate::factory_isolation::worker_task_branch(assignee, &task.id);
+            let expected_branch = if crate::factory_isolation::branch_at(path).as_deref()
+                == Some(task_branch.as_str())
+            {
+                task_branch
+            } else {
+                format!("factory/{assignee}")
+            };
             validate_pre_close_worktree(path, expected, Some(&expected_branch))
                 .map_err(|error| error.to_string())?;
         }
@@ -8795,7 +9023,7 @@ fn current_factory_branch_receipt_for_identity(
     receipt: &str,
 ) -> Option<String> {
     let assignee = task.assignee.as_deref()?;
-    let branch = format!("factory/{assignee}");
+    let branch = close_measured_factory_branch(repo_path, task, assignee);
     let full_receipt = resolve_task_commit_receipt_sha(repo_path, receipt).ok()?;
     let current_tip = resolve_branch_sha(repo_path, &branch)?;
     (current_tip == full_receipt).then_some(full_receipt)
@@ -9938,7 +10166,9 @@ pub(crate) fn run_factory_branch_merge_gate(
 /// cas-e74c: count commits on `commit_ish` that are not on `parent_branch`
 /// AND either fall inside this task's work cycle (committer date at or after
 /// `window.not_before`, with the same clock-skew allowance the commit
-/// receipt uses) OR are explicitly known to belong to the task. The latter
+/// receipt uses) OR are explicitly known to belong to the task, OR name the
+/// task in their message and are not already on the target as an equivalent
+/// patch (cas-08f9: a merge-recovery rebase made before the restart). The latter
 /// includes durable task identity evidence and the receipt supplied by this
 /// close, because a restart after commit moves the lease boundary forward but
 /// must never turn the already-known delivery into somebody else's residue.
@@ -9983,11 +10213,15 @@ pub(crate) fn count_task_attributable_unmerged_commits(
     // must still be visible for attribution below.
     let range = format!("{merge_base}..{commit_ish}");
     let origin_parent = format!("origin/{parent_branch}");
-    let mut args = vec!["rev-list", "--timestamp", range.as_str()];
-    if git_ref_exists(repo_path, &origin_parent) {
+    let origin_parent_exists = git_ref_exists(repo_path, &origin_parent);
+    // One record per commit: committer epoch, id, then the message, so the
+    // task-id attribution below costs no subprocess per commit.
+    let mut args = vec!["log", "--format=%ct %H%x1f%B%x1e", range.as_str()];
+    if origin_parent_exists {
         args.push("--not");
         args.push(origin_parent.as_str());
     }
+    args.push("--");
     let count_out = Command::new("git")
         .args(&args)
         .current_dir(repo_path)
@@ -10004,17 +10238,76 @@ pub(crate) fn count_task_attributable_unmerged_commits(
         .chain(receipt)
         .collect::<std::collections::HashSet<_>>();
     let cutoff = window.not_before.timestamp() - COMMIT_RECEIPT_CLOCK_SKEW_SECS;
-    String::from_utf8_lossy(&count_out.stdout)
-        .lines()
-        .map(|line| {
-            let (timestamp, sha) = line.split_once(' ')?;
+    let task_id = window.identity.task_id.as_deref();
+    // cas-08f9: a merge-recovery restart moves the lease boundary past a
+    // rebase the worker already made, and the rebase gave the delivery new
+    // ids that no retained anchor matches. A commit whose message names the
+    // task is still this task's delivery, unless the target already carries
+    // an equivalent patch (the delivery landed as a cherry-pick or rebase).
+    let mut integrated_patches: Option<std::collections::HashSet<String>> = None;
+    let stdout = String::from_utf8_lossy(&count_out.stdout);
+    stdout
+        .split('\u{1e}')
+        .map(str::trim)
+        .filter(|record| !record.is_empty())
+        .map(|record| {
+            let (header, message) = record.split_once('\u{1f}')?;
+            let (timestamp, sha) = header.trim().split_once(' ')?;
             let timestamp = timestamp.parse::<i64>().ok()?;
-            Some((timestamp, sha))
+            Some((timestamp, sha.trim(), message))
         })
         .try_fold(0u32, |count, entry| {
-            let (timestamp, sha) = entry?;
-            Some(count + u32::from(timestamp >= cutoff || known_commits.contains(sha)))
+            let (timestamp, sha, message) = entry?;
+            let names_task =
+                task_id.is_some_and(|task_id| message_references_task(message, task_id));
+            let attributable = timestamp >= cutoff
+                || known_commits.contains(sha)
+                || (names_task
+                    && !integrated_patches
+                        .get_or_insert_with(|| {
+                            patch_equivalent_on_targets(
+                                repo_path,
+                                commit_ish,
+                                parent_branch,
+                                origin_parent_exists.then_some(origin_parent.as_str()),
+                            )
+                        })
+                        .contains(sha));
+            Some(count + u32::from(attributable))
         })
+}
+
+/// cas-08f9: commits on `commit_ish` whose patch is already on `parent_branch`
+/// (or its remote-tracking ref), per `git cherry`. Unknowable Git state yields
+/// an empty set, so a commit that names the task stays attributed (the guard
+/// fails closed).
+fn patch_equivalent_on_targets(
+    repo_path: &std::path::Path,
+    commit_ish: &str,
+    parent_branch: &str,
+    origin_parent: Option<&str>,
+) -> std::collections::HashSet<String> {
+    use std::process::Command;
+
+    let mut equivalent = std::collections::HashSet::new();
+    for upstream in std::iter::once(parent_branch).chain(origin_parent) {
+        let Ok(output) = Command::new("git")
+            .args(["cherry", upstream, commit_ish])
+            .current_dir(repo_path)
+            .output()
+        else {
+            continue;
+        };
+        if !output.status.success() {
+            continue;
+        }
+        for line in String::from_utf8_lossy(&output.stdout).lines() {
+            if let Some(sha) = line.strip_prefix("- ") {
+                equivalent.insert(sha.trim().to_string());
+            }
+        }
+    }
+    equivalent
 }
 
 /// cas-e33f (GH #1004): agents that held this task before a transfer,
@@ -10043,6 +10336,24 @@ fn handoff_prior_holders(notes: &str) -> Vec<&str> {
     holders
 }
 
+/// cas-73b8: `factory/<assignee>-<task-id>` when it exists locally, else
+/// `origin/factory/<assignee>-<task-id>` when only the remote has it.
+pub(crate) fn worker_task_branch_ref(
+    repo_path: &std::path::Path,
+    assignee: &str,
+    task_id: &str,
+) -> Option<String> {
+    let branch = crate::factory_isolation::worker_task_branch(assignee, task_id);
+    if !is_safe_git_refname(&branch) {
+        return None;
+    }
+    if git_ref_exists(repo_path, &branch) {
+        return Some(branch);
+    }
+    let remote = format!("origin/{branch}");
+    git_ref_exists(repo_path, &remote).then_some(remote)
+}
+
 /// cas-e33f (GH #1004): whether this task changed hands after work began —
 /// a recorded handoff branch, a commit-time `parked_branch` that is not the
 /// current assignee's, or a transfer audit note.
@@ -10051,7 +10362,13 @@ pub(crate) fn task_changed_hands(task: &Task) -> bool {
         .assignee
         .as_deref()
         .map(|assignee| format!("factory/{assignee}"));
-    let foreign = |branch: &str| own.as_deref() != Some(branch);
+    // cas-73b8: the assignee's own per-task branch is not a handoff.
+    let own_task = task
+        .assignee
+        .as_deref()
+        .map(|assignee| crate::factory_isolation::worker_task_branch(assignee, &task.id));
+    let foreign =
+        |branch: &str| own.as_deref() != Some(branch) && own_task.as_deref() != Some(branch);
     task.deliverables
         .handoff_branches
         .iter()
@@ -10075,7 +10392,12 @@ pub(crate) fn task_changed_hands(task: &Task) -> bool {
 /// `None` when the task has no assignee or none of them resolves.
 pub(crate) fn task_delivery_branch(repo_path: &std::path::Path, task: &Task) -> Option<String> {
     let assignee = task.assignee.as_deref()?;
-    let mut candidates = vec![format!("factory/{assignee}")];
+    // cas-73b8: the per-task branch, when the worker used one, holds exactly
+    // this task's commits.
+    let mut candidates = vec![
+        crate::factory_isolation::worker_task_branch(assignee, &task.id),
+        format!("factory/{assignee}"),
+    ];
     candidates.extend(task.deliverables.parked_branch.clone());
     candidates.extend(task.deliverables.handoff_branches.iter().rev().cloned());
     candidates.extend(
@@ -10109,6 +10431,13 @@ pub(crate) fn close_measured_factory_branch(
     task: &Task,
     assignee: &str,
 ) -> String {
+    // cas-73b8: a worker whose `factory/<assignee>` is frozen for another
+    // task's parked delivery commits this task on its per-task branch. When
+    // that branch exists (locally, else on origin) it is the one to measure;
+    // the frozen branch holds the other task's commits.
+    if let Some(branch) = worker_task_branch_ref(repo_path, assignee, &task.id) {
+        return branch;
+    }
     let own = format!("factory/{assignee}");
     if !task_changed_hands(task) || git_ref_exists(repo_path, &own) {
         return own;
@@ -20638,6 +20967,92 @@ mod merge_state_gate_tests {
         assert_eq!(handoff_prior_holders(notes), vec!["gamma", "beta", "alpha"]);
     }
 
+    // --- cas-73b8: a per-task branch while factory/<worker> is frozen -------
+
+    /// `factory/worker` carries another task's parked delivery (frozen, one
+    /// unmerged commit). This task's commits live on the worker's per-task
+    /// branch `factory/worker-<task-id>`. The gate measures that branch: it
+    /// refuses naming it while unmerged, and proceeds once it is merged, even
+    /// though the frozen branch is still unmerged.
+    #[test]
+    fn per_task_branch_is_measured_while_the_worker_branch_is_frozen_cas_73b8() {
+        let (dir, _bare) = handoff_repo();
+        let p = dir.path();
+        let task = worker_task("worker");
+        let task_branch = format!("factory/worker-{}", task.id);
+        git(p, &["checkout", "-q", "-b", &task_branch, "main"]);
+        std::fs::write(p.join("next.rs"), "// next task\n").unwrap();
+        git(p, &["add", "next.rs"]);
+        git(p, &["commit", "-q", "-m", "feat: next task"]);
+
+        assert_eq!(
+            close_measured_factory_branch(p, &task, "worker"),
+            task_branch
+        );
+        assert_eq!(
+            task_delivery_branch(p, &task).as_deref(),
+            Some(task_branch.as_str())
+        );
+        assert!(!task_changed_hands(&task));
+        match run_factory_branch_merge_gate(&task, &base_req(&task.id), "main", p) {
+            MergeStateGateOutcome::Reject(msg) => {
+                assert!(msg.contains(&task_branch), "{msg}");
+            }
+            other => panic!("an unmerged per-task branch must refuse, got {other:?}"),
+        }
+
+        // Merge only the per-task branch; the frozen factory/worker stays out.
+        git(p, &["checkout", "-q", "main"]);
+        git(
+            p,
+            &[
+                "merge",
+                "-q",
+                "--no-ff",
+                &task_branch,
+                "-m",
+                "merge next task",
+            ],
+        );
+        git(p, &["push", "-q", "origin", "main"]);
+        let out = run_factory_branch_merge_gate(&task, &base_req(&task.id), "main", p);
+        assert!(
+            matches!(
+                out,
+                MergeStateGateOutcome::Proceed | MergeStateGateOutcome::ProceedWithNote(_)
+            ),
+            "the merged per-task delivery must close, got {out:?}"
+        );
+
+        // A park that recorded the per-task branch is not a handoff.
+        let mut parked = task.clone();
+        parked.deliverables.parked_branch = Some(task_branch.clone());
+        assert!(!task_changed_hands(&parked));
+
+        // Only the remote copy left locally: origin/<branch> is measured.
+        git(p, &["push", "-q", "origin", &task_branch]);
+        git(p, &["fetch", "-q", "origin"]);
+        git(p, &["branch", "-D", &task_branch]);
+        assert_eq!(
+            close_measured_factory_branch(p, &task, "worker"),
+            format!("origin/{task_branch}")
+        );
+    }
+
+    /// Without a per-task branch the worker's own branch is measured, as
+    /// before.
+    #[test]
+    fn without_a_per_task_branch_the_worker_branch_is_measured_cas_73b8() {
+        let (dir, _bare) = handoff_repo();
+        let p = dir.path();
+        let task = worker_task("worker");
+        assert_eq!(
+            close_measured_factory_branch(p, &task, "worker"),
+            "factory/worker"
+        );
+        assert!(worker_task_branch_ref(p, "worker", &task.id).is_none());
+    }
+
     // --- cas-e74c (GH #80 / #62 symptoms 3-4): delivery-scoped guard -------
     //
     // The guard used to evaluate the worker's ENTIRE registered lane
@@ -20878,12 +21293,72 @@ mod merge_state_gate_tests {
     /// GH #62 symptom 4: the delivery lives on a clean task-local branch that
     /// was merged into the parent BEFORE close. The guard must resolve merge
     /// state from the receipt's ancestry, not the registered lane name.
+    ///
+    /// cas-b62d: the task-local branch must not be named
+    /// `factory/<assignee>-<task-id>`. Since cas-73b8 that is the worker's own
+    /// per-task branch, which the close gate measures directly (see
+    /// `merged_per_task_branch_is_measured_and_proceeds_cas_73b8`). The old
+    /// fixture name took that path and never reached the receipt-ancestry
+    /// logic this test exists for.
     #[test]
     fn clean_task_local_branch_merged_before_close_proceeds() {
         let dir = init_factory_repo("worker");
         let p = dir.path();
         commit_file_at(p, "unrelated.rs", "// other task\n", "2020-03-01T00:00:00Z");
         // Task work on its own branch, cut from main and merged into main.
+        git(p, &["checkout", "-q", "main"]);
+        git(p, &["checkout", "-q", "-b", "task-local/cas-test1"]);
+        commit_file_at(p, "scoped.rs", "// scoped\n", "2026-08-04T12:00:00Z");
+        let receipt = head_sha(p);
+        git(p, &["checkout", "-q", "main"]);
+        git(
+            p,
+            &[
+                "merge",
+                "-q",
+                "--no-ff",
+                "task-local/cas-test1",
+                "-m",
+                "merge",
+            ],
+        );
+        git(p, &["checkout", "-q", "factory/worker"]);
+
+        let task = worker_task("worker");
+        assert_eq!(
+            close_measured_factory_branch(p, &task, "worker"),
+            "factory/worker",
+            "the fixture must measure the lane, not a cas-73b8 per-task branch"
+        );
+        let mut req = base_req(&task.id);
+        req.commit_receipt = Some(receipt.clone());
+        let window = window_at(1_000_000_000, "latest task lease claim/transfer");
+
+        let out = run_factory_branch_merge_gate_with_attribution(
+            &task,
+            &req,
+            "main",
+            p,
+            TaskCommitAttribution {
+                receipt: Some(&receipt),
+                window: Some(&window),
+            },
+        );
+        assert!(
+            matches!(out, MergeStateGateOutcome::ProceedWithNote(_)),
+            "receipt merged into parent before close must clear the guard, got {out:?}"
+        );
+    }
+
+    /// cas-73b8: a worker whose factory branch was frozen committed this task
+    /// on `factory/<assignee>-<task-id>`. The close gate measures that branch
+    /// itself, and once it is merged into the parent the guard proceeds with
+    /// nothing stranded, even though the lane carries another task's commit.
+    #[test]
+    fn merged_per_task_branch_is_measured_and_proceeds_cas_73b8() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        commit_file_at(p, "unrelated.rs", "// other task\n", "2020-03-01T00:00:00Z");
         git(p, &["checkout", "-q", "main"]);
         git(p, &["checkout", "-q", "-b", "factory/worker-cas-test1"]);
         commit_file_at(p, "scoped.rs", "// scoped\n", "2026-08-04T12:00:00Z");
@@ -20903,6 +21378,10 @@ mod merge_state_gate_tests {
         git(p, &["checkout", "-q", "factory/worker"]);
 
         let task = worker_task("worker");
+        assert_eq!(
+            close_measured_factory_branch(p, &task, "worker"),
+            "factory/worker-cas-test1"
+        );
         let mut req = base_req(&task.id);
         req.commit_receipt = Some(receipt.clone());
         let window = window_at(1_000_000_000, "latest task lease claim/transfer");
@@ -20918,8 +21397,8 @@ mod merge_state_gate_tests {
             },
         );
         assert!(
-            matches!(out, MergeStateGateOutcome::ProceedWithNote(_)),
-            "receipt merged into parent before close must clear the guard, got {out:?}"
+            matches!(out, MergeStateGateOutcome::Proceed),
+            "a merged per-task branch strands nothing, got {out:?}"
         );
     }
 
@@ -20995,6 +21474,144 @@ mod merge_state_gate_tests {
             }
             other => panic!("unmerged task-own commits must still reject, got {other:?}"),
         }
+    }
+
+    fn commit_file_with_message_at(dir: &std::path::Path, name: &str, message: &str, date: &str) {
+        std::fs::write(dir.join(name), format!("// {name}\n")).unwrap();
+        git_at(dir, &["add", name], date);
+        git_at(dir, &["commit", "-q", "-m", message], date);
+    }
+
+    /// cas-08f9: a parked delivery bounced for a merge conflict. The worker
+    /// rebased (new commit ids, committed before the restart), then ran the
+    /// merge-recovery `task start`, which moved the lease window past those
+    /// commits and retired the old anchor. The rebased commits name the task,
+    /// so they are still this task's unmerged delivery: MERGE REQUIRED, not a
+    /// silent pass that later reads as "merged without a QA round".
+    #[test]
+    fn merge_recovery_rebase_before_restart_is_still_this_tasks_delivery_cas_08f9() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        // Someone else's residue on the reused lane.
+        commit_file_at(p, "other-1.rs", "// 1\n", "2020-01-01T00:00:00Z");
+        // The rebased delivery: made before the restart, message names the task.
+        commit_file_with_message_at(
+            p,
+            "fix.rs",
+            "hub-web: the fix (cas-test1)",
+            "2026-08-04T12:00:00Z",
+        );
+        commit_file_with_message_at(
+            p,
+            "dist.js",
+            "hub-web: rebuild dist for cas-test1",
+            "2026-08-04T12:00:05Z",
+        );
+
+        let mut task = worker_task("worker");
+        // The pre-rebase anchor survives only as history, under an id the
+        // rebase replaced.
+        task.deliverables.historical_factory_branch_anchors =
+            vec!["0123456789abcdef0123456789abcdef01234567".to_string()];
+        let req = base_req(&task.id);
+        // The restart's lease claim is later than the rebase.
+        let mut window = window_at(1_800_000_000, "latest task lease claim/transfer");
+        window.identity = task_commit_identity(&task, None);
+
+        let out = run_factory_branch_merge_gate_with_attribution(
+            &task,
+            &req,
+            "main",
+            p,
+            TaskCommitAttribution {
+                receipt: None,
+                window: Some(&window),
+            },
+        );
+        match out {
+            MergeStateGateOutcome::Reject(msg) => {
+                assert!(msg.contains("MERGE REQUIRED"), "missing header: {msg}");
+                assert!(
+                    msg.contains("2 commit(s) from this task"),
+                    "both rebased commits name the task; the residue does not: {msg}"
+                );
+            }
+            other => {
+                panic!("a rebased, unmerged delivery must not clear the guard, got {other:?}")
+            }
+        }
+        assert_eq!(
+            count_task_attributable_unmerged_commits(p, "factory/worker", "main", &window, None),
+            Some(2)
+        );
+    }
+
+    /// cas-08f9 counterpart: a commit that names the task but whose patch is
+    /// already on the target (it landed as a cherry-pick) is not stranded work.
+    #[test]
+    fn task_named_commit_already_on_target_as_an_equivalent_patch_is_not_attributed_cas_08f9() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        commit_file_with_message_at(
+            p,
+            "fix.rs",
+            "hub-web: the fix (cas-test1)",
+            "2026-08-04T12:00:00Z",
+        );
+        let delivered = head_sha(p);
+        git(p, &["checkout", "-q", "main"]);
+        git_at(p, &["cherry-pick", &delivered], "2026-08-04T13:00:00Z");
+        git(p, &["checkout", "-q", "factory/worker"]);
+
+        let task = worker_task("worker");
+        let mut window = window_at(1_800_000_000, "latest task lease claim/transfer");
+        window.identity = task_commit_identity(&task, None);
+        assert_eq!(
+            count_task_attributable_unmerged_commits(p, "factory/worker", "main", &window, None),
+            Some(0)
+        );
+        // A message naming another task (a longer id) is never attributed.
+        commit_file_with_message_at(
+            p,
+            "other.rs",
+            "fix: unrelated (cas-test10)",
+            "2026-08-04T14:00:00Z",
+        );
+        assert_eq!(
+            count_task_attributable_unmerged_commits(p, "factory/worker", "main", &window, None),
+            Some(0)
+        );
+    }
+
+    /// cas-08f9: the QA backstop's "cannot tell which commit" refusal never
+    /// claims a merge when the branch tip is not on the target.
+    #[test]
+    fn unresolved_delivery_refusal_never_claims_an_unmerged_branch_merged_cas_08f9() {
+        let tip = "59f25d1ac0000000000000000000000000000000";
+        let refusal = super::super::qa_dispatch::unresolved_delivery_refusal(
+            "cas-1622",
+            "epic/burn-down",
+            "factory/proud-shark-78",
+            Some(tip),
+            "remedy",
+        );
+        assert!(!refusal.contains("merged into epic/burn-down"), "{refusal}");
+        assert!(
+            refusal.contains("is not contained in epic/burn-down, so it is not merged"),
+            "{refusal}"
+        );
+        assert!(
+            refusal.contains(&format!("commit_receipt={tip}")),
+            "{refusal}"
+        );
+        let missing = super::super::qa_dispatch::unresolved_delivery_refusal(
+            "cas-1622",
+            "epic/burn-down",
+            "factory/gone",
+            None,
+            "remedy",
+        );
+        assert!(missing.contains("does not resolve here"), "{missing}");
     }
 
     /// GH #849: `request_changes` deliberately clears the active parked

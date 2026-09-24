@@ -148,7 +148,14 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     await page.getByRole("button", { name: "Appearance & commands" }).click();
     // Commands are grouped; the debugging switches wait, collapsed, in Advanced.
     const palette = page.locator("#command-palette");
-    await expect(palette.locator(".palette-group-heading")).toHaveText(["Conversations", "Appearance", "Advanced"]);
+    // Commands sit with what they act on: the lease with this session,
+    // Paired machines with the machines, and "Dismiss all info" only when
+    // there is something to dismiss (3.30.0 journey F4).
+    // With no session open there is no "This session" group at all.
+    await expect(palette.locator(".palette-group-heading:visible")).toHaveText(["Conversations", "Machines", "Appearance", "Advanced"]);
+    await expect(palette.locator('[data-palette-group="conversations"] .palette-command:not([data-palette-session])')).toHaveCount(0);
+    await expect(palette.locator('[data-palette-group="machines"]')).toContainText("Paired machines");
+    await expect(palette.getByRole("button", { name: /Dismiss all info/ })).toHaveCount(0);
     await expect(palette.getByRole("button", { name: /Show worker panes/ })).toBeHidden();
     await expect(palette.getByRole("button", { name: /Open the terminal view/ })).toBeHidden();
     await filter.fill("worker");
@@ -157,19 +164,19 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     const rows = palette.locator(".palette-command");
     await filter.fill("gabber");
     await expect(rows.visible()).toHaveCount(1);
-    await expect(rows.visible().first()).toContainText(`Jump to ${OTTER}`);
-    await expect(rows.visible().first()).toContainText("gabber-studio · Studio Mac");
+    await expect(rows.visible().first()).toContainText("Jump to gabber-studio");
+    await expect(rows.visible().first()).toContainText(`${OTTER} · Studio Mac`);
     // Every word must match, not the whole phrase, as in the list search.
     await filter.fill("gabber studio");
     await expect(rows.visible()).toHaveCount(1);
-    await expect(rows.visible().first()).toContainText(`Jump to ${OTTER}`);
+    await expect(rows.visible().first()).toContainText("Jump to gabber-studio");
     await filter.fill(OTTER);
     await expect(palette.getByRole("button", { name: /Show worker panes/ })).toBeHidden();
     const commands = page.locator("#command-palette .palette-command");
     await expect(commands.visible()).toHaveCount(1);
-    await expect(commands.visible().first()).toContainText(`Jump to ${OTTER}`);
+    await expect(commands.visible().first()).toContainText("Jump to gabber-studio");
     await expect(page.getByRole("button", { name: /Appearance · Dark/ })).toBeHidden();
-    await page.getByRole("button", { name: new RegExp(`Jump to ${OTTER}`) }).click();
+    await page.getByRole("button", { name: /Jump to gabber-studio/ }).click();
     await expect(page.locator("#command-palette")).toBeHidden();
     await expect(page.getByRole("button", { name: `Send to ${OTTER}`, exact: true })).toBeVisible();
     await expect(page.locator(".conversation-identity h1")).toHaveText("gabber-studio");
@@ -178,6 +185,9 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     // this first visit's lease loads, the palette offers "Release control".
     await expect(page.getByRole("textbox", { name: "Your message" })).toBeFocused();
     await expect(page.locator('#command-palette [data-palette-action="control"]')).toContainText("Release control");
+    // The lease command sits in its own group once a session is open.
+    await expect(page.locator('#command-palette [data-palette-group="session"]')).toContainText("This session");
+    await expect(page.locator('#command-palette [data-palette-group="session"] [data-palette-action="control"]')).toHaveCount(1);
     await expect(page.getByRole("textbox", { name: "Your message" })).toBeFocused();
   });
 
@@ -205,7 +215,7 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     await openPaletteFromKeyboard();
     await filter.fill(OTTER);
     await filter.press("ArrowDown");
-    await expect(page.getByRole("button", { name: new RegExp(`Jump to ${OTTER}`) })).toBeFocused();
+    await expect(page.getByRole("button", { name: /Jump to gabber-studio/ })).toBeFocused();
     await expect(filter).toHaveValue(OTTER);
     await page.keyboard.press("Enter");
     await expect(page.locator("#command-palette")).toBeHidden();
@@ -228,7 +238,7 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     await openPaletteFromKeyboard();
     await filter.fill(PELICAN);
     await filter.press("ArrowDown");
-    const row = page.getByRole("button", { name: new RegExp(`Jump to ${PELICAN}`) });
+    const row = page.getByRole("button", { name: /Jump to cas-src/ });
     await expect(row).toBeFocused();
     // Any render while the row has focus must leave the palette alone.
     hub.supervisorSays(OTTER, "Still here.", { kind: "status" });
@@ -282,7 +292,31 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     await reopen();
     // Typing after the reopen filters from scratch.
     await filter.pressSequentially(OTTER.slice(0, 6));
-    await expect(commands.visible().first()).toContainText(`Jump to ${OTTER}`);
+    await expect(commands.visible().first()).toContainText("Jump to gabber-studio");
     await page.keyboard.press("Escape");
+  });
+
+  await journey.stage("Open Paired machines from the palette, then a conversation", async () => {
+    // Paired machines replaces the palette; the palette must stay closed
+    // afterwards, not come back over the next conversation opened (cas-dfc8).
+    const palette = page.locator("#command-palette");
+    const paired = page.locator("#paired-machines-dialog");
+    // The last stage's Escape only cleared the filter; close the palette first.
+    if (await palette.isVisible()) await page.getByRole("button", { name: "Close command palette" }).click();
+    await expect(palette).toBeHidden();
+    await page.getByRole("button", { name: "Appearance & commands" }).click();
+    await expect(palette).toBeVisible();
+    await palette.getByRole("button", { name: /Paired machines/ }).click();
+    await expect(paired).toBeVisible();
+    await expect(palette).toBeHidden();
+    await page.locator("#paired-machines-close").click();
+    await expect(paired).toBeHidden();
+    await list.getByRole("button", { name: /gabber-studio/ }).click();
+    await expect(page.getByRole("button", { name: `Send to ${OTTER}`, exact: true })).toBeVisible();
+    await expect(palette).toBeHidden();
+    // And once more from the other conversation: still closed.
+    await list.getByRole("button", { name: /cas-src/ }).click();
+    await expect(page.getByRole("button", { name: `Send to ${PELICAN}`, exact: true })).toBeVisible();
+    await expect(palette).toBeHidden();
   });
 });

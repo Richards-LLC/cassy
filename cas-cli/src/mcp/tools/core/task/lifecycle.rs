@@ -640,11 +640,41 @@ fn recent_other_epic_planner(
     Ok(recent)
 }
 
+/// cas-3e41 (GH #993): the recall query for a task: the content terms of its
+/// title, labels and description, filtered by the ambient-recall stopword
+/// floor so filler and harness words cannot carry a match. Labels come first
+/// so a domain label such as `qa` is never cut by the term cap.
+pub(crate) fn task_recall_query(title: &str, labels: &[String], description: &str) -> String {
+    let mut terms: Vec<String> = Vec::new();
+    for label in labels {
+        let label = label.trim().to_ascii_lowercase();
+        if !label.is_empty() && !terms.contains(&label) {
+            terms.push(label);
+        }
+    }
+    for term in crate::ambient_recall::content_terms(&format!("{title}\n{description}")) {
+        if !terms.contains(&term) {
+            terms.push(term);
+        }
+    }
+    terms.join(" ")
+}
+
 /// Best-effort, response-only recall for write moments that establish work.
 /// Uses the same unified BM25 index as `search`; failures deliberately add no
 /// noise or friction to task creation/spawning.
 impl CasCore {
     pub(crate) fn related_recall(&self, query: &str) -> Option<String> {
+        self.related_recall_excluding(query, None)
+    }
+
+    /// [`Self::related_recall`] without one id, so a started epic never lists
+    /// itself as its own prior context (cas-3e41).
+    pub(crate) fn related_recall_excluding(
+        &self,
+        query: &str,
+        exclude_id: Option<&str>,
+    ) -> Option<String> {
         use crate::hybrid_search::{DocType, SearchOptions};
 
         let query = query.trim();
@@ -656,17 +686,23 @@ impl CasCore {
             .search_unified(&SearchOptions {
                 query: query.chars().take(600).collect(),
                 limit: RELATED_RECALL_LIMIT * 3,
-                doc_types: vec![DocType::Entry, DocType::Task],
+                // cas-3e41: standing rules (golden test data, brand voice)
+                // are domain context too, not only memories and past epics.
+                doc_types: vec![DocType::Entry, DocType::Rule, DocType::Task],
                 ..Default::default()
             })
             .ok()?;
         let store = self.open_store().ok();
+        let rules = self.open_rule_store().ok();
         let tasks = self.open_task_store().ok();
         let mut lines = Vec::new();
 
         for hit in results {
             if lines.len() == RELATED_RECALL_LIMIT {
                 break;
+            }
+            if exclude_id.is_some_and(|id| id == hit.id) {
+                continue;
             }
             let line = match hit.doc_type {
                 DocType::Entry => store.as_ref().and_then(|store| {
@@ -678,6 +714,18 @@ impl CasCore {
                             title,
                             entry.preview(140)
                         )
+                    })
+                }),
+                DocType::Rule => rules.as_ref().and_then(|rules| {
+                    rules.get(&hit.id).ok().and_then(|rule| {
+                        (!matches!(
+                            rule.status,
+                            cas_types::RuleStatus::Stale | cas_types::RuleStatus::Retired
+                        ))
+                        .then(|| {
+                            let first = rule.content.lines().next().unwrap_or_default();
+                            format!("- Rule [{}]: {}", rule.id, truncate_str(first, 160))
+                        })
                     })
                 }),
                 DocType::Task => tasks.as_ref().and_then(|tasks| {
@@ -1112,10 +1160,15 @@ impl CasCore {
 
         // Recall before indexing this task so an epic cannot surface itself as
         // "prior context" and turn an otherwise clean create receipt noisy.
+        // cas-3e41 (GH #993): every task create, not only an epic, pushes the
+        // domain-matched rules and memories back to the creating supervisor.
         let related_context = sibling_warning
-            + &(task.task_type == crate::types::TaskType::Epic)
-                .then(|| self.related_recall(&format!("{} {}", task.title, task.description)))
-                .flatten()
+            + &self
+                .related_recall(&task_recall_query(
+                    &task.title,
+                    &task.labels,
+                    &task.description,
+                ))
                 .unwrap_or_default();
 
         if let Ok(search) = self.open_search_index() {
@@ -2155,6 +2208,15 @@ impl CasCore {
         let cited_issues = crate::github_issue_attach::cited_issue_section(&self.cas_root, &task)
             .map(|section| format!("\n\n📎 {section}"))
             .unwrap_or_default();
+        // cas-3e41 (GH #993): the worker's first context for this task carries
+        // the domain-matched rules and memories, bounded like the create and
+        // spawn receipts. Empty when nothing matches.
+        let related_context = self
+            .related_recall_excluding(
+                &task_recall_query(&task.title, &task.labels, &task.description),
+                Some(&task.id),
+            )
+            .unwrap_or_default();
 
         if brief {
             // Bound the complete variable portion of the brief response. The
@@ -2194,7 +2256,7 @@ impl CasCore {
                 )
             };
             let response = format!(
-                "Started task: {} - {}\nDelivery mode: {}{}{}{}{}{}{}{}{}{}",
+                "Started task: {} - {}\nDelivery mode: {}{}{}{}{}{}{}{}{}{}{}",
                 req.id,
                 crate::mcp::tools::truncate_str(&task.title, 509),
                 task.delivery_mode,
@@ -2203,6 +2265,7 @@ impl CasCore {
                 blocker_warning,
                 crate::mcp::tools::truncate_str(&unanchored_warning.unwrap_or_default(), 765,),
                 crate::mcp::tools::truncate_str(&cited_issues, 1_021),
+                related_context,
                 execution_state.unwrap_or_default(),
                 own_notes,
                 no_code_external_ref_guidance(&task),
@@ -2216,7 +2279,7 @@ impl CasCore {
         }
 
         Ok(Self::success(format!(
-            "Started task: {} - {}\nDelivery mode: {}{}{}{}{}{}{}{}{}{}{}{}",
+            "Started task: {} - {}\nDelivery mode: {}{}{}{}{}{}{}{}{}{}{}{}{}",
             req.id,
             task.title,
             task.delivery_mode,
@@ -2228,6 +2291,7 @@ impl CasCore {
             // worktree blocks.
             unanchored_warning.unwrap_or_default(),
             cited_issues,
+            related_context,
             epic_ownership_info.unwrap_or_default(),
             wt_info,
             sibling_notes_info.unwrap_or_default(),
@@ -3046,6 +3110,68 @@ mod related_recall_response_tests {
             response.contains("Avoid duplicate timeline work"),
             "{response}"
         );
+    }
+
+    /// cas-3e41 (GH #993): a qa-labelled task's create receipt and its
+    /// worker's first context (the start response) both carry the standing
+    /// golden-set memory, not only an epic's create receipt.
+    #[tokio::test]
+    async fn qa_task_create_and_start_carry_the_golden_set_memory_cas_3e41() {
+        let _env = TestEnvGuard::with_optional_vars(&[
+            ("CAS_AGENT_NAME", Some("related-recall-response-test")),
+            ("CAS_SESSION_ID", Some("related-recall-response-test")),
+        ]);
+        let temp = TempDir::new().expect("temp project");
+        let core = CasCore::with_daemon(temp.path().to_path_buf(), None, None);
+        add_memory(
+            &core,
+            "m-golden-set",
+            "QA golden test data",
+            "Every qa pass judges checkout against the golden test data set, never ad-hoc fixtures.",
+        );
+
+        let mut request = plain_task_request("Checkout flow pass");
+        request.labels = Some("qa".to_string());
+        request.description = Some("Walk the checkout flow before the release.".to_string());
+        let created = text(
+            core.cas_task_create(Parameters(request))
+                .await
+                .expect("create qa task"),
+        );
+        assert!(created.contains("Related prior context:"), "{created}");
+        assert!(created.contains("m-golden-set"), "{created}");
+
+        let task_id = core
+            .open_task_store()
+            .expect("open task store")
+            .list(None)
+            .expect("list tasks")
+            .into_iter()
+            .find(|task| task.title == "Checkout flow pass")
+            .expect("created task")
+            .id;
+        let started = text(
+            core.cas_task_start(Parameters(IdRequest { id: task_id }))
+                .await
+                .expect("start qa task"),
+        );
+        assert!(started.contains("m-golden-set"), "{started}");
+        assert!(started.contains("QA golden test data"), "{started}");
+    }
+
+    #[test]
+    fn task_recall_query_leads_with_labels_and_drops_filler() {
+        let query = task_recall_query(
+            "Checkout flow pass",
+            &["qa".to_string()],
+            "Walk the checkout flow before you see the next release.",
+        );
+        let terms: Vec<&str> = query.split(' ').collect();
+        assert_eq!(terms.first(), Some(&"qa"));
+        assert!(terms.contains(&"checkout") && terms.contains(&"release"), "{query}");
+        for filler in ["the", "you", "see", "next", "before"] {
+            assert!(!terms.contains(&filler), "{filler} in {query}");
+        }
     }
 
     #[tokio::test]

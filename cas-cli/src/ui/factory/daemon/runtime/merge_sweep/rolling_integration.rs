@@ -24,6 +24,9 @@ pub(super) struct BaseFailure {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct IntegrationReceipt {
     base: String,
+    /// GH #954: the trunk branch `base` was read from (`origin/<trunk>`).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    trunk: String,
     epics: Vec<EpicTip>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     already_integrated: Vec<EpicTip>,
@@ -191,6 +194,64 @@ fn ref_tip(root: &Path, reference: &str) -> Option<String> {
         &["rev-parse", "--verify", &format!("{reference}^{{commit}}")],
     )
     .ok()
+}
+
+/// GH #954: the trunk the rolling union is built on, and its fetched tip.
+///
+/// The sweep used to read `origin/main` unconditionally, so a repository whose
+/// trunk is `master` (or anything else) failed before it assembled anything.
+/// Resolution order, first match wins:
+/// 1. the configured trunk, `[factory] epic_base_branch` (an explicit setting
+///    that does not resolve on origin is an error, never silently skipped);
+/// 2. `origin/HEAD`, the remote's own default;
+/// 3. `origin/main`, then `origin/master`.
+///
+/// Every candidate must resolve under `refs/remotes/origin/`: the union is
+/// built on what origin holds, not on a local branch that may be ahead of it.
+fn resolve_integration_trunk(
+    root: &Path,
+    configured: Option<&str>,
+) -> Result<(String, String), String> {
+    let remote_tip = |branch: &str| ref_tip(root, &format!("refs/remotes/origin/{branch}"));
+    if let Some(configured) = configured
+        .map(str::trim)
+        .map(|branch| branch.strip_prefix("origin/").unwrap_or(branch))
+        .filter(|branch| !branch.is_empty())
+    {
+        return remote_tip(configured)
+            .map(|tip| (configured.to_owned(), tip))
+            .ok_or_else(|| {
+                format!(
+                    "configured trunk `{configured}` ([factory] epic_base_branch) does not \
+                     resolve as origin/{configured}"
+                )
+            });
+    }
+    if let Ok(reference) = git_output(
+        root,
+        &["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"],
+    ) && let Some(branch) = reference.trim().strip_prefix("refs/remotes/origin/")
+        && !branch.is_empty()
+        && let Some(tip) = remote_tip(branch)
+    {
+        return Ok((branch.to_owned(), tip));
+    }
+    for candidate in ["main", "master"] {
+        if let Some(tip) = remote_tip(candidate) {
+            return Ok((candidate.to_owned(), tip));
+        }
+    }
+    Err(
+        "cannot resolve the trunk to integrate on: origin/HEAD is unset and neither \
+         origin/main nor origin/master exists; set [factory] epic_base_branch or run \
+         `git remote set-head origin --auto`"
+            .to_owned(),
+    )
+}
+
+/// The configured trunk for the repository at `main_root`, if any.
+fn configured_trunk(main_root: &Path) -> Option<String> {
+    crate::config::Config::configured_epic_base_branch(main_root)
 }
 
 fn merge_tree_conflicts(root: &Path, left: &str, right: &str) -> Result<bool, String> {
@@ -361,6 +422,7 @@ fn integrate(
     // fetch or missing epic can never leave release assembly looking green.
     let mut receipt = IntegrationReceipt {
         base: String::new(),
+        trunk: String::new(),
         epics: Vec::new(),
         already_integrated: Vec::new(),
         tip: None,
@@ -397,11 +459,12 @@ fn integrate(
         },
     )?;
     git_output(project_root, &["fetch", "--prune", "origin"])?;
-    let base = git_output(
-        project_root,
-        &["rev-parse", "--verify", "refs/remotes/origin/main^{commit}"],
-    )?;
+    // GH #954: the trunk is resolved, not assumed to be main.
+    let (trunk, base) =
+        resolve_integration_trunk(project_root, configured_trunk(main_root).as_deref())?;
+    let base_label = format!("origin/{trunk}");
     receipt.base = base.clone();
+    receipt.trunk = trunk.clone();
     let store = crate::store::open_task_store(&shared_cas).map_err(|error| error.to_string())?;
     let mut tasks = store.list(None).map_err(|error| error.to_string())?;
     if let Some(focused_id) = focused_epic_id_for_project(main_root) {
@@ -429,7 +492,7 @@ fn integrate(
         ],
     )
     .ok();
-    let (tip, prefixes) = match assemble(&worktree, &base, "origin/main", &receipt.epics)? {
+    let (tip, prefixes) = match assemble(&worktree, &base, &base_label, &receipt.epics)? {
         Assembly::Conflict { detail, affected } => {
             receipt.status = "CONFLICT".to_owned();
             receipt.detail = detail.clone();
@@ -516,6 +579,7 @@ fn integrate(
     let mut affected = vec![request.epic_id.clone()];
     let mut base_failure = None;
     if result.status == SweepStatus::Failed {
+        let failed_targets = normalized_failures(&result.failures);
         let mut probe_settings = settings.clone();
         probe_settings.nextest_filter = failing_filter(&result.failures);
         let mut probe = |commit: &str| {
@@ -529,15 +593,12 @@ fn integrate(
                 probe_settings.clone(),
                 Arc::clone(cancel),
             );
-            match probe_result.status {
-                SweepStatus::Passed => Ok(true),
-                SweepStatus::Failed => Ok(false),
-                other => Err(format!(
-                    "attribution probe {} at {commit}; log {}",
-                    status_text(other),
+            target_probe_passed(&failed_targets, &probe_result).map_err(|error| {
+                format!(
+                    "attribution probe at {commit}: {error}; log {}",
                     probe_result.log_path.display()
-                )),
-            }
+                )
+            })
         };
         if let Some(prior) = &previous {
             match probe(prior) {
@@ -562,13 +623,13 @@ fn integrate(
                     .collect();
             }
             Ok(None) => {
-                result
-                    .summary
-                    .push_str("; failing targets also fail on origin/main (no epic attribution)");
+                result.summary.push_str(&format!(
+                    "; failing targets also fail on {base_label} (no epic attribution)"
+                ));
                 affected = receipt.epics.iter().map(|epic| epic.id.clone()).collect();
                 let evidence = BaseFailure {
                     base: base.clone(),
-                    failing: normalized_failures(&result.failures),
+                    failing: failed_targets,
                 };
                 base_failure = Some(evidence.clone());
                 result.base_failure = Some(evidence);
@@ -624,9 +685,9 @@ fn integrate(
             accepted_at: None,
         })
     };
-    match sweep_tasks.and_then(|report| {
-        crate::factory_sweep_tasks::write_report(&shared_cas, &report)
-    }) {
+    match sweep_tasks
+        .and_then(|report| crate::factory_sweep_tasks::write_report(&shared_cas, &report))
+    {
         Ok(path) if result.status == SweepStatus::Failed && !result.failures.is_empty() => {
             result
                 .summary
@@ -635,7 +696,9 @@ fn integrate(
         Ok(_) => {}
         Err(error) => {
             tracing::warn!(%error, "could not publish sweep task report");
-            result.summary.push_str(&format!("; fix proposal report failed: {error}"));
+            result
+                .summary
+                .push_str(&format!("; fix proposal report failed: {error}"));
         }
     }
     write_receipt(&receipt_path, &receipt)?;
@@ -835,13 +898,18 @@ pub(super) fn recovery_request_for_any_open_epic(
 }
 
 /// A base-only recovery has no event-owned branch to validate. The rolling
-/// integration path fetches origin/main before it constructs the union, so
-/// this request only identifies the recovery mode in logs and receipts.
+/// integration path fetches and resolves the trunk before it constructs the
+/// union, so this request only identifies the recovery mode in logs and
+/// receipts. It names the trunk the same way (GH #954), falling back to
+/// `main` only as a label when nothing resolves yet.
 pub(super) fn base_only_recovery_request(project_root: &Path) -> Result<SweepRequest, String> {
-    let _ = project_root;
+    let target_branch =
+        resolve_integration_trunk(project_root, configured_trunk(project_root).as_deref())
+            .map(|(trunk, _)| trunk)
+            .unwrap_or_else(|_| "main".to_owned());
     Ok(SweepRequest {
         epic_id: "base-only".to_owned(),
-        target_branch: "main".to_owned(),
+        target_branch,
         commit: "base-only".to_owned(),
     })
 }
@@ -873,6 +941,29 @@ fn normalized_failures(failures: &[String]) -> Vec<String> {
         .collect::<std::collections::BTreeSet<_>>()
         .into_iter()
         .collect()
+}
+
+/// A failing process does not prove that the integration tip's named tests
+/// failed on this prefix. Nextest can fail before selecting a test, and an
+/// unfiltered/custom runner can fail on a different test entirely.
+fn target_probe_passed(targets: &[String], probe: &SweepResult) -> Result<bool, String> {
+    if targets.is_empty() {
+        return Err("integration failure has no named test targets".to_owned());
+    }
+    match probe.status {
+        SweepStatus::Passed => Ok(true),
+        SweepStatus::Failed => {
+            let failed = normalized_failures(&probe.failures);
+            if failed.is_empty() {
+                if probe.summary.contains("0 tests run") {
+                    return Ok(true);
+                }
+                return Err("probe failed without named test results".to_owned());
+            }
+            Ok(!targets.iter().all(|target| failed.contains(target)))
+        }
+        other => Err(format!("probe {}", status_text(other))),
+    }
 }
 
 fn write_receipt(path: &Path, receipt: &IntegrationReceipt) -> Result<(), String> {
@@ -1042,9 +1133,7 @@ fn failing_filter(failures: &[String]) -> Option<String> {
     let names: Vec<String> = failures
         .iter()
         .filter_map(|line| failure_target(line))
-        .map(|name| {
-            format!("test(/^{}$/)", regex::escape(&name).replace('/', "\\/"))
-        })
+        .map(|name| format!("test(/^{}$/)", regex::escape(&name).replace('/', "\\/")))
         .collect();
     (!names.is_empty()).then(|| names.join(" | "))
 }
@@ -1614,6 +1703,90 @@ mod tests {
     }
 
     #[test]
+    fn probe_requires_the_same_named_test_to_fail() {
+        let mut probe = SweepResult {
+            request: SweepRequest {
+                epic_id: "fixture".into(),
+                target_branch: "main".into(),
+                commit: "base".into(),
+            },
+            status: SweepStatus::Failed,
+            log_path: PathBuf::from("probe.log"),
+            summary: "Summary: 1 failed".into(),
+            failures: vec!["FAIL [0.1s] cas::fixture unrelated_test".into()],
+            integration_epics: Vec::new(),
+            base_failure: None,
+            after_deferrals: 0,
+        };
+        let targets = vec!["cas::fixture epic_added_test".to_owned()];
+        assert_eq!(target_probe_passed(&targets, &probe), Ok(true));
+        probe.failures = vec!["FAIL [0.1s] cas::fixture epic_added_test".into()];
+        assert_eq!(target_probe_passed(&targets, &probe), Ok(false));
+        probe.failures.clear();
+        probe.summary = "Summary: 0 tests run".into();
+        assert_eq!(target_probe_passed(&targets, &probe), Ok(true));
+        probe.summary = "compilation failed".into();
+        assert!(target_probe_passed(&targets, &probe).is_err());
+    }
+
+    #[test]
+    fn epic_added_test_is_not_attributed_to_unrelated_base_failure() {
+        let repo = fixture();
+        let added = epic(repo.path(), "cas-added", "epic-test", "test exists\n");
+        git(repo.path(), &["checkout", "--detach", "main"]);
+        git(
+            repo.path(),
+            &["remote", "add", "origin", repo.path().to_str().unwrap()],
+        );
+        let stub = repo.path().join("cargo-stub.sh");
+        crate::test_paths::warm_stub(
+            &stub,
+            "#!/bin/sh\nif [ -f epic-test ]; then\n  echo 'FAIL [0.1s] cas::fixture epic_added_test'\nelse\n  echo 'FAIL [0.1s] cas::fixture unrelated_base_test'\nfi\necho 'Summary: 1 failed'\nexit 1\n",
+        );
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[
+            ("CARGO", stub.to_str().unwrap()),
+            ("CAS_FACTORY_BUILD_GUARD", "off"),
+        ]);
+        let cas_dir = crate::store::init_cas_dir(repo.path()).unwrap();
+        let tasks = crate::store::open_task_store(&cas_dir).unwrap();
+        let mut task = Task::new(added.id.clone(), added.id.clone());
+        task.task_type = TaskType::Epic;
+        task.branch = Some(added.branch.clone());
+        tasks.add(&task).unwrap();
+        let mut settings = SweepSettings::from(&FactoryConfig::default());
+        settings.nice_cargo = false;
+        let result = execute(
+            repo.path(),
+            &cas_dir,
+            SweepRequest {
+                epic_id: added.id.clone(),
+                target_branch: added.branch,
+                commit: added.tip,
+            },
+            settings,
+            Arc::new(AtomicBool::new(false)),
+            false,
+        );
+        assert_eq!(result.status, SweepStatus::Failed);
+        assert!(
+            result.summary.contains("introduced by cas-added"),
+            "{}",
+            result.summary
+        );
+        assert!(
+            !result.summary.contains("also fail on origin/main"),
+            "{}",
+            result.summary
+        );
+        assert!(result.base_failure.is_none());
+        let receipt: IntegrationReceipt = serde_json::from_slice(
+            &fs::read(cas_dir.join(LOG_DIR).join("integration.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(receipt.base_failure.is_none());
+    }
+
+    #[test]
     fn runtime_union_sweep_receipt_and_close_reopen_with_stub_cargo() {
         let repo = fixture();
         let first = epic(repo.path(), "cas-0081", "a", "one");
@@ -2146,15 +2319,130 @@ echo 'Summary: 1 passed'
         )
         .unwrap();
 
-        let request = recovery_request_for_any_open_epic(
-            repo.path(),
-            &cas_dir,
-            "recovery-session",
-        )
-        .unwrap();
+        let request =
+            recovery_request_for_any_open_epic(repo.path(), &cas_dir, "recovery-session").unwrap();
         assert_eq!(request.epic_id, open_delivery.id);
         assert_eq!(request.target_branch, open_delivery.branch);
         assert_eq!(request.commit, open_delivery.tip);
+    }
+
+    /// GH #954: the trunk is resolved, not assumed: an explicit setting first,
+    /// then origin/HEAD, then origin/main and origin/master.
+    #[test]
+    fn integration_trunk_resolves_config_then_origin_head_then_main_or_master_gh954() {
+        let repo = fixture();
+        git(repo.path(), &["branch", "-m", "main", "master"]);
+        git(repo.path(), &["branch", "release"]);
+        git(
+            repo.path(),
+            &["remote", "add", "origin", repo.path().to_str().unwrap()],
+        );
+        git(repo.path(), &["fetch", "origin"]);
+        let master = git(repo.path(), &["rev-parse", "master"]);
+
+        // No origin/HEAD and no origin/main: origin/master is the trunk.
+        assert_eq!(
+            resolve_integration_trunk(repo.path(), None).unwrap(),
+            ("master".to_owned(), master.clone())
+        );
+        // An explicit setting wins, written with or without "origin/".
+        for configured in ["release", "origin/release", " release "] {
+            assert_eq!(
+                resolve_integration_trunk(repo.path(), Some(configured))
+                    .unwrap()
+                    .0,
+                "release"
+            );
+        }
+        // A setting that does not resolve on origin is an error, never skipped.
+        let error = resolve_integration_trunk(repo.path(), Some("staging")).unwrap_err();
+        assert!(error.contains("staging"), "{error}");
+        // origin/HEAD, when set, wins over the main/master fallback.
+        git(repo.path(), &["remote", "set-head", "origin", "release"]);
+        assert_eq!(
+            resolve_integration_trunk(repo.path(), None).unwrap().0,
+            "release"
+        );
+        // Nothing to resolve: a clear error naming both ways out.
+        let bare = tempfile::tempdir().unwrap();
+        git(bare.path(), &["init", "-b", "trunk"]);
+        let error = resolve_integration_trunk(bare.path(), None).unwrap_err();
+        assert!(error.contains("epic_base_branch"), "{error}");
+        assert!(error.contains("set-head"), "{error}");
+    }
+
+    /// GH #954: a repository whose trunk is `master` integrates and sweeps.
+    /// Before the fix the sweep failed at `rev-parse refs/remotes/origin/main`.
+    #[test]
+    fn base_only_recovery_integrates_on_a_master_trunk_gh954() {
+        let repo = fixture();
+        git(repo.path(), &["branch", "-m", "main", "master"]);
+        git(
+            repo.path(),
+            &["checkout", "-b", "epic/cas-master-open", "master"],
+        );
+        fs::write(repo.path().join("open"), "open\n").unwrap();
+        git(repo.path(), &["add", "."]);
+        git(repo.path(), &["commit", "-m", "cas-master-open"]);
+        let epic_tip = git(repo.path(), &["rev-parse", "HEAD"]);
+        git(repo.path(), &["checkout", "--detach", "master"]);
+        git(
+            repo.path(),
+            &["remote", "add", "origin", repo.path().to_str().unwrap()],
+        );
+        let stub = repo.path().join("cargo-stub.sh");
+        crate::test_paths::warm_stub(&stub, "#!/bin/sh\necho 'Summary: 1 passed'\n");
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[
+            ("CARGO", stub.to_str().unwrap()),
+            ("CAS_FACTORY_BUILD_GUARD", "off"),
+        ]);
+        let cas_dir = crate::store::init_cas_dir(repo.path()).unwrap();
+        let tasks = crate::store::open_task_store(&cas_dir).unwrap();
+        let mut open_task = Task::new("cas-master-open".to_owned(), "cas-master-open".to_owned());
+        open_task.task_type = TaskType::Epic;
+        open_task.branch = Some("epic/cas-master-open".to_owned());
+        tasks.add(&open_task).unwrap();
+
+        assert_eq!(
+            base_only_recovery_request(repo.path())
+                .unwrap()
+                .target_branch,
+            "main",
+            "before the fetch nothing resolves on origin yet; the label falls back"
+        );
+        let summary = crate::ui::factory::daemon::FactoryDaemon::recover_integration(
+            repo.path(),
+            &cas_dir,
+            "master-trunk-session",
+            None,
+            true,
+            &FactoryConfig::default(),
+        )
+        .unwrap();
+        assert!(summary.starts_with("PASSED:"), "{summary}");
+        let receipt: IntegrationReceipt = serde_json::from_slice(
+            &fs::read(cas_dir.join(LOG_DIR).join("integration.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(receipt.status, "PASSED");
+        assert_eq!(receipt.trunk, "master");
+        assert_eq!(receipt.base, git(repo.path(), &["rev-parse", "master"]));
+        let tip = receipt.tip.as_deref().expect("integration tip published");
+        git(
+            repo.path(),
+            &["merge-base", "--is-ancestor", &receipt.base, tip],
+        );
+        git(
+            repo.path(),
+            &["merge-base", "--is-ancestor", &epic_tip, tip],
+        );
+        assert_eq!(
+            base_only_recovery_request(repo.path())
+                .unwrap()
+                .target_branch,
+            "master",
+            "after the fetch the recovery label names the resolved trunk"
+        );
     }
 
     #[test]
@@ -2208,10 +2496,7 @@ echo 'Summary: 1 passed'
                 .collect::<Vec<_>>(),
             [open.id.as_str()]
         );
-        assert!(!receipt
-            .epics
-            .iter()
-            .any(|epic| epic.id == closed.id));
+        assert!(!receipt.epics.iter().any(|epic| epic.id == closed.id));
         assert_eq!(
             receipt.test_process_env_scrubbed,
             scrubbed_test_process_identity_names()

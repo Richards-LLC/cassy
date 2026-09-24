@@ -41,6 +41,8 @@ Close runs a merge-state guard before anything else: every commit on your `facto
 
 When `delivery_mode=local_merge`, await supervisor local merge: the supervisor merges your local factory branch from the shared repository, and you must **not push origin**. `CAS_FACTORY_LOCAL_MERGE_PUSH_OVERRIDE=1` is allowed only after explicit supervisor authorization. The normal push/merge route below applies only to `delivery_mode=push_branch`.
 
+**Your branch is frozen for a parked delivery under QA?** Start the next task on your per-task branch instead of holding commits locally: `git switch -c factory/<name>-<task-id>` from the epic tip, then commit and `git push -u origin factory/<name>-<task-id>`. The commit and push guards accept exactly that branch, pushed to its own name, and never let it move the frozen `factory/<name>`. Close and `merge_request=true` measure that branch for that task. Name it in your merge request.
+
 **Crossed-message freshness handshake.** After any push, `MERGE REQUIRED`, or late amendment—and before any corrective commit—run `cas__coordination action=inbox_poll` repeatedly to `No unread messages` so unread supervisor messages cannot cross the delivery, re-read the task, check `git merge-base --is-ancestor <delivered-tip> <target-tip>`, and inspect whether the task is already closed/merged. If the delivery already landed or the task closed, re-close or stop; do not edit stale state.
 
 Bad (observed): start a corrective commit from an old rejection while the merge/amendment crosses the worker. Good: drain, re-read, ancestor-check, then edit only if the current state still requires it.

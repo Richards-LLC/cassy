@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { MACHINE_ACCENT_BASE, MACHINE_ACCENT_COUNT, MACHINE_ACCENT_STORAGE_KEY, assignMachineAccents, fnv1a32, jumpConsistentHash, machineAccentClass, machineAccentIndex, machineMonogram, setMachineAccentFleet, storageAccentStore } from "./machine-accent";
+import { MACHINE_ACCENT_BASE, MACHINE_ACCENT_COUNT, MACHINE_ACCENT_STORAGE_KEY, assignMachineAccents, fnv1a32, jumpConsistentHash, machineAccentClass, machineAccentIndex, machineInitials, machineMonogram, setMachineAccentFleet, storageAccentStore } from "./machine-accent";
 
 const tokens = readFileSync(fileURLToPath(new URL("./tokens.css", import.meta.url)), "utf8");
 
@@ -350,3 +350,20 @@ describe("one thread surface and one selection colour (journey F11)", () => {
     }
   });
 });
+
+describe("machine rail initials (3.30.0 journey F3)", () => {
+  it("takes letters from the machine's own name, never a separator", () => {
+    expect(machineInitials("Atlas · Linux")).toBe("AT");
+    expect(machineInitials("Studio Mac · macOS")).toBe("SM");
+    expect(machineInitials("Alpha · Linux")).toBe("AL");
+    expect(machineInitials("build-box-2 · Linux")).toBe("BB");
+    expect(machineInitials("Atlas")).toBe("AT");
+    expect(machineInitials("  ")).toBe("?");
+  });
+
+  it("falls back to the whole label when the name part holds no letters", () => {
+    expect(machineInitials("· Linux")).toBe("LI");
+    expect(machineInitials("— · —")).toBe("?");
+  });
+});
+

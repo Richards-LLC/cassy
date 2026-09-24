@@ -56,6 +56,8 @@ Usage: scripts/release.sh [--publish-tag [--manual-publish --acknowledge-workflo
 Build local audit archives without touching the remote. Add --publish-tag to
 push the annotated tag; the tag-triggered GitHub Release workflow creates the
 normal published release.
+In a guarded factory worker worktree, --publish-tag creates the local tag and
+exits with a supervisor handoff before building or pushing.
 
   --publish-tag
       Explicitly push the annotated tag after a successful local audit. This
@@ -90,6 +92,56 @@ if ! "$MANUAL_PUBLISH" && "$ACKNOWLEDGED_CONFLICT"; then
     exit 2
 fi
 
+VERSION="$(grep -m1 '^version = "' cas-cli/Cargo.toml | sed -E 's/^version = "([^"]+)"/\1/')"
+TAG="v$VERSION"
+
+# Factory workers can write a local annotated tag, but their worktree-scoped
+# pre-push hook rejects refs/tags/*. Detect that exact guard before any audit
+# or Rust command, so --publish-tag produces an actionable handoff instead of
+# failing after a multi-minute build. A role env alone is not evidence of the
+# installed hook: the supervisor may inherit those variables in a release run.
+worker_guard_hooks="$(git config --get core.hooksPath || true)"
+if [[ -n "$worker_guard_hooks" ]]; then
+    case "$worker_guard_hooks" in
+        /*) ;;
+        *) worker_guard_hooks="$REPO_ROOT/$worker_guard_hooks" ;;
+    esac
+fi
+if "$PUBLISH_TAG" && [[ -n "$worker_guard_hooks" ]] && \
+    grep -qF 'Cassy factory worker push guard' "$worker_guard_hooks/pre-push" 2>/dev/null; then
+    release_sha="$(git rev-parse HEAD)"
+    if ! remote_main_line="$(git ls-remote --heads origin refs/heads/main)"; then
+        echo "HANDOFF REQUIRED: origin/main unavailable; no tag created." >&2
+        exit 3
+    fi
+    remote_main_sha="${remote_main_line%%$'\t'*}"
+    if [[ "$remote_main_line" != *$'\trefs/heads/main' || "$release_sha" != "$remote_main_sha" ]]; then
+        echo "HANDOFF REQUIRED: HEAD differs from origin/main; no tag created." >&2
+        echo "HEAD: $release_sha" >&2
+        echo "origin/main: ${remote_main_sha:-missing}" >&2
+        echo "Use your guarded worktree at origin/main." >&2
+        echo "Or create the local tag at the verified SHA and hand it off." >&2
+        exit 3
+    fi
+    if git show-ref --verify --quiet "refs/tags/$TAG"; then
+        if [[ "$(git cat-file -t "refs/tags/$TAG")" != tag || \
+              "$(git rev-parse "refs/tags/$TAG^{}")" != "$release_sha" ]]; then
+            echo "HANDOFF REQUIRED: local $TAG is not annotated at HEAD." >&2
+            exit 3
+        fi
+    else
+        git tag -a "$TAG" -m "$TAG" "$release_sha"
+    fi
+    tag_object_sha="$(git rev-parse "refs/tags/$TAG")"
+    echo "HANDOFF REQUIRED: worker push guard blocks release tags." >&2
+    echo "Tag: $TAG @ $release_sha (annotated locally)" >&2
+    echo "Tag object: $tag_object_sha" >&2
+    echo "Supervisor: git push origin refs/tags/$TAG" >&2
+    echo "No audit build or remote push ran." >&2
+    echo "Supervisor: finish publication and verify receipts." >&2
+    exit 3
+fi
+
 # Reject unsupported host/target combinations before bootstrapping toolchains
 # or compiling, rather than failing deep in a native compiler invocation.
 ./scripts/check-release-host.sh "$HOST_OS" "${TARGETS[@]}"
@@ -100,9 +152,6 @@ if [ -f "$REPO_ROOT/.env" ]; then
     source "$REPO_ROOT/.env"
     set +a
 fi
-
-VERSION="$(grep -m1 '^version = "' cas-cli/Cargo.toml | sed -E 's/^version = "([^"]+)"/\1/')"
-TAG="v$VERSION"
 
 echo "=== CAS Local Release Audit ==="
 echo "Version:  $VERSION"

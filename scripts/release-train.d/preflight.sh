@@ -14,6 +14,11 @@ if ! declare -F release_train_date_stamp >/dev/null 2>&1; then
     }
 fi
 
+if ! declare -F release_portable_stat_device >/dev/null 2>&1; then
+    # shellcheck source=scripts/release-portable.sh
+    source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/release-portable.sh"
+fi
+
 if ! declare -F release_train_receipts_unmerged_records >/dev/null 2>&1; then
     # shellcheck disable=SC1091
     source "$script_dir/release-train.d/receipts-common.sh"
@@ -107,7 +112,7 @@ cut_preflight_check_scratch() {
     local probe archive required available previous scratch_parent checkout_device scratch_device
     if [[ -z "$scratch" ]]; then
         configured="$(cut_preflight_env_value CAS_RELEASE_GATE_HOME_DIR 2>/dev/null || true)"
-        scratch="${configured:-/var/tmp/cas-release-gate}"
+        scratch="${configured:-$(release_portable_default_scratch_base)}"
     fi
     probe="$scratch/.release-train-write.$$"
     mkdir -p "$scratch" 2>/dev/null || {
@@ -120,8 +125,8 @@ cut_preflight_check_scratch() {
     }
     rm -f "$probe"
     scratch_parent="$(dirname "$scratch")"
-    checkout_device="${CAS_RELEASE_TRAIN_CHECKOUT_DEVICE:-$(stat -c %d "$worktree" 2>/dev/null || true)}"
-    scratch_device="${CAS_RELEASE_TRAIN_SCRATCH_DEVICE:-$(stat -c %d "$scratch_parent" 2>/dev/null || true)}"
+    checkout_device="${CAS_RELEASE_TRAIN_CHECKOUT_DEVICE:-$(release_portable_stat_device "$worktree" || true)}"
+    scratch_device="${CAS_RELEASE_TRAIN_SCRATCH_DEVICE:-$(release_portable_stat_device "$scratch_parent" || true)}"
     if [[ -z "$checkout_device" || -z "$scratch_device" || "$checkout_device" != "$scratch_device" ]]; then
         cut_preflight_block scratch-space \
             "filesystem boundary: checkout device=${checkout_device:-unknown} scratch-parent device=${scratch_device:-unknown}"
@@ -201,6 +206,38 @@ cut_preflight_check_zig() {
     fi
     cut_preflight_block zig "zig is not resolvable from ZIG, the release worktree, or the main checkout"
     return $?
+}
+
+# cas-fed5: name every host tool the gate and publish stages need, before
+# anything is built or detached. A macOS cut used to discover them one failed
+# stage at a time (setsid, GNU stat, cargo-nextest off PATH, GNU objdump).
+# Runs after the Zig check, so ZIG is resolved for the ISA self-test compiler.
+cut_preflight_check_toolchain() {
+    [[ "${CAS_RELEASE_TRAIN_PREFLIGHT_SKIP_TOOLCHAIN:-}" == 1 ]] && return 0
+    local -a missing=()
+    local tool listing
+    for tool in cargo cargo-nextest cargo-zigbuild git jq python3; do
+        command -v "$tool" >/dev/null 2>&1 || missing+=("$tool")
+    done
+    release_portable_setsid_prefix 2>/dev/null \
+        || missing+=("setsid, or perl/python3 for its fallback")
+    release_portable_stat_device "$worktree" >/dev/null \
+        || missing+=("stat that reports a device number (GNU stat -c %d or BSD stat -f %d)")
+    command -v sha256sum >/dev/null 2>&1 || command -v shasum >/dev/null 2>&1 \
+        || missing+=("sha256sum or shasum")
+    release_portable_gnu_objdump >/dev/null \
+        || missing+=("GNU objdump for the x86_64 ISA audit (macOS: brew install binutils)")
+    release_portable_x86_64_linux_cc \
+        || missing+=("an x86_64 Linux C compiler for the ISA self-test (set CC, or provide zig)")
+    if command -v rustup >/dev/null 2>&1; then
+        listing="$(rustup target list --installed 2>/dev/null || true)"
+        grep -qx 'x86_64-unknown-linux-gnu' <<<"$listing" \
+            || missing+=("Rust target x86_64-unknown-linux-gnu (rustup target add x86_64-unknown-linux-gnu)")
+    fi
+    ((${#missing[@]} == 0)) && return 0
+    local joined
+    joined="$(printf '%s; ' "${missing[@]}")"
+    cut_preflight_block toolchain "missing on this host: ${joined%; }"
 }
 
 cut_preflight_check_changelog() {
@@ -325,6 +362,7 @@ cut_stage_preflight() {
     cut_preflight_check_env || return 1
     cut_preflight_check_scratch || return 1
     cut_preflight_check_zig || return 1
+    cut_preflight_check_toolchain || return 1
     cut_preflight_check_changelog || return 1
     cut_preflight_check_changelog_lint || return 1
     cut_preflight_check_draft || return 1

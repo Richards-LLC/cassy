@@ -148,6 +148,18 @@ enum TransportEligibility {
     After(chrono::DateTime<Utc>),
 }
 
+/// cas-098d (GH #904): the order an inbox poll drains a recipient's unread
+/// rows in. Rows no transport has handed over come first, by priority and then
+/// oldest first. Transport-delivered rows follow, most recently delivered
+/// first, so the row a wake just named precedes older deliveries that the
+/// recipient already handled. `processed_at` is the handoff stamp the inbox
+/// renderer reports as "already delivered".
+pub(crate) const INBOX_POLL_ORDER_SQL: &str = "ORDER BY (q.processed_at IS NOT NULL) ASC,
+                                   q.priority ASC,
+                                   CASE WHEN q.processed_at IS NULL THEN q.id END ASC,
+                                   q.processed_at DESC,
+                                   q.id DESC";
+
 /// Eligibility for [`TransportEligibility::After`]; binds the turn start.
 const DELIVERED_AFTER_TURN_START_RECEIPT_SQL: &str =
     "AND (seen.prompt_id IS NULL OR seen.source = 'transport_delivered')
@@ -5545,6 +5557,17 @@ impl SqlitePromptQueueStore {
                 TransportEligibility::After(at) => Some(at.to_rfc3339()),
                 _ => None,
             };
+            // cas-098d (GH #904): an inbox poll hands over rows no transport
+            // has delivered first, oldest first, then transport-delivered
+            // rows newest delivery first. A wake names a row the transport
+            // just delivered; under a plain id order it sat behind a limit's
+            // worth of older, already-handled deliveries and never came back.
+            // Other drains keep the delivery order they were built on.
+            let order_sql = if source == SurfacingSource::InboxPoll {
+                INBOX_POLL_ORDER_SQL
+            } else {
+                "ORDER BY q.priority ASC, q.id ASC"
+            };
             let source_sql = if normalized_sources.is_empty() {
                 String::new()
             } else {
@@ -5588,7 +5611,7 @@ impl SqlitePromptQueueStore {
                            AND (q.target = ? OR q.target = 'all_workers')
                            {source_sql}
                            AND (q.factory_session = ? OR q.factory_session IS NULL)
-                         ORDER BY q.priority ASC, q.id ASC
+                         {order_sql}
                          LIMIT ?"
                         ),
                         params,
@@ -5625,7 +5648,7 @@ impl SqlitePromptQueueStore {
                            AND (q.target = ? OR q.target = 'all_workers')
                            {source_sql}
                            AND q.factory_session IS NULL
-                         ORDER BY q.priority ASC, q.id ASC
+                         {order_sql}
                          LIMIT ?"
                         ),
                         params,
@@ -10768,6 +10791,87 @@ mod tests {
                 params![created, id],
             )
             .unwrap();
+    }
+
+    /// Backdate a row's transport handoff, as a delivery made `age_secs` ago.
+    fn backdate_delivery(store: &SqlitePromptQueueStore, id: i64, age_secs: i64) {
+        let delivered = (Utc::now() - chrono::Duration::seconds(age_secs)).to_rfc3339();
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE prompt_queue SET processed_at = ?, transport_delivered_at = ? WHERE id = ?",
+                params![delivered, delivered, id],
+            )
+            .unwrap();
+    }
+
+    /// cas-098d (GH #904): a wake names the row the transport just handed
+    /// over. With a dozen older, already-delivered rows still unread in the
+    /// durable inbox, the poll used to return the oldest of those (id order)
+    /// and never the named one. It now hands over undelivered rows first,
+    /// then deliveries newest first.
+    #[test]
+    fn inbox_poll_returns_the_just_delivered_row_before_older_deliveries_cas_098d() {
+        let (_temp, store) = create_test_store();
+        let mut older = Vec::new();
+        for n in 0..12i64 {
+            let id = store
+                .enqueue("director", "supervisor", &format!("handled {n}"))
+                .unwrap();
+            store.mark_transport_delivered(id).unwrap();
+            backdate_delivery(&store, id, 3_600 - n * 60);
+            older.push(id);
+        }
+        let named = store
+            .enqueue("director", "supervisor", "the wake's message")
+            .unwrap();
+        store.mark_transport_delivered(named).unwrap();
+        let fresh = store
+            .enqueue("director", "supervisor", "not yet delivered")
+            .unwrap();
+
+        let first: Vec<i64> = store
+            .poll_unseen_for_recipient("supervisor", None, 3)
+            .unwrap()
+            .iter()
+            .map(|prompt| prompt.id)
+            .collect();
+        assert_eq!(
+            first,
+            vec![fresh, named, older[11]],
+            "undelivered first, then the most recent delivery (the one a wake names)"
+        );
+        // The remaining older deliveries follow, newest first, on later polls.
+        let rest: Vec<i64> = store
+            .poll_unseen_for_recipient("supervisor", None, 20)
+            .unwrap()
+            .iter()
+            .map(|prompt| prompt.id)
+            .collect();
+        let mut expected = older[..11].to_vec();
+        expected.reverse();
+        assert_eq!(rest, expected);
+    }
+
+    /// cas-098d: only the inbox poll changes order. The turn-start hook keeps
+    /// the id order its delivery contract was built on.
+    #[test]
+    fn hook_surfacing_keeps_id_order_cas_098d() {
+        let (_temp, store) = create_test_store();
+        let delivered = store
+            .enqueue("director", "supervisor", "delivered")
+            .unwrap();
+        store.mark_transport_delivered(delivered).unwrap();
+        let fresh = store.enqueue("director", "supervisor", "fresh").unwrap();
+        let surfaced: Vec<i64> = store
+            .surface_unseen_for_recipient("supervisor", None, 10)
+            .unwrap()
+            .iter()
+            .map(|prompt| prompt.id)
+            .collect();
+        assert_eq!(surfaced, vec![delivered, fresh]);
     }
 
     /// GH #70 core: once the addressed recipient has drained a message through

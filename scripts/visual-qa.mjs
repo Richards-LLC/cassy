@@ -641,6 +641,8 @@ export async function runVisualQa(options) {
   const result = {
     status: findings.length ? 'FAIL' : 'PASS',
     exitCode: findings.length && options.strict ? 1 : 0,
+    // The close gate counts a claimed pass only from a strict run (cas-a6a3).
+    strict: Boolean(options.strict),
     generatedAt: new Date().toISOString(),
     playwrightVersion,
     schemes,

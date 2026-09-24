@@ -221,6 +221,54 @@ async fn user_facing_park_dispatches_an_independent_round_and_refuses_self_revie
 }
 
 #[tokio::test]
+async fn resetting_a_qa_work_item_lets_a_replacement_start_the_same_round_cas_1aef3() {
+    let (temp, core, repo, task_id) = fixture();
+    let _env = env_test_lock();
+    let cas_dir = repo.join(".cas");
+    let _keep = &temp;
+
+    let parked = close_text(&core, &task_id).await;
+    assert!(parked.contains("INDEPENDENT QA DISPATCHED"), "{parked}");
+    let qa_task = qa_task_id(&cas_dir, &task_id);
+    let original = reviewer_core(&cas_dir, "dead-reviewer");
+    original
+        .cas_task_start(Parameters(IdRequest { id: qa_task.clone() }))
+        .await
+        .expect("first reviewer claims the round");
+    let before = cas_store::latest_qa_pass(&cas_dir, &task_id, chrono::Utc::now())
+        .unwrap()
+        .unwrap();
+
+    core.cas_task_reset(Parameters(TaskReleaseRequest {
+        task_id: qa_task.clone(),
+        force: Some(true),
+    }))
+    .await
+    .expect("supervisor reset clears the dead reviewer's task and pass claim");
+    let pending = cas_store::latest_qa_pass(&cas_dir, &task_id, chrono::Utc::now())
+        .unwrap()
+        .unwrap();
+    assert_eq!(pending.id, before.id);
+    assert_eq!(pending.deadline_at, before.deadline_at);
+    assert_eq!(pending.state, cas::types::QaPassState::Pending);
+    assert!(pending.reviewer_agent_id.is_none());
+
+    let replacement = reviewer_core(&cas_dir, "replacement-reviewer");
+    let started = extract_text(
+        replacement
+            .cas_task_start(Parameters(IdRequest { id: qa_task }))
+            .await
+            .expect("replacement reviewer starts the reset QA task"),
+    );
+    assert!(started.contains("claimed"), "{started}");
+    let reclaimed = cas_store::latest_qa_pass(&cas_dir, &task_id, chrono::Utc::now())
+        .unwrap()
+        .unwrap();
+    assert_eq!(reclaimed.id, before.id);
+    assert_eq!(reclaimed.reviewer_agent_id.as_deref(), Some("replacement-reviewer"));
+}
+
+#[tokio::test]
 async fn rejection_returns_the_delivery_and_approval_unlocks_merge_and_close() {
     let (temp, core, repo, task_id) = fixture();
     let _env = env_test_lock();
@@ -999,4 +1047,112 @@ async fn rejected_round_reopens_after_a_target_change_and_a_test_only_fix() {
             .unwrap(),
     );
     assert!(approved.contains("APPROVAL"), "{approved}");
+}
+
+/// cas-ce39: a re-park at a new tip while a reviewer holds the round used to
+/// supersede it silently: the reviewer kept reviewing a dead head and the old
+/// QA task stayed open. Now the old round's work item is cancelled, pointing
+/// at the new one, the reviewer is told to stop, and the park says so.
+#[tokio::test]
+async fn a_new_tip_supersedes_a_claimed_round_and_tells_its_reviewer_cas_ce39() {
+    let (temp, core, repo, task_id) = fixture();
+    let _env = env_test_lock();
+    let cas_dir = repo.join(".cas");
+    let _keep = &temp;
+
+    let parked = close_text(&core, &task_id).await;
+    assert!(parked.contains("INDEPENDENT QA DISPATCHED"), "{parked}");
+    let round1 = cas_store::latest_qa_pass(&cas_dir, &task_id, chrono::Utc::now())
+        .unwrap()
+        .expect("round one");
+    let old_qa_task = round1.qa_task_id.clone().expect("its work item");
+    let reviewer = reviewer_core(&cas_dir, "qa-reviewer");
+    reviewer
+        .cas_task_start(Parameters(IdRequest { id: old_qa_task.clone() }))
+        .await
+        .expect("the reviewer claims round one");
+
+    // The implementer pushes a new tip and parks again.
+    let new_head = commit_file(&repo, "web/composer.css", ".composer{gap:12px}\n", "wider gap");
+    let reparked = close_text(&core, &task_id).await;
+    assert!(reparked.contains("INDEPENDENT QA DISPATCHED"), "{reparked}");
+    assert!(reparked.contains("SUPERSEDED"), "{reparked}");
+    assert!(reparked.contains("claimed by qa-reviewer"), "{reparked}");
+    assert!(reparked.contains("Reviewer qa-reviewer told to stop"), "{reparked}");
+
+    let passes = cas_store::list_qa_passes(&cas_dir, &task_id).unwrap();
+    let old = passes.iter().find(|pass| pass.id == round1.id).unwrap();
+    assert_eq!(old.state, cas_types::QaPassState::Superseded);
+    let current = passes
+        .iter()
+        .find(|pass| pass.state.is_active())
+        .expect("one open round for the new tip");
+    assert_eq!(current.bound_head, new_head);
+    let new_qa_task = current.qa_task_id.clone().expect("the new round has its work item");
+    assert!(reparked.contains(&new_qa_task), "{reparked}");
+
+    // The old work item is cancelled and points at the new one.
+    let tasks = open_task_store(&cas_dir).unwrap();
+    let cancelled = tasks.get(&old_qa_task).unwrap();
+    assert_eq!(cancelled.status, TaskStatus::Cancelled);
+    assert_eq!(
+        cancelled.terminal_outcome,
+        Some(cas_types::TaskTerminalOutcome::Cancelled {
+            superseded_by: Some(new_qa_task.clone()),
+        })
+    );
+    assert!(
+        cancelled.close_reason.as_deref().unwrap_or_default().contains("superseded"),
+        "{:?}",
+        cancelled.close_reason
+    );
+
+    // The reviewer is messaged with the new round.
+    let queued = open_prompt_queue_store(&cas_dir).unwrap().peek_all(100).unwrap();
+    let notice = queued
+        .iter()
+        .find(|row| row.source == format!("qa-dispatch:superseded:{}", round1.id))
+        .expect("superseded notice queued for the reviewer");
+    assert_eq!(notice.target, "qa-reviewer");
+    assert!(notice.prompt.contains("STOP reviewing"), "{}", notice.prompt);
+    assert!(notice.prompt.contains(&new_qa_task), "{}", notice.prompt);
+    assert!(notice.prompt.contains(&current.id), "{}", notice.prompt);
+}
+
+/// cas-ce39, pending case: an unclaimed round for the old tip is retired the
+/// same way (its work item cancelled, pointing at the new one) and nobody is
+/// messaged, because nobody had started it.
+#[tokio::test]
+async fn a_new_tip_supersedes_a_pending_round_without_messaging_anyone_cas_ce39() {
+    let (temp, core, repo, task_id) = fixture();
+    let _env = env_test_lock();
+    let cas_dir = repo.join(".cas");
+    let _keep = &temp;
+
+    let parked = close_text(&core, &task_id).await;
+    assert!(parked.contains("INDEPENDENT QA DISPATCHED"), "{parked}");
+    let round1 = cas_store::latest_qa_pass(&cas_dir, &task_id, chrono::Utc::now())
+        .unwrap()
+        .expect("round one");
+    let old_qa_task = round1.qa_task_id.clone().expect("its work item");
+
+    commit_file(&repo, "web/composer.css", ".composer{gap:12px}\n", "wider gap");
+    let reparked = close_text(&core, &task_id).await;
+    assert!(reparked.contains("SUPERSEDED"), "{reparked}");
+    assert!(reparked.contains("pending, unclaimed"), "{reparked}");
+    assert!(!reparked.contains("told to stop"), "{reparked}");
+
+    let tasks = open_task_store(&cas_dir).unwrap();
+    assert_eq!(tasks.get(&old_qa_task).unwrap().status, TaskStatus::Cancelled);
+    let queued = open_prompt_queue_store(&cas_dir).unwrap().peek_all(100).unwrap();
+    assert!(
+        !queued
+            .iter()
+            .any(|row| row.source == format!("qa-dispatch:superseded:{}", round1.id)),
+        "no reviewer to message for an unclaimed round"
+    );
+    // Re-parking the same new tip again changes nothing further.
+    let again = close_text(&core, &task_id).await;
+    assert!(again.contains("INDEPENDENT QA PENDING"), "{again}");
+    assert!(!again.contains("SUPERSEDED"), "{again}");
 }

@@ -11,7 +11,9 @@ import {
   saveStoredSelection,
   selectSelection,
   sessionPickerEntries,
+  sessionPickerHeadline,
   sessionPickerMeta,
+  sessionPickerRowMeta,
   workerCountLabel,
   SELECTION_HISTORY_LIMIT,
   type SelectionState,
@@ -210,6 +212,39 @@ describe("session picker entries", () => {
     const [entry] = sessionPickerEntries({ machines, sessions: withProject, selection: { machineId: "m1" } });
     expect(entry!.project).toBe("cas-src");
     expect(sessionPickerMeta(entry!)).toMatch(/^cas-src · supervisor /);
+  });
+
+  it("picker rows lead with the project and keep the codename secondary (3.30.0 F2)", () => {
+    const withProject = new Map([["m1", [{ ...sessions.get("m1")![0]!, project_dir: "/home/op/projects/cas-src/" }]]]);
+    const [entry] = sessionPickerEntries({ machines, sessions: withProject, selection: { machineId: "m1" } });
+    expect(sessionPickerHeadline(entry!)).toBe("cas-src");
+    expect(sessionPickerRowMeta(entry!)).toBe("supervisor fast-kestrel-6 · 5 workers · live");
+    // No supervisor: the session name is the codename on the second line.
+    const bare = { ...entry!, role: "session" as const, supervisor: undefined };
+    expect(sessionPickerRowMeta(bare)).toBe(`session ${entry!.session} · 5 workers · live`);
+  });
+
+  it("picker rows without a project lead with the session name and do not repeat it", () => {
+    const [entry] = sessionPickerEntries({ machines, sessions, selection: { machineId: "m1" } });
+    expect(entry!.project).toBeUndefined();
+    expect(sessionPickerHeadline(entry!)).toBe(entry!.session);
+    expect(sessionPickerRowMeta({ ...entry!, role: "session", supervisor: undefined })).toBe("session · 5 workers · live");
+  });
+
+  it("names a no-project supervisor once, in the headline, when it shares the session's name (cas-3055)", () => {
+    const lone = hubSession("lone-heron-5", { supervisor: "lone-heron-5", workers: ["odd-newt-3"] });
+    const [entry] = sessionPickerEntries({ machines, sessions: new Map([["m1", [lone]]]), selection: { machineId: "m1" } });
+    expect(sessionPickerHeadline(entry!)).toBe("lone-heron-5");
+    expect(sessionPickerRowMeta(entry!)).toBe("supervisor · 1 worker · live");
+    expect(`${sessionPickerHeadline(entry!)} ${sessionPickerRowMeta(entry!)}`.match(/lone-heron-5/g)).toHaveLength(1);
+    // A supervisor with a different name than its session is new information, so it stays.
+    const renamed = hubSession("cas-src-young-raven-93", { supervisor: "fast-kestrel-6", workers: [] });
+    const [other] = sessionPickerEntries({ machines, sessions: new Map([["m1", [renamed]]]), selection: { machineId: "m1" } });
+    expect(sessionPickerRowMeta(other!)).toBe("supervisor fast-kestrel-6 · no workers · live");
+    // With a project, the codename stays secondary on the second line.
+    const [projectLed] = sessionPickerEntries({ machines, sessions: new Map([["m1", [{ ...lone, project_dir: "/p/orion" }]]]), selection: { machineId: "m1" } });
+    expect(sessionPickerHeadline(projectLed!)).toBe("orion");
+    expect(sessionPickerRowMeta(projectLed!)).toBe("supervisor lone-heron-5 · 1 worker · live");
   });
 
   it("says a worker-less session has none instead of omitting the fact", () => {

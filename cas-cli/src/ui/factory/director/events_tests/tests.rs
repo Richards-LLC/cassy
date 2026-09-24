@@ -358,6 +358,7 @@ fn test_worker_idle_payload_includes_close_rejected_task_state() {
         task_title: "Fix close gate".to_string(),
         task_status: TaskStatus::InProgress,
         close_rejected_reason: Some("MERGE REQUIRED".to_string()),
+        pending_qa: None,
     });
 
     let data = DirectorData {
@@ -420,6 +421,7 @@ fn test_worker_idle_awaiting_merge_close_rejected_debounces_after_first_fire() {
         task_title: "Fix close gate".to_string(),
         task_status: TaskStatus::AwaitingMerge,
         close_rejected_reason: Some("MERGE REQUIRED".to_string()),
+        pending_qa: None,
     });
 
     let data = DirectorData {

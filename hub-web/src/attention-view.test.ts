@@ -20,6 +20,19 @@ describe("attention timeline", () => {
     expect(root.querySelector(".attention-item")).toBeNull();
   });
 
+  it("names an outage instead of saying All clear beside a reconnect banner (cas-edcd)", () => {
+    const root = document.createElement("div");
+    renderAttentionPanel(root, [], callbacks(), { now, outage: "Not all clear. Atlas · Linux is reconnecting." });
+    const empty = root.querySelector(".attention-empty")!;
+    expect(empty.classList.contains("outage")).toBe(true);
+    expect(empty.querySelector("p")?.textContent).toBe("Not all clear. Atlas · Linux is reconnecting.");
+    expect(empty.textContent).not.toContain("All clear.");
+    // Events still win over the empty state: the outage line is for an empty rail only.
+    const busy = document.createElement("div");
+    renderAttentionPanel(busy, [event("1")], callbacks(), { now, outage: "Not all clear. Atlas · Linux is reconnecting." });
+    expect(busy.querySelector(".attention-empty")).toBeNull();
+  });
+
   it("gives all twelve events one primary text action and a timestamp", () => {
     const root = document.createElement("div");
     renderAttentionPanel(root, Array.from({ length: 12 }, (_, i) => event(String(i))), callbacks(), { now });

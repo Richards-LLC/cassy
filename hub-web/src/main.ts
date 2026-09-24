@@ -1861,11 +1861,95 @@ function finePointerClick(event: MouseEvent): boolean {
   return window.matchMedia("(pointer: fine)").matches;
 }
 
+/**
+ * One place for "where does keyboard focus go now" (cas-7eaf). A view change
+ * that rebuilds or closes what held focus used to leave it on <body>, so a
+ * keyboard user had to Tab from the top of the page. After the render
+ * settles, the first target that can take focus gets it. With `keep`, focus
+ * the operator already has somewhere real is left alone.
+ */
+type FocusTarget = () => HTMLElement | null | undefined;
+const focusTargets = {
+  composer: (() => document.querySelector<HTMLTextAreaElement>("#message-text")) as FocusTarget,
+  thread: (() => document.querySelector<HTMLElement>(".conversation-reading.thread")) as FocusTarget,
+  sessionTitle: (() => document.querySelector<HTMLElement>("#session-picker-toggle")) as FocusTarget,
+  terminal: (() => activePaneContext()?.surface.element.querySelector<HTMLElement>(".t3-ghostty-input")) as FocusTarget,
+  conversationReturn: (() => document.querySelector<HTMLElement>("#conversation-return")) as FocusTarget,
+};
+function landFocus(targets: readonly FocusTarget[], options: { keep?: boolean; nextTask?: boolean; waitMs?: number; since?: Element | null } = {}): void {
+  // `nextTask` waits a task, not a microtask: a dialog's cancel event runs
+  // before the dialog hands focus back, and a tap's deferred render runs in
+  // the task after its click (DeferredRenderScheduler.afterGesture).
+  // `waitMs` keeps trying, a frame at a time, while the target is still
+  // mounting (a thread whose history is loading, a terminal still attaching),
+  // and for that long re-lands if a re-mount drops the landed focus to
+  // <body>; focus the operator moves elsewhere is never taken back.
+  const deadline = Date.now() + (options.waitMs ?? 0);
+  // Where focus was when the operator acted: moving away from it is their own
+  // choice, which `keep` respects. A landing scheduled for later passes the
+  // moment it was asked for as `since`; capturing it when the timer fires
+  // would treat a control the operator has since chosen as the baseline and
+  // pull focus off it (cas-7eaf QA F01).
+  const initial = options.since !== undefined ? options.since : document.activeElement;
+  let landed: Element | undefined;
+  const attempt = (): void => {
+    const active = document.activeElement;
+    // Focus left inside a dialog that just closed is lost too: the browser
+    // drops it to <body> a moment later.
+    const held = active && active !== document.body && active.isConnected && !active.closest("dialog:not([open])");
+    const onTarget = held && targets.some((target) => target() === active);
+    if (landed && held && !onTarget) return;
+    if (!landed && options.keep && held && active !== initial) return;
+    if (!onTarget) {
+      for (const target of targets) {
+        const element = target();
+        if (!element || !element.isConnected || element.getClientRects().length === 0) continue;
+        element.focus();
+        if (document.activeElement === element) { landed = element; break; }
+      }
+    }
+    if (Date.now() < deadline) requestAnimationFrame(attempt);
+  };
+  if (options.nextTask) window.setTimeout(attempt, 0);
+  else queueMicrotask(attempt);
+}
+
+/**
+ * Entering the terminal workspace: the keyboard and the mouse land in the
+ * attached terminal, so keystrokes go to the pane; before a pane is attached,
+ * and for a touch (no soft keyboard over the pane), on the way back to the
+ * conversation (cas-7eaf).
+ */
+function landInTerminalView(event: MouseEvent | undefined): void {
+  landFocus(touchActivation(event) ? [focusTargets.conversationReturn] : [focusTargets.terminal, focusTargets.conversationReturn]);
+}
+
+/** A tap from a touch screen or pen; keyboard (detail 0) and mouse are not. */
+function touchActivation(event: MouseEvent | undefined): boolean {
+  return Boolean(event && event.detail > 0 && !finePointerClick(event));
+}
+
+/**
+ * After opening a conversation from a list row or the session picker: the
+ * keyboard and the mouse land where the next keystroke belongs, as a palette
+ * jump does; a touch lands on the thread to read, without raising a soft
+ * keyboard (cas-7eaf).
+ */
+function landAfterOpen(opened: Promise<void>, event: MouseEvent | undefined): void {
+  if (!touchActivation(event)) { focusJumpedComposer(opened); return; }
+  // The thread may only mount once the session's history loads, so land
+  // again when the open settles unless the operator has moved on.
+  landFocus([focusTargets.thread, focusTargets.sessionTitle], { keep: true, nextTask: true, waitMs: 2_000 });
+}
+
 /** After a palette jump, hand focus to the opened conversation's composer
  * (restoreMessageDraft already put its caret back). Where the composer cannot
  * take focus — the terminal workspace hides it — the attached pane takes focus
  * once the attach settles, unless the operator has moved focus themselves. */
 function focusJumpedComposer(opened: Promise<void>): void {
+  // Captured at the pick, before anything moves focus: the landings below
+  // run later and must not take focus the operator moved in the meantime.
+  const pickedFrom = document.activeElement;
   const machineId = selectedMachineId;
   const session = selectedSession;
   const composer = document.querySelector<HTMLTextAreaElement>("#message-text");
@@ -1889,8 +1973,11 @@ function focusJumpedComposer(opened: Promise<void>): void {
   }
   void opened.then(() => {
     if (selectedMachineId !== machineId || selectedSession !== session) return;
-    if (document.activeElement && document.activeElement !== document.body) return;
-    activePaneContext()?.surface.focus();
+    // The attached terminal once it is ready (attaching takes a moment),
+    // else the session title: never <body> (cas-7eaf). Focus the operator
+    // moved themselves is kept.
+    landFocus([focusTargets.terminal], { keep: true, waitMs: 1_500, since: pickedFrom });
+    window.setTimeout(() => landFocus([focusTargets.terminal, focusTargets.sessionTitle], { keep: true, since: pickedFrom }), 1_600);
   });
 }
 
@@ -2170,6 +2257,9 @@ function render(captureDraft = true): void {
   if (captureDraft) capturePairingDraft();
   captureMessageDraft();
   const composerWasFocused = document.activeElement?.id === "message-text";
+  // A shell rebuild re-mounts the thread, which would drop focus a touch
+  // landed there to <body> (cas-7eaf).
+  const threadWasFocused = document.activeElement?.matches(".conversation-reading.thread") === true;
   const selected = selectedMachineId ? machines.get(selectedMachineId) : undefined;
   const lease = selected && selectedSession ? leases.get(sessionKey(selected.id, selectedSession)) : undefined;
   const status = selected && selectedSession ? statuses.get(sessionKey(selected.id, selectedSession)) : undefined;
@@ -2416,8 +2506,13 @@ function render(captureDraft = true): void {
   if (hubPresentation === "conversation") {
     arrangeConversationShell(app, { selected: Boolean(selectedSession), supervisor, projectDir: selectedHubSession?.project_dir, host: selected?.label, machineId: selectedSession ? selected?.id : undefined, loaded: machineCatalogLoaded, paired: machines.size > 0, searchQuery: conversationSearchQuery });
   } else {
+    // The way back to the conversation is first in the workspace's Tab order:
+    // after the header, the pane controls and the terminal (which keeps Tab)
+    // a keyboard could not reach it. It is still drawn at the foot, where it
+    // was, by flex order (cas-7eaf); a header copy would crowd the controls
+    // off a 1280 px header.
     const returnControl = app.querySelector<HTMLButtonElement>("#talk-supervisor");
-    if (returnControl) { returnControl.id = "conversation-return"; returnControl.textContent = "Conversations"; }
+    if (returnControl) { returnControl.id = "conversation-return"; returnControl.textContent = "Conversations"; returnControl.closest("main")?.prepend(returnControl); }
     else app.querySelector(".session-identity")?.insertAdjacentHTML("afterbegin", '<button id="conversation-return" type="button">Conversations</button>');
   }
   if (preservedGrid) document.querySelector<HTMLElement>("#pane-grid")!.replaceWith(preservedGrid);
@@ -2425,6 +2520,7 @@ function render(captureDraft = true): void {
   if (focusWinner === "terminal") queueMicrotask(() => activePaneContext()?.surface.focus());
   restoreMessageDraft();
   if (focusWinner === "composer") queueMicrotask(() => document.querySelector<HTMLTextAreaElement>("#message-text")?.focus());
+  if (threadWasFocused && focusWinner !== "composer" && focusWinner !== "terminal") landFocus([focusTargets.thread], { keep: true, waitMs: 500 });
   lastRailSignature = undefined;
   lastShellSignature = signature;
   lastPairingView = pairingView;
@@ -2556,7 +2652,7 @@ function renderConversationList(): void {
   }));
   conversationRows = rows;
   const shown = filterConversationRows(rows, conversationSearchQuery);
-  conversationList.render(container, shown, (row) => { void openSession(row.machineId, row.session); });
+  conversationList.render(container, shown, (row, event) => { landAfterOpen(openSession(row.machineId, row.session), event); });
   const empty = document.querySelector<HTMLElement>("#conversation-empty");
   if (empty) {
     empty.hidden = shown.length > 0;
@@ -2713,8 +2809,9 @@ function openSessionPicker(): void {
   });
 }
 
-function closeSessionPicker(): void {
-  sessionPickerClosed();
+/** `landOnTitle`: Escape and × put focus back on the session title; choosing a session lands in it instead. */
+function closeSessionPicker(landOnTitle: boolean): void {
+  sessionPickerClosed(landOnTitle);
   document.querySelector<HTMLDialogElement>("#session-picker")?.close();
 }
 
@@ -2723,9 +2820,15 @@ function closeSessionPicker(): void {
  * does not rebuild the shell, so the toggle's aria-expanded is set in place;
  * a stale "true" would also let the next rebuild pop the picker back open.
  */
-function sessionPickerClosed(): void {
+function sessionPickerClosed(landOnTitle: boolean): void {
   sessionPickerOpen = false;
   syncSessionPickerToggle();
+  // The first open rebuilds the shell, so the toggle that opened the picker
+  // is gone and the dialog hands focus back to <body>. Escape and × land on
+  // the session title every time, so Enter reopens it (cas-7eaf).
+  // 2 s: on a loaded machine the modal can still be closing when 500 ms run
+  // out, and a title behind a modal cannot take focus.
+  if (landOnTitle) landFocus([focusTargets.sessionTitle], { keep: true, nextTask: true, waitMs: 2_000 });
 }
 
 function syncSessionPickerToggle(): void {
@@ -2804,10 +2907,10 @@ function rebuildSessionPickerList(list: HTMLElement, entries: readonly SessionPi
     // alone reads as a random animal. The hub now derives the roster from the
     // live agent registry, so the count is stated rather than hidden.
     button.innerHTML = `<span class="session-name">${escapeHtml(entry.session)}</span><small class="session-meta">${escapeHtml(sessionPickerMeta(entry))}</small>${entry.title ? `<span class="session-summary-title">${escapeHtml(entry.title)}</span>` : ""}${entry.phase ? `<span class="phase-chip phase-${escapeAttr(entry.phase)}">${escapeHtml(entry.phase)}</span>` : ""}${entry.current ? '<span class="session-picker-current">Open</span>' : ""}`;
-    button.onclick = () => {
-      closeSessionPicker();
+    button.onclick = (event) => {
+      closeSessionPicker(false);
       machineDrawerOpen = false;
-      void openSession(entry.machineId, entry.session);
+      landAfterOpen(openSession(entry.machineId, entry.session), event);
     };
     list.append(button);
   }
@@ -3015,7 +3118,7 @@ function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | und
   const conversationBack = document.querySelector<HTMLButtonElement>("#conversation-back");
   if (conversationBack) conversationBack.onclick = () => { if (selectedMachineId) commitSelection({ machineId: selectedMachineId }); render(); queueMicrotask(() => document.querySelector<HTMLButtonElement>(".conversation-row")?.focus()); };
   const terminal = document.querySelector<HTMLButtonElement>("#conversation-terminal");
-  if (terminal) terminal.onclick = () => { hubPresentation = "terminal"; const storage = paneLayoutStorage(); if (storage && selectedMachineId && selectedSession) saveTranscriptView(storage, sessionKey(selectedMachineId, selectedSession), "terminal"); render(); };
+  if (terminal) terminal.onclick = (event) => { hubPresentation = "terminal"; const storage = paneLayoutStorage(); if (storage && selectedMachineId && selectedSession) saveTranscriptView(storage, sessionKey(selectedMachineId, selectedSession), "terminal"); render(); landInTerminalView(event); };
   const returning = document.querySelector<HTMLButtonElement>("#conversation-return");
   if (returning) returning.onclick = (event) => {
     hubPresentation = "conversation";
@@ -3025,13 +3128,7 @@ function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | und
     // arrives as a click with detail 0) and a mouse. A touch tap would raise a
     // soft keyboard over the thread, so it lands on the thread to read instead.
     // Either way, never on <body> (cas-cf8e).
-    const keyboardOrMouse = event.detail === 0 || finePointerClick(event);
-    queueMicrotask(() => {
-      const composer = document.querySelector<HTMLTextAreaElement>("#message-text");
-      if (keyboardOrMouse && composer) composer.focus();
-      if (keyboardOrMouse && composer && document.activeElement === composer) return;
-      document.querySelector<HTMLElement>(".conversation-reading.thread")?.focus({ preventScroll: true });
-    });
+    landFocus(touchActivation(event) ? [focusTargets.thread] : [focusTargets.composer, focusTargets.thread]);
   };
   // Phone compose FAB: open the thread that is waiting on the operator, else
   // the first one, and land in its composer; with nothing paired, pair.
@@ -3168,7 +3265,7 @@ function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | und
     command.onclick = () => { setScheme(command.dataset.paletteScheme as SchemePreference); markAppearanceCommands(palette); closePalette(); };
   }
   const paletteTerminal = palette.querySelector<HTMLButtonElement>("[data-palette-action=terminal-view]");
-  if (paletteTerminal) paletteTerminal.onclick = () => { closePalette(); hubPresentation = "terminal"; render(); };
+  if (paletteTerminal) paletteTerminal.onclick = (event) => { closePalette(); hubPresentation = "terminal"; render(); landInTerminalView(event); };
   const paletteWorkers = palette.querySelector<HTMLButtonElement>("[data-palette-action='workers']");
   if (paletteWorkers) paletteWorkers.onclick = () => { closePalette(); setWorkersRevealed(!revealWorkers); };
   const paletteDormant = palette.querySelector<HTMLButtonElement>("[data-palette-action='dormant']");
@@ -3181,11 +3278,11 @@ function bindEvents(selected: StoredMachine | undefined, lease: LeaseState | und
   const back = document.querySelector<HTMLButtonElement>("#session-back");
   if (back) back.onclick = goBack;
   const picker = document.querySelector<HTMLDialogElement>("#session-picker")!;
-  picker.oncancel = sessionPickerClosed;
+  picker.oncancel = () => sessionPickerClosed(true);
   // Any other close (a form, a browser close request) settles the same state.
   // A dialog replaced by a shell rebuild is detached and must not reset it.
-  picker.onclose = () => { if (picker.isConnected && !picker.open) sessionPickerClosed(); };
-  document.querySelector<HTMLButtonElement>("#session-picker-close")!.onclick = closeSessionPicker;
+  picker.onclose = () => { if (picker.isConnected && !picker.open) sessionPickerClosed(false); };
+  document.querySelector<HTMLButtonElement>("#session-picker-close")!.onclick = () => closeSessionPicker(true);
   const pickerQuery = document.querySelector<HTMLInputElement>("#session-picker-query")!;
   pickerQuery.oninput = () => {
     const query = pickerQuery.value.trim().toLocaleLowerCase();

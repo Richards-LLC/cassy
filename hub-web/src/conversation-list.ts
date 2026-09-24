@@ -91,7 +91,7 @@ export function conversationRowMarkup(row: ConversationRow): string {
 /** Keyed buttons: a catalog heartbeat must never steal keyboard focus. */
 export class ConversationList {
   private nodes = new Map<string, HTMLButtonElement>();
-  render(container: HTMLElement, rows: readonly ConversationRow[], open: (row: ConversationRow) => void): void {
+  render(container: HTMLElement, rows: readonly ConversationRow[], open: (row: ConversationRow, event?: MouseEvent) => void): void {
     const current = new Set(rows.map((row) => row.key));
     for (const [key, node] of this.nodes) {
       if (!current.has(key) || node.parentElement !== container) { node.remove(); this.nodes.delete(key); }
@@ -111,7 +111,7 @@ export class ConversationList {
       node.dataset.waiting = String(row.attention > 0);
       node.dataset.unread = String(row.unread ?? 0);
       node.setAttribute("aria-current", String(row.selected));
-      node.onclick = () => open(row);
+      node.onclick = (event) => open(row, event);
       const markup = conversationRowMarkup(row);
       if (node.innerHTML !== markup) node.innerHTML = markup;
       if (container.children[index] !== node) container.insertBefore(node, container.children[index] ?? null);

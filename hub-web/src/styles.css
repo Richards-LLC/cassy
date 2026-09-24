@@ -455,9 +455,8 @@ pre { font-family: var(--font-mono); }
   color: var(--text-hi);
 }
 .fleet-hero { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 2fr); gap: var(--space-6); align-items: start; }
-.fleet-board-header { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-2); }
+.fleet-board-header { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-2) var(--space-3); }
 .fleet-eyebrow { margin: 0; color: var(--text-mid); font: var(--weight-semibold) var(--fs-xs)/1.33 var(--font-mono); letter-spacing: var(--tracking-label); text-transform: uppercase; }
-.fleet-catalog-time::before, .fleet-board-summary::before { content: "· "; }
 .fleet-catalog-time { color: var(--text-mid); font: var(--fs-xs)/1.33 var(--font-mono); }
 .fleet-board-summary { margin: 0; color: var(--text-mid); font: var(--fs-xs)/1.33 var(--font-mono); }
 .fleet-verdict { flex-basis: 100%; margin: var(--space-2) 0 0; max-width: 22ch; font: var(--weight-regular) var(--fs-verdict)/1.1 var(--font-display); letter-spacing: -.015em; text-wrap: pretty; }

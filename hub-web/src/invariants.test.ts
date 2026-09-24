@@ -456,6 +456,8 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(main).toContain('if (paletteToggle) paletteToggle.onclick = openCommandPalette;');
     expect(main).toContain('if (leaseButton) leaseButton.onclick = () =>');
     expect(main).toContain('<span class="commander-mark-label">Machines</span>');
+    // cas-e503: no separator is drawn before the fleet summary or its time.
+    expect(css).not.toMatch(/\.fleet-(?:board-summary|catalog-time)::before/);
     expect(css).toContain(".shell.fleet-empty .machine-navigation,");
     expect(css).toContain(".shell.fleet-empty .context-panel");
     expect(css).toContain(".shell.fleet-empty .session-header");

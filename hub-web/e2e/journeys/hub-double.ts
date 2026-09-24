@@ -261,6 +261,10 @@ export class HubDouble {
       const id = decodeURIComponent(artifactView[1]!);
       this.artifactRequests.push(id);
       if (id.startsWith("art-local")) return route.fulfill({ status: 409, json: { error: "artifact_not_in_cloud", status: "local" } });
+      // cas-e503: Cloud down behind a reachable machine, and a machine that
+      // never answers.
+      if (id.startsWith("art-cloud-down")) return route.fulfill({ status: 502, json: { error: "cloud_failed", status: null } });
+      if (id.startsWith("art-offline")) return route.abort("connectionrefused");
       return route.fulfill({ json: { artifact_id: id, cloud_artifact_id: `cloud-${id}`, url: `https://store.test/view/${encodeURIComponent(id)}?sig=journey`, expires_at: new Date(Date.now() + 600_000).toISOString(), name: `${id}.pdf`, mime: "application/pdf", size_bytes: 1024 } });
     }
     if (path.endsWith("/lease")) return route.fulfill({ json: { held_by_me: true, controller_label: "Journey browser" } });

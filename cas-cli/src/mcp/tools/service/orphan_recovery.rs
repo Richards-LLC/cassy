@@ -78,6 +78,15 @@ pub fn recover_worker_vanished(
         }
     };
 
+    // GH #924: this row may be a superseded registration of a worker that is
+    // alive under a newer row with the same name. The worker did not vanish,
+    // so nothing is parked and no death is reported; its leases move to the
+    // live row.
+    if let Some(live) = live_successor(agent_store, agent) {
+        rehome_leases_to_live_successor(&task_store, agent_store, agent, &live, held_task_ids);
+        return summary;
+    }
+
     let mut candidate_ids: Vec<String> = held_task_ids.to_vec();
 
     // Also pick up every non-terminal task still assigned to this worker.
@@ -144,6 +153,77 @@ pub fn recover_expired_leases_for_dead_holders(
         out.push(summary);
     }
     out
+}
+
+/// Heartbeat age within which a same-name row counts as the live worker.
+const LIVE_SUCCESSOR_STALE_SECS: i64 = 600;
+
+/// A different, heartbeating registry row for the same worker: same name
+/// (case-insensitive) and role. A superseded row must never speak for it.
+fn live_successor(agent_store: &dyn AgentStore, agent: &Agent) -> Option<Agent> {
+    agent_store
+        .list(None)
+        .ok()?
+        .into_iter()
+        .filter(|candidate| {
+            candidate.id != agent.id
+                && candidate.role == agent.role
+                && candidate.name.eq_ignore_ascii_case(&agent.name)
+                && holder_is_alive(candidate, LIVE_SUCCESSOR_STALE_SECS)
+        })
+        .max_by_key(|candidate| (candidate.last_heartbeat, candidate.registered_at))
+}
+
+/// Move the dead row's task leases to the live row of the same worker, so the
+/// task stays InProgress under its real holder (GH #924). Only non-terminal
+/// tasks still assigned to that worker are claimed; a lease the live row
+/// cannot take (someone else holds it) is left alone.
+fn rehome_leases_to_live_successor(
+    task_store: &Arc<dyn TaskStore>,
+    agent_store: &dyn AgentStore,
+    dead: &Agent,
+    live: &Agent,
+    task_ids: &[String],
+) {
+    for task_id in task_ids {
+        let Ok(mut task) = task_store.get(task_id) else {
+            continue;
+        };
+        if matches!(task.status, TaskStatus::Closed | TaskStatus::Cancelled)
+            || !(task_assigned_to_agent(&task.assignee, dead)
+                || task_assigned_to_agent(&task.assignee, live))
+        {
+            continue;
+        }
+        if let Some(lease) = agent_store.get_lease(task_id).ok().flatten()
+            && lease.agent_id == dead.id
+        {
+            let _ = agent_store.release_lease(task_id, &dead.id);
+        }
+        let claimed = agent_store.try_claim(
+            task_id,
+            &live.id,
+            LIVE_SUCCESSOR_STALE_SECS,
+            Some("lease moved from a superseded registry row to the live worker (GH #924)"),
+        );
+        if claimed.is_ok_and(|result| result.is_success()) {
+            let ts = Utc::now().format("%Y-%m-%d %H:%M");
+            let audit = format!(
+                "[{ts}] lease kept: registry row {} of worker {} was superseded; the lease moved \
+                 to its live row {} and the task stays {:?} (GH #924).",
+                &dead.id[..8.min(dead.id.len())],
+                live.name,
+                &live.id[..8.min(live.id.len())],
+                task.status,
+            );
+            task.notes = if task.notes.is_empty() {
+                audit
+            } else {
+                format!("{}\n\n{}", task.notes, audit)
+            };
+            let _ = task_store.update(&task);
+        }
+    }
 }
 
 fn holder_is_alive(agent: &Agent, stale_threshold_secs: i64) -> bool {
@@ -906,6 +986,72 @@ mod cas_3dcb_death_relay_tests {
         }
         let relay = fixture.prompt_relays().pop().expect("death relay");
         assert!(relay.prompt.contains("cas-in-progress") && relay.prompt.contains("cas-blocked"));
+    }
+
+    /// GH #924: a worker re-registered under a new row while its old row went
+    /// stale. The old row's lease expires; recovery must not park the task the
+    /// live worker is on, nor report its death. The lease moves to the live row.
+    #[test]
+    fn superseded_row_lease_expiry_keeps_the_live_workers_task_in_progress_gh_924() {
+        let fixture = Fixture::new();
+        let old_row = fixture.dead_worker("twin-worker", 900);
+        let mut live_row = Agent::new(Agent::generate_fallback_id(), "twin-worker".to_string());
+        live_row.role = AgentRole::Worker;
+        live_row.last_heartbeat = Utc::now();
+        fixture.agent_store.register(&live_row).expect("register live row");
+
+        let tasks = open_task_store(&fixture.cas_root).expect("task store");
+        let mut task = Task::new("cas-live-work".to_string(), "live work".to_string());
+        task.status = TaskStatus::InProgress;
+        task.assignee = Some("twin-worker".to_string());
+        tasks.add(&task).expect("add task");
+        // The old row holds the lease, already expired, and the maintenance
+        // pass has reclaimed it, as in the reported incident.
+        assert!(
+            fixture
+                .agent_store
+                .try_claim("cas-live-work", &old_row.id, -1, None)
+                .expect("claim")
+                .is_success()
+        );
+        let _ = fixture.agent_store.reclaim_expired_leases();
+
+        let summaries = recover_expired_leases_for_dead_holders(
+            &fixture.cas_root,
+            fixture.agent_store.as_ref(),
+            &[("cas-live-work".to_string(), old_row.id.clone())],
+            600,
+        );
+        assert!(
+            summaries.iter().all(|summary| summary.recovered_task_ids.is_empty()),
+            "a live same-name worker's task must not be parked: {summaries:?}"
+        );
+        let after = tasks.get("cas-live-work").expect("task");
+        assert_eq!(after.status, TaskStatus::InProgress);
+        assert_eq!(after.assignee.as_deref(), Some("twin-worker"));
+        assert!(after.notes.contains("lease kept"), "{}", after.notes);
+        let lease = fixture
+            .agent_store
+            .get_lease("cas-live-work")
+            .expect("lease lookup")
+            .expect("the live row holds the lease");
+        assert_eq!(lease.agent_id, live_row.id);
+        assert!(fixture.prompt_relays().is_empty(), "no death relay for a live worker");
+
+        // Without a live row the same expiry still parks the task (control).
+        let lone = fixture.dead_worker("lone-worker", 900);
+        let mut lone_task = Task::new("cas-lone-work".to_string(), "lone work".to_string());
+        lone_task.status = TaskStatus::InProgress;
+        lone_task.assignee = Some("lone-worker".to_string());
+        tasks.add(&lone_task).expect("add lone task");
+        let summaries = recover_expired_leases_for_dead_holders(
+            &fixture.cas_root,
+            fixture.agent_store.as_ref(),
+            &[("cas-lone-work".to_string(), lone.id.clone())],
+            600,
+        );
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(tasks.get("cas-lone-work").unwrap().status, TaskStatus::Open);
     }
 
     /// Dedup keys the death INCIDENT, not the agent: a worker that comes back,

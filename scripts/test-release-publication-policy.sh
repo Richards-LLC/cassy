@@ -53,3 +53,49 @@ release_workflow="$(cd "$script_dir/.." && pwd)/.github/workflows/release.yml"
 grep -qE 'check-release-preflight\.sh "\$\{GITHUB_REF_NAME\}"' "$release_workflow"
 ! grep -qF 'check-release-preflight.sh --local' "$release_workflow"
 echo 'ok   CI release workflow keeps the remote-tag preflight lane'
+
+# A factory worker must stop before the audit and hand the annotated local tag
+# to a supervisor. This fixture has no release toolchain or secrets, so reaching
+# any of the expensive checks would fail before the handoff assertion.
+fixture="$(mktemp -d)"
+trap 'rm -rf "$fixture"' EXIT
+git init -q --bare "$fixture/origin.git"
+git init -q -b main "$fixture/repo"
+git -C "$fixture/repo" config user.name 'Release Fixture'
+git -C "$fixture/repo" config user.email 'release@example.test'
+git -C "$fixture/repo" remote add origin "$fixture/origin.git"
+mkdir -p "$fixture/repo/cas-cli" "$fixture/repo/scripts" "$fixture/repo/hooks"
+printf '[package]\nversion = "9.99.9"\n' >"$fixture/repo/cas-cli/Cargo.toml"
+cp "$release" "$fixture/repo/scripts/release.sh"
+printf '# Cassy factory worker push guard\n' >"$fixture/repo/hooks/pre-push"
+git -C "$fixture/repo" add .
+git -C "$fixture/repo" commit -qm 'release fixture'
+git -C "$fixture/repo" push -q origin main
+git -C "$fixture/repo" config core.hooksPath "$fixture/repo/hooks"
+release_sha="$(git -C "$fixture/repo" rev-parse HEAD)"
+set +e
+handoff="$(cd "$fixture/repo" && ./scripts/release.sh --publish-tag 2>&1)"
+handoff_status=$?
+set -e
+test "$handoff_status" -eq 3
+grep -qF "v9.99.9 @ $release_sha" <<<"$handoff"
+grep -qF "Tag object: $(git -C "$fixture/repo" rev-parse refs/tags/v9.99.9)" <<<"$handoff"
+grep -qF 'git push origin refs/tags/v9.99.9' <<<"$handoff"
+test -z "$(awk 'length($0) > 80 {print NR}' <<<"$handoff")"
+test "$(git -C "$fixture/repo" cat-file -t refs/tags/v9.99.9)" = tag
+test "$(git -C "$fixture/repo" rev-parse refs/tags/v9.99.9^{})" = "$release_sha"
+test -z "$(git -C "$fixture/repo" ls-remote --tags origin refs/tags/v9.99.9)"
+test ! -d "$fixture/repo/dist/local-audit"
+echo 'ok   worker hands off an annotated local tag before audit or remote push'
+
+printf 'unlanded\n' >"$fixture/repo/unlanded.txt"
+git -C "$fixture/repo" add unlanded.txt
+git -C "$fixture/repo" commit -qm 'unlanded worker commit'
+set +e
+wrong_head="$(cd "$fixture/repo" && ./scripts/release.sh --publish-tag 2>&1)"
+wrong_head_status=$?
+set -e
+test "$wrong_head_status" -eq 3
+grep -qF 'HEAD differs from origin/main' <<<"$wrong_head"
+test "$(git -C "$fixture/repo" rev-parse refs/tags/v9.99.9^{})" = "$release_sha"
+echo 'ok   worker cannot retarget the release tag to an unlanded commit'

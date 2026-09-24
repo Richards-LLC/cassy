@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { ConversationHistory } from "./conversation-history";
 import { ConversationList, conversationRowMarkup, filterConversationRows, truncateConversationPreview, type ConversationRow } from "./conversation-list";
 import { ConversationView } from "./conversation-view";
-import { ATTACH_DISABLED_REASON, arrangeConversationShell, conversationNoMatchText, conversationShellMarkup, dressComposer } from "./conversation-shell";
+import { ATTACH_DISABLED_REASON, ATTACH_SUPPORTED, arrangeConversationShell, conversationNoMatchText, conversationShellMarkup, dressComposer } from "./conversation-shell";
 import { renderConversationFixture } from "../fixtures/conversations";
 import { projectName, projectBadge } from "./cloud-brand";
 
@@ -319,16 +319,17 @@ describe('conversation evidence', () => {
     shell.querySelector('#conversation-pane-slot')!.append(view.element);
     expect(shell.querySelectorAll('.thead')).toHaveLength(1);
   });
-  it('dresses the composer as Pebble: pill field, disabled attach clip with its reason, send in the accent naming the supervisor', () => {
+  it('dresses the composer as Pebble: pill field, no dead attach clip, send in the accent naming the supervisor', () => {
     const app = document.createElement('div');
     app.innerHTML = '<div class="shell"><div id="pane-grid"></div><div class="message"><h2><label for="message-text">Talk to x</label></h2><div class="operator-thread"></div><textarea id="message-text" placeholder="old"></textarea><div class="composer-actions"><button id="message-mic" type="button" aria-label="Start listening" aria-pressed="false"><svg class="mic-glyph" aria-hidden="true"></svg></button><button id="message-keyboard" type="button">Keyboard</button><button id="message-send" class="primary">Send message</button></div><p id="message-status" class="message-status" role="status" hidden></p></div><div id="status-view"></div><section id="attention-panel" hidden></section></div>';
     arrangeConversationShell(app, { selected: true, supervisor: 'patient-pelican-9', machineId: 'atlas-linux', loaded: true, paired: true });
     const composer = app.querySelector<HTMLElement>('#conversation-composer-slot > .message.conversation-composer')!;
     expect(composer).not.toBeNull();
     expect(composer.querySelector('.operator-thread')).toBeNull();
-    const clip = composer.querySelector<HTMLButtonElement>('.composer-clip')!;
-    expect(clip.disabled).toBe(true); expect(clip.title).toBe(ATTACH_DISABLED_REASON);
-    expect(clip.nextElementSibling?.id).toBe('message-text');
+    // cas-17e3: attaching has no transport yet, so the clip is not offered at all.
+    expect(ATTACH_SUPPORTED).toBe(false);
+    expect(composer.querySelector('.composer-clip')).toBeNull();
+    expect(ATTACH_DISABLED_REASON).toContain('not supported yet');
     const mic = composer.querySelector<HTMLButtonElement>('#message-mic')!;
     expect(mic.getAttribute('aria-label')).toBe('Start listening');
     expect(mic.querySelector('.mic-glyph')).not.toBeNull();
@@ -341,7 +342,7 @@ describe('conversation evidence', () => {
     expect(app.querySelector('.conversation-shell')?.classList.contains('machine-accent-0')).toBe(true);
     // Dressing twice (every re-render) never stacks a second clip or label.
     dressComposer(composer, 'patient-pelican-9');
-    expect(composer.querySelectorAll('.composer-clip')).toHaveLength(1); expect(send.querySelectorAll('.send-label')).toHaveLength(1);
+    expect(composer.querySelectorAll('.composer-clip')).toHaveLength(0); expect(send.querySelectorAll('.send-label')).toHaveLength(1);
   });
   it('shows only turns — never pane text — escapes replies, and never presents the operator as the supervisor', () => {
     const history = new ConversationHistory();

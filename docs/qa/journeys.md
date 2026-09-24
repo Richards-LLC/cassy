@@ -160,6 +160,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 - The composer status is in plain words, never protocol vocabulary.
 - A refusal says why in plain words, names the next step, and offers Edit and Retry right on the message.
 - Once its edit is sent, a refused message cannot be retried.
+- A screen reader hears who spoke and when for each message group ("You, 12:45"), the status as "Live", and meets no dead attach control.
 
 **Edge paths**
 

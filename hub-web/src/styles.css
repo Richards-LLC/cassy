@@ -3269,6 +3269,8 @@ button.chip:disabled { cursor: default; }
    send handler's and the live-region updater's; only the dress changes. */
 .conversation-composer { position: relative; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; grid-template-areas: "clip field send" "status status status"; align-items: center; column-gap: 11px; row-gap: var(--space-2); padding: 14px 30px 22px; padding-bottom: max(22px, env(safe-area-inset-bottom)); margin: 0; border-top: 0; background: var(--canvas); color: var(--ink); }
 .conversation-composer h2 { margin: 0; } /* .sr-only from dressComposer: the label is for the reader */
+/* Without the attach clip (cas-17e3) the field takes the first column. */
+.conversation-composer:not(:has(.composer-clip)) { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "field send" "status status"; }
 .conversation-composer .composer-clip { grid-area: clip; display: flex; align-items: center; justify-content: center; width: 44px; height: 44px; min-height: 44px; padding: 0; border: 0; border-radius: var(--radius-pill); background: var(--panel); color: var(--ink-mid); box-shadow: var(--lift); }
 .conversation-composer .composer-clip:disabled { opacity: 1; color: var(--ink-mid); }
 .conversation-composer .composer-clip svg { width: 19px; height: 19px; display: block; opacity: 0.55; }

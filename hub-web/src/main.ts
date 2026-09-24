@@ -2550,7 +2550,16 @@ function renderConversationList(): void {
     empty.dataset.state = listState.kind;
   }
   const state = document.querySelector<HTMLElement>("#conversation-connection");
-  if (state && selectedMachineId) state.textContent = ` · ${visibleSessions(selectedMachineId).find(session => session.name === selectedSession)?.unreachable ? "Unreachable · message pending" : fleetConnectionLabel(conversationConnection(selectedMachineId, selectedSession), selectedMachineId)}`;
+  if (state && selectedMachineId) {
+    const label = visibleSessions(selectedMachineId).find(session => session.name === selectedSession)?.unreachable ? "Unreachable · message pending" : fleetConnectionLabel(conversationConnection(selectedMachineId, selectedSession), selectedMachineId);
+    // The dot separates it from the codename on screen; the status reads just
+    // the state ("Live", not "· Live") (cas-17e3).
+    if (state.dataset.label !== label) {
+      state.dataset.label = label;
+      const separator = document.createElement("span"); separator.setAttribute("aria-hidden", "true"); separator.textContent = " · ";
+      state.replaceChildren(separator, label);
+    }
+  }
 }
 
 /**

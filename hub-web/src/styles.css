@@ -3270,7 +3270,7 @@ button.chip:disabled { cursor: default; }
 .thread .empty { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; min-width: 0; padding: 60px 40px; text-align: center; color: var(--ink); }
 .thread .empty[hidden], .thread .msgs[hidden] { display: none; }
 .thread .empty .mono { display: flex; align-items: center; justify-content: center; flex: none; width: 76px; height: 76px; border-radius: var(--radius-pill); background: var(--accent, var(--you-bg)); color: var(--accent-fg); font: var(--weight-semibold) 30px/1 var(--font-ui); box-shadow: var(--lift-strong); }
-.thread .empty b { max-width: 100%; font: var(--weight-semibold) 21px/1.2 var(--font-ui); letter-spacing: -0.015em; overflow-wrap: anywhere; }
+.thread .empty b { max-width: 100%; font: var(--weight-semibold) 21px/1.2 var(--font-ui); letter-spacing: -0.015em; white-space: normal; overflow-wrap: anywhere; } /* b.codename: wrap, not the codename's nowrap (cas-1334 QA F2) */
 .thread .empty .proj2 { font: var(--weight-regular) 13px/1.3 var(--font-mono); color: var(--ink-mid); overflow-wrap: anywhere; }
 .thread .empty .proj2:empty { display: none; }
 .thread .empty .said { margin: 0; max-width: 34ch; color: var(--ink-mid); font-size: 15px; overflow-wrap: anywhere; }
@@ -3283,13 +3283,15 @@ button.chip:disabled { cursor: default; }
    clip is present beside the field but disabled — there is no operator
    attachment transport yet and its title says so. The ids inside are the
    send handler's and the live-region updater's; only the dress changes. */
-/* The send column is fit-content(50%) and the button may shrink (cas-1334): a
-   60-character supervisor name ellipsises in the button instead of crushing
-   the message field to a sliver. The aria-label keeps the whole name. */
-.conversation-composer { position: relative; display: grid; grid-template-columns: auto minmax(0, 1fr) fit-content(50%); grid-template-areas: "clip field send" "status status status"; align-items: center; column-gap: 11px; row-gap: var(--space-2); padding: 14px 30px 22px; padding-bottom: max(22px, env(safe-area-inset-bottom)); margin: 0; border-top: 0; background: var(--canvas); color: var(--ink); }
+/* The field has a floor, min(16rem, 45%), and the send column is `auto` over
+   shrinkable content (cas-1334): a normal "Send to <name>" takes its full
+   width, and only a name too long for the row ellipsises in the button
+   instead of crushing the message field to a sliver. The aria-label keeps
+   the whole name. */
+.conversation-composer { position: relative; display: grid; grid-template-columns: auto minmax(min(16rem, 45%), 1fr) auto; grid-template-areas: "clip field send" "status status status"; align-items: center; column-gap: 11px; row-gap: var(--space-2); padding: 14px 30px 22px; padding-bottom: max(22px, env(safe-area-inset-bottom)); margin: 0; border-top: 0; background: var(--canvas); color: var(--ink); }
 .conversation-composer h2 { margin: 0; } /* .sr-only from dressComposer: the label is for the reader */
 /* Without the attach clip (cas-17e3) the field takes the first column. */
-.conversation-composer:not(:has(.composer-clip)) { grid-template-columns: minmax(0, 1fr) fit-content(50%); grid-template-areas: "field send" "status status"; }
+.conversation-composer:not(:has(.composer-clip)) { grid-template-columns: minmax(min(16rem, 45%), 1fr) auto; grid-template-areas: "field send" "status status"; }
 .conversation-composer .composer-clip { grid-area: clip; display: flex; align-items: center; justify-content: center; width: 44px; height: 44px; min-height: 44px; padding: 0; border: 0; border-radius: var(--radius-pill); background: var(--panel); color: var(--ink-mid); box-shadow: var(--lift); }
 .conversation-composer .composer-clip:disabled { opacity: 1; color: var(--ink-mid); }
 .conversation-composer .composer-clip svg { width: 19px; height: 19px; display: block; opacity: 0.55; }
@@ -3334,7 +3336,9 @@ button.chip:disabled { cursor: default; }
   button.primary:focus-visible,
   .conversation-composer #message-send.send:focus-visible { outline: var(--focus-ring-width) solid Highlight; outline: var(--focus-ring-width) solid color(from Highlight srgb r g b / 1); outline-offset: var(--focus-ring-width); }
 }
-.conversation-composer .send-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+/* line-height 1.4 keeps the glyphs' own box inside the clipping box, so a
+   name that fits is never counted as clipped (cas-1334 QA F1). */
+.conversation-composer .send-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; line-height: 1.4; }
 .conversation-composer .control-disabled-reason { display: none; }
 .conversation-composer .composer-status, .conversation-composer .message-status, .conversation-composer .message-delivery { grid-area: status; font-size: var(--fs-meta); margin: 0; }
 .conversation-composer .composer-status[hidden], .conversation-composer .message-status[hidden], .conversation-composer .message-delivery[hidden] { display: none; }

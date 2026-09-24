@@ -91,5 +91,10 @@ test("HUB-J5 reply by typing", async ({ page, journey }) => {
     expect(field!.width, "message field width").toBeGreaterThan(row!.width * 0.33);
     expect(button!.x + button!.width, "Send stays inside the composer").toBeLessThanOrEqual(row!.x + row!.width);
     expect(await longSend.locator(".send-label").evaluate((label) => label.scrollWidth > label.clientWidth), "the label ellipsises").toBe(true);
+    // The empty-thread title wraps the long name, and nothing scrolls sideways (QA F2).
+    const thread = page.locator(".conversation-reading.thread");
+    expect(await thread.evaluate((element) => element.scrollWidth - element.clientWidth), "thread sideways overflow").toBeLessThanOrEqual(1);
+    const title = page.locator(".thread .empty b");
+    expect(await title.evaluate((element) => element.scrollWidth <= element.clientWidth + 1), "the empty-thread title is not clipped").toBe(true);
   });
 });

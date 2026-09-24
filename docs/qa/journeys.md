@@ -206,7 +206,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 **Steps**
 
 1. Open the conversation — the thread is live
-2. The supervisor asks a question — it is pinned above the composer with its choices
+2. The supervisor asks a question — it is pinned above the composer with its choices, and the thread keeps a one-line reference to it
 3. Answer with one tap — the pin clears, the thread records the chosen answer, and nothing is left waiting in the context rail, even when the machine's clock runs ahead; the answer shows the time it was sent, under today
 4. See the supervisor act on the answer — the reply follows, and a new blocker after the answer waits
 5. Reply to a machine a day ahead — the reply shows the time it was sent, under today, below the machine's future-dated turn
@@ -267,8 +267,9 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 2. Tap a conversation — the thread replaces the list, with a back control
 3. Reply with the phone keyboard — send, then see the answer
 4. Go back to the list — the row shows the latest turn
-5. See the switched-off machine named plainly — the footer counts it with a warning dot, and Paired machines says "Can't reach · retrying"
-6. Pair another machine and read its header at once — pairing from the phone opens its conversation, and the "connected" toast sits below the thread header, never over the back link, project and host
+5. Scroll back through a long thread — "Jump to latest" takes its own row above the composer, never over a turn, and one tap returns to the newest turn
+6. See the switched-off machine named plainly — the footer counts it with a warning dot, and Paired machines says "Can't reach · retrying"
+7. Pair another machine and read its header at once — pairing from the phone opens its conversation, and the "connected" toast sits below the thread header, never over the back link, project and host
 
 **Expected experience**
 

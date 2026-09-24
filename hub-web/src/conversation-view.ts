@@ -138,7 +138,12 @@ export class ConversationView {
   private readonly loadEarlier: HTMLButtonElement;
   private readonly msgs: HTMLElement;
   private readonly empty: HTMLElement;
-  private readonly jump: HTMLButtonElement;
+  /**
+   * "Jump to latest", shown while the reader is scrolled away from the tail.
+   * Mount it above the composer (as main.ts does), outside the scrolling
+   * thread, so it takes its own row instead of floating over a turn (cas-97ea).
+   */
+  readonly jump: HTMLButtonElement;
   private readonly options: ConversationViewOptions;
   private nodes = new Map<string, HTMLElement>();
   /** Coalesced status lines the operator opened with "Show full update"; survives repaints. */

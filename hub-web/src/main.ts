@@ -350,6 +350,9 @@ function mountConversation(key: string, mount: HTMLElement): void {
   // The unanswered ask is pinned directly above the composer as well as in the flow.
   const composerSlot = document.querySelector<HTMLElement>("#conversation-composer-slot");
   if (composerSlot && conversation.pinned.parentElement !== composerSlot) composerSlot.prepend(conversation.pinned);
+  // "Jump to latest" gets its own row above the pinned card and composer, so
+  // it never floats over a turn in the thread (cas-97ea).
+  if (composerSlot && conversation.jump.parentElement !== composerSlot) composerSlot.prepend(conversation.jump);
   conversation.update();
 }
 

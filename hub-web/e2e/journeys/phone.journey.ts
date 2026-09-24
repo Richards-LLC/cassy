@@ -86,6 +86,22 @@ test("HUB-J9 on a phone: from the list to a reply and back", async ({ page, jour
     await expect(composer).not.toBeFocused();
   });
 
+  await journey.stage("Scroll back through a long thread", async () => {
+    // Enough turns to scroll, then read from the top: "Jump to latest" takes its
+    // own row above the composer instead of floating over a turn (cas-97ea).
+    for (let turn = 1; turn <= 14; turn += 1) hub.supervisorSays(OTTER, `Build step ${turn} of 14 finished; moving on to the next one after checking its logs.`, { kind: "answer" });
+    const thread = page.locator(".conversation-reading.thread");
+    await expect(page.getByRole("log").getByText("Build step 14 of 14 finished; moving on to the next one after checking its logs.")).toBeVisible();
+    await thread.evaluate((element) => { element.scrollTop = 0; element.dispatchEvent(new Event("scroll")); });
+    const jump = page.getByRole("button", { name: "Jump to latest" });
+    await expect(jump).toBeVisible();
+    const [chip, reading] = await Promise.all([jump.boundingBox(), thread.boundingBox()]);
+    expect(chip!.y, "Jump to latest sits below the thread, not over it").toBeGreaterThanOrEqual(reading!.y + reading!.height - 1);
+    await jump.tap();
+    await expect(jump).toBeHidden();
+    await expect(page.getByRole("log").getByText("Build step 14 of 14 finished; moving on to the next one after checking its logs.")).toBeInViewport();
+  });
+
   await journey.stage("See the switched-off machine named plainly", async () => {
     // Never live and failing: "Can't reach · retrying" in the dialog, not
     // "Connecting…" forever; the footer counts it and its dot is not all-clear.

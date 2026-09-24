@@ -2800,29 +2800,34 @@ pub fn sync_all_builtins_for_project(
                 &project_root.join(".claude"),
                 BUILTIN_AGENTS,
                 &skills,
-                BUILTIN_WORKFLOWS,
+                Some(BUILTIN_WORKFLOWS),
             )
         }
         SupervisorCli::Codex => {
             let skills = filtered_project_skills(CODEX_BUILTIN_SKILLS, project_root);
-            sync_project_catalog(&project_root.join(".codex"), CODEX_BUILTIN_AGENTS, &skills, &[])
+            sync_project_catalog(&project_root.join(".codex"), CODEX_BUILTIN_AGENTS, &skills, None)
         }
         SupervisorCli::Grok => {
             let skills = filtered_project_skills(GROK_BUILTIN_SKILLS, project_root);
-            sync_project_catalog(&project_root.join(".grok"), GROK_BUILTIN_AGENTS, &skills, &[])
+            sync_project_catalog(&project_root.join(".grok"), GROK_BUILTIN_AGENTS, &skills, None)
         }
         SupervisorCli::OpenCode => Ok(SyncResult::default()),
     }
 }
 
+/// `workflows` is `Some` for a harness that carries a workflow catalog (Claude),
+/// even when that catalog is empty: cas-c4e4 (GH #967, #971). Every builtin
+/// workflow is retired today, so `BUILTIN_WORKFLOWS` is empty, and gating the
+/// prune on a non-empty catalog left the retired `cas-code-review.js` in about
+/// 20 projects after every sync.
 fn sync_project_catalog(
     target_dir: &Path,
     agents: &[BuiltinFile],
     skills: &[BuiltinFile],
-    workflows: &[BuiltinFile],
+    workflows: Option<&[BuiltinFile]>,
 ) -> std::io::Result<SyncResult> {
     let mut result = sync_all_builtins_inner(target_dir, agents, skills)?;
-    if !workflows.is_empty() {
+    if let Some(workflows) = workflows {
         sync_workflows(target_dir, workflows, &mut result)?;
         let keep = builtin_workflow_names(workflows);
         prune_stale_cas_workflow_files(&target_dir.join("workflows"), &keep)?;
@@ -7644,6 +7649,52 @@ This is the body content."#;
             unmanaged.exists(),
             "unmanaged workflow should never be touched by pruning"
         );
+    }
+
+    /// cas-c4e4 (GH #967, #971): a project sync removes the retired review
+    /// workflow and skill even though the builtin workflow catalog is now
+    /// empty. About 20 projects kept an Aug-11 `cas-code-review` copy because
+    /// the project path only pruned workflows when some were still shipped.
+    #[test]
+    fn project_sync_prunes_retired_review_workflow_and_skill_with_empty_catalog_cas_c4e4() {
+        use tempfile::tempdir;
+
+        assert!(
+            builtin_workflow_names(BUILTIN_WORKFLOWS).is_empty(),
+            "precondition: every builtin workflow is retired, the case that skipped the prune"
+        );
+        let project = tempdir().unwrap();
+        let claude_dir = project.path().join(".claude");
+        let workflows_dir = claude_dir.join("workflows");
+        std::fs::create_dir_all(&workflows_dir).unwrap();
+        // The Aug-11 copy predates the JS managed marker.
+        let retired_workflow = workflows_dir.join("cas-code-review.js");
+        std::fs::write(&retired_workflow, "export const meta = { name: 'cas-code-review' };
+").unwrap();
+        let retired_constants = workflows_dir.join("cas-code-review-constants.js");
+        std::fs::write(&retired_constants, "export const X = 1;
+").unwrap();
+        let user_workflow = workflows_dir.join("my-release.js");
+        std::fs::write(&user_workflow, "export const meta = {};
+").unwrap();
+        let retired_skill = claude_dir.join("skills/cas-code-review");
+        std::fs::create_dir_all(&retired_skill).unwrap();
+        std::fs::write(
+            retired_skill.join("SKILL.md"),
+            "---\nname: cas-code-review\nmanaged_by: cas\n---\n# retired\n",
+        )
+        .unwrap();
+
+        sync_all_builtins_for_project(SupervisorCli::Claude, project.path()).unwrap();
+
+        assert!(!retired_workflow.exists(), "retired workflow pruned by the project sync");
+        assert!(!retired_constants.exists(), "retired workflow helper pruned too");
+        assert!(!retired_skill.exists(), "retired managed skill pruned by the project sync");
+        assert!(user_workflow.exists(), "an unmanaged project workflow is never touched");
+
+        // A second sync is a no-op and leaves the user's file alone.
+        sync_all_builtins_for_project(SupervisorCli::Claude, project.path()).unwrap();
+        assert!(user_workflow.exists());
     }
 
     // cas-e0d1: builtin_skill_dir_names extracts `<dir>` from `skills/<dir>/...`

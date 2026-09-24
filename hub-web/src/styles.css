@@ -3144,6 +3144,7 @@ button.chip:disabled { cursor: default; }
 .thread .empty .said { margin: 0; max-width: 34ch; color: var(--ink-mid); font-size: 15px; }
 .thread .empty .said .codename { font: var(--weight-medium) 0.93em/1 var(--font-mono); color: var(--ink); }
 .thread .empty .quiet { max-width: min(100%, 56ch); background: var(--sup-bg); color: var(--sup-fg); border-radius: 22px; padding: 12px 22px; box-shadow: var(--lift); overflow-wrap: anywhere; }
+.thread .empty .conversation-loading { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 10px; }
 
 /* Composer: the field is a pill on --panel with --lift; the send button takes
    the machine accent from the shell root and names the supervisor; the attach

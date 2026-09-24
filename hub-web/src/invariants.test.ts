@@ -1150,7 +1150,19 @@ describe("binding Cassy Cloud browser invariants", () => {
 
   it("removes the connecting instruction when the terminal state arrives", async () => {
     const source = await readSource("main.ts");
-    expect(source).toContain('grid.querySelector(".empty")?.remove();');
+    // Scoped to the grid's own child: the conversation thread's empty state is
+    // also ".empty" and must survive a re-open (cas-04ee).
+    expect(source).toContain('grid.querySelector(":scope > .empty")?.remove();');
+    expect(source).not.toMatch(/grid\.querySelector(<HTMLElement>)?\("\.empty"\)/);
+  });
+
+  it("puts the conversation over the pane before its terminal surface loads (cas-04ee)", async () => {
+    const [main, surface] = await Promise.all(["main.ts", "terminal/ghostty/surface.ts"].map((path) => readSource(path)));
+    const premount = main.indexOf('if (hubPresentation === "conversation" && !surfaces.has(key)) mountConversation(key, mount);');
+    expect(premount).toBeGreaterThan(-1);
+    expect(premount).toBeLessThan(main.indexOf("const surface = await createTerminalSurface(mount, {"));
+    // The surface keeps a reading overlay in place instead of wiping the mount.
+    expect(surface).toContain("mount.replaceChildren(canvas, input, scrollbar, ...overlays);");
   });
 
   it("requests an authoritative supervisor keyframe before lazily mounted workers", async () => {

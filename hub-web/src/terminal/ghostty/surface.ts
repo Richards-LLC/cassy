@@ -639,7 +639,11 @@ export class GhosttyTerminalSurface {
     const scrollbarThumb = document.createElement("div");
     scrollbarThumb.className = "t3-ghostty-scrollbar-thumb";
     scrollbar.append(scrollbarThumb);
-    mount.replaceChildren(canvas, input, scrollbar);
+    // A reading view the page already laid over this mount (the conversation
+    // thread, marked data-mount-overlay) survives the setup, so the reader never
+    // sees the mount blank while fonts and WASM load (cas-04ee).
+    const overlays = [...mount.children].filter((child) => child instanceof HTMLElement && child.dataset.mountOverlay !== undefined);
+    mount.replaceChildren(canvas, input, scrollbar, ...overlays);
 
     const context = canvas.getContext("2d", { alpha: false });
     if (!context) throw new Error("Canvas 2D is unavailable");

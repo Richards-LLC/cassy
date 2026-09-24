@@ -46,6 +46,7 @@ export const test = base.extend<{ journey: Journey }>({
     await page.screencast.start({ path: join(dir, "receipt.webm"), size: viewport });
     await page.screencast.showActions({ position: "top-right", duration: 300 });
     let double: HubDouble | undefined;
+    const frames = await watchConversationFrames(page);
 
     const journey: Journey = {
       id,
@@ -94,13 +95,46 @@ export const test = base.extend<{ journey: Journey }>({
       viewport,
       stages,
       page_errors: errors,
+      frame_defects: frames,
       output_dir: testInfo.outputDir,
     }, null, 2) + "\n");
     expect(errors, "the page threw while the journey ran").toEqual([]);
+    expect(frames, "a conversation showed the terminal frame or a bare panel").toEqual([]);
   },
 });
 
 /** Two animation frames: let the UI paint before a screenshot. */
 async function settle(page: Page): Promise<void> {
   await page.evaluate(() => new Promise((ok) => requestAnimationFrame(() => requestAnimationFrame(ok))));
+}
+
+/**
+ * Every animation frame, on every page load: a conversation must never show
+ * the terminal canvas (a near-black frame in the light theme) and never sit on
+ * a bare panel (cas-04ee, journey evaluation F9/F13). A bare panel is allowed
+ * for a moment while one view replaces another, not for 250 ms.
+ */
+async function watchConversationFrames(page: Page): Promise<string[]> {
+  const defects: string[] = [];
+  await page.exposeFunction("__journeyFrameDefect", (defect: string) => { if (!defects.includes(defect)) defects.push(defect); });
+  await page.addInitScript(() => {
+    const report = (window as unknown as { __journeyFrameDefect: (defect: string) => void }).__journeyFrameDefect;
+    let bareSince: number | undefined;
+    const tick = (now: number) => {
+      const slot = document.querySelector<HTMLElement>(".conversation-pane-slot");
+      if (slot) {
+        for (const canvas of slot.querySelectorAll("canvas")) {
+          const box = canvas.getBoundingClientRect();
+          if (getComputedStyle(canvas).visibility === "visible" && box.width > 0 && box.height > 0) report("terminal canvas visible in the conversation");
+        }
+        if (!slot.innerText.trim()) {
+          bareSince ??= now;
+          if (now - bareSince > 250) report("conversation panel bare for over 250 ms");
+        } else bareSince = undefined;
+      } else bareSince = undefined;
+      requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+  });
+  return defects;
 }

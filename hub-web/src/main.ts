@@ -111,8 +111,8 @@ function conversationHistory(key: string): ConversationHistory {
   if (!history) { history = new ConversationHistory(); conversationHistories.set(key, history); }
   return history;
 }
-const conversationHistoryPages = new Map<string, { hasEarlier: boolean; nextBefore?: number; loading: boolean; loaded: boolean }>();
-function conversationHistoryPage(key: string): { hasEarlier: boolean; nextBefore?: number; loading: boolean; loaded: boolean } {
+const conversationHistoryPages = new Map<string, { hasEarlier: boolean; nextBefore?: number; loading: boolean; loaded: boolean; requested?: boolean }>();
+function conversationHistoryPage(key: string): { hasEarlier: boolean; nextBefore?: number; loading: boolean; loaded: boolean; requested?: boolean } {
   let page = conversationHistoryPages.get(key);
   if (!page) {
     page = { hasEarlier: false, loading: false, loaded: false };
@@ -274,66 +274,80 @@ function releaseSurface(key: string, surface: TerminalSurface): void {
   surfaces.delete(key);
 }
 
+/**
+ * The conversation thread over a pane's mount. It goes up as soon as the pane
+ * card exists — before the terminal surface finishes loading beneath it — so
+ * opening a conversation never shows the terminal's own dark frame or a bare
+ * panel (cas-04ee); the surface keeps it in place when it mounts.
+ */
+function mountConversation(key: string, mount: HTMLElement): void {
+  mount.classList.remove("transcript-active");
+  mount.classList.add("conversation-active");
+  let conversation = conversationViews.get(key);
+  if (!conversation) {
+    const threadKey = sessionKey(selectedMachineId!, selectedSession!);
+    const hubSession = sessions.get(selectedMachineId!)?.find((item) => item.name === selectedSession);
+    const target = supervisorTarget(hubSession) || "Supervisor";
+    const history = conversationHistory(threadKey);
+    conversation = new ConversationView(document, history, {
+      supervisor: target,
+      machine: machines.get(selectedMachineId!)?.label,
+      project: projectName(hubSession?.project_dir),
+      header: false,
+      // The supervisor is executing while a send awaits its reply or the
+      // pane produced output in the last half minute.
+      working: () => history.hasPending() || [...paneLastActivity].some(([paneId, at]) => paneId.startsWith(`${threadKey}:`) && Date.now() - at < WORKING_WINDOW_MS),
+      editMessage: (text, send) => {
+        const composer = document.querySelector<HTMLTextAreaElement>("#message-text");
+        if (!composer || composer.dataset.threadKey !== threadKey) return;
+        if (composer.value.trim()) { showComposerStatus("Your draft already has text. Clear it before editing the refused message.", "info"); composer.focus(); return; }
+        composer.value = text; composer.dispatchEvent(new Event("input")); composer.focus();
+        editingRefused = { threadKey, id: send.id };
+      },
+      // A quick-reply chip answers the ask through the same leased path as
+      // the composer, with in_reply_to = the ask's notification id.
+      respond: (ask, text) => { void submitSupervisorMessage({ text, replyTo: ask.notification_id }); },
+      // Retry sends the refused text again through the same leased path,
+      // keeping its original in_reply_to; the refused bubble leaves the
+      // thread only once the new send is actually on the wire.
+      retryMessage: (send) => { void submitSupervisorMessage({ text: send.text, replyTo: send.replyTo, retryOf: send.id }); },
+      hasEarlier: () => conversationHistoryPage(threadKey).hasEarlier,
+      loadingEarlier: () => conversationHistoryPage(threadKey).loading,
+      loadingHistory: () => {
+        const page = conversationHistoryPage(threadKey);
+        return page.requested === true && !page.loaded;
+      },
+      historyEnd: () => {
+        const page = conversationHistoryPage(threadKey);
+        return page.loaded && !page.hasEarlier;
+      },
+      loadEarlier: () => {
+        const page = conversationHistoryPage(threadKey);
+        if (page.loading || page.nextBefore === undefined) return;
+        page.loading = true;
+        updateConversationViews();
+        const sent = connections.get(selectedMachineId!)?.requestConversationHistory(selectedSession!, page.nextBefore);
+        if (!sent) {
+          page.loading = false;
+          updateConversationViews();
+        }
+      },
+    });
+    conversationViews.set(key, conversation);
+  }
+  if (conversation.element.parentElement !== mount) mount.append(conversation.element);
+  // The unanswered ask is pinned directly above the composer as well as in the flow.
+  const composerSlot = document.querySelector<HTMLElement>("#conversation-composer-slot");
+  if (composerSlot && conversation.pinned.parentElement !== composerSlot) composerSlot.prepend(conversation.pinned);
+  conversation.update();
+}
+
 function applyPaneView(key: string, mount: HTMLElement, surface: TerminalSurface, view: TranscriptViewMode): void {
   surface.setMinimumColumns(compactViewport() ? COMPACT_MINIMUM_COLUMNS : 0);
   if (hubPresentation === "conversation") {
     transcripts.get(key)?.dispose(); transcripts.delete(key);
-    mount.classList.remove("transcript-active");
-    mount.classList.add("conversation-active");
     surface.setCanvasPainting(false);
-    let conversation = conversationViews.get(key);
-    if (!conversation) {
-      const threadKey = sessionKey(selectedMachineId!, selectedSession!);
-      const hubSession = sessions.get(selectedMachineId!)?.find((item) => item.name === selectedSession);
-      const target = supervisorTarget(hubSession) || "Supervisor";
-      const history = conversationHistory(threadKey);
-      conversation = new ConversationView(document, history, {
-        supervisor: target,
-        machine: machines.get(selectedMachineId!)?.label,
-        project: projectName(hubSession?.project_dir),
-        header: false,
-        // The supervisor is executing while a send awaits its reply or the
-        // pane produced output in the last half minute.
-        working: () => history.hasPending() || [...paneLastActivity].some(([paneId, at]) => paneId.startsWith(`${threadKey}:`) && Date.now() - at < WORKING_WINDOW_MS),
-        editMessage: (text, send) => {
-          const composer = document.querySelector<HTMLTextAreaElement>("#message-text");
-          if (!composer || composer.dataset.threadKey !== threadKey) return;
-          if (composer.value.trim()) { showComposerStatus("Your draft already has text. Clear it before editing the refused message.", "info"); composer.focus(); return; }
-          composer.value = text; composer.dispatchEvent(new Event("input")); composer.focus();
-          editingRefused = { threadKey, id: send.id };
-        },
-        // A quick-reply chip answers the ask through the same leased path as
-        // the composer, with in_reply_to = the ask's notification id.
-        respond: (ask, text) => { void submitSupervisorMessage({ text, replyTo: ask.notification_id }); },
-        // Retry sends the refused text again through the same leased path,
-        // keeping its original in_reply_to; the refused bubble leaves the
-        // thread only once the new send is actually on the wire.
-        retryMessage: (send) => { void submitSupervisorMessage({ text: send.text, replyTo: send.replyTo, retryOf: send.id }); },
-        hasEarlier: () => conversationHistoryPage(threadKey).hasEarlier,
-        loadingEarlier: () => conversationHistoryPage(threadKey).loading,
-        historyEnd: () => {
-          const page = conversationHistoryPage(threadKey);
-          return page.loaded && !page.hasEarlier;
-        },
-        loadEarlier: () => {
-          const page = conversationHistoryPage(threadKey);
-          if (page.loading || page.nextBefore === undefined) return;
-          page.loading = true;
-          updateConversationViews();
-          const sent = connections.get(selectedMachineId!)?.requestConversationHistory(selectedSession!, page.nextBefore);
-          if (!sent) {
-            page.loading = false;
-            updateConversationViews();
-          }
-        },
-      });
-      conversationViews.set(key, conversation);
-    }
-    if (conversation.element.parentElement !== mount) mount.append(conversation.element);
-    // The unanswered ask is pinned directly above the composer as well as in the flow.
-    const composerSlot = document.querySelector<HTMLElement>("#conversation-composer-slot");
-    if (composerSlot && conversation.pinned.parentElement !== composerSlot) composerSlot.prepend(conversation.pinned);
-    conversation.update();
+    mountConversation(key, mount);
     return;
   }
   mount.classList.remove("conversation-active");
@@ -668,6 +682,14 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
         operatorReplies.set(key, replies.slice(-20));
       }
       if (selectedMachineId === machine.id && selectedSession === session) render();
+    },
+    onConversationHistoryRequested: (session) => {
+      const cursor = conversationHistoryPage(sessionKey(machine.id, session));
+      if (cursor.loaded) return;
+      // The first page, not an earlier one: the thread shows its own loading
+      // line, and the "Load earlier" control stays out of it.
+      cursor.requested = true;
+      updateConversationViews();
     },
     onConversationHistory: (session, page: ConversationHistoryPage) => {
       const key = sessionKey(machine.id, session);
@@ -1156,10 +1178,12 @@ function renderTerminalConnecting(machineId: string, session: string): void {
   if (selectedMachineId !== machineId || selectedSession !== session) return;
   const grid = document.querySelector<HTMLElement>("#pane-grid");
   if (grid?.dataset.sessionKey !== sessionKey(machineId, session)) return;
-  const placeholder = grid.querySelector<HTMLElement>(".empty");
+  const placeholder = grid.querySelector<HTMLElement>(":scope > .empty");
   if (placeholder) {
     placeholder.classList.remove("terminal-state");
-    placeholder.textContent = `Connecting to ${session}…`;
+    // The conversation names who the operator is waiting on, not the pane.
+    const who = hubPresentation === "conversation" ? supervisorTarget(sessions.get(machineId)?.find((item) => item.name === session)) || session : session;
+    placeholder.textContent = `Connecting to ${who}…`;
   }
 }
 
@@ -1210,7 +1234,7 @@ function renderConnectionSurface(machineId: string, session: string, snapshot: C
   }
   clearDisconnectedState(grid);
   if (snapshot.phase === "live") return;
-  const placeholder = grid.querySelector<HTMLElement>(".empty");
+  const placeholder = grid.querySelector<HTMLElement>(":scope > .empty");
   if (!placeholder) return;
   renderConnectionSurfaceInto(placeholder, session, snapshot, {
     retry: () => { void connections.get(machineId)?.attach(session); },
@@ -1240,7 +1264,7 @@ function renderTerminalFailure(machineId: string, session: string, detail: strin
   if (selectedMachineId !== machineId || selectedSession !== session) return;
   const grid = document.querySelector<HTMLElement>("#pane-grid");
   if (grid?.dataset.sessionKey !== sessionKey(machineId, session)) return;
-  const placeholder = grid.querySelector<HTMLElement>(".empty");
+  const placeholder = grid.querySelector<HTMLElement>(":scope > .empty");
   if (!placeholder) return;
   const message = document.createElement("p");
   message.textContent = `Terminal unavailable: ${detail}`;
@@ -1392,7 +1416,10 @@ async function renderSessionState(machineId: string, session: string, state: Ses
     grid.replaceChildren(empty);
     return;
   }
-  grid.querySelector(".empty")?.remove();
+  // Only the grid's own placeholder: a bare ".empty" also matched the
+  // conversation thread's empty state and deleted it, leaving a re-opened
+  // conversation on a blank panel (cas-04ee).
+  grid.querySelector(":scope > .empty")?.remove();
   const selectedPane = selectedPanes.get(selectedKey);
   if (!selectedPane || !active.has(selectedPane)) {
     const fallback = visiblePanes.find((pane) => pane.focused) ?? visiblePanes[0];
@@ -1553,6 +1580,9 @@ async function renderSessionState(machineId: string, session: string, state: Ses
       releaseSurface(key, existingSurface);
     }
     if (collapsedOnPhone) continue;
+    // The thread goes up before the surface loads beneath it: the canvas
+    // stays hidden under it and the reader sees the conversation at once.
+    if (hubPresentation === "conversation" && !surfaces.has(key)) mountConversation(key, mount);
     if (!surfaces.has(key)) {
       const surface = await createTerminalSurface(mount, {
         onData: (data) => { if (canControl(machineId, session, "pane-input")) sendControl(machineId, session, { Input: { pane_id: pane.id, data: [...data] } }); },

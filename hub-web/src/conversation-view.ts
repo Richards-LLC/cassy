@@ -113,6 +113,11 @@ export interface ConversationViewOptions {
   hasEarlier?: () => boolean;
   /** Keeps the paging control honest while a request is in flight. */
   loadingEarlier?: () => boolean;
+  /**
+   * The first history page is on its way: an empty thread shows a loading
+   * line rather than claiming nothing is waiting (cas-04ee).
+   */
+  loadingHistory?: () => boolean;
   /** The loaded page reaches the beginning of the project history. */
   historyEnd?: () => boolean;
 }
@@ -148,6 +153,8 @@ export class ConversationView {
     const { supervisor } = this.options;
     this.element = document.createElement("div");
     this.element.className = "conversation-reading thread";
+    // Kept in place when a terminal surface mounts beneath it (cas-04ee).
+    this.element.dataset.mountOverlay = "";
     if (this.options.accentClass) this.element.classList.add(this.options.accentClass);
     this.element.tabIndex = 0;
     this.element.setAttribute("aria-label", `Conversation with ${supervisor}`);
@@ -214,7 +221,7 @@ export class ConversationView {
     const same = this.msgs.children.length === children.length && children.every((node, index) => this.msgs.children[index] === node);
     if (!same) this.msgs.replaceChildren(...children);
     this.renderPinned(document);
-    this.renderEmpty(model.length === 0);
+    this.renderEmpty(model.length === 0, this.options.loadingHistory?.() === true);
     if (this.following && document.getSelection()?.isCollapsed !== false) this.pin();
   }
 
@@ -283,11 +290,27 @@ export class ConversationView {
    * supervisor's name, a quiet centred line, and the last message as a faint
    * echo. Lives beside `.msgs`, never inside it, so the log stays a log.
    */
-  private renderEmpty(show: boolean): void {
+  private renderEmpty(show: boolean, loading = false): void {
     this.empty.hidden = !show;
     this.msgs.hidden = show;
-    if (!show) { this.empty.replaceChildren(); delete this.empty.dataset.signature; return; }
+    if (!show) { this.empty.replaceChildren(); delete this.empty.dataset.signature; delete this.empty.dataset.state; return; }
     const { supervisor, machine, project } = this.options;
+    if (loading) {
+      // Until the first page lands, "Nothing waiting" would be a guess.
+      if (this.empty.dataset.state === "loading") return;
+      this.empty.dataset.state = "loading";
+      delete this.empty.dataset.signature;
+      const document = this.element.ownerDocument;
+      const line = document.createElement("p"); line.className = "said conversation-loading"; line.setAttribute("role", "status");
+      const dots = document.createElement("span"); dots.className = "dots"; dots.setAttribute("aria-hidden", "true");
+      dots.append(document.createElement("i"), document.createElement("i"), document.createElement("i"));
+      const codename = document.createElement("span"); codename.className = "codename"; codename.textContent = supervisor;
+      const text = document.createElement("span"); text.append("Loading your conversation with ", codename, "…");
+      line.append(dots, text);
+      this.empty.replaceChildren(line);
+      return;
+    }
+    delete this.empty.dataset.state;
     const echo = this.options.echo?.()?.trim() || "";
     const signature = JSON.stringify([supervisor, machine, project, echo]);
     if (this.empty.dataset.signature === signature) return;

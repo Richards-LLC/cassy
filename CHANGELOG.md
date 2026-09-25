@@ -7,6 +7,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.32.0] - 2026-09-25
+
 ### Added
 
 - `cas doctor` reports `host install parity`: installed skills and agents
@@ -17,6 +19,22 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   receipts their close gates ask for.
 - The design language ships a ready-to-paste `tokens.css`, and the image
   helper takes `--aspect` and `--size`.
+- A new `factory` MCP tool holds the supervisor's fleet control: spawning and
+  shutting down workers, worker and epic status, worktrees, servers, database
+  branches, loops and queues. `coordination` keeps identity, messaging and
+  reminders.
+- A call-shape lint checks every suggested `<tool> action=` call in the
+  shipped skills and in the runtime prompt templates. Each call must use a
+  dispatched action, known parameters, and the parameters its handler
+  requires.
+- An operator-data lint keeps real names, ids and project data out of the
+  shipped skills.
+- `rule action=promote` records a reviewer's promotion decision, where
+  promotion used to count a single helpful vote.
+- User-invoked-only skills ship `agents/openai.yaml` with implicit invocation
+  turned off, so Codex no longer triggers them on its own.
+- Factory sessions log a `session_start_fired` event per role. It shows
+  whether each harness actually received its SessionStart context.
 
 ### Changed
 
@@ -24,6 +42,68 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   instead of a hand-written render and pasted PDF programs.
 - Report, figure and screen skills share one form table, and `DESIGN.md`
   follows the public DESIGN.md format and its linter.
+- The built-in skills are one tree for every harness. Skills name tools by
+  bare name, and each harness's tool prefix is stated once in its role
+  guidance. The per-harness twin copies are gone, except the few whose
+  content really differs; the task-verifier frontmatter is generated per
+  harness.
+- `AGENTS.md` is the canonical, harness-neutral instruction file. `CLAUDE.md`
+  imports it and adds only Claude-specific lines, and each stays under
+  10,000 characters. `cas update` removes duplicate `CLAUDE.md` blocks in
+  subdirectories, previews the same plan in a dry run, and checks that
+  `AGENTS.md` is current.
+- SessionStart fits under the 10,000-character hook cap for every role (the
+  assembled payload is at most 9,216 bytes). Knowledge and Handoff degrade to
+  summaries with a pull command, the usage reminder is 214 bytes, and the
+  always-loaded worker skill body went from 7,989 to about 6,490 bytes.
+- The MCP tool list is smaller. Every tool description is at most 2,048
+  characters (1,500 for `coordination`), and each `action` parameter
+  publishes an enum generated from its dispatch table. Schema boilerplate
+  (`nullable`, `"default": null`, non-standard formats) is stripped.
+- The `coordination` schema publishes only its own parameters, each with a
+  description written for its own actions, so workers no longer load the
+  supervisor's spawn, worktree and server parameters.
+- task-verifier went from 27.7 KB to 9.3 KB. It diffs against the task's
+  delivery base, runs with a tools restriction, and escalates checks it could
+  not exercise to the supervisor instead of approving or rejecting them
+  silently.
+- session-learn classifies with its own prompt instead of the skill text, and
+  a partial draft no longer drops the whole batch.
+- Each Stop-hook job has one body, remapped to the running harness's tool
+  prefix.
+- Claude, Codex and Grok workers receive one rendered contract with the same
+  rules.
+- Close-gate refusals come from one renderer per refusal family. Every
+  suggested command is complete and carries the reader's tool prefix, and no
+  remedy names a call the reader cannot make.
+- A worker's close now defers `risk=platform` proof to the assembly build of
+  the epic, because workers cannot run a platform build themselves.
+- The `cas` skill that `cas init` writes is now a short pointer to the
+  built-in skills. Its `task action=create` example no longer passes the
+  unknown `start` field. Shipped text no longer uses the retired `mecha_cassy`
+  key.
+- Skill descriptions are YAML-safe and at most 250 characters, and
+  `managed_by` moved under `metadata`.
+- The `release-notes` skill is renamed `cas-release-notes`, because the old
+  name collided with a Grok built-in command. The mecha-cassy skill now owns
+  only Slack transport; the release rubric owns wording and order.
+- The factory-core, workflow, tooling, design and report skills went through
+  an accuracy pass, so their commands, parameters and paths match the code.
+  For example, `codex exec` closes stdin, Viktor calls retry safely with an
+  idempotency key, and task creates declare `risk`.
+
+### Deprecated
+
+- The `coordination` actions that moved to `factory` still work through
+  `coordination` for this release. They return a note naming the `factory`
+  call and will be removed in a later release. The moved actions are:
+  - `spawn_workers`, `shutdown_workers`, `recycle_worker`, `hold_worker`,
+    `release_worker`
+  - `worker_status`, `worker_activity`, `epic_status`, `focus_epic`,
+    `sweep_tasks`, `sync_all_workers`, `clear_context`
+  - `gc_report`, `gc_cleanup`, `restart_spawn_queue`
+  - `agent_list`, `agent_cleanup`, `lease_history`
+  - `server_*`, `db_branch_*`, `worktree_*`, `loop_*`, `queue_*`
 
 ### Fixed
 
@@ -40,6 +120,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   this one.
 - Pulled knowledge pages record the project that wrote them; pages from
   older clients are kept locally but never pushed back out.
+- Rule and knowledge writes that name another registered project are refused
+  with an actionable error, and are kept out of rule-file sync.
 - `cas update` now refreshes every file a built-in skill ships, including
   scripts, examples and templates, which previously stayed at their first
   installed version. Local edits are still preserved.
@@ -47,6 +129,26 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   longer ships, and retired built-in skills without the `cas-` prefix.
 - Links in the supervisor and worker skills now resolve in the installed
   layout.
+- Close and merge gates key off the current tip (GH #1022). Merge-request
+  suppression compares the pushed tip, not a stale recorded one. A close no
+  longer asks for verification before its commit receipt is reachable. Merging
+  one sibling no longer invalidates the other pending verification dispatches.
+- Suggested calls now work for the agent that receives them:
+  - Claude workers in a Codex-default session get their own tool names.
+  - Every suggested message carries the required `summary`, and every
+    reminder carries its `remind_message`.
+  - Verdict guidance names the `dispatch_id`.
+  - Local-merge workers are no longer told to push.
+- The worktree merge jail points at `factory action=worktree_merge` instead
+  of an agent that does not exist.
+- The SessionStart pull commands name real actions (`system action=proxy_list`
+  and `skill action=show`).
+- A pre-assigned worker no longer receives a second assignment prompt after
+  its spawn brief.
+- `verification action=add` accepts `files_reviewed` as an alias for
+  `files`, so older verifier calls no longer drop the list silently.
+- Ambient recall strips message-envelope markup from its queries and skips
+  evidence the current turn already names.
 
 ## [3.31.0] - 2026-09-24
 

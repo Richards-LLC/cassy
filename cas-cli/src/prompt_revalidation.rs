@@ -1052,6 +1052,29 @@ pub(crate) fn merge_landed_guidance(
     )
 }
 
+/// Reply for a merge request whose parked delivery anchor already landed while
+/// the pushed factory branch carries newer, unmerged commits (GH #1022).
+///
+/// "Merge already landed" was true of the anchor and false of the branch the
+/// worker asked about. The anchor stays frozen (GH #703), so the new commits
+/// are a new delivery: the supervisor reopens the cycle with `request_changes`.
+pub(crate) fn merge_request_beyond_landed_anchor_guidance(
+    task_id: &str,
+    anchor: &str,
+    live_tip: &str,
+    target_branch: &str,
+) -> String {
+    let supervisor_prefix = crate::mcp::tools::core::guidance::supervisor_prefix();
+    format!(
+        "No merge request was queued: task {task_id}'s delivery anchor {anchor} already \
+         landed on {target_branch}, but the pushed factory branch tip {live_tip} is not on \
+         it. Commits after a landed anchor are a new delivery.\n\n\
+         Next: message the supervisor with blocker=true asking for \
+         `{supervisor_prefix}task action=request_changes id={task_id}`; after that verdict, \
+         close again so {live_tip} is parked, then request its merge."
+    )
+}
+
 pub(crate) fn parse_merge_request_envelope(prompt: &str) -> Option<MergeRequestEnvelope> {
     let start = prompt.rfind(MERGE_ENVELOPE_OPEN)? + MERGE_ENVELOPE_OPEN.len();
     let end = prompt[start..].find(MERGE_ENVELOPE_CLOSE)? + start;
@@ -2090,6 +2113,19 @@ mod tests {
         );
         assert!(guidance.contains("Merge already landed"));
         assert!(guidance.contains("Re-run task close for cas-test now"));
+    }
+
+    /// GH #1022: a merge request for a branch whose parked anchor landed but
+    /// whose pushed tip did not is answered with the reopen path, not with
+    /// "Merge already landed".
+    #[test]
+    fn beyond_landed_anchor_guidance_names_both_tips_and_the_reopen_path() {
+        let guidance =
+            merge_request_beyond_landed_anchor_guidance("cas-test", "aaa111", "bbb222", "main");
+        assert!(guidance.contains("No merge request was queued"));
+        assert!(guidance.contains("aaa111") && guidance.contains("bbb222"));
+        assert!(guidance.contains("task action=request_changes id=cas-test"));
+        assert!(!guidance.contains("Merge already landed"));
     }
 
     #[test]

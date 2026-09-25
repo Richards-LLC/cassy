@@ -242,20 +242,35 @@ pub(crate) fn capture_repository_proof_at_target(
 
 /// Commits whose content this close is really delivering.
 ///
-/// The resolved commit receipt always counts. The worktree tip counts only
-/// when it carries work beyond the integration base — a close with nothing
-/// delivered yet returns an empty list and keeps the strict whole-boundary
-/// contract, which is what pins "the verifier looked at exactly this tree".
+/// The resolved commit receipt always counts, and so does the task's parked
+/// delivery anchor (the factory-branch tip recorded when an earlier close was
+/// parked for merge). The worktree tip counts only when it carries work beyond
+/// the integration base — a close with nothing delivered returns an empty list
+/// and keeps the strict whole-boundary contract, which is what pins "the
+/// verifier looked at exactly this tree".
+///
+/// GH #1022: the normal factory flow merges the lane *before* the close that
+/// mints the dispatch, so HEAD is no longer ahead of the base. Without the
+/// parked anchor the list was empty and any sibling merge moving the epic head
+/// invalidated the dispatch (three times in one epic on 2026-09-25).
 pub(crate) fn delivered_anchor_commits(
     worktree_root: &Path,
     parent_branch: Option<&str>,
     commit_receipt: Option<&str>,
+    parked_anchor: Option<&str>,
 ) -> Vec<String> {
     let mut anchors: Vec<String> = Vec::new();
-    if let Some(receipt) = commit_receipt
-        && let Ok(sha) = rev_parse(worktree_root, receipt)
+    for revision in [commit_receipt, parked_anchor]
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .filter(|revision| !revision.is_empty() && !revision.starts_with('-'))
     {
-        anchors.push(sha);
+        if let Ok(sha) = rev_parse(worktree_root, revision)
+            && !anchors.iter().any(|anchor| anchor == &sha)
+        {
+            anchors.push(sha);
+        }
     }
     if let Ok(head) = rev_parse(worktree_root, "HEAD")
         && head_is_ahead_of_integration_base(worktree_root, parent_branch, &head)
@@ -549,7 +564,7 @@ mod tests {
         let repo = delivered_repo();
         let path = repo.path();
 
-        let anchors = delivered_anchor_commits(path, Some("main"), None);
+        let anchors = delivered_anchor_commits(path, Some("main"), None, None);
         assert_eq!(
             anchors,
             vec![head(path)],
@@ -558,11 +573,11 @@ mod tests {
 
         git(path, &["checkout", "-q", "main"]);
         assert!(
-            delivered_anchor_commits(path, Some("main"), None).is_empty(),
+            delivered_anchor_commits(path, Some("main"), None, None).is_empty(),
             "nothing delivered beyond the integration base means no anchor"
         );
         assert!(
-            delivered_anchor_commits(path, None, None).is_empty(),
+            delivered_anchor_commits(path, None, None, None).is_empty(),
             "an unresolvable integration branch must not widen tolerance"
         );
     }
@@ -574,8 +589,55 @@ mod tests {
         let delivered = head(path);
         git(path, &["checkout", "-q", "main"]);
 
-        let anchors = delivered_anchor_commits(path, Some("main"), Some(&delivered));
+        let anchors = delivered_anchor_commits(path, Some("main"), Some(&delivered), None);
         assert_eq!(anchors, vec![delivered]);
+    }
+
+    /// GH #1022: the lane is merged before the close that mints the dispatch,
+    /// so HEAD is no longer ahead of the base. The parked delivery anchor must
+    /// still bind, so a sibling merge moving the target keeps the verdict.
+    #[test]
+    fn parked_anchor_binds_after_the_lane_is_merged() {
+        let repo = delivered_repo();
+        let path = repo.path();
+        let delivered = head(path);
+        git(path, &["checkout", "-q", "main"]);
+        git(
+            path,
+            &["merge", "-q", "--no-ff", "factory/worker", "-m", "merge lane"],
+        );
+        git(path, &["checkout", "-q", "factory/worker"]);
+
+        assert!(
+            delivered_anchor_commits(path, Some("main"), None, None).is_empty(),
+            "a merged lane with no receipt used to bind nothing"
+        );
+        let anchors = delivered_anchor_commits(path, Some("main"), None, Some(&delivered));
+        assert_eq!(anchors, vec![delivered.clone()]);
+        assert_eq!(
+            delivered_anchor_commits(path, Some("main"), Some(&delivered), Some(&delivered)),
+            vec![delivered],
+            "a receipt equal to the parked anchor is bound once"
+        );
+
+        let proof = capture_repository_proof_at_target(path, "main", anchors).expect("capture");
+        git(path, &["checkout", "-q", "-b", "factory/sibling", "main"]);
+        std::fs::write(path.join("sibling.txt"), "sibling\n").unwrap();
+        git(path, &["add", "sibling.txt"]);
+        git(path, &["commit", "-q", "-m", "sibling lane"]);
+        git(path, &["checkout", "-q", "main"]);
+        git(
+            path,
+            &["merge", "-q", "--no-ff", "factory/sibling", "-m", "merge sibling"],
+        );
+
+        assert!(
+            matches!(
+                evaluate_repository_proof(&proof).expect("sibling merge keeps the proof"),
+                RepositoryProofStatus::DeliveredContentIntact { .. }
+            ),
+            "a sibling merge must not invalidate a dispatch anchored on a merged delivery"
+        );
     }
 
     /// The wedge from GH cas-5c33: the worker fast-forwards its branch to the
@@ -585,7 +647,7 @@ mod tests {
     fn branch_advance_keeps_the_proof_when_delivered_commits_stay_reachable() {
         let repo = delivered_repo();
         let path = repo.path();
-        let anchors = delivered_anchor_commits(path, Some("main"), None);
+        let anchors = delivered_anchor_commits(path, Some("main"), None, None);
         let proof = capture_repository_proof_with_anchors(path, path, anchors).expect("capture");
 
         // The supervisor merges the work, the worker moves on: new commits on
@@ -618,7 +680,7 @@ mod tests {
     fn uncommitted_work_is_reported_when_anchors_are_bound() {
         let repo = delivered_repo();
         let path = repo.path();
-        let anchors = delivered_anchor_commits(path, Some("main"), None);
+        let anchors = delivered_anchor_commits(path, Some("main"), None, None);
         let proof = capture_repository_proof_with_anchors(path, path, anchors).expect("capture");
 
         std::fs::write(path.join("scratch.txt"), "wip for the next task\n").unwrap();
@@ -638,7 +700,7 @@ mod tests {
         let repo = delivered_repo();
         let path = repo.path();
         let delivered = head(path);
-        let anchors = delivered_anchor_commits(path, Some("main"), None);
+        let anchors = delivered_anchor_commits(path, Some("main"), None, None);
         let proof = capture_repository_proof_with_anchors(path, path, anchors).expect("capture");
 
         git(path, &["reset", "-q", "--hard", "main"]);
@@ -662,7 +724,7 @@ mod tests {
         let repo = delivered_repo();
         let path = repo.path();
         git(path, &["checkout", "-q", "main"]);
-        let anchors = delivered_anchor_commits(path, Some("main"), None);
+        let anchors = delivered_anchor_commits(path, Some("main"), None, None);
         assert!(anchors.is_empty());
         let proof = capture_repository_proof_with_anchors(path, path, anchors).expect("capture");
 

@@ -11095,8 +11095,7 @@ pub(crate) fn run_factory_branch_merge_gate_with_attribution(
          guard cannot be bypassed (use of supervisor_override=true does not \
          skip merge-state checks — it is a data-state guard, not a review \
          gate).\n\n\
-         {remediation}\n\n{stop}",
-        stop = gate_text::repeated_close_refusal_stop(&task.id, caller),
+         {remediation}",
     ))
 }
 
@@ -20703,6 +20702,10 @@ mod merge_state_gate_tests {
             match run_factory_branch_merge_gate(&task, &req, parent, dir.path()) {
                 MergeStateGateOutcome::Reject(msg) => {
                     assert!(msg.contains("MERGE REQUIRED"), "{parent}: {msg}");
+                    assert!(
+                        !msg.contains("If this gate has now refused you twice"),
+                        "routine merge handoff must not suggest a premise stop: {msg}"
+                    );
                     assert!(!msg.contains("git push origin"), "{parent}: {msg}");
                     assert!(!msg.contains("Open a PR targeting"), "{parent}: {msg}");
                     assert!(msg.contains("merge_request=true"), "{parent}: {msg}");

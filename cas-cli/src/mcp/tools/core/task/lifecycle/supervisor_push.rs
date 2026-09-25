@@ -413,13 +413,19 @@ pub fn lifecycle_push_failure_message(
         "Task {task_id} is already {current_status}; supervisor lifecycle push \
          for {} failed: {error}. \
          Task state was NOT rolled back. \
-         Repair: call drain_lifecycle_outbox (CasCore / factory daemon auto-drain) \
-         for transition_key={transition_key} — durable event may already exist with \
-         prompt_delivered_at unmarked; drain re-delivers via idempotent prompt \
-         dedupe_key and stamps delivery exactly once. \
+         Repair needs no call from you: the durable event for \
+         transition_key={transition_key} stays pending, and the factory daemon's \
+         lifecycle outbox drain (drain_lifecycle_outbox) re-delivers it exactly once. \
+         If the supervisor must know now, tell it with \
+         `{coord} action=message target=supervisor summary=\"lifecycle push failed for {task_id}\" \
+         message=\"...\"`. \
          Do NOT re-run the original task operation solely to recover the event; \
          that operation may now be illegal or a no-op for status={current_status}.",
-        kind.as_event_type()
+        kind.as_event_type(),
+        coord = format!(
+            "{}coordination",
+            crate::mcp::tools::core::guidance::caller_prefix()
+        ),
     )
 }
 
@@ -742,7 +748,8 @@ pub fn emit_task_lifecycle_transition_with_branch_tip(
             "prompt_queue unavailable after durable enqueue \
              (notification_id={notification_id}, transition_key={key}); \
              durable event left pending (prompt_delivered_at unmarked). \
-             Repair: drain_lifecycle_outbox once prompt_queue is available"
+             No caller action: the factory daemon's outbox drain \
+             (drain_lifecycle_outbox) re-delivers it once prompt_queue is available"
         ));
     };
 
@@ -1628,8 +1635,12 @@ mod tests {
         assert!(!msg.to_lowercase().contains("retry is safe"));
         assert!(msg.contains("transition_key=key"));
         assert!(
-            msg.contains("drain_lifecycle_outbox"),
-            "must name callable repair path: {msg}"
+            msg.contains("drain_lifecycle_outbox") && !msg.contains("Repair: call"),
+            "must name the automatic repair path, not a Rust function to call: {msg}"
+        );
+        assert!(
+            msg.contains("action=message target=supervisor summary="),
+            "the only caller action offered is a callable message: {msg}"
         );
     }
 

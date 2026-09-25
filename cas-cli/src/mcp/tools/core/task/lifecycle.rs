@@ -879,7 +879,7 @@ impl CasCore {
                     return Err(McpError {
                         code: ErrorCode::INVALID_PARAMS,
                         message: Cow::from(format!(
-                            "PLANNING RACE WARNING: supervisor {other_creator} created children under epic {epic} at {planned_at}. \\
+                            "PLANNING RACE WARNING: supervisor {other_creator} created children under epic {epic} at {planned_at}. \
                              Review that plan before adding another child; if this is intentional, retry with confirm_warning=true."
                         )),
                         data: None,
@@ -914,7 +914,7 @@ impl CasCore {
                 return Err(McpError {
                     code: ErrorCode::INVALID_PARAMS,
                     message: Cow::from(format!(
-                        "DUPLICATE TASK WARNING: open task {existing_id} ({existing_title:?}) overlaps this {overlap_subject} \\
+                        "DUPLICATE TASK WARNING: open task {existing_id} ({existing_title:?}) overlaps this {overlap_subject} \
                          at {:.0}%{identifier_note}. Review or reuse it; if this is intentional, retry with confirm_warning=true.",
                         score * 100.0,
                     )),

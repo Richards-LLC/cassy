@@ -10,7 +10,8 @@ Use `mcp__cs__task` instead of built-in TodoWrite. Cassy tasks persist across se
 
 ## Core Workflow
 
-1. **Create**: `mcp__cs__task action=create title="..." description="..." priority=2`
+1. **Create**: `mcp__cs__task action=create title="..." description="..." priority=2 risk=none`
+   — `risk` is required for `task`, `bug` and `feature` types (`blast-radius`, `platform`, `concurrency` or `none`); `risk=blast-radius` also needs `proof_targets`.
 2. **Start**: `mcp__cs__task action=start id=<task-id>`
 3. **Progress**: `mcp__cs__task action=notes id=<task-id> notes="..." note_type=progress`
 4. **Close**: `mcp__cs__task action=close id=<task-id> reason="..."`
@@ -19,15 +20,13 @@ Use `mcp__cs__task` instead of built-in TodoWrite. Cassy tasks persist across se
 
 - **Ready tasks**: `mcp__cs__task action=ready` — unblocked, actionable work
 - **My tasks**: `mcp__cs__task action=mine` — tasks assigned to you
-- **Blocked**: `mcp__cs__task action=list status=blocked`
+- **Blocked**: `mcp__cs__task action=blocked` — dependency-blocked work; `action=list status=blocked` shows only tasks explicitly set to blocked
 - **Add dependency**: `mcp__cs__task action=dep_add id=<task> to_id=<blocker> dep_type=blocks`
 
 ## Note Types
 
-`progress`, `blocker`, `decision`, `discovery`, `question` — use the right type so notes are meaningful in context.
+`progress`, `blocker`, `decision`, `discovery`, `question`, `platform_proof` — use the right type so notes are meaningful in context. The close gate reads a `platform_proof` note for `risk=platform`.
 
 ## Valid Actions
-
-The list below is the dispatch order for `mcp__cs__task`; keep it synchronized with the live service.
 
 **Valid `mcp__cs__task` actions** (exact list — do not invent others): `create`, `proposal_inbox`, `proposal_accept`, `proposal_reject`, `proposal_reconcile`, `show`, `get`, `update`, `start`, `close`, `cancel`, `reopen`, `request_changes`, `delete`, `list`, `ready`, `blocked`, `notes`, `dep_add`, `dep_remove`, `dep_list`, `claim`, `release`, `reset`, `transfer`, `available`, `mine`.

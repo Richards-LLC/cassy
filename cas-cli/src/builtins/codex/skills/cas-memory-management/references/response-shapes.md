@@ -22,9 +22,9 @@ Low-overlap and moderate-overlap writes return:
 }
 ```
 
-`related_memories` contains matching slugs for moderate overlap. The
-`refresh_recommended` flag indicates that a candidate reached the
-cross-reference cap.
+`related_memories` contains the slugs linked for moderate overlap. A candidate
+already at the cross-reference cap is not linked and does not appear there;
+`refresh_recommended` is `true` when that happened.
 
 ## Blocked
 

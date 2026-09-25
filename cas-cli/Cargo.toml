@@ -209,7 +209,7 @@ sentry = { version = "0.35", default-features = false, features = ["backtrace", 
 # call upstream platform MCPs (Vercel, Neon). Without it, integrate handlers
 # bail with a clear "rebuild with --features mcp-proxy" message.
 default = ["mcp-proxy"]
-mcp-proxy = ["dep:cmcp_core"]
+mcp-proxy = ["dep:cmcp_core", "cas-mcp/mcp-proxy"]
 claude_rs_e2e = []
 # factory-recording feature removed - recording is now always available
 

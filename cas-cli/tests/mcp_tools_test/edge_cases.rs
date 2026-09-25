@@ -115,15 +115,17 @@ async fn test_invalid_entry_type() {
         personal: None,
     };
 
-
-    // Should use default type
-    let result = service
+    // An unknown type is rejected loudly instead of stored as a learning.
+    let error = service
         .cas_remember(Parameters(req))
         .await
-        .expect("remember should handle invalid type");
-
-    let text = extract_text(result);
-    assert!(text.contains("Created entry"));
+        .expect_err("remember must reject an unknown entry_type");
+    assert!(
+        error.message.contains("unknown entry_type 'invalid_type'")
+            && error.message.contains("handoff"),
+        "rejection must name the bad value and the valid types: {}",
+        error.message
+    );
 }
 
 #[tokio::test]

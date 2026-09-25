@@ -450,11 +450,20 @@ impl CasCore {
         // context memory tagged `handoff` and `role:<role>`. Handoffs are never
         // merged into or blocked by an existing memory; saving one supersedes
         // the previous current handoff for its role instead (below).
-        let handoff_kind = req.entry_type.trim().eq_ignore_ascii_case("handoff");
+        // An unknown type is rejected, never silently stored as a learning.
+        let requested_type = req.entry_type.trim();
+        let handoff_kind = requested_type.eq_ignore_ascii_case("handoff");
         let entry_type: EntryType = if handoff_kind {
             EntryType::Context
         } else {
-            req.entry_type.parse().unwrap_or(EntryType::Learning)
+            requested_type.parse().map_err(|_| McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from(format!(
+                    "unknown entry_type '{requested_type}'. Valid: {}. Nothing was stored.",
+                    cas_mcp::actions::MEMORY_ENTRY_TYPES.join(", ")
+                )),
+                data: None,
+            })?
         };
         let id = store.generate_id().map_err(|e| McpError {
             code: ErrorCode::INTERNAL_ERROR,

@@ -174,14 +174,19 @@ fn test_search_context_request_search() {
 
 #[test]
 fn search_descriptions_document_time_bound_history_filtering() {
-    let service_source = include_str!("../src/mcp/tools/service/mod.rs");
-    let shared_request_source = include_str!("../../crates/cas-mcp/src/types/ops_secondary.rs");
-    for source in [service_source, shared_request_source] {
-        assert!(
-            source.contains("'history' (search indexed git commits by text/path/time"),
-            "history description must document time filtering"
-        );
-    }
+    // The action list lives in the published `action` enum; its description
+    // keeps the gloss for actions whose name does not explain them.
+    let search = CasService::tool_definitions_for_build()
+        .into_iter()
+        .find(|tool| tool.name == "search")
+        .expect("search tool is registered");
+    let action_description = search.input_schema["properties"]["action"]["description"]
+        .as_str()
+        .expect("search action description");
+    assert!(
+        action_description.contains("'history' (search indexed git commits by text/path/time"),
+        "history description must document time filtering: {action_description}"
+    );
 }
 
 #[test]

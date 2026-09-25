@@ -16,10 +16,12 @@
 //!
 //! # Modules
 //!
+//! - `actions`: Accepted `action` values per tool (published as schema enums)
 //! - `types`: Request/response types for MCP tools
 //! - `daemon`: Embedded daemon types for background maintenance
 //! - `error`: MCP-specific error types
 
+pub mod actions;
 pub mod daemon;
 pub mod error;
 pub mod types;

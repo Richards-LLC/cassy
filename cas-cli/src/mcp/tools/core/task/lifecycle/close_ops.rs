@@ -5178,9 +5178,13 @@ impl CasCore {
                 Ok(Some(dispatch))
                     if dispatch.state == cas_types::VerificationDispatchState::TimedOut =>
                 {
+                    let sup_ver = format!(
+                        "{}verification",
+                        crate::mcp::tools::core::guidance::supervisor_prefix()
+                    );
                     return Ok(Self::tool_error(format!(
-                        "⚠️ VERIFICATION TIMED OUT\n\nTask {} exact dispatch {} requires named registered-supervisor recovery before close.",
-                        req.id, dispatch.id
+                        "⚠️ VERIFICATION TIMED OUT\n\nTask {} exact dispatch {} requires named registered-supervisor recovery before close.\n\nRecord the direct recovery verdict with {sup_ver} action=add task_id={} dispatch_id={} status=approved summary=\"...\", then retry close.",
+                        req.id, dispatch.id, req.id, dispatch.id
                     )));
                 }
                 Ok(_) => {}
@@ -6379,9 +6383,9 @@ impl CasCore {
                             spawned, or failed silently.\n\n\
                             To proceed:\n\
                             1. Re-dispatch verifier: Task(subagent_type=\"task-verifier\", prompt=\"Verify task {}\")\n\
-                            2. Or record verdict directly: {sup_ver} action=add task_id={} status=approved summary=\"...\"\n\
-                            3. Then retry {caller_task} action=close with the same task id.",
-                            req.id, elapsed_mins, req.id, req.id
+                            2. Or record the verdict directly: retry {caller_task} action=close id={} to mint a verification dispatch, then {sup_ver} action=add task_id={} dispatch_id=<dispatch id named in that response> status=approved summary=\"...\"\n\
+                            3. Then retry {caller_task} action=close id={}.",
+                            req.id, elapsed_mins, req.id, req.id, req.id, req.id
                         )));
                     }
                     Ok(None) | Ok(Some(_)) => {
@@ -6731,9 +6735,9 @@ impl CasCore {
                                 "You implemented this task yourself. Spawn a task-verifier to review your work:\n\n\
                                      Task(subagent_type=\"{}\", prompt=\"Verify task {}\")\n\n\
                                      Or record verification directly:\n\
-                                     {sup_ver} action=add task_id={} \
+                                     {sup_ver} action=add task_id={} dispatch_id={} \
                                      status=approved summary=\"Self-verified: <reason>\"",
-                                verifier_agent, req.id, req.id
+                                verifier_agent, req.id, req.id, dispatch.id
                             )
                         } else {
                             let bound_head = dispatch
@@ -6864,16 +6868,21 @@ impl CasCore {
                                 Task {} has an associated worktree that needs to be merged before closing.\n\n\
                                 📍 Worktree: {}\n\
                                 🌿 Branch: {}\n\n\
-                                🔒 WORKTREE JAIL ACTIVE: You cannot use other tools until you spawn the 'worktree-merger' agent.\n\n\
-                                To merge: Spawn the 'worktree-merger' agent to:\n\
-                                1. Check for uncommitted changes and commit them\n\
-                                2. Push the branch to remote\n\
-                                3. Merge the branch to the parent branch\n\
-                                4. Clean up the worktree directory\n\n\
-                                After the merge completes, retry {caller_task} action=close with the same task id.",
+                                🔒 WORKTREE JAIL ACTIVE: other tools are blocked until this worktree is merged.\n\n\
+                                To merge and clean up: `{coord} action=worktree_merge id={} task_id={} cleanup=true`. \
+                                That call is allowed through the jail. It refuses a dirty worktree; add force=true only \
+                                if the uncommitted changes are disposable.\n\n\
+                                After the merge completes, retry `{caller_task} action=close id={}`.",
                                 req.id,
                                 worktree.path.display(),
-                                worktree.branch
+                                worktree.branch,
+                                worktree.branch,
+                                req.id,
+                                req.id,
+                                coord = format!(
+                                    "{}coordination",
+                                    crate::mcp::tools::core::guidance::caller_prefix()
+                                ),
                             )));
                         }
                     }
@@ -7436,6 +7445,7 @@ impl CasCore {
                     assignee,
                     &resolved_parent_branch,
                     task.delivery_mode,
+                    Some(&task.id),
                 ) {
                     MergeRealityOutcome::Proceed => {}
                     MergeRealityOutcome::Refuse(msg) => {
@@ -10954,6 +10964,18 @@ pub(crate) fn run_factory_branch_merge_gate_with_attribution(
         )
     };
 
+    // cas-dc1b (M03): the push step exists only for push_branch delivery.
+    let durable_step = if local_merge {
+        format!(
+            "3. Do NOT push: delivery mode is local_merge, so {factory_branch} stays \
+             local and the supervisor merges it from this checkout.\n"
+        )
+    } else {
+        format!(
+            "3. Push {factory_branch} to origin so your commit is durable: \
+             `git push origin {factory_branch}`\n"
+        )
+    };
     let remediation = if parent_is_epic_branch {
         format!(
             "Remediation:\n\
@@ -10967,8 +10989,7 @@ pub(crate) fn run_factory_branch_merge_gate_with_attribution(
              requests more changes, follow it and do not send a stale merge \
              request.\n\
              {epic_push_state_step}\
-             3. Push {factory_branch} to origin so your commit is durable: \
-             `git push origin {factory_branch}`\n\
+             {durable_step}\
              4. If a merge is still needed, message your supervisor to merge \
              {factory_branch} into {parent_branch}, including the current tip \
              and freshness qualifier (e.g. \
@@ -10979,7 +11000,7 @@ pub(crate) fn run_factory_branch_merge_gate_with_attribution(
              merge into {parent_branch} if still needed\"`). \
              They merge with \
              `git merge --no-ff {factory_branch}` on the epic branch.\n\
-             5. Once merged, retry {tool_prefix}task action=close. If this is a \
+             5. Once merged, retry `{tool_prefix}task action=close id={}`. If this is a \
              completed measured negative result whose experimental delivery \
              must not land, a registered supervisor may instead close with \
              `negative_result=true negative_result_artifact_path=<absolute-path-under-artifacts_root/task-id> \
@@ -10988,6 +11009,31 @@ pub(crate) fn run_factory_branch_merge_gate_with_attribution(
              declines an actual delivery for rework instead, the supervisor runs \
              `{supervisor_prefix}task action=request_changes id={} reason=\"state what prior work remains and what must be corrected or reverted\"`; \
              only after that verdict may the assigned worker start a fresh cycle.",
+            task.id,
+            task.id,
+            task.id,
+            tool_prefix = crate::mcp::tools::core::guidance::caller_prefix(),
+            supervisor_prefix = crate::mcp::tools::core::guidance::supervisor_prefix()
+        )
+    } else if local_merge {
+        // cas-dc1b (M03): local_merge keeps the factory branch local and the
+        // PreToolUse guard denies `git push origin`, so neither a push nor a
+        // PR is a step this worker can take. The supervisor merges the local
+        // branch; the worker asks for that merge and re-closes.
+        format!(
+            "Remediation (delivery mode local_merge — do NOT push origin; the \
+             supervisor merges your local branch):\n\
+             1. Repeatedly run `{coord} action=inbox_poll` until it returns \
+             `No unread messages`, and follow any merged or request-changes reply.\n\
+             2. Commit everything on {factory_branch}; leave it local.\n\
+             3. Ask your supervisor to merge it: `{coord} action=message \
+             target=supervisor task_id={} merge_request=true summary=\"ready to merge\" \
+             message=\"{factory_branch} tip {branch_tip} is ready for local merge into {parent_branch}\"`.\n\
+             4. Once merged, retry `{tool_prefix}task action=close id={}`. If the supervisor \
+             declines the delivery for rework, the supervisor runs \
+             `{supervisor_prefix}task action=request_changes id={} reason=\"state what prior work remains and what must be corrected or reverted\"`; \
+             only after that verdict may the assigned worker start a fresh cycle.",
+            task.id,
             task.id,
             task.id,
             tool_prefix = crate::mcp::tools::core::guidance::caller_prefix(),
@@ -11002,8 +11048,9 @@ pub(crate) fn run_factory_branch_merge_gate_with_attribution(
              every unread merge or review instruction it returns. The polling \
              claim is at-most-once, so also re-read just-delivered supervisor \
              messages in case the MCP response was lost after claiming rows.\n\
-             2. Push {factory_branch} to its remote\n\
-             3. Open a PR targeting {parent_branch}\n\
+             2. Push {factory_branch} to its remote: `git push origin {factory_branch}`\n\
+             3. Open a PR targeting {parent_branch}: \
+             `gh pr create --base {parent_branch} --head {factory_branch}`\n\
              4. Merge the PR. Cassy already fetched and measured this branch \
              against BOTH {parent_branch} and origin/{parent_branch}, so a \
              merge that has landed on either one is already counted — running \
@@ -11011,7 +11058,7 @@ pub(crate) fn run_factory_branch_merge_gate_with_attribution(
              {parent_branch} ref cannot be the cause (fetch never moves a local \
              branch ref). If you believe the work is merged, check it directly: \
              `git merge-base --is-ancestor {factory_branch} origin/{parent_branch}`.\n\
-             5. Retry {tool_prefix}task action=close. If this is a completed measured \
+             5. Retry `{tool_prefix}task action=close id={}`. If this is a completed measured \
              negative result whose experimental delivery must not land, a registered \
              supervisor may instead close with `negative_result=true \
              negative_result_artifact_path=<absolute-path-under-artifacts_root/task-id> \
@@ -11020,6 +11067,7 @@ pub(crate) fn run_factory_branch_merge_gate_with_attribution(
              declines an actual delivery for rework instead, the supervisor runs \
              `{supervisor_prefix}task action=request_changes id={} reason=\"state what prior work remains and what must be corrected or reverted\"`; \
              only after that verdict may the assigned worker start a fresh cycle.",
+            task.id,
             task.id,
             tool_prefix = crate::mcp::tools::core::guidance::caller_prefix(),
             supervisor_prefix = crate::mcp::tools::core::guidance::supervisor_prefix()
@@ -11779,14 +11827,18 @@ pub(crate) fn check_factory_branch_merge_reality(
         assignee,
         parent_branch,
         cas_types::DeliveryMode::PushBranch,
+        None,
     )
 }
 
+/// `task_id` names the task in the emitted retry command; `None` renders a
+/// `<task-id>` placeholder.
 pub(crate) fn check_factory_branch_merge_reality_with_delivery_mode(
     repo_path: &std::path::Path,
     assignee: &str,
     parent_branch: &str,
     delivery_mode: cas_types::DeliveryMode,
+    task_id: Option<&str>,
 ) -> MergeRealityOutcome {
     let factory_branch = format!("factory/{assignee}");
 
@@ -11821,6 +11873,38 @@ pub(crate) fn check_factory_branch_merge_reality_with_delivery_mode(
 
     // Branch exists + 0 commits beyond parent + no remote push evidence.
     // The worker's commits almost certainly landed on the wrong branch.
+    //
+    // cas-dc1b (M38/M03): the steps follow the delivery model. An epic
+    // parent integrates by a supervisor merge (never a PR against the epic
+    // branch), local_merge never pushes, and every command is complete.
+    let tool_prefix = crate::mcp::tools::core::guidance::caller_prefix();
+    let coord = format!("{tool_prefix}coordination");
+    let task_id = task_id.unwrap_or("<task-id>");
+    let local_merge = delivery_mode == cas_types::DeliveryMode::LocalMerge;
+    let publish_step = if local_merge {
+        format!(
+            "3. Do NOT push: delivery mode is local_merge, so {factory_branch} stays \
+             local and the supervisor merges it from this checkout.\n"
+        )
+    } else {
+        format!(
+            "3. Push {factory_branch} to origin:\n\
+                `git push origin {factory_branch}`\n"
+        )
+    };
+    let integrate_step = if local_merge || parent_branch.starts_with("epic/") {
+        format!(
+            "4. Ask your supervisor to merge it into {parent_branch} (do NOT open a \
+             PR against an epic branch): `{coord} action=message target=supervisor \
+             task_id={task_id} merge_request=true summary=\"ready to merge\" \
+             message=\"{factory_branch} is ready to merge into {parent_branch}\"`\n"
+        )
+    } else {
+        format!(
+            "4. Open a PR targeting {parent_branch} and merge it:\n\
+                `gh pr create --base {parent_branch} --head {factory_branch}`\n"
+        )
+    };
     MergeRealityOutcome::Refuse(format!(
         "⚠️ MERGE REALITY CHECK FAILED\n\n\
          task close rejected: {factory_branch} has no commits beyond \
@@ -11832,16 +11916,14 @@ pub(crate) fn check_factory_branch_merge_reality_with_delivery_mode(
          1. Check where your commits actually landed:\n\
             `git log --oneline {parent_branch} -5` and \
             `git log --oneline {factory_branch} -5`\n\
-         2. If commits are on the wrong branch, move them onto \
-         {factory_branch}:\n\
-            `git cherry-pick <sha>` or `git rebase --onto {factory_branch}`\n\
-         3. Push {factory_branch} to origin:\n\
-            `git push origin {factory_branch}`\n\
-         4. Open a PR targeting {parent_branch} and merge it.\n\
-         5. Retry: `{tool_prefix}task action=close`\n\n\
+         2. If commits are on the wrong branch, copy them onto \
+         {factory_branch} from its worktree:\n\
+            `git switch {factory_branch} && git cherry-pick <sha>...`\n\
+         {publish_step}\
+         {integrate_step}\
+         5. Retry: `{tool_prefix}task action=close id={task_id}`\n\n\
          If this task intentionally has no code commits, record an \
-         execution_note or ask the supervisor to audit and close it.",
-        tool_prefix = crate::mcp::tools::core::guidance::caller_prefix()
+         execution_note or ask the supervisor to audit and close it."
     ))
 }
 
@@ -20572,6 +20654,43 @@ mod merge_state_gate_tests {
                     );
                 }
                 other => panic!("expected Reject for stranded factory branch, got {other:?}"),
+            }
+        }
+    }
+
+    /// cas-dc1b (M03): PreToolUse denies `git push origin` for local_merge
+    /// delivery, so MERGE REQUIRED must not tell such a worker to push or
+    /// open a PR; it asks the supervisor for the local merge instead. Both
+    /// the trunk-parent and epic-parent remediations are covered.
+    #[test]
+    fn local_merge_merge_required_remediation_never_suggests_a_push() {
+        let dir = init_factory_repo("worker");
+        std::fs::write(dir.path().join("a.rs"), "// a\n").unwrap();
+        git(dir.path(), &["add", "a.rs"]);
+        git(dir.path(), &["commit", "-q", "-m", "feat: a"]);
+        git(dir.path(), &["branch", "epic/local-lane", "main"]);
+
+        let mut task = worker_task("worker");
+        task.delivery_mode = cas_types::DeliveryMode::LocalMerge;
+        let req = base_req(&task.id);
+        let _env = TestEnvGuard::with_optional_vars(&[
+            ("CAS_FACTORY_WORKER_CLI", Some("claude")),
+            ("CAS_FACTORY_SUPERVISOR_CLI", Some("claude")),
+        ]);
+
+        for parent in ["main", "epic/local-lane"] {
+            match run_factory_branch_merge_gate(&task, &req, parent, dir.path()) {
+                MergeStateGateOutcome::Reject(msg) => {
+                    assert!(msg.contains("MERGE REQUIRED"), "{parent}: {msg}");
+                    assert!(!msg.contains("git push origin"), "{parent}: {msg}");
+                    assert!(!msg.contains("Open a PR targeting"), "{parent}: {msg}");
+                    assert!(msg.contains("merge_request=true"), "{parent}: {msg}");
+                    assert!(
+                        msg.contains(&format!("task action=close id={}`", task.id)),
+                        "{parent}: retry must be a complete command: {msg}"
+                    );
+                }
+                other => panic!("{parent}: expected Reject, got {other:?}"),
             }
         }
     }
@@ -30127,6 +30246,46 @@ mod merge_reality_tests {
         }
     }
 
+    /// cas-dc1b (M38): an epic parent integrates by supervisor merge, so the
+    /// refusal must never send the worker at a PR against the epic branch,
+    /// and every command it names must be complete (retry carries `id=`, no
+    /// argument-less `git rebase --onto`).
+    #[test]
+    fn merge_reality_refusal_follows_epic_merge_model_with_complete_commands() {
+        let dir = init_repo_worker_branch_empty();
+        git(dir.path(), &["branch", "epic/wave-a"]);
+        let outcome = check_factory_branch_merge_reality_with_delivery_mode(
+            dir.path(),
+            "test-worker",
+            "epic/wave-a",
+            cas_types::DeliveryMode::PushBranch,
+            Some("cas-dc1b"),
+        );
+        let MergeRealityOutcome::Refuse(msg) = outcome else {
+            panic!("expected Refuse, got Proceed");
+        };
+        assert!(!msg.contains("gh pr create"), "{msg}");
+        assert!(!msg.contains("Open a PR targeting epic/"), "{msg}");
+        assert!(!msg.contains("git rebase --onto"), "{msg}");
+        assert!(
+            msg.contains("action=message target=supervisor task_id=cas-dc1b merge_request=true summary="),
+            "{msg}"
+        );
+        assert!(msg.contains("task action=close id=cas-dc1b`"), "{msg}");
+        assert!(msg.contains("git push origin factory/test-worker"), "{msg}");
+
+        // A trunk parent keeps the PR route, with the full command.
+        let outcome = check_factory_branch_merge_reality(dir.path(), "test-worker", "main");
+        let MergeRealityOutcome::Refuse(msg) = outcome else {
+            panic!("expected Refuse, got Proceed");
+        };
+        assert!(
+            msg.contains("gh pr create --base main --head factory/test-worker"),
+            "{msg}"
+        );
+        assert!(msg.contains("task action=close id=<task-id>`"), "{msg}");
+    }
+
     // -------------------------------------------------------------------------
     // AC3a: branch has ≥1 unmerged commit → PROCEED
     // (cas-95ce already guards this; B2 must not double-reject)
@@ -30193,6 +30352,7 @@ mod merge_reality_tests {
             "test-worker",
             "main",
             cas_types::DeliveryMode::LocalMerge,
+            None,
         );
         assert!(
             matches!(outcome, MergeRealityOutcome::Proceed),

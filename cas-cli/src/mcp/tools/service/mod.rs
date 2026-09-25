@@ -579,7 +579,7 @@ impl CasService {
             {
                 return Err(Self::error(
                     ErrorCode::INVALID_PARAMS,
-                    "spawn_workers does not deliver `prompt` to the worker; no spawn was queued. `prompt` belongs to coordination action=loop_start. Spawn without `prompt`, then send the brief with coordination action=message target=<worker-name> after registration.",
+                    "spawn_workers does not deliver `prompt` to the worker; no spawn was queued. `prompt` belongs to coordination action=loop_start. Spawn without `prompt`, then send the brief with coordination action=message target=<worker-name> summary=\"...\" message=\"...\" after registration.",
                 ));
             }
             let event_target = req.target.clone().unwrap_or_default();

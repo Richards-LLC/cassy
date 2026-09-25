@@ -94,7 +94,7 @@ const DEGRADABLE_BASE_SECTIONS: &[(&str, &str, DegradationPriority)] = &[
     ("## Helpful Memories", "memory action=recent", DegradationPriority::Context),
     ("## Related to Current Work", "search action=context", DegradationPriority::Context),
     ("## Available Skills", "skill action=list", DegradationPriority::Static),
-    ("## Connected MCP Tools", "system action=status", DegradationPriority::Static),
+    ("## Connected MCP Tools", "system action=proxy_list", DegradationPriority::Static),
     // cas-caaf: the Codex worker note is static boilerplate appended to the
     // supervisor guidance when `CAS_FACTORY_WORKER_CLI=codex`. Left protected
     // it cost ~1.1KB of a 9KB budget and pushed the GitHub issue triage into
@@ -104,7 +104,7 @@ const DEGRADABLE_BASE_SECTIONS: &[(&str, &str, DegradationPriority)] = &[
     // unchanging, and carrying no session evidence or safety assertion.
     (
         "## Codex Worker Coordination Note",
-        "skill action=get name=cas-supervisor",
+        "skill action=show id=cas-supervisor",
         DegradationPriority::Static,
     ),
     // WP2 (audit cas-1660 M30/M33): the knowledge index is a title list whose

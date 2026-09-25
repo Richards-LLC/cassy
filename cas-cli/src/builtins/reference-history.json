@@ -28,17 +28,20 @@
     ],
     "skills/cas-cli-craft/references/exemplars/before-after.md": [
       "4e888df31ddf1e621ad7ab9ede7d76621f4a6f925ebf7291de5428581b32a108",
-      "58bbd62ad6e7e04b6a7812a6f31c66f48b41567ab4cd34cf652ca65ec77e7f63"
+      "58bbd62ad6e7e04b6a7812a6f31c66f48b41567ab4cd34cf652ca65ec77e7f63",
+      "903fedd7b2b95b1aaf5927b3fa05befc490b46fb7e8a9a2f76d89a273a92e908"
     ],
     "skills/cas-cli-craft/references/exemplars/doctor-report.md": [
       "850d787e8a912e952ef345f0dace75ac45864dbb587c3dd55674dbcb39a2bf1b",
       "aea2d0e9ff44c41d01d7365c8299dca9fa5383bcaedc2b8850ac664c28c529fc"
     ],
     "skills/cas-cli-craft/references/exemplars/long-running.md": [
+      "0c956a96f81e4b4b98426264feb726c9a205389885957f5e7482f08913e8f8f8",
       "0e35739065a653e3a343e756b8687a42a57df2dc05ff5a8ef6a540343b8d228b"
     ],
     "skills/cas-cli-craft/references/exemplars/status-screen.md": [
       "c0b7ec3ee374661e1077f4c1d949337a45d45bc3c7a5a1f95484b97c62eec47d",
+      "e58bd94d352f5eeddedb50259dbe9a881b63df72528bf26349f853162974e44e",
       "f7ca47f68001afd342d70fa2748976f11e66dcbdfd02578abe487b36ec1f945f"
     ],
     "skills/cas-cli-craft/references/output-contract.md": [
@@ -46,6 +49,7 @@
     ],
     "skills/cas-cut-release/references/failure-log.md": [
       "01adf107e100b731d03129bc04627138d46cb1bcd80714d23b6d94c121d70926",
+      "0408c0a99e92e24ad9b2da1a53d0a0dce0fce6a759d51273c431206073757c27",
       "11c45dae553a929aa30499764890fce418d6ad272b39af1b33ff500ed0f8209e",
       "138897585718151746e89a914d89a6f53a3373adaffa9f583e63beff944d91d3",
       "223930195c28196d552886fbe96e5445bc780ff262026f733d2d3c41fed0b8bb",
@@ -107,24 +111,6 @@
       "80f2925c1ed46aa9f7680355684ca7813d1ad16d3123fea2432781ac9cd905e0",
       "b88751483ecc8b3e2e0cf8cfbd232905b275f2638653f21b2ef632f3d81e0fd9",
       "d58991d5b9a21e5b5720577eabd30b3b02c8bf33445520a4b09ddad380626678"
-    ],
-    "skills/cas-html-reports/references/examples/before-after/rubric-review-after.html": [
-      "36d334edb0d25ee07aca6a55c91cf72e6d04b59e548e1660a452d20334c26e6b",
-      "cf3c84dd46f63005c57b67c480cd522e2e8d75be9f703b85332176824968e40c"
-    ],
-    "skills/cas-html-reports/references/examples/before-after/rubric-review-before.html": [
-      "09b3353e5a4a8077422c561a88e893ca0b3384a5bcc2dc74be7fcd6b6321b038",
-      "1563f22a9fa56177c1932771eaa71defb06ee0b5e7ed972c672959bfe287ec49",
-      "208017d8a09371f446d705d5dfcd371689de4cf189b95250ab9369d73ce515fb",
-      "8e4f57005d6a8edc2b277f121ddb76c5ff02518ab5ea68c087a48ec30ceb7f17",
-      "a9f6f594190eb759b11a238f5fa599c8d48a6fc3db67905f44feb145ea4f9920",
-      "f485d50227eaa45a4191cde87485e9df5aad7e8da4a06666fa2c68d0d49aa24b"
-    ],
-    "skills/cas-html-reports/references/examples/before-after/rubric-review.brief.md": [
-      "7c417a836cc265ff809b8fa5a54fcc24debf837741c6406ebb839d66cd31f6b4"
-    ],
-    "skills/cas-html-reports/references/examples/before-after/rubric-review.why.md": [
-      "9960262f6266130e391f3356dc36395163bcdacb89b439b4cf19836e28a75f2a"
     ],
     "skills/cas-html-reports/references/examples/benchmark-small-multiples.html": [
       "84ef58dd5a39bb44fd3d58a45e5470d0279a784f82a25eeacc726c6057151ddb",
@@ -248,6 +234,7 @@
       "ddcd665359b281748111ab2e6f599d2d7ae9387301fc3dd8a46898ce88c008cc"
     ],
     "skills/cas-nuxt-playwright/references/auth-fixture-template.md": [
+      "3230edda6cd25bc1c76eb0c379b54093f74f9b1c027bcc7635da8333f0a47d01",
       "9adc8d1e4ce1e1f382870861d9a1da710d073b50482ec6033e2d7c9161a18a83",
       "b74b96068a8e21c2f394b2d564842c79c669dfc339238529cc0c50d2710e70d8",
       "d9437509594c27626f8d71ef2c39c7391b1fdb2ec68ab2109fb5e17de23170dd"
@@ -264,6 +251,7 @@
     ],
     "skills/cas-qa-craft/references/exemplar.md": [
       "01e262c379080a2f4676064091cb3c8b34d278337eab8a17626053408e7d82be",
+      "65deca3f0ee06b6358c6c392565fa2117473037016fcb30c9345ea73e471daa5",
       "c901c898d9e29eea66d970c20668762c291f43a1cb6158eaa4b699ea83e7fe55"
     ],
     "skills/cas-qa-craft/references/independent-pass.md": [
@@ -319,7 +307,8 @@
       "af446e89c3ea738e100e044bbc917ba41a7107ea71aabcfc9c3eed6fdbf1f62f",
       "b055985542773cd41495335b5573fef2f3a43fdfba756627ebdcf83535020d19",
       "b9aef7a6305ec9e3638e5f1a01839b7366ccc5707e9032d3f37276db5f64d5ff",
-      "c42eb0252f43cc3bf3056fa1de42853876dd9c3c6d1a59ac9abfc840349e5293"
+      "c42eb0252f43cc3bf3056fa1de42853876dd9c3c6d1a59ac9abfc840349e5293",
+      "ebd1231bd9fdfb6424bc4eed3bf1caab4eb83cfc7ce72ad5650e4b8e7bdd23d6"
     ],
     "skills/cas-supervisor/references/intake.md": [
       "11f13336393cd11670b82aa6fcae2dd091ee4f5f5e1414b4d52a2bdc4925e9c9",
@@ -612,7 +601,8 @@
       "f847fd0dc15bc47004edb86b16e5e7697bb44a4a2db93f42612270a687fa8df1"
     ],
     "skills/cas-supervisor/references/reporting-and-routing.md": [
-      "6742840251a359a2bd884278df0ce3ba4dfe0df814e2e95a9a510d6d4d3a826e"
+      "6742840251a359a2bd884278df0ce3ba4dfe0df814e2e95a9a510d6d4d3a826e",
+      "9b0c603befb548956ccb8eef4aa0e79b1f0e6060a178521aed6c40f00eb00d2b"
     ],
     "skills/cas-supervisor/references/worker-recovery.md": [
       "186194057b9818062d7cf5e6a7eae9bcea8914505b95f984d55818044b11cd8d",
@@ -1028,12 +1018,14 @@
       "5b939b73e5dfae3de49e5b488f030b2e927828d38643c04d225d810400851cee"
     ],
     "skills/design-spec/references/petrastella-design-language.md": [
+      "9781834a7b6839f16444eb3c23dee1c33c7e011f47d285383c04e2827f71eed2",
       "997b4bf17927193b81bbf807750a8f6dd7d9160c79d5aa234337386a089fbd12",
       "d328055725ea9e7808971a2d9ac0850e02ff05a3773b53541befa5eb932aa483",
       "f2ec54d015b063af278f8bf69a34b0f96eb65c442bdc3380019d75e55c802316"
     ],
     "skills/fallow/references/cli-reference.md": [
       "7a4944f1a5ced9b9f6599da03c8ef6ebd6268c7bbdc32a27adfa6d77db0b037d",
+      "808dd02c08c7c97beafe429e473f5359facab049c92657b0835147c69e2fcf42",
       "a960a82368b7d01e43052548ee70fd8277aa952906359e4ee56db1333a44ef7e"
     ],
     "skills/fallow/references/gotchas.md": [
@@ -1066,11 +1058,14 @@
       "85b3a504dd949cb187c157deaac4018a36226706200f209eda0034002343a3d1",
       "8dca3b72a8417238f13a2d44038d645812898a24c26eb5845f5897d3f95bbb0f",
       "9f7b5fb173f9c4423c49a306933fff6c7cbf1faf23a194773ab2bb8d1f8cc797",
+      "a340c9911573616d440ba190916940228ce117b10561960ddfcc4329a31c0776",
       "a9b31947652b1c5ddc61fd614260a94c1fa4289a75d3cf53102323a6d10e1939",
       "ab9ba3b3a3eb171373f1b6f1df544e0e074ddcb9cc5329a481eea9640d78d8b1",
       "b4fb68231cb6ba66f571ecec9eacdf79a995472e50da3c9d986dd00665b6acff",
       "ba8bb4a19eff946596246d942f90be162a108875d1100a04e23e3234eae23902",
       "beb0d02f593af2b75a9debbb60889783da123c00a2ee950d6fa53c826e228afc",
+      "e2183d6d214dcc30d84987dbb6c5961cd9f252a35654b157e018b1966cd274db",
+      "e281075f414b1ee24069dd63e3622c0084d5f26014a0d543a9bc93a370c5a7d5",
       "e7539702d3fe07ed1b800fe5c0f142861610fb83790a2bd4da25de5280794f22",
       "ea406e08e61c2b2b7ad6e70169fa3e5f29950ff8d0dcc64f601256eb1b7f9e43"
     ],

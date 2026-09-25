@@ -9010,7 +9010,14 @@ This is the body content."#;
                 .unwrap_or_else(|| panic!("{label} cas-cut-release skill is not registered"));
             assert!(is_managed_by_cas(skill.content));
             assert!(skill.content.contains("description: Use when"));
-            assert!(skill.content.contains("references/failure-log.md in full"));
+            // Only the manual:* hazards are read up front; the rest of the
+            // log is enforced by gate rows and grepped on a failure.
+            assert!(
+                skill
+                    .content
+                    .contains("`manual:*` entries in `references/failure-log.md`")
+            );
+            assert!(!skill.content.contains("failure-log.md in full"));
             assert!(skill.content.contains("release-gate.sh --learn"));
             assert!(skill.content.contains(&format!("{prefix}memory")));
             for marker in [

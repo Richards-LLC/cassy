@@ -240,8 +240,12 @@ pub(crate) fn neon_production_write_denial(
     Some(format!(
         "🚫 NEON PRODUCTION WRITE: this {tool_name} call carries a write statement ({keyword}) and resolved to {resolved}. \
          Workers may write only to a non-production branch.\n\n\
-         Create or pick a branch (create_branch / list_branches on the Neon MCP server), then pass its id as `branchId`. \
-         Read-only statements (SELECT, SHOW, EXPLAIN) need no branch and are not blocked."
+         Workers cannot create Neon branches. Ask the supervisor for one: \
+         `{coord} action=message target=supervisor blocker=true summary=\"db branch for <task-id>\" message=\"...\"`; \
+         its db_branch_create writes DATABASE_URL to .env.cas-db in your worktree. \
+         If a non-production branch is already recorded for this task, pass its id as `branchId`. \
+         Read-only statements (SELECT, SHOW, EXPLAIN) need no branch and are not blocked.",
+        coord = format!("{}coordination", crate::harness_policy::own_tool_prefix()),
     ))
 }
 
@@ -328,6 +332,13 @@ mod tests {
             "{reason}"
         );
         assert!(reason.contains("(INSERT)"), "{reason}");
+        // cas-90e8: the remedy is one a worker can take — a blocker message
+        // to the supervisor, who owns db_branch_create — never a branch create.
+        assert!(
+            reason.contains("coordination action=message target=supervisor blocker=true summary="),
+            "{reason}"
+        );
+        assert!(!reason.contains("create_branch"), "{reason}");
 
         let prod = serde_json::json!({"projectId": "proj-1", "branchId": "br-prod", "sql": "DELETE FROM t"});
         let reason = neon_production_write_denial(tool, Some(&prod), &roots)

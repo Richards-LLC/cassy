@@ -15,9 +15,8 @@ The most common close rejection: your `factory/<name>` branch has commits not ye
    ```
    Do **NOT** `gh pr create --base epic/...` — epic branches are supervisor-local; the ref doesn't exist on origin and the call always fails.
 5. **Parent is `main`/`master`/`staging`**: push and complete the project's PR/merge flow, then retry close.
-6. **Guard still counts unmerged commits after a confirmed merge** → squash-merge SHA drift makes already-merged commits look missing. **Clear it yourself first**: re-close with `commit_receipt=<sha>` naming the commit that carries this task's work (cas-e74c). Cassy resolves the SHA, checks it has a non-empty diff and is reachable from the parent branch (or `origin/<parent>`), and treats that as the delivery evidence — close proceeds with a note even if the lane branch still holds other tasks' commits. Only if the receipt is rejected, send the supervisor the exact guard text *and* the rejection reason (they reset the stale branch ref). Do not retry-loop against the guard.
-   - For a fully transactional handoff, `close` also accepts `completion_receipt=<json>` (`WorkerCompletionReceiptInput`: `task_id`, `worker_agent_id`, `repo_selector`, `source_branch`, `commit_sha`, `merge_base_sha`, `target_branch`, `target_sha`, `proof_reference`, `scope_summary`). Cassy revalidates every field against registered agent state and live Git, persists an immutable delivery transaction, releases your lease, and parks the task in `awaiting_merge`. It is opt-in — omitting it leaves close unchanged. See [close-gate.md](close-gate.md).
-7. **Never route around it** with `action=update status=closed` plus a hand-written `verification action=add` — that forges the verification record and the audit trail. Rejection loops are a supervisor conversation, not a workaround opportunity.
+6. **Guard still counts unmerged commits after a confirmed merge** → squash-merge SHA drift. Clear it yourself first: re-close with `commit_receipt=<sha>` naming the commit that carries this task's work. Only if the receipt is rejected, send the supervisor the exact guard text *and* the rejection reason. Do not retry-loop against the guard. `completion_receipt` is accepted only after your current tip is merged. Both receipts are specified in [close-gate.md](close-gate.md) "Delivery receipts".
+7. **Never route around it** with `action=update status=closed` plus a hand-written verification record; see [close-gate.md](close-gate.md) "Never bypass the close path".
 
 ## Close requires task-scoped verification
 
@@ -41,7 +40,7 @@ If your output degrades to garbled multi-language text, or you find yourself rep
 
 Message supervisor immediately: "Context exhausted, need respawn." Do not attempt to continue working.
 
-Prevention lives in [discipline.md](discipline.md): report headroom in every milestone note, and checkpoint (commit + push + handoff note + respawn request) before you reach this state — never work into auto-compaction.
+Prevention: below 20 % headroom, checkpoint (commit, push or park, handoff note, respawn request) before you reach this state.
 
 ## Worktree Issues (Isolated Mode)
 
@@ -50,32 +49,19 @@ Prevention lives in [discipline.md](discipline.md): report headroom in every mil
 ln -s /path/to/main/repo/vendor/<submodule> vendor/<submodule>
 ```
 
-**Build errors in code you didn't touch**: Triage before reporting to supervisor.
+**Failures in code you didn't touch**: Triage before reporting to supervisor. Do not build or test Rust to triage; the supervisor's assembly build covers Rust.
 
-1. **Merge conflict from another worker?** Rebase onto the **local** branch the supervisor named at assignment (`main`, `master`, or `epic/<slug>`):
-   ```bash
-   git stash && git rebase <branch> && git stash pop
-   ```
-   Do **not** rebase onto `origin/<branch>`. In factory mode the supervisor merges worker branches into the local branch directly, and epic branches are local-only (cas-c631) — `origin/main` is stale and `origin/epic/...` does not exist. Same rule as [details.md](details.md) "Syncing". If conflicts appear in files you own, resolve them; if in files you don't own, report to supervisor.
+1. **Merge conflict from another worker?** Checkpoint uncommitted work as a commit, then rebase onto the **local** branch the supervisor named at assignment (`main`, `master`, or `epic/<slug>`); see [details.md](details.md) "Syncing". Do **not** rebase onto `origin/<branch>`: the supervisor merges into the local branch, so `origin/main` is stale and `origin/epic/...` does not exist. If conflicts appear in files you own, resolve them; if in files you don't own, report to supervisor.
 
 2. **Missing dependency or new module?** Check if another worker added dependencies, diffing against that same local branch:
    ```bash
    git diff <branch> -- Cargo.toml Cargo.lock package.json pnpm-lock.yaml
    ```
-   If new crates/packages were added, rebase onto it and rebuild.
+   If new crates/packages were added, rebase onto it.
 
-3. **Environment issue?** Verify tool versions and env vars match what the project expects:
-   ```bash
-   rustc --version && cargo --version  # Check Rust toolchain
-   node --version                       # Check Node if applicable
-   ```
-
-4. **Reproducible on the base branch?** Test whether the failure is pre-existing:
-   ```bash
-   git stash && git checkout <branch> && cargo build  # or npm run build
-   ```
+3. **Non-Rust failure: reproducible on the base branch?** Commit your work first, then `git switch --detach <branch>`, run the same non-Rust command, and `git switch -` back.
    - If it fails there too → report to supervisor as **pre-existing** (not your blocker).
-   - If it passes there → the conflict is between your changes and another worker's recent commit. Report as **cross-worker conflict** with both commit hashes.
+   - If it passes there → report a **cross-worker conflict** with both commit hashes.
 
 Only report to supervisor after completing at least steps 1–2. Include the error output and which step identified the cause.
 
@@ -136,7 +122,7 @@ If the supervisor hasn't responded after 5 minutes on any blocking question:
 
 If the supervisor reassigns your current task to another worker:
 
-1. **Commit or stash WIP immediately** — do not lose work in progress.
+1. **Commit WIP immediately** (`git add <paths> && git commit -m "WIP: <task-id> handoff"`) — do not lose work in progress, and do not use `git stash`: the stash stack is shared by every worktree.
 2. **Post progress notes** summarizing what's done and what's left:
    ```
    mcp__cas__task action=notes id=<task-id> notes="WIP: <what's done>, remaining: <what's left>" note_type=progress
@@ -147,121 +133,3 @@ If the supervisor reassigns your current task to another worker:
 ## Outbox replay
 
 Your outbox may replay stale messages after task state changes (delivery-layer artifact). Before re-sending a blocker or completion notification, re-check task state with `mcp__cas__task action=show` — the issue may already be resolved.
-
-## A build that looks stuck: killed vs wedged
-
-These are different failures with the same symptom (no output, no progress), and
-telling them apart takes about ten seconds. **Do not wait it out** — a wedged
-build never recovers on its own, and one was observed sitting for 57 minutes.
-
-**First, read the build log, not the clock.** Cargo already reports a killed
-child clearly:
-
-```
-error: could not compile `foo` (signal: 9, SIGKILL: kill)
-```
-
-If you see that, the build **failed** — it did not hang. Something killed the
-compiler. Re-run it. If it recurs, find out who is sending the signal before
-blaming the machine.
-
-**If there is no such line and nothing is moving, inspect the process:**
-
-```bash
-ps -eo pid,etime,time,stat,wchan:20,comm | grep -E "rustc|cargo"
-```
-
-Read two columns together:
-
-| `TIME` (CPU used) | Meaning |
-|---|---|
-| climbing | It is compiling. Slow ≠ stuck. Leave it alone. |
-| ~0:00 with large `ETIME` | Wedged. It has been alive for minutes and burned no CPU. |
-
-Confirm before concluding it is a resource problem:
-
-```bash
-grep oom_kill /proc/vmstat        # 0 => the kernel has killed nothing, ever
-cat /proc/pressure/memory         # "full avg10" = % of time all tasks stalled
-```
-
-`oom_kill 0` is decisive: whatever happened, it was not the OOM killer. Do not
-report memory exhaustion without that counter being non-zero.
-
-**Orphans wedge the next build.** Killing a `cargo` leaves its `rustc` children
-adopted by init. They keep running, can hold locks, and have been seen blocking
-a later build in a *different* `CARGO_TARGET_DIR`. If a build wedges right
-after you killed a previous one, that is the first thing to check:
-
-```
-mcp__cas__coordination action=gc_report
-```
-
-Orphaned `rustc` shows up as reapable, annotated "build tool with no parent to
-report to".
-
-**Reporting is yours; cleanup is the supervisor's.** `gc_report` is read-only —
-run it freely. `gc_cleanup force=true dry_run=false` is **not** scoped to your
-worktree: it sweeps every worker's worktree on the host, because all workers run
-as the same user. Ask the supervisor rather than running it yourself, and say
-which pid you want gone. A worker clearing its own wedge with a host-wide kill
-is how one worker's recovery becomes another worker's mystery build failure.
-
-**Never select build processes by name to kill them.** `pkill -9 -f rustc` and
-`pgrep -x rustc` match another worker's live compile on a shared host, and you
-will destroy their build without knowing — this has actually happened here. The
-only pid you may signal directly is one you captured yourself from a process you
-started (`$!`), and only after confirming its command line.
-
-Note what the fingerprint does and does not buy you: `gc_cleanup` revalidates a
-`/proc` start-time fingerprint before signalling, so it cannot hit a *recycled*
-pid — but that proves identity, not that the process is unwanted. It is a
-protection against killing the wrong process, not against killing the right
-process at the wrong time.
-
-## A test run that looks hung: wedged test binaries (GH #114)
-
-The same fingerprint shows up one level down, in the test binaries `cargo test`
-runs. A parked binary from an earlier run holds the lock the next run wants, so
-the *new* suite prints nothing and looks like a hung test. It is not hung — it
-is blocked behind a corpse. This has been seen twice in one epic; one case
-burned an hour before anyone looked at the process table, and once the stale pid
-was reaped the "hung" suite finished in **0.11s**.
-
-**Look at the test binaries, not at cargo:**
-
-```bash
-ps -eo pid,ppid,etime,time,stat,wchan:20,args | grep -F "/target/debug/deps/"
-```
-
-Read the same two columns as for a wedged build, plus `wchan`:
-
-| `TIME` (CPU used) | `WCHAN` | Meaning |
-|---|---|---|
-| climbing | anything | The suite is running. Slow ≠ stuck. Leave it alone. |
-| ~0:00 with large `ETIME` | `futex_do_wait` | Wedged. Alive for minutes, no CPU burned, parked on a futex. |
-
-**Confirm it has no children before calling it dead:**
-
-```bash
-pgrep -P <pid>      # no output => nothing is running underneath it
-```
-
-A wedged test binary is childless. If it *does* have children, it is a live
-suite forking helpers — leave it alone and re-read `TIME`.
-
-**Then reap by pid, and only by pid.** `gc_report` is read-only and yours to
-run; cleanup is the supervisor's (`gc_cleanup` is host-wide, not scoped to your
-worktree), so name the exact pid you want gone:
-
-```
-mcp__cas__coordination action=gc_report
-```
-
-**Never select test binaries by name.** `pkill -f cas-` or `pkill -f
-"target/debug/deps"` matches another worker's live test run on this shared host
-— every worker runs as the same user, and the deps binaries have identical names
-across worktrees. This is the same rule as for `rustc` above, and it has the
-same consequence: your recovery becomes someone else's mystery failure. The only
-pid you may signal directly is one you captured yourself (`$!`) from a process
-you started, and only after confirming its command line.

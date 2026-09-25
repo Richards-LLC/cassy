@@ -46,15 +46,15 @@ from the close verifier or substitute the children's ledgers for the epic walk.
    ledger; list every failed check, row ID, and observed count/value in the
    verification summary, then stop.
 
-| Check | REJECT when |
-| --- | --- |
-| Required cells | Any data row has a blank `verdict` or `label` cell. |
-| Source inference | A row has `label=source-inferred` and `verdict=PASS`. |
-| Failed-cell ownership | A `verdict=FAIL` row has no non-blank `cas-*` defect task ID. |
-| Forbidden verdict | The standalone word `partial` occurs in any verdict cell, case-insensitively. |
-| Matrix breadth | Fewer than three data rows exist after the demo statement's happy-path row (the first matrix row). |
-| Headline counts | Header counts for `cells`, `PASS`, `FAIL`, or `NOT EXERCISED` do not equal the parsed row totals. |
-| PASS evidence | A `PASS` row has no evidence path, or its referenced capture is absent or unreadable. |
+   | Check | REJECT when |
+   | --- | --- |
+   | Required cells | Any data row has a blank `verdict` or `label` cell. |
+   | Source inference | A row has `label=source-inferred` and `verdict=PASS`. |
+   | Failed-cell ownership | A `verdict=FAIL` row has no non-blank `cas-*` defect task ID. |
+   | Forbidden verdict | The standalone word `partial` occurs in any verdict cell, case-insensitively. |
+   | Matrix breadth | Fewer than three data rows exist after the demo statement's happy-path row (the first matrix row). |
+   | Headline counts | Header counts for `cells`, `PASS`, `FAIL`, or `NOT EXERCISED` do not equal the parsed row totals. |
+   | PASS evidence | A `PASS` row has no evidence path, or its referenced capture is absent or unreadable. |
 
 4. If the REJECT table passes, open every capture referenced by a `PASS` row
    with the available image-capable or terminal-capture reader. Judge the

@@ -68,8 +68,9 @@ pub fn halt_blocks_task_work_message(tool: &str) -> String {
     format!(
         "WORK HALTED: supervisor issued an urgent stop. \
          Refusing `{tool}` until you respond to that instruction. \
-         Send `coordination action=message target=supervisor summary=\"...\" message=\"...\"` with your acknowledgement or question, then retry `{tool}`. \
-         If you cannot respond, call `task action=mine` and only start a task that is assigned to you."
+         Send `{prefix}coordination action=message target=supervisor summary=\"...\" message=\"...\"` with your acknowledgement or question, then retry `{tool}`. \
+         If you cannot respond, call `{prefix}task action=mine` and only start a task that is assigned to you.",
+        prefix = crate::mcp::tools::core::guidance::caller_prefix(),
     )
 }
 

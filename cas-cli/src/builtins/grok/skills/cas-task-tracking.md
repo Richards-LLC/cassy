@@ -10,7 +10,8 @@ Use `cas__task` instead of built-in TodoWrite. Cassy tasks persist across sessio
 
 ## Core Workflow
 
-1. **Create**: `cas__task action=create title="..." description="..." priority=2`
+1. **Create**: `cas__task action=create title="..." description="..." priority=2 risk=none`
+   — `risk` is required for `task`, `bug` and `feature` types (`blast-radius`, `platform`, `concurrency` or `none`); `risk=blast-radius` also needs `proof_targets`.
 2. **Start**: `cas__task action=start id=<task-id>`
 3. **Progress**: `cas__task action=notes id=<task-id> notes="..." note_type=progress`
 4. **Close**: `cas__task action=close id=<task-id> reason="..."`
@@ -19,15 +20,13 @@ Use `cas__task` instead of built-in TodoWrite. Cassy tasks persist across sessio
 
 - **Ready tasks**: `cas__task action=ready` — unblocked, actionable work
 - **My tasks**: `cas__task action=mine` — tasks assigned to you
-- **Blocked**: `cas__task action=list status=blocked`
+- **Blocked**: `cas__task action=blocked` — dependency-blocked work; `action=list status=blocked` shows only tasks explicitly set to blocked
 - **Add dependency**: `cas__task action=dep_add id=<task> to_id=<blocker> dep_type=blocks`
 
 ## Note Types
 
-`progress`, `blocker`, `decision`, `discovery`, `question` — use the right type so notes are meaningful in context.
+`progress`, `blocker`, `decision`, `discovery`, `question`, `platform_proof` — use the right type so notes are meaningful in context. The close gate reads a `platform_proof` note for `risk=platform`.
 
 ## Valid Actions
-
-The list below is the dispatch order for `cas__task`; keep it synchronized with the live service.
 
 **Valid `cas__task` actions** (exact list — do not invent others): `create`, `proposal_inbox`, `proposal_accept`, `proposal_reject`, `proposal_reconcile`, `show`, `get`, `update`, `start`, `close`, `cancel`, `reopen`, `request_changes`, `delete`, `list`, `ready`, `blocked`, `notes`, `dep_add`, `dep_remove`, `dep_list`, `claim`, `release`, `reset`, `transfer`, `available`, `mine`.

@@ -1,8 +1,10 @@
 # Form vocabulary
 
-Choose the form by the reader's task, not by the data's shape. Tables and cards are the last
-resort, not the default. Construction notes assume the Petrastella tokens; every figure also
-carries a claim-title, source line, text alternative, and data table (`cas-dataviz`).
+This is the one form table for reports, figures, and screens; `cas-html-reports` and
+`cas-dataviz` point here rather than keeping their own. Choose the form by the reader's task, not
+by the data's shape. Tables and cards are the last resort, not the default. Construction notes
+assume the Petrastella tokens; every figure also carries a claim-title, source line, text
+alternative, and data table (`cas-dataviz`).
 
 ## Forms
 
@@ -22,6 +24,13 @@ carries a claim-title, source line, text alternative, and data table (`cas-datav
 | **Callout rail** | see what changed since last time | a single column of eyebrow + one-line items on surface-hero beside the main figure | it becomes a second navigation |
 | **Before/after pair** | judge a change in the artifact itself | same data, two renders stacked or side by side, each with its rubric scores | the "before" is a straw man |
 | **Ruled pricing** | compare plans | a ledger where rows are capabilities and columns are plans; the recommended column carries a verdict left rule | it becomes three cards with buttons |
+| **Line chart** | follow a value over time | time left to right, direct end labels, area fill only for a single series | two y-axes (split or index to a baseline instead) |
+| **Sorted bars** | rank or compare magnitudes | horizontal bars sorted by value, starting at zero, value at the bar end | the axis is truncated (plot the variance instead) |
+| **Stacked bar** | see the composition of a whole | usually horizontal, at most 5–6 segments, the tail merged into "Other" | segments must be compared across bars (use small multiples) |
+| **Signed variance bars** | see the gap against a named base | bars centred on a zero line, sign printed, base named in the title ("vs plan") | two value bars are drawn for the reader to subtract |
+| **Heatmap** | scan a matrix of two categories | one-hue magnitude scale with values printed or tabled beside it | a rainbow scale, or exact values matter more than pattern (table it) |
+| **Distribution** | see spread, not just the average | histogram or box plot, n printed | a bar of means alone |
+| **Scatter** | judge a relationship between two measures | one dot per case, the correlation stated in text, outliers labelled | a trend line is drawn without stating its fit |
 
 ## Anti-defaults
 

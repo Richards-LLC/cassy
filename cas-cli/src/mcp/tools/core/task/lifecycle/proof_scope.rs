@@ -299,13 +299,17 @@ pub(crate) fn guard_task_proof_scope(
         Ok(true) => {
             let remediation = if matches!(operation, ProofScopeOperation::ParentLink) {
                 format!(
-                    "Ask a registered supervisor to run `task action=request_changes id={} reason=\"re-link task to epic after proof scope changed\"`, then retry `task action=dep_add ... dep_type=parent`.",
+                    "Ask a registered supervisor to run `{}task action=request_changes id={} reason=\"re-link task to epic after proof scope changed\"`, then retry `{}task action=dep_add id={} to_id=<epic-id> dep_type=parent`.",
+                    crate::mcp::tools::core::guidance::supervisor_prefix(),
+                    task.id,
+                    crate::mcp::tools::core::guidance::caller_prefix(),
                     task.id
                 )
             } else {
                 match close_authoritative_task_proof_dispatch(cas_root, &task.id) {
                 Ok(Some(_)) => format!(
-                    "To start a fresh reviewed scope without closing, ask a registered supervisor to run `task action=reopen id={} reason=\"invalidate approved proof before rework\"`; then start the task and retry the update.",
+                    "To start a fresh reviewed scope without closing, ask a registered supervisor to run `{}task action=reopen id={} reason=\"invalidate approved proof before rework\"`; then start the task and retry the update.",
+                    crate::mcp::tools::core::guidance::supervisor_prefix(),
                     task.id
                 ),
                 _ => "Complete or explicitly recover the active exact proof cycle before changing task scope.".to_string(),

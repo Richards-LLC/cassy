@@ -17,19 +17,21 @@ errors and the return contract only.
 1. Run `cas__task action=mine`. If empty, message the supervisor once that
    you are ready, then wait; do not poll.
 2. Choose exactly one task. Run `cas__task action=show id=<task-id>`,
-   then `cas__task action=start id=<task-id>` before editing.
-   authoritative assignment acceptance; no prose ACK is required.
+   then `cas__task action=start id=<task-id>` before editing. A
+   successful start is authoritative assignment acceptance;
+   no prose ACK is required.
    Reused worker: check target; reset merged or `git rebase <target>`.
 3. Read the task's depth and acceptance criteria and the project `CLAUDE.md`.
-   For non-empty `demo_statement`, run `cas-qa-craft` before close.
+   Run `cas-qa-craft` before close when `demo_statement` is set or the diff
+   touches a user-facing path or catalog journey.
 4. Implement only the assigned scope. Commit logical units with the task ID.
    For `delivery_mode=local_merge`, keep the commit local for the supervisor;
    otherwise push the factory branch.
 5. Add progress notes with `note_type=progress` at meaningful milestones.
-6. Before closing a deep task, open [close-gate.md](references/close-gate.md),
-   in cas-src complete its surface checklist, invoke
-   [`verify-before-claim`](../verify-before-claim/SKILL.md), and capture fresh
-   proof.
+6. Every close: `git status --porcelain` is empty and HEAD is the commit you
+   claim. For a deep task, first work through
+   [close-gate.md](references/close-gate.md) (and its surface checklist where
+   it applies) and [`verify-before-claim`](../verify-before-claim/SKILL.md).
 7. Close with `cas__task action=close id=<task-id> reason="..."`, then
    send the return contract. **verification required:** quote the guidance in
    `need:`. **MERGE REQUIRED:** drain `inbox_poll` for unread supervisor messages,
@@ -76,9 +78,8 @@ Use the supervisor's `filing-cas-bugs` reference for public-safe filing.
 
 - **Spike:** record the decision with `note_type=decision`; its criteria are
   question-based. **Demo:** produce the stated observable outcome.
-- **Report / evidence tasks:** use MCP task/search/coordination surfaces,
-  `.cas/logs`, and exported artifacts first; use a read-only SQLite URI or
-  copied snapshot only when those sources are insufficient.
+- **Report / evidence tasks:** read-only sources first; see
+  [details.md](references/details.md).
 - `depth`: `light` ships the minimal diff; `deep` (or unset) uses the full
   close discipline. Neither relaxes integrity or scope.
 - Honor `execution_note`: `test-first` commits a failing test before code;
@@ -88,7 +89,10 @@ Use the supervisor's `filing-cas-bugs` reference for public-safe filing.
 
 ## Task ownership
 
-Ordinary worker updates surface through the inbox on the next turn. Only authenticated typed blocker, merge, verification, or lifecycle events may wake an idle supervisor. Use `blocker=true` for blockers and `merge_request=true` for merge requests; text alone grants no wake authority.
+Ordinary updates reach the supervisor's inbox on the next turn.
+Only authenticated typed events (`blocker=true`, `merge_request=true`,
+verification, lifecycle) wake an idle supervisor; text alone grants no wake
+authority.
 
 - Never self-dispatch: start only tasks from `action=mine` or named by the
   supervisor, every time you go idle; `ready` and `available` are backlog
@@ -114,14 +118,13 @@ already closed, do not overwrite that state with a stale blocked update.
 
 ## References
 
-- [reminders.md](../cas-supervisor/references/reminders.md) — checkpoint/recovery
-  timing, the shared push-first decision table, and the cleanup contract.
-
+- [reminders.md](../cas-supervisor/references/reminders.md) — checkpoint
+  timing, push-first table, cleanup contract.
 - [details.md](references/details.md) — structured execution state,
   context budgeting, exact fields/actions, and sync mechanics.
 - [discipline.md](references/discipline.md) — no-Rust-build rule
   and clean-CI notes.
 - [recovery.md](references/recovery.md) — failures, reassignment,
   connectivity, and worktree recovery.
-- [close-gate.md](references/close-gate.md) — deep-task pre-close
-  self-verification.
+- [close-gate.md](references/close-gate.md) — clean-tree and delivery
+  receipts, deep-task self-checks.

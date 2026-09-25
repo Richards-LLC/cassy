@@ -14,20 +14,10 @@ argument readable, not the goal. Within a report and across successive editions,
 color, a scenario keeps its fill, a status keeps its glyph and position, and a reader who learns the
 notation once never relearns it. A report that satisfies this constraint and has no hero has failed.
 
-## Form vocabulary
+## Form
 
-Take the form from `cas-ui-craft` and write the reason in the brief. The forms a report reaches for
-most, with the reader task each one fits:
-
-| Reader task | Form | The reason it fits |
-| --- | --- | --- |
-| See a claim next to what contradicts or supports it | Ledger: two aligned columns per row, a verdict stamp in the gutter | Contradiction is spatial; the eye reads across |
-| Compare several similar series | Small multiples on one shared scale | Differences carry the work, not chart furniture |
-| Show change between two states | Slope or dumbbell | The delta is the mark, and direction is the shape |
-| Show when things happened relative to each other | Annotated timeline | Causality is an ordering claim |
-| Show a count as parts of a whole | Waffle or dot plot | Every unit is visible; nothing is hidden in a wedge |
-| Carry the one sentence that must survive | Pull-quote set in the display face | Typographic weight is hierarchy |
-| Attach a caveat to the evidence it qualifies | Marginal note beside the row or mark | Proximity beats a footnote |
+Choose every form from `cas-ui-craft/references/form-vocabulary.md`, the one form table, and write
+the reason in the brief. The rules below cover how a chosen form is drawn.
 
 ## Scenario encoding (actual / plan / forecast)
 
@@ -65,18 +55,8 @@ For any comparison, the delta is the message.
 - Time runs left to right. Categories are ordered by value unless a natural order (time, severity,
   stage) exists — then use it, consistently.
 
-## Chart choice
-
-| Message | Use |
-| --- | --- |
-| Value over time | Line (continuous) or column (discrete periods) |
-| Structure / share of a whole | Stacked bar, ≤5–6 segments; merge the tail into "Other" |
-| Ranking across categories | Horizontal bars, sorted |
-| Variance vs a base | Signed bars on a zero line |
-| Distribution | Histogram or box plot; never a bar of means alone |
-| Two-variable relationship | Scatter, with the correlation stated in text |
-
-If the message is a single number, do not draw it — write it large as a KPI card with its variance.
+If the message is a single number, do not draw it: write it large in a stat strip with its
+variance.
 
 ## Legends and labels
 
@@ -101,13 +81,15 @@ If the message is a single number, do not draw it — write it large as a KPI ca
 - Large tables: keep the header visible (`position: sticky` on screen, `table-header-group` in print)
   and cap what is shown, linking to the full data file rather than paginating with JS.
 
-## KPI cards
+## Stat strip
 
-Every card carries four things: the **value** (largest), the **label**, the **comparison base**, and the
-**variance** (absolute and percent, signed). A card without a comparison base is a decoration.
+Every value in the strip carries four things: the **value** (largest), the **label**, the
+**comparison base**, and the **variance** (absolute and percent, signed). A value without a
+comparison base is a decoration. The strip is one ruled line with hairline separators, never a row
+of boxed cards.
 
-Trend direction is shown by an arrow glyph *and* the sign, never by color alone. Three to five cards;
-past five, nobody reads any of them.
+Trend direction is shown by an arrow glyph *and* the sign, never by color alone. Three to five
+values; past five, nobody reads any of them.
 
 ## Numbers in prose
 

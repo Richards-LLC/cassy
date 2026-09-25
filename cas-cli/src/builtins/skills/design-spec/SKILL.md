@@ -8,7 +8,7 @@ managed_by: cas
 
 Produce a **single, self-contained** design source of truth at `DESIGN.md` (repo root, or the frontend app root — e.g. `apps/frontend/DESIGN.md` — when the UI lives in one package of a monorepo). Front-end workers read this file *instead of* grepping components and theme files to reconstruct design intent; point every UI task at it.
 
-**IMPORTANT: All file references use repo-relative paths** (e.g., `apps/frontend/assets/app.scss`), never absolute paths.
+Use repo-relative paths (e.g. `apps/frontend/assets/app.scss`), never absolute ones, so the file stays valid in every checkout.
 
 ## What this skill is (and isn't)
 
@@ -33,9 +33,11 @@ Probe in this order and stop at the first that exists:
 Record the token file path — it becomes the freshness anchor and is cited in the Overview section.
 
 **No token source found (greenfield):** the project inherits the Petrastella design language.
-Copy the values in [references/design-tokens.json](references/design-tokens.json) into the
-framework's native token form (CSS custom properties in the global stylesheet, `theme.extend`,
-`quasar.variables.scss`, …), commit that file, and treat it as the token source from here on.
+Paste [references/tokens.css](references/tokens.css) into the global stylesheet (or translate it
+into `theme.extend`, `quasar.variables.scss`, …), commit that file, and treat it as the token
+source from here on. `tokens.css` is generated from
+[references/design-tokens.json](references/design-tokens.json), which stays the machine-readable
+source for tooling.
 [references/petrastella-design-language.md](references/petrastella-design-language.md) explains
 each role's intent and the type pairing (serif argument, sans reading, mono numbers) that
 survives every override. Add `inherits: petrastella` to the frontmatter.
@@ -63,17 +65,26 @@ modal/dialog, card/panel, primary + secondary button, text input, badge/chip, ta
 
 Write to `DESIGN.md`: **YAML frontmatter (normative, machine-readable) + 8 markdown sections (rationale, human-readable)**. Target **120–200 lines**. Hard cap 300.
 
-Frontmatter keys (omit a key only when the project genuinely has no such token — never invent values):
+The frontmatter follows the public DESIGN.md format (google-labs-code/design.md, `docs/spec.md`)
+so its linter and other agents can read it. Omit a key only when the project genuinely has no such
+token — never invent values — and list deliberately absent groups under `omitted`.
 
-- `source` — repo-relative path(s) of the token source
-- `inherits` — `petrastella` | `neutral` | `none`; which base language the tokens descend from
-- `theme` — `dark-first` | `light-first` | `dual`
-- `colors` — by **role** (`bg`, `surface`, `surface-raised`, `border`, `text`, `text-muted`, `primary`, `accent`, `success`, `warning`, `danger`), value = the token name AND its resolved value
-- `typography` — `families` (role → stack), `scale` (name → size/line-height/weight)
-- `spacing` — base unit + the scale steps (e.g. 8pt grid)
-- `radius` — name → value
-- `elevation` — level → shadow value
-- `breakpoints` — name → min-width
+- `version: alpha`, `name`, `description` — spec keys.
+- `colors` — token → CSS color. Name the tokens by the Petrastella roles (`bg`, `surface`,
+  `surface-hero`, `line`, `ink`, `ink-muted`, `verdict`, `verdict-soft`, `evidence`, `action`,
+  `good`, `warning`, `danger`) so `cas-ui-craft`, `cas-html-reports`, and `cas-dataviz` read them
+  verbatim, plus `primary` (the spec expects it; use the `action` value). Dark values take a
+  `-dark` suffix.
+- `typography` — level → `{fontFamily, fontSize, fontWeight, lineHeight, letterSpacing}`.
+- `rounded`, `spacing` — scale level → dimension (`px`, `em`, or `rem`).
+- `components` — optional; component → properties, with `{colors.verdict}`-style references.
+- `maps` — when the project's own token names differ, role → project token (`verdict: --g-accent`).
+  Consumers use the role; the map says which project variable carries it.
+- `source`, `inherits` — extra keys the spec tolerates: the repo-relative token source path(s),
+  and `petrastella` | `neutral` | `none`.
+
+Theme polarity, elevation, and breakpoints are stated in prose (Overview, Elevation & Depth,
+Layout); the spec has no key for them.
 
 Then the eight sections, in this order:
 
@@ -104,7 +115,8 @@ Follow [../codemap/references/doc-hygiene.md](../codemap/references/doc-hygiene.
 
 - **Keep-blocks** most often wrap `## Do's & Don'ts` rules the team wrote by hand (`❌ Never use Quasar's --q-* variables; the theme only wires --g-*.`). Put them back in the section they came from.
 - **Pointer memory title:** `project_<slug>_designmd` (slug = lowercase kebab-case of project name). Body example: `See [apps/frontend/DESIGN.md](apps/frontend/DESIGN.md) — Quasar dark-first `--g-*` theme, Playfair/Inter, 8pt grid.`
-- **Commit** `DESIGN.md` so reviewers can diff it against the token source. Nothing in Cassy reads `DESIGN.md`: there is no hook, banner, or `cas` subcommand for it, and no automatic signal will tell anyone it went stale. Comparing the commit dates of `DESIGN.md` and its token source, by hand, is the only check there is.
+- **Lint:** `npx @google/design.md lint DESIGN.md` (schema, broken token references, WCAG contrast). Done when it is clean, or each remaining warning is listed in Overview with its reason.
+- **Commit** `DESIGN.md` so reviewers can diff it against the token source. Nothing in Cassy reads `DESIGN.md`: there is no hook, banner, or `cas` subcommand for it. The linter checks the file, not its freshness; comparing the commit dates of `DESIGN.md` and its token source is still a manual step.
 - **Report back:** (a) the token source it was grounded in, (b) how many roles/components are documented, (c) any token the project is missing.
 
 ## When to run

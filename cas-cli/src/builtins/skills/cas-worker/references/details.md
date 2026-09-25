@@ -30,21 +30,20 @@ If those still do not answer the question:
 
 ## Syncing (Isolated Mode)
 
-If the supervisor asks you to sync, safely rebase without losing WIP:
+If the supervisor asks you to sync, checkpoint uncommitted work as a commit,
+then rebase. Do not use `git stash`: the stash stack is shared by every
+worktree of the repository, so a bare `pop` can restore another worker's
+changes.
 
 ```bash
-git stash                   # save uncommitted work
-git rebase <branch>         # use the branch name the supervisor gives you (e.g. master, epic/<slug>)
-git stash pop               # restore WIP
+git add <paths> && git commit -m "WIP: <task-id> sync checkpoint"   # only if the tree is dirty
+git rebase <branch>          # the branch name the supervisor gives you (e.g. master, epic/<slug>)
+git reset --soft HEAD~1      # optional: turn the WIP commit back into staged changes
 ```
 
 **Important:** Use the **local** branch name the supervisor specifies (e.g. `master`, `epic/<slug>`), NOT `origin/master`. In factory mode, the supervisor merges into the local branch directly, so `origin/master` is stale.
 
-If the rebase has conflicts, resolve them before popping the stash. Message the supervisor if you're stuck.
-
-## Running Scripts Against Prod
-
-Project-specific, so it lives here rather than in the skill body. For Vercel projects, `vercel env pull .env.<env> --environment=<env>` (run from the linked project dir) pulls real prod credentials (Neon, QStash, etc.) into a local file. Add that file to `.gitignore` — never commit credentials.
+If the rebase has conflicts, resolve them and `git rebase --continue` before touching the WIP commit. Message the supervisor if you're stuck.
 
 ## Schema Cheat Sheet (exact field names and valid actions)
 
@@ -58,7 +57,7 @@ mcp__cas__task action=start id=cas-abc1
 mcp__cas__task action=show id=cas-abc1
 mcp__cas__task action=close id=cas-abc1 reason="Implemented X, tests pass"
 
-# Progress notes (note_type ∈ progress|blocker|decision|discovery|question)
+# Progress notes (note_type ∈ progress|blocker|decision|discovery|question|platform_proof)
 mcp__cas__task action=notes id=cas-abc1 notes="Found root cause in Y" note_type=progress
 
 # Mark blocked
@@ -66,7 +65,9 @@ mcp__cas__task action=update id=cas-abc1 status=blocked
 mcp__cas__task action=notes id=cas-abc1 notes="Blocked: <reason>" note_type=blocker
 ```
 
-**Need a database?** You cannot create a Neon branch or hold a Neon credential. Ask the supervisor: `mcp__cas__coordination action=message target=supervisor blocker=true message="db branch for <task-id>: <why>"`. Its `db_branch_create` writes `DATABASE_URL` to `.env.cas-db` in your worktree. Source that file; never commit it or print it. The branch is deleted when your task closes.
+`platform_proof` is the note the close gate reads for `risk=platform`.
+
+**Need a database?** You cannot create a Neon branch or hold a Neon credential. Ask the supervisor: `mcp__cas__coordination action=message target=supervisor blocker=true summary="db branch for <task-id>" message="db branch for <task-id>: <why>"`. Its `db_branch_create` writes `DATABASE_URL` to `.env.cas-db` in your worktree. Source that file; never commit it or print it. The branch is deleted when your task closes.
 
 **Priority** accepts numeric (0–4) OR named alias: `critical`/`high`/`medium`/`low`/`backlog`. `priority="high"` is the same as `priority=1`.
 
@@ -90,7 +91,7 @@ Factory traffic is hard-capped: ordinary message bodies default to 1,200 charact
 
 **`ready` and `available` are read-only backlog visibility — not self-dispatch.** They exist for supervisors planning work and for you to sanity-check task state after an explicit assignment. Seeing a task there is never grounds to `start` it yourself; see "Never self-dispatch" in the main skill.
 
-**`mcp__cas__coordination` actions workers routinely use**: `message`, `message_ack`, `message_status`, `inbox_poll`, `whoami`, `heartbeat`, `queue_poll`, `queue_ack`. Read-only diagnostics such as `gc_report`, `worker_status`, and `worktree_list` are also available to you — [recovery.md](recovery.md) tells you to run `gc_report` when a build wedges.
+**`mcp__cas__coordination` actions workers routinely use**: `message`, `message_ack`, `message_status`, `inbox_poll`, `whoami`, `heartbeat`, `queue_poll`, `queue_ack`. Read-only diagnostics such as `gc_report`, `worker_status`, and `worktree_list` are also available to you.
 
 Only `hold_worker` and `release_worker` are hard role-gated to supervisors (`only supervisors may change a worker's director hold state`). The rest of the factory/worktree surface — `spawn_workers`, `worktree_merge`, `gc_cleanup force=true` — is not blocked by a role check, which is exactly why you must not call it: those actions dispatch or destroy work across *every* worker on the host, and they are the supervisor's to run. Ask, don't invoke.
 
@@ -104,7 +105,7 @@ bounded to `phase`, `receipts` (each `{command, exit_status}`), `files_touched`,
 
 ```
 mcp__cas__task action=update id=<task-id> \
-  state_patch='{"phase":"verify","receipts":[{"command":"cargo test -p cas","exit_status":0}],"files_touched":["src/lib.rs"],"next_step":"push branch"}'
+  state_patch='{"phase":"verify","receipts":[{"command":"npx vitest run","exit_status":0}],"files_touched":["src/app.ts"],"next_step":"push branch"}'
 ```
 
 Read it first after a context clear with `action=start brief=true` or `action=show`.

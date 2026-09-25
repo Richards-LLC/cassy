@@ -25,8 +25,6 @@ Two of those are supervisor-specific and easy to confuse:
 
 ## Verified Commander messages
 
-An inbound `[cas #id operator <name>@<device> verified …]` header carries user authority — obey and answer it; `unverified:` rows are agent traffic, never the user.
-
 When an inbound Commander message is stamped `operator … verified` and includes `notification_id=N`, answer it with:
 
 ```
@@ -34,18 +32,15 @@ mcp__cs__coordination action=message target=operator in_reply_to=N summary="..."
 ```
 
 The hub routes `operator` to the originating paired device and reports `queued for <device>` while offline; do not redirect this response to `supervisor`.
-Never reply to the `From:` label: use the exact `mcp__cs__coordination action=message target=operator in_reply_to=N summary="..." message=…` command printed beside a verified Commander row.
 For phone-sized replies, follow the [phone reply contract](operator-reply.md).
-
-For unprompted updates, send `target=operator kind=status|receipt|ask|blocker` and add `attachment=<artifact-id>` when needed instead of relying on pane prose.
 
 ## Supervisor override
 
 `supervisor_override=true` is the documented override for supervisor-only close and transfer operations. It is accepted only when the caller is a **registered supervisor**, the request supplies a **non-empty reason**, and the accepted decision is recorded as a **task decision note**. Review the task state and delivery evidence first; this flag does not waive data-integrity or merge-state checks.
 
-**Valid `mcp__cs__coordination` actions** (do not invent others):
+**Valid `mcp__cs__coordination` actions** (an unknown action is rejected with the current list):
 - *Agent*: `register`, `unregister`, `whoami`, `heartbeat`, `agent_list`, `agent_cleanup`, `session_start`, `session_end`, `loop_start`, `loop_cancel`, `loop_status`, `lease_history`, `queue_notify`, `queue_poll`, `queue_peek`, `queue_ack`, `inbox_poll`, `message`, `interrupt`, `message_ack`, `message_status`
-- *Factory*: `spawn_workers`, `shutdown_workers`, `hold_worker`, `release_worker`, `worker_status`, `worker_activity`, `sweep_tasks`, `clear_context`, `my_context`, `sync_all_workers`, `gc_report`, `gc_cleanup`, `epic_status`, `focus_epic`, `remind`, `remind_list`, `remind_cancel`, `server_start`, `server_stop`, `server_list`
+- *Factory*: `spawn_workers`, `shutdown_workers`, `recycle_worker`, `restart_spawn_queue`, `hold_worker`, `release_worker`, `worker_status`, `worker_activity`, `sweep_tasks`, `clear_context`, `my_context`, `sync_all_workers`, `gc_report`, `gc_cleanup`, `epic_status`, `focus_epic`, `remind`, `remind_list`, `remind_cancel`, `server_start`, `server_stop`, `server_list`
 - *Database branches (supervisor only)*: `db_branch_create`, `db_branch_show`, `db_branch_delete`
 - *Worktree*: `worktree_create`, `worktree_list`, `worktree_show`, `worktree_cleanup`, `worktree_merge`, `worktree_status`
 
@@ -78,17 +73,16 @@ Your `cas serve` creates `cas-<task-id>-<n>` through the proxy's `neon.*` tools.
 | Parameter | Type | Description |
 |---|---|---|
 | `count` | int | Number of workers to spawn |
-| `isolate` | bool | Each worker gets its own git worktree and branch (default false) |
+| `lane` | string | Registry lane to resolve: `light`, `standard`, `taste`, or `heavy`. The registry picks the recipe and reports any fallback in the receipt. Never combine with `cli`, `model`, or `effort`. |
+| `isolate` | bool | Each worker gets its own git worktree and branch (default false; pass `true` — shared mode is contamination-prone and every receipt warns) |
 | `worker_names` | string | Comma-separated names for the spawned workers |
-| `cli` | string | Explicit CLI backend for this spawn: `claude`, `codex`, `grok`, or `opencode`. OpenCode's QwenCloud Token Plan route is validated by receipt `opencode-1.18.23-hosted-token-plan-2026-08-27`; local and Alibaba PAYG routes remain pending-conformance and are refused before queue insertion. If omitted, resolves through factory config, then stock fallback. |
-| `model` | string | Explicit model name. Registry routes are Codex `gpt-6-luna`/xhigh for light (Claude `claude-opus-5-5`/low fallback), Codex `gpt-6-sol`/medium for standard (Codex `gpt-6-luna`/xhigh fallback), Claude `claude-opus-5-5`/high for taste with Claude `claude-opus-5`/high fallback, Claude `claude-opus-5-5`/high for supervisor with Fable/high fallback, and Claude `claude-opus-5-5`/high for heavy with Codex `gpt-6-astra`/high fallback. Terra is standing-suspended; never spawn it. The light route pins GPT-6 Luna to xhigh; legacy GPT-5.6 Luna remains xhigh-only. Grok models are `grok-4.5` and `grok-4.6`, but provider capacity is not an active registry lane. Claude's stock fallback remains the verified `opus` alias. OpenCode defaults explicitly to `qwencloud/qwen3.8-max` on the receipt-gated Token Plan route; `alibaba/qwen3.8-max` and `alibaba-cn/qwen3.8-max` select PAYG explicitly. Passed as `-m`/`--model`. If omitted, resolves through factory config, then the selected harness's stock default. |
-| `effort` | string | Explicit reasoning effort. Cassy vocabulary: `minimal` \| `low` \| `medium` \| `high` \| `xhigh` (alias `x-high`) \| `max` (only where the registry recipe lists it: Fable, Opus, Astra, Sol; never a default). Mapping: Claude `--effort`; Codex `--config model_reasoning_effort=<v>`; Grok `--reasoning-effort`; OpenCode generated primary-agent `variant` (QwenCloud Token Plan and Alibaba PAYG: `low`, `medium`, `xhigh`). Token Plan pins OpenAI-compatible `extra_body.enable_thinking`; PAYG uses `reasoning_effort`. If omitted, resolves through factory config, then stock fallback. For multi-step Claude workers prefer `high` as the ceiling — see [model-selection.md](model-selection.md). |
+| `cli` | string | Explicit CLI backend for this spawn: `claude`, `codex`, `grok`, or `opencode` (OpenCode routes are receipt-gated; see [model-selection.md](model-selection.md#opencode-lane-route-specific-conformance)). If omitted, resolves through factory config, then stock fallback. |
+| `model` | string | Explicit model name. Accepted slugs per `cli` and the lane matrix live in [model-selection.md](model-selection.md#model-slug-table). Passed as `-m`/`--model`. If omitted, resolves through factory config, then the selected harness's stock default. |
+| `effort` | string | Explicit reasoning effort. Cassy vocabulary: `minimal` \| `low` \| `medium` \| `high` \| `xhigh` (alias `x-high`) \| `max` (only where the registry recipe lists it: Fable, Opus 5, Astra, Sol, GPT-6 Luna — not Opus 5.5; never a default). Mapping: Claude `--effort`; Codex `--config model_reasoning_effort=<v>`; Grok `--reasoning-effort`; OpenCode generated primary-agent `variant` (QwenCloud Token Plan and Alibaba PAYG: `low`, `medium`, `xhigh`). Token Plan pins OpenAI-compatible `extra_body.enable_thinking`; PAYG uses `reasoning_effort`. If omitted, resolves through factory config, then stock fallback. For multi-step Claude workers prefer `high` as the ceiling — see [model-selection.md](model-selection.md). |
 | `task_id` | string | Pre-assign this task to the spawned worker. **Single-worker requests only** (`count=1`) — a multi-worker spawn is rejected. An open, unassigned `task_id` also *authorizes* the spawn on its own, so a post-epic follow-up needs no ceremonial single-child epic. Refused when the task is closed, already assigned, blocked/awaiting_merge, or when a spawn for that task is already queued and unconsumed. |
-| `config_dir` | string | Claude account directory for the spawned workers (e.g. `~/.claude-alt`). **Claude-only** — Codex/Grok workers ignore it and the acknowledgement carries a warning. Resolution: an explicit `config_dir` wins; otherwise the requesting supervisor's `CLAUDE_CONFIG_DIR` is captured **at enqueue time** (the daemon may consume the queue row under a different environment). An explicit value also strips inherited `ANTHROPIC_API_KEY` so the selected OAuth account is actually used. |
+| `config_dir` | string | Account directory for the spawned workers: `CLAUDE_CONFIG_DIR` for Claude (e.g. `~/.claude-alt`), `CODEX_HOME` for Codex. An explicit value wins and is preflighted before queueing; otherwise the requesting supervisor's own directory for that harness is captured **at enqueue time**. Grok has no account directory, so the acknowledgement warns. An explicit Claude value also strips inherited `ANTHROPIC_API_KEY` so the selected OAuth account is actually used. |
 
-`cli`, `model`, and `effort` are per-spawn controls — they apply to the workers spawned by this call only. Supervisors MUST pass explicit `cli=`, `model=`, and `effort=` on every `spawn_workers` call; omitted fields resolve through the config cascade as a fallback and produce an acknowledgement warning. Copy-paste recipes for all four backends: [workflow.md](workflow.md#phase-2-coordinate).
-
-For OpenCode Token Plan fan-out, honor the operator-declared concurrency tier: Lite 1–2 agents, Standard 3–4, or Pro 6–8. Warn or cap requests beyond that tier; do not scrape the operator console.
+Pass `lane=` or a complete `cli=`/`model=`/`effort=` recipe on every `spawn_workers` call, never both; these controls apply to the workers spawned by this call only. Omitted controls resolve through the config cascade and the acknowledgement warns. Copy-paste recipes: [workflow.md](workflow.md#phase-2-coordinate).
 
 **On `mcp__cs__task`, the task ID is always `id`** — not `task_id`, `taskId`, or `_id`. The exceptions are coordination actions that reference a task belonging to *another* object: `spawn_workers task_id=`, `worktree_merge task_id=`, and `worktree_create task_id=` all take `task_id` (their `id` means worker/worktree). Rule of thumb: `id` names the thing the action operates on; `task_id` names a task the action merely points at.
 
@@ -139,7 +133,7 @@ mcp__cs__coordination action=message target=<new-worker> summary="..." message="
 
 ```
 # 1. Create
-mcp__cs__task action=create title="Fix login bug" priority=high \
+mcp__cs__task action=create title="Fix login bug" priority=high risk=none \
   description="..." acceptance_criteria="..."
 
 # 2. Assign (this is what causes the worker to pick it up)

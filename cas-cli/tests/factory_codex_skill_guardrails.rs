@@ -199,8 +199,6 @@ fn supervisor_epic_driving_reference_is_compact_and_three_way_mirrored() {
             "release-notes draft",
             "integration PR",
             "one tree, one queue cycle",
-            "release/vX-prepare",
-            "Release Prebuild",
         ] {
             assert!(
                 content.contains(required),

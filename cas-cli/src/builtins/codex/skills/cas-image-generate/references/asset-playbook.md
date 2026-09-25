@@ -7,9 +7,10 @@ explicitly unwired references in [providers.md](providers.md).
 ## Routing and presets
 
 All rows use Nano Banana. Pick NB2 for a draft or iteration and NB Pro for a
-final, cover, or dense in-image copy. The requested dimensions belong in the
-prompt and in the output review; the helper sends references and decodes the
-returned image but does not silently resize it.
+final, cover, or dense in-image copy. Request the shape with the helper's
+`--aspect` and `--size` flags shown in the Suggested output column; the helper
+does not resize, so crop an exact pixel target (1200x630, A4) from the returned
+master and check it in the output review.
 
 Vector-suitable rows are the exception to the raster default. Read
 [svg-web-assets.md](svg-web-assets.md) before choosing a medium: the
@@ -24,13 +25,13 @@ SVG in the repository; it does not mean ask Nano Banana for SVG output.
 | SVG logomark / favicon | author-directly | `logo.svg` or `favicon.svg` | simple paths, CSS palette vars, generous clear space; use raster only when the mark is organic |
 | SVG divider / pattern | author-directly | reusable `divider.svg` or `pattern.svg` | waves, blobs, grids, and flat repeats with a stable `viewBox` |
 | Organic logo / ribbon-C | NB2 → NB Pro, then raster-to-vector | approved raster plus cleaned SVG | generate a flat high-contrast master, trace only after approval, and manually clean paths |
-| Logo / logomark (complex or text-heavy) | NB2 → NB Pro | square PNG, 1024px or larger | flat, simple mark, the wordmark TEXT (spelled exactly, no quotation marks), high contrast, generous clear space; manual vectorization required |
-| Icon set (painterly or textured) | NB2 → NB Pro | one square grid sheet, 1024–2048px | one locked 24px-grid spec sentence, uniform stroke, padding, one color; manually trace approved glyphs |
-| Hero image | NB2 → NB Pro | 16:9, up to 1920px wide | focal subject, camera, lighting, and negative space for copy |
-| Background / texture | NB2 | 16:9 or tileable square, 2K | low contrast, no focal object, exact palette, usable behind text |
-| OG / social card | NB Pro | 1200x630 PNG | exact quoted copy early, safe area, brand contrast, no gibberish |
-| Report cover / section art | NB Pro | A4 portrait or section banner, 2K+ | restrained palette, title placement, print-safe whitespace |
-| Spot illustration | NB2 → NB Pro | square 800–1600px PNG | simple silhouette, transparent-look isolation only if verified; consistent family style |
+| Logo / logomark (complex or text-heavy) | NB2 → NB Pro | square PNG (`--aspect 1:1 --size 2K`) | flat, simple mark, the wordmark TEXT (spelled exactly, no quotation marks), high contrast, generous clear space; manual vectorization required |
+| Icon set (painterly or textured) | NB2 → NB Pro | one square grid sheet (`--aspect 1:1 --size 2K`) | one locked 24px-grid spec sentence, uniform stroke, padding, one color; manually trace approved glyphs |
+| Hero image | NB2 → NB Pro | `--aspect 16:9 --size 2K` | focal subject, camera, lighting, and negative space for copy |
+| Background / texture | NB2 | `--aspect 16:9 --size 2K`, or `--aspect 1:1` for a tile | low contrast, no focal object, exact palette, usable behind text |
+| OG / social card | NB Pro | `--aspect 16:9 --size 2K`, cropped to 1200x630 PNG | exact quoted copy early, safe area, brand contrast, no gibberish |
+| Report cover / section art | NB Pro | `--aspect 2:3 --size 2K` cropped to A4 portrait, or `--aspect 21:9` for a banner | restrained palette, title placement, print-safe whitespace |
+| Spot illustration | NB2 → NB Pro | square PNG (`--aspect 1:1 --size 1K`) | simple silhouette, transparent-look isolation only if verified; consistent family style |
 | Favicon / app icon | derive from approved logo | 1024px square master, then 16/32/48/180/192/512px derivatives | centered mark inside the safe area; never generate six independent variants |
 
 ## Prompt templates

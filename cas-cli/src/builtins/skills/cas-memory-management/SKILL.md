@@ -14,9 +14,6 @@ decision.
 
 ## Valid Actions
 
-The list below is the dispatch order for `mcp__cas__memory`; keep it aligned
-with the live service.
-
 **Valid `mcp__cas__memory` actions** (exact list — do not invent others): `remember`, `get`, `list`, `update`, `delete`, `archive`, `unarchive`, `helpful`, `harmful`, `mark_reviewed`, `recent`, `set_tier`, `opinion_reinforce`, `opinion_weaken`, `opinion_contradict`.
 
 ## Common Operations
@@ -41,9 +38,10 @@ the other fields are optional and apply to the actions described here.
   `helpful`, `harmful`, `mark_reviewed`, `set_tier`, and `opinion_*` actions.
 - `content`: text for `remember` and `update`; evidence for `opinion_*` actions.
 - `entry_type`: one of `learning`, `preference`, `context`, `observation`, or
-  `handoff` for `remember` (default: `learning`). A `handoff` is the note for
-  the next session: saving one supersedes your role's previous handoff (kept
-  as history, never overwritten), and session start shows only the newest.
+  `handoff` for `remember` (default: `learning`); any other value is rejected
+  and nothing is stored. A `handoff` is the note for the next session: saving
+  one supersedes your role's previous handoff (kept as history, never
+  overwritten), skips the overlap check, and session start shows only the newest.
 - `tags`: comma-separated tags for `remember`; for `list`, every supplied tag
   must match case-insensitively.
 - `title`: optional entry title for `remember`.
@@ -51,14 +49,12 @@ the other fields are optional and apply to the actions described here.
 - `tier`: `working`, `cold`, or `archive` for `set_tier` and `list`.
 - `limit`: maximum results for `list` and `recent` (`list` defaults to 20;
   `recent` defaults to 10).
-- `scope`: `global`, `project`, or `all` for list filtering; remember defaults
-  to project scope.
+- `scope`: `global`, `project`, or `all` for `list` filtering; `remember`
+  ignores it and stores the entry in project scope.
 - `team_id`: team filter for `list`, or explicit team association for
   `remember`.
-- `bypass_overlap`: set `true` only for bulk imports or tests that deliberately
-  create overlapping entries; the default is `false`.
-- `mode`: `interactive` (default) or `autofix` for `remember`. Autofix performs
-  an atomic merge of a high-overlap entry.
+- `bypass_overlap`: `true` skips the overlap check (bulk imports and tests only).
+- `mode`: `interactive` (default) or `autofix` for `remember`.
 - `expected_updated_at`: RFC3339 timestamp for a `remember` autofix merge. A
   stale value returns a non-mutating conflict.
 - `sort`: `created`, `updated`, `importance`, or `title` for `list`.
@@ -83,33 +79,16 @@ in the body. See [schema.yaml](references/schema.yaml) and
 
 ## Overlap Detection
 
-`remember` checks for overlapping entries by default. It scores problem
-statement, root cause, solution approach, referenced files, and tags, then
-applies module and track mismatch penalties.
-
-- Low overlap creates the new entry.
-- Moderate overlap creates the entry and adds bounded `related:<slug>` tags to
-  cross-reference the matching entries.
-- High overlap returns a structured blocked result in interactive mode. Follow
-  its `existing_slug` and `recommended_action` instead of creating a duplicate.
-- `mode=autofix` atomically replaces the overlapping entry's content while
-  preserving its ID. Supply `expected_updated_at` when coordinating with
-  another writer; a conflict does not change stored data.
-
-Use `bypass_overlap=true` only when the caller is intentionally importing or
-testing duplicate entries. See [overlap-detection.md](references/overlap-detection.md)
-for scoring and cross-reference details. Structured response examples live in
-[response-shapes.md](references/response-shapes.md).
+`remember` checks overlap by default: low overlap creates the entry, moderate
+overlap creates it with bounded `related:<slug>` cross-links, and high overlap
+returns a blocked result — follow its `existing_slug` and `recommended_action`
+instead of creating a duplicate. `mode=autofix` merges into the existing entry.
+Scoring and autofix: [overlap-detection.md](references/overlap-detection.md);
+response examples: [response-shapes.md](references/response-shapes.md).
 
 ## Choosing Memory vs Other Records
 
-- Use a **memory** for an enduring fact, preference, lesson, or local constraint.
-- Use a **task** for work that needs ownership, dependencies, verification, or
-  closure.
-- Use a **knowledge page** for a curated project reference.
-- Use a **spec** for an approved product, API, or architecture contract.
-
-Use `update` to revise a continuing fact, `archive` when it should leave normal
-retrieval, `unarchive` when it becomes current again, and temporal validity
-fields when the fact has a known time window. See
+Use a memory for an enduring fact, preference, lesson, or local constraint;
+tasks, knowledge pages, and specs cover the rest. The decision table and the
+`update` / `archive` / `unarchive` / validity-window lifecycle live in
 [lifecycle-and-storage.md](references/lifecycle-and-storage.md).

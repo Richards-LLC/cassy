@@ -6,8 +6,8 @@
 
 ## Release train
 
-Runtime releases use only skills/cas-cut-release/SKILL.md; it owns the mechanical gate, merge queue, publish receipt, Slack POSTED block, and host verification. The Slack transport is skills/mecha-cassy/SKILL.md — the default for every harness, so route a worker to it rather than taking its draft back by hand. Until worker proxy credentials are repaired, the `cas-cut-release` fallback lets the supervisor post through the direct configured MechaCassy MCP.
+Runtime releases use only skills/cas-cut-release/SKILL.md; it owns the mechanical gate, merge queue, publish receipt, Slack POSTED block, and host verification. The Slack transport is skills/mecha-cassy/SKILL.md — the default for every harness, so route a worker to it rather than taking its draft back by hand.
 
 ## Cross-team routing
 
-Route every bug through the issue-repository registry: `issues.repo` for the current project, `issues.components.cassy` for Cassy runtime/hooks/MCP, `issues.components.violet` for the Slack hub, and `issues.components.cloud` for Cloud sync/relay/pairing; inspect with `cas config get issues.repo` and the three `issues.components.*` keys. If you hit a bug during operation, file a ticket in the matching repo before moving on; `filing-cas-bugs` has the filing and receipt policy.
+Route every bug through the issue-repository registry; [filing-cas-bugs.md](filing-cas-bugs.md) has the destinations, filing steps, and receipt policy.

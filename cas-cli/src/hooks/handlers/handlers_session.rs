@@ -1826,28 +1826,10 @@ If no clear learnings found, respond with: []"#
 /// (`include_str!`), which shipped maintainer sections and a "scan the store
 /// with `search`" step the call cannot run, and its "omit the rest of the
 /// body" advice produced drafts the parser rejected. Duplicate candidates are
-/// passed in instead (see `build_session_learn_prompt`).
-const SESSION_LEARN_CLASSIFIER_PROMPT: &str = r#"You classify one coding-agent session into memory drafts. You cannot call tools. Read the transcript below and return a JSON array.
-
-Signals (one per draft; a finding that fits two signals is two drafts):
-- concept: a domain term learned here. entry_type "learning".
-- entity: a person, project, tool, repo or library worth recalling by name. entry_type "context".
-- correction: the user pushed back in a way that should bind future behaviour. entry_type "preference", usually scope "global".
-- pattern: a recurring pitfall or gotcha. entry_type "learning".
-- idea: a proposal floated but not acted on. entry_type "context".
-- decision: an architecture, process or scope decision with its rationale. entry_type "context".
-- gap: something the agent did not know but should have. entry_type "observation".
-
-Rules:
-- Only session-, project- or user-specific findings. General programming advice is not a memory.
-- scope is "project" unless the finding clearly holds across projects ("global").
-- confidence is in [0.0, 1.0]; be honest. Drafts below 0.6 (0.5 for corrections) are discarded.
-- If a finding repeats one of the existing memories listed below, put that memory's ID in dedup_hits. Still fill every other field.
-- Every draft has all of: signal, entry_type, scope, tags, content, confidence, dedup_hits. content is one imperative sentence or two.
-- If nothing qualifies, return [].
-
-Output: only the JSON array, no prose, no markdown fence. Example element:
-{"signal":"correction","entry_type":"preference","scope":"global","tags":["correction","scope-discipline"],"content":"When a worker flags a real gap, amend the acceptance criteria instead of working around it.","confidence":0.85,"dedup_hits":[]}"#;
+/// passed in instead (see `build_session_learn_prompt`). The prompt lives in
+/// `session_learn_classifier_prompt.txt` beside this file; the skill file is
+/// the human procedure and is owned separately.
+const SESSION_LEARN_CLASSIFIER_PROMPT: &str = include_str!("session_learn_classifier_prompt.txt");
 
 /// Existing memories offered to the classifier as duplicate candidates.
 const SESSION_LEARN_DEDUP_CANDIDATES: usize = 40;
@@ -1864,7 +1846,7 @@ fn build_session_learn_prompt(
             .iter()
             .map(|(id, content)| {
                 let one_line = content.split_whitespace().collect::<Vec<_>>().join(" ");
-                format!("- {id}: {}", crate::hooks::handlers::handlers_middle::truncate_str(&one_line, 160))
+                format!("- {id}: {}", crate::hooks::handlers::handlers_middle::utils::truncate_str(&one_line, 160))
             })
             .collect::<Vec<_>>()
             .join("\n")

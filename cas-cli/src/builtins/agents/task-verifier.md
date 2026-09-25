@@ -18,7 +18,7 @@ If `verification action=add` returns a message starting `Verifier handoff reject
 
 Run `mcp__cas__task action=show id=<task-id>`. If the task has a non-empty `demo_statement`, or it is an epic and **any child** (closed children included; enumerate them with `mcp__cas__task action=dep_list id=<epic-id>`) has one, apply the evidence gate before you read the close reason. The gate is `references/verifier-evidence-gate.md` in the installed `cas-qa-craft` skill (for example `.claude/skills/cas-qa-craft/references/verifier-evidence-gate.md`). It holds the ledger REJECT table, capture judgments, the epic walk prerequisites, and the NOT EXERCISED policy: `NOT EXERCISED` rows go to the supervisor as a `SUPERVISOR CALL`, never a silent approve or reject. If the gate file cannot be found, record `status=error` with a summary naming the missing file and stop.
 
-# Phase 1: Completeness
+## Phase 1: Completeness
 
 ### Step 1: Check the close reason against the acceptance criteria
 
@@ -42,6 +42,7 @@ If the branch is already merged (`$BASE` equals `HEAD`), inspect the recorded co
 ### Step 4: Read every changed file in full
 
 Run `mcp__cas__rule action=list` for the project rules. Read each changed file completely. In the changed code, reject:
+
 - TODO/FIXME/XXX/HACK markers, and `todo!()`, `unimplemented!()`, `raise NotImplementedError`, `throw new Error('Not implemented')`;
 - temporal shortcuts ("for now", "temporarily", "placeholder") that leave an acceptance-criteria item undone;
 - new `@ts-ignore`, `#[allow(dead_code)]`, `# type: ignore` without a stated reason;
@@ -66,16 +67,19 @@ Back every finding with a command output or an exact line reference.
 ### Step 7: Honor the task's `execution_note`
 
 - `test-first`: the diff must add at least one test file. Check with:
+
   ```bash
   git diff --name-status "$BASE" HEAD | grep -E '^A[[:space:]]+.*(_test\.rs|tests/.*\.rs|\.test\.tsx?$|\.spec\.tsx?$|test_.*\.py|_test\.py|tests?/|__tests__/)'
   ```
+
   If none, reject with "REJECTED (test-first posture): no new test file in the diff."
 - `characterization-first`: expect new tests that pin current behaviour before the change; if none, reject naming the posture.
 - `additive-only`, `value-only`, `no-code`, or none: nothing to check here; the close gate enforces those.
 
-# Phase 2: Quality (only when Phase 1 passes)
+## Phase 2: Quality (only when Phase 1 passes)
 
 Compare the change with how neighbouring code solves the same problem (`rg '<pattern>' -l`). Then look for, and report only with evidence:
+
 - correctness: edge cases, error propagation, races;
 - design: follows existing patterns, sensible abstraction;
 - performance: redundant work, unbounded queries, quadratic loops;
@@ -83,11 +87,11 @@ Compare the change with how neighbouring code solves the same problem (`rg '<pat
 
 Each suggestion names the file and line, why it is better, how to do it, and an impact of `high`, `medium`, or `low`. Skip style nits and sweeping refactors.
 
-# Recording the verdict
+## Recording the verdict
 
 One template; set `status`, `summary`, `confidence` and `issues` for the outcome:
 
-```
+```text
 mcp__cas__verification action=add task_id=<id> status=<approved|rejected|error> confidence=<0.0-1.0> files="file1,file2" summary="<verdict>\n\nBlocking:\n- <file:line: what must be done>\n\nImprovements (non-blocking):\n- <file:line: suggestion>" issues='[{"file":"src/file","line":42,"severity":"blocking","category":"stub","code":"<snippet>","problem":"<what is missing>","suggestion":"<exact fix>"}]'
 ```
 
@@ -100,7 +104,7 @@ mcp__cas__verification action=add task_id=<id> status=<approved|rejected|error> 
 
 On a rejection, for each new issue category run `mcp__cas__rule action=check_similar content="<proposed rule>"`; if nothing matches, `mcp__cas__rule action=create content="<rule>" tags="from_verification,category:<cat>"` (pass `source_ids` when the context provides them). One draft rule per category.
 
-# Epic verification
+## Epic verification
 
 When `task_type=epic`, use `verification_type=epic` and check, in order:
 

@@ -29,7 +29,7 @@ back as a follow-up task.
 
 ## Non-Rust work is unaffected
 
-Non-Rust suites (for example hub-web `npm`/`vitest`/`playwright`) still run in
+Non-Rust suites (for example `npm`/`vitest`/`playwright`) still run in
 the worker. A green exit code is not a green test run: the receipt must show a
 harness summary and a nonzero passed count. Record the exact passed and failed
 counts in the close note; a zero-test run is a failure to run.
@@ -40,13 +40,6 @@ Factory shells export `CAS_*` identity variables. Tests that read them can pass
 locally and fail in clean CI. When a diff touches agent resolution,
 coordination, messaging, cloud config, or another environment-sensitive path,
 say so in the close note; the supervisor's assembly run then uses the project's
-clean-environment wrapper:
-
-```bash
-make -C cas-cli test-clean-env
-make -C cas-cli test-clean-env CLEAN_ENV_ARGS='--lib cloud::config'
-```
-
-The wrapper enumerates and strips the live `CAS_*` variables; do not hand-write
-an `env -u` list. In particular, `CAS_ROOT` and `CAS_CLONE_PATH` can redirect a
-test to the main checkout's `.cas`. There is no `CAS_TASK_ID`.
+clean-environment wrapper, if it has one. In particular, `CAS_ROOT` and
+`CAS_CLONE_PATH` can redirect a test to the main checkout's `.cas`. There is no
+`CAS_TASK_ID`.

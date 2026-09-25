@@ -11,7 +11,7 @@ managed_by: cas
 request:
   entry_type:
     type: enum
-    values: [learning, preference, context, observation]
+    values: [learning, preference, context, observation, handoff]
     default: learning
     applies_to: remember
     description: "The single entry-type enum accepted by the memory request."
@@ -51,6 +51,7 @@ search_index_fields:
 
 validation:
   - "The memory request always carries action; all other request fields are optional and action-specific."
-  - "entry_type must be one of the four values above when supplied to remember."
+  - "entry_type must be one of the five values above when supplied to remember; any other value is rejected and nothing is stored."
+  - "A handoff is stored as a context entry, supersedes the role's previous handoff, and skips the overlap check."
   - "Frontmatter is best-effort metadata inside content; malformed or absent frontmatter does not prevent body-text indexing."
   - "track and root_cause are recommendations for overlap metadata, not separate request parameters."

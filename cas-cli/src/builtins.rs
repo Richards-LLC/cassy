@@ -7788,8 +7788,8 @@ This is the body content."#;
                 "{label} must not contain a GPT-5.5 supervisor worker recipe"
             );
         }
-        // cas-b342/cas-96ea: the hard rule requires explicit cli/model/effort on EVERY
-        // spawn, so every `spawn_workers` recipe line in the rubric — including
+        // cas-b342/cas-96ea: a spawn recipe that forces one model (rather than
+        // passing `lane=`) must be complete, so every `spawn_workers` recipe line in the rubric — including
         // the light Grok lane — must carry an explicit `effort=`, and
         // Sonnet must not remain as a copyable spawn recipe.
         for line in claude.content.lines() {
@@ -7977,7 +7977,7 @@ This is the body content."#;
             "worktree_merge id=<worker> task_id=<task-id>",
             "Hold the main merge",
             "Run the final assembled-tree gate",
-            "cargo nextest run -p cas",
+            "the project's assembly gate command",
             "bounded epic-child fix-round task",
             "Never pipe the test run to `tail`",
         ] {
@@ -8002,7 +8002,7 @@ This is the body content."#;
             .expect("BUILTIN_SKILLS missing cas-supervisor planning.md");
         for required in [
             "Every worker merge receives the canonical merge-time diff review",
-            "Phase 4 runs the full final-tree nextest gate",
+            "Phase 4 runs the project's full final-tree assembly gate",
             "Do not dispatch a separate review workflow",
         ] {
             assert!(

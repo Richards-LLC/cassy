@@ -12,8 +12,10 @@ Use `mcp__cs__search` to find information across Cassy content and code. Choose 
 
 **`search`** — conceptual queries across memories, tasks, rules, skills, and indexed code:
 `mcp__cs__search action=search query="authentication flow" doc_type=entry`
-Filter with `doc_type`: `entry`, `task`, `rule`, `skill`, `code_symbol`, or
-`code_file`.
+Filter with `doc_type`: `entry`, `task`, `rule`, `skill`, `spec`, `artifact`,
+`code_symbol`, or `code_file`; an unrecognized value searches every type.
+`scope` is `global`, `project`, or `all` (default); `tags` is comma-separated
+and every tag must match.
 
 **`context`** — session context summary. Use `task_id` to focus the result on one task and `max_tokens` to bound it.
 
@@ -24,6 +26,9 @@ Filter with `doc_type`: `entry`, `task`, `rule`, `skill`, `code_symbol`, or
 
 **`grep`** — exact regex matching in indexed files. Use `pattern`, optionally `glob`, `before_context`, `after_context`, and `case_insensitive`:
 `mcp__cs__search action=grep pattern="TODO:" glob="*.rs"`
+
+**`blame`** — git blame for one file, linked to the AI sessions and prompts that wrote each line. Pass `file_path` (optionally `path:line` or `path:start-end`); add `line_start`/`line_end`, `ai_only`, or `include_prompts` as needed:
+`mcp__cs__search action=blame file_path="src/auth.rs:40-80" ai_only=true`
 
 **`history`** — search the indexed git commit history. Use `query`, optionally `path`, `symbol`, `since`, `until`, and `include_merges`; every response includes index freshness information.
 
@@ -48,22 +53,6 @@ For memories with structured frontmatter embedded in their `content` (see `cas-m
 
 Recognized filter keys are `module`, `track`, `problem_type`, `severity`, `root_cause`, and `date`. Unknown `key:value` tokens remain keyword text. Values cannot contain whitespace; quoting and escaping are not supported.
 
-## Decision Guide
-
-| Need | Action |
-| --- | --- |
-| Conceptual or memory lookup | `search` |
-| Session or task context | `context` or `context_for_subagent` |
-| Exact regex or file scan | `grep` |
-| Find a function by behavior | `code_search` |
-| Inspect one indexed symbol | `code_show` |
-| Find an old change | `history` |
-| Record retrieval quality | `retrieval_feedback` |
-| Aggregate retrieval quality | `retrieval_metrics` |
-| Inspect entities | `entity_list`, `entity_show`, or `entity_extract` |
-
 ## Valid Actions
-
-The list below is the dispatch order for `mcp__cs__search`; `impact_report` is the alias accepted by the same handler as `skill_impact`.
 
 **Valid `mcp__cs__search` actions** (exact list — do not invent others): `search`, `retrieval_feedback`, `retrieval_metrics`, `skill_impact`, `impact_report`, `context`, `context_for_subagent`, `observe`, `entity_list`, `entity_show`, `entity_extract`, `code_search`, `code_show`, `grep`, `blame`, `history`.

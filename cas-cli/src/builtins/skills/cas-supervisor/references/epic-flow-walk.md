@@ -9,7 +9,7 @@ Run one pass per epic when any child has a non-empty `demo_statement`:
    gate detached using the project's release procedure **before** dispatching
    QA. Record the gate receipt and schedule its reminder immediately; neither
    QA availability nor completion may block the gate launch or monitoring.
-3. Inspect `~/.cas/artifacts/<epic-id>/LEDGER.md` and epic notes before spawning.
+3. Inspect `<artifacts_root>/<epic-id>/LEDGER.md` (`[factory] artifacts_root`) and epic notes before spawning.
    If a pass is running or complete, resume its recorded agent or consume its
    receipt; never spawn a duplicate on a gate retry or supervisor restart.
    Otherwise initialize that ledger with status `running`, epic tip, worktree,
@@ -31,8 +31,7 @@ Run one pass per epic when any child has a non-empty `demo_statement`:
    across children: dump visible terminal-state text from every affected
    surface; a surface fixed by one child must not contradict another child's
    surface. Map conflicting claims to child IDs and captures in Contradictions.
-   This combined-tip check addresses the regressions found in
-   https://github.com/Richards-LLC/cassy/issues/759.
+   This combined-tip check catches regressions that each child's own QA misses.
 6. At the deadline mark all unrun cells `NOT EXERCISED`; keep them as owed
    work. File one task per defect without patching the build. Finish the single
    ledger with status `complete` and add exactly one epic note headed
@@ -53,7 +52,7 @@ Illustrative receipt, not proof of an actual run:
 Epic flow walk
 Tip: <assembled-commit-sha>; worktree: <dedicated-epic-worktree>
 Children: cas-1111 M01/M02; cas-2222 M01/M03/M04
-Ledger: ~/.cas/artifacts/<epic-id>/LEDGER.md
+Ledger: <artifacts_root>/<epic-id>/LEDGER.md
 cells=4; PASS=3; FAIL=0; NOT EXERCISED=1
 labels: source-inferred=1; fixture=0; real-build=3; eyewitness=0
 Budget: 60 minutes; status: complete

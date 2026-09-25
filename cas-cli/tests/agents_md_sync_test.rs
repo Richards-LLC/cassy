@@ -53,3 +53,33 @@ fn agents_md_write_and_check_have_expected_staleness_behavior() {
         .failure()
         .stderr(predicate::str::contains("stale"));
 }
+
+/// Skills audit L6 F7: the tracked AGENTS.md went stale for a week because
+/// nothing checked this repository's own generated file, only the command.
+/// Code and mixed diffs run this; docs-only diffs hit the same check in the
+/// Docs Lint CI job.
+#[test]
+fn repository_agents_md_is_current() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("cas-cli has a workspace parent")
+        .to_path_buf();
+    let scratch = TempDir::new().unwrap();
+    let mut cmd = Command::new(cas::test_paths::cas_binary());
+    let home = scratch.path().join("home");
+    let xdg = scratch.path().join("xdg");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&xdg).unwrap();
+    if let Some(host_home) = std::env::var_os("HOME") {
+        cmd.env("CAS_TEST_PROTECTED_HOME", host_home);
+    }
+    cmd.env("HOME", home)
+        .env("XDG_CONFIG_HOME", xdg)
+        .env_remove("CAS_ROOT")
+        .env("CAS_SKIP_FACTORY_TOOLING", "1")
+        .current_dir(&repo_root)
+        .args(["sync", "agents-md", "--check"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("current"));
+}

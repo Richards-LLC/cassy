@@ -1317,8 +1317,7 @@ fn ensure_gitignore(cwd: &Path) -> anyhow::Result<String> {
 mod docs_and_skill;
 
 pub(crate) use crate::cli::init::docs_and_skill::{
-    CAS_SECTION_BEGIN, CAS_SECTION_END, CAS_SKILL, build_cas_section, is_old_cas_skill,
-    is_skill_managed_by_cas,
+    CAS_SKILL, ClaudeMdPlan, is_old_cas_skill, is_skill_managed_by_cas, plan_claude_md,
 };
 pub use crate::cli::init::docs_and_skill::{generate_cas_skill, update_claude_md};
 

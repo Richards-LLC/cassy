@@ -153,6 +153,7 @@ require_text "$docs_lint_job" "needs.ci-diff.outputs.class == 'docs-only'" 'docs
 require_text "$docs_lint_job" 'markdownlint-cli2' 'docs-only lane runs Markdown lint'
 require_text "$docs_lint_job" '--config .markdownlint-cli2.jsonc' 'docs-only lane uses the repository Markdown lint policy'
 require_text "$docs_lint_job" 'scripts/release-train-announce.py --validate' 'docs-only lane validates release-note drafts'
+require_text "$docs_lint_job" 'sync agents-md --check' 'docs-only lane fails a CLAUDE.md edit that leaves the generated AGENTS.md stale'
 
 # Docs design directories intentionally carry CSS, JavaScript, HTML, and image
 # assets beside Markdown. Keep the markdownlint input contract narrowed to real

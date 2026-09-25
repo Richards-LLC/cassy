@@ -129,9 +129,15 @@ fn fallow_examples_honor_machine_output_rule() {
                 command.contains("--quiet"),
                 "example lacks quiet output: {command}"
             );
+            // `|| true` forces status 0, so a missing binary or a failed
+            // `npx` looked like a clean pass; the status must stay visible.
             assert!(
-                command.contains("2>/dev/null || true"),
-                "example lacks safe exit handling: {command}"
+                command.contains("2>/dev/null; echo \"exit=$?\""),
+                "example must print its exit status: {command}"
+            );
+            assert!(
+                !command.contains("|| true"),
+                "example swallows the exit status: {command}"
             );
         }
     }
@@ -140,7 +146,18 @@ fn fallow_examples_honor_machine_output_rule() {
         "expected the workflow examples to be guarded"
     );
     assert!(skill.contains("## Procedure"));
-    assert!(skill.contains("91 framework plugins"));
+    assert!(skill.contains("Preserve and read the exit status"));
+    // Counts and tool tables drift between fallow releases; the skill points
+    // at `fallow schema` instead of copying them.
+    assert!(skill.contains("fallow schema"));
+    for stale in [
+        "91 framework plugins",
+        "90 auto-detecting",
+        "## Node.js Bindings",
+        "| `trace_clone` |",
+    ] {
+        assert!(!skill.contains(stale), "stale fallow content: {stale}");
+    }
 }
 
 #[test]

@@ -68,6 +68,8 @@ impl CasService {
                 req.task_id.as_deref(),
                 req.allow_trunk.unwrap_or(false),
                 req.cleanup,
+                req.supervisor_override.unwrap_or(false),
+                req.reason.as_deref(),
             )
             .await
     }

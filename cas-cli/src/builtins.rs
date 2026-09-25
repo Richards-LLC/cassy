@@ -45,22 +45,6 @@ pub const BUILTIN_AGENTS: &[BuiltinFile] = &[
         path: "agents/task-verifier.md",
         content: include_str!("builtins/agents/task-verifier.md"),
     },
-    BuiltinFile {
-        path: "agents/learning-reviewer.md",
-        content: include_str!("builtins/agents/learning-reviewer.md"),
-    },
-    BuiltinFile {
-        path: "agents/rule-reviewer.md",
-        content: include_str!("builtins/agents/rule-reviewer.md"),
-    },
-    BuiltinFile {
-        path: "agents/duplicate-detector.md",
-        content: include_str!("builtins/agents/duplicate-detector.md"),
-    },
-    BuiltinFile {
-        path: "agents/session-summarizer.md",
-        content: include_str!("builtins/agents/session-summarizer.md"),
-    },
 ];
 
 /// All built-in agents managed by Cassy for Codex
@@ -68,22 +52,6 @@ pub const CODEX_BUILTIN_AGENTS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "agents/task-verifier.md",
         content: include_str!("builtins/codex/agents/task-verifier.md"),
-    },
-    BuiltinFile {
-        path: "agents/learning-reviewer.md",
-        content: include_str!("builtins/codex/agents/learning-reviewer.md"),
-    },
-    BuiltinFile {
-        path: "agents/rule-reviewer.md",
-        content: include_str!("builtins/codex/agents/rule-reviewer.md"),
-    },
-    BuiltinFile {
-        path: "agents/duplicate-detector.md",
-        content: include_str!("builtins/codex/agents/duplicate-detector.md"),
-    },
-    BuiltinFile {
-        path: "agents/session-summarizer.md",
-        content: include_str!("builtins/codex/agents/session-summarizer.md"),
     },
     BuiltinFile {
         path: "agents/factory-supervisor.md",
@@ -1205,22 +1173,6 @@ pub const GROK_BUILTIN_AGENTS: &[BuiltinFile] = &[
         path: "agents/task-verifier.md",
         content: include_str!("builtins/grok/agents/task-verifier.md"),
     },
-    BuiltinFile {
-        path: "agents/learning-reviewer.md",
-        content: include_str!("builtins/grok/agents/learning-reviewer.md"),
-    },
-    BuiltinFile {
-        path: "agents/rule-reviewer.md",
-        content: include_str!("builtins/grok/agents/rule-reviewer.md"),
-    },
-    BuiltinFile {
-        path: "agents/duplicate-detector.md",
-        content: include_str!("builtins/grok/agents/duplicate-detector.md"),
-    },
-    BuiltinFile {
-        path: "agents/session-summarizer.md",
-        content: include_str!("builtins/grok/agents/session-summarizer.md"),
-    },
 ];
 
 /// All built-in skills managed by Cassy for Grok (EPIC cas-8888, Phase 5 /
@@ -2114,13 +2066,12 @@ pub const GENERAL_PARITY_CAPABILITIES: &[RequiredCapability] = &[
 /// `factory-supervisor` agent, which Claude/Grok don't need because their
 /// supervisor is the primary pane rather than a spawned sub-agent) are allowed
 /// and are simply absent from this required set.
-pub const REQUIRED_FACTORY_AGENTS: &[&str] = &[
-    "agents/task-verifier.md",
-    "agents/learning-reviewer.md",
-    "agents/rule-reviewer.md",
-    "agents/duplicate-detector.md",
-    "agents/session-summarizer.md",
-];
+///
+/// The Stop-hook maintenance jobs (learning-reviewer, rule-reviewer,
+/// duplicate-detector, session-summarizer) are not agents: each has one body
+/// in `crate::maintenance_jobs`, remapped per harness at prompt build
+/// (cas-228e, audit D12).
+pub const REQUIRED_FACTORY_AGENTS: &[&str] = &["agents/task-verifier.md"];
 
 /// The skill catalog for a harness (cas-cc8c parity helpers).
 pub fn skill_catalog_for_harness(harness: SupervisorCli) -> &'static [BuiltinFile] {
@@ -4648,6 +4599,12 @@ This is the body content."#;
         for retired in [
             "agents/git-history-analyzer.md",
             "agents/issue-intelligence-analyst.md",
+            // cas-228e (audit D12, L2 P1-58): the Stop-hook maintenance jobs
+            // are one body each in `crate::maintenance_jobs`, not subagents.
+            "agents/learning-reviewer.md",
+            "agents/rule-reviewer.md",
+            "agents/duplicate-detector.md",
+            "agents/session-summarizer.md",
         ] {
             for (name, catalog) in [
                 ("BUILTIN_AGENTS", BUILTIN_AGENTS),
@@ -6556,7 +6513,7 @@ This is the body content."#;
     }
 
     #[test]
-    fn test_verifier_and_learning_reviewer_markers_stay_in_all_harness_catalogs() {
+    fn test_verifier_markers_and_learning_reviewer_job_contract() {
         for (label, agents) in [
             ("BUILTIN_AGENTS", BUILTIN_AGENTS),
             ("CODEX_BUILTIN_AGENTS", CODEX_BUILTIN_AGENTS),
@@ -6578,22 +6535,13 @@ This is the body content."#;
                     "{label} task-verifier missing marker {marker:?}"
                 );
             }
-
-            let reviewer = agents
-                .iter()
-                .find(|builtin| builtin.path == "agents/learning-reviewer.md")
-                .unwrap_or_else(|| panic!("{label}: learning-reviewer agent is not registered"));
-            assert!(
-                !reviewer.content.contains("model:"),
-                "{label} learning-reviewer must use the light lane"
-            );
-            for marker in ["complete list of unreviewed learning IDs"] {
-                assert!(
-                    reviewer.content.contains(marker),
-                    "{label} learning-reviewer missing marker {marker:?}"
-                );
-            }
         }
+        let reviewer = crate::maintenance_jobs::job_body("learning-reviewer")
+            .expect("learning-reviewer job body");
+        assert!(
+            reviewer.contains("complete list of unreviewed learning IDs"),
+            "learning-reviewer job must consume the supplied ID list"
+        );
     }
 
     /// cas-4900 regression: `sync_all_builtins` was reported to silently

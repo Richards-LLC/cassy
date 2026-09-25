@@ -796,6 +796,16 @@ fn builtin_call_shape_offenders(surface: &CallSurface) -> Vec<CallShapeOffender>
             );
         }
     }
+    // Stop-hook job bodies ship outside the catalogs (cas-228e) but are sent
+    // to a model verbatim apart from the tool prefix.
+    for job in cas::maintenance_jobs::MAINTENANCE_JOBS {
+        lint_call_shapes(
+            job.body,
+            &format!("job:jobs/{}.md", job.name),
+            surface,
+            &mut offenders,
+        );
+    }
     offenders
 }
 

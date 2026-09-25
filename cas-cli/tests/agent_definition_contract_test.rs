@@ -1,4 +1,5 @@
-//! Contract tests for the built-in verifier and learning-reviewer agents.
+//! Contract tests for the built-in verifier agent and the Stop-hook
+//! maintenance job bodies.
 //!
 //! These tests intentionally read the checked-in source files. The files are
 //! embedded into the runtime catalog, so a test that only exercises the
@@ -33,23 +34,11 @@ const VERIFIER_PATHS: [&str; 3] = [
     "cas-cli/src/builtins/grok/agents/task-verifier.md",
 ];
 
-const REVIEWER_PATHS: [&str; 3] = [
-    "cas-cli/src/builtins/agents/learning-reviewer.md",
-    "cas-cli/src/builtins/codex/agents/learning-reviewer.md",
-    "cas-cli/src/builtins/grok/agents/learning-reviewer.md",
-];
-
-const RULE_REVIEWER_PATHS: [&str; 3] = [
-    "cas-cli/src/builtins/agents/rule-reviewer.md",
-    "cas-cli/src/builtins/codex/agents/rule-reviewer.md",
-    "cas-cli/src/builtins/grok/agents/rule-reviewer.md",
-];
-
-const DUPLICATE_DETECTOR_PATHS: [&str; 3] = [
-    "cas-cli/src/builtins/agents/duplicate-detector.md",
-    "cas-cli/src/builtins/codex/agents/duplicate-detector.md",
-    "cas-cli/src/builtins/grok/agents/duplicate-detector.md",
-];
+/// Stop-hook maintenance job bodies: one per job, not agent definitions
+/// (cas-228e, audit D12).
+fn job(name: &str) -> &'static str {
+    cas::maintenance_jobs::job_body(name).unwrap_or_else(|| panic!("no {name} job body"))
+}
 
 /// Every shipped agent definition, in all three flavors.
 ///
@@ -68,10 +57,13 @@ fn every_agent_definition() -> Vec<(String, &'static str)> {
     }
     found.sort_by(|left, right| left.0.cmp(&right.0));
     assert!(
-        found.len() >= 15,
+        found.len() >= 4,
         "expected the three agent catalogs to be discovered, found {}",
         found.len()
     );
+    for maintenance in cas::maintenance_jobs::MAINTENANCE_JOBS {
+        found.push((format!("jobs/{}.md", maintenance.name), maintenance.body));
+    }
     found
 }
 
@@ -263,47 +255,107 @@ fn learning_reviewer_receives_and_consumes_explicit_ids() {
     );
     let stop_flow = load("cas-cli/src/hooks/handlers/handlers_middle/session_stop/stop_flow.rs");
     assert!(stop_flow.contains("build_learning_review_context(store.as_ref(), &config)"));
-    assert!(stop_flow.contains("\"learning-reviewer\",\n                context,"));
+    assert!(stop_flow.contains("jobs.push((\"learning-reviewer\", context));"));
     assert!(stop_flow.contains("{body}\\n\\nRun this maintenance job"));
     assert!(
         stop_flow.contains("{context}"),
         "queued prompt must carry explicit-ID context"
     );
+    assert!(
+        job("learning-reviewer").contains("learning ID from the queued prompt"),
+        "learning-reviewer must consume IDs supplied by the queued prompt"
+    );
+}
 
-    for path in REVIEWER_PATHS {
-        let body = load(path);
+/// Audit D12 / L2 P1-58 (cas-228e): each Stop job has one body, built into
+/// the prompt with the light lane's own tool prefix. No harness installs the
+/// jobs as subagents, and stop_flow never embeds a per-harness copy.
+#[test]
+fn stop_jobs_use_one_body_remapped_to_the_light_lane_prefix() {
+    let stop_flow = load("cas-cli/src/hooks/handlers/handlers_middle/session_stop/stop_flow.rs");
+    assert!(stop_flow.contains("crate::light_lane::tool_prefix()"));
+    assert!(stop_flow.contains("crate::maintenance_jobs::render_job_prompt_body("));
+    assert!(
+        !stop_flow.contains("builtins/codex/agents/"),
+        "stop_flow must not embed the Codex agent copies"
+    );
+    for maintenance in cas::maintenance_jobs::MAINTENANCE_JOBS {
+        let rel = format!("agents/{}.md", maintenance.name);
+        for (flavor, label) in builtin_catalog::FLAVORS {
+            assert!(
+                !builtin_catalog::agents(*flavor)
+                    .iter()
+                    .any(|builtin| builtin.path == rel),
+                "{label} catalog still installs {rel} as a subagent"
+            );
+        }
+        let rendered =
+            cas::maintenance_jobs::render_job_prompt_body(maintenance.body, "mcp__cs__");
         assert!(
-            body.contains("learning ID from the queued prompt"),
-            "{path} must consume IDs supplied by the queued prompt"
+            !rendered.contains("mcp__cas__"),
+            "{} keeps a Claude tool name after the Codex remap",
+            maintenance.name
         );
     }
 }
 
+/// Audit M16 / L2 P0-07, P0-08 (cas-228e).
+#[test]
+fn maintenance_jobs_call_tools_the_way_the_tools_accept() {
+    let learning = job("learning-reviewer");
+    let skill_create = learning
+        .lines()
+        .find(|line| line.contains("skill action=create"))
+        .expect("learning-reviewer documents skill creation");
+    for field in ["invocation=", "scope=project", "draft=true", "source_ids="] {
+        assert!(skill_create.contains(field), "skill create lacks {field}: {skill_create}");
+    }
+    assert_eq!(
+        learning.matches("skill action=list_all").count(),
+        1,
+        "learning-reviewer lists skills once, not once per learning"
+    );
+
+    let rules = job("rule-reviewer");
+    assert!(rules.contains("rule action=promote id=<id> change_note="));
+    assert!(
+        !rules.contains("rule action=helpful"),
+        "rule-reviewer must promote by decision, not by voting"
+    );
+    assert!(rules.contains("rule action=show id=<id>"));
+    assert!(!rules.contains("30+ days"), "an uncheckable criterion was dropped");
+
+    let summarizer = job("session-summarizer");
+    assert!(!summarizer.contains("task action=mine"), "the job is not the session's caller");
+    assert!(summarizer.contains("transcript path"));
+    assert!(summarizer.contains("task action=list status=in_progress"));
+
+    let detector = job("duplicate-detector");
+    assert!(!detector.contains("action=recent"), "process exactly the supplied IDs");
+    assert!(detector.contains("UNCERTAIN <keep-id> <dup-id>"));
+}
+
 #[test]
 fn agent_hygiene_instructions_match_available_actions_and_runtime_context() {
-    for path in RULE_REVIEWER_PATHS {
-        let body = load(path);
-        assert!(
-            body.contains("Retire (tombstone)"),
-            "{path} must describe rule deletion as a tombstone retirement"
-        );
-        assert!(
-            body.contains("rule action=delete"),
-            "{path} must use the available rule delete action"
-        );
-        assert!(
-            !body.contains("**Archive**"),
-            "{path} must not describe an unavailable rule archive action"
-        );
-    }
+    let rules = job("rule-reviewer");
+    assert!(
+        rules.contains("Retire (tombstone)"),
+        "rule-reviewer must describe rule deletion as a tombstone retirement"
+    );
+    assert!(
+        rules.contains("rule action=delete"),
+        "rule-reviewer must use the available rule delete action"
+    );
+    assert!(
+        !rules.contains("**Archive**"),
+        "rule-reviewer must not describe an unavailable rule archive action"
+    );
 
-    for path in DUPLICATE_DETECTOR_PATHS {
-        let body = load(path);
-        assert!(
-            body.contains("task action=notes id=<task-id> note_type=question"),
-            "{path} must name the task-note channel for uncertain cases"
-        );
-    }
+    let detector = job("duplicate-detector");
+    assert!(
+        !detector.contains("task action=notes"),
+        "duplicate-detector has no task to note; it reports UNCERTAIN lines"
+    );
 
     for (path, body) in every_agent_definition() {
         assert!(

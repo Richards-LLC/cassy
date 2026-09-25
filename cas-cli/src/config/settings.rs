@@ -326,10 +326,17 @@ pub fn default_evidence_gate() -> bool {
 }
 
 pub fn default_terminal_render_paths() -> Vec<String> {
-    ["**/ui/**", "**/tui/**", "**/*render*", "**/*output*", "**/*theme*", "**/*progress*"]
-        .into_iter()
-        .map(ToOwned::to_owned)
-        .collect()
+    [
+        "**/ui/**",
+        "**/tui/**",
+        "**/*render*",
+        "**/*output*",
+        "**/*theme*",
+        "**/*progress*",
+    ]
+    .into_iter()
+    .map(ToOwned::to_owned)
+    .collect()
 }
 
 pub fn default_user_facing_paths() -> Vec<String> {
@@ -1502,7 +1509,7 @@ impl Default for SyncConfig {
 /// Manual invocation of the `session-learn` skill works regardless of this
 /// flag — the flag only gates the auto-trigger from the `Stop` hook
 /// handler.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryConfig {
     /// When `true`, the `Stop` hook runs the `session-learn` classifier
     /// against the session transcript and writes draft memories through
@@ -1512,9 +1519,35 @@ pub struct MemoryConfig {
     #[serde(default)]
     pub session_learn_auto: bool,
 
+    /// Completed, non-loop turns required since the last classifier run.
+    #[serde(default = "default_session_learn_min_turns")]
+    pub session_learn_min_turns: usize,
+
+    /// Minimum elapsed minutes between classifier runs in this project.
+    #[serde(default = "default_session_learn_min_minutes")]
+    pub session_learn_min_minutes: u64,
+
     /// Curated-memory decay and access-promotion policy.
     #[serde(default)]
     pub decay: MemoryDecayConfig,
+}
+
+fn default_session_learn_min_turns() -> usize {
+    10
+}
+fn default_session_learn_min_minutes() -> u64 {
+    120
+}
+
+impl Default for MemoryConfig {
+    fn default() -> Self {
+        Self {
+            session_learn_auto: false,
+            session_learn_min_turns: default_session_learn_min_turns(),
+            session_learn_min_minutes: default_session_learn_min_minutes(),
+            decay: MemoryDecayConfig::default(),
+        }
+    }
 }
 
 /// Memory lifecycle policy used by background decay and access paths.
@@ -1731,7 +1764,10 @@ mod tests {
             toml::from_str(toml_str).expect("valid toml");
         let fc = parsed.get("factory").expect("section present");
         assert_eq!(fc.context_recycle_threshold_percent, 90);
-        assert_eq!(FactoryConfig::default().context_recycle_threshold_percent, 80);
+        assert_eq!(
+            FactoryConfig::default().context_recycle_threshold_percent,
+            80
+        );
     }
 
     #[test]
@@ -1865,6 +1901,8 @@ mod tests {
              v1 rollout is opt-in. Flipping this default is the wrong way to \
              enable session-learn; users must set the flag in .cas/config.toml."
         );
+        assert_eq!(default_cfg.session_learn_min_turns, 10);
+        assert_eq!(default_cfg.session_learn_min_minutes, 120);
     }
 
     #[test]
@@ -1877,6 +1915,8 @@ mod tests {
             !mc.session_learn_auto,
             "empty [memory] section must deserialize with session_learn_auto = false"
         );
+        assert_eq!(mc.session_learn_min_turns, 10);
+        assert_eq!(mc.session_learn_min_minutes, 120);
     }
 
     #[test]

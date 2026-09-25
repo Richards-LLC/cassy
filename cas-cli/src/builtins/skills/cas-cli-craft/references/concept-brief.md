@@ -16,7 +16,7 @@ A field that would fit any command is not filled.
 - *First two lines* is a verdict and a count, not a title. "cas doctor" is the prompt the
   reader typed; repeating it is the weakest opening a command can have.
 - *Scannable* names the shape (rows, columns, marks) and the reading order; *readable* names
-  the prose and what unlocks it.
+  the prose and what makes it possible.
 - *Machine output* is a contract: field names, one document, stable order. If a human field
   has no machine twin, say so here; the reverse is usual and fine.
 - *Omitted* is where ambition shows. The 14-line paragraph you did not print is the brief's

@@ -48,7 +48,10 @@ pub fn handle_session_start(
             &[
                 ("session_id", input.session_id.as_str()),
                 ("tool_prefix", crate::harness_policy::own_tool_prefix()),
-                ("custom_config_dir", if custom_config_dir { "true" } else { "false" }),
+                (
+                    "custom_config_dir",
+                    if custom_config_dir { "true" } else { "false" },
+                ),
             ],
         );
         let mut stores = HookStores::new(cas_root);
@@ -83,12 +86,11 @@ pub fn handle_session_start(
             .agents()
             .and_then(|store| store.get(&input.session_id).ok())
             .map(|agent| agent.role);
-        registration_role_warning =
-            registered_role_mismatch_banner(
-                configured_role,
-                registered_role,
-                crate::harness_policy::own_tool_prefix(),
-            );
+        registration_role_warning = registered_role_mismatch_banner(
+            configured_role,
+            registered_role,
+            crate::harness_policy::own_tool_prefix(),
+        );
 
         // Helper to register agent directly in database
         let register_directly = |stores: &mut HookStores| {
@@ -716,7 +718,10 @@ mod large_artifact_staging_tests {
     #[test]
     fn session_start_records_that_it_fired_for_its_role() {
         let tmp = tempfile::tempdir().unwrap();
-        crate::store::open_agent_store(tmp.path()).unwrap().init().unwrap();
+        crate::store::open_agent_store(tmp.path())
+            .unwrap()
+            .init()
+            .unwrap();
         let mut env = staging_env("worker");
         env.set("CAS_FACTORY_SESSION", "d4-session");
         env.set("CAS_AGENT_NAME", "d4-worker");
@@ -733,7 +738,10 @@ mod large_artifact_staging_tests {
             .unwrap_or_else(|| panic!("no session_start_fired record: {logs}"));
         assert!(fired.contains("\"role\":\"worker\""), "{fired}");
         assert!(fired.contains("\"agent\":\"d4-worker\""), "{fired}");
-        assert!(fired.contains("\"session_id\":\"staging-session\""), "{fired}");
+        assert!(
+            fired.contains("\"session_id\":\"staging-session\""),
+            "{fired}"
+        );
     }
 
     /// cas-dc1b (M36): the banner names the reader's own coordination tool.
@@ -1878,6 +1886,190 @@ const SESSION_LEARN_CLASSIFIER_PROMPT: &str = include_str!("session_learn_classi
 /// Existing memories offered to the classifier as duplicate candidates.
 const SESSION_LEARN_DEDUP_CANDIDATES: usize = 40;
 
+/// The offset is advanced only after a successful classifier call. A skipped
+/// Stop therefore keeps every unmined turn available for the next Stop.
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+struct SessionLearnIndex {
+    #[serde(default)]
+    last_run_unix_secs: Option<i64>,
+    #[serde(default)]
+    transcripts: std::collections::BTreeMap<String, SessionLearnCursor>,
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct SessionLearnCursor {
+    mtime_millis: u64,
+    offset: u64,
+}
+
+pub(crate) struct SessionLearnPending {
+    index: SessionLearnIndex,
+    path: std::path::PathBuf,
+    key: String,
+    cursor: SessionLearnCursor,
+    pub(crate) delta: String,
+}
+
+fn session_learn_index_path(cas_root: &std::path::Path) -> std::path::PathBuf {
+    cas_root.join("session-learn-index.json")
+}
+
+fn write_session_learn_index(
+    path: &std::path::Path,
+    index: &SessionLearnIndex,
+) -> Result<(), MemError> {
+    let bytes = serde_json::to_vec(index)
+        .map_err(|e| MemError::Other(format!("session-learn index serialization failed: {e}")))?;
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, bytes)
+        .and_then(|_| std::fs::rename(&tmp, path))
+        .map_err(|e| MemError::Other(format!("session-learn index write failed: {e}")))
+}
+
+/// Return only content added since the last successful classifier run. The
+/// cadence is project-wide for time, and per transcript for completed turns.
+pub(crate) fn session_learn_prepare(
+    cas_root: &std::path::Path,
+    transcript_path: &str,
+    enabled: bool,
+    min_turns: usize,
+    min_minutes: u64,
+    now_unix_secs: i64,
+) -> Result<Option<SessionLearnPending>, MemError> {
+    use std::io::{Read, Seek};
+    if !enabled {
+        return Ok(None);
+    }
+    let path = session_learn_index_path(cas_root);
+    let mut index = match std::fs::read(&path) {
+        Ok(bytes) => serde_json::from_slice::<SessionLearnIndex>(&bytes)
+            .map_err(|e| MemError::Other(format!("session-learn index parse failed: {e}")))?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => SessionLearnIndex::default(),
+        Err(e) => {
+            return Err(MemError::Other(format!(
+                "session-learn index read failed: {e}"
+            )));
+        }
+    };
+    let before = index.transcripts.len();
+    index
+        .transcripts
+        .retain(|name, _| std::path::Path::new(name).exists());
+    if index.transcripts.len() != before {
+        write_session_learn_index(&path, &index)?;
+    }
+
+    let transcript = std::path::Path::new(transcript_path);
+    let mut file = std::fs::File::open(transcript)
+        .map_err(|e| MemError::Other(format!("session-learn: cannot open transcript: {e}")))?;
+    let metadata = file
+        .metadata()
+        .map_err(|e| MemError::Other(format!("session-learn: cannot stat transcript: {e}")))?;
+    let mtime_millis = metadata
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis().min(u64::MAX as u128) as u64)
+        .unwrap_or(0);
+    let key = transcript.to_string_lossy().into_owned();
+    let old_offset = index
+        .transcripts
+        .get(&key)
+        .filter(|old| old.offset <= metadata.len() && old.mtime_millis <= mtime_millis)
+        .map_or(0, |old| old.offset);
+    file.seek(std::io::SeekFrom::Start(old_offset))
+        .map_err(|e| MemError::Other(format!("session-learn: cannot seek transcript: {e}")))?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).map_err(|e| {
+        MemError::Other(format!("session-learn: cannot read transcript delta: {e}"))
+    })?;
+    // Only index complete JSONL records. A concurrent append can leave a
+    // partial final record that must remain in the next delta.
+    let complete_len = bytes
+        .iter()
+        .rposition(|byte| *byte == b'\n')
+        .map_or(0, |at| at + 1);
+    bytes.truncate(complete_len);
+    let delta = String::from_utf8(bytes)
+        .map_err(|e| MemError::Other(format!("session-learn: transcript is not UTF-8: {e}")))?;
+    let turn_count = session_learn_completed_turns(&delta);
+    let time_ready = index.last_run_unix_secs.is_none_or(|last| {
+        now_unix_secs.saturating_sub(last)
+            >= min_minutes.saturating_mul(60).min(i64::MAX as u64) as i64
+    });
+    if turn_count < min_turns || !time_ready || delta.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(SessionLearnPending {
+        index,
+        path,
+        key,
+        cursor: SessionLearnCursor {
+            mtime_millis,
+            offset: old_offset + delta.len() as u64,
+        },
+        delta,
+    }))
+}
+
+fn session_learn_completed_turns(delta: &str) -> usize {
+    let mut count = 0;
+    let mut pending_user = false;
+    for line in delta.lines() {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if value["isSidechain"] == true || value["isMeta"] == true {
+            continue;
+        }
+        match value["type"].as_str() {
+            Some("user") => {
+                // Claude tool results also use type=user; only text prompts
+                // represent a new turn. Loop continuations do not count.
+                if let Some(content) = value["message"]["content"].as_str() {
+                    pending_user = !content.contains("🔄 Loop iteration");
+                }
+            }
+            Some("assistant") if value["message"]["stop_reason"] == "end_turn" => {
+                if pending_user {
+                    count += 1;
+                }
+                pending_user = false;
+            }
+            Some("event_msg") if value["payload"]["type"] == "user_message" => {
+                pending_user = value["payload"]["message"]
+                    .as_str()
+                    .is_some_and(|text| !text.contains("🔄 Loop iteration"));
+            }
+            Some("event_msg") if value["payload"]["type"] == "task_complete" => {
+                if pending_user && value["payload"]["error"].is_null() {
+                    count += 1;
+                }
+                pending_user = false;
+            }
+            Some("response_item")
+                if value["payload"]["type"] == "message" && value["payload"]["role"] == "user" =>
+            {
+                pending_user = true;
+            }
+            _ => {}
+        }
+    }
+    count
+}
+
+pub(crate) fn session_learn_commit(
+    mut pending: SessionLearnPending,
+    now_unix_secs: i64,
+) -> Result<(), MemError> {
+    pending
+        .index
+        .transcripts
+        .insert(pending.key, pending.cursor);
+    pending.index.last_run_unix_secs = Some(now_unix_secs);
+    write_session_learn_index(&pending.path, &pending.index)
+}
+
 fn build_session_learn_prompt(
     transcript_excerpt: &str,
     file_context: &str,
@@ -1890,7 +2082,10 @@ fn build_session_learn_prompt(
             .iter()
             .map(|(id, content)| {
                 let one_line = content.split_whitespace().collect::<Vec<_>>().join(" ");
-                format!("- {id}: {}", crate::hooks::handlers::handlers_middle::utils::truncate_str(&one_line, 160))
+                format!(
+                    "- {id}: {}",
+                    crate::hooks::handlers::handlers_middle::utils::truncate_str(&one_line, 160)
+                )
             })
             .collect::<Vec<_>>()
             .join("\n")
@@ -1942,6 +2137,17 @@ pub(crate) fn session_learn_sync(
     file_paths: &[String],
     existing: &[(String, String)],
 ) -> Result<Vec<SessionLearnDraft>, MemError> {
+    let transcript = std::fs::read_to_string(transcript_path)
+        .map_err(|e| MemError::Other(format!("session-learn: cannot read transcript: {e}")))?;
+    session_learn_text_sync(&transcript, file_paths, existing)
+}
+
+/// Classify a prepared transcript slice without reopening the entire file.
+pub(crate) fn session_learn_text_sync(
+    transcript: &str,
+    file_paths: &[String],
+    existing: &[(String, String)],
+) -> Result<Vec<SessionLearnDraft>, MemError> {
     use std::time::Duration;
     use tokio::runtime::Runtime;
 
@@ -1951,7 +2157,7 @@ pub(crate) fn session_learn_sync(
     rt.block_on(async {
         tokio::time::timeout(
             Duration::from_secs(30),
-            session_learn_async(transcript_path, file_paths, existing),
+            session_learn_async(transcript, file_paths, existing),
         )
         .await
         .map_err(|_| MemError::Other("session-learn timed out after 30s".to_string()))?
@@ -1971,19 +2177,16 @@ pub(crate) fn session_learn_dedup_candidates(
         .collect()
 }
 
-/// Async implementation — reads the transcript, builds the classifier prompt,
+/// Async implementation — builds the classifier prompt from the supplied slice,
 /// makes one single-turn call (`claude-opus-5-5` at low effort), and parses
 /// the returned JSON array into `Vec<SessionLearnDraft>`.
 async fn session_learn_async(
-    transcript_path: &str,
+    transcript: &str,
     file_paths: &[String],
     existing: &[(String, String)],
 ) -> Result<Vec<SessionLearnDraft>, MemError> {
     use crate::tracing::claude_wrapper::traced_prompt;
     use claude_rs::QueryOptions;
-
-    let transcript = std::fs::read_to_string(transcript_path)
-        .map_err(|e| MemError::Other(format!("session-learn: cannot read transcript: {e}")))?;
 
     // Skip trivial transcripts.
     if transcript.len() < 500 {
@@ -2035,15 +2238,168 @@ async fn session_learn_async(
 #[cfg(test)]
 mod session_learn_tests {
     use super::*;
+    use std::io::Write;
+
+    fn completed_turn(label: &str) -> String {
+        format!(
+            "{{\"type\":\"user\",\"message\":{{\"content\":\"{label}\"}}}}\n\
+             {{\"type\":\"assistant\",\"message\":{{\"stop_reason\":\"end_turn\"}}}}\n"
+        )
+    }
+
+    #[test]
+    fn cadence_requires_both_completed_turns_and_elapsed_minutes() {
+        let root = tempfile::tempdir().unwrap();
+        let transcript = root.path().join("session.jsonl");
+        let path = transcript.to_str().unwrap();
+        std::fs::write(&transcript, completed_turn("one")).unwrap();
+        assert!(
+            session_learn_prepare(root.path(), path, true, 2, 120, 1_000)
+                .unwrap()
+                .is_none()
+        );
+        assert!(!session_learn_index_path(root.path()).exists());
+        std::fs::write(
+            &transcript,
+            format!("{}{}", completed_turn("one"), completed_turn("two")),
+        )
+        .unwrap();
+        let first = session_learn_prepare(root.path(), path, true, 2, 120, 1_000)
+            .unwrap()
+            .expect("two completed turns run initially");
+        session_learn_commit(first, 1_000).unwrap();
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&transcript)
+            .unwrap()
+            .write_all(format!("{}{}", completed_turn("three"), completed_turn("four")).as_bytes())
+            .unwrap();
+        assert!(
+            session_learn_prepare(root.path(), path, true, 2, 120, 1_001)
+                .unwrap()
+                .is_none()
+        );
+        let second = session_learn_prepare(root.path(), path, true, 2, 120, 8_200)
+            .unwrap()
+            .expect("elapsed minutes and two new turns run");
+        assert!(second.delta.contains("three") && second.delta.contains("four"));
+    }
+
+    #[test]
+    fn second_run_receives_only_unmined_delta_and_skips_loop_turns() {
+        let root = tempfile::tempdir().unwrap();
+        let transcript = root.path().join("session.jsonl");
+        let path = transcript.to_str().unwrap();
+        std::fs::write(&transcript, completed_turn("first")).unwrap();
+        let first = session_learn_prepare(root.path(), path, true, 1, 0, 1_000)
+            .unwrap()
+            .unwrap();
+        assert!(first.delta.contains("first"));
+        session_learn_commit(first, 1_000).unwrap();
+        let added = format!(
+            "{}{}",
+            completed_turn("🔄 Loop iteration 2"),
+            completed_turn("second")
+        );
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&transcript)
+            .unwrap()
+            .write_all(added.as_bytes())
+            .unwrap();
+        let second = session_learn_prepare(root.path(), path, true, 1, 0, 1_001)
+            .unwrap()
+            .unwrap();
+        assert_eq!(second.delta, added);
+        assert!(!second.delta.contains("first"));
+        assert_eq!(session_learn_completed_turns(&second.delta), 1);
+    }
+
+    #[test]
+    fn codex_counts_only_successful_completed_user_turns() {
+        let delta = concat!(
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\"}}\n",
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"work\"}}\n",
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"error\":\"failed\"}}\n",
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"work again\"}}\n",
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\"}}\n",
+        );
+        assert_eq!(session_learn_completed_turns(delta), 1);
+    }
+
+    #[test]
+    fn incomplete_jsonl_tail_is_retained_for_the_next_run() {
+        let root = tempfile::tempdir().unwrap();
+        let transcript = root.path().join("session.jsonl");
+        let path = transcript.to_str().unwrap();
+        std::fs::write(
+            &transcript,
+            format!("{}{{\"type\":\"user\"", completed_turn("ready")),
+        )
+        .unwrap();
+        let pending = session_learn_prepare(root.path(), path, true, 1, 0, 1_000)
+            .unwrap()
+            .unwrap();
+        assert_eq!(pending.delta, completed_turn("ready"));
+        session_learn_commit(pending, 1_000).unwrap();
+        std::fs::OpenOptions::new().append(true).open(&transcript).unwrap()
+            .write_all(b",\"message\":{\"content\":\"next\"}}\n{\"type\":\"assistant\",\"message\":{\"stop_reason\":\"end_turn\"}}\n")
+            .unwrap();
+        let next = session_learn_prepare(root.path(), path, true, 1, 0, 1_001)
+            .unwrap()
+            .unwrap();
+        assert!(next.delta.contains("next"));
+        assert!(!next.delta.contains("ready"));
+    }
+
+    #[test]
+    fn disabled_does_not_write_index_and_deleted_transcripts_are_pruned() {
+        let root = tempfile::tempdir().unwrap();
+        let old = root.path().join("old.jsonl");
+        let live = root.path().join("live.jsonl");
+        std::fs::write(&old, completed_turn("old")).unwrap();
+        std::fs::write(&live, completed_turn("live")).unwrap();
+        let old_path = old.to_str().unwrap();
+        let live_path = live.to_str().unwrap();
+        assert!(
+            session_learn_prepare(root.path(), old_path, false, 1, 0, 1_000)
+                .unwrap()
+                .is_none()
+        );
+        assert!(!session_learn_index_path(root.path()).exists());
+        let first = session_learn_prepare(root.path(), old_path, true, 1, 0, 1_000)
+            .unwrap()
+            .unwrap();
+        session_learn_commit(first, 1_000).unwrap();
+        std::fs::remove_file(&old).unwrap();
+        assert!(
+            session_learn_prepare(root.path(), live_path, true, 2, 0, 1_001)
+                .unwrap()
+                .is_none()
+        );
+        let index: SessionLearnIndex =
+            serde_json::from_slice(&std::fs::read(session_learn_index_path(root.path())).unwrap())
+                .unwrap();
+        assert!(!index.transcripts.contains_key(old_path));
+    }
 
     #[test]
     fn session_learn_prompt_is_the_dedicated_classifier_prompt() {
-        let existing = vec![("cas-e0a1".to_string(), "Epics branch\nfrom main.".to_string())];
+        let existing = vec![(
+            "cas-e0a1".to_string(),
+            "Epics branch\nfrom main.".to_string(),
+        )];
         let prompt = build_session_learn_prompt("transcript excerpt", "", &existing);
         assert!(prompt.starts_with(SESSION_LEARN_CLASSIFIER_PROMPT));
-        assert!(prompt.contains("## Transcript\ntranscript excerpt"), "{prompt}");
+        assert!(
+            prompt.contains("## Transcript\ntranscript excerpt"),
+            "{prompt}"
+        );
         // Duplicate candidates are passed in: the call cannot search.
-        assert!(prompt.contains("- cas-e0a1: Epics branch from main."), "{prompt}");
+        assert!(
+            prompt.contains("- cas-e0a1: Epics branch from main."),
+            "{prompt}"
+        );
         // The human skill (frontmatter, tool steps, maintainer notes) is not sent.
         for absent in ["managed_by:", "mcp__cas__", "Kill switch", "omit the rest"] {
             assert!(!prompt.contains(absent), "prompt must not carry {absent:?}");
@@ -2073,7 +2429,11 @@ mod session_learn_tests {
         assert!(drafts[1].content.is_empty());
         assert_eq!(drafts[1].confidence, 0.0);
 
-        assert!(parse_session_learn_drafts("no array at all").unwrap().is_empty());
+        assert!(
+            parse_session_learn_drafts("no array at all")
+                .unwrap()
+                .is_empty()
+        );
     }
 
     /// Confirm `SessionLearnDraft` round-trips through JSON correctly.

@@ -7,6 +7,81 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.33.0] - 2026-09-25
+
+### Added
+
+- `cas-qa-craft` can generate a verification kit for any project: a
+  `docs/qa/verify.md` recipe (Launch with a readiness signal, read-only
+  Doctor, Drive, Evidence, Cleanup) and a `docs/qa/features/` map with one
+  file per user-facing feature (Sub-features, How to get to it, Driving it,
+  Gotchas, Touches). Generation is a capped background chore and never a
+  close prerequisite. A per-release sweep reference triages drift as doc
+  drift, harness gap or product regression.
+- `scripts/check-feature-map.mjs` in `cas-qa-craft` statically checks a
+  feature map: the five headings, Touches globs that match files, and an
+  index that lists every file. It warns when a route or selector named under
+  "Driving it" no longer appears in the touched source. Node only, no
+  dependencies; projects without `docs/qa/features/` are skipped.
+- An opt-in close gate for projects with `docs/qa/features/`: when a
+  delivery touches a feature's Touches globs but not its feature file, close
+  names the stale feature files. A `decision` note containing
+  `map unchanged: <reason>` accepts the delivery as is.
+- A `cas-why` skill answers "why was this built this way" from blame,
+  history with provenance, tasks, memories, specs and PRs. Each claim is
+  tagged Documented, Inferred or Unknown, and the answer ends with a coverage
+  map that keeps the sources that found nothing.
+- Session-learn runs on a cadence: an automatic run needs
+  `memory.session_learn_min_turns` completed turns (default 10) and
+  `memory.session_learn_min_minutes` minutes (default 120) since the last
+  run. A per-transcript index means each run reads only what is new, and
+  entries for deleted transcripts are pruned. Nothing changes when
+  session-learn is off.
+- The learning and rule reviewers ask whether a lint, test, close gate, hook
+  or schema could enforce a lesson before writing it as a rule, and tag such
+  rules `enforceable:<lint|hook|gate|type>`. Promoting a tagged rule with at
+  least two sources files one "encode as mechanism" chore, never a
+  duplicate.
+- A builtin text lint flags stock AI vocabulary and abstract metaphor nouns
+  in shipped skill, agent and job text, with a file-and-phrase allowlist
+  that carries a reason for each entry.
+- The handoff memory template has a four-part brief: capsule, threads with
+  one status tag each, problems, and one next move.
+- `verify-before-claim` gives every claim a VERIFIED, NOT VERIFIED or
+  INCONCLUSIVE verdict, scales proof to blast radius on a four-rung ladder,
+  and asks for a same-command baseline and treatment for measurable claims.
+  The task verifier and the QA evidence gate use the same verdicts.
+
+### Changed
+
+- `worktree_merge` refuses a branch whose lane CI is already red and names
+  the failing run. A registered supervisor can override with
+  `supervisor_override=true`, a task id and a non-empty reason, which is
+  logged as a decision note. Pending CI still merges with the advisory note
+  and never waits; green and unavailable results merge as before.
+- Close refusals that tend to repeat end with a stop: after the second
+  refusal, write the working premise as a decision note and compare what
+  the gate checks with what changed. The routine merge-required handoff
+  omits it. A principles reference ships with `cas-codebase-design`, linked
+  from `cas-tdd` and `cas-diagnosing-bugs`.
+- Worker close reasons start with PASS or ISSUES, then the commit and how it
+  was checked. Supervisor guidance retries by failure mode with a two-retry
+  cap, requires goal, scope, acceptance and proof in every brief, and
+  re-verifies by patch id after a rebase.
+- Builtin tests assert behaviour (tool-call shapes, registered files, routed
+  references, link targets) instead of freezing skill sentences, so
+  rewording a skill no longer fails a release gate. Literal substring
+  probes in the scoped tests went from 1,026 to 809; cross-file relation
+  pins and the SessionStart size budgets stay.
+
+### Fixed
+
+- The `search` tool's `doc_type` description now lists `spec` and
+  `artifact`, which the handler already accepted.
+- Removed dead code from `hub-web` (four one-off QA scripts and e2e-only
+  exports) and `slack-bridge` (five exports used only in their own file).
+  The built hub is byte-identical.
+
 ## [3.32.0] - 2026-09-25
 
 ### Added

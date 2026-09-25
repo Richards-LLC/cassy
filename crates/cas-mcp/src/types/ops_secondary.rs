@@ -51,9 +51,9 @@ pub struct SearchContextRequest {
     #[serde(default)]
     pub correction_ref: Option<String>,
 
-    /// Document type filter: entry, task, rule, skill, code_symbol, code_file
+    /// Document type filter: entry, task, rule, skill, spec, artifact, code_symbol, code_file
     #[schemars(
-        description = "Filter by type: 'entry', 'task', 'rule', 'skill', 'code_symbol', 'code_file'"
+        description = "Filter by type: entry, task, rule, skill, spec, artifact, code_symbol, code_file"
     )]
     #[serde(default)]
     pub doc_type: Option<String>,

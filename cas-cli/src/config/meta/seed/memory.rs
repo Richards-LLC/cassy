@@ -17,6 +17,33 @@ pub(super) fn register_memory(registry: &mut ConfigRegistry) {
     });
 
     registry.register(ConfigMeta {
+        key: "memory.session_learn_min_turns",
+        section: "memory",
+        name: "Session Learning Turn Cadence",
+        description: "Completed turns required since the previous automatic session-learn run. Defaults to 10.",
+        value_type: ConfigType::Int,
+        default: "10",
+        constraint: Constraint::None,
+        advanced: true,
+        requires_feature: None,
+        keywords: &["memory", "session", "learn", "turns", "cadence"],
+        use_cases: &["Tune automatic session learning cadence"],
+    });
+    registry.register(ConfigMeta {
+        key: "memory.session_learn_min_minutes",
+        section: "memory",
+        name: "Session Learning Time Cadence",
+        description: "Minutes required since the previous automatic session-learn run. Defaults to 120.",
+        value_type: ConfigType::Int,
+        default: "120",
+        constraint: Constraint::None,
+        advanced: true,
+        requires_feature: None,
+        keywords: &["memory", "session", "learn", "minutes", "cadence"],
+        use_cases: &["Tune automatic session learning cadence"],
+    });
+
+    registry.register(ConfigMeta {
         key: "memory.decay.curated_importance_floor",
         section: "memory.decay",
         name: "Curated Importance Floor",

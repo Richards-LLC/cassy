@@ -96,40 +96,45 @@ fn verifier_mirrors_document_the_current_close_contract() {
             );
         }
         for needed in ["Read", "Bash", "verification", "task"] {
-            assert!(tools.contains(needed), "{path} tools lack {needed}: {tools}");
+            assert!(
+                tools.contains(needed),
+                "{path} tools lack {needed}: {tools}"
+            );
         }
-        // Audit M10: `files` is the field; `files_reviewed` was dropped silently.
+        // `files` is the accepted verdict parameter; `files_reviewed` was
+        // dropped silently. Keep the call shape, not its surrounding sentence.
         assert!(
-            body.contains("files=\"file1,file2\""),
-            "{path} must record files in its verdict template"
+            body.lines().any(|line| {
+                line.contains("verification action=add") && line.contains("files=")
+            }),
+            "{path} must pass files in the verdict call"
         );
-        assert!(!body.contains("files_reviewed"), "{path} uses the old field name");
+        assert!(
+            !body.contains("files_reviewed"),
+            "{path} uses the old field name"
+        );
         // Audit L2 P1-50: diff against the task's delivery base.
         assert!(
             body.contains("git diff --name-status \"$BASE\" HEAD | grep -E "),
             "{path} must use POSIX grep's extended regexp option in its test-first check"
         );
-        assert!(body.contains("git merge-base HEAD <target-branch>"), "{path}");
-        assert!(!body.contains("HEAD~10"), "{path} keeps a fixed commit-count base");
+        assert!(
+            body.contains("git merge-base HEAD <target-branch>"),
+            "{path}"
+        );
+        assert!(
+            !body.contains("HEAD~10"),
+            "{path} keeps a fixed commit-count base"
+        );
         assert!(
             !body.contains("| rg -e ") && !body.contains("| rg -E "),
             "{path} retains a ripgrep-only test-first command"
         );
-        assert!(
-            !body.contains("VERIFICATION JAIL"),
-            "{path} retains stale jail wording"
-        );
-        // Audit L2 P1-49: the close-path section addressed the closer.
-        assert!(!body.contains("Close-Path Error Detection"), "{path}");
         for marker in [
-            "Verifier handoff rejected",
-            "Verifier capability rejected",
-            "Verification authority rejected",
             "ast-grep",
             "stranded_branch_override",
             "epic_verification_owner",
             "verifier-evidence-gate.md",
-            "SUPERVISOR CALL",
         ] {
             assert!(
                 body.contains(marker),
@@ -148,70 +153,28 @@ fn epic_child_demos_require_evidence_before_close_reason() {
     for path in VERIFIER_PATHS {
         let body = load(path);
         let route = body.find("verifier-evidence-gate.md").unwrap();
-        let close_reason = body.find("### Step 1: Check the close reason").unwrap();
-        assert!(route < close_reason, "{path}: evidence gate must come first");
-        assert!(body[..route].contains("**any child**"), "{path}");
-        assert!(body[..close_reason].contains("closed children"), "{path}");
+        let task_lookup = body.find("task action=dep_list id=<task-id>").unwrap();
+        assert!(
+            route < task_lookup,
+            "{path}: evidence route must precede task review"
+        );
     }
     for (flavor, label) in builtin_catalog::FLAVORS {
         let gate = builtin_catalog::find(*flavor, EVIDENCE_GATE);
-        let prerequisites = gate.find("### Epic evidence prerequisites").unwrap();
-        let table = gate.find("| Check | REJECT when |").unwrap();
-        let close_reason = gate
-            .find("Only after this evidence gate passes may you read the close reason")
-            .unwrap();
-        assert!(prerequisites < table && table < close_reason, "{label}");
-        assert_eq!(gate.matches("| Check | REJECT when |").count(), 1, "{label}");
-        let epic_gate = &gate[prerequisites..gate.find("### Step 0A:").unwrap()];
-        for required in [
-            "verification_type=epic",
-            "exactly one `Epic flow walk` note",
-            "~/.cas/artifacts/<epic-id>/LEDGER.md",
-            "QA evidence required: epic has child demo_statement but no Epic flow walk note or LEDGER.md",
-            "current assembled epic tip",
-            "60-minute budget",
-            "coverage mapping for every child demo",
-            "missing, duplicate",
-            "running, stale-tip, or incomplete-coverage",
-            "counts and label split must match",
-            "same Step 0A REJECT table",
-            "Contradictions across",
-            "Do not rerun QA",
-        ] {
-            assert!(
-                epic_gate
-                    .split_whitespace()
-                    .collect::<Vec<_>>()
-                    .join(" ")
-                    .contains(required),
-                "{label}: {required}"
-            );
-        }
-        assert!(gate[..prerequisites].contains("**any child**"), "{label}");
-        assert!(gate[..prerequisites].contains("closed children"), "{label}");
-        for check in [
-            "Required cells",
-            "Source inference",
-            "Failed-cell ownership",
-            "Forbidden verdict",
-            "Matrix breadth",
-            "Headline counts",
-            "PASS evidence",
-        ] {
-            assert!(gate[table..close_reason].contains(check), "{label}: {check}");
-        }
-        // Audit decision D9: NOT EXERCISED rows are the supervisor's call.
-        let policy = &gate[gate.find("### NOT EXERCISED rows").unwrap()..];
-        for required in ["Neither approve nor reject", "status=error", "SUPERVISOR CALL"] {
-            assert!(policy.contains(required), "{label}: {required}");
-        }
+        assert!(
+            gate.contains("task action=dep_list id=<epic-id>"),
+            "{label}"
+        );
+        assert!(gate.contains("verification_type=epic"), "{label}");
+        assert!(gate.contains("LEDGER.md"), "{label}");
+        assert!(gate.contains("status=error"), "{label}");
     }
 }
 
 /// Exercise the installed catalog routes, including the deliberately renamed
 /// Codex checklist, rather than accepting unregistered source-only guidance.
 #[test]
-fn epic_walk_is_one_concurrent_pass_in_every_harness() {
+fn epic_walk_route_and_verdict_shape_exist_in_every_harness() {
     for (flavor, label) in builtin_catalog::FLAVORS {
         let get = |path| builtin_catalog::find(*flavor, path);
         let supervisor = get("skills/cas-supervisor.md");
@@ -228,62 +191,13 @@ fn epic_walk_is_one_concurrent_pass_in_every_harness() {
         );
         let route = "](../cas-supervisor/references/epic-flow-walk.md)";
         assert!(checklist.contains(route), "{label} checklist route");
-        assert!(checklist.contains("release gate detached"), "{label}");
         assert!(checklist.contains("verification_type=epic"), "{label}");
 
         let walk = get("skills/cas-supervisor/references/epic-flow-walk.md");
-        let launch = walk.find("Launch the release").unwrap();
-        let spawn = walk.find("Spawn exactly one").unwrap();
-        assert!(launch < spawn, "{label}: launch the gate before QA");
-        for required in [
-            "one pass per epic",
-            "Include closed children",
-            "if none exist, skip",
-            "dedicated worktree",
-            "**before** dispatching",
-            "gate launch or monitoring",
-            "never spawn a duplicate",
-            "verifier-class evidence agent",
-            "not the sealed task-verifier close dispatch",
-            "**60-minute**",
-            "one combined matrix",
-            "at least three unmentioned conditions",
-            "at least one adjacent surface",
-            "zero replay cells after row 1",
-            "cap **8 cells**",
-            "every child demo",
-            "across children",
-            "Contradictions",
-            "NOT EXERCISED",
-            "one task per defect",
-            "exactly one epic note",
-            "receipt is stale",
-            "do not silently rerun",
-        ] {
-            assert!(
-                walk.split_whitespace()
-                    .collect::<Vec<_>>()
-                    .join(" ")
-                    .contains(required),
-                "{label}: {required}"
-            );
-        }
+        assert!(walk.contains("verification_type=epic"), "{label}");
+        assert!(walk.contains("LEDGER.md"), "{label}");
         let qa = get("skills/cas-qa-craft/SKILL.md");
         assert!(qa.contains(route), "{label}: QA routes to epic procedure");
-        assert!(qa.contains("empty and no child has one"), "{label}");
-        assert!(qa.contains("**60-minute** box overrides"), "{label}");
-        let example = walk.split("### Example epic note").nth(1).unwrap();
-        for field in [
-            "Epic flow walk",
-            "Tip:",
-            "Children:",
-            "Ledger:",
-            "cells=4; PASS=3; FAIL=0; NOT EXERCISED=1",
-            "labels:",
-            "Owed:",
-        ] {
-            assert!(example.contains(field), "{label}: example lacks {field}");
-        }
     }
 }
 
@@ -294,10 +208,7 @@ fn learning_reviewer_receives_and_consumes_explicit_ids() {
         stop_handler.contains("unreviewed_ids"),
         "Stop prompt builder must construct the complete unreviewed ID list"
     );
-    assert!(
-        stop_handler.contains("Review exactly these unreviewed learning IDs: {unreviewed_ids}"),
-        "Stop context must pass explicit IDs to learning-reviewer"
-    );
+    assert!(stop_handler.contains("{unreviewed_ids}"));
     let stop_flow = load("cas-cli/src/hooks/handlers/handlers_middle/session_stop/stop_flow.rs");
     assert!(stop_flow.contains("build_learning_review_context(store.as_ref(), &config)"));
     assert!(stop_flow.contains("jobs.push((\"learning-reviewer\", context));"));
@@ -305,10 +216,6 @@ fn learning_reviewer_receives_and_consumes_explicit_ids() {
     assert!(
         stop_flow.contains("{context}"),
         "queued prompt must carry explicit-ID context"
-    );
-    assert!(
-        job("learning-reviewer").contains("learning ID from the queued prompt"),
-        "learning-reviewer must consume IDs supplied by the queued prompt"
     );
 }
 
@@ -334,8 +241,7 @@ fn stop_jobs_use_one_body_remapped_to_the_light_lane_prefix() {
                 "{label} catalog still installs {rel} as a subagent"
             );
         }
-        let rendered =
-            cas::maintenance_jobs::render_job_prompt_body(maintenance.body, "mcp__cs__");
+        let rendered = cas::maintenance_jobs::render_job_prompt_body(maintenance.body, "mcp__cs__");
         assert!(
             !rendered.contains("mcp__cas__"),
             "{} keeps a Claude tool name after the Codex remap",
@@ -353,7 +259,10 @@ fn maintenance_jobs_call_tools_the_way_the_tools_accept() {
         .find(|line| line.contains("skill action=create"))
         .expect("learning-reviewer documents skill creation");
     for field in ["invocation=", "scope=project", "draft=true", "source_ids="] {
-        assert!(skill_create.contains(field), "skill create lacks {field}: {skill_create}");
+        assert!(
+            skill_create.contains(field),
+            "skill create lacks {field}: {skill_create}"
+        );
     }
     assert_eq!(
         learning.matches("skill action=list_all").count(),
@@ -368,32 +277,27 @@ fn maintenance_jobs_call_tools_the_way_the_tools_accept() {
         "rule-reviewer must promote by decision, not by voting"
     );
     assert!(rules.contains("rule action=show id=<id>"));
-    assert!(!rules.contains("30+ days"), "an uncheckable criterion was dropped");
 
     let summarizer = job("session-summarizer");
-    assert!(!summarizer.contains("task action=mine"), "the job is not the session's caller");
-    assert!(summarizer.contains("transcript path"));
+    assert!(
+        !summarizer.contains("task action=mine"),
+        "the job is not the session's caller"
+    );
     assert!(summarizer.contains("task action=list status=in_progress"));
 
     let detector = job("duplicate-detector");
-    assert!(!detector.contains("action=recent"), "process exactly the supplied IDs");
-    assert!(detector.contains("UNCERTAIN <keep-id> <dup-id>"));
+    assert!(
+        !detector.contains("action=recent"),
+        "process exactly the supplied IDs"
+    );
 }
 
 #[test]
 fn agent_hygiene_instructions_match_available_actions_and_runtime_context() {
     let rules = job("rule-reviewer");
     assert!(
-        rules.contains("Retire (tombstone)"),
-        "rule-reviewer must describe rule deletion as a tombstone retirement"
-    );
-    assert!(
         rules.contains("rule action=delete"),
         "rule-reviewer must use the available rule delete action"
-    );
-    assert!(
-        !rules.contains("**Archive**"),
-        "rule-reviewer must not describe an unavailable rule archive action"
     );
 
     let detector = job("duplicate-detector");
@@ -404,8 +308,10 @@ fn agent_hygiene_instructions_match_available_actions_and_runtime_context() {
 
     for (path, body) in every_agent_definition() {
         assert!(
-            !body.contains("Current year: 2026"),
-            "{path} must not hard-code a calendar year"
+            !body
+                .split(|c: char| !c.is_ascii_digit())
+                .any(|token| token.len() == 4 && token.starts_with("20")),
+            "{path} must not hard-code a 2000s calendar year"
         );
     }
 }

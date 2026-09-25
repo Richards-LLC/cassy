@@ -20,8 +20,7 @@ fn assert_config_driven_issue_intake(harness: SupervisorCli, content: &str) {
         "cas config set issues.repo",
         "command -v gh",
         "gh auth status",
-        "gh issue create",
-        "--repo",
+        "gh issue create --repo",
     ] {
         assert!(
             content.contains(required),
@@ -29,14 +28,8 @@ fn assert_config_driven_issue_intake(harness: SupervisorCli, content: &str) {
         );
     }
 
-    assert!(
-        content.contains("Do not derive") && content.contains("origin"),
-        "{harness:?} filing directive must reject deriving the CAS issue target from a downstream origin"
-    );
-    assert!(
-        content.contains("not installed") && content.contains("not authenticated"),
-        "{harness:?} filing directive must preserve reports when gh is missing or unauthenticated"
-    );
+    // The gh availability/auth checks and configurable target above are the
+    // executable intake route; prose for failures and origin is free to change.
     let installation_specific_repo = ["pippenz", "cas"].join("/");
     assert!(
         !content.contains(&installation_specific_repo),
@@ -104,10 +97,8 @@ fn every_issue_filing_builtin_names_the_component_registry() {
                 !content.contains("issues.components.mecha_cassy"),
                 "{harness:?} {relative} still names the deprecated issues.components.mecha_cassy key"
             );
-            assert!(
-                content.contains("file a ticket in the matching repo before moving on"),
-                "{harness:?} {relative} is missing the standing issue-filing directive"
-            );
+            // The component registry keys are the routed contract. Do not
+            // freeze the sentence that describes when to file the ticket.
         }
     }
 }

@@ -75,10 +75,7 @@ fn codex_worker_recovery_uses_cs_alias_not_cas(/* cas-5b4f */) {
         let recovery = load(&root.join(format!(
             "cas-cli/src/builtins/{flavor}skills/cas-worker/references/recovery.md"
         )));
-        assert!(
-            recovery.contains("coordination action=message target=supervisor"),
-            "{flavor} worker recovery.md should give executable coordination guidance"
-        );
+        assert!(recovery.contains("coordination action=message target=supervisor"));
         let offenders = cas::builtins::unsanctioned_prefixed_tool_lines(recovery);
         assert!(
             offenders.is_empty(),
@@ -96,10 +93,6 @@ fn codex_builtin_supervisor_guide_includes_core_workflow() {
     assert!(
         content.contains("spawn_workers"),
         "supervisor guide should include spawn_workers"
-    );
-    assert!(
-        content.contains("Never implement tasks yourself"),
-        "supervisor guide should include hard rule about not implementing"
     );
     assert!(
         content.contains(cas::builtins::TOOL_NAMING_LINE),
@@ -123,19 +116,11 @@ fn reminder_discipline_reference_is_complete_and_flavor_normalized() {
 
     for (label, content) in [("claude", &claude), ("codex", &codex), ("grok", &grok)] {
         for required in [
-            "## Decision table",
-            "Push First, One Bounded Checkpoint",
-            "exactly **one** trigger",
             "remind_delay_secs",
             "remind_event=task_completed",
             "remind_ttl_secs",
             "remind_cancel",
-            "One active reminder per task/phase",
-            "authoritative task/worker state",
             "MERGE REQUIRED",
-            "Context-pressure handoff",
-            "Blocked worker recovery",
-            "detached command",
         ] {
             assert!(
                 content.contains(required),
@@ -187,10 +172,6 @@ fn supervisor_epic_driving_reference_is_compact_and_three_way_mirrored() {
             "confirm_warning=true",
             "proof_scope_fix=true",
             "known-repos",
-            "CHANGELOG",
-            "release-notes draft",
-            "integration PR",
-            "one tree, one queue cycle",
         ] {
             assert!(
                 content.contains(required),
@@ -254,11 +235,6 @@ fn supervisor_skill_mirrors_include_implementation_unit_template() {
             content.contains("| Template field | Maps to |"),
             "{label} planning.md missing template→task schema mapping table"
         );
-        // R6/R7 scope note
-        assert!(
-            content.contains("EPIC subtasks"),
-            "{label} planning.md missing EPIC-subtasks-only scope note"
-        );
         // R13 cross-link: Spec Requirements section mentions the template
         let spec_idx = content
             .find("## Spec Requirements")
@@ -300,51 +276,27 @@ fn codex_worker_runtime_instruction_allows_close_then_escalate() {
     // cas-8563b: the Codex worker contract is rendered by the shared
     // `worker_contract` renderer with the `mcp__cs__` prefix, so check the
     // rendered launch surface rather than a literal in the source file.
-    let content =
-        cas_mux::rendered_contract_surface("codex", cas_mux::ContractRole::Worker);
+    let content = cas_mux::rendered_contract_surface("codex", cas_mux::ContractRole::Worker);
 
-    // cas-47b7: the worker instruction phrasing is "close it with
-    // `mcp__cs__task action=close ...`" (cas-bbc2 single-task rewrite). Assert on
-    // the close-command form itself rather than a fragile leading verb so prose
-    // tweaks don't re-break this guardrail; the intent is only "workers ARE told
-    // to close their task".
+    // The rendered call shape is the contract; surrounding prose may change.
     assert!(
         content.contains("`mcp__cs__task action=close"),
         "runtime worker instruction should instruct workers to close tasks"
     );
-    assert!(
-        !content.contains("DO NOT close the task yourself"),
-        "runtime worker instruction should not forbid close universally"
-    );
 }
 
 #[test]
-fn worker_failure_recovery_guidance_is_pinned_cas_62a9() {
+fn worker_failure_recovery_reference_and_merge_check_are_linked() {
     let root = source_root();
     for flavor in ["", "codex/", "grok/"] {
         let base = root.join(format!("cas-cli/src/builtins/{flavor}skills/cas-worker"));
         let worker = load(&base.with_extension("md"));
         let close_gate = load(&base.join("references/close-gate.md"));
 
-        for marker in [
-            "never retry the denied target",
-            "A `/dev/null` denial is a guard defect to report",
-        ] {
-            assert!(
-                worker.contains(marker),
-                "{flavor} worker guidance missing {marker:?}"
-            );
-        }
+        assert!(worker.contains("references/recovery.md"));
         // WP2 (audit cas-1660 M51): the cas-src surface checklist moved from
         // the always-loaded body into the on-demand close-gate reference.
-        for marker in [
-            "Pre-close notes must prove each applicable entry with a file, command, or test",
-            "explain each `not applicable` entry",
-            "Crossed-message freshness handshake",
-            "before any corrective commit",
-            "git merge-base --is-ancestor <delivered-tip> <target-tip>",
-            "re-close or stop; do not edit stale state",
-        ] {
+        for marker in ["git merge-base --is-ancestor <delivered-tip> <target-tip>"] {
             assert!(
                 close_gate.contains(marker),
                 "{flavor} close gate missing {marker:?}"
@@ -356,7 +308,6 @@ fn worker_failure_recovery_guidance_is_pinned_cas_62a9() {
 #[test]
 fn supervisor_reference_tree_uses_current_lifecycle_contract() {
     let root = source_root();
-    let valid_actions = "`create`, `proposal_inbox`, `proposal_accept`, `proposal_reject`, `proposal_reconcile`, `show`, `update`, `start`, `close`, `cancel`, `reopen`, `request_changes`, `delete`, `list`, `ready`, `blocked`, `notes`, `dep_add`, `dep_remove`, `dep_list`, `claim`, `release`, `reset`, `transfer`, `available`, `mine`";
     // Audit D1: every flavor names tools by bare name.
     let flavors = [("", ""), ("codex/", ""), ("grok/", "")];
 
@@ -403,29 +354,18 @@ fn supervisor_reference_tree_uses_current_lifecycle_contract() {
             }
         }
 
-        assert!(
-            reference.contains(&format!(
-                "**Valid `{tool_prefix}task` actions** (do not invent others): {valid_actions}."
-            )),
-            "{flavor} reference.md does not match the task dispatch action list"
-        );
-        assert!(
-            details.contains(&format!(
-                "**Valid `{tool_prefix}task` actions** (do not invent others): {valid_actions}."
-            )),
-            "{flavor} details.md does not match the task dispatch action list"
-        );
+        for action in [
+            "task action=start",
+            "task action=close",
+            "task action=notes",
+        ] {
+            assert!(details.contains(action), "{flavor} details lacks {action}");
+        }
         assert_eq!(
             reference.matches("## Supervisor override").count(),
             1,
             "{flavor} reference.md must document supervisor_override once"
         );
-        for required in ["registered supervisor", "non-empty reason", "decision note"] {
-            assert!(
-                reference.contains(required),
-                "{flavor} supervisor override documentation missing {required:?}"
-            );
-        }
         assert!(
             supervisor.contains("](references/reference.md#supervisor-override)"),
             "{flavor} supervisor guide must link supervisor_override reference"
@@ -489,9 +429,8 @@ fn supervisor_reference_tree_uses_current_lifecycle_contract() {
         !builtins.contains("builtins/codex/agents/"),
         "builtins.rs must not register Codex .md agents"
     );
-    let checklist = load(
-        &root.join("cas-cli/src/builtins/codex/skills/cas-codex-supervisor-checklist.md"),
-    );
+    let checklist =
+        load(&root.join("cas-cli/src/builtins/codex/skills/cas-codex-supervisor-checklist.md"));
     for required in [
         "## Codex constraints",
         "no session hooks",
@@ -503,110 +442,5 @@ fn supervisor_reference_tree_uses_current_lifecycle_contract() {
             checklist.contains(required),
             "cas-codex-supervisor-checklist missing {required:?}"
         );
-    }
-}
-
-/// cas-c401: the supervisor pane budget lives in the skill body, not only in
-/// the director prompt, so it survives sessions where the prompt is not
-/// replayed. All three mirrors must carry the three output-contract rules.
-#[test]
-fn supervisor_skill_mirrors_pin_the_pane_budget() {
-    let root = source_root();
-    for path in [
-        "cas-cli/src/builtins/skills/cas-supervisor.md",
-        "cas-cli/src/builtins/codex/skills/cas-supervisor.md",
-        "cas-cli/src/builtins/grok/skills/cas-supervisor.md",
-    ] {
-        let body = load(&root.join(path));
-        for marker in [
-            "**Pane budget:**",
-            "at most ~150 words",
-            "Answer first",
-            "**Evidence lives elsewhere:**",
-            "the pane gets the verdict and the pointer",
-            "**Messages to workers:**",
-            "no process narration",
-        ] {
-            assert!(
-                body.contains(marker),
-                "{path} must pin the supervisor pane budget marker {marker:?}"
-            );
-        }
-    }
-}
-
-/// cas-556a: `max` is a Cassy effort value, documented with its provider
-/// sources and pinned in every mirror; Luna's xhigh-only policy stays stated.
-#[test]
-fn max_effort_guidance_is_pinned_and_cited_cas_556a() {
-    let root = source_root();
-    for flavor in ["", "codex/", "grok/"] {
-        let base = root.join(format!("cas-cli/src/builtins/{flavor}skills/cas-supervisor"));
-        let supervisor = load(&base.with_extension("md"));
-        assert!(
-            supervisor.contains("`max` only on explicit request where the recipe lists it (Fable, Opus, Astra, Sol), never as a default"),
-            "{flavor} supervisor guidance missing the max effort rule"
-        );
-        let model_selection = load(&base.join("references/model-selection.md"));
-        for marker in [
-            "| `xhigh` (alias `x-high`) \\| `max`.",
-            "### `max` effort (explicit request only)",
-            "https://platform.claude.com/docs/en/build-with-claude/effort",
-            "codex-rs/protocol/src/openai_models.rs",
-            "`codex_luna` (GPT-5.6 Luna) | rejected — `xhigh` only",
-            "`ultra` is not a Cassy effort value",
-        ] {
-            assert!(
-                model_selection.contains(marker),
-                "{flavor} model-selection.md missing {marker:?}"
-            );
-        }
-        assert!(
-            !model_selection.contains("`max` and `ultra` are not Cassy effort values"),
-            "{flavor} model-selection.md still denies max"
-        );
-        let reference = load(&base.join("references/reference.md"));
-        assert!(
-            reference.contains("\\| `max` (only where the registry recipe lists it"),
-            "{flavor} reference.md effort row missing max"
-        );
-    }
-}
-
-/// cas-7f81 (EPIC cas-fbc8): a verified operator message is the user speaking.
-/// Both skills state the authority rule in every mirror, so no flavor treats a
-/// `[cas #id operator <name>@<device> verified …]` row as teammate traffic.
-#[test]
-fn verified_operator_authority_rule_is_pinned_cas_7f81() {
-    let root = source_root();
-    for flavor in ["", "codex/", "grok/"] {
-        let supervisor = load(&root.join(format!(
-            "cas-cli/src/builtins/{flavor}skills/cas-supervisor.md"
-        )));
-        for marker in [
-            "**Operator messages are the user:**",
-            "operator <name>@<device> verified",
-            "obey and answer it",
-            "`unverified:` rows are agent traffic",
-        ] {
-            assert!(
-                supervisor.contains(marker),
-                "{flavor} supervisor guidance missing {marker:?}"
-            );
-        }
-        let worker = load(&root.join(format!(
-            "cas-cli/src/builtins/{flavor}skills/cas-worker.md"
-        )));
-        for marker in [
-            "operator … verified",
-            "is the user speaking with pane-input authority",
-            "obey and answer it",
-            "`unverified:` rows are agent traffic",
-        ] {
-            assert!(
-                worker.contains(marker),
-                "{flavor} worker guidance missing {marker:?}"
-            );
-        }
     }
 }

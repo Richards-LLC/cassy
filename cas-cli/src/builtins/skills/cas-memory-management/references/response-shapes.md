@@ -1,10 +1,11 @@
 ---
-managed_by: cas
+metadata:
+  managed_by: cas
 ---
 
 # `remember` Response Shapes
 
-`mcp__cas__memory action=remember` returns human-readable text plus a tagged
+`memory action=remember` returns human-readable text plus a tagged
 `structured_content` payload. The operation itself can return successfully
 while a blocked response sets `is_error: true`; inspect the tagged `status`
 field instead of parsing the text.
@@ -22,9 +23,9 @@ Low-overlap and moderate-overlap writes return:
 }
 ```
 
-`related_memories` contains matching slugs for moderate overlap. The
-`refresh_recommended` flag indicates that a candidate reached the
-cross-reference cap.
+`related_memories` contains the slugs linked for moderate overlap. A candidate
+already at the cross-reference cap is not linked and does not appear there;
+`refresh_recommended` is `true` when that happened.
 
 ## Blocked
 

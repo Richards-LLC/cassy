@@ -11,13 +11,13 @@ never hold their values.
 
 ## One command, once per machine
 
-After `cas login`, `cas integrate mecha-cassy` writes all three registrations
+After `cas login`, `cas integrate violet` writes all three registrations
 below — a machine-scoped proxy registration under the user config directory
 that every project inherits, plus the Codex and Claude Code entries — refusing
 to claim success without an authenticated `tools/list` receipt. Re-running it
 is the refresh path, and `cas doctor`'s `mecha-cassy` row states whether this
 machine can post and what to do when it cannot. Setting up a new machine or a
-teammate: `docs/MECHA_CASSY_ONBOARDING.md`.
+teammate: run `cas integrate violet --help` on that machine.
 
 The command also repairs a project `.cas/proxy.toml` that shadows the machine
 registration: a project file **replaces** the machine allowlist rather than
@@ -65,10 +65,11 @@ auth = "env:MECHA_SLACK_TOKEN_<LABEL>"
 x-vercel-protection-bypass = "env:MECHA_VERCEL_BYPASS"
 ```
 
-Dispatch through the proxy:
+Dispatch through the proxy. `mcp_execute` takes a single `code` string holding
+the JSON dispatch; it has no `server`, `tool` or `args` parameters:
 
 ```text
-mcp__cas__mcp_execute server=mecha-cassy tool=mecha_read args={"channel":"<name>","since":"<RFC3339>","max_messages":50}
+mcp_execute code='{"server":"mecha-cassy","tool":"mecha_read","args":{"channel":"<name>","since":"<RFC3339>","max_messages":50}}'
 ```
 
 A project `allowlist` replaces the machine allowlist entirely, so list every
@@ -80,14 +81,14 @@ factory workers are refused with a named reason. `cas serve` logs one
 `mcp_search` marks such tools "supervisors only".
 
 The proxy resolves its bearer when `cas serve` starts, so a variable exported
-after startup stays invisible until the next restart. `mcp__cas__system
+after startup stays invisible until the next restart. `system
 action=proxy_health` is credential-free: the healthy record for `mecha-cassy`
 reports `tool_count=2` and no error code. `.cas/proxy_catalog.json` is a
 generated cache, not source configuration.
 
 ### Downstream projects and workers
 
-Run `cas integrate mecha-cassy` from the downstream checkout as well as on the
+Run `cas integrate violet` from the downstream checkout as well as on the
 machine. A checkout with no `.cas/proxy.toml` inherits the machine-level hub
 server and allowlist; a checkout with its own file uses that file's allowlist
 as the dispatch policy. If `mcp_search` for `server:mecha-cassy` returns no

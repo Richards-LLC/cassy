@@ -1,6 +1,6 @@
 [package]
 name = "cas-mcp"
-version = "3.31.0"
+version = "3.32.0"
 edition = "2024"
 rust-version = "1.88"
 description = "MCP server for CAS"
@@ -8,6 +8,11 @@ license = "MIT"
 
 [lints]
 workspace = true
+
+[features]
+# Mirrors cas-cli's `mcp-proxy`: the proxy-only system/verification actions
+# are published in the action enums only when the dispatch includes them.
+mcp-proxy = []
 
 [dependencies]
 cas-types = { path = "../cas-types" }

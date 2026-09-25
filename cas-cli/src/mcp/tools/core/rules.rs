@@ -1,5 +1,6 @@
 use crate::config::{Config, parse_promotion_evidence};
 use crate::mcp::tools::core::imports::*;
+use crate::store::foreign_project_guard::ForeignProjectGuard;
 use cas_store::{RetrievalAggregate, SqliteRetrievalStore};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -338,14 +339,6 @@ impl CasCore {
         &self,
         Parameters(req): Parameters<RuleCreateRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let rule_store = self.open_rule_store()?;
-
-        let id = rule_store.generate_id().map_err(|e| McpError {
-            code: ErrorCode::INTERNAL_ERROR,
-            message: Cow::from(format!("Failed to generate ID: {e}")),
-            data: None,
-        })?;
-
         let tags: Vec<String> = req
             .tags
             .map(|t| {
@@ -355,6 +348,28 @@ impl CasCore {
                     .collect()
             })
             .unwrap_or_default();
+
+        // cas-caae (skills audit M27/M83): a rule naming another registered
+        // project belongs in that project's store, unless tagged
+        // `project:<slug>` as a deliberate cross-project rule.
+        let project_root = self.cas_root.parent().unwrap_or(&self.cas_root);
+        if let Some(refusal) =
+            ForeignProjectGuard::for_project_root(project_root).check_rule(&req.content, &tags)
+        {
+            return Err(McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from(refusal.to_string()),
+                data: None,
+            });
+        }
+
+        let rule_store = self.open_rule_store()?;
+
+        let id = rule_store.generate_id().map_err(|e| McpError {
+            code: ErrorCode::INTERNAL_ERROR,
+            message: Cow::from(format!("Failed to generate ID: {e}")),
+            data: None,
+        })?;
 
         // Validate auto_approve_tools if provided
         if let Some(ref tools) = req.auto_approve_tools {
@@ -464,6 +479,90 @@ impl CasCore {
                 agent.name
             )),
         }
+    }
+
+    /// Promote a rule to Proven on a reviewer's recorded decision (audit
+    /// D11). `helpful` is a vote: it promotes only once votes reach
+    /// `sync.promotion_threshold`, and a reviewer voting on rules it judges
+    /// inflates the very metric it judges by. `promote` is the explicit
+    /// decision instead: it needs a reason, which rule history records, and it
+    /// never adds a helpful vote. It raises `helpful_count` only to the
+    /// `sync.min_helpful` floor rule-file sync requires, so the rule reaches
+    /// Claude Code.
+    pub async fn cas_rule_promote(
+        &self,
+        id: String,
+        change_note: Option<String>,
+        changed_by: Option<String>,
+    ) -> Result<CallToolResult, McpError> {
+        let invalid = |message: String| McpError {
+            code: ErrorCode::INVALID_PARAMS,
+            message: Cow::from(message),
+            data: None,
+        };
+        let reason = change_note
+            .as_deref()
+            .map(str::trim)
+            .filter(|note| !note.is_empty())
+            .ok_or_else(|| {
+                invalid(format!(
+                    "rule action=promote requires change_note: say why {id} deserves Proven (it is recorded in rule history)"
+                ))
+            })?
+            .to_string();
+
+        let rule_store = self.open_rule_store()?;
+        let config = self.load_config();
+        let mut rule = rule_store
+            .get(&id)
+            .map_err(|e| invalid(format!("Rule not found: {e}")))?;
+
+        match rule.status {
+            RuleStatus::Proven => {
+                return Ok(Self::success(format!("{id} is already Proven; nothing changed")));
+            }
+            RuleStatus::Retired => {
+                return Err(invalid(format!(
+                    "{id} is retired; restore it with rule action=restore before promoting"
+                )));
+            }
+            RuleStatus::Draft | RuleStatus::Stale => {}
+        }
+        if rule.harmful_count > 0 {
+            return Err(invalid(format!(
+                "{id} has {} harmful report(s); rewrite or retire it instead of promoting",
+                rule.harmful_count
+            )));
+        }
+        let project_root = self.cas_root.parent().unwrap_or(&self.cas_root);
+        if let Some(refusal) =
+            ForeignProjectGuard::for_project_root(project_root).check_rule(&rule.content, &rule.tags)
+        {
+            return Err(invalid(refusal.to_string()));
+        }
+
+        let floor = config.sync.min_helpful.max(0);
+        let raised_to_floor = rule.helpful_count < floor;
+        rule.helpful_count = rule.helpful_count.max(floor);
+        rule.status = RuleStatus::Proven;
+        rule.last_accessed = Some(chrono::Utc::now());
+        let note = format!("promoted: {reason}");
+        rule_store
+            .update_with_metadata(&rule, changed_by.as_deref(), Some(&note))
+            .map_err(|e| McpError {
+                code: ErrorCode::INTERNAL_ERROR,
+                message: Cow::from(format!("Failed to update: {e}")),
+                data: None,
+            })?;
+        let _ = self.sync_rules();
+
+        let mut msg = format!("Promoted {id} to Proven (synced to Claude Code)");
+        if raised_to_floor {
+            msg.push_str(&format!(
+                "; helpful_count raised to the sync floor of {floor}"
+            ));
+        }
+        Ok(Self::success(msg))
     }
 
     /// Mark rule as harmful
@@ -612,6 +711,21 @@ impl CasCore {
 
         if changes.is_empty() {
             return Ok(Self::success("No changes specified"));
+        }
+
+        // cas-caae: the M27 rule reached its store as an edit of an existing
+        // row, so a content or tag edit gets the same guard as create.
+        if changes.contains(&"content") || changes.contains(&"tags") {
+            let project_root = self.cas_root.parent().unwrap_or(&self.cas_root);
+            if let Some(refusal) = ForeignProjectGuard::for_project_root(project_root)
+                .check_rule(&rule.content, &rule.tags)
+            {
+                return Err(McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(refusal.to_string()),
+                    data: None,
+                });
+            }
         }
 
         // cas-5372: an authorised caller's edit re-authorises the hard rule

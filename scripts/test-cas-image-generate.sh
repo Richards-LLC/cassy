@@ -180,7 +180,6 @@ PY
     echo "ok   ${label}: key absent from curl argv; header mode 600; cleanup verified"
 }
 
-run_case claude "${repo_root}/cas-cli/src/builtins/skills/cas-image-generate/scripts/generate-image.sh"
-run_case codex "${repo_root}/cas-cli/src/builtins/codex/skills/cas-image-generate/scripts/generate-image.sh"
-run_case grok "${repo_root}/cas-cli/src/builtins/grok/skills/cas-image-generate/scripts/generate-image.sh"
+# One prefix-neutral copy ships to every harness (audit D1).
+run_case all-harnesses "${repo_root}/cas-cli/src/builtins/skills/cas-image-generate/scripts/generate-image.sh"
 echo "PASS: cas-image-generate credential argv and header-file contract verified"

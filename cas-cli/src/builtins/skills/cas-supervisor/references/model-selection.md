@@ -1,26 +1,19 @@
----
-name: model-selection
-description: Supervisor model/effort routing — match worker model tier to task complexity at breakdown, spawn, and escalation time.
-managed_by: cas
----
-
 # Model Selection — Matching Workers to Tasks
 
 Pay for reasoning only where reasoning is the bottleneck. Every worker slot has three knobs — `cli`, `model`, `effort` — and the supervisor owns them: decide per task at breakdown, spawn the mix the backlog needs, escalate deliberately. Spawning everything at the session default wastes budget on chores and starves hard tasks of capability.
 
+This file is the one authoritative copy of the lane matrix; the skill body and other references point here.
+
 Routing is two stages. **Stage 1 — tier the task** by complexity; the tier is a stable property of the work. **Stage 2 — pick the registry lane** that fills that tier:
 
-- **Light** is Codex GPT-6 Luna at xhigh, with Claude Opus 5.5/low as fallback: bounded chores, docs, and mechanical work still carry an explicit effort.
+- **Light** is Codex GPT-6 Luna at xhigh, with Claude Opus 5.5/low as fallback: bounded chores, mechanical non-public docs, and other mechanical work.
 - **Standard** is Codex GPT-6 Sol at medium, with Codex GPT-6 Luna/xhigh as fallback: the stock engineering floor for normal feature and bug work.
 - **Supervisor** is Claude Opus 5.5 at high, with Claude Fable 5.1/high as fallback.
 - **Taste** is Claude Opus 5.5 at high: public surfaces, prompts, docs, naming, release notes, and general judgment are normal taste work, with Claude Opus 5/high as its loud fallback when Opus 5.5 is unavailable.
 - **Heavy** is Claude Opus 5.5 at high: cross-cutting refactors, concurrency/lifecycle code, migrations, and critical-path work, with Codex GPT-6 Astra/high as its loud fallback.
-- **OpenCode is route-specific** — its local and hosted Qwen lanes each require their
-  own live receipt before production spawning. Never infer provider auth or effort
-  support from the selector alone. The operator's default hosted lane is the explicit
-  QwenCloud Token Plan route.
+- **OpenCode is route-specific** — each Qwen route needs its own live receipt; see [OpenCode lane](#opencode-lane-route-specific-conformance).
 
-The light lane defaults to GPT-6 Luna/xhigh. The older GPT-5.6 Luna recipe remains xhigh-only for explicit requests. `max` is a Cassy effort value (cas-556a) accepted only on explicit request by recipes that list it — Claude Fable 5.1, Claude Opus 5, Codex GPT-6 Astra, Sol, and Luna, Codex GPT-5.6 Sol; `ultra` is not a Cassy effort value. The canonical policy is `crates/cas-factory/policy/lane-registry.toml`; the generated table below reflects its lane status.
+**How to spawn a lane.** Pass `lane=<light|standard|taste|heavy>` (preferred) or a complete explicit `cli=`/`model=`/`effort=` recipe to force one model — never both. The fallbacks above fire only in lane mode; an explicit recipe runs as written or fails. The generated table below reflects the registry's lane status.
 
 ## Registry route table
 
@@ -41,14 +34,14 @@ The route table below is generated from the embedded `cas-factory` registry. Kee
 | `— (explicit only)` | `codex_terra` | `openai` | `codex` | `gpt-5.6-terra` | `xhigh` | `suspended` | `not lane-routed` | Standing operator suspension (2026-08-27) |
 | `— (explicit only)` | `qwencloud_qwen` | `qwencloud` | `opencode` | `qwen3.8-max` | `medium` | `active` | `not lane-routed` | Receipt-gated by opencode-1.18.23-hosted-token-plan-2026-08-27; explicit recipe/model only |
 
-Lane request mode: call `coordination spawn_workers` with `lane=<lane>`. The registry resolves the ordered candidates; any fallback selection is reported loudly as `fallback: <recipe> (primary <recipe> unavailable: <reason>)` in the spawn receipt and launch summary. Lanes marked `disabled` fail closed when their primary is unavailable.
+Lane request mode: call the `factory` tool's `spawn_workers` action with `lane=<lane>`. The registry resolves the ordered candidates; any fallback selection is reported loudly as `fallback: <recipe> (primary <recipe> unavailable: <reason>)` in the spawn receipt and launch summary. Lanes marked `disabled` fail closed when their primary is unavailable.
 <!-- END GENERATED ROUTE TABLE -->
 
 Token-heavy read-only investigation belongs in a `cas-codex-exec` shell-out, not a worker and not your own context window.
 
 ### Taste lane
 
-Use Claude Opus 5.5 at high for architecture judgment, public decisions, rescue assessment, and independent challenge. Route safety-critical implementation through heavy. Taste falls back to Claude Opus 5/high when Opus 5.5 is unavailable, and the spawn receipt names the fallback and primary-unavailable reason. Claude Opus 5 remains the taste fallback; Claude Opus 5.5/high is the supervisor, taste, and heavy primary. Claude Sonnet is not a normal worker lane and must not appear in copyable supervisor recipes.
+Use taste for architecture judgment, public decisions, rescue assessment, and independent challenge. Route safety-critical implementation through heavy. In lane mode the spawn receipt names any fallback and the primary-unavailable reason. Claude Sonnet is not a normal worker lane and must not appear in copyable supervisor recipes.
 
 ### Capacity overlays
 
@@ -56,57 +49,35 @@ The registry's active lanes are the enforcement source for copyable routes. Prov
 
 ### OpenCode lane (route-specific conformance)
 
-OpenCode supports three explicit OpenAI-compatible Qwen lanes through generated
-primary agents and inline `cas` MCP config: `local/<model>` for the operator's
-local server, `qwencloud/qwen3.8-max` for the operator's default QwenCloud Token
-Plan lane, and `alibaba/qwen3.8-max` (or `alibaba-cn/qwen3.8-max`) for DashScope
-pay-as-you-go. A lane is never inferred or used as fallback for another. Receipt
-`opencode-1.18.23-hosted-token-plan-2026-08-27` validates only the Token Plan
-route; local and Alibaba PAYG remain pending-conformance. Factory spawning fails
-closed before queue insertion unless the selected route has its own matching
-passing receipt. Do not persist keys in generated files or task receipts.
+Read this section only when spawning with `cli=opencode`. OpenCode has three
+explicit Qwen routes, never inferred or used as a fallback for one another:
 
-Token Plan fan-out follows the operator-declared plan tier: Lite permits 1–2,
-Standard 3–4, and Pro 6–8 concurrent OpenCode agents. Warn or cap a spawn request
-that exceeds the declared tier; do not scrape the operator console. A receipt may
-carry the operator-declared tier as metadata when supplied.
+- `cli=opencode model=qwencloud/qwen3.8-max effort=low|medium|xhigh` — the
+  operator's default hosted QwenCloud Token Plan route; needs
+  `QWENCLOUD_TOKEN_PLAN_API_KEY` (`sk-sp-` prefix). Validated by receipt
+  `opencode-1.18.23-hosted-token-plan-2026-08-27`.
+- `cli=opencode model=alibaba/qwen3.8-max effort=low|medium|xhigh` — DashScope
+  pay-as-you-go (`alibaba-cn/...` for the mainland endpoint); needs
+  `DASHSCOPE_API_KEY`. Pending conformance.
+- `cli=opencode model=local/<model>` — the operator's local server; effort
+  variants come from its preflight. Pending conformance.
 
-- `cli=opencode model=local/qwen3.8` — local serving; endpoint reachability, model
-  loading, and accepted effort variants come from the local operator preflight.
-- `cli=opencode model=qwencloud/qwen3.8-max effort=low|medium|xhigh` — hosted
-  Token Plan; the pinned endpoint is
-  `https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1` and
-  preflight requires `QWENCLOUD_TOKEN_PLAN_API_KEY` with the dedicated `sk-sp-`
-  prefix. Its minimal preflight performs auth plus at most one tiny completion;
-  it never lists models and never probes `/apps/anthropic`.
-- `cli=opencode model=alibaba/qwen3.8-max effort=low|medium|xhigh` — hosted
-  DashScope pay-as-you-go; preflight requires `DASHSCOPE_API_KEY` with `sk-` or
-  `sk-ws-` prefix, endpoint reachability, and the selected model in `/models`.
-  `alibaba-cn/...` selects the mainland endpoint. Token Plan and pay-as-you-go
-  keys are lane-bound and a mismatch is refused before any network request.
-- Each hosted Qwen lane currently accepts only `low`, `medium`, and `xhigh` for
-  qwen3.8-max; `minimal` and `high` are rejected before OpenCode and are never
-  silently remapped. Token Plan uses the OpenAI-compatible thinking body
-  (`enable_thinking`); its effort table is independent of pay-as-you-go.
-  The Token Plan route is supported by its OpenCode 1.18.23 live receipt, but
-  still requires the dedicated key and bounded auth/answerability preflight on
-  every spawn. Local and Alibaba PAYG remain `pending-conformance` and are
-  refused before queue insertion.
-- Every new conformance receipt records its explicit `route` and secret-free
-  `serving_identity`; legacy receipts without these fields remain readable only as
-  historical local-era fixtures.
-- The OpenCode MCP server name `cas` yields `cas_task`, `cas_coordination`, and
-  `cas_verification`; generated `cassy-worker`/`cassy-supervisor` prompts carry
-  the role contract and remain process-local.
+A route without its own passing receipt is refused before queue insertion, and a
+key for the wrong route is refused before any network request. Hosted routes
+accept only `low`, `medium`, and `xhigh`; other efforts are rejected, never
+remapped. Token Plan fan-out follows the operator-declared tier (Lite 1–2,
+Standard 3–4, Pro 6–8 agents): warn or cap beyond it and do not scrape the
+operator console. Never persist keys in generated files or receipts. The
+OpenCode MCP tools are `cas_task`, `cas_coordination`, and `cas_verification`.
 
 ### Model slug table
 
 | `cli=` | Accepted `model=` slugs | Notes |
 |---|---|---|
-| `codex` | `gpt-6-astra`, `gpt-6-sol`, `gpt-6-luna`, `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna` | Plain slugs only — `-codex`-suffixed slugs are rejected by the API, and bare `gpt-5.6` is invalid. Astra/high is the heavy fallback; the medium Astra recipe remains explicit-only; GPT-6 Sol/medium is the standard route; GPT-6 Luna/xhigh is the light route; Luna is the gpt-5.4-mini successor. |
-| `claude` | any canonical `claude-*` id (e.g. `claude-fable-5-1`, `claude-opus-5-5`, `claude-opus-5`, `claude-sonnet-5`) or the `opus`/`sonnet` aliases | Canonical IDs accept future numeric family/version releases and the CLI's optional `[1m]` context suffix; Haiku requests are rejected. Opus 5.5/high is the taste, heavy, and supervisor primary and its low effort variant is the light fallback. |
+| `codex` | `gpt-6-astra`, `gpt-6-sol`, `gpt-6-luna`, `gpt-5.6-sol`, `gpt-5.6-luna` | Plain slugs only — `-codex`-suffixed slugs are rejected by the API, and bare `gpt-5.6` is invalid. |
+| `claude` | any canonical `claude-*` id (e.g. `claude-fable-5-1`, `claude-opus-5-5`, `claude-opus-5`, `claude-sonnet-5`) or the `opus`/`sonnet` aliases | Canonical IDs accept future numeric family/version releases and the CLI's optional `[1m]` context suffix; Haiku requests are rejected. |
 | `grok` | `grok-4.5`, `grok-4.6` | Provider capacity is not an active registry lane in this matrix; never invent `cli=cursor` or a fallback recipe. |
-| `opencode` | `local/<model>`, `qwencloud/qwen3.8-max`, `alibaba/qwen3.8-max`, `alibaba-cn/qwen3.8-max` | Explicit local, Token Plan, or DashScope pay-as-you-go lane; per-lane conformance receipt required. Hosted auth/model availability are operator preflight inputs. |
+| `opencode` | `local/<model>`, `qwencloud/qwen3.8-max`, `alibaba/qwen3.8-max`, `alibaba-cn/qwen3.8-max` | Per-route receipt required; see [OpenCode lane](#opencode-lane-route-specific-conformance). |
 
 ### Stock fallback routes
 
@@ -115,9 +86,10 @@ the harness stock fallback. Claude intentionally keeps the verified `opus`
 alias as its stock model; this is a fallback route, not a registry lane.
 
 ```text
+# Codex stock fallback
+factory action=spawn_workers count=1 isolate=true cli=codex model=gpt-6-sol effort=medium
 # Claude stock fallback
-mcp__cas__coordination action=spawn_workers count=1 isolate=true cli=codex model=gpt-6-sol effort=medium
-mcp__cas__coordination action=spawn_workers count=1 isolate=true cli=claude model=opus effort=high
+factory action=spawn_workers count=1 isolate=true cli=claude model=opus effort=high
 ```
 
 ### Effort vocabulary (Cassy-wide)
@@ -133,20 +105,17 @@ How each backend receives them:
 | Grok | `--reasoning-effort <level>` |
 | OpenCode | generated primary-agent `variant` (local: endpoint-specific; Token Plan/pay-as-you-go qwen3.8-max: `low`, `medium`, `xhigh`; Token Plan also pins `enable_thinking`) |
 
-For multi-step workers, choose the lane default. GPT-6 Luna defaults to `xhigh` in the light lane; legacy GPT-5.6 Luna only permits `xhigh`. The registry sets GPT-6 Luna light to xhigh, GPT-6 Sol standard to medium, Opus 5.5 supervisor to high, Opus 5.5 taste and heavy to high; `max` is never a lane default and `ultra` is not a Cassy effort value.
+For multi-step workers, choose the lane default. `ultra` is not a Cassy effort value.
 
 ### `max` effort (explicit request only)
 
-`max` means "absolute maximum capability with no constraints on token spending". It is accepted only where the registry recipe lists it, and no lane recipe defaults to it:
+`max` is never a lane default; use it only when a task already failed at `high`/`xhigh` and the operator asked for it. Accepted where the recipe lists it: Claude Fable 5.1 and Opus 5 (Claude effort doc, https://platform.claude.com/docs/en/build-with-claude/effort), Codex GPT-6 Astra, GPT-6 Sol, GPT-6 Luna, and GPT-5.6 Sol (`codex-rs/protocol/src/openai_models.rs`). Refused elsewhere:
 
-| Recipe | `max` | Source |
-|---|---|---|
-| `claude_fable` (Claude Fable 5.1), `claude_opus` (Claude Opus 5) | accepted | Claude effort doc (https://platform.claude.com/docs/en/build-with-claude/effort): `max` is available on Claude Fable 5.1/5, Mythos 5.1/5, Opus 5/4.8/4.7/4.6, Sonnet 5/4.6; `xhigh` on Fable 5.1/5, Mythos 5.1/5, Opus 5/4.8/4.7, Sonnet 5. Set a large `max_tokens` (≥64k) at xhigh/max. |
-| `codex_astra`, `codex_astra_high` (GPT-6 Astra), `codex_sol_6` (GPT-6 Sol), `codex_luna_6` (GPT-6 Luna), `codex_sol` (GPT-5.6 Sol) | accepted | codex-rs `codex-rs/protocol/src/openai_models.rs` defines `ReasoningEffort::Max` (wire value `max`); the per-model sets come from the Codex models manifest (codex 0.156.0): GPT-6 Sol lists `low`–`ultra`, GPT-6 Luna lists `low`–`max`; Cassy accepts through `max`. |
-| `codex_luna` (GPT-5.6 Luna) | rejected — `xhigh` only | Cassy policy (legacy explicit route), not a provider limit. |
-| OpenCode Qwen lanes | rejected | Not listed by the provider tables above. |
-
-Cost caveat: an independent measurement (dev.to, synthorai) put Astra `max` at ≈2.3× the cost of `low` with no accuracy gain on its 11 tasks. Reach for `max` when a task has already failed at `high`/`xhigh` and the operator asked for it, not as a routine escalation. Codex receives `--config model_reasoning_effort=max`; Claude receives `--effort max`.
+| Recipe | `max` |
+|---|---|
+| `claude_opus_5_5` (Claude Opus 5.5) | rejected — `low`/`high` only |
+| `codex_luna` (GPT-5.6 Luna) | rejected — `xhigh` only |
+| OpenCode Qwen lanes | rejected |
 
 ## Spawn recipes
 
@@ -157,14 +126,11 @@ The canonical copy-paste recipes are maintained once in [workflow.md](workflow.m
 Use this recipe for the receipted OpenCode 1.18.23 Token Plan route:
 
 ```
-mcp__cas__coordination action=spawn_workers count=1 isolate=true cli=opencode model=qwencloud/qwen3.8-max effort=medium worker_names="oc-ada"
+factory action=spawn_workers count=1 isolate=true cli=opencode model=qwencloud/qwen3.8-max effort=medium worker_names="oc-ada"
 ```
 
-The default hosted recipe requires `QWENCLOUD_TOKEN_PLAN_API_KEY` in the operator
-environment and performs one bounded auth/answerability completion without model
-discovery. Use `alibaba/qwen3.8-max` with `DASHSCOPE_API_KEY` for pay-as-you-go, or
-`local/<model>` for a local server. Parameter table and field names:
-[reference.md](reference.md#spawn_workers-parameters).
+Route requirements are in [OpenCode lane](#opencode-lane-route-specific-conformance); parameter table in
+[reference.md](reference.md).
 
 ## Decision glossary
 
@@ -183,20 +149,20 @@ Taste-sensitive work uses the registry's Claude Opus 5.5/high lane even when the
 
 Score each task while breaking down the EPIC:
 
-- `task_type=chore`, docs-only, or `depth=light` → **light**
+- `task_type=chore` or mechanical, non-public docs → **light**
 - Priority 0–1 on the critical path, or work touching 3+ modules/shared traits → **heavy**
-- Taste, public-surface, or general-judgment work → **taste**
+- Public docs, skills, prompts, and other taste, public-surface, or general-judgment work → **taste**
 - Architecture, safety, rescue, or independent challenge → **taste** for the public decision, **heavy** for implementation risk
 - Everything else → **standard**
 
-Use the generated recipe block in [workflow.md](workflow.md#phase-2-coordinate) for the selected lane. Every command must carry explicit `cli=`, `model=`, and `effort=`; do not invent a fallback route outside the registry.
+Spawn the selected lane with `lane=<lane>`, or copy its explicit recipe from [workflow.md](workflow.md#phase-2-coordinate) to force one model; do not invent a fallback route outside the registry.
 
-For every worker, `effort=high` is the ceiling except for the registry's Luna/xhigh standard route and an explicit operator request for `max` on a recipe that lists it. `ultra` is not a Cassy effort value. If a route is unavailable, report it and choose another active registry lane deliberately rather than silently changing the requested route.
+For every worker, `effort=high` is the ceiling except for the registry's Luna/xhigh light route and an explicit operator request for `max` on a recipe that lists it. If a route is unavailable, report it and choose another active registry lane deliberately rather than silently changing the requested route.
 
 ## Workflow
 
 1. **Tag at breakdown** — tasks default to standard; tag deviations with `labels="tier:light"` / `"tier:heavy"` and note non-obvious rationale in the task's `design` field.
-2. **Spawn the mix** — count the lanes in the ready backlog and use the generated registry recipes above. Worker count may vary, but every `spawn_workers` command must retain the generated route's `cli`, `model`, and `effort`.
+2. **Spawn the mix** — count the lanes in the ready backlog and spawn each with `lane=<lane>` or its complete explicit recipe, never a partial one.
 3. **Route by lane** — assign light, standard, taste, and heavy work to matching registry lanes. Use taste for public decisions and heavy for implementation risk.
 4. **Escalate on failure** — after repeated rejection or verification failure, move deliberately to another active lane with the needed capability; never silently mutate an explicit recipe.
 5. **Escalate on judgment** — the two-rejection rule is a floor, not a permission gate. Judge the output, not the price tag; use cheap lanes for information and drafts, then pay for what ships.

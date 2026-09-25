@@ -89,9 +89,7 @@ EOF
     mkdir -p "$repo/cas-cli/src/builtins"
     : >"$repo/cas-cli/src/builtins/reference-history.json"
     for mirror in \
-        "$repo/cas-cli/src/builtins/skills/cas-cut-release/references/failure-log.md" \
-        "$repo/cas-cli/src/builtins/codex/skills/cas-cut-release/references/failure-log.md" \
-        "$repo/cas-cli/src/builtins/grok/skills/cas-cut-release/references/failure-log.md"; do
+        "$repo/cas-cli/src/builtins/skills/cas-cut-release/references/failure-log.md"; do
         mkdir -p "$(dirname "$mirror")"
         printf '%s\n' '- 2026-09-02 — **version-literals** — Symptom: fixture source literal. Root cause: fixture. Release: fixture.' >"$mirror"
     done
@@ -628,15 +626,12 @@ fi
 repo="$(new_fixture learn-mode)"
 learn_output="$(cd "$repo" && GATE_FIXTURE_REFERENCE_FAIL=1 \
     "$repo/scripts/release-gate.sh" --learn 'new release symptom' 'new release cause' 'procedure-guardrails' 2>&1)"
-grep -qF 'Learned release failure in all three mirrors' <<<"$learn_output"
+grep -qF 'Learned release failure in the failure log' <<<"$learn_output"
 grep -qF 'Regenerated builtin reference history after --learn' <<<"$learn_output"
 grep -qF 'changed ledger' "$repo/cas-cli/src/builtins/reference-history.json"
 grep -qF 'new release symptom' "$repo/cas-cli/src/builtins/skills/cas-cut-release/references/failure-log.md"
-cmp "$repo/cas-cli/src/builtins/skills/cas-cut-release/references/failure-log.md" \
-    "$repo/cas-cli/src/builtins/codex/skills/cas-cut-release/references/failure-log.md"
-cmp "$repo/cas-cli/src/builtins/skills/cas-cut-release/references/failure-log.md" \
-    "$repo/cas-cli/src/builtins/grok/skills/cas-cut-release/references/failure-log.md"
-ok '--learn appends and mirrors a dated failure entry'
+[[ ! -e "$repo/cas-cli/src/builtins/codex/skills/cas-cut-release/references/failure-log.md" ]]
+ok '--learn appends a dated failure entry to the one failure log'
 
 # cas-6df6. Keep the release diagnosis in the executable nextest failure-log
 # category and prove --learn accepts the exact operator-reported cause.
@@ -644,13 +639,9 @@ repo="$(new_fixture learn-nextest-factory-session)"
 nextest_cause='gate inherited the supervisor shell'"'"'s CAS_FACTORY_SESSION; a test agent registered under it routed lifecycle pushes to a supervisor absent from the fixture'
 learn_output="$(cd "$repo" && \
     "$repo/scripts/release-gate.sh" --learn 'nextest inherited factory identity' "$nextest_cause" nextest 2>&1)"
-if grep -qF 'Learned release failure in all three mirrors' <<<"$learn_output" \
-    && grep -qF "$nextest_cause" "$repo/cas-cli/src/builtins/skills/cas-cut-release/references/failure-log.md" \
-    && cmp -s "$repo/cas-cli/src/builtins/skills/cas-cut-release/references/failure-log.md" \
-        "$repo/cas-cli/src/builtins/codex/skills/cas-cut-release/references/failure-log.md" \
-    && cmp -s "$repo/cas-cli/src/builtins/skills/cas-cut-release/references/failure-log.md" \
-        "$repo/cas-cli/src/builtins/grok/skills/cas-cut-release/references/failure-log.md"; then
-    ok '--learn records the nextest factory-session diagnosis in all mirrors'
+if grep -qF 'Learned release failure in the failure log' <<<"$learn_output" \
+    && grep -qF "$nextest_cause" "$repo/cas-cli/src/builtins/skills/cas-cut-release/references/failure-log.md"; then
+    ok '--learn records the nextest factory-session diagnosis in the failure log'
 else
     bad "--learn did not record the nextest factory-session diagnosis: $learn_output"
 fi
@@ -658,21 +649,17 @@ fi
 # cas-7715. A worker's scoped proof can pass while archive-mode catches a
 # builtin size/phrase guardrail that the proof surface failed to require. Keep
 # that diagnosis attached to a real executable release row, and exercise the
-# exact operator text through --learn so the three mirrors remain durable.
+# exact operator text through --learn so the failure log stays durable.
 repo="$(new_fixture learn-scoped-proof-surface)"
 scoped_proof_symptom='worker proof passed while a skill-size guardrail test failed in the gate'
 scoped_proof_cause='proof surface mapped files to the tests that mention them, not to the guardrail binaries that read them'
 learn_output="$(cd "$repo" && \
     "$repo/scripts/release-gate.sh" --learn "$scoped_proof_symptom" "$scoped_proof_cause" archive-mode 2>&1)"
-if grep -qF 'Learned release failure in all three mirrors' <<<"$learn_output" \
+if grep -qF 'Learned release failure in the failure log' <<<"$learn_output" \
     && grep -qF "**archive-mode**" \
         "$repo/cas-cli/src/builtins/skills/cas-cut-release/references/failure-log.md" \
     && grep -qF "Symptom: $scoped_proof_symptom Root cause: $scoped_proof_cause" \
-        "$repo/cas-cli/src/builtins/skills/cas-cut-release/references/failure-log.md" \
-    && cmp -s "$repo/cas-cli/src/builtins/skills/cas-cut-release/references/failure-log.md" \
-        "$repo/cas-cli/src/builtins/codex/skills/cas-cut-release/references/failure-log.md" \
-    && cmp -s "$repo/cas-cli/src/builtins/skills/cas-cut-release/references/failure-log.md" \
-        "$repo/cas-cli/src/builtins/grok/skills/cas-cut-release/references/failure-log.md"; then
+        "$repo/cas-cli/src/builtins/skills/cas-cut-release/references/failure-log.md"; then
     ok '--learn records the scoped-proof guardrail diagnosis on archive-mode'
 else
     bad "--learn did not record the scoped-proof guardrail diagnosis: $learn_output"
@@ -686,14 +673,10 @@ nextest_symptom='nextest: spawn_workers integration tests refused by build guard
 nextest_cause='integration harness never set CAS_FACTORY_BUILD_GUARD=off; guard read live /proc/loadavg during full-suite run'
 learn_output="$(cd "$repo" && \
     "$repo/scripts/release-gate.sh" --learn "$nextest_symptom" "$nextest_cause" nextest 2>&1)"
-if grep -qF 'Learned release failure in all three mirrors' <<<"$learn_output" \
+if grep -qF 'Learned release failure in the failure log' <<<"$learn_output" \
     && grep -qF "Symptom: $nextest_symptom Root cause: $nextest_cause" \
-        "$repo/cas-cli/src/builtins/skills/cas-cut-release/references/failure-log.md" \
-    && cmp -s "$repo/cas-cli/src/builtins/skills/cas-cut-release/references/failure-log.md" \
-        "$repo/cas-cli/src/builtins/codex/skills/cas-cut-release/references/failure-log.md" \
-    && cmp -s "$repo/cas-cli/src/builtins/skills/cas-cut-release/references/failure-log.md" \
-        "$repo/cas-cli/src/builtins/grok/skills/cas-cut-release/references/failure-log.md"; then
-    ok '--learn records the nextest factory build-guard diagnosis in all mirrors'
+        "$repo/cas-cli/src/builtins/skills/cas-cut-release/references/failure-log.md"; then
+    ok '--learn records the nextest factory build-guard diagnosis in the failure log'
 else
     bad "--learn did not record the nextest factory build-guard diagnosis: $learn_output"
 fi

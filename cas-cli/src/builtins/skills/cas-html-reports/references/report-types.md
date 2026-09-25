@@ -6,6 +6,16 @@ fold; the audience fixes the order of depth and the vocabulary. Every report als
 technical contract (`technical-contract.md`) and the presentation rules (`presentation-rules.md`),
 and every report commits a concept brief (`cas-ui-craft`) that names its hero and the reason for it.
 
+## Contents
+
+- The audience axis; the hero figure per type
+- The type axis: 1 Investigation · 2 Metrics · 3 Decision brief · 4 Comparison · 5 Incident ·
+  6 Status · 7 Financial · 8 Product showcase · 9 System explainer · 10 Executive brief ·
+  11 Board update · 12 Client deliverable · 13 Research
+- Choosing when a deliverable spans types; reusable accessible system-flow pattern
+
+Read only the cell you picked.
+
 ## The audience axis
 
 The audience never changes the *data*. It changes what leads, how deep the page runs before detail is
@@ -13,7 +23,7 @@ relegated, and which words are allowed.
 
 | Audience | Leads with | Depth policy | Vocabulary |
 | --- | --- | --- | --- |
-| **Executive** | The hero figure, then the selected type's one-sentence lead: a decision/number for evaluative work, a capability/system takeaway for explanatory work | One screen of substance; ≤5 KPI cards when the selected type calls for them; at most one chart or diagram above the fold; everything else in expandable or lower sections; methodology is present but LAST | Plain business language. No tool names, no file paths, no method jargon in the top third |
+| **Executive** | The hero figure, then the selected type's one-sentence lead: a decision/number for evaluative work, a capability/system takeaway for explanatory work | One screen of substance; a stat strip of ≤5 values when the selected type calls for one; at most one chart or diagram above the fold; everything else in expandable or lower sections; methodology is present but LAST | Plain business language. No tool names, no file paths, no method jargon in the top third |
 | **Practitioner** | The hero figure and the verdict, then the evidence that establishes it | Full depth inline. Evidence tables, reproduction steps, and provenance are primary content, not appendices | Precise and technical. Symbol names, file:line, commands, versions |
 | **External** (client, partner, public) | The outcome and what it means for the reader | Full narrative depth, but internal mechanics abstracted to outcomes | No internal jargon, no ticket IDs, no team or agent names, no process narration |
 
@@ -45,7 +55,7 @@ concept brief either way.
 
 **Executive is an audience, not an automatic decision brief.** A product showcase or system explainer
 for executives leads with its capability or system takeaway; it does not require an ask, a decision,
-or KPI cards unless the selected type independently calls for them.
+or a stat strip unless the selected type independently calls for one.
 
 ## The type axis
 
@@ -125,7 +135,8 @@ Mandatory visual: the timeline. No blame, no individual names as causes.
 
 ### 6. Status / release summary
 
-What shipped or where the work stands.
+What shipped or where the work stands. A published version release uses `cas-release-report`, not
+this type.
 
 1. `[R]` **State in one line** — shipped / on track / at risk, and the date that matters.
 2. `[R]` **Overview table** — workstream, status, owner, target date, change since last report.
@@ -141,7 +152,7 @@ color alone.
 The strictest presentation discipline; this is where the IBCS-derived rules bind hardest.
 
 1. `[R]` **Bottom line** — the result versus plan, in one sentence with the variance stated.
-2. `[R]` **KPI row** — 3–5 cards: value, comparison base, absolute variance, % variance, direction.
+2. `[R]` **Stat strip** — 3–5 values: value, comparison base, absolute variance, % variance, direction.
 3. `[R]` **Period statement** — the exact period, comparison period, currency, and units. Once, unambiguously.
 4. `[R]` **Variance analysis** — the delta against plan and against prior period, decomposed by driver.
    Show the delta as its own chart, not two value bars side by side.
@@ -211,7 +222,7 @@ or KPI row is required solely because the audience is executive.
 Everything the executive audience rule demands, hardened into a type.
 
 1. `[R]` **Hero conclusion** — the decision, the number, or the risk. One sentence, largest type on the page.
-2. `[R]` **KPI cards** — 3–5, each with value, trend direction, and variance versus the relevant base.
+2. `[R]` **Stat strip** — 3–5 values, each with trend direction and variance versus the relevant base.
 3. `[R]` **One supporting chart** — at most one, above the fold. Choose the one that carries the conclusion.
 4. `[R]` **So what** — the implication, in three bullets maximum.
 5. `[R]` **The ask** — decision needed, by whom, by when. Explicit or the report has failed.

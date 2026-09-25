@@ -815,3 +815,153 @@ fn test_with_deps_rejects_garbage_string_with_helpful_error() {
         "error must show valid values: {msg}"
     );
 }
+
+#[test]
+fn verification_files_reviewed_is_an_alias_of_files() {
+    let req: VerificationRequest =
+        serde_json::from_str(r#"{"action":"add","task_id":"cas-1","files_reviewed":"a.rs,b.rs"}"#)
+            .expect("files_reviewed must deserialize");
+    assert_eq!(req.files.as_deref(), Some("a.rs,b.rs"));
+
+    let req: VerificationRequest =
+        serde_json::from_str(r#"{"action":"add","task_id":"cas-1","files":"c.rs"}"#).unwrap();
+    assert_eq!(req.files.as_deref(), Some("c.rs"));
+}
+
+fn action_enum(schema: schemars::Schema) -> Vec<String> {
+    let value = serde_json::to_value(schema).expect("schema serializes");
+    let action = &value["properties"]["action"];
+    assert_eq!(
+        action["type"], "string",
+        "action must stay a string: {action}"
+    );
+    assert!(
+        action["description"]
+            .as_str()
+            .is_some_and(|d| !d.is_empty()),
+        "action keeps its description next to the enum: {action}"
+    );
+    action["enum"]
+        .as_array()
+        .unwrap_or_else(|| panic!("action must be an enum: {action}"))
+        .iter()
+        .map(|v| v.as_str().expect("enum value is a string").to_string())
+        .collect()
+}
+
+#[test]
+fn every_action_field_publishes_its_dispatch_list_as_an_enum() {
+    use crate::actions::*;
+    let owned = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    let cases: Vec<(&str, schemars::Schema, Vec<String>)> = vec![
+        (
+            "memory",
+            schemars::schema_for!(MemoryRequest),
+            owned(MEMORY_ACTIONS),
+        ),
+        (
+            "task",
+            schemars::schema_for!(TaskRequest),
+            owned(TASK_ACTIONS),
+        ),
+        (
+            "rule",
+            schemars::schema_for!(RuleRequest),
+            owned(RULE_ACTIONS),
+        ),
+        (
+            "skill",
+            schemars::schema_for!(SkillRequest),
+            owned(SKILL_ACTIONS),
+        ),
+        (
+            "coordination",
+            schemars::schema_for!(CoordinationRequest),
+            owned(&coordination_request_actions()[..]),
+        ),
+        (
+            "search",
+            schemars::schema_for!(SearchContextRequest),
+            owned(SEARCH_ACTIONS),
+        ),
+        (
+            "system",
+            schemars::schema_for!(SystemRequest),
+            owned(&system_actions()[..]),
+        ),
+        (
+            "verification",
+            schemars::schema_for!(VerificationRequest),
+            owned(&verification_actions()[..]),
+        ),
+        (
+            "artifact",
+            schemars::schema_for!(ArtifactRequest),
+            owned(ARTIFACT_ACTIONS),
+        ),
+        (
+            "knowledge",
+            schemars::schema_for!(KnowledgeRequest),
+            owned(KNOWLEDGE_ACTIONS),
+        ),
+        (
+            "team",
+            schemars::schema_for!(TeamRequest),
+            owned(TEAM_ACTIONS),
+        ),
+        (
+            "pattern",
+            schemars::schema_for!(PatternRequest),
+            owned(PATTERN_ACTIONS),
+        ),
+        (
+            "spec",
+            schemars::schema_for!(SpecRequest),
+            owned(SPEC_ACTIONS),
+        ),
+    ];
+    for (tool, schema, expected) in cases {
+        assert_eq!(action_enum(schema), expected, "{tool} action enum drifted");
+    }
+}
+
+#[test]
+fn action_aliases_point_at_listed_canonical_actions() {
+    use crate::actions::*;
+    for (list, aliases) in [
+        (TASK_ACTIONS, TASK_ACTION_ALIASES),
+        (COORDINATION_ACTIONS, COORDINATION_ACTION_ALIASES),
+    ] {
+        for (alias, canonical) in aliases {
+            assert!(
+                list.contains(alias),
+                "alias {alias} must be accepted by the enum"
+            );
+            assert!(
+                list.contains(canonical),
+                "{alias} must point at a listed action"
+            );
+            assert_eq!(canonical_action(aliases, alias), *canonical);
+        }
+    }
+    assert_eq!(canonical_action(TASK_ACTION_ALIASES, "start"), "start");
+}
+
+#[test]
+fn memory_entry_type_enum_includes_handoff() {
+    let value = serde_json::to_value(schemars::schema_for!(MemoryRequest)).unwrap();
+    let entry_type = &value["properties"]["entry_type"];
+    let values: Vec<&str> = entry_type["enum"]
+        .as_array()
+        .expect("entry_type must be an enum")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert_eq!(values, crate::actions::MEMORY_ENTRY_TYPES);
+    assert!(values.contains(&"handoff"));
+    let required = value["required"].as_array().cloned().unwrap_or_default();
+    assert!(
+        !required.iter().any(|field| field == "entry_type"),
+        "entry_type stays optional"
+    );
+}

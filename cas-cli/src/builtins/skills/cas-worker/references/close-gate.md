@@ -1,16 +1,15 @@
 ---
-name: close-gate
-description: Worker pre-close self-verification gate.
-managed_by: cas
+metadata:
+  managed_by: cas
 ---
 
 # Close Gate — Self-Verification
 
-Run all 6 self-verification checks before `mcp__cas__task action=close`. They apply to every task type — but a few types add a gate on top of them (see "Task-type extras" below), so the close path is not identical everywhere. Skip the checks and you eat a verifier rejection round-trip.
+Run all 6 self-verification checks before `task action=close`. They apply to every task type — but a few types add a gate on top of them (see "Task-type extras" below), so the close path is not identical everywhere. Skip the checks and you eat a verifier rejection round-trip.
 
 ## Clean-tree receipt — applies to EVERY close, including `depth=light`
 
-Before `mcp__cas__task action=close`, run these two commands in your own worktree and read the output:
+Before `task action=close`, run these two commands in your own worktree and read the output:
 
 ```bash
 git status --porcelain    # must print nothing
@@ -21,7 +20,7 @@ Empty porcelain + HEAD equal to your claimed commit is the receipt: it says the 
 
 This is not covered by the 6 checks and **`depth=light` does not skip it** — it is data safety, not quality. Close hard-rejects tracked dirt with `⚠️ UNCOMMITTED WORK`, but only when it can resolve your worktree and run git inside it. Everything else — a check that could not run, untracked leftovers, a HEAD that is not the commit you claimed — is recorded as a `CLEAN-TREE RECEIPT` note on the task and close proceeds. Close names the discrepancy; it does not resolve it. Reading it is your job.
 
-**Do not assume a rejected tool call left the disk untouched.** On 2026-08-06 (cas-f102) an `Edit` returned REJECTED and the write landed on disk anyway. Nothing unreviewed shipped only because that worker ran `git status` unprompted, saw the divergence, and reverted. A tool result reports what the harness intended; `git status` reports what is true. When they disagree, believe git.
+**Do not assume a rejected tool call left the disk untouched.** A rejected `Edit` can still land its write. A tool result reports what the harness intended; `git status` reports what is true. When they disagree, believe git.
 
 If the receipt is not clean:
 
@@ -43,31 +42,31 @@ When `delivery_mode=local_merge`, await supervisor local merge: the supervisor m
 
 **Your branch is frozen for a parked delivery under QA?** Start the next task on your per-task branch instead of holding commits locally: `git switch -c factory/<name>-<task-id>` from the epic tip, then commit and `git push -u origin factory/<name>-<task-id>`. The commit and push guards accept exactly that branch, pushed to its own name, and never let it move the frozen `factory/<name>`. Close and `merge_request=true` measure that branch for that task. Name it in your merge request.
 
-**Crossed-message freshness handshake.** After any push, `MERGE REQUIRED`, or late amendment—and before any corrective commit—run `mcp__cas__coordination action=inbox_poll` repeatedly to `No unread messages` so unread supervisor messages cannot cross the delivery, re-read the task, check `git merge-base --is-ancestor <delivered-tip> <target-tip>`, and inspect whether the task is already closed/merged. If the delivery already landed or the task closed, re-close or stop; do not edit stale state.
+**Crossed-message freshness handshake.** After any push, `MERGE REQUIRED`, or late amendment—and before any corrective commit—run `coordination action=inbox_poll` repeatedly to `No unread messages` so unread supervisor messages cannot cross the delivery, re-read the task, check `git merge-base --is-ancestor <delivered-tip> <target-tip>`, and inspect whether the task is already closed/merged. If the delivery already landed or the task closed, re-close or stop; do not edit stale state.
 
 Bad (observed): start a corrective commit from an old rejection while the merge/amendment crosses the worker. Good: drain, re-read, ancestor-check, then edit only if the current state still requires it.
 
 - **Parent is `epic/<slug>`** — epic branches are supervisor-local by convention. After the freshness handshake, capture the current tip with `git rev-parse factory/<name>`, then push and send a freshness-qualified merge request only if one is still needed. **Never `gh pr create --base epic/...`** — that ref doesn't exist on origin; the call always fails.
 - **Parent is `main`/`master`/`staging`** — push and complete the project's PR/merge flow (or the merge flow the supervisor stated at assignment), then close.
-- **Guard still fires after a confirmed merge?** Squash-merges rewrite SHAs, so the guard can count already-merged commits as missing. You can usually clear this yourself: re-close with `commit_receipt=<sha>` naming the commit that carries your work. A receipt that resolves to a commit with a **non-empty diff** that is already **reachable from the parent branch** (or `origin/<parent>`) IS the delivery evidence, and close proceeds with a note even if the lane branch still carries unrelated residue (cas-e74c). If the receipt is rejected, send the supervisor the exact guard text plus the rejection reason — they fix the stale branch ref. Do not retry-loop.
+- **Guard still fires after a confirmed merge?** Squash-merges rewrite SHAs, so the guard can count already-merged commits as missing. Re-close with `commit_receipt=<sha>` (see "Delivery receipts" below). If the receipt is rejected, send the supervisor the exact guard text plus the rejection reason — they fix the stale branch ref. Do not retry-loop.
 
-**Never bypass the close path.** Setting `status=closed` via `action=update` and hand-writing a `mcp__cas__verification action=add` record forges the verification audit trail — the task looks verified when nobody verified it. If close keeps rejecting, that is a supervisor conversation, not a workaround opportunity.
+**Never bypass the close path.** Setting `status=closed` via `action=update` and hand-writing a `verification action=add` record forges the verification audit trail — the task looks verified when nobody verified it. If close keeps rejecting, that is a supervisor conversation, not a workaround opportunity.
 
 ## Delivery receipts (worker-supplied close evidence)
 
 Two distinct `close` fields — you supply them, no supervisor needed:
 
-- **`commit_receipt=<sha>`** — full SHA or unambiguous abbreviation of the commit this task delivered. Cassy resolves it to an immutable commit id, validates a **non-empty diff** and **ancestry from the parent branch**, and persists only the resolved id. This is the self-serve remedy for squash-merge SHA drift, and for cherry-picked delivery out of a lane branch that still carries other tasks' commits: a valid receipt clears the merge-state guard and close proceeds with a note about the lane's residue (cas-e74c). If the receipt is rejected, close tells you why — fix that, don't retry blind.
-- **`completion_receipt=<json>`** — opt-in transactional close. Serialize a `WorkerCompletionReceiptInput`: `{task_id, worker_agent_id, repo_selector, source_branch, commit_sha, merge_base_sha, target_branch, target_sha, proof_reference, scope_summary}`. Cassy revalidates every identity-bearing field against registered agent state and live Git before persisting an immutable delivery transaction, then releases your lease and moves the task to `awaiting_merge` awaiting a fresh verification verdict. Omit it and the legacy close path is unchanged. Rejection returns `DELIVERY RECEIPT REJECTED` and changes nothing.
+- **`commit_receipt=<sha>`** — full SHA or unambiguous abbreviation of the commit this task delivered. Cassy resolves it to an immutable commit id, validates a **non-empty diff** and **ancestry from the parent branch** (or `origin/<parent>`), and persists only the resolved id. This is the self-serve remedy for squash-merge SHA drift, and for cherry-picked delivery out of a lane branch that still carries other tasks' commits: a valid receipt clears the merge-state guard and close proceeds with a note about the lane's residue. If the receipt is rejected, close tells you why — fix that, don't retry blind.
+- **`completion_receipt=<json>`** — opt-in transactional close, accepted only after your current source tip is merged into the target branch; before that it returns `DELIVERY RECEIPT REJECTED` and changes nothing. Serialize a `WorkerCompletionReceiptInput`: `{task_id, worker_agent_id, repo_selector, source_branch, commit_sha, merge_base_sha, target_branch, target_sha, proof_reference, scope_summary, artifact_path?}`. The optional `artifact_path` must be an absolute path to an existing file under `[factory] artifacts_root/<task-id>/`. Cassy revalidates every identity-bearing field against registered agent state and live Git, persists an immutable delivery, releases your lease, and leaves the task in progress with verification pending until a fresh verdict. Omit it and the legacy close path is unchanged.
 
 ## Task-type extras
 
 The 6 checks below apply to every task type. These gates sit on top of them:
 
-- **Spike** (`task_type=spike`) — optional `search_manifest`: a JSON array of the search steps you ran, e.g. `[{"command": "rg -c foo src/", "hits": 3}]`. **Opt-in and warning-only** — it never blocks close. Entries with `hits: 0` (or a manifest that fails to parse) are appended to the task as a loud `ZERO_HIT_SEARCH_WARNING` note, because a search that matches nothing anywhere is more often a broken pattern than a clean corpus (cas-49f1). Supply it whenever your conclusion rests on "I searched and found nothing".
-- **User-facing delivery** (`qa.evidence_gate`, cas-0cd5). This covers a web surface in the diff, a catalog journey, or a `demo_statement`. Before the park, close refuses it until your `cas-qa-craft` evidence validates for the delivered commit:
+- **Spike** (`task_type=spike`) — optional `search_manifest`: a JSON array of the search steps you ran, e.g. `[{"command": "rg -c foo src/", "hits": 3}]`. **Opt-in and warning-only** — it never blocks close. Entries with `hits: 0` (or a manifest that fails to parse) are appended to the task as a loud `ZERO_HIT_SEARCH_WARNING` note, because a search that matches nothing anywhere is more often a broken pattern than a clean corpus. Supply it whenever your conclusion rests on "I searched and found nothing".
+- **User-facing delivery** (`qa.evidence_gate`). This covers a web surface in the diff, a catalog journey, or a `demo_statement`. Before the park, close refuses it until your `cas-qa-craft` evidence validates for the delivered commit:
   - **Web surface:** the evidence bundle (`<artifacts>/<task-id>/qa/bundle.json`, cited with `note_type=platform_proof notes="qa-bundle: <abs path>/bundle.json"`).
-  - **Demo-only non-web change:** a fresh `LEDGER.md` with a `PASS` / `real-build` row. If the diff touches terminal rendering (`qa.terminal_render_paths`), you also need a fresh `terminal-qa: PASS` report under `<task-id>/terminal-qa/` (`node scripts/terminal-qa.mjs --out <artifacts>/<task-id>/terminal-qa/<cmd> -- <cmd>`).
+  - **Demo-only non-web change:** a fresh `LEDGER.md` with a `PASS` / `real-build` row. If the diff touches terminal rendering (`qa.terminal_render_paths`), you also need a fresh `terminal-qa: PASS` report under `<task-id>/terminal-qa/` (`node <skills-dir>/cas-cli-craft/scripts/terminal-qa.mjs --out <artifacts>/<task-id>/terminal-qa/<cmd> -- <cmd>`).
   - **Staleness:** a commit after the bundle makes it stale; re-run it.
   - **Docs, test and CI-only diffs** are never gated.
   - **Skip markers, on every delivery:** added `test.fixme`/`.skip`/`.only` markers are refused unless the marker or the line above it carries `cas-allow-skip: <reason>`.
@@ -141,14 +140,12 @@ If tests fail in code you didn't modify:
 | What you changed | What to trace by reading and `rg` |
 |---|---|
 | Internal logic, private functions only | Callers inside the crate |
-| Public type in `crates/*/src/lib.rs` — new/removed field, changed signature | **Every consumer across the workspace** |
-| Anything in `crates/cas-mux`, `crates/cas-factory`, `crates/cas-types` | **Every consumer in `cas-cli`** |
+| Public type in a library crate — new/removed field, changed signature | **Every consumer across the workspace** |
+| Anything in a shared crate that other workspace members depend on | **Every consumer in each dependent crate** |
 
 **Why per-crate isn't enough:** when you add a field to a `pub struct` in a shared crate, that crate's own tests pass (the new field has a `Default`). But downstream crates that name every field in a struct literal fail with `E0063`. Name the touched shared crates in your close note so the supervisor's workspace build at assembly is read with them in mind.
 
 **JS/TS monorepos (pnpm/turbo):** same blast-radius logic. Changed a shared package or exported type → run the *consuming* apps' typecheck and tests (`pnpm -r typecheck`, `pnpm --filter <app> test`), not just the package's own suite. A changed interface compiles fine in its own package and breaks only where it's consumed.
-
-**Historical note (cas-c0e0):** two fields were added to `FactoryConfig` (cas-factory). Per-crate tests passed. `cas-cli` constructors failed E0063 at workspace scope. The regression shipped to main as commit `3dc7488` and was caught only during manual merge.
 
 ### 5. No dead code left behind
 Check for language-specific dead code markers on your new code:
@@ -174,8 +171,28 @@ Only close after all checks pass. The verifier will catch what you miss — but 
 After closing your **third** task in the current EPIC — and again after the 6th, 9th, 12th, etc. — invoke the `simplify` skill on your own recent work in that EPIC before picking up the next task.
 
 - **Counter is per-worker-per-EPIC.** It resets when you move to a different EPIC.
-- **Counter is stateless** — derive it at close time by querying `mcp__cas__task action=list assignee=<self> epic=<current-epic> status=closed` and checking whether `(count + 1) % 3 == 0` (the `+1` is for the task you're about to close).
+- **Counter is stateless** — derive it at close time by querying `task action=list assignee=<self> epic=<current-epic> status=closed` and checking whether `(count + 1) % 3 == 0` (the `+1` is for the task you're about to close).
 - **Scope of simplification** = your own committed and staged work within the current EPIC only. Not cross-worker. Not cross-EPIC. Not code you haven't touched.
 - **If the EPIC has fewer than 3 of your tasks total**, simplify-as-you-go never fires for you in that EPIC. That is intentional — the trigger exists to catch pattern accumulation, and <3 tasks is below the accumulation threshold.
 
 The simplify pass should produce visible output — a commit, a task note, or an explicit "nothing to simplify" decision note. Do not run it silently.
+
+## cas-src surface checklist — required before close in cas-src
+
+Pre-close notes must prove each applicable entry with a file, command, or test and explain each `not applicable` entry.
+
+- **Builtin skill/agent:** update Claude, Codex, and Grok mirrors.
+- **MCP tool:** cover CLI parity, docs, and dispatch registration.
+- **Hook/gate:** regenerate `config_gen` and `.codex/hooks.json` when applicable.
+- **Migration:** update pinned bootstrap/reconciliation expectations and
+  `doctor_snapshot` when applicable.
+- **Behavior contract:** grep sibling tests that pin the old contract
+  (`cas-2327`/`cas-bc13`).
+- **State transition:** cover reverse states too (hold/release, pause/resume,
+  remember/archive, snooze/unsnooze).
+- **Public surface:** run `node <skills-dir>/cas-ui-craft/scripts/visual-qa.mjs --strict`; record `docs/factory/data/visual-qa/visual-qa.md`
+  PASS, allowlist reasons, and the critique rubric score.
+  (floor 4/5 on distinctiveness, fit, hierarchy).
+- **CLI/TUI surface:** apply `cas-cli-craft`; paste the `terminal-qa: PASS …`
+  receipt from `node <skills-dir>/cas-cli-craft/scripts/terminal-qa.mjs --label <cmd> -- <cmd …>`.
+- **User-visible change:** assess release-notes impact.

@@ -142,6 +142,7 @@ pub use cas_store::{
 
 // Local modules (not in cas-store)
 pub mod detect;
+pub mod foreign_project_guard;
 pub mod known_repos;
 mod notifying_entry;
 mod notifying_rule;

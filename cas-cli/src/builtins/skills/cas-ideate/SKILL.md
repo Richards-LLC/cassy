@@ -1,7 +1,8 @@
 ---
 name: cas-ideate
 description: Use when the user asks for new grounded project-improvement ideas ("what should I improve?", "surprise me", or "what would you change?") rather than refinement of an existing idea.
-managed_by: cas
+metadata:
+  managed_by: cas
 ---
 
 # Adversarial Ideation
@@ -52,7 +53,7 @@ Look at `docs/ideation/` for ideation documents created within the last 30 days,
 ls docs/ideation/ 2>/dev/null
 ```
 ```
-mcp__cas__search action=search query="ideation <focus>" doc_type=entry limit=5
+search action=search query="ideation <focus>" doc_type=entry limit=5
 ```
 
 A prior ideation doc is relevant when:
@@ -87,7 +88,7 @@ Before generating ideas, gather codebase context. Ideas detached from the actual
 
 Run two grounding steps in parallel (in the **foreground** — results are needed before Phase 2):
 
-**1. Quick context scan** — dispatch a general-purpose sub-agent (light lane is appropriate, e.g. GPT-6 Luna/xhigh) with this prompt:
+**1. Quick context scan** — dispatch a general-purpose sub-agent (the harness's smallest model is enough) with this prompt:
 
 > Read the project's `CLAUDE.md` and `README.md` (or `AGENTS.md` if present), then discover the top-level directory layout using Glob with pattern `*` or `*/*`. Return a concise summary (under 30 lines) covering:
 > - Project shape (language, framework, top-level directory layout)
@@ -102,8 +103,8 @@ Run two grounding steps in parallel (in the **foreground** — results are neede
 **2. Cassy memory/learnings search** — run directly (not via sub-agent):
 
 ```
-mcp__cas__search action=search query="<focus or general pain points>" doc_type=entry limit=15
-mcp__cas__search action=search query="<focus>" doc_type=rule limit=10
+search action=search query="<focus or general pain points>" doc_type=entry limit=15
+search action=search query="<focus>" doc_type=rule limit=10
 ```
 
 Pull out any bugfix memories, architecture notes, or feedback entries that suggest known friction, fragile subsystems, or recurring problems.

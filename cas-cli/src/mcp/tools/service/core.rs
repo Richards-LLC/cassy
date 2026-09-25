@@ -270,7 +270,7 @@ impl CasService {
                     ErrorCode::INVALID_PARAMS,
                     format!(
                         "title required for create — pass a short descriptive title. \
-                     Example: {}task action=create title=\"Fix login bug\" priority=1",
+                     Example: {}task action=create title=\"Fix login bug\" risk=none priority=1",
                         self.inner.guidance_prefix()
                     ),
                 )
@@ -842,6 +842,13 @@ impl CasService {
             id: req.id.ok_or_else(|| self.missing_id("rule", "helpful"))?,
         };
         self.inner.cas_rule_helpful(Parameters(inner_req)).await
+    }
+
+    pub(super) async fn rule_promote(&self, req: RuleRequest) -> Result<CallToolResult, McpError> {
+        let id = req.id.ok_or_else(|| self.missing_id("rule", "promote"))?;
+        self.inner
+            .cas_rule_promote(id, req.change_note, req.changed_by)
+            .await
     }
 
     pub(super) async fn rule_harmful(&self, req: RuleRequest) -> Result<CallToolResult, McpError> {

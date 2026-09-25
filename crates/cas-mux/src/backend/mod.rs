@@ -254,7 +254,7 @@ fn user_proxy_config_document() -> Option<toml::Value> {
 /// A factory daemon is often started by a desktop launcher or a non-login
 /// service, so its environment is not guaranteed to contain credentials that
 /// the supervisor's login shell had sourced. Resolve the same private
-/// credentials file and shell profile used by `cas integrate mecha-cassy` as a
+/// credentials file and shell profile used by `cas integrate violet` as a
 /// fallback, while keeping an explicitly exported value authoritative.
 fn proxy_credential_environment(cas_root: Option<&PathBuf>) -> Vec<(String, String)> {
     let mut names = BTreeSet::new();
@@ -298,7 +298,7 @@ fn proxy_credential_environment(cas_root: Option<&PathBuf>) -> Vec<(String, Stri
 }
 
 /// Return the credentials file and login profile locations that a normal
-/// `cas integrate mecha-cassy` invocation uses. The explicit override wins,
+/// `cas integrate violet` invocation uses. The explicit override wins,
 /// then XDG, then the HOME default; the profile is included so a profile can
 /// source an operator-selected credentials file outside those defaults.
 fn credential_source_paths() -> Vec<PathBuf> {

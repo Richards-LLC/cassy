@@ -206,10 +206,12 @@ pub fn merge_gate(task: &Task, qa: &QaConfig, passes: &[QaPass], head: &str) -> 
     };
     Err(format!(
         "INDEPENDENT QA REQUIRED before {task} merges: no passed or waived QA round covers @{head8}; {status}. \
-         Spawn a reviewer who is not the implementer (spawn_workers lane=taste task_id=<QA task>), \
-         or waive with a logged reason: verification action=qa_waive task_id={task} summary=\"...\". \
-         Check with: verification action=qa_status task_id={task}",
+         Spawn a reviewer who is not the implementer \
+         (`{prefix}factory action=spawn_workers lane=taste task_id=<QA task>`), \
+         or waive with a logged reason: `{prefix}verification action=qa_waive task_id={task} summary=\"...\"`. \
+         Check with: `{prefix}verification action=qa_status task_id={task}`",
         task = task.id,
+        prefix = crate::mcp::tools::core::guidance::supervisor_prefix(),
     ))
 }
 

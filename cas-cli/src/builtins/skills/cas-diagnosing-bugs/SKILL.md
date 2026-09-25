@@ -1,9 +1,9 @@
 ---
 name: cas-diagnosing-bugs
 description: Use when diagnosing, debugging, or reproducing a broken, failing, throwing, or slow behavior.
-managed_by: cas
 license: MIT
 metadata:
+  managed_by: cas
   author: Matt Pocock
   upstream: https://github.com/mattpocock/skills
   provenance: Adapted from mattpocock/skills (MIT, © 2026 Matt Pocock).
@@ -26,8 +26,11 @@ increase reproduction rate with repeated or stress runs.
 
 Completion requires one already-run command whose redacted output proves it is
 red-capable, deterministic (or has a stated high repro rate), fast, and
-unattended. If no loop can be built, state what was tried and request the
-reproducing environment, a redacted capture, or approval for temporary
+unattended. A factory worker on a lane that forbids builds (cargo is denied on
+Rust lanes) cannot run a Rust loop: build it from non-Rust evidence (logs, a
+CLI binary already installed, a script), or write the failing test and hand the
+run to the supervisor with a blocker message. If no loop can be built, state
+what was tried and request the reproducing environment, a redacted capture, or approval for temporary
 instrumentation; do not hypothesize without a loop.
 
 ## Phase 2 — Reproduce and minimize
@@ -39,7 +42,7 @@ time until every remaining element is load-bearing.
 ## Phase 3 — Rank falsifiable hypotheses
 
 Produce 3–5 ranked hypotheses. Each must predict what changing one variable
-would do. Record them with `mcp__cas__task action=notes note_type=discovery` and
+would do. Record them with `task action=notes note_type=discovery` and
 invite domain correction without blocking on it; discard a hypothesis that
 cannot make a testable prediction.
 
@@ -61,4 +64,4 @@ the original loop.
 Before claiming done, rerun the original loop, confirm regression coverage (or
 the documented missing seam), remove tagged instrumentation and marked
 throwaways, and record the validated hypothesis in the commit message and with
-`mcp__cas__task action=notes note_type=discovery`.
+`task action=notes note_type=discovery`.

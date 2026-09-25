@@ -7,7 +7,8 @@ use serde::{Deserialize, Serialize};
 pub struct SearchContextRequest {
     /// Action to perform
     #[schemars(
-        description = "Action: 'search', 'retrieval_feedback', 'retrieval_metrics' (optional strict agent session_id/CAS_SESSION_ID filter; reports identity and judge availability, distinct retrieved/injected/opened/explicit-used/judge-helpful stages, resolved-outcome quality rates, and session-scoped rolling judge precision), 'skill_impact' (impact_report alias), 'context', 'context_for_subagent', 'observe', 'entity_list', 'entity_show', 'entity_extract', 'code_search', 'code_show', 'grep', 'blame', 'history' (search indexed git commits by text/path/time)"
+        schema_with = "crate::actions::search_action_schema",
+        description = "Operation. search is BM25 full-text; 'history' (search indexed git commits by text/path/time; each response carries an index_status block stating freshness and gaps); retrieval_metrics aggregates retrieval outcomes offline (optional strict session_id filter); skill_impact (alias impact_report) reports skill surface and session-outcome impact; code_search and code_show find and show indexed code symbols."
     )]
     pub action: String,
 
@@ -249,7 +250,8 @@ pub struct SearchContextRequest {
 pub struct SystemRequest {
     /// Action to perform
     #[schemars(
-        description = "Action: 'version', 'preflight', 'doctor', 'stats', 'info', 'reindex', 'maintenance_run', 'maintenance_status', 'config_docs', 'config_search', 'report_cas_bug', 'proxy_add', 'proxy_remove', 'proxy_list', 'proxy_health'"
+        schema_with = "crate::actions::system_action_schema",
+        description = "Operation. report_cas_bug files a Cassy bug on GitHub: anonymize paths, credentials and proprietary code first. preflight is the bounded factory readiness report; proxy_* manage upstream MCP servers."
     )]
     pub action: String,
 
@@ -294,7 +296,7 @@ pub struct SystemRequest {
 
     /// Bug description (for report_cas_bug)
     #[schemars(
-        description = "Detailed description including steps to reproduce. IMPORTANT: Anonymize paths, remove credentials, avoid proprietary code"
+        description = "Detailed description including steps to reproduce. Anonymize paths, remove credentials and leave out proprietary code."
     )]
     #[serde(default)]
     pub description: Option<String>,
@@ -355,7 +357,8 @@ pub struct SystemRequest {
 pub struct VerificationRequest {
     /// Action to perform
     #[schemars(
-        description = "Action: 'add', 'show', 'list', 'latest', 'external_verify', 'qa_record', 'qa_waive', 'qa_status'"
+        schema_with = "crate::actions::verification_action_schema",
+        description = "Operation. qa_record records an independent QA reviewer's verdict, never the implementer's; qa_waive is a logged supervisor waiver; external_verify is registered-supervisor-only receipted external verification."
     )]
     pub action: String,
 
@@ -389,9 +392,13 @@ pub struct VerificationRequest {
     #[serde(default)]
     pub issues: Option<String>,
 
-    /// Files reviewed, comma-separated (for add)
-    #[schemars(description = "Comma-separated list of files reviewed")]
-    #[serde(default)]
+    /// Files reviewed, comma-separated (for add). `files_reviewed` is
+    /// accepted as an alias: verifier templates used that name, and this
+    /// request does not deny unknown fields, so it used to be dropped silently.
+    #[schemars(
+        description = "Comma-separated list of files reviewed (add). files_reviewed is accepted as an alias."
+    )]
+    #[serde(default, alias = "files_reviewed")]
     pub files: Option<String>,
 
     /// Duration of verification in milliseconds (for add)
@@ -452,7 +459,10 @@ pub struct VerificationRequest {
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct ArtifactRequest {
     /// Action to perform
-    #[schemars(description = "Action: 'publish', 'show', 'list'")]
+    #[schemars(
+        schema_with = "crate::actions::artifact_action_schema",
+        description = "Operation. publish turns a local file (at most 25 MiB) into a durable, citable artifact for a task."
+    )]
     pub action: String,
 
     /// Task the artifact belongs to (publish, list)
@@ -482,7 +492,10 @@ pub struct ArtifactRequest {
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct KnowledgeRequest {
     /// Action to perform
-    #[schemars(description = "Action: 'search', 'read', 'write', 'list', 'status'")]
+    #[schemars(
+        schema_with = "crate::actions::knowledge_action_schema",
+        description = "Operation. read takes id or rel_path; write hand-authors a page stored locked:true so distillation never overwrites it."
+    )]
     pub action: String,
 
     /// Full-text query (for search)
@@ -550,7 +563,10 @@ pub struct KnowledgeRequest {
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct TeamRequest {
     /// Action to perform
-    #[schemars(description = "Action: 'list', 'show', 'members', 'sync'")]
+    #[schemars(
+        schema_with = "crate::actions::team_action_schema",
+        description = "Operation. sync triggers a team push and pull."
+    )]
     pub action: String,
 
     /// Team ID (for show, members, sync)
@@ -750,10 +766,10 @@ pub struct FactoryRequest {
     #[serde(default)]
     pub lane: Option<String>,
 
-    /// Worker CLI override for spawn_workers ('claude' or 'codex').
+    /// Worker harness override for spawn_workers.
     /// Applies to every spawned worker in this request.
     #[schemars(
-        description = "Worker CLI to use for spawned workers: 'claude' (default) or 'codex'. Applies to all workers in this spawn request."
+        description = "Worker harness for spawned workers: 'claude' (default), 'codex', 'grok' or 'opencode'. Applies to all workers in this spawn request."
     )]
     #[serde(default)]
     pub cli: Option<String>,
@@ -761,7 +777,7 @@ pub struct FactoryRequest {
     /// Worker model override for spawn_workers.
     /// Applies to every spawned worker in this request.
     #[schemars(
-        description = "Worker model override (e.g. 'claude-opus-4-5'). Applies to all workers in this spawn request."
+        description = "Worker model override (e.g. 'claude-opus-5-5'). Applies to all workers in this spawn request."
     )]
     #[serde(default)]
     pub model: Option<String>,
@@ -774,10 +790,10 @@ pub struct FactoryRequest {
     #[serde(default)]
     pub effort: Option<String>,
 
-    /// Claude configuration directory override for spawn_workers. Applies to
-    /// every spawned worker in this request; only Claude workers use it.
+    /// Account directory override for spawn_workers: CLAUDE_CONFIG_DIR for
+    /// Claude workers, CODEX_HOME for Codex workers.
     #[schemars(
-        description = "Claude configuration directory for spawned Claude workers (for example '~/.claude-alt'). Applies to all workers in this spawn request. Claude-only: Codex/Grok workers ignore it and emit a warning. An explicit value also removes inherited ANTHROPIC_API_KEY so the selected OAuth account is used."
+        description = "Account directory for the workers in this spawn request: CLAUDE_CONFIG_DIR for Claude workers (e.g. '~/.claude-alt'; an explicit value also drops an inherited ANTHROPIC_API_KEY so that OAuth account is used), CODEX_HOME for Codex workers (must hold auth.json). Grok has no account plumbing and warns instead. Omitted: the requesting supervisor's own account directory for that harness is captured at enqueue time, never crossed between providers."
     )]
     #[serde(default)]
     pub config_dir: Option<String>,
@@ -795,7 +811,7 @@ pub struct FactoryRequest {
     // ========== Server registry (cas-7c93, GH #87) ==========
     /// Shell command for `server_start`.
     #[schemars(
-        description = "server_start: the shell command to run (for example 'npm run dev'). Runs under `sh -c` from the given cwd; stdout/stderr are captured to a log file, never inherited."
+        description = "server_start: the shell command to run (for example 'npm run dev'), instead of a raw background `&`: registered servers are the only ones that survive worker teardown. Runs under `sh -c` from the given cwd; stdout/stderr are captured to a log file, never inherited."
     )]
     #[serde(default)]
     pub command: Option<String>,
@@ -838,7 +854,8 @@ pub struct FactoryRequest {
 pub struct CoordinationRequest {
     /// Action to perform
     #[schemars(
-        description = "Action: agent ops (register, unregister, whoami, heartbeat, agent_list, agent_cleanup, session_start, session_end, loop_start, loop_cancel, loop_status, lease_history, queue_notify, queue_poll, queue_peek, queue_ack, inbox_poll (also accepted as inbox), message, interrupt, message_ack, message_status), factory ops (spawn_workers, shutdown_workers, recycle_worker, hold_worker, release_worker, worker_status, worker_activity, sweep_tasks, clear_context, my_context, sync_all_workers, gc_report, gc_cleanup, focus_epic, remind, remind_list, remind_cancel, restart_spawn_queue), database branch ops (supervisor only: db_branch_create, db_branch_show, db_branch_delete), worktree ops (worktree_create, worktree_list, worktree_show, worktree_cleanup, worktree_merge, worktree_status). Only available in factory mode. 'interrupt' is shorthand for 'message' with urgent=true (breaks the target's in-flight turn, then injects). shutdown_workers accepts target as an alias for worker_names and requires force=true for mid-task or dirty/unpushed workers. hold_worker/release_worker accept worker_names as an alias for target. sync_all_workers skips worktrees that are dirty or whose assignee is mid-task unless force=true, and always refuses one already mid-rebase."
+        schema_with = "crate::actions::coordination_action_schema",
+        description = "Operation. `inbox` is an alias of `inbox_poll`; `interrupt` is `message` with urgent=true. Per-action rules are on the parameters they govern."
     )]
     pub action: String,
 
@@ -915,7 +932,7 @@ pub struct CoordinationRequest {
 
     /// Short summary of the message (shown in UI notifications)
     #[schemars(
-        description = "A short one-line summary of the message, shown as a preview in the UI"
+        description = "Required for action=message and action=interrupt (rejected without it): a short one-line summary of the message, shown as a preview in the UI"
     )]
     #[serde(default)]
     pub summary: Option<String>,
@@ -929,7 +946,7 @@ pub struct CoordinationRequest {
 
     /// Force operation (shutdown, worktree cleanup/merge, gc_cleanup, sync_all_workers)
     #[schemars(
-        description = "Force operation even with uncommitted changes (dirty worktree cleanup/merge). For sync_all_workers: consent to rebase worktrees that are dirty (WIP is stashed and restored) or whose assignee is mid-task — without it those are skipped; a worktree already mid-rebase is refused either way. Does NOT authorize trunk as a merge target — use allow_trunk for that (cas-0b32)."
+        description = "Override the dirty/in-progress guard. shutdown_workers: required to stop a mid-task, dirty or unpushed worker (check worktree state first). worktree_cleanup/worktree_merge: proceed with uncommitted changes; never authorizes trunk (use allow_trunk). sync_all_workers: rebase a stale or offline worker's worktree that is dirty (WIP is stashed and restored) or mid-task; a live worker's worktree is always skipped and one already mid-rebase is refused, even with force=true."
     )]
     #[serde(default)]
     pub force: Option<bool>,
@@ -1104,10 +1121,10 @@ pub struct CoordinationRequest {
     #[serde(default)]
     pub lane: Option<String>,
 
-    /// Worker CLI override for spawn_workers ('claude' or 'codex').
+    /// Worker harness override for spawn_workers.
     /// Applies to every spawned worker in this request.
     #[schemars(
-        description = "Worker CLI to use for spawned workers: 'claude' (default) or 'codex'. Applies to all workers in this spawn_workers request."
+        description = "Worker harness for spawned workers: 'claude' (default), 'codex', 'grok' or 'opencode'. Applies to all workers in this spawn_workers request."
     )]
     #[serde(default)]
     pub cli: Option<String>,
@@ -1115,7 +1132,7 @@ pub struct CoordinationRequest {
     /// Worker model override for spawn_workers.
     /// Applies to every spawned worker in this request.
     #[schemars(
-        description = "Worker model override (e.g. 'claude-opus-4-5'). Applies to all workers in this spawn_workers request."
+        description = "Worker model override (e.g. 'claude-opus-5-5'). Applies to all workers in this spawn_workers request."
     )]
     #[serde(default)]
     pub model: Option<String>,
@@ -1128,10 +1145,10 @@ pub struct CoordinationRequest {
     #[serde(default)]
     pub effort: Option<String>,
 
-    /// Claude configuration directory override for spawn_workers. Applies to
-    /// every spawned worker in this request; only Claude workers use it.
+    /// Account directory override for spawn_workers: CLAUDE_CONFIG_DIR for
+    /// Claude workers, CODEX_HOME for Codex workers.
     #[schemars(
-        description = "Claude configuration directory for spawned Claude workers (for example '~/.claude-alt'). Applies to all workers in this spawn_workers request. Claude-only: Codex/Grok workers ignore it and emit a warning. An explicit value also removes inherited ANTHROPIC_API_KEY so the selected OAuth account is used."
+        description = "Account directory for the workers in this spawn_workers request: CLAUDE_CONFIG_DIR for Claude workers (e.g. '~/.claude-alt'; an explicit value also drops an inherited ANTHROPIC_API_KEY so that OAuth account is used), CODEX_HOME for Codex workers (must hold auth.json). Grok has no account plumbing and warns instead. Omitted: the requesting supervisor's own account directory for that harness is captured at enqueue time, never crossed between providers."
     )]
     #[serde(default)]
     pub config_dir: Option<String>,
@@ -1221,7 +1238,7 @@ pub struct CoordinationRequest {
     // ========== Server registry (cas-7c93, GH #87) ==========
     /// Shell command for `server_start`.
     #[schemars(
-        description = "server_start: the shell command to run (for example 'npm run dev'). Runs under `sh -c` from the given cwd; stdout/stderr are captured to a log file, never inherited."
+        description = "server_start: the shell command to run (for example 'npm run dev'), instead of a raw background `&`: registered servers are the only ones that survive worker teardown. Runs under `sh -c` from the given cwd; stdout/stderr are captured to a log file, never inherited."
     )]
     #[serde(default)]
     pub command: Option<String>,
@@ -1254,19 +1271,18 @@ pub struct CoordinationRequest {
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[schemars(title = "ExecuteRequest")]
 pub struct ExecuteRequest {
-    /// TypeScript code to execute.
+    /// Dispatch or query text.
     ///
-    /// For `mcp_search`: filter code against a typed `tools` array.
-    /// For `mcp_execute`: call tools across connected servers as typed async functions.
+    /// For `mcp_execute`: a JSON dispatch object, a JSON array of them, or
+    /// dot-call syntax (parsed by the proxy's `parse_dispatch`).
+    /// For `mcp_search`: a keyword query, optionally `server:name`.
     #[schemars(
-        description = "TypeScript code to execute. Each connected server is a typed global object where every tool is an async function. Type declarations are auto-generated from tool schemas. Chain calls sequentially: await chrome_devtools.navigate_page({ url: \"https://example.com\" }); const screenshot = await chrome_devtools.take_screenshot({ format: \"png\" }); return screenshot; Or run calls in parallel with Promise.all: const [issues, designs] = await Promise.all([github.list_issues({ repo: \"myorg/app\" }), canva.list_designs({})]);"
+        description = "mcp_execute: a JSON dispatch {\"server\":\"github\",\"tool\":\"list_issues\",\"args\":{\"repo\":\"org/app\"}}, a JSON array of such objects for a batch, or dot-call syntax github.list_issues({\"repo\":\"org/app\"}). mcp_search: a keyword query matched against tool names and descriptions; 'server:name' filters by server."
     )]
     pub code: String,
 
     /// Max response length in characters. Default: 40000.
-    #[schemars(
-        description = "Max response length in characters. Default: 40000. Use your code to extract only what you need rather than increasing this."
-    )]
+    #[schemars(description = "Max response length in characters. Default: 40000.")]
     #[serde(default, deserialize_with = "deser::option_usize")]
     pub max_length: Option<usize>,
 }

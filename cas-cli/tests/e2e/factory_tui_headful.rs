@@ -265,7 +265,7 @@ fn factory_tui_headful_reuse_window() {
 
             let prompt = format!(
                 "Use MCP tools only. Run exactly:\n\
-mcp__cas__coordination action=spawn_workers count=3\n\
+mcp__cas__factory action=spawn_workers count=3\n\
 Then send to all workers:\n\
 mcp__cas__coordination action=message target=all_workers message=\"Reply with: mcp__cas__coordination action=message target={supervisor_name} message=\\\"{token}\\\"\"\n\
 Do not add extra text."

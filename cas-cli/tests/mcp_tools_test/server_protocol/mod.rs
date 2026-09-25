@@ -65,7 +65,12 @@ fn test_server_info() {
     assert!(info.instructions.is_some());
 
     let instructions = info.instructions.unwrap();
-    assert!(instructions.contains("CAS"));
+    assert!(instructions.contains("Cassy"));
+    // Claude Code always injects server instructions: keep them to routing.
+    assert!(
+        instructions.chars().count() <= 200,
+        "server instructions must stay within 200 chars: {instructions}"
+    );
 }
 
 #[test]

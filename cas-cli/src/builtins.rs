@@ -2,10 +2,16 @@
 //!
 //! These definitions are managed by Cassy and regenerated on `cas update`.
 //! Files with `managed_by: cas` in frontmatter are overwritten on update.
-//! References beneath a managed builtin skill inherit directory ownership and
-//! use a last-synced hash to propagate Cassy changes without clobbering local edits.
+//! Every other file beneath a managed builtin skill (references, scripts,
+//! examples) inherits directory ownership and uses a last-synced hash plus the
+//! shipped-version ledger to propagate Cassy changes without clobbering local
+//! edits. Files, agents and skill directories Cassy stops shipping are pruned
+//! when they are provably Cassy content.
 //!
-//! All content uses MCP tools (`mcp__cas__*`).
+//! Content names Cassy tools by bare name (`task`, `coordination`, …) so one
+//! catalog serves every harness (audit D1). The per-harness prefix is stated
+//! once, in the role guidance ([`TOOL_NAMING_LINE`]), and the SessionStart copy
+//! of that line is remapped to the reader's own prefix at load.
 //!
 //! The factory guide skill files are also the source of truth for HooksConfig
 //! guidance that gets injected into supervisor/worker context.
@@ -27,6 +33,19 @@ pub const WORKER_GUIDE: &str = include_str!("builtins/skills/cas-worker.md");
 
 pub const CHECKLIST_GUIDE: &str = include_str!("builtins/skills/cas-supervisor-checklist.md");
 
+/// The one place shipped skill text states the per-harness tool prefix
+/// (audit D1). Every other mention of a Cassy tool uses its bare name. It
+/// appears verbatim in the cas-worker and cas-supervisor role files, so a
+/// harness that reads another harness's skill directory still resolves the
+/// names.
+pub const TOOL_NAMING_LINE: &str = "Cassy tools are named here without a prefix (`task`, `coordination`, `factory`, `memory`, `search`, `verification`). Call them with your harness's prefix: `mcp__cas__` in Claude Code, `mcp__cs__` in Codex, `cas__` in Grok, `cas_` in OpenCode.";
+
+/// The SessionStart form of [`TOOL_NAMING_LINE`]. It is written against the
+/// `mcp__cas__` baseline like the rest of the SessionStart context, which
+/// `remap_tool_prefix` rewrites to the reader's own prefix at load, so each
+/// harness is told exactly its own spelling.
+pub const SESSION_TOOL_NAMING_LINE: &str = "Cassy tools are named here without a prefix (`task`, `coordination`, `factory`, `memory`, `search`, `verification`). In this session call them as `mcp__cas__<tool>`, for example `mcp__cas__task`.";
+
 /// A built-in file that Cassy manages
 #[derive(Clone, Copy)]
 pub struct BuiltinFile {
@@ -36,57 +55,40 @@ pub struct BuiltinFile {
     pub content: &'static str,
 }
 
+/// The task-verifier agent: one shared body (`builtins/agents/task-verifier.body.md`)
+/// under frontmatter generated per harness, because an agent `tools:` allowlist
+/// must spell the harness's own tool names (audit D1). Expands to a string
+/// literal, so the catalogs stay `const`.
+macro_rules! task_verifier_agent {
+    ($prefix:literal) => {
+        concat!(
+            "---\nname: task-verifier\ndescription: Internal agent for verifying task completion. Spawned automatically on task close. Do not invoke directly.\nmodel: inherit\ntools: Read, Grep, Glob, Bash, ",
+            $prefix, "task, ",
+            $prefix, "verification, ",
+            $prefix, "rule, ",
+            $prefix, "search, ",
+            $prefix, "coordination\nmetadata:\n  managed_by: cas\n---\n",
+            include_str!("builtins/agents/task-verifier.body.md")
+        )
+    };
+}
+
 /// All built-in agents managed by Cassy
 pub const BUILTIN_AGENTS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "agents/task-verifier.md",
-        content: include_str!("builtins/agents/task-verifier.md"),
-    },
-    BuiltinFile {
-        path: "agents/learning-reviewer.md",
-        content: include_str!("builtins/agents/learning-reviewer.md"),
-    },
-    BuiltinFile {
-        path: "agents/rule-reviewer.md",
-        content: include_str!("builtins/agents/rule-reviewer.md"),
-    },
-    BuiltinFile {
-        path: "agents/duplicate-detector.md",
-        content: include_str!("builtins/agents/duplicate-detector.md"),
-    },
-    BuiltinFile {
-        path: "agents/session-summarizer.md",
-        content: include_str!("builtins/agents/session-summarizer.md"),
+        content: task_verifier_agent!("mcp__cas__"),
     },
 ];
 
-/// All built-in agents managed by Cassy for Codex
-pub const CODEX_BUILTIN_AGENTS: &[BuiltinFile] = &[
-    BuiltinFile {
-        path: "agents/task-verifier.md",
-        content: include_str!("builtins/codex/agents/task-verifier.md"),
-    },
-    BuiltinFile {
-        path: "agents/learning-reviewer.md",
-        content: include_str!("builtins/codex/agents/learning-reviewer.md"),
-    },
-    BuiltinFile {
-        path: "agents/rule-reviewer.md",
-        content: include_str!("builtins/codex/agents/rule-reviewer.md"),
-    },
-    BuiltinFile {
-        path: "agents/duplicate-detector.md",
-        content: include_str!("builtins/codex/agents/duplicate-detector.md"),
-    },
-    BuiltinFile {
-        path: "agents/session-summarizer.md",
-        content: include_str!("builtins/codex/agents/session-summarizer.md"),
-    },
-    BuiltinFile {
-        path: "agents/factory-supervisor.md",
-        content: include_str!("builtins/codex/agents/factory-supervisor.md"),
-    },
-];
+/// Built-in agents Cassy installs for Codex: none (audit D6, cas-6b97).
+///
+/// Codex custom agents are TOML files with `developer_instructions`; it
+/// ignores `.md` files in its agents directory, so the task-verifier and factory-supervisor
+/// files Cassy used to install there were inert. With an empty catalog the
+/// agent prune removes the installed copies on the next sync. The Codex
+/// supervisor's constraints live in `cas-codex-supervisor-checklist`.
+pub const CODEX_BUILTIN_AGENTS: &[BuiltinFile] = &[];
 
 /// All built-in skills managed by Cassy
 pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
@@ -129,11 +131,10 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
         content: include_str!("builtins/skills/cas-task-tracking.md"),
     },
     // session-learn (cas-39f5, EPIC cas-ebea): 7-signal session classifier
-    // borrowed from third-brain-v5-skills. The skill body is also the
-    // runtime prompt template embedded by the Stop hook handler (decision:
-    // in-process for v1, see the skill body's "in-process vs subprocess"
-    // section). v1 default: `[memory] session_learn_auto = false` —
-    // manual-invocation only until user opts in.
+    // borrowed from third-brain-v5-skills. This is the human procedure; the
+    // Stop hook runs in-process with its own classifier prompt
+    // (`SESSION_LEARN_CLASSIFIER_PROMPT`, cas-228e). v1 default:
+    // `[memory] session_learn_auto = false`.
     BuiltinFile {
         path: "skills/session-learn/SKILL.md",
         content: include_str!("builtins/skills/session-learn/SKILL.md"),
@@ -169,6 +170,10 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-release-report/scripts/render.py",
         content: include_str!("builtins/skills/cas-release-report/scripts/render.py"),
+    },
+    BuiltinFile {
+        path: "skills/cas-release-report/scripts/check-pdf.py",
+        content: include_str!("builtins/skills/cas-release-report/scripts/check-pdf.py"),
     },
     BuiltinFile {
         path: "skills/cas-cut-release/SKILL.md",
@@ -387,22 +392,6 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
         path: "skills/cas-html-reports/references/examples/benchmark-small-multiples.why.md",
         content: include_str!("builtins/skills/cas-html-reports/references/examples/benchmark-small-multiples.why.md"),
     },
-    BuiltinFile {
-        path: "skills/cas-html-reports/references/examples/before-after/rubric-review-before.html",
-        content: include_str!("builtins/skills/cas-html-reports/references/examples/before-after/rubric-review-before.html"),
-    },
-    BuiltinFile {
-        path: "skills/cas-html-reports/references/examples/before-after/rubric-review-after.html",
-        content: include_str!("builtins/skills/cas-html-reports/references/examples/before-after/rubric-review-after.html"),
-    },
-    BuiltinFile {
-        path: "skills/cas-html-reports/references/examples/before-after/rubric-review.brief.md",
-        content: include_str!("builtins/skills/cas-html-reports/references/examples/before-after/rubric-review.brief.md"),
-    },
-    BuiltinFile {
-        path: "skills/cas-html-reports/references/examples/before-after/rubric-review.why.md",
-        content: include_str!("builtins/skills/cas-html-reports/references/examples/before-after/rubric-review.why.md"),
-    },
     // cas-1e7e: cross-harness data visualization guidance for static evidence artifacts.
     BuiltinFile {
         path: "skills/cas-dataviz/SKILL.md",
@@ -445,6 +434,10 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
         path: "skills/design-spec/references/design-tokens.json",
         content: include_str!("builtins/skills/design-spec/references/design-tokens.json"),
     },
+    BuiltinFile {
+        path: "skills/design-spec/references/tokens.css",
+        content: include_str!("builtins/skills/design-spec/references/tokens.css"),
+    },
     // cas-ui-craft skill (cas-d967) : concept brief before any render,
     // first-three-seconds rule, form vocabulary, scored critique rubric with a
     // merge floor, and four annotated exemplars.
@@ -480,6 +473,10 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
         path: "skills/cas-ui-craft/references/exemplars/before-after.html",
         content: include_str!("builtins/skills/cas-ui-craft/references/exemplars/before-after.html"),
     },
+    BuiltinFile {
+        path: "skills/cas-ui-craft/scripts/visual-qa.mjs",
+        content: include_str!("builtins/skills/cas-ui-craft/scripts/visual-qa.mjs"),
+    },
     // cas-21dc: demo-statement exploration matrix and durable evidence ledger.
     BuiltinFile {
         path: "skills/cas-qa-craft/SKILL.md",
@@ -498,6 +495,10 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
         content: include_str!("builtins/skills/cas-qa-craft/references/evidence-ledger.md"),
     },
     BuiltinFile {
+        path: "skills/cas-qa-craft/references/verifier-evidence-gate.md",
+        content: include_str!("builtins/skills/cas-qa-craft/references/verifier-evidence-gate.md"),
+    },
+    BuiltinFile {
         path: "skills/cas-qa-craft/references/exemplar.md",
         content: include_str!("builtins/skills/cas-qa-craft/references/exemplar.md"),
     },
@@ -514,20 +515,20 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
         path: "skills/cas-qa-craft/references/independent-pass.md",
         content: include_str!("builtins/skills/cas-qa-craft/references/independent-pass.md"),
     },
-    // release-notes skill (GH #65): drafts/posts the user + dev Slack threads
+    // cas-release-notes skill (GH #65): drafts/posts the user + dev Slack threads
     // for every staging/main merge and installs the canonical rubric template
     // at docs/release-notes/RUBRIC.md when a project has none.
     BuiltinFile {
-        path: "skills/release-notes/SKILL.md",
-        content: include_str!("builtins/skills/release-notes/SKILL.md"),
+        path: "skills/cas-release-notes/SKILL.md",
+        content: include_str!("builtins/skills/cas-release-notes/SKILL.md"),
     },
     BuiltinFile {
-        path: "skills/release-notes/references/RUBRIC-template.md",
-        content: include_str!("builtins/skills/release-notes/references/RUBRIC-template.md"),
+        path: "skills/cas-release-notes/references/RUBRIC-template.md",
+        content: include_str!("builtins/skills/cas-release-notes/references/RUBRIC-template.md"),
     },
     // mecha-cassy skill (cas-945f, GH #687): the default Slack transport for
     // every harness. The MechaCassy hub holds the Slack bot credential
-    // server-side and exposes four tools over one authenticated MCP endpoint,
+    // server-side and exposes two tools (mecha_read, mecha_post) over one authenticated MCP endpoint,
     // so a Codex or Grok worker posts on the same footing as Claude. The skill
     // owns channel resolution, the two-check preflight, ordered thread posting
     // with 1s pacing, the POSTED receipt, and the env-only credential rules;
@@ -576,6 +577,10 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-frontend-engineering/SKILL.md",
         content: include_str!("builtins/skills/cas-frontend-engineering/SKILL.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-frontend-engineering/references/playwright-acceptance.md",
+        content: include_str!("builtins/skills/cas-frontend-engineering/references/playwright-acceptance.md"),
     },
     // fallow skill: vendored from https://github.com/fallow-rs/fallow-skills
     // (MIT, Bart Waardenburg). Codebase intelligence for JS/TS — dead code,
@@ -638,6 +643,10 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
         content: include_str!("builtins/skills/cas-cli-craft/references/exemplars/before-after.md"),
     },
     BuiltinFile {
+        path: "skills/cas-cli-craft/scripts/terminal-qa.mjs",
+        content: include_str!("builtins/skills/cas-cli-craft/scripts/terminal-qa.mjs"),
+    },
+    BuiltinFile {
         path: "skills/cas-diagnosing-bugs/SKILL.md",
         content: include_str!("builtins/skills/cas-diagnosing-bugs/SKILL.md"),
     },
@@ -675,147 +684,153 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
 pub const BUILTIN_WORKFLOWS: &[BuiltinFile] = &[
 ];
 
-/// All built-in skills managed by Cassy for Codex
+/// All built-in skills managed by Cassy for Codex. Entries embed the canonical
+/// (prefix-neutral, audit D1) files plus the Codex-only no-hooks
+/// `cas-codex-supervisor-checklist` and the `agents/openai.yaml` policies.
 pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-memory-management/SKILL.md",
-        content: include_str!("builtins/codex/skills/cas-memory-management/SKILL.md"),
+        content: include_str!("builtins/skills/cas-memory-management/SKILL.md"),
     },
     BuiltinFile {
         path: "skills/cas-memory-management/references/schema.yaml",
-        content: include_str!("builtins/codex/skills/cas-memory-management/references/schema.yaml"),
+        content: include_str!("builtins/skills/cas-memory-management/references/schema.yaml"),
     },
     BuiltinFile {
         path: "skills/cas-memory-management/references/body-templates.md",
         content: include_str!(
-            "builtins/codex/skills/cas-memory-management/references/body-templates.md"
+            "builtins/skills/cas-memory-management/references/body-templates.md"
         ),
     },
     BuiltinFile {
         path: "skills/cas-memory-management/references/overlap-detection.md",
         content: include_str!(
-            "builtins/codex/skills/cas-memory-management/references/overlap-detection.md"
+            "builtins/skills/cas-memory-management/references/overlap-detection.md"
         ),
     },
     BuiltinFile {
         path: "skills/cas-memory-management/references/lifecycle-and-storage.md",
         content: include_str!(
-            "builtins/codex/skills/cas-memory-management/references/lifecycle-and-storage.md"
+            "builtins/skills/cas-memory-management/references/lifecycle-and-storage.md"
         ),
     },
     BuiltinFile {
         path: "skills/cas-memory-management/references/response-shapes.md",
         content: include_str!(
-            "builtins/codex/skills/cas-memory-management/references/response-shapes.md"
+            "builtins/skills/cas-memory-management/references/response-shapes.md"
         ),
     },
     BuiltinFile {
         path: "skills/cas-search/SKILL.md",
-        content: include_str!("builtins/codex/skills/cas-search.md"),
+        content: include_str!("builtins/skills/cas-search.md"),
     },
     BuiltinFile {
         path: "skills/cas-task-tracking/SKILL.md",
-        content: include_str!("builtins/codex/skills/cas-task-tracking.md"),
+        content: include_str!("builtins/skills/cas-task-tracking.md"),
     },
     // session-learn (cas-39f5, EPIC cas-ebea) — Codex mirror. Kept
     // byte-identical to the .claude copy by regression test in
     // `test_session_learn_mirrors_are_identical`.
     BuiltinFile {
         path: "skills/session-learn/SKILL.md",
-        content: include_str!("builtins/codex/skills/session-learn/SKILL.md"),
+        content: include_str!("builtins/skills/session-learn/SKILL.md"),
     },
     BuiltinFile {
         path: "skills/cas-supervisor/SKILL.md",
-        content: include_str!("builtins/codex/skills/cas-supervisor.md"),
+        content: include_str!("builtins/skills/cas-supervisor.md"),
     },
     BuiltinFile {
         path: "skills/cas-release-report/SKILL.md",
-        content: include_str!("builtins/codex/skills/cas-release-report/SKILL.md"),
+        content: include_str!("builtins/skills/cas-release-report/SKILL.md"),
     },
     BuiltinFile {
         path: "skills/cas-release-report/references/brief-template.md",
-        content: include_str!("builtins/codex/skills/cas-release-report/references/brief-template.md"),
+        content: include_str!("builtins/skills/cas-release-report/references/brief-template.md"),
     },
     BuiltinFile {
         path: "skills/cas-release-report/references/default-tokens.json",
-        content: include_str!("builtins/codex/skills/cas-release-report/references/default-tokens.json"),
+        content: include_str!("builtins/skills/cas-release-report/references/default-tokens.json"),
     },
     BuiltinFile {
         path: "skills/cas-release-report/references/exemplar.md",
-        content: include_str!("builtins/codex/skills/cas-release-report/references/exemplar.md"),
+        content: include_str!("builtins/skills/cas-release-report/references/exemplar.md"),
     },
     BuiltinFile {
         path: "skills/cas-release-report/references/pdf.md",
-        content: include_str!("builtins/codex/skills/cas-release-report/references/pdf.md"),
+        content: include_str!("builtins/skills/cas-release-report/references/pdf.md"),
     },
     BuiltinFile {
         path: "skills/cas-release-report/references/template.html",
-        content: include_str!("builtins/codex/skills/cas-release-report/references/template.html"),
+        content: include_str!("builtins/skills/cas-release-report/references/template.html"),
     },
     BuiltinFile {
         path: "skills/cas-release-report/scripts/render.py",
-        content: include_str!("builtins/codex/skills/cas-release-report/scripts/render.py"),
+        content: include_str!("builtins/skills/cas-release-report/scripts/render.py"),
+    },
+    BuiltinFile {
+        path: "skills/cas-release-report/scripts/check-pdf.py",
+        content: include_str!("builtins/skills/cas-release-report/scripts/check-pdf.py"),
     },
     BuiltinFile {
         path: "skills/cas-cut-release/SKILL.md",
-        content: include_str!("builtins/codex/skills/cas-cut-release/SKILL.md"),
+        content: include_str!("builtins/skills/cas-cut-release/SKILL.md"),
     },
     BuiltinFile {
         path: "skills/cas-cut-release/references/failure-log.md",
-        content: include_str!("builtins/codex/skills/cas-cut-release/references/failure-log.md"),
+        content: include_str!("builtins/skills/cas-cut-release/references/failure-log.md"),
     },
     BuiltinFile {
         path: "skills/cas-supervisor/references/preflight.md",
-        content: include_str!("builtins/codex/skills/cas-supervisor/references/preflight.md"),
+        content: include_str!("builtins/skills/cas-supervisor/references/preflight.md"),
     },
     BuiltinFile {
         path: "skills/cas-supervisor/references/intake.md",
-        content: include_str!("builtins/codex/skills/cas-supervisor/references/intake.md"),
+        content: include_str!("builtins/skills/cas-supervisor/references/intake.md"),
     },
     BuiltinFile {
         path: "skills/cas-supervisor/references/planning.md",
-        content: include_str!("builtins/codex/skills/cas-supervisor/references/planning.md"),
+        content: include_str!("builtins/skills/cas-supervisor/references/planning.md"),
     },
     BuiltinFile {
         path: "skills/cas-supervisor/references/workflow.md",
-        content: include_str!("builtins/codex/skills/cas-supervisor/references/workflow.md"),
+        content: include_str!("builtins/skills/cas-supervisor/references/workflow.md"),
     },
     BuiltinFile {
         path: "skills/cas-supervisor/references/worker-recovery.md",
-        content: include_str!("builtins/codex/skills/cas-supervisor/references/worker-recovery.md"),
+        content: include_str!("builtins/skills/cas-supervisor/references/worker-recovery.md"),
     },
     BuiltinFile {
         path: "skills/cas-supervisor/references/reference.md",
-        content: include_str!("builtins/codex/skills/cas-supervisor/references/reference.md"),
+        content: include_str!("builtins/skills/cas-supervisor/references/reference.md"),
     },
     BuiltinFile {
         path: "skills/cas-supervisor/references/operator-reply.md",
-        content: include_str!("builtins/codex/skills/cas-supervisor/references/operator-reply.md"),
+        content: include_str!("builtins/skills/cas-supervisor/references/operator-reply.md"),
     },
     BuiltinFile {
         path: "skills/cas-supervisor/references/filing-cas-bugs.md",
-        content: include_str!("builtins/codex/skills/cas-supervisor/references/filing-cas-bugs.md"),
+        content: include_str!("builtins/skills/cas-supervisor/references/filing-cas-bugs.md"),
     },
     BuiltinFile {
         path: "skills/cas-supervisor/references/model-selection.md",
-        content: include_str!("builtins/codex/skills/cas-supervisor/references/model-selection.md"),
+        content: include_str!("builtins/skills/cas-supervisor/references/model-selection.md"),
     },
     BuiltinFile {
         path: "skills/cas-supervisor/references/reminders.md",
-        content: include_str!("builtins/codex/skills/cas-supervisor/references/reminders.md"),
+        content: include_str!("builtins/skills/cas-supervisor/references/reminders.md"),
     },
     BuiltinFile {
         path: "skills/cas-supervisor/references/epic-driving.md",
-        content: include_str!("builtins/codex/skills/cas-supervisor/references/epic-driving.md"),
+        content: include_str!("builtins/skills/cas-supervisor/references/epic-driving.md"),
     },
     BuiltinFile {
         path: "skills/cas-supervisor/references/epic-flow-walk.md",
-        content: include_str!("builtins/codex/skills/cas-supervisor/references/epic-flow-walk.md"),
+        content: include_str!("builtins/skills/cas-supervisor/references/epic-flow-walk.md"),
     },
     BuiltinFile {
         path: "skills/cas-supervisor/references/reporting-and-routing.md",
         content: include_str!(
-            "builtins/codex/skills/cas-supervisor/references/reporting-and-routing.md"
+            "builtins/skills/cas-supervisor/references/reporting-and-routing.md"
         ),
     },
     BuiltinFile {
@@ -824,403 +839,414 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
     },
     BuiltinFile {
         path: "skills/cas-worker/SKILL.md",
-        content: include_str!("builtins/codex/skills/cas-worker.md"),
+        content: include_str!("builtins/skills/cas-worker.md"),
     },
     BuiltinFile {
         path: "skills/cas-worker/references/close-gate.md",
-        content: include_str!("builtins/codex/skills/cas-worker/references/close-gate.md"),
+        content: include_str!("builtins/skills/cas-worker/references/close-gate.md"),
     },
     BuiltinFile {
         path: "skills/cas-worker/references/recovery.md",
-        content: include_str!("builtins/codex/skills/cas-worker/references/recovery.md"),
+        content: include_str!("builtins/skills/cas-worker/references/recovery.md"),
     },
     BuiltinFile {
         path: "skills/cas-worker/references/details.md",
-        content: include_str!("builtins/codex/skills/cas-worker/references/details.md"),
+        content: include_str!("builtins/skills/cas-worker/references/details.md"),
     },
     BuiltinFile {
         path: "skills/cas-worker/references/discipline.md",
-        content: include_str!("builtins/codex/skills/cas-worker/references/discipline.md"),
+        content: include_str!("builtins/skills/cas-worker/references/discipline.md"),
     },
     // verify-before-claim skill (cas-5b2a) — codex mirror. See claude-side
     // entry above for context.
     BuiltinFile {
         path: "skills/verify-before-claim/SKILL.md",
-        content: include_str!("builtins/codex/skills/verify-before-claim/SKILL.md"),
+        content: include_str!("builtins/skills/verify-before-claim/SKILL.md"),
     },
     BuiltinFile {
         path: "skills/cas-codex-exec/SKILL.md",
-        content: include_str!("builtins/codex/skills/cas-codex-exec/SKILL.md"),
+        content: include_str!("builtins/skills/cas-codex-exec/SKILL.md"),
     },
     BuiltinFile {
         path: "skills/cli-routing/SKILL.md",
-        content: include_str!("builtins/codex/skills/cli-routing/SKILL.md"),
+        content: include_str!("builtins/skills/cli-routing/SKILL.md"),
     },
     BuiltinFile {
         path: "skills/cli-routing/references/routing.md",
-        content: include_str!("builtins/codex/skills/cli-routing/references/routing.md"),
+        content: include_str!("builtins/skills/cli-routing/references/routing.md"),
     },
     BuiltinFile {
         path: "skills/cas-brainstorm/SKILL.md",
-        content: include_str!("builtins/codex/skills/cas-brainstorm/SKILL.md"),
+        content: include_str!("builtins/skills/cas-brainstorm/SKILL.md"),
     },
     BuiltinFile {
         path: "skills/cas-brainstorm/references/handoff.md",
-        content: include_str!("builtins/codex/skills/cas-brainstorm/references/handoff.md"),
+        content: include_str!("builtins/skills/cas-brainstorm/references/handoff.md"),
     },
     BuiltinFile {
         path: "skills/cas-brainstorm/references/requirements-capture.md",
         content: include_str!(
-            "builtins/codex/skills/cas-brainstorm/references/requirements-capture.md"
+            "builtins/skills/cas-brainstorm/references/requirements-capture.md"
         ),
     },
     BuiltinFile {
         path: "skills/cas-ideate/SKILL.md",
-        content: include_str!("builtins/codex/skills/cas-ideate/SKILL.md"),
+        content: include_str!("builtins/skills/cas-ideate/SKILL.md"),
     },
     BuiltinFile {
         path: "skills/cas-ideate/references/post-ideation-workflow.md",
         content: include_str!(
-            "builtins/codex/skills/cas-ideate/references/post-ideation-workflow.md"
+            "builtins/skills/cas-ideate/references/post-ideation-workflow.md"
         ),
     },
     // project-overview skill (EPIC cas-19a2b) — codex mirror.
     BuiltinFile {
         path: "skills/project-overview/SKILL.md",
-        content: include_str!("builtins/codex/skills/project-overview/SKILL.md"),
+        content: include_str!("builtins/skills/project-overview/SKILL.md"),
     },
     // codemap skill (cas-4d84) — codex mirror.
     BuiltinFile {
         path: "skills/codemap/SKILL.md",
-        content: include_str!("builtins/codex/skills/codemap/SKILL.md"),
+        content: include_str!("builtins/skills/codemap/SKILL.md"),
     },
     BuiltinFile {
         path: "skills/codemap/references/doc-hygiene.md",
-        content: include_str!("builtins/codex/skills/codemap/references/doc-hygiene.md"),
+        content: include_str!("builtins/skills/codemap/references/doc-hygiene.md"),
     },
     // cas-servers skill (cas-7c93, GH #87) — codex mirror. Kept byte-identical
     // to the .claude copy by `test_builtin_skills_contains_cas_servers`.
     BuiltinFile {
         path: "skills/cas-servers/SKILL.md",
-        content: include_str!("builtins/codex/skills/cas-servers/SKILL.md"),
+        content: include_str!("builtins/skills/cas-servers/SKILL.md"),
     },
     // cas-1219: byte-identical Codex mirror of the field-tested MCP guidance.
     BuiltinFile {
         path: "skills/mcp-integration/SKILL.md",
-        content: include_str!("builtins/codex/skills/mcp-integration/SKILL.md"),
+        content: include_str!("builtins/skills/mcp-integration/SKILL.md"),
     },
     BuiltinFile {
         path: "skills/mcp-integration/references/diagnosis.md",
-        content: include_str!("builtins/codex/skills/mcp-integration/references/diagnosis.md"),
+        content: include_str!("builtins/skills/mcp-integration/references/diagnosis.md"),
     },
     BuiltinFile {
         path: "skills/cas-viktor/SKILL.md",
-        content: include_str!("builtins/codex/skills/cas-viktor/SKILL.md"),
+        content: include_str!("builtins/skills/cas-viktor/SKILL.md"),
     },
     BuiltinFile {
         path: "skills/cas-viktor/references/gateway.md",
-        content: include_str!("builtins/codex/skills/cas-viktor/references/gateway.md"),
+        content: include_str!("builtins/skills/cas-viktor/references/gateway.md"),
     },
     BuiltinFile {
         path: "skills/cas-html-reports/SKILL.md",
-        content: include_str!("builtins/codex/skills/cas-html-reports/SKILL.md"),
+        content: include_str!("builtins/skills/cas-html-reports/SKILL.md"),
     },
     BuiltinFile {
         path: "skills/cas-html-reports/references/report-types.md",
-        content: include_str!("builtins/codex/skills/cas-html-reports/references/report-types.md"),
+        content: include_str!("builtins/skills/cas-html-reports/references/report-types.md"),
     },
     BuiltinFile {
         path: "skills/cas-html-reports/references/presentation-rules.md",
-        content: include_str!("builtins/codex/skills/cas-html-reports/references/presentation-rules.md"),
+        content: include_str!("builtins/skills/cas-html-reports/references/presentation-rules.md"),
     },
     BuiltinFile {
         path: "skills/cas-html-reports/references/technical-contract.md",
-        content: include_str!("builtins/codex/skills/cas-html-reports/references/technical-contract.md"),
+        content: include_str!("builtins/skills/cas-html-reports/references/technical-contract.md"),
     },
     BuiltinFile {
         path: "skills/cas-html-reports/references/review-checklist.md",
-        content: include_str!("builtins/codex/skills/cas-html-reports/references/review-checklist.md"),
+        content: include_str!("builtins/skills/cas-html-reports/references/review-checklist.md"),
     },
     BuiltinFile {
         path: "skills/cas-html-reports/references/sources.md",
-        content: include_str!("builtins/codex/skills/cas-html-reports/references/sources.md"),
+        content: include_str!("builtins/skills/cas-html-reports/references/sources.md"),
     },
     BuiltinFile {
         path: "skills/cas-html-reports/references/examples/investigation-annotated-timeline.html",
-        content: include_str!("builtins/codex/skills/cas-html-reports/references/examples/investigation-annotated-timeline.html"),
+        content: include_str!("builtins/skills/cas-html-reports/references/examples/investigation-annotated-timeline.html"),
     },
     BuiltinFile {
         path: "skills/cas-html-reports/references/examples/investigation-annotated-timeline.why.md",
-        content: include_str!("builtins/codex/skills/cas-html-reports/references/examples/investigation-annotated-timeline.why.md"),
+        content: include_str!("builtins/skills/cas-html-reports/references/examples/investigation-annotated-timeline.why.md"),
     },
     BuiltinFile {
         path: "skills/cas-html-reports/references/examples/executive-variance-brief.html",
-        content: include_str!("builtins/codex/skills/cas-html-reports/references/examples/executive-variance-brief.html"),
+        content: include_str!("builtins/skills/cas-html-reports/references/examples/executive-variance-brief.html"),
     },
     BuiltinFile {
         path: "skills/cas-html-reports/references/examples/executive-variance-brief.why.md",
-        content: include_str!("builtins/codex/skills/cas-html-reports/references/examples/executive-variance-brief.why.md"),
+        content: include_str!("builtins/skills/cas-html-reports/references/examples/executive-variance-brief.why.md"),
     },
     BuiltinFile {
         path: "skills/cas-html-reports/references/examples/benchmark-small-multiples.html",
-        content: include_str!("builtins/codex/skills/cas-html-reports/references/examples/benchmark-small-multiples.html"),
+        content: include_str!("builtins/skills/cas-html-reports/references/examples/benchmark-small-multiples.html"),
     },
     BuiltinFile {
         path: "skills/cas-html-reports/references/examples/benchmark-small-multiples.why.md",
-        content: include_str!("builtins/codex/skills/cas-html-reports/references/examples/benchmark-small-multiples.why.md"),
-    },
-    BuiltinFile {
-        path: "skills/cas-html-reports/references/examples/before-after/rubric-review-before.html",
-        content: include_str!("builtins/codex/skills/cas-html-reports/references/examples/before-after/rubric-review-before.html"),
-    },
-    BuiltinFile {
-        path: "skills/cas-html-reports/references/examples/before-after/rubric-review-after.html",
-        content: include_str!("builtins/codex/skills/cas-html-reports/references/examples/before-after/rubric-review-after.html"),
-    },
-    BuiltinFile {
-        path: "skills/cas-html-reports/references/examples/before-after/rubric-review.brief.md",
-        content: include_str!("builtins/codex/skills/cas-html-reports/references/examples/before-after/rubric-review.brief.md"),
-    },
-    BuiltinFile {
-        path: "skills/cas-html-reports/references/examples/before-after/rubric-review.why.md",
-        content: include_str!("builtins/codex/skills/cas-html-reports/references/examples/before-after/rubric-review.why.md"),
+        content: include_str!("builtins/skills/cas-html-reports/references/examples/benchmark-small-multiples.why.md"),
     },
     BuiltinFile {
         path: "skills/cas-dataviz/SKILL.md",
-        content: include_str!("builtins/codex/skills/cas-dataviz/SKILL.md"),
+        content: include_str!("builtins/skills/cas-dataviz/SKILL.md"),
     },
     BuiltinFile {
         path: "skills/cas-dataviz/references/design-review.md",
-        content: include_str!("builtins/codex/skills/cas-dataviz/references/design-review.md"),
+        content: include_str!("builtins/skills/cas-dataviz/references/design-review.md"),
     },
     BuiltinFile {
         path: "skills/cas-dataviz/references/quality-checklist.md",
-        content: include_str!("builtins/codex/skills/cas-dataviz/references/quality-checklist.md"),
+        content: include_str!("builtins/skills/cas-dataviz/references/quality-checklist.md"),
     },
     BuiltinFile {
         path: "skills/cas-dataviz/scripts/validate_palette.js",
-        content: include_str!("builtins/codex/skills/cas-dataviz/scripts/validate_palette.js"),
+        content: include_str!("builtins/skills/cas-dataviz/scripts/validate_palette.js"),
     },
     BuiltinFile {
         path: "skills/cas-dataviz/examples/send-backs-dot-strip.html",
-        content: include_str!("builtins/codex/skills/cas-dataviz/examples/send-backs-dot-strip.html"),
+        content: include_str!("builtins/skills/cas-dataviz/examples/send-backs-dot-strip.html"),
     },
     BuiltinFile {
         path: "skills/cas-dataviz/examples/send-backs-dot-strip.why.md",
-        content: include_str!("builtins/codex/skills/cas-dataviz/examples/send-backs-dot-strip.why.md"),
+        content: include_str!("builtins/skills/cas-dataviz/examples/send-backs-dot-strip.why.md"),
     },
     // design-spec skill (GH #64) — codex mirror.
     BuiltinFile {
         path: "skills/design-spec/SKILL.md",
-        content: include_str!("builtins/codex/skills/design-spec/SKILL.md"),
+        content: include_str!("builtins/skills/design-spec/SKILL.md"),
     },
     // cas-d967: the Petrastella design language every project inherits through
     // design-spec and overrides in DESIGN.md; tokens are the machine-readable twin.
     BuiltinFile {
         path: "skills/design-spec/references/petrastella-design-language.md",
-        content: include_str!("builtins/codex/skills/design-spec/references/petrastella-design-language.md"),
+        content: include_str!("builtins/skills/design-spec/references/petrastella-design-language.md"),
     },
     BuiltinFile {
         path: "skills/design-spec/references/design-tokens.json",
-        content: include_str!("builtins/codex/skills/design-spec/references/design-tokens.json"),
+        content: include_str!("builtins/skills/design-spec/references/design-tokens.json"),
+    },
+    BuiltinFile {
+        path: "skills/design-spec/references/tokens.css",
+        content: include_str!("builtins/skills/design-spec/references/tokens.css"),
     },
     // cas-ui-craft skill (cas-d967) — codex mirror: concept brief before any render,
     // first-three-seconds rule, form vocabulary, scored critique rubric with a
     // merge floor, and four annotated exemplars.
     BuiltinFile {
         path: "skills/cas-ui-craft/SKILL.md",
-        content: include_str!("builtins/codex/skills/cas-ui-craft/SKILL.md"),
+        content: include_str!("builtins/skills/cas-ui-craft/SKILL.md"),
     },
     BuiltinFile {
         path: "skills/cas-ui-craft/references/concept-brief.md",
-        content: include_str!("builtins/codex/skills/cas-ui-craft/references/concept-brief.md"),
+        content: include_str!("builtins/skills/cas-ui-craft/references/concept-brief.md"),
     },
     BuiltinFile {
         path: "skills/cas-ui-craft/references/form-vocabulary.md",
-        content: include_str!("builtins/codex/skills/cas-ui-craft/references/form-vocabulary.md"),
+        content: include_str!("builtins/skills/cas-ui-craft/references/form-vocabulary.md"),
     },
     BuiltinFile {
         path: "skills/cas-ui-craft/references/critique-rubric.md",
-        content: include_str!("builtins/codex/skills/cas-ui-craft/references/critique-rubric.md"),
+        content: include_str!("builtins/skills/cas-ui-craft/references/critique-rubric.md"),
     },
     BuiltinFile {
         path: "skills/cas-ui-craft/references/exemplars/report.html",
-        content: include_str!("builtins/codex/skills/cas-ui-craft/references/exemplars/report.html"),
+        content: include_str!("builtins/skills/cas-ui-craft/references/exemplars/report.html"),
     },
     BuiltinFile {
         path: "skills/cas-ui-craft/references/exemplars/dashboard.html",
-        content: include_str!("builtins/codex/skills/cas-ui-craft/references/exemplars/dashboard.html"),
+        content: include_str!("builtins/skills/cas-ui-craft/references/exemplars/dashboard.html"),
     },
     BuiltinFile {
         path: "skills/cas-ui-craft/references/exemplars/product-page.html",
-        content: include_str!("builtins/codex/skills/cas-ui-craft/references/exemplars/product-page.html"),
+        content: include_str!("builtins/skills/cas-ui-craft/references/exemplars/product-page.html"),
     },
     BuiltinFile {
         path: "skills/cas-ui-craft/references/exemplars/before-after.html",
-        content: include_str!("builtins/codex/skills/cas-ui-craft/references/exemplars/before-after.html"),
+        content: include_str!("builtins/skills/cas-ui-craft/references/exemplars/before-after.html"),
+    },
+    BuiltinFile {
+        path: "skills/cas-ui-craft/scripts/visual-qa.mjs",
+        content: include_str!("builtins/skills/cas-ui-craft/scripts/visual-qa.mjs"),
     },
     // cas-21dc: Codex mirror of the demo-statement QA skill.
     BuiltinFile {
         path: "skills/cas-qa-craft/SKILL.md",
-        content: include_str!("builtins/codex/skills/cas-qa-craft/SKILL.md"),
+        content: include_str!("builtins/skills/cas-qa-craft/SKILL.md"),
     },
     BuiltinFile {
         path: "skills/cas-qa-craft/references/journeys.md",
-        content: include_str!("builtins/codex/skills/cas-qa-craft/references/journeys.md"),
+        content: include_str!("builtins/skills/cas-qa-craft/references/journeys.md"),
     },
     BuiltinFile {
         path: "skills/cas-qa-craft/references/matrix-builder.md",
-        content: include_str!("builtins/codex/skills/cas-qa-craft/references/matrix-builder.md"),
+        content: include_str!("builtins/skills/cas-qa-craft/references/matrix-builder.md"),
     },
     BuiltinFile {
         path: "skills/cas-qa-craft/references/evidence-ledger.md",
-        content: include_str!("builtins/codex/skills/cas-qa-craft/references/evidence-ledger.md"),
+        content: include_str!("builtins/skills/cas-qa-craft/references/evidence-ledger.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-qa-craft/references/verifier-evidence-gate.md",
+        content: include_str!("builtins/skills/cas-qa-craft/references/verifier-evidence-gate.md"),
     },
     BuiltinFile {
         path: "skills/cas-qa-craft/references/exemplar.md",
-        content: include_str!("builtins/codex/skills/cas-qa-craft/references/exemplar.md"),
+        content: include_str!("builtins/skills/cas-qa-craft/references/exemplar.md"),
     },
     BuiltinFile {
         path: "skills/cas-qa-craft/references/telemetry-sweep.md",
-        content: include_str!("builtins/codex/skills/cas-qa-craft/references/telemetry-sweep.md"),
+        content: include_str!("builtins/skills/cas-qa-craft/references/telemetry-sweep.md"),
     },
     BuiltinFile {
         path: "skills/cas-qa-craft/references/evidence-bundle.md",
-        content: include_str!("builtins/codex/skills/cas-qa-craft/references/evidence-bundle.md"),
+        content: include_str!("builtins/skills/cas-qa-craft/references/evidence-bundle.md"),
     },
     // cas-619f: the independent reviewer's procedure for a qa-pass task.
     BuiltinFile {
         path: "skills/cas-qa-craft/references/independent-pass.md",
-        content: include_str!("builtins/codex/skills/cas-qa-craft/references/independent-pass.md"),
+        content: include_str!("builtins/skills/cas-qa-craft/references/independent-pass.md"),
     },
-    // release-notes skill (GH #65) — codex mirror.
+    // cas-release-notes skill (GH #65) — codex mirror.
     BuiltinFile {
-        path: "skills/release-notes/SKILL.md",
-        content: include_str!("builtins/codex/skills/release-notes/SKILL.md"),
+        path: "skills/cas-release-notes/SKILL.md",
+        content: include_str!("builtins/skills/cas-release-notes/SKILL.md"),
     },
     BuiltinFile {
-        path: "skills/release-notes/references/RUBRIC-template.md",
-        content: include_str!("builtins/codex/skills/release-notes/references/RUBRIC-template.md"),
+        path: "skills/cas-release-notes/references/RUBRIC-template.md",
+        content: include_str!("builtins/skills/cas-release-notes/references/RUBRIC-template.md"),
     },
     // mecha-cassy skill (cas-945f, GH #687) — codex mirror. Byte-identical to
     // the claude copy except for the harness tool prefix.
     BuiltinFile {
         path: "skills/mecha-cassy/SKILL.md",
-        content: include_str!("builtins/codex/skills/mecha-cassy/SKILL.md"),
+        content: include_str!("builtins/skills/mecha-cassy/SKILL.md"),
     },
     BuiltinFile {
         path: "skills/mecha-cassy/references/registration.md",
-        content: include_str!("builtins/codex/skills/mecha-cassy/references/registration.md"),
+        content: include_str!("builtins/skills/mecha-cassy/references/registration.md"),
     },
     // cas-github-issues skill (cas-ff2f, GH #94) — codex mirror. Byte-identical
     // to the claude copy except for the harness tool prefix.
     BuiltinFile {
         path: "skills/cas-github-issues/SKILL.md",
-        content: include_str!("builtins/codex/skills/cas-github-issues/SKILL.md"),
+        content: include_str!("builtins/skills/cas-github-issues/SKILL.md"),
     },
     // cas-nuxt-playwright skill — codex mirror.
     BuiltinFile {
         path: "skills/cas-nuxt-playwright/SKILL.md",
-        content: include_str!("builtins/codex/skills/cas-nuxt-playwright/SKILL.md"),
+        content: include_str!("builtins/skills/cas-nuxt-playwright/SKILL.md"),
     },
     BuiltinFile {
         path: "skills/cas-nuxt-playwright/references/auth-fixture-template.md",
         content: include_str!(
-            "builtins/codex/skills/cas-nuxt-playwright/references/auth-fixture-template.md"
+            "builtins/skills/cas-nuxt-playwright/references/auth-fixture-template.md"
         ),
+    },
+    // Codex ignores `disable-model-invocation`; `agents/openai.yaml` is its
+    // opt-out from implicit invocation.
+    BuiltinFile {
+        path: "skills/cas-nuxt-playwright/agents/openai.yaml",
+        content: include_str!("builtins/codex/skills/cas-nuxt-playwright/agents/openai.yaml"),
     },
     // cas-playwright-debug skill (cas-5e54) — codex mirror, byte-identical.
     BuiltinFile {
         path: "skills/cas-playwright-debug/SKILL.md",
-        content: include_str!("builtins/codex/skills/cas-playwright-debug/SKILL.md"),
+        content: include_str!("builtins/skills/cas-playwright-debug/SKILL.md"),
     },
     // cas-frontend-engineering skill — codex mirror.
     BuiltinFile {
         path: "skills/cas-frontend-engineering/SKILL.md",
         content: include_str!(
-            "builtins/codex/skills/cas-frontend-engineering/SKILL.md"
+            "builtins/skills/cas-frontend-engineering/SKILL.md"
         ),
+    },
+    BuiltinFile {
+        path: "skills/cas-frontend-engineering/references/playwright-acceptance.md",
+        content: include_str!("builtins/skills/cas-frontend-engineering/references/playwright-acceptance.md"),
     },
     // fallow skill — codex mirror. See the claude-side entry above for the
     // upstream attribution (fallow-rs/fallow-skills, MIT).
     BuiltinFile {
         path: "skills/fallow/SKILL.md",
-        content: include_str!("builtins/codex/skills/fallow/SKILL.md"),
+        content: include_str!("builtins/skills/fallow/SKILL.md"),
     },
     BuiltinFile {
         path: "skills/fallow/references/cli-reference.md",
-        content: include_str!("builtins/codex/skills/fallow/references/cli-reference.md"),
+        content: include_str!("builtins/skills/fallow/references/cli-reference.md"),
     },
     BuiltinFile {
         path: "skills/fallow/references/gotchas.md",
-        content: include_str!("builtins/codex/skills/fallow/references/gotchas.md"),
+        content: include_str!("builtins/skills/fallow/references/gotchas.md"),
     },
     BuiltinFile {
         path: "skills/fallow/references/patterns.md",
-        content: include_str!("builtins/codex/skills/fallow/references/patterns.md"),
+        content: include_str!("builtins/skills/fallow/references/patterns.md"),
     },
     // cas-writing-for-agents: Codex mirror of the MIT Matt Pocock import above.
     BuiltinFile {
         path: "skills/cas-writing-for-agents/SKILL.md",
-        content: include_str!("builtins/codex/skills/cas-writing-for-agents/SKILL.md"),
+        content: include_str!("builtins/skills/cas-writing-for-agents/SKILL.md"),
     },
     // cas-cli-craft: terminal and text design craft (cas-4df0). No CAS tool
     // calls, so the codex and grok twins are byte-identical to this source.
     BuiltinFile {
         path: "skills/cas-cli-craft/SKILL.md",
-        content: include_str!("builtins/codex/skills/cas-cli-craft/SKILL.md"),
+        content: include_str!("builtins/skills/cas-cli-craft/SKILL.md"),
     },
     BuiltinFile {
         path: "skills/cas-cli-craft/references/concept-brief.md",
-        content: include_str!("builtins/codex/skills/cas-cli-craft/references/concept-brief.md"),
+        content: include_str!("builtins/skills/cas-cli-craft/references/concept-brief.md"),
     },
     BuiltinFile {
         path: "skills/cas-cli-craft/references/output-contract.md",
-        content: include_str!("builtins/codex/skills/cas-cli-craft/references/output-contract.md"),
+        content: include_str!("builtins/skills/cas-cli-craft/references/output-contract.md"),
     },
     BuiltinFile {
         path: "skills/cas-cli-craft/references/critique-rubric.md",
-        content: include_str!("builtins/codex/skills/cas-cli-craft/references/critique-rubric.md"),
+        content: include_str!("builtins/skills/cas-cli-craft/references/critique-rubric.md"),
     },
     BuiltinFile {
         path: "skills/cas-cli-craft/references/exemplars/status-screen.md",
-        content: include_str!("builtins/codex/skills/cas-cli-craft/references/exemplars/status-screen.md"),
+        content: include_str!("builtins/skills/cas-cli-craft/references/exemplars/status-screen.md"),
     },
     BuiltinFile {
         path: "skills/cas-cli-craft/references/exemplars/doctor-report.md",
-        content: include_str!("builtins/codex/skills/cas-cli-craft/references/exemplars/doctor-report.md"),
+        content: include_str!("builtins/skills/cas-cli-craft/references/exemplars/doctor-report.md"),
     },
     BuiltinFile {
         path: "skills/cas-cli-craft/references/exemplars/long-running.md",
-        content: include_str!("builtins/codex/skills/cas-cli-craft/references/exemplars/long-running.md"),
+        content: include_str!("builtins/skills/cas-cli-craft/references/exemplars/long-running.md"),
     },
     BuiltinFile {
         path: "skills/cas-cli-craft/references/exemplars/before-after.md",
-        content: include_str!("builtins/codex/skills/cas-cli-craft/references/exemplars/before-after.md"),
+        content: include_str!("builtins/skills/cas-cli-craft/references/exemplars/before-after.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-cli-craft/scripts/terminal-qa.mjs",
+        content: include_str!("builtins/skills/cas-cli-craft/scripts/terminal-qa.mjs"),
     },
     BuiltinFile {
         path: "skills/cas-diagnosing-bugs/SKILL.md",
-        content: include_str!("builtins/codex/skills/cas-diagnosing-bugs/SKILL.md"),
+        content: include_str!("builtins/skills/cas-diagnosing-bugs/SKILL.md"),
     },
-    BuiltinFile { path: "skills/cas-codebase-design/SKILL.md", content: include_str!("builtins/codex/skills/cas-codebase-design/SKILL.md") },
-    BuiltinFile { path: "skills/cas-tdd/SKILL.md", content: include_str!("builtins/codex/skills/cas-tdd/SKILL.md") },
-    BuiltinFile { path: "skills/cas-wizard/SKILL.md", content: include_str!("builtins/codex/skills/cas-wizard/SKILL.md") },
-    BuiltinFile { path: "skills/cas-wizard/template.sh", content: include_str!("builtins/codex/skills/cas-wizard/template.sh") },
-    BuiltinFile { path: "skills/cas-resolving-merge-conflicts/SKILL.md", content: include_str!("builtins/codex/skills/cas-resolving-merge-conflicts/SKILL.md") },
-    BuiltinFile { path: "skills/cas-to-questionnaire/SKILL.md", content: include_str!("builtins/codex/skills/cas-to-questionnaire/SKILL.md") },
-    BuiltinFile { path: "skills/cas-image-generate/SKILL.md", content: include_str!("builtins/codex/skills/cas-image-generate/SKILL.md") },
-    BuiltinFile { path: "skills/cas-image-generate/references/asset-playbook.md", content: include_str!("builtins/codex/skills/cas-image-generate/references/asset-playbook.md") },
-    BuiltinFile { path: "skills/cas-image-generate/references/svg-web-assets.md", content: include_str!("builtins/codex/skills/cas-image-generate/references/svg-web-assets.md") },
-    BuiltinFile { path: "skills/cas-image-generate/references/style-harvest.md", content: include_str!("builtins/codex/skills/cas-image-generate/references/style-harvest.md") },
-    BuiltinFile { path: "skills/cas-image-generate/references/output-checklist.md", content: include_str!("builtins/codex/skills/cas-image-generate/references/output-checklist.md") },
-    BuiltinFile { path: "skills/cas-image-generate/references/providers.md", content: include_str!("builtins/codex/skills/cas-image-generate/references/providers.md") },
-    BuiltinFile { path: "skills/cas-image-generate/scripts/generate-image.sh", content: include_str!("builtins/codex/skills/cas-image-generate/scripts/generate-image.sh") },
-    BuiltinFile { path: "skills/cas-technical-drawing/SKILL.md", content: include_str!("builtins/codex/skills/cas-technical-drawing/SKILL.md") },
-    BuiltinFile { path: "skills/cas-technical-drawing/references/model-schema.md", content: include_str!("builtins/codex/skills/cas-technical-drawing/references/model-schema.md") },
-    BuiltinFile { path: "skills/cas-technical-drawing/references/drafting-conventions.md", content: include_str!("builtins/codex/skills/cas-technical-drawing/references/drafting-conventions.md") },
-    BuiltinFile { path: "skills/cas-technical-drawing/references/likeness-critique.md", content: include_str!("builtins/codex/skills/cas-technical-drawing/references/likeness-critique.md") },
-    BuiltinFile { path: "skills/cas-technical-drawing/scripts/draft.mjs", content: include_str!("builtins/codex/skills/cas-technical-drawing/scripts/draft.mjs") },
-    BuiltinFile { path: "skills/cas-technical-drawing/examples/shelf-box.json", content: include_str!("builtins/codex/skills/cas-technical-drawing/examples/shelf-box.json") },
+    BuiltinFile { path: "skills/cas-codebase-design/SKILL.md", content: include_str!("builtins/skills/cas-codebase-design/SKILL.md") },
+    BuiltinFile { path: "skills/cas-tdd/SKILL.md", content: include_str!("builtins/skills/cas-tdd/SKILL.md") },
+    BuiltinFile { path: "skills/cas-wizard/SKILL.md", content: include_str!("builtins/skills/cas-wizard/SKILL.md") },
+    BuiltinFile { path: "skills/cas-wizard/template.sh", content: include_str!("builtins/skills/cas-wizard/template.sh") },
+    BuiltinFile { path: "skills/cas-resolving-merge-conflicts/SKILL.md", content: include_str!("builtins/skills/cas-resolving-merge-conflicts/SKILL.md") },
+    BuiltinFile { path: "skills/cas-to-questionnaire/SKILL.md", content: include_str!("builtins/skills/cas-to-questionnaire/SKILL.md") },
+    BuiltinFile { path: "skills/cas-to-questionnaire/agents/openai.yaml", content: include_str!("builtins/codex/skills/cas-to-questionnaire/agents/openai.yaml") },
+    BuiltinFile { path: "skills/cas-image-generate/SKILL.md", content: include_str!("builtins/skills/cas-image-generate/SKILL.md") },
+    BuiltinFile { path: "skills/cas-image-generate/references/asset-playbook.md", content: include_str!("builtins/skills/cas-image-generate/references/asset-playbook.md") },
+    BuiltinFile { path: "skills/cas-image-generate/references/svg-web-assets.md", content: include_str!("builtins/skills/cas-image-generate/references/svg-web-assets.md") },
+    BuiltinFile { path: "skills/cas-image-generate/references/style-harvest.md", content: include_str!("builtins/skills/cas-image-generate/references/style-harvest.md") },
+    BuiltinFile { path: "skills/cas-image-generate/references/output-checklist.md", content: include_str!("builtins/skills/cas-image-generate/references/output-checklist.md") },
+    BuiltinFile { path: "skills/cas-image-generate/references/providers.md", content: include_str!("builtins/skills/cas-image-generate/references/providers.md") },
+    BuiltinFile { path: "skills/cas-image-generate/scripts/generate-image.sh", content: include_str!("builtins/skills/cas-image-generate/scripts/generate-image.sh") },
+    BuiltinFile { path: "skills/cas-technical-drawing/SKILL.md", content: include_str!("builtins/skills/cas-technical-drawing/SKILL.md") },
+    BuiltinFile { path: "skills/cas-technical-drawing/references/model-schema.md", content: include_str!("builtins/skills/cas-technical-drawing/references/model-schema.md") },
+    BuiltinFile { path: "skills/cas-technical-drawing/references/drafting-conventions.md", content: include_str!("builtins/skills/cas-technical-drawing/references/drafting-conventions.md") },
+    BuiltinFile { path: "skills/cas-technical-drawing/references/likeness-critique.md", content: include_str!("builtins/skills/cas-technical-drawing/references/likeness-critique.md") },
+    BuiltinFile { path: "skills/cas-technical-drawing/scripts/draft.mjs", content: include_str!("builtins/skills/cas-technical-drawing/scripts/draft.mjs") },
+    BuiltinFile { path: "skills/cas-technical-drawing/examples/shelf-box.json", content: include_str!("builtins/skills/cas-technical-drawing/examples/shelf-box.json") },
 ];
 
 /// All built-in agents managed by Cassy for Grok (EPIC cas-8888, Phase 5 /
@@ -1233,23 +1259,7 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
 pub const GROK_BUILTIN_AGENTS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "agents/task-verifier.md",
-        content: include_str!("builtins/grok/agents/task-verifier.md"),
-    },
-    BuiltinFile {
-        path: "agents/learning-reviewer.md",
-        content: include_str!("builtins/grok/agents/learning-reviewer.md"),
-    },
-    BuiltinFile {
-        path: "agents/rule-reviewer.md",
-        content: include_str!("builtins/grok/agents/rule-reviewer.md"),
-    },
-    BuiltinFile {
-        path: "agents/duplicate-detector.md",
-        content: include_str!("builtins/grok/agents/duplicate-detector.md"),
-    },
-    BuiltinFile {
-        path: "agents/session-summarizer.md",
-        content: include_str!("builtins/grok/agents/session-summarizer.md"),
+        content: task_verifier_agent!("cas__"),
     },
 ];
 
@@ -1264,172 +1274,171 @@ pub const GROK_BUILTIN_AGENTS: &[BuiltinFile] = &[
 /// right. A Grok session MUST NOT depend on implicitly inheriting `~/.claude`
 /// for ANY skill: the factory can run against a project-local `.grok` mirror or
 /// a `~/.grok` home with no Claude tree present, so every twin is installed here
-/// directly. The only intentional differences from the Claude set are the tool
-/// prefix and the supervisor-checklist twin spelling — no capability is dropped.
-///
-/// Tool-prefix content is modeled on the Claude originals (matching
-/// capability tier — hooks/subagents/textbox-submit all supported, unlike
-/// Codex) with `mcp__cas__` swapped for `cas__`. The supervisor checklist
-/// specifically is built from the Claude version (not Codex's "no hooks"
-/// compensation variant), since Grok has real SessionStart hooks like
-/// Claude does.
+/// directly. Entries embed the canonical (prefix-neutral, audit D1) files; the
+/// task-verifier agent differs only by its generated `tools:` frontmatter. The
+/// supervisor checklist is the Claude one
+/// (not Codex's "no hooks" variant), since Grok has real SessionStart hooks.
 pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-worker/SKILL.md",
-        content: include_str!("builtins/grok/skills/cas-worker.md"),
+        content: include_str!("builtins/skills/cas-worker.md"),
     },
     BuiltinFile {
         path: "skills/cas-worker/references/close-gate.md",
-        content: include_str!("builtins/grok/skills/cas-worker/references/close-gate.md"),
+        content: include_str!("builtins/skills/cas-worker/references/close-gate.md"),
     },
     BuiltinFile {
         path: "skills/cas-worker/references/recovery.md",
-        content: include_str!("builtins/grok/skills/cas-worker/references/recovery.md"),
+        content: include_str!("builtins/skills/cas-worker/references/recovery.md"),
     },
     BuiltinFile {
         path: "skills/cas-worker/references/details.md",
-        content: include_str!("builtins/grok/skills/cas-worker/references/details.md"),
+        content: include_str!("builtins/skills/cas-worker/references/details.md"),
     },
     BuiltinFile {
         path: "skills/cas-worker/references/discipline.md",
-        content: include_str!("builtins/grok/skills/cas-worker/references/discipline.md"),
+        content: include_str!("builtins/skills/cas-worker/references/discipline.md"),
     },
     BuiltinFile {
         path: "skills/verify-before-claim/SKILL.md",
-        content: include_str!("builtins/grok/skills/verify-before-claim/SKILL.md"),
+        content: include_str!("builtins/skills/verify-before-claim/SKILL.md"),
     },
     BuiltinFile {
         path: "skills/cas-supervisor/SKILL.md",
-        content: include_str!("builtins/grok/skills/cas-supervisor.md"),
+        content: include_str!("builtins/skills/cas-supervisor.md"),
     },
     BuiltinFile {
         path: "skills/cas-supervisor/references/preflight.md",
-        content: include_str!("builtins/grok/skills/cas-supervisor/references/preflight.md"),
+        content: include_str!("builtins/skills/cas-supervisor/references/preflight.md"),
     },
     BuiltinFile {
         path: "skills/cas-supervisor/references/intake.md",
-        content: include_str!("builtins/grok/skills/cas-supervisor/references/intake.md"),
+        content: include_str!("builtins/skills/cas-supervisor/references/intake.md"),
     },
     BuiltinFile {
         path: "skills/cas-supervisor/references/planning.md",
-        content: include_str!("builtins/grok/skills/cas-supervisor/references/planning.md"),
+        content: include_str!("builtins/skills/cas-supervisor/references/planning.md"),
     },
     BuiltinFile {
         path: "skills/cas-supervisor/references/workflow.md",
-        content: include_str!("builtins/grok/skills/cas-supervisor/references/workflow.md"),
+        content: include_str!("builtins/skills/cas-supervisor/references/workflow.md"),
     },
     BuiltinFile {
         path: "skills/cas-supervisor/references/model-selection.md",
-        content: include_str!("builtins/grok/skills/cas-supervisor/references/model-selection.md"),
+        content: include_str!("builtins/skills/cas-supervisor/references/model-selection.md"),
     },
     BuiltinFile {
         path: "skills/cas-supervisor/references/reminders.md",
-        content: include_str!("builtins/grok/skills/cas-supervisor/references/reminders.md"),
+        content: include_str!("builtins/skills/cas-supervisor/references/reminders.md"),
     },
     BuiltinFile {
         path: "skills/cas-supervisor/references/epic-driving.md",
-        content: include_str!("builtins/grok/skills/cas-supervisor/references/epic-driving.md"),
+        content: include_str!("builtins/skills/cas-supervisor/references/epic-driving.md"),
     },
     BuiltinFile {
         path: "skills/cas-supervisor/references/epic-flow-walk.md",
-        content: include_str!("builtins/grok/skills/cas-supervisor/references/epic-flow-walk.md"),
+        content: include_str!("builtins/skills/cas-supervisor/references/epic-flow-walk.md"),
     },
     BuiltinFile {
         path: "skills/cas-supervisor/references/reporting-and-routing.md",
         content: include_str!(
-            "builtins/grok/skills/cas-supervisor/references/reporting-and-routing.md"
+            "builtins/skills/cas-supervisor/references/reporting-and-routing.md"
         ),
     },
     BuiltinFile {
         path: "skills/cas-supervisor/references/worker-recovery.md",
-        content: include_str!("builtins/grok/skills/cas-supervisor/references/worker-recovery.md"),
+        content: include_str!("builtins/skills/cas-supervisor/references/worker-recovery.md"),
     },
     BuiltinFile {
         path: "skills/cas-supervisor/references/reference.md",
-        content: include_str!("builtins/grok/skills/cas-supervisor/references/reference.md"),
+        content: include_str!("builtins/skills/cas-supervisor/references/reference.md"),
     },
     BuiltinFile {
         path: "skills/cas-supervisor/references/operator-reply.md",
-        content: include_str!("builtins/grok/skills/cas-supervisor/references/operator-reply.md"),
+        content: include_str!("builtins/skills/cas-supervisor/references/operator-reply.md"),
     },
     BuiltinFile {
         path: "skills/cas-supervisor/references/filing-cas-bugs.md",
-        content: include_str!("builtins/grok/skills/cas-supervisor/references/filing-cas-bugs.md"),
+        content: include_str!("builtins/skills/cas-supervisor/references/filing-cas-bugs.md"),
     },
     BuiltinFile {
         path: "skills/cas-release-report/SKILL.md",
-        content: include_str!("builtins/grok/skills/cas-release-report/SKILL.md"),
+        content: include_str!("builtins/skills/cas-release-report/SKILL.md"),
     },
     BuiltinFile {
         path: "skills/cas-release-report/references/brief-template.md",
-        content: include_str!("builtins/grok/skills/cas-release-report/references/brief-template.md"),
+        content: include_str!("builtins/skills/cas-release-report/references/brief-template.md"),
     },
     BuiltinFile {
         path: "skills/cas-release-report/references/default-tokens.json",
-        content: include_str!("builtins/grok/skills/cas-release-report/references/default-tokens.json"),
+        content: include_str!("builtins/skills/cas-release-report/references/default-tokens.json"),
     },
     BuiltinFile {
         path: "skills/cas-release-report/references/exemplar.md",
-        content: include_str!("builtins/grok/skills/cas-release-report/references/exemplar.md"),
+        content: include_str!("builtins/skills/cas-release-report/references/exemplar.md"),
     },
     BuiltinFile {
         path: "skills/cas-release-report/references/pdf.md",
-        content: include_str!("builtins/grok/skills/cas-release-report/references/pdf.md"),
+        content: include_str!("builtins/skills/cas-release-report/references/pdf.md"),
     },
     BuiltinFile {
         path: "skills/cas-release-report/references/template.html",
-        content: include_str!("builtins/grok/skills/cas-release-report/references/template.html"),
+        content: include_str!("builtins/skills/cas-release-report/references/template.html"),
     },
     BuiltinFile {
         path: "skills/cas-release-report/scripts/render.py",
-        content: include_str!("builtins/grok/skills/cas-release-report/scripts/render.py"),
+        content: include_str!("builtins/skills/cas-release-report/scripts/render.py"),
+    },
+    BuiltinFile {
+        path: "skills/cas-release-report/scripts/check-pdf.py",
+        content: include_str!("builtins/skills/cas-release-report/scripts/check-pdf.py"),
     },
     BuiltinFile {
         path: "skills/cas-cut-release/SKILL.md",
-        content: include_str!("builtins/grok/skills/cas-cut-release/SKILL.md"),
+        content: include_str!("builtins/skills/cas-cut-release/SKILL.md"),
     },
     BuiltinFile {
         path: "skills/cas-cut-release/references/failure-log.md",
-        content: include_str!("builtins/grok/skills/cas-cut-release/references/failure-log.md"),
+        content: include_str!("builtins/skills/cas-cut-release/references/failure-log.md"),
     },
     BuiltinFile {
         path: "skills/cas-supervisor-checklist/SKILL.md",
-        content: include_str!("builtins/grok/skills/cas-supervisor-checklist.md"),
+        content: include_str!("builtins/skills/cas-supervisor-checklist.md"),
     },
     BuiltinFile {
         path: "skills/cas-task-tracking/SKILL.md",
-        content: include_str!("builtins/grok/skills/cas-task-tracking.md"),
+        content: include_str!("builtins/skills/cas-task-tracking.md"),
     },
     BuiltinFile {
         path: "skills/cas-memory-management/SKILL.md",
-        content: include_str!("builtins/grok/skills/cas-memory-management/SKILL.md"),
+        content: include_str!("builtins/skills/cas-memory-management/SKILL.md"),
     },
     BuiltinFile {
         path: "skills/cas-memory-management/references/schema.yaml",
-        content: include_str!("builtins/grok/skills/cas-memory-management/references/schema.yaml"),
+        content: include_str!("builtins/skills/cas-memory-management/references/schema.yaml"),
     },
     BuiltinFile {
         path: "skills/cas-memory-management/references/body-templates.md",
         content: include_str!(
-            "builtins/grok/skills/cas-memory-management/references/body-templates.md"
+            "builtins/skills/cas-memory-management/references/body-templates.md"
         ),
     },
     BuiltinFile {
         path: "skills/cas-memory-management/references/overlap-detection.md",
         content: include_str!(
-            "builtins/grok/skills/cas-memory-management/references/overlap-detection.md"
+            "builtins/skills/cas-memory-management/references/overlap-detection.md"
         ),
     },
     BuiltinFile {
         path: "skills/cas-memory-management/references/lifecycle-and-storage.md",
         content: include_str!(
-            "builtins/grok/skills/cas-memory-management/references/lifecycle-and-storage.md"
+            "builtins/skills/cas-memory-management/references/lifecycle-and-storage.md"
         ),
     },
     BuiltinFile {
         path: "skills/cas-memory-management/references/response-shapes.md",
         content: include_str!(
-            "builtins/grok/skills/cas-memory-management/references/response-shapes.md"
+            "builtins/skills/cas-memory-management/references/response-shapes.md"
         ),
     },
     // cas-cc8c: required-capability parity — a Grok factory session must resolve
@@ -1440,30 +1449,30 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
     // skills above.
     BuiltinFile {
         path: "skills/cas-search/SKILL.md",
-        content: include_str!("builtins/grok/skills/cas-search.md"),
+        content: include_str!("builtins/skills/cas-search.md"),
     },
     BuiltinFile {
         path: "skills/cas-brainstorm/SKILL.md",
-        content: include_str!("builtins/grok/skills/cas-brainstorm/SKILL.md"),
+        content: include_str!("builtins/skills/cas-brainstorm/SKILL.md"),
     },
     BuiltinFile {
         path: "skills/cas-brainstorm/references/handoff.md",
-        content: include_str!("builtins/grok/skills/cas-brainstorm/references/handoff.md"),
+        content: include_str!("builtins/skills/cas-brainstorm/references/handoff.md"),
     },
     BuiltinFile {
         path: "skills/cas-brainstorm/references/requirements-capture.md",
         content: include_str!(
-            "builtins/grok/skills/cas-brainstorm/references/requirements-capture.md"
+            "builtins/skills/cas-brainstorm/references/requirements-capture.md"
         ),
     },
     BuiltinFile {
         path: "skills/cas-ideate/SKILL.md",
-        content: include_str!("builtins/grok/skills/cas-ideate/SKILL.md"),
+        content: include_str!("builtins/skills/cas-ideate/SKILL.md"),
     },
     BuiltinFile {
         path: "skills/cas-ideate/references/post-ideation-workflow.md",
         content: include_str!(
-            "builtins/grok/skills/cas-ideate/references/post-ideation-workflow.md"
+            "builtins/skills/cas-ideate/references/post-ideation-workflow.md"
         ),
     },
     // cas-20f2: full GENERAL-skill parity — Grok now owns twins for every
@@ -1474,350 +1483,354 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
     // cas-codex-exec make no CAS MCP calls so their twins are byte-identical.
     BuiltinFile {
         path: "skills/session-learn/SKILL.md",
-        content: include_str!("builtins/grok/skills/session-learn/SKILL.md"),
+        content: include_str!("builtins/skills/session-learn/SKILL.md"),
     },
     BuiltinFile {
         path: "skills/codemap/SKILL.md",
-        content: include_str!("builtins/grok/skills/codemap/SKILL.md"),
+        content: include_str!("builtins/skills/codemap/SKILL.md"),
     },
     BuiltinFile {
         path: "skills/codemap/references/doc-hygiene.md",
-        content: include_str!("builtins/grok/skills/codemap/references/doc-hygiene.md"),
+        content: include_str!("builtins/skills/codemap/references/doc-hygiene.md"),
     },
     BuiltinFile {
         path: "skills/project-overview/SKILL.md",
-        content: include_str!("builtins/grok/skills/project-overview/SKILL.md"),
+        content: include_str!("builtins/skills/project-overview/SKILL.md"),
     },
     // cas-servers skill (cas-7c93, GH #87) — grok twin.
     BuiltinFile {
         path: "skills/cas-servers/SKILL.md",
-        content: include_str!("builtins/grok/skills/cas-servers/SKILL.md"),
+        content: include_str!("builtins/skills/cas-servers/SKILL.md"),
     },
     // cas-1219: byte-identical Grok mirror of the field-tested MCP guidance.
     BuiltinFile {
         path: "skills/mcp-integration/SKILL.md",
-        content: include_str!("builtins/grok/skills/mcp-integration/SKILL.md"),
+        content: include_str!("builtins/skills/mcp-integration/SKILL.md"),
     },
     BuiltinFile {
         path: "skills/mcp-integration/references/diagnosis.md",
-        content: include_str!("builtins/grok/skills/mcp-integration/references/diagnosis.md"),
+        content: include_str!("builtins/skills/mcp-integration/references/diagnosis.md"),
     },
     BuiltinFile {
         path: "skills/cas-viktor/SKILL.md",
-        content: include_str!("builtins/grok/skills/cas-viktor/SKILL.md"),
+        content: include_str!("builtins/skills/cas-viktor/SKILL.md"),
     },
     BuiltinFile {
         path: "skills/cas-viktor/references/gateway.md",
-        content: include_str!("builtins/grok/skills/cas-viktor/references/gateway.md"),
+        content: include_str!("builtins/skills/cas-viktor/references/gateway.md"),
     },
     BuiltinFile {
         path: "skills/cas-html-reports/SKILL.md",
-        content: include_str!("builtins/grok/skills/cas-html-reports/SKILL.md"),
+        content: include_str!("builtins/skills/cas-html-reports/SKILL.md"),
     },
     BuiltinFile {
         path: "skills/cas-html-reports/references/report-types.md",
-        content: include_str!("builtins/grok/skills/cas-html-reports/references/report-types.md"),
+        content: include_str!("builtins/skills/cas-html-reports/references/report-types.md"),
     },
     BuiltinFile {
         path: "skills/cas-html-reports/references/presentation-rules.md",
-        content: include_str!("builtins/grok/skills/cas-html-reports/references/presentation-rules.md"),
+        content: include_str!("builtins/skills/cas-html-reports/references/presentation-rules.md"),
     },
     BuiltinFile {
         path: "skills/cas-html-reports/references/technical-contract.md",
-        content: include_str!("builtins/grok/skills/cas-html-reports/references/technical-contract.md"),
+        content: include_str!("builtins/skills/cas-html-reports/references/technical-contract.md"),
     },
     BuiltinFile {
         path: "skills/cas-html-reports/references/review-checklist.md",
-        content: include_str!("builtins/grok/skills/cas-html-reports/references/review-checklist.md"),
+        content: include_str!("builtins/skills/cas-html-reports/references/review-checklist.md"),
     },
     BuiltinFile {
         path: "skills/cas-html-reports/references/sources.md",
-        content: include_str!("builtins/grok/skills/cas-html-reports/references/sources.md"),
+        content: include_str!("builtins/skills/cas-html-reports/references/sources.md"),
     },
     BuiltinFile {
         path: "skills/cas-html-reports/references/examples/investigation-annotated-timeline.html",
-        content: include_str!("builtins/grok/skills/cas-html-reports/references/examples/investigation-annotated-timeline.html"),
+        content: include_str!("builtins/skills/cas-html-reports/references/examples/investigation-annotated-timeline.html"),
     },
     BuiltinFile {
         path: "skills/cas-html-reports/references/examples/investigation-annotated-timeline.why.md",
-        content: include_str!("builtins/grok/skills/cas-html-reports/references/examples/investigation-annotated-timeline.why.md"),
+        content: include_str!("builtins/skills/cas-html-reports/references/examples/investigation-annotated-timeline.why.md"),
     },
     BuiltinFile {
         path: "skills/cas-html-reports/references/examples/executive-variance-brief.html",
-        content: include_str!("builtins/grok/skills/cas-html-reports/references/examples/executive-variance-brief.html"),
+        content: include_str!("builtins/skills/cas-html-reports/references/examples/executive-variance-brief.html"),
     },
     BuiltinFile {
         path: "skills/cas-html-reports/references/examples/executive-variance-brief.why.md",
-        content: include_str!("builtins/grok/skills/cas-html-reports/references/examples/executive-variance-brief.why.md"),
+        content: include_str!("builtins/skills/cas-html-reports/references/examples/executive-variance-brief.why.md"),
     },
     BuiltinFile {
         path: "skills/cas-html-reports/references/examples/benchmark-small-multiples.html",
-        content: include_str!("builtins/grok/skills/cas-html-reports/references/examples/benchmark-small-multiples.html"),
+        content: include_str!("builtins/skills/cas-html-reports/references/examples/benchmark-small-multiples.html"),
     },
     BuiltinFile {
         path: "skills/cas-html-reports/references/examples/benchmark-small-multiples.why.md",
-        content: include_str!("builtins/grok/skills/cas-html-reports/references/examples/benchmark-small-multiples.why.md"),
-    },
-    BuiltinFile {
-        path: "skills/cas-html-reports/references/examples/before-after/rubric-review-before.html",
-        content: include_str!("builtins/grok/skills/cas-html-reports/references/examples/before-after/rubric-review-before.html"),
-    },
-    BuiltinFile {
-        path: "skills/cas-html-reports/references/examples/before-after/rubric-review-after.html",
-        content: include_str!("builtins/grok/skills/cas-html-reports/references/examples/before-after/rubric-review-after.html"),
-    },
-    BuiltinFile {
-        path: "skills/cas-html-reports/references/examples/before-after/rubric-review.brief.md",
-        content: include_str!("builtins/grok/skills/cas-html-reports/references/examples/before-after/rubric-review.brief.md"),
-    },
-    BuiltinFile {
-        path: "skills/cas-html-reports/references/examples/before-after/rubric-review.why.md",
-        content: include_str!("builtins/grok/skills/cas-html-reports/references/examples/before-after/rubric-review.why.md"),
+        content: include_str!("builtins/skills/cas-html-reports/references/examples/benchmark-small-multiples.why.md"),
     },
     BuiltinFile {
         path: "skills/cas-dataviz/SKILL.md",
-        content: include_str!("builtins/grok/skills/cas-dataviz/SKILL.md"),
+        content: include_str!("builtins/skills/cas-dataviz/SKILL.md"),
     },
     BuiltinFile {
         path: "skills/cas-dataviz/references/design-review.md",
-        content: include_str!("builtins/grok/skills/cas-dataviz/references/design-review.md"),
+        content: include_str!("builtins/skills/cas-dataviz/references/design-review.md"),
     },
     BuiltinFile {
         path: "skills/cas-dataviz/references/quality-checklist.md",
-        content: include_str!("builtins/grok/skills/cas-dataviz/references/quality-checklist.md"),
+        content: include_str!("builtins/skills/cas-dataviz/references/quality-checklist.md"),
     },
     BuiltinFile {
         path: "skills/cas-dataviz/scripts/validate_palette.js",
-        content: include_str!("builtins/grok/skills/cas-dataviz/scripts/validate_palette.js"),
+        content: include_str!("builtins/skills/cas-dataviz/scripts/validate_palette.js"),
     },
     BuiltinFile {
         path: "skills/cas-dataviz/examples/send-backs-dot-strip.html",
-        content: include_str!("builtins/grok/skills/cas-dataviz/examples/send-backs-dot-strip.html"),
+        content: include_str!("builtins/skills/cas-dataviz/examples/send-backs-dot-strip.html"),
     },
     BuiltinFile {
         path: "skills/cas-dataviz/examples/send-backs-dot-strip.why.md",
-        content: include_str!("builtins/grok/skills/cas-dataviz/examples/send-backs-dot-strip.why.md"),
+        content: include_str!("builtins/skills/cas-dataviz/examples/send-backs-dot-strip.why.md"),
     },
     // design-spec skill (GH #64) — grok twin.
     BuiltinFile {
         path: "skills/design-spec/SKILL.md",
-        content: include_str!("builtins/grok/skills/design-spec/SKILL.md"),
+        content: include_str!("builtins/skills/design-spec/SKILL.md"),
     },
     // cas-d967: the Petrastella design language every project inherits through
     // design-spec and overrides in DESIGN.md; tokens are the machine-readable twin.
     BuiltinFile {
         path: "skills/design-spec/references/petrastella-design-language.md",
-        content: include_str!("builtins/grok/skills/design-spec/references/petrastella-design-language.md"),
+        content: include_str!("builtins/skills/design-spec/references/petrastella-design-language.md"),
     },
     BuiltinFile {
         path: "skills/design-spec/references/design-tokens.json",
-        content: include_str!("builtins/grok/skills/design-spec/references/design-tokens.json"),
+        content: include_str!("builtins/skills/design-spec/references/design-tokens.json"),
+    },
+    BuiltinFile {
+        path: "skills/design-spec/references/tokens.css",
+        content: include_str!("builtins/skills/design-spec/references/tokens.css"),
     },
     // cas-ui-craft skill (cas-d967) — grok twin: concept brief before any render,
     // first-three-seconds rule, form vocabulary, scored critique rubric with a
     // merge floor, and four annotated exemplars.
     BuiltinFile {
         path: "skills/cas-ui-craft/SKILL.md",
-        content: include_str!("builtins/grok/skills/cas-ui-craft/SKILL.md"),
+        content: include_str!("builtins/skills/cas-ui-craft/SKILL.md"),
     },
     BuiltinFile {
         path: "skills/cas-ui-craft/references/concept-brief.md",
-        content: include_str!("builtins/grok/skills/cas-ui-craft/references/concept-brief.md"),
+        content: include_str!("builtins/skills/cas-ui-craft/references/concept-brief.md"),
     },
     BuiltinFile {
         path: "skills/cas-ui-craft/references/form-vocabulary.md",
-        content: include_str!("builtins/grok/skills/cas-ui-craft/references/form-vocabulary.md"),
+        content: include_str!("builtins/skills/cas-ui-craft/references/form-vocabulary.md"),
     },
     BuiltinFile {
         path: "skills/cas-ui-craft/references/critique-rubric.md",
-        content: include_str!("builtins/grok/skills/cas-ui-craft/references/critique-rubric.md"),
+        content: include_str!("builtins/skills/cas-ui-craft/references/critique-rubric.md"),
     },
     BuiltinFile {
         path: "skills/cas-ui-craft/references/exemplars/report.html",
-        content: include_str!("builtins/grok/skills/cas-ui-craft/references/exemplars/report.html"),
+        content: include_str!("builtins/skills/cas-ui-craft/references/exemplars/report.html"),
     },
     BuiltinFile {
         path: "skills/cas-ui-craft/references/exemplars/dashboard.html",
-        content: include_str!("builtins/grok/skills/cas-ui-craft/references/exemplars/dashboard.html"),
+        content: include_str!("builtins/skills/cas-ui-craft/references/exemplars/dashboard.html"),
     },
     BuiltinFile {
         path: "skills/cas-ui-craft/references/exemplars/product-page.html",
-        content: include_str!("builtins/grok/skills/cas-ui-craft/references/exemplars/product-page.html"),
+        content: include_str!("builtins/skills/cas-ui-craft/references/exemplars/product-page.html"),
     },
     BuiltinFile {
         path: "skills/cas-ui-craft/references/exemplars/before-after.html",
-        content: include_str!("builtins/grok/skills/cas-ui-craft/references/exemplars/before-after.html"),
+        content: include_str!("builtins/skills/cas-ui-craft/references/exemplars/before-after.html"),
+    },
+    BuiltinFile {
+        path: "skills/cas-ui-craft/scripts/visual-qa.mjs",
+        content: include_str!("builtins/skills/cas-ui-craft/scripts/visual-qa.mjs"),
     },
     // cas-21dc: Grok mirror of the demo-statement QA skill.
     BuiltinFile {
         path: "skills/cas-qa-craft/SKILL.md",
-        content: include_str!("builtins/grok/skills/cas-qa-craft/SKILL.md"),
+        content: include_str!("builtins/skills/cas-qa-craft/SKILL.md"),
     },
     BuiltinFile {
         path: "skills/cas-qa-craft/references/journeys.md",
-        content: include_str!("builtins/grok/skills/cas-qa-craft/references/journeys.md"),
+        content: include_str!("builtins/skills/cas-qa-craft/references/journeys.md"),
     },
     BuiltinFile {
         path: "skills/cas-qa-craft/references/matrix-builder.md",
-        content: include_str!("builtins/grok/skills/cas-qa-craft/references/matrix-builder.md"),
+        content: include_str!("builtins/skills/cas-qa-craft/references/matrix-builder.md"),
     },
     BuiltinFile {
         path: "skills/cas-qa-craft/references/evidence-ledger.md",
-        content: include_str!("builtins/grok/skills/cas-qa-craft/references/evidence-ledger.md"),
+        content: include_str!("builtins/skills/cas-qa-craft/references/evidence-ledger.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-qa-craft/references/verifier-evidence-gate.md",
+        content: include_str!("builtins/skills/cas-qa-craft/references/verifier-evidence-gate.md"),
     },
     BuiltinFile {
         path: "skills/cas-qa-craft/references/exemplar.md",
-        content: include_str!("builtins/grok/skills/cas-qa-craft/references/exemplar.md"),
+        content: include_str!("builtins/skills/cas-qa-craft/references/exemplar.md"),
     },
     BuiltinFile {
         path: "skills/cas-qa-craft/references/telemetry-sweep.md",
-        content: include_str!("builtins/grok/skills/cas-qa-craft/references/telemetry-sweep.md"),
+        content: include_str!("builtins/skills/cas-qa-craft/references/telemetry-sweep.md"),
     },
     BuiltinFile {
         path: "skills/cas-qa-craft/references/evidence-bundle.md",
-        content: include_str!("builtins/grok/skills/cas-qa-craft/references/evidence-bundle.md"),
+        content: include_str!("builtins/skills/cas-qa-craft/references/evidence-bundle.md"),
     },
     // cas-619f: the independent reviewer's procedure for a qa-pass task.
     BuiltinFile {
         path: "skills/cas-qa-craft/references/independent-pass.md",
-        content: include_str!("builtins/grok/skills/cas-qa-craft/references/independent-pass.md"),
+        content: include_str!("builtins/skills/cas-qa-craft/references/independent-pass.md"),
     },
-    // release-notes skill (GH #65) — grok twin.
+    // cas-release-notes skill (GH #65) — grok twin.
     BuiltinFile {
-        path: "skills/release-notes/SKILL.md",
-        content: include_str!("builtins/grok/skills/release-notes/SKILL.md"),
+        path: "skills/cas-release-notes/SKILL.md",
+        content: include_str!("builtins/skills/cas-release-notes/SKILL.md"),
     },
     BuiltinFile {
-        path: "skills/release-notes/references/RUBRIC-template.md",
-        content: include_str!("builtins/grok/skills/release-notes/references/RUBRIC-template.md"),
+        path: "skills/cas-release-notes/references/RUBRIC-template.md",
+        content: include_str!("builtins/skills/cas-release-notes/references/RUBRIC-template.md"),
     },
     // mecha-cassy skill (cas-945f, GH #687) — grok twin. Byte-identical to the
     // claude copy except for the harness tool prefix.
     BuiltinFile {
         path: "skills/mecha-cassy/SKILL.md",
-        content: include_str!("builtins/grok/skills/mecha-cassy/SKILL.md"),
+        content: include_str!("builtins/skills/mecha-cassy/SKILL.md"),
     },
     BuiltinFile {
         path: "skills/mecha-cassy/references/registration.md",
-        content: include_str!("builtins/grok/skills/mecha-cassy/references/registration.md"),
+        content: include_str!("builtins/skills/mecha-cassy/references/registration.md"),
     },
     BuiltinFile {
         path: "skills/fallow/SKILL.md",
-        content: include_str!("builtins/grok/skills/fallow/SKILL.md"),
+        content: include_str!("builtins/skills/fallow/SKILL.md"),
     },
     BuiltinFile {
         path: "skills/fallow/references/cli-reference.md",
-        content: include_str!("builtins/grok/skills/fallow/references/cli-reference.md"),
+        content: include_str!("builtins/skills/fallow/references/cli-reference.md"),
     },
     BuiltinFile {
         path: "skills/fallow/references/gotchas.md",
-        content: include_str!("builtins/grok/skills/fallow/references/gotchas.md"),
+        content: include_str!("builtins/skills/fallow/references/gotchas.md"),
     },
     BuiltinFile {
         path: "skills/fallow/references/patterns.md",
-        content: include_str!("builtins/grok/skills/fallow/references/patterns.md"),
+        content: include_str!("builtins/skills/fallow/references/patterns.md"),
     },
     // cas-github-issues skill (cas-ff2f, GH #94) — grok twin.
     BuiltinFile {
         path: "skills/cas-github-issues/SKILL.md",
-        content: include_str!("builtins/grok/skills/cas-github-issues/SKILL.md"),
+        content: include_str!("builtins/skills/cas-github-issues/SKILL.md"),
     },
     BuiltinFile {
         path: "skills/cas-nuxt-playwright/SKILL.md",
-        content: include_str!("builtins/grok/skills/cas-nuxt-playwright/SKILL.md"),
+        content: include_str!("builtins/skills/cas-nuxt-playwright/SKILL.md"),
     },
     BuiltinFile {
         path: "skills/cas-nuxt-playwright/references/auth-fixture-template.md",
         content: include_str!(
-            "builtins/grok/skills/cas-nuxt-playwright/references/auth-fixture-template.md"
+            "builtins/skills/cas-nuxt-playwright/references/auth-fixture-template.md"
         ),
     },
     // cas-playwright-debug skill (cas-5e54) — grok mirror, byte-identical.
     BuiltinFile {
         path: "skills/cas-playwright-debug/SKILL.md",
-        content: include_str!("builtins/grok/skills/cas-playwright-debug/SKILL.md"),
+        content: include_str!("builtins/skills/cas-playwright-debug/SKILL.md"),
     },
     // cas-frontend-engineering skill — grok mirror.
     BuiltinFile {
         path: "skills/cas-frontend-engineering/SKILL.md",
         content: include_str!(
-            "builtins/grok/skills/cas-frontend-engineering/SKILL.md"
+            "builtins/skills/cas-frontend-engineering/SKILL.md"
         ),
     },
     BuiltinFile {
+        path: "skills/cas-frontend-engineering/references/playwright-acceptance.md",
+        content: include_str!("builtins/skills/cas-frontend-engineering/references/playwright-acceptance.md"),
+    },
+    BuiltinFile {
         path: "skills/cas-codex-exec/SKILL.md",
-        content: include_str!("builtins/grok/skills/cas-codex-exec/SKILL.md"),
+        content: include_str!("builtins/skills/cas-codex-exec/SKILL.md"),
     },
     BuiltinFile {
         path: "skills/cli-routing/SKILL.md",
-        content: include_str!("builtins/grok/skills/cli-routing/SKILL.md"),
+        content: include_str!("builtins/skills/cli-routing/SKILL.md"),
     },
     BuiltinFile {
         path: "skills/cli-routing/references/routing.md",
-        content: include_str!("builtins/grok/skills/cli-routing/references/routing.md"),
+        content: include_str!("builtins/skills/cli-routing/references/routing.md"),
     },
     // cas-writing-for-agents: Grok mirror of the MIT Matt Pocock import above.
     BuiltinFile {
         path: "skills/cas-writing-for-agents/SKILL.md",
-        content: include_str!("builtins/grok/skills/cas-writing-for-agents/SKILL.md"),
+        content: include_str!("builtins/skills/cas-writing-for-agents/SKILL.md"),
     },
     // cas-cli-craft: terminal and text design craft (cas-4df0). No CAS tool
     // calls, so the codex and grok twins are byte-identical to this source.
     BuiltinFile {
         path: "skills/cas-cli-craft/SKILL.md",
-        content: include_str!("builtins/grok/skills/cas-cli-craft/SKILL.md"),
+        content: include_str!("builtins/skills/cas-cli-craft/SKILL.md"),
     },
     BuiltinFile {
         path: "skills/cas-cli-craft/references/concept-brief.md",
-        content: include_str!("builtins/grok/skills/cas-cli-craft/references/concept-brief.md"),
+        content: include_str!("builtins/skills/cas-cli-craft/references/concept-brief.md"),
     },
     BuiltinFile {
         path: "skills/cas-cli-craft/references/output-contract.md",
-        content: include_str!("builtins/grok/skills/cas-cli-craft/references/output-contract.md"),
+        content: include_str!("builtins/skills/cas-cli-craft/references/output-contract.md"),
     },
     BuiltinFile {
         path: "skills/cas-cli-craft/references/critique-rubric.md",
-        content: include_str!("builtins/grok/skills/cas-cli-craft/references/critique-rubric.md"),
+        content: include_str!("builtins/skills/cas-cli-craft/references/critique-rubric.md"),
     },
     BuiltinFile {
         path: "skills/cas-cli-craft/references/exemplars/status-screen.md",
-        content: include_str!("builtins/grok/skills/cas-cli-craft/references/exemplars/status-screen.md"),
+        content: include_str!("builtins/skills/cas-cli-craft/references/exemplars/status-screen.md"),
     },
     BuiltinFile {
         path: "skills/cas-cli-craft/references/exemplars/doctor-report.md",
-        content: include_str!("builtins/grok/skills/cas-cli-craft/references/exemplars/doctor-report.md"),
+        content: include_str!("builtins/skills/cas-cli-craft/references/exemplars/doctor-report.md"),
     },
     BuiltinFile {
         path: "skills/cas-cli-craft/references/exemplars/long-running.md",
-        content: include_str!("builtins/grok/skills/cas-cli-craft/references/exemplars/long-running.md"),
+        content: include_str!("builtins/skills/cas-cli-craft/references/exemplars/long-running.md"),
     },
     BuiltinFile {
         path: "skills/cas-cli-craft/references/exemplars/before-after.md",
-        content: include_str!("builtins/grok/skills/cas-cli-craft/references/exemplars/before-after.md"),
+        content: include_str!("builtins/skills/cas-cli-craft/references/exemplars/before-after.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-cli-craft/scripts/terminal-qa.mjs",
+        content: include_str!("builtins/skills/cas-cli-craft/scripts/terminal-qa.mjs"),
     },
     BuiltinFile {
         path: "skills/cas-diagnosing-bugs/SKILL.md",
-        content: include_str!("builtins/grok/skills/cas-diagnosing-bugs/SKILL.md"),
+        content: include_str!("builtins/skills/cas-diagnosing-bugs/SKILL.md"),
     },
-    BuiltinFile { path: "skills/cas-codebase-design/SKILL.md", content: include_str!("builtins/grok/skills/cas-codebase-design/SKILL.md") },
-    BuiltinFile { path: "skills/cas-tdd/SKILL.md", content: include_str!("builtins/grok/skills/cas-tdd/SKILL.md") },
-    BuiltinFile { path: "skills/cas-wizard/SKILL.md", content: include_str!("builtins/grok/skills/cas-wizard/SKILL.md") },
-    BuiltinFile { path: "skills/cas-wizard/template.sh", content: include_str!("builtins/grok/skills/cas-wizard/template.sh") },
-    BuiltinFile { path: "skills/cas-resolving-merge-conflicts/SKILL.md", content: include_str!("builtins/grok/skills/cas-resolving-merge-conflicts/SKILL.md") },
-    BuiltinFile { path: "skills/cas-to-questionnaire/SKILL.md", content: include_str!("builtins/grok/skills/cas-to-questionnaire/SKILL.md") },
-    BuiltinFile { path: "skills/cas-image-generate/SKILL.md", content: include_str!("builtins/grok/skills/cas-image-generate/SKILL.md") },
-    BuiltinFile { path: "skills/cas-image-generate/references/asset-playbook.md", content: include_str!("builtins/grok/skills/cas-image-generate/references/asset-playbook.md") },
-    BuiltinFile { path: "skills/cas-image-generate/references/svg-web-assets.md", content: include_str!("builtins/grok/skills/cas-image-generate/references/svg-web-assets.md") },
-    BuiltinFile { path: "skills/cas-image-generate/references/style-harvest.md", content: include_str!("builtins/grok/skills/cas-image-generate/references/style-harvest.md") },
-    BuiltinFile { path: "skills/cas-image-generate/references/output-checklist.md", content: include_str!("builtins/grok/skills/cas-image-generate/references/output-checklist.md") },
-    BuiltinFile { path: "skills/cas-image-generate/references/providers.md", content: include_str!("builtins/grok/skills/cas-image-generate/references/providers.md") },
-    BuiltinFile { path: "skills/cas-image-generate/scripts/generate-image.sh", content: include_str!("builtins/grok/skills/cas-image-generate/scripts/generate-image.sh") },
-    BuiltinFile { path: "skills/cas-technical-drawing/SKILL.md", content: include_str!("builtins/grok/skills/cas-technical-drawing/SKILL.md") },
-    BuiltinFile { path: "skills/cas-technical-drawing/references/model-schema.md", content: include_str!("builtins/grok/skills/cas-technical-drawing/references/model-schema.md") },
-    BuiltinFile { path: "skills/cas-technical-drawing/references/drafting-conventions.md", content: include_str!("builtins/grok/skills/cas-technical-drawing/references/drafting-conventions.md") },
-    BuiltinFile { path: "skills/cas-technical-drawing/references/likeness-critique.md", content: include_str!("builtins/grok/skills/cas-technical-drawing/references/likeness-critique.md") },
-    BuiltinFile { path: "skills/cas-technical-drawing/scripts/draft.mjs", content: include_str!("builtins/grok/skills/cas-technical-drawing/scripts/draft.mjs") },
-    BuiltinFile { path: "skills/cas-technical-drawing/examples/shelf-box.json", content: include_str!("builtins/grok/skills/cas-technical-drawing/examples/shelf-box.json") },
+    BuiltinFile { path: "skills/cas-codebase-design/SKILL.md", content: include_str!("builtins/skills/cas-codebase-design/SKILL.md") },
+    BuiltinFile { path: "skills/cas-tdd/SKILL.md", content: include_str!("builtins/skills/cas-tdd/SKILL.md") },
+    BuiltinFile { path: "skills/cas-wizard/SKILL.md", content: include_str!("builtins/skills/cas-wizard/SKILL.md") },
+    BuiltinFile { path: "skills/cas-wizard/template.sh", content: include_str!("builtins/skills/cas-wizard/template.sh") },
+    BuiltinFile { path: "skills/cas-resolving-merge-conflicts/SKILL.md", content: include_str!("builtins/skills/cas-resolving-merge-conflicts/SKILL.md") },
+    BuiltinFile { path: "skills/cas-to-questionnaire/SKILL.md", content: include_str!("builtins/skills/cas-to-questionnaire/SKILL.md") },
+    BuiltinFile { path: "skills/cas-image-generate/SKILL.md", content: include_str!("builtins/skills/cas-image-generate/SKILL.md") },
+    BuiltinFile { path: "skills/cas-image-generate/references/asset-playbook.md", content: include_str!("builtins/skills/cas-image-generate/references/asset-playbook.md") },
+    BuiltinFile { path: "skills/cas-image-generate/references/svg-web-assets.md", content: include_str!("builtins/skills/cas-image-generate/references/svg-web-assets.md") },
+    BuiltinFile { path: "skills/cas-image-generate/references/style-harvest.md", content: include_str!("builtins/skills/cas-image-generate/references/style-harvest.md") },
+    BuiltinFile { path: "skills/cas-image-generate/references/output-checklist.md", content: include_str!("builtins/skills/cas-image-generate/references/output-checklist.md") },
+    BuiltinFile { path: "skills/cas-image-generate/references/providers.md", content: include_str!("builtins/skills/cas-image-generate/references/providers.md") },
+    BuiltinFile { path: "skills/cas-image-generate/scripts/generate-image.sh", content: include_str!("builtins/skills/cas-image-generate/scripts/generate-image.sh") },
+    BuiltinFile { path: "skills/cas-technical-drawing/SKILL.md", content: include_str!("builtins/skills/cas-technical-drawing/SKILL.md") },
+    BuiltinFile { path: "skills/cas-technical-drawing/references/model-schema.md", content: include_str!("builtins/skills/cas-technical-drawing/references/model-schema.md") },
+    BuiltinFile { path: "skills/cas-technical-drawing/references/drafting-conventions.md", content: include_str!("builtins/skills/cas-technical-drawing/references/drafting-conventions.md") },
+    BuiltinFile { path: "skills/cas-technical-drawing/references/likeness-critique.md", content: include_str!("builtins/skills/cas-technical-drawing/references/likeness-critique.md") },
+    BuiltinFile { path: "skills/cas-technical-drawing/scripts/draft.mjs", content: include_str!("builtins/skills/cas-technical-drawing/scripts/draft.mjs") },
+    BuiltinFile { path: "skills/cas-technical-drawing/examples/shelf-box.json", content: include_str!("builtins/skills/cas-technical-drawing/examples/shelf-box.json") },
 ];
 
 /// OpenCode does not load a filesystem skill/agent home for its generated
@@ -1825,7 +1838,7 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
 /// source used by the projection and drift gate, and it makes the four
 /// harnesses resolve the same required roles without pretending that an
 /// OpenCode config write occurred.  Claude's canonical content is the richest
-/// common source; only MCP spelling is adapted to OpenCode's `cas_<tool>`
+/// common source; only agent `tools:` spelling is adapted to OpenCode's `cas_<tool>`
 /// sanitizer.  `OnceLock` keeps the leaked transformed strings immutable and
 /// initializes them once per process.
 fn project_opencode_catalog(source: &[BuiltinFile]) -> Vec<BuiltinFile> {
@@ -1833,16 +1846,26 @@ fn project_opencode_catalog(source: &[BuiltinFile]) -> Vec<BuiltinFile> {
         .iter()
         .map(|builtin| BuiltinFile {
             path: builtin.path,
-            content: Box::leak(
-                builtin
-                    .content
-                    .replace("mcp__cas__", "cas_")
-                    .replace("mcp__cs__", "cas_")
-                    .replace("cas__", "cas_")
-                    .into_boxed_str(),
-            ),
+            content: Box::leak(project_opencode_content(builtin.content).into_boxed_str()),
         })
         .collect()
+}
+
+/// Catalog text is prefix-neutral (audit D1), so the OpenCode projection
+/// only rewrites the agent `tools:` frontmatter allowlist to OpenCode's
+/// `cas_<tool>` spelling. Every other line ships unchanged.
+fn project_opencode_content(content: &str) -> String {
+    content
+        .split('\n')
+        .map(|line| {
+            if line.starts_with("tools:") {
+                line.replace("mcp__cas__", "cas_")
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 static OPENCODE_BUILTIN_AGENTS: OnceLock<Vec<BuiltinFile>> = OnceLock::new();
@@ -2017,11 +2040,12 @@ pub const GENERAL_PARITY_CAPABILITIES: &[RequiredCapability] = &[
         note: "",
     },
     RequiredCapability {
-        // GH #65: release-notes rubric + Slack announcement workflow.
-        id: "release-notes",
-        claude: Some("skills/release-notes"),
-        codex: Some("skills/release-notes"),
-        grok: Some("skills/release-notes"),
+        // GH #65: release-notes rubric + Slack announcement workflow. Named
+        // cas-release-notes: Grok ships a built-in /release-notes command.
+        id: "cas-release-notes",
+        claude: Some("skills/cas-release-notes"),
+        codex: Some("skills/cas-release-notes"),
+        grok: Some("skills/cas-release-notes"),
         note: "",
     },
     RequiredCapability {
@@ -2155,18 +2179,27 @@ pub const GENERAL_PARITY_CAPABILITIES: &[RequiredCapability] = &[
     },
 ];
 
-/// Factory-critical agent roles that every harness must define in its own agent
-/// catalog (cas-cc8c AC-3). Harness-specific extras (e.g. Codex's
-/// `factory-supervisor` agent, which Claude/Grok don't need because their
-/// supervisor is the primary pane rather than a spawned sub-agent) are allowed
-/// and are simply absent from this required set.
-pub const REQUIRED_FACTORY_AGENTS: &[&str] = &[
-    "agents/task-verifier.md",
-    "agents/learning-reviewer.md",
-    "agents/rule-reviewer.md",
-    "agents/duplicate-detector.md",
-    "agents/session-summarizer.md",
-];
+/// Factory-critical agent roles that every harness that loads `.md` agents
+/// must define in its own agent catalog (cas-cc8c AC-3). Codex loads none
+/// (audit D6); see [`required_factory_agents_for`].
+///
+/// The Stop-hook maintenance jobs (learning-reviewer, rule-reviewer,
+/// duplicate-detector, session-summarizer) are not agents: each has one body
+/// in `crate::maintenance_jobs`, remapped per harness at prompt build
+/// (cas-228e, audit D12).
+pub const REQUIRED_FACTORY_AGENTS: &[&str] = &["agents/task-verifier.md"];
+
+/// The required agent roles for one harness: [`REQUIRED_FACTORY_AGENTS`],
+/// except for Codex, which ignores `.md` agents and so is required to ship
+/// none (audit D6, cas-6b97).
+pub fn required_factory_agents_for(harness: SupervisorCli) -> &'static [&'static str] {
+    match harness {
+        SupervisorCli::Codex => &[],
+        SupervisorCli::Claude | SupervisorCli::Grok | SupervisorCli::OpenCode => {
+            REQUIRED_FACTORY_AGENTS
+        }
+    }
+}
 
 /// The skill catalog for a harness (cas-cc8c parity helpers).
 pub fn skill_catalog_for_harness(harness: SupervisorCli) -> &'static [BuiltinFile] {
@@ -2201,9 +2234,13 @@ pub fn required_dir_for(cap: &RequiredCapability, harness: SupervisorCli) -> Opt
     }
 }
 
-/// Check if a file is managed by Cassy (has `managed_by: cas` in frontmatter)
+/// Check if a file is managed by Cassy.
+///
+/// The portable marker is `metadata:` → `managed_by: cas`; a top-level
+/// `managed_by: cas` (the form shipped before 3.32) is still accepted so
+/// installed copies carrying it stay managed and get updated.
 pub fn is_managed_by_cas(content: &str) -> bool {
-    // Check frontmatter for managed_by: cas
+    // Substring match covers both the nested and the legacy top-level form.
     if let Some(stripped) = content.strip_prefix("---") {
         if let Some(end) = stripped.find("---") {
             let frontmatter = &content[3..3 + end];
@@ -2228,6 +2265,26 @@ pub fn normalize_harness_skill_content(content: &str) -> String {
         normalized = normalized.replace(prefix, "<CAS_TOOL_PREFIX>");
     }
     normalized
+}
+
+/// Lines of shipped text that spell a harness tool prefix (`mcp__cas__`,
+/// `mcp__cs__` or `cas__`) where the catalog rule (audit D1) forbids it, as
+/// `(1-based line, text)`.
+///
+/// Skill and agent text names tools by bare name. The only prefixed literals
+/// allowed are [`TOOL_NAMING_LINE`] and an agent's `tools:` frontmatter, which
+/// builtins.rs generates per harness.
+pub fn unsanctioned_prefixed_tool_lines(content: &str) -> Vec<(usize, &str)> {
+    content
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| {
+            *line != TOOL_NAMING_LINE
+                && !line.starts_with("tools:")
+                && (line.contains("mcp__cas__") || line.contains("mcp__cs__") || line.contains("cas__"))
+        })
+        .map(|(index, line)| (index + 1, line))
+        .collect()
 }
 
 /// Preview what would change for a built-in file (dry-run)
@@ -2459,7 +2516,7 @@ pub fn mark_missing_owned_references_for_replacement(
     let mut state = BuiltinReferenceState::load(target_dir)?;
     let mut marked = 0;
     for builtin in skills {
-        if is_reference_owned_by_managed_skill(builtin, skills)
+        if is_file_owned_by_managed_skill(builtin, skills)
             && !target_dir.join(builtin.path).exists()
             && state
                 .replace_on_next_sync
@@ -2527,26 +2584,36 @@ fn is_shipped_builtin_reference_version(path: &str, content_hash: &str) -> bool 
         .is_some_and(|hashes| hashes.contains(content_hash))
 }
 
-/// A reference is owned by its skill directory when that directory has a
-/// cataloged, managed `SKILL.md`. This makes ownership automatic for newly
-/// added reference files instead of relying on an easy-to-forget per-file
-/// frontmatter marker.
-fn is_reference_owned_by_managed_skill(builtin: &BuiltinFile, skills: &[BuiltinFile]) -> bool {
-    let Some(relative) = builtin.path.strip_prefix("skills/") else {
-        return false;
-    };
-    let Some((skill_dir, child_path)) = relative.split_once('/') else {
-        return false;
-    };
-    if !child_path.starts_with("references/") {
-        return false;
-    }
+/// Split `skills/<dir>/<child>` into `(<dir>, <child>)`. `None` for anything
+/// that is not a child of a skill directory (agents, flat files).
+fn skill_dir_child(path: &str) -> Option<(&str, &str)> {
+    let (skill_dir, child_path) = path.strip_prefix("skills/")?.split_once('/')?;
+    (!skill_dir.is_empty() && !child_path.is_empty()).then_some((skill_dir, child_path))
+}
 
+/// True when `skills` carries a managed `SKILL.md` for `skill_dir`.
+fn skill_dir_is_managed(skill_dir: &str, skills: &[BuiltinFile]) -> bool {
     let body_path = format!("skills/{skill_dir}/SKILL.md");
     skills
         .iter()
         .find(|candidate| candidate.path == body_path)
         .is_some_and(|body| is_managed_by_cas(body.content))
+}
+
+/// Every file beneath a skill directory other than its `SKILL.md` is owned by
+/// that directory when the directory has a cataloged, managed `SKILL.md`. That
+/// covers `references/`, `scripts/`, `examples/` and top-level helpers such as
+/// `cas-wizard/template.sh` alike. These files cannot carry frontmatter, so
+/// before cas-57c02 anything outside `references/` fell back to the
+/// `managed_by: cas` gate, was never updated after first install, and drifted
+/// away from the `SKILL.md` that describes it. Owned files use the last-synced
+/// baseline plus the shipped-version ledger, so a local edit is still
+/// preserved.
+fn is_file_owned_by_managed_skill(builtin: &BuiltinFile, skills: &[BuiltinFile]) -> bool {
+    let Some((skill_dir, child_path)) = skill_dir_child(builtin.path) else {
+        return false;
+    };
+    child_path != "SKILL.md" && skill_dir_is_managed(skill_dir, skills)
 }
 
 fn sync_owned_reference(
@@ -2682,9 +2749,16 @@ fn sync_all_builtins_inner(
         }
     }
 
+    // Retired agents: a managed agent file this catalog no longer ships is
+    // listed in every session until something removes it (cas-57c02).
+    let keep_agents = builtin_agent_file_names(agents);
+    for name in prune_stale_cas_agent_files(&target_dir.join("agents"), &keep_agents)? {
+        result.pruned_files.push(format!("agents/{name}"));
+    }
+
     // Sync skills
     for builtin in skills {
-        let outcome = if is_reference_owned_by_managed_skill(builtin, skills) {
+        let outcome = if is_file_owned_by_managed_skill(builtin, skills) {
             sync_owned_reference(builtin, target_dir, &mut reference_state)?
         } else {
             sync_builtin_detailed(builtin, target_dir)?
@@ -2706,8 +2780,124 @@ fn sync_all_builtins_inner(
         }
     }
 
+    // Files a managed skill directory no longer ships (for example a removed
+    // reference) are pruned once their content proves they are Cassy's.
+    result.pruned_files.extend(prune_removed_owned_skill_files(
+        target_dir,
+        skills,
+        &mut reference_state,
+    )?);
+
     reference_state.save(target_dir)?;
     Ok(result)
+}
+
+/// SHA-256 of raw file bytes; equal to [`builtin_content_hash`] for UTF-8.
+fn file_bytes_hash(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+/// True when an installed file at `path` (relative to the harness dir) is
+/// provably Cassy content: it matches the last content Cassy synced there,
+/// a version Cassy shipped at that path, or it carries `managed_by: cas`.
+/// Anything else may be a user's own file and is never deleted.
+fn is_provably_cassy_skill_file(path: &str, bytes: &[u8], state: &BuiltinReferenceState) -> bool {
+    let hash = file_bytes_hash(bytes);
+    state.files.get(path).is_some_and(|baseline| *baseline == hash)
+        || is_shipped_builtin_reference_version(path, &hash)
+        || std::str::from_utf8(bytes).is_ok_and(is_managed_by_cas)
+}
+
+/// Installed files beneath a managed skill directory that `skills` no longer
+/// ships and whose content is provably Cassy's (see
+/// [`is_provably_cassy_skill_file`]). Paths are relative to `target_dir`,
+/// `/`-separated and sorted. Symlinks and unreadable files are never listed.
+fn removed_owned_skill_files(
+    target_dir: &Path,
+    skills: &[BuiltinFile],
+    state: &BuiltinReferenceState,
+) -> Vec<String> {
+    let shipped: HashSet<&str> = skills.iter().map(|builtin| builtin.path).collect();
+    let managed_dirs: BTreeSet<&str> = skills
+        .iter()
+        .filter_map(|builtin| skill_dir_child(builtin.path))
+        .map(|(skill_dir, _)| skill_dir)
+        .filter(|skill_dir| skill_dir_is_managed(skill_dir, skills))
+        .collect();
+
+    let mut removed = Vec::new();
+    for skill_dir in managed_dirs {
+        let mut pending = vec![target_dir.join("skills").join(skill_dir)];
+        while let Some(current) = pending.pop() {
+            let Ok(entries) = std::fs::read_dir(&current) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let Ok(file_type) = entry.file_type() else {
+                    continue;
+                };
+                let path = entry.path();
+                if file_type.is_dir() {
+                    pending.push(path);
+                    continue;
+                }
+                if !file_type.is_file() {
+                    continue;
+                }
+                let Some(relative) = path
+                    .strip_prefix(target_dir)
+                    .ok()
+                    .and_then(|relative| relative.to_str())
+                    .map(|relative| relative.replace(std::path::MAIN_SEPARATOR, "/"))
+                else {
+                    continue;
+                };
+                let is_body = skill_dir_child(&relative).is_some_and(|(_, child)| child == "SKILL.md");
+                if is_body || shipped.contains(relative.as_str()) {
+                    continue;
+                }
+                let Ok(bytes) = std::fs::read(&path) else {
+                    continue;
+                };
+                if is_provably_cassy_skill_file(&relative, &bytes, state) {
+                    removed.push(relative);
+                }
+            }
+        }
+    }
+    removed.sort();
+    removed
+}
+
+/// Delete the files [`removed_owned_skill_files`] names, forget their
+/// baselines, and drop directories the deletion left empty inside the skill
+/// directory. Returns the removed paths relative to `target_dir`.
+fn prune_removed_owned_skill_files(
+    target_dir: &Path,
+    skills: &[BuiltinFile],
+    state: &mut BuiltinReferenceState,
+) -> std::io::Result<Vec<String>> {
+    let removed = removed_owned_skill_files(target_dir, skills, state);
+    for relative in &removed {
+        let path = target_dir.join(relative);
+        std::fs::remove_file(&path)?;
+        state.files.remove(relative);
+        state.skipped_references.remove(relative);
+        state.replace_on_next_sync.remove(relative);
+
+        let Some((skill_dir, _)) = skill_dir_child(relative) else {
+            continue;
+        };
+        let skill_root = target_dir.join("skills").join(skill_dir);
+        let mut parent = path.parent();
+        while let Some(dir) = parent {
+            if dir == skill_root || !dir.starts_with(&skill_root) || std::fs::remove_dir(dir).is_err() {
+                break;
+            }
+            parent = dir.parent();
+        }
+    }
+    Ok(removed)
 }
 
 /// Sync built-in Workflow scripts to the target directory.
@@ -2811,7 +3001,42 @@ pub fn sync_all_builtins_for_project(
             let skills = filtered_project_skills(GROK_BUILTIN_SKILLS, project_root);
             sync_project_catalog(&project_root.join(".grok"), GROK_BUILTIN_AGENTS, &skills, None)
         }
-        SupervisorCli::OpenCode => Ok(SyncResult::default()),
+        // cas-6b97 (audit M40): OpenCode reads `.opencode/skills` ahead of
+        // `.claude/skills`, so the `cas_` projection is written there. Agents
+        // are not: OpenCode validates its own agent schema and the Claude
+        // agent frontmatter does not fit it.
+        SupervisorCli::OpenCode => {
+            let skills = filtered_project_skills(opencode_builtin_skills(), project_root);
+            sync_project_catalog(&project_root.join(".opencode"), NO_AGENTS, &skills, None)
+        }
+    }
+}
+
+/// An empty agent catalog, for harnesses Cassy installs no `.md` agents for.
+const NO_AGENTS: &[BuiltinFile] = &[];
+
+/// Whether `harness` is installed for this user, judged by its user-level
+/// home (cas-6b97, audit M39/M40). Grok and OpenCode rank a project's own
+/// `.grok/skills` / `.opencode/skills` above `.claude/skills` (measured with
+/// `grok inspect --json` and `opencode debug skill`), so project sync writes
+/// their projection whenever they are installed; otherwise they load the
+/// Claude-spelled copies whose tool names do not resolve for them.
+/// `GROK_CLAUDE_SKILLS_ENABLED=false` does not help: it hides only the
+/// user-level Claude skills, and Grok still reads the project's `.claude/skills`.
+pub fn harness_installed_for_user(harness: SupervisorCli) -> bool {
+    let Some(home) = dirs::home_dir() else {
+        return false;
+    };
+    match harness {
+        SupervisorCli::Claude => true,
+        SupervisorCli::Codex => home.join(".codex").is_dir(),
+        SupervisorCli::Grok => home.join(".grok").is_dir(),
+        SupervisorCli::OpenCode => {
+            let config = std::env::var_os("XDG_CONFIG_HOME")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| home.join(".config"));
+            config.join("opencode").is_dir() || home.join(".opencode").is_dir()
+        }
     }
 }
 
@@ -3003,8 +3228,7 @@ pub fn builtin_gitignore_entries(harnesses: &[SupervisorCli]) -> Vec<String> {
             ),
             SupervisorCli::Codex => (".codex", CODEX_BUILTIN_AGENTS, CODEX_BUILTIN_SKILLS, None),
             SupervisorCli::Grok => (".grok", GROK_BUILTIN_AGENTS, GROK_BUILTIN_SKILLS, None),
-            // OpenCode has no project-level builtin filesystem tree.
-            SupervisorCli::OpenCode => continue,
+            SupervisorCli::OpenCode => (".opencode", NO_AGENTS, opencode_builtin_skills(), None),
         };
 
         for builtin in agents.iter().chain(skills.iter()) {
@@ -3170,12 +3394,100 @@ fn builtin_skill_dir_names(skills: &[BuiltinFile]) -> HashSet<String> {
         .collect()
 }
 
-/// Prune stale managed `cas-*` skill directories from a `skills/` dir.
+/// Builtin skill directories Cassy ships without the `cas-` prefix.
+///
+/// The skill prune only considers names Cassy owns: every `cas-*` directory
+/// plus this list. Keep an entry here after its skill leaves the catalogs, so
+/// a retired `codemap` or `fallow` is still pruned from installs instead of
+/// persisting forever. A test fails when a catalog gains a non-`cas-` skill
+/// that is missing from this list. `cas` itself (the `cas init` project skill)
+/// is deliberately absent: it is managed but lives outside the catalogs.
+pub const SHIPPED_NON_CAS_SKILL_DIRS: &[&str] = &[
+    "cli-routing",
+    "codemap",
+    "design-spec",
+    "fallow",
+    "mcp-integration",
+    "mecha-cassy",
+    "project-overview",
+    // Retired: renamed cas-release-notes (it collided with Grok's built-in
+    // /release-notes). Kept so old installs are pruned.
+    "release-notes",
+    "session-learn",
+    "verify-before-claim",
+];
+
+/// True for a skill directory name Cassy has shipped: any `cas-*` name or an
+/// entry in [`SHIPPED_NON_CAS_SKILL_DIRS`].
+fn is_cassy_skill_dir_name(name: &str) -> bool {
+    name.starts_with("cas-") || SHIPPED_NON_CAS_SKILL_DIRS.contains(&name)
+}
+
+/// Agent file names (`task-verifier.md`) one agent catalog ships.
+fn builtin_agent_file_names(agents: &[BuiltinFile]) -> HashSet<String> {
+    agents
+        .iter()
+        .filter_map(|builtin| builtin.path.strip_prefix("agents/"))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Managed agent files in `agents_dir` that `keep` (the harness catalog) no
+/// longer ships: regular `*.md` files directly in the directory whose
+/// frontmatter carries `managed_by: cas`. User agents, symlinks and unreadable
+/// files are never listed. Sorted file names.
+fn stale_cas_agent_files(agents_dir: &Path, keep: &HashSet<String>) -> Vec<String> {
+    let mut stale = Vec::new();
+    let Ok(entries) = std::fs::read_dir(agents_dir) else {
+        return stale;
+    };
+    for entry in entries.flatten() {
+        if !entry.file_type().is_ok_and(|file_type| file_type.is_file()) {
+            continue;
+        }
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if !name.ends_with(".md") || keep.contains(name) {
+            continue;
+        }
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        if is_managed_by_cas(&content) {
+            stale.push(name.to_string());
+        }
+    }
+    stale.sort();
+    stale
+}
+
+/// Prune retired managed agent files from an `agents/` dir (cas-57c02).
+///
+/// Mirrors [`prune_stale_cas_skill_dirs`]: a file is removed only when it is
+/// not in `keep` (the harness catalog) and carries `managed_by: cas` (see
+/// `stale_cas_agent_files`). Before this, agents dropped from the catalog
+/// (`code-reviewer`, `git-history-analyzer`, `issue-intelligence-analyst`)
+/// stayed installed and listed in every session. Returns the removed names.
+pub fn prune_stale_cas_agent_files(
+    agents_dir: &Path,
+    keep: &HashSet<String>,
+) -> std::io::Result<Vec<String>> {
+    let stale = stale_cas_agent_files(agents_dir, keep);
+    for name in &stale {
+        std::fs::remove_file(agents_dir.join(name))?;
+    }
+    Ok(stale)
+}
+
+/// Prune stale managed skill directories from a `skills/` dir.
 ///
 /// This mirrors the project-level prune in `SkillSyncer::sync_all`
 /// (`cas-cli/src/sync/skills.rs`): a directory is removed only when ALL of
 /// these hold:
-///   1. its name is `cas-*` prefixed (we never touch user-authored skills),
+///   1. its name is one Cassy ships — `cas-*` or an entry in
+///      [`SHIPPED_NON_CAS_SKILL_DIRS`] (we never touch user-authored skills),
 ///   2. it is not one of the builtin skill dirs we just wrote (`keep`), and
 ///   3. its `SKILL.md` is present and carries the `managed_by: cas` marker.
 ///      Any other read error (including a missing file) preserves the
@@ -3183,8 +3495,8 @@ fn builtin_skill_dir_names(skills: &[BuiltinFile]) -> HashSet<String> {
 ///      managed builtin.
 ///
 /// The managed-by check is the critical safety net: an unmanaged user skill
-/// is never removed, even when its name has a `cas-` prefix. Non-`cas-` dirs
-/// are left untouched. Used by `cas update --user` (`sync_user_builtins`) so
+/// is never removed, even when its name has a `cas-` prefix. Other dirs are
+/// left untouched. Used by `cas update --user` (`sync_user_builtins`) so
 /// that removed managed builtins are removed from `~/.claude/skills` and
 /// `~/.codex/skills` on every downstream host.
 ///
@@ -3210,8 +3522,8 @@ pub fn prune_stale_cas_skill_dirs(
             None => continue,
         };
 
-        // Only ever touch cas-* dirs we are not currently writing.
-        if !name.starts_with("cas-") || keep.contains(&name) {
+        // Only ever touch Cassy-named dirs we are not currently writing.
+        if !is_cassy_skill_dir_name(&name) || keep.contains(&name) {
             continue;
         }
 
@@ -3330,6 +3642,86 @@ pub fn prune_stale_user_skills_for_harness(
     prune_stale_cas_skill_dirs(&harness_dir.join("skills"), &keep)
 }
 
+/// How one installed harness tree compares with the embedded catalog
+/// (cas-57c02). Source-level parity tests never see an install, which is how
+/// frozen scripts and retired agents went unnoticed; `cas doctor` reads this.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct InstallParity {
+    /// Catalog files compared.
+    pub checked: usize,
+    /// Catalog files absent from the install.
+    pub missing: Vec<String>,
+    /// Installed files that differ from the catalog and that the next sync
+    /// would replace.
+    pub stale: Vec<String>,
+    /// Skill-owned files that match no version Cassy shipped. Sync preserves
+    /// them as local edits, so they are reported but are not drift.
+    pub local_edits: Vec<String>,
+    /// Installed files Cassy no longer ships that the next sync would prune:
+    /// retired managed agents and files removed from a managed skill dir.
+    pub retired: Vec<String>,
+}
+
+impl InstallParity {
+    /// True when a sync would change nothing (local edits are preserved by
+    /// design and do not count).
+    pub fn is_current(&self) -> bool {
+        self.missing.is_empty() && self.stale.is_empty() && self.retired.is_empty()
+    }
+}
+
+/// Compare the harness tree at `target_dir` with the catalog this binary
+/// would write there. Read-only. OpenCode has no installed tree.
+pub fn install_parity_for_harness(harness: SupervisorCli, target_dir: &Path) -> InstallParity {
+    match harness {
+        SupervisorCli::Claude => install_parity(target_dir, BUILTIN_AGENTS, BUILTIN_SKILLS),
+        SupervisorCli::Codex => install_parity(target_dir, CODEX_BUILTIN_AGENTS, CODEX_BUILTIN_SKILLS),
+        SupervisorCli::Grok => install_parity(target_dir, GROK_BUILTIN_AGENTS, GROK_BUILTIN_SKILLS),
+        SupervisorCli::OpenCode => InstallParity::default(),
+    }
+}
+
+fn install_parity(target_dir: &Path, agents: &[BuiltinFile], skills: &[BuiltinFile]) -> InstallParity {
+    let state = BuiltinReferenceState::load(target_dir).unwrap_or_default();
+    let mut parity = InstallParity::default();
+    for builtin in agents.iter().chain(skills) {
+        parity.checked += 1;
+        let Ok(existing) = std::fs::read(target_dir.join(builtin.path)) else {
+            parity.missing.push(builtin.path.to_string());
+            continue;
+        };
+        if existing == builtin.content.as_bytes() {
+            continue;
+        }
+        // Mirror the sync decision exactly: owned files follow the baseline
+        // and shipped-version ledger, everything else the managed marker.
+        let replaceable = if is_file_owned_by_managed_skill(builtin, skills) {
+            let hash = file_bytes_hash(&existing);
+            state.replace_on_next_sync.contains(builtin.path)
+                || state.files.get(builtin.path).is_some_and(|baseline| *baseline == hash)
+                || is_shipped_builtin_reference_version(builtin.path, &hash)
+        } else {
+            is_managed_by_cas(builtin.content)
+                || std::str::from_utf8(&existing).is_ok_and(is_managed_by_cas)
+        };
+        if replaceable {
+            parity.stale.push(builtin.path.to_string());
+        } else {
+            parity.local_edits.push(builtin.path.to_string());
+        }
+    }
+    let keep_agents = builtin_agent_file_names(agents);
+    parity.retired.extend(
+        stale_cas_agent_files(&target_dir.join("agents"), &keep_agents)
+            .into_iter()
+            .map(|name| format!("agents/{name}")),
+    );
+    parity
+        .retired
+        .extend(removed_owned_skill_files(target_dir, skills, &state));
+    parity
+}
+
 #[derive(Default, Debug)]
 pub struct SyncResult {
     pub agents_updated: usize,
@@ -3348,6 +3740,10 @@ pub struct SyncResult {
     /// last Cassy-synced baseline. These are preserved as possible intentional
     /// local customizations and must be surfaced to the user.
     pub modified_reference_files: Vec<String>,
+    /// Paths (relative to `target_dir`) this sync deleted because Cassy no
+    /// longer ships them: retired managed agents and files removed from a
+    /// managed skill directory (cas-57c02).
+    pub pruned_files: Vec<String>,
 }
 
 impl SyncResult {
@@ -3462,13 +3858,13 @@ pub fn preview_all_builtins_for_project(
         SupervisorCli::Claude => project_root.join(".claude"),
         SupervisorCli::Codex => project_root.join(".codex"),
         SupervisorCli::Grok => project_root.join(".grok"),
-        SupervisorCli::OpenCode => return Ok(Vec::new()),
+        SupervisorCli::OpenCode => project_root.join(".opencode"),
     };
     let (agents, skills): (&[BuiltinFile], Vec<BuiltinFile>) = match harness {
         SupervisorCli::Claude => (BUILTIN_AGENTS, filtered_project_skills(BUILTIN_SKILLS, project_root)),
         SupervisorCli::Codex => (CODEX_BUILTIN_AGENTS, filtered_project_skills(CODEX_BUILTIN_SKILLS, project_root)),
         SupervisorCli::Grok => (GROK_BUILTIN_AGENTS, filtered_project_skills(GROK_BUILTIN_SKILLS, project_root)),
-        SupervisorCli::OpenCode => unreachable!(),
+        SupervisorCli::OpenCode => (NO_AGENTS, filtered_project_skills(opencode_builtin_skills(), project_root)),
     };
     let mut changes = Vec::new();
     for builtin in agents.iter().chain(skills.iter()) {
@@ -3530,7 +3926,7 @@ pub(crate) const SUPERVISOR_GUIDANCE_SOFT_CAP_BYTES: usize = 8_000;
 /// task-tracking, memory, and search are autonomous skills the agent invokes
 /// on demand via the Skill tool — same rationale.
 pub fn supervisor_guidance() -> String {
-    extract_body(SUPERVISOR_GUIDE).to_string()
+    role_guidance(SUPERVISOR_GUIDE)
 }
 
 /// Get the worker guidance injected at factory SessionStart.
@@ -3538,7 +3934,13 @@ pub fn supervisor_guidance() -> String {
 /// Returns only the worker SKILL.md. task-tracking/memory/search load on
 /// demand — same rationale as `supervisor_guidance`.
 pub fn worker_guidance() -> String {
-    extract_body(WORKER_GUIDE).to_string()
+    role_guidance(WORKER_GUIDE)
+}
+
+/// A role file's body with [`TOOL_NAMING_LINE`] swapped for its SessionStart
+/// form, which names only the reader's prefix once remapped.
+fn role_guidance(guide: &str) -> String {
+    extract_body(guide).replacen(TOOL_NAMING_LINE, SESSION_TOOL_NAMING_LINE, 1)
 }
 
 #[cfg(test)]
@@ -3656,8 +4058,9 @@ mod tests {
             .find(|file| file.path == "skills/cas-supervisor/SKILL.md")
             .unwrap()
             .content;
-        assert!(codex.contains("Use `cas-codex-supervisor-checklist`"));
-        assert!(!codex.contains("`cas-supervisor-checklist`"));
+        // Audit D1: one supervisor body; it names each harness's checklist.
+        assert!(codex.contains("`cas-codex-supervisor-checklist` on Codex"));
+        assert_eq!(codex, SUPERVISOR_GUIDE);
         assert!(supervisor_guidance().contains("`cas-codex-supervisor-checklist` on Codex"));
     }
 
@@ -3699,7 +4102,8 @@ mod tests {
         assert!(content.starts_with("project-rule\n"));
         assert!(content.ends_with("other-rule\n"));
         assert!(!content.contains("/stale-rendered-file"));
-        assert!(content.contains("/.codex/agents/task-verifier.md"));
+        assert!(content.contains("/.codex/skills/cas-worker/SKILL.md"));
+        assert!(!content.contains("/.codex/agents/"), "Codex installs no .md agents (D6)");
         assert!(!content.contains("/.claude/agents/task-verifier.md"));
     }
 
@@ -3882,12 +4286,12 @@ This is the body content."#;
             (
                 "codex",
                 CODEX_BUILTIN_SKILLS,
-                include_str!("builtins/codex/skills/cas-supervisor/references/operator-reply.md"),
+                include_str!("builtins/skills/cas-supervisor/references/operator-reply.md"),
             ),
             (
                 "grok",
                 GROK_BUILTIN_SKILLS,
-                include_str!("builtins/grok/skills/cas-supervisor/references/operator-reply.md"),
+                include_str!("builtins/skills/cas-supervisor/references/operator-reply.md"),
             ),
         ] {
             let contract = catalog
@@ -3912,7 +4316,7 @@ This is the body content."#;
     /// against the two surfaces silently drifting back apart.
     #[test]
     fn test_codex_supervisor_guidance_mirrors_tiering_rule() {
-        let codex_guide = include_str!("builtins/codex/skills/cas-supervisor.md");
+        let codex_guide = include_str!("builtins/skills/cas-supervisor.md");
         for keyword in [
             "Tier every spawn",
             "never fleet-default",
@@ -3935,42 +4339,24 @@ This is the body content."#;
         }
     }
 
-    /// cas-b342: the three supervisor bodies must be semantically identical
-    /// apart from the intentional per-harness tool prefix (mcp__cas__ /
-    /// mcp__cs__ / cas__) and the Grok Heterogeneous-Teams section title. This
+    /// cas-b342, audit D1: every harness installs the one supervisor body. This
     /// pins routing examples (tier table, Quick Start spawn recipes, the
     /// heterogeneous complete-call) to full explicit controls across all three
     /// harnesses — a condensed or drifted example on one twin now fails CI.
     #[test]
     fn test_supervisor_bodies_normalized_consistent_across_harnesses() {
         let claude = SUPERVISOR_GUIDE;
-        let codex = include_str!("builtins/codex/skills/cas-supervisor.md");
-        let grok = include_str!("builtins/grok/skills/cas-supervisor.md");
-
-        // Codex selects its dedicated checklist; all other prose stays mirrored.
-        assert_eq!(
-            claude.replace("mcp__cas__", "mcp__cs__").replace(
-                "Use the checklist for your harness: `cas-codex-supervisor-checklist` on Codex; `cas-supervisor-checklist` on Claude, Grok, or OpenCode",
-                "Use `cas-codex-supervisor-checklist`",
-            ),
-            codex,
-            "codex cas-supervisor.md may differ only by its tool prefix and checklist selection"
-        );
-
-        // Claude -> Grok differs only by the cas__ prefix and the intentional
-        // Heterogeneous-Teams section title (Grok supervisors lead a different
-        // fleet). Normalize both, then require exact equality.
-        let claude_as_grok = claude
-            .replace("mcp__cas__", "cas__")
-            .replace(
-                "## Heterogeneous Teams (Claude supervisor + Codex workers)",
-                "## Heterogeneous Teams (Grok supervisor + Claude/Codex workers)",
-            );
-        assert_eq!(
-            claude_as_grok, grok,
-            "grok cas-supervisor.md must equal the Claude body apart from the cas__ \
-             tool prefix and the intentional Heterogeneous-Teams section title"
-        );
+        let codex = include_str!("builtins/skills/cas-supervisor.md");
+        let grok = include_str!("builtins/skills/cas-supervisor.md");
+        // Audit D1: every catalog embeds the one supervisor body.
+        for catalog in [CODEX_BUILTIN_SKILLS, GROK_BUILTIN_SKILLS] {
+            let body = catalog
+                .iter()
+                .find(|b| b.path == "skills/cas-supervisor/SKILL.md")
+                .unwrap()
+                .content;
+            assert_eq!(body, claude, "cas-supervisor.md must be one body for every harness");
+        }
 
         // The shared body must retain explicit complete-call controls and the
         // registry's Opus heavy route on every twin without duplicating workflow.
@@ -4136,11 +4522,11 @@ This is the body content."#;
             ),
             (
                 "codex",
-                include_str!("builtins/codex/skills/cas-worker/references/details.md"),
+                include_str!("builtins/skills/cas-worker/references/details.md"),
             ),
             (
                 "grok",
-                include_str!("builtins/grok/skills/cas-worker/references/details.md"),
+                include_str!("builtins/skills/cas-worker/references/details.md"),
             ),
         ] {
             for required in ["## Structured execution state", "state_patch", "## Context budgeting"] {
@@ -4192,15 +4578,21 @@ This is the body content."#;
         // Supervisor cap was lowered to 8KB (cas-5e4b). The worker reference
         // names the 8KB component cap and 9KB aggregate budget introduced by
         // cas-b114; keeping it on demand protects the SessionStart payload.
+        // WP2 (audit cas-1660 L2 P2-62): the supervisor's budgeting note is
+        // maintainer text, so it lives in the on-demand reference.md rather
+        // than in the always-loaded SKILL.md body.
         let supervisor_files = [
-            ("claude cas-supervisor.md", SUPERVISOR_GUIDE),
             (
-                "codex cas-supervisor.md",
-                include_str!("builtins/codex/skills/cas-supervisor.md"),
+                "claude cas-supervisor reference.md",
+                include_str!("builtins/skills/cas-supervisor/references/reference.md"),
             ),
             (
-                "grok cas-supervisor.md",
-                include_str!("builtins/grok/skills/cas-supervisor.md"),
+                "codex cas-supervisor reference.md",
+                include_str!("builtins/skills/cas-supervisor/references/reference.md"),
+            ),
+            (
+                "grok cas-supervisor reference.md",
+                include_str!("builtins/skills/cas-supervisor/references/reference.md"),
             ),
         ];
         let worker_files = [
@@ -4210,11 +4602,11 @@ This is the body content."#;
             ),
             (
                 "codex cas-worker details.md",
-                include_str!("builtins/codex/skills/cas-worker/references/details.md"),
+                include_str!("builtins/skills/cas-worker/references/details.md"),
             ),
             (
                 "grok cas-worker details.md",
-                include_str!("builtins/grok/skills/cas-worker/references/details.md"),
+                include_str!("builtins/skills/cas-worker/references/details.md"),
             ),
         ];
         for (label, content) in supervisor_files {
@@ -4242,23 +4634,26 @@ This is the body content."#;
         }
     }
 
-    // cas-5be8: disallowed-tools frontmatter in builtin skills
+    /// `disallowed-tools` is not a guard: Claude Code clears it when the user
+    /// sends the next message (turn-scoped), and Codex, Grok and OpenCode
+    /// ignore it. cas-5be8's TodoWrite/EnterPlanMode ban on cas-worker lapsed
+    /// at the first supervisor message and never applied outside Claude, so
+    /// it was dropped rather than presented as enforcement.
     #[test]
-    fn test_builtin_cas_worker_disallowed_tools() {
+    fn test_builtin_cas_worker_does_not_pose_disallowed_tools_as_a_guard() {
         for (label, skills) in [
             ("BUILTIN_SKILLS", BUILTIN_SKILLS),
             ("CODEX_BUILTIN_SKILLS", CODEX_BUILTIN_SKILLS),
+            ("GROK_BUILTIN_SKILLS", GROK_BUILTIN_SKILLS),
         ] {
             let entry = skills
                 .iter()
                 .find(|b| b.path == "skills/cas-worker/SKILL.md")
                 .unwrap_or_else(|| panic!("{label}: cas-worker SKILL.md missing"));
-            for required in ["disallowed-tools:", "- TodoWrite", "- EnterPlanMode"] {
-                assert!(
-                    entry.content.contains(required),
-                    "{label}: cas-worker SKILL.md missing disallowed-tools entry: {required:?}"
-                );
-            }
+            assert!(
+                !entry.content.contains("disallowed-tools:"),
+                "{label}: cas-worker must not rely on turn-scoped, Claude-only disallowed-tools"
+            );
         }
     }
 
@@ -4272,8 +4667,8 @@ This is the body content."#;
             ),
             (
                 "codex",
-                include_str!("builtins/codex/skills/cas-worker.md"),
-                include_str!("builtins/codex/skills/cas-worker/references/details.md"),
+                include_str!("builtins/skills/cas-worker.md"),
+                include_str!("builtins/skills/cas-worker/references/details.md"),
             ),
         ] {
             for required in [
@@ -4302,7 +4697,7 @@ This is the body content."#;
             ),
             (
                 "codex",
-                include_str!("builtins/codex/skills/cas-supervisor/references/planning.md"),
+                include_str!("builtins/skills/cas-supervisor/references/planning.md"),
             ),
         ] {
             for required in [
@@ -4366,7 +4761,10 @@ This is the body content."#;
     #[test]
     fn test_is_managed_by_cas() {
         let managed = "---\nname: test\nmanaged_by: cas\n---\nContent";
-        assert!(is_managed_by_cas(managed));
+        assert!(is_managed_by_cas(managed), "legacy top-level form");
+
+        let nested = "---\nname: test\nmetadata:\n  managed_by: cas\n---\nContent";
+        assert!(is_managed_by_cas(nested), "portable metadata form");
 
         let not_managed = "---\nname: test\n---\nContent";
         assert!(!is_managed_by_cas(not_managed));
@@ -4385,6 +4783,12 @@ This is the body content."#;
         for retired in [
             "agents/git-history-analyzer.md",
             "agents/issue-intelligence-analyst.md",
+            // cas-228e (audit D12, L2 P1-58): the Stop-hook maintenance jobs
+            // are one body each in `crate::maintenance_jobs`, not subagents.
+            "agents/learning-reviewer.md",
+            "agents/rule-reviewer.md",
+            "agents/duplicate-detector.md",
+            "agents/session-summarizer.md",
         ] {
             for (name, catalog) in [
                 ("BUILTIN_AGENTS", BUILTIN_AGENTS),
@@ -4486,13 +4890,13 @@ This is the body content."#;
             ),
             (
                 "codex",
-                include_str!("builtins/codex/skills/cas-worker.md"),
-                include_str!("builtins/codex/skills/cas-worker/references/discipline.md"),
+                include_str!("builtins/skills/cas-worker.md"),
+                include_str!("builtins/skills/cas-worker/references/discipline.md"),
             ),
             (
                 "grok",
-                include_str!("builtins/grok/skills/cas-worker.md"),
-                include_str!("builtins/grok/skills/cas-worker/references/discipline.md"),
+                include_str!("builtins/skills/cas-worker.md"),
+                include_str!("builtins/skills/cas-worker/references/discipline.md"),
             ),
         ] {
             // These launch-contract rules are intentionally absent from both
@@ -4561,11 +4965,41 @@ This is the body content."#;
     /// preserves the SessionStart hard-limit margin.
     #[test]
     fn test_worker_skills_require_cas_src_surface_checklist() {
-        for (label, content) in [
-            ("claude", include_str!("builtins/skills/cas-worker.md")),
-            ("codex", include_str!("builtins/codex/skills/cas-worker.md")),
-            ("grok", include_str!("builtins/grok/skills/cas-worker.md")),
+        // WP2 (audit cas-1660 M51): the checklist is cas-src-only, so it lives
+        // in the on-demand close-gate reference; the always-loaded body keeps
+        // one pointer to it.
+        for (label, content, close_gate) in [
+            (
+                "claude",
+                include_str!("builtins/skills/cas-worker.md"),
+                include_str!("builtins/skills/cas-worker/references/close-gate.md"),
+            ),
+            (
+                "codex",
+                include_str!("builtins/skills/cas-worker.md"),
+                include_str!("builtins/skills/cas-worker/references/close-gate.md"),
+            ),
+            (
+                "grok",
+                include_str!("builtins/skills/cas-worker.md"),
+                include_str!("builtins/skills/cas-worker/references/close-gate.md"),
+            ),
         ] {
+            for required in [
+                "surface checklist",
+                "close-gate.md",
+                "Reused worker:",
+                "git rebase <target>",
+            ] {
+                assert!(
+                    content.contains(required),
+                    "{label} cas-worker.md missing {required:?}"
+                );
+            }
+            assert!(
+                !content.contains("## cas-src surface checklist"),
+                "{label} cas-worker.md must not carry the cas-src-only checklist in the always-loaded body"
+            );
             for required in [
                 "cas-src surface checklist",
                 "Pre-close notes must prove each applicable entry",
@@ -4579,10 +5013,11 @@ This is the body content."#;
                 "cas-2327",
                 "reverse states",
                 "release-notes impact",
-                "Reused worker:",
-                "git rebase <target>",
             ] {
-                assert!(content.contains(required), "{label} surface checklist missing {required:?}");
+                assert!(
+                    close_gate.contains(required),
+                    "{label} close-gate.md surface checklist missing {required:?}"
+                );
             }
         }
     }
@@ -4597,8 +5032,8 @@ This is the body content."#;
     fn test_worker_skills_pin_return_contract_and_silent_execution_cas_0de3() {
         for (label, content) in [
             ("claude", include_str!("builtins/skills/cas-worker.md")),
-            ("codex", include_str!("builtins/codex/skills/cas-worker.md")),
-            ("grok", include_str!("builtins/grok/skills/cas-worker.md")),
+            ("codex", include_str!("builtins/skills/cas-worker.md")),
+            ("grok", include_str!("builtins/skills/cas-worker.md")),
         ] {
             for required in [
                 "## Return contract",
@@ -4657,13 +5092,13 @@ This is the body content."#;
             ),
             (
                 "codex",
-                include_str!("builtins/codex/skills/cas-worker.md"),
-                include_str!("builtins/codex/skills/cas-worker/references/discipline.md"),
+                include_str!("builtins/skills/cas-worker.md"),
+                include_str!("builtins/skills/cas-worker/references/discipline.md"),
             ),
             (
                 "grok",
-                include_str!("builtins/grok/skills/cas-worker.md"),
-                include_str!("builtins/grok/skills/cas-worker/references/discipline.md"),
+                include_str!("builtins/skills/cas-worker.md"),
+                include_str!("builtins/skills/cas-worker/references/discipline.md"),
             ),
         ] {
             // The hot body keeps only the pointer; the rule's detail is on
@@ -4711,8 +5146,8 @@ This is the body content."#;
             ),
             (
                 "codex",
-                include_str!("builtins/codex/skills/cas-worker.md"),
-                include_str!("builtins/codex/skills/cas-worker/references/close-gate.md"),
+                include_str!("builtins/skills/cas-worker.md"),
+                include_str!("builtins/skills/cas-worker/references/close-gate.md"),
             ),
         ] {
             // SKILL.md points workers at the gate (via close-gate.md).
@@ -4738,17 +5173,15 @@ This is the body content."#;
     /// it replaces, the survival rule that is the whole reason to register,
     /// and the three actions.
     ///
-    /// The three copies are identical *modulo the harness tool prefix*: each
-    /// CLI resolves a different one (`mcp__cas__` / `mcp__cs__` / `cas__`), so
-    /// a byte-identical mirror would hand two of the three harnesses tool
-    /// names that do not resolve.
+    /// The three copies are byte-identical: tool names are bare (audit D1),
+    /// and the role guidance states each harness's prefix.
     #[test]
     fn test_builtin_skills_contains_cas_servers() {
         let mut bodies = Vec::new();
-        for (label, catalog, prefix) in [
-            ("claude", BUILTIN_SKILLS, "mcp__cas__"),
-            ("codex", CODEX_BUILTIN_SKILLS, "mcp__cs__"),
-            ("grok", GROK_BUILTIN_SKILLS, "cas__"),
+        for (label, catalog) in [
+            ("claude", BUILTIN_SKILLS),
+            ("codex", CODEX_BUILTIN_SKILLS),
+            ("grok", GROK_BUILTIN_SKILLS),
         ] {
             let entry = catalog
                 .iter()
@@ -4785,20 +5218,21 @@ This is the body content."#;
                     "{label} cas-servers SKILL.md missing required marker: {required:?}"
                 );
             }
-            // The tool calls must be spelled the way this harness resolves them.
+            // cas-8563b: server_* moved from coordination to factory.
             assert!(
-                entry.content.contains(&format!("{prefix}coordination")),
-                "{label} cas-servers SKILL.md must call {prefix}coordination"
+                entry.content.contains("`factory action=server_start")
+                    || entry.content.contains("\nfactory action=server_start"),
+                "{label} cas-servers SKILL.md must call the bare `factory` tool"
             );
-            bodies.push((label, entry.content.replace(prefix, "<PREFIX>")));
+            bodies.push((label, entry.content));
         }
 
-        let claude_body = bodies[0].1.clone();
+        let claude_body = bodies[0].1;
         for (label, body) in &bodies[1..] {
             assert_eq!(
                 *body, claude_body,
-                "{label} cas-servers SKILL.md must match the claude copy except for the \
-                 harness tool prefix — the guidance itself must not drift per harness"
+                "{label} cas-servers SKILL.md must be the claude copy — the guidance \
+                 must not drift per harness"
             );
         }
     }
@@ -4852,17 +5286,10 @@ This is the body content."#;
         }
 
         let (_, claude_skill, claude_diagnosis) = shipped[0];
-        let canonical_skill = |content: &str| {
-            content
-                .replace("mcp__cas__", "<MCP_TOOL>")
-                .replace("mcp__cs__", "<MCP_TOOL>")
-                .replace("cas__", "<MCP_TOOL>")
-        };
         for (label, skill, diagnosis) in &shipped[1..] {
             assert_eq!(
-                canonical_skill(skill),
-                canonical_skill(claude_skill),
-                "{label} {SKILL} must match the Claude copy apart from the harness tool prefix"
+                *skill, claude_skill,
+                "{label} {SKILL} must be byte-identical to the Claude copy"
             );
             assert_eq!(
                 *diagnosis, claude_diagnosis,
@@ -4888,9 +5315,9 @@ This is the body content."#;
             let target = temp.path().join(label);
             sync(&target).unwrap();
             assert_eq!(
-                canonical_skill(&std::fs::read_to_string(target.join(SKILL)).unwrap()),
-                canonical_skill(claude_skill),
-                "{label} synced {SKILL} must match the Claude copy apart from the harness tool prefix"
+                std::fs::read_to_string(target.join(SKILL)).unwrap(),
+                claude_skill,
+                "{label} synced {SKILL} must be byte-identical to the Claude copy"
             );
             assert_eq!(
                 std::fs::read_to_string(target.join(DIAGNOSIS)).unwrap(),
@@ -4917,17 +5344,17 @@ This is the body content."#;
             "skills/cas-html-reports/references/examples/investigation-annotated-timeline.html",
             "skills/cas-html-reports/references/examples/executive-variance-brief.html",
             "skills/cas-html-reports/references/examples/benchmark-small-multiples.html",
-            "skills/cas-html-reports/references/examples/before-after/rubric-review-after.html",
             "skills/cas-html-reports/references/examples/investigation-annotated-timeline.why.md",
             "skills/cas-html-reports/references/examples/executive-variance-brief.why.md",
             "skills/cas-html-reports/references/examples/benchmark-small-multiples.why.md",
-            "skills/cas-html-reports/references/examples/before-after/rubric-review-before.html",
-            "skills/cas-html-reports/references/examples/before-after/rubric-review.brief.md",
-            "skills/cas-html-reports/references/examples/before-after/rubric-review.why.md",
         ];
-        // FILES[6..10] are the rendered exemplars held to the contract; the
-        // `.why.md` sidecars and the before/after pair follow.
-        const RENDERED: std::ops::Range<usize> = 6..10;
+        // FILES[6..9] are the rendered exemplars held to the contract; their
+        // `.why.md` sidecars follow.
+        const RENDERED: std::ops::Range<usize> = 6..9;
+        // The before/after exemplar was a real operator report (e-mails, local
+        // account paths, costs, task ids) and is no longer shipped; the skill
+        // points at cas-ui-craft's synthetic before/after instead.
+        const RETIRED_PREFIX: &str = "skills/cas-html-reports/references/examples/before-after/";
 
         let mut claude_bodies: Vec<(&str, &str)> = Vec::new();
 
@@ -4971,7 +5398,7 @@ This is the body content."#;
                 "investigation-annotated-timeline.html",
                 "executive-variance-brief.html",
                 "benchmark-small-multiples.html",
-                "before-after/",
+                "cas-ui-craft/references/exemplars/before-after.html",
             ] {
                 assert!(
                     skill.contains(required),
@@ -5044,7 +5471,7 @@ This is the body content."#;
                 }
             }
             // Every exemplar ships its concept brief and critique scores in a sidecar.
-            for sidecar in &FILES[10..13] {
+            for sidecar in &FILES[9..12] {
                 let why = get(sidecar);
                 for required in ["Concept brief", "Hero form", "Critique", "Distinctiveness"] {
                     assert!(
@@ -5054,8 +5481,12 @@ This is the body content."#;
                 }
             }
             assert!(
-                get(FILES[15]).contains("Before") && get(FILES[15]).contains("after"),
-                "{label} before/after sidecar must explain both renders"
+                !catalog.iter().any(|b| b.path.starts_with(RETIRED_PREFIX)),
+                "{label} catalog still ships the retired operator before/after exemplar"
+            );
+            assert!(
+                !skill.contains("rubric-review"),
+                "{label} cas-html-reports SKILL.md still points at the retired exemplar"
             );
 
             // The skill makes no CAS MCP tool calls, so the twins are held
@@ -5472,10 +5903,10 @@ This is the body content."#;
     #[test]
     fn test_builtin_skills_contains_cas_github_issues() {
         let mut bodies = Vec::new();
-        for (label, catalog, prefix) in [
-            ("claude", BUILTIN_SKILLS, "mcp__cas__"),
-            ("codex", CODEX_BUILTIN_SKILLS, "mcp__cs__"),
-            ("grok", GROK_BUILTIN_SKILLS, "cas__"),
+        for (label, catalog) in [
+            ("claude", BUILTIN_SKILLS),
+            ("codex", CODEX_BUILTIN_SKILLS),
+            ("grok", GROK_BUILTIN_SKILLS),
         ] {
             let entry = catalog
                 .iter()
@@ -5540,18 +5971,18 @@ This is the body content."#;
                 );
             }
             assert!(
-                entry.content.contains(&format!("{prefix}task")),
-                "{label} cas-github-issues SKILL.md must call {prefix}task"
+                entry.content.contains("\ntask action="),
+                "{label} cas-github-issues SKILL.md must call the bare `task` tool"
             );
-            bodies.push((label, entry.content.replace(prefix, "<PREFIX>")));
+            bodies.push((label, entry.content));
         }
 
-        let claude_body = bodies[0].1.clone();
+        let claude_body = bodies[0].1;
         for (label, body) in &bodies[1..] {
             assert_eq!(
                 *body, claude_body,
-                "{label} cas-github-issues SKILL.md must match the claude copy except for \
-                 the harness tool prefix — the sweep procedure must not drift per harness"
+                "{label} cas-github-issues SKILL.md must be the claude copy — the sweep \
+                 procedure must not drift per harness"
             );
         }
     }
@@ -5706,16 +6137,16 @@ This is the body content."#;
         ] {
             let skill = catalog
                 .iter()
-                .find(|b| b.path == "skills/release-notes/SKILL.md")
+                .find(|b| b.path == "skills/cas-release-notes/SKILL.md")
                 .unwrap_or_else(|| {
-                    panic!("skills/release-notes/SKILL.md missing from {label} catalog")
+                    panic!("skills/cas-release-notes/SKILL.md missing from {label} catalog")
                 });
             assert!(
                 is_managed_by_cas(skill.content),
                 "{label} release-notes SKILL.md must be managed_by: cas"
             );
             for required in [
-                "name: release-notes",
+                "name: cas-release-notes",
                 "docs/release-notes/RUBRIC.md",
                 "references/RUBRIC-template.md",
                 "Was → Now",
@@ -5734,10 +6165,10 @@ This is the body content."#;
 
             let template = catalog
                 .iter()
-                .find(|b| b.path == "skills/release-notes/references/RUBRIC-template.md")
+                .find(|b| b.path == "skills/cas-release-notes/references/RUBRIC-template.md")
                 .unwrap_or_else(|| {
                     panic!(
-                        "skills/release-notes/references/RUBRIC-template.md missing from \
+                        "skills/cas-release-notes/references/RUBRIC-template.md missing from \
                          {label} catalog"
                     )
                 });
@@ -5789,7 +6220,7 @@ This is the body content."#;
             );
             // The tool contract is pinned to the single machine-readable
             // source of truth rather than re-spelled here. When the hub
-            // renames a tool, `cas integrate mecha-cassy` and `cas doctor`
+            // renames a tool, `cas integrate violet` and `cas doctor`
             // change with MECHA_CASSY_TOOLS, and this assertion drags the
             // prose along with them instead of letting the skill keep
             // documenting a retired name (which is exactly how the
@@ -6216,11 +6647,9 @@ This is the body content."#;
             .find(|b| b.path == "skills/session-learn/SKILL.md")
             .expect("CODEX_BUILTIN_SKILLS missing session-learn SKILL.md");
         assert_eq!(
-            claude.content.replace("mcp__cas__", "mcp__cs__"),
+            claude.content,
             codex.content,
-            "session-learn SKILL.md .claude and .codex copies must be identical apart from \
-             the mcp__cas__/mcp__cs__ tool prefix; drift here produces a divergent \
-             classifier prompt across harnesses",
+            "session-learn SKILL.md .claude and .codex copies must be identical (audit D1: one catalog)",
         );
     }
 
@@ -6259,10 +6688,10 @@ This is the body content."#;
     }
 
     #[test]
-    fn test_verifier_and_learning_reviewer_markers_stay_in_all_harness_catalogs() {
+    fn test_verifier_markers_and_learning_reviewer_job_contract() {
         for (label, agents) in [
+            // Codex ships no .md agents (audit D6).
             ("BUILTIN_AGENTS", BUILTIN_AGENTS),
-            ("CODEX_BUILTIN_AGENTS", CODEX_BUILTIN_AGENTS),
             ("GROK_BUILTIN_AGENTS", GROK_BUILTIN_AGENTS),
         ] {
             let verifier = agents
@@ -6271,8 +6700,9 @@ This is the body content."#;
                 .unwrap_or_else(|| panic!("{label}: task-verifier agent is not registered"));
             for marker in [
                 "model:",
-                "files_reviewed=",
-                "Close-Path Error Detection",
+                "tools:",
+                "files=\"",
+                "Verifier handoff rejected",
                 "Stranded-branch gate",
                 "Epic verification owner gate",
             ] {
@@ -6281,22 +6711,13 @@ This is the body content."#;
                     "{label} task-verifier missing marker {marker:?}"
                 );
             }
-
-            let reviewer = agents
-                .iter()
-                .find(|builtin| builtin.path == "agents/learning-reviewer.md")
-                .unwrap_or_else(|| panic!("{label}: learning-reviewer agent is not registered"));
-            assert!(
-                !reviewer.content.contains("model:"),
-                "{label} learning-reviewer must use the light lane"
-            );
-            for marker in ["complete list of unreviewed learning IDs"] {
-                assert!(
-                    reviewer.content.contains(marker),
-                    "{label} learning-reviewer missing marker {marker:?}"
-                );
-            }
         }
+        let reviewer = crate::maintenance_jobs::job_body("learning-reviewer")
+            .expect("learning-reviewer job body");
+        assert!(
+            reviewer.contains("complete list of unreviewed learning IDs"),
+            "learning-reviewer job must consume the supplied ID list"
+        );
     }
 
     /// cas-4900 regression: `sync_all_builtins` was reported to silently
@@ -6748,6 +7169,402 @@ This is the body content."#;
         }
     }
 
+    // ---------------------------------------------------------------------
+    // cas-57c02: install sync and prune
+    // ---------------------------------------------------------------------
+
+    const WP4_BODY: &str = "---\nname: cas-test\nmanaged_by: cas\n---\n# Test\n";
+    const WP4_BODY_FILE: BuiltinFile = BuiltinFile {
+        path: "skills/cas-test/SKILL.md",
+        content: WP4_BODY,
+    };
+
+    /// Before cas-57c02 a non-`references/` skill file had no frontmatter, so
+    /// both sides failed the managed gate and the first-installed copy froze.
+    #[test]
+    fn every_non_body_child_of_a_managed_skill_dir_is_owned() {
+        let owned = |path: &'static str| {
+            is_file_owned_by_managed_skill(&BuiltinFile { path, content: "" }, &[WP4_BODY_FILE])
+        };
+        assert!(owned("skills/cas-test/references/a.md"));
+        assert!(owned("skills/cas-test/template.sh"));
+        assert!(owned("skills/cas-test/scripts/run.py"));
+        assert!(owned("skills/cas-test/examples/deep/x.json"));
+        assert!(!owned("skills/cas-test/SKILL.md"), "the body is governed by its marker");
+        assert!(!owned("skills/cas-other/template.sh"), "no managed body, no ownership");
+        assert!(!owned("agents/cas-test.md"));
+
+        for (label, catalog) in [
+            ("claude", BUILTIN_SKILLS),
+            ("codex", CODEX_BUILTIN_SKILLS),
+            ("grok", GROK_BUILTIN_SKILLS),
+        ] {
+            for builtin in catalog {
+                let Some((_, child)) = skill_dir_child(builtin.path) else {
+                    continue;
+                };
+                if child != "SKILL.md" {
+                    assert!(
+                        is_file_owned_by_managed_skill(builtin, catalog),
+                        "{label}: {} must be owned so installs refresh it",
+                        builtin.path
+                    );
+                }
+            }
+        }
+    }
+
+    /// Acceptance: a stale installed script refreshes, and a local edit to it
+    /// is preserved and reported.
+    #[test]
+    fn stale_installed_script_refreshes_and_local_edit_is_preserved() {
+        use tempfile::tempdir;
+
+        const OLD: &str = "#!/usr/bin/env bash\necho shipped-in-august\n";
+        const NEW: &str = "#!/usr/bin/env bash\necho shipped-in-september\n";
+        const LOCAL: &str = "#!/usr/bin/env bash\necho our-own-wizard\n";
+        const PATH: &str = "skills/cas-test/template.sh";
+        const SCRIPT: BuiltinFile = BuiltinFile {
+            path: PATH,
+            content: NEW,
+        };
+
+        let temp = tempdir().unwrap();
+        let target_dir = temp.path().join(".claude");
+        let target = target_dir.join(PATH);
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(&target, OLD).unwrap();
+
+        set_history_override(PATH, &[OLD]);
+        let result = sync_all_builtins_inner(&target_dir, &[], &[WP4_BODY_FILE, SCRIPT]).unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), NEW, "stale script must refresh");
+        assert!(result.updated_files.contains(&PATH.to_string()));
+        assert!(result.skipped_files.is_empty(), "no silent skip: {:?}", result.skipped_files);
+
+        std::fs::write(&target, LOCAL).unwrap();
+        let result = sync_all_builtins_inner(&target_dir, &[], &[WP4_BODY_FILE, SCRIPT]).unwrap();
+        clear_history_override();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), LOCAL, "local edit must survive");
+        assert_eq!(result.modified_reference_files, vec![PATH.to_string()]);
+    }
+
+    /// The same acceptance against the real catalog and the real ledger key:
+    /// `cas-wizard/template.sh` was frozen at its 2026-08-20 revision on every
+    /// install before cas-57c02.
+    #[test]
+    fn real_catalog_refreshes_a_stale_cas_wizard_template() {
+        use tempfile::tempdir;
+
+        const PATH: &str = "skills/cas-wizard/template.sh";
+        const OLD: &str = "#!/usr/bin/env bash\n# an older shipped wizard template\n";
+        let temp = tempdir().unwrap();
+        let claude_dir = temp.path().join(".claude");
+        sync_all_builtins(&claude_dir).unwrap();
+        std::fs::write(claude_dir.join(PATH), OLD).unwrap();
+        // Forget the baseline so only the shipped-version ledger can prove it.
+        std::fs::remove_file(claude_dir.join(BUILTIN_REFERENCE_STATE_FILE)).unwrap();
+
+        set_history_override(PATH, &[OLD]);
+        sync_all_builtins(&claude_dir).unwrap();
+        clear_history_override();
+
+        let expected = BUILTIN_SKILLS.iter().find(|b| b.path == PATH).unwrap().content;
+        assert_eq!(std::fs::read_to_string(claude_dir.join(PATH)).unwrap(), expected);
+    }
+
+    /// The ledger must carry the files that froze and the removed reference
+    /// that must be pruned; otherwise pre-ledger installs stay stuck.
+    #[test]
+    fn embedded_ledger_covers_scripts_and_removed_references() {
+        // Spelled with concat! so this source file never contains the retired
+        // file name as one literal: factory_codex_skill_guardrails greps
+        // builtins.rs for it to prove the reference is not registered.
+        const REMOVED_QUEUE_REFERENCE: &str =
+            concat!("skills/cas-supervisor/references/code-review", "-queue.md");
+        let history = builtin_reference_history();
+        for path in [
+            "skills/cas-wizard/template.sh",
+            "skills/cas-image-generate/scripts/generate-image.sh",
+            "skills/cas-technical-drawing/scripts/draft.mjs",
+            "skills/cas-release-report/scripts/render.py",
+            "skills/cas-dataviz/scripts/validate_palette.js",
+            REMOVED_QUEUE_REFERENCE,
+        ] {
+            assert!(
+                history.files.get(path).is_some_and(|hashes| !hashes.is_empty()),
+                "{path} missing from reference-history.json; rerun \
+                 scripts/gen-builtin-reference-history.sh"
+            );
+        }
+        assert!(
+            !BUILTIN_SKILLS
+                .iter()
+                .any(|b| b.path == REMOVED_QUEUE_REFERENCE),
+            "fixture assumption: the retired queue reference is no longer shipped"
+        );
+    }
+
+    /// Acceptance: a removed reference is pruned. Only provably Cassy content
+    /// goes (shipped hash, baseline, or managed marker); a user's own file in
+    /// the same directory stays, and emptied directories are cleaned up.
+    #[test]
+    fn removed_skill_files_are_pruned_only_when_provably_cassy() {
+        use tempfile::tempdir;
+
+        const RETIRED_PATH: &str = "skills/cas-test/scripts/retired.sh";
+        const RETIRED: &str = "echo retired\n";
+        let temp = tempdir().unwrap();
+        let target_dir = temp.path().join(".claude");
+        let write = |relative: &str, content: &str| {
+            let path = target_dir.join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, content).unwrap();
+        };
+        write(RETIRED_PATH, RETIRED);
+        write(
+            "skills/cas-test/references/old-queue.md",
+            "---\nname: old-queue\nmanaged_by: cas\n---\n# retired reference\n",
+        );
+        write("skills/cas-test/references/my-notes.md", "# my own notes\n");
+        write("skills/cas-unlisted/extra.md", "---\nmanaged_by: cas\n---\n");
+
+        set_history_override(RETIRED_PATH, &[RETIRED]);
+        let result = sync_all_builtins_inner(&target_dir, &[], &[WP4_BODY_FILE]).unwrap();
+        clear_history_override();
+
+        assert_eq!(
+            result.pruned_files,
+            vec![
+                "skills/cas-test/references/old-queue.md".to_string(),
+                RETIRED_PATH.to_string(),
+            ]
+        );
+        assert!(!target_dir.join("skills/cas-test/scripts").exists(), "empty dir left behind");
+        assert!(target_dir.join("skills/cas-test/references/my-notes.md").is_file());
+        assert!(
+            target_dir.join("skills/cas-unlisted/extra.md").is_file(),
+            "a directory outside the catalog is not this prune's business"
+        );
+
+        let again = sync_all_builtins_inner(&target_dir, &[], &[WP4_BODY_FILE]).unwrap();
+        assert!(again.pruned_files.is_empty(), "prune must be idempotent");
+    }
+
+    /// Acceptance: a retired agent is removed; user agents and current
+    /// builtins stay.
+    #[test]
+    fn retired_managed_agent_is_pruned_on_sync() {
+        use tempfile::tempdir;
+
+        const CURRENT: BuiltinFile = BuiltinFile {
+            path: "agents/task-verifier.md",
+            content: "---\nname: task-verifier\nmanaged_by: cas\n---\nverify\n",
+        };
+        let temp = tempdir().unwrap();
+        let target_dir = temp.path().join(".claude");
+        let agents = target_dir.join("agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        std::fs::write(
+            agents.join("code-reviewer.md"),
+            "---\nname: code-reviewer\nmanaged_by: cas\n---\nDEPRECATED\n",
+        )
+        .unwrap();
+        std::fs::write(agents.join("my-agent.md"), "---\nname: my-agent\n---\nmine\n").unwrap();
+        std::fs::write(agents.join("notes.txt"), "managed_by: cas\n").unwrap();
+
+        let result = sync_all_builtins_inner(&target_dir, &[CURRENT], &[]).unwrap();
+
+        assert_eq!(result.pruned_files, vec!["agents/code-reviewer.md".to_string()]);
+        assert!(!agents.join("code-reviewer.md").exists());
+        assert!(agents.join("my-agent.md").is_file(), "user agent must be kept");
+        assert!(agents.join("notes.txt").is_file(), "non-markdown files are not agents");
+        assert!(agents.join("task-verifier.md").is_file(), "current builtin written");
+    }
+
+    #[test]
+    fn skill_dir_prune_covers_non_cas_builtins_but_not_user_or_init_skills() {
+        use tempfile::tempdir;
+
+        let temp = tempdir().unwrap();
+        let skills_dir = temp.path().join("skills");
+        let managed = |name: &str| {
+            let dir = skills_dir.join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("SKILL.md"),
+                format!("---\nname: {name}\nmanaged_by: cas\n---\n"),
+            )
+            .unwrap();
+            dir
+        };
+        let retired_codemap = managed("codemap");
+        let kept_fallow = managed("fallow");
+        let init_skill = managed("cas");
+        let user_named = managed("my-tool");
+
+        let keep = HashSet::from(["fallow".to_string()]);
+        let removed = prune_stale_cas_skill_dirs(&skills_dir, &keep).unwrap();
+
+        assert_eq!(removed, vec!["codemap".to_string()]);
+        assert!(!retired_codemap.exists());
+        assert!(kept_fallow.exists(), "a current builtin is kept");
+        assert!(init_skill.exists(), "the `cas init` skill is not a catalog builtin");
+        assert!(user_named.exists(), "unknown names are never pruned");
+    }
+
+    /// Adding a non-`cas-` builtin without listing it would make it
+    /// unprunable forever once retired.
+    #[test]
+    fn every_non_cas_catalog_skill_is_in_the_prune_allowlist() {
+        for catalog in [BUILTIN_SKILLS, CODEX_BUILTIN_SKILLS, GROK_BUILTIN_SKILLS] {
+            for name in builtin_skill_dir_names(catalog) {
+                assert!(
+                    is_cassy_skill_dir_name(&name),
+                    "add {name:?} to SHIPPED_NON_CAS_SKILL_DIRS"
+                );
+            }
+        }
+    }
+
+    /// L2 P1-29: links in skill bodies and references must resolve against
+    /// the installed layout (`skills/<name>/SKILL.md` beside `references/`),
+    /// not the source tree (`skills/<name>.md`). Checks every relative link
+    /// that points into the skill tree: `references/`, `scripts/`,
+    /// `examples/`, `../` and `SKILL.md` targets. Project paths used as
+    /// examples (`docs/PRODUCT_OVERVIEW.md`) are not skill links.
+    #[test]
+    fn skill_links_resolve_in_the_installed_layout() {
+        fn normalize(path: &str) -> Option<String> {
+            let mut parts: Vec<&str> = Vec::new();
+            for part in path.split('/') {
+                match part {
+                    "" | "." => {}
+                    ".." => {
+                        parts.pop()?;
+                    }
+                    other => parts.push(other),
+                }
+            }
+            Some(parts.join("/"))
+        }
+
+        let mut broken = Vec::new();
+        let mut checked = 0;
+        for (label, catalog) in [
+            ("claude", BUILTIN_SKILLS),
+            ("codex", CODEX_BUILTIN_SKILLS),
+            ("grok", GROK_BUILTIN_SKILLS),
+        ] {
+            let installed: HashSet<&str> = catalog.iter().map(|b| b.path).collect();
+            for builtin in catalog.iter().filter(|b| b.path.ends_with(".md")) {
+                let base = builtin.path.rsplit_once('/').map_or("", |(dir, _)| dir);
+                for (index, _) in builtin.content.match_indices("](") {
+                    let rest = &builtin.content[index + 2..];
+                    let Some(end) = rest.find(')') else { continue };
+                    let target = rest[..end].split('#').next().unwrap_or_default();
+                    if target.is_empty()
+                        || target.contains(char::is_whitespace)
+                        || target.contains("://")
+                        || target.starts_with('/')
+                        || target.starts_with("mailto:")
+                    {
+                        continue;
+                    }
+                    let skill_link = target.contains("references/")
+                        || target.starts_with("scripts/")
+                        || target.starts_with("examples/")
+                        || target.starts_with("../")
+                        || target.ends_with("SKILL.md");
+                    if !skill_link {
+                        continue;
+                    }
+                    checked += 1;
+                    let resolved = normalize(&format!("{base}/{target}"));
+                    if !resolved.as_deref().is_some_and(|path| installed.contains(path)) {
+                        broken.push(format!("{label} {}: {target}", builtin.path));
+                    }
+                }
+            }
+        }
+        assert!(checked >= 100, "link scan looks broken: only {checked} links checked");
+        assert!(broken.is_empty(), "links broken in the installed layout:\n{}", broken.join("\n"));
+    }
+
+    /// Acceptance: after sync the doctor reports install parity, and it
+    /// notices drift, retired agents and removed files.
+    #[test]
+    fn install_parity_is_clean_after_sync_and_names_every_kind_of_drift() {
+        use tempfile::tempdir;
+
+        for harness in [SupervisorCli::Claude, SupervisorCli::Codex, SupervisorCli::Grok] {
+            let temp = tempdir().unwrap();
+            let dir = temp.path().join("home");
+            sync_all_builtins_for_harness(harness, &dir).unwrap();
+            let parity = install_parity_for_harness(harness, &dir);
+            assert!(
+                parity.is_current() && parity.local_edits.is_empty(),
+                "{harness:?} install must match its catalog right after sync: {parity:?}"
+            );
+            assert_eq!(
+                parity.checked,
+                agent_catalog_for_harness(harness).len() + skill_catalog_for_harness(harness).len()
+            );
+        }
+
+        const SCRIPT_PATH: &str = "skills/cas-test/template.sh";
+        const OLD: &str = "echo old\n";
+        let script = BuiltinFile {
+            path: SCRIPT_PATH,
+            content: "echo new\n",
+        };
+        let reference = BuiltinFile {
+            path: "skills/cas-test/references/guide.md",
+            content: "# guide\n",
+        };
+        let agent = BuiltinFile {
+            path: "agents/task-verifier.md",
+            content: "---\nname: task-verifier\nmanaged_by: cas\n---\nnew\n",
+        };
+        let skills = [WP4_BODY_FILE, script, reference];
+        let temp = tempdir().unwrap();
+        let dir = temp.path().join(".claude");
+        sync_all_builtins_inner(&dir, &[agent], &skills).unwrap();
+
+        std::fs::write(dir.join(SCRIPT_PATH), OLD).unwrap();
+        std::fs::write(dir.join("skills/cas-test/references/guide.md"), "# my guide\n").unwrap();
+        std::fs::remove_file(dir.join("skills/cas-test/SKILL.md")).unwrap();
+        std::fs::write(
+            dir.join("agents/code-reviewer.md"),
+            "---\nname: code-reviewer\nmanaged_by: cas\n---\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("skills/cas-test/references/removed.md"),
+            "---\nmanaged_by: cas\n---\n# removed\n",
+        )
+        .unwrap();
+        std::fs::remove_file(dir.join(BUILTIN_REFERENCE_STATE_FILE)).unwrap();
+
+        set_history_override(SCRIPT_PATH, &[OLD]);
+        let parity = install_parity(&dir, &[agent], &skills);
+        clear_history_override();
+
+        assert_eq!(parity.stale, vec![SCRIPT_PATH.to_string()]);
+        assert_eq!(parity.missing, vec!["skills/cas-test/SKILL.md".to_string()]);
+        assert_eq!(
+            parity.local_edits,
+            vec!["skills/cas-test/references/guide.md".to_string()]
+        );
+        assert_eq!(
+            parity.retired,
+            vec![
+                "agents/code-reviewer.md".to_string(),
+                "skills/cas-test/references/removed.md".to_string(),
+            ]
+        );
+        assert!(!parity.is_current());
+    }
+
     #[test]
     fn test_sync_all_builtins_includes_compound_engineering() {
         use tempfile::tempdir;
@@ -6867,11 +7684,9 @@ This is the body content."#;
 
     #[test]
     fn test_taste_routes_match_registry_in_all_supervisor_readers() {
-        for (skills, prefix) in [
-            (BUILTIN_SKILLS, "mcp__cas__"),
-            (CODEX_BUILTIN_SKILLS, "mcp__cs__"),
-            (GROK_BUILTIN_SKILLS, "cas__"),
-        ] {
+        // Recipes name the bare `factory` tool in every catalog (audit D1).
+        let prefix = "";
+        for skills in [BUILTIN_SKILLS, CODEX_BUILTIN_SKILLS, GROK_BUILTIN_SKILLS] {
             for builtin in skills
                 .iter()
                 .filter(|b| b.path.starts_with("skills/cas-supervisor"))
@@ -6899,17 +7714,19 @@ This is the body content."#;
                         builtin.path
                     );
                     assert!(recipes.contains(&format!(
-                        "# taste — recipe claude_opus_5_5 (fallback: claude_opus)\n{prefix}coordination action=spawn_workers count=1 isolate=true cli=claude model=claude-opus-5-5 effort=high"
+                        "# taste — recipe claude_opus_5_5 (fallback: claude_opus)\n{prefix}factory action=spawn_workers count=1 isolate=true cli=claude model=claude-opus-5-5 effort=high"
                     )));
                 }
             }
         }
-        let agent = include_str!("builtins/codex/agents/factory-supervisor.md");
-        assert!(agent.contains(&render_spawn_recipes("mcp__cs__").unwrap()));
-        assert_eq!(
-            agent,
-            include_str!("../../.codex/agents/factory-supervisor.md")
-        );
+        // Audit D6: the Codex factory-supervisor agent file is gone; the Codex
+        // supervisor finds the recipes through its checklist's workflow link.
+        let checklist = CODEX_BUILTIN_SKILLS
+            .iter()
+            .find(|b| b.path == "skills/cas-codex-supervisor-checklist/SKILL.md")
+            .expect("codex checklist")
+            .content;
+        assert!(checklist.contains("../cas-supervisor/references/workflow.md"));
     }
 
     /// cas-6219: the supervisor's model-selection rubric must be registered on
@@ -6932,18 +7749,16 @@ This is the body content."#;
             .find(|b| b.path == "skills/cas-supervisor/references/model-selection.md")
             .expect("GROK_BUILTIN_SKILLS missing cas-supervisor model-selection.md");
         assert_eq!(
-            claude.content.replace("mcp__cas__", "mcp__cs__"),
+            claude.content,
             codex.content,
-            "model-selection.md .claude and .codex copies must be identical apart from \
-             the mcp__cas__/mcp__cs__ tool prefix",
+            "model-selection.md .claude and .codex copies must be identical (audit D1: one catalog)",
         );
         // cas-b342: the Grok twin is a third normalized mirror — identical to
         // the Claude copy apart from the cas__ tool prefix.
         assert_eq!(
-            claude.content.replace("mcp__cas__", "cas__"),
+            claude.content,
             grok.content,
-            "model-selection.md .claude and .grok copies must be identical apart from \
-             the mcp__cas__/cas__ tool prefix",
+            "model-selection.md .claude and .grok copies must be identical (audit D1: one catalog)",
         );
         // cas-a7d1: route values and copyable commands are golden-tested from
         // the embedded registry, rather than maintained as hand-pinned marker
@@ -6982,17 +7797,17 @@ This is the body content."#;
             (
                 "claude",
                 include_str!("builtins/skills/cas-supervisor/references/workflow.md"),
-                "mcp__cas__",
+                "",
             ),
             (
                 "codex",
-                include_str!("builtins/codex/skills/cas-supervisor/references/workflow.md"),
-                "mcp__cs__",
+                include_str!("builtins/skills/cas-supervisor/references/workflow.md"),
+                "",
             ),
             (
                 "grok",
-                include_str!("builtins/grok/skills/cas-supervisor/references/workflow.md"),
-                "cas__",
+                include_str!("builtins/skills/cas-supervisor/references/workflow.md"),
+                "",
             ),
         ] {
             let generated_recipes =
@@ -7057,35 +7872,35 @@ This is the body content."#;
             ),
             (
                 "codex body",
-                include_str!("builtins/codex/skills/cas-supervisor.md"),
+                include_str!("builtins/skills/cas-supervisor.md"),
             ),
             (
                 "codex model-selection",
-                include_str!("builtins/codex/skills/cas-supervisor/references/model-selection.md"),
+                include_str!("builtins/skills/cas-supervisor/references/model-selection.md"),
             ),
             (
                 "codex workflow",
-                include_str!("builtins/codex/skills/cas-supervisor/references/workflow.md"),
+                include_str!("builtins/skills/cas-supervisor/references/workflow.md"),
             ),
             (
                 "codex reference",
-                include_str!("builtins/codex/skills/cas-supervisor/references/reference.md"),
+                include_str!("builtins/skills/cas-supervisor/references/reference.md"),
             ),
             (
                 "grok body",
-                include_str!("builtins/grok/skills/cas-supervisor.md"),
+                include_str!("builtins/skills/cas-supervisor.md"),
             ),
             (
                 "grok model-selection",
-                include_str!("builtins/grok/skills/cas-supervisor/references/model-selection.md"),
+                include_str!("builtins/skills/cas-supervisor/references/model-selection.md"),
             ),
             (
                 "grok workflow",
-                include_str!("builtins/grok/skills/cas-supervisor/references/workflow.md"),
+                include_str!("builtins/skills/cas-supervisor/references/workflow.md"),
             ),
             (
                 "grok reference",
-                include_str!("builtins/grok/skills/cas-supervisor/references/reference.md"),
+                include_str!("builtins/skills/cas-supervisor/references/reference.md"),
             ),
         ] {
             assert!(
@@ -7093,8 +7908,8 @@ This is the body content."#;
                 "{label} must not contain a GPT-5.5 supervisor worker recipe"
             );
         }
-        // cas-b342/cas-96ea: the hard rule requires explicit cli/model/effort on EVERY
-        // spawn, so every `spawn_workers` recipe line in the rubric — including
+        // cas-b342/cas-96ea: a spawn recipe that forces one model (rather than
+        // passing `lane=`) must be complete, so every `spawn_workers` recipe line in the rubric — including
         // the light Grok lane — must carry an explicit `effort=`, and
         // Sonnet must not remain as a copyable spawn recipe.
         for line in claude.content.lines() {
@@ -7114,11 +7929,11 @@ This is the body content."#;
             ("claude cas-supervisor.md", SUPERVISOR_GUIDE),
             (
                 "codex cas-supervisor.md",
-                include_str!("builtins/codex/skills/cas-supervisor.md"),
+                include_str!("builtins/skills/cas-supervisor.md"),
             ),
             (
                 "grok cas-supervisor.md",
-                include_str!("builtins/grok/skills/cas-supervisor.md"),
+                include_str!("builtins/skills/cas-supervisor.md"),
             ),
         ] {
             assert!(
@@ -7138,28 +7953,28 @@ This is the body content."#;
         let claude_workflow = include_str!("builtins/skills/cas-supervisor/references/workflow.md");
         let claude_reference =
             include_str!("builtins/skills/cas-supervisor/references/reference.md");
-        let codex_body = include_str!("builtins/codex/skills/cas-supervisor.md");
+        let codex_body = include_str!("builtins/skills/cas-supervisor.md");
         let codex_model =
-            include_str!("builtins/codex/skills/cas-supervisor/references/model-selection.md");
+            include_str!("builtins/skills/cas-supervisor/references/model-selection.md");
         let codex_workflow =
-            include_str!("builtins/codex/skills/cas-supervisor/references/workflow.md");
+            include_str!("builtins/skills/cas-supervisor/references/workflow.md");
         let codex_reference =
-            include_str!("builtins/codex/skills/cas-supervisor/references/reference.md");
-        let grok_body = include_str!("builtins/grok/skills/cas-supervisor.md");
+            include_str!("builtins/skills/cas-supervisor/references/reference.md");
+        let grok_body = include_str!("builtins/skills/cas-supervisor.md");
         let grok_model =
-            include_str!("builtins/grok/skills/cas-supervisor/references/model-selection.md");
+            include_str!("builtins/skills/cas-supervisor/references/model-selection.md");
         let grok_workflow =
-            include_str!("builtins/grok/skills/cas-supervisor/references/workflow.md");
+            include_str!("builtins/skills/cas-supervisor/references/workflow.md");
         let grok_reference =
-            include_str!("builtins/grok/skills/cas-supervisor/references/reference.md");
+            include_str!("builtins/skills/cas-supervisor/references/reference.md");
 
         assert_eq!(
-            claude_reference.replace("mcp__cas__", "mcp__cs__"),
+            claude_reference,
             codex_reference,
             "Codex reference.md must normalize to the Claude twin"
         );
         assert_eq!(
-            claude_reference.replace("mcp__cas__", "cas__"),
+            claude_reference,
             grok_reference,
             "Grok reference.md must normalize to the Claude twin"
         );
@@ -7180,7 +7995,7 @@ This is the body content."#;
         ] {
             let lines: Vec<_> = content.lines().collect();
             for (index, line) in lines.iter().enumerate() {
-                if line.contains("coordination action=spawn_workers") {
+                if line.contains("factory action=spawn_workers") {
                     for argument in ["cli=", "model=", "effort="] {
                         assert!(
                             line.contains(argument),
@@ -7246,10 +8061,9 @@ This is the body content."#;
             // tool prefix — the codex copy correctly uses mcp__cs__, not
             // Claude's mcp__cas__.
             assert_eq!(
-                claude.content.replace("mcp__cas__", "mcp__cs__"),
+                claude.content,
                 codex.content,
-                "{path} .claude and .codex copies must be identical apart from the \
-                 mcp__cas__/mcp__cs__ tool prefix",
+                "{path} .claude and .codex copies must be identical (audit D1: one catalog)",
             );
         }
 
@@ -7282,7 +8096,7 @@ This is the body content."#;
             "worktree_merge id=<worker> task_id=<task-id>",
             "Hold the main merge",
             "Run the final assembled-tree gate",
-            "cargo nextest run -p cas",
+            "the project's assembly gate command",
             "bounded epic-child fix-round task",
             "Never pipe the test run to `tail`",
         ] {
@@ -7307,7 +8121,7 @@ This is the body content."#;
             .expect("BUILTIN_SKILLS missing cas-supervisor planning.md");
         for required in [
             "Every worker merge receives the canonical merge-time diff review",
-            "Phase 4 runs the full final-tree nextest gate",
+            "Phase 4 runs the project's full final-tree assembly gate",
             "Do not dispatch a separate review workflow",
         ] {
             assert!(
@@ -7353,8 +8167,8 @@ This is the body content."#;
                 }
             }
         }
-        // recovery.md mirrors intentionally diverge by MCP alias (cas-5b4f):
-        // the Codex copy's executable remediation must use the cs alias.
+        // Audit D1: one recovery.md serves every harness, so its executable
+        // remediation names the bare `coordination` tool.
         let codex_recovery = CODEX_BUILTIN_SKILLS
             .iter()
             .find(|b| b.path == "skills/cas-worker/references/recovery.md")
@@ -7362,14 +8176,14 @@ This is the body content."#;
         assert!(
             codex_recovery
                 .content
-                .contains("mcp__cs__coordination action=message target=supervisor"),
-            "codex recovery.md MERGE REQUIRED section must use the mcp__cs__ alias"
+                .contains("coordination action=message target=supervisor"),
+            "recovery.md MERGE REQUIRED section must message the supervisor"
         );
         assert!(
             codex_recovery
                 .content
-                .contains("mcp__cs__coordination action=inbox_poll"),
-            "codex recovery.md inbox remediation must use the mcp__cs__ alias"
+                .contains("`coordination action=inbox_poll"),
+            "recovery.md inbox remediation must name the bare coordination tool"
         );
         // The SessionStart-injected body must surface the MERGE REQUIRED close
         // outcome and the literal-`supervisor` messaging target on both surfaces.
@@ -7377,11 +8191,11 @@ This is the body content."#;
             ("claude cas-worker.md", WORKER_GUIDE),
             (
                 "codex cas-worker.md",
-                include_str!("builtins/codex/skills/cas-worker.md"),
+                include_str!("builtins/skills/cas-worker.md"),
             ),
             (
                 "grok cas-worker.md",
-                include_str!("builtins/grok/skills/cas-worker.md"),
+                include_str!("builtins/skills/cas-worker.md"),
             ),
         ] {
             for required in [
@@ -7411,7 +8225,7 @@ This is the body content."#;
             ("claude cas-worker.md", WORKER_GUIDE),
             (
                 "codex cas-worker.md",
-                include_str!("builtins/codex/skills/cas-worker.md"),
+                include_str!("builtins/skills/cas-worker.md"),
             ),
         ] {
             for required in [
@@ -7446,8 +8260,8 @@ This is the body content."#;
             }
         }
 
-        // recovery.md mirrors intentionally diverge by MCP alias (cas-5b4f) —
-        // the new section must follow the same convention as the rest of the file.
+        // Audit D1: the section names no prefix literal; the call uses the
+        // full prefixed name from the role guidance's naming line.
         let claude_recovery = BUILTIN_SKILLS
             .iter()
             .find(|b| b.path == "skills/cas-worker/references/recovery.md")
@@ -7455,19 +8269,44 @@ This is the body content."#;
         assert!(
             claude_recovery
                 .content
-                .contains("literally named `mcp__cas__task`"),
-            "claude recovery.md ToolSearch section must use the mcp__cas__ alias"
+                .contains("a *separate* call to that tool by its full prefixed name"),
+            "recovery.md ToolSearch section must name the prefixed call"
         );
-        let codex_recovery = CODEX_BUILTIN_SKILLS
-            .iter()
-            .find(|b| b.path == "skills/cas-worker/references/recovery.md")
-            .expect("CODEX_BUILTIN_SKILLS missing recovery.md");
-        assert!(
-            codex_recovery
-                .content
-                .contains("literally named `mcp__cs__task`"),
-            "codex recovery.md ToolSearch section must use the mcp__cs__ alias"
-        );
+    }
+
+    /// Audit D1: each role file states the per-harness prefix once, verbatim,
+    /// and the SessionStart guidance swaps that line for a single-prefix form
+    /// that `remap_tool_prefix` rewrites to the reader's own spelling.
+    #[test]
+    fn role_guidance_states_the_tool_prefix_once_and_remaps_at_load() {
+        for (label, guide, guidance) in [
+            ("supervisor", SUPERVISOR_GUIDE, supervisor_guidance()),
+            ("worker", WORKER_GUIDE, worker_guidance()),
+        ] {
+            assert_eq!(
+                guide.matches(TOOL_NAMING_LINE).count(),
+                1,
+                "{label} role file must carry TOOL_NAMING_LINE exactly once"
+            );
+            assert!(!guidance.contains(TOOL_NAMING_LINE), "{label}");
+            assert_eq!(guidance.matches(SESSION_TOOL_NAMING_LINE).count(), 1, "{label}");
+            for prefix in ["mcp__cs__", "cas__", "cas_"] {
+                let remapped = guidance.replace("mcp__cas__", prefix);
+                assert!(
+                    remapped.contains(&format!("call them as `{prefix}<tool>`")),
+                    "{label} guidance must name {prefix} after remap"
+                );
+            }
+        }
+        for (label, catalog) in [
+            ("codex", CODEX_BUILTIN_SKILLS),
+            ("grok", GROK_BUILTIN_SKILLS),
+        ] {
+            for path in ["skills/cas-supervisor/SKILL.md", "skills/cas-worker/SKILL.md"] {
+                let entry = catalog.iter().find(|b| b.path == path).unwrap();
+                assert_eq!(entry.content.matches(TOOL_NAMING_LINE).count(), 1, "{label} {path}");
+            }
+        }
     }
 
     /// cas-3558: the 2026-07-09 grok run had an idle worker self-dispatch
@@ -7484,19 +8323,19 @@ This is the body content."#;
             ("claude cas-worker.md", WORKER_GUIDE),
             (
                 "codex cas-worker.md",
-                include_str!("builtins/codex/skills/cas-worker.md"),
+                include_str!("builtins/skills/cas-worker.md"),
             ),
             (
                 "grok cas-worker.md",
-                include_str!("builtins/grok/skills/cas-worker.md"),
+                include_str!("builtins/skills/cas-worker.md"),
             ),
         ] {
+            // WP2 (audit cas-1660 L2 P2-73): the rule is stated once in the
+            // always-loaded body, so it is pinned once.
             for required in [
-                "no self-dispatch",
-                "This applies every time you go idle, not just at session start",
-                "backlog *visibility*, never authorization to `start` a task yourself",
-                "Never self-dispatch.",
-                "Do not pull the next ready task yourself",
+                "Never self-dispatch",
+                "every time you go idle",
+                "backlog\n  visibility, not authorization",
             ] {
                 assert!(
                     guide.contains(required),
@@ -7718,48 +8557,64 @@ This is the body content."#;
         );
     }
 
+    /// Audit D6 (cas-6b97): Codex ignores `.md` agents, so its sync installs
+    /// none and prunes the inert managed copies earlier versions installed.
     #[test]
-    fn test_sync_all_codex_builtins_includes_agents() {
-        // Verify sync_all_codex_builtins syncs agents (which includes task-verifier)
+    fn test_sync_all_codex_builtins_installs_no_md_agents_and_prunes_old_ones() {
         use tempfile::tempdir;
 
         let temp = tempdir().unwrap();
         let codex_dir = temp.path().join(".codex");
-        std::fs::create_dir_all(&codex_dir).unwrap();
+        let agents = codex_dir.join("agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        for name in ["task-verifier.md", "factory-supervisor.md"] {
+            std::fs::write(
+                agents.join(name),
+                "---\nname: old\nmetadata:\n  managed_by: cas\n---\nold\n",
+            )
+            .unwrap();
+        }
+        std::fs::write(agents.join("reviewer.toml"), "name = \"mine\"\n").unwrap();
 
         let result = sync_all_codex_builtins(&codex_dir).unwrap();
 
-        // Should sync at least 1 agent (task-verifier)
-        assert!(
-            result.agents_updated > 0,
-            "sync_all_codex_builtins should sync agents"
+        assert_eq!(result.agents_updated, 0, "Codex has no agent catalog");
+        assert!(result.skills_updated > 0);
+        assert_eq!(
+            result.pruned_files,
+            vec![
+                "agents/factory-supervisor.md".to_string(),
+                "agents/task-verifier.md".to_string(),
+            ]
         );
-
-        // Verify task-verifier file was created
-        let task_verifier_path = codex_dir.join("agents/task-verifier.md");
-        assert!(
-            task_verifier_path.exists(),
-            "task-verifier.md should be created by sync_all_codex_builtins"
-        );
+        assert!(agents.join("reviewer.toml").is_file(), "user TOML agents are untouched");
+        assert!(CODEX_BUILTIN_AGENTS.is_empty());
+        assert!(required_factory_agents_for(SupervisorCli::Codex).is_empty());
     }
 
-    /// cas-2c61: every Codex builtin (agent or skill) must reference the
-    /// codex-aliased tool prefix `mcp__cs__` (per
-    /// `SupervisorCli::Codex.backend().capabilities().tool_prefix`), never `mcp__cas__`
-    /// (Claude's prefix). A codex worker/supervisor following a skill that
-    /// carries the wrong prefix calls a tool name that doesn't resolve.
-    /// Anti-drift guard mirroring the Grok corpus check (cas-6f46).
+    /// cas-2c61, audit D1: a Codex worker following a skill that spells
+    /// another harness's prefix calls a tool name that doesn't resolve. The
+    /// catalog names tools by bare name; a prefix appears only in the naming
+    /// line and generated agent `tools:` frontmatter.
     #[test]
     fn test_codex_builtins_never_reference_claude_tool_prefix() {
         for builtin in CODEX_BUILTIN_SKILLS
             .iter()
             .chain(CODEX_BUILTIN_AGENTS.iter())
         {
+            let offenders = unsanctioned_prefixed_tool_lines(builtin.content);
             assert!(
-                !builtin.content.contains("mcp__cas__"),
-                "{} must not reference mcp__cas__ (Claude's prefix) — Codex uses mcp__cs__",
+                offenders.is_empty(),
+                "{} spells a harness prefix outside the naming rule: {offenders:?}",
                 builtin.path
             );
+            for line in builtin.content.lines().filter(|l| l.starts_with("tools:")) {
+                assert!(
+                    !line.contains("mcp__cas__") && line.contains("mcp__cs__"),
+                    "{} tools: allowlist must use mcp__cs__",
+                    builtin.path
+                );
+            }
         }
     }
 
@@ -7879,29 +8734,32 @@ This is the body content."#;
         );
     }
 
-    /// cas-6f46: every Grok skill twin must use the `cas__` tool prefix —
-    /// never `mcp__cas__` (Claude) or `mcp__cs__` (Codex). A Grok worker
-    /// copying tool-call syntax from a skill with the wrong prefix gets a
-    /// tool-not-found error instead of a working call.
+    /// cas-6f46, audit D1: a Grok worker copying tool-call syntax from a
+    /// skill with another harness's prefix gets a tool-not-found error. Tool
+    /// names are bare; a prefix appears only in the naming line and the
+    /// generated agent `tools:` frontmatter, which uses `cas__` for Grok.
     #[test]
     fn test_grok_builtin_skills_never_reference_mcp_wrapped_tool_names() {
         for builtin in GROK_BUILTIN_SKILLS.iter().chain(GROK_BUILTIN_AGENTS.iter()) {
+            let offenders = unsanctioned_prefixed_tool_lines(builtin.content);
             assert!(
-                !builtin.content.contains("mcp__cas__"),
-                "{} must not reference mcp__cas__ (Claude's prefix) — Grok uses cas__",
+                offenders.is_empty(),
+                "{} spells a harness prefix outside the naming rule: {offenders:?}",
                 builtin.path
             );
-            assert!(
-                !builtin.content.contains("mcp__cs__"),
-                "{} must not reference mcp__cs__ (Codex's prefix) — Grok uses cas__",
-                builtin.path
-            );
+            for line in builtin.content.lines().filter(|l| l.starts_with("tools:")) {
+                assert!(
+                    !line.contains("mcp__") && line.contains("cas__task"),
+                    "{} tools: allowlist must use cas__",
+                    builtin.path
+                );
+            }
         }
     }
 
     /// cas-6f46 AC: "a grok worker following its cas-worker twin can call
-    /// cas__task successfully" — the twin must actually reference the
-    /// cas__ prefixed tool names a Grok worker needs for its core workflow.
+    /// cas__task successfully". The worker skill names `task` and
+    /// `coordination` by bare name and states Grok's `cas__` prefix once.
     #[test]
     fn test_grok_worker_skill_references_cas_prefixed_tools() {
         let worker = GROK_BUILTIN_SKILLS
@@ -7909,7 +8767,7 @@ This is the body content."#;
             .find(|b| b.path == "skills/cas-worker/SKILL.md")
             .expect("GROK_BUILTIN_SKILLS missing cas-worker/SKILL.md");
 
-        for required in ["cas__task", "cas__coordination"] {
+        for required in [TOOL_NAMING_LINE, "`cas__` in Grok", "`task action=", "coordination action="] {
             assert!(
                 worker.content.contains(required),
                 "grok cas-worker skill missing required tool reference: {required:?}"
@@ -8143,9 +9001,8 @@ This is the body content."#;
         }
     }
 
-    /// Required agent roles have equivalent coverage across all four harnesses.
-    /// Harness-specific extras (Codex `factory-supervisor`) are allowed and are
-    /// simply not in the required set.
+    /// Required agent roles have equivalent coverage across every harness that
+    /// loads `.md` agents; Codex requires none (audit D6).
     #[test]
     fn test_required_agents_present_in_every_harness() {
         for harness in [
@@ -8155,7 +9012,7 @@ This is the body content."#;
             SupervisorCli::OpenCode,
         ] {
             let catalog = agent_catalog_for_harness(harness);
-            for agent in REQUIRED_FACTORY_AGENTS {
+            for agent in required_factory_agents_for(harness) {
                 assert!(
                     catalog.iter().any(|b| &b.path == agent),
                     "{harness:?} agent catalog is missing required role {agent}"
@@ -8164,49 +9021,38 @@ This is the body content."#;
         }
     }
 
-    /// No tailored-harness catalog leaks a foreign MCP tool prefix in its OWN
-    /// tool-call guidance (cas-cc8c AC-5). Grok must never carry `mcp__cas__`
-    /// (Claude) or `mcp__cs__` (Codex); Codex must never carry `mcp__cas__`.
-    /// (Claude is the reference harness and legitimately documents the other
-    /// aliases in cross-harness recovery guidance, so it is not swept here — its
-    /// own tool calls use `mcp__cas__` by construction.) This spans every entry
-    /// in both tailored catalogs, so the new cas-cc8c Grok required twins are
-    /// covered automatically.
+    /// No catalog leaks a harness prefix into its tool-call guidance
+    /// (cas-cc8c AC-5, audit D1). Every catalog, Claude's included, names
+    /// tools by bare name; the only prefixed spellings are the naming line
+    /// and generated agent `tools:` allowlists.
     #[test]
     fn test_tailored_catalogs_never_leak_foreign_tool_prefix() {
-        for b in GROK_BUILTIN_SKILLS.iter().chain(GROK_BUILTIN_AGENTS.iter()) {
-            assert!(
-                !b.content.contains("mcp__cas__"),
-                "Grok {} leaks Claude prefix mcp__cas__",
-                b.path
-            );
-            assert!(
-                !b.content.contains("mcp__cs__"),
-                "Grok {} leaks Codex prefix mcp__cs__",
-                b.path
-            );
+        for harness in [
+            SupervisorCli::Claude,
+            SupervisorCli::Codex,
+            SupervisorCli::Grok,
+            SupervisorCli::OpenCode,
+        ] {
+            for b in skill_catalog_for_harness(harness)
+                .iter()
+                .chain(agent_catalog_for_harness(harness).iter())
+            {
+                let offenders = unsanctioned_prefixed_tool_lines(b.content);
+                assert!(
+                    offenders.is_empty(),
+                    "{harness:?} {} spells a harness prefix outside the naming rule: {offenders:?}",
+                    b.path
+                );
+            }
         }
-        for b in CODEX_BUILTIN_SKILLS
-            .iter()
-            .chain(CODEX_BUILTIN_AGENTS.iter())
-        {
-            assert!(
-                !b.content.contains("mcp__cas__"),
-                "Codex {} leaks Claude prefix mcp__cas__",
-                b.path
-            );
-        }
-        for b in opencode_builtin_skills()
-            .iter()
-            .chain(opencode_builtin_agents().iter())
-        {
-            assert!(
-                !b.content.contains("mcp__cas__")
-                    && !b.content.contains("mcp__cs__")
-                    && !b.content.contains("cas__"),
-                "OpenCode {} leaks a foreign MCP prefix",
-                b.path
-            );
+        for b in opencode_builtin_agents() {
+            for line in b.content.lines().filter(|l| l.starts_with("tools:")) {
+                assert!(
+                    !line.contains("mcp__") && line.contains("cas_task"),
+                    "OpenCode {} tools: allowlist must use cas_",
+                    b.path
+                );
+            }
         }
     }
 
@@ -8216,10 +9062,18 @@ This is the body content."#;
         let agents = agent_catalog_for_harness(SupervisorCli::OpenCode);
         assert_eq!(skills.len(), BUILTIN_SKILLS.len());
         assert_eq!(agents.len(), BUILTIN_AGENTS.len());
+        // Skill text is prefix-neutral, so OpenCode ships it unchanged; only the
+        // agent `tools:` allowlist is respelled to `cas_<tool>`.
+        let tracking = BUILTIN_SKILLS
+            .iter()
+            .find(|b| b.path == "skills/cas-task-tracking/SKILL.md")
+            .unwrap();
         assert!(skills.iter().any(|b| {
-            b.path == "skills/cas-task-tracking/SKILL.md" && b.content.contains("cas_task")
+            b.path == "skills/cas-task-tracking/SKILL.md" && b.content == tracking.content
         }));
-        assert!(agents.iter().any(|b| b.path == "agents/task-verifier.md"));
+        assert!(agents.iter().any(|b| {
+            b.path == "agents/task-verifier.md" && b.content.contains("tools: Read, Grep, Glob, Bash, cas_task")
+        }));
         assert!(required_dir_for(
             &REQUIRED_FACTORY_CAPABILITIES[0],
             SupervisorCli::OpenCode
@@ -8268,7 +9122,7 @@ This is the body content."#;
                     on_disk.display()
                 );
             }
-            for agent in REQUIRED_FACTORY_AGENTS {
+            for agent in required_factory_agents_for(harness) {
                 assert!(
                     dir.join(agent).exists(),
                     "{harness:?} fresh sync did not install required agent {agent}"
@@ -8277,15 +9131,15 @@ This is the body content."#;
         }
     }
 
-    /// The three new Grok required twins (cas-cc8c) exist and use the `cas__`
-    /// prefix for the tools their workflow calls — a Grok session copying tool
-    /// syntax from them must get a working call.
+    /// The three Grok required skills (cas-cc8c) exist and name the tools their
+    /// workflow calls by bare name (audit D1); the Grok role guidance states
+    /// the `cas__` prefix.
     #[test]
     fn test_grok_search_brainstorm_ideate_use_cas_prefix() {
         let expect = [
-            ("skills/cas-search/SKILL.md", "cas__search"),
-            ("skills/cas-brainstorm/SKILL.md", "cas__"),
-            ("skills/cas-ideate/SKILL.md", "cas__"),
+            ("skills/cas-search/SKILL.md", "`search action=search"),
+            ("skills/cas-brainstorm/SKILL.md", "search action=search"),
+            ("skills/cas-ideate/SKILL.md", "action="),
         ];
         for (path, needle) in expect {
             let file = GROK_BUILTIN_SKILLS
@@ -8294,17 +9148,17 @@ This is the body content."#;
                 .unwrap_or_else(|| panic!("GROK_BUILTIN_SKILLS missing {path}"));
             assert!(
                 file.content.contains(needle),
-                "grok {path} must reference {needle} (cas__ prefix)"
+                "grok {path} must reference {needle}"
             );
         }
     }
 
     #[test]
     fn test_builtin_skills_contains_cas_cut_release() {
-        for (label, catalog, prefix) in [
-            ("claude", BUILTIN_SKILLS, "mcp__cas__"),
-            ("codex", CODEX_BUILTIN_SKILLS, "mcp__cs__"),
-            ("grok", GROK_BUILTIN_SKILLS, "cas__"),
+        for (label, catalog) in [
+            ("claude", BUILTIN_SKILLS),
+            ("codex", CODEX_BUILTIN_SKILLS),
+            ("grok", GROK_BUILTIN_SKILLS),
         ] {
             let skill = catalog
                 .iter()
@@ -8312,9 +9166,16 @@ This is the body content."#;
                 .unwrap_or_else(|| panic!("{label} cas-cut-release skill is not registered"));
             assert!(is_managed_by_cas(skill.content));
             assert!(skill.content.contains("description: Use when"));
-            assert!(skill.content.contains("references/failure-log.md in full"));
+            // Only the manual:* hazards are read up front; the rest of the
+            // log is enforced by gate rows and grepped on a failure.
+            assert!(
+                skill
+                    .content
+                    .contains("`manual:*` entries in `references/failure-log.md`")
+            );
+            assert!(!skill.content.contains("failure-log.md in full"));
             assert!(skill.content.contains("release-gate.sh --learn"));
-            assert!(skill.content.contains(&format!("{prefix}memory")));
+            assert!(skill.content.contains("`memory action=remember"));
             for marker in [
                 "--check-lane",
                 "Scoped Validation",
@@ -8368,5 +9229,463 @@ This is the body content."#;
                 );
             }
         }
+    }
+
+
+    // ---------------------------------------------------------------------
+    // cas-0fa1 (WP10): design and report skills
+    // ---------------------------------------------------------------------
+
+    const WP10_SKILLS: [&str; 9] = [
+        "cas-html-reports",
+        "cas-ui-craft",
+        "cas-dataviz",
+        "cas-image-generate",
+        "cas-technical-drawing",
+        "cas-release-report",
+        "design-spec",
+        "cas-cli-craft",
+        "cas-frontend-engineering",
+    ];
+
+    fn wp10_catalogs() -> [(&'static str, &'static [BuiltinFile]); 3] {
+        [
+            ("claude", BUILTIN_SKILLS),
+            ("codex", CODEX_BUILTIN_SKILLS),
+            ("grok", GROK_BUILTIN_SKILLS),
+        ]
+    }
+
+    fn wp10_get(label: &str, catalog: &'static [BuiltinFile], path: &str) -> &'static str {
+        catalog
+            .iter()
+            .find(|b| b.path == path)
+            .unwrap_or_else(|| panic!("{path} missing from {label} catalog"))
+            .content
+    }
+
+    /// D7: the public-surface gates need visual-qa.mjs and terminal-qa.mjs, which
+    /// used to exist only in the cas-src checkout. They ship with the skills now,
+    /// byte-identical to the repo scripts, and every invocation is skill-relative.
+    #[test]
+    fn design_qa_scripts_ship_with_their_skills_and_run_skill_relative() {
+        const VISUAL_QA: &str = include_str!("../../scripts/visual-qa.mjs");
+        const TERMINAL_QA: &str = include_str!("../../scripts/terminal-qa.mjs");
+        for (label, catalog) in wp10_catalogs() {
+            assert_eq!(
+                wp10_get(label, catalog, "skills/cas-ui-craft/scripts/visual-qa.mjs"),
+                VISUAL_QA,
+                "{label} visual-qa.mjs drifted from scripts/visual-qa.mjs; copy it again"
+            );
+            assert_eq!(
+                wp10_get(label, catalog, "skills/cas-cli-craft/scripts/terminal-qa.mjs"),
+                TERMINAL_QA,
+                "{label} terminal-qa.mjs drifted from scripts/terminal-qa.mjs; copy it again"
+            );
+            let ui_rubric = wp10_get(label, catalog, "skills/cas-ui-craft/references/critique-rubric.md");
+            let cli_rubric = wp10_get(label, catalog, "skills/cas-cli-craft/references/critique-rubric.md");
+            assert!(ui_rubric.contains("<skills-dir>/cas-ui-craft/scripts/visual-qa.mjs"));
+            assert!(ui_rubric.contains("--artifact-dir"));
+            assert!(cli_rubric.contains("<skills-dir>/cas-cli-craft/scripts/terminal-qa.mjs"));
+            for skill in WP10_SKILLS {
+                let prefix = format!("skills/{skill}/");
+                for builtin in catalog.iter().filter(|b| b.path.starts_with(&prefix)) {
+                    if !builtin.path.ends_with(".md") {
+                        continue;
+                    }
+                    for stale in ["node scripts/visual-qa.mjs", "node scripts/terminal-qa.mjs", "node scripts/validate_palette.js"] {
+                        assert!(
+                            !builtin.content.contains(stale),
+                            "{label} {}: {stale:?} is project-relative; use <skills-dir>/<skill>/scripts/",
+                            builtin.path
+                        );
+                    }
+                    let fallbacks = builtin.content.matches("Fallback, stated once").count();
+                    let is_rubric = builtin.path.ends_with("craft/references/critique-rubric.md");
+                    assert_eq!(
+                        fallbacks,
+                        usize::from(is_rubric),
+                        "{label} {}: the QA fallback is stated once, in the craft rubric",
+                        builtin.path
+                    );
+                }
+            }
+        }
+    }
+
+    fn wp10_css_value(value: &serde_json::Value) -> String {
+        match value {
+            serde_json::Value::String(text) => text.clone(),
+            other => other.to_string(),
+        }
+    }
+
+    fn wp10_entries(group: &serde_json::Value) -> Vec<(&String, &serde_json::Value)> {
+        group
+            .as_object()
+            .expect("token group is an object")
+            .iter()
+            .filter(|(name, _)| !name.starts_with('$'))
+            .collect()
+    }
+
+    fn wp10_expected_colors(color: &serde_json::Value, mode: &str) -> BTreeMap<String, String> {
+        let mut vars = BTreeMap::new();
+        for (role, token) in wp10_entries(&color[mode]) {
+            vars.insert(format!("--{role}"), wp10_css_value(&token["$value"]));
+        }
+        for group in ["series", "magnitude", "polarity"] {
+            let values = color[group][mode]["$value"].as_array().expect("color ramp");
+            for (index, value) in values.iter().enumerate() {
+                vars.insert(format!("--{group}-{}", index + 1), wp10_css_value(value));
+            }
+        }
+        vars.insert(
+            "--series-neutral".to_string(),
+            wp10_css_value(&color["series-neutral"][mode]["$value"]),
+        );
+        vars
+    }
+
+    fn wp10_css_vars(block: &str) -> BTreeMap<String, String> {
+        block
+            .lines()
+            .filter_map(|line| {
+                let (name, value) = line.trim().split_once(": ")?;
+                name.starts_with("--")
+                    .then(|| (name.to_string(), value.trim_end_matches(';').to_string()))
+            })
+            .collect()
+    }
+
+    /// Audit L4 F10: every render pasted from a 22 KB DTCG JSON. tokens.css is
+    /// generated from it (scripts/gen-design-tokens-css.py) and must say exactly
+    /// what the JSON says, in light and in dark.
+    #[test]
+    fn design_spec_tokens_css_matches_the_json() {
+        let generic = [
+            "serif", "sans-serif", "monospace", "cursive", "fantasy", "system-ui", "ui-serif",
+            "ui-sans-serif", "ui-monospace", "ui-rounded", "-apple-system",
+        ];
+        for (label, catalog) in wp10_catalogs() {
+            let tokens: serde_json::Value = serde_json::from_str(wp10_get(
+                label,
+                catalog,
+                "skills/design-spec/references/design-tokens.json",
+            ))
+            .expect("design tokens are JSON");
+            let css = wp10_get(label, catalog, "skills/design-spec/references/tokens.css");
+            let dark_at = css
+                .find("@media screen and (prefers-color-scheme: dark)")
+                .expect("tokens.css has a screen-only dark block");
+            let (root, dark) = css.split_at(dark_at);
+            assert!(root.contains(":root {"), "{label} tokens.css lacks :root");
+
+            let mut expected = wp10_expected_colors(&tokens["color"], "light");
+            let typography = &tokens["typography"];
+            for (name, token) in wp10_entries(&typography["family"]) {
+                let family = token["$value"]
+                    .as_array()
+                    .expect("font stack")
+                    .iter()
+                    .map(|font| {
+                        let font = font.as_str().expect("font name");
+                        if generic.contains(&font) || !font.contains(' ') {
+                            font.to_string()
+                        } else {
+                            format!("\"{font}\"")
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                expected.insert(format!("--font-{name}"), family);
+            }
+            for (name, token) in wp10_entries(&typography["scale"]) {
+                let value = &token["$value"];
+                expected.insert(
+                    format!("--type-{name}"),
+                    format!(
+                        "{} {}/{} var(--font-{})",
+                        wp10_css_value(&value["fontWeight"]),
+                        wp10_css_value(&value["fontSize"]),
+                        wp10_css_value(&value["lineHeight"]),
+                        wp10_css_value(&value["fontFamily"]),
+                    ),
+                );
+            }
+            expected.insert(
+                "--measure".to_string(),
+                wp10_css_value(&typography["measure"]["$value"]),
+            );
+            for (step, token) in wp10_entries(&tokens["space"]) {
+                expected.insert(format!("--space-{step}"), wp10_css_value(&token["$value"]));
+            }
+            for name in ["container", "gutter", "margin-column"] {
+                expected.insert(
+                    format!("--{name}"),
+                    wp10_css_value(&tokens["layout"][name]["$value"]),
+                );
+            }
+            for (name, token) in wp10_entries(&tokens["radius"]) {
+                expected.insert(format!("--radius-{name}"), wp10_css_value(&token["$value"]));
+            }
+
+            assert_eq!(
+                wp10_css_vars(root),
+                expected,
+                "{label} tokens.css :root drifted from design-tokens.json; rerun \
+                 scripts/gen-design-tokens-css.py"
+            );
+            assert_eq!(
+                wp10_css_vars(dark),
+                wp10_expected_colors(&tokens["color"], "dark"),
+                "{label} tokens.css dark block drifted from design-tokens.json; rerun \
+                 scripts/gen-design-tokens-css.py"
+            );
+        }
+    }
+
+    /// Audit L4 F28: the release renderer's bundled defaults are a copy of the
+    /// Petrastella tokens; every value they carry must match design-spec's.
+    #[test]
+    fn release_report_default_tokens_match_the_design_spec_tokens() {
+        fn walk(
+            defaults: &serde_json::Value,
+            design: &serde_json::Value,
+            path: &str,
+            checked: &mut usize,
+            label: &str,
+        ) {
+            if let Some(value) = defaults.get("$value") {
+                *checked += 1;
+                assert_eq!(
+                    Some(value),
+                    design.get("$value"),
+                    "{label} default-tokens.json{path} differs from design-tokens.json"
+                );
+                return;
+            }
+            for (name, child) in wp10_entries(defaults) {
+                walk(child, &design[name.as_str()], &format!("{path}/{name}"), checked, label);
+            }
+        }
+        for (label, catalog) in wp10_catalogs() {
+            let defaults: serde_json::Value = serde_json::from_str(wp10_get(
+                label,
+                catalog,
+                "skills/cas-release-report/references/default-tokens.json",
+            ))
+            .expect("default tokens are JSON");
+            let design: serde_json::Value = serde_json::from_str(wp10_get(
+                label,
+                catalog,
+                "skills/design-spec/references/design-tokens.json",
+            ))
+            .expect("design tokens are JSON");
+            let mut checked = 0;
+            walk(&defaults, &design, "", &mut checked, label);
+            assert!(checked >= 30, "{label}: only {checked} default tokens compared");
+        }
+    }
+
+    /// Audit L4 F9 / L1 #8: design and report skill descriptions are loaded on
+    /// every turn in every harness; each fits 250 characters.
+    #[test]
+    fn design_and_report_skill_descriptions_fit_250_chars() {
+        for (label, catalog) in wp10_catalogs() {
+            for skill in WP10_SKILLS {
+                let body = wp10_get(label, catalog, &format!("skills/{skill}/SKILL.md"));
+                let description = body
+                    .lines()
+                    .find_map(|line| line.strip_prefix("description: "))
+                    .unwrap_or_else(|| panic!("{label} {skill} has no description"));
+                assert!(
+                    description.chars().count() <= 250,
+                    "{label} {skill} description is {} chars: {description}",
+                    description.chars().count()
+                );
+            }
+        }
+    }
+
+    /// Audit L4 F4: three contradictory form tables (pie, KPI cards) became one,
+    /// in cas-ui-craft's form vocabulary; the others point at it.
+    #[test]
+    fn one_form_table_lives_in_the_ui_craft_form_vocabulary() {
+        for (label, catalog) in wp10_catalogs() {
+            let forms = wp10_get(label, catalog, "skills/cas-ui-craft/references/form-vocabulary.md");
+            for marker in ["the one form table", "**Heatmap**", "**Scatter**", "**Distribution**", "**Stat strip**", "Pie, donut"] {
+                assert!(forms.contains(marker), "{label} form vocabulary missing {marker:?}");
+            }
+            for path in [
+                "skills/cas-dataviz/SKILL.md",
+                "skills/cas-html-reports/SKILL.md",
+                "skills/cas-html-reports/references/presentation-rules.md",
+            ] {
+                let body = wp10_get(label, catalog, path);
+                assert!(body.contains("form-vocabulary.md"), "{label} {path} must point at the form table");
+                for table in ["| Reader task |", "| Reader's task |", "| Message | Use |"] {
+                    assert!(!body.contains(table), "{label} {path} keeps its own form table ({table})");
+                }
+            }
+            for path in [
+                "skills/cas-dataviz/SKILL.md",
+                "skills/cas-html-reports/references/presentation-rules.md",
+                "skills/cas-html-reports/references/report-types.md",
+                "skills/cas-html-reports/references/review-checklist.md",
+            ] {
+                assert!(
+                    !wp10_get(label, catalog, path).contains("KPI cards"),
+                    "{label} {path} still prescribes KPI cards; the form is a stat strip"
+                );
+            }
+        }
+    }
+
+    /// Audit L4 F2/F3/F14 and decision D5: the release report is CLI-first, it
+    /// owns published releases, and the PDF check is a shipped script.
+    #[test]
+    fn release_report_is_cli_first_and_owns_published_releases() {
+        for (label, catalog) in wp10_catalogs() {
+            let skill = wp10_get(label, catalog, "skills/cas-release-report/SKILL.md");
+            let cli = skill
+                .find("`cas release report <version> --pdf`")
+                .unwrap_or_else(|| panic!("{label} release-report step 2 must run the CLI"));
+            let manual = skill.find("render.py <md>").expect("manual fallback stays documented");
+            assert!(cli < manual, "{label}: the CLI comes before the manual renderer");
+            let pdf = wp10_get(label, catalog, "skills/cas-release-report/references/pdf.md");
+            assert!(pdf.contains("check-pdf.py") && !pdf.contains("import fitz"));
+            assert!(!pdf.contains("chromium.launch"), "{label} pdf.md still pastes a render program");
+            let check = wp10_get(label, catalog, "skills/cas-release-report/scripts/check-pdf.py");
+            assert!(check.contains("import pymupdf") && !check.contains("import fitz"));
+
+            let html = wp10_get(label, catalog, "skills/cas-html-reports/SKILL.md");
+            let description = html.lines().find_map(|l| l.strip_prefix("description: ")).unwrap();
+            assert!(description.contains("cas-release-report"), "{label} html-reports must hand releases off");
+            let types = wp10_get(label, catalog, "skills/cas-html-reports/references/report-types.md");
+            assert!(types.contains("uses `cas-release-report`"));
+        }
+    }
+
+    /// Audit L4 F6/F7 and decision D8: DESIGN.md follows the public spec's keys,
+    /// maps project token names to roles, and is linted.
+    #[test]
+    fn design_spec_adopts_the_design_md_spec_and_its_linter() {
+        for (label, catalog) in wp10_catalogs() {
+            let skill = wp10_get(label, catalog, "skills/design-spec/SKILL.md");
+            for marker in [
+                "google-labs-code/design.md",
+                "`rounded`",
+                "`maps`",
+                "`omitted`",
+                "npx @google/design.md lint DESIGN.md",
+                "references/tokens.css",
+            ] {
+                assert!(skill.contains(marker), "{label} design-spec missing {marker:?}");
+            }
+            assert!(!skill.contains("IMPORTANT:"), "{label} design-spec shouts");
+            assert!(!skill.contains("`radius` —"), "{label} design-spec keeps the pre-spec radius key");
+        }
+    }
+
+    #[test]
+    fn wp10_shipped_files_are_registered_in_every_catalog() {
+        for (label, catalog) in wp10_catalogs() {
+            for path in [
+                "skills/cas-ui-craft/scripts/visual-qa.mjs",
+                "skills/cas-cli-craft/scripts/terminal-qa.mjs",
+                "skills/design-spec/references/tokens.css",
+                "skills/cas-release-report/scripts/check-pdf.py",
+                "skills/cas-frontend-engineering/references/playwright-acceptance.md",
+            ] {
+                assert!(!wp10_get(label, catalog, path).is_empty(), "{label} {path} is empty");
+            }
+        }
+    }
+
+
+    // ---------------------------------------------------------------------
+    // cas-6b97 (WP12b): harness projection and D6
+    // ---------------------------------------------------------------------
+
+    /// Every harness's project sync writes its own tree, with text whose tool
+    /// names resolve for that harness, and nothing else.
+    #[test]
+    fn project_sync_writes_each_harness_its_own_projection() {
+        use tempfile::tempdir;
+
+        // Foreign spellings only: once skill text is prefix-neutral (audit D1)
+        // a skill may carry no prefix at all, but never another harness's.
+        for (harness, dir, foreign) in [
+            (SupervisorCli::Claude, ".claude", &["mcp__cs__task"][..]),
+            (SupervisorCli::Codex, ".codex", &["mcp__cas__task"][..]),
+            (SupervisorCli::Grok, ".grok", &["mcp__cas__task", "mcp__cs__task"][..]),
+            (
+                SupervisorCli::OpenCode,
+                ".opencode",
+                &["mcp__cas__task", "mcp__cs__task", "cas__task"][..],
+            ),
+        ] {
+            let temp = tempdir().unwrap();
+            sync_all_builtins_for_project(harness, temp.path()).unwrap();
+            let worker = std::fs::read_to_string(
+                temp.path().join(dir).join("skills/cas-worker/SKILL.md"),
+            )
+            .unwrap_or_else(|err| panic!("{harness:?} wrote no {dir}/skills/cas-worker: {err}"));
+            let expected = skill_catalog_for_harness(harness)
+                .iter()
+                .find(|b| b.path == "skills/cas-worker/SKILL.md")
+                .unwrap()
+                .content;
+            assert_eq!(worker, expected, "{harness:?} wrote another harness's worker text");
+            for wrong in foreign {
+                assert!(!worker.contains(wrong), "{harness:?} worker carries {wrong}");
+            }
+            let written: Vec<String> = std::fs::read_dir(temp.path())
+                .unwrap()
+                .flatten()
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .filter(|name| name.starts_with('.') && !name.starts_with(".cas"))
+                .collect();
+            assert_eq!(written, vec![dir.to_string()], "{harness:?} wrote other trees");
+            let agents = temp.path().join(dir).join("agents");
+            let md_agents = std::fs::read_dir(&agents)
+                .map(|entries| entries.flatten().count())
+                .unwrap_or(0);
+            assert_eq!(
+                md_agents,
+                required_factory_agents_for(harness).len()
+                    * usize::from(matches!(harness, SupervisorCli::Claude | SupervisorCli::Grok)),
+                "{harness:?} installed an unexpected agent set"
+            );
+        }
+    }
+
+    #[test]
+    fn builtin_gitignore_covers_the_opencode_projection() {
+        let entries = builtin_gitignore_entries(&[SupervisorCli::OpenCode]);
+        assert!(entries.contains(&"/.opencode/skills/cas-worker/SKILL.md".to_string()));
+        assert!(entries.iter().all(|entry| entry.starts_with("/.opencode/skills/")));
+    }
+
+    /// Audit D6: Codex ignores `.md` agents, so none is registered, required,
+    /// or kept on disk, and the Codex supervisor's constraints moved into its
+    /// checklist.
+    #[test]
+    fn codex_ships_no_md_agents_and_the_checklist_keeps_its_constraints() {
+        assert!(CODEX_BUILTIN_AGENTS.is_empty());
+        assert!(agent_catalog_for_harness(SupervisorCli::Codex).is_empty());
+        assert!(required_factory_agents_for(SupervisorCli::Codex).is_empty());
+        assert_eq!(
+            required_factory_agents_for(SupervisorCli::Grok),
+            REQUIRED_FACTORY_AGENTS
+        );
+        let checklist = CODEX_BUILTIN_SKILLS
+            .iter()
+            .find(|b| b.path == "skills/cas-codex-supervisor-checklist/SKILL.md")
+            .unwrap()
+            .content;
+        assert!(checklist.contains("## Codex constraints"));
+        assert!(checklist.contains("loads no `.md` agents"));
     }
 }

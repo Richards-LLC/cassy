@@ -163,7 +163,7 @@ pub(crate) fn queued_message_provenance(message: &cas_store::QueuedPrompt) -> St
 pub(crate) fn commander_reply_command(message: &cas_store::QueuedPrompt) -> Option<String> {
     matches!(operator_class(message), Some(OperatorClass::Verified { .. })).then(|| {
         format!(
-            "coordination action=message target=operator in_reply_to={} message=…",
+            "coordination action=message target=operator in_reply_to={} summary=… message=…",
             message.id
         )
     })
@@ -1606,6 +1606,10 @@ impl CasService {
                     && (other_task_active || anchor_integrated))
                     .then(|| recorded_anchor.clone())
                     .flatten();
+                // GH #1022: only a landed anchor with no other active task can
+                // hide same-task commits pushed after the merge.
+                let frozen_on_landed_anchor =
+                    frozen_anchor.is_some() && anchor_integrated && !other_task_active;
                 if let Some(branch) = branch
                     && let Some(branch_tip) = frozen_anchor.or_else(|| {
                         crate::prompt_revalidation::resolve_live_branch_tip(
@@ -1634,6 +1638,32 @@ impl CasService {
                         &repo.target_branch,
                     ) {
                         MergeRequestDecision::AlreadyIntegrated { target_tip } => {
+                            if frozen_on_landed_anchor
+                                && let Some(live_tip) =
+                                    crate::prompt_revalidation::resolve_live_branch_tip(
+                                        &repo.repo_root,
+                                        &branch,
+                                        recorded_anchor.as_deref(),
+                                    )
+                                    .filter(|live_tip| *live_tip != branch_tip)
+                                && matches!(
+                                    revalidate_merge_request(
+                                        &repo.repo_root,
+                                        &live_tip,
+                                        &repo.target_branch,
+                                    ),
+                                    MergeRequestDecision::Pending { .. }
+                                )
+                            {
+                                return Ok(Self::success(
+                                    crate::prompt_revalidation::merge_request_beyond_landed_anchor_guidance(
+                                        &task.id,
+                                        &branch_tip,
+                                        &live_tip,
+                                        &repo.target_branch,
+                                    ),
+                                ));
+                            }
                             return Ok(Self::success(merge_landed_guidance(
                                 &task.id,
                                 &branch_tip,
@@ -4341,12 +4371,12 @@ mod cas_89e1_post_merge_message_type_tests {
         };
         assert_eq!(
             commander_reply_command(&row).as_deref(),
-            Some("coordination action=message target=operator in_reply_to=3139 message=…")
+            Some("coordination action=message target=operator in_reply_to=3139 summary=… message=…")
         );
         assert_eq!(
             super::commander_reply_framing(&row).as_deref(),
             Some(
-                "Reply with: `coordination action=message target=operator in_reply_to=3139 message=…`\nPhone reply contract: see `cas-supervisor/references/operator-reply.md`.\n",
+                "Reply with: `coordination action=message target=operator in_reply_to=3139 summary=… message=…`\nPhone reply contract: see `cas-supervisor/references/operator-reply.md`.\n",
             )
         );
         row.origin = None;

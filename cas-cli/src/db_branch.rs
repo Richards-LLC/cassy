@@ -712,7 +712,7 @@ pub fn role_gate(is_supervisor: bool, action: &str) -> Result<(), String> {
         Ok(())
     } else {
         Err(format!(
-            "coordination {action} rejected: only the supervisor provisions or deletes database branches, and connection strings never reach a worker through MCP. Ask for one with `coordination action=message target=supervisor blocker=true message=\"db branch for <task-id>: <why>\"`; the supervisor's db_branch_create writes {ENV_FILE} into your worktree."
+            "coordination {action} rejected: only the supervisor provisions or deletes database branches, and connection strings never reach a worker through MCP. Ask for one with `coordination action=message target=supervisor blocker=true summary=\"db branch for <task-id>\" message=\"db branch for <task-id>: <why>\"`; the supervisor's db_branch_create writes {ENV_FILE} into your worktree."
         ))
     }
 }

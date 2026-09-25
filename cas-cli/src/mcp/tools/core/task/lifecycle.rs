@@ -879,7 +879,7 @@ impl CasCore {
                     return Err(McpError {
                         code: ErrorCode::INVALID_PARAMS,
                         message: Cow::from(format!(
-                            "PLANNING RACE WARNING: supervisor {other_creator} created children under epic {epic} at {planned_at}. \\
+                            "PLANNING RACE WARNING: supervisor {other_creator} created children under epic {epic} at {planned_at}. \
                              Review that plan before adding another child; if this is intentional, retry with confirm_warning=true."
                         )),
                         data: None,
@@ -914,7 +914,7 @@ impl CasCore {
                 return Err(McpError {
                     code: ErrorCode::INVALID_PARAMS,
                     message: Cow::from(format!(
-                        "DUPLICATE TASK WARNING: open task {existing_id} ({existing_title:?}) overlaps this {overlap_subject} \\
+                        "DUPLICATE TASK WARNING: open task {existing_id} ({existing_title:?}) overlaps this {overlap_subject} \
                          at {:.0}%{identifier_note}. Review or reuse it; if this is intentional, retry with confirm_warning=true.",
                         score * 100.0,
                     )),
@@ -1817,7 +1817,7 @@ impl CasCore {
                            {tool_prefix}task action=update id=<task_id> assignee=<worker_name>\n\
                            {tool_prefix}coordination action=message target=<worker_name> summary=\"task assigned\" message=\"Task <task_id> assigned\"\n\n\
                         2. Or spawn a new worker:\n\
-                           {tool_prefix}coordination action=spawn_workers count=1 task_id=<task_id>\n\n\
+                           {tool_prefix}factory action=spawn_workers count=1 task_id=<task_id>\n\n\
                         Supervisors coordinate and review; workers execute tasks.",
                         tool_prefix = crate::mcp::tools::core::guidance::caller_prefix()
                     )),

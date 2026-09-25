@@ -1,6 +1,6 @@
 # Auth Fixture Template
 
-Ready-to-copy Playwright fixture for Nuxt (3 & 4) apps with Firebase auth, written for `@playwright/test` 1.63. Modeled after the gabber-studio production test suite.
+Ready-to-copy Playwright fixture for Nuxt (3 & 4) apps with Firebase auth, written for `@playwright/test` 1.63. Modeled after a production Nuxt test suite.
 
 ## tests/config/environments.ts
 

@@ -1,7 +1,8 @@
 ---
 name: cas-brainstorm
 description: Use when the user asks to brainstorm or clarify an ambiguous feature, problem, scope, or direction before planning or coding.
-managed_by: cas
+metadata:
+  managed_by: cas
 ---
 
 # Brainstorm Before You Build
@@ -29,7 +30,7 @@ The durable output is a **requirements document** stored at `docs/brainstorms/YY
 
 These exist because Cassy agents have a documented tendency to dump multiple questions at once and lead with solutions. Do not skip them.
 
-1. **Ask ONE question at a time.** Never batch unrelated questions into one message. If you find yourself writing "Also,..." or "And another thing:" — stop. Send the first question, wait for the answer, then ask the next.
+1. **Ask one frontier per round.** Each round, ask only the questions whose prerequisites are settled, numbered, each with a recommended answer (usually one question). Never add an unrelated or dependent question to the round; if you find yourself writing "Also,..." or "And another thing:", stop. Wait for the answers, then ask the next frontier.
 2. **Use the `AskUserQuestion` tool for blocking questions.** It is the platform's blocking question tool. Use it instead of presenting numbered options in chat whenever possible. Numbered chat options are a fallback only. In factory mode AskUserQuestion is blocked — ask the questions in plain text and end your turn; the director relays answers.
 3. **Prefer single-select multiple choice.** Single-select is faster for the user than open-ended prose questions. Use it when picking one direction, one priority, or one next step.
 4. **Use multi-select rarely and intentionally.** Only for compatible sets like goals, constraints, or non-goals that can all coexist. If prioritization matters, follow up by asking which selected item is primary.
@@ -73,7 +74,7 @@ ls docs/brainstorms/ 2>/dev/null
 Also check Cassy for prior brainstorms or tasks:
 
 ```
-mcp__cas__search action=search query="<topic keywords>" doc_type=entry limit=5
+search action=search query="<topic keywords>" doc_type=entry limit=5
 ```
 
 If a recent matching `*-requirements.md` file exists, or the user references prior work:
@@ -125,8 +126,8 @@ Match depth to scope:
 
 *Constraint Check* — Read project instruction files (`CLAUDE.md`, `AGENTS.md` if present) for workflow, product, or scope constraints that affect the brainstorm. Search Cassy for prior decisions:
 ```
-mcp__cas__search action=search query="<topic>" doc_type=entry
-mcp__cas__task action=list status=closed
+search action=search query="<topic>" doc_type=entry
+task action=list status=closed
 ```
 
 *Topic Scan* — Search for relevant terms in the codebase. Read the most relevant existing artifact (prior brainstorm, plan, spec, skill, or feature doc). Skim adjacent examples covering similar behavior.
@@ -214,7 +215,7 @@ For **Lightweight** brainstorms, keep the document compact. Skip document creati
 After writing the document, also store the topic and key decisions in Cassy memory so future brainstorms can find them:
 
 ```
-mcp__cas__memory action=remember title="Brainstorm: <topic>" content="<1-paragraph summary + decisions + path to doc>" tags=brainstorm,<topic>
+memory action=remember title="Brainstorm: <topic>" content="<1-paragraph summary + decisions + path to doc>" tags=brainstorm,<topic>
 ```
 
 ### Phase 4: Handoff

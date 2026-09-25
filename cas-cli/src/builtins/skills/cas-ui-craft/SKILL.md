@@ -1,7 +1,8 @@
 ---
 name: cas-ui-craft
-description: Use when designing or rendering any human-facing surface — an HTML report, dashboard, product or landing page, README hero, slide, or application screen — before the first render, and when critiquing one before it merges to a public surface. Owns the concept brief, the first-three-seconds rule, the form vocabulary, and the scored critique rubric; cas-html-reports keeps the report contract and cas-dataviz the figure contract.
-managed_by: cas
+description: Use when designing, rendering, or critiquing a human-facing HTML surface — report, dashboard, product or landing page, README hero, slide, app screen — before first render and before merge. Reports follow cas-html-reports, figures cas-dataviz.
+metadata:
+  managed_by: cas
 ---
 
 # UI craft
@@ -17,8 +18,10 @@ page as ours. Compliance with a contract is the floor; this skill is the ceiling
    page is not filled.
 2. **Inherit the design language.** Read the project's `DESIGN.md`; without one, read
    [../design-spec/references/petrastella-design-language.md](../design-spec/references/petrastella-design-language.md)
-   and its `design-tokens.json`. Done when the artifact's `:root` declares tokens by the names in
-   that source and no rule carries a hex value the tokens do not. A neutral palette is chosen
+   and paste [../design-spec/references/tokens.css](../design-spec/references/tokens.css) into
+   the artifact (`design-tokens.json` is for tooling; do not read it to copy values). Done when
+   the artifact's `:root` declares tokens by the names in that source and no rule carries a hex
+   value the tokens do not. A neutral palette is chosen
    only when the brief's *omitted* field names the brand reason.
 3. **Compose the first screen around the argument as a figure.** The verdict sentence and the one
    figure that proves it are both fully visible at 1280×800 and at 390×844 with no scroll; nothing
@@ -34,9 +37,9 @@ page as ours. Compliance with a contract is the floor; this skill is the ceiling
    `cas-html-reports/references/technical-contract.md` is the full list; apply the same list to
    any other surface. No fixed height on a text-bearing box without a declared overflow
    strategy; a rule that sets a background sets its foreground. Done when a JS-disabled reload
-   and a print preview lose nothing and `node scripts/visual-qa.mjs <artifact>` prints PASS
-   (light and dark contrast per node, clipping, overlap, 390px overflow) — or, where the project
-   lacks the script, the same four checks were made by eye on both schemes and the brief says so.
+   and a print preview lose nothing and the visual-QA run in
+   [references/critique-rubric.md](references/critique-rubric.md#mechanical-defects-score-0)
+   prints PASS.
 6. **Critique with the rubric before merge.** Score the artifact 1–5 on each dimension in
    [references/critique-rubric.md](references/critique-rubric.md) and append the scored table to
    the brief under `## Critique`. A public surface (anything an operator, client, or reader outside
@@ -73,6 +76,7 @@ Open them in a browser and read the source.
 ## Scope boundaries
 
 `cas-html-reports` owns the report type × audience matrix, provenance, and the markdown-first
-workflow; `cas-dataviz` owns chart selection, number formatting, and palette validation;
-`design-spec` owns `DESIGN.md`. This skill sits between the markdown and the render: it decides
+workflow; `cas-dataviz` owns chart construction, number formatting, and palette validation;
+`design-spec` owns `DESIGN.md`; `cas-frontend-engineering` implements an application screen once
+its brief is approved. This skill sits between the markdown and the render: it decides
 what the page is *for* and whether the result is good enough to carry the name.

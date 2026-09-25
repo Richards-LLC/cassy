@@ -741,8 +741,37 @@ pub fn with_response_instructions(
 ) -> String {
     let prefix = receiver_cli.backend().capabilities().tool_prefix;
     format!(
-        "{message}\n\n---\nTo respond to this message, use: `{prefix}coordination action=message target={respond_to} message=\"...\"`"
+        "{message}\n\n---\nTo respond to this message, use: `{prefix}coordination action=message target={respond_to} summary=\"...\" message=\"...\"`"
     )
+}
+
+/// Resolve the harness of the worker a director event is about (cas-dc1b).
+///
+/// Worker-facing lines (assignment, stall nudge, reply footer) and the
+/// worker-side commands quoted to the supervisor must carry the tool prefix
+/// of the worker that will run them. The session-wide `worker_cli` is only
+/// the spawn default: a mixed fleet (for example a Claude worker in a
+/// Codex-default session) would otherwise be told to call `mcp__cs__*`, a
+/// tool its harness does not have. `harness_for` is the per-recipient
+/// resolver (`FactoryApp::harness_for`); events that name no worker keep the
+/// session default.
+pub fn recipient_worker_cli(
+    event: &DirectorEvent,
+    default_worker_cli: SupervisorCli,
+    harness_for: impl Fn(&str) -> SupervisorCli,
+) -> SupervisorCli {
+    match event {
+        DirectorEvent::TaskAssigned { worker, .. }
+        | DirectorEvent::TaskCompleted { worker, .. }
+        | DirectorEvent::TaskBlocked { worker, .. }
+        | DirectorEvent::WorkerIdle { worker, .. }
+        | DirectorEvent::WorkerStalled { worker, .. } => harness_for(worker),
+        DirectorEvent::AgentRegistered { agent_name, .. } => harness_for(agent_name),
+        DirectorEvent::SupervisorStalled { .. }
+        | DirectorEvent::EpicStarted { .. }
+        | DirectorEvent::EpicCompleted { .. }
+        | DirectorEvent::EpicAllSubtasksClosed { .. } => default_worker_cli,
+    }
 }
 
 /// True when a WorkerIdle active-task payload is the merge-gate park path
@@ -1186,9 +1215,9 @@ fn merge_required_idle_prompt_text(
         format!("`{supervisor_prefix}task action=show id={}`", task.task_id)
     } else {
         match epic_id.as_deref() {
-            Some(id) => format!("`{supervisor_prefix}coordination action=epic_status id={id}`"),
+            Some(id) => format!("`{supervisor_prefix}factory action=epic_status id={id}`"),
             None => {
-                format!("`{supervisor_prefix}coordination action=epic_status id=<focused-epic>")
+                format!("`{supervisor_prefix}factory action=epic_status id=<focused-epic>")
             }
         }
     };
@@ -1385,7 +1414,7 @@ pub fn generate_prompt_at(
                  Start working: {worker_prefix}task action=start id={task_id}\n\
                  Successful task action=start is authoritative assignment acceptance; no prose ACK is required. A concise execution plan is optional.\n\
                  While working, post progress notes with {worker_prefix}task action=notes.\n\
-                 If blocked, set status=blocked and send {worker_prefix}coordination action=message target=supervisor blocker=true with the blocker. For merge requests, use merge_request=true. Ordinary updates surface through the inbox on the next turn; only authenticated typed blocker, merge, verification, or lifecycle events may wake an idle supervisor."
+                 If blocked, set status=blocked and send {worker_prefix}coordination action=message target=supervisor blocker=true summary=\"...\" message=\"...\" with the blocker. For merge requests, use merge_request=true. Ordinary updates surface through the inbox on the next turn; only authenticated typed blocker, merge, verification, or lifecycle events may wake an idle supervisor."
             );
 
             Some(Prompt {
@@ -3553,7 +3582,7 @@ mod tests {
         assert!(
             prompt
                 .text
-                .contains("cas__coordination action=epic_status id=cas-4c77")
+                .contains("cas__factory action=epic_status id=cas-4c77")
                 || prompt.text.contains("epic_status"),
             "must direct supervisor to epic_status with cas__ prefix for Grok: {}",
             prompt.text
@@ -3670,7 +3699,7 @@ mod tests {
 
         // Supervisor-facing body tools: exact Claude alias (not footer-only).
         assert!(
-            body.contains("mcp__cas__coordination action=epic_status id=cas-epic1"),
+            body.contains("mcp__cas__factory action=epic_status id=cas-epic1"),
             "supervisor body epic_status must use exact Claude command: {}",
             body
         );
@@ -3686,7 +3715,7 @@ mod tests {
         );
         // Worker prefix must not appear on supervisor body actions.
         assert!(
-            !body.contains("mcp__cs__coordination action=epic_status"),
+            !body.contains("mcp__cs__factory action=epic_status"),
             "supervisor epic_status must not use worker (Codex) prefix: {}",
             body
         );
@@ -3748,7 +3777,7 @@ mod tests {
 
         // Supervisor body commands: exact Claude prefix (not footer `mcp__cas__`).
         assert!(
-            grok_body.contains("mcp__cas__coordination action=epic_status id=<focused-epic>"),
+            grok_body.contains("mcp__cas__factory action=epic_status id=<focused-epic>"),
             "Claude+Grok supervisor body epic_status must be exact Claude command: {}",
             grok_body
         );
@@ -3766,7 +3795,7 @@ mod tests {
         // Match the leading backtick so Claude's `mcp__cas__` (which
         // contains the substring `cas__`) does not false-fail the check.
         assert!(
-            !grok_body.contains("`cas__coordination action=epic_status"),
+            !grok_body.contains("`cas__factory action=epic_status"),
             "supervisor epic_status must not use bare worker (Grok) prefix: {}",
             grok_body
         );
@@ -4216,6 +4245,98 @@ mod tests {
             None,
         );
         assert!(prompt.is_none());
+    }
+
+    /// cas-dc1b (M01): a Claude worker in a Codex-default session must be
+    /// told Claude tool names in its assignment, stall nudge and reply footer,
+    /// and a Codex worker in the same session keeps the Codex names.
+    #[test]
+    fn claude_worker_in_codex_default_session_gets_its_own_tool_prefix() {
+        let resolver = |name: &str| {
+            if name == "swift-fox" {
+                SupervisorCli::Claude
+            } else {
+                SupervisorCli::Codex
+            }
+        };
+        // `make_data` registers swift-fox as the live worker the stall
+        // nudge requires; here it runs Claude while the session default is
+        // Codex.
+        let data = make_data(0);
+        let events = [
+            (
+                "swift-fox",
+                DirectorEvent::TaskAssigned {
+                    task_id: "cas-mixd".to_string(),
+                    task_title: "Mixed fleet".to_string(),
+                    worker: "swift-fox".to_string(),
+                },
+            ),
+            (
+                "swift-fox",
+                DirectorEvent::WorkerStalled {
+                    worker: "swift-fox".to_string(),
+                    task_id: "cas-mixd".to_string(),
+                    elapsed_secs: 900,
+                    escalate: false,
+                },
+            ),
+            (
+                "codex-worker",
+                DirectorEvent::TaskAssigned {
+                    task_id: "cas-mixd".to_string(),
+                    task_title: "Mixed fleet".to_string(),
+                    worker: "codex-worker".to_string(),
+                },
+            ),
+        ];
+        for (worker, event) in events {
+            let worker_cli = recipient_worker_cli(&event, SupervisorCli::Codex, resolver);
+            let prompt = generate_prompt(
+                &event,
+                &data,
+                &data,
+                "supervisor",
+                &default_config(),
+                SupervisorCli::Codex,
+                worker_cli,
+                &HashSet::new(),
+                None,
+            )
+            .unwrap_or_else(|| panic!("{worker}: {event:?} must render a worker prompt"));
+            assert_eq!(prompt.target, worker);
+            let (own, foreign) = if worker == "swift-fox" {
+                ("mcp__cas__", "mcp__cs__")
+            } else {
+                ("mcp__cs__", "mcp__cas__")
+            };
+            assert!(
+                prompt.text.contains(&format!("{own}task action=")),
+                "{worker} must see its own prefix {own}: {}",
+                prompt.text
+            );
+            assert!(
+                prompt
+                    .text
+                    .contains(&format!("{own}coordination action=message target=supervisor summary=")),
+                "{worker} reply footer must use {own} and carry summary=: {}",
+                prompt.text
+            );
+            assert!(
+                !prompt.text.contains(foreign),
+                "{worker} must never see the other harness prefix {foreign}: {}",
+                prompt.text
+            );
+        }
+
+        // Events that name no worker keep the session default.
+        let epic = DirectorEvent::EpicCompleted {
+            epic_id: "cas-epic".to_string(),
+        };
+        assert_eq!(
+            recipient_worker_cli(&epic, SupervisorCli::Codex, resolver),
+            SupervisorCli::Codex
+        );
     }
 
     #[test]

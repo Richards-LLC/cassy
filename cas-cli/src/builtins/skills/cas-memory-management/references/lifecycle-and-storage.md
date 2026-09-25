@@ -1,5 +1,6 @@
 ---
-managed_by: cas
+metadata:
+  managed_by: cas
 ---
 
 # Memory Lifecycle and Record Choice
@@ -11,7 +12,7 @@ parallel document or index.
 
 ## Recent Ordering
 
-`mcp__cas__memory action=recent` orders active entries by
+`memory action=recent` orders active entries by
 `recent_at desc, id desc`, where `recent_at` is the later of creation and last
 update. The response repeats that `ordered_by` value so callers do not infer
 ordering from display timestamps. The `limit` request field bounds the result

@@ -533,9 +533,10 @@ fn parse_skill_file(path: &Path) -> Result<Skill, CasError> {
         .map(|v| v == "true")
         .unwrap_or(false);
 
-    let managed_by_cas = extract_yaml_value(&frontmatter, "managed_by")
-        .map(|v| v == "cas")
-        .unwrap_or(false);
+    // `metadata.managed_by: cas` is the portable form; the top-level key is
+    // still accepted for copies written before the marker moved.
+    let managed_by_cas = extract_yaml_value(&frontmatter, "managed_by").is_some_and(|v| v == "cas")
+        || extract_metadata_value(&frontmatter, "managed_by").is_some_and(|v| v == "cas");
 
     // Generate ID from name
     let id = if let Some(stripped) = name.strip_prefix("cas-") {
@@ -625,6 +626,13 @@ fn extract_yaml_value(frontmatter: &str, key: &str) -> Option<String> {
         // scan, because only the pre-fix writer produced those.
         Err(_) => legacy_line_scan(frontmatter, key),
     }
+}
+
+/// Scalar under the frontmatter's `metadata` map (for example
+/// `metadata.managed_by`). A document YAML cannot parse has no metadata map.
+fn extract_metadata_value(frontmatter: &str, key: &str) -> Option<String> {
+    let parsed = serde_yaml::from_str::<serde_yaml::Value>(frontmatter).ok()?;
+    scalar_field(parsed.get("metadata")?, key)
 }
 
 /// Exact-key scalar lookup that preserves the typed-field behaviour callers
@@ -810,7 +818,7 @@ Use these MCP tools:
 ### 2. After Plan Approval
 
 Create tasks using MCP tools:
-- `mcp__cas__task action=create task_type=epic` - Create epic
+- `mcp__cas__task action=create title="..." task_type=epic` - Create epic
 - `mcp__cas__task action=create` - Create subtasks
 - `mcp__cas__task action=dep_add` - Link dependencies
 

@@ -235,7 +235,8 @@ impl CheckGroup {
             | "hub transport"
             | "hub supervised but not publishable"
             | "registered project roots"
-            | "host user skills" => Self::Host,
+            | "host user skills"
+            | "host install parity" => Self::Host,
             "user skills" | "scratchpad policy" => Self::Config,
             "legacy search index"
             | "pre-versioned search index"
@@ -353,8 +354,9 @@ const EXPECTED_TABLES: &[&str] = &[
 /// now owned by a builtin. Each entry names the builtin that supersedes it.
 ///
 /// This list exists because [`crate::builtins::prune_stale_cas_skill_dirs`]
-/// only ever removes `cas-*` directories, so a hand-installed skill without
-/// that prefix is never written by `cas update` **and** never pruned by it —
+/// only ever removes `cas-*` directories and the builtin names in
+/// [`crate::builtins::SHIPPED_NON_CAS_SKILL_DIRS`], so any other
+/// hand-installed skill is never written by `cas update` **and** never pruned by it —
 /// it simply persists forever, unreachable by any test in this repo. That is
 /// exactly how `mecha-cassy-post` kept documenting a retired hub tool contract
 /// after every in-repo copy had been corrected.
@@ -1015,7 +1017,105 @@ fn host_checks(current: Option<&Path>) -> Vec<Check> {
         duplicates.name = "host duplicate skills".into();
         checks.push(duplicates);
     }
+    checks.push(install_parity_check(&gather_install_parity()));
     checks
+}
+
+/// The harness homes `cas update --user` writes, compared against the
+/// embedded catalogs. A home is skipped when it has no `skills/` tree: that
+/// harness is not installed (or never synced) on this machine.
+fn gather_install_parity() -> Vec<(String, crate::builtins::InstallParity)> {
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        return Vec::new();
+    };
+    [
+        ("~/.claude", cas_mux::SupervisorCli::Claude, ".claude"),
+        ("~/.codex", cas_mux::SupervisorCli::Codex, ".codex"),
+        ("~/.grok", cas_mux::SupervisorCli::Grok, ".grok"),
+    ]
+    .into_iter()
+    .filter_map(|(label, harness, dir)| {
+        let dir = home.join(dir);
+        dir.join("skills").is_dir().then(|| {
+            (
+                label.to_string(),
+                crate::builtins::install_parity_for_harness(harness, &dir),
+            )
+        })
+    })
+    .collect()
+}
+
+/// Render installed-vs-catalog parity (cas-57c02). Warning, never Error: a
+/// stale copy misleads an agent but `cas update --user` repairs it. Local
+/// edits are named but do not fail the check, because sync preserves them on
+/// purpose.
+fn install_parity_check(reports: &[(String, crate::builtins::InstallParity)]) -> Check {
+    const NAME: &str = "host install parity";
+    const SAMPLE: usize = 3;
+    if reports.is_empty() {
+        return Check::new(NAME, CheckStatus::Ok, "no user-level Cassy skill install found");
+    }
+    let sample = |paths: &[String]| {
+        let mut shown = paths.iter().take(SAMPLE).cloned().collect::<Vec<_>>().join(", ");
+        if paths.len() > SAMPLE {
+            shown.push_str(&format!(", +{} more", paths.len() - SAMPLE));
+        }
+        shown
+    };
+    let local_edits = reports
+        .iter()
+        .filter(|(_, parity)| !parity.local_edits.is_empty())
+        .map(|(label, parity)| {
+            format!(
+                "{label}: {} local edit(s) preserved ({})",
+                parity.local_edits.len(),
+                sample(parity.local_edits.as_slice())
+            )
+        })
+        .collect::<Vec<_>>();
+    let drift = reports
+        .iter()
+        .filter(|(_, parity)| !parity.is_current())
+        .map(|(label, parity)| {
+            let mut parts = Vec::new();
+            for (count, kind, paths) in [
+                (parity.stale.len(), "stale", &parity.stale),
+                (parity.missing.len(), "missing", &parity.missing),
+                (parity.retired.len(), "no longer shipped", &parity.retired),
+            ] {
+                if count > 0 {
+                    parts.push(format!("{count} {kind} ({})", sample(paths.as_slice())));
+                }
+            }
+            format!("{label}: {}", parts.join(", "))
+        })
+        .collect::<Vec<_>>();
+    let checked: usize = reports.iter().map(|(_, parity)| parity.checked).sum();
+    let edits_note = if local_edits.is_empty() {
+        String::new()
+    } else {
+        format!("; {}", local_edits.join("; "))
+    };
+    if drift.is_empty() {
+        let labels = reports.iter().map(|(label, _)| label.as_str()).collect::<Vec<_>>();
+        return Check::new(
+            NAME,
+            CheckStatus::Ok,
+            format!(
+                "{} match the embedded catalog ({checked} files){edits_note}",
+                labels.join(", ")
+            ),
+        );
+    }
+    Check::new(
+        NAME,
+        CheckStatus::Warning,
+        format!(
+            "installed built-ins differ from this binary's catalog: {}{edits_note}. Run `cas update --user` to refresh and prune them",
+            drift.join("; ")
+        ),
+    )
 }
 
 fn host_hub_service_check() -> Check {
@@ -7869,6 +7969,62 @@ mod tests {
         let identical = find_divergent_user_skills(&[claude.clone(), codex], &claude);
         assert!(identical.is_empty(), "identical copies are not findings");
         assert!(matches!(divergent_user_skills_check(&identical).status, CheckStatus::Ok));
+    }
+
+    /// cas-57c02: installed-vs-catalog parity is a host row. Drift names the
+    /// harness, the kind and a sample path and points at `cas update --user`;
+    /// preserved local edits are reported without failing the check.
+    #[test]
+    fn install_parity_check_reports_drift_per_harness_and_tolerates_local_edits() {
+        use crate::builtins::InstallParity;
+
+        assert_eq!(CheckGroup::for_name("host install parity"), CheckGroup::Host);
+        assert!(matches!(install_parity_check(&[]).status, CheckStatus::Ok));
+
+        let current = InstallParity {
+            checked: 10,
+            ..InstallParity::default()
+        };
+        let edited = InstallParity {
+            checked: 10,
+            local_edits: vec!["skills/cas-wizard/template.sh".to_string()],
+            ..InstallParity::default()
+        };
+        let check = install_parity_check(&[
+            ("~/.claude".to_string(), current.clone()),
+            ("~/.codex".to_string(), edited.clone()),
+        ]);
+        assert!(matches!(check.status, CheckStatus::Ok), "{}", check.message);
+        assert!(check.message.contains("20 files"), "{}", check.message);
+        assert!(check.message.contains("1 local edit(s) preserved"), "{}", check.message);
+
+        let drifted = InstallParity {
+            checked: 10,
+            stale: vec!["skills/cas-wizard/template.sh".to_string()],
+            missing: vec!["skills/cas-worker/SKILL.md".to_string()],
+            retired: (0..5).map(|n| format!("agents/retired-{n}.md")).collect(),
+            ..InstallParity::default()
+        };
+        let check = install_parity_check(&[
+            ("~/.claude".to_string(), current),
+            ("~/.grok".to_string(), drifted),
+            ("~/.codex".to_string(), edited),
+        ]);
+        assert!(matches!(check.status, CheckStatus::Warning), "{}", check.message);
+        for needle in [
+            "~/.grok: 1 stale (skills/cas-wizard/template.sh)",
+            "1 missing (skills/cas-worker/SKILL.md)",
+            "5 no longer shipped (agents/retired-0.md, agents/retired-1.md, agents/retired-2.md, +2 more)",
+            "~/.codex: 1 local edit(s) preserved",
+            "cas update --user",
+        ] {
+            assert!(check.message.contains(needle), "missing {needle:?}: {}", check.message);
+        }
+        assert!(
+            !check.message.contains("~/.claude:"),
+            "a current harness is not listed as drift: {}",
+            check.message
+        );
     }
 
     #[test]

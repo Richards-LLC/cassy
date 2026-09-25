@@ -250,7 +250,7 @@ fn test_real_factory_spawn_workers() {
 
     // Inject prompt to spawn 2 workers
     let prompt = "Use MCP tools only. Run exactly:\n\
-        mcp__cas__coordination action=spawn_workers count=2\n\
+        mcp__cas__factory action=spawn_workers count=2\n\
         Do not add extra text.";
 
     let queue = open_prompt_queue_store(&cas_root).expect("open prompt queue");
@@ -344,7 +344,7 @@ fn test_real_factory_message_round_trip() {
     // Inject prompt: spawn 2 workers, then message them with the token
     let prompt = format!(
         "Use MCP tools only. Run exactly:\n\
-        mcp__cas__coordination action=spawn_workers count=2\n\
+        mcp__cas__factory action=spawn_workers count=2\n\
         Then send to all workers:\n\
         mcp__cas__coordination action=message target=all_workers message=\"Reply with: mcp__cas__coordination action=message target={supervisor} message=\\\"{token}\\\"\"\n\
         Do not add extra text.",

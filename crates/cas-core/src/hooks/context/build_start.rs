@@ -140,6 +140,22 @@ fn render_knowledge_index(ks: &dyn KnowledgeStore, token_budget: usize) -> (Stri
     (section, used)
 }
 
+/// Demote Markdown `#`/`##` headings inside an injected memory body to `####`
+/// so the body cannot open a new top-level SessionStart section.
+pub(super) fn demote_body_headings(body: &str) -> String {
+    body.lines()
+        .map(|line| {
+            let hashes = line.len() - line.trim_start_matches('#').len();
+            if (1..=2).contains(&hashes) && line[hashes..].starts_with(' ') {
+                format!("####{}", &line[hashes..])
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// The pull half of "index-inject / body-pull".
 ///
 /// Kept as one constant so the MCP surface (T4) can rename its actions without
@@ -391,6 +407,10 @@ pub fn build_context_with_stores(
         context_parts.push(String::new());
         let body = truncate(&current.content, HANDOFF_BODY_MAX_CHARS);
         let cut = body.len() < current.content.len();
+        // The SessionStart budget splits the payload at `## ` headings, so a
+        // heading inside the handoff body would detach the rest of the body
+        // from the degradable handoff section. Demote them below `###`.
+        let body = demote_body_headings(&body);
         total_tokens += estimate_tokens(&body) + 30;
         context_parts.push(body);
         context_parts.push(String::new());

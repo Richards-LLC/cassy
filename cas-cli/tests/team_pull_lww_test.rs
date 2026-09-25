@@ -197,3 +197,117 @@ async fn team_pull_reconciles_same_id_entries_with_lww_and_skips_foreign_rows() 
         "foreign project row must not be imported"
     );
 }
+
+fn team_rule(id: &str, content: &str, origin: Option<&str>) -> serde_json::Value {
+    let mut rule = cas::types::Rule::new(id.to_string(), content.to_string());
+    rule.last_accessed = Some(Utc::now() + chrono::Duration::hours(1));
+    let mut value = serde_json::to_value(&rule).unwrap();
+    value["project_id"] = serde_json::json!("p");
+    if let Some(origin) = origin {
+        value["origin_project"] = serde_json::json!(origin);
+    }
+    value
+}
+
+/// cas-42ee (cas-caae trace): rule ids are per-store `rule-NNN` sequence
+/// numbers, so a legacy team row without `origin_project` must never replace
+/// a rule this project authored. It may still create a free id (recorded as an
+/// unauthored pull) or refresh a local rule that was itself an unauthored pull;
+/// a row stamped with this project still wins as before.
+#[tokio::test]
+async fn team_pull_never_overwrites_an_authored_rule_with_an_unattributed_row() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path(format!("/api/teams/{TEST_TEAM}/sync/pull")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "entries": [],
+            "tasks": [],
+            "rules": [
+                team_rule("rule-002", "Gabber Studio: cut branches from staging.", None),
+                team_rule("rule-003", "Own rule, edited on another machine.", Some("p")),
+                team_rule("rule-004", "Refreshed legacy team rule.", None),
+                team_rule("rule-777", "A legacy team rule with a free id.", None),
+            ],
+            "skills": [],
+            "pulled_at": "2026-09-25T00:00:00Z",
+            "team_id": TEST_TEAM,
+            "status": "ok",
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let tmp = TempDir::new().unwrap();
+    std::fs::write(tmp.path().join("config.toml"), "[project]\ncanonical_id = \"p\"\n").unwrap();
+    let queue = Arc::new(cas::cloud::SyncQueue::open(tmp.path()).unwrap());
+    queue.init().unwrap();
+    let store = open_store_local(tmp.path()).unwrap();
+    let task_store = open_task_store_local(tmp.path()).unwrap();
+    let rule_store = open_rule_store_local(tmp.path()).unwrap();
+    let skill_store = open_skill_store_local(tmp.path()).unwrap();
+    for (id, content) in [
+        ("rule-002", "Epics branch from main."),
+        ("rule-003", "Own rule."),
+        ("rule-004", "Legacy team rule."),
+    ] {
+        rule_store
+            .add(&cas::types::Rule::new(id.to_string(), content.to_string()))
+            .unwrap();
+    }
+    // rule-004 arrived by an earlier unattributed pull, so it is not ours.
+    queue
+        .record_unauthored_pull("rule", "rule-004", "fixture")
+        .unwrap();
+
+    let mut config = CloudConfig::default();
+    config.endpoint = server.uri();
+    config.token = Some("test-token".to_string());
+    config.set_team(TEST_TEAM, "test-team");
+    let syncer = CloudSyncer::new(Arc::clone(&queue), config, CloudSyncerConfig::default());
+
+    let result = tokio::task::spawn_blocking(move || {
+        syncer.pull_team(
+            TEST_TEAM,
+            "p",
+            store.as_ref(),
+            task_store.as_ref(),
+            rule_store.as_ref(),
+            skill_store.as_ref(),
+        )
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(result.errors.is_empty(), "pull errors: {:?}", result.errors);
+    assert_eq!(result.pulled_rules, 3, "rule-003, rule-004 and rule-777 apply");
+    assert!(result.conflicts_resolved_local >= 1, "rule-002 is kept locally");
+
+    let rule_store = open_rule_store_local(tmp.path()).unwrap();
+    assert_eq!(
+        rule_store.get("rule-002").unwrap().content,
+        "Epics branch from main.",
+        "an unattributed row must not replace this project's own rule"
+    );
+    assert_eq!(
+        rule_store.get("rule-003").unwrap().content,
+        "Own rule, edited on another machine."
+    );
+    assert_eq!(
+        rule_store.get("rule-004").unwrap().content,
+        "Refreshed legacy team rule."
+    );
+    assert_eq!(
+        rule_store.get("rule-777").unwrap().content,
+        "A legacy team rule with a free id."
+    );
+    assert!(queue.is_unauthored_pull("rule", "rule-777").unwrap());
+    assert!(!queue.is_unauthored_pull("rule", "rule-002").unwrap());
+    let journaled = queue.list_conflicts(50).unwrap();
+    assert!(
+        journaled.iter().any(|conflict| conflict.entity_type == "rule"
+            && conflict.entity_id == "rule-002"
+            && conflict.strategy == "unattributed_rule_keeps_local"
+            && conflict.winner_side == "local"),
+        "the refused row is journaled: {journaled:?}"
+    );
+}

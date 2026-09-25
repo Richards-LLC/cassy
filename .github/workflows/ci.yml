@@ -157,6 +157,38 @@ jobs:
             done
           fi
 
+      # CLAUDE.md is Markdown, so a CLAUDE.md-only edit is docs-only and never
+      # reaches the Rust suite's agents_md_sync_test. The generated AGENTS.md
+      # went stale that way for a week (skills audit L6 F7). A docs-only tree
+      # has the same generator as its base, so the latest published binary
+      # renders it faithfully without a Rust build here.
+      - name: Instruction files are current and within the size cap
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CAS_SKIP_FACTORY_TOOLING: "1"
+        run: |
+          set -euo pipefail
+          # Grok truncates each instruction file at 10,000 characters.
+          for file in AGENTS.md CLAUDE.md; do
+            chars="$(wc -m < "$file")"
+            if (( chars >= 10000 )); then
+              echo "::error file=$file::$file is $chars characters; Grok truncates at 10,000"
+              exit 1
+            fi
+          done
+          # A CLAUDE.md that imports @AGENTS.md makes AGENTS.md canonical
+          # (skills audit D3): there is nothing generated to compare.
+          if grep -qx '@AGENTS.md' CLAUDE.md; then
+            echo 'AGENTS.md is canonical (CLAUDE.md imports it).'
+            exit 0
+          fi
+          bin_dir="$RUNNER_TEMP/cas-bin"
+          mkdir -p "$bin_dir" "$RUNNER_TEMP/cas-home"
+          gh release download --repo "$GITHUB_REPOSITORY" \
+            --pattern cas-x86_64-unknown-linux-gnu.tar.gz --dir "$RUNNER_TEMP"
+          tar -xzf "$RUNNER_TEMP/cas-x86_64-unknown-linux-gnu.tar.gz" -C "$bin_dir"
+          HOME="$RUNNER_TEMP/cas-home" "$bin_dir/cas" sync agents-md --check
+
   # GitHub Actions cannot fall back after it has assigned an offline
   # self-hosted runner: the job would simply remain queued. Select the runner
   # before assignment instead. The repository variable is deliberately

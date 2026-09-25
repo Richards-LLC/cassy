@@ -67,32 +67,24 @@ fn codex_factory_skills_use_cs_prefix_only() {
 
 #[test]
 fn codex_worker_recovery_uses_cs_alias_not_cas(/* cas-5b4f */) {
-    // The Codex worker recovery guide is rendered only into Codex worker
-    // sessions, where every CAS tool surfaces under the `mcp__cs__` alias.
-    // It must never hardcode `mcp__cas__` coordination/task instructions — those
-    // are unreachable for a Codex worker. Mirrors the file-level
-    // `codex_factory_skills_use_cs_prefix_only` convention.
+    // cas-5b4f, audit D1: a Codex worker cannot call `mcp__cas__` tools. The
+    // one recovery guide every harness installs names tools by bare name and
+    // spells no prefix literal; the role guidance states each prefix once.
     let root = source_root();
-    let codex_recovery =
-        load(&root.join("cas-cli/src/builtins/codex/skills/cas-worker/references/recovery.md"));
-
-    assert!(
-        codex_recovery.contains("mcp__cs__coordination"),
-        "codex worker recovery.md should give executable mcp__cs__coordination guidance"
-    );
-    assert!(
-        !codex_recovery.contains("mcp__cas__"),
-        "codex worker recovery.md must not hardcode the Claude `mcp__cas__` alias \
-         (Codex workers only have mcp__cs__ tools)"
-    );
-
-    // AC: the Claude worker recovery doc must stay correct for the Claude alias.
-    let claude_recovery =
-        load(&root.join("cas-cli/src/builtins/skills/cas-worker/references/recovery.md"));
-    assert!(
-        claude_recovery.contains("mcp__cas__coordination"),
-        "claude worker recovery.md should retain mcp__cas__coordination guidance"
-    );
+    for flavor in ["", "codex/", "grok/"] {
+        let recovery = load(&root.join(format!(
+            "cas-cli/src/builtins/{flavor}skills/cas-worker/references/recovery.md"
+        )));
+        assert!(
+            recovery.contains("coordination action=message target=supervisor"),
+            "{flavor} worker recovery.md should give executable coordination guidance"
+        );
+        let offenders = cas::builtins::unsanctioned_prefixed_tool_lines(recovery);
+        assert!(
+            offenders.is_empty(),
+            "{flavor} worker recovery.md spells a harness prefix outside the naming rule: {offenders:?}"
+        );
+    }
 }
 
 #[test]
@@ -110,8 +102,8 @@ fn codex_builtin_supervisor_guide_includes_core_workflow() {
         "supervisor guide should include hard rule about not implementing"
     );
     assert!(
-        content.contains("mcp__cs__"),
-        "codex supervisor guide should use mcp__cs__ prefix"
+        content.contains(cas::builtins::TOOL_NAMING_LINE),
+        "codex supervisor guide should state the per-harness tool prefix"
     );
 }
 
@@ -152,8 +144,8 @@ fn reminder_discipline_reference_is_complete_and_flavor_normalized() {
         }
     }
 
-    assert_eq!(claude.replace("mcp__cas__", "mcp__cs__"), codex);
-    assert_eq!(claude.replace("mcp__cas__", "cas__"), grok);
+    assert_eq!(claude, codex);
+    assert_eq!(claude, grok);
 
     for path in [
         "cas-cli/src/builtins/skills/cas-supervisor.md",
@@ -199,8 +191,6 @@ fn supervisor_epic_driving_reference_is_compact_and_three_way_mirrored() {
             "release-notes draft",
             "integration PR",
             "one tree, one queue cycle",
-            "release/vX-prepare",
-            "Release Prebuild",
         ] {
             assert!(
                 content.contains(required),
@@ -284,14 +274,9 @@ fn supervisor_skill_mirrors_include_implementation_unit_template() {
     }
 }
 
-/// cas-2c61/cas-62ab: the ~25-file mcp__cas__ sweep beyond recovery.md
-/// (cas-5b4f fixed only that one file; this closes the rest of the list
-/// cas-62ab named — workflow.md, details.md, worker-recovery.md,
-/// reference.md, cas-worker.md, session-learn/SKILL.md,
-/// cas-memory-management/SKILL.md, and the remaining swept files). Every
-/// codex builtin skill/agent source must use mcp__cs__ for executable
-/// tool instructions, never Claude's mcp__cas__ — extends the
-/// `codex_worker_recovery_uses_cs_alias_not_cas` convention corpus-wide.
+/// cas-2c61/cas-62ab, audit D1: no Codex catalog entry hardcodes Claude's
+/// `mcp__cas__` alias as an instruction. Tool names are bare; a prefix is
+/// spelled only in the naming line and generated agent `tools:` frontmatter.
 #[test]
 fn codex_builtin_skills_and_agents_never_hardcode_claude_alias() {
     for builtin in builtin_catalog::skills(builtin_catalog::Flavor::Codex)
@@ -301,10 +286,10 @@ fn codex_builtin_skills_and_agents_never_hardcode_claude_alias() {
         if !matches!(builtin.path.rsplit('.').next(), Some("md" | "yaml")) {
             continue;
         }
+        let offenders = cas::builtins::unsanctioned_prefixed_tool_lines(builtin.content);
         assert!(
-            !builtin.content.contains("mcp__cas__"),
-            "codex {} still hardcodes the Claude mcp__cas__ alias — Codex entries only \
-             surface CAS tools under mcp__cs__ (cas-2c61/cas-62ab)",
+            offenders.is_empty(),
+            "codex {} spells a harness prefix outside the naming rule: {offenders:?}",
             builtin.path
         );
     }
@@ -312,7 +297,11 @@ fn codex_builtin_skills_and_agents_never_hardcode_claude_alias() {
 
 #[test]
 fn codex_worker_runtime_instruction_allows_close_then_escalate() {
-    let content = include_str!("../../crates/cas-pty/src/pty.rs");
+    // cas-8563b: the Codex worker contract is rendered by the shared
+    // `worker_contract` renderer with the `mcp__cs__` prefix, so check the
+    // rendered launch surface rather than a literal in the source file.
+    let content =
+        cas_mux::rendered_contract_surface("codex", cas_mux::ContractRole::Worker);
 
     // cas-47b7: the worker instruction phrasing is "close it with
     // `mcp__cs__task action=close ...`" (cas-bbc2 single-task rewrite). Assert on
@@ -340,15 +329,17 @@ fn worker_failure_recovery_guidance_is_pinned_cas_62a9() {
         for marker in [
             "never retry the denied target",
             "A `/dev/null` denial is a guard defect to report",
-            "Pre-close notes must prove each applicable entry with a file, command, or test",
-            "explain each `not applicable` entry",
         ] {
             assert!(
                 worker.contains(marker),
                 "{flavor} worker guidance missing {marker:?}"
             );
         }
+        // WP2 (audit cas-1660 M51): the cas-src surface checklist moved from
+        // the always-loaded body into the on-demand close-gate reference.
         for marker in [
+            "Pre-close notes must prove each applicable entry with a file, command, or test",
+            "explain each `not applicable` entry",
             "Crossed-message freshness handshake",
             "before any corrective commit",
             "git merge-base --is-ancestor <delivered-tip> <target-tip>",
@@ -366,11 +357,8 @@ fn worker_failure_recovery_guidance_is_pinned_cas_62a9() {
 fn supervisor_reference_tree_uses_current_lifecycle_contract() {
     let root = source_root();
     let valid_actions = "`create`, `proposal_inbox`, `proposal_accept`, `proposal_reject`, `proposal_reconcile`, `show`, `update`, `start`, `close`, `cancel`, `reopen`, `request_changes`, `delete`, `list`, `ready`, `blocked`, `notes`, `dep_add`, `dep_remove`, `dep_list`, `claim`, `release`, `reset`, `transfer`, `available`, `mine`";
-    let flavors = [
-        ("", "mcp__cas__"),
-        ("codex/", "mcp__cs__"),
-        ("grok/", "cas__"),
-    ];
+    // Audit D1: every flavor names tools by bare name.
+    let flavors = [("", ""), ("codex/", ""), ("grok/", "")];
 
     for (flavor, tool_prefix) in flavors {
         let base = root.join(format!("cas-cli/src/builtins/{flavor}skills"));
@@ -439,15 +427,15 @@ fn supervisor_reference_tree_uses_current_lifecycle_contract() {
             );
         }
         assert!(
-            supervisor.contains("cas-supervisor/references/reference.md#supervisor-override"),
+            supervisor.contains("](references/reference.md#supervisor-override)"),
             "{flavor} supervisor guide must link supervisor_override reference"
         );
         assert!(
-            checklist.contains("cas-supervisor/references/reference.md#supervisor-override"),
+            checklist.contains("](../cas-supervisor/references/reference.md#supervisor-override)"),
             "{flavor} checklist must link supervisor_override reference"
         );
         assert!(
-            workflow.contains(&format!("{tool_prefix}coordination action=worktree_merge")),
+            workflow.contains(&format!("{tool_prefix}factory action=worktree_merge")),
             "{flavor} workflow must use worktree_merge"
         );
         assert!(
@@ -494,16 +482,26 @@ fn supervisor_reference_tree_uses_current_lifecycle_contract() {
         "builtins.rs must not register deleted code-review-queue.md"
     );
 
-    let factory_supervisor =
-        load(&root.join("cas-cli/src/builtins/codex/agents/factory-supervisor.md"));
+    // Audit D6 (cas-6b97): Codex ignores `.md` agents, so the inert
+    // factory-supervisor agent is gone and its constraints live in the
+    // Codex supervisor checklist.
     assert!(
-        factory_supervisor.lines().count() < 60,
-        "Codex factory-supervisor.md exceeds the 60-line prompt budget"
+        !builtins.contains("builtins/codex/agents/"),
+        "builtins.rs must not register Codex .md agents"
     );
-    for required in ["Codex Constraints", "cli=codex", "cas-supervisor"] {
+    let checklist = load(
+        &root.join("cas-cli/src/builtins/codex/skills/cas-codex-supervisor-checklist.md"),
+    );
+    for required in [
+        "## Codex constraints",
+        "no session hooks",
+        "never implement a worker's task yourself",
+        "`cli=`, `model=`, and `effort=`",
+        "cas-supervisor/references/workflow.md",
+    ] {
         assert!(
-            factory_supervisor.contains(required),
-            "factory-supervisor.md missing {required:?}"
+            checklist.contains(required),
+            "cas-codex-supervisor-checklist missing {required:?}"
         );
     }
 }

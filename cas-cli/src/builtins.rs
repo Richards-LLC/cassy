@@ -452,6 +452,10 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
         content: include_str!("builtins/skills/cas-qa-craft/references/evidence-ledger.md"),
     },
     BuiltinFile {
+        path: "skills/cas-qa-craft/references/verifier-evidence-gate.md",
+        content: include_str!("builtins/skills/cas-qa-craft/references/verifier-evidence-gate.md"),
+    },
+    BuiltinFile {
         path: "skills/cas-qa-craft/references/exemplar.md",
         content: include_str!("builtins/skills/cas-qa-craft/references/exemplar.md"),
     },
@@ -1015,6 +1019,10 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
         content: include_str!("builtins/codex/skills/cas-qa-craft/references/evidence-ledger.md"),
     },
     BuiltinFile {
+        path: "skills/cas-qa-craft/references/verifier-evidence-gate.md",
+        content: include_str!("builtins/codex/skills/cas-qa-craft/references/verifier-evidence-gate.md"),
+    },
+    BuiltinFile {
         path: "skills/cas-qa-craft/references/exemplar.md",
         content: include_str!("builtins/codex/skills/cas-qa-craft/references/exemplar.md"),
     },
@@ -1570,6 +1578,10 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-qa-craft/references/evidence-ledger.md",
         content: include_str!("builtins/grok/skills/cas-qa-craft/references/evidence-ledger.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-qa-craft/references/verifier-evidence-gate.md",
+        content: include_str!("builtins/grok/skills/cas-qa-craft/references/verifier-evidence-gate.md"),
     },
     BuiltinFile {
         path: "skills/cas-qa-craft/references/exemplar.md",
@@ -6525,8 +6537,9 @@ This is the body content."#;
                 .unwrap_or_else(|| panic!("{label}: task-verifier agent is not registered"));
             for marker in [
                 "model:",
-                "files_reviewed=",
-                "Close-Path Error Detection",
+                "tools:",
+                "files=\"",
+                "Verifier handoff rejected",
                 "Stranded-branch gate",
                 "Epic verification owner gate",
             ] {

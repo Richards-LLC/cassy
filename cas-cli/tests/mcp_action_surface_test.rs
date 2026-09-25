@@ -475,11 +475,6 @@ const CALL_SHAPE_ALLOWLIST: &[(&str, &str, &str)] = &[
         "coordination action=message: missing summary",
         "M02",
     ),
-    (
-        "agents/task-verifier.md",
-        "verification action=add: unknown field files_reviewed",
-        "M10",
-    ),
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]

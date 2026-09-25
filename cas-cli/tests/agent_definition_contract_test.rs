@@ -67,6 +67,8 @@ fn every_agent_definition() -> Vec<(String, &'static str)> {
     found
 }
 
+const EVIDENCE_GATE: &str = "skills/cas-qa-craft/references/verifier-evidence-gate.md";
+
 #[test]
 fn verifier_mirrors_document_the_current_close_contract() {
     for path in VERIFIER_PATHS {
@@ -75,18 +77,40 @@ fn verifier_mirrors_document_the_current_close_contract() {
             body.contains("model: inherit"),
             "{path} must inherit the caller model"
         );
+        // Audit M47 / L2 P2-60 (cas-228e): one verifier spawn costs this body.
         assert!(
-            body.contains("files_reviewed=\"file1,file2\""),
-            "{path} must record files_reviewed in every verdict template"
+            body.len() < 15_000,
+            "{path} is {} bytes; keep it under 15 KB and move procedure to references",
+            body.len()
         );
+        // Audit L2 P1-59: the verifier reads and records; it never edits.
+        let frontmatter = &body[..body[3..].find("---").unwrap() + 3];
+        let tools = frontmatter
+            .lines()
+            .find_map(|line| line.strip_prefix("tools: "))
+            .unwrap_or_else(|| panic!("{path} must restrict its tools"));
+        for denied in ["Edit", "Write", "Agent", "NotebookEdit"] {
+            assert!(
+                !tools.split(", ").any(|tool| tool == denied),
+                "{path} must not grant {denied}"
+            );
+        }
+        for needed in ["Read", "Bash", "verification", "task"] {
+            assert!(tools.contains(needed), "{path} tools lack {needed}: {tools}");
+        }
+        // Audit M10: `files` is the field; `files_reviewed` was dropped silently.
         assert!(
-            !body.contains(" files=\""),
-            "{path} must not use the unknown verification field files="
+            body.contains("files=\"file1,file2\""),
+            "{path} must record files in its verdict template"
         );
+        assert!(!body.contains("files_reviewed"), "{path} uses the old field name");
+        // Audit L2 P1-50: diff against the task's delivery base.
         assert!(
-            body.contains("git diff --name-status HEAD~10 | grep -E "),
+            body.contains("git diff --name-status \"$BASE\" HEAD | grep -E "),
             "{path} must use POSIX grep's extended regexp option in its test-first check"
         );
+        assert!(body.contains("git merge-base HEAD <target-branch>"), "{path}");
+        assert!(!body.contains("HEAD~10"), "{path} keeps a fixed commit-count base");
         assert!(
             !body.contains("| rg -e ") && !body.contains("| rg -E "),
             "{path} retains a ripgrep-only test-first command"
@@ -95,12 +119,17 @@ fn verifier_mirrors_document_the_current_close_contract() {
             !body.contains("VERIFICATION JAIL"),
             "{path} retains stale jail wording"
         );
+        // Audit L2 P1-49: the close-path section addressed the closer.
+        assert!(!body.contains("Close-Path Error Detection"), "{path}");
         for marker in [
-            "⚠️ VERIFICATION REQUIRED",
-            "⚠️ VERIFICATION FAILED",
+            "Verifier handoff rejected",
+            "Verifier capability rejected",
+            "Verification authority rejected",
             "ast-grep",
             "stranded_branch_override",
             "epic_verification_owner",
+            "verifier-evidence-gate.md",
+            "SUPERVISOR CALL",
         ] {
             assert!(
                 body.contains(marker),
@@ -112,16 +141,28 @@ fn verifier_mirrors_document_the_current_close_contract() {
 
 /// An epic's own demo is often empty. Pin the child-discovery route ahead of
 /// the shared evidence gate so per-task success cannot bypass combined QA.
+/// The gate moved out of the verifier body into a cas-qa-craft reference
+/// (cas-228e); the verifier routes to it before it reads the close reason.
 #[test]
 fn epic_child_demos_require_evidence_before_close_reason() {
     for path in VERIFIER_PATHS {
         let body = load(path);
-        let prerequisites = body.find("### Epic evidence prerequisites").unwrap();
-        let table = body.find("| Check | REJECT when |").unwrap();
-        let close_reason = body.find("### Step 0B: Check Close Reason").unwrap();
-        assert!(prerequisites < table && table < close_reason, "{path}");
-        assert_eq!(body.matches("| Check | REJECT when |").count(), 1, "{path}");
-        let epic_gate = &body[prerequisites..body.find("### Step 0A:").unwrap()];
+        let route = body.find("verifier-evidence-gate.md").unwrap();
+        let close_reason = body.find("### Step 1: Check the close reason").unwrap();
+        assert!(route < close_reason, "{path}: evidence gate must come first");
+        assert!(body[..route].contains("**any child**"), "{path}");
+        assert!(body[..close_reason].contains("closed children"), "{path}");
+    }
+    for (flavor, label) in builtin_catalog::FLAVORS {
+        let gate = builtin_catalog::find(*flavor, EVIDENCE_GATE);
+        let prerequisites = gate.find("### Epic evidence prerequisites").unwrap();
+        let table = gate.find("| Check | REJECT when |").unwrap();
+        let close_reason = gate
+            .find("Only after this evidence gate passes may you read the close reason")
+            .unwrap();
+        assert!(prerequisites < table && table < close_reason, "{label}");
+        assert_eq!(gate.matches("| Check | REJECT when |").count(), 1, "{label}");
+        let epic_gate = &gate[prerequisites..gate.find("### Step 0A:").unwrap()];
         for required in [
             "verification_type=epic",
             "exactly one `Epic flow walk` note",
@@ -143,11 +184,11 @@ fn epic_child_demos_require_evidence_before_close_reason() {
                     .collect::<Vec<_>>()
                     .join(" ")
                     .contains(required),
-                "{path}: {required}"
+                "{label}: {required}"
             );
         }
-        assert!(body[..prerequisites].contains("**any child**"), "{path}");
-        assert!(body[..prerequisites].contains("closed children"), "{path}");
+        assert!(gate[..prerequisites].contains("**any child**"), "{label}");
+        assert!(gate[..prerequisites].contains("closed children"), "{label}");
         for check in [
             "Required cells",
             "Source inference",
@@ -157,7 +198,12 @@ fn epic_child_demos_require_evidence_before_close_reason() {
             "Headline counts",
             "PASS evidence",
         ] {
-            assert!(body[table..close_reason].contains(check), "{path}: {check}");
+            assert!(gate[table..close_reason].contains(check), "{label}: {check}");
+        }
+        // Audit decision D9: NOT EXERCISED rows are the supervisor's call.
+        let policy = &gate[gate.find("### NOT EXERCISED rows").unwrap()..];
+        for required in ["Neither approve nor reject", "status=error", "SUPERVISOR CALL"] {
+            assert!(policy.contains(required), "{label}: {required}");
         }
     }
 }
@@ -391,37 +437,30 @@ fn session_learn_stop_hook_uses_a_dedicated_classifier_prompt() {
 fn verifier_test_first_command_runs_on_a_fixture_repo() {
     let temp = tempfile::tempdir().expect("temporary git fixture");
     let repo = temp.path();
-    run_git(repo, ["init", "--quiet"]);
+    run_git(repo, ["init", "--quiet", "--initial-branch=main"]);
     run_git(repo, ["config", "user.name", "Cassy Test"]);
     run_git(repo, ["config", "user.email", "cassy@example.invalid"]);
 
+    // History on the target branch that is not part of the delivery.
     fs::write(repo.join("seed.txt"), "seed\n").unwrap();
-    run_git(repo, ["add", "seed.txt"]);
+    fs::write(repo.join("old_test.rs"), "#[test] fn old() {}\n").unwrap();
+    run_git(repo, ["add", "seed.txt", "old_test.rs"]);
     run_git(repo, ["commit", "--quiet", "-m", "seed"]);
-    for index in 0..9 {
-        run_git(
-            repo,
-            [
-                "commit",
-                "--quiet",
-                "--allow-empty",
-                "-m",
-                &format!("history-{index}"),
-            ],
-        );
-    }
+
+    // The delivery: one branch commit adding a test.
+    run_git(repo, ["checkout", "--quiet", "-b", "factory/worker"]);
     fs::write(repo.join("contract_test.rs"), "#[test] fn contract() {}\n").unwrap();
     run_git(repo, ["add", "contract_test.rs"]);
     run_git(repo, ["commit", "--quiet", "-m", "add test"]);
 
-    // This is the exact command shape documented by task-verifier.md after
-    // the fix: HEAD~10 is valid because the fixture has eleven commits, and
-    // POSIX grep's `-E` selects extended regular expressions.
+    // This is the exact command shape documented by task-verifier.md: the
+    // delivery base is the merge-base with the task's target branch (never a
+    // fixed commit count), and POSIX grep's `-E` selects extended regexps.
     let output = Command::new("sh")
         .current_dir(repo)
         .arg("-c")
         .arg(
-            "git diff --name-status HEAD~10 | grep -E '^A[[:space:]]+.*(_test\\.rs|tests/.*\\.rs)'",
+            "BASE=$(git merge-base HEAD main) && git diff --name-status \"$BASE\" HEAD | grep -E '^A[[:space:]]+.*(_test\\.rs|tests/.*\\.rs)'",
         )
         .output()
         .expect("run documented verifier command");
@@ -430,9 +469,14 @@ fn verifier_test_first_command_runs_on_a_fixture_repo() {
         "documented test-first command failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+    let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        String::from_utf8_lossy(&output.stdout).contains("contract_test.rs"),
-        "fixture test file should be found by the documented command"
+        stdout.contains("contract_test.rs"),
+        "the delivered test file is found: {stdout}"
+    );
+    assert!(
+        !stdout.contains("old_test.rs"),
+        "target-branch history is not attributed to the delivery: {stdout}"
     );
 }
 

@@ -741,8 +741,37 @@ pub fn with_response_instructions(
 ) -> String {
     let prefix = receiver_cli.backend().capabilities().tool_prefix;
     format!(
-        "{message}\n\n---\nTo respond to this message, use: `{prefix}coordination action=message target={respond_to} message=\"...\"`"
+        "{message}\n\n---\nTo respond to this message, use: `{prefix}coordination action=message target={respond_to} summary=\"...\" message=\"...\"`"
     )
+}
+
+/// Resolve the harness of the worker a director event is about (cas-dc1b).
+///
+/// Worker-facing lines (assignment, stall nudge, reply footer) and the
+/// worker-side commands quoted to the supervisor must carry the tool prefix
+/// of the worker that will run them. The session-wide `worker_cli` is only
+/// the spawn default: a mixed fleet (for example a Claude worker in a
+/// Codex-default session) would otherwise be told to call `mcp__cs__*`, a
+/// tool its harness does not have. `harness_for` is the per-recipient
+/// resolver (`FactoryApp::harness_for`); events that name no worker keep the
+/// session default.
+pub fn recipient_worker_cli(
+    event: &DirectorEvent,
+    default_worker_cli: SupervisorCli,
+    harness_for: impl Fn(&str) -> SupervisorCli,
+) -> SupervisorCli {
+    match event {
+        DirectorEvent::TaskAssigned { worker, .. }
+        | DirectorEvent::TaskCompleted { worker, .. }
+        | DirectorEvent::TaskBlocked { worker, .. }
+        | DirectorEvent::WorkerIdle { worker, .. }
+        | DirectorEvent::WorkerStalled { worker, .. } => harness_for(worker),
+        DirectorEvent::AgentRegistered { agent_name, .. } => harness_for(agent_name),
+        DirectorEvent::SupervisorStalled { .. }
+        | DirectorEvent::EpicStarted { .. }
+        | DirectorEvent::EpicCompleted { .. }
+        | DirectorEvent::EpicAllSubtasksClosed { .. } => default_worker_cli,
+    }
 }
 
 /// True when a WorkerIdle active-task payload is the merge-gate park path
@@ -4216,6 +4245,98 @@ mod tests {
             None,
         );
         assert!(prompt.is_none());
+    }
+
+    /// cas-dc1b (M01): a Claude worker in a Codex-default session must be
+    /// told Claude tool names in its assignment, stall nudge and reply footer,
+    /// and a Codex worker in the same session keeps the Codex names.
+    #[test]
+    fn claude_worker_in_codex_default_session_gets_its_own_tool_prefix() {
+        let resolver = |name: &str| {
+            if name == "swift-fox" {
+                SupervisorCli::Claude
+            } else {
+                SupervisorCli::Codex
+            }
+        };
+        // `make_data` registers swift-fox as the live worker the stall
+        // nudge requires; here it runs Claude while the session default is
+        // Codex.
+        let data = make_data(0);
+        let events = [
+            (
+                "swift-fox",
+                DirectorEvent::TaskAssigned {
+                    task_id: "cas-mixd".to_string(),
+                    task_title: "Mixed fleet".to_string(),
+                    worker: "swift-fox".to_string(),
+                },
+            ),
+            (
+                "swift-fox",
+                DirectorEvent::WorkerStalled {
+                    worker: "swift-fox".to_string(),
+                    task_id: "cas-mixd".to_string(),
+                    elapsed_secs: 900,
+                    escalate: false,
+                },
+            ),
+            (
+                "codex-worker",
+                DirectorEvent::TaskAssigned {
+                    task_id: "cas-mixd".to_string(),
+                    task_title: "Mixed fleet".to_string(),
+                    worker: "codex-worker".to_string(),
+                },
+            ),
+        ];
+        for (worker, event) in events {
+            let worker_cli = recipient_worker_cli(&event, SupervisorCli::Codex, resolver);
+            let prompt = generate_prompt(
+                &event,
+                &data,
+                &data,
+                "supervisor",
+                &default_config(),
+                SupervisorCli::Codex,
+                worker_cli,
+                &HashSet::new(),
+                None,
+            )
+            .unwrap_or_else(|| panic!("{worker}: {event:?} must render a worker prompt"));
+            assert_eq!(prompt.target, worker);
+            let (own, foreign) = if worker == "swift-fox" {
+                ("mcp__cas__", "mcp__cs__")
+            } else {
+                ("mcp__cs__", "mcp__cas__")
+            };
+            assert!(
+                prompt.text.contains(&format!("{own}task action=")),
+                "{worker} must see its own prefix {own}: {}",
+                prompt.text
+            );
+            assert!(
+                prompt
+                    .text
+                    .contains(&format!("{own}coordination action=message target=supervisor summary=")),
+                "{worker} reply footer must use {own} and carry summary=: {}",
+                prompt.text
+            );
+            assert!(
+                !prompt.text.contains(foreign),
+                "{worker} must never see the other harness prefix {foreign}: {}",
+                prompt.text
+            );
+        }
+
+        // Events that name no worker keep the session default.
+        let epic = DirectorEvent::EpicCompleted {
+            epic_id: "cas-epic".to_string(),
+        };
+        assert_eq!(
+            recipient_worker_cli(&epic, SupervisorCli::Codex, resolver),
+            SupervisorCli::Codex
+        );
     }
 
     #[test]

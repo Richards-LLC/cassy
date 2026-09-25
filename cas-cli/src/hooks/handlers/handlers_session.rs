@@ -1,15 +1,22 @@
 use crate::hooks::handlers::session_budget::{DegradationPriority, SessionContextAssembler};
 use crate::hooks::handlers::*;
 
+/// The banner is authored against the canonical `mcp__cas__` prefix and then
+/// remapped to the reader's own harness prefix (cas-dc1b, M36). It is added
+/// to the assembled context after the builder's end-of-function remap pass,
+/// so it must do its own remap: a hardcoded Codex `mcp__cs__` sent Claude
+/// supervisors to a tool they do not have.
 fn registered_role_mismatch_banner(
     configured_role: Option<AgentRole>,
     registered_role: Option<AgentRole>,
+    tool_prefix: &str,
 ) -> Option<String> {
     let (configured, registered) = configured_role.zip(registered_role)?;
     (configured != registered).then(|| {
         format!(
-            "\u{26a0}\u{fe0f} Cassy AGENT ROLE MISMATCH: `CAS_AGENT_ROLE={configured}` but the durable agent row was registered as `{registered}` at session start. Cassy attempted to repair the row; run `mcp__cs__coordination action=whoami` and `cas doctor` before assigning or closing factory work."
+            "\u{26a0}\u{fe0f} Cassy AGENT ROLE MISMATCH: `CAS_AGENT_ROLE={configured}` but the durable agent row was registered as `{registered}` at session start. Cassy attempted to repair the row; run `mcp__cas__coordination action=whoami` and `cas doctor` before assigning or closing factory work."
         )
+        .replace("mcp__cas__", tool_prefix)
     })
 }
 
@@ -59,7 +66,11 @@ pub fn handle_session_start(
             .and_then(|store| store.get(&input.session_id).ok())
             .map(|agent| agent.role);
         registration_role_warning =
-            registered_role_mismatch_banner(configured_role, registered_role);
+            registered_role_mismatch_banner(
+                configured_role,
+                registered_role,
+                crate::harness_policy::own_tool_prefix(),
+            );
 
         // Helper to register agent directly in database
         let register_directly = |stores: &mut HookStores| {
@@ -678,6 +689,36 @@ mod large_artifact_staging_tests {
                 .count(),
             3,
             "configured context_limit must inject exactly three memories: {context}"
+        );
+    }
+
+    /// cas-dc1b (M36): the banner names the reader's own coordination tool.
+    #[test]
+    fn role_mismatch_banner_uses_the_readers_tool_prefix() {
+        for (prefix, foreign) in [
+            ("mcp__cas__", "mcp__cs__"),
+            ("mcp__cs__", "mcp__cas__"),
+            ("cas__", "mcp__"),
+        ] {
+            let banner = registered_role_mismatch_banner(
+                Some(AgentRole::Supervisor),
+                Some(AgentRole::Standard),
+                prefix,
+            )
+            .expect("mismatched roles render a banner");
+            assert!(
+                banner.contains(&format!("`{prefix}coordination action=whoami`")),
+                "{prefix}: {banner}"
+            );
+            assert!(!banner.contains(foreign), "{prefix}: {banner}");
+        }
+        assert!(
+            registered_role_mismatch_banner(
+                Some(AgentRole::Supervisor),
+                Some(AgentRole::Supervisor),
+                "mcp__cas__",
+            )
+            .is_none()
         );
     }
 

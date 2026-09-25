@@ -1352,6 +1352,11 @@ impl FactoryApp {
                     }
                 };
 
+            // cas-dc1b: worker-facing tool names come from the recipient
+            // worker's harness, not the session-wide spawn default.
+            let worker_cli = super::director::recipient_worker_cli(event, self.worker_cli, |w| {
+                self.harness_for(w)
+            });
             if let Some(mut prompt) = generate_prompt_at(
                 event,
                 &self.director_data,
@@ -1359,7 +1364,7 @@ impl FactoryApp {
                 &self.supervisor_name,
                 &self.auto_prompt,
                 self.supervisor_cli,
-                self.worker_cli,
+                worker_cli,
                 &gated_task_ids,
                 merge_alert_evidence.as_ref(),
                 snapshot_at,

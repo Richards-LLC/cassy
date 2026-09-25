@@ -780,7 +780,7 @@ pub struct SkillRequest {
 
     /// Disallowed tools (comma-separated) — harness-enforced bans (Claude Code 2.1.152+)
     #[schemars(
-        description = "Disallowed tools (comma-separated). Harness-enforced at runtime (Claude Code 2.1.152+)."
+        description = "Disallowed tools (comma-separated). Claude Code only; removed while the skill is active and cleared at the next user message, so not a guard."
     )]
     #[serde(default)]
     pub disallowed_tools: Option<String>,

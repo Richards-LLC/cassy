@@ -397,6 +397,7 @@ fn call_shape_action_lists() -> Vec<(&'static str, Vec<&'static str>)> {
         ("rule", accepted::RULE_ACTIONS.to_vec()),
         ("skill", accepted::SKILL_ACTIONS.to_vec()),
         ("coordination", accepted::COORDINATION_ACTIONS.to_vec()),
+        ("factory", accepted::FACTORY_ACTIONS.to_vec()),
         ("search", accepted::SEARCH_ACTIONS.to_vec()),
         (
             "system",
@@ -799,7 +800,8 @@ fn call_shape_surface_comes_from_the_published_action_lists() {
     let surface = call_surface();
     for (tool, action) in [
         ("coordination", "message"),
-        ("coordination", "worktree_merge"),
+        ("factory", "worktree_merge"),
+        ("factory", "spawn_workers"),
         ("coordination", "interrupt"),
         ("coordination", "inbox"),
         ("task", "get"),
@@ -818,6 +820,14 @@ fn call_shape_surface_comes_from_the_published_action_lists() {
             "coordination action set leaked {bogus}"
         );
     }
+    // cas-8563b (D2): fleet control is only on `factory`, messaging only on
+    // `coordination`.
+    for moved in ["spawn_workers", "worktree_merge", "epic_status", "server_start"] {
+        assert!(!surface.actions["coordination"].contains(moved), "{moved}");
+    }
+    assert!(!surface.actions["factory"].contains("message"));
+    assert!(!surface.fields["factory"].contains("summary"));
+    assert!(!surface.fields["coordination"].contains("worker_names"));
     assert!(!surface.actions["skill"].contains("get"));
     assert!(!surface.actions["system"].contains("status"));
     assert!(surface.fields["coordination"].contains("summary"));
@@ -855,6 +865,10 @@ fn call_shape_lint_flags_known_bad_shapes() {
             "task action=create: missing risk",
         ),
         ("`system action=status`", "system action=status: unknown action"),
+        (
+            "`mcp__cas__coordination action=spawn_workers count=1`",
+            "coordination action=spawn_workers: unknown action",
+        ),
     ];
     for (text, expected) in cases {
         let mut offenders = Vec::new();
@@ -871,7 +885,7 @@ fn call_shape_lint_flags_known_bad_shapes() {
         "`mcp__cas__task action=create title=\"e\" task_type=epic`",
         "use coordination action=message after the worker registers",
         "the subtask action=create flow",
-        "`{coord} action=worktree_merge id=factory/x task_id=cas-1 cleanup=true`",
+        "`mcp__cs__factory action=worktree_merge id=factory/x task_id=cas-1 cleanup=true`",
     ] {
         let mut offenders = Vec::new();
         lint_call_shapes(clean, "fixture", &surface, &mut offenders);
@@ -1113,7 +1127,7 @@ fn published_action_enums_equal_their_dispatch_tables() {
         checked += 1;
     }
     assert_eq!(
-        checked, 13,
+        checked, 14,
         "every multi-action tool publishes an action enum"
     );
 }

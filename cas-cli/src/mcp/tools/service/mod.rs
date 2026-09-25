@@ -561,354 +561,66 @@ impl CasService {
     // ========================================================================
 
     #[tool(
-        description = "Agent messaging and factory control; only available in factory mode. Actions by group: agent (whoami, heartbeat, message, interrupt, inbox_poll, message_ack, message_status, remind, remind_list, remind_cancel, register, session_start, session_end, loop_*, queue_*, lease_history, agent_list, agent_cleanup); factory (spawn_workers, shutdown_workers, recycle_worker, hold_worker, release_worker, worker_status, worker_activity, epic_status, focus_epic, sweep_tasks, sync_all_workers, clear_context, my_context, gc_report, gc_cleanup, restart_spawn_queue); servers (server_start, server_stop, server_list); database, supervisor only (db_branch_create, db_branch_show, db_branch_delete: a disposable Neon branch per task, whose DATABASE_URL is written to the worker's .env.cas-db and never printed, deleted when the task closes; a worker asks for one with a blocker message); worktree (worktree_create, worktree_list, worktree_show, worktree_cleanup, worktree_merge, worktree_status). clear_context types the recipient harness's own reset command and confirms it against the new transcript; a reset it cannot prove is an error. Per-action rules are on the parameters they govern."
+        description = "Agent identity, messaging and reminders; only available in factory mode. Actions: whoami, heartbeat, register, unregister, session_start, session_end, message, interrupt (message with urgent=true), inbox_poll (alias inbox), message_ack, message_status, remind, remind_list, remind_cancel, my_context. Supervisor fleet, worktree, server, database, loop and queue control moved to the `factory` tool; those actions still work here for one release with a deprecation note. Per-action rules are on the parameters they govern."
     )]
     pub async fn coordination(
         &self,
         Parameters(req): Parameters<CoordinationRequest>,
     ) -> Result<CallToolResult, McpError> {
-        let this = self.clone();
-        panic_catch::dispatch_with_guidance("coordination", this.inner.clone(), async move {
-            crate::ui::factory::record_supervisor_mcp_call();
-            let mut req = req;
-            let action = canonical_coordination_action(&req.action).to_string();
-            req.action.clone_from(&action);
-            normalize_coordination_aliases(&mut req, &action);
-            if action == "spawn_workers"
-                && req.prompt.as_deref().is_some_and(|prompt| !prompt.trim().is_empty())
-            {
-                return Err(Self::error(
-                    ErrorCode::INVALID_PARAMS,
-                    "spawn_workers does not deliver `prompt` to the worker; no spawn was queued. `prompt` belongs to coordination action=loop_start. Spawn without `prompt`, then send the brief with coordination action=message target=<worker-name> summary=\"...\" message=\"...\" after registration.",
-                ));
+        let action = canonical_coordination_action(&req.action).to_string();
+        // cas-8563b (D2): agent actions only. The factory actions moved to the
+        // `factory` tool and stay accepted here for one release.
+        let result = match action.as_str() {
+            "register" | "unregister" | "whoami" | "heartbeat" | "session_start"
+            | "session_end" | "inbox_poll" | "message" | "interrupt" | "message_ack"
+            | "message_status" | "remind" | "remind_list" | "remind_cancel"
+            | "my_context" => self.coordination_dispatch(req).await,
+            moved if cas_mcp::actions::FACTORY_ACTIONS.contains(&moved) => {
+                let notice = moved_to_factory_notice(moved, self.inner.guidance_prefix());
+                Self::append_notice(self.coordination_dispatch(req).await, &notice)
             }
-            let event_target = req.target.clone().unwrap_or_default();
-            let event_task_id = req.task_id.clone().unwrap_or_default();
+            _ => Err(Self::error(
+                ErrorCode::INVALID_PARAMS,
+                format!(
+                    "Unknown coordination action: '{action}'. Valid: {}. Supervisor fleet control is on the factory tool: {}",
+                    cas_mcp::actions::COORDINATION_ACTIONS.join(", "),
+                    cas_mcp::actions::FACTORY_ACTIONS.join(", ")
+                ),
+            )),
+        };
+        result
+    }
 
-            // Destructive operations fail closed on fields that belong to
-            // another action in this unified request. Serde catches unknown
-            // JSON keys; this catches known union fields that the selected
-            // action would otherwise silently discard (the GH #197 incident
-            // was exactly `shutdown_workers id=...` falling through to ALL).
-            let allowed: Option<&[&str]> = match action.as_str() {
-                "recycle_worker" => Some(&["action", "target"]),
-                "shutdown_workers" => {
-                    Some(&["action", "id", "count", "worker_names", "force", "reason"])
-                }
-                "sync_all_workers" => {
-                    Some(&["action", "id", "branch", "worker_names", "force"])
-                }
-                "gc_cleanup" => Some(&["action", "older_than_secs", "force", "dry_run"]),
-                "server_stop" => Some(&["action", "id"]),
-                "worktree_cleanup" => {
-                    Some(&["action", "id", "all", "orphans", "dry_run", "force"])
-                }
-                "worktree_merge" => {
-                    // `task_id` binds a delivery merge to its immutable task
-                    // receipt and is consumed by target resolution. It is not
-                    // an incidental task-domain field.
-                    Some(&["action", "id", "task_id", "force", "allow_trunk", "cleanup"])
-                }
-                _ => None,
-            };
-            if let Some(allowed) = allowed {
-                let unsupported = coordination_params_not_in(&req, allowed);
-                if !unsupported.is_empty() {
-                    return Err(Self::error(
-                        ErrorCode::INVALID_PARAMS,
-                        format!(
-                            "Unsupported parameter(s) for destructive action `{action}`: {}. Nothing was queued or changed.",
-                            unsupported.join(", ")
-                        ),
-                    ));
-                }
+    #[tool(
+        description = "Supervisor factory control; only available in factory mode. Actions by group: fleet (spawn_workers, shutdown_workers, recycle_worker, hold_worker, release_worker, worker_status, worker_activity, epic_status, focus_epic, sweep_tasks, sync_all_workers, clear_context, gc_report, gc_cleanup, restart_spawn_queue, agent_list, agent_cleanup, lease_history); servers (server_start, server_stop, server_list); database, supervisor only (db_branch_create, db_branch_show, db_branch_delete: a disposable Neon branch per task, whose DATABASE_URL is written to the worker's .env.cas-db and never printed, deleted when the task closes; a worker asks for one with a blocker message); worktree (worktree_create, worktree_list, worktree_show, worktree_cleanup, worktree_merge, worktree_status); loops and queues (loop_start, loop_cancel, loop_status, queue_notify, queue_poll, queue_peek, queue_ack). clear_context types the recipient harness's own reset command and confirms it against the new transcript; a reset it cannot prove is an error. Messaging and reminders are on the `coordination` tool. Per-action rules are on the parameters they govern."
+    )]
+    pub async fn factory(
+        &self,
+        Parameters(req): Parameters<CoordinationRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let action = req.action.clone();
+        let result = match action.as_str() {
+            "spawn_workers" | "shutdown_workers" | "recycle_worker" | "hold_worker"
+            | "release_worker" | "worker_status" | "worker_activity" | "sweep_tasks"
+            | "clear_context" | "sync_all_workers" | "gc_report" | "gc_cleanup"
+            | "epic_status" | "focus_epic" | "restart_spawn_queue" | "agent_list"
+            | "agent_cleanup" | "lease_history" | "server_start" | "server_stop"
+            | "server_list" | "db_branch_create" | "db_branch_show" | "db_branch_delete"
+            | "worktree_create" | "worktree_list" | "worktree_show" | "worktree_cleanup"
+            | "worktree_merge" | "worktree_status" | "loop_start" | "loop_cancel"
+            | "loop_status" | "queue_notify" | "queue_poll" | "queue_peek" | "queue_ack" => {
+                self.coordination_dispatch(req).await
             }
-
-            let result = match action.as_str() {
-                // ---- Agent domain ----
-                "register" | "unregister" | "whoami" | "heartbeat" | "session_start"
-                | "session_end" | "loop_start" | "loop_cancel" | "loop_status"
-                | "lease_history" | "queue_notify" | "queue_poll" | "queue_peek"
-                | "queue_ack" | "inbox_poll" | "message" | "interrupt" | "message_ack"
-                | "message_status" => {
-                    // `interrupt` is sugar for `message` with urgent=true.
-                    let agent_req = if action == "interrupt" {
-                        let mut r = req.to_agent_request("message");
-                        r.urgent = Some(true);
-                        r
-                    } else {
-                        req.to_agent_request(&action)
-                    };
-                    // cas-15f2: `cross_session` is a reminder parameter.
-                    // `AgentRequest` has no such field, so serde dropped it
-                    // silently here and a supervisor who set it reasonably
-                    // believed it had asked for cross-session delivery. Since
-                    // cas-15f2 every message routes by the recipient's session
-                    // unconditionally, so the flag is redundant rather than
-                    // wrong — warn, do not reject, so existing callers keep
-                    // working.
-                    let cross_session_notice = matches!(
-                        action.as_str(),
-                        "message" | "interrupt"
-                    ) && req.cross_session.unwrap_or(false);
-                    match action.as_str() {
-                        "register" => this.agent_register(agent_req).await,
-                        "unregister" => this.agent_unregister(agent_req).await,
-                        "whoami" => this.agent_whoami(agent_req).await,
-                        "heartbeat" => this.agent_heartbeat(agent_req).await,
-                        "session_start" => this.agent_session_start(agent_req).await,
-                        "session_end" => this.agent_session_end(agent_req).await,
-                        "loop_start" => this.loop_start(agent_req).await,
-                        "loop_cancel" => this.loop_cancel(agent_req).await,
-                        "loop_status" => this.loop_status(agent_req).await,
-                        "lease_history" => this.lease_history(agent_req).await,
-                        "queue_notify" => this.queue_notify(agent_req).await,
-                        "queue_poll" => this.queue_poll(agent_req).await,
-                        "queue_peek" => this.queue_peek(agent_req).await,
-                        "queue_ack" => this.queue_ack(agent_req).await,
-                        "inbox_poll" => this.inbox_poll(agent_req).await,
-                        "message" | "interrupt" => {
-                            let result = this.message_send(agent_req).await;
-                            if cross_session_notice {
-                                Self::append_notice(
-                                    result,
-                                    "Note: `cross_session` is ignored on action=message — it is a \
-                                     reminder-scoped parameter. Messages are routed by the \
-                                     recipient's registered factory session automatically, so no \
-                                     flag is needed to reach an agent in another session.",
-                                )
-                            } else {
-                                result
-                            }
-                        }
-                        "message_ack" => this.message_ack(agent_req).await,
-                        "message_status" => this.message_status_query(agent_req).await,
-                        _ => unreachable!(),
-                    }
-                }
-                // agent_list and agent_cleanup: prefixed to avoid collision with worktree
-                "agent_list" => {
-                    let agent_req = req.to_agent_request("list");
-                    this.agent_list(agent_req).await
-                }
-                "agent_cleanup" => {
-                    let agent_req = req.to_agent_request("cleanup");
-                    this.agent_cleanup(agent_req).await
-                }
-
-                // ---- Disposable database branches (cas-0033) ----
-                "db_branch_create" => this.db_branch_create(&req).await,
-                "db_branch_show" => this.db_branch_show(&req).await,
-                "db_branch_delete" => this.db_branch_delete(&req).await,
-
-                // ---- Factory domain ----
-                "spawn_workers" | "shutdown_workers" | "recycle_worker" | "hold_worker" | "release_worker"
-                | "worker_status" | "worker_activity" | "sweep_tasks"
-                | "clear_context" | "my_context" | "sync_all_workers" | "gc_report"
-                | "gc_cleanup" | "epic_status" | "focus_epic" | "remind" | "remind_list"
-                | "remind_cancel" | "server_start" | "server_stop" | "server_list"
-                | "restart_spawn_queue" => {
-                    let factory_req = req.to_factory_request();
-                    match action.as_str() {
-                        "spawn_workers" => this.factory_spawn_workers(factory_req).await,
-                        "shutdown_workers" => this.factory_shutdown_workers(factory_req).await,
-                        "recycle_worker" => this.factory_recycle_worker(factory_req).await,
-                        "hold_worker" => this.factory_set_worker_hold(factory_req, true).await,
-                        "release_worker" => this.factory_set_worker_hold(factory_req, false).await,
-                        "worker_status" => this.factory_worker_status(factory_req).await,
-                        "sweep_tasks" => this.factory_sweep_tasks(factory_req).await,
-                        "clear_context" => this.factory_clear_context(factory_req).await,
-                        "my_context" => this.factory_my_context(factory_req).await,
-                        "worker_activity" => this.factory_worker_activity(factory_req).await,
-                        "sync_all_workers" => this.factory_sync_all_workers(factory_req).await,
-                        "gc_report" => this.factory_gc_report(factory_req).await,
-                        "gc_cleanup" => this.factory_gc_cleanup(factory_req).await,
-                        // cas-8f8f: per-child branch merge-state diagnostic.
-                        // Same data source as the epic-close gate so report
-                        // and gate cannot disagree.
-                        "epic_status" => this.factory_epic_status(factory_req).await,
-                        "focus_epic" => this.factory_focus_epic(factory_req).await,
-                        "remind" => this.factory_remind(factory_req).await,
-                        "remind_list" => this.factory_remind_list(factory_req).await,
-                        "remind_cancel" => this.factory_remind_cancel(factory_req).await,
-                        // cas-7c93 (GH #87): sanctioned lifecycle for servers
-                        // that must outlive a task or be shared across workers.
-                        "server_start" => this.factory_server_start(factory_req).await,
-                        "server_stop" => this.factory_server_stop(factory_req).await,
-                        "server_list" => this.factory_server_list(factory_req).await,
-                        // cas-73b5 (GH #970): unwedge the spawn queue in place.
-                        "restart_spawn_queue" => {
-                            this.factory_restart_spawn_queue(factory_req).await
-                        }
-                        _ => unreachable!(),
-                    }
-                }
-
-                // ---- Worktree domain (prefixed with worktree_) ----
-                "worktree_create" | "worktree_list" | "worktree_show" | "worktree_cleanup"
-                | "worktree_merge" | "worktree_status" => {
-                    let wt_action = action.strip_prefix("worktree_").unwrap();
-
-                    // Gate: require System A (`worktrees.enabled`) for mutating or
-                    // detail operations, but let `status`, `list`, and `merge`
-                    // through always.
-                    //
-                    // `status` reports configuration — must work regardless.
-                    // `list` must reflect reality: factory (System B) worktrees are
-                    // created by `spawn_workers isolate=true` independently of the
-                    // System A flag, and the handler distinguishes both systems in
-                    // its output (cas-af86). Blocking `list` here was the bug:
-                    // it returned a misleading "disabled" message even when workers
-                    // were actively running in real git worktrees.
-                    //
-                    // `merge` is exempt for the same reason (cas-1d11): spawn's
-                    // `isolate=true` never checks this flag (it gates on the
-                    // separate `--worktrees` factory CLI flag instead, default
-                    // on), so System-B worker worktrees exist and need merging
-                    // regardless of `worktrees.enabled`. Blocking `merge` here
-                    // left supervisors with no Cassy-tracked way to fold a spawned
-                    // worker's branch back in — the reported fallback was manual
-                    // `git worktree add` + merge + push, bypassing factory
-                    // tracking/lease/cleanup entirely. `worktree_merge`'s own
-                    // handler resolves System A first, then falls back to the
-                    // System B `<cas_root>/worktrees/<assignee>` convention, and
-                    // returns an accurate "not found" for neither — so removing
-                    // this gate never masks a genuine absence, only the false
-                    // "disabled" refusal for worktrees that demonstrably exist.
-                    //
-                    // `cleanup` is exempt for the same reason (cas-f102,
-                    // GH #140). cas-1d11 kept it gated on the premise that
-                    // cleanup is "pure WorktreeStore CRUD with no System-B
-                    // analogue". That premise is false for RETIRED workers: a
-                    // System-B worktree outlives its worker unless `cleanup=true`
-                    // was passed at merge time, and merge is the only action that
-                    // ever removes one — so a worker that finished without it
-                    // leaves a worktree with no Cassy-tracked removal path at all,
-                    // and the reported workaround was a manual `git worktree
-                    // remove` that bypasses tracking exactly like the manual merge
-                    // cas-1d11 fixed. `worktree_cleanup`'s own handler resolves
-                    // System A first, then the System-B
-                    // `<cas_root>/worktrees/<assignee>` convention, and returns an
-                    // accurate "not found" for neither — so removing this gate
-                    // never masks a genuine absence, only the false "disabled"
-                    // refusal for worktrees that demonstrably exist on disk.
-                    //
-                    // create / show still genuinely require System A — they are
-                    // pure WorktreeStore CRUD with no System-B analogue (nothing
-                    // creates a System-B row to show, and `create` is the System-A
-                    // constructor itself).
-                    if wt_action != "status"
-                        && wt_action != "list"
-                        && wt_action != "merge"
-                        && wt_action != "cleanup"
-                    {
-                        let config = crate::config::Config::load(&this.inner.cas_root)
-                            .map_err(|e| {
-                                Self::error(
-                                    ErrorCode::INTERNAL_ERROR,
-                                    format!("Failed to load config: {e}"),
-                                )
-                            })?;
-                        if !config.worktrees_enabled() {
-                            return Ok(Self::success(
-                                crate::mcp::tools::core::workflow::SYSTEM_A_WORKTREES_DISABLED_MESSAGE,
-                            ));
-                        }
-                    }
-
-                    let wt_req = WorktreeRequest {
-                        action: wt_action.to_string(),
-                        id: req.id,
-                        task_id: req.task_id,
-                        all: req.all,
-                        status: req.status,
-                        orphans: req.orphans,
-                        dry_run: req.dry_run,
-                        force: req.force,
-                        allow_trunk: req.allow_trunk,
-                        cleanup: req.cleanup,
-                    };
-                    match wt_action {
-                        "create" => this.worktree_create(wt_req).await,
-                        "list" => this.worktree_list(wt_req).await,
-                        "show" => this.worktree_show(wt_req).await,
-                        "cleanup" => this.worktree_cleanup(wt_req).await,
-                        "merge" => this.worktree_merge(wt_req).await,
-                        "status" => this.worktree_status(wt_req).await,
-                        _ => unreachable!(),
-                    }
-                }
-
-                _ => Err(Self::error(
-                    ErrorCode::INVALID_PARAMS,
-                    format!(
-                        "Unknown coordination action: '{action}'. Valid: {}",
-                        cas_mcp::actions::COORDINATION_ACTIONS.join(", ")
-                    ),
-                )),
-            };
-
-            // cas-0033: the supervisor's calls retry queued branch deletions
-            // and delete branches whose task ended or whose worktree is gone
-            // (for example right after worktree_cleanup). A no-op otherwise.
-            if !action.starts_with("db_branch_") {
-                this.db_branch_sweep().await;
-            }
-
-            if let Err(error) = &result {
-                let _ = crate::hooks::handlers::session_hygiene::append_factory_session_event(
-                    &this.inner.cas_root,
-                    "error",
-                    &[
-                        ("tool", "coordination"),
-                        ("action", &action),
-                        ("target", &event_target),
-                        ("task_id", &event_task_id),
-                        ("message", error.message.as_ref()),
-                    ],
-                );
-            }
-
-            // Track with domain-specific tool name for backwards-compatible telemetry
-            let domain = if action.starts_with("worktree_") {
-                "worktree"
-            } else if matches!(
-                action.as_str(),
-                "spawn_workers"
-                    | "shutdown_workers"
-                    | "recycle_worker"
-                    | "hold_worker"
-                    | "release_worker"
-                    | "worker_status"
-                    | "worker_activity"
-                    | "sweep_tasks"
-                    | "clear_context"
-                    | "my_context"
-                    | "sync_all_workers"
-                    | "gc_report"
-                    | "gc_cleanup"
-                    | "epic_status"
-                    | "focus_epic"
-                    | "remind"
-                    | "remind_list"
-                    | "remind_cancel"
-                    | "server_start"
-                    | "server_stop"
-                    | "server_list"
-                    | "restart_spawn_queue"
-                    | "db_branch_create"
-                    | "db_branch_show"
-                    | "db_branch_delete"
-            ) {
-                "factory"
-            } else {
-                "agent"
-            };
-            crate::telemetry::track_mcp_tool(domain, &action, result.is_ok());
-
-            result
-        })
-        .await
+            _ => Err(Self::error(
+                ErrorCode::INVALID_PARAMS,
+                format!(
+                    "Unknown factory action: '{action}'. Valid: {}. Identity, messaging and reminders are on the coordination tool: {}",
+                    cas_mcp::actions::FACTORY_ACTIONS.join(", "),
+                    cas_mcp::actions::COORDINATION_ACTIONS.join(", ")
+                ),
+            )),
+        };
+        result
     }
 
     // ========================================================================
@@ -1401,6 +1113,16 @@ fn canonical_task_action(action: &str) -> &str {
     cas_mcp::actions::canonical_action(cas_mcp::actions::TASK_ACTION_ALIASES, action)
 }
 
+/// Deprecation note for a factory action called through `coordination`
+/// (cas-8563b, D2). The alias works for one release.
+fn moved_to_factory_notice(action: &str, prefix: &str) -> String {
+    format!(
+        "Deprecated: `coordination action={action}` moved to the supervisor factory tool. \
+         Call `{prefix}factory action={action}`; this coordination alias is accepted for one \
+         release only."
+    )
+}
+
 fn canonical_coordination_action(action: &str) -> &str {
     cas_mcp::actions::canonical_action(cas_mcp::actions::COORDINATION_ACTION_ALIASES, action)
 }
@@ -1453,9 +1175,360 @@ fn coordination_params_not_in(req: &CoordinationRequest, allowed: &[&str]) -> Ve
 // ============================================================================
 
 impl CasService {
-    /// Wrapper for factory operations (used by tests). Delegates to coordination.
+    /// Shared dispatch behind the `coordination` and `factory` tools. Each
+    /// tool decides which actions it accepts before calling this.
+    async fn coordination_dispatch(
+        &self,
+        req: CoordinationRequest,
+    ) -> Result<CallToolResult, McpError> {
+        let this = self.clone();
+        panic_catch::dispatch_with_guidance("coordination", this.inner.clone(), async move {
+            crate::ui::factory::record_supervisor_mcp_call();
+            let mut req = req;
+            let action = canonical_coordination_action(&req.action).to_string();
+            req.action.clone_from(&action);
+            normalize_coordination_aliases(&mut req, &action);
+            if action == "spawn_workers"
+                && req.prompt.as_deref().is_some_and(|prompt| !prompt.trim().is_empty())
+            {
+                return Err(Self::error(
+                    ErrorCode::INVALID_PARAMS,
+                    "spawn_workers does not deliver `prompt` to the worker; no spawn was queued. `prompt` belongs to coordination action=loop_start. Spawn without `prompt`, then send the brief with coordination action=message target=<worker-name> summary=\"...\" message=\"...\" after registration.",
+                ));
+            }
+            let event_target = req.target.clone().unwrap_or_default();
+            let event_task_id = req.task_id.clone().unwrap_or_default();
+
+            // Destructive operations fail closed on fields that belong to
+            // another action in this unified request. Serde catches unknown
+            // JSON keys; this catches known union fields that the selected
+            // action would otherwise silently discard (the GH #197 incident
+            // was exactly `shutdown_workers id=...` falling through to ALL).
+            let allowed: Option<&[&str]> = match action.as_str() {
+                "recycle_worker" => Some(&["action", "target"]),
+                "shutdown_workers" => {
+                    Some(&["action", "id", "count", "worker_names", "force", "reason"])
+                }
+                "sync_all_workers" => {
+                    Some(&["action", "id", "branch", "worker_names", "force"])
+                }
+                "gc_cleanup" => Some(&["action", "older_than_secs", "force", "dry_run"]),
+                "server_stop" => Some(&["action", "id"]),
+                "worktree_cleanup" => {
+                    Some(&["action", "id", "all", "orphans", "dry_run", "force"])
+                }
+                "worktree_merge" => {
+                    // `task_id` binds a delivery merge to its immutable task
+                    // receipt and is consumed by target resolution. It is not
+                    // an incidental task-domain field.
+                    Some(&["action", "id", "task_id", "force", "allow_trunk", "cleanup"])
+                }
+                _ => None,
+            };
+            if let Some(allowed) = allowed {
+                let unsupported = coordination_params_not_in(&req, allowed);
+                if !unsupported.is_empty() {
+                    return Err(Self::error(
+                        ErrorCode::INVALID_PARAMS,
+                        format!(
+                            "Unsupported parameter(s) for destructive action `{action}`: {}. Nothing was queued or changed.",
+                            unsupported.join(", ")
+                        ),
+                    ));
+                }
+            }
+
+            let result = match action.as_str() {
+                // ---- Agent domain ----
+                "register" | "unregister" | "whoami" | "heartbeat" | "session_start"
+                | "session_end" | "loop_start" | "loop_cancel" | "loop_status"
+                | "lease_history" | "queue_notify" | "queue_poll" | "queue_peek"
+                | "queue_ack" | "inbox_poll" | "message" | "interrupt" | "message_ack"
+                | "message_status" => {
+                    // `interrupt` is sugar for `message` with urgent=true.
+                    let agent_req = if action == "interrupt" {
+                        let mut r = req.to_agent_request("message");
+                        r.urgent = Some(true);
+                        r
+                    } else {
+                        req.to_agent_request(&action)
+                    };
+                    // cas-15f2: `cross_session` is a reminder parameter.
+                    // `AgentRequest` has no such field, so serde dropped it
+                    // silently here and a supervisor who set it reasonably
+                    // believed it had asked for cross-session delivery. Since
+                    // cas-15f2 every message routes by the recipient's session
+                    // unconditionally, so the flag is redundant rather than
+                    // wrong — warn, do not reject, so existing callers keep
+                    // working.
+                    let cross_session_notice = matches!(
+                        action.as_str(),
+                        "message" | "interrupt"
+                    ) && req.cross_session.unwrap_or(false);
+                    match action.as_str() {
+                        "register" => this.agent_register(agent_req).await,
+                        "unregister" => this.agent_unregister(agent_req).await,
+                        "whoami" => this.agent_whoami(agent_req).await,
+                        "heartbeat" => this.agent_heartbeat(agent_req).await,
+                        "session_start" => this.agent_session_start(agent_req).await,
+                        "session_end" => this.agent_session_end(agent_req).await,
+                        "loop_start" => this.loop_start(agent_req).await,
+                        "loop_cancel" => this.loop_cancel(agent_req).await,
+                        "loop_status" => this.loop_status(agent_req).await,
+                        "lease_history" => this.lease_history(agent_req).await,
+                        "queue_notify" => this.queue_notify(agent_req).await,
+                        "queue_poll" => this.queue_poll(agent_req).await,
+                        "queue_peek" => this.queue_peek(agent_req).await,
+                        "queue_ack" => this.queue_ack(agent_req).await,
+                        "inbox_poll" => this.inbox_poll(agent_req).await,
+                        "message" | "interrupt" => {
+                            let result = this.message_send(agent_req).await;
+                            if cross_session_notice {
+                                Self::append_notice(
+                                    result,
+                                    "Note: `cross_session` is ignored on action=message — it is a \
+                                     reminder-scoped parameter. Messages are routed by the \
+                                     recipient's registered factory session automatically, so no \
+                                     flag is needed to reach an agent in another session.",
+                                )
+                            } else {
+                                result
+                            }
+                        }
+                        "message_ack" => this.message_ack(agent_req).await,
+                        "message_status" => this.message_status_query(agent_req).await,
+                        _ => unreachable!(),
+                    }
+                }
+                // agent_list and agent_cleanup: prefixed to avoid collision with worktree
+                "agent_list" => {
+                    let agent_req = req.to_agent_request("list");
+                    this.agent_list(agent_req).await
+                }
+                "agent_cleanup" => {
+                    let agent_req = req.to_agent_request("cleanup");
+                    this.agent_cleanup(agent_req).await
+                }
+
+                // ---- Disposable database branches (cas-0033) ----
+                "db_branch_create" => this.db_branch_create(&req).await,
+                "db_branch_show" => this.db_branch_show(&req).await,
+                "db_branch_delete" => this.db_branch_delete(&req).await,
+
+                // ---- Factory domain ----
+                "spawn_workers" | "shutdown_workers" | "recycle_worker" | "hold_worker" | "release_worker"
+                | "worker_status" | "worker_activity" | "sweep_tasks"
+                | "clear_context" | "my_context" | "sync_all_workers" | "gc_report"
+                | "gc_cleanup" | "epic_status" | "focus_epic" | "remind" | "remind_list"
+                | "remind_cancel" | "server_start" | "server_stop" | "server_list"
+                | "restart_spawn_queue" => {
+                    let factory_req = req.to_factory_request();
+                    match action.as_str() {
+                        "spawn_workers" => this.factory_spawn_workers(factory_req).await,
+                        "shutdown_workers" => this.factory_shutdown_workers(factory_req).await,
+                        "recycle_worker" => this.factory_recycle_worker(factory_req).await,
+                        "hold_worker" => this.factory_set_worker_hold(factory_req, true).await,
+                        "release_worker" => this.factory_set_worker_hold(factory_req, false).await,
+                        "worker_status" => this.factory_worker_status(factory_req).await,
+                        "sweep_tasks" => this.factory_sweep_tasks(factory_req).await,
+                        "clear_context" => this.factory_clear_context(factory_req).await,
+                        "my_context" => this.factory_my_context(factory_req).await,
+                        "worker_activity" => this.factory_worker_activity(factory_req).await,
+                        "sync_all_workers" => this.factory_sync_all_workers(factory_req).await,
+                        "gc_report" => this.factory_gc_report(factory_req).await,
+                        "gc_cleanup" => this.factory_gc_cleanup(factory_req).await,
+                        // cas-8f8f: per-child branch merge-state diagnostic.
+                        // Same data source as the epic-close gate so report
+                        // and gate cannot disagree.
+                        "epic_status" => this.factory_epic_status(factory_req).await,
+                        "focus_epic" => this.factory_focus_epic(factory_req).await,
+                        "remind" => this.factory_remind(factory_req).await,
+                        "remind_list" => this.factory_remind_list(factory_req).await,
+                        "remind_cancel" => this.factory_remind_cancel(factory_req).await,
+                        // cas-7c93 (GH #87): sanctioned lifecycle for servers
+                        // that must outlive a task or be shared across workers.
+                        "server_start" => this.factory_server_start(factory_req).await,
+                        "server_stop" => this.factory_server_stop(factory_req).await,
+                        "server_list" => this.factory_server_list(factory_req).await,
+                        // cas-73b5 (GH #970): unwedge the spawn queue in place.
+                        "restart_spawn_queue" => {
+                            this.factory_restart_spawn_queue(factory_req).await
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+
+                // ---- Worktree domain (prefixed with worktree_) ----
+                "worktree_create" | "worktree_list" | "worktree_show" | "worktree_cleanup"
+                | "worktree_merge" | "worktree_status" => {
+                    let wt_action = action.strip_prefix("worktree_").unwrap();
+
+                    // Gate: require System A (`worktrees.enabled`) for mutating or
+                    // detail operations, but let `status`, `list`, and `merge`
+                    // through always.
+                    //
+                    // `status` reports configuration — must work regardless.
+                    // `list` must reflect reality: factory (System B) worktrees are
+                    // created by `spawn_workers isolate=true` independently of the
+                    // System A flag, and the handler distinguishes both systems in
+                    // its output (cas-af86). Blocking `list` here was the bug:
+                    // it returned a misleading "disabled" message even when workers
+                    // were actively running in real git worktrees.
+                    //
+                    // `merge` is exempt for the same reason (cas-1d11): spawn's
+                    // `isolate=true` never checks this flag (it gates on the
+                    // separate `--worktrees` factory CLI flag instead, default
+                    // on), so System-B worker worktrees exist and need merging
+                    // regardless of `worktrees.enabled`. Blocking `merge` here
+                    // left supervisors with no Cassy-tracked way to fold a spawned
+                    // worker's branch back in — the reported fallback was manual
+                    // `git worktree add` + merge + push, bypassing factory
+                    // tracking/lease/cleanup entirely. `worktree_merge`'s own
+                    // handler resolves System A first, then falls back to the
+                    // System B `<cas_root>/worktrees/<assignee>` convention, and
+                    // returns an accurate "not found" for neither — so removing
+                    // this gate never masks a genuine absence, only the false
+                    // "disabled" refusal for worktrees that demonstrably exist.
+                    //
+                    // `cleanup` is exempt for the same reason (cas-f102,
+                    // GH #140). cas-1d11 kept it gated on the premise that
+                    // cleanup is "pure WorktreeStore CRUD with no System-B
+                    // analogue". That premise is false for RETIRED workers: a
+                    // System-B worktree outlives its worker unless `cleanup=true`
+                    // was passed at merge time, and merge is the only action that
+                    // ever removes one — so a worker that finished without it
+                    // leaves a worktree with no Cassy-tracked removal path at all,
+                    // and the reported workaround was a manual `git worktree
+                    // remove` that bypasses tracking exactly like the manual merge
+                    // cas-1d11 fixed. `worktree_cleanup`'s own handler resolves
+                    // System A first, then the System-B
+                    // `<cas_root>/worktrees/<assignee>` convention, and returns an
+                    // accurate "not found" for neither — so removing this gate
+                    // never masks a genuine absence, only the false "disabled"
+                    // refusal for worktrees that demonstrably exist on disk.
+                    //
+                    // create / show still genuinely require System A — they are
+                    // pure WorktreeStore CRUD with no System-B analogue (nothing
+                    // creates a System-B row to show, and `create` is the System-A
+                    // constructor itself).
+                    if wt_action != "status"
+                        && wt_action != "list"
+                        && wt_action != "merge"
+                        && wt_action != "cleanup"
+                    {
+                        let config = crate::config::Config::load(&this.inner.cas_root)
+                            .map_err(|e| {
+                                Self::error(
+                                    ErrorCode::INTERNAL_ERROR,
+                                    format!("Failed to load config: {e}"),
+                                )
+                            })?;
+                        if !config.worktrees_enabled() {
+                            return Ok(Self::success(
+                                crate::mcp::tools::core::workflow::SYSTEM_A_WORKTREES_DISABLED_MESSAGE,
+                            ));
+                        }
+                    }
+
+                    let wt_req = WorktreeRequest {
+                        action: wt_action.to_string(),
+                        id: req.id,
+                        task_id: req.task_id,
+                        all: req.all,
+                        status: req.status,
+                        orphans: req.orphans,
+                        dry_run: req.dry_run,
+                        force: req.force,
+                        allow_trunk: req.allow_trunk,
+                        cleanup: req.cleanup,
+                    };
+                    match wt_action {
+                        "create" => this.worktree_create(wt_req).await,
+                        "list" => this.worktree_list(wt_req).await,
+                        "show" => this.worktree_show(wt_req).await,
+                        "cleanup" => this.worktree_cleanup(wt_req).await,
+                        "merge" => this.worktree_merge(wt_req).await,
+                        "status" => this.worktree_status(wt_req).await,
+                        _ => unreachable!(),
+                    }
+                }
+
+                _ => Err(Self::error(
+                    ErrorCode::INVALID_PARAMS,
+                    format!(
+                        "Unknown coordination action: '{action}'. Valid: {}",
+                        cas_mcp::actions::coordination_request_actions().join(", ")
+                    ),
+                )),
+            };
+
+            // cas-0033: the supervisor's calls retry queued branch deletions
+            // and delete branches whose task ended or whose worktree is gone
+            // (for example right after worktree_cleanup). A no-op otherwise.
+            if !action.starts_with("db_branch_") {
+                this.db_branch_sweep().await;
+            }
+
+            if let Err(error) = &result {
+                let _ = crate::hooks::handlers::session_hygiene::append_factory_session_event(
+                    &this.inner.cas_root,
+                    "error",
+                    &[
+                        ("tool", "coordination"),
+                        ("action", &action),
+                        ("target", &event_target),
+                        ("task_id", &event_task_id),
+                        ("message", error.message.as_ref()),
+                    ],
+                );
+            }
+
+            // Track with domain-specific tool name for backwards-compatible telemetry
+            let domain = if action.starts_with("worktree_") {
+                "worktree"
+            } else if matches!(
+                action.as_str(),
+                "spawn_workers"
+                    | "shutdown_workers"
+                    | "recycle_worker"
+                    | "hold_worker"
+                    | "release_worker"
+                    | "worker_status"
+                    | "worker_activity"
+                    | "sweep_tasks"
+                    | "clear_context"
+                    | "my_context"
+                    | "sync_all_workers"
+                    | "gc_report"
+                    | "gc_cleanup"
+                    | "epic_status"
+                    | "focus_epic"
+                    | "remind"
+                    | "remind_list"
+                    | "remind_cancel"
+                    | "server_start"
+                    | "server_stop"
+                    | "server_list"
+                    | "restart_spawn_queue"
+                    | "db_branch_create"
+                    | "db_branch_show"
+                    | "db_branch_delete"
+            ) {
+                "factory"
+            } else {
+                "agent"
+            };
+            crate::telemetry::track_mcp_tool(domain, &action, result.is_ok());
+
+            result
+        })
+        .await
+    }
+
+    /// Wrapper for factory operations (used by tests). Takes the internal
+    /// `FactoryRequest` directly; the MCP surface is the `factory` tool.
     #[allow(dead_code)]
-    pub async fn factory(
+    pub async fn factory_request(
         &self,
         Parameters(req): Parameters<FactoryRequest>,
     ) -> Result<CallToolResult, McpError> {
@@ -1682,6 +1755,7 @@ mod tests {
             "search",
             "system",
             "coordination",
+            "factory",
             "verification",
             "team",
             "pattern",

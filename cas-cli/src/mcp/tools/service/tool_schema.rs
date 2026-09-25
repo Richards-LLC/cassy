@@ -40,9 +40,100 @@ const STANDARD_FORMATS: &[&str] = &[
 /// property names, never keywords, so they must not be stripped.
 const SCHEMA_MAP_KEYWORDS: &[&str] = &["properties", "patternProperties", "$defs", "definitions"];
 
+/// Parameters the agent-facing `coordination` tool publishes (D2 split,
+/// cas-8563b). The tool shares `CoordinationRequest` with `factory`, so it
+/// still deserializes the rest during the one-release alias window; it just
+/// stops loading the supervisor parameters into every worker's context.
+pub(crate) const COORDINATION_FIELDS: &[&str] = &[
+    "action",
+    "id",
+    "target",
+    "message",
+    "summary",
+    "blocker",
+    "merge_request",
+    "urgent",
+    "in_reply_to",
+    "kind",
+    "attachment",
+    "task_id",
+    "notification_id",
+    "limit",
+    "name",
+    "agent_type",
+    "parent_id",
+    "session_id",
+    "remind_message",
+    "remind_delay_secs",
+    "remind_event",
+    "remind_filter",
+    "remind_id",
+    "remind_ttl_secs",
+    "cross_session",
+];
+
+/// Messaging and reminder parameters the supervisor `factory` tool does not
+/// publish: they belong to `coordination`.
+pub(crate) const FACTORY_HIDDEN_FIELDS: &[&str] = &[
+    "message",
+    "summary",
+    "blocker",
+    "merge_request",
+    "urgent",
+    "in_reply_to",
+    "kind",
+    "attachment",
+    "remind_message",
+    "remind_delay_secs",
+    "remind_event",
+    "remind_filter",
+    "remind_id",
+    "remind_ttl_secs",
+    "cross_session",
+];
+
+/// Narrow the shared `CoordinationRequest` schema to the tool publishing it:
+/// its own action enum and its own parameters.
+fn narrow_split_tool(tool_name: &str, schema: &mut JsonObject) {
+    fn coordination_keeps(field: &str) -> bool {
+        COORDINATION_FIELDS.contains(&field)
+    }
+    fn factory_keeps(field: &str) -> bool {
+        !FACTORY_HIDDEN_FIELDS.contains(&field)
+    }
+    let (actions, keep): (&[&str], fn(&str) -> bool) = match tool_name {
+        "coordination" => (cas_mcp::actions::COORDINATION_ACTIONS, coordination_keeps),
+        "factory" => (cas_mcp::actions::FACTORY_ACTIONS, factory_keeps),
+        _ => return,
+    };
+    let Some(Value::Object(properties)) = schema.get_mut("properties") else {
+        return;
+    };
+    let hidden: Vec<String> = properties
+        .keys()
+        .filter(|name| !keep(name))
+        .cloned()
+        .collect();
+    for name in hidden {
+        properties.remove(&name);
+    }
+    if let Some(Value::Object(action)) = properties.get_mut("action") {
+        action.insert(
+            "enum".to_string(),
+            Value::Array(
+                actions
+                    .iter()
+                    .map(|action| Value::String((*action).to_string()))
+                    .collect(),
+            ),
+        );
+    }
+}
+
 /// Return `tool` with a compact input schema.
 pub(crate) fn compact_tool(mut tool: Tool) -> Tool {
     let mut schema = tool.input_schema.as_ref().clone();
+    narrow_split_tool(tool.name.as_ref(), &mut schema);
     for keyword in ["$schema", "title", "description"] {
         schema.remove(keyword);
     }
@@ -130,5 +221,62 @@ mod tests {
             })
         );
         assert_eq!(tool.description.as_deref(), Some("fixture tool"));
+    }
+
+    /// cas-8563b (D2): the two tools sharing `CoordinationRequest` publish
+    /// disjoint action enums, and `coordination` drops the supervisor params.
+    #[test]
+    fn coordination_and_factory_publish_their_own_actions_and_params() {
+        let tools = crate::mcp::tools::CasService::tool_definitions_for_build();
+        let schema_of = |name: &str| {
+            tools
+                .iter()
+                .find(|tool| tool.name == name)
+                .unwrap_or_else(|| panic!("{name} tool is not registered"))
+                .input_schema
+                .as_ref()
+                .clone()
+        };
+        let enum_of = |schema: &JsonObject| -> Vec<String> {
+            schema["properties"]["action"]["enum"]
+                .as_array()
+                .expect("action enum")
+                .iter()
+                .map(|v| v.as_str().unwrap().to_string())
+                .collect()
+        };
+        let coordination = schema_of("coordination");
+        let factory = schema_of("factory");
+        assert_eq!(enum_of(&coordination), cas_mcp::actions::COORDINATION_ACTIONS);
+        assert_eq!(enum_of(&factory), cas_mcp::actions::FACTORY_ACTIONS);
+
+        let coordination_params: Vec<&String> =
+            coordination["properties"].as_object().unwrap().keys().collect();
+        for param in &coordination_params {
+            assert!(COORDINATION_FIELDS.contains(&param.as_str()), "{param}");
+        }
+        for supervisor_only in ["count", "worker_names", "config_dir", "workers", "allow_trunk", "command", "port"] {
+            assert!(
+                !coordination["properties"].as_object().unwrap().contains_key(supervisor_only),
+                "coordination still publishes {supervisor_only}"
+            );
+            assert!(
+                factory["properties"].as_object().unwrap().contains_key(supervisor_only),
+                "factory must publish {supervisor_only}"
+            );
+        }
+        for messaging in ["message", "summary", "remind_message"] {
+            assert!(
+                !factory["properties"].as_object().unwrap().contains_key(messaging),
+                "factory still publishes {messaging}"
+            );
+        }
+        let bytes = |schema: &JsonObject| serde_json::to_string(schema).unwrap().len();
+        assert!(
+            bytes(&factory) - bytes(&coordination) >= 6_000,
+            "the worker tool must shed the supervisor params: coordination {} B, factory {} B",
+            bytes(&coordination),
+            bytes(&factory)
+        );
     }
 }

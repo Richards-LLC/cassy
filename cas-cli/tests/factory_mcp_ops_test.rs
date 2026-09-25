@@ -674,7 +674,7 @@ async fn remind_auto_binds_issuer_single_in_progress_task_and_close_quarantines_
     remind.remind_message = Some("follow up on discarded draft".to_string());
     remind.remind_delay_secs = Some(300);
     env.service
-        .factory(Parameters(remind))
+        .factory_request(Parameters(remind))
         .await
         .expect("remind should infer the issuer task");
 
@@ -710,7 +710,7 @@ async fn remind_external_condition_defaults_to_non_expiring_cross_session_row() 
 
     let result = env
         .service
-        .factory(Parameters(remind))
+        .factory_request(Parameters(remind))
         .await
         .expect("external reminder should be accepted");
     assert!(get_text(&result).contains("event-based, fires on tag_exists"));
@@ -737,7 +737,7 @@ async fn remind_delay_beyond_ttl_stays_pending_and_list_shows_ended_reminders() 
     remind.remind_message = Some("overnight checkpoint".to_string());
     remind.remind_delay_secs = Some(24_900);
     env.service
-        .factory(Parameters(remind))
+        .factory_request(Parameters(remind))
         .await
         .expect("a delay longer than the TTL is accepted");
 
@@ -764,7 +764,7 @@ async fn remind_delay_beyond_ttl_stays_pending_and_list_shows_ended_reminders() 
     cancelled.remind_message = Some("superseded wake".to_string());
     cancelled.remind_delay_secs = Some(60);
     env.service
-        .factory(Parameters(cancelled))
+        .factory_request(Parameters(cancelled))
         .await
         .expect("second reminder");
     let superseded = reminders
@@ -777,7 +777,7 @@ async fn remind_delay_beyond_ttl_stays_pending_and_list_shows_ended_reminders() 
 
     let listed = get_text(
         &env.service
-            .factory(Parameters(factory_req("remind_list")))
+            .factory_request(Parameters(factory_req("remind_list")))
             .await
             .expect("remind_list"),
     );
@@ -834,7 +834,7 @@ async fn worker_status_surfaces_a_wedged_daemon_loop_and_restart_spawn_queue_req
         status.summary = Some(summary);
         let text = get_text(
             &env.service
-                .factory(Parameters(status))
+                .factory_request(Parameters(status))
                 .await
                 .expect("worker_status"),
         );
@@ -856,7 +856,7 @@ async fn worker_status_surfaces_a_wedged_daemon_loop_and_restart_spawn_queue_req
 
     let restart = get_text(
         &env.service
-            .factory(Parameters(factory_req("restart_spawn_queue")))
+            .factory_request(Parameters(factory_req("restart_spawn_queue")))
             .await
             .expect("the supervisor may restart the spawn queue"),
     );
@@ -879,7 +879,7 @@ async fn restart_spawn_queue_is_supervisor_only() {
     let env = FactoryTestEnv::new();
     let error = env
         .service
-        .factory(Parameters(factory_req("restart_spawn_queue")))
+        .factory_request(Parameters(factory_req("restart_spawn_queue")))
         .await
         .expect_err("a worker may not restart the spawn queue");
     assert!(
@@ -1039,7 +1039,7 @@ async fn test_sync_all_workers_explicit_id_beats_unrelated_in_progress_epic_cas_
     req.id = Some("cas-3b7c".to_string());
     let result = env
         .service
-        .factory(Parameters(req))
+        .factory_request(Parameters(req))
         .await
         .expect("explicit requested epic should resolve");
     let text = get_text(&result);
@@ -1076,7 +1076,7 @@ async fn test_sync_all_workers_explicit_epic_uses_recorded_parent_branch_cas_580
     req.id = Some(epic.id);
     let result = env
         .service
-        .factory(Parameters(req))
+        .factory_request(Parameters(req))
         .await
         .expect("explicit epic should resolve its recorded parent");
     let text = get_text(&result);
@@ -1112,7 +1112,7 @@ async fn test_sync_all_workers_invalid_explicit_id_has_zero_worker_mutations_cas
     req.id = Some("cas-does-not-exist".to_string());
     let err = env
         .service
-        .factory(Parameters(req))
+        .factory_request(Parameters(req))
         .await
         .expect_err("invalid explicit id must fail closed");
     let err_text = err.to_string();
@@ -1158,7 +1158,7 @@ async fn test_sync_all_workers_rejects_cross_project_session_focus_cas_bfa5() {
     let req = factory_req("sync_all_workers");
     let err = env
         .service
-        .factory(Parameters(req))
+        .factory_request(Parameters(req))
         .await
         .expect_err("cross-project focus must fail closed");
     let err_text = err.to_string();
@@ -1187,7 +1187,7 @@ async fn test_focus_epic_pins_valid_epic_and_records_activity() {
     req.id = Some(epic_id.clone());
     let result = env
         .service
-        .factory(Parameters(req))
+        .factory_request(Parameters(req))
         .await
         .expect("focus_epic should succeed");
 
@@ -1225,7 +1225,7 @@ async fn test_focus_epic_rejects_missing_and_non_epic_without_mutation() {
     let mut missing = factory_req("focus_epic");
     missing.id = None;
     assert!(
-        env.service.factory(Parameters(missing)).await.is_err(),
+        env.service.factory_request(Parameters(missing)).await.is_err(),
         "missing id without clear=true should fail"
     );
     assert_eq!(
@@ -1236,7 +1236,7 @@ async fn test_focus_epic_rejects_missing_and_non_epic_without_mutation() {
     let mut nonexistent = factory_req("focus_epic");
     nonexistent.id = Some("cas-does-not-exist".to_string());
     assert!(
-        env.service.factory(Parameters(nonexistent)).await.is_err(),
+        env.service.factory_request(Parameters(nonexistent)).await.is_err(),
         "nonexistent id should fail"
     );
     assert_eq!(
@@ -1252,7 +1252,7 @@ async fn test_focus_epic_rejects_missing_and_non_epic_without_mutation() {
     let mut non_epic = factory_req("focus_epic");
     non_epic.id = Some(task_id);
     assert!(
-        env.service.factory(Parameters(non_epic)).await.is_err(),
+        env.service.factory_request(Parameters(non_epic)).await.is_err(),
         "non-epic id should fail"
     );
     assert_eq!(
@@ -1280,7 +1280,7 @@ async fn test_focus_epic_rejects_closed_epic_without_mutation() {
     let mut req = factory_req("focus_epic");
     req.id = Some(epic_id);
     assert!(
-        env.service.factory(Parameters(req)).await.is_err(),
+        env.service.factory_request(Parameters(req)).await.is_err(),
         "closed epic id should fail"
     );
 
@@ -1304,14 +1304,14 @@ async fn test_focus_epic_clear_removes_pin_and_preserves_session_default() {
     let mut pin = factory_req("focus_epic");
     pin.id = Some(epic_id);
     env.service
-        .factory(Parameters(pin))
+        .factory_request(Parameters(pin))
         .await
         .expect("pin should succeed");
 
     let mut clear = factory_req("focus_epic");
     clear.clear = Some(true);
     env.service
-        .factory(Parameters(clear))
+        .factory_request(Parameters(clear))
         .await
         .expect("clear should succeed");
 
@@ -1422,7 +1422,7 @@ async fn test_spawn_workers_build_guard_override_allows_loaded_fixture_in_isolat
     req.count = Some(1);
     let response = env
         .service
-        .factory(Parameters(req))
+        .factory_request(Parameters(req))
         .await
         .expect("spawn_workers must ignore host load in the isolated fixture");
     let text = get_text(&response);
@@ -1438,7 +1438,7 @@ async fn test_spawn_workers_requires_epic() {
     let env = FactoryTestEnv::new();
 
     let req = factory_req("spawn_workers");
-    let result = env.service.factory(Parameters(req)).await;
+    let result = env.service.factory_request(Parameters(req)).await;
 
     assert!(result.is_err(), "Should fail without epic");
     let err = result.unwrap_err();
@@ -1476,7 +1476,7 @@ async fn test_spawn_workers_enqueues_with_epic_in_isolated_child() {
     req.count = Some(3);
     req.worker_names = Some("alpha,beta,gamma".to_string());
 
-    let result = env.service.factory(Parameters(req)).await;
+    let result = env.service.factory_request(Parameters(req)).await;
     assert!(result.is_ok(), "Should succeed with epic");
 
     let text = get_text(&result.unwrap());
@@ -1517,7 +1517,7 @@ async fn test_spawn_workers_isolate_flag_in_isolated_child() {
 
     let result = env
         .service
-        .factory(Parameters(req))
+        .factory_request(Parameters(req))
         .await
         .expect("stock spawn should succeed");
     let text = get_text(&result);
@@ -1574,7 +1574,7 @@ async fn test_spawn_workers_with_task_id_succeeds_after_epic_closed_in_isolated_
     req.count = Some(1);
     req.task_id = Some(task_id.clone());
 
-    let result = env.service.factory(Parameters(req)).await;
+    let result = env.service.factory_request(Parameters(req)).await;
     assert!(
         result.is_ok(),
         "spawn_workers with a concrete open task_id must not require an epic: {result:?}"
@@ -1601,7 +1601,7 @@ async fn test_spawn_workers_with_task_id_succeeds_with_no_epic_at_all() {
     req.task_id = Some(task_id.clone());
     req.cli = Some("claude".to_string());
 
-    let result = env.service.factory(Parameters(req)).await;
+    let result = env.service.factory_request(Parameters(req)).await;
     assert!(
         result.is_ok(),
         "a single named worker for an open task needs no epic: {result:?}"
@@ -1661,7 +1661,7 @@ async fn test_spawn_workers_undispatchable_task_id_is_rejected_without_epic() {
         req.task_id = Some(id.clone());
         let err = env
             .service
-            .factory(Parameters(req))
+            .factory_request(Parameters(req))
             .await
             .expect_err(&format!(
                 "{status:?} (assignee={assignee:?}) must not authorize an epic-free spawn"
@@ -1712,7 +1712,7 @@ async fn test_undispatchable_task_id_still_allowed_when_an_epic_is_open_in_isola
         req.count = Some(1);
         req.task_id = Some(id.clone());
         assert!(
-            env.service.factory(Parameters(req)).await.is_ok(),
+            env.service.factory_request(Parameters(req)).await.is_ok(),
             "with an open epic, {status:?} (assignee={assignee:?}) must behave exactly as before"
         );
         assert_eq!(env.spawn_queue().peek(10).expect("peek").len(), 1);
@@ -1737,7 +1737,7 @@ async fn test_task_id_authorizes_only_one_epic_free_spawn() {
     first.task_id = Some(task_id.clone());
     first.cli = Some("claude".to_string());
     env.service
-        .factory(Parameters(first))
+        .factory_request(Parameters(first))
         .await
         .expect("first epic-free spawn should be authorized");
 
@@ -1746,7 +1746,7 @@ async fn test_task_id_authorizes_only_one_epic_free_spawn() {
     second.task_id = Some(task_id.clone());
     let err = env
         .service
-        .factory(Parameters(second))
+        .factory_request(Parameters(second))
         .await
         .expect_err("a second spawn for the same queued task must be refused");
     assert!(
@@ -1786,7 +1786,7 @@ async fn test_spawn_workers_task_id_bypass_requires_a_valid_open_task() {
     req.task_id = Some(closed_id.clone());
     let err = env
         .service
-        .factory(Parameters(req))
+        .factory_request(Parameters(req))
         .await
         .expect_err("a closed task must not authorize a spawn");
     assert!(
@@ -1801,7 +1801,7 @@ async fn test_spawn_workers_task_id_bypass_requires_a_valid_open_task() {
     req.task_id = Some("cas-doesnotexist".to_string());
     let err = env
         .service
-        .factory(Parameters(req))
+        .factory_request(Parameters(req))
         .await
         .expect_err("an unknown task must not authorize a spawn");
     assert!(
@@ -1816,7 +1816,7 @@ async fn test_spawn_workers_task_id_bypass_requires_a_valid_open_task() {
     req.task_id = Some(open_id);
     let err = env
         .service
-        .factory(Parameters(req))
+        .factory_request(Parameters(req))
         .await
         .expect_err("multi-worker + task_id stays ambiguous");
     assert!(
@@ -1850,7 +1850,7 @@ async fn test_spawn_workers_task_id_enqueues_for_single_worker() {
     req.task_id = Some(task_id.clone());
     req.cli = Some("claude".to_string());
 
-    let result = env.service.factory(Parameters(req)).await;
+    let result = env.service.factory_request(Parameters(req)).await;
     assert!(
         result.is_ok(),
         "single-worker spawn with task_id should succeed: {result:?}"
@@ -1885,7 +1885,7 @@ async fn test_spawn_workers_task_id_accepts_stale_assignee_for_reset_preassign()
     req.cli = Some("claude".to_string());
     let text = get_text(
         &env.service
-            .factory(Parameters(req))
+            .factory_request(Parameters(req))
             .await
             .expect("stale holder must not strand a replacement spawn"),
     );
@@ -1914,7 +1914,7 @@ async fn test_spawn_workers_task_id_refuses_fresh_heartbeat_holder() {
     req.task_id = Some(task_id);
     let error = env
         .service
-        .factory(Parameters(req))
+        .factory_request(Parameters(req))
         .await
         .expect_err("fresh holder must reject replacement spawn");
 
@@ -1939,7 +1939,7 @@ async fn test_spawn_workers_task_id_enqueues_for_single_named_worker() {
     req.task_id = Some(task_id.clone());
     req.cli = Some("claude".to_string());
 
-    let result = env.service.factory(Parameters(req)).await;
+    let result = env.service.factory_request(Parameters(req)).await;
     assert!(
         result.is_ok(),
         "single named-worker spawn with task_id should succeed: {result:?}"
@@ -1967,7 +1967,7 @@ async fn test_spawn_workers_task_id_rejects_multi_worker_count() {
     req.count = Some(3);
     req.task_id = Some(task_id);
 
-    let result = env.service.factory(Parameters(req)).await;
+    let result = env.service.factory_request(Parameters(req)).await;
     assert!(result.is_err(), "task_id with count>1 must be rejected");
     let err = result.unwrap_err();
     assert!(
@@ -1997,7 +1997,7 @@ async fn test_spawn_workers_task_id_rejects_multi_worker_names() {
     req.worker_names = Some("alpha,beta".to_string());
     req.task_id = Some(task_id);
 
-    let result = env.service.factory(Parameters(req)).await;
+    let result = env.service.factory_request(Parameters(req)).await;
     assert!(
         result.is_err(),
         "task_id with 2 worker_names must be rejected"
@@ -2016,7 +2016,7 @@ async fn test_spawn_workers_task_id_rejects_unknown_task() {
     req.count = Some(1);
     req.task_id = Some("cas-doesnotexist".to_string());
 
-    let result = env.service.factory(Parameters(req)).await;
+    let result = env.service.factory_request(Parameters(req)).await;
     assert!(result.is_err(), "unknown task_id must be rejected");
     let err = result.unwrap_err();
     assert!(
@@ -2042,7 +2042,7 @@ async fn test_spawn_workers_task_id_rejects_closed_task() {
     req.count = Some(1);
     req.task_id = Some(task_id);
 
-    let result = env.service.factory(Parameters(req)).await;
+    let result = env.service.factory_request(Parameters(req)).await;
     assert!(result.is_err(), "closed task_id must be rejected");
     let err = result.unwrap_err();
     assert!(
@@ -2064,7 +2064,7 @@ async fn test_spawn_workers_closed_epic_not_counted() {
     store.update(&task).expect("close epic");
 
     let req = factory_req("spawn_workers");
-    let result = env.service.factory(Parameters(req)).await;
+    let result = env.service.factory_request(Parameters(req)).await;
 
     assert!(result.is_err(), "Closed epic should not count as active");
 }
@@ -2106,7 +2106,7 @@ async fn test_spawn_workers_codex_available_enqueues_codex_spec_in_isolated_chil
     req.count = Some(1);
     req.cli = Some("codex".to_string());
 
-    let result = env.service.factory(Parameters(req)).await;
+    let result = env.service.factory_request(Parameters(req)).await;
     assert!(
         result.is_ok(),
         "spawn_workers with cli=codex should succeed"
@@ -2162,7 +2162,7 @@ async fn test_spawn_workers_codex_unavailable_fails_loudly_in_isolated_child() {
 
     let error = env
         .service
-        .factory(Parameters(req))
+        .factory_request(Parameters(req))
         .await
         .expect_err("unavailable Codex must refuse rather than substitute Claude");
     assert!(
@@ -2184,7 +2184,7 @@ async fn test_spawn_workers_invalid_cli_returns_error() {
     req.count = Some(1);
     req.cli = Some("openai".to_string()); // invalid
 
-    let result = env.service.factory(Parameters(req)).await;
+    let result = env.service.factory_request(Parameters(req)).await;
     assert!(result.is_err(), "invalid cli should return error");
     let err = result.unwrap_err();
     assert!(
@@ -2215,7 +2215,7 @@ async fn test_spawn_workers_no_cli_override_queues_safe_worker_spec_in_isolated_
     let mut req = factory_req("spawn_workers");
     req.count = Some(2);
 
-    let result = env.service.factory(Parameters(req)).await;
+    let result = env.service.factory_request(Parameters(req)).await;
     assert!(result.is_ok());
 
     let entries = env.spawn_queue().peek(10).expect("peek");
@@ -2301,7 +2301,7 @@ async fn test_shutdown_workers_mid_task_requires_force_and_receipt_enumerates_st
     req.worker_names = Some("alice".to_string());
     let err = env
         .service
-        .factory(Parameters(req.clone()))
+        .factory_request(Parameters(req.clone()))
         .await
         .expect_err("mid-task shutdown must require force");
     assert!(
@@ -2317,7 +2317,7 @@ async fn test_shutdown_workers_mid_task_requires_force_and_receipt_enumerates_st
     req.force = Some(true);
     let result = env
         .service
-        .factory(Parameters(req))
+        .factory_request(Parameters(req))
         .await
         .expect("force should authorize exact target");
     let text = get_text(&result);
@@ -2355,7 +2355,7 @@ async fn test_shutdown_workers_dirty_or_unpushed_worktree_requires_force() {
     req.worker_names = Some("alice".to_string());
     let err = env
         .service
-        .factory(Parameters(req))
+        .factory_request(Parameters(req))
         .await
         .expect_err("dirty/unpushed shutdown must require force");
     assert!(
@@ -2386,7 +2386,7 @@ async fn test_shutdown_workers_no_remote_merged_tip_is_safe_without_force_cas_22
     req.worker_names = Some("alice".to_string());
     let result = env
         .service
-        .factory(Parameters(req))
+        .factory_request(Parameters(req))
         .await
         .expect("a clean tip reachable from main must be safe without force");
     let text = get_text(&result);
@@ -2413,7 +2413,7 @@ async fn test_shutdown_workers_no_remote_unmerged_tip_still_requires_force_cas_2
     req.worker_names = Some("alice".to_string());
     let err = env
         .service
-        .factory(Parameters(req))
+        .factory_request(Parameters(req))
         .await
         .expect_err("an unmerged no-remote tip must still require force");
     assert!(
@@ -2492,7 +2492,7 @@ async fn test_shutdown_workers_local_merge_accepts_epic_target_ahead_of_main_cas
     req.worker_names = Some("alice".to_string());
     let result = env
         .service
-        .factory(Parameters(req))
+        .factory_request(Parameters(req))
         .await
         .expect("a tip reachable from the local epic target must be safe");
     let text = get_text(&result);
@@ -2511,7 +2511,7 @@ async fn test_shutdown_workers_validates_existence() {
     let mut req = factory_req("shutdown_workers");
     req.worker_names = Some("alice,charlie".to_string());
 
-    let result = env.service.factory(Parameters(req)).await;
+    let result = env.service.factory_request(Parameters(req)).await;
     assert!(result.is_err(), "Should fail for nonexistent worker");
 
     let err = result.unwrap_err();
@@ -2532,7 +2532,7 @@ async fn test_shutdown_workers_enqueues() {
     let mut req = factory_req("shutdown_workers");
     req.worker_names = Some("alice,bob".to_string());
 
-    let result = env.service.factory(Parameters(req)).await;
+    let result = env.service.factory_request(Parameters(req)).await;
     assert!(result.is_ok());
 
     let text = get_text(&result.unwrap());
@@ -2558,7 +2558,7 @@ async fn test_shutdown_workers_accepts_json_array_worker_names_cas_4691() {
 
         let mut req = factory_req("shutdown_workers");
         req.worker_names = Some(names.to_string());
-        let result = env.service.factory(Parameters(req)).await;
+        let result = env.service.factory_request(Parameters(req)).await;
         let text = get_text(&result.unwrap_or_else(|error| {
             panic!("worker_names={names} must retire the worker: {}", error.message)
         }));
@@ -2589,7 +2589,7 @@ async fn test_shutdown_workers_all() {
     let mut req = factory_req("shutdown_workers");
     req.count = Some(0);
 
-    let result = env.service.factory(Parameters(req)).await;
+    let result = env.service.factory_request(Parameters(req)).await;
     assert!(result.is_ok());
 
     let text = get_text(&result.unwrap());
@@ -2608,7 +2608,7 @@ async fn test_shutdown_workers_supervisor_scoping() {
 
     // Empty worker_names should auto-scope to owned workers
     let req = factory_req("shutdown_workers");
-    let result = env.service.factory(Parameters(req)).await;
+    let result = env.service.factory_request(Parameters(req)).await;
     assert!(result.is_ok());
 
     let entries = env.spawn_queue().peek(10).expect("peek");
@@ -2643,7 +2643,7 @@ async fn test_recycle_worker_preserves_name_worktree_and_recipe() {
     req.target = Some("codex-worker".to_string());
     let result = env
         .service
-        .factory(Parameters(req))
+        .factory_request(Parameters(req))
         .await
         .expect("idle clean worker should be recyclable");
     let text = get_text(&result);
@@ -2687,7 +2687,7 @@ async fn test_recycle_worker_refuses_in_progress_task() {
     req.target = Some("busy-worker".to_string());
     let error = env
         .service
-        .factory(Parameters(req))
+        .factory_request(Parameters(req))
         .await
         .expect_err("in-progress worker must not be recycled");
     assert!(error.message.contains("force=true"), "{error:?}");
@@ -2714,7 +2714,7 @@ async fn test_recycle_worker_refuses_dirty_worktree() {
     req.target = Some("dirty-worker".to_string());
     let error = env
         .service
-        .factory(Parameters(req))
+        .factory_request(Parameters(req))
         .await
         .expect_err("dirty worker must not be recycled");
     assert!(error.message.contains("force=true"), "{error:?}");
@@ -2733,7 +2733,7 @@ async fn test_worker_status_empty() {
     let env = FactoryTestEnv::new();
 
     let req = factory_req("worker_status");
-    let result = env.service.factory(Parameters(req)).await;
+    let result = env.service.factory_request(Parameters(req)).await;
     assert!(result.is_ok());
 
     let text = get_text(&result.unwrap());
@@ -2780,7 +2780,7 @@ async fn cas_a736_worker_status_reconciles_the_full_terminal_relay_backlog() {
 
     let text = get_text(
         &env.service
-            .factory(Parameters(factory_req("worker_status")))
+            .factory_request(Parameters(factory_req("worker_status")))
             .await
             .expect("worker_status"),
     );
@@ -2814,7 +2814,7 @@ async fn test_worker_status_shows_agents() {
     env.register_worker("fox");
 
     let req = factory_req("worker_status");
-    let result = env.service.factory(Parameters(req)).await;
+    let result = env.service.factory_request(Parameters(req)).await;
     assert!(result.is_ok());
 
     let text = get_text(&result.unwrap());
@@ -2860,7 +2860,7 @@ async fn test_worker_status_dedupes_nested_identity_with_missing_worktree() {
 
     let text = get_text(
         &env.service
-            .factory(Parameters(factory_req("worker_status")))
+            .factory_request(Parameters(factory_req("worker_status")))
             .await
             .expect("worker_status"),
     );
@@ -2907,7 +2907,7 @@ async fn test_worker_status_task_state_is_fresh_for_a_just_closed_task() {
 
     let before = get_text(
         &env.service
-            .factory(Parameters(factory_req("worker_status")))
+            .factory_request(Parameters(factory_req("worker_status")))
             .await
             .expect("status"),
     );
@@ -2931,7 +2931,7 @@ async fn test_worker_status_task_state_is_fresh_for_a_just_closed_task() {
 
     let after = get_text(
         &env.service
-            .factory(Parameters(factory_req("worker_status")))
+            .factory_request(Parameters(factory_req("worker_status")))
             .await
             .expect("status"),
     );
@@ -2994,7 +2994,7 @@ async fn test_worker_status_stale_lease_alone_does_not_assert_work_in_progress()
 
     let text = get_text(
         &env.service
-            .factory(Parameters(factory_req("worker_status")))
+            .factory_request(Parameters(factory_req("worker_status")))
             .await
             .expect("status"),
     );
@@ -3032,7 +3032,7 @@ async fn test_worker_status_names_finished_awaiting_merge_as_waiting_on_supervis
 
         let text = get_text(
             &env.service
-                .factory(Parameters(factory_req("worker_status")))
+                .factory_request(Parameters(factory_req("worker_status")))
                 .await
                 .expect("status"),
         );
@@ -3118,7 +3118,7 @@ async fn test_worker_status_names_delivered_merge_awaiting_worker_reclose_cas_9f
 
     let text = get_text(
         &env.service
-            .factory(Parameters(factory_req("worker_status")))
+            .factory_request(Parameters(factory_req("worker_status")))
             .await
             .expect("status"),
     );
@@ -3154,7 +3154,7 @@ async fn test_worker_status_counts_broadcast_messages_in_worker_inboxes() {
 
     let text = get_text(
         &env.service
-            .factory(Parameters(factory_req("worker_status")))
+            .factory_request(Parameters(factory_req("worker_status")))
             .await
             .expect("status"),
     );
@@ -3189,7 +3189,7 @@ async fn test_worker_status_shows_inbox_depth_even_when_not_stalled() {
 
     let text = get_text(
         &env.service
-            .factory(Parameters(factory_req("worker_status")))
+            .factory_request(Parameters(factory_req("worker_status")))
             .await
             .expect("status"),
     );
@@ -3224,7 +3224,7 @@ async fn test_worker_status_names_parked_task_assigned_by_agent_id() {
 
     let text = get_text(
         &env.service
-            .factory(Parameters(factory_req("worker_status")))
+            .factory_request(Parameters(factory_req("worker_status")))
             .await
             .expect("status"),
     );
@@ -3253,7 +3253,7 @@ async fn test_worker_status_names_a_blocked_task() {
 
     let text = get_text(
         &env.service
-            .factory(Parameters(factory_req("worker_status")))
+            .factory_request(Parameters(factory_req("worker_status")))
             .await
             .expect("status"),
     );
@@ -3290,7 +3290,7 @@ async fn test_worker_status_prefers_live_task_over_parked_one() {
 
     let text = get_text(
         &env.service
-            .factory(Parameters(factory_req("worker_status")))
+            .factory_request(Parameters(factory_req("worker_status")))
             .await
             .expect("status"),
     );
@@ -3333,7 +3333,7 @@ async fn test_worker_status_reports_between_turns_not_stalled_for_claude_worker(
 
     let text = get_text(
         &env.service
-            .factory(Parameters(factory_req("worker_status")))
+            .factory_request(Parameters(factory_req("worker_status")))
             .await
             .expect("status"),
     );
@@ -3379,7 +3379,7 @@ async fn test_worker_status_surfaces_unread_inbox_without_consuming_it() {
 
     let text = get_text(
         &env.service
-            .factory(Parameters(factory_req("worker_status")))
+            .factory_request(Parameters(factory_req("worker_status")))
             .await
             .expect("status"),
     );
@@ -3418,7 +3418,7 @@ async fn test_worker_status_scopes_agents_to_factory_session() {
     let req = factory_req("worker_status");
     let result = env
         .service
-        .factory(Parameters(req))
+        .factory_request(Parameters(req))
         .await
         .expect("worker_status should succeed");
 
@@ -3445,7 +3445,7 @@ async fn test_worker_status_reports_scope_for_empty_summary_and_owned_roster() {
 
     let full = get_text(
         &env.service
-            .factory(Parameters(factory_req("worker_status")))
+            .factory_request(Parameters(factory_req("worker_status")))
             .await
             .expect("empty scoped worker_status should succeed"),
     );
@@ -3468,7 +3468,7 @@ async fn test_worker_status_reports_scope_for_empty_summary_and_owned_roster() {
     summary_request.summary = Some(true);
     let summary = get_text(
         &env.service
-            .factory(Parameters(summary_request.clone()))
+            .factory_request(Parameters(summary_request.clone()))
             .await
             .expect("empty scoped worker_status summary should succeed"),
     );
@@ -3490,7 +3490,7 @@ async fn test_worker_status_reports_scope_for_empty_summary_and_owned_roster() {
     env.register_worker_in_session("owned-a", "session-a");
     let full = get_text(
         &env.service
-            .factory(Parameters(factory_req("worker_status")))
+            .factory_request(Parameters(factory_req("worker_status")))
             .await
             .expect("owned worker_status should succeed"),
     );
@@ -3515,7 +3515,7 @@ async fn test_worker_status_reports_scope_for_empty_summary_and_owned_roster() {
 
     let summary = get_text(
         &env.service
-            .factory(Parameters(summary_request))
+            .factory_request(Parameters(summary_request))
             .await
             .expect("owned worker_status summary should succeed"),
     );
@@ -3545,7 +3545,7 @@ async fn test_worker_status_summary_names_no_factory_context() {
     request.summary = Some(true);
     let summary = get_text(
         &env.service
-            .factory(Parameters(request))
+            .factory_request(Parameters(request))
             .await
             .expect("unscoped worker_status summary should succeed"),
     );
@@ -3584,7 +3584,7 @@ async fn test_worker_status_summary_counts_scoped_duplicate_before_dedupe() {
     request.summary = Some(true);
     let summary = get_text(
         &env.service
-            .factory(Parameters(request))
+            .factory_request(Parameters(request))
             .await
             .expect("duplicate worker_status summary should succeed"),
     );
@@ -3628,7 +3628,7 @@ async fn test_worker_status_and_agent_list_agree_on_live_workers() {
 
     let status_text = get_text(
         &env.service
-            .factory(Parameters(factory_req("worker_status")))
+            .factory_request(Parameters(factory_req("worker_status")))
             .await
             .expect("worker_status"),
     );
@@ -3705,7 +3705,7 @@ async fn test_worker_status_keeps_heartbeat_stale_process_alive_worker() {
     let req = factory_req("worker_status");
     let result = env
         .service
-        .factory(Parameters(req))
+        .factory_request(Parameters(req))
         .await
         .expect("worker_status call should succeed");
     let text = get_text(&result);
@@ -3758,7 +3758,7 @@ async fn test_worker_status_prunes_stale_worker_and_keeps_live_one() {
     let req = factory_req("worker_status");
     let result = env
         .service
-        .factory(Parameters(req))
+        .factory_request(Parameters(req))
         .await
         .expect("worker_status call should succeed");
     let text = get_text(&result);
@@ -3816,7 +3816,7 @@ async fn test_worker_status_prune_skips_stale_workers_in_other_factory_sessions(
     let req = factory_req("worker_status");
     let result = env
         .service
-        .factory(Parameters(req))
+        .factory_request(Parameters(req))
         .await
         .expect("worker_status call should succeed");
     let text = get_text(&result);
@@ -3918,7 +3918,7 @@ async fn test_9829_worker_status_marks_stalled_worker_with_in_progress_task() {
     let req = factory_req("worker_status");
     let result = env
         .service
-        .factory(Parameters(req))
+        .factory_request(Parameters(req))
         .await
         .expect("worker_status call should succeed");
     let text = get_text(&result);
@@ -4006,7 +4006,7 @@ async fn test_worker_status_recommends_recycle_for_idle_near_limit_codex() {
 
     let text = get_text(
         &env.service
-            .factory(Parameters(factory_req("worker_status")))
+            .factory_request(Parameters(factory_req("worker_status")))
             .await
             .expect("worker_status should succeed"),
     );
@@ -4043,7 +4043,7 @@ async fn test_2e81_worker_status_parks_orphaned_inprogress_on_stale_prune() {
     let req = factory_req("worker_status");
     let result = env
         .service
-        .factory(Parameters(req))
+        .factory_request(Parameters(req))
         .await
         .expect("worker_status");
     let text = get_text(&result);
@@ -4097,7 +4097,7 @@ async fn test_2e81_worker_status_distinguishes_empty_fleet_vs_died_while_leased(
     // Empty fleet (only supervisor) — no died-while-leased section.
     let empty_text = get_text(
         &env.service
-            .factory(Parameters(factory_req("worker_status")))
+            .factory_request(Parameters(factory_req("worker_status")))
             .await
             .expect("worker_status empty"),
     );
@@ -4125,7 +4125,7 @@ async fn test_2e81_worker_status_distinguishes_empty_fleet_vs_died_while_leased(
 
     let died_text = get_text(
         &env.service
-            .factory(Parameters(factory_req("worker_status")))
+            .factory_request(Parameters(factory_req("worker_status")))
             .await
             .expect("worker_status after death"),
     );
@@ -4214,7 +4214,7 @@ async fn test_2e81_orphan_recovery_skips_awaiting_merge_tasks() {
 
     let _ = env
         .service
-        .factory(Parameters(factory_req("worker_status")))
+        .factory_request(Parameters(factory_req("worker_status")))
         .await
         .expect("worker_status");
 
@@ -4454,7 +4454,7 @@ async fn test_3dcb_worker_death_reaches_the_prompt_path() {
         .is_success();
 
     env.service
-        .factory(Parameters(factory_req("worker_status")))
+        .factory_request(Parameters(factory_req("worker_status")))
         .await
         .expect("worker_status");
 
@@ -4528,7 +4528,7 @@ async fn test_3dcb_a_second_genuine_death_is_reported_again() {
         .is_success();
 
     env.service
-        .factory(Parameters(factory_req("worker_status")))
+        .factory_request(Parameters(factory_req("worker_status")))
         .await
         .expect("first death");
     assert_eq!(worker_died_prompt_rows(&env.cas_root).len(), 1);
@@ -4551,7 +4551,7 @@ async fn test_3dcb_a_second_genuine_death_is_reported_again() {
         .is_success();
 
     env.service
-        .factory(Parameters(factory_req("worker_status")))
+        .factory_request(Parameters(factory_req("worker_status")))
         .await
         .expect("second death");
 
@@ -4572,7 +4572,7 @@ async fn test_worker_activity_empty() {
     let env = FactoryTestEnv::new();
 
     let req = factory_req("worker_activity");
-    let result = env.service.factory(Parameters(req)).await;
+    let result = env.service.factory_request(Parameters(req)).await;
     assert!(result.is_ok());
 
     let text = get_text(&result.unwrap());
@@ -4596,7 +4596,7 @@ async fn test_worker_activity_scopes_session_and_honors_target_filter() {
     req.target = Some("worker-a".to_string());
     let result = env
         .service
-        .factory(Parameters(req))
+        .factory_request(Parameters(req))
         .await
         .expect("worker_activity should succeed");
 
@@ -4614,7 +4614,7 @@ async fn test_worker_activity_scopes_session_and_honors_target_filter() {
     req.target = Some("worker-b".to_string());
     let result = env
         .service
-        .factory(Parameters(req))
+        .factory_request(Parameters(req))
         .await
         .expect("worker_activity should succeed for hidden target");
     let text = get_text(&result);
@@ -4644,7 +4644,7 @@ async fn test_worker_activity_includes_idle_workers() {
     req.target = Some("idle-worker".to_string());
     let result = env
         .service
-        .factory(Parameters(req))
+        .factory_request(Parameters(req))
         .await
         .expect("worker_activity should include idle worker");
 
@@ -4696,7 +4696,7 @@ async fn test_worker_activity_uses_worker_status_signal_full_names_and_suppresse
 
     let result = env
         .service
-        .factory(Parameters(factory_req("worker_activity")))
+        .factory_request(Parameters(factory_req("worker_activity")))
         .await
         .expect("worker_activity should succeed");
     let text = get_text(&result);
@@ -4761,7 +4761,7 @@ async fn test_worker_activity_codex_tool_call_uses_worker_status_rollout_signal(
     req.target = Some("codex-worker".to_string());
     let result = env
         .service
-        .factory(Parameters(req))
+        .factory_request(Parameters(req))
         .await
         .expect("worker_activity should consume the resolved Codex rollout");
     let text = get_text(&result);
@@ -4857,7 +4857,7 @@ async fn test_clear_context_queues_a_control_command_not_message_text() {
 
     let mut req = factory_req("clear_context");
     req.target = Some("wolf".to_string());
-    let result = env.service.factory(Parameters(req)).await;
+    let result = env.service.factory_request(Parameters(req)).await;
 
     // No daemon is running in this fixture, so nothing types the command into a
     // pane and no post-reset transcript ever appears. The call must therefore
@@ -4942,7 +4942,7 @@ async fn test_clear_context_confirms_reset_from_new_session_transcript() {
 
     let mut req = factory_req("clear_context");
     req.target = Some("otter".to_string());
-    let (result, ()) = tokio::join!(env.service.factory(Parameters(req)), write_transcript);
+    let (result, ()) = tokio::join!(env.service.factory_request(Parameters(req)), write_transcript);
 
     let text = get_text(&result.expect("a confirmed reset must succeed"));
     assert!(text.contains("CONFIRMED"), "{text}");
@@ -4987,7 +4987,7 @@ async fn test_clear_context_recycles_harness_without_verified_reset() {
     req.target = Some("badger".to_string());
     let result = env
         .service
-        .factory(Parameters(req))
+        .factory_request(Parameters(req))
         .await
         .expect("Codex clear_context should recycle the worker");
     let message = get_text(&result);
@@ -5029,7 +5029,7 @@ async fn test_clear_context_refuses_prompt_overflow_failure_loop() {
     req.target = Some("lynx".to_string());
     let error = env
         .service
-        .factory(Parameters(req))
+        .factory_request(Parameters(req))
         .await
         .expect_err("prompt-overflow failure loop must refuse clear_context");
     let message = error.message.to_string();
@@ -5183,7 +5183,7 @@ async fn test_clear_context_all_workers_fans_out_to_live_workers() {
 
     let mut req = factory_req("clear_context");
     req.target = Some("all_workers".to_string());
-    let result = env.service.factory(Parameters(req)).await;
+    let result = env.service.factory_request(Parameters(req)).await;
     assert!(
         result.is_err(),
         "no daemon is running, so no reset can be confirmed"
@@ -5215,7 +5215,7 @@ async fn test_my_context_shows_agent_info() {
     store.register(&agent).expect("register");
 
     let req = factory_req("my_context");
-    let result = env.service.factory(Parameters(req)).await;
+    let result = env.service.factory_request(Parameters(req)).await;
     assert!(result.is_ok());
 
     let text = get_text(&result.unwrap());
@@ -5234,7 +5234,7 @@ async fn test_gc_report_empty() {
     let env = FactoryTestEnv::new();
 
     let req = factory_req("gc_report");
-    let result = env.service.factory(Parameters(req)).await;
+    let result = env.service.factory_request(Parameters(req)).await;
     assert!(result.is_ok());
 
     let text = get_text(&result.unwrap());
@@ -5262,7 +5262,7 @@ async fn test_gc_report_shows_pending_prompts() {
     pq.enqueue("src", "fox", "do other stuff").expect("enqueue");
 
     let req = factory_req("gc_report");
-    let result = env.service.factory(Parameters(req)).await;
+    let result = env.service.factory_request(Parameters(req)).await;
     assert!(result.is_ok());
 
     let text = get_text(&result.unwrap());
@@ -5284,7 +5284,7 @@ async fn test_gc_report_names_dangling_primary_node_modules_link() {
 
     let report = env
         .service
-        .factory(Parameters(factory_req("gc_report")))
+        .factory_request(Parameters(factory_req("gc_report")))
         .await
         .expect("gc report");
     let text = get_text(&report);
@@ -5305,7 +5305,7 @@ async fn test_gc_report_lists_stale_temp_roots_without_deleting_them() {
 
     let report = env
         .service
-        .factory(Parameters(factory_req("gc_report")))
+        .factory_request(Parameters(factory_req("gc_report")))
         .await
         .expect("gc report");
     let text = get_text(&report);
@@ -5350,7 +5350,7 @@ async fn test_gc_artifacts_are_lifecycle_keyed_and_strays_are_review_only() {
 
     let report = env
         .service
-        .factory(Parameters(factory_req("gc_report")))
+        .factory_request(Parameters(factory_req("gc_report")))
         .await
         .unwrap();
     let report_text = get_text(&report);
@@ -5365,7 +5365,7 @@ async fn test_gc_artifacts_are_lifecycle_keyed_and_strays_are_review_only() {
 
     let mut preview = factory_req("gc_cleanup");
     preview.force = Some(true);
-    let preview = env.service.factory(Parameters(preview)).await.unwrap();
+    let preview = env.service.factory_request(Parameters(preview)).await.unwrap();
     assert!(get_text(&preview).contains("mode=review-only"));
     assert!(
         root.join(&closed_id).exists(),
@@ -5375,7 +5375,7 @@ async fn test_gc_artifacts_are_lifecycle_keyed_and_strays_are_review_only() {
     let mut cleanup = factory_req("gc_cleanup");
     cleanup.force = Some(true);
     cleanup.dry_run = Some(false);
-    let cleanup = env.service.factory(Parameters(cleanup)).await.unwrap();
+    let cleanup = env.service.factory_request(Parameters(cleanup)).await.unwrap();
     let cleanup_text = get_text(&cleanup);
     assert!(
         cleanup_text.contains("Closed-task artifact directories removed: 1"),
@@ -5414,7 +5414,7 @@ async fn test_target_cache_gc_public_dry_run_and_explicit_cleanup() {
 
     let report = env
         .service
-        .factory(Parameters(factory_req("gc_report")))
+        .factory_request(Parameters(factory_req("gc_report")))
         .await
         .unwrap();
     let report_text = get_text(&report);
@@ -5437,7 +5437,7 @@ async fn test_target_cache_gc_public_dry_run_and_explicit_cleanup() {
 
     let mut preview = factory_req("gc_cleanup");
     preview.force = Some(true);
-    let preview = env.service.factory(Parameters(preview)).await.unwrap();
+    let preview = env.service.factory_request(Parameters(preview)).await.unwrap();
     let preview_text = get_text(&preview);
     assert!(preview_text.contains("mode=dry-run"), "{preview_text}");
     assert!(
@@ -5448,7 +5448,7 @@ async fn test_target_cache_gc_public_dry_run_and_explicit_cleanup() {
     let mut cleanup = factory_req("gc_cleanup");
     cleanup.force = Some(true);
     cleanup.dry_run = Some(false);
-    let cleanup = env.service.factory(Parameters(cleanup)).await.unwrap();
+    let cleanup = env.service.factory_request(Parameters(cleanup)).await.unwrap();
     let cleanup_text = get_text(&cleanup);
     assert!(
         cleanup_text.contains("reclaimed_bytes=64"),
@@ -5471,7 +5471,7 @@ async fn test_gc_cleanup_without_force() {
     pq.enqueue("src", "wolf", "test").expect("enqueue");
 
     let req = factory_req("gc_cleanup");
-    let result = env.service.factory(Parameters(req)).await;
+    let result = env.service.factory_request(Parameters(req)).await;
     assert!(result.is_ok());
 
     let text = get_text(&result.unwrap());
@@ -5501,7 +5501,7 @@ async fn test_gc_cleanup_removes_only_stale_skill_markers_and_invalid_bare_marke
 
     let result = env
         .service
-        .factory(Parameters(factory_req("gc_cleanup")))
+        .factory_request(Parameters(factory_req("gc_cleanup")))
         .await
         .unwrap();
     let text = get_text(&result);
@@ -5526,7 +5526,7 @@ async fn test_gc_cleanup_with_force() {
     let mut req = factory_req("gc_cleanup");
     req.force = Some(true);
 
-    let result = env.service.factory(Parameters(req)).await;
+    let result = env.service.factory_request(Parameters(req)).await;
     assert!(result.is_ok());
 
     let text = get_text(&result.unwrap());
@@ -5547,7 +5547,7 @@ async fn test_gc_cleanup_force_with_age_expires_without_deleting_prompt_rows() {
     let mut req = factory_req("gc_cleanup");
     req.force = Some(true);
     req.older_than_secs = Some(0);
-    let result = env.service.factory(Parameters(req)).await.unwrap();
+    let result = env.service.factory_request(Parameters(req)).await.unwrap();
     let text = get_text(&result);
 
     assert!(
@@ -5575,7 +5575,7 @@ async fn test_gc_cleanup_purges_stale_and_shutdown_worker_records() {
     let shutdown_id = env.register_worker_with_status("shutdown-fox", AgentStatus::Shutdown);
 
     let req = factory_req("gc_cleanup");
-    let result = env.service.factory(Parameters(req)).await;
+    let result = env.service.factory_request(Parameters(req)).await;
     assert!(result.is_ok());
 
     let text = get_text(&result.unwrap());
@@ -5606,7 +5606,7 @@ async fn test_gc_cleanup_preserves_stale_supervisors() {
     store.update(&supervisor).expect("mark supervisor stale");
 
     let req = factory_req("gc_cleanup");
-    let result = env.service.factory(Parameters(req)).await;
+    let result = env.service.factory_request(Parameters(req)).await;
     assert!(result.is_ok());
 
     let text = get_text(&result.unwrap());
@@ -5635,13 +5635,13 @@ async fn test_spawn_then_shutdown_sequence() {
     let mut req = factory_req("spawn_workers");
     req.count = Some(2);
     req.cli = Some("claude".to_string());
-    let result = env.service.factory(Parameters(req)).await;
+    let result = env.service.factory_request(Parameters(req)).await;
     assert!(result.is_ok());
 
     // Shutdown
     let mut req = factory_req("shutdown_workers");
     req.worker_names = Some("alpha".to_string());
-    let result = env.service.factory(Parameters(req)).await;
+    let result = env.service.factory_request(Parameters(req)).await;
     assert!(result.is_ok());
 
     // Both should be in queue
@@ -5656,7 +5656,7 @@ async fn test_unknown_action() {
     let env = FactoryTestEnv::new();
 
     let req = factory_req("invalid_action");
-    let result = env.service.factory(Parameters(req)).await;
+    let result = env.service.factory_request(Parameters(req)).await;
     assert!(result.is_err());
 
     let err = result.unwrap_err();
@@ -7491,7 +7491,7 @@ async fn test_efc4_heterogeneous_codex_then_claude_spawn_queued_correctly_in_iso
     codex_req.effort = Some("high".to_string());
     codex_req.worker_names = Some("codex-alpha".to_string());
     env.service
-        .factory(Parameters(codex_req))
+        .factory_request(Parameters(codex_req))
         .await
         .expect("codex spawn should succeed");
 
@@ -7500,7 +7500,7 @@ async fn test_efc4_heterogeneous_codex_then_claude_spawn_queued_correctly_in_iso
     claude_req.count = Some(1);
     claude_req.worker_names = Some("claude-beta".to_string());
     env.service
-        .factory(Parameters(claude_req))
+        .factory_request(Parameters(claude_req))
         .await
         .expect("claude spawn should succeed");
 
@@ -7573,7 +7573,7 @@ async fn test_efc4_model_and_effort_reach_spawn_spec_for_each_harness_in_isolate
     codex_req.model = Some("o4-mini".to_string());
     codex_req.effort = Some("xhigh".to_string());
     env.service
-        .factory(Parameters(codex_req))
+        .factory_request(Parameters(codex_req))
         .await
         .expect("codex+model+effort spawn should succeed");
 
@@ -7584,7 +7584,7 @@ async fn test_efc4_model_and_effort_reach_spawn_spec_for_each_harness_in_isolate
     claude_req.model = Some("claude-opus-4-5".to_string());
     claude_req.effort = Some("medium".to_string());
     env.service
-        .factory(Parameters(claude_req))
+        .factory_request(Parameters(claude_req))
         .await
         .expect("claude+model+effort spawn should succeed");
 
@@ -7656,7 +7656,7 @@ async fn test_efc4_worker_status_shows_clone_path_for_both_harnesses() {
     let req = factory_req("worker_status");
     let result = env
         .service
-        .factory(Parameters(req))
+        .factory_request(Parameters(req))
         .await
         .expect("worker_status should succeed");
     let text = get_text(&result);
@@ -8274,7 +8274,7 @@ async fn test_sync_all_workers_skips_dirty_worktree_without_force_cas_0a6f() {
 
     let mut req = factory_req("sync_all_workers");
     req.id = Some("cas-3b7c".to_string());
-    let text = get_text(&env.service.factory(Parameters(req)).await.expect("sync"));
+    let text = get_text(&env.service.factory_request(Parameters(req)).await.expect("sync"));
 
     assert!(
         text.contains("Skipped:") && text.contains("uncommitted change(s)"),
@@ -8310,7 +8310,7 @@ async fn test_sync_all_workers_refuses_live_worker_even_with_force_cas_6cdc() {
     let mut req = factory_req("sync_all_workers");
     req.id = Some("cas-3b7c".to_string());
     req.force = Some(true);
-    let text = get_text(&env.service.factory(Parameters(req)).await.expect("sync"));
+    let text = get_text(&env.service.factory_request(Parameters(req)).await.expect("sync"));
 
     assert!(
         text.contains("Skipped:") && text.contains("live worker"),
@@ -8341,7 +8341,7 @@ async fn test_sync_all_workers_force_syncs_dirty_worktree_and_restores_wip_cas_0
     let mut req = factory_req("sync_all_workers");
     req.id = Some("cas-3b7c".to_string());
     req.force = Some(true);
-    let text = get_text(&env.service.factory(Parameters(req)).await.expect("sync"));
+    let text = get_text(&env.service.factory_request(Parameters(req)).await.expect("sync"));
 
     assert!(
         text.contains("Synced:") && text.contains("stashed + rebased + restored"),
@@ -8378,7 +8378,7 @@ async fn test_sync_all_workers_skips_worker_holding_an_in_progress_task_cas_0a6f
 
     let mut req = factory_req("sync_all_workers");
     req.id = Some("cas-3b7c".to_string());
-    let text = get_text(&env.service.factory(Parameters(req)).await.expect("sync"));
+    let text = get_text(&env.service.factory_request(Parameters(req)).await.expect("sync"));
 
     assert!(
         text.contains("Skipped:") && text.contains(&task_id),
@@ -8407,7 +8407,7 @@ async fn test_sync_all_workers_notifies_worker_and_supervisor_on_stranded_stash_
     let mut req = factory_req("sync_all_workers");
     req.id = Some("cas-3b7c".to_string());
     req.force = Some(true);
-    let text = get_text(&env.service.factory(Parameters(req)).await.expect("sync"));
+    let text = get_text(&env.service.factory_request(Parameters(req)).await.expect("sync"));
 
     assert!(
         text.contains("Failed:") && text.contains("WIP IS NOT LOST"),
@@ -8764,7 +8764,7 @@ async fn test_epic_status_reports_a_three_deep_stack_end_to_end_cas_aae6() {
 
     let mut req = factory_req("epic_status");
     req.id = Some("cas-top".to_string());
-    let text = get_text(&env.service.factory(Parameters(req)).await.expect("status"));
+    let text = get_text(&env.service.factory_request(Parameters(req)).await.expect("status"));
 
     assert!(
         text.contains("Stacked on: 2 unlanded epic branch(es) — 'epic/a' → 'epic/b'"),
@@ -8809,7 +8809,7 @@ async fn test_epic_status_omits_stack_lines_for_an_unstacked_epic_cas_aae6() {
 
     let mut req = factory_req("epic_status");
     req.id = Some("cas-solo".to_string());
-    let text = get_text(&env.service.factory(Parameters(req)).await.expect("status"));
+    let text = get_text(&env.service.factory_request(Parameters(req)).await.expect("status"));
 
     assert!(
         !text.contains("Stacked on"),
@@ -8906,7 +8906,7 @@ async fn test_epic_status_and_close_use_declared_target_branch_cas_50fe() {
     status_req.id = Some(epic.id.clone());
     let status = get_text(
         &env.service
-            .factory(Parameters(status_req))
+            .factory_request(Parameters(status_req))
             .await
             .expect("epic_status"),
     );
@@ -8923,7 +8923,7 @@ async fn test_epic_status_and_close_use_declared_target_branch_cas_50fe() {
     summary_req.summary = Some(true);
     let summary = get_text(
         &env.service
-            .factory(Parameters(summary_req))
+            .factory_request(Parameters(summary_req))
             .await
             .expect("paged summary epic_status"),
     );
@@ -10227,7 +10227,7 @@ async fn gh_699_worker_status_names_the_other_live_supervisor_on_this_clone() {
 
     let text = get_text(
         &env.service
-            .factory(Parameters(factory_req("worker_status")))
+            .factory_request(Parameters(factory_req("worker_status")))
             .await
             .expect("worker_status"),
     );
@@ -10275,7 +10275,7 @@ async fn cas_5087_worker_status_names_each_live_supervisors_epic() {
 
     let text = get_text(
         &env.service
-            .factory(Parameters(factory_req("worker_status")))
+            .factory_request(Parameters(factory_req("worker_status")))
             .await
             .expect("worker_status"),
     );
@@ -10312,7 +10312,7 @@ async fn cas_5087_a_supervisor_with_no_epic_renders_cleanly() {
 
     let text = get_text(
         &env.service
-            .factory(Parameters(factory_req("worker_status")))
+            .factory_request(Parameters(factory_req("worker_status")))
             .await
             .expect("worker_status"),
     );
@@ -10342,7 +10342,7 @@ async fn gh_699_worker_status_stays_quiet_with_one_live_supervisor() {
 
     let text = get_text(
         &env.service
-            .factory(Parameters(factory_req("worker_status")))
+            .factory_request(Parameters(factory_req("worker_status")))
             .await
             .expect("worker_status"),
     );
@@ -10379,7 +10379,7 @@ async fn gh_699_spawn_preflight_warns_when_a_second_supervisor_shares_the_clone(
 
     let text = get_text(
         &env.service
-            .factory(Parameters(req))
+            .factory_request(Parameters(req))
             .await
             .expect("spawn must still be allowed, only warned about"),
     );

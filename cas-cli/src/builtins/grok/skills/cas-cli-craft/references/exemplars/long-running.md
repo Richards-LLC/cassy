@@ -40,9 +40,9 @@ Piped: each phase transition appends one line with a timestamp and nothing redra
 ✓ complete · Cassy 3.17.2 · 29 projects refreshed · 0 failed · 41.3s
   project                 migr  index  skills  member  cloud  note
   cas-src                 ✓     ✓      ✓       ✓       ✓
-  gabber-studio           ✓     ✓      ✓       ✓       –      not linked
-  penguinz                ✓     ✓      ⚠       ✓       ✓      2 skills conflict
-    penguinz details:
+  acme-web                ✓     ✓      ✓       ✓       –      not linked
+  acme-api                ✓     ✓      ⚠       ✓       ✓      2 skills conflict
+    acme-api details:
       [WARN] skills: .claude/skills/cas/SKILL.md is locally modified
   [OK] user-level store: 3 built-ins refreshed
 ```

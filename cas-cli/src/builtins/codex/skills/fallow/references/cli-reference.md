@@ -929,7 +929,7 @@ fallow plugin-schema > plugin-schema.json
 Manage the local JWT used to unlock continuous/cloud runtime monitoring. Single-capture local runtime analysis does not require a license. Verification is fully offline against an Ed25519 public key compiled into the binary. Only `--trial` and `refresh` hit the network (`api.fallow.cloud`, 5s connect / 10s total timeout).
 
 ```bash
-fallow license activate --trial --email you@company.com
+fallow license activate --trial --email you@example.com
 fallow license activate eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9...
 fallow license activate --from-file ./license.jwt
 cat ./license.jwt | fallow license activate --stdin

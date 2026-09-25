@@ -14,8 +14,8 @@ Indexes       ✓ legacy search index  ✓ search index  ✓ symbol index
 Cloud         ✓ supervisor relay  ✓ delivery retries  ✓ canonical id
   ⚠ cloud identity metadata  foreign cloud scope(s) for project `cas-src`:
                              team_project_registered_2a57bec9-5dfa-4a8f-b711-31f
-                             9aeb8d6cb_gabber-studio=2026-08-31T18:04:22.8295309
-                             94+00:00,
+                             9aeb8d6cb_acme-web=2026-08-31T18:04:22.829530994+0
+                             0:00,
   → run `cas cloud purge-foreign --dry-run`, then `cas cloud purge-foreign`; only after the purge, run `cas cloud sync` to re-register the current project
   ⚠ registered project roots Registered root `/tmp/.tmpdInYXx` is excluded from
                              `cas update` discovery: a disposable temp root at

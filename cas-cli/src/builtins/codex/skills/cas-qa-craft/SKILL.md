@@ -62,7 +62,7 @@ instead of the procedure below.
 ## Close gate
 
 Close enforces this evidence before a user-facing delivery can park or close
-(`qa.evidence_gate`, cas-0cd5). A web-surface delivery needs the evidence bundle
+(`qa.evidence_gate`). A web-surface delivery needs the evidence bundle
 (`references/evidence-bundle.md`): `<artifacts>/<task-id>/qa/bundle.json` for
 the delivered commit, cited with `task action=notes note_type=platform_proof
 notes="qa-bundle: <abs path>/bundle.json"`. It must be newer than your last

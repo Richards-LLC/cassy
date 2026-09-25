@@ -8,7 +8,7 @@ managed_by: cas
 
 ## Session Start
 
-0. **Binary freshness check (cas-d0f9).** Before anything else — confirm the running `cas serve` binary matches HEAD of this repo. A stale binary may impose legacy global verification blocks instead of the current exact-task close gate. See [preflight.md](cas-supervisor/references/preflight.md) for the full command; the 10-second version:
+0. **Binary freshness check.** Before anything else — confirm the running `cas serve` binary matches HEAD of this repo. A stale binary may impose legacy global verification blocks instead of the current exact-task close gate. See [preflight.md](cas-supervisor/references/preflight.md) for the full command; the 10-second version:
 
    ```
    # cas --version format: cas 2.27.0 (9b52e17-dirty 2026-07-16)
@@ -105,7 +105,7 @@ Supervisor close override constraints: [`supervisor_override`](cas-supervisor/re
 - Launch the release gate detached on the assembled epic in its dedicated worktree, then run the [epic flow walk](cas-supervisor/references/epic-flow-walk.md) concurrently when any child has a demo statement.
 - Require both gate receipts and the single epic evidence note before epic close verification; apply task-verifier Step 0A with `verification_type=epic`.
 
-The `epic_status` action is a defense-in-depth diagnostic: the close-time gate (cas-8f8f) refuses to close an epic with stranded child branches regardless of supervisor overrides, but running `epic_status` mid-flight surfaces the same data so you can resolve merges without chasing a close-time error.
+The `epic_status` action is a defense-in-depth diagnostic: the close-time gate refuses to close an epic with stranded child branches regardless of supervisor overrides, but running `epic_status` mid-flight surfaces the same data so you can resolve merges without chasing a close-time error.
 
 ## Session End
 

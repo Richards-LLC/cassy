@@ -124,8 +124,8 @@ decisions that make it work. Open both; read the HTML source.
   signed variance ladder against plan, with forecast hatched; the ask is the closing figure.
 - `references/examples/benchmark-small-multiples.html` — comparison, practitioner audience. Hero:
   small multiples on one shared scale, with the crossover condition annotated.
-- `references/examples/before-after/` — the same decision brief rendered before and after this
-  contract, with `rubric-review.why.md` naming what changed and why the after version scores higher.
+- Before/after: `cas-ui-craft/references/exemplars/before-after.html` renders the same data the old
+  way and this way, each scored on the rubric.
 
 ## Sources
 

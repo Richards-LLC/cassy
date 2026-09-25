@@ -1205,10 +1205,11 @@ fn agent_visible_tool_text_has_no_ticket_ids_or_stale_values() {
     ] {
         assert!(!payload.contains(stale), "stale tool text {stale:?}");
     }
+    // cas-8563b (D2): spawn and sync parameters are published on `factory`.
     let coordination = published_tools()
         .into_iter()
-        .find(|tool| tool.name == "coordination")
-        .expect("coordination tool");
+        .find(|tool| tool.name == "factory")
+        .expect("factory tool");
     let config_dir = coordination.input_schema["properties"]["config_dir"]["description"]
         .as_str()
         .unwrap_or_default()

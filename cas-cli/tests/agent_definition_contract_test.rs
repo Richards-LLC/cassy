@@ -188,10 +188,8 @@ fn epic_walk_is_one_concurrent_pass_in_every_harness() {
             supervisor.contains("](references/epic-flow-walk.md)"),
             "{label} supervisor route"
         );
-        assert!(
-            checklist.contains("](../cas-supervisor/references/epic-flow-walk.md)"),
-            "{label} checklist route"
-        );
+        let route = "](../cas-supervisor/references/epic-flow-walk.md)";
+        assert!(checklist.contains(route), "{label} checklist route");
         assert!(checklist.contains("release gate detached"), "{label}");
         assert!(checklist.contains("verification_type=epic"), "{label}");
 

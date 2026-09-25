@@ -15,7 +15,7 @@ First use each session — load MCP schemas: ToolSearch(query="select:mcp__cs__t
 Cassy provides persistent context across sessions. Built-in tools are ephemeral.
 
 Bug routing: `cas config get issues.repo` / `issues.components.{cassy,violet,cloud}` name the project, Cassy, Violet and Cloud trackers; file operational bugs in the matching repo before moving on.
-Release notes: if docs/release-notes/RUBRIC.md exists, it defines when to announce a merge; use the `cas-release-notes` skill and follow docs/release-notes/RUBRIC.md.
+Release notes: when a merge reaches `staging` or `main` and the project has docs/release-notes/RUBRIC.md, use the `cas-release-notes` skill and follow docs/release-notes/RUBRIC.md.
 <!-- CAS:END -->
 
 ## Codex-specific notes

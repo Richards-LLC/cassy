@@ -21,11 +21,9 @@ fn source(flavor: &str, relative: &str) -> &'static str {
 
 #[test]
 fn mcp_and_viktor_guidance_use_the_cassy_surface() {
-    for (flavor, prefix) in [
-        ("", "mcp__cas__"),
-        ("codex", "mcp__cs__"),
-        ("grok", "cas__"),
-    ] {
+    // Audit D1: every flavor names Cassy tools by bare name.
+    let prefix = "";
+    for flavor in ["", "codex", "grok"] {
         let mcp = source(flavor, "skills/mcp-integration/SKILL.md");
         for marker in [
             "cas mcp add",

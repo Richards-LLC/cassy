@@ -35,14 +35,10 @@ this skill tells you where each of those lands in a report.
    `references/technical-contract.md` (one file, progressive enhancement, accessibility, print,
    provenance, design language) and `references/presentation-rules.md` (encodings, scales, numbers).
    Chart construction follows `cas-dataviz`.
-5. **Score it with the `cas-ui-craft` rubric** (`references/critique-rubric.md`): distinctiveness,
-   fit to argument, hierarchy, craft, accessibility, each 1–5, appended to the brief under
-   `## Critique` with one line of evidence per score. A report ships only at 4 or above on the first
-   three and with no mechanical defect (a contrast pair under 4.5:1 in either scheme, clipped or
-   overflowing text, a rule crossing a glyph, phone-width overflow scores 0 and blocks). Evidence is
-   the visual-QA receipt and fallback defined in the `cas-ui-craft` rubric, plus print preview and a
-   JS-disabled reload; then run `references/review-checklist.md`. A grep for expected tags is not a
-   review.
+5. **Score it with the `cas-ui-craft` rubric** (`references/critique-rubric.md`) and append the
+   table to the brief under `## Critique`. A report ships only when it meets that rubric's floor,
+   with its visual-QA receipt, a print preview, and a JS-disabled reload as evidence; then run
+   `references/review-checklist.md`. A grep for expected tags is not a review.
 6. **Commit all three files together**: markdown, concept brief, HTML. An HTML artifact without its
    markdown source is a provenance failure; a markdown report whose HTML is stale is worse than no
    HTML at all; a rendered report without its brief cannot be critiqued.

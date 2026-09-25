@@ -965,10 +965,12 @@ impl CasCore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::init_cas_dir;
 
     async fn promote_with_sources(tags: &[&str], sources: &[&str], repeat: bool) -> Vec<Task> {
         let temp = tempfile::tempdir().expect("temporary project");
-        let core = CasCore::with_daemon(temp.path().to_path_buf(), None, None);
+        let cas_root = init_cas_dir(temp.path()).expect("initialize isolated project");
+        let core = CasCore::with_daemon(cas_root, None, None);
         let rule_store = core.open_rule_store().expect("rule store");
         rule_store.init().expect("initialize rule store");
         let task_store = core.open_task_store().expect("task store");
@@ -989,6 +991,12 @@ mod tests {
                 .await
                 .expect("repeat promotion");
         }
+        assert!(
+            temp.path()
+                .join(".claude/rules/cas/cas-encode-example.md")
+                .exists(),
+            "promoted rule must sync inside the isolated project"
+        );
         task_store.list(None).expect("list tasks")
     }
 

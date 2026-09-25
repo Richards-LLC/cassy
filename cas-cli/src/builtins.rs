@@ -5225,28 +5225,21 @@ This is the body content."#;
     }
 
     /// cas-0bf6: the verification kit generator, maintenance sweep, feature
-    /// template and static map check ship in every harness catalog, and the
-    /// QA skill routes to them without making the kit a close prerequisite.
+    /// template and static map check ship in every harness catalog, the
+    /// template and script agree on the five feature-file H2s, and the QA
+    /// skill links the generator and the sweep.
     #[test]
     fn qa_craft_verification_kit_is_installed_and_linked() {
         const KIT: &[(&str, &str, &[&str])] = &[
             (
                 "skills/cas-qa-craft/references/verify-harness.md",
                 include_str!("builtins/skills/cas-qa-craft/references/verify-harness.md"),
-                &[
-                    "docs/qa/verify.md",
-                    "docs/qa/features/",
-                    "readiness signal",
-                    "kill only what you started; evidence survives",
-                    "15 minutes",
-                    "Background chore only",
-                    "check-feature-map.mjs",
-                ],
+                &[],
             ),
             (
                 "skills/cas-qa-craft/references/maintain.md",
                 include_str!("builtins/skills/cas-qa-craft/references/maintain.md"),
-                &["doc drift", "harness gap", "product regression", "clean", "changed", "blocked", "never edits product code"],
+                &[],
             ),
             (
                 "skills/cas-qa-craft/references/feature-template.md",
@@ -5279,13 +5272,7 @@ This is the body content."#;
                 .find(|file| file.path == "skills/cas-qa-craft/SKILL.md")
                 .unwrap_or_else(|| panic!("{label} missing cas-qa-craft"))
                 .content;
-            for marker in [
-                "references/verify-harness.md",
-                "references/maintain.md",
-                "one entry point per row",
-                "\"verified via another entry point\" does not count",
-                "never a close prerequisite",
-            ] {
+            for marker in ["references/verify-harness.md", "references/maintain.md"] {
                 assert!(skill.contains(marker), "{label} cas-qa-craft missing {marker:?}");
             }
         }

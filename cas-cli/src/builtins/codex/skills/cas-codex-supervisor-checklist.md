@@ -48,8 +48,6 @@ metadata:
    `SessionEnd`; each block records session id, agent, worktree, and a
    `git status --porcelain` snapshot).
 
-Do not use `/cas-start`, `/cas-context`, or `/cas-end` — they are not available in Codex.
-
 ## Intake Gate (Before Planning)
 
 Run the [intake gate](../cas-supervisor/references/intake.md) on every request; log any user override.

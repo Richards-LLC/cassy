@@ -310,7 +310,11 @@ fn codex_builtin_skills_and_agents_never_hardcode_claude_alias() {
 
 #[test]
 fn codex_worker_runtime_instruction_allows_close_then_escalate() {
-    let content = include_str!("../../crates/cas-pty/src/pty.rs");
+    // cas-8563b: the Codex worker contract is rendered by the shared
+    // `worker_contract` renderer with the `mcp__cs__` prefix, so check the
+    // rendered launch surface rather than a literal in the source file.
+    let content =
+        cas_mux::rendered_contract_surface("codex", cas_mux::ContractRole::Worker);
 
     // cas-47b7: the worker instruction phrasing is "close it with
     // `mcp__cs__task action=close ...`" (cas-bbc2 single-task rewrite). Assert on

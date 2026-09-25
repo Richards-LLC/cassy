@@ -1079,7 +1079,7 @@ pub struct AgentRequest {
 
     /// Short summary of the message (shown in UI notifications)
     #[schemars(
-        description = "A short one-line summary of the message, shown as a preview in the UI"
+        description = "Required for action=message (rejected without it): a short one-line summary of the message, shown as a preview in the UI"
     )]
     #[serde(default)]
     pub summary: Option<String>,

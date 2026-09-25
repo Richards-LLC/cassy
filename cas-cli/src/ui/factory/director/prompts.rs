@@ -1414,7 +1414,7 @@ pub fn generate_prompt_at(
                  Start working: {worker_prefix}task action=start id={task_id}\n\
                  Successful task action=start is authoritative assignment acceptance; no prose ACK is required. A concise execution plan is optional.\n\
                  While working, post progress notes with {worker_prefix}task action=notes.\n\
-                 If blocked, set status=blocked and send {worker_prefix}coordination action=message target=supervisor blocker=true with the blocker. For merge requests, use merge_request=true. Ordinary updates surface through the inbox on the next turn; only authenticated typed blocker, merge, verification, or lifecycle events may wake an idle supervisor."
+                 If blocked, set status=blocked and send {worker_prefix}coordination action=message target=supervisor blocker=true summary=\"...\" message=\"...\" with the blocker. For merge requests, use merge_request=true. Ordinary updates surface through the inbox on the next turn; only authenticated typed blocker, merge, verification, or lifecycle events may wake an idle supervisor."
             );
 
             Some(Prompt {

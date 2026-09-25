@@ -1773,36 +1773,6 @@ fn validate_risk_close_proofs_with_base_and_target_and_cache(
     build_proofs: BuildProofs,
     scoped_proof_cache: &mut ScopedProofTargetCache,
 ) -> Result<(), String> {
-    if task.risk.contains(&TaskRisk::Platform) && !has_platform_proof_note(&task.notes) {
-        let missing = platform_proof_missing_evidence(&task.notes).join(", ");
-        let caller = crate::mcp::tools::core::guidance::caller_prefix();
-        let supervisor = crate::mcp::tools::core::guidance::supervisor_prefix();
-        let correction = format!(
-            "If platform risk was declared in error, a live registered supervisor may run \
-             `{supervisor}task action=update id={id} risk=none proof_scope_fix=true reason=\"correct erroneous platform risk\"` \
-             on a merged delivery, or close with \
-             `{supervisor}task action=close id={id} supervisor_override=true reason=\"reviewed the platform-risk mismatch\"`; \
-             the missing evidence is recorded on the task.",
-            id = task.id,
-        );
-        // cas-90e8: a factory worker may not run cargo or xcodebuild, so it
-        // cannot produce this receipt itself. Name the route that can.
-        if build_proofs == BuildProofs::DeferredToAssembly {
-            return Err(format!(
-                "TASK CLOSE REJECTED: task {id} declares risk=platform but its platform_proof receipt is incomplete (missing evidence: {missing}). \
-                 Workers cannot produce it: ask the supervisor to record one from a macOS run or the macOS CI lane with \
-                 `{caller}coordination action=message target=supervisor blocker=true summary=\"platform proof for {id}\" message=\"...\"`, \
-                 then retry `{caller}task action=close id={id}`. {correction}",
-                id = task.id,
-            ));
-        }
-        return Err(format!(
-            "TASK CLOSE REJECTED: task {id} declares risk=platform but its platform_proof receipt is incomplete (missing evidence: {missing}). \
-             Add one with `{caller}task action=notes id={id} note_type=platform_proof notes=\"...\"` containing macOS, a platform command, and a passing result, \
-             then retry `{caller}task action=close id={id}`. {correction}",
-            id = task.id,
-        ));
-    }
     if task.risk.contains(&TaskRisk::Concurrency)
         && build_proofs == BuildProofs::Required
         && !has_loaded_proof_note(&task.notes)
@@ -1829,6 +1799,28 @@ fn validate_risk_close_proofs_with_base_and_target_and_cache(
     // tip at assembly proves every child at once.
     if build_proofs == BuildProofs::DeferredToAssembly {
         return Ok(());
+    }
+    // cas-90e8 (L3 P2): platform proof needs a macOS cargo/xcodebuild run a
+    // factory worker is forbidden to make, so a worker close defers it to
+    // assembly with the build proofs; every other close still owes it here.
+    if task.risk.contains(&TaskRisk::Platform) && !has_platform_proof_note(&task.notes) {
+        let missing = platform_proof_missing_evidence(&task.notes).join(", ");
+        let caller = crate::mcp::tools::core::guidance::caller_prefix();
+        let supervisor = crate::mcp::tools::core::guidance::supervisor_prefix();
+        let correction = format!(
+            "If platform risk was declared in error, a live registered supervisor may run \
+             `{supervisor}task action=update id={id} risk=none proof_scope_fix=true reason=\"correct erroneous platform risk\"` \
+             on a merged delivery, or close with \
+             `{supervisor}task action=close id={id} supervisor_override=true reason=\"reviewed the platform-risk mismatch\"`; \
+             the missing evidence is recorded on the task.",
+            id = task.id,
+        );
+        return Err(format!(
+            "TASK CLOSE REJECTED: task {id} declares risk=platform but its platform_proof receipt is incomplete (missing evidence: {missing}). \
+             Add one with `{caller}task action=notes id={id} note_type=platform_proof notes=\"...\"` containing macOS, a platform command, and a passing result, \
+             then retry `{caller}task action=close id={id}`. {correction}",
+            id = task.id,
+        ));
     }
     let required_targets = required_scoped_proof_targets(
         proof_repo,
@@ -2885,9 +2877,11 @@ mod risk_proof_tests {
         )
         .expect("a worker close needs neither a scoped receipt nor a loaded proof");
 
-        // Non-build evidence is still required: platform risk keeps its gate.
+        // cas-90e8 (L3 P2): a worker cannot run the macOS platform command,
+        // so platform proof defers to assembly with the build proofs; a
+        // non-worker close still owes the receipt.
         task.risk = vec![TaskRisk::Platform];
-        let worker_refusal = validate_risk_close_proofs_with_base_and_target_and_cache(
+        validate_risk_close_proofs_with_base_and_target_and_cache(
             &task,
             &changed,
             dir.path(),
@@ -2897,16 +2891,23 @@ mod risk_proof_tests {
             BuildProofs::DeferredToAssembly,
             &mut cache,
         )
-        .expect_err("deferring build proofs does not waive platform evidence");
-        // cas-90e8: the worker cannot run the platform command itself, so the
-        // refusal routes it to the supervisor instead of asking for a receipt.
-        assert!(worker_refusal.contains("platform_proof receipt is incomplete"));
-        assert!(worker_refusal.contains("Workers cannot produce it"), "{worker_refusal}");
+        .expect("a worker close defers platform proof to assembly");
+        let non_worker = validate_risk_close_proofs_with_base_and_target_and_cache(
+            &task,
+            &changed,
+            dir.path(),
+            dir.path(),
+            Some(&expected_base),
+            None,
+            BuildProofs::Required,
+            &mut cache,
+        )
+        .expect_err("a non-worker close still needs its platform proof");
+        assert!(non_worker.contains("platform_proof receipt is incomplete"), "{non_worker}");
         assert!(
-            worker_refusal.contains("coordination action=message target=supervisor blocker=true summary="),
-            "{worker_refusal}"
+            non_worker.contains("task action=notes id=cas-4cbb-close note_type=platform_proof"),
+            "{non_worker}"
         );
-        assert!(!worker_refusal.contains("note_type=platform_proof"), "{worker_refusal}");
     }
 
     #[test]

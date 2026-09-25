@@ -13,7 +13,7 @@ import type { SessionManager } from "./session-manager.js";
 
 export type CommandType = "shutdown" | "reset" | "status" | null;
 
-export interface CommandResult {
+interface CommandResult {
   /** Reply text to post in the Slack thread */
   reply: string;
   /** Whether this was a recognized command (prevents message forwarding) */
@@ -78,7 +78,7 @@ export function detectCommand(text: string): CommandType {
 /**
  * Execute a detected command against the session manager.
  */
-export async function executeCommand(
+async function executeCommand(
   commandType: CommandType,
   sessionManager: SessionManager,
   projectDir: string,

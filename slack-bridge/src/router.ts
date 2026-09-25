@@ -47,7 +47,7 @@ export interface DaemonMessage {
  * Send a message to a per-user daemon via Unix socket.
  * Returns true if the message was accepted, false on connection error.
  */
-export function forwardToDaemon(
+function forwardToDaemon(
   socketPath: string,
   msg: DaemonMessage,
 ): Promise<boolean> {

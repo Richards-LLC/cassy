@@ -514,7 +514,7 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
     },
     // mecha-cassy skill (cas-945f, GH #687): the default Slack transport for
     // every harness. The MechaCassy hub holds the Slack bot credential
-    // server-side and exposes four tools over one authenticated MCP endpoint,
+    // server-side and exposes two tools (mecha_read, mecha_post) over one authenticated MCP endpoint,
     // so a Codex or Grok worker posts on the same footing as Claude. The skill
     // owns channel resolution, the two-check preflight, ordered thread posting
     // with 1s pacing, the POSTED receipt, and the env-only credential rules;

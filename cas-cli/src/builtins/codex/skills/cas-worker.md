@@ -28,7 +28,7 @@ errors and the return contract only.
    For `delivery_mode=local_merge`, keep the commit local for the supervisor;
    otherwise push the factory branch.
 5. Add progress notes with `note_type=progress` at meaningful milestones.
-6. Before closing a deep task, open [close-gate.md](cas-worker/references/close-gate.md),
+6. Before closing a deep task, open [close-gate.md](references/close-gate.md),
    complete the surface checklist below, invoke
    [`verify-before-claim`](../verify-before-claim/SKILL.md), and capture fresh
    proof.
@@ -146,11 +146,11 @@ already closed, do not overwrite that state with a stale blocked update.
 - [reminders.md](../cas-supervisor/references/reminders.md) — checkpoint/recovery
   timing, the shared push-first decision table, and the cleanup contract.
 
-- [details.md](cas-worker/references/details.md) — structured execution state,
+- [details.md](references/details.md) — structured execution state,
   context budgeting, exact fields/actions, and sync mechanics.
-- [discipline.md](cas-worker/references/discipline.md) — no-Rust-build rule
+- [discipline.md](references/discipline.md) — no-Rust-build rule
   and clean-CI notes.
-- [recovery.md](cas-worker/references/recovery.md) — failures, reassignment,
+- [recovery.md](references/recovery.md) — failures, reassignment,
   connectivity, and worktree recovery.
-- [close-gate.md](cas-worker/references/close-gate.md) — deep-task pre-close
+- [close-gate.md](references/close-gate.md) — deep-task pre-close
   self-verification.

@@ -106,6 +106,10 @@ fn report_builtin_sync(
             fmt.write_raw("  ")?;
             fmt.success(&format!("{location}: built-ins up to date"))?;
         }
+        for file in &result.pruned_files {
+            fmt.write_raw(&format!("    - {location}/{file} (no longer shipped; removed)"))?;
+            fmt.newline()?;
+        }
 
         // cas-4900: surface silent skips so stale destinations stop
         // accumulating invisibly. Each entry here is a file whose
@@ -2179,6 +2183,10 @@ fn sync_user_builtins(cli: &Cli) -> anyhow::Result<()> {
                 fmt.write_raw(&format!("    - skills/{name} (removed stale orphan)"))?;
                 fmt.newline()?;
             }
+            for file in &r.pruned_files {
+                fmt.write_raw(&format!("    - {file} (no longer shipped; removed)"))?;
+                fmt.newline()?;
+            }
             drop(fmt);
             report_modified_builtin_references(&r, "~/.claude", &theme)?;
         }
@@ -2216,6 +2224,10 @@ fn sync_user_builtins(cli: &Cli) -> anyhow::Result<()> {
                 fmt.write_raw(&format!("    - skills/{name} (removed stale orphan)"))?;
                 fmt.newline()?;
             }
+            for file in &r.pruned_files {
+                fmt.write_raw(&format!("    - {file} (no longer shipped; removed)"))?;
+                fmt.newline()?;
+            }
             drop(fmt);
             report_modified_builtin_references(&r, "~/.codex", &theme)?;
         }
@@ -2245,6 +2257,10 @@ fn sync_user_builtins(cli: &Cli) -> anyhow::Result<()> {
             }
             for name in &grok_pruned {
                 fmt.write_raw(&format!("    - skills/{name} (removed stale orphan)"))?;
+                fmt.newline()?;
+            }
+            for file in &r.pruned_files {
+                fmt.write_raw(&format!("    - {file} (no longer shipped; removed)"))?;
                 fmt.newline()?;
             }
             drop(fmt);
@@ -2285,8 +2301,14 @@ fn sync_user_builtins(cli: &Cli) -> anyhow::Result<()> {
             .as_ref()
             .map(|r| r.modified_reference_files.len())
             .unwrap_or(0);
+        let files_pruned = |result: &Option<SyncResult>| {
+            result.as_ref().map(|r| r.pruned_files.len()).unwrap_or(0)
+        };
+        let claude_files_pruned = files_pruned(&claude_result);
+        let codex_files_pruned = files_pruned(&codex_result);
+        let grok_files_pruned = files_pruned(&grok_result);
         println!(
-            r#"{{"claude_present":{claude_present},"claude_builtins_updated":{claude_total},"claude_builtin_reference_conflicts":{claude_conflicts},"claude_skills_pruned":{claude_pruned_n},"codex_present":{codex_present},"codex_builtins_updated":{codex_total},"codex_builtin_reference_conflicts":{codex_conflicts},"codex_skills_pruned":{codex_pruned_n},"grok_present":{grok_present},"grok_builtins_updated":{grok_total},"grok_builtin_reference_conflicts":{grok_conflicts},"grok_skills_pruned":{grok_pruned_n}}}"#
+            r#"{{"claude_present":{claude_present},"claude_builtins_updated":{claude_total},"claude_builtin_reference_conflicts":{claude_conflicts},"claude_skills_pruned":{claude_pruned_n},"claude_files_pruned":{claude_files_pruned},"codex_present":{codex_present},"codex_builtins_updated":{codex_total},"codex_builtin_reference_conflicts":{codex_conflicts},"codex_skills_pruned":{codex_pruned_n},"codex_files_pruned":{codex_files_pruned},"grok_present":{grok_present},"grok_builtins_updated":{grok_total},"grok_builtin_reference_conflicts":{grok_conflicts},"grok_skills_pruned":{grok_pruned_n},"grok_files_pruned":{grok_files_pruned}}}"#
         );
     }
 

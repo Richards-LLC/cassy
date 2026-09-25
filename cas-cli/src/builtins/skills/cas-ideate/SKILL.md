@@ -94,7 +94,7 @@ Run two grounding steps in parallel (in the **foreground** — results are neede
 > - Project shape (language, framework, top-level directory layout)
 > - Notable patterns or conventions
 > - Obvious pain points or gaps
-> - Likely leverage points for improvement
+> - Changes likely to improve future work
 >
 > Keep the scan shallow — read only top-level documentation and directory structure. Do not do deep code search.
 >
@@ -111,7 +111,7 @@ Pull out any bugfix memories, architecture notes, or feedback entries that sugge
 
 **Consolidate into a short grounding summary:**
 
-- **Codebase context** — project shape, notable patterns, observable pain points, likely leverage points
+- **Codebase context** — project shape, notable patterns, observable pain points, changes likely to help
 - **Past learnings** — relevant Cassy memories (bugfixes, architecture notes, feedback entries)
 - **Known friction** — anything flagged as "this is annoying", "we keep hitting", "fragile", etc.
 
@@ -138,14 +138,14 @@ Assign each sub-agent a different **thinking frame** as a *starting bias, not a 
 1. **User/operator pain and friction** — what makes daily work annoying, slow, or error-prone?
 2. **Inversion, removal, or automation** — what painful step could be automated away, inverted, or removed entirely?
 3. **Assumption-breaking / reframing** — what assumption is the project making that might not need to hold? What if the opposite were true?
-4. **Leverage and compounding effects** — what small change would make many future changes easier? What unlocks downstream work?
+4. **Effects on future work** — what small change would make many future changes easier? What enables downstream work?
 
 **Compact structure per idea** (each sub-agent returns):
 
 ```yaml
 - title: <short phrase>
   summary: <1-2 sentences>
-  why_it_matters: <the pain or leverage>
+  why_it_matters: <the pain or expected benefit>
   grounding: <file/module/memory this hooks into>
   boldness: <0-100, optional>
 ```
@@ -155,7 +155,7 @@ Assign each sub-agent a different **thinking frame** as a *starting bias, not a 
 1. **Merge and dedupe** into one master candidate list. Collapse near-duplicates, preferring the better-grounded version.
 2. **Synthesize cross-cutting combinations** — scan for ideas from different frames that combine into something stronger. Expect 3-5 additions at most, not 30.
 3. **Weight toward the focus** if one was provided — but don't exclude stronger adjacent ideas.
-4. **Spread across dimensions** — workflow/DX, reliability, extensibility, missing capabilities, docs/knowledge compounding, quality/maintenance, leverage on future work.
+4. **Spread across dimensions** — workflow/DX, reliability, extensibility, missing capabilities, docs/knowledge compounding, quality/maintenance, effects on future work.
 
 Then read `references/post-ideation-workflow.md` for the adversarial filtering rubric, presentation format, artifact template, and handoff. **Do not load that file before Phase 2 completes** — it would anchor critique thinking during generation.
 

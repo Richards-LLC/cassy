@@ -32,7 +32,8 @@
       "ca5c28eac7c8e646d1fec67d1fb5cd0f8fcc183d0a23d2a288abea80b579de73"
     ],
     "skills/cas-cli-craft/references/concept-brief.md": [
-      "8932b0f274451768c1357eff5bc7aa3a15038df327e19048c59dd9d3b5b9b0bc"
+      "8932b0f274451768c1357eff5bc7aa3a15038df327e19048c59dd9d3b5b9b0bc",
+      "a3f2c0b26d3ad7e318f76244f7f4d99f359bdb7bd98dc36ee761a832e0378a21"
     ],
     "skills/cas-cli-craft/references/critique-rubric.md": [
       "4b3d7350ce5c9a702f2d5dd23cf1a7e3fa288b9e54fa67410aa035c54d052a51",
@@ -317,6 +318,7 @@
       "922816265f9cd654446c6a961e970f61f83889adf329155dd42a11af782fd6e1",
       "aa0ba797d84a7a8b67a34cbf869b826055af8d84c3b0d65d58a06ed7c370cfa5",
       "c7763005f2c54501a9a74d5862eadae9aab0db4a2c057b9f87b1330b1ba2c781",
+      "ccd3bce65c8d382fb5260ea8f796b2c80a221e9e2f5e08d6eea2daf96a06d2a6",
       "cf3d7281eb6041feb7281971bfbd6ddb1e2b42fd6fb50d35ac55da61bbc10478",
       "dcd4333ad1b00989ed8b1370849334b2b14292107f3dd056c70db666d06df28f",
       "dda4c9217681a88d1c81b866f1d289e08543e3d3d37e4d024417dfeaf5e6ef4a",
@@ -447,9 +449,6 @@
       "65deca3f0ee06b6358c6c392565fa2117473037016fcb30c9345ea73e471daa5",
       "c901c898d9e29eea66d970c20668762c291f43a1cb6158eaa4b699ea83e7fe55"
     ],
-    "skills/cas-qa-craft/references/feature-template.md": [
-      "9490a7a46802fa880141e5d1bcc8f0b04147499824f7ee681e25faf979d11e5c"
-    ],
     "skills/cas-qa-craft/references/independent-pass.md": [
       "132deb6bf61ffc4643d93bf11f06d325c70ffd0f29d1a4d098057e5da155542f",
       "267a6ade031287b20f3cb141d98dd9340abf12799e6980173adfe5173593a022",
@@ -461,9 +460,6 @@
     "skills/cas-qa-craft/references/journeys.md": [
       "b6259eaaefa9bd98023d4905de71451c88040fa47b6cc6c67d70853ac4a61240",
       "c2b89fc33e7943317c8af178a05a06bf7a99ee35f380a58470dc396be667f8f9"
-    ],
-    "skills/cas-qa-craft/references/maintain.md": [
-      "def9ba57bd66af1e6f230e7592d2e153e551f6cea4b993b002876431747eaf25"
     ],
     "skills/cas-qa-craft/references/matrix-builder.md": [
       "b259edd54251c807929e68f52685653346abff1fd440c3324b7b87869f56393e"
@@ -480,12 +476,6 @@
       "b85621320c7191237504aa6687943b36237d9f24918c1fbdad20e018a3a42df3",
       "cb2a10132e1fe1151cacaf2f2b72b9d61bea23caddd2a8c1c0de5d3a2455d438",
       "ef0573ccdf97ec145ee9d4b3edce439bc2dcb202dfc52b0a80ad41bad7e57088"
-    ],
-    "skills/cas-qa-craft/references/verify-harness.md": [
-      "f6285715732d5c2ca17f15bd9d133f7b05ec400eab9aea0e3a8250e989386982"
-    ],
-    "skills/cas-qa-craft/scripts/check-feature-map.mjs": [
-      "04b9d4ec0f7f73a1dbeeffeed4f67844c8647ece286b3830dcb6b5d32d3beb55"
     ],
     "skills/cas-release-notes/references/RUBRIC-template.md": [
       "1d114e9b6f61cefa40566ca0bdd20e6cde2c8c28c283c53ece11485231243e29",

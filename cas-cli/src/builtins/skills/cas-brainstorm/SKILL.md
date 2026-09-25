@@ -142,7 +142,7 @@ If nothing obvious appears after a short scan, say so and continue.
 
 #### 1.2 Product Pressure Test
 
-Before generating approaches, challenge the request to catch misframing. **This is the highest-leverage step in the entire skill.** Match depth to scope:
+Before generating approaches, challenge the request to catch misframing. **This step has the greatest effect on the result.** Match depth to scope:
 
 **Lightweight:**
 - Is this solving the real user problem?
@@ -154,7 +154,7 @@ Before generating approaches, challenge the request to catch misframing. **This 
 - What user or business outcome actually matters here?
 - What happens if we do nothing?
 - Is there a nearby framing that creates more value without more carrying cost?
-- Given the current project state and goal, what is the single highest-leverage move right now: the request as framed, a reframing, an adjacent addition, a simplification, or doing nothing?
+- Given the current project state and goal, which move would help most right now: the request as framed, a reframing, an adjacent addition, a simplification, or doing nothing?
 - Use the result to *sharpen* the conversation, not bulldoze the user's intent.
 
 **Deep** — Standard questions plus:

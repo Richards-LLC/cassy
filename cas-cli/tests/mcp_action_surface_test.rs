@@ -191,21 +191,34 @@ fn canonicalized_aliases_are_pinned_and_described() {
         Some("get".to_string())
     );
     assert!(
-        source.contains("\"get\" => \"show\""),
+        cas_mcp::actions::TASK_ACTION_ALIASES.contains(&("get", "show")),
         "task get alias must remain canonicalized to show"
     );
     assert!(
-        source.contains("show (also accepted as get)"),
-        "task description must document the get alias"
+        source.contains("canonical_action(cas_mcp::actions::TASK_ACTION_ALIASES, action)"),
+        "task dispatch must canonicalize through the published alias table"
     );
     assert!(
-        source.contains("\"inbox\" => \"inbox_poll\""),
+        cas_mcp::actions::COORDINATION_ACTION_ALIASES.contains(&("inbox", "inbox_poll")),
         "coordination inbox alias must remain canonicalized to inbox_poll"
     );
     assert!(
-        source.contains("inbox_poll (also accepted as inbox)"),
-        "coordination description must document the inbox alias"
+        source.contains("canonical_action(cas_mcp::actions::COORDINATION_ACTION_ALIASES, action)"),
+        "coordination dispatch must canonicalize through the published alias table"
     );
+    for (tool, documented) in [
+        ("task", "`get` is an alias of `show`"),
+        ("coordination", "`inbox` is an alias of `inbox_poll`"),
+    ] {
+        let description = published_action(tool)["description"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        assert!(
+            description.contains(documented),
+            "{tool} action description must document its alias: {description}"
+        );
+    }
 }
 
 fn documented_actions(content: &str) -> Vec<String> {
@@ -348,4 +361,263 @@ fn memory_guidance_uses_content_frontmatter_and_live_names() {
             }
         }
     }
+}
+
+// ============================================================================
+// Published tool surface (tools/list)
+// ============================================================================
+
+/// Claude Code cuts tool descriptions at 2 KB without warning.
+const CLAUDE_CODE_DESCRIPTION_CAP: usize = 2_048;
+
+/// `tools/list` for 3.31.0 was 69,635 bytes (compact JSON). The schema diet
+/// must keep at least 10 KB of that off.
+const TOOLS_LIST_BUDGET_BYTES: usize = 59_000;
+
+fn published_tools() -> Vec<rmcp::model::Tool> {
+    cas::mcp::tools::CasService::tool_definitions_for_build()
+}
+
+fn published_action(tool: &str) -> serde_json::Value {
+    let tool = published_tools()
+        .into_iter()
+        .find(|candidate| candidate.name == tool)
+        .unwrap_or_else(|| panic!("{tool} tool is not registered"));
+    tool.input_schema["properties"]["action"].clone()
+}
+
+/// Every string literal in pattern position of the tool's top-level dispatch
+/// `match`. Nested matches, arm bodies, attributes and comments are skipped,
+/// so multi-line `"a" | "b"` arms and `#[cfg]`-gated arms are both read.
+fn top_level_dispatch_literals(source: &str, tool: &str) -> Vec<String> {
+    let start = source
+        .find(&format!("pub async fn {tool}("))
+        .unwrap_or_else(|| panic!("missing {tool} dispatch function"));
+    let function = &source[start..];
+    let match_start = function
+        .find("let result = match action.as_str() {")
+        .or_else(|| function.find("let result = match req.action.as_str() {"))
+        .unwrap_or_else(|| panic!("missing {tool} dispatch match"));
+    let body = &function[match_start..];
+    let body = &body[body.find('{').expect("match opening brace") + 1..];
+    let chars: Vec<char> = body.chars().collect();
+
+    let mut literals = Vec::new();
+    let mut depth = 0usize;
+    let mut in_pattern = true;
+    let mut block_arm = false;
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        let next = chars.get(i + 1).copied();
+        match c {
+            '/' if next == Some('/') => {
+                while i < chars.len() && chars[i] != '\n' {
+                    i += 1;
+                }
+                continue;
+            }
+            '"' => {
+                let mut literal = String::new();
+                let mut j = i + 1;
+                while j < chars.len() && chars[j] != '"' {
+                    if chars[j] == '\\' {
+                        j += 1;
+                    }
+                    if let Some(&ch) = chars.get(j) {
+                        literal.push(ch);
+                    }
+                    j += 1;
+                }
+                if depth == 0 && in_pattern {
+                    literals.push(literal);
+                }
+                i = j + 1;
+                continue;
+            }
+            '\'' if chars.get(i + 2) == Some(&'\'') => {
+                i += 3;
+                continue;
+            }
+            '=' if next == Some('>') && depth == 0 && in_pattern => {
+                in_pattern = false;
+                let rest = chars[i + 2..].iter().find(|ch| !ch.is_whitespace());
+                block_arm = rest == Some(&'{');
+                i += 2;
+                continue;
+            }
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => {
+                if depth == 0 {
+                    break; // end of the dispatch match
+                }
+                depth -= 1;
+                if depth == 0 && c == '}' && block_arm && !in_pattern {
+                    in_pattern = true;
+                    block_arm = false;
+                }
+            }
+            ',' if depth == 0 => {
+                in_pattern = true;
+                block_arm = false;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    literals
+}
+
+#[test]
+fn published_action_enums_equal_their_dispatch_tables() {
+    use cas_mcp::actions::{COORDINATION_ACTION_ALIASES, TASK_ACTION_ALIASES};
+    use std::collections::BTreeSet;
+
+    let source = service_source();
+    let proxy_only = [
+        "proxy_add",
+        "proxy_remove",
+        "proxy_list",
+        "proxy_health",
+        "external_verify",
+    ];
+    let mut checked = 0;
+    for tool in published_tools() {
+        let action = &tool.input_schema["properties"]["action"];
+        if action.is_null() {
+            continue; // mcp_search / mcp_execute take no action
+        }
+        let name = tool.name.to_string();
+        let published: BTreeSet<String> = action["enum"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{name} action must be an enum: {action}"))
+            .iter()
+            .map(|value| value.as_str().expect("enum values are strings").to_string())
+            .collect();
+
+        let mut dispatched: BTreeSet<String> = top_level_dispatch_literals(&source, &name)
+            .into_iter()
+            .filter(|action| cfg!(feature = "mcp-proxy") || !proxy_only.contains(&action.as_str()))
+            .collect();
+        let aliases: &[(&str, &str)] = match name.as_str() {
+            "task" => TASK_ACTION_ALIASES,
+            "coordination" => COORDINATION_ACTION_ALIASES,
+            _ => &[],
+        };
+        for (alias, canonical) in aliases {
+            assert!(
+                dispatched.contains(*canonical),
+                "{name} alias {alias} points at an undispatched action {canonical}"
+            );
+            dispatched.insert((*alias).to_string());
+        }
+        assert!(
+            !dispatched.is_empty(),
+            "{name} dispatch table was not parsed"
+        );
+        assert_eq!(
+            published, dispatched,
+            "{name} action enum drifted from its dispatch table"
+        );
+        checked += 1;
+    }
+    assert_eq!(
+        checked, 13,
+        "every multi-action tool publishes an action enum"
+    );
+}
+
+#[test]
+fn every_tool_description_fits_the_claude_code_cap() {
+    for tool in published_tools() {
+        let description = tool.description.as_deref().unwrap_or_default();
+        assert!(
+            !description.is_empty() && description.chars().count() <= CLAUDE_CODE_DESCRIPTION_CAP,
+            "{} description is {} chars; Claude Code truncates at {CLAUDE_CODE_DESCRIPTION_CAP}",
+            tool.name,
+            description.chars().count()
+        );
+        if tool.name == "coordination" {
+            assert!(
+                description.chars().count() <= 1_500,
+                "coordination description must stay a purpose line plus action groups"
+            );
+        }
+        assert!(
+            !description.contains("IMPORTANT"),
+            "{} description shouts; the rule belongs on the parameter it governs",
+            tool.name
+        );
+    }
+}
+
+#[test]
+fn tools_list_carries_no_schema_boilerplate() {
+    let tools = published_tools();
+    let payload = serde_json::to_string(&tools).expect("tools serialize");
+    for boilerplate in [
+        "\"nullable\"",
+        "\"default\":null",
+        "\"$schema\"",
+        "\"format\":\"uint",
+        "\"format\":\"int",
+        "\"format\":\"float",
+        "\"format\":\"double",
+    ] {
+        assert!(
+            !payload.contains(boilerplate),
+            "tools/list still carries {boilerplate}"
+        );
+    }
+    for tool in &tools {
+        assert!(
+            tool.input_schema.get("title").is_none(),
+            "{} input schema still has a root title",
+            tool.name
+        );
+    }
+    assert!(
+        payload.len() <= TOOLS_LIST_BUDGET_BYTES,
+        "tools/list is {} bytes; budget {TOOLS_LIST_BUDGET_BYTES}",
+        payload.len()
+    );
+}
+
+#[test]
+fn agent_visible_tool_text_has_no_ticket_ids_or_stale_values() {
+    let payload = serde_json::to_string(&published_tools()).expect("tools serialize");
+    let ticket = regex::Regex::new(r"\(cas-[0-9a-f]{4}\)|cassy#[0-9]+|GH #[0-9]+").unwrap();
+    assert!(
+        !ticket.is_match(&payload),
+        "ticket ids in agent-visible tool text: {:?}",
+        ticket.find(&payload).map(|m| m.as_str())
+    );
+    for stale in [
+        "claude-opus-4-5",
+        "'claude' (default) or 'codex'",
+        "TypeScript code",
+        "Claude-only",
+    ] {
+        assert!(!payload.contains(stale), "stale tool text {stale:?}");
+    }
+    let coordination = published_tools()
+        .into_iter()
+        .find(|tool| tool.name == "coordination")
+        .expect("coordination tool");
+    let config_dir = coordination.input_schema["properties"]["config_dir"]["description"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        config_dir.contains("CODEX_HOME"),
+        "config_dir must name CODEX_HOME"
+    );
+    let force = coordination.input_schema["properties"]["force"]["description"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        force.contains("live worker's worktree is always skipped"),
+        "force must state that live worktrees are never synced: {force}"
+    );
 }

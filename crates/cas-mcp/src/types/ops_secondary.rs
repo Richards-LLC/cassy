@@ -1282,9 +1282,7 @@ pub struct ExecuteRequest {
     pub code: String,
 
     /// Max response length in characters. Default: 40000.
-    #[schemars(
-        description = "Max response length in characters. Default: 40000."
-    )]
+    #[schemars(description = "Max response length in characters. Default: 40000.")]
     #[serde(default, deserialize_with = "deser::option_usize")]
     pub max_length: Option<usize>,
 }

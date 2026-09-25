@@ -237,8 +237,13 @@ pub const SPEC_ACTIONS: &[&str] = &[
 ];
 
 /// Values accepted by `memory action=remember entry_type=`.
-pub const MEMORY_ENTRY_TYPES: &[&str] =
-    &["learning", "preference", "context", "observation", "handoff"];
+pub const MEMORY_ENTRY_TYPES: &[&str] = &[
+    "learning",
+    "preference",
+    "context",
+    "observation",
+    "handoff",
+];
 
 /// Rewrite an alias to its canonical action; any other value is returned as is.
 pub fn canonical_action<'a>(aliases: &[(&'static str, &'static str)], action: &'a str) -> &'a str {

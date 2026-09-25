@@ -13,6 +13,10 @@ use tracing::{info, warn};
 use crate::mcp::server::CasCore;
 use crate::mcp::tools::service::CasService;
 
+/// Always injected by the client, and cut at 2 KB by Claude Code: keep it to
+/// routing guidance, well under 200 characters.
+pub(crate) const SERVER_INSTRUCTIONS: &str = "Cassy: tasks, memory, search and factory coordination. If these tools are deferred, load task, coordination, search and memory together before first use.";
+
 #[allow(clippy::manual_async_fn)]
 impl ServerHandler for CasService {
     fn get_info(&self) -> ServerInfo {
@@ -32,10 +36,7 @@ impl ServerHandler for CasService {
                 icons: None,
                 website_url: None,
             },
-            instructions: Some(
-                "CAS (Coding Agent System) provides unified memory, tasks, rules, and skills."
-                    .to_string(),
-            ),
+            instructions: Some(SERVER_INSTRUCTIONS.to_string()),
         }
     }
 
@@ -124,7 +125,7 @@ impl ServerHandler for CasService {
         async move {
             let start = std::time::Instant::now();
             info!(method = "tools/list", "MCP tools/list START");
-            let tools = self.tool_router.list_all();
+            let tools = self.tool_definitions();
             info!(
                 method = "tools/list",
                 count = tools.len(),

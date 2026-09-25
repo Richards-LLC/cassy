@@ -818,10 +818,9 @@ fn test_with_deps_rejects_garbage_string_with_helpful_error() {
 
 #[test]
 fn verification_files_reviewed_is_an_alias_of_files() {
-    let req: VerificationRequest = serde_json::from_str(
-        r#"{"action":"add","task_id":"cas-1","files_reviewed":"a.rs,b.rs"}"#,
-    )
-    .expect("files_reviewed must deserialize");
+    let req: VerificationRequest =
+        serde_json::from_str(r#"{"action":"add","task_id":"cas-1","files_reviewed":"a.rs,b.rs"}"#)
+            .expect("files_reviewed must deserialize");
     assert_eq!(req.files.as_deref(), Some("a.rs,b.rs"));
 
     let req: VerificationRequest =
@@ -832,9 +831,14 @@ fn verification_files_reviewed_is_an_alias_of_files() {
 fn action_enum(schema: schemars::Schema) -> Vec<String> {
     let value = serde_json::to_value(schema).expect("schema serializes");
     let action = &value["properties"]["action"];
-    assert_eq!(action["type"], "string", "action must stay a string: {action}");
+    assert_eq!(
+        action["type"], "string",
+        "action must stay a string: {action}"
+    );
     assert!(
-        action["description"].as_str().is_some_and(|d| !d.is_empty()),
+        action["description"]
+            .as_str()
+            .is_some_and(|d| !d.is_empty()),
         "action keeps its description next to the enum: {action}"
     );
     action["enum"]
@@ -850,10 +854,26 @@ fn every_action_field_publishes_its_dispatch_list_as_an_enum() {
     use crate::actions::*;
     let owned = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<_>>();
     let cases: Vec<(&str, schemars::Schema, Vec<String>)> = vec![
-        ("memory", schemars::schema_for!(MemoryRequest), owned(MEMORY_ACTIONS)),
-        ("task", schemars::schema_for!(TaskRequest), owned(TASK_ACTIONS)),
-        ("rule", schemars::schema_for!(RuleRequest), owned(RULE_ACTIONS)),
-        ("skill", schemars::schema_for!(SkillRequest), owned(SKILL_ACTIONS)),
+        (
+            "memory",
+            schemars::schema_for!(MemoryRequest),
+            owned(MEMORY_ACTIONS),
+        ),
+        (
+            "task",
+            schemars::schema_for!(TaskRequest),
+            owned(TASK_ACTIONS),
+        ),
+        (
+            "rule",
+            schemars::schema_for!(RuleRequest),
+            owned(RULE_ACTIONS),
+        ),
+        (
+            "skill",
+            schemars::schema_for!(SkillRequest),
+            owned(SKILL_ACTIONS),
+        ),
         (
             "coordination",
             schemars::schema_for!(CoordinationRequest),
@@ -864,21 +884,41 @@ fn every_action_field_publishes_its_dispatch_list_as_an_enum() {
             schemars::schema_for!(SearchContextRequest),
             owned(SEARCH_ACTIONS),
         ),
-        ("system", schemars::schema_for!(SystemRequest), owned(&system_actions()[..])),
+        (
+            "system",
+            schemars::schema_for!(SystemRequest),
+            owned(&system_actions()[..]),
+        ),
         (
             "verification",
             schemars::schema_for!(VerificationRequest),
             owned(&verification_actions()[..]),
         ),
-        ("artifact", schemars::schema_for!(ArtifactRequest), owned(ARTIFACT_ACTIONS)),
+        (
+            "artifact",
+            schemars::schema_for!(ArtifactRequest),
+            owned(ARTIFACT_ACTIONS),
+        ),
         (
             "knowledge",
             schemars::schema_for!(KnowledgeRequest),
             owned(KNOWLEDGE_ACTIONS),
         ),
-        ("team", schemars::schema_for!(TeamRequest), owned(TEAM_ACTIONS)),
-        ("pattern", schemars::schema_for!(PatternRequest), owned(PATTERN_ACTIONS)),
-        ("spec", schemars::schema_for!(SpecRequest), owned(SPEC_ACTIONS)),
+        (
+            "team",
+            schemars::schema_for!(TeamRequest),
+            owned(TEAM_ACTIONS),
+        ),
+        (
+            "pattern",
+            schemars::schema_for!(PatternRequest),
+            owned(PATTERN_ACTIONS),
+        ),
+        (
+            "spec",
+            schemars::schema_for!(SpecRequest),
+            owned(SPEC_ACTIONS),
+        ),
     ];
     for (tool, schema, expected) in cases {
         assert_eq!(action_enum(schema), expected, "{tool} action enum drifted");
@@ -893,8 +933,14 @@ fn action_aliases_point_at_listed_canonical_actions() {
         (COORDINATION_ACTIONS, COORDINATION_ACTION_ALIASES),
     ] {
         for (alias, canonical) in aliases {
-            assert!(list.contains(alias), "alias {alias} must be accepted by the enum");
-            assert!(list.contains(canonical), "{alias} must point at a listed action");
+            assert!(
+                list.contains(alias),
+                "alias {alias} must be accepted by the enum"
+            );
+            assert!(
+                list.contains(canonical),
+                "{alias} must point at a listed action"
+            );
             assert_eq!(canonical_action(aliases, alias), *canonical);
         }
     }

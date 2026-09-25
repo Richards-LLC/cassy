@@ -4561,11 +4561,41 @@ This is the body content."#;
     /// preserves the SessionStart hard-limit margin.
     #[test]
     fn test_worker_skills_require_cas_src_surface_checklist() {
-        for (label, content) in [
-            ("claude", include_str!("builtins/skills/cas-worker.md")),
-            ("codex", include_str!("builtins/codex/skills/cas-worker.md")),
-            ("grok", include_str!("builtins/grok/skills/cas-worker.md")),
+        // WP2 (audit cas-1660 M51): the checklist is cas-src-only, so it lives
+        // in the on-demand close-gate reference; the always-loaded body keeps
+        // one pointer to it.
+        for (label, content, close_gate) in [
+            (
+                "claude",
+                include_str!("builtins/skills/cas-worker.md"),
+                include_str!("builtins/skills/cas-worker/references/close-gate.md"),
+            ),
+            (
+                "codex",
+                include_str!("builtins/codex/skills/cas-worker.md"),
+                include_str!("builtins/codex/skills/cas-worker/references/close-gate.md"),
+            ),
+            (
+                "grok",
+                include_str!("builtins/grok/skills/cas-worker.md"),
+                include_str!("builtins/grok/skills/cas-worker/references/close-gate.md"),
+            ),
         ] {
+            for required in [
+                "surface checklist",
+                "close-gate.md",
+                "Reused worker:",
+                "git rebase <target>",
+            ] {
+                assert!(
+                    content.contains(required),
+                    "{label} cas-worker.md missing {required:?}"
+                );
+            }
+            assert!(
+                !content.contains("## cas-src surface checklist"),
+                "{label} cas-worker.md must not carry the cas-src-only checklist in the always-loaded body"
+            );
             for required in [
                 "cas-src surface checklist",
                 "Pre-close notes must prove each applicable entry",
@@ -4579,10 +4609,11 @@ This is the body content."#;
                 "cas-2327",
                 "reverse states",
                 "release-notes impact",
-                "Reused worker:",
-                "git rebase <target>",
             ] {
-                assert!(content.contains(required), "{label} surface checklist missing {required:?}");
+                assert!(
+                    close_gate.contains(required),
+                    "{label} close-gate.md surface checklist missing {required:?}"
+                );
             }
         }
     }
@@ -7491,12 +7522,12 @@ This is the body content."#;
                 include_str!("builtins/grok/skills/cas-worker.md"),
             ),
         ] {
+            // WP2 (audit cas-1660 L2 P2-73): the rule is stated once in the
+            // always-loaded body, so it is pinned once.
             for required in [
-                "no self-dispatch",
-                "This applies every time you go idle, not just at session start",
-                "backlog *visibility*, never authorization to `start` a task yourself",
-                "Never self-dispatch.",
-                "Do not pull the next ready task yourself",
+                "Never self-dispatch",
+                "every time you go idle",
+                "backlog\n  visibility, not authorization",
             ] {
                 assert!(
                     guide.contains(required),

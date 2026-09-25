@@ -64,7 +64,7 @@ See [reference.md](cas-supervisor/references/reference.md) for Claude account pa
 
 ## On-demand references
 
-Use `cas-supervisor/references/` for workflow, release, merge, recovery and issue filing; [reporting-and-routing.md](cas-supervisor/references/reporting-and-routing.md) for reporting, release ownership and cross-team routing. Bug registry: `issues.repo` (this project), `issues.components.cassy` (runtime/hooks/MCP), `issues.components.mecha_cassy` (Slack hub), `issues.components.cloud` (Cloud sync); file a ticket in the matching repo before moving on.
+Use `cas-supervisor/references/` for workflow, release, merge, recovery and issue filing; [reporting-and-routing.md](cas-supervisor/references/reporting-and-routing.md) for reporting, release ownership and cross-team routing. Bug registry: `issues.repo` (this project), `issues.components.cassy` (runtime/hooks/MCP), `issues.components.violet` (Slack hub), `issues.components.cloud` (Cloud sync); file a ticket in the matching repo before moving on.
 Reminder discipline: `cas-supervisor/references/reminders.md`; epic driving: `cas-supervisor/references/epic-driving.md`.
 
 ## Context budgeting

@@ -42,7 +42,7 @@ everything and ignore the closed ones yourself.
 
 The sweep must preserve component ownership. Resolve the four destinations
 with `cas config get issues.repo`, `cas config get issues.components.cassy`,
-`cas config get issues.components.mecha_cassy`, and
+`cas config get issues.components.violet`, and
 `cas config get issues.components.cloud`. Use `issues.repo` for the current
 project, the Cassy component key for runtime/hooks/MCP/factory/skill defects,
 the MechaCassy key for Slack hub defects, and the Cloud key for sync,

@@ -90,7 +90,7 @@ fn every_issue_filing_builtin_names_the_component_registry() {
             for key in [
                 "issues.repo",
                 "issues.components.cassy",
-                "issues.components.mecha_cassy",
+                "issues.components.violet",
                 "issues.components.cloud",
             ] {
                 assert!(

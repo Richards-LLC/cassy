@@ -63,10 +63,11 @@ before you run the cell. Capture a trace and a screenshot per cell.
 ## 4. Polish
 
 ```bash
-node scripts/visual-qa.mjs --strict --artifact-dir <ledger-dir>/visual-qa <url>...
+npm exec --yes --package=playwright -- node <skills-dir>/cas-ui-craft/scripts/visual-qa.mjs --strict --artifact-dir <ledger-dir>/visual-qa <url>...
 ```
 
-Point `<url>` at your local serve of the reviewed tip from step 1, never the
+`<skills-dir>` is the harness skill directory (`.claude/skills`, `.codex/skills`
+or `.grok/skills`). Point `<url>` at your local serve of the reviewed tip from step 1, never the
 production site. `qa_record` refuses a `visual_qa_status: "pass"` bundle
 unless `visual-qa/visual-qa.json` records a strict PASS run against local URLs,
 generated after the round opened.

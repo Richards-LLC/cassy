@@ -29,7 +29,9 @@ memory, using the title the parent skill specifies.
 - **No content duplication.** Do not inline the doc's contents. The point is that
   search surfaces the pointer and the reader opens the doc.
 
-If a pointer with that title already exists, update it. Do not create duplicates.
+Find an existing pointer first: `mcp__cas__search action=search query="<title>" doc_type=entry`.
+If one exists, update it with `memory action=update id=<id>`; otherwise remember a new
+one. Do not create duplicates.
 
 ## 3. Commit the doc
 

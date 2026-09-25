@@ -17,7 +17,7 @@ that every project inherits, plus the Codex and Claude Code entries — refusing
 to claim success without an authenticated `tools/list` receipt. Re-running it
 is the refresh path, and `cas doctor`'s `mecha-cassy` row states whether this
 machine can post and what to do when it cannot. Setting up a new machine or a
-teammate: `docs/MECHA_CASSY_ONBOARDING.md`.
+teammate: run `cas integrate violet --help` on that machine.
 
 The command also repairs a project `.cas/proxy.toml` that shadows the machine
 registration: a project file **replaces** the machine allowlist rather than
@@ -65,10 +65,11 @@ auth = "env:MECHA_SLACK_TOKEN_<LABEL>"
 x-vercel-protection-bypass = "env:MECHA_VERCEL_BYPASS"
 ```
 
-Dispatch through the proxy:
+Dispatch through the proxy. `mcp_execute` takes a single `code` string holding
+the JSON dispatch; it has no `server`, `tool` or `args` parameters:
 
 ```text
-mcp__cs__mcp_execute server=mecha-cassy tool=mecha_read args={"channel":"<name>","since":"<RFC3339>","max_messages":50}
+mcp__cs__mcp_execute code='{"server":"mecha-cassy","tool":"mecha_read","args":{"channel":"<name>","since":"<RFC3339>","max_messages":50}}'
 ```
 
 A project `allowlist` replaces the machine allowlist entirely, so list every

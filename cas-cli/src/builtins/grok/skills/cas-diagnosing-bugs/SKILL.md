@@ -26,8 +26,11 @@ increase reproduction rate with repeated or stress runs.
 
 Completion requires one already-run command whose redacted output proves it is
 red-capable, deterministic (or has a stated high repro rate), fast, and
-unattended. If no loop can be built, state what was tried and request the
-reproducing environment, a redacted capture, or approval for temporary
+unattended. A factory worker on a lane that forbids builds (cargo is denied on
+Rust lanes) cannot run a Rust loop: build it from non-Rust evidence (logs, a
+CLI binary already installed, a script), or write the failing test and hand the
+run to the supervisor with a blocker message. If no loop can be built, state
+what was tried and request the reproducing environment, a redacted capture, or approval for temporary
 instrumentation; do not hypothesize without a loop.
 
 ## Phase 2 — Reproduce and minimize

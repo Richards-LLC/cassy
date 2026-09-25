@@ -166,11 +166,7 @@ If the user picks an idea:
 - Write or update the ideation doc first (Phase 5)
 - Mark that idea as `Explored` in the doc
 - Append a session log entry: `YYYY-MM-DD: Selected idea #N for brainstorming`
-- Invoke `cas-brainstorm` with the selected idea as the seed
-- Also create a Cassy task pointing at both the ideation doc and the brainstorm-in-progress:
-  ```
-  mcp__cs__task action=create title="Brainstorm: <idea title>" description="Seed from docs/ideation/<file>.md idea #N" labels=brainstorm,from-ideation
-  ```
+- Invoke `cas-brainstorm` with the selected idea as the seed. Do not create a task here: the memory pointer records the ideation doc, and brainstorm's handoff owns what happens next.
 
 **Do NOT skip brainstorming and go straight to planning from ideation output.** The ideation artifact is a list of directions, not a spec.
 

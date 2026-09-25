@@ -1,6 +1,6 @@
 ---
 name: cli-routing
-description: Use when a bounded, non-interactive task needs a one-shot `codex exec` or `claude -p` subprocess, such as capacity recovery or release-note drafting. Codex first; Claude only after the account gate in references/routing.md passes.
+description: Use when one-shot CLI work must fall back between harnesses — Codex failed for capacity or auth, or a `claude -p` subprocess is being considered. Owns the Codex-first order and the Claude account gate; a plain read-only `codex exec` investigation is cas-codex-exec.
 managed_by: cas
 ---
 
@@ -32,7 +32,7 @@ strict Codex output schemas, and the account-gate procedure.
 ## Release-note posting
 
 Every merge to `main` or `staging` needs the existing
-[release-notes](../release-notes/SKILL.md) flow and the project's content/channel
+[cas-release-notes](../cas-release-notes/SKILL.md) flow and the project's content/channel
 rubric. Slack uses only the MechaCassy hub/bot through
 [mecha-cassy](../mecha-cassy/SKILL.md); never use Claude.ai Slack or a personal
 connector. The account gate above authorizes non-Slack CLI work only. If the

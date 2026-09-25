@@ -27,15 +27,16 @@ Cassy tools are named here without a prefix (`task`, `coordination`, `factory`, 
 4. Implement only the assigned scope. Commit logical units with the task ID.
    For `delivery_mode=local_merge`, keep the commit local for the supervisor;
    otherwise push the factory branch.
-5. Add progress notes with `note_type=progress` at milestones.
+5. Add `note_type=progress` notes at milestones.
 6. Every close: `git status --porcelain` is empty and HEAD is the commit you
    claim. For a deep task, first work through
    [close-gate.md](references/close-gate.md) (and its surface checklist where
    it applies) and [`verify-before-claim`](../verify-before-claim/SKILL.md).
 7. Close with `task action=close id=<task-id> reason="..."`; the reason
-   starts PASS, ISSUES or BLOCKED, then the commit SHA and how you checked
-   it. Then send the return contract. **verification required:** quote the
-   guidance in `need:`. **MERGE REQUIRED:** drain `inbox_poll` for unread supervisor messages,
+   starts PASS, or ISSUES plus known non-blocking defects, then the SHA
+   and how you checked it. Then send the return contract.
+   **verification required:** quote the guidance in `need:`.
+   **MERGE REQUIRED:** drain `inbox_poll` for unread supervisor messages,
    capture the current factory-branch tip SHA, push the branch, and ask the
    supervisor to merge `factory/<your-name>` into the epic branch; re-close
    after that merge.

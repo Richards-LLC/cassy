@@ -68,11 +68,12 @@ first. A worker cannot recover a goal or a proof method the brief never named.
 | Acceptance: the observable pass condition | `acceptance_criteria` |
 | Proof expected: how the result will be checked | `proof_targets`, `demo_statement`, or the named command or grep in `acceptance_criteria` |
 
-Workers report in one shape: the close reason starts `PASS`, `ISSUES` or
-`BLOCKED`, then the commit SHA and how it was checked. `ISSUES` lists every
-known defect. A report without the SHA or the check the brief named is a gap,
-not a pass: ask for it once, and a second miss goes through the
-[retry policy](worker-recovery.md#retry-policy-by-failure-mode).
+Workers report in one shape: the close reason starts `PASS`, or `ISSUES`
+plus the known non-blocking defects, then the commit SHA and how it was
+checked. A blocked worker does not close: it sets `status=blocked` and
+messages you with `blocker=true`. A report without the SHA or the check
+the brief named is a gap, not a pass: ask for it once, and a second miss
+goes through the [retry policy](worker-recovery.md#retry-policy-by-failure-mode).
 
 ## Phase 2: Coordinate
 

@@ -118,12 +118,14 @@ fn no_code_close_proof<'a>(
     }
     let proof_reference = external_ref.map(str::trim).filter(|value| !value.is_empty()).ok_or_else(|| {
         format!(
-            "⚠️ NO-CODE PROOF REQUIRED\n\nTask {task_id} declares execution_note=no-code, but no external_ref was supplied inline or persisted on the task. Retry close with `task action=close id={task_id} execution_note=no-code external_ref=<portable-reference>` so the paired metadata is validated before verification dispatch."
+            "⚠️ NO-CODE PROOF REQUIRED\n\nTask {task_id} declares execution_note=no-code, but no external_ref was supplied inline or persisted on the task. Retry close with `{caller}task action=close id={task_id} execution_note=no-code external_ref=<portable-reference>` so the paired metadata is validated before verification dispatch.",
+            caller = crate::mcp::tools::core::guidance::caller_prefix(),
         )
     })?;
     if let Some(reason) = delivery_audit_text_rejection(proof_reference) {
         return Err(format!(
-            "⚠️ NO-CODE PROOF REQUIRED\n\nTask {task_id} declares execution_note=no-code, but the supplied external_ref {reason}. Retry with `task action=close id={task_id} execution_note=no-code external_ref=<portable-reference>` so the paired metadata is validated before verification dispatch."
+            "⚠️ NO-CODE PROOF REQUIRED\n\nTask {task_id} declares execution_note=no-code, but the supplied external_ref {reason}. Retry with `{caller}task action=close id={task_id} execution_note=no-code external_ref=<portable-reference>` so the paired metadata is validated before verification dispatch.",
+            caller = crate::mcp::tools::core::guidance::caller_prefix(),
         ));
     }
     if has_reviewable_code {
@@ -169,17 +171,20 @@ fn prepare_no_code_close_metadata(
         Some(raw) => {
             let validated = crate::mcp::tools::types::validate_execution_note(Some(raw))?;
             if validated.as_deref() != Some("no-code") {
-                return Err(
-                    "INLINE EXECUTION NOTE REJECTED: task close accepts only execution_note=no-code, paired with a portable external_ref. Record other execution methodologies with task action=update before requesting verification."
-                        .to_string(),
-                );
+                return Err(format!(
+                    "INLINE EXECUTION NOTE REJECTED: task close accepts only execution_note=no-code, paired with a portable external_ref. Record other execution methodologies with `{}task action=update id={} execution_note=<methodology>` before requesting verification.",
+                    crate::mcp::tools::core::guidance::caller_prefix(),
+                    task.id,
+                ));
             }
             if let Some(stored) = task.execution_note.as_deref()
                 && stored != "no-code"
             {
                 return Err(format!(
-                    "INLINE NO-CODE INTENT REJECTED: Task {} already records execution_note={stored}. task close may set no-code only when execution_note is empty or already no-code; it cannot replace a reviewed methodology. Preserve the stored methodology and satisfy its close gates. If it is wrong after verification, ask a registered supervisor to run `task action=reopen id={}`, then update it before a fresh proof cycle.",
-                    task.id, task.id
+                    "INLINE NO-CODE INTENT REJECTED: Task {} already records execution_note={stored}. task close may set no-code only when execution_note is empty or already no-code; it cannot replace a reviewed methodology. Preserve the stored methodology and satisfy its close gates. If it is wrong after verification, ask a registered supervisor to run `{}task action=reopen id={}`, then update it before a fresh proof cycle.",
+                    task.id,
+                    crate::mcp::tools::core::guidance::supervisor_prefix(),
+                    task.id
                 ));
             }
             validated
@@ -1644,9 +1649,11 @@ fn proof_targets_scope_fix_command(task: &Task, uncovered: &[String]) -> String 
         }
     }
     format!(
-        "Ask a live registered supervisor to run `task action=update id={} proof_targets=\"{}\" proof_scope_fix=true reason=\"widen proof scope for delivered modules\"`, then record scoped proof and retry close. If no delivery transaction exists, a live registered supervisor may instead close with `supervisor_override=true reason=\"reviewed uncovered source modules and accepted the measured scope mismatch\"`; the waived modules are recorded on the task.",
+        "Ask a live registered supervisor to run `{supervisor}task action=update id={} proof_targets=\"{}\" proof_scope_fix=true reason=\"widen proof scope for delivered modules\"`, then record scoped proof and retry close. If no delivery transaction exists, a live registered supervisor may instead close with `{supervisor}task action=close id={} supervisor_override=true reason=\"reviewed uncovered source modules and accepted the measured scope mismatch\"`; the waived modules are recorded on the task.",
         task.id,
-        targets.join(",")
+        targets.join(","),
+        task.id,
+        supervisor = crate::mcp::tools::core::guidance::supervisor_prefix(),
     )
 }
 
@@ -1768,10 +1775,32 @@ fn validate_risk_close_proofs_with_base_and_target_and_cache(
 ) -> Result<(), String> {
     if task.risk.contains(&TaskRisk::Platform) && !has_platform_proof_note(&task.notes) {
         let missing = platform_proof_missing_evidence(&task.notes).join(", ");
+        let caller = crate::mcp::tools::core::guidance::caller_prefix();
+        let supervisor = crate::mcp::tools::core::guidance::supervisor_prefix();
+        let correction = format!(
+            "If platform risk was declared in error, a live registered supervisor may run \
+             `{supervisor}task action=update id={id} risk=none proof_scope_fix=true reason=\"correct erroneous platform risk\"` \
+             on a merged delivery, or close with \
+             `{supervisor}task action=close id={id} supervisor_override=true reason=\"reviewed the platform-risk mismatch\"`; \
+             the missing evidence is recorded on the task.",
+            id = task.id,
+        );
+        // cas-90e8: a factory worker may not run cargo or xcodebuild, so it
+        // cannot produce this receipt itself. Name the route that can.
+        if build_proofs == BuildProofs::DeferredToAssembly {
+            return Err(format!(
+                "TASK CLOSE REJECTED: task {id} declares risk=platform but its platform_proof receipt is incomplete (missing evidence: {missing}). \
+                 Workers cannot produce it: ask the supervisor to record one from a macOS run or the macOS CI lane with \
+                 `{caller}coordination action=message target=supervisor blocker=true summary=\"platform proof for {id}\" message=\"...\"`, \
+                 then retry `{caller}task action=close id={id}`. {correction}",
+                id = task.id,
+            ));
+        }
         return Err(format!(
-            "TASK CLOSE REJECTED: task {} declares risk=platform but its platform_proof receipt is incomplete (missing evidence: {missing}). Add one with action=notes note_type=platform_proof containing macOS, a platform command, and a passing result, then retry close. If platform risk was declared in error, a live registered supervisor may run `task action=update id={} risk=none proof_scope_fix=true reason=\"correct erroneous platform risk\"` on a merged delivery, or close with `supervisor_override=true reason=\"reviewed the platform-risk mismatch\"`; the missing evidence is recorded on the task.",
-            task.id,
-            task.id,
+            "TASK CLOSE REJECTED: task {id} declares risk=platform but its platform_proof receipt is incomplete (missing evidence: {missing}). \
+             Add one with `{caller}task action=notes id={id} note_type=platform_proof notes=\"...\"` containing macOS, a platform command, and a passing result, \
+             then retry `{caller}task action=close id={id}`. {correction}",
+            id = task.id,
         ));
     }
     if task.risk.contains(&TaskRisk::Concurrency)
@@ -2858,20 +2887,26 @@ mod risk_proof_tests {
 
         // Non-build evidence is still required: platform risk keeps its gate.
         task.risk = vec![TaskRisk::Platform];
+        let worker_refusal = validate_risk_close_proofs_with_base_and_target_and_cache(
+            &task,
+            &changed,
+            dir.path(),
+            dir.path(),
+            Some(&expected_base),
+            None,
+            BuildProofs::DeferredToAssembly,
+            &mut cache,
+        )
+        .expect_err("deferring build proofs does not waive platform evidence");
+        // cas-90e8: the worker cannot run the platform command itself, so the
+        // refusal routes it to the supervisor instead of asking for a receipt.
+        assert!(worker_refusal.contains("platform_proof receipt is incomplete"));
+        assert!(worker_refusal.contains("Workers cannot produce it"), "{worker_refusal}");
         assert!(
-            validate_risk_close_proofs_with_base_and_target_and_cache(
-                &task,
-                &changed,
-                dir.path(),
-                dir.path(),
-                Some(&expected_base),
-                None,
-                BuildProofs::DeferredToAssembly,
-                &mut cache,
-            )
-            .is_err(),
-            "deferring build proofs does not waive platform evidence"
+            worker_refusal.contains("coordination action=message target=supervisor blocker=true summary="),
+            "{worker_refusal}"
         );
+        assert!(!worker_refusal.contains("note_type=platform_proof"), "{worker_refusal}");
     }
 
     #[test]
@@ -5254,7 +5289,10 @@ impl CasCore {
                             code: ErrorCode::INVALID_PARAMS,
                             message: Cow::from(
                                 super::stale_close_guard::halt_blocks_task_work_message(
-                                    "task action=close",
+                                    &format!(
+                                        "{}task action=close",
+                                        crate::mcp::tools::core::guidance::caller_prefix()
+                                    ),
                                 ),
                             ),
                             data: None,
@@ -8600,8 +8638,10 @@ impl CasCore {
                     "Task is already {} (only closed or blocked tasks can be \
                      reopened, unless an exact Resolved task-only proof must be \
                      invalidated before fresh review scope). To change status \
-                     directly, use: `task action=update id={} status=open`.",
-                    task.status, req.id
+                     directly, use: `{}task action=update id={} status=open`.",
+                    task.status,
+                    crate::mcp::tools::core::guidance::caller_prefix(),
+                    req.id
                 ),
             ));
         }
@@ -13526,15 +13566,15 @@ fn advance_clean_epic_after_child_integration(
     let integration_ref = preferred_diff_target_ref(repo_path, integration_branch);
     let Some(epic_tip) = resolve_branch_sha(repo_path, &epic_ref) else {
         return Some(format!(
-            "decision: CAS_EPIC_ADVANCEMENT_V1 REFUSED epic={epic_id} branch={epic_branch} \\
-             integration_branch={integration_branch}; the epic ref `{epic_ref}` could not be resolved. \\
+            "decision: CAS_EPIC_ADVANCEMENT_V1 REFUSED epic={epic_id} branch={epic_branch} \
+             integration_branch={integration_branch}; the epic ref `{epic_ref}` could not be resolved. \
              Child close remains valid; supervisor action: restore or reconcile the epic branch."
         ));
     };
     let Some(integration_tip) = resolve_branch_sha(repo_path, &integration_ref) else {
         return Some(format!(
-            "decision: CAS_EPIC_ADVANCEMENT_V1 REFUSED epic={epic_id} branch={epic_branch} \\
-             integration_branch={integration_branch}; the integration ref `{integration_ref}` could not be resolved. \\
+            "decision: CAS_EPIC_ADVANCEMENT_V1 REFUSED epic={epic_id} branch={epic_branch} \
+             integration_branch={integration_branch}; the integration ref `{integration_ref}` could not be resolved. \
              Child close remains valid; supervisor action: fetch/repair the declared integration branch."
         ));
     };
@@ -13544,10 +13584,10 @@ fn advance_clean_epic_after_child_integration(
     }
     if !git_commit_is_ancestor(repo_path, &epic_tip, &integration_tip) {
         return Some(format!(
-            "decision: CAS_EPIC_ADVANCEMENT_V1 REFUSED epic={epic_id} branch={epic_branch} \\
-             epic_tip={epic_tip} integration_branch={integration_branch} integration_tip={integration_tip}; \\
-             the branches diverge or the epic carries commits absent from its declared integration branch. \\
-             Cassy will not auto-merge or overwrite shared epic history. Child close remains valid; \\
+            "decision: CAS_EPIC_ADVANCEMENT_V1 REFUSED epic={epic_id} branch={epic_branch} \
+             epic_tip={epic_tip} integration_branch={integration_branch} integration_tip={integration_tip}; \
+             the branches diverge or the epic carries commits absent from its declared integration branch. \
+             Cassy will not auto-merge or overwrite shared epic history. Child close remains valid; \
              supervisor action: inspect and explicitly reconcile `{epic_branch}` with `{integration_branch}`."
         ));
     }
@@ -13561,13 +13601,13 @@ fn advance_clean_epic_after_child_integration(
         return Some(
             match fast_forward_local_epic_ref(repo_path, epic_branch, &integration_tip) {
                 Ok(()) => format!(
-                    "decision: CAS_EPIC_ADVANCEMENT_V1 LOCAL_ONLY epic={epic_id} branch={epic_branch} \\
-                 advanced from {epic_tip} to declared integration `{integration_branch}` ({integration_tip}); \\
+                    "decision: CAS_EPIC_ADVANCEMENT_V1 LOCAL_ONLY epic={epic_id} branch={epic_branch} \
+                 advanced from {epic_tip} to declared integration `{integration_branch}` ({integration_tip}); \
                  no origin remote is configured, so there was no shared ref to push."
                 ),
                 Err(error) => format!(
-                    "decision: CAS_EPIC_ADVANCEMENT_V1 FAILED_LOCAL epic={epic_id} branch={epic_branch} \\
-                 integration_branch={integration_branch}; {error}. Child close remains valid; \\
+                    "decision: CAS_EPIC_ADVANCEMENT_V1 FAILED_LOCAL epic={epic_id} branch={epic_branch} \
+                 integration_branch={integration_branch}; {error}. Child close remains valid; \
                  supervisor action: reconcile the local epic ref."
                 ),
             },
@@ -13595,8 +13635,8 @@ fn advance_clean_epic_after_child_integration(
                     }
                 };
             Some(format!(
-                "decision: CAS_EPIC_ADVANCEMENT_V1 ADVANCED epic={epic_id} branch={epic_branch} \\
-                 from {epic_tip} to declared integration `{integration_branch}` ({integration_tip}) \\
+                "decision: CAS_EPIC_ADVANCEMENT_V1 ADVANCED epic={epic_id} branch={epic_branch} \
+                 from {epic_tip} to declared integration `{integration_branch}` ({integration_tip}) \
                  with a non-force remote fast-forward.{local_note}"
             ))
         }
@@ -13614,22 +13654,22 @@ fn advance_clean_epic_after_child_integration(
                         Err(error) => format!(" Local convergence was refused: {error}."),
                     };
                 return Some(format!(
-                    "decision: CAS_EPIC_ADVANCEMENT_V1 CONCURRENT epic={epic_id} branch={epic_branch} \\
-                     already advanced remotely to {remote_tip}, which contains integration {integration_tip}; \\
+                    "decision: CAS_EPIC_ADVANCEMENT_V1 CONCURRENT epic={epic_id} branch={epic_branch} \
+                     already advanced remotely to {remote_tip}, which contains integration {integration_tip}; \
                      no overwrite was attempted.{local_note}"
                 ));
             }
             Some(format!(
-                "decision: CAS_EPIC_ADVANCEMENT_V1 FAILED_REMOTE epic={epic_id} branch={epic_branch} \\
-                 integration_branch={integration_branch} integration_tip={integration_tip}; non-force push \\
-                 was rejected and re-read did not show an equivalent concurrent advance: {}. \\
+                "decision: CAS_EPIC_ADVANCEMENT_V1 FAILED_REMOTE epic={epic_id} branch={epic_branch} \
+                 integration_branch={integration_branch} integration_tip={integration_tip}; non-force push \
+                 was rejected and re-read did not show an equivalent concurrent advance: {}. \
                  Child close remains valid; supervisor action: inspect remote epic history and credentials.",
                 String::from_utf8_lossy(&output.stderr).trim()
             ))
         }
         Err(error) => Some(format!(
-            "decision: CAS_EPIC_ADVANCEMENT_V1 FAILED_REMOTE epic={epic_id} branch={epic_branch} \\
-             integration_branch={integration_branch}; could not start non-force push: {error}. \\
+            "decision: CAS_EPIC_ADVANCEMENT_V1 FAILED_REMOTE epic={epic_id} branch={epic_branch} \
+             integration_branch={integration_branch}; could not start non-force push: {error}. \
              Child close remains valid; supervisor action: retry or inspect remote access."
         )),
     }

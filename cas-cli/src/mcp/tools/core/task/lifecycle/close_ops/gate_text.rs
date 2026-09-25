@@ -241,6 +241,109 @@ mod tests {
 
     const PREFIXES: [&str; 4] = ["mcp__cas__", "mcp__cs__", "cas__", "cas_"];
 
+    /// Close-gate sources whose runtime text suggests calls. Paths are
+    /// relative to this file.
+    const GATE_SOURCES: [(&str, &str); 10] = [
+        ("close_ops.rs", include_str!("../close_ops.rs")),
+        ("stale_close_guard.rs", include_str!("../stale_close_guard.rs")),
+        ("proof_scope.rs", include_str!("../proof_scope.rs")),
+        ("qa_dispatch.rs", include_str!("../qa_dispatch.rs")),
+        ("supervisor_push.rs", include_str!("../supervisor_push.rs")),
+        ("lifecycle.rs", include_str!("../../lifecycle.rs")),
+        ("qa_pass.rs", include_str!("../../../../../../qa_pass.rs")),
+        (
+            "pre_tool.rs",
+            include_str!("../../../../../../hooks/handlers/handlers_events/pre_tool.rs"),
+        ),
+        (
+            "neon_sql_guard.rs",
+            include_str!("../../../../../../hooks/handlers/handlers_events/neon_sql_guard.rs"),
+        ),
+        ("gate_text.rs", include_str!("gate_text.rs")),
+    ];
+
+    /// Bare mentions that are not suggested calls: a matcher's marker list
+    /// and stored acceptance-criteria text read by any harness.
+    const BARE_MENTION_ALLOWLIST: &[(&str, &str)] = &[
+        ("stale_close_guard.rs", "\"task action=close\","),
+        ("qa_dispatch.rs", "verdict recorded with verification action=qa_record"),
+    ];
+
+    /// Source lines outside `#[cfg(test)] mod` blocks and `//` comments.
+    fn runtime_lines(source: &str) -> Vec<(usize, &str)> {
+        let lines: Vec<&str> = source.lines().collect();
+        let mut kept = Vec::new();
+        let mut i = 0;
+        while i < lines.len() {
+            let next_is_module = lines.get(i + 1).is_some_and(|next| {
+                let next = next.trim_start();
+                (next.starts_with("mod ") || next.starts_with("pub(crate) mod "))
+                    && next.trim_end().ends_with('{')
+            });
+            if lines[i].trim() == "#[cfg(test)]" && next_is_module {
+                let mut depth: i64 = 0;
+                let mut j = i + 1;
+                while j < lines.len() {
+                    depth += lines[j].matches('{').count() as i64
+                        - lines[j].matches('}').count() as i64;
+                    if depth <= 0 && j > i + 1 {
+                        break;
+                    }
+                    j += 1;
+                }
+                i = j + 1;
+                continue;
+            }
+            if !lines[i].trim_start().starts_with("//") {
+                kept.push((i + 1, lines[i]));
+            }
+            i += 1;
+        }
+        kept
+    }
+
+    /// Every suggested `task`/`verification`/`coordination` call in close-gate
+    /// runtime text carries a harness prefix (literal or `{…}` placeholder).
+    #[test]
+    fn close_gate_calls_always_carry_a_prefix() {
+        let mut bare = Vec::new();
+        for (name, source) in GATE_SOURCES {
+            for (line_no, line) in runtime_lines(source) {
+                for tool in ["task", "verification", "coordination"] {
+                    let needle = format!("{tool} action=");
+                    for (at, _) in line.match_indices(&needle) {
+                        let before = line[..at].chars().next_back();
+                        let prefixed = before
+                            .is_some_and(|c| c == '_' || c == '}' || c.is_ascii_alphanumeric());
+                        let allowed = BARE_MENTION_ALLOWLIST
+                            .iter()
+                            .any(|(file, text)| *file == name && line.contains(text));
+                        if !prefixed && !allowed {
+                            bare.push(format!("{name}:{line_no}: {}", line.trim()));
+                        }
+                    }
+                }
+            }
+        }
+        assert!(bare.is_empty(), "unprefixed calls in close-gate text:\n{}", bare.join("\n"));
+    }
+
+    /// A string literal line ending in `\\` renders a literal backslash plus
+    /// the next line's indentation instead of joining the lines.
+    #[test]
+    fn close_gate_text_has_no_doubled_line_continuations() {
+        let mut doubled = Vec::new();
+        for (name, source) in GATE_SOURCES {
+            for (index, line) in source.lines().enumerate() {
+                let trimmed = line.trim_end();
+                if trimmed.ends_with("\\\\") && !trimmed.ends_with("\\\\\\") {
+                    doubled.push(format!("{name}:{}", index + 1));
+                }
+            }
+        }
+        assert!(doubled.is_empty(), "doubled continuations: {doubled:?}");
+    }
+
     #[test]
     fn verification_timeout_always_names_a_complete_recovery_verdict() {
         for prefix in PREFIXES {

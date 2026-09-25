@@ -203,20 +203,29 @@ pub struct ExtractedLearning {
 /// The Rust hook handler calls `session_learn_sync`, receives these drafts,
 /// applies the confidence + dedup gate, then writes survivors to the store via
 /// `Entry`.  The LLM never writes to the store directly — it only returns JSON.
+///
+/// Every field has a serde default (audit M09): a model reply that omits a
+/// field still parses, and the caller's confidence and content gates discard
+/// what is unusable, instead of one partial draft failing the whole batch.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SessionLearnDraft {
     /// Epistemic signal: concept | entity | correction | pattern | idea | decision | gap
+    #[serde(default)]
     pub signal: String,
     /// Cassy entry_type string: learning | preference | context | observation
+    #[serde(default)]
     pub entry_type: String,
     /// Storage scope string: global | project
+    #[serde(default)]
     pub scope: String,
     /// Categorisation tags (e.g. ["correction", "scope-discipline"])
     #[serde(default)]
     pub tags: Vec<String>,
     /// Memory body in imperative form
+    #[serde(default)]
     pub content: String,
-    /// Confidence score [0.0, 1.0]
+    /// Confidence score [0.0, 1.0]; a missing score is 0.0, below every gate
+    #[serde(default)]
     pub confidence: f32,
     /// IDs of near-duplicate entries already in the store; empty = genuinely new
     #[serde(default)]
@@ -272,7 +281,8 @@ pub(crate) use handlers_session::detect_and_mark_skill_drift;
 #[cfg(test)]
 pub(crate) use handlers_session::estimate_tokens;
 pub(crate) use handlers_session::{
-    extract_learnings_sync, generate_session_summary_sync, session_learn_sync,
+    extract_learnings_sync, generate_session_summary_sync, session_learn_dedup_candidates,
+    session_learn_sync,
 };
 pub use handlers_session::{generate_session_title_sync, handle_session_end, handle_session_start};
 pub(crate) use handlers_state::{

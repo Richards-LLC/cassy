@@ -1703,7 +1703,7 @@ pub(crate) fn extract_learnings_sync(
 
 /// Extract learnings from transcript using AI
 ///
-/// Reads the transcript, sends to Haiku to identify project conventions
+/// Reads the transcript, sends it to the model to identify project conventions
 /// that the user taught Claude during the session.
 async fn extract_learnings_async(
     transcript_path: &str,
@@ -1818,25 +1818,103 @@ If no clear learnings found, respond with: []"#
 
 // ─── session-learn: 7-signal memory classifier (cas-6156 / EPIC cas-ebea) ─────
 
-const SESSION_LEARN_SKILL_BODY: &str = include_str!("../../builtins/skills/session-learn/SKILL.md");
+/// The Stop-hook classifier prompt (skills audit M09, cas-228e).
+///
+/// This is a single-turn, tool-less model call, so it gets its own prompt:
+/// the signals, the output contract and one example. The `session-learn`
+/// skill is the human-facing procedure and is not sent here — it used to be
+/// (`include_str!`), which shipped maintainer sections and a "scan the store
+/// with `search`" step the call cannot run, and its "omit the rest of the
+/// body" advice produced drafts the parser rejected. Duplicate candidates are
+/// passed in instead (see `build_session_learn_prompt`).
+const SESSION_LEARN_CLASSIFIER_PROMPT: &str = r#"You classify one coding-agent session into memory drafts. You cannot call tools. Read the transcript below and return a JSON array.
 
-fn build_session_learn_prompt(transcript_excerpt: &str, file_context: &str) -> String {
+Signals (one per draft; a finding that fits two signals is two drafts):
+- concept: a domain term learned here. entry_type "learning".
+- entity: a person, project, tool, repo or library worth recalling by name. entry_type "context".
+- correction: the user pushed back in a way that should bind future behaviour. entry_type "preference", usually scope "global".
+- pattern: a recurring pitfall or gotcha. entry_type "learning".
+- idea: a proposal floated but not acted on. entry_type "context".
+- decision: an architecture, process or scope decision with its rationale. entry_type "context".
+- gap: something the agent did not know but should have. entry_type "observation".
+
+Rules:
+- Only session-, project- or user-specific findings. General programming advice is not a memory.
+- scope is "project" unless the finding clearly holds across projects ("global").
+- confidence is in [0.0, 1.0]; be honest. Drafts below 0.6 (0.5 for corrections) are discarded.
+- If a finding repeats one of the existing memories listed below, put that memory's ID in dedup_hits. Still fill every other field.
+- Every draft has all of: signal, entry_type, scope, tags, content, confidence, dedup_hits. content is one imperative sentence or two.
+- If nothing qualifies, return [].
+
+Output: only the JSON array, no prose, no markdown fence. Example element:
+{"signal":"correction","entry_type":"preference","scope":"global","tags":["correction","scope-discipline"],"content":"When a worker flags a real gap, amend the acceptance criteria instead of working around it.","confidence":0.85,"dedup_hits":[]}"#;
+
+/// Existing memories offered to the classifier as duplicate candidates.
+const SESSION_LEARN_DEDUP_CANDIDATES: usize = 40;
+
+fn build_session_learn_prompt(
+    transcript_excerpt: &str,
+    file_context: &str,
+    existing: &[(String, String)],
+) -> String {
+    let existing = if existing.is_empty() {
+        "(none)".to_string()
+    } else {
+        existing
+            .iter()
+            .map(|(id, content)| {
+                let one_line = content.split_whitespace().collect::<Vec<_>>().join(" ");
+                format!("- {id}: {}", crate::hooks::handlers::handlers_middle::truncate_str(&one_line, 160))
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
     format!(
-        "{SESSION_LEARN_SKILL_BODY}\n\n## Transcript\n{transcript_excerpt}{file_context}\n\nReturn only the JSON array, no prose, no markdown wrapper."
+        "{SESSION_LEARN_CLASSIFIER_PROMPT}\n\n## Existing memories (duplicate candidates)\n{existing}\n\n## Transcript\n{transcript_excerpt}{file_context}\n\nReturn only the JSON array."
     )
+}
+
+/// Parse the classifier's reply one element at a time, so a single malformed
+/// or partial draft is dropped on its own instead of failing the whole batch
+/// (audit M09: one `dedup_hits`-only draft used to lose every draft).
+fn parse_session_learn_drafts(response_text: &str) -> Result<Vec<SessionLearnDraft>, MemError> {
+    let json_str = response_text
+        .find('[')
+        .and_then(|start| {
+            response_text
+                .rfind(']')
+                .map(|end| &response_text[start..=end])
+        })
+        .unwrap_or("[]");
+    let items: Vec<serde_json::Value> = serde_json::from_str(json_str)
+        .map_err(|e| MemError::Parse(format!("session-learn: reply is not a JSON array: {e}")))?;
+    let total = items.len();
+    let drafts: Vec<SessionLearnDraft> = items
+        .into_iter()
+        .filter_map(|item| serde_json::from_value::<SessionLearnDraft>(item).ok())
+        .filter(|draft| !draft.content.trim().is_empty() || !draft.dedup_hits.is_empty())
+        .collect();
+    if drafts.len() < total {
+        eprintln!(
+            "cas: session-learn: dropped {} unusable draft(s) of {total}",
+            total - drafts.len()
+        );
+    }
+    Ok(drafts)
 }
 
 /// Run the session-learn 7-signal classifier against the transcript.
 ///
 /// Synchronous wrapper — creates a `tokio::Runtime`, calls `session_learn_async`
-/// with a 30-second timeout (longer than `extract_learnings_sync` because the
-/// 7-signal prompt is richer), and returns the draft list.
+/// with a 30-second timeout, and returns the draft list. `existing` is the
+/// `(id, content)` list of memories offered as duplicate candidates.
 ///
 /// Callers in `stop_flow.rs` apply the confidence gate and overlap-detection
 /// (`find_similar_entry`) before writing survivors to the store.
 pub(crate) fn session_learn_sync(
     transcript_path: &str,
     file_paths: &[String],
+    existing: &[(String, String)],
 ) -> Result<Vec<SessionLearnDraft>, MemError> {
     use std::time::Duration;
     use tokio::runtime::Runtime;
@@ -1847,18 +1925,33 @@ pub(crate) fn session_learn_sync(
     rt.block_on(async {
         tokio::time::timeout(
             Duration::from_secs(30),
-            session_learn_async(transcript_path, file_paths),
+            session_learn_async(transcript_path, file_paths, existing),
         )
         .await
         .map_err(|_| MemError::Other("session-learn timed out after 30s".to_string()))?
     })
 }
 
-/// Async implementation — reads transcript, builds the 7-signal prompt, calls
-/// Haiku, and parses the returned JSON array into `Vec<SessionLearnDraft>`.
+/// Pick the duplicate candidates offered to the classifier: the most recent
+/// project memories, capped at [`SESSION_LEARN_DEDUP_CANDIDATES`].
+pub(crate) fn session_learn_dedup_candidates(
+    store: &dyn crate::store::Store,
+) -> Vec<(String, String)> {
+    store
+        .recent(SESSION_LEARN_DEDUP_CANDIDATES)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|entry| (entry.id, entry.content))
+        .collect()
+}
+
+/// Async implementation — reads the transcript, builds the classifier prompt,
+/// makes one single-turn call (`claude-opus-5-5` at low effort), and parses
+/// the returned JSON array into `Vec<SessionLearnDraft>`.
 async fn session_learn_async(
     transcript_path: &str,
     file_paths: &[String],
+    existing: &[(String, String)],
 ) -> Result<Vec<SessionLearnDraft>, MemError> {
     use crate::tracing::claude_wrapper::traced_prompt;
     use claude_rs::QueryOptions;
@@ -1866,7 +1959,7 @@ async fn session_learn_async(
     let transcript = std::fs::read_to_string(transcript_path)
         .map_err(|e| MemError::Other(format!("session-learn: cannot read transcript: {e}")))?;
 
-    // Skip trivial transcripts — same guard the SKILL.md documents
+    // Skip trivial transcripts.
     if transcript.len() < 500 {
         return Ok(vec![]);
     }
@@ -1896,7 +1989,7 @@ async fn session_learn_async(
         )
     };
 
-    let prompt_text = build_session_learn_prompt(transcript_excerpt, &file_context);
+    let prompt_text = build_session_learn_prompt(transcript_excerpt, &file_context, existing);
 
     let result = traced_prompt(
         &prompt_text,
@@ -1910,22 +2003,7 @@ async fn session_learn_async(
     .await
     .map_err(|e| MemError::Other(format!("session-learn LLM call failed: {e}")))?;
 
-    let response_text = result.text();
-
-    // Extract JSON array from the response
-    let json_str = response_text
-        .find('[')
-        .and_then(|start| {
-            response_text
-                .rfind(']')
-                .map(|end| &response_text[start..=end])
-        })
-        .unwrap_or("[]");
-
-    let drafts: Vec<SessionLearnDraft> = serde_json::from_str(json_str)
-        .map_err(|e| MemError::Parse(format!("session-learn: failed to parse drafts: {e}")))?;
-
-    Ok(drafts)
+    parse_session_learn_drafts(&result.text())
 }
 
 #[cfg(test)]
@@ -1933,16 +2011,43 @@ mod session_learn_tests {
     use super::*;
 
     #[test]
-    fn session_learn_prompt_starts_with_the_canonical_skill_body() {
-        let prompt = build_session_learn_prompt("transcript excerpt", "");
-        assert!(
-            prompt.starts_with(SESSION_LEARN_SKILL_BODY),
-            "Stop hook classifier prompt must use the embedded session-learn skill body"
-        );
-        assert!(
-            prompt.contains("## Transcript\ntranscript excerpt"),
-            "dynamic transcript must be appended after the canonical skill body"
-        );
+    fn session_learn_prompt_is_the_dedicated_classifier_prompt() {
+        let existing = vec![("cas-e0a1".to_string(), "Epics branch\nfrom main.".to_string())];
+        let prompt = build_session_learn_prompt("transcript excerpt", "", &existing);
+        assert!(prompt.starts_with(SESSION_LEARN_CLASSIFIER_PROMPT));
+        assert!(prompt.contains("## Transcript\ntranscript excerpt"), "{prompt}");
+        // Duplicate candidates are passed in: the call cannot search.
+        assert!(prompt.contains("- cas-e0a1: Epics branch from main."), "{prompt}");
+        // The human skill (frontmatter, tool steps, maintainer notes) is not sent.
+        for absent in ["managed_by:", "mcp__cas__", "Kill switch", "omit the rest"] {
+            assert!(!prompt.contains(absent), "prompt must not carry {absent:?}");
+        }
+        let none = build_session_learn_prompt("t", "", &[]);
+        assert!(none.contains("## Existing memories (duplicate candidates)\n(none)"));
+    }
+
+    /// Audit M09: one partial draft (a `dedup_hits`-only object, as the old
+    /// prompt asked for) used to fail the whole `Vec` parse and drop every
+    /// draft. Now it parses with defaults, and a malformed element is dropped
+    /// on its own.
+    #[test]
+    fn a_partial_or_malformed_draft_does_not_drop_the_batch() {
+        let reply = r#"Here you go:
+        [
+          {"signal":"pattern","entry_type":"learning","scope":"project","tags":["git"],
+           "content":"Rebase worker branches onto the epic tip before a merge request.","confidence":0.8,"dedup_hits":[]},
+          {"dedup_hits":["cas-1234"]},
+          {"signal":"idea","confidence":"high"},
+          "not an object"
+        ]"#;
+        let drafts = parse_session_learn_drafts(reply).expect("array parses");
+        assert_eq!(drafts.len(), 2, "{drafts:?}");
+        assert_eq!(drafts[0].signal, "pattern");
+        assert_eq!(drafts[1].dedup_hits, ["cas-1234"]);
+        assert!(drafts[1].content.is_empty());
+        assert_eq!(drafts[1].confidence, 0.0);
+
+        assert!(parse_session_learn_drafts("no array at all").unwrap().is_empty());
     }
 
     /// Confirm `SessionLearnDraft` round-trips through JSON correctly.
@@ -2006,7 +2111,7 @@ mod session_learn_tests {
         writeln!(tmp, "short").expect("write");
         let path = tmp.path().to_str().unwrap().to_string();
 
-        let result = session_learn_sync(&path, &[]);
+        let result = session_learn_sync(&path, &[], &[]);
         assert!(
             result.is_ok(),
             "trivial transcript must return Ok, not Err: {result:?}"

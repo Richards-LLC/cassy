@@ -313,17 +313,26 @@ fn agent_hygiene_instructions_match_available_actions_and_runtime_context() {
     }
 }
 
+/// Audit M09 (cas-228e): the Stop-hook classifier is a single-turn,
+/// tool-less call, so it has a dedicated prompt and is handed duplicate
+/// candidates. It no longer embeds the human session-learn skill.
 #[test]
-fn session_learn_stop_hook_uses_the_skill_as_its_prompt_source() {
+fn session_learn_stop_hook_uses_a_dedicated_classifier_prompt() {
     let handler = load("cas-cli/src/hooks/handlers/handlers_session.rs");
     assert!(
-        handler.contains("include_str!(\"../../builtins/skills/session-learn/SKILL.md\")"),
-        "Stop hook must embed the canonical session-learn skill body"
+        handler.contains("const SESSION_LEARN_CLASSIFIER_PROMPT: &str"),
+        "Stop hook must carry its own classifier prompt"
     );
     assert!(
-        !handler.contains("You are analyzing a Claude Code session transcript"),
-        "Stop hook must not retain a second inline session-learn prompt"
+        !handler.contains("include_str!(\"../../builtins/skills/session-learn/SKILL.md\")"),
+        "Stop hook must not send the human skill body to a tool-less call"
     );
+    assert!(
+        handler.contains("## Existing memories (duplicate candidates)"),
+        "Stop hook must pass duplicate candidates in"
+    );
+    let stop_flow = load("cas-cli/src/hooks/handlers/handlers_middle/session_stop/stop_flow.rs");
+    assert!(stop_flow.contains("session_learn_dedup_candidates(store.as_ref())"));
 }
 
 #[test]

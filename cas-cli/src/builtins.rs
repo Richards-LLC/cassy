@@ -132,11 +132,10 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
         content: include_str!("builtins/skills/cas-task-tracking.md"),
     },
     // session-learn (cas-39f5, EPIC cas-ebea): 7-signal session classifier
-    // borrowed from third-brain-v5-skills. The skill body is also the
-    // runtime prompt template embedded by the Stop hook handler (decision:
-    // in-process for v1, see the skill body's "in-process vs subprocess"
-    // section). v1 default: `[memory] session_learn_auto = false` —
-    // manual-invocation only until user opts in.
+    // borrowed from third-brain-v5-skills. This is the human procedure; the
+    // Stop hook runs in-process with its own classifier prompt
+    // (`SESSION_LEARN_CLASSIFIER_PROMPT`, cas-228e). v1 default:
+    // `[memory] session_learn_auto = false`.
     BuiltinFile {
         path: "skills/session-learn/SKILL.md",
         content: include_str!("builtins/skills/session-learn/SKILL.md"),
@@ -6518,8 +6517,7 @@ This is the body content."#;
             claude.content.replace("mcp__cas__", "mcp__cs__"),
             codex.content,
             "session-learn SKILL.md .claude and .codex copies must be identical apart from \
-             the mcp__cas__/mcp__cs__ tool prefix; drift here produces a divergent \
-             classifier prompt across harnesses",
+             the mcp__cas__/mcp__cs__ tool prefix",
         );
     }
 

@@ -392,7 +392,7 @@ pub fn handle_stop(input: &HookInput, cas_root: Option<&Path>) -> Result<HookOut
         // session-learn: 7-signal memory classifier (cas-6156 / EPIC cas-ebea)
         // Gated on [memory] session_learn_auto = true in .cas/config.toml.
         // The obs_count >= 5 guard mirrors the SKILL.md "< 5 tool calls = skip"
-        // floor so we never pay a Haiku call on a trivial session.
+        // floor so we never pay a model call on a trivial session.
         let session_learn_auto = config.memory.as_ref().is_some_and(|m| m.session_learn_auto);
 
         if session_learn_auto && obs_count >= 5 {
@@ -409,7 +409,10 @@ pub fn handle_stop(input: &HookInput, cas_root: Option<&Path>) -> Result<HookOut
                     })
                     .collect();
 
-                match session_learn_sync(transcript_path, &sl_file_paths) {
+                // The classifier cannot search, so offer it the recent
+                // memories as duplicate candidates.
+                let dedup_candidates = session_learn_dedup_candidates(store.as_ref());
+                match session_learn_sync(transcript_path, &sl_file_paths, &dedup_candidates) {
                     Ok(drafts) if !drafts.is_empty() => {
                         eprintln!(
                             "cas: session-learn: {} draft(s) from transcript",
@@ -427,7 +430,11 @@ pub fn handle_stop(input: &HookInput, cas_root: Option<&Path>) -> Result<HookOut
                         let mut stored = 0usize;
                         for draft in drafts
                             .iter()
-                            .filter(|d| confidence_floor(d) && d.dedup_hits.is_empty())
+                            .filter(|d| {
+                                confidence_floor(d)
+                                    && d.dedup_hits.is_empty()
+                                    && !d.content.trim().is_empty()
+                            })
                         {
                             // BM25 overlap-detection gate
                             if find_similar_entry(cas_root, &draft.content) {

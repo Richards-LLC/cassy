@@ -103,8 +103,7 @@ shapes, and command output.
   can find them.
 - **Readable output:** CLI and MCP output should scan like a small report: lead
   with status and outcome, group related fields, and end with the next action or
-  receipt. Follow the `cas-update-and-doctor-read-like-reports` precedent when
-  shaping operational output.
+  receipt. Use `cas-cli-craft` when shaping operational terminal output.
 
 ### Critique rubric
 

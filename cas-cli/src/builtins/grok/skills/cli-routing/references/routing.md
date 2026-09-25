@@ -15,10 +15,10 @@ blocker.
 recipe — the invocation, the sandbox flag, the model default, closing stdin, and
 redirecting long output to a file. Use it as written; do not restate it here.
 
-What routing adds on top of that recipe: reads can stay sandboxed, but a write
-needs a narrowly scoped prompt and
-`--dangerously-bypass-approvals-and-sandbox` in an externally sandboxed
-session. Prefer `-c model_reasoning_effort="low"` for mechanical or
+What routing adds on top of that recipe: reads stay `-s read-only`; a small
+write needs a narrowly scoped prompt and `-s workspace-write` (add
+`--add-dir <dir>` for each extra writable directory). Never use
+`--dangerously-bypass-approvals-and-sandbox` for this. Prefer `-c model_reasoning_effort="low"` for mechanical or
 transcription work. Keep the captured output file and its exit status; they are
 the only admissible evidence if routing falls through to Claude.
 

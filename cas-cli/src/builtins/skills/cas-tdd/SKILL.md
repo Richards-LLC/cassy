@@ -16,6 +16,7 @@ Use a red → green loop to produce tests worth keeping. Test behavior through p
 - Work vertical tracer bullets: one test, the smallest implementation that makes it pass, then the next learned slice. Do not write a horizontal wall of imagined tests.
 - Expected values come from an independent source of truth: a worked example, specification, known-good literal, or external contract.
 - Use the project’s scoped test command and record the actual proof result in the task. Do not treat a zero-test success as proof.
+- A factory worker on a lane that forbids builds (for example Rust lanes, where cargo is denied) writes the failing test and the fix but does not run them; the supervisor's `ASSEMBLY_PROOF` run is the red/green evidence (see `cas-worker`).
 
 When module shape or a seam is unclear, consult `cas-codebase-design` for module, interface, depth, seam, adapter, leverage, and locality vocabulary.
 

@@ -14,8 +14,11 @@ This is the canonical `codex exec` recipe; every other Cassy skill that shells
 out to Codex points here rather than restating its own variant.
 
 ```bash
-/usr/bin/timeout 600 codex exec -s read-only -C "$PWD" "<prompt>"
+/usr/bin/timeout 600 codex exec -s read-only -C "$PWD" "<prompt>" < /dev/null
 ```
+
+`< /dev/null` closes stdin: when stdin is piped, `codex exec` appends it to
+the prompt as a `<stdin>` block, and an open terminal stdin can stall the run.
 
 Useful flags:
 
@@ -31,7 +34,7 @@ For long sweeps, run in the background and poll an output file:
 
 ```bash
 out=/tmp/codex-exec-investigation.txt
-/usr/bin/timeout 1800 codex exec -s read-only -C "$PWD" -o "$out" "<prompt>" &
+/usr/bin/timeout 1800 codex exec -s read-only -C "$PWD" -o "$out" "<prompt>" < /dev/null &
 ```
 
 ## Prompt Shape

@@ -1,6 +1,6 @@
 ---
 name: cli-routing
-description: Use when a bounded, non-interactive task needs a one-shot `codex exec` or `claude -p` subprocess, such as capacity recovery or release-note drafting. Codex first; Claude only after the account gate in references/routing.md passes.
+description: Use when one-shot CLI work must fall back between harnesses — Codex failed for capacity or auth, or a `claude -p` subprocess is being considered. Owns the Codex-first order and the Claude account gate; a plain read-only `codex exec` investigation is cas-codex-exec.
 managed_by: cas
 ---
 

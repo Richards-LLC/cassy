@@ -42,7 +42,9 @@ the other fields are optional and apply to the actions described here.
   `handoff` for `remember` (default: `learning`); any other value is rejected
   and nothing is stored. A `handoff` is the note for the next session: saving
   one supersedes your role's previous handoff (kept as history, never
-  overwritten), skips the overlap check, and session start shows only the newest.
+  overwritten), skips the overlap check, and session start shows only the newest;
+  shape it as the Handoff Brief in
+  [body-templates.md](references/body-templates.md#handoff-brief).
 - `tags`: comma-separated tags for `remember`; for `list`, every supplied tag
   must match case-insensitively.
 - `title`: optional entry title for `remember`.

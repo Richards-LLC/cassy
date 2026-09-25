@@ -12,7 +12,7 @@ Inputs, all in this directory:
 | L3 | cas-988a | `L3-findings.md` | runtime prompts in Rust, MCP tool descriptions |
 | L4 | cas-a4d8 | `L4-findings.md` | design and reporting skills |
 | L5 | cas-9233 | `L5-findings.md` | engineering, release, workflow skills |
-| L6 | cas-ea56 | pending | installed instruction files |
+| L6 | cas-ea56 | `L6-findings.md` | installed instruction files, non-builtin skills |
 
 All lanes worked from the same code baseline, `4836e56f7` (v3.31.0). The epic tip adds only audit
 documents on top of that.
@@ -25,13 +25,14 @@ How rows are referenced:
   severity. The P3 provenance row that sits inside the L3 P2 table is skipped.
 - `L4 Fn`: finding n in L4.
 - `L5 P0-n` / `P1-n`: row numbers as printed in L5.
+- `L6 Fn`: finding n in L6.
 
 ## 1. Verdict (one screen)
 
-The five lanes reported **46 P0s and about 120 P1s**. After deduplication they come to **25 P0 and 34
+The six lanes reported **48 P0s and 99 P1s**. After deduplication they come to **27 P0 and 39
 P1 master rows** (§2). **Every P0 was re-checked against the current code:**
 
-- 45 are confirmed.
+- 47 are confirmed.
 - 1 is partly confirmed (L2 P0-21, where the fix scope is wider than reported).
 
 Taken sentence by sentence, the shipped skills are well written. The failures are in the machinery
@@ -73,18 +74,26 @@ around them.
      - lane matrices written out about eight times
    - Text that is specific to cas-src ships in every project's builtins: release-train steps, cargo
      triage, Richards-LLC links, and the rule "fix Cassy bugs here".
+6. **Instruction files and stores carry other projects' facts.**
+   - cas-src's store holds a proven Gabber Studio rule ("branch from `staging`"; cas-src has no
+     staging), gabber PostHog knowledge pages that SessionStart injects, and 149 test-fixture rules.
+   - The init-written `cas` skill (32 installs) recommends a `start=` parameter that the schema rejects.
+   - Claude in cas-src loads the CLAUDE.md block three times, about 3.3k tokens of instruction files
+     per turn. Grok loads CLAUDE.md and AGENTS.md together, in two wrong spellings, and cuts
+     CLAUDE.md at 10,000 characters.
 
 **What I need from the operator.**
 
-- **Approve Wave A now:** WP1–WP4 plus the deprecated-name sweep, which is the M17 part of WP5 (§4).
+- **Approve Wave A now:** WP1–WP4, the deprecated-name sweep (the M17 part of WP5), the `start=`
+  fix (WP14a) and the store clean-up (WP15) (§4).
   None of these changes the architecture. Together they:
   - fix the runtime-envelope P0s;
   - bring SessionStart back under the hook cap;
   - make later skill fixes reach installed copies.
-- **Decide D1–D12 (§5)** before Waves C and D start.
+- **Decide D1–D13 (§5)** before Waves C and D start.
 - **Expected savings once Waves A and B land:**
   - Worker SessionStart shrinks by about 2.6 KB and actually reaches the model.
-  - Worker MCP schemas shrink by about 4.5k tokens per session.
+  - Worker MCP schemas shrink by about 1.6k tokens per session (about 4.5k once the D2 split lands).
   - Each verification spawn saves about 3.2k tokens.
   - Each release cut saves about 5.7k tokens.
   - The recurring failed-call recovery turns go away.
@@ -128,6 +137,8 @@ master row (column "Lane refs") or in the duplicate list (§2.4).
 | M23 | Wrong MCP call shapes. <br>• `mcp_execute server= tool= args=` (the only param is `code`). <br>• Viktor `question` (should be `message`). <br>• The schema text itself calls `code` "TypeScript". | L5 P0-3, P0-12 (+ L5 cross-lane 2) | `ops_secondary.rs:1256-1272`; live `ask_viktor` schema | ✔ |
 | M24 | Instruction contradiction inside a skill: cas-brainstorm says "ONE question at a time" and also "ask the full frontier". | L5 P0-10 | `cas-brainstorm/SKILL.md:32` vs `:41` | ✔ |
 | M25 | mcp-integration never mentions the fail-closed proxy allowlist (the test call is denied after every add). It also applies Claude `-s local` semantics to `cas mcp`. | L5 P0-13, P0-14 | `cas-mcp-proxy/src/config.rs:53-59,421-425`; `cli/mcp_cmd.rs:54,118-124` | ✔ |
+| M26 | The init-written `cas` skill (32 installs) recommends `start` on `task action=create`, "(RECOMMENDED)". `TaskRequest` has no such field and has `deny_unknown_fields`, so the call is rejected. | L6 F1 | `cli/init/docs_and_skill.rs:177`; `crates/cas-mcp/src/types.rs:141-144`; live schema has no `start` | ✔ |
+| M27 | A Gabber Studio rule ("ALWAYS cut new branches … from `staging`") is the only proven rule in cas-src's store and is synced unconditionally to `.claude/rules/cas/rule-002.md`. cas-src has no `staging` branch. | L6 F2 (+ M83 contamination) | `cas-src/.claude/rules/cas/rule-002.md:5`; `git branch -r` lists `main`/`develop` only | ✔ |
 
 ### 2.2 P1: routing, format, budget, architecture
 
@@ -145,9 +156,9 @@ master row (column "Lane refs") or in the duplicate list (§2.4).
 | M39 | Grok resolves all CAS skills from `.claude/skills` (Claude spelling). | L1#2 | T1 |
 | M40 | OpenCode loads Claude-spelled skills. The `cas_` projection is never written. | L1#3 | T1 |
 | M41 | Codex agents are TOML, so installed `.md` agents are inert. `factory-supervisor.md` has no consumer and stale content. | L1#4, L2 P1-48 | T1/T2 |
-| M42 | Retired managed agents are never pruned from installs. | L1#5 | T2 |
+| M42 | Retired managed agents are never pruned from installs. | L1#5, L6 F9 | T2 |
 | M43 | `disallowed-tools` is documented as a guard. It is turn-scoped and Claude-only. | L1#6 | T5 |
-| M44 | AGENTS.md is generated in Codex spelling with Claude ToolSearch syntax and caps. Grok loads it twice. | L1#7 | T1/T7 |
+| M44 | Instruction-file projection. <br>• AGENTS.md is generated in Codex spelling with Claude-only `ToolSearch`/`TodoWrite` bootstrap and shouted caps. <br>• Grok loads CLAUDE.md **and** AGENTS.md (≈5.1k tok, ≈2.1k duplicated, neither in Grok's spelling) and cuts CLAUDE.md at 10,000 chars, losing the release-duty rubric link. <br>• The TodoWrite ban names a tool Opus 5.x/Fable do not have. | L1#7, L6 F3, F4, F5 | T1/T7 |
 | M45 | Opt-in skills are model-invocable in Codex and OpenCode. `disable-model-invocation` is ignored and `agents/openai.yaml` is never generated. | L1#10 (P2), L5 P1-10 | T1 |
 | M46 | Supervisor references are stale or contradictory. <br>• Three dead-worker procedures. <br>• is-wedged table lacks approval-hang and uses the wrong bands. <br>• "verify in TUI" / "ask the supervisor". <br>• Untiered, non-isolated spawn examples. <br>• `max` effort list. <br>• Suspended terra listed. <br>• Unfiltered `remind_event`. <br>• cas-src SHA check in checklist step 0. <br>• "tests pass" per task. <br>• Orphaned intake.md/planning.md. <br>• Phantom mecha-cassy fallback. | L2 P1-34, 35, 37, 38, 39, 40, 41, 43, 44, 45, 47 | T4/T5 |
 | M47 | task-verifier structure. <br>• Close-path section addresses the closer. <br>• `HEAD~10` base. <br>• Self-contradicting reject policy. <br>• No `tools:` restriction. <br>• 27.7 KB per spawn (P2-60). | L2 P1-49, 50, 59 (+ P2-60) | T4 |
@@ -167,6 +178,11 @@ master row (column "Lane refs") or in the duplicate list (§2.4).
 | M61 | `generate-image.sh` cannot request aspect or size. | L4 F8 | T5 |
 | M62 | Descriptions over budget: cli-craft 514, ui-craft 428. 5 skills are over 250. | L4 F9, L1#8 | T3 |
 | M63 | Reference hygiene. <br>• References carry skill frontmatter. <br>• Orphans. | L2 P1-46 (L1#16 P3) | T2 |
+| M64 | Descendant CLAUDE.md blocks are never removed or refreshed. 38 files under ~ duplicate the home block and 6 are stale (incl. `~/Petrastella/CLAUDE.md`), so a Petrastella session loads the directive ×3 (≈600 redundant tokens) in two versions. `cas update --dry-run` promises changes apply won't make. | L6 F6 | T2/T3 |
+| M65 | The tracked AGENTS.md has been stale since 2026-09-18 and nothing enforces regeneration (`cas sync agents-md --check` fails). | L6 F7 | T2/T4 |
+| M66 | Codex guidance says "Codex does not support Claude hooks", but CAS installs Codex hooks. Codex outside cas-src gets **no** Cassy directive (no AGENTS.md block, no Codex SessionStart). | L6 F8 | T1 |
+| M67 | Non-builtin `accounting-client-report` competes with cas-html-reports on every "write a report" request, contradicts its layout rules, and lists client names in a non-accounting home. | L6 F10 | T4/T6 |
+| M68 | `macos-onboarding-reviewer` hard-codes Sonoma/Sequoia baselines; macOS 27 is Apple-silicon-only. | L6 F11 | T5 |
 
 ### 2.3 P2 / P3 (grouped; full detail is in the lane reports)
 
@@ -183,7 +199,9 @@ master row (column "Lane refs") or in the duplicate list (§2.4).
 | M78 | Top-level `managed_by: cas` is not portable; move it to `metadata.managed_by`. | L1#9, L4 F20, L5 scope note | ≈0 |
 | M79 | Dead `/cas-start`, `/cas-context`, `/cas-end` prohibitions. | L1#11, L3 P3 | −25 |
 | M80 | Operator names and ticket ids in shipped text. | L4 F18, L3 P3, L2 P2-80 | small |
-| M81 | Polish, gathered from all lanes. | L1#14–17, L2 P3, L3 P3, L4 F21–F28, L5 P3 | small |
+| M81 | Polish, gathered from all lanes. | L1#14–17, L2 P3, L3 P3, L4 F21–F28, L5 P3, L6 F22–F26 | small |
+| M82 | Instruction-file trims. <br>• Repo CLAUDE.md carries 3.95 KB of build/CI/sccache policy loaded every turn. <br>• Ink-crash section cites a task closed in April. <br>• Three release-announcement rules with two rubric files and different reply counts. <br>• Ambiguous bug routing (cas-src vs elsewhere). <br>• `CAS_SKILL` manual shouts and repeats the block. <br>• `~/.codex/AGENTS.md`/`GROK.md` duplicate the exa skill. <br>• exa description 520 chars. <br>• Stale unmanaged project skill copies. | L6 F12–F19, F21 | −900 always (build policy); −300 (Ink); −150 always + −600 per-invoke (`CAS_SKILL`); −280 (Codex/Grok exa) |
+| M83 | Store contamination. <br>• A gabber rule in cas-src (M27). <br>• gabber PostHog knowledge pages injected at cas-src SessionStart (L3 P1.2). <br>• 149 test-fixture draft rules. <br>• Suspected cause: sessions writing through a `CAS_ROOT` override (not verified). | L6 F2, F20, L3 P1.2 | 0 tokens; removes wrong facts |
 
 ### 2.4 Duplicates merged
 
@@ -206,11 +224,15 @@ master row (column "Lane refs") or in the duplicate list (§2.4).
 | L5 P1-23, P1-24 (session-learn) | M09 |
 | L5 P1-25 (`mecha_cassy` key) | M17 |
 | L5 P1-31 (cas-tdd cargo) | M11 |
+| L6 F3, F4, F5 (Grok double load, Claude-only bootstrap, TodoWrite shout) | M44 |
+| L6 F9 (retired agents installed) | M42 |
+| L6 F15 (bug-routing ambiguity) | M82, same fact as M19 |
+| L6 F20 (fixture rules) | M83 |
 
 ### 2.5 P0 spot-verification
 
-**Result: 45 of 46 lane P0s CONFIRMED, 1 PARTIAL.** The 39 L2 and L5 P0s were checked by a read-only
-sub-audit against the tree at `ca73bb591`.
+**Result: 47 of 48 lane P0s CONFIRMED, 1 PARTIAL.** The 39 L2 and L5 P0s were checked by a read-only
+sub-audit against the tree at `ca73bb591`; the rest were checked directly.
 
 | Row | Verdict | Note |
 |---|---|---|
@@ -220,6 +242,7 @@ sub-audit against the tree at `ca73bb591`.
 | L5 P0-4 | CONFIRMED, caveat | The conflict sits in the template example `:88-95`; `:33-45` is prose about the rubric itself. |
 | L2 P0-01…25 (other 22), L5 P0-1…14 (other 13) | CONFIRMED | Each checked at the cited file:line plus the cited code. For example: `ops_secondary.rs:354-395` has `files` and no `deny_unknown_fields`; `factory_ops.rs:2778-2785` treats `limit==0` as all workers; `types/task.rs:131-138` rejects a create without `risk`; `hooks/handlers.rs:207-227` has no `serde(default)`. |
 | L1#1, L3 P0.1–P0.4, L4 F1, F2 | CONFIRMED | Checked directly for this synthesis. Examples: `builtins.rs:2318-2339,2534-2549`; installed `template.sh` ≠ source; 7+7 identity hits; `grep -c 'release report'` = 0; the four L3 literals re-grepped. |
+| L6 F1, F2 | CONFIRMED | `docs_and_skill.rs:177` has "`start` - Set to true to start immediately (RECOMMENDED)"; `TaskRequest` is `deny_unknown_fields` and the live schema has no `start` with `additionalProperties:false`. `rule-002.md` is present in the cas-src main checkout, and `git branch -r` has no `staging`. |
 
 ## 3. Themes (root causes that span lanes)
 
@@ -229,15 +252,16 @@ prefix is taken from the wrong source:
 - the session-wide harness instead of the recipient's (M01);
 - a literal written after the remap pass (M36);
 - the harness that wrote a directory instead of the harness that reads it (M39, M40, M44, M45);
-- Codex job bodies reused for Claude fallbacks (M36).
+- Codex job bodies reused for Claude fallbacks (M36);
+- a Codex projection that exists only in cas-src (M66).
 
 The three-spelling catalog guarantees parity between source files, not between what each harness
 actually receives. → decision D1.
 
 **T2: Install lifecycle only ever adds.** Sync overwrites only files whose frontmatter it can match
 (M05). The prune step removes neither agents (M42), non-`cas-` builtins, nor removed references. The
-links in the source tree do not resolve in the installed layout (M37). No test compares an installed copy
-with the catalog. The consequences cascade: the operator-data purge (M06), every script fix (M08, M20,
+links in the source tree do not resolve in the installed layout (M37). CLAUDE.md blocks and AGENTS.md
+are never refreshed or de-duplicated (M64, M65). No test compares an installed copy with the catalog. The consequences cascade: the operator-data purge (M06), every script fix (M08, M20,
 M57, M61) and every reference fix stay stale in existing installs until this is fixed. **WP4 gates the
 install effect of WP5, WP7, WP9 and WP10.**
 
@@ -268,7 +292,7 @@ Parity tests check markers, not meaning. The fix pattern: one owning file, or on
 
 **T5: Prose is not tied to what the code accepts.** This is the source of most P0s. Suggested calls:
 
-- omit required params (M02, M04, M10, M12, M16, M23);
+- omit required params, or invent ones the schema rejects (M02, M04, M10, M12, M16, M23, M26);
 - name denied or wrong actions (M03, M11, M13);
 - name non-existent agents, commands or scripts (M08, M38, M79);
 - describe guards that are not guards (M43);
@@ -290,6 +314,16 @@ and M80. The 09-02 de-operator-ise item has regressed. Two things are needed:
 **T7: Wording lags current model guidance.** Emphasis in always-loaded text (M34, M44), verification
 scaffolding (L2 P2-70), and conflicting rules that stall GPT-6 (M24, M59, M46). This is handled by the
 house-standard rewrite (M77) plus targeted edits.
+
+**T8: Stores and rule files carry other projects' facts.** The cas-src store holds a Gabber branching
+rule, synced as an unconditional rule file (M27). It also holds gabber PostHog knowledge pages, which
+SessionStart injects into every cas-src session (L3 P1.2), and 149 test-fixture rules (M83). The
+suspected cause is sessions writing through a `CAS_ROOT` override. Factory workers in this repo run with
+`CAS_ROOT=…/cas-src/.cas`, but the write path has not been traced. Needed:
+
+- a one-off clean-up (no-code operation);
+- a write guard that refuses rules or knowledge naming another registered project;
+- confirmation that the `test-real-store-untouched` target covers rule writes.
 
 ## 4. Proposed fix plan (work packages)
 
@@ -325,7 +359,7 @@ Run the whole set in one pass with no fail-fast.
 | WP | Scope (master IDs) | Main files | Risk | Tests affected / to add | Est. savings | Depends on |
 |---|---|---|---|---|---|---|
 | **WP1** Envelope and remediation correctness | M01, M02 (runtime), M03 (runtime), M04, M36 banner, M38, M72 remind/push | `director/prompts.rs`, `app/mod.rs`, `cas-pty/src/pty.rs`, `close_ops.rs`, `handlers_session.rs`, `pre_tool.rs`, `ops_secondary.rs` | R-build, R-pins (pty contract markers, `factory_codex_skill_guardrails`, `--lib cli::factory::parity`) | Add: every suggested `action=message` literal carries `summary=`. Add: per-recipient prefix test (Claude worker in a Codex-default session). | ≥1 failed call + recovery (~300–800 tok) per assignment or rejection | — |
-| **WP2** Always-loaded budget | M30, M33, M34, M35 (body side), M19, M51 (body parts), L2 P2-62/73 | `session_budget.rs`, `cas-core/.../build_start.rs`, `…/context/mod.rs`, `handlers_session.rs`, `cas-worker.md`, `cas-supervisor.md` | R-build, R-pins (P-L2 in full) | Add: assembled payload ≤ 9,216 B per role on a realistic fixture. Retarget the surface-checklist pin. | Worker −2.6 KB (assembled) and −1.6 KB body; supervisor −4 KB assembled, −0.9 KB body | — (**first**: every WP7 body fix needs its headroom) |
+| **WP2** Always-loaded budget | M30, M33, M34, M35 (body side), M19, M51 (body parts), M71 (per-turn recall), L2 P2-62/73 | `session_budget.rs`, `cas-core/.../build_start.rs`, `…/context/mod.rs`, `handlers_session.rs`, `cas-worker.md`, `cas-supervisor.md` | R-build, R-pins (P-L2 in full) | Add: assembled payload ≤ 9,216 B per role on a realistic fixture. Retarget the surface-checklist pin. | Worker −2.6 KB (assembled) and −1.6 KB body; supervisor −4 KB assembled, −0.9 KB body | — (**first**: every WP7 body fix needs its headroom) |
 | **WP3** MCP schema diet and text | M32, M70 (no split), M23 schema text, M10 `files` alias, M14 `config_dir` text, M18 enum | `service/mod.rs`, `crates/cas-mcp/src/types*.rs`, `list_tools` post-process | R-build; pin `mcp_action_surface_test` | Add: every tool description ≤ 2,048; `action` enum = dispatch table; no `nullable`/`default:null` | −2.9k tok schema; −1.6k for the 4 always-selected tools | — (D2 extends it) |
 | **WP4** Install sync and prune | M05, M42, M37 (+ link-resolution test), removed-reference prune, ledger glob, doctor install parity | `builtins.rs` (owner check, prune fns), `gen-builtin-reference-history.sh`, `reference-history.json`, doctor | R-build | `--lib builtins` sync tests. Add: installed-vs-catalog parity test and link-resolution test. | −120 always; makes every later fix reach installs | — |
 | **WP5** Deprecated names and operator data | M17 (expires next release), M06, M80, T6 lint | skills ×3 flavours, CLAUDE.md block (`docs_and_skill.rs`), `issue_intake_directive_test`, exemplar deletions | R-build (registrations, pinned test) + R-docs | `issue_intake_directive_test`, drift test. Add: operator-data lint. | −42.9k on-demand; −170 KB ×3 binary | WP4, for installed copies |
@@ -337,8 +371,10 @@ Run the whole set in one pass with no fail-fast.
 | **WP11** House standard and portable frontmatter | M43, M62, M77, M78, M79, M45 (Codex yaml) | `cas-writing-for-agents`, all frontmatter, `builtin_skill_description_test.rs` | R-docs + R-pins (P8) | Extend the ≤250 description cap to all skills; `is_managed_by_cas` accepts `metadata.managed_by` | −170 always ×harnesses | D1 (tool naming wording) |
 | **WP12** Harness projection | M39, M40, M41, M44, L1#13 | sync paths, `cli/sync/agents_md.rs`, `docs_and_skill.rs`, Codex agents | R-build, large (drift-test redesign if D1 = neutral) | `builtin_flavor_drift_test`, `factory_parity_test`, AGENTS.md sync tests | −450 always (Grok), −60 per harness | **D1, D3, D6** |
 | **WP13** Startup single source and coordination split | M31, M35 (contract side), M72 renderer, optional `coordination`/`factory` split | `pty.rs`, `app/mod.rs`, `cas-worker.md`, `ops_secondary.rs`, `service/mod.rs`, every skill naming supervisor actions | R-build, R-pins (P-L2) | Contract markers; add "SessionStart fired" telemetry | −790 per spawn; −2–3k per worker session if split | **D2, D4**; WP2 |
+| **WP14** Instruction files | **14a (Wave A):** M26 (drop `start`; reduce `CAS_SKILL` to a pointer), M64 (descendant-block prune + `preview.rs` parity), M65 (`agents-md --check` in Docs Lint). **14b (Wave D):** M44, M66 projection per D3; M82 block and `CAS_SKILL` wording; M67, M68 (operator/repo files, R-docs) | `cli/init/docs_and_skill.rs`, `cli/update.rs`, `update/preview.rs`, `cas-core/src/sync/agents_md.rs`, CI Docs Lint job | R-build (14a, 14b); repo CLAUDE.md trims are R-docs (operator-owned, D13) | `agents_md_sync_test`, init/update CLAUDE.md tests, `issue_intake_directive_test` (block carries the registry line) | −600 always per Petrastella session; −600 per `cas` invoke; −2.1k always (Grok) with 14b | 14b: D1, D3 |
+| **WP15** Store hygiene | M27, M83 | one-off store clean-up (no-code operation, operator-approved); write guard in rule/knowledge sync | ops + R-build (guard) | Add: rule/knowledge write naming another registered project is refused; confirm `test-real-store-untouched` covers rule writes | −91 always; removes wrong facts from every cas-src session | — |
 
-Cross-cutting test to add early (WP1 or WP3), for T5: a call-shape lint that extracts every
+M81 (polish) rides with whichever package touches the file. Cross-cutting test to add early (WP1 or WP3), for T5: a call-shape lint that extracts every
 `mcp__cas__<tool> action=<a> key=value` from `cas-cli/src/builtins/**` and from runtime template strings.
 It checks each against the dispatch arms and the request structs' required and known fields. That
 single test would have caught M02, M04, M10, M12, M13 (`scope=code`, release) and M23.
@@ -347,10 +383,10 @@ single test would have caught M02, M04, M10, M12, M13 (`scope=code`, release) an
 
 | Wave | Packages | When |
 |---|---|---|
-| A (parallel) | WP1, WP2, WP3, WP4, and the M17 part of WP5 | Now. Deprecated names expire next release. |
+| A (parallel) | WP1, WP2, WP3, WP4, WP14a, WP15, and the M17 part of WP5 | Now. Deprecated names expire next release. |
 | B | WP5 remainder, WP6, WP7, WP8 | After WP4 and WP2 |
 | C | WP9, WP10, WP11 | After D5/D7/D8/D10 |
-| D | WP12, WP13 | After D1–D4, D6 |
+| D | WP12, WP13, WP14b | After D1–D4, D6, D13 |
 
 Build and pin rules:
 
@@ -365,7 +401,7 @@ Build and pin rules:
 |---|---|---|---|---|
 | D1 | Tool naming in shipped text | (a) keep three spellings and fix delivery per recipient/harness; (b) **prefix-neutral catalog**: bare tool names in skills, prefix stated once in role guidance | (b). The spellings already fail to reach Grok and OpenCode, and Stop jobs already cross flavours. It retires ~276 embedded twins and most of the drift test. | WP11 wording, WP12, WP8 Stop bodies |
 | D2 | Split `coordination` | (a) keep one tool, trimmed; (b) worker-facing `coordination` plus supervisor `factory` tool | (b). Workers stop loading ~8 KB of spawn/worktree/db params, and tool annotations become honest. The skill-text edits are mechanical. | WP13, WP3 extension |
-| D3 | AGENTS.md projection | (a) Codex spelling (today); (b) prefix-neutral, no ToolSearch line, plain imperatives; (c) per-harness files | (b) | WP12 |
+| D3 | Instruction-file projection | (a) CLAUDE.md canonical, AGENTS.md generated in Codex spelling (today); (b) prefix-neutral generated AGENTS.md; (c) per-harness files; (d) **AGENTS.md canonical and harness-neutral, CLAUDE.md = `@AGENTS.md` + `claude-only` lines** (L6 F3) | (d), with bare tool names per D1. Keep each file < 10,000 chars (Grok cap). This also gives Codex a directive outside cas-src (M66). | WP12, WP14b |
 | D4 | Canonical carrier for worker startup rules | SessionStart body vs launch brief vs on-demand skill | Decide after WP2 telemetry answers M31. If SessionStart is unreliable, make the brief canonical and cut SessionStart to identity plus inbox. | WP13 |
 | D5 | `cas-release-report` vs `cas release report` | CLI-first skill vs declare CLI reports exempt from brief/QA | CLI-first. Practice already follows the CLI. | WP10 |
 | D6 | Codex agents | Emit TOML agents vs stop installing `.md` for Codex | Stop installing, unless Codex supervisors should delegate natively | WP12 |
@@ -375,8 +411,4 @@ Build and pin rules:
 | D10 | Home for cas-src-only guidance | repo `CLAUDE.md`/`docs/`, or a cas-src-only overlay skill synced only into this repo | Repo docs plus one pointer. Keep universal builtins project-neutral. | WP2, WP7, WP9 |
 | D11 | Rule promotion | document vote semantics vs add a Rust `promote` action | Add `promote`, so the reviewer stops inflating its own metric | WP8 |
 | D12 | Stop-hook agent bodies | per-harness subagent files vs one job body with a prefix remap at prompt build | One job body (follows D1) | WP8, WP12 |
-
-## 6. Lanes pending
-
-L6 (cas-ea56, installed instruction files) is still in progress. Its P0 and P1 rows will be added to §2
-under the same deduplication rules.
+| D13 | Repo and home instruction files (operator-owned) | keep build/CI/sccache policy and the Ink section in repo CLAUDE.md, or move them to CONTRIBUTING.md / a path-scoped `.claude/rules/build-ci.md`; reconcile the home CLAUDE.md release-notes section ("one reply") with `docs/RELEASE_SLACK_RUBRIC.md` | Move them (−900 always per turn); re-test the Ink crash before keeping that section; one release-rubric pointer | WP14b, M82 |

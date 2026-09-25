@@ -6463,6 +6463,7 @@ impl CasCore {
                                     &proof_worktree,
                                     Some(resolved_parent_branch.as_str()),
                                     req.commit_receipt.as_deref(),
+                                    task.deliverables.factory_branch_anchor.as_deref(),
                                 );
                                 let repository_proof = if use_target_branch_proof {
                                     if let Some(context) = declared_repo_context.as_ref() {
@@ -10445,6 +10446,30 @@ pub(crate) fn close_measured_factory_branch(
     task_delivery_branch(repo_path, task).unwrap_or(own)
 }
 
+/// MERGE REQUIRED text for a close whose receipt is newer than a parked
+/// delivery anchor that already landed (GH #1022). Commits after a landed
+/// anchor are a new delivery; the supervisor reopens the cycle with
+/// `request_changes` so the new tip is parked and merged, instead of the
+/// worker re-sending a merge request that is suppressed against the old anchor.
+fn landed_anchor_receipt_rejection(
+    task_id: &str,
+    anchor: &str,
+    receipt: &str,
+    parent_branch: &str,
+) -> String {
+    let supervisor_prefix = crate::mcp::tools::core::guidance::supervisor_prefix();
+    format!(
+        "⚠️ MERGE REQUIRED\n\n\
+         task close rejected: commit_receipt `{receipt}` is not on {parent_branch}, but this \
+         task's parked delivery anchor `{anchor}` already landed there. Commits after a landed \
+         anchor are a new delivery.\n\n\
+         Next: message the supervisor with blocker=true asking for \
+         `{supervisor_prefix}task action=request_changes id={task_id}`; after that verdict, close \
+         again with commit_receipt={receipt} so the new tip is parked and merged. Do not \
+         re-send a merge request for the landed anchor."
+    )
+}
+
 pub(crate) fn run_factory_branch_merge_gate_with_attribution(
     task: &Task,
     _req: &TaskCloseRequest,
@@ -10500,6 +10525,34 @@ pub(crate) fn run_factory_branch_merge_gate_with_attribution(
         }
         _ => None,
     };
+    // GH #1022: the caller's commit_receipt names the delivery it is closing.
+    // When the parked anchor already landed but that receipt is on neither the
+    // local nor the origin target, the landed anchor must not clear the gate:
+    // the close would otherwise mint a verification dispatch for a head that
+    // lacks the delivery (seen on 2026-09-25 with a follow-up commit pushed
+    // after the lane merged).
+    if let Some(anchor) = trusted_anchor
+        && let Some(receipt) = attribution
+            .receipt
+            .map(str::trim)
+            .filter(|receipt| is_safe_git_refname(receipt) && git_ref_exists(repo_path, receipt))
+    {
+        let _ = fetch_parent_branch_best_effort(repo_path, parent_branch);
+        let origin_parent = format!("origin/{parent_branch}");
+        let on_target = |commit: &str| {
+            git_commit_is_ancestor(repo_path, commit, parent_branch)
+                || (git_ref_exists(repo_path, &origin_parent)
+                    && git_commit_is_ancestor(repo_path, commit, &origin_parent))
+        };
+        if on_target(anchor) && !on_target(receipt) {
+            return MergeStateGateOutcome::Reject(landed_anchor_receipt_rejection(
+                &task.id,
+                anchor,
+                receipt,
+                parent_branch,
+            ));
+        }
+    }
     let mut commit_ish = trusted_anchor.unwrap_or(factory_branch.as_str());
     // cas-e33f (GH #1004): a task that changed hands and has no resolvable
     // branch left is measured by its recorded delivery anchor. With neither,
@@ -20330,6 +20383,98 @@ mod merge_state_gate_tests {
             search_manifest: None,
             commit_receipt: None,
         }
+    }
+
+    /// GH #1022: a parked anchor that already landed must not clear the gate
+    /// for a close whose receipt names a newer, unmerged commit. The close is
+    /// told to reopen the cycle with request_changes; a receipt on the target
+    /// still proceeds.
+    #[test]
+    fn landed_anchor_does_not_clear_a_newer_unmerged_receipt_gh1022() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        let sha = |rev: &str| {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(p)
+                .args(["rev-parse", rev])
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        std::fs::write(p.join("delivered.rs"), "// delivered\n").unwrap();
+        git(p, &["add", "delivered.rs"]);
+        git(p, &["commit", "-q", "-m", "feat(cas-test1): deliver"]);
+        let anchor = sha("HEAD");
+        git(p, &["checkout", "-q", "main"]);
+        git(
+            p,
+            &[
+                "merge",
+                "-q",
+                "--no-ff",
+                "factory/worker",
+                "-m",
+                "merge lane",
+            ],
+        );
+        git(p, &["checkout", "-q", "factory/worker"]);
+        std::fs::write(p.join("follow_up.rs"), "// follow-up\n").unwrap();
+        git(p, &["add", "follow_up.rs"]);
+        git(
+            p,
+            &[
+                "commit",
+                "-q",
+                "-m",
+                "feat(cas-test1): follow-up after merge",
+            ],
+        );
+        let newer = sha("HEAD");
+
+        let mut task = worker_task("worker");
+        task.status = TaskStatus::AwaitingMerge;
+        task.deliverables.factory_branch_anchor = Some(anchor.clone());
+        let mut req = base_req(&task.id);
+        req.commit_receipt = Some(newer.clone());
+        match run_factory_branch_merge_gate_with_attribution(
+            &task,
+            &req,
+            "main",
+            p,
+            TaskCommitAttribution {
+                receipt: Some(&newer),
+                window: None,
+            },
+        ) {
+            MergeStateGateOutcome::Reject(message) => {
+                assert!(message.contains("MERGE REQUIRED"), "{message}");
+                assert!(message.contains(&newer), "{message}");
+                assert!(
+                    message.contains("request_changes id=cas-test1"),
+                    "{message}"
+                );
+            }
+            other => panic!("expected MERGE REQUIRED for the unmerged receipt, got {other:?}"),
+        }
+
+        req.commit_receipt = Some(anchor.clone());
+        assert!(
+            !matches!(
+                run_factory_branch_merge_gate_with_attribution(
+                    &task,
+                    &req,
+                    "main",
+                    p,
+                    TaskCommitAttribution {
+                        receipt: Some(&anchor),
+                        window: None,
+                    },
+                ),
+                MergeStateGateOutcome::Reject(ref message) if message.contains("request_changes id=cas-test1")
+            ),
+            "a receipt already on the target must not take the landed-anchor rejection"
+        );
     }
 
     // --- The 6 named tests (per cas-95ce design / acceptance criteria) ----

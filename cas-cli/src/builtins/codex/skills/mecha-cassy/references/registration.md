@@ -11,7 +11,7 @@ never hold their values.
 
 ## One command, once per machine
 
-After `cas login`, `cas integrate mecha-cassy` writes all three registrations
+After `cas login`, `cas integrate violet` writes all three registrations
 below — a machine-scoped proxy registration under the user config directory
 that every project inherits, plus the Codex and Claude Code entries — refusing
 to claim success without an authenticated `tools/list` receipt. Re-running it
@@ -87,7 +87,7 @@ generated cache, not source configuration.
 
 ### Downstream projects and workers
 
-Run `cas integrate mecha-cassy` from the downstream checkout as well as on the
+Run `cas integrate violet` from the downstream checkout as well as on the
 machine. A checkout with no `.cas/proxy.toml` inherits the machine-level hub
 server and allowlist; a checkout with its own file uses that file's allowlist
 as the dispatch policy. If `mcp_search` for `server:mecha-cassy` returns no

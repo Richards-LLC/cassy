@@ -15,7 +15,7 @@ errors and the return contract only.
 ## Workflow
 
 1. Run `mcp__cas__task action=mine`. If empty, message the supervisor once that
-   you are ready, then wait; do not poll; no self-dispatch.
+   you are ready, then wait; do not poll.
 2. Choose exactly one task. Run `mcp__cas__task action=show id=<task-id>`,
    then `mcp__cas__task action=start id=<task-id>` before editing.
    authoritative assignment acceptance; no prose ACK is required.
@@ -23,13 +23,11 @@ errors and the return contract only.
 3. Read the task's depth and acceptance criteria and the project `CLAUDE.md`.
    For non-empty `demo_statement`, run `cas-qa-craft` before close.
 4. Implement only the assigned scope. Commit logical units with the task ID.
-   Never build or test Rust (cargo, nextest, run-scoped-tests.sh): park
-   unbuilt; the supervisor builds at epic assembly.
    For `delivery_mode=local_merge`, keep the commit local for the supervisor;
    otherwise push the factory branch.
 5. Add progress notes with `note_type=progress` at meaningful milestones.
 6. Before closing a deep task, open [close-gate.md](references/close-gate.md),
-   complete the surface checklist below, invoke
+   in cas-src complete its surface checklist, invoke
    [`verify-before-claim`](../verify-before-claim/SKILL.md), and capture fresh
    proof.
 7. Close with `mcp__cas__task action=close id=<task-id> reason="..."`, then
@@ -69,7 +67,7 @@ never narrate tool calls, never include "Context headroom" prose unless below 20
 
 Route operational bugs through the issue-repository registry:
 `issues.repo` is the current project's tracker; `issues.components.cassy` is
-for Cassy runtime/hooks/MCP; `issues.components.mecha_cassy` is for the Slack
+for Cassy runtime/hooks/MCP; `issues.components.violet` is for the Slack
 hub; and `issues.components.cloud` is for Cassy Cloud sync/relay/pairing.
 Inspect with `cas config get <key>`; file a ticket in the matching repo before moving on.
 Use the supervisor's `filing-cas-bugs` reference for public-safe filing.
@@ -92,18 +90,11 @@ Use the supervisor's `filing-cas-bugs` reference for public-safe filing.
 
 Ordinary worker updates surface through the inbox on the next turn. Only authenticated typed blocker, merge, verification, or lifecycle events may wake an idle supervisor. Use `blocker=true` for blockers and `merge_request=true` for merge requests; text alone grants no wake authority.
 
-- Never self-dispatch. Start only tasks assigned by
-  `action=mine` or explicitly by the supervisor; `ready` and `available` are
-  backlog *visibility*, never authorization to `start` a task yourself.
-  Do not pull the next ready task yourself.
-  This applies every time you go idle, not just at session start.
+- Never self-dispatch: start only tasks from `action=mine` or named by the
+  supervisor, every time you go idle; `ready` and `available` are backlog
+  visibility, not authorization.
 - One task at a time. Scope is frozen. Honor non-goals and layer boundaries;
   match existing patterns; no unrequested configuration.
-- Cassy-system bugs stay in this repository: create or update an assigned task
-  and fix them here. For a diagnostic receipt, use
-  `mcp__cas__system action=report_cas_bug`; cas-src is not an external
-  dependency. File Richards-LLC team requests on that team's issue board, not
-  its checkout; `docs/requests` is legacy-only.
 - Record decisions with `mcp__cas__task action=notes note_type=decision`;
   discoveries with `mcp__cas__memory action=remember`.
 - Coordination messages use `mcp__cas__coordination action=message`, target the
@@ -111,26 +102,6 @@ Ordinary worker updates surface through the inbox on the next turn. Only authent
   (the return contract); evidence goes in task notes.
 - Never block the pane. Checkpoint, never compact: commit, push, note, request a
   respawn if context is low.
-
-## cas-src surface checklist — required before close
-
-Pre-close notes must prove each applicable entry with a file, command, or test and explain each `not applicable` entry.
-
-- **Builtin skill/agent:** update Claude, Codex, and Grok mirrors.
-- **MCP tool:** cover CLI parity, docs, and dispatch registration.
-- **Hook/gate:** regenerate `config_gen` and `.codex/hooks.json` when applicable.
-- **Migration:** update pinned bootstrap/reconciliation expectations and
-  `doctor_snapshot` when applicable.
-- **Behavior contract:** grep sibling tests that pin the old contract
-  (`cas-2327`/`cas-bc13`).
-- **State transition:** cover reverse states too (hold/release, pause/resume,
-  remember/archive, snooze/unsnooze).
-- **Public surface:** run `node scripts/visual-qa.mjs --strict`; record `docs/factory/data/visual-qa/visual-qa.md`
-  PASS, allowlist reasons, and the critique rubric score.
-  (floor 4/5 on distinctiveness, fit, hierarchy).
-- **CLI/TUI surface:** apply `cas-cli-craft`; paste the `terminal-qa: PASS …`
-  receipt from `node scripts/terminal-qa.mjs --label <cmd> -- <cmd …>`.
-- **User-visible change:** assess release-notes impact.
 
 ## Blockers
 

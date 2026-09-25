@@ -10,4 +10,4 @@ Runtime releases use only skills/cas-cut-release/SKILL.md; it owns the mechanica
 
 ## Cross-team routing
 
-Route every bug through the issue-repository registry: `issues.repo` for the current project, `issues.components.cassy` for Cassy runtime/hooks/MCP, `issues.components.mecha_cassy` for the Slack hub, and `issues.components.cloud` for Cloud sync/relay/pairing; inspect with `cas config get issues.repo` and the three `issues.components.*` keys. If you hit a bug during operation, file a ticket in the matching repo before moving on; `filing-cas-bugs` has the filing and receipt policy.
+Route every bug through the issue-repository registry: `issues.repo` for the current project, `issues.components.cassy` for Cassy runtime/hooks/MCP, `issues.components.violet` for the Slack hub, and `issues.components.cloud` for Cloud sync/relay/pairing; inspect with `cas config get issues.repo` and the three `issues.components.*` keys. If you hit a bug during operation, file a ticket in the matching repo before moving on; `filing-cas-bugs` has the filing and receipt policy.

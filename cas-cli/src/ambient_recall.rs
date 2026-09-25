@@ -309,9 +309,27 @@ pub(crate) struct RecallQuery {
     /// Terms accumulated from safe PostToolUse result and MCP-query context.
     /// They can cross the conversational precision gate only in pairs.
     pub(crate) tool_context_terms: Vec<String>,
+    /// Lower-cased, redacted text of the current turn. Evidence whose id the
+    /// turn already names (an assignment naming its task, a pasted memory id)
+    /// is in context and is not re-injected.
+    pub(crate) turn_text: String,
 }
 
 impl RecallQuery {
+    /// Whether the current turn already names `evidence_id` as a whole token.
+    pub(crate) fn turn_names(&self, evidence_id: &str) -> bool {
+        let id = evidence_id.trim().to_ascii_lowercase();
+        if id.len() < 5 {
+            return false;
+        }
+        let is_id_char = |ch: char| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_';
+        self.turn_text.match_indices(&id).any(|(start, _)| {
+            let before = self.turn_text[..start].chars().next_back();
+            let after = self.turn_text[start + id.len()..].chars().next();
+            !before.is_some_and(is_id_char) && !after.is_some_and(is_id_char)
+        })
+    }
+
     pub(crate) fn build(identity: &RecallIdentity, request: &RecallRequest) -> Option<Self> {
         if !identity.is_eligible() {
             return None;
@@ -386,6 +404,7 @@ impl RecallQuery {
             lines.push(format!("focus_labels={}", focus_labels.join(",")));
         }
         let prompt = redact_prompt(&request.prompt);
+        let turn_text = prompt.to_ascii_lowercase();
         if !prompt.is_empty() {
             lines.push(format!("request={prompt}"));
         }
@@ -403,6 +422,7 @@ impl RecallQuery {
             focus_terms,
             authored_evidence,
             tool_context_terms,
+            turn_text,
         })
     }
 }
@@ -3239,6 +3259,7 @@ pub(crate) fn render_packet(
         .candidates
         .iter()
         .filter(|candidate| !ledger.has_seen(candidate))
+        .filter(|candidate| !query.turn_names(&candidate.evidence_id))
         .filter(|candidate| {
             let authored = ledger.has_authored(candidate);
             if authored {
@@ -3605,11 +3626,40 @@ fn clean_scalar(value: &str, max_chars: usize) -> String {
     )
 }
 
+/// Strip harness and factory envelope markup from one prompt line.
+///
+/// Teammate-message tags carry attribute values (`teammate_id="director"`,
+/// `color="green"`) and CAS wake headers carry `[cas #N agent-authored …]`;
+/// neither says anything about the request, but both used to become lexical
+/// recall terms (audit cas-1660 M71). Returns the line's remaining content,
+/// or `None` when the whole line is envelope.
+fn strip_envelope(line: &str) -> Option<&str> {
+    let mut rest = line.trim();
+    for tag in [
+        "<teammate-message",
+        "</teammate-message",
+        "<task-notification",
+        "</task-notification",
+        "<system-reminder",
+        "</system-reminder",
+    ] {
+        if rest.starts_with(tag) {
+            rest = rest.find('>').map_or("", |end| rest[end + 1..].trim());
+        }
+    }
+    if rest.starts_with("[cas #") {
+        rest = rest.find(']').map_or("", |end| rest[end + 1..].trim());
+    }
+    (!rest.is_empty()).then_some(rest)
+}
+
 fn redact_prompt(prompt: &str) -> String {
     let mut kept = Vec::new();
     let mut fenced = false;
     for line in prompt.lines() {
-        let trimmed = line.trim();
+        let Some(trimmed) = strip_envelope(line) else {
+            continue;
+        };
         if trimmed.starts_with("```") {
             fenced = !fenced;
             continue;
@@ -3810,6 +3860,62 @@ mod tests {
         assert!(!first.canonical.contains("do-not-leak"));
         assert!(!first.canonical.contains("300k body"));
         assert!(first.canonical.len() <= 512 * 4);
+    }
+
+    /// Audit cas-1660 M71: envelope markup (teammate-message attributes, CAS
+    /// wake headers) must not become recall terms.
+    #[test]
+    fn query_strips_teammate_and_wake_envelopes() {
+        let request = RecallRequest {
+            prompt: "<teammate-message teammate_id=\"director\" color=\"green\" summary=\"x\">\n\
+                     [cas #34968 agent-authored 0s first]\n\n\
+                     Refactor the parser cache\n\
+                     </teammate-message>"
+                .into(),
+            ..Default::default()
+        };
+        let query = RecallQuery::build(&identity(RecallRole::Worker), &request).unwrap();
+        assert!(query.canonical.contains("Refactor the parser cache"));
+        for envelope in [
+            "director",
+            "green",
+            "teammate_id",
+            "agent-authored",
+            "34968",
+        ] {
+            assert!(
+                !query.canonical.contains(envelope),
+                "envelope text {envelope:?} leaked into the recall query: {}",
+                query.canonical
+            );
+        }
+        assert_eq!(
+            strip_envelope("[cas #1 supervisor-authored 0s first]"),
+            None
+        );
+        assert_eq!(strip_envelope("plain line"), Some("plain line"));
+    }
+
+    /// Audit cas-1660 M71: evidence the current turn already names (a task
+    /// assignment naming its task id) is in context and is not re-injected.
+    #[test]
+    fn evidence_named_in_the_turn_is_not_reinjected() {
+        let request = RecallRequest {
+            prompt: "You have been assigned a new task: Task ID: cas-988a (parser cache)".into(),
+            ..Default::default()
+        };
+        let query = RecallQuery::build(&identity(RecallRole::Worker), &request).unwrap();
+        assert!(query.turn_names("cas-988a"));
+        assert!(query.turn_names("CAS-988A"));
+        assert!(
+            !query.turn_names("cas-988"),
+            "a prefix of a named id is a different id"
+        );
+        assert!(!query.turn_names("cas-988ab"));
+        assert!(
+            !query.turn_names("pars"),
+            "ids shorter than five chars never match"
+        );
     }
 
     #[test]

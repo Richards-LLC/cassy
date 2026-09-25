@@ -62,7 +62,7 @@ Every failure is `{"ok": false, "error": {"code", "message", "retryable"}}`. Rea
 - **`pagination_exhausted`:** the digest could not be collected within the bound. Pass `since`, or narrow it.
 - **`size_cap_exceeded`:** the digest exceeds the byte limits. Narrow `since`, lower `max_messages`, or set `include_files: false`.
 - **`upstream_unavailable`:** preserve the full `error` object, retry `mecha_read` at most 3 times with a 10-second timeout when `retryable: true`, then use the write-safe fallback in step 3. A read outage does not prove that `mecha_post` is unavailable.
-- **`denied by policy`:** the route is not allowlisted for this client. Run `cas integrate mecha-cassy` and re-check `cas doctor`.
+- **`denied by policy`:** the route is not allowlisted for this client. Run `cas integrate violet` and re-check `cas doctor`.
 - **429 or one-write-per-second:** honour `Retry-After`, or retry after 1 second. Retry only the failed call and preserve every earlier `message_id`.
 
 A `retryable: false` error must not be retried unchanged. A connected server listing is not evidence that a message landed.
@@ -75,6 +75,6 @@ Configurations carry environment-variable names only. Never print, log, or commi
 
 This transport changes nothing about the message: **Was → Now** for every item, no ticket labels or agent/factory/process narration, and one punch per top-level message with its detail in one reply.
 
-Set this machine up once with `cas integrate mecha-cassy` (see [references/registration.md](references/registration.md)), then dispatch from a Cassy-connected harness with `cas__mcp_execute`. A bounded one-shot process with no live proxy uses the proxy-less route in that same reference instead.
+Set this machine up once with `cas integrate violet` (see [references/registration.md](references/registration.md)), then dispatch from a Cassy-connected harness with `cas__mcp_execute`. A bounded one-shot process with no live proxy uses the proxy-less route in that same reference instead.
 
 This skill is the whole posting contract. If a machine still carries a separate user-level `mecha-cassy-post` skill, it is a stale copy from before this was a builtin: delete it and use this one, because nothing tests a skill that lives outside the repo.

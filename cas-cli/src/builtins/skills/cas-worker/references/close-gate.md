@@ -179,3 +179,23 @@ After closing your **third** task in the current EPIC — and again after the 6t
 - **If the EPIC has fewer than 3 of your tasks total**, simplify-as-you-go never fires for you in that EPIC. That is intentional — the trigger exists to catch pattern accumulation, and <3 tasks is below the accumulation threshold.
 
 The simplify pass should produce visible output — a commit, a task note, or an explicit "nothing to simplify" decision note. Do not run it silently.
+
+## cas-src surface checklist — required before close in cas-src
+
+Pre-close notes must prove each applicable entry with a file, command, or test and explain each `not applicable` entry.
+
+- **Builtin skill/agent:** update Claude, Codex, and Grok mirrors.
+- **MCP tool:** cover CLI parity, docs, and dispatch registration.
+- **Hook/gate:** regenerate `config_gen` and `.codex/hooks.json` when applicable.
+- **Migration:** update pinned bootstrap/reconciliation expectations and
+  `doctor_snapshot` when applicable.
+- **Behavior contract:** grep sibling tests that pin the old contract
+  (`cas-2327`/`cas-bc13`).
+- **State transition:** cover reverse states too (hold/release, pause/resume,
+  remember/archive, snooze/unsnooze).
+- **Public surface:** run `node scripts/visual-qa.mjs --strict`; record `docs/factory/data/visual-qa/visual-qa.md`
+  PASS, allowlist reasons, and the critique rubric score.
+  (floor 4/5 on distinctiveness, fit, hierarchy).
+- **CLI/TUI surface:** apply `cas-cli-craft`; paste the `terminal-qa: PASS …`
+  receipt from `node scripts/terminal-qa.mjs --label <cmd> -- <cmd …>`.
+- **User-visible change:** assess release-notes impact.

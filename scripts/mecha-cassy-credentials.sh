@@ -2,7 +2,7 @@
 # Store the two MechaCassy secrets in this machine's credentials file.
 #
 # This is the fallback path when the hub cannot return a token or bypass:
-# `cas integrate mecha-cassy` normally provisions through the authenticated
+# `cas integrate violet` normally provisions through the authenticated
 # hub route and writes the private file itself. See the onboarding doc.
 #
 # Guarantees:
@@ -10,7 +10,7 @@
 #     argument (so they never appear in `ps` or shell history);
 #   - the credentials file is written 0600 and updated in place, never
 #     truncating a variable this script does not own;
-#   - nothing is sent anywhere. Verification is `cas integrate mecha-cassy`.
+#   - nothing is sent anywhere. Verification is `cas integrate violet`.
 
 set -euo pipefail
 
@@ -60,7 +60,7 @@ while [[ -z "$label" ]]; do
     printf 'Machine label for the issued token (e.g. DANIEL_LAPTOP): ' >&2
     IFS= read -r label || die "no input available"
 done
-# Match the folding `cas integrate mecha-cassy --label` applies, so the wizard
+# Match the folding `cas integrate violet --label` applies, so the wizard
 # and the command always agree on the variable name.
 label="$(printf '%s' "$label" | tr '[:lower:]' '[:upper:]' | tr -c '[:alnum:]\n' '_')"
 token_var="MECHA_SLACK_TOKEN_${label}"
@@ -94,4 +94,4 @@ else
     printf '\nAdd this line to %s so every shell exports them:\n\n  %s\n' "$profile" "$source_line"
 fi
 
-printf '\nThen, in a NEW shell:\n\n  cas integrate mecha-cassy --label %s\n  cas doctor\n' "$label"
+printf '\nThen, in a NEW shell:\n\n  cas integrate violet --label %s\n  cas doctor\n' "$label"

@@ -817,3 +817,32 @@ fn session_start_injects_only_the_newest_handoff_for_the_session_role_cas_0339()
     );
     assert!(!worker.contains("CURRENT handoff NEW"), "{worker}");
 }
+
+/// WP2 (audit cas-1660 M34): the usage reminder is paid on every SessionStart,
+/// so it stays at or under 300 bytes and carries no emphasis block.
+#[test]
+fn usage_reminder_is_short_and_unemphatic() {
+    let reminder = super::USAGE_REMINDER.trim();
+    assert!(
+        reminder.len() <= 300,
+        "USAGE_REMINDER is {} bytes; the always-loaded budget allows 300",
+        reminder.len()
+    );
+    assert!(!reminder.contains("<IMPORTANT>"));
+    for tool in ["`mcp__cas__task`", "`mcp__cas__memory`", "`mcp__cas__search`"] {
+        assert!(reminder.contains(tool), "reminder must still name {tool}");
+    }
+}
+
+/// WP2: a heading inside an injected handoff body must not open a new
+/// top-level SessionStart section (the budget splits at `## `).
+#[test]
+fn handoff_body_headings_are_demoted_below_section_level() {
+    let body = "# Title\n## STATE\n### kept\nplain ## text\n##no-space";
+    let demoted = super::build_start::demote_body_headings(body);
+    assert_eq!(
+        demoted,
+        "#### Title\n#### STATE\n### kept\nplain ## text\n##no-space"
+    );
+    assert!(!demoted.lines().any(|line| line.starts_with("## ")));
+}

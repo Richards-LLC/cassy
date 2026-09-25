@@ -107,7 +107,56 @@ const DEGRADABLE_BASE_SECTIONS: &[(&str, &str, DegradationPriority)] = &[
         "skill action=get name=cas-supervisor",
         DegradationPriority::Static,
     ),
+    // WP2 (audit cas-1660 M30/M33): the knowledge index is a title list whose
+    // bodies are always one tool call away; left protected it cost ~2.4KB of
+    // every factory payload and pushed role guidance past the harness cap.
+    (
+        "## 📚 Project Knowledge",
+        "knowledge action=search query=<topic>",
+        DegradationPriority::Static,
+    ),
+    // WP2: the current handoff can run to 6,000 chars. Its compact form keeps
+    // the id and title (see `compact_section`) so the session still knows a
+    // handoff exists and how to read it.
+    (
+        HANDOFF_HEADING_PREFIX,
+        "memory action=get id=",
+        DegradationPriority::Context,
+    ),
 ];
+
+/// Heading prefix of the current-handoff section emitted by the context builder.
+const HANDOFF_HEADING_PREFIX: &str = "## 🔁 Current Handoff";
+
+/// Compact rendering of a degradable base section: its heading (which carries
+/// the counts) plus the command that brings the detail back. The handoff keeps
+/// its `### <id> — saved …` line and bold title so the pull command can name
+/// the exact memory id.
+fn compact_section(lines: &[&str], remediation: &str, prefix: &str) -> String {
+    let heading = lines.first().copied().unwrap_or_default();
+    if heading.starts_with(HANDOFF_HEADING_PREFIX) {
+        // The builder emits `### <id> — saved <when>` and, when the handoff has
+        // a title, `**<title>**` on the very next line.
+        let id_index = lines.iter().position(|line| line.starts_with("### "));
+        let id_line = id_index.map(|index| lines[index]);
+        let id = id_line
+            .and_then(|line| line.trim_start_matches("### ").split_whitespace().next())
+            .unwrap_or("<id>");
+        let title = id_index
+            .and_then(|index| lines.get(index + 1).copied())
+            .filter(|line| line.len() > 4 && line.starts_with("**") && line.ends_with("**"));
+        let mut out = vec![heading.to_string()];
+        out.extend(id_line.map(str::to_string));
+        out.extend(title.map(str::to_string));
+        out.push(format!(
+            "(body omitted to fit the session-start size budget — run `{prefix}{remediation}{id}`)"
+        ));
+        return out.join(SEP);
+    }
+    format!(
+        "{heading}\n(omitted to fit the session-start size budget — run `{prefix}{remediation}`)"
+    )
+}
 
 /// Split the base context into budget segments at its `## ` headings.
 ///
@@ -121,15 +170,18 @@ fn split_base_context(base: &str) -> Vec<(String, Option<String>, DegradationPri
     let prefix = crate::harness_policy::own_tool_prefix();
     let mut segments: Vec<(String, Option<String>, DegradationPriority)> = Vec::new();
     let mut current: Vec<&str> = Vec::new();
-    let mut current_compact: Option<String> = None;
+    let mut current_remediation: Option<&str> = None;
     let mut current_priority = DegradationPriority::Context;
 
     let flush = |segments: &mut Vec<(String, Option<String>, DegradationPriority)>,
                  current: &mut Vec<&str>,
-                 compact: &mut Option<String>,
+                 remediation: &mut Option<&str>,
                  priority: &mut DegradationPriority| {
         if !current.is_empty() {
-            segments.push((current.join(SEP), compact.take(), *priority));
+            let compact = remediation
+                .take()
+                .map(|remediation| compact_section(current, remediation, prefix));
+            segments.push((current.join(SEP), compact, *priority));
             current.clear();
         }
     };
@@ -140,27 +192,23 @@ fn split_base_context(base: &str) -> Vec<(String, Option<String>, DegradationPri
             flush(
                 &mut segments,
                 &mut current,
-                &mut current_compact,
+                &mut current_remediation,
                 &mut current_priority,
             );
-            current_priority = DEGRADABLE_BASE_SECTIONS
+            let entry = DEGRADABLE_BASE_SECTIONS
                 .iter()
-                .find(|(name, _, _)| line.starts_with(name))
+                .find(|(name, _, _)| line.starts_with(name));
+            current_priority = entry
                 .map(|(_, _, priority)| *priority)
                 .unwrap_or(DegradationPriority::Context);
-            current_compact = DEGRADABLE_BASE_SECTIONS
-                .iter()
-                .find(|(name, _, _)| line.starts_with(name))
-                .map(|(_, remediation, _)| {
-                    format!("{line}\n(omitted to fit the session-start size budget — run `{prefix}{remediation}`)")
-                });
+            current_remediation = entry.map(|(_, remediation, _)| *remediation);
         }
         current.push(line);
     }
     flush(
         &mut segments,
         &mut current,
-        &mut current_compact,
+        &mut current_remediation,
         &mut current_priority,
     );
     segments
@@ -840,6 +888,29 @@ mod tests {
         assert!(payload.contains("action=ready"));
         assert!(!payload.contains("cas-0007"));
         assert!(payload.contains("header"), "protected header survives");
+    }
+
+    /// WP2 (audit cas-1660 M30): Knowledge and Handoff are degradable, and the
+    /// handoff's compact form keeps its id and title so it can be pulled back.
+    #[test]
+    fn knowledge_and_handoff_compact_to_pull_stubs() {
+        let base = format!(
+            "## 📋 CAS Context\nheader\n\n## 🔁 Current Handoff (worker)\n\n\
+             ### handoff-42 — saved 2026-09-25 14:20Z\n**Audit fixes in flight**\n\n{}\n\n\
+             ## 📚 Project Knowledge (11/148 pages indexed)\n\n{}",
+            "- a long handoff body line\n".repeat(80),
+            "- cas-kn001 [architecture] A page title — a snippet\n".repeat(40),
+        );
+        let payload = SessionContextAssembler::new(base).with_budget(600).render();
+        assert!(payload.len() <= 600, "payload {} bytes", payload.len());
+        assert!(payload.contains("header"), "protected header survives");
+        assert!(payload.contains("### handoff-42 — saved 2026-09-25 14:20Z"));
+        assert!(payload.contains("**Audit fixes in flight**"));
+        assert!(payload.contains("memory action=get id=handoff-42"));
+        assert!(!payload.contains("a long handoff body line"));
+        assert!(payload.contains("## 📚 Project Knowledge (11/148 pages indexed)"));
+        assert!(payload.contains("knowledge action=search"));
+        assert!(!payload.contains("cas-kn001"));
     }
 
     #[test]

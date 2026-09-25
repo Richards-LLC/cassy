@@ -4192,15 +4192,21 @@ This is the body content."#;
         // Supervisor cap was lowered to 8KB (cas-5e4b). The worker reference
         // names the 8KB component cap and 9KB aggregate budget introduced by
         // cas-b114; keeping it on demand protects the SessionStart payload.
+        // WP2 (audit cas-1660 L2 P2-62): the supervisor's budgeting note is
+        // maintainer text, so it lives in the on-demand reference.md rather
+        // than in the always-loaded SKILL.md body.
         let supervisor_files = [
-            ("claude cas-supervisor.md", SUPERVISOR_GUIDE),
             (
-                "codex cas-supervisor.md",
-                include_str!("builtins/codex/skills/cas-supervisor.md"),
+                "claude cas-supervisor reference.md",
+                include_str!("builtins/skills/cas-supervisor/references/reference.md"),
             ),
             (
-                "grok cas-supervisor.md",
-                include_str!("builtins/grok/skills/cas-supervisor.md"),
+                "codex cas-supervisor reference.md",
+                include_str!("builtins/codex/skills/cas-supervisor/references/reference.md"),
+            ),
+            (
+                "grok cas-supervisor reference.md",
+                include_str!("builtins/grok/skills/cas-supervisor/references/reference.md"),
             ),
         ];
         let worker_files = [

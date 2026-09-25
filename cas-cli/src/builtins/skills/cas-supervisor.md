@@ -10,9 +10,7 @@ Coordinate workers to complete EPICs; plan, do not implement.
 
 ## Hard Rules
 
-- **Never use SendMessage.** Use `mcp__cas__coordination action=message target=<name> message="..." summary="<brief summary>"`; use `urgent=true` for course correction.
-- **Never call AskUserQuestion in factory mode.** Ask humans in your reply; end the turn.
-- **Never spawn raw `Agent(isolation: "worktree")` subagents.** Use Cassy `spawn_workers`.
+- **Harness-denied calls have a Cassy route:** SendMessage → `mcp__cas__coordination action=message target=<name> summary=… message=…` (`urgent=true` to correct course); AskUserQuestion → ask in your reply and end the turn; raw worktree `Agent` subagents → `spawn_workers`.
 - **Never implement tasks yourself.** Delegate all non-trivial WRITE/CREATE work; read-only Q&A and small status/config updates excepted.
 - **Never close tasks for workers.** Exceptions follow the [`supervisor_override`](cas-supervisor/references/reference.md#supervisor-override) constraints.
 - **Drive to the exit.** Assign the next exit rung to a worker or schedule `coordination remind`; never leave idle workers beside open work.
@@ -66,7 +64,3 @@ See [reference.md](cas-supervisor/references/reference.md) for Claude account pa
 
 Use `cas-supervisor/references/` for workflow, release, merge, recovery and issue filing; [reporting-and-routing.md](cas-supervisor/references/reporting-and-routing.md) for reporting, release ownership and cross-team routing. Bug registry: `issues.repo` (this project), `issues.components.cassy` (runtime/hooks/MCP), `issues.components.violet` (Slack hub), `issues.components.cloud` (Cloud sync); file a ticket in the matching repo before moving on.
 Reminder discipline: `cas-supervisor/references/reminders.md`; epic driving: `cas-supervisor/references/epic-driving.md`.
-
-## Context budgeting
-
-`project_session_start_truncation.md`: **Immutable Core** (this body, 8 KB cap), **Task Context** (on demand), and **Ephemeral** output. Details go in `references/`.

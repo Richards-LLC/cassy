@@ -10515,6 +10515,10 @@ fn landed_anchor_receipt_rejection(
     parent_branch: &str,
 ) -> String {
     let supervisor_prefix = crate::mcp::tools::core::guidance::supervisor_prefix();
+    let stop = gate_text::repeated_close_refusal_stop(
+        task_id,
+        crate::mcp::tools::core::guidance::caller_prefix(),
+    );
     format!(
         "⚠️ MERGE REQUIRED\n\n\
          task close rejected: commit_receipt `{receipt}` is not on {parent_branch}, but this \
@@ -10523,7 +10527,7 @@ fn landed_anchor_receipt_rejection(
          Next: message the supervisor with blocker=true asking for \
          `{supervisor_prefix}task action=request_changes id={task_id}`; after that verdict, close \
          again with commit_receipt={receipt} so the new tip is parked and merged. Do not \
-         re-send a merge request for the landed anchor."
+         re-send a merge request for the landed anchor.\n\n{stop}"
     )
 }
 
@@ -11091,7 +11095,8 @@ pub(crate) fn run_factory_branch_merge_gate_with_attribution(
          guard cannot be bypassed (use of supervisor_override=true does not \
          skip merge-state checks — it is a data-state guard, not a review \
          gate).\n\n\
-         {remediation}",
+         {remediation}\n\n{stop}",
+        stop = gate_text::repeated_close_refusal_stop(&task.id, caller),
     ))
 }
 
@@ -13905,6 +13910,7 @@ fn commit_receipt_rejection(
     reason: &str,
 ) -> String {
     let caller = crate::mcp::tools::core::guidance::caller_prefix();
+    let stop = gate_text::repeated_close_refusal_stop(task_id, caller);
     let merge_recovery = supervisor_merge_commit_for_receipt(repo_path, receipt, parent_branch)
         .map(|merge| {
             format!(
@@ -13930,7 +13936,7 @@ fn commit_receipt_rejection(
          diff's tree effect present on the current target.\n\n\
          To resolve:\n\
          1. To pick another receipt, {steps}\n\
-         {merge_recovery}",
+         {merge_recovery}\n\n{stop}",
         steps = gate_text::commit_receipt_recovery_steps(task_id, parent_branch, caller),
     )
 }
@@ -14123,12 +14129,16 @@ pub(crate) fn check_zero_commit_close(
                registered supervisor may retry with \
                `{supervisor_prefix}task action=close id={task_id} supervisor_override=true external_verification_receipt=<dr-id> reason=\"...\"`. \
                `supervisor_override` alone does not satisfy zero-commit \
-               delivery evidence.",
+               delivery evidence.\n\n{stop}",
             tool_prefix = crate::mcp::tools::core::guidance::caller_prefix(),
             supervisor_prefix = crate::mcp::tools::core::guidance::supervisor_prefix(),
             receipt_steps = gate_text::commit_receipt_recovery_steps(
                 task_id,
                 parent_branch,
+                crate::mcp::tools::core::guidance::caller_prefix(),
+            ),
+            stop = gate_text::repeated_close_refusal_stop(
+                task_id,
                 crate::mcp::tools::core::guidance::caller_prefix(),
             ),
         ));
@@ -14169,12 +14179,16 @@ pub(crate) fn check_zero_commit_close(
            supervisor may retry with \
            `{supervisor_prefix}task action=close id={task_id} supervisor_override=true external_verification_receipt=<dr-id> reason=\"...\"`. \
            `supervisor_override` alone does not satisfy zero-commit delivery \
-           evidence.",
+           evidence.\n\n{stop}",
         tool_prefix = crate::mcp::tools::core::guidance::caller_prefix(),
         supervisor_prefix = crate::mcp::tools::core::guidance::supervisor_prefix(),
         receipt_steps = gate_text::commit_receipt_recovery_steps(
             task_id,
             parent_branch,
+            crate::mcp::tools::core::guidance::caller_prefix(),
+        ),
+        stop = gate_text::repeated_close_refusal_stop(
+            task_id,
             crate::mcp::tools::core::guidance::caller_prefix(),
         ),
     ))

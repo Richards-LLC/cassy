@@ -60,10 +60,16 @@ fn agents_md_write_and_check_have_expected_staleness_behavior() {
 /// Docs Lint CI job.
 #[test]
 fn repository_agents_md_is_current() {
-    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("cas-cli has a workspace parent")
-        .to_path_buf();
+    // Resolve the checkout at runtime: archive-mode tests run from a checkout
+    // at a different path than the producer's CARGO_MANIFEST_DIR.
+    let repo_root = cas::test_paths::workspace_root();
+    if !repo_root.join("AGENTS.md").is_file() || !repo_root.join("CLAUDE.md").is_file() {
+        eprintln!(
+            "SKIP repository_agents_md_is_current: source checkout is absent at {}",
+            repo_root.display()
+        );
+        return;
+    }
     let scratch = TempDir::new().unwrap();
     let mut cmd = Command::new(cas::test_paths::cas_binary());
     let home = scratch.path().join("home");

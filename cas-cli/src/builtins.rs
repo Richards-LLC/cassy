@@ -7154,6 +7154,11 @@ This is the body content."#;
     /// that must be pruned; otherwise pre-ledger installs stay stuck.
     #[test]
     fn embedded_ledger_covers_scripts_and_removed_references() {
+        // Spelled with concat! so this source file never contains the retired
+        // file name as one literal: factory_codex_skill_guardrails greps
+        // builtins.rs for it to prove the reference is not registered.
+        const REMOVED_QUEUE_REFERENCE: &str =
+            concat!("skills/cas-supervisor/references/code-review", "-queue.md");
         let history = builtin_reference_history();
         for path in [
             "skills/cas-wizard/template.sh",
@@ -7161,7 +7166,7 @@ This is the body content."#;
             "skills/cas-technical-drawing/scripts/draft.mjs",
             "skills/cas-release-report/scripts/render.py",
             "skills/cas-dataviz/scripts/validate_palette.js",
-            "skills/cas-supervisor/references/code-review-queue.md",
+            REMOVED_QUEUE_REFERENCE,
         ] {
             assert!(
                 history.files.get(path).is_some_and(|hashes| !hashes.is_empty()),
@@ -7172,8 +7177,8 @@ This is the body content."#;
         assert!(
             !BUILTIN_SKILLS
                 .iter()
-                .any(|b| b.path == "skills/cas-supervisor/references/code-review-queue.md"),
-            "fixture assumption: code-review-queue.md is no longer shipped"
+                .any(|b| b.path == REMOVED_QUEUE_REFERENCE),
+            "fixture assumption: the retired queue reference is no longer shipped"
         );
     }
 

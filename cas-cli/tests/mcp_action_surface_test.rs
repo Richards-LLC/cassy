@@ -385,7 +385,7 @@ fn memory_guidance_uses_content_frontmatter_and_live_names() {
 // ============================================================================
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 /// Multi-action tools and every action text may name for them. Proxy-only
 /// actions count: shipped text serves builds with `mcp-proxy` (the default).
@@ -728,9 +728,19 @@ fn runtime_text(source: &str) -> String {
 /// Rust sources that carry runtime text: `cas-cli/src` (builtins excluded;
 /// they are linted from the compiled catalogs) and `crates/*/src`, skipping
 /// every test file and test directory.
-fn runtime_rust_sources() -> Vec<(String, PathBuf)> {
-    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let workspace = manifest.parent().expect("workspace root");
+fn runtime_rust_sources() -> Option<Vec<(String, PathBuf)>> {
+    // Resolve the checkout at runtime (archive-mode tests run from a checkout
+    // at a different path than the producer's CARGO_MANIFEST_DIR).
+    let workspace_root = cas::test_paths::workspace_root();
+    let workspace = workspace_root.as_path();
+    let manifest = workspace.join("cas-cli");
+    if !manifest.join("src").is_dir() || !workspace.join("crates").is_dir() {
+        eprintln!(
+            "SKIP runtime template call-shape lint: source checkout is absent at {}",
+            workspace.display()
+        );
+        return None;
+    }
     let mut sources = Vec::new();
     for root in [manifest.join("src"), workspace.join("crates")] {
         for entry in walkdir::WalkDir::new(&root)
@@ -768,7 +778,7 @@ fn runtime_rust_sources() -> Vec<(String, PathBuf)> {
                 .any(|(r, _)| r == "cas-cli/src/ui/factory/director/prompts.rs"),
         "runtime source walk missed the worker contracts"
     );
-    sources
+    Some(sources)
 }
 
 fn builtin_call_shape_offenders(surface: &CallSurface) -> Vec<CallShapeOffender> {
@@ -891,7 +901,10 @@ fn call_shape_lint_flags_known_bad_shapes() {
 fn runtime_templates_suggest_only_calls_the_mcp_surface_accepts() {
     let surface = call_surface();
     let mut offenders = Vec::new();
-    for (relative, path) in runtime_rust_sources() {
+    let Some(sources) = runtime_rust_sources() else {
+        return;
+    };
+    for (relative, path) in sources {
         let source = std::fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
         lint_call_shapes(&runtime_text(&source), &relative, &surface, &mut offenders);
@@ -978,10 +991,17 @@ fn top_level_dispatch_literals(source: &str, tool: &str) -> Vec<String> {
         .find(&format!("pub async fn {tool}("))
         .unwrap_or_else(|| panic!("missing {tool} dispatch function"));
     let function = &source[start..];
-    let match_start = function
-        .find("let result = match action.as_str() {")
-        .or_else(|| function.find("let result = match req.action.as_str() {"))
-        .unwrap_or_else(|| panic!("missing {tool} dispatch match"));
+    // Take whichever dispatch form comes FIRST after this function's start.
+    // Preferring one spelling and falling back to the other searched past the
+    // end of `memory` (which matches on `req.action`) into `task`'s table.
+    let match_start = [
+        "let result = match action.as_str() {",
+        "let result = match req.action.as_str() {",
+    ]
+    .iter()
+    .filter_map(|needle| function.find(needle))
+    .min()
+    .unwrap_or_else(|| panic!("missing {tool} dispatch match"));
     let body = &function[match_start..];
     let body = &body[body.find('{').expect("match opening brace") + 1..];
     let chars: Vec<char> = body.chars().collect();

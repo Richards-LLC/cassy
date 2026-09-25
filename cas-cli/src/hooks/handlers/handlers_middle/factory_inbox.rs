@@ -354,7 +354,7 @@ mod tests {
         );
         assert!(
             rendered.contains(
-                "coordination action=message target=operator in_reply_to=81 message=…"
+                "coordination action=message target=operator in_reply_to=81 summary=… message=…"
             ),
             "{rendered}"
         );

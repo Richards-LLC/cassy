@@ -1,7 +1,8 @@
 ---
 name: cas-dataviz
 description: Use when a Cassy report, issue, or note needs a static, self-contained figure (inline SVG plus its data table) or a document is becoming text-dense. Interactive or library-rendered charts belong to the bundled `dataviz` skill.
-managed_by: cas
+metadata:
+  managed_by: cas
 ---
 
 # Figures that show the argument

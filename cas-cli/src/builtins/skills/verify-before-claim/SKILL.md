@@ -1,7 +1,8 @@
 ---
 name: verify-before-claim
 description: Use immediately before claiming a task, test, build, script, fix, or acceptance criterion is complete.
-managed_by: cas
+metadata:
+  managed_by: cas
 ---
 
 # Verify Before You Claim

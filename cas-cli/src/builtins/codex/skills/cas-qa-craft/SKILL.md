@@ -1,7 +1,8 @@
 ---
 name: cas-qa-craft
 description: Use when a factory delivery needs QA evidence before close — a non-empty demo_statement, a changed user-facing path, or a touched user journey — proven against the real build.
-managed_by: cas
+metadata:
+  managed_by: cas
 ---
 
 # Delivery QA evidence

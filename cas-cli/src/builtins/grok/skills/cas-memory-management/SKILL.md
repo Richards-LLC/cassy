@@ -1,7 +1,8 @@
 ---
 name: cas-memory-management
 description: Use when facts, preferences, learnings, decisions, or context should persist beyond the current session.
-managed_by: cas
+metadata:
+  managed_by: cas
 ---
 
 # Cassy Memory Management

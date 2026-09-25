@@ -1107,6 +1107,12 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
             "builtins/codex/skills/cas-nuxt-playwright/references/auth-fixture-template.md"
         ),
     },
+    // Codex ignores `disable-model-invocation`; `agents/openai.yaml` is its
+    // opt-out from implicit invocation.
+    BuiltinFile {
+        path: "skills/cas-nuxt-playwright/agents/openai.yaml",
+        content: include_str!("builtins/codex/skills/cas-nuxt-playwright/agents/openai.yaml"),
+    },
     // cas-playwright-debug skill (cas-5e54) — codex mirror, byte-identical.
     BuiltinFile {
         path: "skills/cas-playwright-debug/SKILL.md",
@@ -1194,6 +1200,7 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile { path: "skills/cas-wizard/template.sh", content: include_str!("builtins/codex/skills/cas-wizard/template.sh") },
     BuiltinFile { path: "skills/cas-resolving-merge-conflicts/SKILL.md", content: include_str!("builtins/codex/skills/cas-resolving-merge-conflicts/SKILL.md") },
     BuiltinFile { path: "skills/cas-to-questionnaire/SKILL.md", content: include_str!("builtins/codex/skills/cas-to-questionnaire/SKILL.md") },
+    BuiltinFile { path: "skills/cas-to-questionnaire/agents/openai.yaml", content: include_str!("builtins/codex/skills/cas-to-questionnaire/agents/openai.yaml") },
     BuiltinFile { path: "skills/cas-image-generate/SKILL.md", content: include_str!("builtins/codex/skills/cas-image-generate/SKILL.md") },
     BuiltinFile { path: "skills/cas-image-generate/references/asset-playbook.md", content: include_str!("builtins/codex/skills/cas-image-generate/references/asset-playbook.md") },
     BuiltinFile { path: "skills/cas-image-generate/references/svg-web-assets.md", content: include_str!("builtins/codex/skills/cas-image-generate/references/svg-web-assets.md") },
@@ -2179,9 +2186,13 @@ pub fn required_dir_for(cap: &RequiredCapability, harness: SupervisorCli) -> Opt
     }
 }
 
-/// Check if a file is managed by Cassy (has `managed_by: cas` in frontmatter)
+/// Check if a file is managed by Cassy.
+///
+/// The portable marker is `metadata:` → `managed_by: cas`; a top-level
+/// `managed_by: cas` (the form shipped before 3.32) is still accepted so
+/// installed copies carrying it stay managed and get updated.
 pub fn is_managed_by_cas(content: &str) -> bool {
-    // Check frontmatter for managed_by: cas
+    // Substring match covers both the nested and the legacy top-level form.
     if let Some(stripped) = content.strip_prefix("---") {
         if let Some(end) = stripped.find("---") {
             let frontmatter = &content[3..3 + end];
@@ -4531,23 +4542,26 @@ This is the body content."#;
         }
     }
 
-    // cas-5be8: disallowed-tools frontmatter in builtin skills
+    /// `disallowed-tools` is not a guard: Claude Code clears it when the user
+    /// sends the next message (turn-scoped), and Codex, Grok and OpenCode
+    /// ignore it. cas-5be8's TodoWrite/EnterPlanMode ban on cas-worker lapsed
+    /// at the first supervisor message and never applied outside Claude, so
+    /// it was dropped rather than presented as enforcement.
     #[test]
-    fn test_builtin_cas_worker_disallowed_tools() {
+    fn test_builtin_cas_worker_does_not_pose_disallowed_tools_as_a_guard() {
         for (label, skills) in [
             ("BUILTIN_SKILLS", BUILTIN_SKILLS),
             ("CODEX_BUILTIN_SKILLS", CODEX_BUILTIN_SKILLS),
+            ("GROK_BUILTIN_SKILLS", GROK_BUILTIN_SKILLS),
         ] {
             let entry = skills
                 .iter()
                 .find(|b| b.path == "skills/cas-worker/SKILL.md")
                 .unwrap_or_else(|| panic!("{label}: cas-worker SKILL.md missing"));
-            for required in ["disallowed-tools:", "- TodoWrite", "- EnterPlanMode"] {
-                assert!(
-                    entry.content.contains(required),
-                    "{label}: cas-worker SKILL.md missing disallowed-tools entry: {required:?}"
-                );
-            }
+            assert!(
+                !entry.content.contains("disallowed-tools:"),
+                "{label}: cas-worker must not rely on turn-scoped, Claude-only disallowed-tools"
+            );
         }
     }
 
@@ -4655,7 +4669,10 @@ This is the body content."#;
     #[test]
     fn test_is_managed_by_cas() {
         let managed = "---\nname: test\nmanaged_by: cas\n---\nContent";
-        assert!(is_managed_by_cas(managed));
+        assert!(is_managed_by_cas(managed), "legacy top-level form");
+
+        let nested = "---\nname: test\nmetadata:\n  managed_by: cas\n---\nContent";
+        assert!(is_managed_by_cas(nested), "portable metadata form");
 
         let not_managed = "---\nname: test\n---\nContent";
         assert!(!is_managed_by_cas(not_managed));

@@ -1,7 +1,8 @@
 ---
 name: cas-tdd
 description: Use when a task requires test-first work, red-green-refactor, seam selection for tests, or integration-test design.
-managed_by: cas
+metadata:
+  managed_by: cas
 ---
 
 # Test-Driven Development

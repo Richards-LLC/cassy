@@ -1,9 +1,9 @@
 ---
 name: fallow
 description: Use when analyzing a JavaScript or TypeScript codebase for unused code, duplicates, circular dependencies, complexity, boundaries, feature flags, or runtime coverage.
-managed_by: cas
 license: MIT
 metadata:
+  managed_by: cas
   author: Bart Waardenburg
   version: 1.0.0
   homepage: https://docs.fallow.tools

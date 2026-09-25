@@ -1,7 +1,8 @@
 ---
 name: cas-nuxt-playwright
-description: Use when writing or debugging Playwright E2E tests for a Nuxt 3 or Nuxt 4 app with Firebase auth and Quasar UI: SSR-mode detection, auth-state reuse, selector and timing triage.
-managed_by: cas
+description: Use when writing or debugging Playwright E2E tests for a Nuxt 3 or Nuxt 4 app with Firebase auth and Quasar UI — SSR-mode detection, auth-state reuse, selector and timing triage.
+metadata:
+  managed_by: cas
 disable-model-invocation: true
 ---
 

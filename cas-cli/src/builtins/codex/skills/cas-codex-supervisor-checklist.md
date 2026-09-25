@@ -1,7 +1,8 @@
 ---
 name: cas-codex-supervisor-checklist
 description: Use at the start of a Codex factory-supervisor session to load context, inspect EPICs, and confirm worker availability.
-managed_by: cas
+metadata:
+  managed_by: cas
 ---
 
 # Codex Supervisor Checklist
@@ -46,8 +47,6 @@ managed_by: cas
    `.cas/logs/factory-session-{YYYY-MM-DD}.log` (written automatically on
    `SessionEnd`; each block records session id, agent, worktree, and a
    `git status --porcelain` snapshot).
-
-Do not use `/cas-start`, `/cas-context`, or `/cas-end` — they are not available in Codex.
 
 ## Intake Gate (Before Planning)
 

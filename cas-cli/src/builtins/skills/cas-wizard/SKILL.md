@@ -1,7 +1,8 @@
 ---
 name: cas-wizard
 description: Use when a human must perform setup, secrets, dashboard, cutover, or migration steps; generates an interactive Bash wizard. Not for work the agent can do itself.
-managed_by: cas
+metadata:
+  managed_by: cas
 ---
 
 # Human Procedure Wizard

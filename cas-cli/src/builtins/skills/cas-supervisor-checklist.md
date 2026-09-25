@@ -1,7 +1,8 @@
 ---
 name: cas-supervisor-checklist
 description: Use at the start of a factory-supervisor session to load context, inspect EPICs, and confirm worker availability.
-managed_by: cas
+metadata:
+  managed_by: cas
 ---
 
 # Supervisor Checklist

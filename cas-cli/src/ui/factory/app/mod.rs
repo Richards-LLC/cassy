@@ -2560,7 +2560,6 @@ pub(crate) fn queue_supervisor_intro_prompt(
             "Codex supervisor startup:\n\
 - Use skills: cas-supervisor, cas-codex-supervisor-checklist, cas-codebase-design\n\
 - No hooks: call MCP tools explicitly (tasks/memory/rules/search)\n\
-- Do NOT use /cas-start, /cas-context, or /cas-end\n\
 - Canonical current workers for this session: {worker_list}\n\
 - First steps: mcp__cs__coordination action=whoami; mcp__cs__task action=list task_type=epic; mcp__cs__task action=ready"
         ),

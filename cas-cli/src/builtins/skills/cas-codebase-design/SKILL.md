@@ -1,9 +1,9 @@
 ---
 name: cas-codebase-design
 description: Use when designing or restructuring a module, choosing a seam, assessing testability and architectural depth, or settling the project's domain terminology and durable technical decisions.
-managed_by: cas
 license: MIT
 metadata:
+  managed_by: cas
   author: Matt Pocock
   upstream: https://github.com/mattpocock/skills
   provenance: Adapted from mattpocock/skills codebase-design (MIT, © 2026 Matt Pocock).

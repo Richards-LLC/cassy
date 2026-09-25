@@ -1,7 +1,8 @@
 ---
 name: cli-routing
-description: Use when one-shot CLI work must fall back between harnesses — Codex failed for capacity or auth, or a `claude -p` subprocess is being considered. Owns the Codex-first order and the Claude account gate; a plain read-only `codex exec` investigation is cas-codex-exec.
-managed_by: cas
+description: Use when one-shot CLI work must fall back between harnesses — Codex failed for capacity or auth, or a `claude -p` run is considered. Owns the Codex-first order and Claude account gate; not for plain read-only codex exec (cas-codex-exec).
+metadata:
+  managed_by: cas
 ---
 
 # CLI Routing

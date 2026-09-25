@@ -1,7 +1,8 @@
 ---
 name: cas-ideate
 description: Use when the user asks for new grounded project-improvement ideas ("what should I improve?", "surprise me", or "what would you change?") rather than refinement of an existing idea.
-managed_by: cas
+metadata:
+  managed_by: cas
 ---
 
 # Adversarial Ideation

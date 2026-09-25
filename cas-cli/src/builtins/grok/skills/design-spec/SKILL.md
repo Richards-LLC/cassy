@@ -1,7 +1,8 @@
 ---
 name: design-spec
 description: Use when the user asks to create or update a design spec, design-system documentation, or DESIGN.md, or before substantial UI work.
-managed_by: cas
+metadata:
+  managed_by: cas
 ---
 
 # Design Spec

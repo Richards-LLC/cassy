@@ -1,7 +1,8 @@
 ---
 name: cas-task-tracking
 description: Use when work needs persistent Cassy task tracking, dependencies, progress notes, or cross-session continuity.
-managed_by: cas
+metadata:
+  managed_by: cas
 ---
 
 # Cassy Task Tracking

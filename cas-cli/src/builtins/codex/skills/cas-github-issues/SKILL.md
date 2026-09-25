@@ -1,7 +1,8 @@
 ---
 name: cas-github-issues
 description: Use when sweeping, triaging, deduplicating, verifying, closing, or filing GitHub issues, or reconciling issues with Cassy tasks.
-managed_by: cas
+metadata:
+  managed_by: cas
 ---
 
 # GitHub Issues sweep

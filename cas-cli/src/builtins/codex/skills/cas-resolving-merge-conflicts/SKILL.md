@@ -1,9 +1,9 @@
 ---
 name: cas-resolving-merge-conflicts
 description: Use when resolving an in-progress git merge or rebase conflict.
-managed_by: cas
 license: MIT
 metadata:
+  managed_by: cas
   author: Matt Pocock
   upstream: https://github.com/mattpocock/skills
   provenance: Adapted from mattpocock/skills resolving-merge-conflicts (MIT, © 2026 Matt Pocock).

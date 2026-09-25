@@ -1922,6 +1922,13 @@ impl FactoryApp {
     /// Remove a worker from the detector and its durable session hold set.
     /// This prevents a later worker that reuses the same friendly name from
     /// inheriting a hold it never received.
+    /// cas-8563b: record that a pre-assigned spawn's task brief already told
+    /// `worker` about `task_id`, so the director does not follow it with a
+    /// duplicate `TaskAssigned` prompt.
+    pub(crate) fn note_assignment_briefed(&mut self, task_id: &str, worker: &str) {
+        self.event_detector.note_assignment_briefed(task_id, worker);
+    }
+
     pub(crate) fn remove_worker_from_event_detector(&mut self, worker_name: &str) {
         self.event_detector.remove_worker(worker_name);
         let Some(session_name) = self.factory_session.as_deref() else {

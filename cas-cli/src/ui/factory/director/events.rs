@@ -1172,6 +1172,15 @@ pub struct DirectorEventDetector {
 }
 
 impl DirectorEventDetector {
+    /// cas-8563b (audit L3 P3): a pre-assigned spawn is told its task by the
+    /// spawn brief. Mark the (task, assignee) pair announced so the next tick
+    /// does not also emit `TaskAssigned` for it. A later reassignment to a
+    /// different worker has a different key and is still announced.
+    pub(crate) fn note_assignment_briefed(&mut self, task_id: &str, assignee: &str) {
+        self.task_assigned_announced
+            .insert(format!("{task_id}:{assignee}"));
+    }
+
     /// Create a new event detector
     pub fn new(worker_names: Vec<String>, supervisor_name: String) -> Self {
         Self {
@@ -1468,7 +1477,13 @@ impl DirectorEventDetector {
                     // *different* worker produces a different key and is not
                     // suppressed.
                     let announced_key = format!("{task_id}:{assignee}");
-                    if !self.task_assigned_announced.contains(&announced_key) {
+                    // cas-8563b: a spawn brief is noted under the worker's
+                    // display name, which the assignee may be stored as an id.
+                    let briefed_key =
+                        format!("{task_id}:{}", self.resolve_agent_name(assignee, data));
+                    if !self.task_assigned_announced.contains(&announced_key)
+                        && !self.task_assigned_announced.contains(&briefed_key)
+                    {
                         self.task_assigned_announced.insert(announced_key);
                         let task_title = task_info
                             .get(task_id.as_str())

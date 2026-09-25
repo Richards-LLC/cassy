@@ -53,7 +53,7 @@ Successful `task action=start` is authoritative assignment acceptance; no prose 
 
 Use the checklist for your harness: `cas-codex-supervisor-checklist` on Codex; `cas-supervisor-checklist` on Claude, Grok, or OpenCode (preflight, intake, create/pin the EPIC). Dispatch each task with `spawn_workers count=1 lane=<lane> isolate=true task_id=<task-id>`; give an idle live worker its next task with `update` (not `transfer`); end the turn.
 
-## Heterogeneous Teams (Claude supervisor + Codex workers)
+## Heterogeneous Teams (mixed-harness workers)
 
 To force one model, pass complete `cli=`, `model=`, and `effort=` controls (never with `lane=`); account directories: [reference.md](references/reference.md).
 

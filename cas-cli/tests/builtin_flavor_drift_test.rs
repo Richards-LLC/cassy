@@ -10,30 +10,34 @@
 //!   grok     GROK_BUILTIN_*    embed the canonical files
 //!   opencode process-local projection of the canonical catalog
 //!
-//! Only a few files stay per-harness, each for a reason the text cannot
-//! express neutrally. They live under `builtins/{codex,grok}/` and are listed
-//! in `TAILORED` (a twin of a canonical file, defined as exact replacements
-//! applied to it) or `ALLOWED_FLAVOR_ONLY` (no canonical counterpart).
+//! Per-harness differences are kept out of shared text (pstack D1 note):
+//!   - `TAILORED` lists entries whose content is the canonical text after
+//!     exact replacements. Today that is only the Grok task-verifier, whose
+//!     `tools:` frontmatter builtins.rs generates around the one shared body.
+//!   - `ALLOWED_FLAVOR_ONLY` lists files with no canonical counterpart, which
+//!     are the only files left under `builtins/codex/`: the Codex no-hooks
+//!     checklist and two `agents/openai.yaml` policies.
 //!
 //! This test asserts:
 //!   1. every other twin-catalog entry is byte-identical to the canonical one;
-//!   2. every tailored twin equals its canonical file after exactly its listed
-//!      replacements, and each replacement still applies;
-//!   3. every file under `builtins/{codex,grok}/` is tailored or flavor-only, so
-//!      the twin trees cannot grow back;
-//!   4. no catalog spells a harness prefix outside the naming rule
-//!      (`cas::builtins::unsanctioned_prefixed_tool_lines`);
+//!   2. every tailored entry equals its canonical text after exactly its
+//!      listed replacements, and each replacement still applies;
+//!   3. every file under `builtins/{codex,grok}/` is sanctioned, so the twin
+//!      trees cannot grow back;
+//!   4. no catalog spells a harness prefix (`mcp__cas__`, `mcp__cs__`,
+//!      `cas__`) outside the single naming line and generated agent `tools:`
+//!      frontmatter (`cas::builtins::unsanctioned_prefixed_tool_lines`);
 //!   5. the OpenCode projection differs from the canonical catalog only in
 //!      agent `tools:` allowlists.
 //!
 //! HOW TO RESOLVE A FAILURE:
 //!   - A twin catalog entry differs from the canonical file: point its
 //!     `include_str!` at the canonical file and delete the twin.
-//!   - A tool name carries a prefix: use the bare name. If the line is
-//!     genuinely harness-specific, name the harness on the line.
-//!   - A per-harness difference is genuinely needed: add a `TAILORED` entry
-//!     with the replacements and a rationale, or an `ALLOWED_FLAVOR_ONLY`
-//!     entry.
+//!   - A tool name carries a prefix: use the bare name; the role guidance
+//!     states each harness's prefix.
+//!   - A per-harness difference is genuinely needed: generate it in
+//!     builtins.rs and add a `TAILORED` entry with a rationale, or add an
+//!     `ALLOWED_FLAVOR_ONLY` file.
 
 use std::fs;
 use std::path::PathBuf;
@@ -59,51 +63,28 @@ const TWINS: [(Flavor, &str); 2] = [(Flavor::Codex, "codex"), (Flavor::Grok, "gr
 // Sanctioned per-harness files
 // ---------------------------------------------------------------------------
 
-/// A per-harness twin of a canonical file: (flavor, catalog path, source path
-/// under `builtins/`, replacements applied to the canonical text, rationale).
-/// The twin must equal the canonical text after exactly these replacements.
+/// A per-harness variant of a canonical entry: (flavor, catalog path, source
+/// file under `builtins/` if the variant has its own file, replacements
+/// applied to the canonical text, rationale). The variant must equal the
+/// canonical text after exactly these replacements. Prefer generated
+/// frontmatter over a source file.
 struct Tailored {
     flavor: &'static str,
     path: &'static str,
-    source: &'static str,
+    source: Option<&'static str>,
     replacements: &'static [(&'static str, &'static str)],
     rationale: &'static str,
 }
 
-const TAILORED: &[Tailored] = &[
-    Tailored {
-        flavor: "codex",
-        path: "skills/cas-supervisor/SKILL.md",
-        source: "codex/skills/cas-supervisor.md",
-        replacements: &[(
-            "Use the checklist for your harness: `cas-codex-supervisor-checklist` on Codex; `cas-supervisor-checklist` on Claude, Grok, or OpenCode",
-            "Use `cas-codex-supervisor-checklist`",
-        )],
-        rationale: "Codex installs only its no-hooks checklist twin, so its supervisor body names \
-                    that one checklist.",
-    },
-    Tailored {
-        flavor: "grok",
-        path: "skills/cas-supervisor/SKILL.md",
-        source: "grok/skills/cas-supervisor.md",
-        replacements: &[(
-            "## Heterogeneous Teams (Claude supervisor + Codex workers)",
-            "## Heterogeneous Teams (Grok supervisor + Claude/Codex workers)",
-        )],
-        rationale: "The Heterogeneous Teams heading names the fleet a Grok supervisor leads.",
-    },
-    Tailored {
-        flavor: "grok",
-        path: "agents/task-verifier.md",
-        source: "grok/agents/task-verifier.md",
-        replacements: &[
-            ("mcp__cas__", "cas__"),
-            (".claude/skills/cas-qa-craft", ".grok/skills/cas-qa-craft"),
-        ],
-        rationale: "An agent `tools:` allowlist must use the harness's own tool names; the \
-                    installed-skill example path names the Grok home.",
-    },
-];
+const TAILORED: &[Tailored] = &[Tailored {
+    flavor: "grok",
+    path: "agents/task-verifier.md",
+    source: None,
+    replacements: &[("mcp__cas__", "cas__")],
+    rationale: "An agent `tools:` allowlist must spell the harness's own tool names. The \
+                body is shared (`agents/task-verifier.body.md`); builtins.rs generates \
+                the frontmatter per harness.",
+}];
 
 /// Canonical files a twin catalog deliberately omits: (catalog path, flavor, rationale).
 const ALLOWED_MISSING_TWIN: &[(&str, &str, &str)] = &[(
@@ -337,7 +318,10 @@ fn twin_source_trees_hold_only_sanctioned_files() {
         return;
     };
     let builtins = root.join("cas-cli/src/builtins");
-    let mut sanctioned: Vec<String> = TAILORED.iter().map(|t| t.source.to_string()).collect();
+    let mut sanctioned: Vec<String> = TAILORED
+        .iter()
+        .filter_map(|t| t.source.map(str::to_string))
+        .collect();
     sanctioned.extend(ALLOWED_FLAVOR_ONLY.iter().map(|(_, _, source, _)| source.to_string()));
     let mut on_disk = Vec::new();
     for (_, name) in TWINS {
@@ -368,8 +352,8 @@ fn twin_source_trees_hold_only_sanctioned_files() {
         );
     }
     assert!(
-        on_disk.len() <= 10,
-        "the per-harness twin trees must stay small; found {} files",
+        on_disk.len() <= 3,
+        "the per-harness source trees must stay small; found {} files",
         on_disk.len()
     );
 }
@@ -408,8 +392,8 @@ fn every_catalog_names_tools_by_bare_name() {
     }
     assert!(
         failures.is_empty(),
-        "shipped text spells a harness tool prefix outside the naming rule (use the bare \
-         name, or name the harness on the line):\n  {}",
+        "shipped text spells a harness tool prefix outside the naming line (use the bare \
+         name):\n  {}",
         failures.join("\n  ")
     );
 }
@@ -459,9 +443,8 @@ fn guard_detects_injected_drift() {
     let canonical_of = |path: &str| -> Option<&'static str> {
         match path {
             "skills/x/SKILL.md" => Some("# X\ncall `task action=close`\n"),
-            "skills/cas-supervisor/SKILL.md" => Some(
-                "## Heterogeneous Teams (Claude supervisor + Codex workers)\nbody\n",
-            ),
+            "agents/task-verifier.md" => Some("---\ntools: Read, mcp__cas__task\n---\nbody\n"),
+            "agents/stale.md" => Some("---\ntools: Read\n---\nbody\n"),
             _ => None,
         }
     };
@@ -482,20 +465,14 @@ fn guard_detects_injected_drift() {
 
     let tailored_ok = twin_catalog_failures(
         "grok",
-        &[(
-            "skills/cas-supervisor/SKILL.md",
-            "## Heterogeneous Teams (Grok supervisor + Claude/Codex workers)\nbody\n",
-        )],
+        &[("agents/task-verifier.md", "---\ntools: Read, cas__task\n---\nbody\n")],
         &canonical_of,
     );
     assert!(tailored_ok.is_empty(), "{tailored_ok:?}");
 
     let tailored_extra = twin_catalog_failures(
         "grok",
-        &[(
-            "skills/cas-supervisor/SKILL.md",
-            "## Heterogeneous Teams (Grok supervisor + Claude/Codex workers)\nother body\n",
-        )],
+        &[("agents/task-verifier.md", "---\ntools: Read, cas__task\n---\nother body\n")],
         &canonical_of,
     );
     assert!(
@@ -503,13 +480,17 @@ fn guard_detects_injected_drift() {
         "{tailored_extra:?}"
     );
 
-    let stale = twin_catalog_failures(
-        "codex",
-        &[("skills/cas-supervisor/SKILL.md", "## Heterogeneous Teams (Claude supervisor + Codex workers)\nbody\n")],
-        &canonical_of,
-    );
+    // A tailoring whose replacement no longer applies is stale.
+    let stale_entry = Tailored {
+        flavor: "grok",
+        path: "agents/stale.md",
+        source: None,
+        replacements: &[("mcp__cas__", "cas__")],
+        rationale: "fixture",
+    };
+    let stale = apply_tailoring(canonical_of("agents/stale.md").unwrap(), &stale_entry);
     assert!(
-        stale.iter().any(|f| f.contains("no longer occurs")),
+        stale.as_ref().is_err_and(|e| e.contains("no longer occurs")),
         "{stale:?}"
     );
 
@@ -525,9 +506,9 @@ fn guard_detects_injected_drift() {
     assert!(unsanctioned_prefixed_tool_lines("run `cas__task action=show`").len() == 1);
     assert!(unsanctioned_prefixed_tool_lines("run `task action=show`").is_empty());
     assert!(unsanctioned_prefixed_tool_lines(TOOL_NAMING_LINE).is_empty());
-    assert!(
-        unsanctioned_prefixed_tool_lines("In Claude Code, call `mcp__cas__task`.").is_empty()
-    );
+    // pstack denylist: naming the harness on the line does not excuse a prefix.
+    assert!(unsanctioned_prefixed_tool_lines("In Claude Code, call `mcp__cas__task`.").len() == 1);
+    assert!(unsanctioned_prefixed_tool_lines("run `ToolSearch(select:mcp__cas__task)`").len() == 1);
     assert!(
         unsanctioned_prefixed_tool_lines("tools: Read, mcp__cas__task").is_empty()
     );
@@ -1102,11 +1083,11 @@ fn supervisor_worker_liveness_contract_is_pinned_in_every_mirror() {
         ("", include_str!("../src/builtins/skills/cas-supervisor.md")),
         (
             "codex/",
-            include_str!("../src/builtins/codex/skills/cas-supervisor.md"),
+            include_str!("../src/builtins/skills/cas-supervisor.md"),
         ),
         (
             "grok/",
-            include_str!("../src/builtins/grok/skills/cas-supervisor.md"),
+            include_str!("../src/builtins/skills/cas-supervisor.md"),
         ),
     ] {
         for marker in [

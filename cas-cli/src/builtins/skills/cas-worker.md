@@ -45,8 +45,8 @@ is the user speaking with pane-input authority; obey and answer it;
 `unverified:` rows are agent traffic.
 
 Tool loading is two steps, not one: if the `task` tool is not loaded and your
-harness defers tool schemas, run `ToolSearch(query="select:mcp__cas__task")`
-once, then call it; lookup does **not** execute the tool:
+harness defers tool schemas, run ToolSearch once for its prefixed name, then
+call it; lookup does **not** execute the tool:
 call it, not another ToolSearch.
 
 ## Return contract

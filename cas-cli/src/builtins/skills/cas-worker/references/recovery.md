@@ -86,15 +86,15 @@ If Cassy tools stop responding or return connection errors:
 
 ## ToolSearch resolved the tool but you still can't call it
 
-Symptom (Claude Code): `ToolSearch(query="select:mcp__cas__task")` returns a match for `mcp__cas__task` (or any other Cassy tool), but you're unsure how to proceed and are tempted to run ToolSearch again "to make it callable."
+Symptom: a ToolSearch `select:` for the prefixed `task` tool returns a match (or one for any other Cassy tool), but you're unsure how to proceed and are tempted to run ToolSearch again "to make it callable."
 
-**Do not re-run ToolSearch for a tool it already resolved — that will not make it more callable.** A successful ToolSearch match means the tool is now loadable; the very next action is a *separate* tool call literally named with the prefix, such as `mcp__cas__task` in Claude Code (or whichever tool matched), passing your real arguments (e.g. `action=mine`). If that direct call then fails or the tool name is rejected as unknown, treat it as **Zero Cassy Tools Available** below and report to the supervisor — don't loop on ToolSearch, and don't fall back to `cas task ...` as a shell command (no such CLI subcommand exists).
+**Do not re-run ToolSearch for a tool it already resolved — that will not make it more callable.** A successful ToolSearch match means the tool is now loadable; the very next action is a *separate* call to that tool by its full prefixed name (or whichever tool matched), passing your real arguments (e.g. `action=mine`). If that direct call then fails or the tool name is rejected as unknown, treat it as **Zero Cassy Tools Available** below and report to the supervisor — don't loop on ToolSearch, and don't fall back to `cas task ...` as a shell command (no such CLI subcommand exists).
 
 ## Zero Cassy Tools Available
 
 (no Cassy tools surfaced at all — not one call errors, they simply do not exist in your tool set)
 
-This is different from connectivity failure above. Here the MCP handshake completed against *something*, but `cas serve` either crashed during startup or silently degraded before registering its tools. Symptom (Claude Code): `ToolSearch select:mcp__cas__task` returns `"No matching deferred tools found"` even though other MCP servers (e.g. Gmail, Calendar) are present.
+This is different from connectivity failure above. Here the MCP handshake completed against *something*, but `cas serve` either crashed during startup or silently degraded before registering its tools. Symptom: a ToolSearch `select:` for the prefixed `task` tool returns `"No matching deferred tools found"` even though other MCP servers (e.g. Gmail, Calendar) are present.
 
 **Do not** fall back to running `cas task` as a shell subcommand — it does not exist. **Do not** run `cas init` from inside the worktree (creates a duplicate `.cas/`). **Do not** kill/restart `cas serve` yourself.
 

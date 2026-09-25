@@ -69,7 +69,7 @@ fn codex_factory_skills_use_cs_prefix_only() {
 fn codex_worker_recovery_uses_cs_alias_not_cas(/* cas-5b4f */) {
     // cas-5b4f, audit D1: a Codex worker cannot call `mcp__cas__` tools. The
     // one recovery guide every harness installs names tools by bare name and
-    // spells a prefix only where the line names its harness.
+    // spells no prefix literal; the role guidance states each prefix once.
     let root = source_root();
     for flavor in ["", "codex/", "grok/"] {
         let recovery = load(&root.join(format!(
@@ -275,9 +275,8 @@ fn supervisor_skill_mirrors_include_implementation_unit_template() {
 }
 
 /// cas-2c61/cas-62ab, audit D1: no Codex catalog entry hardcodes Claude's
-/// `mcp__cas__` alias as an instruction. Tool names are bare; the prefix is
-/// spelled only in the naming line, the agent `tools:` allowlist, and lines
-/// that name their harness (Claude Code's ToolSearch examples).
+/// `mcp__cas__` alias as an instruction. Tool names are bare; a prefix is
+/// spelled only in the naming line and generated agent `tools:` frontmatter.
 #[test]
 fn codex_builtin_skills_and_agents_never_hardcode_claude_alias() {
     for builtin in builtin_catalog::skills(builtin_catalog::Flavor::Codex)

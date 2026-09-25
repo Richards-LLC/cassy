@@ -55,11 +55,29 @@ pub struct BuiltinFile {
     pub content: &'static str,
 }
 
+/// The task-verifier agent: one shared body (`builtins/agents/task-verifier.body.md`)
+/// under frontmatter generated per harness, because an agent `tools:` allowlist
+/// must spell the harness's own tool names (audit D1). Expands to a string
+/// literal, so the catalogs stay `const`.
+macro_rules! task_verifier_agent {
+    ($prefix:literal) => {
+        concat!(
+            "---\nname: task-verifier\ndescription: Internal agent for verifying task completion. Spawned automatically on task close. Do not invoke directly.\nmodel: inherit\ntools: Read, Grep, Glob, Bash, ",
+            $prefix, "task, ",
+            $prefix, "verification, ",
+            $prefix, "rule, ",
+            $prefix, "search, ",
+            $prefix, "coordination\nmetadata:\n  managed_by: cas\n---\n",
+            include_str!("builtins/agents/task-verifier.body.md")
+        )
+    };
+}
+
 /// All built-in agents managed by Cassy
 pub const BUILTIN_AGENTS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "agents/task-verifier.md",
-        content: include_str!("builtins/agents/task-verifier.md"),
+        content: task_verifier_agent!("mcp__cas__"),
     },
 ];
 
@@ -667,9 +685,8 @@ pub const BUILTIN_WORKFLOWS: &[BuiltinFile] = &[
 ];
 
 /// All built-in skills managed by Cassy for Codex. Entries embed the canonical
-/// (prefix-neutral, audit D1) files except the Codex-only adaptations:
-/// `cas-supervisor.md` (checklist selection), the no-hooks
-/// `cas-codex-supervisor-checklist`, and the `agents/openai.yaml` policies.
+/// (prefix-neutral, audit D1) files plus the Codex-only no-hooks
+/// `cas-codex-supervisor-checklist` and the `agents/openai.yaml` policies.
 pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-memory-management/SKILL.md",
@@ -720,7 +737,7 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
     },
     BuiltinFile {
         path: "skills/cas-supervisor/SKILL.md",
-        content: include_str!("builtins/codex/skills/cas-supervisor.md"),
+        content: include_str!("builtins/skills/cas-supervisor.md"),
     },
     BuiltinFile {
         path: "skills/cas-release-report/SKILL.md",
@@ -1242,7 +1259,7 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
 pub const GROK_BUILTIN_AGENTS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "agents/task-verifier.md",
-        content: include_str!("builtins/grok/agents/task-verifier.md"),
+        content: task_verifier_agent!("cas__"),
     },
 ];
 
@@ -1258,8 +1275,8 @@ pub const GROK_BUILTIN_AGENTS: &[BuiltinFile] = &[
 /// for ANY skill: the factory can run against a project-local `.grok` mirror or
 /// a `~/.grok` home with no Claude tree present, so every twin is installed here
 /// directly. Entries embed the canonical (prefix-neutral, audit D1) files; the
-/// only Grok-specific file is `cas-supervisor.md`, whose Heterogeneous-Teams
-/// heading names the Grok fleet. The supervisor checklist is the Claude one
+/// task-verifier agent differs only by its generated `tools:` frontmatter. The
+/// supervisor checklist is the Claude one
 /// (not Codex's "no hooks" variant), since Grok has real SessionStart hooks.
 pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
@@ -1288,7 +1305,7 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
     },
     BuiltinFile {
         path: "skills/cas-supervisor/SKILL.md",
-        content: include_str!("builtins/grok/skills/cas-supervisor.md"),
+        content: include_str!("builtins/skills/cas-supervisor.md"),
     },
     BuiltinFile {
         path: "skills/cas-supervisor/references/preflight.md",
@@ -2250,28 +2267,21 @@ pub fn normalize_harness_skill_content(content: &str) -> String {
     normalized
 }
 
-/// Lines of shipped text that spell a harness's Cassy tool prefix where the
-/// catalog rule (audit D1) does not allow it, as `(1-based line, text)`.
+/// Lines of shipped text that spell a harness tool prefix (`mcp__cas__`,
+/// `mcp__cs__` or `cas__`) where the catalog rule (audit D1) forbids it, as
+/// `(1-based line, text)`.
 ///
-/// Skill and agent text names tools by bare name. A prefix may appear only in
-/// [`TOOL_NAMING_LINE`], in agent `tools:` frontmatter (a per-harness
-/// allowlist), or on a line that names the harness the prefix belongs to:
-/// `mcp__cas__` beside "Claude Code" or a `ToolSearch` call (Claude Code's
-/// deferred-tool loader), `mcp__cs__` beside "Codex", `cas__` beside "Grok".
+/// Skill and agent text names tools by bare name. The only prefixed literals
+/// allowed are [`TOOL_NAMING_LINE`] and an agent's `tools:` frontmatter, which
+/// builtins.rs generates per harness.
 pub fn unsanctioned_prefixed_tool_lines(content: &str) -> Vec<(usize, &str)> {
     content
         .lines()
         .enumerate()
         .filter(|(_, line)| {
-            if *line == TOOL_NAMING_LINE || line.starts_with("tools:") {
-                return false;
-            }
-            let claude = line.matches("mcp__cas__").count();
-            let codex = line.matches("mcp__cs__").count();
-            let grok = line.matches("cas__").count() - claude;
-            (claude > 0 && !line.contains("Claude Code") && !line.contains("ToolSearch"))
-                || (codex > 0 && !line.contains("Codex"))
-                || (grok > 0 && !line.contains("Grok"))
+            *line != TOOL_NAMING_LINE
+                && !line.starts_with("tools:")
+                && (line.contains("mcp__cas__") || line.contains("mcp__cs__") || line.contains("cas__"))
         })
         .map(|(index, line)| (index + 1, line))
         .collect()
@@ -4048,8 +4058,9 @@ mod tests {
             .find(|file| file.path == "skills/cas-supervisor/SKILL.md")
             .unwrap()
             .content;
-        assert!(codex.contains("Use `cas-codex-supervisor-checklist`"));
-        assert!(!codex.contains("`cas-supervisor-checklist`"));
+        // Audit D1: one supervisor body; it names each harness's checklist.
+        assert!(codex.contains("`cas-codex-supervisor-checklist` on Codex"));
+        assert_eq!(codex, SUPERVISOR_GUIDE);
         assert!(supervisor_guidance().contains("`cas-codex-supervisor-checklist` on Codex"));
     }
 
@@ -4305,7 +4316,7 @@ This is the body content."#;
     /// against the two surfaces silently drifting back apart.
     #[test]
     fn test_codex_supervisor_guidance_mirrors_tiering_rule() {
-        let codex_guide = include_str!("builtins/codex/skills/cas-supervisor.md");
+        let codex_guide = include_str!("builtins/skills/cas-supervisor.md");
         for keyword in [
             "Tier every spawn",
             "never fleet-default",
@@ -4328,40 +4339,24 @@ This is the body content."#;
         }
     }
 
-    /// cas-b342: the three supervisor bodies must be identical apart from the
-    /// Codex checklist selection and the Grok Heterogeneous-Teams section
-    /// title; tool names are bare in all three (audit D1). This
+    /// cas-b342, audit D1: every harness installs the one supervisor body. This
     /// pins routing examples (tier table, Quick Start spawn recipes, the
     /// heterogeneous complete-call) to full explicit controls across all three
     /// harnesses — a condensed or drifted example on one twin now fails CI.
     #[test]
     fn test_supervisor_bodies_normalized_consistent_across_harnesses() {
         let claude = SUPERVISOR_GUIDE;
-        let codex = include_str!("builtins/codex/skills/cas-supervisor.md");
-        let grok = include_str!("builtins/grok/skills/cas-supervisor.md");
-
-        // Codex selects its dedicated checklist; all other prose stays mirrored.
-        assert_eq!(
-            claude.replace(
-                "Use the checklist for your harness: `cas-codex-supervisor-checklist` on Codex; `cas-supervisor-checklist` on Claude, Grok, or OpenCode",
-                "Use `cas-codex-supervisor-checklist`",
-            ),
-            codex,
-            "codex cas-supervisor.md may differ only by its checklist selection"
-        );
-
-        // Claude -> Grok differs only by the intentional Heterogeneous-Teams
-        // section title (Grok supervisors lead a different fleet).
-        let claude_as_grok = claude
-            .replace(
-                "## Heterogeneous Teams (Claude supervisor + Codex workers)",
-                "## Heterogeneous Teams (Grok supervisor + Claude/Codex workers)",
-            );
-        assert_eq!(
-            claude_as_grok, grok,
-            "grok cas-supervisor.md must equal the Claude body apart from the \
-             intentional Heterogeneous-Teams section title"
-        );
+        let codex = include_str!("builtins/skills/cas-supervisor.md");
+        let grok = include_str!("builtins/skills/cas-supervisor.md");
+        // Audit D1: every catalog embeds the one supervisor body.
+        for catalog in [CODEX_BUILTIN_SKILLS, GROK_BUILTIN_SKILLS] {
+            let body = catalog
+                .iter()
+                .find(|b| b.path == "skills/cas-supervisor/SKILL.md")
+                .unwrap()
+                .content;
+            assert_eq!(body, claude, "cas-supervisor.md must be one body for every harness");
+        }
 
         // The shared body must retain explicit complete-call controls and the
         // registry's Opus heavy route on every twin without duplicating workflow.
@@ -7877,7 +7872,7 @@ This is the body content."#;
             ),
             (
                 "codex body",
-                include_str!("builtins/codex/skills/cas-supervisor.md"),
+                include_str!("builtins/skills/cas-supervisor.md"),
             ),
             (
                 "codex model-selection",
@@ -7893,7 +7888,7 @@ This is the body content."#;
             ),
             (
                 "grok body",
-                include_str!("builtins/grok/skills/cas-supervisor.md"),
+                include_str!("builtins/skills/cas-supervisor.md"),
             ),
             (
                 "grok model-selection",
@@ -7934,11 +7929,11 @@ This is the body content."#;
             ("claude cas-supervisor.md", SUPERVISOR_GUIDE),
             (
                 "codex cas-supervisor.md",
-                include_str!("builtins/codex/skills/cas-supervisor.md"),
+                include_str!("builtins/skills/cas-supervisor.md"),
             ),
             (
                 "grok cas-supervisor.md",
-                include_str!("builtins/grok/skills/cas-supervisor.md"),
+                include_str!("builtins/skills/cas-supervisor.md"),
             ),
         ] {
             assert!(
@@ -7958,14 +7953,14 @@ This is the body content."#;
         let claude_workflow = include_str!("builtins/skills/cas-supervisor/references/workflow.md");
         let claude_reference =
             include_str!("builtins/skills/cas-supervisor/references/reference.md");
-        let codex_body = include_str!("builtins/codex/skills/cas-supervisor.md");
+        let codex_body = include_str!("builtins/skills/cas-supervisor.md");
         let codex_model =
             include_str!("builtins/skills/cas-supervisor/references/model-selection.md");
         let codex_workflow =
             include_str!("builtins/skills/cas-supervisor/references/workflow.md");
         let codex_reference =
             include_str!("builtins/skills/cas-supervisor/references/reference.md");
-        let grok_body = include_str!("builtins/grok/skills/cas-supervisor.md");
+        let grok_body = include_str!("builtins/skills/cas-supervisor.md");
         let grok_model =
             include_str!("builtins/skills/cas-supervisor/references/model-selection.md");
         let grok_workflow =
@@ -8265,8 +8260,8 @@ This is the body content."#;
             }
         }
 
-        // Audit D1: ToolSearch is Claude Code's, so the section names the
-        // prefixed tool in Claude Code's spelling and says so.
+        // Audit D1: the section names no prefix literal; the call uses the
+        // full prefixed name from the role guidance's naming line.
         let claude_recovery = BUILTIN_SKILLS
             .iter()
             .find(|b| b.path == "skills/cas-worker/references/recovery.md")
@@ -8274,7 +8269,7 @@ This is the body content."#;
         assert!(
             claude_recovery
                 .content
-                .contains("literally named with the prefix, such as `mcp__cas__task` in Claude Code"),
+                .contains("a *separate* call to that tool by its full prefixed name"),
             "recovery.md ToolSearch section must name the prefixed call"
         );
     }
@@ -8599,9 +8594,8 @@ This is the body content."#;
 
     /// cas-2c61, audit D1: a Codex worker following a skill that spells
     /// another harness's prefix calls a tool name that doesn't resolve. The
-    /// catalog names tools by bare name; a prefix appears only where the line
-    /// says which harness it belongs to. The Codex agent allowlist uses the
-    /// Codex prefix.
+    /// catalog names tools by bare name; a prefix appears only in the naming
+    /// line and generated agent `tools:` frontmatter.
     #[test]
     fn test_codex_builtins_never_reference_claude_tool_prefix() {
         for builtin in CODEX_BUILTIN_SKILLS
@@ -8742,8 +8736,8 @@ This is the body content."#;
 
     /// cas-6f46, audit D1: a Grok worker copying tool-call syntax from a
     /// skill with another harness's prefix gets a tool-not-found error. Tool
-    /// names are bare; a prefix appears only where the line names its
-    /// harness, and the Grok agent allowlist uses `cas__`.
+    /// names are bare; a prefix appears only in the naming line and the
+    /// generated agent `tools:` frontmatter, which uses `cas__` for Grok.
     #[test]
     fn test_grok_builtin_skills_never_reference_mcp_wrapped_tool_names() {
         for builtin in GROK_BUILTIN_SKILLS.iter().chain(GROK_BUILTIN_AGENTS.iter()) {
@@ -9029,8 +9023,8 @@ This is the body content."#;
 
     /// No catalog leaks a harness prefix into its tool-call guidance
     /// (cas-cc8c AC-5, audit D1). Every catalog, Claude's included, names
-    /// tools by bare name; the only prefixed spellings are the naming line,
-    /// agent `tools:` allowlists, and lines that name their harness.
+    /// tools by bare name; the only prefixed spellings are the naming line
+    /// and generated agent `tools:` allowlists.
     #[test]
     fn test_tailored_catalogs_never_leak_foreign_tool_prefix() {
         for harness in [

@@ -74,6 +74,12 @@ fi
 
 # Total row count across every user table, so the guard is not blind to a leak
 # that lands in tasks/rules/events rather than entries.
+#
+# Row counts miss an in-place rule edit, and they cannot see the rule files a
+# rule write syncs into Claude Code. That is exactly the shape of the skills
+# audit M27 contamination (cas-caae): an existing `rule-002` row was rewritten
+# and re-synced to `.claude/rules/cas/rule-002.md`. So rules also get a content
+# digest, and each store's synced rule directories get a file digest.
 snapshot() {
     local db="$1"
     sqlite3 "file:${db}?mode=ro" \
@@ -83,6 +89,31 @@ snapshot() {
             count="$(sqlite3 "file:${db}?mode=ro" "SELECT COUNT(*) FROM \"${table}\";" 2>/dev/null)"
             printf '%s\t%s\n' "${table}" "${count:-ERROR}"
         done | sort
+    rule_snapshot "${db}"
+}
+
+digest() {
+    sha256sum | cut -d' ' -f1
+}
+
+# Content digest of the rules table, plus a digest of the rule files synced
+# beside the store (`<root>/.claude/rules/cas{,-global}` for `<root>/.cas/cas.db`).
+rule_snapshot() {
+    local db="$1"
+    local rules
+    rules="$(sqlite3 "file:${db}?mode=ro" \
+        "SELECT id || char(31) || status || char(31) || scope || char(31) || tags || char(31) || paths || char(31) || content FROM rules ORDER BY id;" \
+        2>/dev/null | digest)"
+    printf 'rules.content\t%s\n' "${rules}"
+
+    local root rule_dir files
+    root="$(dirname "$(dirname "${db}")")"
+    for rule_dir in "${root}/.claude/rules/cas" "${root}/.claude/rules/cas-global"; do
+        [[ -d "${rule_dir}" ]] || continue
+        files="$(cd "${rule_dir}" && find . -maxdepth 1 -type f -name '*.md' -print0 |
+            sort -z | xargs -0 -r sha256sum | digest)"
+        printf 'rule-files:%s\t%s\n' "${rule_dir}" "${files}"
+    done
 }
 
 if ! command -v sqlite3 >/dev/null 2>&1; then
@@ -123,7 +154,7 @@ for db in "${present_dbs[@]}"; do
         echo "DRIFT in ${db}:"
         cat "${tmpdir}/diff-${key}"
     else
-        echo "clean: ${db} (no row-count change in any table)"
+        echo "clean: ${db} (no row-count, rule-content or rule-file change)"
     fi
 done
 

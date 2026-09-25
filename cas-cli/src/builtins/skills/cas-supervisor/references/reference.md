@@ -190,3 +190,7 @@ mcp__cas__task action=notes id=cas-abc1 notes="Progress update" note_type=progre
 ```
 
 **Booleans** accept native bool, string `"true"`/`"false"`, or numeric `1`/`0`.
+
+## Context budgeting
+
+`project_session_start_truncation.md`: **Immutable Core** (the cas-supervisor SKILL.md body, 8 KB cap), **Task Context** (on demand), and **Ephemeral** output. Details go in `references/`.

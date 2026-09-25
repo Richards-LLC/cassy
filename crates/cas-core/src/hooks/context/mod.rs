@@ -516,28 +516,14 @@ impl ContextItem {
     }
 }
 
-/// CAS usage reminder for MCP tools
+/// CAS usage reminder for MCP tools.
+///
+/// Always-loaded (every SessionStart), so it is held to ≤300 bytes (audit
+/// cas-1660 M34): one line per tool, no emphasis. When-to-remember guidance
+/// lives in the cas-memory-management skill, not here.
 pub(crate) const USAGE_REMINDER: &str = r#"## 📋 CAS Context
 
-**Use CAS MCP tools for task/memory management (NOT built-in TodoWrite):**
-- `mcp__cas__task` - Track work
-- `mcp__cas__memory` - Store learnings
-- `mcp__cas__search` - Find context
-
-<IMPORTANT>
-**When to use `memory` with action: remember (PROACTIVELY store learnings):**
-- After discovering project-specific patterns or conventions
-- After fixing non-trivial bugs (capture root cause + solution)
-- After learning how unfamiliar code works
-- When you find important architectural decisions
-- After resolving configuration or setup issues
-
-Don't wait to be asked - if you learned something valuable, store it immediately.
-</IMPORTANT>
-
-**Search guidance:**
-- For exploratory searches ("where is X handled?", "how does Y work?"), prefer `mcp__cas__search` - it combines code + tasks + memories with semantic understanding
-- For exact pattern matching (specific regex, literal strings), use Grep directly
+Track work with `mcp__cas__task` (not harness todo lists), store learnings with `mcp__cas__memory`, and find prior tasks, memories and code with `mcp__cas__search`; use Grep for exact strings.
 "#;
 
 /// Stores required for context building

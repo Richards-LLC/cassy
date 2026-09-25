@@ -1606,6 +1606,10 @@ impl CasService {
                     && (other_task_active || anchor_integrated))
                     .then(|| recorded_anchor.clone())
                     .flatten();
+                // GH #1022: only a landed anchor with no other active task can
+                // hide same-task commits pushed after the merge.
+                let frozen_on_landed_anchor =
+                    frozen_anchor.is_some() && anchor_integrated && !other_task_active;
                 if let Some(branch) = branch
                     && let Some(branch_tip) = frozen_anchor.or_else(|| {
                         crate::prompt_revalidation::resolve_live_branch_tip(
@@ -1634,6 +1638,32 @@ impl CasService {
                         &repo.target_branch,
                     ) {
                         MergeRequestDecision::AlreadyIntegrated { target_tip } => {
+                            if frozen_on_landed_anchor
+                                && let Some(live_tip) =
+                                    crate::prompt_revalidation::resolve_live_branch_tip(
+                                        &repo.repo_root,
+                                        &branch,
+                                        recorded_anchor.as_deref(),
+                                    )
+                                    .filter(|live_tip| *live_tip != branch_tip)
+                                && matches!(
+                                    revalidate_merge_request(
+                                        &repo.repo_root,
+                                        &live_tip,
+                                        &repo.target_branch,
+                                    ),
+                                    MergeRequestDecision::Pending { .. }
+                                )
+                            {
+                                return Ok(Self::success(
+                                    crate::prompt_revalidation::merge_request_beyond_landed_anchor_guidance(
+                                        &task.id,
+                                        &branch_tip,
+                                        &live_tip,
+                                        &repo.target_branch,
+                                    ),
+                                ));
+                            }
                             return Ok(Self::success(merge_landed_guidance(
                                 &task.id,
                                 &branch_tip,

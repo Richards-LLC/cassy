@@ -340,15 +340,17 @@ fn worker_failure_recovery_guidance_is_pinned_cas_62a9() {
         for marker in [
             "never retry the denied target",
             "A `/dev/null` denial is a guard defect to report",
-            "Pre-close notes must prove each applicable entry with a file, command, or test",
-            "explain each `not applicable` entry",
         ] {
             assert!(
                 worker.contains(marker),
                 "{flavor} worker guidance missing {marker:?}"
             );
         }
+        // WP2 (audit cas-1660 M51): the cas-src surface checklist moved from
+        // the always-loaded body into the on-demand close-gate reference.
         for marker in [
+            "Pre-close notes must prove each applicable entry with a file, command, or test",
+            "explain each `not applicable` entry",
             "Crossed-message freshness handshake",
             "before any corrective commit",
             "git merge-base --is-ancestor <delivered-tip> <target-tip>",

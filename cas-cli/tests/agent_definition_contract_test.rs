@@ -182,8 +182,13 @@ fn epic_walk_is_one_concurrent_pass_in_every_harness() {
         } else {
             "skills/cas-supervisor-checklist.md"
         });
-        let route = "cas-supervisor/references/epic-flow-walk.md";
-        assert!(supervisor.contains(route), "{label} supervisor route");
+        // Links resolve in the installed layout: the supervisor body sits
+        // beside its own `references/`, the checklist is a sibling skill dir.
+        assert!(
+            supervisor.contains("](references/epic-flow-walk.md)"),
+            "{label} supervisor route"
+        );
+        let route = "](../cas-supervisor/references/epic-flow-walk.md)";
         assert!(checklist.contains(route), "{label} checklist route");
         assert!(checklist.contains("release gate detached"), "{label}");
         assert!(checklist.contains("verification_type=epic"), "{label}");

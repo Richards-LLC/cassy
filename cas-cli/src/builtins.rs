@@ -2,8 +2,11 @@
 //!
 //! These definitions are managed by Cassy and regenerated on `cas update`.
 //! Files with `managed_by: cas` in frontmatter are overwritten on update.
-//! References beneath a managed builtin skill inherit directory ownership and
-//! use a last-synced hash to propagate Cassy changes without clobbering local edits.
+//! Every other file beneath a managed builtin skill (references, scripts,
+//! examples) inherits directory ownership and uses a last-synced hash plus the
+//! shipped-version ledger to propagate Cassy changes without clobbering local
+//! edits. Files, agents and skill directories Cassy stops shipping are pruned
+//! when they are provably Cassy content.
 //!
 //! All content uses MCP tools (`mcp__cas__*`).
 //!
@@ -2411,7 +2414,7 @@ pub fn mark_missing_owned_references_for_replacement(
     let mut state = BuiltinReferenceState::load(target_dir)?;
     let mut marked = 0;
     for builtin in skills {
-        if is_reference_owned_by_managed_skill(builtin, skills)
+        if is_file_owned_by_managed_skill(builtin, skills)
             && !target_dir.join(builtin.path).exists()
             && state
                 .replace_on_next_sync
@@ -2479,26 +2482,36 @@ fn is_shipped_builtin_reference_version(path: &str, content_hash: &str) -> bool 
         .is_some_and(|hashes| hashes.contains(content_hash))
 }
 
-/// A reference is owned by its skill directory when that directory has a
-/// cataloged, managed `SKILL.md`. This makes ownership automatic for newly
-/// added reference files instead of relying on an easy-to-forget per-file
-/// frontmatter marker.
-fn is_reference_owned_by_managed_skill(builtin: &BuiltinFile, skills: &[BuiltinFile]) -> bool {
-    let Some(relative) = builtin.path.strip_prefix("skills/") else {
-        return false;
-    };
-    let Some((skill_dir, child_path)) = relative.split_once('/') else {
-        return false;
-    };
-    if !child_path.starts_with("references/") {
-        return false;
-    }
+/// Split `skills/<dir>/<child>` into `(<dir>, <child>)`. `None` for anything
+/// that is not a child of a skill directory (agents, flat files).
+fn skill_dir_child(path: &str) -> Option<(&str, &str)> {
+    let (skill_dir, child_path) = path.strip_prefix("skills/")?.split_once('/')?;
+    (!skill_dir.is_empty() && !child_path.is_empty()).then_some((skill_dir, child_path))
+}
 
+/// True when `skills` carries a managed `SKILL.md` for `skill_dir`.
+fn skill_dir_is_managed(skill_dir: &str, skills: &[BuiltinFile]) -> bool {
     let body_path = format!("skills/{skill_dir}/SKILL.md");
     skills
         .iter()
         .find(|candidate| candidate.path == body_path)
         .is_some_and(|body| is_managed_by_cas(body.content))
+}
+
+/// Every file beneath a skill directory other than its `SKILL.md` is owned by
+/// that directory when the directory has a cataloged, managed `SKILL.md`. That
+/// covers `references/`, `scripts/`, `examples/` and top-level helpers such as
+/// `cas-wizard/template.sh` alike. These files cannot carry frontmatter, so
+/// before cas-57c02 anything outside `references/` fell back to the
+/// `managed_by: cas` gate, was never updated after first install, and drifted
+/// away from the `SKILL.md` that describes it. Owned files use the last-synced
+/// baseline plus the shipped-version ledger, so a local edit is still
+/// preserved.
+fn is_file_owned_by_managed_skill(builtin: &BuiltinFile, skills: &[BuiltinFile]) -> bool {
+    let Some((skill_dir, child_path)) = skill_dir_child(builtin.path) else {
+        return false;
+    };
+    child_path != "SKILL.md" && skill_dir_is_managed(skill_dir, skills)
 }
 
 fn sync_owned_reference(
@@ -2634,9 +2647,16 @@ fn sync_all_builtins_inner(
         }
     }
 
+    // Retired agents: a managed agent file this catalog no longer ships is
+    // listed in every session until something removes it (cas-57c02).
+    let keep_agents = builtin_agent_file_names(agents);
+    for name in prune_stale_cas_agent_files(&target_dir.join("agents"), &keep_agents)? {
+        result.pruned_files.push(format!("agents/{name}"));
+    }
+
     // Sync skills
     for builtin in skills {
-        let outcome = if is_reference_owned_by_managed_skill(builtin, skills) {
+        let outcome = if is_file_owned_by_managed_skill(builtin, skills) {
             sync_owned_reference(builtin, target_dir, &mut reference_state)?
         } else {
             sync_builtin_detailed(builtin, target_dir)?
@@ -2658,8 +2678,124 @@ fn sync_all_builtins_inner(
         }
     }
 
+    // Files a managed skill directory no longer ships (for example a removed
+    // reference) are pruned once their content proves they are Cassy's.
+    result.pruned_files.extend(prune_removed_owned_skill_files(
+        target_dir,
+        skills,
+        &mut reference_state,
+    )?);
+
     reference_state.save(target_dir)?;
     Ok(result)
+}
+
+/// SHA-256 of raw file bytes; equal to [`builtin_content_hash`] for UTF-8.
+fn file_bytes_hash(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+/// True when an installed file at `path` (relative to the harness dir) is
+/// provably Cassy content: it matches the last content Cassy synced there,
+/// a version Cassy shipped at that path, or it carries `managed_by: cas`.
+/// Anything else may be a user's own file and is never deleted.
+fn is_provably_cassy_skill_file(path: &str, bytes: &[u8], state: &BuiltinReferenceState) -> bool {
+    let hash = file_bytes_hash(bytes);
+    state.files.get(path).is_some_and(|baseline| *baseline == hash)
+        || is_shipped_builtin_reference_version(path, &hash)
+        || std::str::from_utf8(bytes).is_ok_and(is_managed_by_cas)
+}
+
+/// Installed files beneath a managed skill directory that `skills` no longer
+/// ships and whose content is provably Cassy's (see
+/// [`is_provably_cassy_skill_file`]). Paths are relative to `target_dir`,
+/// `/`-separated and sorted. Symlinks and unreadable files are never listed.
+fn removed_owned_skill_files(
+    target_dir: &Path,
+    skills: &[BuiltinFile],
+    state: &BuiltinReferenceState,
+) -> Vec<String> {
+    let shipped: HashSet<&str> = skills.iter().map(|builtin| builtin.path).collect();
+    let managed_dirs: BTreeSet<&str> = skills
+        .iter()
+        .filter_map(|builtin| skill_dir_child(builtin.path))
+        .map(|(skill_dir, _)| skill_dir)
+        .filter(|skill_dir| skill_dir_is_managed(skill_dir, skills))
+        .collect();
+
+    let mut removed = Vec::new();
+    for skill_dir in managed_dirs {
+        let mut pending = vec![target_dir.join("skills").join(skill_dir)];
+        while let Some(current) = pending.pop() {
+            let Ok(entries) = std::fs::read_dir(&current) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let Ok(file_type) = entry.file_type() else {
+                    continue;
+                };
+                let path = entry.path();
+                if file_type.is_dir() {
+                    pending.push(path);
+                    continue;
+                }
+                if !file_type.is_file() {
+                    continue;
+                }
+                let Some(relative) = path
+                    .strip_prefix(target_dir)
+                    .ok()
+                    .and_then(|relative| relative.to_str())
+                    .map(|relative| relative.replace(std::path::MAIN_SEPARATOR, "/"))
+                else {
+                    continue;
+                };
+                let is_body = skill_dir_child(&relative).is_some_and(|(_, child)| child == "SKILL.md");
+                if is_body || shipped.contains(relative.as_str()) {
+                    continue;
+                }
+                let Ok(bytes) = std::fs::read(&path) else {
+                    continue;
+                };
+                if is_provably_cassy_skill_file(&relative, &bytes, state) {
+                    removed.push(relative);
+                }
+            }
+        }
+    }
+    removed.sort();
+    removed
+}
+
+/// Delete the files [`removed_owned_skill_files`] names, forget their
+/// baselines, and drop directories the deletion left empty inside the skill
+/// directory. Returns the removed paths relative to `target_dir`.
+fn prune_removed_owned_skill_files(
+    target_dir: &Path,
+    skills: &[BuiltinFile],
+    state: &mut BuiltinReferenceState,
+) -> std::io::Result<Vec<String>> {
+    let removed = removed_owned_skill_files(target_dir, skills, state);
+    for relative in &removed {
+        let path = target_dir.join(relative);
+        std::fs::remove_file(&path)?;
+        state.files.remove(relative);
+        state.skipped_references.remove(relative);
+        state.replace_on_next_sync.remove(relative);
+
+        let Some((skill_dir, _)) = skill_dir_child(relative) else {
+            continue;
+        };
+        let skill_root = target_dir.join("skills").join(skill_dir);
+        let mut parent = path.parent();
+        while let Some(dir) = parent {
+            if dir == skill_root || !dir.starts_with(&skill_root) || std::fs::remove_dir(dir).is_err() {
+                break;
+            }
+            parent = dir.parent();
+        }
+    }
+    Ok(removed)
 }
 
 /// Sync built-in Workflow scripts to the target directory.
@@ -3122,12 +3258,98 @@ fn builtin_skill_dir_names(skills: &[BuiltinFile]) -> HashSet<String> {
         .collect()
 }
 
-/// Prune stale managed `cas-*` skill directories from a `skills/` dir.
+/// Builtin skill directories Cassy ships without the `cas-` prefix.
+///
+/// The skill prune only considers names Cassy owns: every `cas-*` directory
+/// plus this list. Keep an entry here after its skill leaves the catalogs, so
+/// a retired `codemap` or `fallow` is still pruned from installs instead of
+/// persisting forever. A test fails when a catalog gains a non-`cas-` skill
+/// that is missing from this list. `cas` itself (the `cas init` project skill)
+/// is deliberately absent: it is managed but lives outside the catalogs.
+pub const SHIPPED_NON_CAS_SKILL_DIRS: &[&str] = &[
+    "cli-routing",
+    "codemap",
+    "design-spec",
+    "fallow",
+    "mcp-integration",
+    "mecha-cassy",
+    "project-overview",
+    "release-notes",
+    "session-learn",
+    "verify-before-claim",
+];
+
+/// True for a skill directory name Cassy has shipped: any `cas-*` name or an
+/// entry in [`SHIPPED_NON_CAS_SKILL_DIRS`].
+fn is_cassy_skill_dir_name(name: &str) -> bool {
+    name.starts_with("cas-") || SHIPPED_NON_CAS_SKILL_DIRS.contains(&name)
+}
+
+/// Agent file names (`task-verifier.md`) one agent catalog ships.
+fn builtin_agent_file_names(agents: &[BuiltinFile]) -> HashSet<String> {
+    agents
+        .iter()
+        .filter_map(|builtin| builtin.path.strip_prefix("agents/"))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Managed agent files in `agents_dir` that `keep` (the harness catalog) no
+/// longer ships: regular `*.md` files directly in the directory whose
+/// frontmatter carries `managed_by: cas`. User agents, symlinks and unreadable
+/// files are never listed. Sorted file names.
+fn stale_cas_agent_files(agents_dir: &Path, keep: &HashSet<String>) -> Vec<String> {
+    let mut stale = Vec::new();
+    let Ok(entries) = std::fs::read_dir(agents_dir) else {
+        return stale;
+    };
+    for entry in entries.flatten() {
+        if !entry.file_type().is_ok_and(|file_type| file_type.is_file()) {
+            continue;
+        }
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if !name.ends_with(".md") || keep.contains(name) {
+            continue;
+        }
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        if is_managed_by_cas(&content) {
+            stale.push(name.to_string());
+        }
+    }
+    stale.sort();
+    stale
+}
+
+/// Prune retired managed agent files from an `agents/` dir (cas-57c02).
+///
+/// Mirrors [`prune_stale_cas_skill_dirs`]: a file is removed only when it is
+/// not in `keep` (the harness catalog) and carries `managed_by: cas` (see
+/// `stale_cas_agent_files`). Before this, agents dropped from the catalog
+/// (`code-reviewer`, `git-history-analyzer`, `issue-intelligence-analyst`)
+/// stayed installed and listed in every session. Returns the removed names.
+pub fn prune_stale_cas_agent_files(
+    agents_dir: &Path,
+    keep: &HashSet<String>,
+) -> std::io::Result<Vec<String>> {
+    let stale = stale_cas_agent_files(agents_dir, keep);
+    for name in &stale {
+        std::fs::remove_file(agents_dir.join(name))?;
+    }
+    Ok(stale)
+}
+
+/// Prune stale managed skill directories from a `skills/` dir.
 ///
 /// This mirrors the project-level prune in `SkillSyncer::sync_all`
 /// (`cas-cli/src/sync/skills.rs`): a directory is removed only when ALL of
 /// these hold:
-///   1. its name is `cas-*` prefixed (we never touch user-authored skills),
+///   1. its name is one Cassy ships — `cas-*` or an entry in
+///      [`SHIPPED_NON_CAS_SKILL_DIRS`] (we never touch user-authored skills),
 ///   2. it is not one of the builtin skill dirs we just wrote (`keep`), and
 ///   3. its `SKILL.md` is present and carries the `managed_by: cas` marker.
 ///      Any other read error (including a missing file) preserves the
@@ -3135,8 +3357,8 @@ fn builtin_skill_dir_names(skills: &[BuiltinFile]) -> HashSet<String> {
 ///      managed builtin.
 ///
 /// The managed-by check is the critical safety net: an unmanaged user skill
-/// is never removed, even when its name has a `cas-` prefix. Non-`cas-` dirs
-/// are left untouched. Used by `cas update --user` (`sync_user_builtins`) so
+/// is never removed, even when its name has a `cas-` prefix. Other dirs are
+/// left untouched. Used by `cas update --user` (`sync_user_builtins`) so
 /// that removed managed builtins are removed from `~/.claude/skills` and
 /// `~/.codex/skills` on every downstream host.
 ///
@@ -3162,8 +3384,8 @@ pub fn prune_stale_cas_skill_dirs(
             None => continue,
         };
 
-        // Only ever touch cas-* dirs we are not currently writing.
-        if !name.starts_with("cas-") || keep.contains(&name) {
+        // Only ever touch Cassy-named dirs we are not currently writing.
+        if !is_cassy_skill_dir_name(&name) || keep.contains(&name) {
             continue;
         }
 
@@ -3282,6 +3504,86 @@ pub fn prune_stale_user_skills_for_harness(
     prune_stale_cas_skill_dirs(&harness_dir.join("skills"), &keep)
 }
 
+/// How one installed harness tree compares with the embedded catalog
+/// (cas-57c02). Source-level parity tests never see an install, which is how
+/// frozen scripts and retired agents went unnoticed; `cas doctor` reads this.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct InstallParity {
+    /// Catalog files compared.
+    pub checked: usize,
+    /// Catalog files absent from the install.
+    pub missing: Vec<String>,
+    /// Installed files that differ from the catalog and that the next sync
+    /// would replace.
+    pub stale: Vec<String>,
+    /// Skill-owned files that match no version Cassy shipped. Sync preserves
+    /// them as local edits, so they are reported but are not drift.
+    pub local_edits: Vec<String>,
+    /// Installed files Cassy no longer ships that the next sync would prune:
+    /// retired managed agents and files removed from a managed skill dir.
+    pub retired: Vec<String>,
+}
+
+impl InstallParity {
+    /// True when a sync would change nothing (local edits are preserved by
+    /// design and do not count).
+    pub fn is_current(&self) -> bool {
+        self.missing.is_empty() && self.stale.is_empty() && self.retired.is_empty()
+    }
+}
+
+/// Compare the harness tree at `target_dir` with the catalog this binary
+/// would write there. Read-only. OpenCode has no installed tree.
+pub fn install_parity_for_harness(harness: SupervisorCli, target_dir: &Path) -> InstallParity {
+    match harness {
+        SupervisorCli::Claude => install_parity(target_dir, BUILTIN_AGENTS, BUILTIN_SKILLS),
+        SupervisorCli::Codex => install_parity(target_dir, CODEX_BUILTIN_AGENTS, CODEX_BUILTIN_SKILLS),
+        SupervisorCli::Grok => install_parity(target_dir, GROK_BUILTIN_AGENTS, GROK_BUILTIN_SKILLS),
+        SupervisorCli::OpenCode => InstallParity::default(),
+    }
+}
+
+fn install_parity(target_dir: &Path, agents: &[BuiltinFile], skills: &[BuiltinFile]) -> InstallParity {
+    let state = BuiltinReferenceState::load(target_dir).unwrap_or_default();
+    let mut parity = InstallParity::default();
+    for builtin in agents.iter().chain(skills) {
+        parity.checked += 1;
+        let Ok(existing) = std::fs::read(target_dir.join(builtin.path)) else {
+            parity.missing.push(builtin.path.to_string());
+            continue;
+        };
+        if existing == builtin.content.as_bytes() {
+            continue;
+        }
+        // Mirror the sync decision exactly: owned files follow the baseline
+        // and shipped-version ledger, everything else the managed marker.
+        let replaceable = if is_file_owned_by_managed_skill(builtin, skills) {
+            let hash = file_bytes_hash(&existing);
+            state.replace_on_next_sync.contains(builtin.path)
+                || state.files.get(builtin.path).is_some_and(|baseline| *baseline == hash)
+                || is_shipped_builtin_reference_version(builtin.path, &hash)
+        } else {
+            is_managed_by_cas(builtin.content)
+                || std::str::from_utf8(&existing).is_ok_and(is_managed_by_cas)
+        };
+        if replaceable {
+            parity.stale.push(builtin.path.to_string());
+        } else {
+            parity.local_edits.push(builtin.path.to_string());
+        }
+    }
+    let keep_agents = builtin_agent_file_names(agents);
+    parity.retired.extend(
+        stale_cas_agent_files(&target_dir.join("agents"), &keep_agents)
+            .into_iter()
+            .map(|name| format!("agents/{name}")),
+    );
+    parity
+        .retired
+        .extend(removed_owned_skill_files(target_dir, skills, &state));
+    parity
+}
+
 #[derive(Default, Debug)]
 pub struct SyncResult {
     pub agents_updated: usize,
@@ -3300,6 +3602,10 @@ pub struct SyncResult {
     /// last Cassy-synced baseline. These are preserved as possible intentional
     /// local customizations and must be surfaced to the user.
     pub modified_reference_files: Vec<String>,
+    /// Paths (relative to `target_dir`) this sync deleted because Cassy no
+    /// longer ships them: retired managed agents and files removed from a
+    /// managed skill directory (cas-57c02).
+    pub pruned_files: Vec<String>,
 }
 
 impl SyncResult {
@@ -6739,6 +7045,397 @@ This is the body content."#;
                 "{path} history must contain lowercase sha256 hex digests"
             );
         }
+    }
+
+    // ---------------------------------------------------------------------
+    // cas-57c02: install sync and prune
+    // ---------------------------------------------------------------------
+
+    const WP4_BODY: &str = "---\nname: cas-test\nmanaged_by: cas\n---\n# Test\n";
+    const WP4_BODY_FILE: BuiltinFile = BuiltinFile {
+        path: "skills/cas-test/SKILL.md",
+        content: WP4_BODY,
+    };
+
+    /// Before cas-57c02 a non-`references/` skill file had no frontmatter, so
+    /// both sides failed the managed gate and the first-installed copy froze.
+    #[test]
+    fn every_non_body_child_of_a_managed_skill_dir_is_owned() {
+        let owned = |path: &'static str| {
+            is_file_owned_by_managed_skill(&BuiltinFile { path, content: "" }, &[WP4_BODY_FILE])
+        };
+        assert!(owned("skills/cas-test/references/a.md"));
+        assert!(owned("skills/cas-test/template.sh"));
+        assert!(owned("skills/cas-test/scripts/run.py"));
+        assert!(owned("skills/cas-test/examples/deep/x.json"));
+        assert!(!owned("skills/cas-test/SKILL.md"), "the body is governed by its marker");
+        assert!(!owned("skills/cas-other/template.sh"), "no managed body, no ownership");
+        assert!(!owned("agents/cas-test.md"));
+
+        for (label, catalog) in [
+            ("claude", BUILTIN_SKILLS),
+            ("codex", CODEX_BUILTIN_SKILLS),
+            ("grok", GROK_BUILTIN_SKILLS),
+        ] {
+            for builtin in catalog {
+                let Some((_, child)) = skill_dir_child(builtin.path) else {
+                    continue;
+                };
+                if child != "SKILL.md" {
+                    assert!(
+                        is_file_owned_by_managed_skill(builtin, catalog),
+                        "{label}: {} must be owned so installs refresh it",
+                        builtin.path
+                    );
+                }
+            }
+        }
+    }
+
+    /// Acceptance: a stale installed script refreshes, and a local edit to it
+    /// is preserved and reported.
+    #[test]
+    fn stale_installed_script_refreshes_and_local_edit_is_preserved() {
+        use tempfile::tempdir;
+
+        const OLD: &str = "#!/usr/bin/env bash\necho shipped-in-august\n";
+        const NEW: &str = "#!/usr/bin/env bash\necho shipped-in-september\n";
+        const LOCAL: &str = "#!/usr/bin/env bash\necho our-own-wizard\n";
+        const PATH: &str = "skills/cas-test/template.sh";
+        const SCRIPT: BuiltinFile = BuiltinFile {
+            path: PATH,
+            content: NEW,
+        };
+
+        let temp = tempdir().unwrap();
+        let target_dir = temp.path().join(".claude");
+        let target = target_dir.join(PATH);
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(&target, OLD).unwrap();
+
+        set_history_override(PATH, &[OLD]);
+        let result = sync_all_builtins_inner(&target_dir, &[], &[WP4_BODY_FILE, SCRIPT]).unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), NEW, "stale script must refresh");
+        assert!(result.updated_files.contains(&PATH.to_string()));
+        assert!(result.skipped_files.is_empty(), "no silent skip: {:?}", result.skipped_files);
+
+        std::fs::write(&target, LOCAL).unwrap();
+        let result = sync_all_builtins_inner(&target_dir, &[], &[WP4_BODY_FILE, SCRIPT]).unwrap();
+        clear_history_override();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), LOCAL, "local edit must survive");
+        assert_eq!(result.modified_reference_files, vec![PATH.to_string()]);
+    }
+
+    /// The same acceptance against the real catalog and the real ledger key:
+    /// `cas-wizard/template.sh` was frozen at its 2026-08-20 revision on every
+    /// install before cas-57c02.
+    #[test]
+    fn real_catalog_refreshes_a_stale_cas_wizard_template() {
+        use tempfile::tempdir;
+
+        const PATH: &str = "skills/cas-wizard/template.sh";
+        const OLD: &str = "#!/usr/bin/env bash\n# an older shipped wizard template\n";
+        let temp = tempdir().unwrap();
+        let claude_dir = temp.path().join(".claude");
+        sync_all_builtins(&claude_dir).unwrap();
+        std::fs::write(claude_dir.join(PATH), OLD).unwrap();
+        // Forget the baseline so only the shipped-version ledger can prove it.
+        std::fs::remove_file(claude_dir.join(BUILTIN_REFERENCE_STATE_FILE)).unwrap();
+
+        set_history_override(PATH, &[OLD]);
+        sync_all_builtins(&claude_dir).unwrap();
+        clear_history_override();
+
+        let expected = BUILTIN_SKILLS.iter().find(|b| b.path == PATH).unwrap().content;
+        assert_eq!(std::fs::read_to_string(claude_dir.join(PATH)).unwrap(), expected);
+    }
+
+    /// The ledger must carry the files that froze and the removed reference
+    /// that must be pruned; otherwise pre-ledger installs stay stuck.
+    #[test]
+    fn embedded_ledger_covers_scripts_and_removed_references() {
+        let history = builtin_reference_history();
+        for path in [
+            "skills/cas-wizard/template.sh",
+            "skills/cas-image-generate/scripts/generate-image.sh",
+            "skills/cas-technical-drawing/scripts/draft.mjs",
+            "skills/cas-release-report/scripts/render.py",
+            "skills/cas-dataviz/scripts/validate_palette.js",
+            "skills/cas-supervisor/references/code-review-queue.md",
+        ] {
+            assert!(
+                history.files.get(path).is_some_and(|hashes| !hashes.is_empty()),
+                "{path} missing from reference-history.json; rerun \
+                 scripts/gen-builtin-reference-history.sh"
+            );
+        }
+        assert!(
+            !BUILTIN_SKILLS
+                .iter()
+                .any(|b| b.path == "skills/cas-supervisor/references/code-review-queue.md"),
+            "fixture assumption: code-review-queue.md is no longer shipped"
+        );
+    }
+
+    /// Acceptance: a removed reference is pruned. Only provably Cassy content
+    /// goes (shipped hash, baseline, or managed marker); a user's own file in
+    /// the same directory stays, and emptied directories are cleaned up.
+    #[test]
+    fn removed_skill_files_are_pruned_only_when_provably_cassy() {
+        use tempfile::tempdir;
+
+        const RETIRED_PATH: &str = "skills/cas-test/scripts/retired.sh";
+        const RETIRED: &str = "echo retired\n";
+        let temp = tempdir().unwrap();
+        let target_dir = temp.path().join(".claude");
+        let write = |relative: &str, content: &str| {
+            let path = target_dir.join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, content).unwrap();
+        };
+        write(RETIRED_PATH, RETIRED);
+        write(
+            "skills/cas-test/references/old-queue.md",
+            "---\nname: old-queue\nmanaged_by: cas\n---\n# retired reference\n",
+        );
+        write("skills/cas-test/references/my-notes.md", "# my own notes\n");
+        write("skills/cas-unlisted/extra.md", "---\nmanaged_by: cas\n---\n");
+
+        set_history_override(RETIRED_PATH, &[RETIRED]);
+        let result = sync_all_builtins_inner(&target_dir, &[], &[WP4_BODY_FILE]).unwrap();
+        clear_history_override();
+
+        assert_eq!(
+            result.pruned_files,
+            vec![
+                "skills/cas-test/references/old-queue.md".to_string(),
+                RETIRED_PATH.to_string(),
+            ]
+        );
+        assert!(!target_dir.join("skills/cas-test/scripts").exists(), "empty dir left behind");
+        assert!(target_dir.join("skills/cas-test/references/my-notes.md").is_file());
+        assert!(
+            target_dir.join("skills/cas-unlisted/extra.md").is_file(),
+            "a directory outside the catalog is not this prune's business"
+        );
+
+        let again = sync_all_builtins_inner(&target_dir, &[], &[WP4_BODY_FILE]).unwrap();
+        assert!(again.pruned_files.is_empty(), "prune must be idempotent");
+    }
+
+    /// Acceptance: a retired agent is removed; user agents and current
+    /// builtins stay.
+    #[test]
+    fn retired_managed_agent_is_pruned_on_sync() {
+        use tempfile::tempdir;
+
+        const CURRENT: BuiltinFile = BuiltinFile {
+            path: "agents/task-verifier.md",
+            content: "---\nname: task-verifier\nmanaged_by: cas\n---\nverify\n",
+        };
+        let temp = tempdir().unwrap();
+        let target_dir = temp.path().join(".claude");
+        let agents = target_dir.join("agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        std::fs::write(
+            agents.join("code-reviewer.md"),
+            "---\nname: code-reviewer\nmanaged_by: cas\n---\nDEPRECATED\n",
+        )
+        .unwrap();
+        std::fs::write(agents.join("my-agent.md"), "---\nname: my-agent\n---\nmine\n").unwrap();
+        std::fs::write(agents.join("notes.txt"), "managed_by: cas\n").unwrap();
+
+        let result = sync_all_builtins_inner(&target_dir, &[CURRENT], &[]).unwrap();
+
+        assert_eq!(result.pruned_files, vec!["agents/code-reviewer.md".to_string()]);
+        assert!(!agents.join("code-reviewer.md").exists());
+        assert!(agents.join("my-agent.md").is_file(), "user agent must be kept");
+        assert!(agents.join("notes.txt").is_file(), "non-markdown files are not agents");
+        assert!(agents.join("task-verifier.md").is_file(), "current builtin written");
+    }
+
+    #[test]
+    fn skill_dir_prune_covers_non_cas_builtins_but_not_user_or_init_skills() {
+        use tempfile::tempdir;
+
+        let temp = tempdir().unwrap();
+        let skills_dir = temp.path().join("skills");
+        let managed = |name: &str| {
+            let dir = skills_dir.join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("SKILL.md"),
+                format!("---\nname: {name}\nmanaged_by: cas\n---\n"),
+            )
+            .unwrap();
+            dir
+        };
+        let retired_codemap = managed("codemap");
+        let kept_fallow = managed("fallow");
+        let init_skill = managed("cas");
+        let user_named = managed("my-tool");
+
+        let keep = HashSet::from(["fallow".to_string()]);
+        let removed = prune_stale_cas_skill_dirs(&skills_dir, &keep).unwrap();
+
+        assert_eq!(removed, vec!["codemap".to_string()]);
+        assert!(!retired_codemap.exists());
+        assert!(kept_fallow.exists(), "a current builtin is kept");
+        assert!(init_skill.exists(), "the `cas init` skill is not a catalog builtin");
+        assert!(user_named.exists(), "unknown names are never pruned");
+    }
+
+    /// Adding a non-`cas-` builtin without listing it would make it
+    /// unprunable forever once retired.
+    #[test]
+    fn every_non_cas_catalog_skill_is_in_the_prune_allowlist() {
+        for catalog in [BUILTIN_SKILLS, CODEX_BUILTIN_SKILLS, GROK_BUILTIN_SKILLS] {
+            for name in builtin_skill_dir_names(catalog) {
+                assert!(
+                    is_cassy_skill_dir_name(&name),
+                    "add {name:?} to SHIPPED_NON_CAS_SKILL_DIRS"
+                );
+            }
+        }
+    }
+
+    /// L2 P1-29: links in skill bodies and references must resolve against
+    /// the installed layout (`skills/<name>/SKILL.md` beside `references/`),
+    /// not the source tree (`skills/<name>.md`). Checks every relative link
+    /// that points into the skill tree: `references/`, `scripts/`,
+    /// `examples/`, `../` and `SKILL.md` targets. Project paths used as
+    /// examples (`docs/PRODUCT_OVERVIEW.md`) are not skill links.
+    #[test]
+    fn skill_links_resolve_in_the_installed_layout() {
+        fn normalize(path: &str) -> Option<String> {
+            let mut parts: Vec<&str> = Vec::new();
+            for part in path.split('/') {
+                match part {
+                    "" | "." => {}
+                    ".." => {
+                        parts.pop()?;
+                    }
+                    other => parts.push(other),
+                }
+            }
+            Some(parts.join("/"))
+        }
+
+        let mut broken = Vec::new();
+        let mut checked = 0;
+        for (label, catalog) in [
+            ("claude", BUILTIN_SKILLS),
+            ("codex", CODEX_BUILTIN_SKILLS),
+            ("grok", GROK_BUILTIN_SKILLS),
+        ] {
+            let installed: HashSet<&str> = catalog.iter().map(|b| b.path).collect();
+            for builtin in catalog.iter().filter(|b| b.path.ends_with(".md")) {
+                let base = builtin.path.rsplit_once('/').map_or("", |(dir, _)| dir);
+                for (index, _) in builtin.content.match_indices("](") {
+                    let rest = &builtin.content[index + 2..];
+                    let Some(end) = rest.find(')') else { continue };
+                    let target = rest[..end].split('#').next().unwrap_or_default();
+                    if target.is_empty()
+                        || target.contains(char::is_whitespace)
+                        || target.contains("://")
+                        || target.starts_with('/')
+                        || target.starts_with("mailto:")
+                    {
+                        continue;
+                    }
+                    let skill_link = target.contains("references/")
+                        || target.starts_with("scripts/")
+                        || target.starts_with("examples/")
+                        || target.starts_with("../")
+                        || target.ends_with("SKILL.md");
+                    if !skill_link {
+                        continue;
+                    }
+                    checked += 1;
+                    let resolved = normalize(&format!("{base}/{target}"));
+                    if !resolved.as_deref().is_some_and(|path| installed.contains(path)) {
+                        broken.push(format!("{label} {}: {target}", builtin.path));
+                    }
+                }
+            }
+        }
+        assert!(checked >= 100, "link scan looks broken: only {checked} links checked");
+        assert!(broken.is_empty(), "links broken in the installed layout:\n{}", broken.join("\n"));
+    }
+
+    /// Acceptance: after sync the doctor reports install parity, and it
+    /// notices drift, retired agents and removed files.
+    #[test]
+    fn install_parity_is_clean_after_sync_and_names_every_kind_of_drift() {
+        use tempfile::tempdir;
+
+        for harness in [SupervisorCli::Claude, SupervisorCli::Codex, SupervisorCli::Grok] {
+            let temp = tempdir().unwrap();
+            let dir = temp.path().join("home");
+            sync_all_builtins_for_harness(harness, &dir).unwrap();
+            let parity = install_parity_for_harness(harness, &dir);
+            assert!(
+                parity.is_current() && parity.local_edits.is_empty(),
+                "{harness:?} install must match its catalog right after sync: {parity:?}"
+            );
+            assert_eq!(
+                parity.checked,
+                agent_catalog_for_harness(harness).len() + skill_catalog_for_harness(harness).len()
+            );
+        }
+
+        const SCRIPT_PATH: &str = "skills/cas-test/template.sh";
+        const OLD: &str = "echo old\n";
+        let script = BuiltinFile {
+            path: SCRIPT_PATH,
+            content: "echo new\n",
+        };
+        let reference = BuiltinFile {
+            path: "skills/cas-test/references/guide.md",
+            content: "# guide\n",
+        };
+        let agent = BuiltinFile {
+            path: "agents/task-verifier.md",
+            content: "---\nname: task-verifier\nmanaged_by: cas\n---\nnew\n",
+        };
+        let skills = [WP4_BODY_FILE, script, reference];
+        let temp = tempdir().unwrap();
+        let dir = temp.path().join(".claude");
+        sync_all_builtins_inner(&dir, &[agent], &skills).unwrap();
+
+        std::fs::write(dir.join(SCRIPT_PATH), OLD).unwrap();
+        std::fs::write(dir.join("skills/cas-test/references/guide.md"), "# my guide\n").unwrap();
+        std::fs::remove_file(dir.join("skills/cas-test/SKILL.md")).unwrap();
+        std::fs::write(
+            dir.join("agents/code-reviewer.md"),
+            "---\nname: code-reviewer\nmanaged_by: cas\n---\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("skills/cas-test/references/removed.md"),
+            "---\nmanaged_by: cas\n---\n# removed\n",
+        )
+        .unwrap();
+        std::fs::remove_file(dir.join(BUILTIN_REFERENCE_STATE_FILE)).unwrap();
+
+        set_history_override(SCRIPT_PATH, &[OLD]);
+        let parity = install_parity(&dir, &[agent], &skills);
+        clear_history_override();
+
+        assert_eq!(parity.stale, vec![SCRIPT_PATH.to_string()]);
+        assert_eq!(parity.missing, vec!["skills/cas-test/SKILL.md".to_string()]);
+        assert_eq!(
+            parity.local_edits,
+            vec!["skills/cas-test/references/guide.md".to_string()]
+        );
+        assert_eq!(
+            parity.retired,
+            vec![
+                "agents/code-reviewer.md".to_string(),
+                "skills/cas-test/references/removed.md".to_string(),
+            ]
+        );
+        assert!(!parity.is_current());
     }
 
     #[test]

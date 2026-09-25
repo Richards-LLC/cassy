@@ -441,11 +441,11 @@ fn supervisor_reference_tree_uses_current_lifecycle_contract() {
             );
         }
         assert!(
-            supervisor.contains("cas-supervisor/references/reference.md#supervisor-override"),
+            supervisor.contains("](references/reference.md#supervisor-override)"),
             "{flavor} supervisor guide must link supervisor_override reference"
         );
         assert!(
-            checklist.contains("cas-supervisor/references/reference.md#supervisor-override"),
+            checklist.contains("](../cas-supervisor/references/reference.md#supervisor-override)"),
             "{flavor} checklist must link supervisor_override reference"
         );
         assert!(

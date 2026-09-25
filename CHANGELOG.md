@@ -7,6 +7,22 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Added
+
+- `cas doctor` reports `host install parity`: installed skills and agents
+  that differ from, are missing from, or are no longer in this binary's
+  catalog.
+
+### Fixed
+
+- `cas update` now refreshes every file a built-in skill ships, including
+  scripts, examples and templates, which previously stayed at their first
+  installed version. Local edits are still preserved.
+- `cas update` removes retired Cassy agents and files a built-in skill no
+  longer ships, and retired built-in skills without the `cas-` prefix.
+- Links in the supervisor and worker skills now resolve in the installed
+  layout.
+
 ## [3.31.0] - 2026-09-24
 
 ### Added

@@ -27,7 +27,8 @@ Use the project's release rubric as the contract. The procedure is:
    `docs/release-notes/<date>-<topic>-slack.md` before posting.
 5. **Post in rubric order** through [mecha-cassy](../mecha-cassy/SKILL.md),
    steps 3–6. It owns preflight, posting order, pacing, upload integrity and
-   failure handling. Never use Claude.ai Slack or a personal connector. If the
+   failure handling. Publish only through the MechaCassy hub; never use
+   Claude.ai Slack or a personal Slack connector. If the
    hub cannot complete publication, report the measured failure with the
    partial receipts; never claim that it was posted.
 6. **Record the receipt.** mecha-cassy step 6 appends the `## POSTED` block to

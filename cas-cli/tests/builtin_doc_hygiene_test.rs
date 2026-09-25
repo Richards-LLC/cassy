@@ -106,11 +106,20 @@ fn doc_family_shares_one_hygiene_reference_instead_of_restating_it() {
 #[test]
 fn doc_hygiene_reference_is_registered_in_every_flavor() {
     let rel = "skills/codemap/references/doc-hygiene.md";
+    // Audit D1: one tree. The canonical file exists on disk, and every harness
+    // catalog registers it with exactly that content (no twin copy).
+    let canonical = std::fs::read_to_string(
+        checkout_builtins_root()
+            .map(|root| root.join(rel))
+            .unwrap_or_default(),
+    )
+    .ok();
     if let Some(root) = checkout_builtins_root() {
-        for flavor_rel in all_flavors(rel) {
+        assert!(root.join(rel).is_file(), "{rel} must exist on disk");
+        for twin in ["codex", "grok"] {
             assert!(
-                root.join(&flavor_rel).is_file(),
-                "{flavor_rel} must exist on disk"
+                !root.join(twin).join(rel).exists(),
+                "{twin}/{rel} must not reappear as a twin copy"
             );
         }
     }
@@ -119,10 +128,17 @@ fn doc_hygiene_reference_is_registered_in_every_flavor() {
         ("CODEX_BUILTIN_SKILLS", CODEX_BUILTIN_SKILLS),
         ("GROK_BUILTIN_SKILLS", GROK_BUILTIN_SKILLS),
     ] {
-        assert!(
-            catalog.iter().any(|b| b.path == rel),
-            "{name} must register {rel}; an unregistered reference is never installed"
+        let entry = catalog.iter().find(|b| b.path == rel).unwrap_or_else(|| {
+            panic!("{name} must register {rel}; an unregistered reference is never installed")
+        });
+        assert_eq!(
+            entry.content,
+            load(rel),
+            "{name} {rel} must embed the canonical file"
         );
+        if let Some(canonical) = &canonical {
+            assert_eq!(entry.content, canonical.as_str(), "{name} {rel} drifted from the file on disk");
+        }
     }
 }
 
@@ -324,12 +340,19 @@ fn writing_for_agents_meets_the_bar_it_sets_for_other_skills() {
             body.contains("Use when"),
             "{flavor_rel} must pin the \"Use when …\" description convention"
         );
-        // The three-mirror rule.
-        assert!(
-            body.contains("codex") && body.contains("grok"),
-            "{flavor_rel} must state the three-mirror rule (claude canonical + codex + \
-             grok twins)"
-        );
+        // The one-tree rule (audit D1): one canonical copy with bare tool
+        // names, no codex/grok twin trees, and the named per-harness files.
+        for marker in [
+            "is the one copy",
+            "no `codex/` or `grok/` twin tree",
+            "Name Cassy tools by bare name",
+            "three Codex-only ones under `builtins/codex/`",
+        ] {
+            assert!(
+                body.contains(marker),
+                "{flavor_rel} must state the one-tree rule ({marker:?} missing)"
+            );
+        }
         // A line budget, and the absorbed skill mechanics.
         assert!(
             body.contains("80 lines"),

@@ -863,8 +863,8 @@ fn call_shape_lint_flags_known_bad_shapes() {
         ),
         ("`system action=status`", "system action=status: unknown action"),
         (
-            "`mcp__cas__factory action=spawn_workers count=1`",
-            "factory action=spawn_workers: unknown action",
+            "`mcp__cas__coordination action=spawn_workers count=1`",
+            "coordination action=spawn_workers: unknown action",
         ),
     ];
     for (text, expected) in cases {

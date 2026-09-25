@@ -208,7 +208,7 @@ await expect(page.getByRole('navigation')).toMatchAriaSnapshot(`
 
 | Component | Issue | Recommended selector |
 |---|---|---|
-| `<q-btn>` | Nested `<span>` breaks `getByRole('button')` | `page.getByText('Label')` or `page.locator('button', { hasText: 'Label' })` |
+| `<q-btn>` | Renders a real `<button>`, so `getByRole('button', { name })` works; with `to` or `href` it renders a link | `page.getByRole('button', { name: 'Label' })`, or `page.getByRole('link', { name: 'Label' })` when it has `to`/`href` |
 | `<q-input>` | Label wrapper around `<input>` | `page.getByLabel('Label')` or `page.getByRole('textbox', { name: 'Label' })` |
 | `<q-select>` | Custom `<div role="combobox">`; options teleport to a `q-menu` | `page.getByRole('combobox')`, then `page.getByRole('option', { name }).visible()` |
 | `<q-dialog>` | `.q-dialog` wrapper with backdrop | `page.getByRole('dialog')`, or `page.locator('.your-dialog-class')` scoped to your class |
@@ -273,7 +273,7 @@ Configure these in `playwright.config.ts`. The full config is in `references/aut
 | List the failed actions | `npx playwright trace actions --errors-only` (or `--grep <title>`) |
 | Show one action, its errors and console | `npx playwright trace action <id>`, `trace errors`, `trace console` |
 | Inspect the DOM snapshot around an action | `npx playwright trace snapshot <id> --phase before` (`action` / `after`) |
-| Step through a test from the terminal (1.59+) | `npx playwright test <file> --debug=cli`, then `npx playwright cli attach` and `step-over` / `resume` |
+| Step through a test from the terminal (1.62+) | Start `npx playwright test <file> --debug=cli` in the background, then `npx playwright cli attach <session>`; every later command needs `-s=<session>` (see `cas-playwright-debug` §2) |
 | Open the trace UI (humans) | `npx playwright show-trace test-results/<test>/trace.zip` |
 
 Read the trace before changing a locator or adding a wait. The trace's aria snapshot shows what the locator could see at the moment it failed.
@@ -294,7 +294,7 @@ The old `@playwright/experimental-ct-vue` packages are no longer updated. Do not
 | 500 on protected page (SSR app) | `page.goto()` hit SSR middleware, can't see IndexedDB tokens | Use `navigateTo()` for client-side routing |
 | 500 on protected page (SPA app) | Auth store missing from localStorage | Seed Pinia auth store before navigation |
 | Redirects to sign-in after storageState | Missing `firebase:authUser:*` or Pinia store key | Seed both keys; wait for persistence before saving storageState |
-| `getByRole('button')` times out | Quasar `<q-btn>` nested spans | `getByText()` or `locator('button', { hasText })` |
+| `getByRole('button')` times out on a Quasar button | The `<q-btn>` has `to`/`href`, so it renders role `link` | `getByRole('link', { name })` |
 | Strict-mode error on a Quasar option or menu item | Hidden teleported copies also match | Add `.visible()` |
 | NuxtLink click does nothing | Click fires before hydration | Wait for hydration (see "Hydration timing") |
 | Page stuck / never loads | Missing Firebase API mocks (addInitScript pattern) | Mock `securetoken.googleapis.com` and `identitytoolkit.googleapis.com` |

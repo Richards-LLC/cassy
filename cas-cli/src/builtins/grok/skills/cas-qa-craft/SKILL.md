@@ -1,13 +1,15 @@
 ---
 name: cas-qa-craft
-description: Use when a factory task has a non-empty demo_statement and its observable user flow needs evidence from the real build before close.
+description: Use when a factory delivery needs QA evidence before close — a non-empty demo_statement, a changed user-facing path, or a touched user journey — proven against the real build.
 managed_by: cas
 ---
 
-# Demo-statement QA
+# Delivery QA evidence
 
-Turn a non-empty task `demo_statement` into a capped exploration matrix and
-prove it against the named build. This is an evidence pass, not a fixture test
+Turn a delivery's QA trigger into a capped exploration matrix and prove it
+against the named build. The close gate fires on any of three triggers: a
+non-empty `demo_statement`, a diff that touches a `qa.user_facing_paths` glob,
+or a touched journey in `docs/qa/journeys.md`. This is an evidence pass, not a fixture test
 and not a substitute for unit or integration tests. Time-box the whole pass to
 **30 minutes**; an honest incomplete ledger beats a late, invented result.
 For an epic with child demos, use the supervisor's
@@ -21,20 +23,31 @@ instead of the procedure below.
 
 1. Read the active task with `task action=show`; name the binary version or
    commit SHA and write a one-line scope sentence before exercising anything.
-   If `demo_statement` is empty and no child has one, do not invent a matrix
-   or invoke this skill.
-2. Build the exploration matrix with [references/matrix-builder.md](references/matrix-builder.md):
+   Check the three triggers the close gate uses. If the `demo_statement` is
+   empty and no child has one, and no user-facing path or journey is touched,
+   stop: do not invent a matrix. With no demo, row one comes from the touched
+   path or journey.
+2. **Telemetry sweep, first.** Read `[qa] telemetry_sweep`. If it is set, run
+   it read-only from the project root as described in
+   [references/telemetry-sweep.md](references/telemetry-sweep.md), write
+   `sweep: configured — <path>` in the ledger header, and add each valid
+   finding as a `telemetry sweep` row labeled `eyewitness/telemetry`. If it is
+   unset, write the exact header line `sweep: not configured`.
+3. Build the exploration matrix with [references/matrix-builder.md](references/matrix-builder.md):
    derive the first row from the demo, then add **at least three unmentioned
    conditions**, at least one adjacent surface, and no replay cells after row
    one. Include empty, failure/timeout, revisit, resize/phone, or keyboard
    conditions as risk warrants. Cap the matrix at **8 cells**. Write each
-   expected result in the user's words before running its cell.
-3. Write the ledger to `~/.cas/artifacts/<task-id>/LEDGER.md` using
+   expected result in the user's words before running its cell. When the
+   change touches a user journey, walk it from the real entry point to the
+   user's goal and score the experience, not just pass/fail
+   ([references/journeys.md](references/journeys.md)).
+4. Write the ledger to `~/.cas/artifacts/<task-id>/LEDGER.md` using
    [references/evidence-ledger.md](references/evidence-ledger.md). Drive every
    cell against the real build: Playwright using project/`cas-playwright-debug`
    conventions for web or hub surfaces, or the real binary for CLI. Register
    long-lived servers through `cas-servers`; never substitute fixtures.
-4. Capture one screenshot or terminal capture per cell, and label every row
+5. Capture one screenshot or terminal capture per cell, and label every row
    `source-inferred`, `fixture`, `real-build`, or `eyewitness`. A label weaker
    than the cell needs is `NOT EXERCISED`, never `PASS`; never write “partial”.
    When the 30-minute box expires, mark every unrun cell `NOT EXERCISED`.
@@ -51,11 +64,11 @@ instead of the procedure below.
      `scripts/visual-qa.mjs --strict` output, and a cas-ui-craft critique
      score
    Cite its `bundle.json` in a `platform_proof` note and in the close reason.
-5. Grep the touched feature for `MIN_`, `MAX_`, `_MINUTES`, `_MS`, `_SECS`,
+6. Grep the touched feature for `MIN_`, `MAX_`, `_MINUTES`, `_MS`, `_SECS`,
    `THRESHOLD`, `GRACE`, `DEBOUNCE`, and `RETRY`; record whether each constant is
    predictable from the user's visible contract. For terminal states, dump all
    visible text across surfaces and flag contradictory claims.
-6. Record one task per defect found; do not patch from this QA pass. Add the
+7. Record one task per defect found; do not patch from this QA pass. Add the
    ledger path, build revision, label split, and verdict counts to a task note
    and the `task action=close` reason. Stop registered servers before close.
 
@@ -82,29 +95,3 @@ framework-specific diagnosis, `cas-servers` owns process lifecycle, and the
 task verifier owns judgment. Add automation-caused artifacts to the ledger's
 honesty section. Do not modify the verifier to make a missing or failing
 capture pass.
-
-## Telemetry sweep
-
-Before building the matrix, read `[qa] telemetry_sweep`. If it is configured,
-resolve the project-relative executable from the project root and run it
-read-only as the first QA step. Pass the task's reporter with
-`--reporter <value>` when one is present; omit that flag otherwise. Disable
-shell tracing, do not print environment variables, credentials, or raw event
-payloads, and save only the contract stdout/stderr under the task artifact
-directory.
-
-The command emits one tab-delimited line per finding with exactly
-`kind`, `subject`, `count`, `people`, `window`, and `sample` fields. `kind` is
-one of `NEW`, `RISING`, `HIGH_RATE`, or `BLACKOUT`; `HIGH_RATE` is the
-events-per-person finding. Reject malformed lines as sweep errors rather than
-inventing findings. Write `sweep: configured — <path>` in the ledger header,
-then add every valid finding as a `telemetry sweep` row labeled
-`eyewitness/telemetry` using [references/telemetry-sweep.md](references/telemetry-sweep.md).
-If it is unset, write the exact header line `sweep: not configured` and
-continue the ordinary matrix.
-
-## User journeys
-
-Walk the user journeys a change touches, from the real entry point to the
-user's goal, and score the experience, not just pass/fail. User-facing epics
-keep `docs/qa/journeys.md` current. See [references/journeys.md](references/journeys.md).

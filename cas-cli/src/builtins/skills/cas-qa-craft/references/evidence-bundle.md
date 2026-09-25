@@ -154,9 +154,14 @@ For polish evidence, also score the surface with the cas-ui-craft
 `references/critique-rubric.md` into `critique.md`. Then write `bundle.json`.
 The floor is distinctiveness, fit, and hierarchy each ≥ 4, and no dimension at
 0. A score below the floor is a defect task, not a note. If the project has no
-`scripts/visual-qa.mjs`, take the four renders at 1280×800 and 390×800 in light
-and dark with `page.screenshot`. Set `visual_qa_status: "unavailable"` and say
-so in the ledger's Honesty section. Point `BASE_URL` at your own local serve of
+`scripts/visual-qa.mjs`, run the copy that ships with the cas-ui-craft skill:
+`cas-ui-craft/scripts/visual-qa.mjs` in the harness skill directory
+(`.claude/skills/`, `.codex/skills/` or `.grok/skills/`). Only when neither
+exists, take the four renders at 1280×800 and 390×800 in light and dark with
+`page.screenshot`, set `visual_qa_status: "unavailable"` and say so in the
+ledger's Honesty section. The close gate accepts only `"pass"` without a
+supervisor override, so ask for one with a `blocker=true` message before
+closing. Point `BASE_URL` at your own local serve of
 the delivered commit's build, never the deployed site.
 
 Cite the bundle in the ledger rows: the evidence path is `qa/M01.png`. Also

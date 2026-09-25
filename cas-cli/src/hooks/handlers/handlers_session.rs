@@ -33,6 +33,24 @@ pub fn handle_session_start(
 
     // Record session start for analytics and register agent
     if let Some(cas_root) = cas_root {
+        // cas-8563b (D4): prove per role and harness that SessionStart fired.
+        // Claude workers on a custom config dir were measured not to receive
+        // it (no `sessions` row after 2026-09-11 against 117 registrations),
+        // so the launch brief is the canonical worker contract. This event is
+        // the running check on that decision. No-op outside a factory session.
+        let custom_config_dir = std::env::var("CLAUDE_CONFIG_DIR")
+            .ok()
+            .filter(|dir| !dir.trim().is_empty())
+            .is_some();
+        let _ = crate::hooks::handlers::session_hygiene::append_factory_session_event(
+            cas_root,
+            "session_start_fired",
+            &[
+                ("session_id", input.session_id.as_str()),
+                ("tool_prefix", crate::harness_policy::own_tool_prefix()),
+                ("custom_config_dir", if custom_config_dir { "true" } else { "false" }),
+            ],
+        );
         let mut stores = HookStores::new(cas_root);
 
         if let Some(sqlite_store) = stores.sqlite() {
@@ -690,6 +708,32 @@ mod large_artifact_staging_tests {
             3,
             "configured context_limit must inject exactly three memories: {context}"
         );
+    }
+
+    /// cas-8563b (D4): every factory SessionStart leaves a
+    /// `session_start_fired` record naming its role, so a role whose hook
+    /// never fires shows up as missing rows.
+    #[test]
+    fn session_start_records_that_it_fired_for_its_role() {
+        let tmp = tempfile::tempdir().unwrap();
+        crate::store::open_agent_store(tmp.path()).unwrap().init().unwrap();
+        let mut env = staging_env("worker");
+        env.set("CAS_FACTORY_SESSION", "d4-session");
+        env.set("CAS_AGENT_NAME", "d4-worker");
+        let input = session_input(tmp.path().to_str().unwrap());
+        let _ = handle_session_start(&input, Some(tmp.path()));
+        let logs: String = std::fs::read_dir(tmp.path().join("logs"))
+            .expect("factory session log dir")
+            .filter_map(Result::ok)
+            .filter_map(|entry| std::fs::read_to_string(entry.path()).ok())
+            .collect();
+        let fired = logs
+            .lines()
+            .find(|line| line.contains("\"session_start_fired\""))
+            .unwrap_or_else(|| panic!("no session_start_fired record: {logs}"));
+        assert!(fired.contains("\"role\":\"worker\""), "{fired}");
+        assert!(fired.contains("\"agent\":\"d4-worker\""), "{fired}");
+        assert!(fired.contains("\"session_id\":\"staging-session\""), "{fired}");
     }
 
     /// cas-dc1b (M36): the banner names the reader's own coordination tool.

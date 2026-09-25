@@ -1285,7 +1285,7 @@ fn knowledge_build_verbose_and_status_full_explain_a_failed_source() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            ".claude/agents/duplicate-detector.md",
+            ".claude/agents/task-verifier.md",
         ))
         .stdout(predicate::str::contains("provider refused this source"));
 
@@ -1298,7 +1298,7 @@ fn knowledge_build_verbose_and_status_full_explain_a_failed_source() {
     let status: serde_json::Value = serde_json::from_slice(&status_json.stdout).unwrap();
     assert_eq!(
         status["failed_sources"][0]["path"],
-        ".claude/agents/duplicate-detector.md"
+        ".claude/agents/task-verifier.md"
     );
     assert!(
         status["failed_sources"][0]["error"]

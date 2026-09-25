@@ -596,7 +596,7 @@ pub struct RuleRequest {
     /// Action to perform
     #[schemars(
         schema_with = "crate::actions::rule_action_schema",
-        description = "Operation. `list` returns proven rules only; `helpful` promotes a rule to proven; `delete` tombstones; `sync` writes .claude/rules/; `check_similar` finds similar existing rules."
+        description = "Operation. `list` returns proven rules only; `helpful` votes; `promote` (needs change_note) makes a rule proven; `delete` tombstones; `sync` writes .claude/rules/; `check_similar` finds similar existing rules."
     )]
     pub action: String,
 
@@ -662,7 +662,7 @@ pub struct RuleRequest {
     #[serde(default)]
     pub changed_by: Option<String>,
 
-    /// Reason recorded in rule history.
+    /// Reason recorded in rule history (required for promote).
     #[serde(default)]
     pub change_note: Option<String>,
 }

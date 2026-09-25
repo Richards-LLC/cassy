@@ -844,6 +844,13 @@ impl CasService {
         self.inner.cas_rule_helpful(Parameters(inner_req)).await
     }
 
+    pub(super) async fn rule_promote(&self, req: RuleRequest) -> Result<CallToolResult, McpError> {
+        let id = req.id.ok_or_else(|| self.missing_id("rule", "promote"))?;
+        self.inner
+            .cas_rule_promote(id, req.change_note, req.changed_by)
+            .await
+    }
+
     pub(super) async fn rule_harmful(&self, req: RuleRequest) -> Result<CallToolResult, McpError> {
         use crate::mcp::tools::IdRequest;
         let inner_req = IdRequest {

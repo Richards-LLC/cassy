@@ -94,12 +94,6 @@ pub(crate) fn feature_map_drift_message(
     )
 }
 
-pub(crate) fn feature_map_read_error(task_id: &str, detail: &str) -> String {
-    format!(
-        "⚠️ FEATURE MAP CHECK FAILED\n\nTask {task_id} could not read its target repository's feature map: {detail}. No close was recorded."
-    )
-}
-
 /// How to find, check and present a `commit_receipt` — shared by every
 /// refusal that asks for one.
 pub(crate) fn commit_receipt_recovery_steps(

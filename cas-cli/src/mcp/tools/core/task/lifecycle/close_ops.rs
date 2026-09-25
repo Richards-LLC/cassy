@@ -522,19 +522,30 @@ fn feature_map_drift(
     repo: &std::path::Path,
     changed_paths: &[String],
     task_notes: &str,
-) -> Result<Vec<String>, String> {
+) -> Vec<String> {
     let features_dir = repo.join("docs/qa/features");
     if !features_dir.is_dir()
         || changed_paths.is_empty()
         || feature_map_unchanged_decision(task_notes)
     {
-        return Ok(Vec::new());
+        return Vec::new();
     }
     let mut stale = Vec::new();
-    let entries = std::fs::read_dir(&features_dir)
-        .map_err(|error| format!("cannot read {}: {error}", features_dir.display()))?;
+    let entries = match std::fs::read_dir(&features_dir) {
+        Ok(entries) => entries,
+        Err(error) => {
+            tracing::warn!(path = %features_dir.display(), %error, "feature-map close check skipped unreadable directory");
+            return Vec::new();
+        }
+    };
     for entry in entries {
-        let entry = entry.map_err(|error| format!("cannot read feature-map entry: {error}"))?;
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                tracing::warn!(%error, "feature-map close check skipped unreadable entry");
+                continue;
+            }
+        };
         let file = entry.path();
         if file.extension().and_then(std::ffi::OsStr::to_str) != Some("md") || !file.is_file() {
             continue;
@@ -543,10 +554,16 @@ fn feature_map_drift(
         if changed_paths.iter().any(|path| path == &relative) {
             continue;
         }
-        let source = std::fs::read_to_string(&file)
-            .map_err(|error| format!("cannot read {}: {error}", relative))?;
+        let source = match std::fs::read_to_string(&file) {
+            Ok(source) => source,
+            Err(error) => {
+                tracing::warn!(path = %file.display(), %error, "feature-map close check skipped unreadable feature file");
+                continue;
+            }
+        };
         let mut in_touches = false;
         let mut touched = false;
+        let mut valid = true;
         for line in source.lines() {
             let line = line.trim();
             if line == "## Touches" {
@@ -563,8 +580,14 @@ fn feature_map_drift(
             else {
                 continue;
             };
-            let glob = glob::Pattern::new(pattern)
-                .map_err(|error| format!("invalid Touches glob in {relative}: {pattern}: {error}"))?;
+            let glob = match glob::Pattern::new(pattern) {
+                Ok(glob) => glob,
+                Err(error) => {
+                    tracing::warn!(feature = %relative, %pattern, %error, "feature-map close check skipped malformed feature file");
+                    valid = false;
+                    break;
+                }
+            };
             if changed_paths.iter().any(|path| {
                 glob.matches_with(
                     path,
@@ -578,12 +601,12 @@ fn feature_map_drift(
                 touched = true;
             }
         }
-        if touched {
+        if valid && touched {
             stale.push(relative);
         }
     }
     stale.sort();
-    Ok(stale)
+    stale
 }
 
 #[cfg(test)]
@@ -605,10 +628,7 @@ mod feature_map_tests {
     #[test]
     fn no_feature_folder_is_a_no_op() {
         let dir = tempfile::tempdir().unwrap();
-        assert_eq!(
-            feature_map_drift(dir.path(), &["src/profile/edit.ts".into()], ""),
-            Ok(vec![])
-        );
+        assert!(feature_map_drift(dir.path(), &["src/profile/edit.ts".into()], "").is_empty());
     }
 
     #[test]
@@ -616,7 +636,7 @@ mod feature_map_tests {
         let dir = fixture();
         assert_eq!(
             feature_map_drift(dir.path(), &["src/profile/edit.ts".into()], ""),
-            Ok(vec!["docs/qa/features/profile.md".into()]),
+            vec!["docs/qa/features/profile.md".to_string()],
         );
     }
 
@@ -632,7 +652,7 @@ mod feature_map_tests {
                 ],
                 "",
             ),
-            Ok(vec![]),
+            Vec::<String>::new(),
         );
     }
 
@@ -642,7 +662,7 @@ mod feature_map_tests {
         let notes = "[2026-09-25 21:00] ✅ DECISION map unchanged: UI route still has the same steps";
         assert_eq!(
             feature_map_drift(dir.path(), &["src/profile/edit.ts".into()], notes),
-            Ok(vec![])
+            Vec::<String>::new()
         );
     }
 
@@ -655,9 +675,33 @@ mod feature_map_tests {
         ] {
             assert_eq!(
                 feature_map_drift(dir.path(), &["src/profile/edit.ts".into()], notes),
-                Ok(vec!["docs/qa/features/profile.md".into()]),
+                vec!["docs/qa/features/profile.md".to_string()],
             );
         }
+    }
+
+    #[test]
+    fn invalid_glob_in_one_file_does_not_hide_drift_in_another() {
+        let dir = fixture();
+        std::fs::write(
+            dir.path().join("docs/qa/features/invalid.md"),
+            "# Invalid\n\n## Touches\n\n- `[`\n",
+        )
+        .unwrap();
+        assert_eq!(
+            feature_map_drift(dir.path(), &["src/profile/edit.ts".into()], ""),
+            vec!["docs/qa/features/profile.md".to_string()],
+        );
+    }
+
+    #[test]
+    fn invalid_glob_alone_never_refuses_close() {
+        let dir = tempfile::tempdir().unwrap();
+        let features = dir.path().join("docs/qa/features");
+        std::fs::create_dir_all(&features).unwrap();
+        std::fs::write(features.join("invalid.md"), "# Invalid\n\n## Touches\n\n- `[`\n")
+            .unwrap();
+        assert!(feature_map_drift(dir.path(), &["src/profile/edit.ts".into()], "").is_empty());
     }
 }
 
@@ -7486,24 +7530,17 @@ impl CasCore {
                 .as_ref()
                 .map(|context| context.repo_root.as_path())
                 .unwrap_or(close_project_root.as_path());
-            match feature_map_drift(
+            let stale_feature_maps = feature_map_drift(
                 target_repo,
                 delivered_paths.as_deref().unwrap_or(&[]),
                 &task.notes,
-            ) {
-                Ok(stale) if !stale.is_empty() => {
-                    return Ok(Self::tool_error(gate_text::feature_map_drift_message(
-                        &task.id,
-                        &stale,
-                        crate::mcp::tools::core::guidance::caller_prefix(),
-                    )));
-                }
-                Err(detail) => {
-                    return Ok(Self::tool_error(gate_text::feature_map_read_error(
-                        &task.id, &detail,
-                    )));
-                }
-                Ok(_) => {}
+            );
+            if !stale_feature_maps.is_empty() {
+                return Ok(Self::tool_error(gate_text::feature_map_drift_message(
+                    &task.id,
+                    &stale_feature_maps,
+                    crate::mcp::tools::core::guidance::caller_prefix(),
+                )));
             }
             let mut scoped_proof_cache = ScopedProofTargetCache::default();
             // The tip this close delivers: the named commit receipt, else the

@@ -1,7 +1,8 @@
 ---
 name: cas-viktor
 description: Use when a task needs long-horizon or parallel research, independent external verification, or a durable answer from Viktor through the managed CAS gateway.
-managed_by: cas
+metadata:
+  managed_by: cas
 ---
 
 # Viktor delegation

@@ -1,7 +1,8 @@
 ---
 name: cas-cli-craft
 description: Use when designing or critiquing what a CLI or TUI prints for a person — status screens, doctor reports, tables, progress, errors, receipts, the human side of `--json`. HTML surfaces belong to cas-ui-craft.
-managed_by: cas
+metadata:
+  managed_by: cas
 ---
 
 # CLI craft

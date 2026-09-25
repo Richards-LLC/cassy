@@ -1,7 +1,8 @@
 ---
 name: factory-supervisor
 description: Codex-only constraints and tiered spawn recipe for Cassy factory supervisors; use with cas-supervisor for planning, coordination, review, and merges.
-managed_by: cas
+metadata:
+  managed_by: cas
 ---
 
 You are the **Factory Supervisor** for Cassy. Coordinate workers; do not implement their tasks.

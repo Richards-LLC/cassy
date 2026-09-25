@@ -38,9 +38,15 @@ const OWNED_SKILLS: [&str; 10] = [
     "cas-ideate",
 ];
 
-/// Claude Code truncates a skill description past this length; a truncated
-/// description silently loses its trigger clause.
+/// 1,024 = Agent Skills spec / Skills API / Codex / OpenCode hard limit on a
+/// description. (Claude Code's own listing truncates `description` plus
+/// `when_to_use` at 1,536.)
 const DESCRIPTION_MAX_CHARS: usize = 1024;
+
+/// House budget. Every harness fits all skill descriptions into one shared
+/// listing budget (Claude: 1% of context; Codex: 2%, or 8,000 chars when the
+/// window is unknown) and drops or shortens descriptions first on overflow.
+const HOUSE_DESCRIPTION_MAX_CHARS: usize = 250;
 
 /// Extract the YAML frontmatter block of a markdown file, if present.
 fn frontmatter(content: &str) -> Option<&str> {
@@ -115,6 +121,76 @@ fn every_builtin_skill_description_is_present_and_within_the_harness_limit() {
                     ))
                 }
                 Some(_) => {}
+            }
+        }
+    }
+    assert!(problems.is_empty(), "\n  {}\n", problems.join("\n  "));
+}
+
+/// Keep the key use case first and every description within the house budget,
+/// for every shipped skill in every flavor, not only the owned set.
+#[test]
+fn every_builtin_skill_description_fits_the_house_budget() {
+    let mut problems = Vec::new();
+    for (label, flavor) in FLAVORS {
+        for (path, content) in skill_files(flavor, label) {
+            if let Some(description) = field(content, "description") {
+                let chars = description.chars().count();
+                if chars > HOUSE_DESCRIPTION_MAX_CHARS {
+                    problems.push(format!(
+                        "{path}: description is {chars} chars, over the {HOUSE_DESCRIPTION_MAX_CHARS}-char house budget"
+                    ));
+                }
+            }
+        }
+    }
+    assert!(problems.is_empty(), "\n  {}\n", problems.join("\n  "));
+}
+
+/// Frontmatter must parse as YAML (strict loaders such as Codex skip a skill
+/// whose frontmatter does not), and the Cassy marker lives under `metadata`:
+/// claude.ai, the Skills API and the open-standard validator reject any
+/// top-level key outside name, description, license, compatibility,
+/// metadata and allowed-tools.
+#[test]
+fn every_builtin_frontmatter_is_yaml_with_metadata_managed_by() {
+    let mut problems = Vec::new();
+    for (label, flavor) in FLAVORS {
+        let files = builtin_catalog::skills(flavor)
+            .iter()
+            .chain(builtin_catalog::agents(flavor));
+        for builtin in files {
+            if !builtin.path.ends_with(".md") {
+                continue;
+            }
+            let Some(block) = frontmatter(builtin.content) else {
+                continue;
+            };
+            let parsed: serde_yaml::Value = match serde_yaml::from_str(block) {
+                Ok(parsed) => parsed,
+                Err(error) => {
+                    problems.push(format!(
+                        "{label}/{}: frontmatter is not YAML: {error}",
+                        builtin.path
+                    ));
+                    continue;
+                }
+            };
+            if parsed.get("managed_by").is_some() {
+                problems.push(format!(
+                    "{label}/{}: top-level managed_by; use metadata.managed_by",
+                    builtin.path
+                ));
+            }
+            let nested = parsed
+                .get("metadata")
+                .and_then(|metadata| metadata.get("managed_by"))
+                .and_then(serde_yaml::Value::as_str);
+            if block.contains("managed_by") && nested != Some("cas") {
+                problems.push(format!(
+                    "{label}/{}: managed_by must be `metadata.managed_by: cas`",
+                    builtin.path
+                ));
             }
         }
     }

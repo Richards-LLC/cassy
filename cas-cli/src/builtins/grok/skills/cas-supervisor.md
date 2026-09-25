@@ -1,7 +1,8 @@
 ---
 name: cas-supervisor
-description: Use when supervising a factory EPIC: plan work, assign and coordinate workers, monitor progress, review delivery, or merge completed tasks.
-managed_by: cas
+description: Use when supervising a factory EPIC — planning work, assigning and coordinating workers, monitoring progress, reviewing delivery, or merging completed tasks.
+metadata:
+  managed_by: cas
 ---
 
 # Factory Supervisor

@@ -277,7 +277,8 @@ pub fn update_claude_md(project_root: &Path) -> anyhow::Result<bool> {
 pub(crate) const CAS_SKILL: &str = r#"---
 name: cas
 description: Coding Agent System - unified memory, tasks, rules, and skills. Use when you need to remember something, track work, search past context, or manage tasks. (project)
-managed_by: cas
+metadata:
+  managed_by: cas
 ---
 
 # Cassy - Coding Agent System
@@ -291,7 +292,8 @@ Use Cassy MCP tools, not built-in TodoWrite or plan mode, for work that must out
 Each tool's MCP schema lists its actions and parameters; follow it rather than a remembered parameter list.
 "#;
 
-/// Check if a file is managed by Cassy (has `managed_by: cas` in frontmatter)
+/// Check if a file is managed by Cassy (`metadata.managed_by: cas`, or the
+/// legacy top-level `managed_by: cas`; the substring match covers both)
 pub(crate) fn is_skill_managed_by_cas(content: &str) -> bool {
     if let Some(stripped) = content.strip_prefix("---") {
         if let Some(end) = stripped.find("---") {

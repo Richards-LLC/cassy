@@ -1,7 +1,8 @@
 ---
 name: cas-cut-release
 description: Use when cutting a Cassy runtime release from an assembled epic.
-managed_by: cas
+metadata:
+  managed_by: cas
 ---
 
 # One-command release train

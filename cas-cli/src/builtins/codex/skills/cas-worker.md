@@ -1,7 +1,8 @@
 ---
 name: cas-worker
 description: Use when acting as a factory worker on an assigned Cassy task, including progress reporting, blocker handling, delivery, and supervisor handoff.
-managed_by: cas
+metadata:
+  managed_by: cas
 disallowed-tools:
   - TodoWrite
   - EnterPlanMode

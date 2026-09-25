@@ -1,7 +1,8 @@
 ---
 name: cas-frontend-engineering
 description: Use when turning an approved concept brief into accessible, performant frontend implementation with explicit component, state, token, motion, and Playwright acceptance.
-managed_by: cas
+metadata:
+  managed_by: cas
 ---
 
 # Frontend engineering

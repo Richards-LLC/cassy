@@ -1,7 +1,8 @@
 ---
 name: codemap
 description: Use when the user asks for a codemap, or when .claude/CODEMAP.md is missing or stale.
-managed_by: cas
+metadata:
+  managed_by: cas
 ---
 
 # Codemap

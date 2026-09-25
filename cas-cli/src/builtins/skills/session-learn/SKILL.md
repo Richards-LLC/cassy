@@ -1,7 +1,8 @@
 ---
 name: session-learn
 description: Use when asked to extract or save session learnings; classifies the session into concept, entity, correction, pattern, idea, decision, and gap drafts, then hands each accepted draft to cas-memory-management.
-managed_by: cas
+metadata:
+  managed_by: cas
 ---
 
 # session-learn — 7-signal session classifier

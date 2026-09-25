@@ -1,7 +1,8 @@
 ---
 name: cas-servers
 description: Use when starting, inspecting, or stopping a long-lived local server, watcher, API stub, preview, or Playwright webServer.
-managed_by: cas
+metadata:
+  managed_by: cas
 ---
 
 # Long-running servers go through the registry

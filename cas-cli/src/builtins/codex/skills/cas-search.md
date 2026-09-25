@@ -1,7 +1,8 @@
 ---
 name: cas-search
 description: Use when you need to find Cassy context, code, a symbol, a file pattern, or a prior task, memory, rule, or skill.
-managed_by: cas
+metadata:
+  managed_by: cas
 ---
 
 # Cassy Search

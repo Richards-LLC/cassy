@@ -1,9 +1,9 @@
 ---
 name: cas-writing-for-agents
 description: Use when creating or editing a skill, AGENTS.md, CLAUDE.md, or an agent-facing reference document.
-managed_by: cas
 license: MIT
 metadata:
+  managed_by: cas
   author: Matt Pocock
   upstream: https://github.com/mattpocock/skills
   provenance: Adapted from mattpocock/skills (MIT, © 2026 Matt Pocock).

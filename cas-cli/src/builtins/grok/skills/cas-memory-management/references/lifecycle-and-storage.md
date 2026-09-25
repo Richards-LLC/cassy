@@ -1,5 +1,6 @@
 ---
-managed_by: cas
+metadata:
+  managed_by: cas
 ---
 
 # Memory Lifecycle and Record Choice

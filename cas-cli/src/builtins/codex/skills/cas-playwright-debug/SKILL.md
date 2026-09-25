@@ -1,7 +1,8 @@
 ---
 name: cas-playwright-debug
 description: Use when a Playwright test fails, flakes, or times out and you need the root cause and a fix — trace CLI triage, `--debug=cli` stepping, and flake control for Playwright 1.59+.
-managed_by: cas
+metadata:
+  managed_by: cas
 ---
 
 # Playwright debugging

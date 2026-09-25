@@ -2179,9 +2179,13 @@ pub fn required_dir_for(cap: &RequiredCapability, harness: SupervisorCli) -> Opt
     }
 }
 
-/// Check if a file is managed by Cassy (has `managed_by: cas` in frontmatter)
+/// Check if a file is managed by Cassy.
+///
+/// The portable marker is `metadata:` → `managed_by: cas`; a top-level
+/// `managed_by: cas` (the form shipped before 3.32) is still accepted so
+/// installed copies carrying it stay managed and get updated.
 pub fn is_managed_by_cas(content: &str) -> bool {
-    // Check frontmatter for managed_by: cas
+    // Substring match covers both the nested and the legacy top-level form.
     if let Some(stripped) = content.strip_prefix("---") {
         if let Some(end) = stripped.find("---") {
             let frontmatter = &content[3..3 + end];
@@ -4655,7 +4659,10 @@ This is the body content."#;
     #[test]
     fn test_is_managed_by_cas() {
         let managed = "---\nname: test\nmanaged_by: cas\n---\nContent";
-        assert!(is_managed_by_cas(managed));
+        assert!(is_managed_by_cas(managed), "legacy top-level form");
+
+        let nested = "---\nname: test\nmetadata:\n  managed_by: cas\n---\nContent";
+        assert!(is_managed_by_cas(nested), "portable metadata form");
 
         let not_managed = "---\nname: test\n---\nContent";
         assert!(!is_managed_by_cas(not_managed));

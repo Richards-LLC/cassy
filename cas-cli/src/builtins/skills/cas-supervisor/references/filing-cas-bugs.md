@@ -16,7 +16,7 @@ overridden for a fork or alternate deployment:
 - **Cassy-system defect:** `issues.components.cassy` — Cassy runtime, hooks,
   MCP, factory, and builtin skills. Downstream repositories consume Cassy and
   must not patch it locally.
-- **MechaCassy defect:** `issues.components.mecha_cassy` — the Slack hub and
+- **Violet (formerly MechaCassy) defect:** `issues.components.violet` — the Slack hub and
   message-delivery component.
 - **Cassy Cloud defect:** `issues.components.cloud` — cloud sync, hub relay,
   pairing, and related services.
@@ -30,7 +30,7 @@ checkout from this repository.
 
 Inspect all four resolved destinations with:
 `cas config get issues.repo`, `cas config get issues.components.cassy`,
-`cas config get issues.components.mecha_cassy`, and
+`cas config get issues.components.violet`, and
 `cas config get issues.components.cloud`. Configure the project target with
 `[issues] repo = "owner/repo"`, or use `cas config set issues.repo <owner/repo>`;
 component overrides use the corresponding `issues.components.*` key. Do not derive

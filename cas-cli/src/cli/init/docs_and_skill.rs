@@ -19,7 +19,7 @@ First use each session — load MCP schemas: ToolSearch(query="select:mcp__cas__
 
 Cassy provides persistent context across sessions. Built-in tools are ephemeral.
 
-Bug routing: `cas config get issues.repo` / `issues.components.{cassy,mecha_cassy,cloud}` name the project, Cassy, MechaCassy and Cloud trackers; file operational bugs in the matching repo before moving on.
+Bug routing: `cas config get issues.repo` / `issues.components.{cassy,violet,cloud}` name the project, Cassy, Violet and Cloud trackers; file operational bugs in the matching repo before moving on.
 Release notes: when a merge reaches `staging` or `main`, use the `release-notes` skill and follow docs/release-notes/RUBRIC.md."#;
 
 /// Build the full Cassy section with markers
@@ -27,19 +27,29 @@ pub(crate) fn build_cas_section() -> String {
     format!("{CAS_SECTION_BEGIN}\n{CAS_DIRECTIVE_CONTENT}\n{CAS_SECTION_END}")
 }
 
-/// Returns true if any ancestor directory of `project_root` (from its parent
-/// up to and including `$HOME`) already contains a CLAUDE.md with the Cassy
-/// managed block.
+/// What the nearest-to-root ancestors of a project carry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AncestorBlock {
+    /// No ancestor CLAUDE.md (up to and including `$HOME`) has the block.
+    None,
+    /// At least one ancestor has the block, but none carries the current text.
+    Stale,
+    /// At least one ancestor carries the current block verbatim.
+    Current,
+}
+
+/// Classify the Cassy managed blocks carried by the ancestors of
+/// `project_root` (from its parent up to and including `$HOME`).
 ///
-/// If `project_root` IS `$HOME`, returns false immediately — the root is
+/// If `project_root` IS `$HOME`, returns `None` immediately — the root is
 /// always the canonical injection point, never a "descendant" of itself.
 ///
 /// Paths are canonicalized before comparison to avoid symlink loops.
-fn ancestor_has_cas_block(project_root: &Path) -> bool {
+fn ancestor_cas_block(project_root: &Path) -> AncestorBlock {
     // Resolve $HOME once; if unset or unresolvable, walk to filesystem root.
-    let home: Option<PathBuf> = std::env::var_os("HOME").map(PathBuf::from).map(|h| {
-        h.canonicalize().unwrap_or(h)
-    });
+    let home: Option<PathBuf> = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|h| h.canonicalize().unwrap_or(h));
 
     // Canonicalize project_root to resolve any symlinks in the path.
     let canonical_root = project_root
@@ -49,17 +59,22 @@ fn ancestor_has_cas_block(project_root: &Path) -> bool {
     // If project_root IS $HOME, it is the root anchor — always inject here.
     if let Some(ref home) = home {
         if canonical_root == *home {
-            return false;
+            return AncestorBlock::None;
         }
     }
 
+    let current_section = build_cas_section();
+    let mut found = AncestorBlock::None;
     let mut current = canonical_root.parent();
     while let Some(dir) = current {
         let claude_md = dir.join("CLAUDE.md");
         if claude_md.exists() {
             if let Ok(content) = std::fs::read_to_string(&claude_md) {
+                if content.contains(&current_section) {
+                    return AncestorBlock::Current;
+                }
                 if content.contains(CAS_SECTION_BEGIN) {
-                    return true;
+                    found = AncestorBlock::Stale;
                 }
             }
         }
@@ -74,73 +89,184 @@ fn ancestor_has_cas_block(project_root: &Path) -> bool {
         current = dir.parent();
     }
 
-    false
+    found
 }
 
-/// Update or create CLAUDE.md with Cassy directive section
-/// Returns Ok(true) if file was modified, Ok(false) if no changes needed
-pub fn update_claude_md(project_root: &Path) -> anyhow::Result<bool> {
-    // Skip injection when an ancestor already carries the managed block.
-    // The shallowest ancestor (typically ~/CLAUDE.md) is the canonical copy;
-    // injecting into every descendent project multiplies context noise without value.
-    // Existing duplicate blocks at this level are left untouched (not deleted).
-    if ancestor_has_cas_block(project_root) {
-        return Ok(false);
-    }
+/// The single decision `cas init`, `cas update` and the `cas update
+/// --dry-run` preview all apply to a project's CLAUDE.md, so the preview can
+/// never promise a change that apply will not make (L6 F6).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ClaudeMdPlan {
+    /// Nothing to do.
+    Unchanged,
+    /// Write a new CLAUDE.md with this content.
+    Create { content: String },
+    /// Rewrite the existing CLAUDE.md.
+    Modify {
+        old: String,
+        new: String,
+        description: &'static str,
+    },
+    /// Delete CLAUDE.md: it held only a managed block that an ancestor
+    /// already carries.
+    Delete { old: String },
+}
 
+/// Byte range of the managed block (markers included), if well-formed.
+fn managed_block_range(content: &str) -> Option<(usize, usize)> {
+    let begin = content.find(CAS_SECTION_BEGIN)?;
+    let end = begin + content[begin..].find(CAS_SECTION_END)? + CAS_SECTION_END.len();
+    Some((begin, end))
+}
+
+/// Replace the managed block in `content` with `new_section`.
+fn replace_managed_block(content: &str, begin: usize, end: usize, new_section: &str) -> String {
+    let before = &content[..begin];
+    let after = &content[end..];
+    format!(
+        "{}{}{}{}",
+        before.trim_end(),
+        if before.is_empty() { "" } else { "\n" },
+        new_section,
+        after
+    )
+}
+
+/// Remove the managed block from `content`, joining the surrounding text
+/// with one blank line.
+fn remove_managed_block(content: &str, begin: usize, end: usize) -> String {
+    let before = content[..begin].trim_end();
+    let after = content[end..].trim_start_matches(['\r', '\n']);
+    match (before.is_empty(), after.is_empty()) {
+        (true, _) => after.to_string(),
+        (false, true) => format!("{before}\n"),
+        (false, false) => format!("{before}\n\n{after}"),
+    }
+}
+
+/// True when `path` is tracked in its git repository. When git cannot be run
+/// the answer is unknown, so this says tracked: the caller then only
+/// refreshes, never removes.
+fn is_git_tracked(path: &Path) -> bool {
+    let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else {
+        return false;
+    };
+    match std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["ls-files", "--error-unmatch", "--"])
+        .arg(name)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+    {
+        Ok(status) => status.success(),
+        Err(_) => true,
+    }
+}
+
+/// Decide what should happen to `project_root/CLAUDE.md`.
+///
+/// - No ancestor carries the block: create, refresh, migrate or prepend it
+///   here (this directory is the canonical copy).
+/// - An ancestor carries the current block: a block here is a duplicate that
+///   costs every session its tokens, so remove it — deleting the file when
+///   nothing else is left. No block is ever added. A git-tracked CLAUDE.md is
+///   refreshed instead: its committed block serves every other clone, and
+///   pruning it locally would leave a permanent diff.
+/// - Ancestors carry only a stale block: refresh an existing block here so
+///   the session at least sees the current text; never add a new one.
+pub(crate) fn plan_claude_md(project_root: &Path) -> anyhow::Result<ClaudeMdPlan> {
     let claude_md_path = project_root.join("CLAUDE.md");
     let new_section = build_cas_section();
+    let ancestor = ancestor_cas_block(project_root);
 
-    if claude_md_path.exists() {
-        let content = std::fs::read_to_string(&claude_md_path)?;
+    let content = if claude_md_path.exists() {
+        Some(std::fs::read_to_string(&claude_md_path)?)
+    } else {
+        None
+    };
 
-        // Check for marked section
-        if let (Some(begin_pos), Some(end_pos)) = (
-            content.find(CAS_SECTION_BEGIN),
-            content.find(CAS_SECTION_END),
-        ) {
-            // Replace existing marked section
-            let before = &content[..begin_pos];
-            let after = &content[end_pos + CAS_SECTION_END.len()..];
-            let new_content = format!(
-                "{}{}{}",
-                before.trim_end(),
-                if before.is_empty() { "" } else { "\n" },
-                new_section
-            );
-            let new_content = format!("{new_content}{after}");
+    let Some(content) = content else {
+        return Ok(match ancestor {
+            AncestorBlock::None => ClaudeMdPlan::Create {
+                content: format!("{new_section}\n"),
+            },
+            AncestorBlock::Stale | AncestorBlock::Current => ClaudeMdPlan::Unchanged,
+        });
+    };
 
-            if new_content == content {
-                return Ok(false);
+    if let Some((begin, end)) = managed_block_range(&content) {
+        if ancestor == AncestorBlock::Current && !is_git_tracked(&claude_md_path) {
+            let pruned = remove_managed_block(&content, begin, end);
+            if pruned.trim().is_empty() {
+                return Ok(ClaudeMdPlan::Delete { old: content });
             }
-            std::fs::write(&claude_md_path, new_content)?;
-            return Ok(true);
+            return Ok(ClaudeMdPlan::Modify {
+                old: content,
+                new: pruned,
+                description: "Remove duplicate Cassy section (an ancestor CLAUDE.md carries it)",
+            });
         }
+        let refreshed = replace_managed_block(&content, begin, end, &new_section);
+        if refreshed == content {
+            return Ok(ClaudeMdPlan::Unchanged);
+        }
+        return Ok(ClaudeMdPlan::Modify {
+            old: content,
+            new: refreshed,
+            description: "Update Cassy section in CLAUDE.md",
+        });
+    }
 
-        // Check for old-style directive (migration path)
-        if content.contains("IMPORTANT: USE Cassy FOR TASK AND MEMORY MANAGEMENT") {
-            let new_content = if content.starts_with("# IMPORTANT: USE Cassy") {
-                if let Some(pos) = content.find("---\n\n") {
-                    format!("{}\n\n{}", new_section, &content[pos + 5..])
-                } else if let Some(pos) = content.find("---\n") {
-                    format!("{}\n\n{}", new_section, &content[pos + 4..])
-                } else {
-                    format!("{new_section}\n\n{content}")
-                }
+    // No managed block here. Never add one below an ancestor that has it.
+    if ancestor != AncestorBlock::None {
+        return Ok(ClaudeMdPlan::Unchanged);
+    }
+
+    // Old-style directive (migration path)
+    if content.contains("IMPORTANT: USE Cassy FOR TASK AND MEMORY MANAGEMENT") {
+        let new_content = if content.starts_with("# IMPORTANT: USE Cassy") {
+            if let Some(pos) = content.find("---\n\n") {
+                format!("{}\n\n{}", new_section, &content[pos + 5..])
+            } else if let Some(pos) = content.find("---\n") {
+                format!("{}\n\n{}", new_section, &content[pos + 4..])
             } else {
                 format!("{new_section}\n\n{content}")
-            };
-            std::fs::write(&claude_md_path, new_content)?;
-            return Ok(true);
-        }
+            }
+        } else {
+            format!("{new_section}\n\n{content}")
+        };
+        return Ok(ClaudeMdPlan::Modify {
+            old: content,
+            new: new_content,
+            description: "Migrate Cassy section format in CLAUDE.md",
+        });
+    }
 
-        // Prepend new section to existing content
-        let new_content = format!("{new_section}\n\n{content}");
-        std::fs::write(&claude_md_path, new_content)?;
-        Ok(true)
-    } else {
-        std::fs::write(&claude_md_path, format!("{new_section}\n"))?;
-        Ok(true)
+    // Prepend new section to existing content
+    let new_content = format!("{new_section}\n\n{content}");
+    Ok(ClaudeMdPlan::Modify {
+        old: content,
+        new: new_content,
+        description: "Add Cassy section to CLAUDE.md",
+    })
+}
+
+/// Update, create, prune or delete CLAUDE.md per [`plan_claude_md`].
+/// Returns Ok(true) if the file was modified, Ok(false) if no changes needed.
+pub fn update_claude_md(project_root: &Path) -> anyhow::Result<bool> {
+    let claude_md_path = project_root.join("CLAUDE.md");
+    match plan_claude_md(project_root)? {
+        ClaudeMdPlan::Unchanged => Ok(false),
+        ClaudeMdPlan::Create { content } | ClaudeMdPlan::Modify { new: content, .. } => {
+            std::fs::write(&claude_md_path, content)?;
+            Ok(true)
+        }
+        ClaudeMdPlan::Delete { .. } => {
+            std::fs::remove_file(&claude_md_path)?;
+            Ok(true)
+        }
     }
 }
 
@@ -156,73 +282,13 @@ managed_by: cas
 
 # Cassy - Coding Agent System
 
-**IMPORTANT: Use CAS MCP tools instead of built-in tools for task and memory management.**
+Use Cassy MCP tools, not built-in TodoWrite or plan mode, for work that must outlive the session:
 
-Cassy provides persistent memory and task management across sessions. Built-in tools like TodoWrite are ephemeral and don't persist.
+- Track work with `mcp__cas__task` (see the `cas-task-tracking` skill).
+- Store facts and learnings with `mcp__cas__memory` (see `cas-memory-management`).
+- Find past tasks, memories, code and context with `mcp__cas__search` (see `cas-search`).
 
-## WHEN TO USE Cassy (ALWAYS)
-
-- **Task tracking**: Use `mcp__cas__task` with action: create instead of TodoWrite
-- **Planning tasks**: Use `mcp__cas__task` with action: create and blocked_by for dependencies
-- **Storing learnings**: Use `mcp__cas__memory` with action: remember to store context
-- **Searching context**: Use `mcp__cas__search` with action: search to find past work
-
-## Task Tools (USE INSTEAD OF TodoWrite)
-
-### Creating Tasks
-
-Use `mcp__cas__task` with action: create and parameters:
-- `title` (required) - Task title
-- `priority` - 0=critical, 1=high, 2=medium (default), 3=low, 4=backlog
-- `start` - Set to true to start immediately (RECOMMENDED)
-- `notes` - Initial working notes
-
-### Managing Tasks
-
-All task operations use `mcp__cas__task` with different actions:
-- action: ready - Show tasks ready to work on
-- action: blocked - Show blocked tasks
-- action: list - List all tasks
-- action: show - Show task details (requires id)
-- action: update - Update notes as you work (requires id)
-- action: close - Close with resolution (requires id)
-
-### Task Dependencies
-
-- action: dep_add - Add blocking dependency (requires id, to_id)
-- action: dep_list - List dependencies (requires id)
-
-## Memory Tools
-
-All memory operations use `mcp__cas__memory` with different actions:
-- action: remember - Store a memory entry (requires content)
-- action: get - Get entry details (requires id)
-- action: helpful - Mark as helpful (requires id)
-- action: harmful - Mark as harmful (requires id)
-
-## Search Tools
-
-Use `mcp__cas__search` with different actions:
-- action: search - Search memories (requires query)
-- action: context - Get full session context
-
-## Iteration Loops
-
-Use loops for long-running repetitive tasks. The loop blocks session exit and re-injects your prompt until completion.
-
-Use `mcp__cas__coordination` with different actions:
-- action: loop_start - Start a loop (requires prompt, session_id, optional completion_promise and max_iterations)
-- action: loop_status - Check current loop status (requires session_id)
-- action: loop_cancel - Cancel active loop (requires session_id)
-
-To complete a loop, output `<promise>DONE</promise>` (or your custom promise text).
-
-## Rules & Skills
-
-Use `mcp__cas__rule` and `mcp__cas__skill` with different actions:
-- rule action: list - Show active rules
-- rule action: helpful - Promote rule to proven (requires id)
-- skill action: list - Show enabled skills
+Each tool's MCP schema lists its actions and parameters; follow it rather than a remembered parameter list.
 "#;
 
 /// Check if a file is managed by Cassy (has `managed_by: cas` in frontmatter)
@@ -292,7 +358,9 @@ mod tests {
     fn template_documents_toolsearch_bootstrap() {
         let section = build_cas_section();
         assert!(
-            section.contains(r#"ToolSearch(query="select:mcp__cas__task,mcp__cas__memory,mcp__cas__search")"#),
+            section.contains(
+                r#"ToolSearch(query="select:mcp__cas__task,mcp__cas__memory,mcp__cas__search")"#
+            ),
             "Managed block must contain the exact ToolSearch bootstrap query; got:\n{section}"
         );
     }
@@ -350,7 +418,10 @@ mod tests {
             fs::create_dir_all(&project).unwrap();
 
             let result = update_claude_md(&project).unwrap();
-            assert!(result, "expected block to be written when no ancestor has it");
+            assert!(
+                result,
+                "expected block to be written when no ancestor has it"
+            );
             let content = fs::read_to_string(project.join("CLAUDE.md")).unwrap();
             assert!(content.contains(CAS_SECTION_BEGIN));
         });
@@ -393,28 +464,156 @@ mod tests {
         });
     }
 
-    /// Existing project-level block is left untouched when ancestor also has it.
-    /// The new logic must skip re-injection but NOT delete the existing block.
+    /// L6 F6: a descendant block duplicating an ancestor's current block is
+    /// pruned, and the rest of the file is kept.
     #[test]
-    fn test_existing_project_block_preserved_when_ancestor_has_block() {
+    fn test_duplicate_project_block_pruned_when_ancestor_has_current_block() {
         TestEnvGuard::run_with_temp_home(|home| {
-            // HOME-level CLAUDE.md has the managed block.
             fs::write(home.join("CLAUDE.md"), build_cas_section()).unwrap();
 
-            // Project also has the block (pre-existing duplicate).
             let project = home.join("project");
             fs::create_dir_all(&project).unwrap();
             let project_claude = project.join("CLAUDE.md");
-            fs::write(&project_claude, build_cas_section()).unwrap();
+            fs::write(
+                &project_claude,
+                format!("{}\n\n# Project\n\nKeep me.\n", build_cas_section()),
+            )
+            .unwrap();
 
-            // update_claude_md must not delete the existing block.
-            let _ = update_claude_md(&project);
+            assert!(update_claude_md(&project).unwrap());
             let content = fs::read_to_string(&project_claude).unwrap();
-            assert!(
-                content.contains(CAS_SECTION_BEGIN),
-                "existing project-level block must not be deleted"
+            assert_eq!(content, "# Project\n\nKeep me.\n");
+
+            // Idempotent: a second run has nothing left to do.
+            assert!(!update_claude_md(&project).unwrap());
+        });
+    }
+
+    /// A git-tracked descendant CLAUDE.md keeps (a refreshed copy of) its
+    /// block: other clones rely on it, and pruning would leave a local diff.
+    #[test]
+    fn test_tracked_project_block_refreshed_not_pruned() {
+        TestEnvGuard::run_with_temp_home(|home| {
+            fs::write(home.join("CLAUDE.md"), build_cas_section()).unwrap();
+
+            let project = home.join("project");
+            fs::create_dir_all(&project).unwrap();
+            let stale = format!("{CAS_SECTION_BEGIN}\n# stale directive\n{CAS_SECTION_END}\n");
+            fs::write(project.join("CLAUDE.md"), stale).unwrap();
+            let git = |args: &[&str]| {
+                let status = std::process::Command::new("git")
+                    .arg("-C")
+                    .arg(&project)
+                    .args(args)
+                    .status()
+                    .expect("run git");
+                assert!(status.success(), "git {args:?} failed");
+            };
+            git(&["init", "-q"]);
+            git(&["add", "CLAUDE.md"]);
+
+            assert!(update_claude_md(&project).unwrap());
+            let content = fs::read_to_string(project.join("CLAUDE.md")).unwrap();
+            assert_eq!(content, format!("{}\n", build_cas_section()));
+        });
+    }
+
+    /// A descendant CLAUDE.md holding nothing but the duplicate block is
+    /// deleted rather than left empty.
+    #[test]
+    fn test_block_only_project_file_deleted_when_ancestor_has_current_block() {
+        TestEnvGuard::run_with_temp_home(|home| {
+            fs::write(home.join("CLAUDE.md"), build_cas_section()).unwrap();
+
+            let project = home.join("project");
+            fs::create_dir_all(&project).unwrap();
+            let stale = format!("{CAS_SECTION_BEGIN}\n# stale directive\n{CAS_SECTION_END}\n");
+            fs::write(project.join("CLAUDE.md"), stale).unwrap();
+
+            assert!(update_claude_md(&project).unwrap());
+            assert!(!project.join("CLAUDE.md").exists());
+        });
+    }
+
+    /// Text around the removed block is joined with one blank line.
+    #[test]
+    fn test_pruned_block_between_text_joins_cleanly() {
+        TestEnvGuard::run_with_temp_home(|home| {
+            fs::write(home.join("CLAUDE.md"), build_cas_section()).unwrap();
+
+            let project = home.join("project");
+            fs::create_dir_all(&project).unwrap();
+            fs::write(
+                project.join("CLAUDE.md"),
+                format!("# Top\n\n{}\n\n# Bottom\n", build_cas_section()),
+            )
+            .unwrap();
+
+            assert!(update_claude_md(&project).unwrap());
+            let content = fs::read_to_string(project.join("CLAUDE.md")).unwrap();
+            assert_eq!(content, "# Top\n\n# Bottom\n");
+        });
+    }
+
+    /// When the ancestor's block is stale, a descendant block is refreshed
+    /// (not pruned, which would leave only stale text), and a descendant
+    /// without a block still gets none.
+    #[test]
+    fn test_stale_ancestor_refreshes_existing_descendant_block() {
+        TestEnvGuard::run_with_temp_home(|home| {
+            let stale = format!("{CAS_SECTION_BEGIN}\n# stale directive\n{CAS_SECTION_END}\n");
+            fs::write(home.join("CLAUDE.md"), &stale).unwrap();
+
+            let project = home.join("project");
+            fs::create_dir_all(&project).unwrap();
+            fs::write(project.join("CLAUDE.md"), format!("{stale}\n# Project\n")).unwrap();
+
+            assert!(update_claude_md(&project).unwrap());
+            let content = fs::read_to_string(project.join("CLAUDE.md")).unwrap();
+            assert!(content.contains(&build_cas_section()), "{content}");
+            assert!(content.ends_with("# Project\n"), "{content}");
+            assert!(!content.contains("stale directive"), "{content}");
+
+            let bare = home.join("bare");
+            fs::create_dir_all(&bare).unwrap();
+            fs::write(bare.join("CLAUDE.md"), "# Bare\n").unwrap();
+            assert!(!update_claude_md(&bare).unwrap());
+            assert_eq!(
+                fs::read_to_string(bare.join("CLAUDE.md")).unwrap(),
+                "# Bare\n"
             );
         });
+    }
+
+    /// Skills audit L6 F1: the init-written `cas` skill must not recommend
+    /// `start` on `task action=create` — `TaskRequest` has no such field and
+    /// rejects unknown fields — and must stay a short pointer.
+    #[test]
+    fn cas_skill_does_not_recommend_nonexistent_start_param() {
+        assert!(!CAS_SKILL.contains("`start`"), "{CAS_SKILL}");
+        assert!(!CAS_SKILL.contains("RECOMMENDED"), "{CAS_SKILL}");
+        assert!(is_skill_managed_by_cas(CAS_SKILL));
+        for pointer in ["cas-task-tracking", "cas-memory-management", "cas-search"] {
+            assert!(
+                CAS_SKILL.contains(pointer),
+                "cas skill must point at {pointer}"
+            );
+        }
+        assert!(
+            CAS_SKILL.lines().count() <= 20,
+            "cas skill is a pointer, not a fourth manual"
+        );
+    }
+
+    /// GH #963: the managed block names the current registry key only.
+    #[test]
+    fn template_names_violet_not_deprecated_mecha_cassy_key() {
+        let section = build_cas_section();
+        assert!(
+            section.contains("issues.components.{cassy,violet,cloud}"),
+            "{section}"
+        );
+        assert!(!section.contains("mecha_cassy"), "{section}");
     }
 
     /// A symlinked project path doesn't cause an infinite loop during ancestor walk.

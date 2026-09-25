@@ -456,13 +456,6 @@ const TEMPLATE_TOOL_VARIABLES: &[(&str, &str)] = &[
 /// (applies to every flavor that ships it), defect, audit master ID.
 const CALL_SHAPE_ALLOWLIST: &[(&str, &str, &str)] = &[
     ("skills/cas-task-tracking/SKILL.md", "task action=create: missing risk", "M12"),
-    ("skills/cas-brainstorm/references/handoff.md", "task action=create: missing risk", "M12"),
-    ("skills/cas-github-issues/SKILL.md", "task action=create: missing risk", "M12"),
-    (
-        "skills/cas-ideate/references/post-ideation-workflow.md",
-        "task action=create: missing risk",
-        "M12",
-    ),
     ("skills/cas-supervisor/references/reference.md", "task action=create: missing risk", "M12"),
     ("skills/cas-supervisor/references/workflow.md", "task action=create: missing risk", "M12"),
     (

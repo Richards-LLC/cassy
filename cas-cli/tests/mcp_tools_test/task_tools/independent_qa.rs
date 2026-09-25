@@ -434,7 +434,7 @@ async fn pending_round_refuses_both_merge_paths_in_progress_and_awaiting_merge()
         assert!(raw.contains(&task_id) && raw.contains(&qa_task), "{raw}");
 
         let managed = core
-            .worktree_merge("test-agent", false, Some(&task_id), false, None)
+            .worktree_merge("test-agent", false, Some(&task_id), false, None, false, None)
             .await
             .expect_err("worktree_merge must wait for the independent QA verdict");
         assert!(

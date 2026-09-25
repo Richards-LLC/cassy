@@ -39,3 +39,12 @@ When diagnosing a bug or reasoning about behavior, verify the claim against the 
 ## CAS system bugs are in-repo fixes
 
 This repository is the CAS source. When a bug is reported in the verifier, hooks, factory orchestration, MCP dispatch, the task-verifier agent, worker prompts, or built-in skills, whichever downstream project surfaced it, the fix lands here as a Rust or Markdown change through a task assigned to a worker. Do not file it with a team lead, do not report it upstream, and do not treat CAS as an external dependency: other projects consume CAS, they do not modify it. If you want to escalate a CAS bug, create the fix task in this repository instead.
+
+## Releases and harness diaries → Slack (mandatory)
+
+- A runtime release needs two separate top-level #cas-internal posts: one for users and one for developers.
+- A harness-diary update needs one top-level cross-harness summary with exactly three replies, in the order Grok, Claude, Codex.
+- When a merge contains both, publish both. A merge that only updates the diary must not be presented as a release.
+- Every message leads with impact and contains no ticket ids and no agent or factory narration.
+
+→ See [docs/RELEASE_SLACK_RUBRIC.md](docs/RELEASE_SLACK_RUBRIC.md)

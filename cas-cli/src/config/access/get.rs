@@ -86,6 +86,10 @@ impl Config {
                 Some(daemon.relevance_sampling_sample_size.to_string())
             }
             "memory.session_learn_auto" => Some(memory.session_learn_auto.to_string()),
+            "memory.session_learn_min_turns" => Some(memory.session_learn_min_turns.to_string()),
+            "memory.session_learn_min_minutes" => {
+                Some(memory.session_learn_min_minutes.to_string())
+            }
             "memory.decay.curated_importance_floor" => {
                 Some(memory.decay.curated_importance_floor.to_string())
             }

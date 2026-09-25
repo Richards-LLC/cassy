@@ -91,7 +91,7 @@ Factory traffic is hard-capped: ordinary message bodies default to 1,200 charact
 
 **`ready` and `available` are read-only backlog visibility — not self-dispatch.** They exist for supervisors planning work and for you to sanity-check task state after an explicit assignment. Seeing a task there is never grounds to `start` it yourself; see "Never self-dispatch" in the main skill.
 
-**`mcp__cas__coordination` actions workers routinely use**: `message`, `message_ack`, `message_status`, `inbox_poll`, `whoami`, `heartbeat`, `queue_poll`, `queue_ack`. Read-only diagnostics such as `gc_report`, `worker_status`, and `worktree_list` are also available to you.
+**`mcp__cas__coordination` actions workers routinely use**: `message`, `message_ack`, `message_status`, `inbox_poll`, `whoami`, `heartbeat`, `remind`. Load only `mcp__cas__task` and `mcp__cas__coordination`; the supervisor `mcp__cas__factory` tool (fleet, worktree, server, database, loop and queue control) is not yours, apart from `server_start`/`server_list` when a task needs a long-lived server (see cas-servers).
 
 Only `hold_worker` and `release_worker` are hard role-gated to supervisors (`only supervisors may change a worker's director hold state`). The rest of the factory/worktree surface — `spawn_workers`, `worktree_merge`, `gc_cleanup force=true` — is not blocked by a role check, which is exactly why you must not call it: those actions dispatch or destroy work across *every* worker on the host, and they are the supervisor's to run. Ask, don't invoke.
 

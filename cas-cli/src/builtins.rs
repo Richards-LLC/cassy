@@ -5112,9 +5112,10 @@ This is the body content."#;
                 );
             }
             // The tool calls must be spelled the way this harness resolves them.
+            // cas-8563b: server_* moved from coordination to factory.
             assert!(
-                entry.content.contains(&format!("{prefix}coordination")),
-                "{label} cas-servers SKILL.md must call {prefix}coordination"
+                entry.content.contains(&format!("{prefix}factory action=server_start")),
+                "{label} cas-servers SKILL.md must call {prefix}factory"
             );
             bodies.push((label, entry.content.replace(prefix, "<PREFIX>")));
         }
@@ -7616,7 +7617,7 @@ This is the body content."#;
                         builtin.path
                     );
                     assert!(recipes.contains(&format!(
-                        "# taste — recipe claude_opus_5_5 (fallback: claude_opus)\n{prefix}coordination action=spawn_workers count=1 isolate=true cli=claude model=claude-opus-5-5 effort=high"
+                        "# taste — recipe claude_opus_5_5 (fallback: claude_opus)\n{prefix}factory action=spawn_workers count=1 isolate=true cli=claude model=claude-opus-5-5 effort=high"
                     )));
                 }
             }
@@ -7897,7 +7898,7 @@ This is the body content."#;
         ] {
             let lines: Vec<_> = content.lines().collect();
             for (index, line) in lines.iter().enumerate() {
-                if line.contains("coordination action=spawn_workers") {
+                if line.contains("factory action=spawn_workers") {
                     for argument in ["cli=", "model=", "effort="] {
                         assert!(
                             line.contains(argument),

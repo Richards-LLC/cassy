@@ -877,7 +877,7 @@ fn every_action_field_publishes_its_dispatch_list_as_an_enum() {
         (
             "coordination",
             schemars::schema_for!(CoordinationRequest),
-            owned(COORDINATION_ACTIONS),
+            owned(&coordination_request_actions()[..]),
         ),
         (
             "search",

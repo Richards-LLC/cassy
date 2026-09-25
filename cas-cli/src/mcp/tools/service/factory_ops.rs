@@ -1844,7 +1844,7 @@ fn no_active_epic_guidance(why: &str) -> String {
     format!(
         "No active EPIC found, and {why} Either name the work directly or open an EPIC:\n\
          0. Spawn for one existing open task (no EPIC needed): \
-         {tool_prefix}coordination action=spawn_workers count=1 task_id=<task-id>\n\
+         {tool_prefix}factory action=spawn_workers count=1 task_id=<task-id>\n\
          1. Create EPIC: {tool_prefix}task action=create task_type=epic title=\"...\" description=\"...\"\n\
          2. Or assign existing EPIC: {tool_prefix}task action=start id=<epic-id>\n\
          3. Optionally gather requirements using the cas-supervisor skill's planning references\n\
@@ -6091,7 +6091,7 @@ impl CasService {
         let epic_id = req.id.as_deref().map(str::trim).filter(|s| !s.is_empty()).ok_or_else(|| {
             Self::error(
                 ErrorCode::INVALID_PARAMS,
-                format!("epic_status requires `id`: {tool_prefix}coordination action=epic_status id=<epic-id>", tool_prefix = self.inner.guidance_prefix()),
+                format!("epic_status requires `id`: {tool_prefix}factory action=epic_status id=<epic-id>", tool_prefix = self.inner.guidance_prefix()),
             )
         })?;
 
@@ -9982,7 +9982,7 @@ fn context_recycle_recommendation(
         return String::new();
     }
     format!(
-        "\n    ⚠ RECYCLE RECOMMENDED: idle Codex context is ~{occupancy}% occupied (threshold {threshold_percent}%) — use coordination action=recycle_worker target={worker_name}"
+        "\n    ⚠ RECYCLE RECOMMENDED: idle Codex context is ~{occupancy}% occupied (threshold {threshold_percent}%) — use factory action=recycle_worker target={worker_name}"
     )
 }
 

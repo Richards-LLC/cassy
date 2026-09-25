@@ -1226,7 +1226,7 @@ pub fn render_route_table() -> Result<String, RoutingError> {
     }
 
     output.push_str(
-        "\nLane request mode: call `coordination spawn_workers` with `lane=<lane>`. The registry resolves the ordered candidates; any fallback selection is reported loudly as `fallback: <recipe> (primary <recipe> unavailable: <reason>)` in the spawn receipt and launch summary. Lanes marked `disabled` fail closed when their primary is unavailable.\n",
+        "\nLane request mode: call the `factory` tool's `spawn_workers` action with `lane=<lane>`. The registry resolves the ordered candidates; any fallback selection is reported loudly as `fallback: <recipe> (primary <recipe> unavailable: <reason>)` in the spawn receipt and launch summary. Lanes marked `disabled` fail closed when their primary is unavailable.\n",
     );
 
     output.push_str(GENERATED_ROUTE_TABLE_END);
@@ -1257,7 +1257,7 @@ pub fn render_spawn_recipes(tool_prefix: &str) -> Result<String, RoutingError> {
             )
         };
         output.push_str(&format!(
-            "# {lane_name} — recipe {}{fallback_note}\n{tool_prefix}coordination action=spawn_workers count=1 isolate=true cli={} model={} effort={}\n\n",
+            "# {lane_name} — recipe {}{fallback_note}\n{tool_prefix}factory action=spawn_workers count=1 isolate=true cli={} model={} effort={}\n\n",
             decision.recipe_id,
             recipe.harness.backend().name(),
             recipe.model,
@@ -2154,7 +2154,7 @@ no_fallback = true
         }
 
         assert!(!recipes.contains("gpt-5.6-terra"));
-        assert!(recipes.contains("mcp__cas__coordination action=spawn_workers"));
+        assert!(recipes.contains("mcp__cas__factory action=spawn_workers"));
         assert!(table.contains("Lane request mode"));
         assert!(table.contains("Fallback"));
         assert!(table.contains("disabled"));

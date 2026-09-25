@@ -30,7 +30,7 @@ If the task has a ParentChild dependency, run `mcp__cas__task action=dep_list id
 
 ### Step 3: Find the delivery
 
-The task record names the delivery: `deliverables.files_changed`, `deliverables.commit_hash`, and the target branch (`Target: … @ <branch>`). In factory mode, work in the worker's clone (`mcp__cas__coordination action=worker_status` gives its path). Diff against the task's own delivery base, never a fixed commit count:
+The task record names the delivery: `deliverables.files_changed`, `deliverables.commit_hash`, and the target branch (`Target: … @ <branch>`). In factory mode, work in the worker's clone (`mcp__cas__factory action=worker_status` gives its path). Diff against the task's own delivery base, never a fixed commit count:
 
 ```bash
 BASE=$(git merge-base HEAD <target-branch>)

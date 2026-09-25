@@ -1215,9 +1215,9 @@ fn merge_required_idle_prompt_text(
         format!("`{supervisor_prefix}task action=show id={}`", task.task_id)
     } else {
         match epic_id.as_deref() {
-            Some(id) => format!("`{supervisor_prefix}coordination action=epic_status id={id}`"),
+            Some(id) => format!("`{supervisor_prefix}factory action=epic_status id={id}`"),
             None => {
-                format!("`{supervisor_prefix}coordination action=epic_status id=<focused-epic>")
+                format!("`{supervisor_prefix}factory action=epic_status id=<focused-epic>")
             }
         }
     };
@@ -3582,7 +3582,7 @@ mod tests {
         assert!(
             prompt
                 .text
-                .contains("cas__coordination action=epic_status id=cas-4c77")
+                .contains("cas__factory action=epic_status id=cas-4c77")
                 || prompt.text.contains("epic_status"),
             "must direct supervisor to epic_status with cas__ prefix for Grok: {}",
             prompt.text
@@ -3699,7 +3699,7 @@ mod tests {
 
         // Supervisor-facing body tools: exact Claude alias (not footer-only).
         assert!(
-            body.contains("mcp__cas__coordination action=epic_status id=cas-epic1"),
+            body.contains("mcp__cas__factory action=epic_status id=cas-epic1"),
             "supervisor body epic_status must use exact Claude command: {}",
             body
         );
@@ -3715,7 +3715,7 @@ mod tests {
         );
         // Worker prefix must not appear on supervisor body actions.
         assert!(
-            !body.contains("mcp__cs__coordination action=epic_status"),
+            !body.contains("mcp__cs__factory action=epic_status"),
             "supervisor epic_status must not use worker (Codex) prefix: {}",
             body
         );
@@ -3777,7 +3777,7 @@ mod tests {
 
         // Supervisor body commands: exact Claude prefix (not footer `mcp__cas__`).
         assert!(
-            grok_body.contains("mcp__cas__coordination action=epic_status id=<focused-epic>"),
+            grok_body.contains("mcp__cas__factory action=epic_status id=<focused-epic>"),
             "Claude+Grok supervisor body epic_status must be exact Claude command: {}",
             grok_body
         );
@@ -3795,7 +3795,7 @@ mod tests {
         // Match the leading backtick so Claude's `mcp__cas__` (which
         // contains the substring `cas__`) does not false-fail the check.
         assert!(
-            !grok_body.contains("`cas__coordination action=epic_status"),
+            !grok_body.contains("`cas__factory action=epic_status"),
             "supervisor epic_status must not use bare worker (Grok) prefix: {}",
             grok_body
         );

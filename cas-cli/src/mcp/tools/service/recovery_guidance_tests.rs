@@ -84,7 +84,7 @@ async fn recovery_guidance_missing_parameters_four_harnesses() {
         assert!(
             error
                 .message
-                .contains(&format!("{prefix}coordination action=epic_status")),
+                .contains(&format!("{prefix}factory action=epic_status")),
             "{error}"
         );
     }
@@ -355,7 +355,7 @@ async fn recovery_guidance_claim_and_message_errors_four_harnesses() {
         );
         assert!(
             error.message.contains(&format!(
-                "{prefix}coordination action=spawn_workers count=1 task_id="
+                "{prefix}factory action=spawn_workers count=1 task_id="
             )),
             "{error}"
         );

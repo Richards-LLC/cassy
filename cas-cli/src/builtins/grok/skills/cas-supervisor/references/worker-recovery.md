@@ -16,7 +16,7 @@ Contents: [Authoritative liveness](#authoritative-liveness) · [Is the worker ac
 4. **Never** act on `Workers: None active` or `Filtered stale` alone — a false-empty roster can hide a live worker mid-turn; confirm `ps`/worktree/`is-wedged` first. Use `gc_cleanup` to purge dead registry rows.
 
 Prompt-queue poison remediation requires an explicit age cutoff and supervisor sign-off:
-`cas__coordination action=gc_cleanup force=true older_than_secs=86400` terminally
+`cas__factory action=gc_cleanup force=true older_than_secs=86400` terminally
 abandons only pending prompts older than one day and preserves the rows for forensics.
 Run `gc_report` first. `force=true` without `older_than_secs` retains the legacy,
 destructive whole-queue clear and should not be used for targeted recovery.
@@ -55,7 +55,7 @@ Director and task-lifecycle notifications are hints, not ground truth. A known b
 
 - Run `cas__task action=show id=<task-id>` and trust the task status over the notification text.
 - Check the worker branch tip or worktree commits before assuming work exists: `git -C .cas/worktrees/<worker> log --oneline -5`.
-- Check liveness with `cas__coordination action=worker_status` before declaring a worker idle or dead.
+- Check liveness with `cas__factory action=worker_status` before declaring a worker idle or dead.
 
 ## Worker Failure Recovery
 
@@ -65,14 +65,14 @@ Recurring failure modes and their recovery procedures.
 
 **Signature:** Worker stops responding to messages. No progress notes, no commits, no heartbeat updates. Task stays `in_progress` indefinitely.
 
-Run `cas__coordination action=worker_status`, then the `is-wedged` / `debug` / `kill` triad above. Salvage committed work with `cas__coordination action=worktree_merge id=<worker> task_id=<task-id>` before any cleanup, and message the replacement worker what already landed.
+Run `cas__factory action=worker_status`, then the `is-wedged` / `debug` / `kill` triad above. Salvage committed work with `cas__factory action=worktree_merge id=<worker> task_id=<task-id>` before any cleanup, and message the replacement worker what already landed.
 
 ### Injected but Unwoken Worker
 
 **Signature:** Heartbeat is fresh, worktree is clean, and there is zero activity for 10+ minutes after a supervisor message. Delivery and acceptance are separate: inspect transport receipts, task state, and execution evidence before concluding the worker is stuck.
 
 **Diagnosis:**
-1. Confirm a fresh heartbeat with `cas__coordination action=worker_status`
+1. Confirm a fresh heartbeat with `cas__factory action=worker_status`
 2. Read `cas__task action=show id=<task-id>`: a successful start is authoritative assignment acceptance. A clean `git -C .cas/worktrees/<worker> status --short` alone does not prove inactivity.
 3. Check prompt delivery state with `cas__coordination action=message_status notification_id=<id>` (the id the `message` call returned). It reports transport handoff, wake observations and confirmation separately; the queue columns behind it are `processed_at, acked_at`. A set `processed_at` records transport processing; `acked_at` records queue acknowledgement. Neither is assignment acceptance or execution proof. Use `queue_ack` for durable supervisor notifications and `message_ack` for prompt-message receipts; lifecycle relay acknowledgements reconcile linked rows. Neither replaces `task action=start`. Missing prose ACK alone is not a recovery trigger.
 
@@ -88,7 +88,7 @@ Run `cas__coordination action=worker_status`, then the `is-wedged` / `debug` / `
 
 If `worker_status` shows `SPAWN QUEUE STALLED`, `FACTORY DAEMON LOOP WEDGED`,
 or `SPAWN IN FLIGHT FOR`, the factory daemon has stopped processing spawn and
-shutdown requests. Run `cas__coordination action=restart_spawn_queue`. It
+shutdown requests. Run `cas__factory action=restart_spawn_queue`. It
 keeps the session and every pane. The daemon abandons its in-flight spawn,
 drops dequeued actions that have not run, and messages you what to re-issue.
 If the loop itself is wedged, its watchdog first kills hung git, gh or ssh
@@ -97,7 +97,7 @@ file a CAS bug quoting the phase and wait channel that `worker_status` names.
 
 ### Context pressure (worker_status `context:` line)
 
-`cas__coordination action=worker_status` prints a `context:` line per worker, banded by the share of the model's context window in use:
+`cas__factory action=worker_status` prints a `context:` line per worker, banded by the share of the model's context window in use:
 
 ```
   • bright-leopard-9 (heartbeat: 8s ago)
@@ -114,9 +114,9 @@ An idle Codex worker past the recycle threshold also gets a `RECYCLE RECOMMENDED
 
 **Pre-compaction recovery (context: near-limit):**
 1. Send: `cas__coordination action=message target=<worker> summary="Context near limit — commit now" message="Your context is near the limit. Commit any in-progress work immediately (git add / git commit), then report what you committed."`
-2. Wait for the commit confirmation (watch `cas__coordination action=worker_activity`).
+2. Wait for the commit confirmation (watch `cas__factory action=worker_activity`).
 3. If the worker is mid-task and not responding: check the worktree manually: `git -C .cas/worktrees/<worker> log --oneline HEAD~5..HEAD`
-4. Once work is committed and the worker is idle: `cas__coordination action=recycle_worker target=<worker>`. It restarts the same name with its recorded recipe and keeps the worktree.
+4. Once work is committed and the worker is idle: `cas__factory action=recycle_worker target=<worker>`. It restarts the same name with its recorded recipe and keeps the worktree.
 
 **Why the indicator may be absent:** The context line is read from the tail of the worker's session transcript. A newly spawned worker that hasn't produced an assistant message yet will show no `context:` line — this is expected. The line appears after the worker's first response.
 
@@ -128,7 +128,7 @@ An idle Codex worker past the recycle threshold also gets a `RECYCLE RECOMMENDED
 
 **Recovery:**
 1. Do not send revision instructions. The worker's context is poisoned — any further messages make it worse, not better.
-2. Shut down the affected worker immediately: `cas__coordination action=shutdown_workers worker_names=<worker>`. Do not attempt to salvage the session.
+2. Shut down the affected worker immediately: `cas__factory action=shutdown_workers worker_names=<worker>`. Do not attempt to salvage the session.
 3. Check the worker's worktree for any commits made before degradation: `git -C .cas/worktrees/<worker> log --oneline <epic-branch>..HEAD`
 4. Inspect those diffs carefully — degraded output may be syntactically plausible but semantically wrong. Record which commits are good in a task note.
 5. Free the task with `cas__task action=reset id=<task-id>`, then spawn a fresh worker on it (`task_id=<task-id>`); point it at the good commits in the assignment.

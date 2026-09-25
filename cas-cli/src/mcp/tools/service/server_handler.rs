@@ -309,6 +309,22 @@ fn potentially_mutating_call(tool_name: &str, action: &str) -> bool {
             "show" | "list" | "ready" | "blocked" | "dep_list" | "available" | "mine"
         ),
         "memory" => !matches!(action, "get" | "list" | "recent"),
+        "factory" => !matches!(
+            action,
+            "worker_status"
+                | "worker_activity"
+                | "epic_status"
+                | "gc_report"
+                | "server_list"
+                | "agent_list"
+                | "lease_history"
+                | "loop_status"
+                | "queue_peek"
+                | "worktree_list"
+                | "worktree_show"
+                | "worktree_status"
+                | "db_branch_show"
+        ),
         "rule" | "skill" | "spec" | "verification" | "coordination" | "system" | "team"
         | "pattern" | "knowledge" | "artifact" => {
             !matches!(action, "show" | "list" | "status" | "members")

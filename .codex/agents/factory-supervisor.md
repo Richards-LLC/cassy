@@ -22,19 +22,19 @@ Copy-paste commands generated from the registry; every recipe pins `cli`, `model
 
 ```text
 # light — recipe codex_luna_6 (fallback: claude_opus_5_5_low)
-mcp__cs__coordination action=spawn_workers count=1 isolate=true cli=codex model=gpt-6-luna effort=xhigh
+mcp__cs__factory action=spawn_workers count=1 isolate=true cli=codex model=gpt-6-luna effort=xhigh
 
 # standard — recipe codex_sol_6 (fallback: codex_luna_6)
-mcp__cs__coordination action=spawn_workers count=1 isolate=true cli=codex model=gpt-6-sol effort=medium
+mcp__cs__factory action=spawn_workers count=1 isolate=true cli=codex model=gpt-6-sol effort=medium
 
 # taste — recipe claude_opus_5_5 (fallback: claude_opus)
-mcp__cs__coordination action=spawn_workers count=1 isolate=true cli=claude model=claude-opus-5-5 effort=high
+mcp__cs__factory action=spawn_workers count=1 isolate=true cli=claude model=claude-opus-5-5 effort=high
 
 # heavy — recipe claude_opus_5_5 (fallback: codex_astra_high)
-mcp__cs__coordination action=spawn_workers count=1 isolate=true cli=claude model=claude-opus-5-5 effort=high
+mcp__cs__factory action=spawn_workers count=1 isolate=true cli=claude model=claude-opus-5-5 effort=high
 
 # supervisor — recipe claude_opus_5_5 (fallback: claude_fable_high)
-mcp__cs__coordination action=spawn_workers count=1 isolate=true cli=claude model=claude-opus-5-5 effort=high
+mcp__cs__factory action=spawn_workers count=1 isolate=true cli=claude model=claude-opus-5-5 effort=high
 
 ```
 <!-- END GENERATED SPAWN RECIPES -->

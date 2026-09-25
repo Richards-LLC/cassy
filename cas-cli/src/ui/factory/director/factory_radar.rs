@@ -289,7 +289,7 @@ fn format_branch_status(status: EpicBranchStatus<'_>, width: u16) -> String {
 fn render_unfocused_epic_placeholder(frame: &mut Frame, area: Rect, theme: &ActiveTheme) {
     let styles = &theme.styles;
     let line = Line::from(Span::styled(
-        "No focused epic - supervisor: coordination action=focus_epic id=<epic>",
+        "No focused epic - supervisor: factory action=focus_epic id=<epic>",
         styles.text_muted,
     ));
     frame.render_widget(Paragraph::new(line), area);
@@ -463,7 +463,7 @@ fn render_unfocused_overview(
     // the panel is too short even for header+hint, the caller's height
     // function guarantees at least 2 rows, so this always fits.
     lines.push(Line::from(Span::styled(
-        "Pin: coordination action=focus_epic id=<epic>",
+        "Pin: factory action=focus_epic id=<epic>",
         styles.text_muted,
     )));
 
@@ -791,7 +791,7 @@ mod tests {
 
         let text = buffer_text(&terminal);
         assert!(text.contains("No focused epic"));
-        assert!(text.contains("coordination action=focus_epic id=<epic>"));
+        assert!(text.contains("factory action=focus_epic id=<epic>"));
         assert!(!text.contains("EPIC: cas-foreign"));
     }
 
@@ -1052,7 +1052,7 @@ mod tests {
             "beta epic counts wrong: {text}"
         );
         assert!(
-            text.contains("Pin: coordination action=focus_epic id=<epic>"),
+            text.contains("Pin: factory action=focus_epic id=<epic>"),
             "pin hint should still appear as a footer line: {text}"
         );
         assert!(
@@ -1112,7 +1112,7 @@ mod tests {
 
         let text = buffer_text(&terminal);
         assert!(text.contains("No focused epic"));
-        assert!(text.contains("coordination action=focus_epic id=<epic>"));
+        assert!(text.contains("factory action=focus_epic id=<epic>"));
         assert!(
             !text.contains("Live epics"),
             "must not claim a live-epics overview when nothing is session-visible: {text}"
@@ -1264,7 +1264,7 @@ mod tests {
             "overflow ('+K more') line should render when over the display cap: {text}"
         );
         assert!(
-            text.contains("Pin: coordination action=focus_epic id=<epic>"),
+            text.contains("Pin: factory action=focus_epic id=<epic>"),
             "pin hint must survive the overflow case, not be silently dropped: {text}"
         );
     }

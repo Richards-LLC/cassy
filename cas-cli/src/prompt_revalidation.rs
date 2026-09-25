@@ -486,7 +486,7 @@ pub(crate) fn undelivered_worker_died_notice(worker_name: &str) -> String {
     format!(
         "UNDELIVERED: the factory tried to tell the supervisor that worker {worker_name} died \
          and that message never arrived. The worker is still gone and any work it held is \
-         unattended. Run `coordination action=worker_status` and re-assign {worker_name}'s \
+         unattended. Run `factory action=worker_status` and re-assign {worker_name}'s \
          tasks — do not assume this was handled."
     )
 }
@@ -650,7 +650,7 @@ pub(crate) fn format_worker_died_relay_with_exit(
          Held at death: {held}\n\
          Parked back to Open: {recovered}\n\
          {exit_block}These tasks are unattended. Re-assign them or respawn a worker; \
-         `coordination action=worker_status` shows the current fleet.\n\
+         `factory action=worker_status` shows the current fleet.\n\
          Acknowledge this relay with `coordination action=message_ack \
          notification_id={notification_id}`. (`queue_ack` accepts the same durable ID.)\n\
          </worker-died>"
@@ -1286,7 +1286,7 @@ pub(crate) fn qa_dispatch_envelope(
          round=\"{round}\" bound_head=\"{head}\" deadline=\"{deadline}\">\n\
          {task} (delivered by {implementer}) is user-facing ({reasons}) and {stage}.\n\
          Spawn a reviewer who is not {implementer}: \
-         mcp__cas__coordination action=spawn_workers lane=taste task_id={qa}\n\
+         mcp__cas__factory action=spawn_workers lane=taste task_id={qa}\n\
          Do not {gate} {task} until the pass records a verdict for {head}; \
          to skip it, waive with a reason: mcp__cas__verification action=qa_waive task_id={task} summary=\"...\"\n\
          {QA_DISPATCH_ENVELOPE_CLOSE}",

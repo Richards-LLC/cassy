@@ -1821,6 +1821,40 @@ fn test_task_completed_state_guard_independent_of_debounce() {
     );
 }
 
+/// cas-8563b (audit L3 P3): a pre-assigned spawn is told its task by the
+/// spawn brief, so the director must not send a second `TaskAssigned` for the
+/// same (task, worker) — while a different task for that worker still fires.
+#[test]
+fn test_spawn_brief_suppresses_duplicate_task_assigned() {
+    let mut detector =
+        DirectorEventDetector::new(vec!["swift-fox".to_string()], "supervisor".to_string());
+    detector.initialize(&idle_data_for("agent-1", "swift-fox"));
+
+    detector.note_assignment_briefed("task-1", "swift-fox");
+    let events = detector.detect_changes(
+        &working_data_for("agent-1", "swift-fox", "task-1", "Work Item"),
+        None,
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, DirectorEvent::TaskAssigned { task_id, .. } if task_id == "task-1")),
+        "a briefed pre-assignment must not also emit TaskAssigned: {events:?}"
+    );
+
+    detector.detect_changes(&idle_data_for("agent-1", "swift-fox"), None);
+    let events = detector.detect_changes(
+        &working_data_for("agent-1", "swift-fox", "task-2", "Next Item"),
+        None,
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, DirectorEvent::TaskAssigned { task_id, .. } if task_id == "task-2")),
+        "an unbriefed assignment still emits TaskAssigned: {events:?}"
+    );
+}
+
 /// Regression for cas-55dc: TaskAssigned must also carry an oscillation guard —
 /// once announced for (task_id, worker), do not re-announce when the same
 /// assignment reappears after transient active-set churn.

@@ -38,11 +38,14 @@ For phone-sized replies, follow the [phone reply contract](operator-reply.md).
 
 `supervisor_override=true` is the documented override for supervisor-only close and transfer operations. It is accepted only when the caller is a **registered supervisor**, the request supplies a **non-empty reason**, and the accepted decision is recorded as a **task decision note**. Review the task state and delivery evidence first; this flag does not waive data-integrity or merge-state checks.
 
-**Valid `mcp__cs__coordination` actions** (an unknown action is rejected with the current list):
-- *Agent*: `register`, `unregister`, `whoami`, `heartbeat`, `agent_list`, `agent_cleanup`, `session_start`, `session_end`, `loop_start`, `loop_cancel`, `loop_status`, `lease_history`, `queue_notify`, `queue_poll`, `queue_peek`, `queue_ack`, `inbox_poll`, `message`, `interrupt`, `message_ack`, `message_status`
-- *Factory*: `spawn_workers`, `shutdown_workers`, `recycle_worker`, `restart_spawn_queue`, `hold_worker`, `release_worker`, `worker_status`, `worker_activity`, `sweep_tasks`, `clear_context`, `my_context`, `sync_all_workers`, `gc_report`, `gc_cleanup`, `epic_status`, `focus_epic`, `remind`, `remind_list`, `remind_cancel`, `server_start`, `server_stop`, `server_list`
+**Valid `mcp__cs__coordination` actions** (agent identity, messaging, reminders; an unknown action is rejected with the current list): `register`, `unregister`, `whoami`, `heartbeat`, `session_start`, `session_end`, `inbox_poll` (alias `inbox`), `message`, `interrupt`, `message_ack`, `message_status`, `remind`, `remind_list`, `remind_cancel`, `my_context`.
+
+**Valid `mcp__cs__factory` actions** (supervisor fleet control; `coordination` still accepts these for one release with a deprecation note):
+- *Fleet*: `spawn_workers`, `shutdown_workers`, `recycle_worker`, `restart_spawn_queue`, `hold_worker`, `release_worker`, `worker_status`, `worker_activity`, `sweep_tasks`, `clear_context`, `sync_all_workers`, `gc_report`, `gc_cleanup`, `epic_status`, `focus_epic`, `agent_list`, `agent_cleanup`, `lease_history`
+- *Servers*: `server_start`, `server_stop`, `server_list`
 - *Database branches (supervisor only)*: `db_branch_create`, `db_branch_show`, `db_branch_delete`
 - *Worktree*: `worktree_create`, `worktree_list`, `worktree_show`, `worktree_cleanup`, `worktree_merge`, `worktree_status`
+- *Loops and queues*: `loop_start`, `loop_cancel`, `loop_status`, `queue_notify`, `queue_poll`, `queue_peek`, `queue_ack`
 
 **`hold_worker` / `release_worker` — pause a worker without faking a task state.** `action=hold_worker target=<worker>` marks a worker as deliberately paused: the Director stops accumulating idle ticks for them and emits no `WorkerIdle` nudges until you `release_worker`. Use it for "stand by while I sort out the merge base" instead of parking the task in a misleading status. Supervisor-only, requires a live worker in your factory session; the hold survives a daemon restart of that session and clears on worker removal or session shutdown.
 
@@ -51,9 +54,9 @@ For phone-sized replies, follow the [phone reply contract](operator-reply.md).
 **`server_start` / `server_stop` / `server_list` — the sanctioned way to run a long-lived server.** A raw `npm run dev &` from a worker dies with the worker and leaves no record of what is listening. Register it instead:
 
 ```
-mcp__cs__coordination action=server_start command="npm run dev" cwd=<path> port=3000 shared=true
-mcp__cs__coordination action=server_list
-mcp__cs__coordination action=server_stop ...
+mcp__cs__factory action=server_start command="npm run dev" cwd=<path> port=3000 shared=true
+mcp__cs__factory action=server_list
+mcp__cs__factory action=server_stop ...
 ```
 
 `shared=true` places the server outside worker containment so it outlives worker teardown; the default (`false`) ties its lifetime to the worker that started it. `port` is advisory — `server_list` reports the ports actually bound, plus who started each server. stdout/stderr are captured to a log file, never inherited.
@@ -61,9 +64,9 @@ mcp__cs__coordination action=server_stop ...
 **`db_branch_create` / `db_branch_show` / `db_branch_delete` — a disposable database for one task (supervisor only).** When a worker needs a database to reproduce a bug, it asks with a blocker message; it cannot create a Neon branch itself and never sees a credential. Provision one:
 
 ```
-mcp__cs__coordination action=db_branch_create task_id=<task> [branch=<dev|staging|branch id>] [target=<worker>]
-mcp__cs__coordination action=db_branch_show [task_id=<task>]
-mcp__cs__coordination action=db_branch_delete task_id=<task> [id=<branch id>]
+mcp__cs__factory action=db_branch_create task_id=<task> [branch=<dev|staging|branch id>] [target=<worker>]
+mcp__cs__factory action=db_branch_show [task_id=<task>]
+mcp__cs__factory action=db_branch_delete task_id=<task> [id=<branch id>]
 ```
 
 Your `cas serve` creates `cas-<task-id>-<n>` through the proxy's `neon.*` tools. The project and parent come from the repository's `neon-database` skill file: `dev` by default, else `staging`, and a production parent is always refused. It writes `DATABASE_URL` to `.env.cas-db` in the worker's worktree (mode 600, git-excluded) and records the branch in `.cas/db-branches/<task>.json` and a task note. The connection string is never shown. Closing or cancelling the task deletes the branch; a worker's own close queues the deletion, and your next coordination call performs it. A task has at most 3 branches, each with a 72-hour TTL and a small compute ceiling, and `gc_report` flags any that outlive their task, worktree or TTL.

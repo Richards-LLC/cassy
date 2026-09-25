@@ -778,7 +778,7 @@ mod tests {
                  6 stale server registration(s) — holding port(s) 3000, 3001, 5173.\n{orphan_full}",
             ),
             "⚠ Leftovers from earlier sessions: 34 orphan process(es), 6 stale server \
-             registration(s) — run `mcp__cas__coordination action=gc_report`.\n"
+             registration(s) — run `mcp__cas__factory action=gc_report`.\n"
                 .to_string(),
         );
         let issues_full = (0..20)

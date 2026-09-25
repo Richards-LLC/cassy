@@ -359,7 +359,14 @@ fn high_importance_preferences_are_kept_when_the_memory_budget_omits_other_entri
     store.add(&ordinary).unwrap();
     store.add(&important).unwrap();
 
-    let config = DefaultHooksConfig::new().with_token_budget(350);
+    // The budget must leave room for exactly one memory after the fixed
+    // SessionStart overhead. 350 was calibrated against the old 923 B usage
+    // reminder (~231 tokens, leaving 119). Audit WP2 cut the reminder to
+    // 213 B (~54 tokens), so 350 now fits both entries and the omission this
+    // test exists to exercise never happens. 180 restores the same shape:
+    // 126 tokens left, the preference item (~58) fits under the 76-token
+    // threshold, and adding the ordinary item (~45) does not.
+    let config = DefaultHooksConfig::new().with_token_budget(180);
     let stores = ContextStores {
         project_store: Some(&store),
         ..ContextStores::empty()

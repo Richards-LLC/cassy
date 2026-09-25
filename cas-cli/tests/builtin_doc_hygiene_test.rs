@@ -502,18 +502,6 @@ const OPERATOR_DATA_ALLOWLIST: &[(&str, &str, &str)] = &[
         "Names the Cassy and Cloud trackers a supervisor files Cassy bugs against, from any project.",
     ),
     (
-        "skills/cas-worker/SKILL.md",
-        "operator-org",
-        "Worker guide, pinned by substring tests and the SessionStart budget; its accuracy \
-         rewrite (audit WP7) owns this line.",
-    ),
-    (
-        "skills/cas-worker/SKILL.md",
-        "task-id",
-        "Worker guide, pinned by substring tests and the SessionStart budget; its accuracy \
-         rewrite (audit WP7) owns these provenance ids.",
-    ),
-    (
         "skills/cas-worker/references/close-gate.md",
         "task-id",
         "Factory-core reference owned by the WP7 accuracy rewrite; ids tag the close gates it documents.",

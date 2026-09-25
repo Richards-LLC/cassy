@@ -11875,7 +11875,6 @@ pub(crate) fn check_factory_branch_merge_reality_with_delivery_mode(
     // parent integrates by a supervisor merge (never a PR against the epic
     // branch), local_merge never pushes, and every command is complete.
     let tool_prefix = crate::mcp::tools::core::guidance::caller_prefix();
-    let coord = format!("{tool_prefix}coordination");
     let task_id = task_id.unwrap_or("<task-id>");
     let local_merge = delivery_mode == cas_types::DeliveryMode::LocalMerge;
     let publish_step = if local_merge {
@@ -11890,11 +11889,14 @@ pub(crate) fn check_factory_branch_merge_reality_with_delivery_mode(
         )
     };
     let integrate_step = if local_merge || parent_branch.starts_with("epic/") {
+        // cas-90e8 (M38 follow-through): the same merge-request renderer as
+        // MERGE REQUIRED, naming the tip rather than dictating the wording.
+        let tip = resolve_branch_sha(repo_path, &factory_branch)
+            .unwrap_or_else(|| "<current tip>".to_string());
         format!(
             "4. Ask your supervisor to merge it into {parent_branch} (do NOT open a \
-             PR against an epic branch): `{coord} action=message target=supervisor \
-             task_id={task_id} merge_request=true summary=\"ready to merge\" \
-             message=\"{factory_branch} is ready to merge into {parent_branch}\"`\n"
+             PR against an epic branch): {}\n",
+            gate_text::merge_request_call(tool_prefix, task_id, &factory_branch, &tip)
         )
     } else {
         format!(

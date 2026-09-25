@@ -12,5 +12,5 @@ To enable this System-A worktree command, add:\n\n\
 enabled = true\n\n\
 Factory isolation worktrees use a separate factory `--worktrees` switch. Existing factory \
 worktrees do not enable this System-A command. To create a factory worktree, ask the supervisor \
-to run `coordination action=spawn_workers isolate=true` for the task. Use `coordination \
+to run `factory action=spawn_workers isolate=true` for the task. Use `coordination \
 action=worktree_status` to inspect both systems.";

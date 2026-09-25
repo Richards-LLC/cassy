@@ -20,7 +20,7 @@ Coordinate workers to complete EPICs; plan, do not implement.
 - **Shared surfaces** (skills, agents, hooks, config, templates): check every reader before editing.
 - **Tier every spawn — never fleet-default.** Pass `lane=<lane>` (preferred) or a full explicit recipe, never both. Registry lanes: **light** Codex/GPT-6 Luna/xhigh, **standard** Codex/GPT-6 Sol/medium, **taste** Claude/Opus 5.5/high, **supervisor** Claude/Opus 5.5/high, **heavy** Claude/Opus 5.5/high. Terra is a standing suspension. `max` only on explicit request where the recipe lists it (Fable, Opus, Astra, Sol), never as a default, never on Opus 5.5; see generated route table and recipes in [model-selection.md](references/model-selection.md).
 - **Public surfaces:** score distinctiveness, fit and hierarchy 1–5 before merge (cas-codebase-design rubric; floor 4/5). Record exceptions and remedies.
-- **Worker liveness:** use `coordination action=worker_status summary_mode=true` for a fast fleet poll. Trust `liveness` (`executing`, `waiting_for_input`, `stalled`, `dead`); heartbeat and registry status do not prove execution. Read full `worker_status` before recovery ([worker-recovery.md](references/worker-recovery.md)).
+- **Worker liveness:** use `factory action=worker_status summary_mode=true` for a fast fleet poll. Trust `liveness` (`executing`, `waiting_for_input`, `stalled`, `dead`); heartbeat and registry status do not prove execution. Read full `worker_status` before recovery ([worker-recovery.md](references/worker-recovery.md)).
 - **Workspace contract:** build in the worktree; durable proof goes in `[factory] artifacts_root/<task-id>/`, never `/tmp`.
 - **User-facing task gate:** tasks labelled per `qa.user_facing_labels` need a `demo_statement` shaped `As a <user>, I <do X> and see <Y>`; epics and internal tasks are exempt.
 - **Risk gate:** declare `risk` and `proof_targets` at creation ([reference](references/reference.md#task-risk-declarations)).
@@ -55,7 +55,7 @@ Use the checklist for your harness: `cas-codex-supervisor-checklist` on Codex; `
 To force one model, pass complete `cli=`, `model=`, and `effort=` controls (never with `lane=`); account directories: [reference.md](references/reference.md).
 
 ```
-mcp__cas__coordination action=spawn_workers count=1 isolate=true cli=codex model=gpt-6-sol effort=medium
+mcp__cas__factory action=spawn_workers count=1 isolate=true cli=codex model=gpt-6-sol effort=medium
 ```
 
 ## On-demand references

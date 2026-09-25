@@ -125,7 +125,7 @@ pub fn handle_pre_tool_use(
                 "deny",
                 &format!(
                     "🚫 Supervisors must not spawn isolated-worktree subagents.\n\
-                    Use {prefix}coordination action=spawn_workers — factory-managed worktrees get cleaned up; Agent(isolation=\"worktree\") ones leak.\n\
+                    Use {prefix}factory action=spawn_workers — factory-managed worktrees get cleaned up; Agent(isolation=\"worktree\") ones leak.\n\
                     If you genuinely need a throwaway subagent, drop `isolation` or run as a worker via `cas factory`."
                 ),
             ));
@@ -500,7 +500,7 @@ pub fn handle_pre_tool_use(
     // WORKTREE MERGE JAIL: Block all tools except the worktree merge when pending
     //
     // When a task has pending_worktree_merge=true, block all tools except:
-    // 1. `coordination action=worktree_merge` (any harness prefix), or a
+    // 1. `factory action=worktree_merge` (any harness prefix), or a
     //    Task/Agent spawn of a project-defined `worktree-merger` agent —
     //    either unjails by clearing pending_worktree_merge.
     //
@@ -535,7 +535,7 @@ pub fn handle_pre_tool_use(
 
                 if !pending_merge_tasks.is_empty() {
                     // cas-dc1b (M38): the sanctioned exit is the Cassy
-                    // `coordination action=worktree_merge` call under any
+                    // `factory action=worktree_merge` call under any
                     // harness prefix. No `worktree-merger` agent ships, so
                     // the legacy Task/Agent spawn is only honoured for
                     // projects that define one themselves.
@@ -547,7 +547,8 @@ pub fn handle_pre_tool_use(
                     };
                     let is_worktree_merger = ((tool_name == "Task" || tool_name == "Agent")
                         && tool_input_str("subagent_type") == Some("worktree-merger"))
-                        || (tool_name.ends_with("coordination")
+                        || ((tool_name.ends_with("factory")
+                            || tool_name.ends_with("coordination"))
                             && tool_input_str("action") == Some("worktree_merge"));
 
                     if is_worktree_merger {
@@ -574,7 +575,7 @@ pub fn handle_pre_tool_use(
                             &format!(
                                 "🔒 WORKTREE MERGE JAIL: Task(s) {task_list} require worktree merge before you can continue.\n\n\
                             Merge and clean up each task's worktree with \
-                            `{prefix}coordination action=worktree_merge id=<worktree branch> task_id=<task-id> cleanup=true` \
+                            `{prefix}factory action=worktree_merge id=<worktree branch> task_id=<task-id> cleanup=true` \
                             (the close rejection names the branch). That call is allowed through the jail and releases it; \
                             then retry `{prefix}task action=close id=<task-id>`.",
                                 prefix = crate::harness_policy::own_tool_prefix()

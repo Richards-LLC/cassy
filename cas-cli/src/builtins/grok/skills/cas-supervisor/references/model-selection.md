@@ -87,9 +87,9 @@ alias as its stock model; this is a fallback route, not a registry lane.
 
 ```text
 # Codex stock fallback
-cas__coordination action=spawn_workers count=1 isolate=true cli=codex model=gpt-6-sol effort=medium
+cas__factory action=spawn_workers count=1 isolate=true cli=codex model=gpt-6-sol effort=medium
 # Claude stock fallback
-cas__coordination action=spawn_workers count=1 isolate=true cli=claude model=opus effort=high
+cas__factory action=spawn_workers count=1 isolate=true cli=claude model=opus effort=high
 ```
 
 ### Effort vocabulary (Cassy-wide)
@@ -126,7 +126,7 @@ The canonical copy-paste recipes are maintained once in [workflow.md](workflow.m
 Use this recipe for the receipted OpenCode 1.18.23 Token Plan route:
 
 ```
-cas__coordination action=spawn_workers count=1 isolate=true cli=opencode model=qwencloud/qwen3.8-max effort=medium worker_names="oc-ada"
+cas__factory action=spawn_workers count=1 isolate=true cli=opencode model=qwencloud/qwen3.8-max effort=medium worker_names="oc-ada"
 ```
 
 Route requirements are in [OpenCode lane](#opencode-lane-route-specific-conformance); parameter table in

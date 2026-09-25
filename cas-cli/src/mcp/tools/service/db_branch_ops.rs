@@ -558,7 +558,7 @@ impl CasService {
         for flag in flags {
             out.push_str(&format!("  {flag}\n"));
         }
-        out.push_str("Delete with `coordination action=db_branch_delete task_id=<id>`; the supervisor's calls also retry queued deletions.\n");
+        out.push_str("Delete with `factory action=db_branch_delete task_id=<id>`; the supervisor's calls also retry queued deletions.\n");
         out
     }
 }

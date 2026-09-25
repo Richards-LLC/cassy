@@ -10,7 +10,7 @@
 //!    path as the session-end worktree summary. This gives supervisors a
 //!    greppable history without repeating an unbounded porcelain dump.
 //!
-//! 2. A **WIP candidates** helper used by `coordination action=gc_report`
+//! 2. A **WIP candidates** helper used by `factory action=gc_report`
 //!    (and consumable by `SessionStart` triage for task cas-aeec) that
 //!    lists uncommitted entries in the main worktree so they can be
 //!    surfaced — never auto-deleted.
@@ -599,7 +599,7 @@ pub(crate) fn render_wip_banner(summary: &WipSummary) -> SessionStartBanner {
     let prefix_for_compact = crate::harness_policy::own_tool_prefix();
     let compact = format!(
         "⚠ Prior-factory WIP in main worktree: {} file(s) ({} modified, {} untracked). \
-         Triage BEFORE spawning workers — run `{prefix_for_compact}coordination action=gc_report` \
+         Triage BEFORE spawning workers — run `{prefix_for_compact}factory action=gc_report` \
          for the per-file list and task attribution; full history in \
          .cas/logs/factory-session-{{date}}.log.\n",
         summary.entries.len(),
@@ -637,7 +637,7 @@ pub(crate) fn render_wip_banner(summary: &WipSummary) -> SessionStartBanner {
         // by the supervisor telling itself what to run next.
         let prefix = crate::harness_policy::own_tool_prefix();
         out.push_str(&format!(
-            "  ... and {extra} more — run `{prefix}coordination action=gc_report` for the full list.\n",
+            "  ... and {extra} more — run `{prefix}factory action=gc_report` for the full list.\n",
         ));
     }
     out.push_str(
@@ -949,8 +949,8 @@ pub(crate) fn render_orphan_banner(
     // Compact form: the header (counts + squatted ports) plus the remediation
     // commands, with the per-orphan rows dropped. `gc_report` reproduces them.
     let compact = format!(
-        "{out}Adopt or kill BEFORE binding these ports: `{prefix}coordination action=gc_report` \
-         lists them; reclaim with `{prefix}coordination action=gc_cleanup force=true \
+        "{out}Adopt or kill BEFORE binding these ports: `{prefix}factory action=gc_report` \
+         lists them; reclaim with `{prefix}factory action=gc_cleanup force=true \
          dry_run=false`.\n"
     );
 
@@ -987,8 +987,8 @@ pub(crate) fn render_orphan_banner(
     }
     out.push_str(&format!(
         "\nAdopt or kill BEFORE starting work that binds these ports: review with \
-         `{prefix}coordination action=gc_report`, then reclaim with \
-         `{prefix}coordination action=gc_cleanup force=true dry_run=false`. \
+         `{prefix}factory action=gc_report`, then reclaim with \
+         `{prefix}factory action=gc_cleanup force=true dry_run=false`. \
          Servers registered `shared` are left alone by design.\n"
     ));
     SessionStartBanner { full: out, compact }

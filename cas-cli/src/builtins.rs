@@ -7654,7 +7654,7 @@ This is the body content."#;
                         builtin.path
                     );
                     assert!(recipes.contains(&format!(
-                        "# taste — recipe claude_opus_5_5 (fallback: claude_opus)\n{prefix}coordination action=spawn_workers count=1 isolate=true cli=claude model=claude-opus-5-5 effort=high"
+                        "# taste — recipe claude_opus_5_5 (fallback: claude_opus)\n{prefix}factory action=spawn_workers count=1 isolate=true cli=claude model=claude-opus-5-5 effort=high"
                     )));
                 }
             }
@@ -7935,7 +7935,7 @@ This is the body content."#;
         ] {
             let lines: Vec<_> = content.lines().collect();
             for (index, line) in lines.iter().enumerate() {
-                if line.contains("coordination action=spawn_workers") {
+                if line.contains("factory action=spawn_workers") {
                     for argument in ["cli=", "model=", "effort="] {
                         assert!(
                             line.contains(argument),

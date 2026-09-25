@@ -5350,7 +5350,7 @@ async fn test_system_a_crud_refusal_names_real_gate_and_prints_valid_toml() {
                 && text.contains(
                     "Factory isolation worktrees use a separate factory `--worktrees` switch"
                 )
-                && text.contains("coordination action=spawn_workers isolate=true"),
+                && text.contains("factory action=spawn_workers isolate=true"),
             "{action} must name the System-A gate and the followable factory alternative: {text}"
         );
         assert!(

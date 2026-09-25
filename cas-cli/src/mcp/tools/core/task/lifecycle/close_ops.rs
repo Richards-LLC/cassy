@@ -5536,7 +5536,7 @@ impl CasCore {
             // rejects when any has stranded commits relative to the
             // epic branch. Bypass-immune (data-state guard, not a
             // review gate). Diagnostic surface for in-flight queries
-            // is `mcp__cas__coordination action=epic_status id=<epic>`.
+            // is `mcp__cas__factory action=epic_status id=<epic>`.
             //
             // Errors from `get_subtasks` MUST surface as a hard error,
             // never a silent empty-list pass. Round-1 cas-code-review
@@ -6914,7 +6914,7 @@ impl CasCore {
                                 📍 Worktree: {}\n\
                                 🌿 Branch: {}\n\n\
                                 🔒 WORKTREE JAIL ACTIVE: other tools are blocked until this worktree is merged.\n\n\
-                                To merge and clean up: `{coord} action=worktree_merge id={} task_id={} cleanup=true`. \
+                                To merge and clean up: `{factory} action=worktree_merge id={} task_id={} cleanup=true`. \
                                 That call is allowed through the jail. It refuses a dirty worktree; add force=true only \
                                 if the uncommitted changes are disposable.\n\n\
                                 After the merge completes, retry `{caller_task} action=close id={}`.",
@@ -6924,8 +6924,8 @@ impl CasCore {
                                 worktree.branch,
                                 req.id,
                                 req.id,
-                                coord = format!(
-                                    "{}coordination",
+                                factory = format!(
+                                    "{}factory",
                                     crate::mcp::tools::core::guidance::caller_prefix()
                                 ),
                             )));
@@ -16130,11 +16130,11 @@ fn run_epic_close_merge_gate_with_budget(
          execution_note=no-code, which blocks the honest path and needs \
          proof_scope_fix to unwind.\n\n\
          Remediation when the worker worktree still exists:\n\
-         - `{tool_prefix}coordination action=worktree_merge id=<factory-branch> \
+         - `{tool_prefix}factory action=worktree_merge id=<factory-branch> \
            task_id=<child-task-id>`\n\n\
          {guidance_heading}\n\
          {cleaned_worktree_guidance}\n\
-         Diagnostic: run `{tool_prefix}coordination action=epic_status id={epic_id}` \
+         Diagnostic: run `{tool_prefix}factory action=epic_status id={epic_id}` \
          for a per-child report.",
         headline = headline,
         guidance_heading = guidance_heading,

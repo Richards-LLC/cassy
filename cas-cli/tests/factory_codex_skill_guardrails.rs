@@ -447,7 +447,7 @@ fn supervisor_reference_tree_uses_current_lifecycle_contract() {
             "{flavor} checklist must link supervisor_override reference"
         );
         assert!(
-            workflow.contains(&format!("{tool_prefix}coordination action=worktree_merge")),
+            workflow.contains(&format!("{tool_prefix}factory action=worktree_merge")),
             "{flavor} workflow must use worktree_merge"
         );
         assert!(

@@ -51,9 +51,9 @@ For phone-sized replies, follow the [phone reply contract](operator-reply.md).
 **`server_start` / `server_stop` / `server_list` — the sanctioned way to run a long-lived server.** A raw `npm run dev &` from a worker dies with the worker and leaves no record of what is listening. Register it instead:
 
 ```
-cas__coordination action=server_start command="npm run dev" cwd=<path> port=3000 shared=true
-cas__coordination action=server_list
-cas__coordination action=server_stop ...
+cas__factory action=server_start command="npm run dev" cwd=<path> port=3000 shared=true
+cas__factory action=server_list
+cas__factory action=server_stop ...
 ```
 
 `shared=true` places the server outside worker containment so it outlives worker teardown; the default (`false`) ties its lifetime to the worker that started it. `port` is advisory — `server_list` reports the ports actually bound, plus who started each server. stdout/stderr are captured to a log file, never inherited.
@@ -61,9 +61,9 @@ cas__coordination action=server_stop ...
 **`db_branch_create` / `db_branch_show` / `db_branch_delete` — a disposable database for one task (supervisor only).** When a worker needs a database to reproduce a bug, it asks with a blocker message; it cannot create a Neon branch itself and never sees a credential. Provision one:
 
 ```
-cas__coordination action=db_branch_create task_id=<task> [branch=<dev|staging|branch id>] [target=<worker>]
-cas__coordination action=db_branch_show [task_id=<task>]
-cas__coordination action=db_branch_delete task_id=<task> [id=<branch id>]
+cas__factory action=db_branch_create task_id=<task> [branch=<dev|staging|branch id>] [target=<worker>]
+cas__factory action=db_branch_show [task_id=<task>]
+cas__factory action=db_branch_delete task_id=<task> [id=<branch id>]
 ```
 
 Your `cas serve` creates `cas-<task-id>-<n>` through the proxy's `neon.*` tools. The project and parent come from the repository's `neon-database` skill file: `dev` by default, else `staging`, and a production parent is always refused. It writes `DATABASE_URL` to `.env.cas-db` in the worker's worktree (mode 600, git-excluded) and records the branch in `.cas/db-branches/<task>.json` and a task note. The connection string is never shown. Closing or cancelling the task deletes the branch; a worker's own close queues the deletion, and your next coordination call performs it. A task has at most 3 branches, each with a 72-hour TTL and a small compute ceiling, and `gc_report` flags any that outlive their task, worktree or TTL.

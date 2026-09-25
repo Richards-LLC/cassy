@@ -25,7 +25,7 @@ managed_by: cas
    - If `.claude/CODEMAP.md` is missing → run `/codemap` to generate it.
    - If it exists but is stale (structural changes since last update) → run `/codemap` to refresh.
    - Workers reference CODEMAP for codebase orientation — ensure it's current before spawning them.
-5. Check worker availability: `cas__coordination action=worker_status`
+5. Check worker availability: `cas__factory action=worker_status`
 6. **Session hygiene triage** — the SessionStart hook prepends a "⚠ Prior-factory
    WIP detected" banner to the supervisor context when the main worktree has
    uncommitted changes, with per-file attribution (last `cas-xxxx` commit)
@@ -35,7 +35,7 @@ managed_by: cas
 
    For a full on-demand report (including stale agents and orphan worktrees):
    ```
-   cas__coordination action=gc_report
+   cas__factory action=gc_report
    ```
    The report's "Prior-factory WIP candidates" section mirrors the banner and
    is safe to re-run at any time; it never auto-deletes.
@@ -70,7 +70,7 @@ Supervisor close override constraints: [`supervisor_override`](../cas-supervisor
 
 ## Before Closing an EPIC
 
-- Run `cas__coordination action=epic_status id=<epic-id>` — confirms every child task's `factory/<assignee>` branch is merged into the epic branch. `cas__task action=close` on the epic enforces the same check and refuses stranded branches unless a live registered supervisor passes `stranded_branch_override="<inspection narrative>"`; it never waives genuinely unmerged content. Run `epic_status` mid-flight to resolve merges before the close-time error.
+- Run `cas__factory action=epic_status id=<epic-id>` — confirms every child task's `factory/<assignee>` branch is merged into the epic branch. `cas__task action=close` on the epic enforces the same check and refuses stranded branches unless a live registered supervisor passes `stranded_branch_override="<inspection narrative>"`; it never waives genuinely unmerged content. Run `epic_status` mid-flight to resolve merges before the close-time error.
 - Confirm task deliverables exist on the epic branch
 - Launch the release gate detached on the assembled epic in its dedicated worktree, then run the [epic flow walk](../cas-supervisor/references/epic-flow-walk.md) concurrently when any child has a demo statement.
 - Require both gate receipts and the single epic evidence note before epic close verification; apply task-verifier Step 0A with `verification_type=epic`.

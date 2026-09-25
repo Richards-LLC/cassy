@@ -140,7 +140,7 @@ mcp__cs__task action=show id=<epic-id>
 When verifying a Codex worker's task, inspect files from the worker's clone path, not the supervisor repo:
 ```
 mcp__cs__task action=show id=<task-id>
-mcp__cs__coordination action=worker_status
+mcp__cs__factory action=worker_status
 cd <worker_clone_path> && git diff --name-only HEAD~10
 ```
 

@@ -2,7 +2,7 @@
 //!
 //! # What was broken
 //!
-//! `coordination action=clear_context` used to enqueue the four characters
+//! `factory action=clear_context` used to enqueue the four characters
 //! `/clear` as an ordinary `prompt_queue` message. For a Claude worker under
 //! native Agent Teams that row is routed to the team **inbox** (a file), so the
 //! worker read the string "/clear" as a teammate message, acknowledged it, and

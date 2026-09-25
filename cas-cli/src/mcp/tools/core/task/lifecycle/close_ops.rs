@@ -1,3 +1,4 @@
+pub(crate) mod gate_text;
 mod task_attribution;
 
 use super::TaskLifecycleGateError;
@@ -5125,13 +5126,15 @@ impl CasCore {
                                 )),
                                 data: None,
                             })?;
-                        let sup_ver = format!(
-                            "{}verification",
-                            crate::mcp::tools::core::guidance::supervisor_prefix()
-                        );
-                        return Ok(Self::tool_error(format!(
-                            "⚠️ VERIFICATION TIMED OUT\n\nTask {} exact dispatch {} requires named registered-supervisor recovery before close.\n\nRecord the direct recovery verdict with {sup_ver} action=add task_id={} dispatch_id={} status=approved summary=\"...\", then retry close.",
-                            req.id, timed_out.id, req.id, timed_out.id
+                        return Ok(Self::tool_error(gate_text::verification_timeout_message(
+                            &req.id,
+                            gate_text::VerificationTimeout::Dispatch {
+                                dispatch_id: &timed_out.id,
+                                waited_mins: None,
+                                recovery_action: None,
+                            },
+                            crate::mcp::tools::core::guidance::supervisor_prefix(),
+                            crate::mcp::tools::core::guidance::caller_prefix(),
                         )));
                     }
                     // cas-5c33: a dispatch whose bound proof no longer holds
@@ -5178,13 +5181,15 @@ impl CasCore {
                 Ok(Some(dispatch))
                     if dispatch.state == cas_types::VerificationDispatchState::TimedOut =>
                 {
-                    let sup_ver = format!(
-                        "{}verification",
-                        crate::mcp::tools::core::guidance::supervisor_prefix()
-                    );
-                    return Ok(Self::tool_error(format!(
-                        "⚠️ VERIFICATION TIMED OUT\n\nTask {} exact dispatch {} requires named registered-supervisor recovery before close.\n\nRecord the direct recovery verdict with {sup_ver} action=add task_id={} dispatch_id={} status=approved summary=\"...\", then retry close.",
-                        req.id, dispatch.id, req.id, dispatch.id
+                    return Ok(Self::tool_error(gate_text::verification_timeout_message(
+                        &req.id,
+                        gate_text::VerificationTimeout::Dispatch {
+                            dispatch_id: &dispatch.id,
+                            waited_mins: None,
+                            recovery_action: None,
+                        },
+                        crate::mcp::tools::core::guidance::supervisor_prefix(),
+                        crate::mcp::tools::core::guidance::caller_prefix(),
                     )));
                 }
                 Ok(_) => {}
@@ -6196,17 +6201,16 @@ impl CasCore {
                         );
                     }
                     let elapsed_mins = (now - timed_out.requested_at).num_seconds() / 60;
-                    let sup_ver = format!(
-                        "{}verification",
-                        crate::mcp::tools::core::guidance::supervisor_prefix()
-                    );
-                    return Ok(Self::tool_error(format!(
-                        "⚠️ VERIFICATION TIMED OUT\n\n\
-                         Task {} waited {} minutes for dispatch {} without a verdict. \
-                         Only this task's dispatch was marked timed_out and its lease released.\n\n\
-                         Recovery ({}): a registered supervisor must re-dispatch a task-verifier \
-                         or record a direct verdict with {sup_ver}, then retry this task's close.",
-                        req.id, elapsed_mins, timed_out.id, timed_out.recovery_action
+                    let recovery_action = timed_out.recovery_action.to_string();
+                    return Ok(Self::tool_error(gate_text::verification_timeout_message(
+                        &req.id,
+                        gate_text::VerificationTimeout::Dispatch {
+                            dispatch_id: &timed_out.id,
+                            waited_mins: Some(elapsed_mins),
+                            recovery_action: Some(&recovery_action),
+                        },
+                        crate::mcp::tools::core::guidance::supervisor_prefix(),
+                        crate::mcp::tools::core::guidance::caller_prefix(),
                     )));
                 }
 
@@ -6370,22 +6374,13 @@ impl CasCore {
                         // verification alias must track the supervisor CLI —
                         // hardcoding mcp__cas__verification hands a Codex
                         // supervisor an alias they cannot call.
-                        let sup_ver = format!(
-                            "{}verification",
-                            crate::mcp::tools::core::guidance::supervisor_prefix()
-                        );
-                        return Ok(Self::tool_error(format!(
-                            "⚠️ VERIFICATION TIMED OUT\n\n\
-                            Task {} was awaiting verification for {} minutes with no verdict \
-                            from the task-verifier subagent. Auto-escalated: this task transition \
-                            was released and its lease freed.\n\n\
-                            This usually means the task-verifier subagent crashed, was never \
-                            spawned, or failed silently.\n\n\
-                            To proceed:\n\
-                            1. Re-dispatch verifier: Task(subagent_type=\"task-verifier\", prompt=\"Verify task {}\")\n\
-                            2. Or record the verdict directly: retry {caller_task} action=close id={} to mint a verification dispatch, then {sup_ver} action=add task_id={} dispatch_id=<dispatch id named in that response> status=approved summary=\"...\"\n\
-                            3. Then retry {caller_task} action=close id={}.",
-                            req.id, elapsed_mins, req.id, req.id, req.id, req.id
+                        return Ok(Self::tool_error(gate_text::verification_timeout_message(
+                            &req.id,
+                            gate_text::VerificationTimeout::Legacy {
+                                waited_mins: elapsed_mins,
+                            },
+                            crate::mcp::tools::core::guidance::supervisor_prefix(),
+                            crate::mcp::tools::core::guidance::caller_prefix(),
                         )));
                     }
                     Ok(None) | Ok(Some(_)) => {
@@ -6532,20 +6527,21 @@ impl CasCore {
                             tracing::warn!(task_id = %req.id, error = %e, "failed to set pending_verification on task");
                         }
 
-                        // Include close reason in the message so verifier can check it
-                        let close_reason_section = if let Some(ref reason) = req.reason {
-                            format!(
-                                "\n\n## Proposed Close Reason\n\
-                                    ```\n{reason}\n```\n\n\
-                                    IMPORTANT: The {verifier_agent} MUST validate this close reason.\n\
-                                    Reject if it admits incomplete work (e.g., 'remaining items', 'beyond scope', 'will need to')."
-                            )
-                        } else {
-                            String::new()
-                        };
+                        // Include close reason in the message so verifier can check it.
+                        // cas-90e8: one inline line, never a fenced echo of free text.
+                        let close_reason_section = req
+                            .reason
+                            .as_deref()
+                            .map(|reason| {
+                                format!(
+                                    "\n\n{}",
+                                    gate_text::proposed_close_reason_line(reason, verifier_agent)
+                                )
+                            })
+                            .unwrap_or_default();
 
                         let verification_desc = if is_epic {
-                            "Epic verification runs on master to verify the complete merged implementation.\n\
+                            "Epic verification runs on the merged epic branch to verify the complete implementation.\n\
                                 The agent will check that all subtask implementations integrate correctly.\n\
                                 The verifier MUST record verification_type=epic."
                         } else {
@@ -6767,6 +6763,16 @@ impl CasCore {
                             req.id, dispatch.id
                         );
 
+                        // cas-90e8: a factory worker gets only the gate line with
+                        // its handoff; the verifier brief, recovery hint and close
+                        // reason are for the supervisor and verifier, who get them
+                        // from the dispatch itself.
+                        if is_factory_worker {
+                            return Ok(Self::tool_error(gate_text::worker_verification_required(
+                                &req.id,
+                                &verification_gate,
+                            )));
+                        }
                         return Ok(Self::tool_error(format!(
                             "⚠️ VERIFICATION REQUIRED\n\n\
                                 Task {} requires verification before closing.\n\n\
@@ -10941,10 +10947,6 @@ pub(crate) fn run_factory_branch_merge_gate_with_attribution(
          {origin_parent_branch}@{origin_target_tip}; unreachable=[{unreachable_display}]; \
          origin_fetch_attempted={origin_fetch_attempted}."
     );
-    let coord = format!(
-        "{}coordination",
-        crate::mcp::tools::core::guidance::caller_prefix()
-    );
 
     let epic_push_state_step = if parent_published_on_origin {
         format!(
@@ -10976,44 +10978,28 @@ pub(crate) fn run_factory_branch_merge_gate_with_attribution(
              `git push origin {factory_branch}`\n"
         )
     };
+    // cas-90e8 (M73): the pieces shared across delivery shapes come from one
+    // renderer each; this site only chooses the steps.
+    let caller = crate::mcp::tools::core::guidance::caller_prefix();
+    let drain = gate_text::inbox_drain_step(caller);
+    let merge_request =
+        gate_text::merge_request_call(caller, &task.id, &factory_branch, &branch_tip);
+    let retry = format!("`{caller}task action=close id={}`", task.id);
+    let exits = gate_text::merge_gate_exits_paragraph(
+        &task.id,
+        crate::mcp::tools::core::guidance::supervisor_prefix(),
+    );
     let remediation = if parent_is_epic_branch {
         format!(
             "Remediation:\n\
-             1. Before escalating, repeatedly run `{coord} action=inbox_poll` \
-             until it returns `No unread messages`. A default poll returns at most \
-             10 rows, so one poll is not a complete freshness check. Polling marks \
-             messages seen without consuming daemon transport delivery. The polling \
-             claim is at-most-once: if its MCP response is lost, those rows are not \
-             replayed by another poll, so also re-read any just-delivered supervisor \
-             messages in your conversation. If one says this branch was merged or \
-             requests more changes, follow it and do not send a stale merge \
-             request.\n\
+             1. {drain}\n\
              {epic_push_state_step}\
              {durable_step}\
-             4. If a merge is still needed, message your supervisor to merge \
-             {factory_branch} into {parent_branch}, including the current tip \
-             and freshness qualifier (e.g. \
-             `{coord} action=message \
-             target=supervisor task_id={} merge_request=true summary=\"ready to merge\" message=\"Fresh after \
-             draining unread inbox messages until No unread messages: \
-             {factory_branch} tip {branch_tip}; please re-check reachability, then \
-             merge into {parent_branch} if still needed\"`). \
-             They merge with \
-             `git merge --no-ff {factory_branch}` on the epic branch.\n\
-             5. Once merged, retry `{tool_prefix}task action=close id={}`. If this is a \
-             completed measured negative result whose experimental delivery \
-             must not land, a registered supervisor may instead close with \
-             `negative_result=true negative_result_artifact_path=<absolute-path-under-artifacts_root/task-id> \
-             negative_result_reference=<closed-PR-URL-or-branch> reason=\"decision rationale\"`. \
-             Cassy validates all three receipts and logs the decision. If the supervisor \
-             declines an actual delivery for rework instead, the supervisor runs \
-             `{supervisor_prefix}task action=request_changes id={} reason=\"state what prior work remains and what must be corrected or reverted\"`; \
-             only after that verdict may the assigned worker start a fresh cycle.",
-            task.id,
-            task.id,
-            task.id,
-            tool_prefix = crate::mcp::tools::core::guidance::caller_prefix(),
-            supervisor_prefix = crate::mcp::tools::core::guidance::supervisor_prefix()
+             4. If a merge is still needed, ask your supervisor to merge \
+             {factory_branch} into {parent_branch}: {merge_request}. The supervisor \
+             merges with `git merge --no-ff {factory_branch}` on the epic branch.\n\
+             5. Once merged, retry {retry}.\n\n\
+             {exits}"
         )
     } else if local_merge {
         // cas-dc1b (M03): local_merge keeps the factory branch local and the
@@ -11023,54 +11009,25 @@ pub(crate) fn run_factory_branch_merge_gate_with_attribution(
         format!(
             "Remediation (delivery mode local_merge — do NOT push origin; the \
              supervisor merges your local branch):\n\
-             1. Repeatedly run `{coord} action=inbox_poll` until it returns \
-             `No unread messages`, and follow any merged or request-changes reply.\n\
+             1. {drain}\n\
              2. Commit everything on {factory_branch}; leave it local.\n\
-             3. Ask your supervisor to merge it: `{coord} action=message \
-             target=supervisor task_id={} merge_request=true summary=\"ready to merge\" \
-             message=\"{factory_branch} tip {branch_tip} is ready for local merge into {parent_branch}\"`.\n\
-             4. Once merged, retry `{tool_prefix}task action=close id={}`. If the supervisor \
-             declines the delivery for rework, the supervisor runs \
-             `{supervisor_prefix}task action=request_changes id={} reason=\"state what prior work remains and what must be corrected or reverted\"`; \
-             only after that verdict may the assigned worker start a fresh cycle.",
-            task.id,
-            task.id,
-            task.id,
-            tool_prefix = crate::mcp::tools::core::guidance::caller_prefix(),
-            supervisor_prefix = crate::mcp::tools::core::guidance::supervisor_prefix()
+             3. Ask your supervisor to merge it into {parent_branch}: {merge_request}.\n\
+             4. Once merged, retry {retry}.\n\n\
+             {exits}"
         )
     } else {
         format!(
             "Remediation:\n\
-             1. Repeatedly run `{coord} action=inbox_poll` until it returns \
-             `No unread messages` before continuing. A default poll returns at \
-             most 10 rows, so one poll is not a complete freshness check. Follow \
-             every unread merge or review instruction it returns. The polling \
-             claim is at-most-once, so also re-read just-delivered supervisor \
-             messages in case the MCP response was lost after claiming rows.\n\
+             1. {drain}\n\
              2. Push {factory_branch} to its remote: `git push origin {factory_branch}`\n\
              3. Open a PR targeting {parent_branch}: \
              `gh pr create --base {parent_branch} --head {factory_branch}`\n\
-             4. Merge the PR. Cassy already fetched and measured this branch \
-             against BOTH {parent_branch} and origin/{parent_branch}, so a \
-             merge that has landed on either one is already counted — running \
-             `git fetch` again will not change this number, and a stale local \
-             {parent_branch} ref cannot be the cause (fetch never moves a local \
-             branch ref). If you believe the work is merged, check it directly: \
+             4. Merge the PR. Cassy already measured this branch against both \
+             {parent_branch} and origin/{parent_branch}, so fetching again will not \
+             change the count. To check a merge you believe landed: \
              `git merge-base --is-ancestor {factory_branch} origin/{parent_branch}`.\n\
-             5. Retry `{tool_prefix}task action=close id={}`. If this is a completed measured \
-             negative result whose experimental delivery must not land, a registered \
-             supervisor may instead close with `negative_result=true \
-             negative_result_artifact_path=<absolute-path-under-artifacts_root/task-id> \
-             negative_result_reference=<closed-PR-URL-or-branch> reason=\"decision rationale\"`. \
-             Cassy validates all three receipts and logs the decision. If the supervisor \
-             declines an actual delivery for rework instead, the supervisor runs \
-             `{supervisor_prefix}task action=request_changes id={} reason=\"state what prior work remains and what must be corrected or reverted\"`; \
-             only after that verdict may the assigned worker start a fresh cycle.",
-            task.id,
-            task.id,
-            tool_prefix = crate::mcp::tools::core::guidance::caller_prefix(),
-            supervisor_prefix = crate::mcp::tools::core::guidance::supervisor_prefix()
+             5. Retry {retry}.\n\n\
+             {exits}"
         )
     };
 
@@ -13899,20 +13856,22 @@ fn supervisor_merge_commit_for_receipt(
 
 fn commit_receipt_rejection(
     repo_path: &std::path::Path,
+    task_id: &str,
     receipt: &str,
     parent_branch: &str,
     reason: &str,
 ) -> String {
+    let caller = crate::mcp::tools::core::guidance::caller_prefix();
     let merge_recovery = supervisor_merge_commit_for_receipt(repo_path, receipt, parent_branch)
         .map(|merge| {
             format!(
-                "4. A supervisor merge commit `{merge}` carries this delivery as a merge parent. \
-                 Ask the supervisor to audit that merge and retry with \
-                 `commit_receipt={merge}`."
+                "2. A supervisor merge commit `{merge}` carries this delivery as a merge parent. \
+                 Ask the supervisor to audit that merge, then retry with \
+                 `{caller}task action=close id={task_id} commit_receipt={merge}`."
             )
         })
         .unwrap_or_else(|| {
-            "4. If no commit from this task's current work cycle is available, \
+            "2. If no commit from this task's current work cycle is available, \
              ask the supervisor to audit the merge and record the close \
              decision."
                 .to_string()
@@ -13927,12 +13886,9 @@ fn commit_receipt_rejection(
          {parent_branch} (or origin/{parent_branch}), and still have that \
          diff's tree effect present on the current target.\n\n\
          To resolve:\n\
-         1. Find the task commit with `git log --oneline --all`.\n\
-         2. Verify it with `git show --stat <sha>`, \
-            `git merge-base --is-ancestor <sha> {parent_branch}`, and inspect \
-            the current target files named by the commit.\n\
-         3. Retry close with `commit_receipt=<sha>` (full or an unambiguous abbreviation).\n\
-         {merge_recovery}"
+         1. To pick another receipt, {steps}\n\
+         {merge_recovery}",
+        steps = gate_text::commit_receipt_recovery_steps(task_id, parent_branch, caller),
     )
 }
 
@@ -13951,6 +13907,7 @@ fn commit_receipt_rejection(
 /// one function so they cannot drift apart again.
 fn resolve_merge_evidence(
     worker_worktree_path: &std::path::Path,
+    task_id: &str,
     parent_branch: &str,
     factory_branch_anchor: Option<&str>,
     commit_receipt: Option<&str>,
@@ -13967,6 +13924,7 @@ fn resolve_merge_evidence(
         return Some(ZeroCommitCloseOutcome::AmbiguousCodeTask(
             commit_receipt_rejection(
                 worker_worktree_path,
+                task_id,
                 receipt,
                 parent_branch,
                 "task attribution window is unavailable; ask the supervisor for an audited bypass",
@@ -13978,6 +13936,7 @@ fn resolve_merge_evidence(
             Ok(note) => ZeroCommitCloseOutcome::ProceedWithReceipt(note),
             Err(reason) => ZeroCommitCloseOutcome::AmbiguousCodeTask(commit_receipt_rejection(
                 worker_worktree_path,
+                task_id,
                 receipt,
                 parent_branch,
                 &reason,
@@ -14084,6 +14043,7 @@ pub(crate) fn check_zero_commit_close(
         // heuristic only decides the cases evidence cannot.
         if let Some(outcome) = resolve_merge_evidence(
             worker_worktree_path,
+            task_id,
             parent_branch,
             factory_branch_anchor,
             commit_receipt,
@@ -14110,27 +14070,29 @@ pub(crate) fn check_zero_commit_close(
             2. If the supervisor already merged this task's work and you then \
                synced this branch with {parent_branch}, that is exactly what \
                a finished task looks like — do NOT reset or force-push the \
-               branch. Find the SHA of the worker task commit OR the merge \
-               commit that carried this task's work (never an unrelated \
-               historical commit), verify it with `git show --stat <sha>` and \
-               `git merge-base --is-ancestor <sha> {parent_branch}`, then \
-               retry close with `commit_receipt=<sha>` (full or an \
-               unambiguous abbreviation).\n\
+               branch. Instead, {receipt_steps}\n\
             3. If this task was resolved without code (fixed by a sibling task, \
                docs-only, characterization-only), retry close with explicit \
                no-code intent and its portable proof in the same command:\n\
                `{tool_prefix}task action=close id={task_id} execution_note=no-code external_ref=<portable-reference>`\n\
             4. If this is external production work and a supervisor already \
-               ran `verification action=external_verify`, that same live \
+               ran `{supervisor_prefix}verification action=external_verify`, that same live \
                registered supervisor may retry with \
-               `supervisor_override=true external_verification_receipt=<dr-id> reason=<audit>`. \
+               `{supervisor_prefix}task action=close id={task_id} supervisor_override=true external_verification_receipt=<dr-id> reason=\"...\"`. \
                `supervisor_override` alone does not satisfy zero-commit \
                delivery evidence.",
-            tool_prefix = crate::mcp::tools::core::guidance::caller_prefix()
+            tool_prefix = crate::mcp::tools::core::guidance::caller_prefix(),
+            supervisor_prefix = crate::mcp::tools::core::guidance::supervisor_prefix(),
+            receipt_steps = gate_text::commit_receipt_recovery_steps(
+                task_id,
+                parent_branch,
+                crate::mcp::tools::core::guidance::caller_prefix(),
+            ),
         ));
     }
     if let Some(outcome) = resolve_merge_evidence(
         worker_worktree_path,
+        task_id,
         parent_branch,
         factory_branch_anchor,
         commit_receipt,
@@ -14158,18 +14120,20 @@ pub(crate) fn check_zero_commit_close(
            `{tool_prefix}task action=close id={task_id} execution_note=no-code external_ref=<portable-reference>`\n\
         3. If the supervisor already merged this task's work — including an \
            out-of-band merge after conflict rework cleared the old anchor — \
-           find the SHA of the worker task commit OR the merge commit \
-           that actually carried this task's work (never an unrelated \
-           historical commit), verify it is an ancestor of \
-           {parent_branch}, then retry close with \
-           `commit_receipt=<sha>` (full or an unambiguous abbreviation).\n\
+           {receipt_steps}\n\
         4. If this is external production work and a supervisor already ran \
-           `verification action=external_verify`, that same live registered \
+           `{supervisor_prefix}verification action=external_verify`, that same live registered \
            supervisor may retry with \
-           `supervisor_override=true external_verification_receipt=<dr-id> reason=<audit>`. \
+           `{supervisor_prefix}task action=close id={task_id} supervisor_override=true external_verification_receipt=<dr-id> reason=\"...\"`. \
            `supervisor_override` alone does not satisfy zero-commit delivery \
            evidence.",
-        tool_prefix = crate::mcp::tools::core::guidance::caller_prefix()
+        tool_prefix = crate::mcp::tools::core::guidance::caller_prefix(),
+        supervisor_prefix = crate::mcp::tools::core::guidance::supervisor_prefix(),
+        receipt_steps = gate_text::commit_receipt_recovery_steps(
+            task_id,
+            parent_branch,
+            crate::mcp::tools::core::guidance::caller_prefix(),
+        ),
     ))
 }
 
@@ -20639,11 +20603,11 @@ mod merge_state_gate_tests {
                     assert!(
                         msg.contains(&format!("`{coord} action=inbox_poll`"))
                             && msg.contains("`No unread messages`")
-                            && msg.contains("at most 10 rows")
-                            && msg.contains("polling claim is at-most-once"),
-                        "{harness} remediation must use its harness-resolved inbox API, \
-                         require drain-until-empty polling, and disclose at-most-once \
-                         claim semantics: {msg}"
+                            && !msg.contains("at most 10 rows")
+                            && !msg.contains("at-most-once"),
+                        "{harness} remediation must use its harness-resolved inbox API and \
+                         require drain-until-empty polling, without polling internals \
+                         (cas-90e8): {msg}"
                     );
                     let poll = msg.find("action=inbox_poll").expect("poll step");
                     let push = msg.find("Push factory/worker").expect("push step");
@@ -20763,12 +20727,11 @@ mod merge_state_gate_tests {
                         msg.contains(&format!("`{coord} action=inbox_poll`"))
                             && msg.contains(&format!("`{coord} action=message"))
                             && msg.contains("`No unread messages`")
-                            && msg.contains("at most 10 rows")
-                            && msg.contains("without consuming daemon transport delivery")
-                            && msg.contains("polling claim is at-most-once"),
+                            && !msg.contains("daemon transport delivery")
+                            && !msg.contains("at-most-once"),
                         "{harness} remediation must use its harness-resolved inbox and \
-                         message APIs, require drain-until-empty polling, and disclose \
-                         at-most-once claim semantics: {msg}"
+                         message APIs and require drain-until-empty polling, without \
+                         polling internals (cas-90e8): {msg}"
                     );
                     assert!(
                         msg.contains(&expected_tip),
@@ -20779,10 +20742,10 @@ mod merge_state_gate_tests {
                         "structured merge request must carry the parked task identity: {msg}"
                     );
                     assert!(
-                        msg.contains(
-                            "Fresh after draining unread inbox messages until No unread messages"
-                        ) && msg.contains("re-check reachability"),
-                        "escalation must identify its freshness window and ask the supervisor to re-check: {msg}"
+                        msg.contains("merge_request=true summary=\"...\" message=\"...\"")
+                            && !msg.contains("Fresh after draining"),
+                        "the merge request names its fields but does not dictate the \
+                         worker's wording (cas-90e8): {msg}"
                     );
                     let poll = msg.find("action=inbox_poll").expect("poll step");
                     let push = msg.find("Push factory/worker").expect("push step");
@@ -29396,7 +29359,7 @@ mod zero_change_close_tests {
         assert!(reason.contains("not an ancestor of main"), "{reason}");
         assert!(!reason.contains("40- or 64-character"), "{reason}");
 
-        let message = commit_receipt_rejection(dir.path(), short_receipt, "main", &reason);
+        let message = commit_receipt_rejection(dir.path(), "cas-receipt", short_receipt, "main", &reason);
         assert!(message.contains("INVALID TASK COMMIT RECEIPT"), "{message}");
         assert!(!message.contains("MERGE REQUIRED"), "{message}");
         assert!(message.contains("not an ancestor of main"), "{message}");
@@ -29427,6 +29390,7 @@ mod zero_change_close_tests {
         let merge = head_sha(dir.path());
         let message = commit_receipt_rejection(
             dir.path(),
+            "cas-receipt",
             &receipt,
             "main",
             "the commit is reachable, but its delivery content is absent",

@@ -515,6 +515,24 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
         path: "skills/cas-qa-craft/references/independent-pass.md",
         content: include_str!("builtins/skills/cas-qa-craft/references/independent-pass.md"),
     },
+    // cas-0bf6: verification kit generator, maintenance sweep, feature-map
+    // template and its static check.
+    BuiltinFile {
+        path: "skills/cas-qa-craft/references/verify-harness.md",
+        content: include_str!("builtins/skills/cas-qa-craft/references/verify-harness.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-qa-craft/references/maintain.md",
+        content: include_str!("builtins/skills/cas-qa-craft/references/maintain.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-qa-craft/references/feature-template.md",
+        content: include_str!("builtins/skills/cas-qa-craft/references/feature-template.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-qa-craft/scripts/check-feature-map.mjs",
+        content: include_str!("builtins/skills/cas-qa-craft/scripts/check-feature-map.mjs"),
+    },
     // cas-release-notes skill (GH #65): drafts/posts the user + dev Slack threads
     // for every staging/main merge and installs the canonical rubric template
     // at docs/release-notes/RUBRIC.md when a project has none.
@@ -1106,6 +1124,24 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
         path: "skills/cas-qa-craft/references/independent-pass.md",
         content: include_str!("builtins/skills/cas-qa-craft/references/independent-pass.md"),
     },
+    // cas-0bf6: verification kit generator, maintenance sweep, feature-map
+    // template and its static check.
+    BuiltinFile {
+        path: "skills/cas-qa-craft/references/verify-harness.md",
+        content: include_str!("builtins/skills/cas-qa-craft/references/verify-harness.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-qa-craft/references/maintain.md",
+        content: include_str!("builtins/skills/cas-qa-craft/references/maintain.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-qa-craft/references/feature-template.md",
+        content: include_str!("builtins/skills/cas-qa-craft/references/feature-template.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-qa-craft/scripts/check-feature-map.mjs",
+        content: include_str!("builtins/skills/cas-qa-craft/scripts/check-feature-map.mjs"),
+    },
     // cas-release-notes skill (GH #65) — codex mirror.
     BuiltinFile {
         path: "skills/cas-release-notes/SKILL.md",
@@ -1690,6 +1726,24 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-qa-craft/references/independent-pass.md",
         content: include_str!("builtins/skills/cas-qa-craft/references/independent-pass.md"),
+    },
+    // cas-0bf6: verification kit generator, maintenance sweep, feature-map
+    // template and its static check.
+    BuiltinFile {
+        path: "skills/cas-qa-craft/references/verify-harness.md",
+        content: include_str!("builtins/skills/cas-qa-craft/references/verify-harness.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-qa-craft/references/maintain.md",
+        content: include_str!("builtins/skills/cas-qa-craft/references/maintain.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-qa-craft/references/feature-template.md",
+        content: include_str!("builtins/skills/cas-qa-craft/references/feature-template.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-qa-craft/scripts/check-feature-map.mjs",
+        content: include_str!("builtins/skills/cas-qa-craft/scripts/check-feature-map.mjs"),
     },
     // cas-release-notes skill (GH #65) — grok twin.
     BuiltinFile {
@@ -4935,6 +4989,60 @@ This is the body content."#;
                 get("skills/cas-search/SKILL.md").contains("`cas-why`"),
                 "{label} cas-search does not route to cas-why"
             );
+        }
+    }
+
+    /// cas-0bf6: the verification kit generator, maintenance sweep, feature
+    /// template and static map check ship in every harness catalog, the
+    /// template and script agree on the five feature-file H2s, and the QA
+    /// skill links the generator and the sweep.
+    #[test]
+    fn qa_craft_verification_kit_is_installed_and_linked() {
+        const KIT: &[(&str, &str, &[&str])] = &[
+            (
+                "skills/cas-qa-craft/references/verify-harness.md",
+                include_str!("builtins/skills/cas-qa-craft/references/verify-harness.md"),
+                &[],
+            ),
+            (
+                "skills/cas-qa-craft/references/maintain.md",
+                include_str!("builtins/skills/cas-qa-craft/references/maintain.md"),
+                &[],
+            ),
+            (
+                "skills/cas-qa-craft/references/feature-template.md",
+                include_str!("builtins/skills/cas-qa-craft/references/feature-template.md"),
+                &["## Sub-features", "## How to get to it", "## Driving it", "## Gotchas", "## Touches"],
+            ),
+            (
+                "skills/cas-qa-craft/scripts/check-feature-map.mjs",
+                include_str!("builtins/skills/cas-qa-craft/scripts/check-feature-map.mjs"),
+                &["Sub-features", "How to get to it", "Driving it", "Gotchas", "Touches", "process.exit(summary.ok ? 0 : 1)"],
+            ),
+        ];
+        for (label, catalog) in [
+            ("claude", BUILTIN_SKILLS),
+            ("codex", CODEX_BUILTIN_SKILLS),
+            ("grok", GROK_BUILTIN_SKILLS),
+        ] {
+            for (path, canonical, markers) in KIT {
+                let shipped = catalog
+                    .iter()
+                    .find(|file| file.path == *path)
+                    .unwrap_or_else(|| panic!("{label} missing {path}"));
+                assert_eq!(shipped.content, *canonical, "{label} {path} drifted");
+                for marker in *markers {
+                    assert!(shipped.content.contains(marker), "{label} {path} missing {marker:?}");
+                }
+            }
+            let skill = catalog
+                .iter()
+                .find(|file| file.path == "skills/cas-qa-craft/SKILL.md")
+                .unwrap_or_else(|| panic!("{label} missing cas-qa-craft"))
+                .content;
+            for marker in ["references/verify-harness.md", "references/maintain.md"] {
+                assert!(skill.contains(marker), "{label} cas-qa-craft missing {marker:?}");
+            }
         }
     }
 

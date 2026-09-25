@@ -14,7 +14,7 @@ First use each session — load MCP schemas: ToolSearch(query="select:mcp__cs__t
 
 Cassy provides persistent context across sessions. Built-in tools are ephemeral.
 
-Bug routing: `cas config get issues.repo` / `issues.components.{cassy,mecha_cassy,cloud}` name the project, Cassy, MechaCassy and Cloud trackers; file operational bugs in the matching repo before moving on.
+Bug routing: `cas config get issues.repo` / `issues.components.{cassy,violet,cloud}` name the project, Cassy, Violet and Cloud trackers; file operational bugs in the matching repo before moving on.
 Release notes: when a merge reaches `staging` or `main`, use the `release-notes` skill and follow docs/release-notes/RUBRIC.md.
 <!-- CAS:END -->
 
@@ -87,7 +87,13 @@ lanes. The non-required full/heavy tier (Clippy, Test Compile Guard, Build
 Benchmark, and both Panic Isolation profiles) belongs only to
 supervisor-controlled main pushes, schedules, or manual dispatches—never
 factory/*, epic/*, tags, or pull requests. Keep this policy pinned by
-`scripts/test-ci-test-tiers.sh`, rather than relying on convention.
+`scripts/test-ci-test-tiers.sh`, rather than relying on convention. Docs-only
+diffs (paths under `docs/` or Markdown files outside embedded
+`cas-cli/src/` content) on pull-request, push, and merge-group events route
+only to the `Docs Lint` job; it runs Markdown lint and validates any changed
+release-note drafts. The existing required Fast Validation and macOS Check
+contexts remain present and skip their full work for that class. Mixed and
+code diffs keep the full required tier.
 
 Local sccache 0.10.0 does not produce cross-worktree Rust hits because absolute
 checkout paths remain in its cache keys (measured 0/45 hits even with

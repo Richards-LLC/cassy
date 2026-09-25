@@ -5789,7 +5789,7 @@ This is the body content."#;
             );
             // The tool contract is pinned to the single machine-readable
             // source of truth rather than re-spelled here. When the hub
-            // renames a tool, `cas integrate mecha-cassy` and `cas doctor`
+            // renames a tool, `cas integrate violet` and `cas doctor`
             // change with MECHA_CASSY_TOOLS, and this assertion drags the
             // prose along with them instead of letting the skill keep
             // documenting a retired name (which is exactly how the

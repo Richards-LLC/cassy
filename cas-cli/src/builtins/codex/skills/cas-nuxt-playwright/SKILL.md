@@ -93,7 +93,7 @@ await page.addInitScript((val: string) => {
 await page.route(/.*securetoken\.googleapis\.com.*/, (route) =>
   route.fulfill({ json: { id_token: 'fake', refresh_token: 'fake', expires_in: '3600' } }));
 await page.route(/.*identitytoolkit\.googleapis\.com.*/, (route) =>
-  route.fulfill({ json: { users: [{ localId: 'uid', email: 'test@test.com', emailVerified: true }] } }));
+  route.fulfill({ json: { users: [{ localId: 'uid', email: 'test@example.com', emailVerified: true }] } }));
 await page.route('**/accounts/me', (route) => route.fulfill({ json: ACCOUNT_SEED }));
 ```
 

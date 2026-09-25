@@ -3,7 +3,7 @@
 Task `cas-1234` says, “User filters tasks and sees no matches.” The build under
 test is commit `8b7f1de`, scope is “filtering plus adjacent task-list status,”
 and the 30-minute budget is written in
-`/home/pippenz/.cas/artifacts/cas-1234/LEDGER.md` before the run.
+`~/.cas/artifacts/cas-1234/LEDGER.md` before the run.
 
 ```text
 id | cell | expected | observed | verdict | label | evidence path | defect task

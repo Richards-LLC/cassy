@@ -25,7 +25,7 @@ Agents    2 active · 0 other · 0 actionable-idle min
 
 agent              status  task      last seen
 lively-panther-31  active  -            12s ago
-golden-koala-58    active  cas-4df0      3s ago
+golden-koala-58    active  cas-1111      3s ago
 
 --json for the queue peek and activity · --full for untruncated values
 ```

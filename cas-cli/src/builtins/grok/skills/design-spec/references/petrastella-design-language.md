@@ -131,7 +131,7 @@ and takes slot 3. The series slots share the verdict, rose and teal hues but sit
 (OKLCH L 0.43–0.77 light, 0.48–0.67 dark) with chroma ≥ 0.10, so `verdict` itself is never a series color.
 `neutral` (slate) is not a slot: it is the labelled other/rest bucket and reads as gray by design. Every slot,
 the 3-slot subset and the full set pass the `cas-dataviz` `validate_palette.js` checks on `surface` and `bg` in
-both schemes (receipts: docs/factory, task cas-fd80). Magnitude is a single-hue indigo ramp (five steps in
+both schemes (receipts: docs/factory). Magnitude is a single-hue indigo ramp (five steps in
 the tokens). Polarity is danger → line → good with the sign always printed. Validate any other subset with the
 `cas-dataviz` palette script against the surface in use.
 

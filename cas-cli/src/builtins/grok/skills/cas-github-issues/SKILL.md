@@ -135,8 +135,8 @@ Close the loop on GitHub so the reporter (and the next sweep) can see it:
 gh issue comment <n> --body "Tracked as \`cas-XXXX\`. <one line on the plan.>"
 ```
 
-**Issue-comment specificity.** Bad: `Tracked as \`cas-2a13\`.`
-Good: `Tracked as \`cas-2a13\`. I’ll add real bad/good pairs to the guidance writers use.`
+**Issue-comment specificity.** Bad: `Tracked as \`cas-1234\`.`
+Good: `Tracked as \`cas-1234\`. I’ll add real bad/good pairs to the guidance writers use.`
 Keep the tracker link, then state the concrete outcome; a bare ID leaves the reporter without an answer.
 
 The commit that fixes the issue should carry `Fixes #<n>` so GitHub closes it
@@ -198,7 +198,7 @@ shell. Then task it in step 4's format if it is actionable now.
 
 ## Why you may be here: the unfiled-reports banner
 
-`docs/requests/` is **deprecated for new outbound actionable requests**. Do not create a new file there: file directly on the receiving Richards-LLC team's issue board and save a Cassy memory receipt (issue URL, one-line ask, date). This skill still sweeps pre-existing staged legacy files so they are not lost; history and inbound `RESPONSE-*.md` files remain readable. Prose-heavy specifications and design documents may remain there until cross-project task proposals ship.
+`docs/requests/` is **deprecated for new outbound actionable requests**. Do not create a new file there: file directly on the receiving team's issue board and save a Cassy memory receipt (issue URL, one-line ask, date). This skill still sweeps pre-existing staged legacy files so they are not lost; history and inbound `RESPONSE-*.md` files remain readable. Prose-heavy specifications and design documents may remain there until cross-project task proposals ship.
 
 Cassy emits a SessionStart banner when `BUG-*.md` / `FEATURE-*.md` files are
 staged at the `docs/requests/` root — reports the write-first flow wrote but

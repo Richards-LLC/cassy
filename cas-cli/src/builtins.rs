@@ -387,22 +387,6 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
         path: "skills/cas-html-reports/references/examples/benchmark-small-multiples.why.md",
         content: include_str!("builtins/skills/cas-html-reports/references/examples/benchmark-small-multiples.why.md"),
     },
-    BuiltinFile {
-        path: "skills/cas-html-reports/references/examples/before-after/rubric-review-before.html",
-        content: include_str!("builtins/skills/cas-html-reports/references/examples/before-after/rubric-review-before.html"),
-    },
-    BuiltinFile {
-        path: "skills/cas-html-reports/references/examples/before-after/rubric-review-after.html",
-        content: include_str!("builtins/skills/cas-html-reports/references/examples/before-after/rubric-review-after.html"),
-    },
-    BuiltinFile {
-        path: "skills/cas-html-reports/references/examples/before-after/rubric-review.brief.md",
-        content: include_str!("builtins/skills/cas-html-reports/references/examples/before-after/rubric-review.brief.md"),
-    },
-    BuiltinFile {
-        path: "skills/cas-html-reports/references/examples/before-after/rubric-review.why.md",
-        content: include_str!("builtins/skills/cas-html-reports/references/examples/before-after/rubric-review.why.md"),
-    },
     // cas-1e7e: cross-harness data visualization guidance for static evidence artifacts.
     BuiltinFile {
         path: "skills/cas-dataviz/SKILL.md",
@@ -968,22 +952,6 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-html-reports/references/examples/benchmark-small-multiples.why.md",
         content: include_str!("builtins/codex/skills/cas-html-reports/references/examples/benchmark-small-multiples.why.md"),
-    },
-    BuiltinFile {
-        path: "skills/cas-html-reports/references/examples/before-after/rubric-review-before.html",
-        content: include_str!("builtins/codex/skills/cas-html-reports/references/examples/before-after/rubric-review-before.html"),
-    },
-    BuiltinFile {
-        path: "skills/cas-html-reports/references/examples/before-after/rubric-review-after.html",
-        content: include_str!("builtins/codex/skills/cas-html-reports/references/examples/before-after/rubric-review-after.html"),
-    },
-    BuiltinFile {
-        path: "skills/cas-html-reports/references/examples/before-after/rubric-review.brief.md",
-        content: include_str!("builtins/codex/skills/cas-html-reports/references/examples/before-after/rubric-review.brief.md"),
-    },
-    BuiltinFile {
-        path: "skills/cas-html-reports/references/examples/before-after/rubric-review.why.md",
-        content: include_str!("builtins/codex/skills/cas-html-reports/references/examples/before-after/rubric-review.why.md"),
     },
     BuiltinFile {
         path: "skills/cas-dataviz/SKILL.md",
@@ -1557,22 +1525,6 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-html-reports/references/examples/benchmark-small-multiples.why.md",
         content: include_str!("builtins/grok/skills/cas-html-reports/references/examples/benchmark-small-multiples.why.md"),
-    },
-    BuiltinFile {
-        path: "skills/cas-html-reports/references/examples/before-after/rubric-review-before.html",
-        content: include_str!("builtins/grok/skills/cas-html-reports/references/examples/before-after/rubric-review-before.html"),
-    },
-    BuiltinFile {
-        path: "skills/cas-html-reports/references/examples/before-after/rubric-review-after.html",
-        content: include_str!("builtins/grok/skills/cas-html-reports/references/examples/before-after/rubric-review-after.html"),
-    },
-    BuiltinFile {
-        path: "skills/cas-html-reports/references/examples/before-after/rubric-review.brief.md",
-        content: include_str!("builtins/grok/skills/cas-html-reports/references/examples/before-after/rubric-review.brief.md"),
-    },
-    BuiltinFile {
-        path: "skills/cas-html-reports/references/examples/before-after/rubric-review.why.md",
-        content: include_str!("builtins/grok/skills/cas-html-reports/references/examples/before-after/rubric-review.why.md"),
     },
     BuiltinFile {
         path: "skills/cas-dataviz/SKILL.md",
@@ -4917,17 +4869,17 @@ This is the body content."#;
             "skills/cas-html-reports/references/examples/investigation-annotated-timeline.html",
             "skills/cas-html-reports/references/examples/executive-variance-brief.html",
             "skills/cas-html-reports/references/examples/benchmark-small-multiples.html",
-            "skills/cas-html-reports/references/examples/before-after/rubric-review-after.html",
             "skills/cas-html-reports/references/examples/investigation-annotated-timeline.why.md",
             "skills/cas-html-reports/references/examples/executive-variance-brief.why.md",
             "skills/cas-html-reports/references/examples/benchmark-small-multiples.why.md",
-            "skills/cas-html-reports/references/examples/before-after/rubric-review-before.html",
-            "skills/cas-html-reports/references/examples/before-after/rubric-review.brief.md",
-            "skills/cas-html-reports/references/examples/before-after/rubric-review.why.md",
         ];
-        // FILES[6..10] are the rendered exemplars held to the contract; the
-        // `.why.md` sidecars and the before/after pair follow.
-        const RENDERED: std::ops::Range<usize> = 6..10;
+        // FILES[6..9] are the rendered exemplars held to the contract; their
+        // `.why.md` sidecars follow.
+        const RENDERED: std::ops::Range<usize> = 6..9;
+        // The before/after exemplar was a real operator report (e-mails, local
+        // account paths, costs, task ids) and is no longer shipped; the skill
+        // points at cas-ui-craft's synthetic before/after instead.
+        const RETIRED_PREFIX: &str = "skills/cas-html-reports/references/examples/before-after/";
 
         let mut claude_bodies: Vec<(&str, &str)> = Vec::new();
 
@@ -4971,7 +4923,7 @@ This is the body content."#;
                 "investigation-annotated-timeline.html",
                 "executive-variance-brief.html",
                 "benchmark-small-multiples.html",
-                "before-after/",
+                "cas-ui-craft/references/exemplars/before-after.html",
             ] {
                 assert!(
                     skill.contains(required),
@@ -5044,7 +4996,7 @@ This is the body content."#;
                 }
             }
             // Every exemplar ships its concept brief and critique scores in a sidecar.
-            for sidecar in &FILES[10..13] {
+            for sidecar in &FILES[9..12] {
                 let why = get(sidecar);
                 for required in ["Concept brief", "Hero form", "Critique", "Distinctiveness"] {
                     assert!(
@@ -5054,8 +5006,12 @@ This is the body content."#;
                 }
             }
             assert!(
-                get(FILES[15]).contains("Before") && get(FILES[15]).contains("after"),
-                "{label} before/after sidecar must explain both renders"
+                !catalog.iter().any(|b| b.path.starts_with(RETIRED_PREFIX)),
+                "{label} catalog still ships the retired operator before/after exemplar"
+            );
+            assert!(
+                !skill.contains("rubric-review"),
+                "{label} cas-html-reports SKILL.md still points at the retired exemplar"
             );
 
             // The skill makes no CAS MCP tool calls, so the twins are held

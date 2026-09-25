@@ -1,0 +1,576 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Skills &amp; prompts audit 2026-09 — decision brief</title>
+<style>
+:root{
+  --bg:#F7F4EE;--surface:#FFFFFF;--surface-hero:#F1E7DD;--line:#DAD3C7;--line-strong:#8F8371;
+  --ink:#1B1D24;--ink-muted:#5A5F6E;--verdict:#2E3A9F;--verdict-soft:#DDE1F7;--evidence:#5A5F6E;--action:#2E3A9F;
+  --on-verdict:#F7F4EE;
+  --font-display:"Iowan Old Style","Palatino Linotype",Palatino,"Book Antiqua",Georgia,"Times New Roman",serif;
+  --font-body:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  --font-mono:"JetBrains Mono","IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  color-scheme:light dark;
+}
+@media (prefers-color-scheme:dark){:root{
+  --bg:#12141A;--surface:#191C24;--surface-hero:#241E1E;--line:#2B3040;--line-strong:#6B7390;
+  --ink:#E9E6E0;--ink-muted:#A3A7B4;--verdict:#A9B3FF;--verdict-soft:rgba(169,179,255,.16);--evidence:#A3A7B4;--action:#A9B3FF;
+  --on-verdict:#12141A;
+}}
+*{box-sizing:border-box}
+html{background:var(--bg);color:var(--ink)}
+body{margin:0;background:var(--bg);color:var(--ink);font:400 17px/26px var(--font-body);-webkit-text-size-adjust:100%}
+a{color:var(--action);text-underline-offset:2px}
+a:focus-visible{outline:2px solid var(--action);outline-offset:2px}
+code,.mono{font-family:var(--font-mono)}
+code{font-size:.88em;overflow-wrap:anywhere}
+.wrap{max-width:1120px;margin:0 auto;padding:0 24px}
+.eyebrow{display:block;font:600 12px/16px var(--font-mono);letter-spacing:.08em;text-transform:uppercase;color:var(--ink-muted)}
+h2{font:600 27px/32px var(--font-body);letter-spacing:-.01em;margin:0 0 8px;color:var(--ink)}
+h3{font:600 17px/24px var(--font-body);margin:0;color:var(--ink)}
+.lede{font-size:19px;line-height:28px;color:var(--ink);max-width:68ch;margin:0 0 24px}
+section{padding:56px 0;border-top:1px solid var(--line)}
+p{max-width:68ch}
+
+/* hero */
+.hero{background:var(--surface-hero);color:var(--ink);padding:40px 0 28px}
+.hero-grid{display:grid;grid-template-columns:minmax(0,5fr) minmax(0,7fr);gap:40px;align-items:start}
+.verdict{font:400 clamp(30px,3.6vw,44px)/1.1 var(--font-display);letter-spacing:-.015em;margin:12px 0 16px;max-width:22ch;color:var(--ink)}
+.verdict em{font-style:italic;color:var(--verdict)}
+.hero-sub{font-size:17px;line-height:26px;color:var(--ink);margin:0}
+.fig-title{font:600 15px/22px var(--font-body);margin:0 0 10px;color:var(--ink)}
+.units{list-style:none;margin:0;padding:0}
+.urow{display:grid;grid-template-columns:minmax(0,190px) 28px minmax(0,1fr);gap:10px;align-items:start;padding:5px 0;border-top:1px solid var(--line)}
+.urow:first-child{border-top:0}
+.urow-label{font:400 13px/18px var(--font-body);color:var(--ink-muted);padding-top:4px}
+.urow--v .urow-label{color:var(--ink);font-weight:600}
+.tid{font:600 12px/16px var(--font-mono);color:var(--ink-muted);margin-right:2px}
+.urow--v .tid{color:var(--verdict)}
+.urow-n{font:600 14px/26px var(--font-mono);text-align:right;color:var(--ink-muted)}
+.urow--v .urow-n{color:var(--verdict)}
+.urow-tiles{display:flex;flex-wrap:wrap;gap:4px}
+.tile{display:inline-block;min-width:40px;padding:4px 5px;font:500 11px/16px var(--font-mono);text-align:center;background:var(--surface);color:var(--ink-muted);border:1px solid var(--line-strong)}
+.tile--v{background:var(--verdict);color:var(--on-verdict);border-color:var(--verdict)}
+.tile-empty{display:inline-block;padding:4px 8px;font:400 12px/16px var(--font-body);color:var(--ink-muted);border:1px dashed var(--line-strong)}
+.vrule{height:3px;background:var(--verdict);margin:22px 0 10px;border:0}
+.prov{font:400 12px/18px var(--font-mono);color:var(--ink-muted);margin:0;max-width:none}
+
+/* ask ledger */
+.ask-head{border-left:3px solid var(--verdict);padding-left:16px}
+table{border-collapse:collapse;width:100%;background:var(--surface);color:var(--ink)}
+.tscroll{overflow-x:auto;-webkit-overflow-scrolling:touch}
+caption{caption-side:top;text-align:left;font:400 14px/20px var(--font-body);color:var(--ink-muted);padding:0 0 10px}
+th,td{text-align:left;vertical-align:top;padding:10px 12px;border-bottom:1px solid var(--line);font-size:15px;line-height:22px}
+thead th{font:600 12px/16px var(--font-mono);letter-spacing:.08em;text-transform:uppercase;color:var(--ink-muted);border-bottom:1px solid var(--line-strong);background:var(--surface)}
+tbody th{font-weight:500}
+.ids{font-size:13px;color:var(--ink-muted);white-space:normal}
+.num{text-align:right;font-variant-numeric:tabular-nums}
+
+/* caps figure */
+.caps{list-style:none;margin:0;padding:0;max-width:880px}
+.cap{display:grid;grid-template-columns:minmax(0,260px) minmax(0,1fr) 56px;gap:16px;align-items:center;padding:12px 0;border-top:1px solid var(--line)}
+.cap-label{font:400 15px/20px var(--font-body);color:var(--ink)}
+.cap-sub{display:block;font-size:12px;line-height:18px;color:var(--ink-muted)}
+.cap-track{position:relative;height:18px;background:linear-gradient(to right,var(--line) 0,var(--line) 100%) center/100% 1px no-repeat}
+.cap-limit{position:absolute;left:66.667%;top:-4px;bottom:-4px;width:2px;background:var(--line-strong)}
+.cap-dot{position:absolute;top:50%;width:14px;height:14px;margin:-7px 0 0 -7px;border-radius:50%;background:var(--surface);border:2px solid var(--ink-muted)}
+.cap--v .cap-dot{background:var(--verdict);border-color:var(--verdict);width:16px;height:16px;margin:-8px 0 0 -8px}
+.cap-v{font:600 15px/20px var(--font-mono);text-align:right;color:var(--ink-muted)}
+.cap--v .cap-v,.cap--v .cap-label{color:var(--verdict)}
+.cap-axis{display:grid;grid-template-columns:minmax(0,260px) minmax(0,1fr) 56px;gap:16px;max-width:880px;padding-top:6px}
+.cap-axis span:nth-child(2){position:relative;height:18px;font:400 12px/18px var(--font-mono);color:var(--ink-muted)}
+.cap-axis i{position:absolute;font-style:normal;transform:translateX(-50%);white-space:nowrap}
+figcaption,.src{font:400 13px/20px var(--font-body);color:var(--ink-muted);margin-top:12px;max-width:68ch}
+details{margin-top:12px}
+summary{cursor:pointer;font:600 13px/20px var(--font-body);color:var(--action)}
+
+/* decisions */
+.decs{list-style:none;margin:0;padding:0}
+.dec{display:grid;grid-template-columns:52px minmax(0,1fr) minmax(0,1fr);gap:20px;padding:16px 0;border-top:1px solid var(--line)}
+.dec-id{font:600 15px/24px var(--font-mono);color:var(--ink-muted)}
+.dec-opt{font-size:14px;line-height:20px;color:var(--ink-muted);margin:4px 0 0}
+.dec-rec{margin:0;font-size:15px;line-height:22px;color:var(--ink);border-left:3px solid var(--verdict);padding-left:12px}
+.dec-rec .eyebrow{color:var(--verdict);margin-bottom:2px}
+.dec-gate{display:block;font-size:12px;line-height:18px;color:var(--ink-muted);margin-top:4px}
+
+/* p0 ledger */
+.ledger th,.ledger td{font-size:14px;line-height:20px}
+.ledger thead th{font:600 12px/16px var(--font-mono)}
+.figdata{max-width:880px;margin-top:20px}
+.figdata th,.figdata td{font-size:13px;line-height:18px;padding:6px 10px}
+.ledger .ev{font-size:12px;line-height:18px;color:var(--ink-muted);overflow-wrap:anywhere;min-width:180px}
+.ledger .lanes a{white-space:nowrap;font-size:13px}
+.ledger tr.grp th{background:var(--bg);color:var(--ink);font:600 15px/22px var(--font-body);padding-top:22px;border-bottom:1px solid var(--line-strong)}
+.grp-n{font:600 13px/22px var(--font-mono);color:var(--ink-muted);margin-left:8px}
+.grp-tiles{display:flex;flex-wrap:wrap;gap:3px;margin-top:8px}
+.grp-tiles .tile{min-width:34px;padding:1px 3px;font-size:10px;line-height:14px}
+.grp-gloss{display:block;font:400 13px/18px var(--font-body);color:var(--ink-muted)}
+.ledger tr.is-v th.mono{color:var(--verdict)}
+.ledger tbody:first-of-type tr.grp th{color:var(--verdict)}
+
+/* waves timeline */
+.waves{list-style:none;margin:0;padding:0 0 0 20px;border-left:2px solid var(--line-strong);max-width:880px}
+.wave{position:relative;display:grid;grid-template-columns:90px minmax(0,1fr);gap:16px;padding:0 0 24px 0}
+.wave::before{content:"";position:absolute;left:-27px;top:5px;width:12px;height:12px;border-radius:50%;background:var(--bg);border:2px solid var(--line-strong)}
+.wave-k{font:600 14px/22px var(--font-mono);color:var(--ink)}
+.wave-b p{margin:0 0 4px;font-size:15px;line-height:22px}
+.wave-when{color:var(--ink-muted);font-size:13px!important}
+.wave-save{font-size:13px!important;color:var(--ink-muted)}
+.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+footer{padding:40px 0 64px;border-top:1px solid var(--line);color:var(--ink-muted);font-size:14px;line-height:22px}
+footer p{max-width:none;margin:0 0 6px}
+
+@media (max-width:820px){
+  .hero-grid{grid-template-columns:1fr;gap:18px}
+  .hero{padding:24px 0 20px}
+  .verdict{font-size:29px;line-height:1.12;margin:8px 0 10px}
+  .hero-sub{font-size:15px;line-height:22px}
+  .urow{grid-template-columns:minmax(0,118px) 22px minmax(0,1fr);gap:8px;padding:3px 0}
+  .urow-label{font-size:12px;line-height:16px;padding-top:3px}
+  .urow-n{font-size:13px;line-height:24px}
+  .tile{min-width:36px;padding:3px 3px;font-size:10.5px;line-height:15px}
+  .tile-empty{font-size:11px;padding:3px 6px}
+  .cap,.cap-axis{grid-template-columns:minmax(0,1fr) 48px;gap:8px 12px}
+  .cap-label{grid-column:1 / -1}
+  .cap-axis span:first-child{display:none}
+  .dec{grid-template-columns:40px minmax(0,1fr);gap:8px 12px}
+  .dec-rec{grid-column:2}
+  section{padding:40px 0}
+  h2{font-size:23px;line-height:28px}
+  .wrap{padding:0 16px}
+  .wave{grid-template-columns:1fr;gap:4px}
+  .stack thead{display:none}
+  .stack caption{display:block;width:auto;padding:0 0 10px}
+  .stack,.stack tbody,.stack tr,.stack th,.stack td{display:block;width:auto}
+  .stack tr{padding:10px 0;border-bottom:1px solid var(--line)}
+  .stack th,.stack td{border:0;padding:2px 12px}
+  .stack tr.grp th{padding-top:18px;border-bottom:1px solid var(--line-strong)}
+  .stack td[data-k]::before{content:attr(data-k) " ";font:600 11px/16px var(--font-mono);letter-spacing:.06em;text-transform:uppercase;color:var(--ink-muted)}
+  .stack .tscroll,.tscroll.stackwrap{overflow:visible}
+}
+@media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+@media print{
+  :root{--bg:#fff;--surface:#fff;--surface-hero:#fff;--ink:#1B1D24;--ink-muted:#5A5F6E;--verdict:#2E3A9F;--line:#DAD3C7;--line-strong:#8F8371;--on-verdict:#fff;--action:#2E3A9F}
+  body{background:var(--bg);color:var(--ink)}
+  section{break-inside:auto;padding:24px 0}
+  tr,.dec,.cap,.urow{break-inside:avoid}
+  a[href]:not([href^="#"])::after{content:" (" attr(href) ")";font-size:11px;color:var(--ink-muted)}
+  .tscroll{overflow:visible}
+  details>*{display:block}
+}
+</style>
+</head>
+<body>
+<header class="hero">
+ <div class="wrap hero-grid">
+  <div>
+   <span class="eyebrow">Decision brief · 2026-09-25 · operator</span>
+   <h1 class="verdict">Twenty of the 27 ways Cassy misleads its agents are <em>instructions its own code rejects</em>.</h1>
+   <p class="hero-sub">So the first fix is a test, not a rewrite: check every suggested call in skills and runtime text against the tool schemas. The ask is <a href="#ask">Wave A</a>; thirteen <a href="#decide">decisions</a> gate the rest.</p>
+  </div>
+  <figure style="margin:0" aria-labelledby="hero-title">
+   <p class="fig-title" id="hero-title">Where the 27 P0s come from: one square per finding, by root cause</p>
+   <ul class="units" role="img" aria-label="Unit chart of the 27 P0 findings by primary root-cause theme: T5 prose not tied to what the code accepts, 20; T6 operator content, 2; T1, T2, T4, T7 and T8, 1 each; T3 always-loaded budget, 0. Full data in the P0 ledger below.">
+<li class="urow urow--v">
+  <span class="urow-label"><span class="tid">T5</span> Prose not tied to what the code accepts</span>
+  <span class="urow-n">20</span>
+  <span class="urow-tiles"><span class="tile tile--v" title="M02">M02</span><span class="tile tile--v" title="M03">M03</span><span class="tile tile--v" title="M04">M04</span><span class="tile tile--v" title="M07">M07</span><span class="tile tile--v" title="M08">M08</span><span class="tile tile--v" title="M09">M09</span><span class="tile tile--v" title="M10">M10</span><span class="tile tile--v" title="M11">M11</span><span class="tile tile--v" title="M12">M12</span><span class="tile tile--v" title="M13">M13</span><span class="tile tile--v" title="M14">M14</span><span class="tile tile--v" title="M15">M15</span><span class="tile tile--v" title="M16">M16</span><span class="tile tile--v" title="M17">M17</span><span class="tile tile--v" title="M18">M18</span><span class="tile tile--v" title="M20">M20</span><span class="tile tile--v" title="M22">M22</span><span class="tile tile--v" title="M23">M23</span><span class="tile tile--v" title="M25">M25</span><span class="tile tile--v" title="M26">M26</span></span>
+</li><li class="urow">
+  <span class="urow-label"><span class="tid">T6</span> Operator and cas-src content ships everywhere</span>
+  <span class="urow-n">2</span>
+  <span class="urow-tiles"><span class="tile" title="M06">M06</span><span class="tile" title="M19">M19</span></span>
+</li><li class="urow">
+  <span class="urow-label"><span class="tid">T1</span> Tool-prefix model</span>
+  <span class="urow-n">1</span>
+  <span class="urow-tiles"><span class="tile" title="M01">M01</span></span>
+</li><li class="urow">
+  <span class="urow-label"><span class="tid">T2</span> Install lifecycle only ever adds</span>
+  <span class="urow-n">1</span>
+  <span class="urow-tiles"><span class="tile" title="M05">M05</span></span>
+</li><li class="urow">
+  <span class="urow-label"><span class="tid">T4</span> Rules kept as hand copies</span>
+  <span class="urow-n">1</span>
+  <span class="urow-tiles"><span class="tile" title="M21">M21</span></span>
+</li><li class="urow">
+  <span class="urow-label"><span class="tid">T7</span> Wording lags model guidance</span>
+  <span class="urow-n">1</span>
+  <span class="urow-tiles"><span class="tile" title="M24">M24</span></span>
+</li><li class="urow">
+  <span class="urow-label"><span class="tid">T8</span> Stores carry other projects&#x27; facts</span>
+  <span class="urow-n">1</span>
+  <span class="urow-tiles"><span class="tile" title="M27">M27</span></span>
+</li><li class="urow">
+  <span class="urow-label"><span class="tid">T3</span> No owner for the always-loaded budget</span>
+  <span class="urow-n">0</span>
+  <span class="urow-tiles"><span class="tile-empty">none at P0</span></span>
+</li>
+   </ul>
+  </figure>
+ </div>
+ <div class="wrap">
+  <hr class="vrule">
+  <p class="prov">Source: SYNTHESIS.md @ 5108c1de8 (six lane audits of v3.31.0, 4836e56f7) · 48 lane P0s → 27 master P0s, 47 confirmed + 1 partial against code · 39 P1 · 16 work packages · 13 decisions · themes per report.brief.md</p>
+ </div>
+</header>
+
+<main>
+<section id="ask" aria-labelledby="ask-h">
+ <div class="wrap">
+  <div class="ask-head">
+   <span class="eyebrow">The ask</span>
+   <h2 id="ask-h">Approve Wave A now</h2>
+   <p class="lede">None of these packages changes the architecture. Together they fix the runtime-envelope P0s, bring SessionStart back under the hook cap, and make later skill fixes reach installed copies.</p>
+  </div>
+  <div class="tscroll stackwrap">
+  <table class="stack">
+   <caption>Wave A: eight packages, run in parallel. “Risk” is the build class; Rust changes need one assembly build and the full pinned test set.</caption>
+   <thead><tr><th scope="col">Package</th><th scope="col">What it does</th><th scope="col">Fixes</th><th scope="col">Risk</th><th scope="col">Payoff</th></tr></thead>
+   <tbody><tr>
+  <th scope="row" class="mono">WP1</th>
+  <td>Envelope and remediation correctness</td>
+  <td class="mono ids" data-k="fixes">M01 M02 M03 M04</td>
+  <td data-k="risk">Rust</td>
+  <td data-k="payoff">~300–800 tokens of failed call and recovery per assignment or rejection</td>
+</tr><tr>
+  <th scope="row" class="mono">WP2</th>
+  <td>Always-loaded budget: SessionStart back under the hook cap</td>
+  <td class="mono ids" data-k="fixes">M30 M33 M34</td>
+  <td data-k="risk">Rust + pinned text</td>
+  <td data-k="payoff">worker −2.6 KB assembled; supervisor −4 KB</td>
+</tr><tr>
+  <th scope="row" class="mono">WP3</th>
+  <td>MCP schema diet and text</td>
+  <td class="mono ids" data-k="fixes">M32 M70</td>
+  <td data-k="risk">Rust</td>
+  <td data-k="payoff">−2.9k tokens of schema; −1.6k for the four always-selected tools</td>
+</tr><tr>
+  <th scope="row" class="mono">WP4</th>
+  <td>Install sync and prune</td>
+  <td class="mono ids" data-k="fixes">M05 M42 M37</td>
+  <td data-k="risk">Rust</td>
+  <td data-k="payoff">every later skill fix reaches installed copies</td>
+</tr><tr>
+  <th scope="row" class="mono">WP5·M17</th>
+  <td>Deprecated-name sweep</td>
+  <td class="mono ids" data-k="fixes">M17</td>
+  <td data-k="risk">Rust (pinned test)</td>
+  <td data-k="payoff">the aliases expire next release</td>
+</tr><tr>
+  <th scope="row" class="mono">WP14a</th>
+  <td>Drop <code>start=</code>; prune duplicate CLAUDE.md blocks; <code>agents-md --check</code></td>
+  <td class="mono ids" data-k="fixes">M26 M64 M65</td>
+  <td data-k="risk">Rust</td>
+  <td data-k="payoff">−600 always per Petrastella session</td>
+</tr><tr>
+  <th scope="row" class="mono">WP15</th>
+  <td>Store hygiene: remove the Gabber rule and fixtures; add a write guard</td>
+  <td class="mono ids" data-k="fixes">M27 M83</td>
+  <td data-k="risk">ops + Rust</td>
+  <td data-k="payoff">wrong facts leave every cas-src session</td>
+</tr><tr>
+  <th scope="row" class="mono">WP16</th>
+  <td>Anchor verification dispatches so sibling merges stop cancelling them</td>
+  <td class="mono ids" data-k="fixes">M69</td>
+  <td data-k="risk">Rust</td>
+  <td data-k="payoff">one close-and-verify round per sibling merge (3 in this epic)</td>
+</tr></tbody>
+  </table>
+  </div>
+ </div>
+</section>
+
+<section id="budget" aria-labelledby="budget-h">
+ <div class="wrap">
+  <span class="eyebrow">Why WP2 and WP3 are in Wave A</span>
+  <h2 id="budget-h">Three always-loaded surfaces are already past their harness cap</h2>
+  <p class="lede">Past the cap the harness cuts silently. A worker then sees a ~2 KB preview of its SessionStart guidance, and the tail of the <code>coordination</code> description never reaches the model.</p>
+  <figure style="margin:0" aria-labelledby="caps-t">
+   <p class="fig-title" id="caps-t">Size as a share of the cap that applies (cap = 100%)</p>
+   <ul class="caps" role="img" aria-label="Dot plot: coordination description 138% of the 2,048-character cap; supervisor SessionStart 132% and worker SessionStart 118% of the 10,000-character hook cap; cas-worker.md body 99.9% of its 8,000-byte test cap, 11 bytes of headroom.">
+<li class="cap">
+  <span class="cap-label"><code>coordination</code> tool description<span class="cap-sub mono">2,834 vs 2,048 chars (Claude Code)</span></span>
+  <span class="cap-track" aria-hidden="true"><span class="cap-limit"></span><span class="cap-dot" style="left:92.25%"></span></span>
+  <span class="cap-v mono">138%</span>
+</li><li class="cap">
+  <span class="cap-label">Supervisor SessionStart<span class="cap-sub mono">13,181 B vs 10,000 chars (hook cap)</span></span>
+  <span class="cap-track" aria-hidden="true"><span class="cap-limit"></span><span class="cap-dot" style="left:87.87%"></span></span>
+  <span class="cap-v mono">132%</span>
+</li><li class="cap cap--v">
+  <span class="cap-label">Worker SessionStart<span class="cap-sub mono">11,820 B vs 10,000 chars (hook cap)</span></span>
+  <span class="cap-track" aria-hidden="true"><span class="cap-limit"></span><span class="cap-dot" style="left:78.80%"></span></span>
+  <span class="cap-v mono">118%</span>
+</li><li class="cap">
+  <span class="cap-label"><code>cas-worker.md</code> body (11 B headroom)<span class="cap-sub mono">7,989 B vs 8,000 B (test cap)</span></span>
+  <span class="cap-track" aria-hidden="true"><span class="cap-limit"></span><span class="cap-dot" style="left:66.57%"></span></span>
+  <span class="cap-v mono">99.9%</span>
+</li>
+   </ul>
+   <div class="cap-axis" aria-hidden="true"><span></span><span><i style="left:0">0%</i><i style="left:66.667%">cap</i><i style="left:100%">150%</i></span><span></span></div>
+   <figcaption>Worker SessionStart is marked because every worker pays it at every start. Sizes were measured on v3.31.0. SessionStart was rendered per role against a snapshot of the cas-src store (the sizes are in bytes and the cap counts characters, but both payloads are over in characters too). Source: L3 “Measured” table; L2 for the worker body.</figcaption>
+   <div class="tscroll figdata"><table><caption>Figure data</caption><thead><tr><th scope="col">Surface</th><th scope="col">Size</th><th scope="col">Cap</th><th scope="col">Share</th><th scope="col">Lane</th></tr></thead><tbody><tr><th scope="row"><code>coordination</code> tool description</th><td class="num mono">2,834</td><td>2,048 chars (Claude Code)</td><td class="num mono">138.4%</td><td>L3</td></tr><tr><th scope="row">Supervisor SessionStart</th><td class="num mono">13,181 B</td><td>10,000 chars (hook cap)</td><td class="num mono">131.8%</td><td>L3</td></tr><tr><th scope="row">Worker SessionStart</th><td class="num mono">11,820 B</td><td>10,000 chars (hook cap)</td><td class="num mono">118.2%</td><td>L3</td></tr><tr><th scope="row"><code>cas-worker.md</code> body (11 B headroom)</th><td class="num mono">7,989 B</td><td>8,000 B (test cap)</td><td class="num mono">99.9%</td><td>L2</td></tr></tbody></table></div>
+  </figure>
+ </div>
+</section>
+
+<section id="decide" aria-labelledby="decide-h">
+ <div class="wrap">
+  <span class="eyebrow">Decide first</span>
+  <h2 id="decide-h">Thirteen calls gate Waves C and D</h2>
+  <p class="lede">Each decision has a recommendation. D1–D4 shape the architecture; D5–D13 settle single skills or files.</p>
+  <ol class="decs"><li class="dec">
+  <span class="dec-id mono">D1</span>
+  <div class="dec-q"><h3>Tool naming in shipped text</h3><p class="dec-opt">Options: three spellings fixed per harness, or a prefix-neutral catalog.</p></div>
+  <p class="dec-rec"><span class="eyebrow">Recommend</span>Prefix-neutral catalog: bare tool names, the prefix stated once in role guidance<span class="dec-gate mono">gates WP11, WP12, WP8</span></p>
+</li><li class="dec">
+  <span class="dec-id mono">D2</span>
+  <div class="dec-q"><h3>Split <code>coordination</code></h3><p class="dec-opt">Options: one tool trimmed, or a worker <code>coordination</code> plus a supervisor <code>factory</code> tool.</p></div>
+  <p class="dec-rec"><span class="eyebrow">Recommend</span>Split: workers stop loading ~8 KB of spawn, worktree and db params<span class="dec-gate mono">gates WP13, WP3</span></p>
+</li><li class="dec">
+  <span class="dec-id mono">D3</span>
+  <div class="dec-q"><h3>Instruction-file projection</h3><p class="dec-opt">Options: CLAUDE.md canonical with a Codex-spelled AGENTS.md (today), neutral AGENTS.md, per-harness files, or AGENTS.md canonical with CLAUDE.md importing it.</p></div>
+  <p class="dec-rec"><span class="eyebrow">Recommend</span>AGENTS.md canonical and harness-neutral, CLAUDE.md = <code>@AGENTS.md</code>, each file under 10,000 chars<span class="dec-gate mono">gates WP12, WP14b</span></p>
+</li><li class="dec">
+  <span class="dec-id mono">D4</span>
+  <div class="dec-q"><h3>Carrier for worker startup rules</h3><p class="dec-opt">Options: SessionStart body, launch brief, or on-demand skill.</p></div>
+  <p class="dec-rec"><span class="eyebrow">Recommend</span>Decide after WP2 telemetry answers M31<span class="dec-gate mono">gates WP13</span></p>
+</li><li class="dec">
+  <span class="dec-id mono">D5</span>
+  <div class="dec-q"><h3>cas-release-report vs <code>cas release report</code></h3><p class="dec-opt">Options: CLI-first skill, or CLI reports exempt.</p></div>
+  <p class="dec-rec"><span class="eyebrow">Recommend</span>CLI-first; practice already follows the CLI<span class="dec-gate mono">gates WP10</span></p>
+</li><li class="dec">
+  <span class="dec-id mono">D6</span>
+  <div class="dec-q"><h3>Codex agents</h3><p class="dec-opt">Options: emit TOML, or stop installing <code>.md</code>.</p></div>
+  <p class="dec-rec"><span class="eyebrow">Recommend</span>Stop installing, unless Codex supervisors should delegate natively<span class="dec-gate mono">gates WP12</span></p>
+</li><li class="dec">
+  <span class="dec-id mono">D7</span>
+  <div class="dec-q"><h3>QA gates downstream</h3><p class="dec-opt">Options: ship the QA scripts in skills, or accept <code>unavailable</code> outside cas-src.</p></div>
+  <p class="dec-rec"><span class="eyebrow">Recommend</span>Ship them; otherwise every downstream web close is refused<span class="dec-gate mono">gates WP9, WP10</span></p>
+</li><li class="dec">
+  <span class="dec-id mono">D8</span>
+  <div class="dec-q"><h3>Token schema</h3><p class="dec-opt">Options: public DESIGN.md keys, or the house schema.</p></div>
+  <p class="dec-rec"><span class="eyebrow">Recommend</span>Adopt the spec keys with a <code>maps:</code> note<span class="dec-gate mono">gates WP10</span></p>
+</li><li class="dec">
+  <span class="dec-id mono">D9</span>
+  <div class="dec-q"><h3>Verifier policy for NOT-EXERCISED rows</h3><p class="dec-opt">Options: approve, reject, or supervisor call.</p></div>
+  <p class="dec-rec"><span class="eyebrow">Recommend</span>Operator call<span class="dec-gate mono">gates WP8</span></p>
+</li><li class="dec">
+  <span class="dec-id mono">D10</span>
+  <div class="dec-q"><h3>Home for cas-src-only guidance</h3><p class="dec-opt">Options: repo docs, or an overlay skill.</p></div>
+  <p class="dec-rec"><span class="eyebrow">Recommend</span>Repo docs plus one pointer; keep builtins project-neutral<span class="dec-gate mono">gates WP2, WP7, WP9</span></p>
+</li><li class="dec">
+  <span class="dec-id mono">D11</span>
+  <div class="dec-q"><h3>Rule promotion</h3><p class="dec-opt">Options: document the vote semantics, or add a Rust <code>promote</code> action.</p></div>
+  <p class="dec-rec"><span class="eyebrow">Recommend</span>Add <code>promote</code><span class="dec-gate mono">gates WP8</span></p>
+</li><li class="dec">
+  <span class="dec-id mono">D12</span>
+  <div class="dec-q"><h3>Stop-hook agent bodies</h3><p class="dec-opt">Options: per-harness files, or one body with a prefix remap.</p></div>
+  <p class="dec-rec"><span class="eyebrow">Recommend</span>One job body (follows D1)<span class="dec-gate mono">gates WP8, WP12</span></p>
+</li><li class="dec">
+  <span class="dec-id mono">D13</span>
+  <div class="dec-q"><h3>Repo and home instruction files</h3><p class="dec-opt">Options: keep build and CI policy in CLAUDE.md, or move it to docs or path-scoped rules.</p></div>
+  <p class="dec-rec"><span class="eyebrow">Recommend</span>Move it (−900 tokens every turn); re-test the Ink crash; one release-rubric pointer<span class="dec-gate mono">gates WP14b</span></p>
+</li></ol>
+ </div>
+</section>
+
+<section id="p0" aria-labelledby="p0-h">
+ <div class="wrap">
+  <span class="eyebrow">Evidence</span>
+  <h2 id="p0-h">The 27 P0s, grouped as in the figure</h2>
+  <p class="lede">Every row was checked against the current code. Lane links open the report that found it. P1–P3 detail stays in <a href="SYNTHESIS.md">SYNTHESIS.md</a>.</p>
+  <div class="tscroll stackwrap">
+  <table class="ledger stack">
+   <caption>P0 = “misleads an agent today”. The theme is each finding’s primary root cause (report.brief.md). The evidence column cites file:line.</caption>
+   <thead><tr><th scope="col">ID</th><th scope="col">Finding</th><th scope="col">Evidence</th><th scope="col">Lanes</th></tr></thead>
+   <tbody>
+<tr class="grp"><th colspan="4" scope="rowgroup"><span class="tid">T5</span> Prose not tied to what the code accepts <span class="grp-n">20</span><span class="grp-gloss">suggested calls omit required params, name denied actions, or cite superseded CLIs</span><span class="grp-tiles" aria-hidden="true"><span class="tile tile--v" title="M02">M02</span><span class="tile tile--v" title="M03">M03</span><span class="tile tile--v" title="M04">M04</span><span class="tile tile--v" title="M07">M07</span><span class="tile tile--v" title="M08">M08</span><span class="tile tile--v" title="M09">M09</span><span class="tile tile--v" title="M10">M10</span><span class="tile tile--v" title="M11">M11</span><span class="tile tile--v" title="M12">M12</span><span class="tile tile--v" title="M13">M13</span><span class="tile tile--v" title="M14">M14</span><span class="tile tile--v" title="M15">M15</span><span class="tile tile--v" title="M16">M16</span><span class="tile tile--v" title="M17">M17</span><span class="tile tile--v" title="M18">M18</span><span class="tile tile--v" title="M20">M20</span><span class="tile tile--v" title="M22">M22</span><span class="tile tile--v" title="M23">M23</span><span class="tile tile--v" title="M25">M25</span><span class="tile tile--v" title="M26">M26</span></span></th></tr>
+<tr class="is-v">
+  <th scope="row" class="mono">M02</th>
+  <td>Suggested <code>coordination action=message</code> calls omit the required <code>summary</code></td>
+  <td class="ev mono" data-k="evidence">agent_search_system/message.rs:637-645; prompts.rs:744,1388; pty.rs:20,41,315,1404</td>
+  <td class="lanes" data-k="lanes"><a href="L3-findings.md">L3 P0.2</a> <a href="L2-findings.md">L2 P0-05</a></td>
+</tr><tr class="is-v">
+  <th scope="row" class="mono">M03</th>
+  <td>Text tells <code>local_merge</code> workers to push; PreToolUse denies the push</td>
+  <td class="ev mono" data-k="evidence">close_ops.rs:10918,11786; cas-worker.md:37-39; pre_tool.rs:210-229</td>
+  <td class="lanes" data-k="lanes"><a href="L3-findings.md">L3 P0.3</a> <a href="L2-findings.md">L2 P0-10</a></td>
+</tr><tr class="is-v">
+  <th scope="row" class="mono">M04</th>
+  <td>Direct-verdict guidance omits the required <code>dispatch_id</code></td>
+  <td class="ev mono" data-k="evidence">close_ops.rs:6381,6731; verification_tools.rs:337-345</td>
+  <td class="lanes" data-k="lanes"><a href="L3-findings.md">L3 P0.4</a></td>
+</tr><tr class="is-v">
+  <th scope="row" class="mono">M07</th>
+  <td>cas-release-report never mentions <code>cas release report</code>; 22 of 29 reports skip its brief and QA</td>
+  <td class="ev mono" data-k="evidence">cas-release-report/SKILL.md (0 mentions); cas release report --help</td>
+  <td class="lanes" data-k="lanes"><a href="L4-findings.md">L4 F2</a></td>
+</tr><tr class="is-v">
+  <th scope="row" class="mono">M08</th>
+  <td>QA gates need <code>visual-qa.mjs</code>/<code>terminal-qa.mjs</code>, which ship only in cas-src</td>
+  <td class="ev mono" data-k="evidence">qa_evidence.rs:475-483; builtins: 0 visual-qa files</td>
+  <td class="lanes" data-k="lanes"><a href="L4-findings.md">L4 F5</a> <a href="L5-findings.md">L5 P0-6</a></td>
+</tr><tr class="is-v">
+  <th scope="row" class="mono">M09</th>
+  <td>The session-learn Stop prompt breaks its own parser and drops the whole batch</td>
+  <td class="ev mono" data-k="evidence">hooks/handlers.rs:207-227; handlers_session.rs:1678,1758-1766,1782</td>
+  <td class="lanes" data-k="lanes"><a href="L5-findings.md">L5 P0-11</a> <a href="L3-findings.md">L3 P2.19</a></td>
+</tr><tr class="is-v">
+  <th scope="row" class="mono">M10</th>
+  <td>task-verifier sends <code>files_reviewed=</code>, which the tool silently drops; the wrong marker is pinned</td>
+  <td class="ev mono" data-k="evidence">ops_secondary.rs:354-395; builtins.rs:6274</td>
+  <td class="lanes" data-k="lanes"><a href="L2-findings.md">L2 P0-01</a></td>
+</tr><tr class="is-v">
+  <th scope="row" class="mono">M11</th>
+  <td>Proof and test guidance tells factory workers to run cargo, which the harness denies</td>
+  <td class="ev mono" data-k="evidence">verify-before-claim/SKILL.md:27-28,72-73; pre_tool.rs:30-69; close_ops.rs:1768-1800</td>
+  <td class="lanes" data-k="lanes"><a href="L2-findings.md">L2 P0-02</a> <a href="L5-findings.md">L5 P1-31</a> <a href="L3-findings.md">L3 P2.18</a></td>
+</tr><tr class="is-v">
+  <th scope="row" class="mono">M12</th>
+  <td><code>task create</code> examples omit the required <code>risk</code></td>
+  <td class="ev mono" data-k="evidence">mcp/tools/types/task.rs:124-140</td>
+  <td class="lanes" data-k="lanes"><a href="L2-findings.md">L2 P0-06</a> <a href="L5-findings.md">L5 P0-7…9</a></td>
+</tr><tr class="is-v">
+  <th scope="row" class="mono">M13</th>
+  <td>Supervisor runbooks give wrong commands (<code>shutdown_workers count=0</code> kills every worker, and more)</td>
+  <td class="ev mono" data-k="evidence">factory_ops.rs:2778-2785,7628-7644; ops_task_leases.rs:174; search.rs:148-159</td>
+  <td class="lanes" data-k="lanes"><a href="L2-findings.md">L2 P0-03…22</a></td>
+</tr><tr class="is-v">
+  <th scope="row" class="mono">M14</th>
+  <td>Spawn guidance contradicts the lane registry</td>
+  <td class="ev mono" data-k="evidence">ops_secondary.rs:746-751,1137; factory_ops.rs:53-65,2323-2407</td>
+  <td class="lanes" data-k="lanes"><a href="L2-findings.md">L2 P0-16,20,21</a></td>
+</tr><tr class="is-v">
+  <th scope="row" class="mono">M15</th>
+  <td>Worker references teach the wrong delivery state and headroom rule</td>
+  <td class="ev mono" data-k="evidence">close_ops.rs:4166-4183</td>
+  <td class="lanes" data-k="lanes"><a href="L2-findings.md">L2 P0-09,25</a></td>
+</tr><tr class="is-v">
+  <th scope="row" class="mono">M16</th>
+  <td>Maintenance agents cannot do their job (skill create without <code>invocation</code>; “promote” is one vote)</td>
+  <td class="ev mono" data-k="evidence">service/core.rs:951-968; rules.rs:37-41,233-256</td>
+  <td class="lanes" data-k="lanes"><a href="L2-findings.md">L2 P0-07,08</a></td>
+</tr><tr class="is-v">
+  <th scope="row" class="mono">M17</th>
+  <td>Deprecated names that expire next release: <code>issues.components.mecha_cassy</code>, <code>cas integrate mecha-cassy</code></td>
+  <td class="ev mono" data-k="evidence">config/access/mod.rs:8-13; cli/integrate/mod.rs:106-116</td>
+  <td class="lanes" data-k="lanes"><a href="L2-findings.md">L2 P0-18</a> <a href="L5-findings.md">L5 P0-2</a></td>
+</tr><tr class="is-v">
+  <th scope="row" class="mono">M18</th>
+  <td>The memory entry-type “enum” leaves out the live <code>handoff</code> type</td>
+  <td class="ev mono" data-k="evidence">memory.rs:453-458,513</td>
+  <td class="lanes" data-k="lanes"><a href="L2-findings.md">L2 P0-23</a></td>
+</tr><tr class="is-v">
+  <th scope="row" class="mono">M20</th>
+  <td>fallow’s <code>2&gt;/dev/null || true</code> hides every exit code; a missing binary looks like a pass</td>
+  <td class="ev mono" data-k="evidence">fallow/SKILL.md:21-24,68,193</td>
+  <td class="lanes" data-k="lanes"><a href="L5-findings.md">L5 P0-1</a></td>
+</tr><tr class="is-v">
+  <th scope="row" class="mono">M22</th>
+  <td>The cas-qa-craft trigger ignores the path and journey gates, so closes are refused</td>
+  <td class="ev mono" data-k="evidence">qa_pass.rs:100-108; qa_evidence_gate.rs:84-89</td>
+  <td class="lanes" data-k="lanes"><a href="L5-findings.md">L5 P0-5</a></td>
+</tr><tr class="is-v">
+  <th scope="row" class="mono">M23</th>
+  <td>Wrong MCP call shapes: <code>mcp_execute</code>, Viktor <code>question</code></td>
+  <td class="ev mono" data-k="evidence">ops_secondary.rs:1256-1272; live ask_viktor schema</td>
+  <td class="lanes" data-k="lanes"><a href="L5-findings.md">L5 P0-3,12</a></td>
+</tr><tr class="is-v">
+  <th scope="row" class="mono">M25</th>
+  <td>mcp-integration never mentions the fail-closed proxy allowlist</td>
+  <td class="ev mono" data-k="evidence">cas-mcp-proxy/src/config.rs:53-59,421-425; cli/mcp_cmd.rs:54,118-124</td>
+  <td class="lanes" data-k="lanes"><a href="L5-findings.md">L5 P0-13,14</a></td>
+</tr><tr class="is-v">
+  <th scope="row" class="mono">M26</th>
+  <td>The init-written <code>cas</code> skill (32 installs) recommends a <code>start</code> param the schema rejects</td>
+  <td class="ev mono" data-k="evidence">cli/init/docs_and_skill.rs:177; crates/cas-mcp/src/types.rs:141-144</td>
+  <td class="lanes" data-k="lanes"><a href="L6-findings.md">L6 F1</a></td>
+</tr>
+</tbody><tbody>
+<tr class="grp"><th colspan="4" scope="rowgroup"><span class="tid">T6</span> Operator and cas-src content ships everywhere <span class="grp-n">2</span><span class="grp-gloss">private data and repo-only rules in universal builtins</span><span class="grp-tiles" aria-hidden="true"><span class="tile" title="M06">M06</span><span class="tile" title="M19">M19</span></span></th></tr>
+<tr>
+  <th scope="row" class="mono">M06</th>
+  <td>A shipped exemplar is a real operator report: e-mails, paths, $ figures</td>
+  <td class="ev mono" data-k="evidence">cas-html-reports/…/before-after/rubric-review-{before,after}.html</td>
+  <td class="lanes" data-k="lanes"><a href="L4-findings.md">L4 F1</a></td>
+</tr><tr>
+  <th scope="row" class="mono">M19</th>
+  <td>The worker body routes Cassy bugs into the downstream project’s tracker</td>
+  <td class="ev mono" data-k="evidence">agent_search_system/system.rs:263-277</td>
+  <td class="lanes" data-k="lanes"><a href="L2-findings.md">L2 P0-24</a></td>
+</tr>
+</tbody><tbody>
+<tr class="grp"><th colspan="4" scope="rowgroup"><span class="tid">T1</span> Tool-prefix model <span class="grp-n">1</span><span class="grp-gloss">harness spelling picked from the wrong source</span><span class="grp-tiles" aria-hidden="true"><span class="tile" title="M01">M01</span></span></th></tr>
+<tr>
+  <th scope="row" class="mono">M01</th>
+  <td>Claude workers get Codex <code>mcp__cs__</code> tool names in every assignment</td>
+  <td class="ev mono" data-k="evidence">ui/factory/director/prompts.rs:1357-1393,744; app/mod.rs:1362</td>
+  <td class="lanes" data-k="lanes"><a href="L3-findings.md">L3 P0.1</a></td>
+</tr>
+</tbody><tbody>
+<tr class="grp"><th colspan="4" scope="rowgroup"><span class="tid">T2</span> Install lifecycle only ever adds <span class="grp-n">1</span><span class="grp-gloss">scripts freeze at first install; nothing prunes</span><span class="grp-tiles" aria-hidden="true"><span class="tile" title="M05">M05</span></span></th></tr>
+<tr>
+  <th scope="row" class="mono">M05</th>
+  <td>Skill scripts and examples freeze at first install; removed files are never pruned</td>
+  <td class="ev mono" data-k="evidence">builtins.rs:2318-2339,2534-2549</td>
+  <td class="lanes" data-k="lanes"><a href="L1-findings.md">L1 #1</a></td>
+</tr>
+</tbody><tbody>
+<tr class="grp"><th colspan="4" scope="rowgroup"><span class="tid">T4</span> Rules kept as hand copies <span class="grp-n">1</span><span class="grp-gloss">two copies of one rule disagree</span><span class="grp-tiles" aria-hidden="true"><span class="tile" title="M21">M21</span></span></th></tr>
+<tr>
+  <th scope="row" class="mono">M21</th>
+  <td>The release-notes template uses Markdown <code>**</code>, which mecha-cassy lint refuses</td>
+  <td class="ev mono" data-k="evidence">RUBRIC-template.md:88-95 vs mecha-cassy/SKILL.md:36-37</td>
+  <td class="lanes" data-k="lanes"><a href="L5-findings.md">L5 P0-4</a></td>
+</tr>
+</tbody><tbody>
+<tr class="grp"><th colspan="4" scope="rowgroup"><span class="tid">T7</span> Wording lags model guidance <span class="grp-n">1</span><span class="grp-gloss">a skill contradicts itself</span><span class="grp-tiles" aria-hidden="true"><span class="tile" title="M24">M24</span></span></th></tr>
+<tr>
+  <th scope="row" class="mono">M24</th>
+  <td>cas-brainstorm says “ONE question at a time” and “ask the full frontier”</td>
+  <td class="ev mono" data-k="evidence">cas-brainstorm/SKILL.md:32 vs :41</td>
+  <td class="lanes" data-k="lanes"><a href="L5-findings.md">L5 P0-10</a></td>
+</tr>
+</tbody><tbody>
+<tr class="grp"><th colspan="4" scope="rowgroup"><span class="tid">T8</span> Stores carry other projects&#x27; facts <span class="grp-n">1</span><span class="grp-gloss">a Gabber rule lives in cas-src</span><span class="grp-tiles" aria-hidden="true"><span class="tile" title="M27">M27</span></span></th></tr>
+<tr>
+  <th scope="row" class="mono">M27</th>
+  <td>A Gabber “branch from <code>staging</code>” rule is cas-src’s only proven rule; cas-src has no staging</td>
+  <td class="ev mono" data-k="evidence">cas-src/.claude/rules/cas/rule-002.md:5</td>
+  <td class="lanes" data-k="lanes"><a href="L6-findings.md">L6 F2</a></td>
+</tr>
+</tbody>
+  </table>
+  </div>
+ </div>
+</section>
+
+<section id="later" aria-labelledby="later-h">
+ <div class="wrap">
+  <span class="eyebrow">After Wave A</span>
+  <h2 id="later-h">Waves B to D, in order</h2>
+  <ol class="waves"><li class="wave">
+  <span class="wave-k mono">Wave B</span>
+  <div class="wave-b"><p class="wave-when">After WP2 and WP4</p><p>WP5 remainder · WP6 close-gate helpers · WP7 factory-core skill accuracy · WP8 verifier and Stop-hook jobs</p><p class="wave-save mono">−3.2k tokens per verification spawn</p></div>
+</li><li class="wave">
+  <span class="wave-k mono">Wave C</span>
+  <div class="wave-b"><p class="wave-when">After D5, D7, D8, D10</p><p>WP9 workflow skills · WP10 design and report skills · WP11 house standard and portable frontmatter</p><p class="wave-save mono">−5.7k tokens per release cut; −4.9k per render</p></div>
+</li><li class="wave">
+  <span class="wave-k mono">Wave D</span>
+  <div class="wave-b"><p class="wave-when">After D1–D4, D6, D13</p><p>WP12 harness projection · WP13 startup single source and coordination split · WP14b instruction files</p><p class="wave-save mono">−2–3k tokens per worker session with the split</p></div>
+</li></ol>
+  <p class="src">One assembly build per wave. Packages that touch pinned skill text run the whole pin set in one no-fail-fast pass.</p>
+ </div>
+</section>
+</main>
+
+<footer>
+ <div class="wrap">
+  <p>Markdown source: <a href="SYNTHESIS.md">SYNTHESIS.md</a> (commit 5108c1de8, EPIC cas-1660). Lane reports: <a href="L1-findings.md">L1</a> · <a href="L2-findings.md">L2</a> · <a href="L3-findings.md">L3</a> · <a href="L4-findings.md">L4</a> · <a href="L5-findings.md">L5</a> · <a href="L6-findings.md">L6</a>. Concept brief and critique: <a href="report.brief.md">report.brief.md</a>.</p>
+  <p>Findings only. No code was changed by this audit.</p>
+ </div>
+</footer>
+</body>
+</html>

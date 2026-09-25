@@ -52,7 +52,7 @@ function headers(config: DaemonConfig): Record<string, string> {
 }
 
 /** List running sessions from cas serve, optionally filtering by project_dir. */
-export async function listSessions(
+async function listSessions(
   config: DaemonConfig,
   projectDir?: string,
 ): Promise<Array<{ name: string; project_dir: string | null; is_running: boolean; can_attach: boolean }>> {
@@ -70,7 +70,7 @@ export async function listSessions(
 }
 
 /** Kill a session via cas serve. */
-export async function killSession(
+async function killSession(
   config: DaemonConfig,
   sessionName: string,
 ): Promise<boolean> {
@@ -82,7 +82,7 @@ export async function killSession(
 }
 
 /** Start a factory session via cas serve. Returns session name or null. */
-export async function startSession(
+async function startSession(
   config: DaemonConfig,
   projectDir: string,
 ): Promise<{ name: string; reused: boolean } | null> {

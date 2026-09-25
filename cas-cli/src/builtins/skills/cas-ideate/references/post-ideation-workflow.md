@@ -36,7 +36,7 @@ Score survivors on a consistent rubric weighing:
 - **Expected value** — how much better does the project get?
 - **Novelty** — would the user have thought of this themselves?
 - **Pragmatism** — can this actually ship?
-- **Leverage on future work** — does it unlock other improvements?
+- **Effect on future work** — does it enable other improvements?
 - **Implementation burden** — realistic estimate, not optimistic
 - **Overlap with stronger ideas** — penalize partial duplicates
 

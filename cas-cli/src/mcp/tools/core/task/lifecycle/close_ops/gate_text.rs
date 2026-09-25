@@ -81,6 +81,19 @@ pub(crate) fn repeated_close_refusal_stop(task_id: &str, caller_prefix: &str) ->
     )
 }
 
+/// A feature map is opt-in by the target repository's directory. The caller
+/// supplies only feature files whose Touches globs matched delivered paths.
+pub(crate) fn feature_map_drift_message(
+    task_id: &str,
+    stale: &[String],
+    caller_prefix: &str,
+) -> String {
+    format!(
+        "⚠️ FEATURE MAP DRIFT\n\nTask {task_id} changed paths listed by these feature files without updating them:\n{}\n\nUpdate the named feature files in docs/qa/features, or record a decision note with a non-empty reason: `{caller_prefix}task action=notes id={task_id} note_type=decision notes=\"map unchanged: <reason>\"`. Then retry `{caller_prefix}task action=close id={task_id}`.",
+        stale.iter().map(|file| format!("- {file}")).collect::<Vec<_>>().join("\n")
+    )
+}
+
 /// How to find, check and present a `commit_receipt` — shared by every
 /// refusal that asks for one.
 pub(crate) fn commit_receipt_recovery_steps(
@@ -249,6 +262,18 @@ pub(crate) fn verifier_spawn_denial(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn feature_map_refusal_names_file_and_harness_specific_escape() {
+        let message = feature_map_drift_message(
+            "cas-demo",
+            &["docs/qa/features/profile.md".to_string()],
+            "mcp__cs__",
+        );
+        assert!(message.contains("docs/qa/features/profile.md"), "{message}");
+        assert!(message.contains("mcp__cs__task action=notes id=cas-demo note_type=decision notes=\"map unchanged: <reason>\""), "{message}");
+        assert!(message.contains("mcp__cs__task action=close id=cas-demo"), "{message}");
+    }
 
     const PREFIXES: [&str; 4] = ["mcp__cas__", "mcp__cs__", "cas__", "cas_"];
 

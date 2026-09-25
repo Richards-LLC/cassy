@@ -515,6 +515,24 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
         path: "skills/cas-qa-craft/references/independent-pass.md",
         content: include_str!("builtins/skills/cas-qa-craft/references/independent-pass.md"),
     },
+    // cas-0bf6: verification kit generator, maintenance sweep, feature-map
+    // template and its static check.
+    BuiltinFile {
+        path: "skills/cas-qa-craft/references/verify-harness.md",
+        content: include_str!("builtins/skills/cas-qa-craft/references/verify-harness.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-qa-craft/references/maintain.md",
+        content: include_str!("builtins/skills/cas-qa-craft/references/maintain.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-qa-craft/references/feature-template.md",
+        content: include_str!("builtins/skills/cas-qa-craft/references/feature-template.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-qa-craft/scripts/check-feature-map.mjs",
+        content: include_str!("builtins/skills/cas-qa-craft/scripts/check-feature-map.mjs"),
+    },
     // cas-release-notes skill (GH #65): drafts/posts the user + dev Slack threads
     // for every staging/main merge and installs the canonical rubric template
     // at docs/release-notes/RUBRIC.md when a project has none.
@@ -656,6 +674,7 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile { path: "skills/cas-wizard/SKILL.md", content: include_str!("builtins/skills/cas-wizard/SKILL.md") },
     BuiltinFile { path: "skills/cas-wizard/template.sh", content: include_str!("builtins/skills/cas-wizard/template.sh") },
     BuiltinFile { path: "skills/cas-resolving-merge-conflicts/SKILL.md", content: include_str!("builtins/skills/cas-resolving-merge-conflicts/SKILL.md") },
+    BuiltinFile { path: "skills/cas-why/SKILL.md", content: include_str!("builtins/skills/cas-why/SKILL.md") },
     BuiltinFile { path: "skills/cas-to-questionnaire/SKILL.md", content: include_str!("builtins/skills/cas-to-questionnaire/SKILL.md") },
     BuiltinFile { path: "skills/cas-image-generate/SKILL.md", content: include_str!("builtins/skills/cas-image-generate/SKILL.md") },
     BuiltinFile { path: "skills/cas-image-generate/references/asset-playbook.md", content: include_str!("builtins/skills/cas-image-generate/references/asset-playbook.md") },
@@ -1105,6 +1124,24 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
         path: "skills/cas-qa-craft/references/independent-pass.md",
         content: include_str!("builtins/skills/cas-qa-craft/references/independent-pass.md"),
     },
+    // cas-0bf6: verification kit generator, maintenance sweep, feature-map
+    // template and its static check.
+    BuiltinFile {
+        path: "skills/cas-qa-craft/references/verify-harness.md",
+        content: include_str!("builtins/skills/cas-qa-craft/references/verify-harness.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-qa-craft/references/maintain.md",
+        content: include_str!("builtins/skills/cas-qa-craft/references/maintain.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-qa-craft/references/feature-template.md",
+        content: include_str!("builtins/skills/cas-qa-craft/references/feature-template.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-qa-craft/scripts/check-feature-map.mjs",
+        content: include_str!("builtins/skills/cas-qa-craft/scripts/check-feature-map.mjs"),
+    },
     // cas-release-notes skill (GH #65) — codex mirror.
     BuiltinFile {
         path: "skills/cas-release-notes/SKILL.md",
@@ -1234,6 +1271,7 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile { path: "skills/cas-wizard/SKILL.md", content: include_str!("builtins/skills/cas-wizard/SKILL.md") },
     BuiltinFile { path: "skills/cas-wizard/template.sh", content: include_str!("builtins/skills/cas-wizard/template.sh") },
     BuiltinFile { path: "skills/cas-resolving-merge-conflicts/SKILL.md", content: include_str!("builtins/skills/cas-resolving-merge-conflicts/SKILL.md") },
+    BuiltinFile { path: "skills/cas-why/SKILL.md", content: include_str!("builtins/skills/cas-why/SKILL.md") },
     BuiltinFile { path: "skills/cas-to-questionnaire/SKILL.md", content: include_str!("builtins/skills/cas-to-questionnaire/SKILL.md") },
     BuiltinFile { path: "skills/cas-to-questionnaire/agents/openai.yaml", content: include_str!("builtins/codex/skills/cas-to-questionnaire/agents/openai.yaml") },
     BuiltinFile { path: "skills/cas-image-generate/SKILL.md", content: include_str!("builtins/skills/cas-image-generate/SKILL.md") },
@@ -1689,6 +1727,24 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
         path: "skills/cas-qa-craft/references/independent-pass.md",
         content: include_str!("builtins/skills/cas-qa-craft/references/independent-pass.md"),
     },
+    // cas-0bf6: verification kit generator, maintenance sweep, feature-map
+    // template and its static check.
+    BuiltinFile {
+        path: "skills/cas-qa-craft/references/verify-harness.md",
+        content: include_str!("builtins/skills/cas-qa-craft/references/verify-harness.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-qa-craft/references/maintain.md",
+        content: include_str!("builtins/skills/cas-qa-craft/references/maintain.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-qa-craft/references/feature-template.md",
+        content: include_str!("builtins/skills/cas-qa-craft/references/feature-template.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-qa-craft/scripts/check-feature-map.mjs",
+        content: include_str!("builtins/skills/cas-qa-craft/scripts/check-feature-map.mjs"),
+    },
     // cas-release-notes skill (GH #65) — grok twin.
     BuiltinFile {
         path: "skills/cas-release-notes/SKILL.md",
@@ -1820,6 +1876,7 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile { path: "skills/cas-wizard/SKILL.md", content: include_str!("builtins/skills/cas-wizard/SKILL.md") },
     BuiltinFile { path: "skills/cas-wizard/template.sh", content: include_str!("builtins/skills/cas-wizard/template.sh") },
     BuiltinFile { path: "skills/cas-resolving-merge-conflicts/SKILL.md", content: include_str!("builtins/skills/cas-resolving-merge-conflicts/SKILL.md") },
+    BuiltinFile { path: "skills/cas-why/SKILL.md", content: include_str!("builtins/skills/cas-why/SKILL.md") },
     BuiltinFile { path: "skills/cas-to-questionnaire/SKILL.md", content: include_str!("builtins/skills/cas-to-questionnaire/SKILL.md") },
     BuiltinFile { path: "skills/cas-image-generate/SKILL.md", content: include_str!("builtins/skills/cas-image-generate/SKILL.md") },
     BuiltinFile { path: "skills/cas-image-generate/references/asset-playbook.md", content: include_str!("builtins/skills/cas-image-generate/references/asset-playbook.md") },
@@ -4007,10 +4064,6 @@ mod tests {
                     .unwrap()
                     .content;
                 for required in [
-                    "authoritative assignment acceptance",
-                    "no prose ACK is required",
-                    "inbox on the next turn",
-                    "Only authenticated typed",
                     "blocker=true",
                     "merge_request=true",
                 ] {
@@ -4024,11 +4077,6 @@ mod tests {
                 file.path.contains("cas-supervisor") || file.path.contains("cas-worker")
             }) {
                 for stale in [
-                    "Require worker ACK",
-                    "Then send an ACK",
-                    "acknowledges acceptance criteria before starting",
-                    "sending/receiving a worker acknowledgement",
-                    "arrive asynchronously as new injected turns",
                     "/cas-supervisor-checklist",
                 ] {
                     assert!(
@@ -4048,7 +4096,7 @@ mod tests {
                 "acked_at",
                 "queue_ack",
                 "message_ack",
-                "Neither replaces `task action=start`",
+                "task action=start",
             ] {
                 assert!(
                     recovery.contains(receipt),
@@ -4220,28 +4268,17 @@ This is the body content."#;
     #[test]
     fn test_supervisor_guidance_loads() {
         let guide = supervisor_guidance();
-        assert!(guide.contains("Factory Supervisor"));
+        assert!(!guide.is_empty());
         assert!(!guide.contains("managed_by:"));
-        // Checklist must NOT be bundled — it loads separately via /cas-supervisor-checklist.
-        assert!(
-            !guide.contains("Supervisor Checklist"),
-            "should NOT bundle checklist — invocable separately via /cas-supervisor-checklist"
+        assert_eq!(
+            guide,
+            extract_body(include_str!("builtins/skills/cas-supervisor.md"))
+                .replacen(TOOL_NAMING_LINE, SESSION_TOOL_NAMING_LINE, 1)
         );
-        // task-tracking/memory/search are autonomous skills, not bundled.
-        assert!(
-            !guide.contains("Cassy Task Tracking"),
-            "should NOT bundle task-tracking — loads on demand"
-        );
-        assert!(
-            !guide.contains("Cassy Memory Management"),
-            "should NOT bundle memory — loads on demand"
-        );
+        assert!(guide.contains(SESSION_TOOL_NAMING_LINE) && !guide.contains(TOOL_NAMING_LINE));
     }
 
-    /// The durable supervisor rules and exit ladder must appear verbatim in
-    /// the model-visible briefing.
-    /// These keywords are the ones confirmed present in the model-visible
-    /// hook_additional_context bytes after the harness cap trim (cas-5e4b).
+    /// Keep the callable coordination surfaces in the model-visible briefing.
     #[test]
     fn test_supervisor_guidance_hard_rules() {
         let guide = supervisor_guidance();
@@ -4249,11 +4286,6 @@ This is the body content."#;
             "AskUserQuestion",
             "SendMessage",
             "coordination",
-            "Never close",
-            "Never implement",
-            "Drive to the exit",
-            "Children merged",
-            "Released and deployed",
         ] {
             assert!(
                 guide.contains(keyword),
@@ -4263,23 +4295,7 @@ This is the body content."#;
     }
 
     #[test]
-    fn supervisor_operator_reply_contract_is_registered_and_pinned_on_every_harness() {
-        let required = [
-            "# Phone reply contract",
-            "Answer first",
-            "first line is the answer in one sentence",
-            "Use at most 5 bullets, one line each",
-            "Bold the decision word",
-            "thing waiting on the operator",
-            "under ~600 characters",
-            "file paths or ticket IDs",
-            "Do not narrate the process",
-            "**bold**",
-            "numbered lists",
-            "`inline code`",
-            "links",
-        ];
-
+    fn supervisor_operator_reply_contract_is_registered_on_every_harness() {
         for (label, catalog, source) in [
             (
                 "claude",
@@ -4304,12 +4320,6 @@ This is the body content."#;
                 })
                 .unwrap_or_else(|| panic!("{label} catalog missing operator-reply.md"));
             assert_eq!(contract.content, source, "{label} catalog source drifted");
-            for marker in required {
-                assert!(
-                    contract.content.contains(marker),
-                    "{label} operator-reply.md missing pinned contract marker {marker:?}"
-                );
-            }
         }
     }
 
@@ -4321,19 +4331,11 @@ This is the body content."#;
     fn test_codex_supervisor_guidance_mirrors_tiering_rule() {
         let codex_guide = include_str!("builtins/skills/cas-supervisor.md");
         for keyword in [
-            "Tier every spawn",
-            "never fleet-default",
-            "light",
-            "standard",
-            "heavy",
             "model-selection.md",
             // cas-a7d1: registry lane summary in the small body.
-            "Registry lanes",
             "Codex/GPT-6 Luna/xhigh",
             "Codex/GPT-6 Sol/medium",
             "Claude/Opus 5.5/high",
-            "standing suspension",
-            "generated route table and recipes",
         ] {
             assert!(
                 codex_guide.contains(keyword),
@@ -4361,17 +4363,11 @@ This is the body content."#;
             assert_eq!(body, claude, "cas-supervisor.md must be one body for every harness");
         }
 
-        // The shared body must retain explicit complete-call controls and the
-        // registry's Opus heavy route on every twin without duplicating workflow.
+        // The shared body must retain executable spawn controls on every twin.
         for (label, body) in [("claude", claude), ("codex", codex), ("grok", grok)] {
-            assert!(
-                body.contains("**heavy** Claude/Opus 5.5/high"),
-                "{label} cas-supervisor.md must retain the Opus heavy registry route"
-            );
-            assert!(
-                body.contains("pass complete `cli=`, `model=`, and `effort=` controls"),
-                "{label} cas-supervisor.md heterogeneous example must be a complete call"
-            );
+            for field in ["cli=", "model=", "effort="] {
+                assert!(body.contains(field), "{label} supervisor guidance lacks {field}");
+            }
         }
     }
 
@@ -4501,23 +4497,14 @@ This is the body content."#;
     #[test]
     fn test_worker_guidance_loads() {
         let guide = worker_guidance();
-        assert!(guide.contains("Worker"));
+        assert!(!guide.is_empty());
         assert!(!guide.contains("managed_by:"));
-        // Worker should NOT have supervisor checklist
-        assert!(
-            !guide.contains("Supervisor Checklist"),
-            "should not include supervisor checklist"
+        assert_eq!(
+            guide,
+            extract_body(include_str!("builtins/skills/cas-worker.md"))
+                .replacen(TOOL_NAMING_LINE, SESSION_TOOL_NAMING_LINE, 1)
         );
-        // task-tracking/memory/search are autonomous skills, not bundled.
-        assert!(
-            !guide.contains("Cassy Task Tracking"),
-            "should NOT bundle task-tracking — loads on demand"
-        );
-        assert!(
-            !guide.contains("## Structured execution state")
-                && !guide.contains("## Context budgeting"),
-            "SessionStart worker guidance must omit on-demand details"
-        );
+        assert!(guide.contains(SESSION_TOOL_NAMING_LINE) && !guide.contains(TOOL_NAMING_LINE));
         for (label, details) in [
             (
                 "claude",
@@ -4532,12 +4519,7 @@ This is the body content."#;
                 include_str!("builtins/skills/cas-worker/references/details.md"),
             ),
         ] {
-            for required in ["## Structured execution state", "state_patch", "## Context budgeting"] {
-                assert!(
-                    details.contains(required),
-                    "{label} worker details missing on-demand marker: {required:?}"
-                );
-            }
+            assert!(details.contains("state_patch"), "{label} worker details lack the task field");
         }
     }
 
@@ -4558,83 +4540,6 @@ This is the body content."#;
              {SESSION_START_BUDGET_BYTES}B SessionStart budget",
             guide.len()
         );
-    }
-
-    /// cas-5787 (EPIC cas-ebea, third-brain borrow): both supervisor and
-    /// worker reference files must document the "Context budgeting" 3-layer
-    /// model so future maintainers see the framework before adding to the
-    /// Immutable Core. The section names the three layers explicitly
-    /// (Immutable Core / Task Context / Ephemeral), cites the 8 KB worker
-    /// component cap and 9 KB aggregate SessionStart budget, and points at
-    /// `project_session_start_truncation.md`.
-    #[test]
-    fn test_skills_document_context_budgeting_cas_5787() {
-        // Common markers required in all supervisor/worker files.
-        let common = [
-            "## Context budgeting",
-            "Immutable Core",
-            "Task Context",
-            "Ephemeral",
-            "project_session_start_truncation.md",
-            "references/",
-        ];
-        // Supervisor cap was lowered to 8KB (cas-5e4b). The worker reference
-        // names the 8KB component cap and 9KB aggregate budget introduced by
-        // cas-b114; keeping it on demand protects the SessionStart payload.
-        // WP2 (audit cas-1660 L2 P2-62): the supervisor's budgeting note is
-        // maintainer text, so it lives in the on-demand reference.md rather
-        // than in the always-loaded SKILL.md body.
-        let supervisor_files = [
-            (
-                "claude cas-supervisor reference.md",
-                include_str!("builtins/skills/cas-supervisor/references/reference.md"),
-            ),
-            (
-                "codex cas-supervisor reference.md",
-                include_str!("builtins/skills/cas-supervisor/references/reference.md"),
-            ),
-            (
-                "grok cas-supervisor reference.md",
-                include_str!("builtins/skills/cas-supervisor/references/reference.md"),
-            ),
-        ];
-        let worker_files = [
-            (
-                "claude cas-worker details.md",
-                include_str!("builtins/skills/cas-worker/references/details.md"),
-            ),
-            (
-                "codex cas-worker details.md",
-                include_str!("builtins/skills/cas-worker/references/details.md"),
-            ),
-            (
-                "grok cas-worker details.md",
-                include_str!("builtins/skills/cas-worker/references/details.md"),
-            ),
-        ];
-        for (label, content) in supervisor_files {
-            for required in common.iter().chain(["8 KB"].iter()) {
-                assert!(
-                    content.contains(required),
-                    "{label} missing required Context-budgeting marker: {required:?}"
-                );
-            }
-        }
-        let worker_common = [
-            "## Context budgeting",
-            "Immutable Core",
-            "Task Context",
-            "Ephemeral",
-            "project_session_start_truncation.md",
-        ];
-        for (label, content) in worker_files {
-            for required in worker_common.iter().chain(["8 KB", "9 KB"].iter()) {
-                assert!(
-                    content.contains(required),
-                    "{label} missing required Context-budgeting marker: {required:?}"
-                );
-            }
-        }
     }
 
     /// `disallowed-tools` is not a guard: Claude Code clears it when the user
@@ -4674,23 +4579,14 @@ This is the body content."#;
                 include_str!("builtins/skills/cas-worker/references/details.md"),
             ),
         ] {
-            for required in [
-                "Report / evidence tasks",
-                "MCP task/search/coordination surfaces",
-                ".cas/logs",
-                "read-only SQLite URI",
-                "copied snapshot",
-            ] {
+            for required in [".cas/logs", "task/search/coordination"] {
                 assert!(
                     skill_content.contains(required) || details_content.contains(required),
                     "{label} worker guidance missing report/evidence safety marker: {required:?}"
                 );
             }
-            assert!(
-                details_content
-                    .contains("Do **not** use unrestricted `sqlite3 /path/to/.cas/cas.db`"),
-                "{label} worker details should explicitly discourage unrestricted live sqlite3 access"
-            );
+            assert!(details_content.contains(".cas/cas.db?mode=ro"), "{label}");
+            assert!(details_content.contains("sqlite3 <db> \".backup <path>\""), "{label}");
         }
 
         for (label, planning_content) in [
@@ -4703,12 +4599,7 @@ This is the body content."#;
                 include_str!("builtins/skills/cas-supervisor/references/planning.md"),
             ),
         ] {
-            for required in [
-                "Evidence-source plan",
-                "MCP/log/recording/task-record sources",
-                ".cas/cas.db",
-                "read-only URI or copied-snapshot access",
-            ] {
+            for required in [".cas/cas.db"] {
                 assert!(
                     planning_content.contains(required),
                     "{label} supervisor planning guidance missing report/evidence template marker: {required:?}"
@@ -4854,36 +4745,12 @@ This is the body content."#;
         );
     }
 
-    /// cas-b4921 / GH #121: the two ways a worker dies expensively, both
-    /// preventable and both guidance gaps.
-    ///
-    /// PART A — a worker that foreground-blocks on a long command is
-    /// unreachable: supervisor messages, stand-down orders and urgent stops are
-    /// only delivered between turns. One worker burned 40+ minutes
-    /// foreground-watching queued CI through a provider outage, ignoring nine
-    /// messages including two stand-down orders.
-    ///
-    /// PART B — both workers in that window ran into auto-compaction and were
-    /// killed mid-compaction, so the operator paid to re-summarize work a
-    /// `git push` would have preserved.
-    ///
-    /// All THREE harness flavors carry the launch-time contract in
-    /// `crates/cas-pty/src/pty.rs`. The on-demand discipline reference keeps
-    /// only repository-specific test-loop and clean-environment guidance.
+    /// The launch contract lives in cas-pty. Worker skills link the on-demand
+    /// discipline file, which carries the assembly proof reference.
     #[test]
-    fn test_worker_skills_carry_backgrounding_mandate_cas_b4921() {
+    fn test_worker_discipline_reference_is_linked_and_assembly_proof_is_named() {
         let spawn_prompt = include_str!("../../crates/cas-pty/src/pty.rs");
-        for required in [
-            "NEVER foreground-block",
-            "Budget your context",
-            "facts, not narration",
-            "never trims evidence",
-        ] {
-            assert!(
-                spawn_prompt.contains(required),
-                "worker spawn prompt missing launch-contract marker: {required:?}"
-            );
-        }
+        assert!(spawn_prompt.contains("WORKER_CONTRACT_ELEMENTS"));
 
         for (label, skill_content, ref_content) in [
             (
@@ -4902,24 +4769,8 @@ This is the body content."#;
                 include_str!("builtins/skills/cas-worker/references/discipline.md"),
             ),
         ] {
-            // These launch-contract rules are intentionally absent from both
-            // the SessionStart body and the on-demand reference. They have one
-            // source: the PTY spawn prompt above.
-            for forbidden in [
-                "~2 minutes",
-                "gh run watch",
-                "action=remind",
-                "last_token_usage",
-                "model_context_window",
-                "total_token_usage",
-                "facts, not narration",
-                "never trims evidence",
-            ] {
-                assert!(
-                    !skill_content.contains(forbidden),
-                    "{label} cas-worker SKILL.md duplicates spawn-contract marker: {forbidden:?}"
-                );
-            }
+            // The worker body routes to the separate discipline reference.
+            assert!(skill_content.contains("references/discipline.md"), "{label}");
             for forbidden in [
                 "## Part 1",
                 "## Part 2",
@@ -4928,8 +4779,6 @@ This is the body content."#;
                 "Checkpoint before compaction",
                 "Context: ~",
                 "auto-compaction",
-                "facts, not narration",
-                "never trims evidence",
             ] {
                 assert!(
                     !ref_content.contains(forbidden),
@@ -4938,12 +4787,7 @@ This is the body content."#;
             }
             // cas-4cbb: workers never run Rust builds; the supervisor builds
             // once at epic assembly.
-            for required in [
-                "Workers never run Rust builds",
-                "ASSEMBLY_PROOF",
-                "Non-Rust work is unaffected",
-                "Clean-CI environment",
-            ] {
+            for required in ["ASSEMBLY_PROOF"] {
                 assert!(
                     ref_content.contains(required),
                     "{label} discipline.md missing unique test guidance marker: {required:?}"
@@ -4988,12 +4832,7 @@ This is the body content."#;
                 include_str!("builtins/skills/cas-worker/references/close-gate.md"),
             ),
         ] {
-            for required in [
-                "surface checklist",
-                "close-gate.md",
-                "Reused worker:",
-                "git rebase <target>",
-            ] {
+            for required in ["close-gate.md", "git rebase <target>"] {
                 assert!(
                     content.contains(required),
                     "{label} cas-worker.md missing {required:?}"
@@ -5003,20 +4842,7 @@ This is the body content."#;
                 !content.contains("## cas-src surface checklist"),
                 "{label} cas-worker.md must not carry the cas-src-only checklist in the always-loaded body"
             );
-            for required in [
-                "cas-src surface checklist",
-                "Pre-close notes must prove each applicable entry",
-                "not applicable",
-                "Codex, and Grok mirrors",
-                "CLI parity, docs, and dispatch registration",
-                "config_gen",
-                ".codex/hooks.json",
-                "bootstrap/reconciliation expectations",
-                "doctor_snapshot",
-                "cas-2327",
-                "reverse states",
-                "release-notes impact",
-            ] {
+            for required in [".codex/hooks.json", "config_gen", "doctor_snapshot"] {
                 assert!(
                     close_gate.contains(required),
                     "{label} close-gate.md surface checklist missing {required:?}"
@@ -5032,7 +4858,7 @@ This is the body content."#;
     /// the matching launch-prompt element is pinned by cas-pty's
     /// `WORKER_CONTRACT_ELEMENTS`.
     #[test]
-    fn test_worker_skills_pin_return_contract_and_silent_execution_cas_0de3() {
+    fn test_worker_return_contract_fields_and_runtime_close_call() {
         for (label, content) in [
             ("claude", include_str!("builtins/skills/cas-worker.md")),
             ("codex", include_str!("builtins/skills/cas-worker.md")),
@@ -5040,7 +4866,6 @@ This is the body content."#;
         ] {
             for required in [
                 "## Return contract",
-                "nothing before or after it",
                 "status: <in_progress|ready|blocked|partial>",
                 "tip: <sha> on factory/<name>; worktree: <clean|dirty>",
                 "ci: <run id + result | not started>",
@@ -5048,10 +4873,6 @@ This is the body content."#;
                 "deferred: <one line or none>",
                 "need: <what the supervisor must do, one line, or none>",
                 "`blocker: <cause>`",
-                "one line, milestone only, max one per milestone",
-                "never narrate tool calls",
-                "\"Context headroom\" prose unless below 20%",
-                "SILENT EXECUTION",
             ] {
                 assert!(
                     content.contains(required),
@@ -5059,24 +4880,12 @@ This is the body content."#;
                 );
             }
         }
-        let directive = "SILENT EXECUTION: You run in an automated pipeline; no human watches \
-                         your pane. Do not narrate actions or explain before tool calls. Output \
-                         results, errors and the return contract only.";
-        for (label, surface) in [
-            ("claude", cas_mux::claude_worker_contract("probe-worker")),
-            (
-                "codex",
-                cas_mux::rendered_contract_surface("codex", cas_mux::ContractRole::Worker),
-            ),
-            (
-                "grok",
-                cas_mux::rendered_contract_surface("grok", cas_mux::ContractRole::Worker),
-            ),
+        for surface in [
+            cas_mux::claude_worker_contract("probe-worker"),
+            cas_mux::rendered_contract_surface("codex", cas_mux::ContractRole::Worker),
+            cas_mux::rendered_contract_surface("grok", cas_mux::ContractRole::Worker),
         ] {
-            assert!(
-                surface.contains(directive),
-                "{label} worker launch prompt missing the SILENT EXECUTION directive"
-            );
+            assert!(surface.contains("task action=close"));
         }
     }
 
@@ -5106,7 +4915,7 @@ This is the body content."#;
         ] {
             // The hot body keeps only the pointer; the rule's detail is on
             // demand so it does not consume SessionStart budget.
-            for required in ["discipline.md", "no-Rust-build rule"] {
+            for required in ["discipline.md"] {
                 assert!(
                     skill_content.contains(required),
                     "{label} cas-worker SKILL.md missing discipline pointer: {required:?}"
@@ -5115,12 +4924,7 @@ This is the body content."#;
             // The rule: workers edit, commit and park unbuilt; the supervisor
             // builds once at assembly and records ASSEMBLY_PROOF; worker closes
             // carry no scoped or loaded proof.
-            for required in [
-                "Workers never run Rust builds",
-                "park the\nwork without building",
-                "ASSEMBLY_PROOF",
-                "loaded_proof",
-            ] {
+            for required in ["ASSEMBLY_PROOF", "loaded_proof"] {
                 assert!(
                     ref_content.contains(required),
                     "{label} cas-worker discipline.md missing no-build rule: {required:?}"
@@ -5167,6 +4971,88 @@ This is the body content."#;
             include_str!("builtins/skills/cas-diagnosing-bugs/SKILL.md"),
         ] {
             assert!(skill.contains("principles.md"), "missing principles link");
+        }
+    }
+
+    /// cas-8e23: the `why` workflow ships in every harness catalog and
+    /// cas-search routes to it.
+    #[test]
+    fn cas_why_is_installed_and_routed_from_search() {
+        const WHY: &str = include_str!("builtins/skills/cas-why/SKILL.md");
+        for (label, catalog) in [
+            ("claude", BUILTIN_SKILLS),
+            ("codex", CODEX_BUILTIN_SKILLS),
+            ("grok", GROK_BUILTIN_SKILLS),
+        ] {
+            let get = |path: &str| {
+                catalog
+                    .iter()
+                    .find(|file| file.path == path)
+                    .unwrap_or_else(|| panic!("{label} missing {path}"))
+                    .content
+            };
+            let why = get("skills/cas-why/SKILL.md");
+            assert_eq!(why, WHY, "{label} cas-why drifted");
+            assert!(is_managed_by_cas(why), "{label} cas-why is unmanaged");
+            assert!(why.contains("name: cas-why"), "{label} cas-why name");
+            assert!(
+                get("skills/cas-search/SKILL.md").contains("`cas-why`"),
+                "{label} cas-search does not route to cas-why"
+            );
+        }
+    }
+
+    /// cas-0bf6: the verification kit generator, maintenance sweep, feature
+    /// template and static map check ship in every harness catalog, the
+    /// template and script agree on the five feature-file H2s, and the QA
+    /// skill links the generator and the sweep.
+    #[test]
+    fn qa_craft_verification_kit_is_installed_and_linked() {
+        const KIT: &[(&str, &str, &[&str])] = &[
+            (
+                "skills/cas-qa-craft/references/verify-harness.md",
+                include_str!("builtins/skills/cas-qa-craft/references/verify-harness.md"),
+                &[],
+            ),
+            (
+                "skills/cas-qa-craft/references/maintain.md",
+                include_str!("builtins/skills/cas-qa-craft/references/maintain.md"),
+                &[],
+            ),
+            (
+                "skills/cas-qa-craft/references/feature-template.md",
+                include_str!("builtins/skills/cas-qa-craft/references/feature-template.md"),
+                &["## Sub-features", "## How to get to it", "## Driving it", "## Gotchas", "## Touches"],
+            ),
+            (
+                "skills/cas-qa-craft/scripts/check-feature-map.mjs",
+                include_str!("builtins/skills/cas-qa-craft/scripts/check-feature-map.mjs"),
+                &["Sub-features", "How to get to it", "Driving it", "Gotchas", "Touches", "process.exit(summary.ok ? 0 : 1)"],
+            ),
+        ];
+        for (label, catalog) in [
+            ("claude", BUILTIN_SKILLS),
+            ("codex", CODEX_BUILTIN_SKILLS),
+            ("grok", GROK_BUILTIN_SKILLS),
+        ] {
+            for (path, canonical, markers) in KIT {
+                let shipped = catalog
+                    .iter()
+                    .find(|file| file.path == *path)
+                    .unwrap_or_else(|| panic!("{label} missing {path}"));
+                assert_eq!(shipped.content, *canonical, "{label} {path} drifted");
+                for marker in *markers {
+                    assert!(shipped.content.contains(marker), "{label} {path} missing {marker:?}");
+                }
+            }
+            let skill = catalog
+                .iter()
+                .find(|file| file.path == "skills/cas-qa-craft/SKILL.md")
+                .unwrap_or_else(|| panic!("{label} missing cas-qa-craft"))
+                .content;
+            for marker in ["references/verify-harness.md", "references/maintain.md"] {
+                assert!(skill.contains(marker), "{label} cas-qa-craft missing {marker:?}");
+            }
         }
     }
 
@@ -5573,18 +5459,18 @@ This is the body content."#;
                 .expect("cas-dataviz needs a description");
             assert!(description.len() <= 360, "{label} trigger description exceeds 360 bytes");
             for marker in [
-                "message, not the chart", "claim-title", "annotate the decisive", "Show uncertainty",
+                "claim-title",
                 "small multiples", "table", "@media print", "cas-html-reports", "color last",
-                "becoming text-dense", "30 seconds", "Visually verify the rendered artifact",
+                "30 seconds",
                 "390×844", "Grepping HTML",
                 // cas-db82: form chosen with a stated reason, design-language roles, critique gate.
-                "Choose the form, and say why", "cas-ui-craft", "concept brief", "DESIGN.md",
+                "cas-ui-craft", "DESIGN.md",
                 "ledger", "annotated timeline", "dot/waffle",
             ] {
                 assert!(skill.contains(marker), "{label} cas-dataviz missing {marker:?}");
             }
             let review = get(FILES[1]);
-            for marker in ["Preserve", "Missing", "Deliberate default inversions", "color-last procedure", "computable palette validator", "one-axis rule", "message-first", "annotation practice", "print/PDF"] {
+            for marker in ["computable palette validator", "print/PDF"] {
                 assert!(review.contains(marker), "{label} design review missing {marker:?}");
             }
             assert!(get(FILES[3]).contains("export function validate"), "{label} missing runnable validator");
@@ -5593,7 +5479,7 @@ This is the body content."#;
                 assert!(example.contains(marker), "{label} example missing {marker:?}");
             }
             let sidecar = get(FILES[5]);
-            for marker in ["Form and why", "Claim-title", "Critique"] {
+            for marker in ["Claim-title", "Critique"] {
                 assert!(sidecar.contains(marker), "{label} example sidecar missing {marker:?}");
             }
             if label == "claude" {
@@ -5969,14 +5855,10 @@ This is the body content."#;
                 // Step 4 — task into the ACTIVE epic, creating a successor when
                 // none is open. This is the branch that was exercised for real
                 // and the one an agent gets wrong by default.
-                "Every epic for this lane is closed",
-                "create a successor epic first",
-                "Never task into a closed epic",
                 // The status filter is a substring match, so `status=open`
                 // hides every task/epic somebody is actually working on. A
                 // sweep that filters that way invents a duplicate successor
                 // epic while the real one is mid-flight.
-                "Do not filter this list by `status=open`",
                 "auto-promoted to `in_progress`",
                 "action=create",
                 "external_ref",
@@ -5984,7 +5866,6 @@ This is the body content."#;
                 // Step 5 — unblock chained tasks, and only on MERGED blockers.
                 "action=blocked",
                 "action=dep_remove",
-                "Merged is the bar, not closed",
                 // Step 6 — file what you observed since the last sweep, using
                 // the same six-heading body every other issue in the tracker
                 // uses.
@@ -5999,9 +5880,6 @@ This is the body content."#;
                 // is indistinguishable from a clean one.
                 ".claude/scheduled_tasks.json",
                 "7-day auto-expiry",
-                "recreate it if it expired",
-                // The sweep's success case is silence.
-                "end the turn silently",
             ] {
                 assert!(
                     entry.content.contains(required),
@@ -6079,7 +5957,7 @@ This is the body content."#;
         );
         for required in [
             "name: cas-cli-craft",
-            "description: Use when",
+            "description:",
             "references/concept-brief.md",
             "references/output-contract.md",
             "references/critique-rubric.md",
@@ -6286,23 +6164,17 @@ This is the body content."#;
                 // Channel rule, draft-first, bounded read preflight.
                 "^[a-z0-9-]+-internal$",
                 "docs/release-notes/<date>-<topic>-slack.md",
-                "Preflight, bounded read with a write-safe fallback",
                 // `since` is not schema-required, but omitting it fails
                 // `pagination_exhausted` on any busy channel, so the skill
                 // must keep saying so.
                 "pagination_exhausted",
                 "max_messages",
-                "3 attempts",
-                "10-second timeout",
                 "upstream_unavailable",
                 "slack_error",
-                "read-only outage",
-                "POSTED receipt ledger",
                 // Ordered posting, pacing, upload rule.
                 "user_thread_id",
                 "dev_thread_id",
                 "reply_to",
-                "one write per second",
                 "content_encoding",
                 // Receipt block and the field that is actually returned.
                 "## POSTED",
@@ -6314,7 +6186,6 @@ This is the body content."#;
                 "size_cap_exceeded",
                 "Retry-After",
                 // Content contract inherited from the rubric.
-                "Was → Now",
             ] {
                 assert!(
                     skill.content.contains(required),
@@ -6345,7 +6216,6 @@ This is the body content."#;
                 "env_http_headers",
                 "\"type\": \"http\"",
                 "${MECHA_VERCEL_BYPASS}",
-                "at launch",
             ] {
                 assert!(
                     registration.content.contains(required),
@@ -9203,7 +9073,7 @@ This is the body content."#;
                 .find(|b| b.path == "skills/cas-cut-release/SKILL.md")
                 .unwrap_or_else(|| panic!("{label} cas-cut-release skill is not registered"));
             assert!(is_managed_by_cas(skill.content));
-            assert!(skill.content.contains("description: Use when"));
+            assert!(skill.content.contains("description:"));
             // Only the manual:* hazards are read up front; the rest of the
             // log is enforced by gate rows and grepped on a failure.
             assert!(

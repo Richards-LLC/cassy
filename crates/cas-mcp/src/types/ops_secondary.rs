@@ -51,9 +51,9 @@ pub struct SearchContextRequest {
     #[serde(default)]
     pub correction_ref: Option<String>,
 
-    /// Document type filter: entry, task, rule, skill, code_symbol, code_file
+    /// Document type filter: entry, task, rule, skill, spec, artifact, code_symbol, code_file
     #[schemars(
-        description = "Filter by type: 'entry', 'task', 'rule', 'skill', 'code_symbol', 'code_file'"
+        description = "Filter by type: entry, task, rule, skill, spec, artifact, code_symbol, code_file"
     )]
     #[serde(default)]
     pub doc_type: Option<String>,
@@ -971,6 +971,15 @@ pub struct CoordinationRequest {
     #[serde(default)]
     pub cleanup: Option<bool>,
 
+    /// worktree_merge only: allow an already failed lane CI result to merge.
+    /// Requires a live registered supervisor and a non-empty reason; the
+    /// decision is appended to the task notes before Git changes the target.
+    #[schemars(
+        description = "worktree_merge only: allow a red lane CI result to merge. Requires a live registered supervisor, an explicit task_id, and a non-empty reason; records a decision note on that task. Independent of force= (dirty worktree only)."
+    )]
+    #[serde(default)]
+    pub supervisor_override: Option<bool>,
+
     /// Clear the pinned epic focus for focus_epic
     #[schemars(description = "Clear the pinned epic focus (focus_epic only)")]
     #[serde(default)]
@@ -1032,8 +1041,10 @@ pub struct CoordinationRequest {
     #[serde(default)]
     pub completion_promise: Option<String>,
 
-    /// Reason (for loop_cancel)
-    #[schemars(description = "Reason for cancelling")]
+    /// Reason for loop_cancel or a worktree_merge CI override.
+    #[schemars(
+        description = "Reason for loop_cancel; worktree_merge requires a non-empty audit reason with supervisor_override=true"
+    )]
     #[serde(default)]
     pub reason: Option<String>,
 

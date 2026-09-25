@@ -144,10 +144,7 @@ impl Config {
                 "qa.independent_pass".to_string(),
                 qa.independent_pass.to_string(),
             ),
-            (
-                "qa.evidence_gate".to_string(),
-                qa.evidence_gate.to_string(),
-            ),
+            ("qa.evidence_gate".to_string(), qa.evidence_gate.to_string()),
             (
                 "qa.terminal_render_paths".to_string(),
                 qa.terminal_render_paths.join(","),
@@ -203,6 +200,14 @@ impl Config {
             (
                 "memory.session_learn_auto".to_string(),
                 memory.session_learn_auto.to_string(),
+            ),
+            (
+                "memory.session_learn_min_turns".to_string(),
+                memory.session_learn_min_turns.to_string(),
+            ),
+            (
+                "memory.session_learn_min_minutes".to_string(),
+                memory.session_learn_min_minutes.to_string(),
             ),
             (
                 "memory.decay.curated_importance_floor".to_string(),
@@ -264,10 +269,7 @@ impl Config {
             ),
             // Issues section
             ("issues.repo".to_string(), issues.repo.unwrap_or_default()),
-            (
-                "issues.components.cassy".to_string(),
-                issue_repos.cassy,
-            ),
+            ("issues.components.cassy".to_string(), issue_repos.cassy),
             (
                 "issues.components.violet".to_string(),
                 issue_repos.violet.clone(),
@@ -276,10 +278,7 @@ impl Config {
                 "issues.components.mecha_cassy".to_string(),
                 issue_repos.violet,
             ),
-            (
-                "issues.components.cloud".to_string(),
-                issue_repos.cloud,
-            ),
+            ("issues.components.cloud".to_string(), issue_repos.cloud),
             // History section
             (
                 "history.github_repo".to_string(),

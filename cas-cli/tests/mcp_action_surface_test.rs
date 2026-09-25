@@ -191,21 +191,34 @@ fn canonicalized_aliases_are_pinned_and_described() {
         Some("get".to_string())
     );
     assert!(
-        source.contains("\"get\" => \"show\""),
+        cas_mcp::actions::TASK_ACTION_ALIASES.contains(&("get", "show")),
         "task get alias must remain canonicalized to show"
     );
     assert!(
-        source.contains("show (also accepted as get)"),
-        "task description must document the get alias"
+        source.contains("canonical_action(cas_mcp::actions::TASK_ACTION_ALIASES, action)"),
+        "task dispatch must canonicalize through the published alias table"
     );
     assert!(
-        source.contains("\"inbox\" => \"inbox_poll\""),
+        cas_mcp::actions::COORDINATION_ACTION_ALIASES.contains(&("inbox", "inbox_poll")),
         "coordination inbox alias must remain canonicalized to inbox_poll"
     );
     assert!(
-        source.contains("inbox_poll (also accepted as inbox)"),
-        "coordination description must document the inbox alias"
+        source.contains("canonical_action(cas_mcp::actions::COORDINATION_ACTION_ALIASES, action)"),
+        "coordination dispatch must canonicalize through the published alias table"
     );
+    for (tool, documented) in [
+        ("task", "`get` is an alias of `show`"),
+        ("coordination", "`inbox` is an alias of `inbox_poll`"),
+    ] {
+        let description = published_action(tool)["description"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        assert!(
+            description.contains(documented),
+            "{tool} action description must document its alias: {description}"
+        );
+    }
 }
 
 fn documented_actions(content: &str) -> Vec<String> {
@@ -356,8 +369,11 @@ fn memory_guidance_uses_content_frontmatter_and_live_names() {
 // Every suggested `<prefix><tool> action=<a> key=value …` call in the shipped
 // builtins (all three flavors) and in the runtime template strings of the Rust
 // sources is checked against the live MCP surface:
-//   * the action must be a dispatch arm of that tool (aliases included);
-//   * every key must be a field of the tool's request struct;
+//   * the action must be in the tool's accepted list in
+//     `cas_mcp::actions` (the lists the published `action` enums are built
+//     from and that `published_action_enums_equal_their_dispatch_tables`
+//     pins to the dispatch; aliases and mcp-proxy-only actions included);
+//   * every key must be a property of the tool's published input schema;
 //   * a call that names at least one parameter must carry the fields its
 //     handler rejects the call without (see `REQUIRED_FIELDS`).
 // A bare name reference such as "use coordination action=message" names no
@@ -371,22 +387,36 @@ fn memory_guidance_uses_content_frontmatter_and_live_names() {
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-/// Tool name → request struct. `mcp_search` / `mcp_execute` take no action.
-const CALL_SHAPE_TOOLS: &[(&str, &str)] = &[
-    ("memory", "MemoryRequest"),
-    ("task", "TaskRequest"),
-    ("rule", "RuleRequest"),
-    ("skill", "SkillRequest"),
-    ("coordination", "CoordinationRequest"),
-    ("search", "SearchContextRequest"),
-    ("system", "SystemRequest"),
-    ("verification", "VerificationRequest"),
-    ("artifact", "ArtifactRequest"),
-    ("knowledge", "KnowledgeRequest"),
-    ("team", "TeamRequest"),
-    ("pattern", "PatternRequest"),
-    ("spec", "SpecRequest"),
-];
+/// Multi-action tools and every action text may name for them. Proxy-only
+/// actions count: shipped text serves builds with `mcp-proxy` (the default).
+fn call_shape_action_lists() -> Vec<(&'static str, Vec<&'static str>)> {
+    use cas_mcp::actions as accepted;
+    vec![
+        ("memory", accepted::MEMORY_ACTIONS.to_vec()),
+        ("task", accepted::TASK_ACTIONS.to_vec()),
+        ("rule", accepted::RULE_ACTIONS.to_vec()),
+        ("skill", accepted::SKILL_ACTIONS.to_vec()),
+        ("coordination", accepted::COORDINATION_ACTIONS.to_vec()),
+        ("search", accepted::SEARCH_ACTIONS.to_vec()),
+        (
+            "system",
+            [accepted::SYSTEM_ACTIONS, accepted::SYSTEM_PROXY_ACTIONS].concat(),
+        ),
+        (
+            "verification",
+            [
+                accepted::VERIFICATION_ACTIONS,
+                accepted::VERIFICATION_PROXY_ACTIONS,
+            ]
+            .concat(),
+        ),
+        ("artifact", accepted::ARTIFACT_ACTIONS.to_vec()),
+        ("knowledge", accepted::KNOWLEDGE_ACTIONS.to_vec()),
+        ("team", accepted::TEAM_ACTIONS.to_vec()),
+        ("pattern", accepted::PATTERN_ACTIONS.to_vec()),
+        ("spec", accepted::SPEC_ACTIONS.to_vec()),
+    ]
+}
 
 /// Fields a handler rejects the call without. Kept to rejections that hold
 /// for every caller.
@@ -465,97 +495,26 @@ struct CallSurface {
     fields: BTreeMap<&'static str, BTreeSet<String>>,
 }
 
-fn request_sources() -> [&'static str; 2] {
-    [
-        include_str!("../../crates/cas-mcp/src/types.rs"),
-        include_str!("../../crates/cas-mcp/src/types/ops_secondary.rs"),
-    ]
-}
-
-/// Dispatch actions of one tool: the string arms of every
-/// `match action.as_str()` / `match req.action.as_str()` in its dispatch
-/// function, at that match's own nesting depth (so a nested
-/// `match wt_action` cannot contribute its un-prefixed names), plus the
-/// aliases canonicalized before dispatch.
-fn tool_dispatch_actions(source: &str, tool: &str) -> BTreeSet<String> {
-    let start = source
-        .find(&format!("pub async fn {tool}("))
-        .unwrap_or_else(|| panic!("missing {tool} dispatch function"));
-    let body = &source[start + 1..];
-    let body = match body.find("pub async fn ") {
-        Some(end) => &body[..end],
-        None => body,
-    };
-    let arm = regex::Regex::new(r#"^\|?\s*"[a-z_]+"(\s*\|\s*"[a-z_]+")*\s*\|?$"#).unwrap();
-    let header = regex::Regex::new(r"match (\S+) \{\s*$").unwrap();
-    let quoted = regex::Regex::new(r#""([a-z_]+)""#).unwrap();
-
-    let mut actions = BTreeSet::new();
-    let mut depth: i64 = 0;
-    let mut stack: Vec<(i64, bool)> = Vec::new();
-    for line in body.lines() {
-        while stack.last().is_some_and(|(open, _)| depth < *open) {
-            stack.pop();
-        }
-        if let Some((open, on_action)) = stack.last()
-            && depth == *open
-            && *on_action
-        {
-            let left = line.split("=>").next().unwrap_or_default().trim();
-            if !left.is_empty() && arm.is_match(left) {
-                actions.extend(quoted.captures_iter(left).map(|c| c[1].to_string()));
-            }
-        }
-        depth += line.matches('{').count() as i64 - line.matches('}').count() as i64;
-        if let Some(captures) = header.captures(line) {
-            let on_action = matches!(&captures[1], "action.as_str()" | "req.action.as_str()");
-            stack.push((depth, on_action));
-        }
-    }
-    match tool {
-        "task" => {
-            assert!(source.contains("\"get\" => \"show\""));
-            actions.insert("get".to_string());
-        }
-        "coordination" => {
-            assert!(source.contains("\"inbox\" => \"inbox_poll\""));
-            actions.insert("inbox".to_string());
-        }
-        _ => {}
-    }
-    assert!(!actions.is_empty(), "no dispatch actions parsed for {tool}");
-    actions
-}
-
-fn request_struct_fields(name: &str) -> BTreeSet<String> {
-    let marker = format!("pub struct {name} {{");
-    let source = request_sources()
-        .into_iter()
-        .find(|source| source.contains(&marker))
-        .unwrap_or_else(|| panic!("missing request struct {name}"));
-    let body = source
-        .split_once(&marker)
-        .unwrap()
-        .1
-        .split_once("\n}")
-        .expect("request struct closing brace")
-        .0;
-    let fields: BTreeSet<String> = body
-        .lines()
-        .filter_map(|line| line.trim_start().strip_prefix("pub "))
-        .filter_map(|field| field.split_once(':').map(|(name, _)| name.trim().to_string()))
-        .collect();
-    assert!(fields.contains("action"), "{name} has no action field");
-    fields
-}
-
+/// Accepted actions from `cas_mcp::actions`; fields from the published
+/// `tools/list` input schemas (the same surface the model sees).
 fn call_surface() -> CallSurface {
-    let service = service_source();
+    let published = published_tools();
     let mut actions = BTreeMap::new();
     let mut fields = BTreeMap::new();
-    for (tool, request) in CALL_SHAPE_TOOLS {
-        actions.insert(*tool, tool_dispatch_actions(service, tool));
-        fields.insert(*tool, request_struct_fields(request));
+    for (tool, accepted) in call_shape_action_lists() {
+        actions.insert(tool, accepted.into_iter().map(str::to_string).collect());
+        let schema = published
+            .iter()
+            .find(|candidate| candidate.name == tool)
+            .unwrap_or_else(|| panic!("{tool} tool is not registered"));
+        let properties: BTreeSet<String> = schema.input_schema["properties"]
+            .as_object()
+            .unwrap_or_else(|| panic!("{tool} input schema has no properties"))
+            .keys()
+            .cloned()
+            .collect();
+        assert!(properties.contains("action"), "{tool} schema has no action");
+        fields.insert(tool, properties);
     }
     CallSurface { actions, fields }
 }
@@ -632,9 +591,10 @@ fn lint_call_shapes(
     surface: &CallSurface,
     offenders: &mut Vec<CallShapeOffender>,
 ) {
-    let tools = CALL_SHAPE_TOOLS
-        .iter()
-        .map(|(tool, _)| *tool)
+    let tools = surface
+        .actions
+        .keys()
+        .copied()
         .collect::<Vec<_>>()
         .join("|");
     let call = regex::Regex::new(&format!(
@@ -838,7 +798,7 @@ fn render_offenders(offenders: &[CallShapeOffender]) -> String {
 }
 
 #[test]
-fn call_shape_surface_parses_the_live_dispatch() {
+fn call_shape_surface_comes_from_the_published_action_lists() {
     let surface = call_surface();
     for (tool, action) in [
         ("coordination", "message"),
@@ -854,6 +814,7 @@ fn call_shape_surface_parses_the_live_dispatch() {
         assert!(surface.actions[tool].contains(action), "{tool} lacks {action}");
     }
     // Names of the nested worktree match and domain labels are not actions.
+    // `worktree_merge` must also be accepted by the published schema.
     for bogus in ["create", "merge", "status", "worktree", "agent", "factory"] {
         assert!(
             !surface.actions["coordination"].contains(bogus),
@@ -983,5 +944,264 @@ fn builtin_call_shapes_are_clean_or_allowlisted_with_master_ids() {
     assert!(
         stale.is_empty(),
         "fixed call-shape offenders must leave CALL_SHAPE_ALLOWLIST: {stale:?}"
+    );
+}
+
+// ============================================================================
+// Published tool surface (tools/list)
+// ============================================================================
+
+/// Claude Code cuts tool descriptions at 2 KB without warning.
+const CLAUDE_CODE_DESCRIPTION_CAP: usize = 2_048;
+
+/// `tools/list` for 3.31.0 was 69,635 bytes (compact JSON). The schema diet
+/// must keep at least 10 KB of that off.
+const TOOLS_LIST_BUDGET_BYTES: usize = 59_000;
+
+fn published_tools() -> Vec<rmcp::model::Tool> {
+    cas::mcp::tools::CasService::tool_definitions_for_build()
+}
+
+fn published_action(tool: &str) -> serde_json::Value {
+    let tool = published_tools()
+        .into_iter()
+        .find(|candidate| candidate.name == tool)
+        .unwrap_or_else(|| panic!("{tool} tool is not registered"));
+    tool.input_schema["properties"]["action"].clone()
+}
+
+/// Every string literal in pattern position of the tool's top-level dispatch
+/// `match`. Nested matches, arm bodies, attributes and comments are skipped,
+/// so multi-line `"a" | "b"` arms and `#[cfg]`-gated arms are both read.
+fn top_level_dispatch_literals(source: &str, tool: &str) -> Vec<String> {
+    let start = source
+        .find(&format!("pub async fn {tool}("))
+        .unwrap_or_else(|| panic!("missing {tool} dispatch function"));
+    let function = &source[start..];
+    let match_start = function
+        .find("let result = match action.as_str() {")
+        .or_else(|| function.find("let result = match req.action.as_str() {"))
+        .unwrap_or_else(|| panic!("missing {tool} dispatch match"));
+    let body = &function[match_start..];
+    let body = &body[body.find('{').expect("match opening brace") + 1..];
+    let chars: Vec<char> = body.chars().collect();
+
+    let mut literals = Vec::new();
+    let mut depth = 0usize;
+    let mut in_pattern = true;
+    let mut block_arm = false;
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        let next = chars.get(i + 1).copied();
+        match c {
+            '/' if next == Some('/') => {
+                while i < chars.len() && chars[i] != '\n' {
+                    i += 1;
+                }
+                continue;
+            }
+            '"' => {
+                let mut literal = String::new();
+                let mut j = i + 1;
+                while j < chars.len() && chars[j] != '"' {
+                    if chars[j] == '\\' {
+                        j += 1;
+                    }
+                    if let Some(&ch) = chars.get(j) {
+                        literal.push(ch);
+                    }
+                    j += 1;
+                }
+                if depth == 0 && in_pattern {
+                    literals.push(literal);
+                }
+                i = j + 1;
+                continue;
+            }
+            '\'' if chars.get(i + 2) == Some(&'\'') => {
+                i += 3;
+                continue;
+            }
+            '=' if next == Some('>') && depth == 0 && in_pattern => {
+                in_pattern = false;
+                let rest = chars[i + 2..].iter().find(|ch| !ch.is_whitespace());
+                block_arm = rest == Some(&'{');
+                i += 2;
+                continue;
+            }
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => {
+                if depth == 0 {
+                    break; // end of the dispatch match
+                }
+                depth -= 1;
+                if depth == 0 && c == '}' && block_arm && !in_pattern {
+                    in_pattern = true;
+                    block_arm = false;
+                }
+            }
+            ',' if depth == 0 => {
+                in_pattern = true;
+                block_arm = false;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    literals
+}
+
+#[test]
+fn published_action_enums_equal_their_dispatch_tables() {
+    use cas_mcp::actions::{COORDINATION_ACTION_ALIASES, TASK_ACTION_ALIASES};
+    use std::collections::BTreeSet;
+
+    let source = service_source();
+    let proxy_only = [
+        "proxy_add",
+        "proxy_remove",
+        "proxy_list",
+        "proxy_health",
+        "external_verify",
+    ];
+    let mut checked = 0;
+    for tool in published_tools() {
+        let action = &tool.input_schema["properties"]["action"];
+        if action.is_null() {
+            continue; // mcp_search / mcp_execute take no action
+        }
+        let name = tool.name.to_string();
+        let published: BTreeSet<String> = action["enum"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{name} action must be an enum: {action}"))
+            .iter()
+            .map(|value| value.as_str().expect("enum values are strings").to_string())
+            .collect();
+
+        let mut dispatched: BTreeSet<String> = top_level_dispatch_literals(&source, &name)
+            .into_iter()
+            .filter(|action| cfg!(feature = "mcp-proxy") || !proxy_only.contains(&action.as_str()))
+            .collect();
+        let aliases: &[(&str, &str)] = match name.as_str() {
+            "task" => TASK_ACTION_ALIASES,
+            "coordination" => COORDINATION_ACTION_ALIASES,
+            _ => &[],
+        };
+        for (alias, canonical) in aliases {
+            assert!(
+                dispatched.contains(*canonical),
+                "{name} alias {alias} points at an undispatched action {canonical}"
+            );
+            dispatched.insert((*alias).to_string());
+        }
+        assert!(
+            !dispatched.is_empty(),
+            "{name} dispatch table was not parsed"
+        );
+        assert_eq!(
+            published, dispatched,
+            "{name} action enum drifted from its dispatch table"
+        );
+        checked += 1;
+    }
+    assert_eq!(
+        checked, 13,
+        "every multi-action tool publishes an action enum"
+    );
+}
+
+#[test]
+fn every_tool_description_fits_the_claude_code_cap() {
+    for tool in published_tools() {
+        let description = tool.description.as_deref().unwrap_or_default();
+        assert!(
+            !description.is_empty() && description.chars().count() <= CLAUDE_CODE_DESCRIPTION_CAP,
+            "{} description is {} chars; Claude Code truncates at {CLAUDE_CODE_DESCRIPTION_CAP}",
+            tool.name,
+            description.chars().count()
+        );
+        if tool.name == "coordination" {
+            assert!(
+                description.chars().count() <= 1_500,
+                "coordination description must stay a purpose line plus action groups"
+            );
+        }
+        assert!(
+            !description.contains("IMPORTANT"),
+            "{} description shouts; the rule belongs on the parameter it governs",
+            tool.name
+        );
+    }
+}
+
+#[test]
+fn tools_list_carries_no_schema_boilerplate() {
+    let tools = published_tools();
+    let payload = serde_json::to_string(&tools).expect("tools serialize");
+    for boilerplate in [
+        "\"nullable\"",
+        "\"default\":null",
+        "\"$schema\"",
+        "\"format\":\"uint",
+        "\"format\":\"int",
+        "\"format\":\"float",
+        "\"format\":\"double",
+    ] {
+        assert!(
+            !payload.contains(boilerplate),
+            "tools/list still carries {boilerplate}"
+        );
+    }
+    for tool in &tools {
+        assert!(
+            tool.input_schema.get("title").is_none(),
+            "{} input schema still has a root title",
+            tool.name
+        );
+    }
+    assert!(
+        payload.len() <= TOOLS_LIST_BUDGET_BYTES,
+        "tools/list is {} bytes; budget {TOOLS_LIST_BUDGET_BYTES}",
+        payload.len()
+    );
+}
+
+#[test]
+fn agent_visible_tool_text_has_no_ticket_ids_or_stale_values() {
+    let payload = serde_json::to_string(&published_tools()).expect("tools serialize");
+    let ticket = regex::Regex::new(r"\(cas-[0-9a-f]{4}\)|cassy#[0-9]+|GH #[0-9]+").unwrap();
+    assert!(
+        !ticket.is_match(&payload),
+        "ticket ids in agent-visible tool text: {:?}",
+        ticket.find(&payload).map(|m| m.as_str())
+    );
+    for stale in [
+        "claude-opus-4-5",
+        "'claude' (default) or 'codex'",
+        "TypeScript code",
+        "Claude-only",
+    ] {
+        assert!(!payload.contains(stale), "stale tool text {stale:?}");
+    }
+    let coordination = published_tools()
+        .into_iter()
+        .find(|tool| tool.name == "coordination")
+        .expect("coordination tool");
+    let config_dir = coordination.input_schema["properties"]["config_dir"]["description"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        config_dir.contains("CODEX_HOME"),
+        "config_dir must name CODEX_HOME"
+    );
+    let force = coordination.input_schema["properties"]["force"]["description"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        force.contains("live worker's worktree is always skipped"),
+        "force must state that live worktrees are never synced: {force}"
     );
 }

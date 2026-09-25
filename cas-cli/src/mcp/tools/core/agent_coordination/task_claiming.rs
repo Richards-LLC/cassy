@@ -96,7 +96,7 @@ impl CasCore {
                            {tool_prefix}task action=update id=<task_id> assignee=<worker_name>\n\
                            {tool_prefix}coordination action=message target=<worker_name> summary=\"task assigned\" message=\"Task <task_id> assigned\"\n\n\
                         2. Or spawn a new worker:\n\
-                           {tool_prefix}coordination action=spawn_workers count=1 task_id=<task_id>\n\n\
+                           {tool_prefix}factory action=spawn_workers count=1 task_id=<task_id>\n\n\
                         Supervisors coordinate and review; workers execute tasks.",
                         tool_prefix = crate::mcp::tools::core::guidance::caller_prefix()
                     )),

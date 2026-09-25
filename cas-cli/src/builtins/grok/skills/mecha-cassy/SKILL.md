@@ -1,7 +1,8 @@
 ---
 name: mecha-cassy
 description: Use when an agent must post a Slack message — release notes, a diary update, or an announcement — through the MechaCassy hub. Covers channel resolution, preflight, thread order, receipts, and credential rules.
-managed_by: cas
+metadata:
+  managed_by: cas
 ---
 
 # Post to Slack through the MechaCassy hub

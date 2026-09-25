@@ -82,35 +82,32 @@ pub const SKILL_ACTIONS: &[&str] = &[
     "disable", "sync", "use",
 ];
 
+/// Actions of the agent-facing `coordination` tool (D2 split, cas-8563b):
+/// identity, messaging and reminders, which every worker needs.
 pub const COORDINATION_ACTIONS: &[&str] = &[
-    // Agent
     "register",
     "unregister",
     "whoami",
     "heartbeat",
     "session_start",
     "session_end",
-    "loop_start",
-    "loop_cancel",
-    "loop_status",
-    "lease_history",
-    "queue_notify",
-    "queue_poll",
-    "queue_peek",
-    "queue_ack",
     "inbox_poll",
     "inbox",
     "message",
     "interrupt",
     "message_ack",
     "message_status",
-    "agent_list",
-    "agent_cleanup",
-    // Disposable database branches (supervisor only)
-    "db_branch_create",
-    "db_branch_show",
-    "db_branch_delete",
-    // Factory
+    "remind",
+    "remind_list",
+    "remind_cancel",
+    "my_context",
+];
+
+/// Actions of the supervisor `factory` tool (D2 split, cas-8563b): fleet,
+/// worktree, server, database, loop and queue control. `coordination` still
+/// accepts each of them for one release as a deprecated alias.
+pub const FACTORY_ACTIONS: &[&str] = &[
+    // Fleet
     "spawn_workers",
     "shutdown_workers",
     "recycle_worker",
@@ -120,27 +117,46 @@ pub const COORDINATION_ACTIONS: &[&str] = &[
     "worker_activity",
     "sweep_tasks",
     "clear_context",
-    "my_context",
     "sync_all_workers",
     "gc_report",
     "gc_cleanup",
     "epic_status",
     "focus_epic",
-    "remind",
-    "remind_list",
-    "remind_cancel",
+    "restart_spawn_queue",
+    "agent_list",
+    "agent_cleanup",
+    "lease_history",
+    // Servers
     "server_start",
     "server_stop",
     "server_list",
-    "restart_spawn_queue",
-    // Worktree
+    // Disposable database branches
+    "db_branch_create",
+    "db_branch_show",
+    "db_branch_delete",
+    // Worktrees
     "worktree_create",
     "worktree_list",
     "worktree_show",
     "worktree_cleanup",
     "worktree_merge",
     "worktree_status",
+    // Loops and queues
+    "loop_start",
+    "loop_cancel",
+    "loop_status",
+    "queue_notify",
+    "queue_poll",
+    "queue_peek",
+    "queue_ack",
 ];
+
+/// Every action `CoordinationRequest` deserializes: the `coordination`
+/// actions plus the `factory` actions both tools share the request type for.
+/// Each tool publishes only its own list (`tool_schema` narrows the enum).
+pub fn coordination_request_actions() -> Vec<&'static str> {
+    [COORDINATION_ACTIONS, FACTORY_ACTIONS].concat()
+}
 
 /// `(alias, canonical)` pairs the coordination dispatch rewrites before
 /// matching. `interrupt` is not listed: it has its own dispatch arm.
@@ -279,7 +295,7 @@ pub fn skill_action_schema(_: &mut SchemaGenerator) -> Schema {
 }
 
 pub fn coordination_action_schema(_: &mut SchemaGenerator) -> Schema {
-    string_enum(COORDINATION_ACTIONS)
+    string_enum(&coordination_request_actions())
 }
 
 pub fn search_action_schema(_: &mut SchemaGenerator) -> Schema {

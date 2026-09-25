@@ -1,7 +1,8 @@
 ---
 name: cas-html-reports
 description: Use when producing a human-readable report or analysis that must outlive the conversation, including investigations, audits, decision briefs, benchmarks, post-mortems, or executive updates; not published version releases (cas-release-report).
-managed_by: cas
+metadata:
+  managed_by: cas
 ---
 
 # Reports ship as HTML, and the HTML shows the argument

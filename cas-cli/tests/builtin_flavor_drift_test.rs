@@ -124,17 +124,15 @@ const ALLOWED_MISSING_TWIN: &[(&str, &str, &str)] = &[(
      nothing rather than to the claude checklist. The grok twin IS held identical to \
      claude, and is guarded normally by this test plus \
      test_grok_supervisor_checklist_is_not_the_no_hooks_variant in builtins.rs.",
+), (
+    "agents/task-verifier.md",
+    "codex",
+    "Audit D6 (cas-6b97): Codex custom agents are TOML with developer_instructions, and \
+     Codex ignores .codex/agents/*.md, so Cassy installs no .md agents for Codex.",
 )];
 
 /// Files that exist only in a twin flavor: (flavor, flavor-relative path, rationale).
 const ALLOWED_FLAVOR_ONLY: &[(&str, &str, &str)] = &[
-    (
-        "codex",
-        "agents/factory-supervisor.md",
-        "Codex-only supervisor agent. Claude and grok drive supervision through the \
-         cas-supervisor skill instead of a dedicated agent file, so there is no twin \
-         to hold it to.",
-    ),
     (
         "codex",
         "skills/cas-codex-supervisor-checklist.md",
@@ -905,6 +903,20 @@ fn root_managed_projections_stay_synced_and_project_skills_stay_ignored() {
             path.display()
         );
     }
+    // Audit D6: Codex installs no .md agents, so the root projection has none.
+    let stray_codex_agents: Vec<String> = fs::read_dir(root.join(".codex").join("agents"))
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .filter(|name| name.ends_with(".md"))
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(
+        stray_codex_agents.is_empty(),
+        "root .codex/agents still carries .md agents: {stray_codex_agents:?}"
+    );
     for builtin in cas::builtins::CODEX_BUILTIN_AGENTS {
         let path = root.join(".codex").join(builtin.path);
         let actual = fs::read_to_string(&path).unwrap_or_else(|error| {

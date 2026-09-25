@@ -1,7 +1,8 @@
 ---
 name: cas-technical-drawing
 description: Use when a project needs a technical or shop drawing of a physical object — orthographic set, isometric, section, exploded view, joinery detail, part card, parts list or DXF — rendered from one parts-and-joints model and checked mechanically.
-managed_by: cas
+metadata:
+  managed_by: cas
 ---
 
 # Technical drawings

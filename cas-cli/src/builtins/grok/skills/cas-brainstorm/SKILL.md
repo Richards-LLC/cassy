@@ -1,7 +1,8 @@
 ---
 name: cas-brainstorm
 description: Use when the user asks to brainstorm or clarify an ambiguous feature, problem, scope, or direction before planning or coding.
-managed_by: cas
+metadata:
+  managed_by: cas
 ---
 
 # Brainstorm Before You Build

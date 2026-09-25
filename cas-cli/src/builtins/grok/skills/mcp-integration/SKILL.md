@@ -1,7 +1,8 @@
 ---
 name: mcp-integration
 description: Use when installing, registering, verifying, debugging, or exposing an MCP server — including scope choice, credential handling, zero-scope keys, worktree visibility, and paid/third-party servers. Not for local dev servers (see cas-servers).
-managed_by: cas
+metadata:
+  managed_by: cas
 ---
 
 # Manage MCP servers through Cassy

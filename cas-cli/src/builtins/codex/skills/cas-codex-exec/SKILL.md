@@ -1,7 +1,8 @@
 ---
 name: cas-codex-exec
 description: Use when a token-heavy READ-ONLY investigation needs a one-shot `codex exec` subprocess, such as log mining, bulk inspection, or an independent analysis; never use for edits or task ownership.
-managed_by: cas
+metadata:
+  managed_by: cas
 ---
 
 # cas-codex-exec

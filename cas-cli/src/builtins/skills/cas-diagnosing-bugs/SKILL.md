@@ -1,9 +1,9 @@
 ---
 name: cas-diagnosing-bugs
 description: Use when diagnosing, debugging, or reproducing a broken, failing, throwing, or slow behavior.
-managed_by: cas
 license: MIT
 metadata:
+  managed_by: cas
   author: Matt Pocock
   upstream: https://github.com/mattpocock/skills
   provenance: Adapted from mattpocock/skills (MIT, © 2026 Matt Pocock).

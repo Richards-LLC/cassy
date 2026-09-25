@@ -47,17 +47,14 @@ pub const BUILTIN_AGENTS: &[BuiltinFile] = &[
     },
 ];
 
-/// All built-in agents managed by Cassy for Codex
-pub const CODEX_BUILTIN_AGENTS: &[BuiltinFile] = &[
-    BuiltinFile {
-        path: "agents/task-verifier.md",
-        content: include_str!("builtins/codex/agents/task-verifier.md"),
-    },
-    BuiltinFile {
-        path: "agents/factory-supervisor.md",
-        content: include_str!("builtins/codex/agents/factory-supervisor.md"),
-    },
-];
+/// Built-in agents Cassy installs for Codex: none (audit D6, cas-6b97).
+///
+/// Codex custom agents are TOML files with `developer_instructions`; it
+/// ignores `.codex/agents/*.md`, so the task-verifier and factory-supervisor
+/// files Cassy used to install there were inert. With an empty catalog the
+/// agent prune removes the installed copies on the next sync. The Codex
+/// supervisor's constraints live in `cas-codex-supervisor-checklist`.
+pub const CODEX_BUILTIN_AGENTS: &[BuiltinFile] = &[];
 
 /// All built-in skills managed by Cassy
 pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
@@ -1107,6 +1104,12 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
             "builtins/codex/skills/cas-nuxt-playwright/references/auth-fixture-template.md"
         ),
     },
+    // Codex ignores `disable-model-invocation`; `agents/openai.yaml` is its
+    // opt-out from implicit invocation.
+    BuiltinFile {
+        path: "skills/cas-nuxt-playwright/agents/openai.yaml",
+        content: include_str!("builtins/codex/skills/cas-nuxt-playwright/agents/openai.yaml"),
+    },
     // cas-playwright-debug skill (cas-5e54) — codex mirror, byte-identical.
     BuiltinFile {
         path: "skills/cas-playwright-debug/SKILL.md",
@@ -1194,6 +1197,7 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile { path: "skills/cas-wizard/template.sh", content: include_str!("builtins/codex/skills/cas-wizard/template.sh") },
     BuiltinFile { path: "skills/cas-resolving-merge-conflicts/SKILL.md", content: include_str!("builtins/codex/skills/cas-resolving-merge-conflicts/SKILL.md") },
     BuiltinFile { path: "skills/cas-to-questionnaire/SKILL.md", content: include_str!("builtins/codex/skills/cas-to-questionnaire/SKILL.md") },
+    BuiltinFile { path: "skills/cas-to-questionnaire/agents/openai.yaml", content: include_str!("builtins/codex/skills/cas-to-questionnaire/agents/openai.yaml") },
     BuiltinFile { path: "skills/cas-image-generate/SKILL.md", content: include_str!("builtins/codex/skills/cas-image-generate/SKILL.md") },
     BuiltinFile { path: "skills/cas-image-generate/references/asset-playbook.md", content: include_str!("builtins/codex/skills/cas-image-generate/references/asset-playbook.md") },
     BuiltinFile { path: "skills/cas-image-generate/references/svg-web-assets.md", content: include_str!("builtins/codex/skills/cas-image-generate/references/svg-web-assets.md") },
@@ -2134,17 +2138,27 @@ pub const GENERAL_PARITY_CAPABILITIES: &[RequiredCapability] = &[
     },
 ];
 
-/// Factory-critical agent roles that every harness must define in its own agent
-/// catalog (cas-cc8c AC-3). Harness-specific extras (e.g. Codex's
-/// `factory-supervisor` agent, which Claude/Grok don't need because their
-/// supervisor is the primary pane rather than a spawned sub-agent) are allowed
-/// and are simply absent from this required set.
+/// Factory-critical agent roles that every harness that loads `.md` agents
+/// must define in its own agent catalog (cas-cc8c AC-3). Codex loads none
+/// (audit D6); see [`required_factory_agents_for`].
 ///
 /// The Stop-hook maintenance jobs (learning-reviewer, rule-reviewer,
 /// duplicate-detector, session-summarizer) are not agents: each has one body
 /// in `crate::maintenance_jobs`, remapped per harness at prompt build
 /// (cas-228e, audit D12).
 pub const REQUIRED_FACTORY_AGENTS: &[&str] = &["agents/task-verifier.md"];
+
+/// The required agent roles for one harness: [`REQUIRED_FACTORY_AGENTS`],
+/// except for Codex, which ignores `.md` agents and so is required to ship
+/// none (audit D6, cas-6b97).
+pub fn required_factory_agents_for(harness: SupervisorCli) -> &'static [&'static str] {
+    match harness {
+        SupervisorCli::Codex => &[],
+        SupervisorCli::Claude | SupervisorCli::Grok | SupervisorCli::OpenCode => {
+            REQUIRED_FACTORY_AGENTS
+        }
+    }
+}
 
 /// The skill catalog for a harness (cas-cc8c parity helpers).
 pub fn skill_catalog_for_harness(harness: SupervisorCli) -> &'static [BuiltinFile] {
@@ -2179,9 +2193,13 @@ pub fn required_dir_for(cap: &RequiredCapability, harness: SupervisorCli) -> Opt
     }
 }
 
-/// Check if a file is managed by Cassy (has `managed_by: cas` in frontmatter)
+/// Check if a file is managed by Cassy.
+///
+/// The portable marker is `metadata:` → `managed_by: cas`; a top-level
+/// `managed_by: cas` (the form shipped before 3.32) is still accepted so
+/// installed copies carrying it stay managed and get updated.
 pub fn is_managed_by_cas(content: &str) -> bool {
-    // Check frontmatter for managed_by: cas
+    // Substring match covers both the nested and the legacy top-level form.
     if let Some(stripped) = content.strip_prefix("---") {
         if let Some(end) = stripped.find("---") {
             let frontmatter = &content[3..3 + end];
@@ -2922,7 +2940,42 @@ pub fn sync_all_builtins_for_project(
             let skills = filtered_project_skills(GROK_BUILTIN_SKILLS, project_root);
             sync_project_catalog(&project_root.join(".grok"), GROK_BUILTIN_AGENTS, &skills, None)
         }
-        SupervisorCli::OpenCode => Ok(SyncResult::default()),
+        // cas-6b97 (audit M40): OpenCode reads `.opencode/skills` ahead of
+        // `.claude/skills`, so the `cas_` projection is written there. Agents
+        // are not: OpenCode validates its own agent schema and the Claude
+        // agent frontmatter does not fit it.
+        SupervisorCli::OpenCode => {
+            let skills = filtered_project_skills(opencode_builtin_skills(), project_root);
+            sync_project_catalog(&project_root.join(".opencode"), NO_AGENTS, &skills, None)
+        }
+    }
+}
+
+/// An empty agent catalog, for harnesses Cassy installs no `.md` agents for.
+const NO_AGENTS: &[BuiltinFile] = &[];
+
+/// Whether `harness` is installed for this user, judged by its user-level
+/// home (cas-6b97, audit M39/M40). Grok and OpenCode rank a project's own
+/// `.grok/skills` / `.opencode/skills` above `.claude/skills` (measured with
+/// `grok inspect --json` and `opencode debug skill`), so project sync writes
+/// their projection whenever they are installed; otherwise they load the
+/// Claude-spelled copies whose tool names do not resolve for them.
+/// `GROK_CLAUDE_SKILLS_ENABLED=false` does not help: it hides only the
+/// user-level Claude skills, and Grok still reads the project's `.claude/skills`.
+pub fn harness_installed_for_user(harness: SupervisorCli) -> bool {
+    let Some(home) = dirs::home_dir() else {
+        return false;
+    };
+    match harness {
+        SupervisorCli::Claude => true,
+        SupervisorCli::Codex => home.join(".codex").is_dir(),
+        SupervisorCli::Grok => home.join(".grok").is_dir(),
+        SupervisorCli::OpenCode => {
+            let config = std::env::var_os("XDG_CONFIG_HOME")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| home.join(".config"));
+            config.join("opencode").is_dir() || home.join(".opencode").is_dir()
+        }
     }
 }
 
@@ -3114,8 +3167,7 @@ pub fn builtin_gitignore_entries(harnesses: &[SupervisorCli]) -> Vec<String> {
             ),
             SupervisorCli::Codex => (".codex", CODEX_BUILTIN_AGENTS, CODEX_BUILTIN_SKILLS, None),
             SupervisorCli::Grok => (".grok", GROK_BUILTIN_AGENTS, GROK_BUILTIN_SKILLS, None),
-            // OpenCode has no project-level builtin filesystem tree.
-            SupervisorCli::OpenCode => continue,
+            SupervisorCli::OpenCode => (".opencode", NO_AGENTS, opencode_builtin_skills(), None),
         };
 
         for builtin in agents.iter().chain(skills.iter()) {
@@ -3745,13 +3797,13 @@ pub fn preview_all_builtins_for_project(
         SupervisorCli::Claude => project_root.join(".claude"),
         SupervisorCli::Codex => project_root.join(".codex"),
         SupervisorCli::Grok => project_root.join(".grok"),
-        SupervisorCli::OpenCode => return Ok(Vec::new()),
+        SupervisorCli::OpenCode => project_root.join(".opencode"),
     };
     let (agents, skills): (&[BuiltinFile], Vec<BuiltinFile>) = match harness {
         SupervisorCli::Claude => (BUILTIN_AGENTS, filtered_project_skills(BUILTIN_SKILLS, project_root)),
         SupervisorCli::Codex => (CODEX_BUILTIN_AGENTS, filtered_project_skills(CODEX_BUILTIN_SKILLS, project_root)),
         SupervisorCli::Grok => (GROK_BUILTIN_AGENTS, filtered_project_skills(GROK_BUILTIN_SKILLS, project_root)),
-        SupervisorCli::OpenCode => unreachable!(),
+        SupervisorCli::OpenCode => (NO_AGENTS, filtered_project_skills(opencode_builtin_skills(), project_root)),
     };
     let mut changes = Vec::new();
     for builtin in agents.iter().chain(skills.iter()) {
@@ -3982,7 +4034,8 @@ mod tests {
         assert!(content.starts_with("project-rule\n"));
         assert!(content.ends_with("other-rule\n"));
         assert!(!content.contains("/stale-rendered-file"));
-        assert!(content.contains("/.codex/agents/task-verifier.md"));
+        assert!(content.contains("/.codex/skills/cas-worker/SKILL.md"));
+        assert!(!content.contains("/.codex/agents/"), "Codex installs no .md agents (D6)");
         assert!(!content.contains("/.claude/agents/task-verifier.md"));
     }
 
@@ -4531,23 +4584,26 @@ This is the body content."#;
         }
     }
 
-    // cas-5be8: disallowed-tools frontmatter in builtin skills
+    /// `disallowed-tools` is not a guard: Claude Code clears it when the user
+    /// sends the next message (turn-scoped), and Codex, Grok and OpenCode
+    /// ignore it. cas-5be8's TodoWrite/EnterPlanMode ban on cas-worker lapsed
+    /// at the first supervisor message and never applied outside Claude, so
+    /// it was dropped rather than presented as enforcement.
     #[test]
-    fn test_builtin_cas_worker_disallowed_tools() {
+    fn test_builtin_cas_worker_does_not_pose_disallowed_tools_as_a_guard() {
         for (label, skills) in [
             ("BUILTIN_SKILLS", BUILTIN_SKILLS),
             ("CODEX_BUILTIN_SKILLS", CODEX_BUILTIN_SKILLS),
+            ("GROK_BUILTIN_SKILLS", GROK_BUILTIN_SKILLS),
         ] {
             let entry = skills
                 .iter()
                 .find(|b| b.path == "skills/cas-worker/SKILL.md")
                 .unwrap_or_else(|| panic!("{label}: cas-worker SKILL.md missing"));
-            for required in ["disallowed-tools:", "- TodoWrite", "- EnterPlanMode"] {
-                assert!(
-                    entry.content.contains(required),
-                    "{label}: cas-worker SKILL.md missing disallowed-tools entry: {required:?}"
-                );
-            }
+            assert!(
+                !entry.content.contains("disallowed-tools:"),
+                "{label}: cas-worker must not rely on turn-scoped, Claude-only disallowed-tools"
+            );
         }
     }
 
@@ -4655,7 +4711,10 @@ This is the body content."#;
     #[test]
     fn test_is_managed_by_cas() {
         let managed = "---\nname: test\nmanaged_by: cas\n---\nContent";
-        assert!(is_managed_by_cas(managed));
+        assert!(is_managed_by_cas(managed), "legacy top-level form");
+
+        let nested = "---\nname: test\nmetadata:\n  managed_by: cas\n---\nContent";
+        assert!(is_managed_by_cas(nested), "portable metadata form");
 
         let not_managed = "---\nname: test\n---\nContent";
         assert!(!is_managed_by_cas(not_managed));
@@ -5112,9 +5171,10 @@ This is the body content."#;
                 );
             }
             // The tool calls must be spelled the way this harness resolves them.
+            // cas-8563b: server_* moved from coordination to factory.
             assert!(
-                entry.content.contains(&format!("{prefix}coordination")),
-                "{label} cas-servers SKILL.md must call {prefix}coordination"
+                entry.content.contains(&format!("{prefix}factory action=server_start")),
+                "{label} cas-servers SKILL.md must call {prefix}factory"
             );
             bodies.push((label, entry.content.replace(prefix, "<PREFIX>")));
         }
@@ -6590,8 +6650,8 @@ This is the body content."#;
     #[test]
     fn test_verifier_markers_and_learning_reviewer_job_contract() {
         for (label, agents) in [
+            // Codex ships no .md agents (audit D6).
             ("BUILTIN_AGENTS", BUILTIN_AGENTS),
-            ("CODEX_BUILTIN_AGENTS", CODEX_BUILTIN_AGENTS),
             ("GROK_BUILTIN_AGENTS", GROK_BUILTIN_AGENTS),
         ] {
             let verifier = agents
@@ -7616,17 +7676,19 @@ This is the body content."#;
                         builtin.path
                     );
                     assert!(recipes.contains(&format!(
-                        "# taste — recipe claude_opus_5_5 (fallback: claude_opus)\n{prefix}coordination action=spawn_workers count=1 isolate=true cli=claude model=claude-opus-5-5 effort=high"
+                        "# taste — recipe claude_opus_5_5 (fallback: claude_opus)\n{prefix}factory action=spawn_workers count=1 isolate=true cli=claude model=claude-opus-5-5 effort=high"
                     )));
                 }
             }
         }
-        let agent = include_str!("builtins/codex/agents/factory-supervisor.md");
-        assert!(agent.contains(&render_spawn_recipes("mcp__cs__").unwrap()));
-        assert_eq!(
-            agent,
-            include_str!("../../.codex/agents/factory-supervisor.md")
-        );
+        // Audit D6: the Codex factory-supervisor agent file is gone; the Codex
+        // supervisor finds the recipes through its checklist's workflow link.
+        let checklist = CODEX_BUILTIN_SKILLS
+            .iter()
+            .find(|b| b.path == "skills/cas-codex-supervisor-checklist/SKILL.md")
+            .expect("codex checklist")
+            .content;
+        assert!(checklist.contains("../cas-supervisor/references/workflow.md"));
     }
 
     /// cas-6219: the supervisor's model-selection rubric must be registered on
@@ -7897,7 +7959,7 @@ This is the body content."#;
         ] {
             let lines: Vec<_> = content.lines().collect();
             for (index, line) in lines.iter().enumerate() {
-                if line.contains("coordination action=spawn_workers") {
+                if line.contains("factory action=spawn_workers") {
                     for argument in ["cli=", "model=", "effort="] {
                         assert!(
                             line.contains(argument),
@@ -8435,29 +8497,39 @@ This is the body content."#;
         );
     }
 
+    /// Audit D6 (cas-6b97): Codex ignores `.md` agents, so its sync installs
+    /// none and prunes the inert managed copies earlier versions installed.
     #[test]
-    fn test_sync_all_codex_builtins_includes_agents() {
-        // Verify sync_all_codex_builtins syncs agents (which includes task-verifier)
+    fn test_sync_all_codex_builtins_installs_no_md_agents_and_prunes_old_ones() {
         use tempfile::tempdir;
 
         let temp = tempdir().unwrap();
         let codex_dir = temp.path().join(".codex");
-        std::fs::create_dir_all(&codex_dir).unwrap();
+        let agents = codex_dir.join("agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        for name in ["task-verifier.md", "factory-supervisor.md"] {
+            std::fs::write(
+                agents.join(name),
+                "---\nname: old\nmetadata:\n  managed_by: cas\n---\nold\n",
+            )
+            .unwrap();
+        }
+        std::fs::write(agents.join("reviewer.toml"), "name = \"mine\"\n").unwrap();
 
         let result = sync_all_codex_builtins(&codex_dir).unwrap();
 
-        // Should sync at least 1 agent (task-verifier)
-        assert!(
-            result.agents_updated > 0,
-            "sync_all_codex_builtins should sync agents"
+        assert_eq!(result.agents_updated, 0, "Codex has no agent catalog");
+        assert!(result.skills_updated > 0);
+        assert_eq!(
+            result.pruned_files,
+            vec![
+                "agents/factory-supervisor.md".to_string(),
+                "agents/task-verifier.md".to_string(),
+            ]
         );
-
-        // Verify task-verifier file was created
-        let task_verifier_path = codex_dir.join("agents/task-verifier.md");
-        assert!(
-            task_verifier_path.exists(),
-            "task-verifier.md should be created by sync_all_codex_builtins"
-        );
+        assert!(agents.join("reviewer.toml").is_file(), "user TOML agents are untouched");
+        assert!(CODEX_BUILTIN_AGENTS.is_empty());
+        assert!(required_factory_agents_for(SupervisorCli::Codex).is_empty());
     }
 
     /// cas-2c61: every Codex builtin (agent or skill) must reference the
@@ -8860,9 +8932,8 @@ This is the body content."#;
         }
     }
 
-    /// Required agent roles have equivalent coverage across all four harnesses.
-    /// Harness-specific extras (Codex `factory-supervisor`) are allowed and are
-    /// simply not in the required set.
+    /// Required agent roles have equivalent coverage across every harness that
+    /// loads `.md` agents; Codex requires none (audit D6).
     #[test]
     fn test_required_agents_present_in_every_harness() {
         for harness in [
@@ -8872,7 +8943,7 @@ This is the body content."#;
             SupervisorCli::OpenCode,
         ] {
             let catalog = agent_catalog_for_harness(harness);
-            for agent in REQUIRED_FACTORY_AGENTS {
+            for agent in required_factory_agents_for(harness) {
                 assert!(
                     catalog.iter().any(|b| &b.path == agent),
                     "{harness:?} agent catalog is missing required role {agent}"
@@ -8985,7 +9056,7 @@ This is the body content."#;
                     on_disk.display()
                 );
             }
-            for agent in REQUIRED_FACTORY_AGENTS {
+            for agent in required_factory_agents_for(harness) {
                 assert!(
                     dir.join(agent).exists(),
                     "{harness:?} fresh sync did not install required agent {agent}"
@@ -9464,5 +9535,91 @@ This is the body content."#;
                 assert!(!wp10_get(label, catalog, path).is_empty(), "{label} {path} is empty");
             }
         }
+    }
+
+
+    // ---------------------------------------------------------------------
+    // cas-6b97 (WP12b): harness projection and D6
+    // ---------------------------------------------------------------------
+
+    /// Every harness's project sync writes its own tree, with text whose tool
+    /// names resolve for that harness, and nothing else.
+    #[test]
+    fn project_sync_writes_each_harness_its_own_projection() {
+        use tempfile::tempdir;
+
+        // Foreign spellings only: once skill text is prefix-neutral (audit D1)
+        // a skill may carry no prefix at all, but never another harness's.
+        for (harness, dir, foreign) in [
+            (SupervisorCli::Claude, ".claude", &["mcp__cs__task"][..]),
+            (SupervisorCli::Codex, ".codex", &["mcp__cas__task"][..]),
+            (SupervisorCli::Grok, ".grok", &["mcp__cas__task", "mcp__cs__task"][..]),
+            (
+                SupervisorCli::OpenCode,
+                ".opencode",
+                &["mcp__cas__task", "mcp__cs__task", "cas__task"][..],
+            ),
+        ] {
+            let temp = tempdir().unwrap();
+            sync_all_builtins_for_project(harness, temp.path()).unwrap();
+            let worker = std::fs::read_to_string(
+                temp.path().join(dir).join("skills/cas-worker/SKILL.md"),
+            )
+            .unwrap_or_else(|err| panic!("{harness:?} wrote no {dir}/skills/cas-worker: {err}"));
+            let expected = skill_catalog_for_harness(harness)
+                .iter()
+                .find(|b| b.path == "skills/cas-worker/SKILL.md")
+                .unwrap()
+                .content;
+            assert_eq!(worker, expected, "{harness:?} wrote another harness's worker text");
+            for wrong in foreign {
+                assert!(!worker.contains(wrong), "{harness:?} worker carries {wrong}");
+            }
+            let written: Vec<String> = std::fs::read_dir(temp.path())
+                .unwrap()
+                .flatten()
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .filter(|name| name.starts_with('.') && !name.starts_with(".cas"))
+                .collect();
+            assert_eq!(written, vec![dir.to_string()], "{harness:?} wrote other trees");
+            let agents = temp.path().join(dir).join("agents");
+            let md_agents = std::fs::read_dir(&agents)
+                .map(|entries| entries.flatten().count())
+                .unwrap_or(0);
+            assert_eq!(
+                md_agents,
+                required_factory_agents_for(harness).len()
+                    * usize::from(matches!(harness, SupervisorCli::Claude | SupervisorCli::Grok)),
+                "{harness:?} installed an unexpected agent set"
+            );
+        }
+    }
+
+    #[test]
+    fn builtin_gitignore_covers_the_opencode_projection() {
+        let entries = builtin_gitignore_entries(&[SupervisorCli::OpenCode]);
+        assert!(entries.contains(&"/.opencode/skills/cas-worker/SKILL.md".to_string()));
+        assert!(entries.iter().all(|entry| entry.starts_with("/.opencode/skills/")));
+    }
+
+    /// Audit D6: Codex ignores `.md` agents, so none is registered, required,
+    /// or kept on disk, and the Codex supervisor's constraints moved into its
+    /// checklist.
+    #[test]
+    fn codex_ships_no_md_agents_and_the_checklist_keeps_its_constraints() {
+        assert!(CODEX_BUILTIN_AGENTS.is_empty());
+        assert!(agent_catalog_for_harness(SupervisorCli::Codex).is_empty());
+        assert!(required_factory_agents_for(SupervisorCli::Codex).is_empty());
+        assert_eq!(
+            required_factory_agents_for(SupervisorCli::Grok),
+            REQUIRED_FACTORY_AGENTS
+        );
+        let checklist = CODEX_BUILTIN_SKILLS
+            .iter()
+            .find(|b| b.path == "skills/cas-codex-supervisor-checklist/SKILL.md")
+            .unwrap()
+            .content;
+        assert!(checklist.contains("## Codex constraints"));
+        assert!(checklist.contains("loads no `.md` agents"));
     }
 }

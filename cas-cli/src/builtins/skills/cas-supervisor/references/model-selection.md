@@ -34,7 +34,7 @@ The route table below is generated from the embedded `cas-factory` registry. Kee
 | `— (explicit only)` | `codex_terra` | `openai` | `codex` | `gpt-5.6-terra` | `xhigh` | `suspended` | `not lane-routed` | Standing operator suspension (2026-08-27) |
 | `— (explicit only)` | `qwencloud_qwen` | `qwencloud` | `opencode` | `qwen3.8-max` | `medium` | `active` | `not lane-routed` | Receipt-gated by opencode-1.18.23-hosted-token-plan-2026-08-27; explicit recipe/model only |
 
-Lane request mode: call `coordination spawn_workers` with `lane=<lane>`. The registry resolves the ordered candidates; any fallback selection is reported loudly as `fallback: <recipe> (primary <recipe> unavailable: <reason>)` in the spawn receipt and launch summary. Lanes marked `disabled` fail closed when their primary is unavailable.
+Lane request mode: call the `factory` tool's `spawn_workers` action with `lane=<lane>`. The registry resolves the ordered candidates; any fallback selection is reported loudly as `fallback: <recipe> (primary <recipe> unavailable: <reason>)` in the spawn receipt and launch summary. Lanes marked `disabled` fail closed when their primary is unavailable.
 <!-- END GENERATED ROUTE TABLE -->
 
 Token-heavy read-only investigation belongs in a `cas-codex-exec` shell-out, not a worker and not your own context window.
@@ -87,9 +87,9 @@ alias as its stock model; this is a fallback route, not a registry lane.
 
 ```text
 # Codex stock fallback
-mcp__cas__coordination action=spawn_workers count=1 isolate=true cli=codex model=gpt-6-sol effort=medium
+mcp__cas__factory action=spawn_workers count=1 isolate=true cli=codex model=gpt-6-sol effort=medium
 # Claude stock fallback
-mcp__cas__coordination action=spawn_workers count=1 isolate=true cli=claude model=opus effort=high
+mcp__cas__factory action=spawn_workers count=1 isolate=true cli=claude model=opus effort=high
 ```
 
 ### Effort vocabulary (Cassy-wide)
@@ -126,7 +126,7 @@ The canonical copy-paste recipes are maintained once in [workflow.md](workflow.m
 Use this recipe for the receipted OpenCode 1.18.23 Token Plan route:
 
 ```
-mcp__cas__coordination action=spawn_workers count=1 isolate=true cli=opencode model=qwencloud/qwen3.8-max effort=medium worker_names="oc-ada"
+mcp__cas__factory action=spawn_workers count=1 isolate=true cli=opencode model=qwencloud/qwen3.8-max effort=medium worker_names="oc-ada"
 ```
 
 Route requirements are in [OpenCode lane](#opencode-lane-route-specific-conformance); parameter table in

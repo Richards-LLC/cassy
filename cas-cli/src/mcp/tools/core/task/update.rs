@@ -1265,7 +1265,7 @@ impl CasCore {
                                     warnings.push(format!(
                                         "⚠️ No registered factory agent found for assignee \
                                          '{assignee}'. Verify the worker name with \
-                                         `{tool_prefix}coordination action=worker_status`. Use the \
+                                         `{tool_prefix}factory action=worker_status`. Use the \
                                          worker's display name (e.g. 'codex-jester'), not \
                                          their session UUID, for reliable `task mine` dispatch.",
                                         tool_prefix =

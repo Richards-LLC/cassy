@@ -1,9 +1,9 @@
 ---
 name: cas-writing-for-agents
 description: Use when creating or editing a skill, AGENTS.md, CLAUDE.md, or an agent-facing reference document.
-managed_by: cas
 license: MIT
 metadata:
+  managed_by: cas
   author: Matt Pocock
   upstream: https://github.com/mattpocock/skills
   provenance: Adapted from mattpocock/skills (MIT, © 2026 Matt Pocock).
@@ -15,45 +15,45 @@ Write agent-facing documents as instructions for a repeated process, not prose f
 
 ## Steps
 
-1. **Write the description as a context pointer.** Lead with `Use when <trigger>`, one trigger per branch that should load the document. Name the material and the condition; omit identity the target already carries. A description is always-loaded text — every word spends context on every turn.
+1. **Write the description as a context pointer:** `Use when <trigger>; not for <sibling>.`, where the trigger names what the skill does. Put the key use case first, keep it within 250 characters, and use no emphasis words. The 1,024-character limit is the hard ceiling, but every harness fits all descriptions into one shared listing budget (Claude: 1% of context; Codex: 2%, or 8,000 characters) and drops or shortens the longest first. Add the `not for` clause only when a sibling or bundled skill competes for the same prompts.
 2. **Write the body as imperative steps**, each with an observable done-state. A reader must be able to tell, without judgement, whether a step finished.
-3. **State each rule exactly once.** One authoritative sentence per meaning. Delete any instruction the harness already enforces — a `PreToolUse` denial lands better than a paragraph asking nicely, and the paragraph costs context forever.
-4. **Add a reference file only for a branch that earns it.** A branch earns one when it needs independent model invocation, or when a real invocation boundary protects a sequence from premature completion. Anything under ~15 lines belongs inline: a pointer to a short file costs more than the file saves.
-5. **Update the codex and grok mirrors.** `cas-cli/src/builtins/skills/<name>/` is canonical; `codex/skills/<name>/` and `grok/skills/<name>/` are byte-identical to it apart from each harness's own CAS tool prefix, which is a pure substitution — never write another harness's prefix into a mirror. Register every new file in `BUILTIN_SKILLS`, `CODEX_BUILTIN_SKILLS` and `GROK_BUILTIN_SKILLS` in `builtins.rs` — an unregistered file is never installed — then regenerate `builtins/reference-history.json` with `scripts/gen-builtin-reference-history.sh`.
+3. **State each rule exactly once.** Delete any instruction the harness already enforces: a `PreToolUse` denial lands better than a paragraph asking nicely, and the paragraph costs context forever.
+4. **Add a file only for a branch that earns it.** A reference earns one when it needs independent model invocation or a real invocation boundary; anything under ~15 lines stays inline. Keep references one level deep and give one over 100 lines a table of contents. Put executable helpers in `scripts/` and tell the agent to run them, not read them.
+5. **Update the codex and grok mirrors.** `cas-cli/src/builtins/skills/<name>/` is canonical; `codex/skills/<name>/` and `grok/skills/<name>/` are byte-identical to it apart from each harness's own CAS tool prefix. Grok and OpenCode also load `.claude/skills`, so the text must work whichever copy a harness reads. Register every new file in `BUILTIN_SKILLS`, `CODEX_BUILTIN_SKILLS` and `GROK_BUILTIN_SKILLS` in `builtins.rs` (an unregistered file is never installed), then run `scripts/gen-builtin-reference-history.sh`.
 
-**Done when** the file is under ~80 lines, every line is live, `builtin_flavor_drift_test` passes (supervisors run it; factory workers never build Rust — it runs at epic assembly), and no sentence restates one that appears elsewhere in the same file.
+**Done when** the body fits its line budget (methodology skills under 80 lines, procedural skills under 200, never over 500 lines or ~5,000 tokens: split into references instead), every line is live, `builtin_flavor_drift_test` passes (supervisors run it; factory workers never build Rust), and no sentence restates another.
 
-## Frontmatter
+## Frontmatter by harness
 
-Required: `name`, matching the directory; `description`, the `Use when …` pointer; `managed_by`, always the value `cas` for a builtin.
+| Field | Honoured by | Notes |
+|---|---|---|
+| `name`, `description`, `license`, `compatibility`, `metadata` | every harness and the open standard | `name` matches the directory. Only these (plus `allowed-tools`) pass claude.ai, the Skills API and the spec validator. |
+| `metadata.managed_by: cas` | Cassy | Required for a builtin: sync overwrites only managed files. The legacy top-level `managed_by` still counts for one release. |
+| `disable-model-invocation: true` | Claude, Grok | Makes the skill user-invoked only; its description becomes human-facing. Codex ignores `disable-model-invocation`: ship `agents/openai.yaml` with `policy: {allow_implicit_invocation: false}` in the codex twin. |
+| `allowed-tools`, `argument-hint`, `when_to_use`, `paths`, `model`, `effort` | Claude, Grok | `allowed-tools` pre-approves; it never restricts. |
+| `disallowed-tools`, `context`, `agent`, `hooks`, `shell`, `arguments` | Claude only | `disallowed-tools` is turn-scoped (cleared at the next user message), so it is not a guard; enforce a ban in a hook. |
+| `user-invocable: false` | differs | Hidden from the user only in Claude, from the model too in Grok. Avoid it. |
 
-Optional: `disable-model-invocation` makes the skill user-invoked only. Write it as `disable-model-invocation: true`; its description then becomes human-facing and carries no autonomous trigger; choose it when a person should decide whether to use the skill, trading context load for cognitive load. `disallowed-tools` removes tools from the skill's session; never list a tool the skill's own steps require.
+A family of user-invoked skills may share one user-invoked router: a router helps people find the right skill, but it cannot invoke its peers.
 
-A family of user-invoked skills may share one user-invoked router: a router helps people find the right skill, but it cannot autonomously invoke its peers.
+## Wording for current models
 
-## The two loads
+- Use no capitals or emphasis words except for a true invariant, and at most one per file: current models over-trigger on them.
+- Give the reason with each rule; a rule without one is applied too widely or too narrowly.
+- Leave out verification scaffolding ("double-check", "be thorough", "run the tests again"); it causes over-verification.
+- Tie every ask-first or stop instruction to a concrete trigger; open-ended caution stalls work.
+- Make sure no two rules can conflict; models block or burn reasoning on a conflict.
+- Examples are copied literally: give one exact example and label any anti-example as such.
+- Never ask the model to show or echo its reasoning.
 
-- **Context load** is always-loaded text. Keep it small and earn every word.
-- **Cognitive load** is the human effort of knowing which document to reach for. Spend it where human judgment matters.
+Say what to do rather than what not to do; a prohibition earns space only for a hard guardrail. Prefer compact, familiar leading words that summon a shared behaviour: `tight` for a fast deterministic loop, `red` for a bug-reproducing loop.
 
-Material behind a pointer reduces context load but increases cognitive load.
+## Instruction files
 
-## Information hierarchy
+`AGENTS.md` and `CLAUDE.md` are always loaded, so every line costs context in every session. Keep each under 200 lines. Codex reads `AGENTS.md` from the repo root down to the working directory, up to 32 KiB; Grok reads `AGENTS.md` and `CLAUDE.md` in full; OpenCode reads `AGENTS.md` instead of `CLAUDE.md`. Write blocks that ship in both files harness-neutral, and never duplicate a block across them.
 
-Put material at the lowest tier that still makes execution reliable:
+## Loads and pruning
 
-1. In-file steps: actions every branch performs, in order.
-2. In-file reference: rules consulted while doing those steps.
-3. Disclosed reference: branch-specific material in a linked file.
+Context load is always-loaded text; cognitive load is the human effort of knowing which document to reach for. Material behind a pointer reduces the first and raises the second, so split only when a sequence or invocation branch earns the pointer, and co-locate a concept's definition, rules and caveats.
 
-Use progressive disclosure to keep the main path legible. Co-locate a concept's definition, rules, and caveats. Split only when a sequence or invocation branch earns the extra pointer; otherwise splitting becomes sprawl.
-
-## Completion criteria
-
-Every step needs one. Make it **clear** (done is observable) and **demanding** (the necessary legwork is required). Sharpen a fuzzy criterion before hiding later steps; only a real context boundary prevents later work from pulling attention toward premature completion.
-
-## Leading words and pruning
-
-Prefer compact, familiar leading words that reliably summon a shared behavior: `tight` for a fast deterministic loop, `red` for a bug-reproducing loop. Use positive instructions; a prohibition earns space only for a hard guardrail.
-
-Treat environment facts as lookups, not prose caches, unless the lookup is costly or misses an unwritten convention. Remove stale exposition, irrelevant branches, and no-op instructions. Ticket-phase narration ("Phase 2", "v1 ships as advisory"), dated verification notes, and operator-specific facts — an e-mail address, an absolute home path, a downstream framework's conventions — are the reliable markers of text that has gone stale; they belong in project rubrics, config keys, or memories, never in a file installed for every user. The result should be short because every line is live.
+Treat environment facts as lookups, not prose caches. Remove stale exposition, irrelevant branches and no-op instructions. Ticket-phase narration ("Phase 2", "v1 ships as advisory"), dated verification notes and operator-specific facts (an e-mail address, an absolute home path, one downstream framework's conventions) mark text that has gone stale; they belong in project rubrics, config keys or memories, never in a file installed for every user.

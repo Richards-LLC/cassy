@@ -80,10 +80,11 @@ fn supervisor_agent_worktree_is_denied() {
     let input = agent_input_with_role(Some("supervisor"), Some("worktree"));
     let out = handle_pre_tool_use(&input, None).expect("handler ok");
     let reason = deny_reason(&out).expect("expected deny");
-    // Message must point at the coordination escape hatch and explain the leak.
+    // Message must point at the factory escape hatch (cas-8563b: spawn_workers
+    // moved from coordination to factory) and explain the leak.
     assert!(
-        reason.contains("mcp__cas__coordination"),
-        "deny message should direct to coordination: {reason}"
+        reason.contains("mcp__cas__factory action=spawn_workers"),
+        "deny message should direct to factory: {reason}"
     );
     assert!(
         reason.contains("spawn_workers"),
@@ -108,11 +109,11 @@ fn grok_supervisor_agent_worktree_is_denied_with_cas_prefix() {
     let out = handle_pre_tool_use(&input, None).expect("handler ok");
     let reason = deny_reason(&out).expect("expected deny");
     assert!(
-        reason.contains("cas__coordination"),
+        reason.contains("cas__factory"),
         "grok supervisor deny message must use its own cas__ prefix: {reason}"
     );
     assert!(
-        !reason.contains("mcp__cas__coordination") && !reason.contains("mcp__cs__coordination"),
+        !reason.contains("mcp__cas__factory") && !reason.contains("mcp__cs__factory"),
         "grok supervisor deny message must NOT carry another harness's prefix: {reason}"
     );
 }

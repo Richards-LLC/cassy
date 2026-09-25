@@ -184,6 +184,7 @@
       "Bash(cas add:*)",
       "mcp__cas__task",
       "mcp__cas__coordination",
+      "mcp__cas__factory",
       "mcp__cas__memory",
       "mcp__cas__search",
       "mcp__cas__rule",

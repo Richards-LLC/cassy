@@ -1,7 +1,8 @@
 ---
 name: cas-release-report
 description: Use after every published version release, before its Slack announcement, to produce the standalone HTML release report and verified PDF with `cas release report`.
-managed_by: cas
+metadata:
+  managed_by: cas
 ---
 
 # Release report

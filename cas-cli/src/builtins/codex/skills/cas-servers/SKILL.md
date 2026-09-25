@@ -1,7 +1,8 @@
 ---
 name: cas-servers
 description: Use when starting, inspecting, or stopping a long-lived local server, watcher, API stub, preview, or Playwright webServer.
-managed_by: cas
+metadata:
+  managed_by: cas
 ---
 
 # Long-running servers go through the registry
@@ -14,7 +15,7 @@ knows which task it belongs to, and nothing can stop it except hunting through `
 Start it through Cassy instead:
 
 ```
-mcp__cs__coordination action=server_start command="npm run dev" port=5173 task_id=<your task>
+mcp__cs__factory action=server_start command="npm run dev" port=5173 task_id=<your task>
 ```
 
 **Registered servers are the only ones that survive worker teardown.** When a worker is torn
@@ -29,7 +30,7 @@ worker's containment scope on purpose.
 ### Start
 
 ```
-mcp__cs__coordination action=server_start command="npm run dev" cwd=apps/web port=5173 task_id=cas-1234
+mcp__cs__factory action=server_start command="npm run dev" cwd=apps/web port=5173 task_id=cas-1234
 ```
 
 | Parameter | Meaning |
@@ -58,8 +59,8 @@ A server that dies on startup leaves its reason in that log.
 ### List
 
 ```
-mcp__cs__coordination action=server_list
-mcp__cs__coordination action=server_list task_id=cas-1234
+mcp__cs__factory action=server_list
+mcp__cs__factory action=server_list task_id=cas-1234
 ```
 
 Answers "what is listening, and who started it" — name, pid, the ports actually bound, the
@@ -70,7 +71,7 @@ answer. A pid that has gone away is reported dead; Cassy never restarts anything
 ### Stop
 
 ```
-mcp__cs__coordination action=server_stop id=dev-web
+mcp__cs__factory action=server_stop id=dev-web
 ```
 
 Takes the name or the id from `server_list`. Stops the whole server, not just its wrapper

@@ -1,7 +1,8 @@
 ---
 name: cas-ui-craft
-description: Use when designing, rendering, or critiquing a human-facing HTML surface — report, dashboard, product or landing page, README hero, slide, app screen — before first render and before merge. Report contract: cas-html-reports; figures: cas-dataviz.
-managed_by: cas
+description: Use when designing, rendering, or critiquing a human-facing HTML surface — report, dashboard, product or landing page, README hero, slide, app screen — before first render and before merge. Reports follow cas-html-reports, figures cas-dataviz.
+metadata:
+  managed_by: cas
 ---
 
 # UI craft

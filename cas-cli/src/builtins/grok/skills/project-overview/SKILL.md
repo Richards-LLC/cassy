@@ -1,7 +1,8 @@
 ---
 name: project-overview
 description: Use when asked what a project is, to create or update PRODUCT_OVERVIEW.md, or when onboarding needs product intent after code structure is understood.
-managed_by: cas
+metadata:
+  managed_by: cas
 ---
 
 # Project Overview

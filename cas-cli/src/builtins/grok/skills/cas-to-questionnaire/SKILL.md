@@ -2,7 +2,8 @@
 name: cas-to-questionnaire
 description: Turn a decision the user cannot answer alone into a discovery questionnaire for a knowledgeable third party.
 disable-model-invocation: true
-managed_by: cas
+metadata:
+  managed_by: cas
 ---
 
 # Discovery Questionnaire

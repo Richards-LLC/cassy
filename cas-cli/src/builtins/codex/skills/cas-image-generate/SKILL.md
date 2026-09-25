@@ -1,7 +1,8 @@
 ---
 name: cas-image-generate
 description: Use when a project needs a hero, background, logo, icon, OG card, illustration, or report artwork matching its design system; flat or geometric assets become agent-authored SVG, photographic or painterly work goes to Nano Banana.
-managed_by: cas
+metadata:
+  managed_by: cas
 ---
 
 # Style-aware image generation

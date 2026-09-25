@@ -1,10 +1,17 @@
 ---
 name: cas-codex-supervisor-checklist
 description: Use at the start of a Codex factory-supervisor session to load context, inspect EPICs, and confirm worker availability.
-managed_by: cas
+metadata:
+  managed_by: cas
 ---
 
 # Codex Supervisor Checklist
+
+## Codex constraints
+
+- Codex has no session hooks and loads no `.md` agents, so call the `mcp__cs__` tools explicitly for tasks, memory, rules, and search, and follow `cas-supervisor` for everything below.
+- Coordinate workers; never implement a worker's task yourself or close one outside the documented Cassy lifecycle.
+- Every spawn names `cli=`, `model=`, and `effort=`; copy a generated recipe from [workflow.md](../cas-supervisor/references/workflow.md).
 
 ## Session Start (No Hooks)
 
@@ -26,13 +33,13 @@ managed_by: cas
    - If it exists but is stale (structural changes since last update) → run the `codemap` skill to refresh.
    - Codex has no SessionStart/PreToolUse banner to warn you, so check explicitly: `cas codemap status`.
    - Workers reference CODEMAP for codebase orientation — ensure it's current before spawning them.
-5. Check worker availability: `mcp__cs__coordination action=worker_status`
+5. Check worker availability: `mcp__cs__factory action=worker_status`
 6. **Session hygiene triage** — on hook-enabled harnesses a SessionStart banner
    flags prior-factory WIP left in the main worktree. Codex gets no such
    banner, so run the report yourself, every session, before spawning workers:
 
    ```
-   mcp__cs__coordination action=gc_report
+   mcp__cs__factory action=gc_report
    ```
 
    The report's "Prior-factory WIP candidates" section lists uncommitted
@@ -46,8 +53,6 @@ managed_by: cas
    `.cas/logs/factory-session-{YYYY-MM-DD}.log` (written automatically on
    `SessionEnd`; each block records session id, agent, worktree, and a
    `git status --porcelain` snapshot).
-
-Do not use `/cas-start`, `/cas-context`, or `/cas-end` — they are not available in Codex.
 
 ## Intake Gate (Before Planning)
 
@@ -74,7 +79,7 @@ Supervisor close override constraints: [`supervisor_override`](../cas-supervisor
 
 ## Before Closing an EPIC
 
-- Run `mcp__cs__coordination action=epic_status id=<epic-id>` — confirms every child task's `factory/<assignee>` branch is merged into the epic branch. `mcp__cs__task action=close` on the epic enforces the same check and refuses stranded branches unless a live registered supervisor passes `stranded_branch_override="<inspection narrative>"`; it never waives genuinely unmerged content. Run `epic_status` mid-flight to resolve merges before the close-time error.
+- Run `mcp__cs__factory action=epic_status id=<epic-id>` — confirms every child task's `factory/<assignee>` branch is merged into the epic branch. `mcp__cs__task action=close` on the epic enforces the same check and refuses stranded branches unless a live registered supervisor passes `stranded_branch_override="<inspection narrative>"`; it never waives genuinely unmerged content. Run `epic_status` mid-flight to resolve merges before the close-time error.
 - Confirm task deliverables exist on the epic branch
 - Launch the release gate detached on the assembled epic in its dedicated worktree, then run the [epic flow walk](../cas-supervisor/references/epic-flow-walk.md) concurrently when any child has a demo statement.
 - Require both gate receipts and the single epic evidence note before epic close verification; apply task-verifier Step 0A with `verification_type=epic`.

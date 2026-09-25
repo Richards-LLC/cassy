@@ -755,7 +755,7 @@ fn enqueue_worker_attention_relay_detail_with_key(
         .unwrap_or("");
     let detail = detail(prefix);
     let body = format!(
-        "<worker-attention kind=\"{kind}\" worker=\"{worker}\" notification_id=\"{notification_id}\">\n{detail}\nRun `{prefix}coordination action=worker_status` and reassign or recover the worker as needed.\n</worker-attention>"
+        "<worker-attention kind=\"{kind}\" worker=\"{worker}\" notification_id=\"{notification_id}\">\n{detail}\nRun `{prefix}factory action=worker_status` and reassign or recover the worker as needed.\n</worker-attention>"
     );
     let source = format!("{LIFECYCLE_WAKE_SOURCE_PREFIX}worker-attention:{notification_id}");
     if let Err(error) = prompt_queue.enqueue_idempotent(
@@ -1169,7 +1169,7 @@ mod worker_attention_tests {
             );
             assert!(
                 row.prompt
-                    .contains(&format!("{prefix}coordination action=worker_status")),
+                    .contains(&format!("{prefix}factory action=worker_status")),
                 "{harness}: {}",
                 row.prompt
             );
@@ -1261,7 +1261,7 @@ mod worker_attention_tests {
         assert!(
             rows[0]
                 .prompt
-                .contains("`coordination action=worker_status`")
+                .contains("`factory action=worker_status`")
         );
         assert!(!rows[0].prompt.contains("mcp__"));
         assert_eq!(rows[0].origin, Some(cas_store::QueueOrigin::Daemon));

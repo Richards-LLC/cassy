@@ -3,7 +3,7 @@ mod post_tool;
 mod prompt_capture;
 mod session_stop;
 mod tmpfs_guardrail;
-mod utils;
+pub(crate) mod utils;
 
 pub use post_tool::*;
 pub use prompt_capture::*;

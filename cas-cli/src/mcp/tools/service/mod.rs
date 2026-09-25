@@ -463,7 +463,7 @@ impl CasService {
             let action = req.action.clone();
             let is_mutating = matches!(
                 req.action.as_str(),
-                "create" | "update" | "delete" | "restore" | "helpful" | "harmful" | "sync"
+                "create" | "update" | "delete" | "restore" | "helpful" | "promote" | "harmful" | "sync"
             );
 
             let result = match req.action.as_str() {
@@ -476,13 +476,14 @@ impl CasService {
                 "list" => this.rule_list(req).await,
                 "list_all" => this.rule_list_all(req).await,
                 "helpful" => this.rule_helpful(req).await,
+                "promote" => this.rule_promote(req).await,
                 "harmful" => this.rule_harmful(req).await,
                 "sync" => this.rule_sync(req).await,
                 "check_similar" => this.rule_check_similar(req).await,
                 _ => Err(Self::error(
                     ErrorCode::INVALID_PARAMS,
                     format!(
-                        "Unknown rule action: {}. Valid: create, show, update, delete, list, list_all, history, restore, helpful, harmful, sync, check_similar",
+                        "Unknown rule action: {}. Valid: create, show, update, delete, list, list_all, history, restore, helpful, promote, harmful, sync, check_similar",
                         req.action
                     ),
                 )),

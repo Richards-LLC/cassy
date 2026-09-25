@@ -64,6 +64,7 @@ pub mod hybrid_search;
 pub(crate) mod internal_llm;
 pub mod knowledge;
 pub mod logging;
+pub mod maintenance_jobs;
 pub mod memory_migration;
 pub mod migration;
 pub mod notifications;

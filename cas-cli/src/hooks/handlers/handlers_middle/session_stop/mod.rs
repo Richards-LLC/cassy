@@ -306,7 +306,7 @@ pub fn build_rule_review_context(rule_store: &dyn RuleStore, config: &Config) ->
         draft_rules.len()
     ));
     context.push_str(
-        "Review these draft rules and determine which should be promoted, merged, or archived:\n\n",
+        "Review these draft rules and determine which should be promoted, rewritten, merged, or retired:\n\n",
     );
     context.push_str("| ID | Content Preview | Helpful |\n");
     context.push_str("|----|-----------------|----------|\n");
@@ -327,7 +327,7 @@ pub fn build_rule_review_context(rule_store: &dyn RuleStore, config: &Config) ->
         ));
     }
 
-    context.push_str("\n**rule-reviewer job:** Review the draft rules shown above. Promote, merge, or retire each according to the job instructions.\n");
+    context.push_str("\n**rule-reviewer job:** Review the draft rules shown above, reading each in full with rule action=show. Promote, rewrite, merge, or retire each according to the job instructions.\n");
     context.push_str("</rule-review>\n");
 
     Some(context)

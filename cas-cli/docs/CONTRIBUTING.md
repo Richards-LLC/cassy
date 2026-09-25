@@ -114,9 +114,99 @@ shipped commands live in `docs/design/cli/`.
 
 Dev dependencies include: `insta` (snapshot testing), `wiremock` (HTTP mocking), `rstest` (parametrized tests), `proptest` (property-based), `criterion` (benchmarks), `cas-tui-test` (TUI testing).
 
+## Build, assembly and CI policy
+
+This section moved here from the repository `CLAUDE.md`, where it loaded into every session.
+
+### Commands
+
+```bash
+# Supervisor/operator only — factory workers never run these
+cargo build                          # Dev build
+cargo build --release                # Release build (LTO, strip)
+cargo build --profile release-fast   # Fast release (thin LTO, 16 codegen units)
+cargo check -p cas --lib --tests     # Compile feedback, no test linking/runs
+scripts/run-scoped-tests.sh -p cas --lib module_name
+scripts/run-scoped-tests.sh -p cas --test cli_test
+cargo nextest run -p cas             # Full suite: epic assembly and release gates
+cargo test -p cas --doc              # Doctests (nextest does not support them)
+cargo bench --bench code_indexing    # Benchmarks
+make test-release-panic              # Verify A2/A3/B3 panic isolation under release profiles
+```
+
+Install the standard local runner once with `cargo install cargo-nextest` (or
+`make -C cas-cli install-tools`). `scripts/run-scoped-tests.sh` defaults to
+nextest and rejects a silent zero-test success.
+
+### Assembly: only the supervisor builds
+
+Factory workers never run Rust builds. Workers edit and commit code, then park
+it without building or testing Rust; a PreToolUse guard denies them any
+`cargo` build/check/test/nextest/clippy/run, `rustc`,
+`scripts/run-scoped-tests.sh`, and `make test*`. Only the supervisor builds:
+once per epic at assembly it runs one full build + test of the epic tip and
+records `ASSEMBLY_PROOF: head=<epic tip sha> result=PASS command=<cmd>
+log=<path>` on the epic. Child task closes reference that proof instead of
+carrying a scoped `--proof` receipt or `loaded_proof` note. Non-Rust work (for
+example hub-web npm/vitest/playwright) is unaffected.
+
+Gate evidence: PR #655/run 33430464567; PR #657/run 33435093275.
+
+### Worker build caches
+
+Factory worker spawns use `sccache` automatically when it is installed, while
+keeping a separate target directory per worktree so concurrent Cargo builds do
+not serialize. An existing `RUSTC_WRAPPER` wins; set
+`CAS_FACTORY_DISABLE_SCCACHE=1` for the emergency opt-out. CI uses the GitHub
+cache-v2 backend and keeps the cold Build Benchmark explicitly uncached.
+
+New isolated workers also seed their private `target/` from compiled artifacts
+hardlinked out of the quiescent snapshot named by `.cas/build-cache/current`;
+small Cargo dep-info files are copied with their target root rebased. Refresh that
+baseline after an epic/main integration merge with
+`scripts/refresh-worker-build-cache.sh`; the script builds a new snapshot to
+completion and only then publishes its pointer, so no worker ever seeds from a
+live Cargo writer. Old snapshots remain valid for in-flight seeders and should
+only be removed during a maintenance window. Set
+`CAS_FACTORY_DISABLE_TARGET_SEED=1` to skip seeding. Do not replace this with a
+shared live `CARGO_TARGET_DIR`: its Cargo lock serializes the worker fleet.
+
+Local sccache 0.10.0 does not produce cross-worktree Rust hits because absolute
+checkout paths remain in its cache keys (measured 0/45 hits even with
+`--remap-path-prefix`). Keep sccache enabled for same-path/CI reuse and for when
+[upstream path normalization](https://github.com/mozilla/sccache/pull/2678)
+lands; hardlink seeding is the current cross-worktree mechanism.
+
+### CI-load policy
+
+Standing operator policy: factory/* pushes run only Scoped
+Validation; protected-default PRs run only the required Fast Validation and
+macOS Check lanes. The merge queue validates its synthetic tree once; when its
+successful tree is pushed unchanged to main, the main-push Fast Validation and
+macOS lanes reuse that receipt and name the validating run. Direct pushes,
+bypass merges, receipt lookup failures, and changed trees still run those
+lanes. The non-required full/heavy tier (Clippy, Test Compile Guard, Build
+Benchmark, and both Panic Isolation profiles) belongs only to
+supervisor-controlled main pushes, schedules, or manual dispatches—never
+factory/*, epic/*, tags, or pull requests. Keep this policy pinned by
+`scripts/test-ci-test-tiers.sh`, rather than relying on convention. Docs-only
+diffs (paths under `docs/` or Markdown files outside embedded
+`cas-cli/src/` content) on pull-request, push, and merge-group events route
+only to the `Docs Lint` job; it runs Markdown lint, validates any changed
+release-note drafts, and checks that generated AGENTS.md files are current.
+The existing required Fast Validation and macOS Check
+contexts remain present and skip their full work for that class. Mixed and
+code diffs keep the full required tier.
+
+### Build profiles and the binary
+
+The MCP server is always included because factory agents depend on `cas serve`; the optional `mcp-proxy` feature is enabled by default. Binary is `cas` (lib + bin in `cas-cli/`). Build script embeds git hash and build date.
+
+Build profiles must use `panic = "unwind"`. The MCP tool-dispatch panic catcher relies on `tokio::spawn` + `JoinError::is_panic`, which only observes a panic if the worker thread unwinds. A compile-time guard in `cas-cli/src/lib.rs` refuses non-test builds with `panic = "abort"`; do not work around it, because the catcher is what keeps `cas serve` alive across handler bugs.
+
 ## Skill & Rule Sync
 
-Cassy auto-syncs rules to `.claude/rules/` and skills to `.claude/skills/` as SKILL.md files with YAML frontmatter. The sync logic lives in `cas-cli/src/sync/`. Rule promotion uses configurable outcome evidence: `sync.promotion_threshold` defaults to 2 and `sync.promotion_evidence` accepts `helpful` and/or `retrieval`; one `mcp__cas__rule action=helpful` call never promotes. Retrieval promotion requires useful outcomes across at least two distinct privacy-preserving sessions. Harmful feedback and negative retrieval outcomes require `sync.demotion_threshold` (default 2) before demoting Proven rules to Stale and removing their synced files. Existing Proven rules are grandfathered until new evidence crosses the configured threshold.
+Cassy auto-syncs rules to `.claude/rules/` and skills to `.claude/skills/` as SKILL.md files with YAML frontmatter. The sync logic lives in `cas-cli/src/sync/`. Rule promotion uses configurable outcome evidence: `sync.promotion_threshold` defaults to 2 and `sync.promotion_evidence` accepts `helpful` and/or `retrieval`; one `mcp__cas__rule action=helpful` call never promotes. A reviewer's explicit decision uses `mcp__cas__rule action=promote id=<id> change_note="<why>"` instead of voting. Retrieval promotion requires useful outcomes across at least two distinct privacy-preserving sessions. Harmful feedback and negative retrieval outcomes require `sync.demotion_threshold` (default 2) before demoting Proven rules to Stale and removing their synced files. Existing Proven rules are grandfathered until new evidence crosses the configured threshold.
 
 Built-in skills ship to every project, so they carry no cas-src-only procedure. This repository's own factory guidance (release prebuild, worker build-cache refresh, the assembly gate command, cargo triage) lives in [docs/factory/cas-src-factory-notes.md](../../docs/factory/cas-src-factory-notes.md) and [docs/factory/cas-src-worker-notes.md](../../docs/factory/cas-src-worker-notes.md).
 

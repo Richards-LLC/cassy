@@ -1,6 +1,6 @@
 # Worker Recovery — Triage and Failure Modes
 
-Contents: [Authoritative liveness](#authoritative-liveness) · [Is the worker actually dead?](#is-the-worker-actually-dead) · [Verify lifecycle notifications](#verify-lifecycle-notifications-before-acting) · [Failure modes](#worker-failure-recovery): silent worker, injected but unwoken, stalled spawn queue, context pressure, garbage output, resource contention.
+Contents: [Authoritative liveness](#authoritative-liveness) · [Is the worker actually dead?](#is-the-worker-actually-dead) · [Verify lifecycle notifications](#verify-lifecycle-notifications-before-acting) · [Retry policy](#retry-policy-by-failure-mode) · [Failure modes](#worker-failure-recovery): silent worker, injected but unwoken, stalled spawn queue, context pressure, garbage output, resource contention.
 
 ## Authoritative liveness
 
@@ -56,6 +56,27 @@ Director and task-lifecycle notifications are hints, not ground truth. A known b
 - Run `task action=show id=<task-id>` and trust the task status over the notification text.
 - Check the worker branch tip or worktree commits before assuming work exists: `git -C .cas/worktrees/<worker> log --oneline -5`.
 - Check liveness with `factory action=worker_status` before declaring a worker idle or dead.
+
+## Retry policy by failure mode
+
+Classify the failure before you retry or respawn. The same brief on the same
+cause fails the same way, so the failure mode decides what changes.
+
+| Failure mode | Signature | Retry |
+|---|---|---|
+| Harness crash or transient error | `is-wedged` says `wedged` or `dead`; garbage output; a transient API or network error | Respawn with the same brief. Point the new worker at the commits that already landed. |
+| Capacity | Rate limit, usage cap, model unavailable | Retry as is after the reset, or respawn on the lane's fallback recipe ([model-selection.md](model-selection.md)). |
+| Scope too large | Context ran out before the task finished; out-of-memory | Split the task and give a fresh worker the smaller brief. |
+| Model tool errors | The worker keeps mis-calling a tool or loops on one call | Respawn the same brief on a different model. |
+| Wrong approach | The delivery solves the wrong problem, review rejects the design, or the worker misread the brief | Rewrite the brief to name what was wrong, then use a fresh worker. Never re-send the brief that produced it. |
+| Environment or tooling | Missing binary, denied path, broken worktree, stale Cassy binary, CI infrastructure | Fix the environment first. Do not retry: no retry fixes an environment. |
+| Same failure twice | A retry fails with the same symptom | Stop. An identical second failure was never flake. Write down the premise you were retrying on and escalate to the operator, or file the CAS bug ([filing-cas-bugs.md](filing-cas-bugs.md)). |
+
+Cap it at two retries per task across all modes, then stop and escalate.
+
+**A dead worker still leaves a report.** Before you reassign its task, write
+the report it never sent, so review sees a failure instead of a silent gap:
+`task action=notes id=<task-id> note_type=blocker notes="BLOCKED <tip sha or none>: worker died (<failure mode>); landed: <commits or nothing>"`.
 
 ## Worker Failure Recovery
 

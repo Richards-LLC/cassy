@@ -651,6 +651,7 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
         content: include_str!("builtins/skills/cas-diagnosing-bugs/SKILL.md"),
     },
     BuiltinFile { path: "skills/cas-codebase-design/SKILL.md", content: include_str!("builtins/skills/cas-codebase-design/SKILL.md") },
+    BuiltinFile { path: "skills/cas-codebase-design/references/principles.md", content: include_str!("builtins/skills/cas-codebase-design/references/principles.md") },
     BuiltinFile { path: "skills/cas-tdd/SKILL.md", content: include_str!("builtins/skills/cas-tdd/SKILL.md") },
     BuiltinFile { path: "skills/cas-wizard/SKILL.md", content: include_str!("builtins/skills/cas-wizard/SKILL.md") },
     BuiltinFile { path: "skills/cas-wizard/template.sh", content: include_str!("builtins/skills/cas-wizard/template.sh") },
@@ -1228,6 +1229,7 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
         content: include_str!("builtins/skills/cas-diagnosing-bugs/SKILL.md"),
     },
     BuiltinFile { path: "skills/cas-codebase-design/SKILL.md", content: include_str!("builtins/skills/cas-codebase-design/SKILL.md") },
+    BuiltinFile { path: "skills/cas-codebase-design/references/principles.md", content: include_str!("builtins/skills/cas-codebase-design/references/principles.md") },
     BuiltinFile { path: "skills/cas-tdd/SKILL.md", content: include_str!("builtins/skills/cas-tdd/SKILL.md") },
     BuiltinFile { path: "skills/cas-wizard/SKILL.md", content: include_str!("builtins/skills/cas-wizard/SKILL.md") },
     BuiltinFile { path: "skills/cas-wizard/template.sh", content: include_str!("builtins/skills/cas-wizard/template.sh") },
@@ -1813,6 +1815,7 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
         content: include_str!("builtins/skills/cas-diagnosing-bugs/SKILL.md"),
     },
     BuiltinFile { path: "skills/cas-codebase-design/SKILL.md", content: include_str!("builtins/skills/cas-codebase-design/SKILL.md") },
+    BuiltinFile { path: "skills/cas-codebase-design/references/principles.md", content: include_str!("builtins/skills/cas-codebase-design/references/principles.md") },
     BuiltinFile { path: "skills/cas-tdd/SKILL.md", content: include_str!("builtins/skills/cas-tdd/SKILL.md") },
     BuiltinFile { path: "skills/cas-wizard/SKILL.md", content: include_str!("builtins/skills/cas-wizard/SKILL.md") },
     BuiltinFile { path: "skills/cas-wizard/template.sh", content: include_str!("builtins/skills/cas-wizard/template.sh") },
@@ -5129,6 +5132,41 @@ This is the body content."#;
                     "{label} cas-worker discipline.md still teaches a worker test loop: {forbidden:?}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn codebase_design_principles_are_installed_and_linked() {
+        let path = "skills/cas-codebase-design/references/principles.md";
+        for (label, catalog) in [
+            ("claude", BUILTIN_SKILLS),
+            ("codex", CODEX_BUILTIN_SKILLS),
+            ("grok", GROK_BUILTIN_SKILLS),
+        ] {
+            let reference = catalog
+                .iter()
+                .find(|file| file.path == path)
+                .unwrap_or_else(|| panic!("{label} missing {path}"));
+            for principle in [
+                "Attack the premise",
+                "Laziness",
+                "Subtract",
+                "Redesign at the third patch",
+                "Test behavior",
+                "Use types",
+            ] {
+                assert!(
+                    reference.content.contains(principle),
+                    "{label} missing {principle}"
+                );
+            }
+        }
+        for skill in [
+            include_str!("builtins/skills/cas-codebase-design/SKILL.md"),
+            include_str!("builtins/skills/cas-tdd/SKILL.md"),
+            include_str!("builtins/skills/cas-diagnosing-bugs/SKILL.md"),
+        ] {
+            assert!(skill.contains("principles.md"), "missing principles link");
         }
     }
 

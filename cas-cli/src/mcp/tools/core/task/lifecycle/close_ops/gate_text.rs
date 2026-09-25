@@ -70,6 +70,17 @@ pub(crate) fn verification_timeout_message(
     }
 }
 
+/// A shared stop for repeatable close refusals. This is advice only: the gate
+/// does not count attempts or change its decision based on this paragraph.
+pub(crate) fn repeated_close_refusal_stop(task_id: &str, caller_prefix: &str) -> String {
+    format!(
+        "If this gate has now refused you twice, stop fixing. Write down the premise you are \
+         working from as a task note, take a census of what the gate actually checks versus what \
+         you changed, then act. To record the premise, run `{caller_prefix}task action=notes \
+         id={task_id} note_type=decision notes=\"<premise>\"`."
+    )
+}
+
 /// How to find, check and present a `commit_receipt` — shared by every
 /// refusal that asks for one.
 pub(crate) fn commit_receipt_recovery_steps(
@@ -368,6 +379,7 @@ mod tests {
             );
             assert!(typed.contains("`mcp__cas__task action=close id=cas-t1`"), "{typed}");
             assert!(!typed.contains("Task(subagent_type"), "{typed}");
+            assert!(!typed.contains("If this gate has now refused you twice"), "{typed}");
 
             let bare = verification_timeout_message(
                 "cas-t1",
@@ -394,6 +406,7 @@ mod tests {
                 "{legacy}"
             );
             assert!(legacy.contains("dispatch_id=<dispatch id named in that response>"));
+            assert!(!legacy.contains("If this gate has now refused you twice"), "{legacy}");
         }
     }
 
@@ -410,6 +423,18 @@ mod tests {
             "unambiguous abbreviation",
         ] {
             assert!(steps.contains(required), "missing {required:?}: {steps}");
+        }
+    }
+
+    #[test]
+    fn repeat_refusal_stop_requires_a_premise_note_and_gate_census() {
+        for prefix in PREFIXES {
+            let stop = repeated_close_refusal_stop("cas-r1", prefix);
+            assert!(stop.starts_with("If this gate has now refused you twice, stop fixing."));
+            assert!(stop.contains(&format!(
+                "`{prefix}task action=notes id=cas-r1 note_type=decision notes=\"<premise>\"`"
+            )));
+            assert!(stop.contains("what the gate actually checks versus what you changed"));
         }
     }
 

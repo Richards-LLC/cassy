@@ -10515,6 +10515,10 @@ fn landed_anchor_receipt_rejection(
     parent_branch: &str,
 ) -> String {
     let supervisor_prefix = crate::mcp::tools::core::guidance::supervisor_prefix();
+    let stop = gate_text::repeated_close_refusal_stop(
+        task_id,
+        crate::mcp::tools::core::guidance::caller_prefix(),
+    );
     format!(
         "⚠️ MERGE REQUIRED\n\n\
          task close rejected: commit_receipt `{receipt}` is not on {parent_branch}, but this \
@@ -10523,7 +10527,7 @@ fn landed_anchor_receipt_rejection(
          Next: message the supervisor with blocker=true asking for \
          `{supervisor_prefix}task action=request_changes id={task_id}`; after that verdict, close \
          again with commit_receipt={receipt} so the new tip is parked and merged. Do not \
-         re-send a merge request for the landed anchor."
+         re-send a merge request for the landed anchor.\n\n{stop}"
     )
 }
 
@@ -13905,6 +13909,7 @@ fn commit_receipt_rejection(
     reason: &str,
 ) -> String {
     let caller = crate::mcp::tools::core::guidance::caller_prefix();
+    let stop = gate_text::repeated_close_refusal_stop(task_id, caller);
     let merge_recovery = supervisor_merge_commit_for_receipt(repo_path, receipt, parent_branch)
         .map(|merge| {
             format!(
@@ -13930,7 +13935,7 @@ fn commit_receipt_rejection(
          diff's tree effect present on the current target.\n\n\
          To resolve:\n\
          1. To pick another receipt, {steps}\n\
-         {merge_recovery}",
+         {merge_recovery}\n\n{stop}",
         steps = gate_text::commit_receipt_recovery_steps(task_id, parent_branch, caller),
     )
 }
@@ -14123,12 +14128,16 @@ pub(crate) fn check_zero_commit_close(
                registered supervisor may retry with \
                `{supervisor_prefix}task action=close id={task_id} supervisor_override=true external_verification_receipt=<dr-id> reason=\"...\"`. \
                `supervisor_override` alone does not satisfy zero-commit \
-               delivery evidence.",
+               delivery evidence.\n\n{stop}",
             tool_prefix = crate::mcp::tools::core::guidance::caller_prefix(),
             supervisor_prefix = crate::mcp::tools::core::guidance::supervisor_prefix(),
             receipt_steps = gate_text::commit_receipt_recovery_steps(
                 task_id,
                 parent_branch,
+                crate::mcp::tools::core::guidance::caller_prefix(),
+            ),
+            stop = gate_text::repeated_close_refusal_stop(
+                task_id,
                 crate::mcp::tools::core::guidance::caller_prefix(),
             ),
         ));
@@ -14169,12 +14178,16 @@ pub(crate) fn check_zero_commit_close(
            supervisor may retry with \
            `{supervisor_prefix}task action=close id={task_id} supervisor_override=true external_verification_receipt=<dr-id> reason=\"...\"`. \
            `supervisor_override` alone does not satisfy zero-commit delivery \
-           evidence.",
+           evidence.\n\n{stop}",
         tool_prefix = crate::mcp::tools::core::guidance::caller_prefix(),
         supervisor_prefix = crate::mcp::tools::core::guidance::supervisor_prefix(),
         receipt_steps = gate_text::commit_receipt_recovery_steps(
             task_id,
             parent_branch,
+            crate::mcp::tools::core::guidance::caller_prefix(),
+        ),
+        stop = gate_text::repeated_close_refusal_stop(
+            task_id,
             crate::mcp::tools::core::guidance::caller_prefix(),
         ),
     ))
@@ -20689,6 +20702,10 @@ mod merge_state_gate_tests {
             match run_factory_branch_merge_gate(&task, &req, parent, dir.path()) {
                 MergeStateGateOutcome::Reject(msg) => {
                     assert!(msg.contains("MERGE REQUIRED"), "{parent}: {msg}");
+                    assert!(
+                        !msg.contains("If this gate has now refused you twice"),
+                        "routine merge handoff must not suggest a premise stop: {msg}"
+                    );
                     assert!(!msg.contains("git push origin"), "{parent}: {msg}");
                     assert!(!msg.contains("Open a PR targeting"), "{parent}: {msg}");
                     assert!(msg.contains("merge_request=true"), "{parent}: {msg}");
